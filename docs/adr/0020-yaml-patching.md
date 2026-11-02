@@ -26,7 +26,7 @@ The design left the library open, leaning towards `kyaml`. Four approaches were 
 Patch by replacing the bytes of one scalar:
 
 1. Parse the file with `go.yaml.in/yaml/v3` (the maintained successor of `gopkg.in/yaml.v3`) into nodes, only to find the document and the scalar node of the field, using the same lookup rules as the source mapping (kind, namespace, name; container by name).
-2. Refuse with `NeedsIntervention` when the scalar or any node on its path has an anchor or is an alias, when there is a merge key (`<<`) or a flow-style collection on the path, when a path mapping repeats a key, or when the scalar is not plain, single-quoted or double-quoted (no block or flow scalar, no tag).
+2. Refuse with `NeedsIntervention` when the scalar or any node on its path has an anchor or is an alias, when there is a merge key (`<<`) or a flow-style collection on the path, when a path mapping repeats a key, or when the scalar is not plain, single-quoted or double-quoted (no block or flow scalar, no tag). The same applies to the identity fields of every document in the file (`apiVersion`, `kind`, `metadata.name`, `metadata.namespace`), so another declaration of the target cannot hide behind an alias, a merge key or a tag such as `!!binary`.
 3. Turn the node's line and column into a byte offset, check that the bytes there are exactly the old value in its quoting, and replace only those bytes, keeping the quote style. Columns count characters, not bytes; if the check fails, refuse instead of guessing.
 4. Decode the original and the patched file and require that they differ only in the target value. This also catches any case the rules above miss, such as an alias elsewhere that points into the target.
 

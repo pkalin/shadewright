@@ -52,6 +52,12 @@ The base is Go with Kubebuilder, `controller-runtime` and `client-go` ([ADR-0005
 
 The analyzer and the remediation controller are separate binaries in one Go module (`cmd/analyzer`, `cmd/main.go`), deployed as separate Deployments with separate ServiceAccounts and identities. A slow model call must never block the controller's other reconciles.
 
+The collector, the incident store and the analyzer run in the analyzer binary; the policy engine, the remediation controller, the GitOps adapter and the verifier run in the executor (`cmd/main.go`). Their roles are generated from kubebuilder RBAC markers (`internal/analyzer`, `internal/controller`):
+
+- **Analyzer:** reads events (`events.k8s.io/v1`), pods and workloads; creates and updates `Incident` objects and their status; creates `RemediationRequest` objects in the operator namespace only (a Role). It cannot update, delete or write the status of a request.
+- **Executor:** reads incidents, policies and settings; reads requests and writes their status in the operator namespace only (a Role), and its cache watches requests only there. It cannot create requests or write incidents.
+- Neither can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
+
 No model runs in the cluster and no GPU is needed: the analyzer calls a managed model endpoint (Microsoft Foundry first). The tool loop is our own code, not a hosted agent service.
 
 ### 2.3. Provider interfaces
@@ -475,6 +481,7 @@ Decided on 2026-11-01:
 | Packaging | Kubebuilder's Helm plugin; images on GHCR, signed keyless, with SBOMs |
 | Pluggability | Three axes: platform services, cluster platforms, cluster integrations ([ADR-0018](adr/0018-three-axes-of-pluggability.md)); security integrations diagnose only |
 | Extension packaging | Compiled in now; signed declarative OCI packs later ([ADR-0019](adr/0019-extension-packaging.md)) |
+| Controller identities | Separate analyzer and executor ServiceAccounts and roles; requests reachable only in the operator namespace (2.2) |
 
 Still open:
 
@@ -482,8 +489,7 @@ Still open:
 2. **YAML patching library.** `kyaml` (keeps comments, used by Kustomize) or a typed round-trip. *Leaning:* `kyaml`. Decide at stage 2.
 3. **Model choice.** Benchmark on the scenario set at stage 1: a small model for triage and a stronger one for escalation.
 4. **Teams.** Whether the maintainer's Microsoft account can receive Teams Workflows webhooks. If not, GitHub issues stay the only notifier for now.
-5. **Controller RBAC scope.** The scaffolded manager has one cluster-wide identity. Before the first controller logic lands: a separate analyzer ServiceAccount (create requests, no status) and executor, and requests watched only in the operator namespace.
-6. **Required checks in policy.** Whether a policy should name verification checks a request cannot drop, beyond the ones each action always runs.
+5. **Required checks in policy.** Whether a policy should name verification checks a request cannot drop, beyond the ones each action always runs.
 
 ## 16. Prior art
 

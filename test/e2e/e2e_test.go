@@ -37,10 +37,10 @@ import (
 const namespace = "shadewright-system"
 
 // serviceAccountName created for the project
-const serviceAccountName = "shadewright-controller-manager"
+const serviceAccountName = "shadewright-executor"
 
 // metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "shadewright-controller-manager-metrics-service"
+const metricsServiceName = "shadewright-executor-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "shadewright-metrics-binding"
@@ -146,7 +146,7 @@ var _ = Describe("Manager", Ordered, func() {
 			verifyControllerUp := func(g Gomega) {
 				By("getting the name of the controller-manager pod")
 				cmd := exec.Command("kubectl", "get",
-					"pods", "-l", "control-plane=controller-manager",
+					"pods", "-l", "control-plane=executor",
 					"-o", "go-template={{ range .items }}"+
 						"{{ if not .metadata.deletionTimestamp }}"+
 						"{{ .metadata.name }}"+
@@ -159,7 +159,7 @@ var _ = Describe("Manager", Ordered, func() {
 				podNames := utils.GetNonEmptyLines(podOutput)
 				g.Expect(podNames).To(HaveLen(1), "expected 1 controller pod running")
 				controllerPodName = podNames[0]
-				g.Expect(controllerPodName).To(ContainSubstring("controller-manager"))
+				g.Expect(controllerPodName).To(ContainSubstring("executor"))
 
 				By("validating the pod's status")
 				cmd = exec.Command("kubectl", "get",
@@ -171,6 +171,19 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(output).To(Equal("Running"), "Incorrect controller-manager pod status")
 			}
 			Eventually(verifyControllerUp).Should(Succeed())
+		})
+
+		It("should run the analyzer as a separate pod and identity", func() {
+			verifyAnalyzerUp := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=analyzer",
+					"-o", "jsonpath={.items[*].status.phase}{\" \"}{.items[*].spec.serviceAccountName}",
+					"-n", namespace,
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Running shadewright-analyzer"), "analyzer pod not running under its own ServiceAccount")
+			}
+			Eventually(verifyAnalyzerUp).Should(Succeed())
 		})
 
 		It("should ensure the metrics endpoint is serving metrics", func() {

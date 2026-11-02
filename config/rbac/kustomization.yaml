@@ -1,12 +1,9 @@
 resources:
-# All RBAC will be applied under this service account in
-# the deployment namespace. You may comment out this resource
-# if your manager will use a service account that exists at
-# runtime. Be sure to update RoleBinding and ClusterRoleBinding
-# subjects if changing service account names.
-- service_account.yaml
-- role.yaml
-- role_binding.yaml
+# Two identities (design 2.2, ADR-0005): the executor reconciles requests and writes their status; the
+# analyzer writes incidents and creates requests. Each directory holds a ServiceAccount, the role generated
+# from kubebuilder RBAC markers (make manifests) and its bindings.
+- executor
+- analyzer
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
 # The following RBAC configurations are used to protect

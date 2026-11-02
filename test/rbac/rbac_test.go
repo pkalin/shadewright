@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/cmdutil"
 	"github.com/pkalin/shadewright/internal/controller"
 	"github.com/pkalin/shadewright/internal/testfixtures"
 )
@@ -48,6 +49,7 @@ const (
 	operatorNS = "shadewright-system"
 	otherNS    = "team-a"
 	group      = "remediation.shadewright.io"
+	kindRole   = "Role"
 )
 
 var (
@@ -167,7 +169,7 @@ func applyRoles(ctx context.Context, id, file string) error {
 				if err := admin.Create(ctx, &b); err != nil {
 					return err
 				}
-			case "Role":
+			case kindRole:
 				var r rbacv1.Role
 				if err := decodeInto(u, &r); err != nil {
 					return err
@@ -181,7 +183,7 @@ func applyRoles(ctx context.Context, id, file string) error {
 				}
 				b := &rbacv1.RoleBinding{
 					ObjectMeta: metav1.ObjectMeta{Name: r.Name, Namespace: operatorNS},
-					RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: r.Name},
+					RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindRole, Name: r.Name},
 					Subjects:   subject,
 				}
 				if err := admin.Create(ctx, b); err != nil {
@@ -277,7 +279,7 @@ func TestPermissionBoundary(t *testing.T) {
 
 // TestLeasesAreSeparate checks that each identity can renew only its own leader election Lease.
 func TestLeasesAreSeparate(t *testing.T) {
-	leases := map[string]string{executor: "fbfbf7ca.shadewright.io", analyzer: "analyzer.shadewright.io"}
+	leases := map[string]string{executor: cmdutil.ExecutorLease, analyzer: cmdutil.AnalyzerLease}
 	for id, own := range leases {
 		for other, lease := range leases {
 			want := other == id
@@ -287,11 +289,51 @@ func TestLeasesAreSeparate(t *testing.T) {
 				}
 			}
 		}
-		if !can(t, id, "create", "coordination.k8s.io", "leases", "", operatorNS) {
-			t.Errorf("%s cannot create its lease %s", id, own)
+		if can(t, id, "create", "coordination.k8s.io", "leases", "", operatorNS) {
+			t.Errorf("%s can create leases, so it could squat %s's lease", id, own)
 		}
 		if canNamed(t, id, "delete", "coordination.k8s.io", "leases", "", operatorNS, own) {
 			t.Errorf("%s can delete leases", id)
+		}
+	}
+}
+
+// TestLeaseNamesMatchTheBinaries guards against drift between the Lease created by the manifests, the
+// Role that may renew it, and the LeaderElectionID compiled into each binary. The kustomize name prefix
+// "shadewright-" is applied to the Lease name but not to resourceNames.
+func TestLeaseNamesMatchTheBinaries(t *testing.T) {
+	for id, want := range map[string]string{executor: cmdutil.ExecutorLease, analyzer: cmdutil.AnalyzerLease} {
+		f, err := os.Open(filepath.Join("..", "..", "config", "rbac", id, "leader_election.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		dec := utilyaml.NewYAMLOrJSONDecoder(f, 4096)
+		var leaseName string
+		var resourceNames []string
+		for {
+			var u map[string]any
+			if err := dec.Decode(&u); err != nil {
+				break
+			}
+			switch u["kind"] {
+			case "Lease":
+				leaseName = "shadewright-" + u["metadata"].(map[string]any)["name"].(string)
+			case kindRole:
+				var r rbacv1.Role
+				if err := decodeInto(u, &r); err != nil {
+					t.Fatal(err)
+				}
+				for _, rule := range r.Rules {
+					resourceNames = append(resourceNames, rule.ResourceNames...)
+				}
+			}
+		}
+		_ = f.Close()
+		if leaseName != want {
+			t.Errorf("%s: manifest Lease is %q after the prefix, binary uses %q", id, leaseName, want)
+		}
+		if len(resourceNames) != 1 || resourceNames[0] != want {
+			t.Errorf("%s: Role may renew %v, binary uses %q", id, resourceNames, want)
 		}
 	}
 }

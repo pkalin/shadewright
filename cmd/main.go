@@ -86,7 +86,7 @@ func main() {
 		webhookServerOptions.KeyName = webhookCertKey
 	}
 
-	mgrOpts := opts.ManagerOptions(setupLog, scheme, "fbfbf7ca.shadewright.io")
+	mgrOpts := opts.ManagerOptions(setupLog, scheme, cmdutil.ExecutorLease)
 	mgrOpts.WebhookServer = webhook.NewServer(webhookServerOptions)
 	mgrOpts.Cache = controller.CacheOptions(namespace)
 

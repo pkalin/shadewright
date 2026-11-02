@@ -1,6 +1,17 @@
-# Leader election for the analyzer only: it may create a Lease and renew only its own (analyzer.shadewright.io, the
-# LeaderElectionID in the binary). RBAC cannot restrict create by name; another identity cannot renew a
-# Lease it does not own, so it would expire and the right holder take over.
+# Leader election for the analyzer only. The Lease is created here, not at runtime: the analyzer may get,
+# update and patch only its own Lease and may create none, so it cannot squat the other identity's Lease
+# (for example with a huge leaseDurationSeconds). The name must equal cmdutil.AnalyzerLease; resourceNames
+# below are not rewritten by the kustomize name prefix, so they carry the full name.
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  labels:
+    app.kubernetes.io/name: shadewright
+    app.kubernetes.io/component: analyzer
+    app.kubernetes.io/managed-by: kustomize
+  name: analyzer-leader-election
+  namespace: system
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -15,14 +26,8 @@ rules:
   - coordination.k8s.io
   resources:
   - leases
-  verbs:
-  - create
-- apiGroups:
-  - coordination.k8s.io
-  resources:
-  - leases
   resourceNames:
-  - analyzer.shadewright.io
+  - shadewright-analyzer-leader-election
   verbs:
   - get
   - update

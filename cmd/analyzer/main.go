@@ -51,7 +51,7 @@ func main() {
 
 	ctrl.SetLogger(cmdutil.NewLogger(&opts))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), opts.ManagerOptions(setupLog, scheme, "analyzer.shadewright.io"))
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), opts.ManagerOptions(setupLog, scheme, cmdutil.AnalyzerLease))
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
 		os.Exit(1)

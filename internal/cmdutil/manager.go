@@ -30,6 +30,14 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
+// Leader election Lease names. The manifests create both Leases (config/rbac/<id>/leader_election.yaml, after
+// the kustomize name prefix) and each identity may only get, update and patch its own: neither may create
+// a Lease, so neither can squat the other's before it exists.
+const (
+	ExecutorLease = "shadewright-executor-leader-election"
+	AnalyzerLease = "shadewright-analyzer-leader-election"
+)
+
 // Options are the flags both binaries share.
 type Options struct {
 	MetricsAddr          string

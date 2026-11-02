@@ -186,6 +186,19 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(verifyAnalyzerUp).Should(Succeed())
 		})
 
+		It("should give each binary its own leader election Lease", func() {
+			for _, lease := range []string{"shadewright-executor-leader-election", "shadewright-analyzer-leader-election"} {
+				verifyHeld := func(g Gomega) {
+					cmd := exec.Command("kubectl", "get", "lease", lease, "-n", namespace,
+						"-o", "jsonpath={.spec.holderIdentity}")
+					output, err := utils.Run(cmd)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(output).NotTo(BeEmpty(), "nobody holds "+lease)
+				}
+				Eventually(verifyHeld).Should(Succeed())
+			}
+		})
+
 		It("should ensure the metrics endpoint is serving metrics", func() {
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
 			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,

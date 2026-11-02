@@ -35,7 +35,7 @@ import (
 // +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationsettings,verbs=get;list;watch
 //
 // Source mapping (ADR-0012) reads the target and the Flux objects that deliver it, one object at a time through
-// the uncached client, so get is enough: no list, no watch. The kinds are the action catalog's targets and the
+// the manager's API reader (never the cache), so get is enough: no list, no watch. The kinds are the action catalog's targets and the
 // Flux Kustomization and GitRepository; Secrets are never granted.
 //
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get

@@ -107,9 +107,10 @@ func main() {
 	}
 
 	if err := (&controller.RemediationRequestReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Source: &sourcemap.Resolver{Client: mgr.GetClient(), OpenRepository: openRepository},
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		APIReader: mgr.GetAPIReader(),
+		Source:    &sourcemap.Resolver{Client: mgr.GetAPIReader(), OpenRepository: openRepository},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "remediationrequest")
 		os.Exit(1)

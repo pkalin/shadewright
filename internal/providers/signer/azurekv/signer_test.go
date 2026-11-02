@@ -538,8 +538,9 @@ func TestSDKLogsStayClean(t *testing.T) {
 }
 
 func TestSignMalformedChallenge(t *testing.T) {
+	const foreign = "foreign resource"
 	for name, challenge := range map[string]string{
-		"foreign resource": `Bearer authorization="https://login.microsoftonline.com/x", resource="https://` +
+		foreign: `Bearer authorization="https://login.microsoftonline.com/x", resource="https://` +
 			bodySecret + `.attacker.example"`,
 		"no resource":    `Bearer authorization="https://login.microsoftonline.com/` + bodySecret + `"`,
 		"garbage claims": `Bearer claims="` + bodySecret + `" resource="https://vault.azure.net/` + bodySecret + `"`,
@@ -557,10 +558,10 @@ func TestSignMalformedChallenge(t *testing.T) {
 			continue
 		}
 		assertClean(t, err)
-		if (strings.HasPrefix(name, "authorization") || name == "foreign resource") && !errors.Is(err, errMalformedChallenge) {
+		if (strings.HasPrefix(name, "authorization") || name == foreign) && !errors.Is(err, errMalformedChallenge) {
 			t.Errorf("%s: got %v, want the malformed challenge error", name, err)
 		}
-		if name == "foreign resource" && len(v.authorized()) != 0 {
+		if name == foreign && len(v.authorized()) != 0 {
 			t.Errorf("%s: a token was sent after a foreign challenge", name)
 		}
 	}

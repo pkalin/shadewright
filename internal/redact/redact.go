@@ -59,14 +59,12 @@ type Pattern struct {
 }
 
 // rule is one compiled pattern. Spans of the listed groups are redacted, or the whole match when groups is
-// empty. keep, when set, receives the submatches and returns true to leave a match alone. span, when set,
-// replaces both: it receives the submatches and the end of the previous span it returned for this rule, and
+// empty. span, when set, replaces groups: it receives the submatches and the end of the previous span it returned for this rule, and
 // returns the byte range to redact, or ok false to leave the match alone.
 type rule struct {
 	kind   string
 	re     *regexp.Regexp
 	groups []int
-	keep   func(s string, m []int) bool
 	span   func(s string, m []int, prevEnd int) (start, end int, ok bool)
 }
 
@@ -124,9 +122,6 @@ func (r *Redactor) String(s string) string {
 					spans = append(spans, span{start: start, end: end, kind: ru.kind, rule: i})
 					prevEnd = end
 				}
-				continue
-			}
-			if ru.keep != nil && ru.keep(s, m) {
 				continue
 			}
 			if len(ru.groups) == 0 {
@@ -189,9 +184,10 @@ var referenceSuffixes = []string{
 	"endpoint", "provider", "mode", "enabled", "required", "source", "namespace", "selector", "store",
 }
 
-// keepReference keeps key-value matches whose key, in group 1, is a reference to a secret.
+// keepReference reports whether the key in group 1 of m is a reference to a secret. It judges only that
+// key, never a neighbouring one.
 func keepReference(s string, m []int) bool {
-	key := strings.ToLower(strings.Trim(s[m[2]:m[3]], `"'`))
+	key := strings.ToLower(strings.Trim(s[m[2]:m[3]], `"'\`))
 	key = strings.NewReplacer("_", "", "-", "", ".", "").Replace(key)
 	for _, suffix := range referenceSuffixes {
 		if strings.HasSuffix(key, suffix) {
@@ -204,43 +200,78 @@ func keepReference(s string, m []int) bool {
 // blockIndicator matches a YAML block scalar header value such as "|", ">-" or "|2+".
 var blockIndicator = regexp.MustCompile(`^[|>][1-9+-]{0,2}$`)
 
-// keepKeyValue keeps key-value matches whose key is a reference, and YAML block scalar headers, whose
-// content the block scalar rule redacts.
-func keepKeyValue(s string, m []int) bool {
-	if keepReference(s, m) {
-		return true
-	}
-	return m[8] >= 0 && blockIndicator.MatchString(s[m[8]:m[9]])
-}
-
 // isAlnum reports whether c is an ASCII letter or digit.
 func isAlnum(c byte) bool {
 	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 // ipv6Span confirms an IPv6 candidate with net/netip, so clock times and similar are kept. A single colon
-// at either end that belongs to the surrounding text ("addr ::1: refused") is trimmed first. Candidates
-// glued to letters or digits are kept, as they are part of a longer token.
+// at the end that belongs to the surrounding text ("addr ::1: refused") is trimmed, and when a label is
+// glued to the front ("source:2001:db8::1" gives the candidate "ce:2001:db8::1"), the address after the
+// label's colon is tried. A range glued to letters or digits on either side is kept, as it is part of a
+// longer token. Candidates are at most about 45 bytes, so the retries cost constant time.
 func ipv6Span(s string, m []int, _ int) (int, int, bool) {
 	start, end := m[0], m[1]
-	trimEnd := end-start > 1 && s[end-1] == ':' && s[end-2] != ':'
-	trimStart := end-start > 1 && s[start] == ':' && s[start+1] != ':'
-	for _, try := range [][2]bool{{false, false}, {trimEnd, false}, {false, trimStart}, {trimEnd, trimStart}} {
-		a, b := start, end
-		if try[1] {
-			a++
-		}
-		if try[0] {
-			b--
-		}
-		if b <= a || (a > 0 && isAlnum(s[a-1])) || (b < len(s) && isAlnum(s[b])) {
+	ends := []int{end}
+	if end-start > 1 && s[end-1] == ':' && s[end-2] != ':' {
+		ends = append(ends, end-1)
+	}
+	for a := start; a < end; a++ {
+		if a > start && (s[a-1] != ':' || s[a] == ':') {
 			continue
 		}
-		if addr, err := netip.ParseAddr(s[a:b]); err == nil && addr.Is6() {
-			return a, b, true
+		if a > 0 && isAlnum(s[a-1]) {
+			continue
+		}
+		for _, b := range ends {
+			if b <= a || (b < len(s) && isAlnum(s[b])) {
+				continue
+			}
+			if addr, err := netip.ParseAddr(s[a:b]); err == nil && addr.Is6() {
+				return a, b, true
+			}
 		}
 	}
 	return 0, 0, false
+}
+
+// lineEnd returns the index of the end of the line holding pos, before any "\r\n" or "\n".
+func lineEnd(s string, pos int) int {
+	end := len(s)
+	if i := strings.IndexByte(s[pos:], '\n'); i >= 0 {
+		end = pos + i
+	}
+	if end > pos && s[end-1] == '\r' {
+		end--
+	}
+	return end
+}
+
+// indentedLines scans the lines after pos, which is at a line end, while they are blank or indented
+// deeper than keyCol. It returns the start of the first non-blank one and the end of the last, or -1, -1.
+func indentedLines(s string, pos, keyCol int) (int, int) {
+	start, end := -1, -1
+	for pos < len(s) && (s[pos] == '\n' || s[pos] == '\r') {
+		if s[pos] == '\r' {
+			pos++
+			continue
+		}
+		line := pos + 1
+		le := lineEnd(s, line)
+		text := s[line:le]
+		trimmed := strings.TrimLeft(text, " \t")
+		if trimmed != "" {
+			if len(text)-len(trimmed) <= keyCol {
+				break
+			}
+			if start < 0 {
+				start = line + len(text) - len(trimmed)
+			}
+			end = le
+		}
+		pos = le
+	}
+	return start, end
 }
 
 // blockScalarSpan returns the content of a YAML literal or folded block scalar whose header line the rule
@@ -251,47 +282,143 @@ func blockScalarSpan(s string, m []int, prevEnd int) (int, int, bool) {
 	if m[0] < prevEnd || keepReference(s, m) {
 		return 0, 0, false
 	}
-	keyCol := m[2] - m[0]
-	start, end := -1, -1
-	pos := m[1]
-	for pos < len(s) && s[pos] == '\n' {
-		line := pos + 1
-		next := strings.IndexByte(s[line:], '\n')
-		lineEnd := len(s)
-		if next >= 0 {
-			lineEnd = line + next
-		}
-		text := strings.TrimRight(s[line:lineEnd], "\r")
-		trimmed := strings.TrimLeft(text, " \t")
-		if trimmed != "" {
-			if len(text)-len(trimmed) <= keyCol {
-				break
-			}
-			if start < 0 {
-				start = line + len(text) - len(trimmed)
-			}
-			end = line + len(text)
-		}
-		pos = lineEnd
-	}
+	start, end := indentedLines(s, m[1], m[2]-m[0])
 	if start < 0 {
 		return m[4], m[5], true
 	}
 	return start, end, true
 }
 
-// Secret key names shared by the key-value and block scalar rules.
-const secretKeyExpr = `["']?[A-Za-z0-9_.-]*(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?|connection[_-]?string|conn[_-]?str)[A-Za-z0-9_.-]*["']?`
+// quotedEnd returns the index just past the closing quote of the quoted value starting at pos, honouring
+// backslash escapes in double quotes and doubled quotes in single quotes, or -1 if the line ends first.
+func quotedEnd(s string, pos int) int {
+	q := s[pos]
+	for i := pos + 1; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '\n' || c == '\r':
+			return -1
+		case q == '"' && c == '\\':
+			i++
+		case c == q:
+			if q == '\'' && i+1 < len(s) && s[i+1] == '\'' {
+				i++
+				continue
+			}
+			return i + 1
+		}
+	}
+	return -1
+}
 
-// Quoted value forms: double-quoted with backslash escapes, and single-quoted with doubled quotes (YAML).
+// Value boundaries for the key-value rules, one per format.
+const (
+	// boundaryWhitespace: env files, logfmt and free text. The value runs to the next whitespace, so
+	// punctuation inside it ("&", ";", ",") is redacted with it.
+	boundaryWhitespace = iota
+	// boundaryFlow: JSON and YAML flow mappings. An unquoted value ends at ",", "}", "]" or the line end.
+	boundaryFlow
+	// boundaryLine: YAML block mappings. A plain value runs to the line end, plus continuation lines
+	// indented deeper than the key.
+	boundaryLine
+)
+
+// valueSpan returns the value that starts at pos, after a key and its separator, for the given format.
+// A quoted value is the text between its quotes; an unterminated quote is redacted to the boundary.
+func valueSpan(s string, pos, boundary, keyCol int) (int, int) {
+	if pos >= len(s) {
+		return pos, pos
+	}
+	if c := s[pos]; c == '"' || c == '\'' {
+		if end := quotedEnd(s, pos); end > 0 {
+			return pos + 1, end - 1
+		}
+	}
+	end := pos
+	switch boundary {
+	case boundaryWhitespace:
+		for end < len(s) && !isSpace(s[end]) {
+			end++
+		}
+	case boundaryFlow:
+		end = len(s)
+		if i := strings.IndexAny(s[pos:], ",}]\r\n"); i >= 0 {
+			end = pos + i
+		}
+		for end > pos && isSpace(s[end-1]) {
+			end--
+		}
+	case boundaryLine:
+		le := lineEnd(s, pos)
+		end = le
+		for end > pos && isSpace(s[end-1]) {
+			end--
+		}
+		if end == pos {
+			break
+		}
+		if _, cont := indentedLines(s, le, keyCol); cont > 0 {
+			end = cont
+		}
+	}
+	return pos, end
+}
+
+// isBlockHeader reports whether a YAML block scalar indicator ("|", ">-", "|2+") starts at pos and is
+// followed only by blanks or a comment up to the line end. It reads only the indicator and the blanks after
+// it, so it costs constant time per key on any input.
+func isBlockHeader(s string, pos int) bool {
+	end := pos
+	for end < len(s) && end-pos < 3 && strings.IndexByte("|>123456789+-", s[end]) >= 0 {
+		end++
+	}
+	if !blockIndicator.MatchString(s[pos:end]) {
+		return false
+	}
+	blank := end
+	for blank < len(s) && (s[blank] == ' ' || s[blank] == '\t') {
+		blank++
+	}
+	return blank == len(s) || s[blank] == '\n' || s[blank] == '\r' || (s[blank] == '#' && blank > end)
+}
+
+// isSpace reports whether c is ASCII whitespace.
+func isSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
+}
+
+// keyValueSpan returns the span function of a key-value rule whose regex matches the key (group 1) and its
+// separator; the value is found by valueSpan with the given boundary. Keys that are references are left
+// alone without reading their value, so a reference never hides a neighbouring secret. A key inside a value
+// already redacted is skipped, so each byte is scanned once. A bare YAML block scalar indicator is left to
+// the block scalar rule.
+func keyValueSpan(boundary int) func(s string, m []int, prevEnd int) (int, int, bool) {
+	return func(s string, m []int, prevEnd int) (int, int, bool) {
+		if m[2] < prevEnd || keepReference(s, m) {
+			return 0, 0, false
+		}
+		if isBlockHeader(s, m[1]) {
+			return 0, 0, false
+		}
+		start, end := valueSpan(s, m[1], boundary, m[2]-m[0])
+		return start, end, true
+	}
+}
+
+// Key names that hold secrets, in three forms: bare, optionally quoted (YAML block mappings), and quoted
+// or bare after "{" or "," (JSON and YAML flow mappings, also with escaped quotes inside a JSON string).
+const (
+	secretWordExpr = `(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?|connection[_-]?string|conn[_-]?str)`
+	bareKeyExpr    = `[A-Za-z0-9_.-]*` + secretWordExpr + `[A-Za-z0-9_.-]*`
+	secretKeyExpr  = `["']?` + bareKeyExpr + `["']?`
+	flowKeyExpr    = `\\?["']` + bareKeyExpr + `\\?["']|` + bareKeyExpr
+)
+
+// Quoted value forms for the Authorization rule: double-quoted with backslash escapes, and single-quoted
+// with doubled quotes (YAML).
 const (
 	doubleQuotedExpr = `"((?:[^"\\\r\n]|\\.)*)"`
 	singleQuotedExpr = `'((?:[^'\r\n]|'')*)'`
 )
-
-// Value forms for key-value rules: quoted, or bare up to the next whitespace, so punctuation inside a
-// value (env files allow "&", ";" and ",") is redacted with it. One of groups 2, 3 and 4 matches.
-const valueExpr = `(?:` + doubleQuotedExpr + `|` + singleQuotedExpr + `|(\S+))`
 
 func builtinRules() []rule {
 	return []rule{
@@ -335,9 +462,17 @@ func builtinRules() []rule {
 		// Credentials in URL query strings, such as Azure SAS signatures and presigned URLs.
 		{kind: KindCredential, groups: []int{1}, re: regexp.MustCompile(
 			`(?i)[?&](?:sig|signature|token|access_token|refresh_token|id_token|api_key|apikey|key|code|password|secret|client_secret|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature)=([^&\s#"'<>]+)`)},
-		// Key-value pairs whose key names a secret, in YAML, JSON, env and log formats.
-		{kind: KindCredential, groups: []int{2, 3, 4}, keep: keepKeyValue, re: regexp.MustCompile(
-			`(?i)(` + secretKeyExpr + `)[ \t]*[:=][ \t]*` + valueExpr)},
+		// Key-value pairs whose key names a secret, one rule per format so each value ends at its own
+		// format's boundary. Env files, logfmt and free text: the value runs to the next whitespace.
+		{kind: KindCredential, span: keyValueSpan(boundaryWhitespace), re: regexp.MustCompile(
+			`(?i)(` + bareKeyExpr + `)[ \t]*[:=][ \t]*`)},
+		// JSON and YAML flow mappings: a field after "{" or ",", ending at its closing quote or at , } ].
+		{kind: KindCredential, span: keyValueSpan(boundaryFlow), re: regexp.MustCompile(
+			`(?i)[{,][ \t\r\n]*(` + flowKeyExpr + `)[ \t]*:[ \t]*`)},
+		// YAML block mappings: a key at the start of a line, its value to the line end plus continuation
+		// lines indented deeper than the key.
+		{kind: KindCredential, span: keyValueSpan(boundaryLine), re: regexp.MustCompile(
+			`(?im)^[ \t]*(?:-[ \t]+)?(` + secretKeyExpr + `)[ \t]*:[ \t]+`)},
 		// YAML literal and folded block scalars under a secret key, with chomping and indentation indicators.
 		{kind: KindCredential, span: blockScalarSpan, re: regexp.MustCompile(
 			`(?im)^[ \t]*(?:-[ \t]+)?(` + secretKeyExpr + `)[ \t]*:[ \t]*([|>][1-9+-]{0,2})[ \t]*(?:#[^\r\n]*)?\r?$`)},

@@ -53,6 +53,8 @@ var (
 	// tail is secret material that must not survive after an escape, punctuation, a space or a line break.
 	tail  = "Remaining" + "SyntheticValue" + "42"
 	tail2 = "Second" + "SyntheticValue" + "43"
+	// opaque is a secret value long enough for the full marker.
+	opaque = "Synthetic" + "OpaqueValue42"
 )
 
 type corpusCase struct {
@@ -131,6 +133,21 @@ func corpus() []corpusCase {
 		{"ipv6 trailing double colon", "peer 2001:db8:1:2:3:4:5:: lost", []string{"2001:db8:1:2:3:4:5"}, []string{KindIP}},
 		{"ipv6 leading double colon", "peer ::1:2:3:4:5:6:7 lost", []string{"1:2:3:4:5:6:7"}, nil},
 		{"ipv6 followed by colon", "dial 2001:db8::7: refused", []string{"2001:db8::7"}, nil},
+		// Second review round: a label glued to an IPv6 address, and per-format value boundaries.
+		{"ipv6 after source label", "source:2001:db8::1 dropped", []string{"2001:db8::1"}, []string{KindIP}},
+		{"ipv6 after remote label", "remote:2001:db8:0:0:0:0:0:2 dropped", []string{"2001:db8:0:0:0:0:0:2"}, nil},
+		{"ipv6 after face label", "face:2001:db8::3", []string{"2001:db8::3"}, nil},
+		{"compact json reference first", `{"tokenExpiry":3600,"clientSecret":"` + opaque + `"}`, []string{opaque}, nil},
+		{"compact json reference last", `{"clientSecret":"` + opaque + `","tokenExpiry":3600}`, []string{opaque}, nil},
+		{"compact json unquoted secret", `{"tokenExpiry":3600,"apiKey":` + tail + `,"x":1}`, []string{tail}, nil},
+		{"escaped json in a string", `"{\"tokenExpiry\":1,\"clientSecret\":\"` + opaque + `\"}"`, []string{opaque}, nil},
+		{"pretty json", "{\n  \"tokenExpiry\": 3600,\n  \"clientSecret\": \"" + opaque + "\"\n}", []string{opaque}, nil},
+		{"yaml flow reference first", "{tokenExpiry: 3600, clientSecret: " + opaque + "}", []string{opaque}, nil},
+		{"yaml flow reference last", "{clientSecret: " + opaque + ", tokenExpiry: 3600}", []string{opaque}, nil},
+		{"env reference next to secret", "tokenExpiry=3600,clientSecret=" + opaque, []string{opaque}, nil},
+		{"yaml plain scalar with spaces", "token: prefix " + tail, []string{tail}, []string{KindCredential}},
+		{"yaml multi-line plain scalar", "auth:\n  token: prefix\n    " + tail + "\n    " + tail2 + "\n  user: app",
+			[]string{tail, tail2}, nil},
 		{"several in one line",
 			"user synthetic@example.org from 198.51.100.7 used " + ghToken + " and " + jwtToken,
 			[]string{"synthetic@example.org", "198.51.100.7", ghToken, jwtToken},
@@ -186,6 +203,13 @@ func TestKeepsTextAroundValues(t *testing.T) {
 		"db:\n  password: |\n    a-" + tail + "\n    b\n  user: app": "db:\n  password: |\n    [REDACTED:credential]\n  user: app",
 		"Server=example;Password=prefix " + tail + ";Encrypt=True":   "Server=example;Password=[REDACTED:connection-string];Encrypt=True",
 		"password: |\nnext: field":                                   "password: *\nnext: field",
+		`{"tokenExpiry":3600,"clientSecret":"` + opaque + `"}`:       `{"tokenExpiry":3600,"clientSecret":"[REDACTED:credential]"}`,
+		`{"clientSecret":"` + opaque + `","tokenExpiry":3600}`:       `{"clientSecret":"[REDACTED:credential]","tokenExpiry":3600}`,
+		"{tokenName: x, apiKey: " + opaque + "}":                     "{tokenName: x, apiKey: [REDACTED:credential]",
+		"token: prefix " + tail:                                      "token: [REDACTED:credential]",
+		"auth:\n  token: prefix\n    " + tail + "\n  user: app":      "auth:\n  token: [REDACTED:credential]\n  user: app",
+		"credentials:   \n  name: app\n":                             "credentials:   \n  name: app\n",
+		"src 2001:db8::1, ok":                                        "src [ip], ok",
 		"secretName: |\n  orders-tls\n":                              "secretName: |\n  orders-tls\n",
 	} {
 		if got := String(in); got != want {

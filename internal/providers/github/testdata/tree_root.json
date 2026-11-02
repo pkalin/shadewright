@@ -1,0 +1,6 @@
+{"sha":"4444444444444444444444444444444444444444","url":"https://api.github.com/repos/acme/fleet/git/trees/4444444444444444444444444444444444444444","tree":[
+{"path":"README.md","mode":"100644","type":"blob","sha":"9999999999999999999999999999999999999999","size":12,"url":"https://api.github.com/repos/acme/fleet/git/blobs/9999999999999999999999999999999999999999"},
+{"path":"apps","mode":"040000","type":"tree","sha":"5555555555555555555555555555555555555555","url":"https://api.github.com/repos/acme/fleet/git/trees/5555555555555555555555555555555555555555"},
+{"path":"link.yaml","mode":"120000","type":"blob","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":16,"url":"https://api.github.com/repos/acme/fleet/git/blobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+{"path":"vendor","mode":"160000","type":"commit","sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+],"truncated":false}

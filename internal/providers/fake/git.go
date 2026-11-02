@@ -111,6 +111,9 @@ func (g *Git) ReadFile(ctx context.Context, sha, path string) (providers.File, e
 	if !ok {
 		return providers.File{}, fmt.Errorf("file %q at %s: %w", path, sha, providers.ErrNotFound)
 	}
+	if len(data) > providers.MaxFileBytes {
+		return providers.File{}, fmt.Errorf("file %q at %s: %w", path, sha, providers.ErrTooLarge)
+	}
 	return providers.File{Path: path, Commit: sha, Data: slices.Clone(data)}, nil
 }
 

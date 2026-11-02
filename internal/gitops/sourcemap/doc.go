@@ -22,8 +22,9 @@ limitations under the License.
 //  0. The target must be pinned by UID and have a kind the action may change ([FieldFor]); this is checked
 //     before anything is read.
 //  1. The Flux labels on the live object (kustomize.toolkit.fluxcd.io/name and /namespace) name its
-//     Kustomization. The labels are untrusted, so the Kustomization must be Ready for its current generation
-//     and list the object in status.inventory.
+//     Kustomization. The labels are untrusted, so the Kustomization must be Ready for its current generation,
+//     apply to this cluster (no spec.kubeConfig) and list the object in status.inventory. It must not
+//     decrypt SOPS files (spec.decryption), which cannot be edited without breaking their MAC.
 //  2. The Kustomization's source must be a GitRepository that tracks only spec.ref.branch, with no
 //     suspend, ignore, include, sparse checkout or submodules. It must be Ready for its current generation,
 //     its artifact must come from that branch, and the Kustomization must have applied that revision. Its URL must equal,
@@ -41,7 +42,8 @@ limitations under the License.
 // unreachable API server or Git host.
 //
 // Git is read only through ReadFile and BranchHead, relying on the ReadFile contract: only regular files
-// are returned and symbolic links are never followed. Reads are bounded by [MaxDepth], [MaxFiles],
+// are returned, symbolic links are never followed, and files over providers.MaxFileBytes are refused before
+// they are downloaded. Reads are bounded by [MaxDepth], [MaxFiles],
 // [MaxReads] and [MaxFileBytes], whatever cap the provider enforces itself. Errors carry no provider text
 // ([TransientError]), since it may hold a repository URL with credentials.
 //

@@ -79,6 +79,25 @@ func TestGitReadFile(t *testing.T) {
 	}
 }
 
+func TestGitReadFileSizeLimit(t *testing.T) {
+	ctx := context.Background()
+	g := fake.NewGit(base, map[string][]byte{
+		"limit.yaml": make([]byte, providers.MaxFileBytes),
+		"big.yaml":   make([]byte, providers.MaxFileBytes+1),
+	})
+	head, err := g.BranchHead(ctx, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, err := g.ReadFile(ctx, head, "limit.yaml"); err != nil || len(f.Data) != providers.MaxFileBytes {
+		t.Errorf("file at the limit: %d bytes, %v", len(f.Data), err)
+	}
+	f, err := g.ReadFile(ctx, head, "big.yaml")
+	if !providers.IsTooLarge(err) || f.Data != nil {
+		t.Errorf("file over the limit: %d bytes, %v; want ErrTooLarge and no data", len(f.Data), err)
+	}
+}
+
 func TestGitCreateBranchIdempotent(t *testing.T) {
 	g, head := newRepo(t)
 	ctx := context.Background()

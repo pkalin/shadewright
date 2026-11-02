@@ -79,6 +79,12 @@ func checkKustomization(ks *unstructured.Unstructured, target schema.GroupVersio
 		r := needsIntervention(ReasonKustomizationNotReady, "%s is not Ready for its current generation", ref)
 		return "", "", "", &r
 	}
+	// A Kustomization with spec.kubeConfig applies to another cluster. Its inventory does not say which
+	// cluster an entry is in, so a local object could match a remote entry; check this before the inventory.
+	if v, ok := field(ks.Object, "spec", "kubeConfig"); ok && !empty(v) {
+		r := needsIntervention(ReasonRemoteCluster, "%s applies to another cluster (spec.kubeConfig)", ref)
+		return "", "", "", &r
+	}
 	if !inInventory(ks, target, ns, name) {
 		r := denied(ReasonNotInInventory,
 			"%s, named by the labels on %s %s/%s, does not list it in status.inventory", ref, target.Kind, ns, name)
@@ -90,6 +96,12 @@ func checkKustomization(ks *unstructured.Unstructured, target schema.GroupVersio
 				"%s sets spec.%s, so the manifests in Git are not what is applied", ref, f)
 			return "", "", "", &r
 		}
+	}
+	// With spec.decryption, files may be SOPS-encrypted, even partly with plaintext fields left in, and
+	// editing them would break the SOPS MAC. Encrypted files are not supported.
+	if v, ok := field(ks.Object, "spec", "decryption"); ok && !empty(v) {
+		r := needsIntervention(ReasonDecryption, "%s decrypts its manifests (spec.decryption)", ref)
+		return "", "", "", &r
 	}
 	kind, _, _ := unstructured.NestedString(ks.Object, "spec", "sourceRef", "kind")
 	srcName, _, _ = unstructured.NestedString(ks.Object, "spec", "sourceRef", "name")

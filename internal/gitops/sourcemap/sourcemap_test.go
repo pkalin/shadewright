@@ -100,7 +100,9 @@ type fixture struct {
 	gitBranch  string
 	in         sourcemap.Input
 	gitFail    func(op string) error
-	getErr     error
+	// gitWrap, when set, wraps the fake repository, for providers that break the GitProvider contract.
+	gitWrap func(providers.GitProvider) providers.GitProvider
+	getErr  error
 }
 
 func obj(apiVersion, kind, namespace, name string, fields map[string]any) *unstructured.Unstructured {
@@ -248,6 +250,9 @@ func (f *fixture) run(t *testing.T) (sourcemap.Result, string, error) {
 		OpenRepository: func(_ context.Context, repo v1alpha1.GitRepository) (providers.GitProvider, error) {
 			if repo.Name != "fleet" {
 				return nil, fmt.Errorf("opened repository %s", repo.Name)
+			}
+			if f.gitWrap != nil {
+				return f.gitWrap(git), nil
 			}
 			return git, nil
 		},
@@ -427,6 +432,14 @@ func TestResolveStops(t *testing.T) {
 		{"Kustomization sets images", func(f *fixture) {
 			set(f.ks, []any{map[string]any{"name": "web"}}, "spec", "images")
 		}, ni, sourcemap.ReasonKustomizationTransforms},
+		// The fixture's inventory lists the target, so only the kubeConfig check can stop this one.
+		{"Kustomization applies to a remote cluster", func(f *fixture) {
+			set(f.ks, map[string]any{"secretRef": map[string]any{"name": "remote-kubeconfig"}}, "spec", "kubeConfig")
+		}, ni, sourcemap.ReasonRemoteCluster},
+		// The manifest keeps the target field in plaintext, as selective SOPS encryption allows.
+		{"Kustomization decrypts SOPS files", func(f *fixture) {
+			set(f.ks, map[string]any{"provider": "sops", "secretRef": map[string]any{"name": "sops-age"}}, "spec", "decryption")
+		}, ni, sourcemap.ReasonDecryption},
 		{"source is an OCIRepository", func(f *fixture) {
 			set(f.ks, "OCIRepository", "spec", "sourceRef", "kind")
 		}, ni, sourcemap.ReasonUnsupportedSource},
@@ -586,6 +599,10 @@ func TestResolveStops(t *testing.T) {
 		}, ni, sourcemap.ReasonFileNotReadable},
 		{"file too large", func(f *fixture) {
 			f.files[soFile] = scaledObjectYAML + "# " + strings.Repeat("x", sourcemap.MaxFileBytes) + "\n"
+		}, ni, sourcemap.ReasonFileNotReadable},
+		// An adapter that ignores the size contract and returns the whole file is still refused.
+		{"file too large from a lax provider", func(f *fixture) {
+			f.gitWrap = func(g providers.GitProvider) providers.GitProvider { return padReads{g} }
 		}, ni, sourcemap.ReasonFileNotReadable},
 		{"too many files", func(f *fixture) {
 			var b strings.Builder
@@ -901,4 +918,15 @@ func TestResolveNeverPicksAnotherDocument(t *testing.T) {
 			t.Fatalf("result = %s/%s (%s), want NeedsIntervention/ValueMismatch", res.Outcome, res.Reason, res.Message)
 		}
 	})
+}
+
+// padReads is a GitProvider that returns every file padded past MaxFileBytes instead of ErrTooLarge.
+type padReads struct{ providers.GitProvider }
+
+func (p padReads) ReadFile(ctx context.Context, commit, path string) (providers.File, error) {
+	f, err := p.GitProvider.ReadFile(ctx, commit, path)
+	if err == nil {
+		f.Data = append(f.Data, make([]byte, providers.MaxFileBytes)...)
+	}
+	return f, err
 }

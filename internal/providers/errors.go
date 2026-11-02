@@ -31,6 +31,8 @@ var (
 	ErrConflict = errors.New("conflict")
 	// ErrRetryable means a transient failure: the same request may succeed later.
 	ErrRetryable = errors.New("retryable")
+	// ErrTooLarge means a file is larger than MaxFileBytes; its content was not downloaded.
+	ErrTooLarge = errors.New("too large")
 )
 
 // RetryableError is a transient failure with an optional delay requested by the remote system, for example
@@ -60,6 +62,9 @@ func IsNotFound(err error) bool { return errors.Is(err, ErrNotFound) }
 
 // IsConflict reports whether err means the request was based on stale state.
 func IsConflict(err error) bool { return errors.Is(err, ErrConflict) }
+
+// IsTooLarge reports whether err means a file exceeds MaxFileBytes.
+func IsTooLarge(err error) bool { return errors.Is(err, ErrTooLarge) }
 
 // IsRetryable reports whether err is a transient failure.
 func IsRetryable(err error) bool { return errors.Is(err, ErrRetryable) }

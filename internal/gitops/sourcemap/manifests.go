@@ -44,8 +44,9 @@ const (
 	// MaxReads is how many ReadFile calls one mapping makes in all, kustomization file lookups included, so
 	// a build cannot fan out into many directories.
 	MaxReads = 512
-	// MaxFileBytes is the largest file read.
-	MaxFileBytes = 1 << 20
+	// MaxFileBytes is the largest file read. The provider refuses larger files before downloading them
+	// (providers.ErrTooLarge); the mapping checks the size again in case an adapter does not.
+	MaxFileBytes = providers.MaxFileBytes
 	// maxRefLen is the longest path accepted, the MaxLength of GitFilePath.
 	maxRefLen = 512
 )
@@ -249,10 +250,10 @@ func (w *walker) read(ctx context.Context, p string) (providers.File, *Result, e
 		r := needsIntervention(reasonFileNotFound, "%s does not exist", p)
 		return providers.File{}, &r, nil
 	}
-	if err != nil {
+	if err != nil && !providers.IsTooLarge(err) {
 		return providers.File{}, nil, transient("read "+p, err)
 	}
-	if len(f.Data) > MaxFileBytes {
+	if err != nil || len(f.Data) > MaxFileBytes {
 		r := needsIntervention(ReasonFileNotReadable, "%s is larger than %d bytes", p, MaxFileBytes)
 		return providers.File{}, &r, nil
 	}

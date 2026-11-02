@@ -69,6 +69,12 @@ const (
 	// ReasonKustomizationTransforms means the Kustomization patches, renames, re-namespaces or substitutes
 	// what it builds (NeedsIntervention).
 	ReasonKustomizationTransforms Reason = "KustomizationTransforms"
+	// ReasonRemoteCluster means the Kustomization applies to another cluster through spec.kubeConfig, whose
+	// inventory cannot be tied to the target (NeedsIntervention).
+	ReasonRemoteCluster Reason = "RemoteCluster"
+	// ReasonDecryption means the Kustomization decrypts SOPS files, which the mapping cannot edit without
+	// breaking their MAC (NeedsIntervention).
+	ReasonDecryption Reason = "Decryption"
 	// ReasonUnsupportedSource means the Kustomization's source is not a GitRepository (NeedsIntervention).
 	ReasonUnsupportedSource Reason = "UnsupportedSource"
 	// ReasonSourceNotFound means the GitRepository does not exist (NeedsIntervention).

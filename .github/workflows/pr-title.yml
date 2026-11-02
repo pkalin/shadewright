@@ -1,9 +1,12 @@
 name: PR title
 
 # Squash merges use the pull request title as the commit message on main, so the title must follow
-# Conventional Commits (see AGENTS.md, "Commits"). Reads only the event payload: no checkout, no secrets.
+# Conventional Commits (see AGENTS.md, "Commits").
+# pull_request_target runs this file from the base branch, so a pull request cannot weaken its own check.
+# That is safe only because the job never checks out or runs pull request code and has read-only
+# permissions: keep it that way.
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, edited, synchronize, reopened]
 
 permissions:

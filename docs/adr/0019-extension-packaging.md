@@ -1,6 +1,6 @@
 # ADR-0019: Packaging extensions: compiled in now, signed OCI packs later
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-02
 
 ## Context

@@ -474,7 +474,7 @@ Decided on 2026-11-01:
 | Agent observability | controller-runtime Prometheus metrics, plus OpenTelemetry traces per analysis (tool calls, tokens, latency) |
 | Packaging | Kubebuilder's Helm plugin; images on GHCR, signed keyless, with SBOMs |
 | Pluggability | Three axes: platform services, cluster platforms, cluster integrations ([ADR-0018](adr/0018-three-axes-of-pluggability.md)); security integrations diagnose only |
-| Extension packaging | Compiled in now; signed declarative OCI packs later (proposed, [ADR-0019](adr/0019-extension-packaging.md)) |
+| Extension packaging | Compiled in now; signed declarative OCI packs later ([ADR-0019](adr/0019-extension-packaging.md)) |
 
 Still open:
 

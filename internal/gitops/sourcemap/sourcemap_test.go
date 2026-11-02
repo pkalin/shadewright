@@ -26,6 +26,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -103,6 +104,21 @@ type fixture struct {
 	// gitWrap, when set, wraps the fake repository, for providers that break the GitProvider contract.
 	gitWrap func(providers.GitProvider) providers.GitProvider
 	getErr  error
+	// duringGit runs on the first read of the branch head, to change the cluster while Git is scanned.
+	duringGit func(c client.Client)
+}
+
+// onHead calls fn once, when the branch head is read.
+type onHead struct {
+	providers.GitProvider
+	fn func()
+}
+
+func (o onHead) BranchHead(ctx context.Context, branch string) (string, error) {
+	if o.fn != nil {
+		o.fn()
+	}
+	return o.GitProvider.BranchHead(ctx, branch)
 }
 
 func obj(apiVersion, kind, namespace, name string, fields map[string]any) *unstructured.Unstructured {
@@ -245,11 +261,15 @@ func (f *fixture) run(t *testing.T) (sourcemap.Result, string, error) {
 			},
 		})
 	}
+	cl := b.Build()
 	r := &sourcemap.Resolver{
-		Client: b.Build(),
+		Client: cl,
 		OpenRepository: func(_ context.Context, repo v1alpha1.GitRepository) (providers.GitProvider, error) {
 			if repo.Name != "fleet" {
 				return nil, fmt.Errorf("opened repository %s", repo.Name)
+			}
+			if f.duringGit != nil {
+				return onHead{GitProvider: git, fn: func() { f.duringGit(cl) }}, nil
 			}
 			if f.gitWrap != nil {
 				return f.gitWrap(git), nil
@@ -929,4 +949,36 @@ func (p padReads) ReadFile(ctx context.Context, commit, path string) (providers.
 		f.Data = append(f.Data, make([]byte, providers.MaxFileBytes)...)
 	}
 	return f, err
+}
+
+// The Kustomization and the GitRepository choose what is scanned. If either changes while Git is scanned, the
+// result is a retry, not a source.
+func TestResolveRetriesWhenFluxObjectsChangeDuringTheScan(t *testing.T) {
+	for _, gvk := range []schema.GroupVersionKind{sourcemap.KustomizationGVK, sourcemap.GitRepositoryGVK} {
+		t.Run(gvk.Kind, func(t *testing.T) {
+			f := newFixture()
+			f.duringGit = func(c client.Client) {
+				o := &unstructured.Unstructured{}
+				o.SetGroupVersionKind(gvk)
+				name := "apps"
+				if gvk == sourcemap.GitRepositoryGVK {
+					name = "fleet"
+				}
+				if err := c.Get(context.Background(), client.ObjectKey{Namespace: "flux-system", Name: name}, o); err != nil {
+					t.Fatal(err)
+				}
+				o.SetAnnotations(map[string]string{"touched": "yes"})
+				if err := c.Update(context.Background(), o); err != nil {
+					t.Fatal(err)
+				}
+			}
+			res, _, err := f.run(t)
+			if !errors.Is(err, sourcemap.ErrTransient) {
+				t.Fatalf("error = %v (outcome %s), want ErrTransient", err, res.Outcome)
+			}
+			if res.Source != nil {
+				t.Error("a source was returned with the error")
+			}
+		})
+	}
 }

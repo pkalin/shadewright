@@ -243,41 +243,9 @@ func (c Checker) Fresh(ctx context.Context, rr *v1alpha1.RemediationRequest) err
 		return errors.New("the request has no plan digest")
 	}
 
-	// Settings first: while writes are paused nothing else is decided, because a stale plan leads to a
-	// write (closing its change request).
-	settings := &v1alpha1.RemediationSettings{}
-	settingsErr := c.Reader.Get(ctx, client.ObjectKey{Name: "default"}, settings)
-	if settingsErr == nil && Paused(settings) {
-		return ErrPaused
-	}
-	pol := &v1alpha1.RemediationPolicy{}
-	switch err := c.Reader.Get(ctx, client.ObjectKey{Name: string(rr.Spec.PolicyRef)}, pol); {
-	case apierrors.IsNotFound(err):
-		return stale(ReasonPolicyChanged, "The policy %q no longer exists", rr.Spec.PolicyRef)
-	case err != nil:
-		return fmt.Errorf("get RemediationPolicy %s: %w", rr.Spec.PolicyRef, err)
-	}
-	switch {
-	case apierrors.IsNotFound(settingsErr):
-		return stale(ReasonSettingsChanged, "RemediationSettings default no longer exists")
-	case settingsErr != nil:
-		return fmt.Errorf("get RemediationSettings default: %w", settingsErr)
-	}
-
-	if v1alpha1.UID(pol.UID) != rr.Status.PolicyUID || RevisionOf(pol) != rr.Status.PolicyRevision {
-		return stale(ReasonPolicyChanged, "The policy %q is not the one that allowed the plan", rr.Spec.PolicyRef)
-	}
-	repo, ok := repository(settings, src.RepositoryRef)
-	if !ok || repo.TargetBranch != src.TargetBranch {
-		return stale(ReasonSettingsChanged, "The repository %q or its target branch changed in the settings",
-			src.RepositoryRef)
-	}
-	want, err := ComputeDigest(rr, src, pol, settings)
+	pol, settings, repo, err := c.loadPlan(ctx, rr)
 	if err != nil {
-		return fmt.Errorf("compute the plan digest: %w", err)
-	}
-	if want != rr.Status.PlanDigest {
-		return stale(ReasonPlanChanged, "The plan, its source or the repository settings changed")
+		return err
 	}
 
 	live, err := c.checkTarget(ctx, rr, pol)
@@ -297,7 +265,68 @@ func (c Checker) Fresh(ctx context.Context, rr *v1alpha1.RemediationRequest) err
 	if again.GetUID() != live.GetUID() || again.GetResourceVersion() != live.GetResourceVersion() {
 		return errors.New("the target changed while its source was mapped, checking again")
 	}
-	return c.checkFile(ctx, rr, repo, commit)
+	if err := c.checkFile(ctx, rr, repo, commit); err != nil {
+		return err
+	}
+	// The scan of Git can take long. Read the policy and the settings once more before saying "fresh": a pause,
+	// a tightened or deleted policy, or a changed repository entry meanwhile must not pass. It is not decided
+	// as stale here; the next check does that on a calm read.
+	switch _, _, _, err := c.loadPlan(ctx, rr); {
+	case err == nil:
+		return nil
+	case errors.Is(err, ErrPaused):
+		return err
+	default:
+		if _, isStale := errors.AsType[*StaleError](err); isStale {
+			return errors.New("the policy or the settings changed while the plan was checked, checking again")
+		}
+		return err
+	}
+}
+
+// loadPlan reads the settings and the policy straight from the API server and checks them against the plan:
+// not paused, the same policy UID and revision, the same repository entry, and the same digest. It returns the
+// repository entry of the plan.
+func (c Checker) loadPlan(ctx context.Context, rr *v1alpha1.RemediationRequest) (*v1alpha1.RemediationPolicy,
+	*v1alpha1.RemediationSettings, v1alpha1.GitRepository, error) {
+	src := rr.Status.Source
+	// Settings first: while writes are paused nothing else is decided, because a stale plan leads to a
+	// write (closing its change request).
+	settings := &v1alpha1.RemediationSettings{}
+	settingsErr := c.Reader.Get(ctx, client.ObjectKey{Name: "default"}, settings)
+	if settingsErr == nil && Paused(settings) {
+		return nil, nil, v1alpha1.GitRepository{}, ErrPaused
+	}
+	pol := &v1alpha1.RemediationPolicy{}
+	switch err := c.Reader.Get(ctx, client.ObjectKey{Name: string(rr.Spec.PolicyRef)}, pol); {
+	case apierrors.IsNotFound(err):
+		return nil, nil, v1alpha1.GitRepository{}, stale(ReasonPolicyChanged, "The policy %q no longer exists", rr.Spec.PolicyRef)
+	case err != nil:
+		return nil, nil, v1alpha1.GitRepository{}, fmt.Errorf("get RemediationPolicy %s: %w", rr.Spec.PolicyRef, err)
+	}
+	switch {
+	case apierrors.IsNotFound(settingsErr):
+		return nil, nil, v1alpha1.GitRepository{}, stale(ReasonSettingsChanged, "RemediationSettings default no longer exists")
+	case settingsErr != nil:
+		return nil, nil, v1alpha1.GitRepository{}, fmt.Errorf("get RemediationSettings default: %w", settingsErr)
+	}
+
+	if v1alpha1.UID(pol.UID) != rr.Status.PolicyUID || RevisionOf(pol) != rr.Status.PolicyRevision {
+		return nil, nil, v1alpha1.GitRepository{}, stale(ReasonPolicyChanged, "The policy %q is not the one that allowed the plan", rr.Spec.PolicyRef)
+	}
+	repo, ok := repository(settings, src.RepositoryRef)
+	if !ok || repo.TargetBranch != src.TargetBranch {
+		return nil, nil, v1alpha1.GitRepository{}, stale(ReasonSettingsChanged, "The repository %q or its target branch changed in the settings",
+			src.RepositoryRef)
+	}
+	want, err := ComputeDigest(rr, src, pol, settings)
+	if err != nil {
+		return nil, nil, v1alpha1.GitRepository{}, fmt.Errorf("compute the plan digest: %w", err)
+	}
+	if want != rr.Status.PlanDigest {
+		return nil, nil, v1alpha1.GitRepository{}, stale(ReasonPlanChanged, "The plan, its source or the repository settings changed")
+	}
+	return pol, settings, repo, nil
 }
 
 // readTarget reads the live target straight from the API server.

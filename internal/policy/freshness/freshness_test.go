@@ -632,3 +632,51 @@ func TestMappingUsesTheCallersDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// changeDuringMapping marks the point where the resolver ran; afterGet then changes what later reads see.
+func changeDuringMapping(w *world, change func(obj client.Object)) {
+	mapped := false
+	inner := w.resolve
+	w.resolve = func(ctx context.Context, in sourcemap.Input) (sourcemap.Result, error) {
+		mapped = true
+		return inner(ctx, in)
+	}
+	w.afterGet = func(obj client.Object) {
+		if mapped {
+			change(obj)
+		}
+	}
+}
+
+// The policy and the settings are read again before "fresh": a pause during the scan is seen.
+func TestPausedDuringTheScanIsNotFresh(t *testing.T) {
+	w := newWorld(t)
+	changeDuringMapping(w, func(obj client.Object) {
+		if st, ok := obj.(*v1alpha1.RemediationSettings); ok {
+			paused := true
+			st.Spec.Paused = &paused
+		}
+	})
+	if err := w.fresh(t); !errors.Is(err, freshness.ErrPaused) {
+		t.Fatalf("want ErrPaused, got %v", err)
+	}
+}
+
+// A policy edited or deleted during the scan is not fresh, and not yet stale: the next check decides.
+func TestPolicyChangedDuringTheScanIsRetried(t *testing.T) {
+	w := newWorld(t)
+	changeDuringMapping(w, func(obj client.Object) {
+		if pol, ok := obj.(*v1alpha1.RemediationPolicy); ok {
+			pol.Generation++
+		}
+	})
+	wantRetry(t, w.fresh(t))
+
+	w = newWorld(t)
+	changeDuringMapping(w, func(obj client.Object) {
+		if pol, ok := obj.(*v1alpha1.RemediationPolicy); ok {
+			pol.UID = "77777777-7777-4777-8777-777777777777"
+		}
+	})
+	wantRetry(t, w.fresh(t))
+}

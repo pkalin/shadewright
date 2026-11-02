@@ -370,7 +370,7 @@ func TestFailClosed(t *testing.T) {
 		}},
 		{"branch head read fails", func(w *world) {
 			w.git.SetFail(func(op string) error {
-				if op == "BranchHead" {
+				if op == opBranchHead {
 					return &providers.RetryableError{Err: boom}
 				}
 				return nil
@@ -383,7 +383,7 @@ func TestFailClosed(t *testing.T) {
 		}},
 		{"file read fails", func(w *world) {
 			w.git.SetFail(func(op string) error {
-				if op == "ReadFile" {
+				if op == opReadFile {
 					return &providers.RetryableError{Err: boom}
 				}
 				return nil
@@ -455,6 +455,12 @@ func chain(err error) []string {
 	return out
 }
 
+// The fake Git provider names its operations so a test can fail one.
+const (
+	opBranchHead = "BranchHead"
+	opReadFile   = "ReadFile"
+)
+
 func TestProviderErrorsKeepNoText(t *testing.T) {
 	const secret = "ghs_supersecrettoken"
 	leaky := &providers.RetryableError{RetryAfter: 4 * time.Second,
@@ -465,7 +471,7 @@ func TestProviderErrorsKeepNoText(t *testing.T) {
 		},
 		"branch head": func(w *world) {
 			w.git.SetFail(func(op string) error {
-				if op == "BranchHead" {
+				if op == opBranchHead {
 					return leaky
 				}
 				return nil
@@ -473,7 +479,7 @@ func TestProviderErrorsKeepNoText(t *testing.T) {
 		},
 		"read file": func(w *world) {
 			w.git.SetFail(func(op string) error {
-				if op == "ReadFile" {
+				if op == opReadFile {
 					return leaky
 				}
 				return nil
@@ -498,6 +504,30 @@ func TestProviderErrorsKeepNoText(t *testing.T) {
 				t.Fatalf("want the class and delay kept, got %#v", err)
 			}
 		})
+	}
+}
+
+// A failed read keeps the host's delay: the branch head is not read again before the error is returned.
+func TestFailedFileReadIsNotFollowedByAnotherHostCall(t *testing.T) {
+	w := newWorld(t)
+	readFailed, headAfter := false, false
+	w.git.SetFail(func(op string) error {
+		switch {
+		case op == opReadFile:
+			readFailed = true
+			return &providers.RetryableError{RetryAfter: 7 * time.Second, Err: errors.New("rate limited")}
+		case op == opBranchHead && readFailed:
+			headAfter = true
+		}
+		return nil
+	})
+	err := w.fresh(t)
+	pe, ok := errors.AsType[*freshness.ProviderError](err)
+	if !ok || pe.RetryAfter != 7*time.Second {
+		t.Fatalf("want the read error with its delay, got %#v", err)
+	}
+	if headAfter {
+		t.Fatal("the branch head was read again after a failed file read")
 	}
 }
 

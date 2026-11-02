@@ -469,6 +469,11 @@ func (c Checker) checkFile(ctx context.Context, rr *v1alpha1.RemediationRequest,
 		return errors.New("the target branch moved while its source was mapped, checking again")
 	}
 	file, err := git.ReadFile(ctx, head, string(src.Path))
+	// A failed read is returned as it is, so a delay the host asked for (Retry-After) is kept and the host is
+	// not called again at once.
+	if err != nil && !errors.Is(err, providers.ErrNotFound) {
+		return provider("read the target file on the target branch", err)
+	}
 	// The read can take long. If the branch moved meanwhile, the file (or its absence) may not be the one at
 	// head, so neither a pass nor a "no longer exists" is trusted: not fresh, not stale; the caller retries.
 	// This check comes before the outcome of the read is looked at.
@@ -479,11 +484,8 @@ func (c Checker) checkFile(ctx context.Context, rr *v1alpha1.RemediationRequest,
 	if after != head {
 		return errors.New("the target branch moved while the target file was read, checking again")
 	}
-	switch {
-	case errors.Is(err, providers.ErrNotFound):
+	if err != nil { // ErrNotFound, the only error left
 		return stale(ReasonTargetFileChanged, "%s no longer exists on the target branch", src.Path)
-	case err != nil:
-		return provider("read the target file on the target branch", err)
 	}
 	got, found, err := sourcemap.ReadField(file.Data, rr.Spec.TargetRef, field)
 	if err != nil {

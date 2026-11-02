@@ -19,6 +19,8 @@ limitations under the License.
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"os"
 
@@ -36,6 +38,8 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/cmdutil"
 	"github.com/pkalin/shadewright/internal/controller"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/pkalin/shadewright/internal/providers"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -43,6 +47,12 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
+
+// openRepository opens a repository named in RemediationSettings. No GitProvider adapter is built yet, so it
+// fails; the source mapping reports that as a retryable error, without any provider text.
+func openRepository(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+	return nil, errors.New("no Git provider adapter is available")
+}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -97,8 +107,10 @@ func main() {
 	}
 
 	if err := (&controller.RemediationRequestReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		APIReader: mgr.GetAPIReader(),
+		Source:    &sourcemap.Resolver{Client: mgr.GetAPIReader(), OpenRepository: openRepository},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "remediationrequest")
 		os.Exit(1)

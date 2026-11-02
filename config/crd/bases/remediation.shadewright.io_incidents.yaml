@@ -67,9 +67,8 @@ spec:
                 pattern: ^sha256:[0-9a-f]{64}$
                 type: string
               reason:
-                description: |-
-                  reason is the event reason or status reason, for example FailedScheduling or OOMKilled.
-                  Deliberately stale: this line is not in docs/reference/api.md.
+                description: reason is the event reason or status reason, for example
+                  FailedScheduling or OOMKilled.
                 maxLength: 128
                 minLength: 1
                 type: string

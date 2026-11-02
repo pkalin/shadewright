@@ -17,7 +17,7 @@ limitations under the License.
 // Package github is the GitHub adapter of [providers.GitProvider] (ADR-0004, ADR-0013, design section 8.2).
 //
 // A [Provider] is bound at construction to one repository and one target branch, and authenticates with
-// installation tokens from package auth. It talks to the REST API at https://api.github.com only: the host
+// installation tokens from package auth. It talks to the REST API and the GraphQL endpoint at https://api.github.com only: the host
 // is pinned in code, redirects are never followed, every response body is read with a bound, and error
 // statuses are classified from the status code and headers without reading the body (the only exception is
 // a 403 without rate limit headers, whose body is searched, never echoed, for a secondary rate limit).
@@ -28,8 +28,9 @@ limitations under the License.
 //   - CreateBranch accepts only a base commit that is on the target branch (the head or an ancestor of it),
 //     so a branch cannot be started from a commit of a fork or of another branch.
 //   - CommitFile builds the commit with the Git data API (blob, tree, commit, each content addressed, so a
-//     retry repeats no work) and moves the branch with a fast-forward-only update after checking that its head
-//     is the expected one. A moved head is ErrConflict; the update never forces.
+//     retry repeats no work; the file keeps its mode) and moves the branch with GraphQL updateRefs, an atomic
+//     compare-and-swap on the expected head without force. A head that moved in any direction, a rewind to
+//     an ancestor included, is ErrConflict; the update never forces.
 //   - Change requests are opened, found and closed only when their head is a shadewright/ branch of this
 //     repository and their base is the target branch.
 //   - ReadFile resolves the path through the trees of the commit, refuses anything that is not a regular file,

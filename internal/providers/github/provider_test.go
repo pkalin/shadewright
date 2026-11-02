@@ -23,7 +23,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -54,9 +56,12 @@ const (
 	// bodyMarker is in error fixtures; it must never reach an error.
 	bodyMarker = "LEAKED-BODY-MARKER"
 	target     = "main"
+	owner      = "acme"
 	other      = "release"
 	mainRef    = "/git/ref/heads/main"
 	hRetry     = "Retry-After"
+	// graphQLPath stands for the GraphQL endpoint in steps.
+	graphQLPath = "/graphql"
 )
 
 var t0 = time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
@@ -95,12 +100,14 @@ func (s *script) RoundTrip(req *http.Request) (*http.Response, error) {
 	if got := req.Header.Get("Authorization"); got != "Bearer "+testToken {
 		t.Errorf("Authorization header is %q", got)
 	}
-	path, ok := strings.CutPrefix(req.URL.EscapedPath(), repoPath+"/")
-	if !ok {
+	path, ok := strings.CutPrefix(req.URL.EscapedPath(), repoPath)
+	switch {
+	case req.URL.EscapedPath() == graphQLPath:
+		path = graphQLPath
+	case !ok || (path != "" && !strings.HasPrefix(path, "/")):
 		t.Errorf("request outside the repository: %s %s", req.Method, req.URL.EscapedPath())
 		return nil, errors.New("unexpected repository")
 	}
-	path = "/" + path
 	if s.n >= len(s.steps) {
 		t.Errorf("unexpected request %s %s", req.Method, path)
 		return nil, errors.New("unexpected request")
@@ -190,7 +197,7 @@ func assertSafe(t *testing.T, err error) {
 		t.Fatal("expected an error")
 	}
 	for e := err; e != nil; e = errors.Unwrap(e) {
-		for _, s := range []string{testToken, "acme", "fleet", "req-", "/git/", "api.github.com", bodyMarker, "https://"} {
+		for _, s := range []string{testToken, owner, "fleet", "req-", "/git/", "api.github.com", bodyMarker, "https://"} {
 			for _, text := range []string{e.Error(), fmt.Sprintf("%+v", e), fmt.Sprintf("%#v", e)} {
 				if strings.Contains(text, s) {
 					t.Errorf("error leaks %q: %s", s, text)
@@ -198,13 +205,12 @@ func assertSafe(t *testing.T, err error) {
 			}
 		}
 	}
-	var ue interface{ URL() string }
-	if errors.As(err, &ue) {
-		t.Error("an error with a URL is reachable")
+	if _, ok := errors.AsType[*url.Error](err); ok {
+		t.Error("an HTTP client error is reachable")
 	}
-	var urlErr interface{ Temporary() bool }
-	if errors.As(err, &urlErr) {
-		t.Error("a transport error is reachable")
+	var ne net.Error
+	if errors.As(err, &ne) && !errors.Is(err, context.DeadlineExceeded) {
+		t.Error("a network error is reachable")
 	}
 }
 
@@ -242,7 +248,7 @@ func (s tokenSource) Repository() auth.Repository               { return s.repo 
 
 func TestNewBindsTheTokenSourceRepository(t *testing.T) {
 	cfg := Config{RepositoryURL: testRepoURL, TargetBranch: target}
-	cfg.Tokens = tokenSource{auth.Repository{Owner: "acme", Name: "other"}}
+	cfg.Tokens = tokenSource{auth.Repository{Owner: owner, Name: "other"}}
 	if _, err := New(cfg); err == nil {
 		t.Error("a token source for another repository was accepted")
 	}
@@ -509,16 +515,29 @@ func commitSteps() []step {
 
 var change = providers.FileChange{Path: "apps/deploy.yaml", Content: []byte("replicas: 3\n"), Message: "fix: raise replicas"}
 
-func noForce(t *testing.T, b map[string]any) {
-	if b["force"] != false || b["sha"] != shaCommit || len(b) != 2 {
-		t.Errorf("update ref body = %v, want sha and force false", b)
+// casUpdate checks the GraphQL updateRefs request: a compare-and-swap from shaBase to the new commit,
+// without force, on this repository.
+func casUpdate(t *testing.T, b map[string]any) {
+	vars, _ := b["variables"].(map[string]any)
+	got, _ := json.Marshal(vars)
+	want := `{"repo":"R_kgDOAAAAAQ","updates":[{"afterOid":"` + shaCommit + `","beforeOid":"` + shaBase +
+		`","force":false,"name":"refs/heads/shadewright/req-1"}]}`
+	if string(got) != want {
+		t.Errorf("updateRefs variables = %s, want %s", got, want)
+	}
+	if q, _ := b["query"].(string); !strings.Contains(q, "updateRefs(") {
+		t.Errorf("query = %q", q)
 	}
 }
 
+func updateSteps(file string) []step {
+	update := status(http.MethodPost, graphQLPath, http.StatusOK, file)
+	update.check = casUpdate
+	return []step{get("", "repo.json"), update}
+}
+
 func TestCommitFile(t *testing.T) {
-	update := status(http.MethodPatch, "/git/refs/heads/shadewright/req-1", http.StatusOK, "ref_branch_committed.json")
-	update.check = noForce
-	h := newHarness(t, append(commitSteps(), update)...)
+	h := newHarness(t, append(commitSteps(), updateSteps("graphql_update_refs.json")...)...)
 	sha, err := h.p.CommitFile(ctx, branch, shaBase, change)
 	if err != nil || sha != shaCommit {
 		t.Fatalf("CommitFile() = %q, %v", sha, err)
@@ -554,16 +573,66 @@ func TestCommitFileHeadMovedIsConflict(t *testing.T) {
 }
 
 func TestCommitFileRaceIsConflictNeverForce(t *testing.T) {
-	// The head moves between the check and the update: GitHub refuses the fast-forward-only update.
-	update := status(http.MethodPatch, "/git/refs/heads/shadewright/req-1", http.StatusUnprocessableEntity,
-		"error_not_ff.json")
-	update.check = noForce
-	h := newHarness(t, append(commitSteps(), update)...)
+	// Someone pushes on top of the head between the check and the update: the swap is refused.
+	steps := append(commitSteps(), updateSteps("graphql_update_refs_stale.json")...)
+	h := newHarness(t, append(steps, get(branchRef, "ref_branch_moved.json"))...)
 	_, err := h.p.CommitFile(ctx, branch, shaBase, change)
 	if !providers.IsConflict(err) {
 		t.Fatalf("got %v", err)
 	}
 	assertSafe(t, err)
+}
+
+func TestCommitFileRewindIsConflict(t *testing.T) {
+	// The branch is rewound to an ancestor of the expected head after it was read. A fast-forward-only
+	// update would succeed and bring back the removed commits; the compare-and-swap on beforeOid is refused.
+	rewound := strings.ReplaceAll(mustRead(t, "ref_branch.json"), shaBase, shaOld)
+	steps := append(commitSteps(), updateSteps("graphql_update_refs_stale.json")...)
+	h := newHarness(t, append(steps, step{method: http.MethodGet, path: branchRef, status: http.StatusOK, raw: rewound})...)
+	_, err := h.p.CommitFile(ctx, branch, shaBase, change)
+	if !providers.IsConflict(err) {
+		t.Fatalf("got %v", err)
+	}
+	assertSafe(t, err)
+}
+
+func TestCommitFileRepeatedUpdateIsSuccess(t *testing.T) {
+	// The swap was applied but its response was lost; the repeat is refused, and the branch is at our commit.
+	steps := append(commitSteps(), updateSteps("graphql_update_refs_stale.json")...)
+	h := newHarness(t, append(steps, get(branchRef, "ref_branch_committed.json"))...)
+	sha, err := h.p.CommitFile(ctx, branch, shaBase, change)
+	if err != nil || sha != shaCommit {
+		t.Fatalf("CommitFile() = %q, %v", sha, err)
+	}
+}
+
+func TestCommitFileRefusedUpdateAtExpectedHead(t *testing.T) {
+	// Refused, yet the branch has not moved: neither success nor a conflict.
+	steps := append(commitSteps(), updateSteps("graphql_update_refs_stale.json")...)
+	h := newHarness(t, append(steps, get(branchRef, "ref_branch.json"))...)
+	_, err := h.p.CommitFile(ctx, branch, shaBase, change)
+	if err == nil || providers.IsConflict(err) {
+		t.Fatalf("got %v", err)
+	}
+	assertSafe(t, err)
+}
+
+func TestCommitFileGraphQLRateLimit(t *testing.T) {
+	h := newHarness(t, append(commitSteps(), updateSteps("graphql_rate_limited.json")...)...)
+	_, err := h.p.CommitFile(ctx, branch, shaBase, change)
+	if d, ok := providers.RetryAfter(err); !ok || d != time.Minute {
+		t.Fatalf("got %v", err)
+	}
+	assertSafe(t, err)
+}
+
+func TestCommitFileRefusesOtherRepository(t *testing.T) {
+	other := step{method: http.MethodGet, path: "", status: http.StatusOK,
+		raw: strings.ReplaceAll(mustRead(t, "repo.json"), "acme/fleet", "acme/other")}
+	h := newHarness(t, append(commitSteps(), other)...)
+	if _, err := h.p.CommitFile(ctx, branch, shaBase, change); err == nil {
+		t.Fatal("a node ID of another repository was used")
+	}
 }
 
 func TestCommitFileMissingFile(t *testing.T) {
@@ -673,6 +742,29 @@ func TestOpenChangeRequestOtherBaseIsConflict(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 	assertSafe(t, err)
+}
+
+func TestOpenChangeRequestMixedBasesIsConflict(t *testing.T) {
+	// One head branch with open pull requests to the target and to another base: a conflict whichever was
+	// opened first.
+	ours := mustRead(t, "pull_open.json")
+	otherBase := strings.ReplaceAll(strings.ReplaceAll(mustRead(t, "pull_open.json"), `"ref":"main"`, `"ref":"release"`),
+		`"number":12`, `"number":14`)
+	for name, list := range map[string]string{
+		"target newest": "[" + strings.Replace(ours, `"number":12`, `"number":15`, 1) + "," + otherBase + "]",
+		"target oldest": "[" + otherBase + "," + ours + "]",
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := listPulls("open", "")
+			s.raw = list
+			h := newHarness(t, s)
+			_, err := h.p.OpenChangeRequest(ctx, newCR)
+			if !providers.IsConflict(err) {
+				t.Fatalf("got %v", err)
+			}
+			assertSafe(t, err)
+		})
+	}
 }
 
 func TestOpenChangeRequestMissingBranch(t *testing.T) {
@@ -946,6 +1038,49 @@ func TestResponseBodyIsBounded(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 	assertSafe(t, err)
+}
+
+type leakyTokens struct{ err error }
+
+func (s leakyTokens) Token(context.Context) (auth.Token, error) { return auth.Token{}, s.err }
+func (s leakyTokens) Repository() auth.Repository {
+	return auth.Repository{Owner: owner, Name: "fleet"}
+}
+
+func TestTokenSourceErrorsAreReplaced(t *testing.T) {
+	leak := fmt.Errorf("POST https://api.github.com/app/installations/1/access_tokens?jwt=%s: %s", testToken, bodyMarker)
+	for name, c := range map[string]struct {
+		err   error
+		check func(error) bool
+	}{
+		"plain":     {leak, func(err error) bool { return !providers.IsRetryable(err) && !providers.IsNotFound(err) }},
+		"not found": {fmt.Errorf("%w: %w", leak, providers.ErrNotFound), providers.IsNotFound},
+		"retryable": {&providers.RetryableError{RetryAfter: 5 * time.Minute, Err: leak}, func(err error) bool {
+			d, ok := providers.RetryAfter(err)
+			return ok && d == 5*time.Minute
+		}},
+		"deadline": {fmt.Errorf("%w: %w", leak, context.DeadlineExceeded), func(err error) bool {
+			return providers.IsRetryable(err) && errors.Is(err, context.DeadlineExceeded)
+		}},
+		"canceled": {fmt.Errorf("%w: %w", leak, context.Canceled), func(err error) bool {
+			return !providers.IsRetryable(err) && errors.Is(err, context.Canceled)
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, err := New(Config{RepositoryURL: testRepoURL, TargetBranch: target, Tokens: leakyTokens{c.err}, MaxAttempts: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = p.BranchHead(ctx, target)
+			if !c.check(err) {
+				t.Fatalf("class lost: %v", err)
+			}
+			assertSafe(t, err)
+			if errors.Is(err, leak) {
+				t.Error("the token source error is reachable")
+			}
+		})
+	}
 }
 
 func TestTokenErrorsKeepTheirClass(t *testing.T) {

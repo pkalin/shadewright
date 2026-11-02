@@ -40,6 +40,8 @@ const (
 
 var (
 	shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	// nodeIDPattern bounds a GraphQL node ID taken from a response.
+	nodeIDPattern = regexp.MustCompile(`^[A-Za-z0-9_=-]{1,100}$`)
 	// headNamePattern is the part after shadewright/: one path segment, as a request UID is.
 	headNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
 	// targetPattern is a conservative subset of Git branch names.

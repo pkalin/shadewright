@@ -326,8 +326,9 @@ func (p *Provider) post(ctx context.Context, path string, body any) (string, err
 }
 
 // CommitFile commits one change to an existing regular file on a shadewright/ branch whose head must be
-// expectedHead, and returns the new commit. The file keeps its mode. The branch moves with a fast-forward-only
-// update; a head that moved is ErrConflict and is never overwritten.
+// expectedHead, and returns the new commit. The file keeps its mode. The branch moves with an atomic
+// compare-and-swap on expectedHead (GraphQL updateRefs, no force); a head that moved in any direction is
+// ErrConflict and is never overwritten.
 func (p *Provider) CommitFile(
 	ctx context.Context, branch, expectedHead string, change providers.FileChange,
 ) (string, error) {
@@ -388,32 +389,104 @@ func (p *Provider) CommitFile(
 	if err != nil {
 		return "", err
 	}
-	// force=false: GitHub refuses an update that is not a fast-forward, so a commit pushed in the meantime is
-	// never overwritten. Repeating this request after a lost response is a no-op.
-	r, err := p.do(ctx, call{
-		op: opCommitFile, method: http.MethodPatch, path: "/git/refs/" + refPath(branch),
-		body: struct {
-			SHA   string `json:"sha"`
-			Force bool   `json:"force"`
-		}{commit, false},
-	})
+	if err := p.updateRef(ctx, branch, expectedHead, commit); err != nil {
+		return "", err
+	}
+	return commit, nil
+}
+
+type repoJSON struct {
+	NodeID   string `json:"node_id"`
+	FullName string `json:"full_name"`
+}
+
+// repositoryID returns the GraphQL node ID of the repository.
+func (p *Provider) repositoryID(ctx context.Context) (string, error) {
+	r, err := p.do(ctx, call{op: opCommitFile, method: http.MethodGet})
 	if err != nil {
 		return "", err
 	}
-	switch {
-	case r.ok():
-		sha, err := parseRef(opCommitFile, r, branch)
-		if err != nil {
-			return "", err
-		}
-		if sha != commit {
-			return "", fmt.Errorf("%s: branch head moved: %w", opCommitFile, providers.ErrConflict)
-		}
-		return commit, nil
-	case r.status == http.StatusUnprocessableEntity:
-		return "", fmt.Errorf("%s: update is not a fast-forward: %w", opCommitFile, providers.ErrConflict)
+	if !r.ok() {
+		return "", statusError(opCommitFile, r.status)
 	}
-	return "", statusError(opCommitFile, r.status)
+	var v repoJSON
+	if err := decode(opCommitFile, r, &v); err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(v.FullName, p.repo.String()) || !nodeIDPattern.MatchString(v.NodeID) {
+		return "", errors.New(opCommitFile + ": GitHub returned an unexpected repository")
+	}
+	return v.NodeID, nil
+}
+
+const updateRefsMutation = `mutation($repo: ID!, $updates: [RefUpdate!]!) {
+  updateRefs(input: {repositoryId: $repo, refUpdates: $updates}) { clientMutationId }
+}`
+
+type graphQLResponse struct {
+	Data *struct {
+		UpdateRefs *struct{} `json:"updateRefs"`
+	} `json:"data"`
+	Errors []struct {
+		Type string `json:"type"`
+	} `json:"errors"`
+}
+
+// updateRef moves branch from expectedHead to commit with GraphQL updateRefs: an atomic compare-and-swap on
+// beforeOid, without force. A branch that moved in any direction since it was read, including a rewind to
+// an ancestor, is refused, so removed commits are never restored and pushed commits never overwritten.
+// When GitHub refuses, the branch is read again: already at commit (a repeated request after a lost
+// response) is success, anywhere else ErrConflict. The text of GraphQL errors is never read.
+func (p *Provider) updateRef(ctx context.Context, branch, expectedHead, commit string) error {
+	repoID, err := p.repositoryID(ctx)
+	if err != nil {
+		return err
+	}
+	type refUpdate struct {
+		Name      string `json:"name"`
+		BeforeOid string `json:"beforeOid"`
+		AfterOid  string `json:"afterOid"`
+		Force     bool   `json:"force"`
+	}
+	r, err := p.do(ctx, call{op: opCommitFile, method: http.MethodPost, graphQL: true, body: map[string]any{
+		"query": updateRefsMutation,
+		"variables": map[string]any{
+			"repo": repoID,
+			"updates": []refUpdate{{
+				Name: "refs/heads/" + branch, BeforeOid: expectedHead, AfterOid: commit, Force: false,
+			}},
+		},
+	}})
+	if err != nil {
+		return err
+	}
+	if !r.ok() {
+		return statusError(opCommitFile, r.status)
+	}
+	var v graphQLResponse
+	if err := decode(opCommitFile, r, &v); err != nil {
+		return err
+	}
+	if len(v.Errors) == 0 && v.Data != nil && v.Data.UpdateRefs != nil {
+		return nil
+	}
+	for _, e := range v.Errors {
+		if e.Type == "RATE_LIMITED" {
+			return &providers.RetryableError{
+				RetryAfter: secondaryRateLimitWait, Err: errors.New(opCommitFile + ": GitHub rate limit"),
+			}
+		}
+	}
+	head, err := p.ref(ctx, opCommitFile, branch)
+	switch {
+	case err != nil:
+		return err
+	case head == commit:
+		return nil
+	case head != expectedHead:
+		return fmt.Errorf("%s: branch head moved: %w", opCommitFile, providers.ErrConflict)
+	}
+	return errors.New(opCommitFile + ": GitHub refused the branch update")
 }
 
 type pullRepoJSON struct {
@@ -512,7 +585,9 @@ func (p *Provider) openFor(ctx context.Context, op, branch string) (providers.Ch
 	if err != nil {
 		return providers.ChangeRequest{}, false, err
 	}
-	for _, pr := range open {
+	// Check every open one before choosing: the refusal must not depend on which was created first.
+	var match *pullJSON
+	for i, pr := range open {
 		if pr.State != stateOpen {
 			continue
 		}
@@ -520,10 +595,15 @@ func (p *Provider) openFor(ctx context.Context, op, branch string) (providers.Ch
 			return providers.ChangeRequest{}, false, fmt.Errorf(
 				"%s: an open pull request of this branch targets another branch: %w", op, providers.ErrConflict)
 		}
-		cr, err := p.toChangeRequest(op, pr)
-		return cr, err == nil, err
+		if match == nil {
+			match = &open[i]
+		}
 	}
-	return providers.ChangeRequest{}, false, nil
+	if match == nil {
+		return providers.ChangeRequest{}, false, nil
+	}
+	cr, err := p.toChangeRequest(op, *match)
+	return cr, err == nil, err
 }
 
 // OpenChangeRequest opens a pull request from a shadewright/ branch to the target branch, or returns the

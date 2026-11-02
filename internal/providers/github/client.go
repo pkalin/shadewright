@@ -226,6 +226,8 @@ type call struct {
 	body   any
 	accept string
 	limit  int64
+	// graphQL sends the call to the GraphQL endpoint instead of path.
+	graphQL bool
 }
 
 // response is a response whose status is not a transient failure. body is read only for 2xx.
@@ -269,8 +271,7 @@ func (p *Provider) once(ctx context.Context, c call) (response, error) {
 	}
 	tok, err := p.token(ctx)
 	if err != nil {
-		// Errors of package auth carry fixed text and their class only.
-		return response{}, fmt.Errorf("%s: installation token: %w", c.op, err)
+		return response{}, tokenError(c.op, err)
 	}
 	if tok == "" {
 		return response{}, fmt.Errorf("%s: installation token is empty", c.op)
@@ -284,6 +285,9 @@ func (p *Provider) once(ctx context.Context, c call) (response, error) {
 		body = bytes.NewReader(data)
 	}
 	u := apiBase + "/repos/" + url.PathEscape(p.repo.Owner) + "/" + url.PathEscape(p.repo.Name) + c.path
+	if c.graphQL {
+		u = apiBase + "/graphql"
+	}
 	if len(c.query) > 0 {
 		u += "?" + c.query.Encode()
 	}
@@ -413,6 +417,26 @@ func (p *Provider) transportError(ctx context.Context, op string, err error) err
 		return &providers.RetryableError{Err: fmt.Errorf("%s: GitHub request timed out", op)}
 	}
 	return &providers.RetryableError{Err: fmt.Errorf("%s: GitHub request failed (network)", op)}
+}
+
+// tokenError replaces an error of the token source with fixed text. Config.Tokens may be any TokenSource,
+// whose errors can carry transport or SDK text, a URL or a credential, so only the class is kept: canceled,
+// past its deadline, retryable (with the requested delay) or not found. Nothing of err stays reachable.
+func tokenError(op string, err error) error {
+	msg := op + ": installation token unavailable"
+	switch {
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("%s: %w", msg, context.Canceled)
+	case errors.Is(err, context.DeadlineExceeded):
+		after, _ := providers.RetryAfter(err)
+		return &providers.RetryableError{RetryAfter: after, Err: fmt.Errorf("%s: %w", msg, context.DeadlineExceeded)}
+	case providers.IsRetryable(err):
+		after, _ := providers.RetryAfter(err)
+		return &providers.RetryableError{RetryAfter: after, Err: errors.New(msg)}
+	case providers.IsNotFound(err):
+		return fmt.Errorf("%s: %w", msg, providers.ErrNotFound)
+	}
+	return errors.New(msg)
 }
 
 // ctxError reports the end of the caller's context. A deadline is retryable (a later reconcile may finish);

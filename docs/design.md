@@ -472,12 +472,12 @@ sequenceDiagram
     E->>V: Sign the App JWT, RS256
     V-->>E: Signature
     E->>G: Exchange the JWT for a one-hour installation token, scoped to the one repository
-    E->>G: Read the head SHA of targetBranch (planned)
-    E->>G: Create branch shadewright/#lt;request-uid#gt; at that SHA (planned)
+    E->>G: Read the head SHA of targetBranch
+    E->>G: Create branch shadewright/#lt;request-uid#gt; at that SHA
     Note over E,G: An existing branch at that SHA is success, at another SHA a conflict
-    E->>G: Commit the file, expecting that head (planned)
+    E->>G: Commit the file, expecting that head
     Note over E,G: A moved head is a conflict, never a force push
-    E->>G: Open the pull request with the request UID and plan digest marker (planned)
+    E->>G: Open the pull request with the request UID and plan digest marker
     Note over E,G: An open pull request for the branch is returned, not duplicated
     alt Approval required
         G->>G: Wait for a human approval of the head commit
@@ -488,9 +488,18 @@ sequenceDiagram
         E->>E: Stop automation: Superseded or NeedsIntervention (planned)
     end
     opt Throttling or a transient error
-        E->>E: Back off with jitter and Retry-After, a bounded number of times (planned)
+        E->>E: Back off with jitter and Retry-After, a bounded number of times
     end
 ```
+
+The GitHub steps are done by the `GitProvider` adapter in `internal/providers/github`; the executor phase that drives them (`PRCreated`) is not wired yet. The adapter is bound to one repository and its `targetBranch`, and refuses anything else before sending a request:
+
+- It writes only to branches named `shadewright/<name>`. A new branch must start at the head of `targetBranch` or an ancestor of it, so a commit of a fork or another branch cannot become the base.
+- The commit is built with the Git data API (blob, tree, commit, keeping the file mode) on top of the expected head, and the branch moves with a fast-forward-only reference update after the head is checked. A moved head is a conflict; the update never forces.
+- Pull requests are opened, found and closed only when their head is a `shadewright/` branch of this repository and their base is `targetBranch`; a fork's pull request from a branch of the same name is ignored.
+- Files are read through the commit's trees: only regular files, the size checked before the download, at most 1 MiB read, and the content checked against its Git object ID.
+- Transient failures (network, timeouts, 408, 429, 5xx, rate limits) are retried with exponential backoff and jitter, at most four attempts. A delay GitHub asks for (`Retry-After`, `X-RateLimit-Reset` for an exhausted quota, or one minute for a secondary rate limit without headers) is waited for when it is at most 15 seconds; a longer one goes back to the reconciler with the delay, so it requeues instead of blocking.
+- Errors carry fixed text, the status code and their class (not found, conflict, too large, retryable); never a URL, a header, response text, a repository or branch name, or a token.
 
 ### 8.3. Auto-merge
 

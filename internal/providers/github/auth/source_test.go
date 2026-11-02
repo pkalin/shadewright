@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,6 +44,8 @@ import (
 
 const (
 	retryAfterHeader = "Retry-After"
+	rlRemaining      = "X-RateLimit-Remaining"
+	rlReset          = "X-RateLimit-Reset"
 	testRepoURL      = "https://github.com/acme/fleet"
 	testClientID     = "Iv23liTESTCLIENT"
 	testToken        = "ghs_SECRETINSTALLATIONTOKEN0123456789"
@@ -385,7 +388,7 @@ func TestStatusMapping(t *testing.T) {
 		{name: "401", status: 401},
 		{name: "403", status: 403},
 		{name: "403 rate limited", status: 403, header: map[string]string{retryAfterHeader: "30"}, retryable: true, after: 30 * time.Second},
-		{name: "403 quota exhausted", status: 403, header: map[string]string{"X-RateLimit-Remaining": "0"}, retryable: true},
+		{name: "403 quota exhausted", status: 403, header: map[string]string{rlRemaining: "0"}, retryable: true},
 		{name: "404", status: 404, notFound: true},
 		{name: "422", status: 422},
 		{name: "429", status: 429, header: map[string]string{retryAfterHeader: "7"}, retryable: true, after: 7 * time.Second},
@@ -393,6 +396,13 @@ func TestStatusMapping(t *testing.T) {
 		{name: "502", status: 502, retryable: true},
 		{name: "503", status: 503, header: map[string]string{retryAfterHeader: "2"}, retryable: true, after: 2 * time.Second},
 		{name: "504", status: 504, retryable: true},
+		{name: "501", status: 501, retryable: true},
+		{name: "599", status: 599, retryable: true},
+		{name: "reset only", status: 403, header: map[string]string{rlRemaining: "0", rlReset: strconv.FormatInt(t0.Add(90*time.Second).Unix(), 10)}, retryable: true, after: 90 * time.Second},
+		{name: "reset capped", status: 403, header: map[string]string{rlRemaining: "0", rlReset: strconv.FormatInt(t0.Add(5*time.Hour).Unix(), 10)}, retryable: true, after: time.Hour},
+		{name: "reset past", status: 403, header: map[string]string{rlRemaining: "0", rlReset: strconv.FormatInt(t0.Add(-time.Minute).Unix(), 10)}, retryable: true},
+		{name: "reset garbage", status: 403, header: map[string]string{rlRemaining: "0", rlReset: "soon"}, retryable: true},
+		{name: "retry-after wins", status: 403, header: map[string]string{retryAfterHeader: "5", rlRemaining: "0", rlReset: strconv.FormatInt(t0.Add(90*time.Second).Unix(), 10)}, retryable: true, after: 5 * time.Second},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -452,6 +462,7 @@ func TestBadResponsesRefused(t *testing.T) {
 		"token with space": `{"token":"a b","expires_at":"2026-11-02T13:00:00Z","repositories":[{"full_name":"acme/fleet"}]}`,
 		"bad expiry":       `{"token":"abc","expires_at":"soon","repositories":[{"full_name":"acme/fleet"}]}`,
 		"expires too soon": `{"token":"abc","expires_at":"2026-11-02T12:00:30Z","repositories":[{"full_name":"acme/fleet"}]}`,
+		"inside margin":    `{"token":"abc","expires_at":"2026-11-02T12:04:00Z","repositories":[{"full_name":"acme/fleet"}]}`,
 		"no repositories":  `{"token":"abc","expires_at":"2026-11-02T13:00:00Z"}`,
 		"other repository": `{"token":"abc","expires_at":"2026-11-02T13:00:00Z","repositories":[{"full_name":"acme/other"}]}`,
 		"two repositories": `{"token":"abc","expires_at":"2026-11-02T13:00:00Z","repositories":[{"full_name":"acme/fleet"},{"full_name":"acme/other"}]}`,
@@ -640,4 +651,132 @@ func TestBodyReadIsBounded(t *testing.T) {
 	if got := n.Load(); got > maxResponseBody+1 {
 		t.Fatalf("read %d bytes, limit is %d", got, maxResponseBody+1)
 	}
+}
+
+func TestSourceRedactsItself(t *testing.T) {
+	e := setup(t, created(func() time.Time { return t0.Add(time.Hour) }))
+	if _, err := e.src.Token(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	slog.New(slog.NewJSONHandler(&logs, nil)).Info("src", "source", e.src, "v", any(e.src))
+	slog.New(slog.NewTextHandler(&logs, nil)).Info("src", "source", e.src)
+	out := []string{
+		logs.String(),
+		fmt.Sprintf("%v|%+v|%#v|%s|%q|%x|%d", e.src, e.src, e.src, e.src, e.src, e.src, e.src),
+		fmt.Sprint(struct{ S *Source }{e.src}),
+		fmt.Sprintf("%+v|%#v", struct{ S *Source }{e.src}, struct{ S *Source }{e.src}),
+	}
+	for _, s := range out {
+		if strings.Contains(s, testToken) || strings.Contains(s, "SECRETINSTALLATION") {
+			t.Fatalf("token in output: %.200s", s)
+		}
+	}
+	if !strings.Contains(logs.String(), "redacted") {
+		t.Fatal("log output lacks the placeholder")
+	}
+}
+
+func TestTransportErrorDropsRawCause(t *testing.T) {
+	var jwt string
+	e := setup(t, func(w http.ResponseWriter, r *http.Request) {
+		jwt = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	})
+	e.srv.Close()
+	e.src.client.Transport = failing{func(r *http.Request) error {
+		jwt = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		return errors.New("boom " + jwt)
+	}}
+	_, err := e.src.Token(context.Background())
+	if !providers.IsRetryable(err) {
+		t.Fatalf("err = %v, want retryable", err)
+	}
+	if _, ok := errors.AsType[*url.Error](err); ok {
+		t.Fatal("chain still holds a *url.Error")
+	}
+	for cur := err; cur != nil; cur = errors.Unwrap(cur) {
+		if strings.Contains(cur.Error(), jwt) || jwt == "" {
+			t.Fatalf("chain element leaks the JWT: %v", cur)
+		}
+	}
+}
+
+type failing struct{ f func(*http.Request) error }
+
+func (f failing) RoundTrip(r *http.Request) (*http.Response, error) { return nil, f.f(r) }
+
+func TestWaiterSurvivesLeaderDeadline(t *testing.T) {
+	var hits atomic.Int32
+	entered := make(chan struct{}, 4)
+	e := setup(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if hits.Add(1) == 1 {
+			entered <- struct{}{}
+			<-r.Context().Done()
+			return
+		}
+		created(func() time.Time { return t0.Add(time.Hour) })(w, r)
+	})
+	leaderCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	leaderErr := make(chan error, 1)
+	go func() { _, err := e.src.Token(leaderCtx); leaderErr <- err }()
+	<-entered
+	waiterErr := make(chan error, 1)
+	go func() { _, err := e.src.Token(context.Background()); waiterErr <- err }()
+	if err := <-leaderErr; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("leader err = %v", err)
+	}
+	if err := <-waiterErr; err != nil {
+		t.Fatalf("waiter err = %v, want its own refresh to succeed", err)
+	}
+}
+
+func TestOwnTimeoutReachesWaiters(t *testing.T) {
+	entered := make(chan struct{}, 4)
+	e := setup(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		entered <- struct{}{}
+		<-r.Context().Done()
+	})
+	e.src.timeout = 300 * time.Millisecond
+	leaderErr := make(chan error, 1)
+	go func() { _, err := e.src.Token(context.Background()); leaderErr <- err }()
+	<-entered
+	_, err := e.src.Token(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) || !providers.IsRetryable(err) {
+		t.Fatalf("waiter err = %v, want the refresh timeout", err)
+	}
+	if err := <-leaderErr; err == nil {
+		t.Fatal("leader should have timed out")
+	}
+}
+
+func TestBodyReadFailureIsRetryable(t *testing.T) {
+	t.Run("truncated", func(t *testing.T) {
+		e := setup(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Length", "500")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"token":"SECRET-PARTIAL`)
+			w.(http.Flusher).Flush()
+			panic(http.ErrAbortHandler)
+		})
+		_, err := e.src.Token(context.Background())
+		if !providers.IsRetryable(err) || strings.Contains(err.Error(), "SECRET-PARTIAL") {
+			t.Fatalf("err = %v, want retryable without response text", err)
+		}
+	})
+	t.Run("stall until deadline", func(t *testing.T) {
+		e := setup(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", "500")
+			w.WriteHeader(http.StatusCreated)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		})
+		e.src.timeout = 100 * time.Millisecond
+		_, err := e.src.Token(context.Background())
+		if !providers.IsRetryable(err) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want retryable deadline", err)
+		}
+	})
 }

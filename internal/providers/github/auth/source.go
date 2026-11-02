@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -104,7 +105,25 @@ type Source struct {
 type refresh struct {
 	done chan struct{}
 	err  error
+	// abandoned is set when the leader's own context ended (cancel or deadline): that says nothing about
+	// the waiters, who go around and lead or follow instead of inheriting the error.
+	abandoned bool
 }
+
+const redactedSource = "[redacted installation token source]"
+
+// String returns a placeholder: a Source holds a cached token, and fmt does not call Token.Format on
+// unexported fields.
+func (*Source) String() string { return redactedSource }
+
+// GoString returns a placeholder, for %#v.
+func (*Source) GoString() string { return "auth.Source{[redacted]}" }
+
+// Format prints a placeholder for every verb.
+func (s *Source) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(s.String())) }
+
+// LogValue returns a placeholder for slog.
+func (*Source) LogValue() slog.Value { return slog.StringValue(redactedSource) }
 
 // New validates cfg and returns a Source. It makes no network call.
 func New(cfg Config) (*Source, error) { return newSource(cfg, testHooks{}) }
@@ -192,8 +211,9 @@ func (s *Source) Token(ctx context.Context) (Token, error) {
 			case <-ctx.Done():
 				return Token{}, fmt.Errorf("wait for installation token: %w", ctx.Err())
 			}
-			// The leader's own cancellation says nothing about this caller: go around and lead or follow.
-			if f.err != nil && !errors.Is(f.err, context.Canceled) {
+			// The leader's own cancellation or deadline says nothing about this caller: go around and lead
+			// or follow. The source's own refresh timeout is a real failure and is returned.
+			if f.err != nil && !f.abandoned {
 				return Token{}, f.err
 			}
 			continue
@@ -209,6 +229,7 @@ func (s *Source) Token(ctx context.Context) (Token, error) {
 			s.tok, s.expires = tok, exp
 		}
 		f.err = err
+		f.abandoned = err != nil && ctx.Err() != nil
 		s.inflight = nil
 		s.mu.Unlock()
 		close(f.done)
@@ -263,8 +284,12 @@ func (s *Source) fetch(ctx context.Context) (Token, time.Time, error) {
 		return Token{}, time.Time{}, s.statusError(op, resp)
 	}
 	data, err := readBounded(resp)
-	if err != nil {
+	if errors.Is(err, errTooLarge) {
 		return Token{}, time.Time{}, fmt.Errorf("%s: %w", op, err)
+	}
+	if err != nil {
+		// A stall, truncation or reset while reading is transient, like a failure to connect.
+		return Token{}, time.Time{}, s.requestError(ctx, err)
 	}
 	return s.parse(op, data)
 }
@@ -285,17 +310,8 @@ func (s *Source) requestError(ctx context.Context, err error) error {
 	case errors.Is(err, context.Canceled):
 		return fmt.Errorf("%s: %w", op, context.Canceled)
 	}
-	return &providers.RetryableError{Err: &opaqueError{msg: op + ": GitHub request failed (network)", err: err}}
+	return &providers.RetryableError{Err: errors.New(op + ": GitHub request failed (network)")}
 }
-
-// opaqueError hides the text of a transport error behind a fixed message.
-type opaqueError struct {
-	msg string
-	err error
-}
-
-func (e *opaqueError) Error() string { return e.msg }
-func (e *opaqueError) Unwrap() error { return e.err }
 
 var errTooLarge = errors.New("GitHub response is larger than 64 KiB")
 
@@ -305,7 +321,7 @@ func readBounded(resp *http.Response) ([]byte, error) {
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
 	if err != nil {
-		return nil, errors.New("read GitHub response failed")
+		return nil, err
 	}
 	if len(data) > maxResponseBody {
 		return nil, errTooLarge
@@ -324,12 +340,14 @@ func (s *Source) statusError(op string, resp *http.Response) error {
 	case http.StatusForbidden:
 		// A rate limit also answers 403; it comes with Retry-After or an exhausted quota.
 		if resp.Header.Get("Retry-After") != "" || resp.Header.Get("X-RateLimit-Remaining") == "0" {
-			return &providers.RetryableError{RetryAfter: retryAfter(resp), Err: msg}
+			return &providers.RetryableError{RetryAfter: s.retryAfter(resp), Err: msg}
 		}
 		return fmt.Errorf("%w: the App may not create tokens for this installation", msg)
-	case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError,
-		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return &providers.RetryableError{RetryAfter: retryAfter(resp), Err: msg}
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return &providers.RetryableError{RetryAfter: s.retryAfter(resp), Err: msg}
+	}
+	if code >= 500 && code <= 599 {
+		return &providers.RetryableError{RetryAfter: s.retryAfter(resp), Err: msg}
 	}
 	return msg
 }
@@ -354,7 +372,10 @@ func (s *Source) parse(op string, data []byte) (Token, time.Time, error) {
 	if err != nil {
 		return Token{}, time.Time{}, fmt.Errorf("%s: response has no valid expiry", op)
 	}
-	if !exp.After(s.now().Add(minValidity)) {
+	// The token must outlive both the floor and the refresh margin; otherwise valid() would be false at once
+	// and every call would mint a new token. A margin that exceeds the lifetime of a GitHub token (one hour)
+	// therefore fails closed here, with a clear error, instead of silently hammering the API.
+	if !exp.After(s.now().Add(max(minValidity, s.margin))) {
 		return Token{}, time.Time{}, fmt.Errorf("%s: token expires too soon", op)
 	}
 	if len(r.Repositories) != 1 || !strings.EqualFold(r.Repositories[0].FullName, s.repo.String()) {
@@ -376,17 +397,21 @@ func validToken(t string) bool {
 	return true
 }
 
-// retryAfter reads a Retry-After header in seconds or as an HTTP date, capped at one hour.
-func retryAfter(resp *http.Response) time.Duration {
-	v := resp.Header.Get("Retry-After")
-	if v == "" {
-		return 0
-	}
+// retryAfter reads a Retry-After header in seconds or as an HTTP date. Without one, an exhausted quota
+// (X-RateLimit-Remaining 0) with X-RateLimit-Reset (Unix seconds) gives the delay until the reset. The
+// result is capped at one hour; past or unparsable values give zero.
+func (s *Source) retryAfter(resp *http.Response) time.Duration {
 	var d time.Duration
-	if secs, err := strconv.Atoi(v); err == nil {
-		d = time.Duration(secs) * time.Second
-	} else if t, err := http.ParseTime(v); err == nil {
-		d = time.Until(t)
+	if v := resp.Header.Get("Retry-After"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil {
+			d = time.Duration(min(secs, 3600)) * time.Second
+		} else if t, err := http.ParseTime(v); err == nil {
+			d = t.Sub(s.now())
+		}
+	} else if resp.Header.Get("X-RateLimit-Remaining") == "0" {
+		if reset, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+			d = time.Unix(reset, 0).Sub(s.now())
+		}
 	}
 	return min(max(d, 0), time.Hour)
 }

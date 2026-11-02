@@ -380,6 +380,39 @@ spec:
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
 	})
 
+	It("closes nothing when the repository entry now names another target branch", func() {
+		settings.Spec.Repositories[0].TargetBranch = "release"
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+		Expect(c).NotTo(BeNil())
+		Expect(c.Reason).To(Equal("TargetBranchChanged"))
+		Expect(closes.Load()).To(BeZero())
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+	})
+
+	It("ends in NeedsIntervention, without closing or retrying, when a stale plan's repository settings cannot be used", func() {
+		Expect(k8sClient.Delete(ctx, policy)).To(Succeed())
+		r := reconciler()
+		r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return nil, fmt.Errorf("https://x-access-token:ghp_secret@github.com/example/fleet: %w", providers.ErrInvalidConfig)
+		}
+		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(BeZero())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+		Expect(c).NotTo(BeNil())
+		Expect(c.Reason).To(Equal("RepositoryUnusable"))
+		Expect(c.Message).NotTo(ContainSubstring("ghp_secret"))
+		Expect(closes.Load()).To(BeZero())
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+	})
+
 	It("closes nothing and does not block when the repository is removed from the settings", func() {
 		settings.Spec.Repositories = nil
 		Expect(k8sClient.Update(ctx, settings)).To(Succeed())

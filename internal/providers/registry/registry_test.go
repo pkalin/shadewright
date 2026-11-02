@@ -207,7 +207,14 @@ func TestOpenRefusesBadSettings(t *testing.T) {
 	for name, change := range cases {
 		t.Run(name, func(t *testing.T) {
 			var c counts
-			r := &Registry{Builders: fakeBuilders(&c)}
+			b := fakeBuilders(&c)
+			// The environment has no workload identity: bad settings must still be refused as settings,
+			// before the signer is built.
+			b.Signer = func(string) (providers.Signer, error) {
+				c.signers.Add(1)
+				return nil, errors.New("no workload identity")
+			}
+			r := &Registry{Builders: b}
 			e := entry()
 			change(&e)
 			p, err := r.Open(context.Background(), e)
@@ -223,6 +230,9 @@ func TestOpenRefusesBadSettings(t *testing.T) {
 			noLeak(t, err)
 			if r.Len() != 0 {
 				t.Error("a refusal must not be cached")
+			}
+			if n := c.signers.Load(); n != 0 {
+				t.Errorf("the signer was built %d times for refused settings", n)
 			}
 		})
 	}

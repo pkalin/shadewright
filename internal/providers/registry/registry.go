@@ -157,10 +157,14 @@ func (r *Registry) Open(ctx context.Context, repo v1alpha1.GitRepository) (provi
 
 // build constructs the signer, the token source and the provider. No step makes a network call.
 func (r *Registry) build(k key) (providers.GitProvider, error) {
+	if err := validate(k); err != nil {
+		return nil, err
+	}
 	b := r.Builders.withDefaults()
 	signer, err := b.Signer(k.keyID)
 	if err != nil || signer == nil {
-		// Not a settings error: the key ID was validated, so this is the environment (no workload identity).
+		// Not a settings error: the settings were validated above, so this is the environment (no workload
+		// identity).
 		return nil, errBuildSigner
 	}
 	tokens, err := b.Tokens(auth.Config{
@@ -180,6 +184,34 @@ func (r *Registry) build(k key) (providers.GitProvider, error) {
 		return nil, errBuildNothing
 	}
 	return git, nil
+}
+
+// validate runs the real config checks of the token source and the provider, which make no network call, with
+// a signer that is never called. It runs before the signer is built, so settings the adapter refuses are
+// reported as unusable even when the environment has no workload identity, instead of being retried.
+func validate(k key) error {
+	tokens, err := auth.New(auth.Config{
+		ClientID:       k.appClientID,
+		InstallationID: k.installationID,
+		RepositoryURL:  k.url,
+		Signer:         unusedSigner{},
+	})
+	if err != nil {
+		return errBadTokens
+	}
+	if _, err := github.New(github.Config{RepositoryURL: k.url, TargetBranch: k.targetBranch, Tokens: tokens}); err != nil {
+		return errBadGit
+	}
+	return nil
+}
+
+// unusedSigner stands in for the Key Vault signer while the settings are validated; nothing calls Sign.
+type unusedSigner struct{}
+
+func (unusedSigner) Algorithm() providers.SignatureAlgorithm { return providers.RS256 }
+
+func (unusedSigner) Sign(context.Context, []byte) ([]byte, error) {
+	return nil, errors.New("the validation signer does not sign")
 }
 
 // prune drops the providers whose entry is no longer in the settings. keep is the key being opened, which

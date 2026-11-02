@@ -144,6 +144,10 @@ const freshRecheckInterval = 5 * time.Minute
 // recorded), so its change request cannot be closed safely.
 var errRepositoryGone = errors.New("the repository of the plan is not configured")
 
+// errTargetBranchChanged means the repository entry of the plan now names another target branch. Its provider
+// is bound to the new branch and must not touch a change request against the old one, so nothing is closed.
+var errTargetBranchChanged = errors.New("the target branch of the plan's repository changed")
+
 // reader returns the uncached reader, or the client when none is set.
 func (r *RemediationRequestReconciler) reader() client.Reader {
 	if r.APIReader != nil {
@@ -503,6 +507,10 @@ func (r *RemediationRequestReconciler) EnsureFresh(ctx context.Context, rr *reme
 			// The settings of the repository cannot be used, so the change request cannot be closed either.
 			phase, reason, message = remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnusable,
 				messageRepositoryUnusable
+		case errors.Is(err, errTargetBranchChanged):
+			phase, reason = remediationv1alpha1.PhaseNeedsIntervention, "TargetBranchChanged"
+			message = "The plan is stale and its repository now targets another branch; " +
+				"its change request, if any, was not closed"
 		case errors.Is(err, errRepositoryGone):
 			// Nothing is closed: the only change request this plan could have is in a repository that cannot be
 			// reached through the settings any more, and closing a number elsewhere could close someone else's.
@@ -532,7 +540,7 @@ func (r *RemediationRequestReconciler) EnsureFresh(ctx context.Context, rr *reme
 // closeChangeRequest closes the request's change request, if it has one, in the repository the plan was made
 // for and nowhere else. A change request that is already closed, or that was never opened, is not an error; a
 // merged one is, because the change landed. It returns [errRepositoryGone] when that repository is not in the
-// settings, and [freshness.ErrPaused] when the settings read now pause writes.
+// settings, [errTargetBranchChanged] when its entry now names another target branch, and [freshness.ErrPaused] when the settings read now pause writes.
 func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	if r.OpenRepository == nil {
 		return errors.New("cannot close the change request: no Git provider")
@@ -550,6 +558,9 @@ func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, r
 	repo, ok := freshness.FindRepository(settings, rr.Status.PlanRepository)
 	if !ok {
 		return errRepositoryGone
+	}
+	if src := rr.Status.Source; src != nil && repo.TargetBranch != src.TargetBranch {
+		return errTargetBranchChanged
 	}
 	git, err := r.OpenRepository(ctx, repo)
 	if providers.IsInvalidConfig(err) {

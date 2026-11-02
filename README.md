@@ -38,6 +38,12 @@ make run                  # against the current kubeconfig context
 
 Contributor and coding-agent guide: [AGENTS.md](AGENTS.md).
 
+## The name
+
+*Shade* for the dark elves' half-light it works from, *wright* (Old English *wyrhta*, as in *shipwright*) for a
+craftsman: it builds fixes as reviewed changes instead of casting them onto the cluster.
+[The longer story](https://shadewright.io/name/).
+
 ## License
 
 Apache License 2.0, see [LICENSE](LICENSE).

@@ -13,6 +13,7 @@ extra_css = ["stylesheets/brand.css"]
 nav = [
   { "Home" = "index.md" },
   { "Design" = "design.md" },
+  { "The name" = "name.md" },
   { "Decisions" = [
     { "Overview" = "adr/index.md" },
     { "0001 Record decisions" = "adr/0001-record-architecture-decisions.md" },

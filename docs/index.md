@@ -1,5 +1,5 @@
 ---
-title: Shadewright
+title: Kubernetes incidents to reviewed GitOps pull requests
 hide:
   - navigation
   - toc

@@ -33,6 +33,8 @@ nav = [
     { "0015 Analysis records kept" = "adr/0015-analysis-records-outlive-the-lab.md" },
     { "0016 Sweden Central" = "adr/0016-lab-region-sweden-central.md" },
     { "0017 Prometheus in the lab" = "adr/0017-prometheus-in-the-lab.md" },
+    { "0018 Pluggability" = "adr/0018-three-axes-of-pluggability.md" },
+    { "0019 Extension packaging" = "adr/0019-extension-packaging.md" },
     { "Template" = "adr/template.md" },
   ] },
 ]

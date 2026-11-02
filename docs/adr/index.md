@@ -19,5 +19,7 @@
 | [0015](0015-analysis-records-outlive-the-lab.md) | Analysis records are kept and outlive the lab | Accepted |
 | [0016](0016-lab-region-sweden-central.md) | Lab region Sweden Central | Accepted |
 | [0017](0017-prometheus-in-the-lab.md) | Prometheus in the lab | Accepted |
+| [0018](0018-three-axes-of-pluggability.md) | Three axes of pluggability | Accepted |
+| [0019](0019-extension-packaging.md) | Packaging extensions: compiled in now, signed OCI packs later | Proposed |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

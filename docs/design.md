@@ -85,11 +85,13 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 
 ### 2.3. Provider interfaces
 
-Every external system sits behind a Go interface with one adapter per product, so switching a product means writing an adapter, not changing the core ([ADR-0013](adr/0013-adapters-for-every-external-system.md)).
+Shadewright is pluggable along three axes ([ADR-0018](adr/0018-three-axes-of-pluggability.md)): platform services outside the cluster (this section), the cluster platform (2.4) and the add-ons installed in the cluster (2.5). On every axis the core works on plain Kubernetes with no module at all; modules add knowledge and capabilities. Modules are compiled in for now; signed, declarative OCI packs are the planned way to ship them later ([ADR-0019](adr/0019-extension-packaging.md)).
+
+Every external system sits behind a Go interface with one adapter per product, so switching a product means writing an adapter, not changing the core ([ADR-0013](adr/0013-adapters-for-every-external-system.md)). Interfaces use neutral terms (a change request, not a pull request) and adapters declare what they support, such as auto-merge, so the core adapts instead of assuming GitHub.
 
 | Interface | First implementation | Later |
 | --- | --- | --- |
-| `GitProvider` | GitHub (GitHub App) | Azure DevOps |
+| `GitProvider` | GitHub (GitHub App) | Azure DevOps, GitLab |
 | `DeliveryVerifier` | Flux (`Kustomization`, `HelmRelease`) | Argo CD |
 | `ModelProvider` | Microsoft Foundry (OpenAI and Anthropic models) | Direct vendor APIs, other gateways |
 | `MetricsSource` | Prometheus HTTP API | Grafana Cloud, Azure Monitor managed Prometheus |
@@ -99,6 +101,34 @@ Every external system sits behind a Go interface with one adapter per product, s
 | `Signer` | Azure Key Vault key | AWS KMS, HashiCorp Vault transit |
 
 Provider SDKs are imported only inside their adapter package. Each interface has an in-memory fake used by the tests.
+
+### 2.4. Cluster platforms
+
+A `Platform` module per provider, detected from node `providerID` and labels. The generic module is always present; the others add diagnosis and, later, platform-specific actions.
+
+| Concern | AKS | EKS | GKE | Cluster API |
+| --- | --- | --- | --- | --- |
+| Workload identity | Microsoft Entra Workload ID | EKS Pod Identity, IRSA | GKE Workload Identity Federation | depends on the infrastructure provider |
+| Node capacity and scaling | node pools, cluster autoscaler | managed node groups, Karpenter | node pools, Autopilot | `MachineDeployment` in the management cluster, changed through GitOps |
+| Typical platform failures | pod IP exhaustion, quota, Spot eviction | ENI and IP limits, load balancer limits | Autopilot resource rules | machines that do not become nodes |
+| Managed add-ons | AKS extensions (Flux, KEDA) | EKS add-ons | Config Sync | none |
+
+Order: generic and AKS first; EKS and GKE as detection-only skeletons; Cluster API when a real case needs it.
+
+### 2.5. Cluster integrations
+
+An `Integration` module per add-on: detection (API groups, CRDs, versions), watched kinds and how their conditions become symptoms, deterministic diagnosis rules, read-only tools for the analyzer, redaction rules, verification checks, and optionally actions that follow the same rules as every action (typed, bounded, policy rule, GitOps patcher, refusal test). Integrations that guard security diagnose only: they explain a refusal or a missing secret, and never propose to relax a policy, change a secret or suppress a finding.
+
+| Integration | Diagnosis | Actions |
+| --- | --- | --- |
+| Core workloads (Deployment, StatefulSet, PDB, NetworkPolicy, ResourceQuota) | OOM, crash loops, unschedulable pods, quota | `SetContainerMemoryLimit` |
+| KEDA | trigger errors, `ScaledObject` not ready, replica ceiling | `AdjustKedaMaxReplicas` |
+| Flux | failing `Kustomization` or `HelmRelease`, drift | none: Flux is the delivery path |
+| Kyverno | a deployment refused by a policy, policy reports | diagnosis only |
+| Secrets Store CSI driver | pods stuck on a missing secret or identity | diagnosis only |
+| cloudflared | tunnel down, so the application is unreachable | none |
+
+Later candidates: External Secrets Operator, Reloader, cert-manager, Trivy Operator, Karpenter. Modules are enabled per cluster in `RemediationSettings`, and the operator reports what it detected in status.
 
 ## 3. Observation and deduplication
 
@@ -457,7 +487,7 @@ The lab itself (AKS node, Key Vault, storage, Foundry) is priced in `shadewright
 
 **Stage 4: controlled auto-merge in the lab.** One or two narrowly defined change classes with `approvalRequired: false`, matching `CODEOWNERS` and ruleset, no bypass. *Done when:* the positive case merges automatically and negative attempts stop on unmet rules, extra diff, exceeded bounds or a swapped plan.
 
-**Stage 5: extensions.** More runbooks, more observability adapters, MCP, Argo CD and Azure DevOps adapters, Crossplane, more clusters.
+**Stage 5: extensions.** More integrations and platforms (2.4, 2.5), more observability adapters, MCP, Argo CD, Azure DevOps and GitLab adapters, Crossplane, more clusters, and declarative OCI extension packs.
 
 The first end-to-end result is: one controlled incident, one documented diagnosis, one safe PR, approval, Flux delivery and a confirmed recovery.
 
@@ -484,6 +514,8 @@ Decided on 2026-11-01:
 | Evaluation | Recorded contexts per scenario with the expected diagnosis or refusal; CI runs them against a fake model, the real model on demand |
 | Agent observability | controller-runtime Prometheus metrics, plus OpenTelemetry traces per analysis (tool calls, tokens, latency) |
 | Packaging | Kubebuilder's Helm plugin; images on GHCR, signed keyless, with SBOMs |
+| Pluggability | Three axes: platform services, cluster platforms, cluster integrations ([ADR-0018](adr/0018-three-axes-of-pluggability.md)); security integrations diagnose only |
+| Extension packaging | Compiled in now; signed declarative OCI packs later (proposed, [ADR-0019](adr/0019-extension-packaging.md)) |
 
 Still open:
 

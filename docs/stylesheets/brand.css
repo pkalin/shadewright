@@ -67,6 +67,31 @@
   --md-code-hl-comment-color: #8a86a3;
   --md-footer-bg-color: var(--sw-ink-raised);
   --md-footer-bg-color--dark: var(--sw-ink);
+
+  /* Mermaid diagrams, in the palette of the SVG diagrams (boxes #1d1b2b, violet lines). The diagram sources
+     carry no colours, so GitHub renders them in its own light or dark theme. */
+  --md-mermaid-font-family: var(--sw-heading-font);
+  --md-mermaid-node-bg-color: #1d1b2b;
+  --md-mermaid-node-fg-color: #f1edff;
+  --md-mermaid-edge-color: var(--sw-violet-light);
+  --md-mermaid-label-bg-color: var(--sw-ink);
+  --md-mermaid-label-fg-color: #c6a8ff;
+  --md-mermaid-sequence-actor-bg-color: #1d1b2b;
+  --md-mermaid-sequence-actor-fg-color: #f1edff;
+  --md-mermaid-sequence-actor-border-color: var(--sw-violet);
+  --md-mermaid-sequence-actor-line-color: #3a3556;
+  --md-mermaid-sequence-message-fg-color: #f1edff;
+  --md-mermaid-sequence-message-line-color: var(--sw-violet-light);
+  --md-mermaid-sequence-note-bg-color: var(--sw-ink-raised);
+  --md-mermaid-sequence-note-fg-color: #f1edff;
+  --md-mermaid-sequence-note-border-color: #3a3556;
+  --md-mermaid-sequence-loop-bg-color: transparent;
+  --md-mermaid-sequence-loop-fg-color: #c6a8ff;
+  --md-mermaid-sequence-loop-border-color: #3a3556;
+  --md-mermaid-sequence-label-bg-color: #1d1b2b;
+  --md-mermaid-sequence-label-fg-color: #f1edff;
+  --md-mermaid-sequence-number-bg-color: var(--sw-violet);
+  --md-mermaid-sequence-number-fg-color: #f1edff;
 }
 
 /* Header: dark bar, larger glowing mark, violet hairline. */

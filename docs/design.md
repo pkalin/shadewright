@@ -36,6 +36,41 @@ One cluster, a few namespaces, one GitOps repository on GitHub synced by Flux, a
 
 The dashed boxes are the two identities: the analyzer can read and call the model, the executor can write request status and use the Git App. The `RemediationRequest` between them is the only thing the analyzer can hand over.
 
+The same flow as a sequence, from a symptom to a verified change. Steps marked *(planned)* are designed but not built yet.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant K as Cluster
+    participant A as Analyzer
+    participant M as Model (Foundry)
+    participant R as RemediationRequest
+    participant E as Executor
+    participant G as GitHub
+    participant F as Flux
+    K->>A: Events, pods and workloads (planned)
+    A->>A: Redact and fingerprint the symptoms
+    A->>K: Group them into an Incident (planned)
+    A->>M: Redacted context, bounded tool loop (planned)
+    M-->>A: Diagnosis and a proposed typed action (planned)
+    A->>R: Create the request: what to change, never where (planned)
+    E->>R: Reconcile the request (planned)
+    E->>K: Read the live target and its Flux objects
+    E->>E: Map the object to its file in Git (ADR-0012)
+    E->>E: Policy decision and plan digest
+    alt Denied or NeedsIntervention
+        E->>R: Status with the reason, no pull request (planned)
+    else Allowed
+        E->>G: Branch, commit and pull request (planned)
+        G->>G: Review and required checks, then merge
+        F->>G: Fetch the merged revision
+        F->>K: Apply it
+        E->>F: Check lastAppliedRevision and Ready (planned)
+        E->>K: Verify health and that the symptom is gone (planned)
+        E->>R: Succeeded or Failed (planned)
+    end
+```
+
 ### 2.2. Components
 
 | Component | Responsibility | Permission boundary |
@@ -277,6 +312,37 @@ A cluster-scoped CR, writable only by the cluster admin ([ADR-0011](adr/0011-pol
 
 The decision is a pure function (`internal/policy`): it reads the request, the policy, the settings, the resolved source and the live target, and returns `Allowed`, `Denied` or `NeedsIntervention` with a machine-readable reason (one per check) and the effective approval. It uses no client and no clock, so the same input always gives the same decision. Missing input (no resolved source, no live target) gives `NeedsIntervention`; every failed check gives `Denied`. It checks, in order: the request's `policyRef` and namespace (`requestNamespaces`) and the `GitOps` mode; that the action type is in the catalog and its parameters are well formed; that the live target is the object `targetRef` names (UID, apiVersion, kind, namespace, name), that its kind is one the action may target and not one excluded by section 10 item 10, and that its namespace and labels are covered by `targets`; that the policy lists the action and the change is within `min`, `max`, `maxIncreasePercent` and `maxDecreasePercent` (compared by value, in arbitrary precision); and that the resolved repository is the policy's `gitOps.repositoryRef`, is configured in RemediationSettings with the resolved branch as its `targetBranch`, and that the file matches `allowedPaths`. The path match is purely lexical, so it is never the only guard: a pattern such as `apps/**` also matches a file declaring a Role or a Secret, and the kind check refuses it. The decision does not trust the API server to have defaulted the policy: an unset field reads in its strictest sense (no request namespaces, approval `Required`, no increases or decreases). The effective approval is `false` only when the outcome is `Allowed`, the policy is `Optional` and the request asked for `approvalRequired: false`. One exception to the strict reading: a policy without `objectSelector` covers every object of the allowed kinds in its target namespaces. Labels are not a security boundary anyway, because anyone who can patch the object can set them.
 
+The checks run in this order, and the first one that fails gives the reason. All of this is built (`internal/policy.Decide`).
+
+```mermaid
+flowchart TD
+    start([Request, policy, settings, resolved source, live target])
+    c0{All present?}
+    c1["Request: policyRef, requestNamespaces, GitOps mode"]
+    c2["Action: in the catalog, parameters well formed"]
+    c3["Target: the object targetRef names, kind allowed and not excluded, namespace and labels in targets"]
+    c4["Policy action: listed, change within min, max, maxIncreasePercent, maxDecreasePercent"]
+    c5["Source: the policy's repositoryRef, configured with this targetBranch, file in allowedPaths"]
+    ok[Allowed: WithinApprovedBounds]
+    ap{"Policy Optional and the request asked for approvalRequired: false?"}
+    start --> c0
+    c0 -- yes --> c1
+    c1 -- passes --> c2
+    c2 -- passes --> c3
+    c3 -- passes --> c4
+    c4 -- passes --> c5
+    c5 -- passes --> ok
+    ok --> ap
+    ap -- yes --> auto[Effective approval: not required]
+    ap -- no --> rev[Effective approval: required]
+    c0 -- no --> ni[NeedsIntervention: IncompleteInput]
+    c1 -- fails --> d1[Denied: PolicyMismatch, RequestNamespaceNotAllowed, ModeNotSupported]
+    c2 -- fails --> d2[Denied: ActionUnknown, InvalidParameters]
+    c3 -- fails --> d3[Denied: TargetMismatch, KindExcluded, KindNotAllowed, TargetNamespaceNotAllowed, TargetLabelsNotMatched, PolicyInvalid]
+    c4 -- fails --> d4[Denied: ActionNotAllowed, BelowMinimum, AboveMaximum, IncreaseTooLarge, DecreaseNotAllowed, DecreaseTooLarge, PolicyInvalid]
+    c5 -- fails --> d5[Denied: RepositoryNotAllowed, RepositoryNotConfigured, BranchNotAllowed, PathNotAllowed]
+```
+
 ### 5.4. RemediationSettings
 
 One cluster-scoped object named `default`. It holds the kill switch (`paused`, checked right before every write), global limits (`maxConcurrentRemediations`, `maxAnalysesPerDay`) and the Git repositories Shadewright may write to, each with its provider settings: for GitHub, the App client ID, installation ID and the signer (a Key Vault key, ADR-0006). Each repository also names the only branch pull requests may target (`targetBranch`, default `main`); the branch Flux tracks must equal it. URLs carry no credentials, query or fragment, and a GitHub repository must be `https://github.com/<owner>/<repo>`, so installation tokens never go to another host. Policies and requests refer to repositories by name only.
@@ -286,6 +352,38 @@ One cluster-scoped object named `default`. It holds the kill switch (`paused`, c
 [![RemediationRequest phases: Pending, PolicyChecked, PRCreated, AwaitingApproval or AutoMergeQueued, Merged, WaitingForDelivery, Verifying, Succeeded; any step can end in Denied, Failed, Expired, Cancelled, Superseded or NeedsIntervention.](assets/diagrams/phases.svg)](assets/diagrams/phases.svg "Open full size")
 
 Other terminal or waiting phases: `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded`, `NeedsIntervention`. Conditions explain why; `phase` is a summary for humans.
+
+The transitions between phases. The API defines every phase below; no controller sets them yet, so the whole lifecycle is designed but not built.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending
+    state Active {
+        state BeforeMerge {
+            Pending --> PolicyChecked: allowed, source resolved
+            PolicyChecked --> PRCreated: branch, commit, pull request
+            PRCreated --> AwaitingApproval: review required
+            PRCreated --> AutoMergeQueued: policy allows automation
+            AwaitingApproval --> Merged: approved and checks pass
+            AutoMergeQueued --> Merged: checks pass
+        }
+        Merged --> WaitingForDelivery
+        WaitingForDelivery --> Verifying: Flux applied the merge commit
+    }
+    Pending --> Denied: policy refuses
+    Verifying --> Succeeded: checks held for stableFor
+    BeforeMerge --> Cancelled: cancelled before merge
+    BeforeMerge --> Superseded: a plan digest input changed
+    Active --> Expired: a step reached its deadline
+    Active --> Failed: a step failed
+    Active --> NeedsIntervention: cannot continue alone
+    Succeeded --> [*]
+    Denied --> [*]
+    Failed --> [*]
+    Expired --> [*]
+    Cancelled --> [*]
+    Superseded --> [*]
+```
 
 Each reconcile:
 
@@ -350,6 +448,36 @@ Fully automatic merges happen only where the repository owner deliberately allow
 7. Bind the PR to the request UID and plan digest. Any new push to the branch invalidates the plan.
 8. After merge, follow delivery and the success criteria instead of stopping at "merged".
 
+Opening the change on GitHub, steps 2 to 7 above. Steps marked *(planned)* are designed but not built yet. The GitHub App key never leaves Key Vault ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)); every write names the state it expects, so a restart or a race finds the existing work instead of repeating it.
+
+```mermaid
+sequenceDiagram
+    participant E as Executor
+    participant V as Key Vault
+    participant G as GitHub
+    E->>V: Sign the App JWT, RS256 (planned)
+    V-->>E: Signature
+    E->>G: Exchange the JWT for a one-hour installation token (planned)
+    E->>G: Read the head SHA of targetBranch (planned)
+    E->>G: Create branch shadewright/#lt;request-uid#gt; at that SHA (planned)
+    Note over E,G: An existing branch at that SHA is success, at another SHA a conflict
+    E->>G: Commit the file, expecting that head (planned)
+    Note over E,G: A moved head is a conflict, never a force push
+    E->>G: Open the pull request with the request UID and plan digest marker (planned)
+    Note over E,G: An open pull request for the branch is returned, not duplicated
+    alt Approval required
+        G->>G: Wait for a human approval of the head commit
+    else Policy allows automation
+        E->>G: Enable auto-merge (squash) if the head is still our commit (planned)
+    end
+    opt Conflict, extra commits or a digest mismatch
+        E->>E: Stop automation: Superseded or NeedsIntervention (planned)
+    end
+    opt Throttling or a transient error
+        E->>E: Back off with jitter and Retry-After, a bounded number of times (planned)
+    end
+```
+
 ### 8.3. Auto-merge
 
 The GitHub App enables auto-merge (GraphQL `enablePullRequestAutoMerge`, squash) only when policy allows automation, the head SHA is the commit Shadewright created, and the diff still matches the plan digest. GitHub then merges once required reviews and checks pass. The repository must have "Allow auto-merge" on.
@@ -387,6 +515,44 @@ The GitHub App enables auto-merge (GraphQL `enablePullRequestAutoMerge`, squash)
 10. **Excluded from the MVP:** deleting PVCs, databases or namespaces, removing finalizers, widening permissions, changing network security, Secrets, protected branches or approval rules.
 
 Emergency direct actions on the cluster could come later as a separate catalog with separate authorization. They are never an automatic fallback after a failed PR.
+
+What each identity can read and write. Arrows show where data goes: a read points at the identity, a write away from it. The cluster roles come from kubebuilder markers in `internal/analyzer` and `internal/controller`, and `test/rbac` checks them against a real API server. Dashed boxes and links are designed but not built yet.
+
+```mermaid
+flowchart TB
+    ev[Events]
+    wl[Pods, Deployments, ReplicaSets, StatefulSets]
+    an([Analyzer])
+    fm[Foundry model]
+    inc[Incident and its status]
+    rr["RemediationRequest, shadewright-system only"]
+    set[RemediationSettings]
+    pol[RemediationPolicy]
+    tgt[Target objects, Flux Kustomizations and GitRepositories]
+    ex([Executor])
+    rrs["RemediationRequest status, shadewright-system only"]
+    kv[Key Vault key, sign only]
+    sec[Secrets]
+    ev -- read --> an
+    wl -- read --> an
+    set -- read --> an
+    an -. inference .-> fm
+    an -- create, update --> inc
+    an -- create --> rr
+    inc -- read --> ex
+    rr -- read --> ex
+    set -- read --> ex
+    pol -- read --> ex
+    tgt -. read .-> ex
+    ex -- update --> rrs
+    ex -. sign .-> kv
+    sec -- no access --x an
+    sec -- no access --x ex
+    classDef planned stroke-dasharray: 5 5
+    class fm,tgt,kv planned
+```
+
+Each identity also has its own leader election Lease, which only it can renew.
 
 ## 11. Model
 

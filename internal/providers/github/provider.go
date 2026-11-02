@@ -30,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/providers/github/ratelimit"
 )
 
 // Fixed labels for errors. They name the operation, never its arguments.
@@ -473,7 +474,7 @@ func (p *Provider) updateRef(ctx context.Context, branch, expectedHead, commit s
 	for _, e := range v.Errors {
 		if e.Type == "RATE_LIMITED" {
 			return &providers.RetryableError{
-				RetryAfter: secondaryRateLimitWait, Err: errors.New(opCommitFile + ": GitHub rate limit"),
+				RetryAfter: ratelimit.Delay(r.header, p.now()), Err: errors.New(opCommitFile + ": GitHub rate limit"),
 			}
 		}
 	}

@@ -28,12 +28,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/github/auth"
+	"github.com/pkalin/shadewright/internal/providers/github/ratelimit"
 )
 
 // Defaults for [Config].
@@ -52,13 +52,7 @@ const (
 const (
 	apiBase = "https://api.github.com"
 	// maxJSONBody bounds a JSON response. A tree of one directory with a thousand entries is about 150 KiB.
-	maxJSONBody = 2 << 20
-	// maxProbeBody bounds the part of a 403 body searched for a secondary rate limit.
-	maxProbeBody = 16 << 10
-	// secondaryRateLimitWait is GitHub's advice for a secondary rate limit without headers: at least a minute.
-	secondaryRateLimitWait = time.Minute
-	// maxRetryAfter caps any delay GitHub asks for.
-	maxRetryAfter  = time.Hour
+	maxJSONBody    = 2 << 20
 	attemptTimeout = 60 * time.Second
 )
 
@@ -233,6 +227,8 @@ type call struct {
 // response is a response whose status is not a transient failure. body is read only for 2xx.
 type response struct {
 	status int
+	// header is kept for 2xx only: GraphQL reports a rate limit with status 200 and the delay in headers.
+	header http.Header
 	body   []byte
 }
 
@@ -328,9 +324,9 @@ func (p *Provider) once(ctx context.Context, c call) (response, error) {
 		if err != nil {
 			return response{}, p.transportError(ctx, c.op, err)
 		}
-		return response{status: code, body: data}, nil
+		return response{status: code, header: resp.Header, body: data}, nil
 	case code == http.StatusForbidden || code == http.StatusTooManyRequests:
-		if d, limited := p.rateLimited(resp); limited {
+		if d, limited := ratelimit.Limited(resp, p.now()); limited {
 			return response{}, &providers.RetryableError{
 				RetryAfter: d,
 				Err:        fmt.Errorf("%s: GitHub rate limit (status %d)", c.op, code),
@@ -339,54 +335,11 @@ func (p *Provider) once(ctx context.Context, c call) (response, error) {
 		return response{status: code}, nil
 	case code == http.StatusRequestTimeout || (code >= 500 && code <= 599):
 		return response{}, &providers.RetryableError{
-			RetryAfter: p.retryAfter(resp.Header),
+			RetryAfter: ratelimit.RetryAfter(resp.Header, p.now()),
 			Err:        fmt.Errorf("%s: GitHub returned status %d", c.op, code),
 		}
 	}
 	return response{status: code}, nil
-}
-
-// rateLimited reports whether a 403 or 429 is a rate limit, and the delay to wait. GitHub's advice: obey
-// Retry-After, else wait for X-RateLimit-Reset when the quota is exhausted, else wait at least a minute.
-// A 403 without those headers is a rate limit only when its body says so; the body is searched, never kept.
-func (p *Provider) rateLimited(resp *http.Response) (time.Duration, bool) {
-	h := resp.Header
-	if h.Get("Retry-After") != "" || h.Get("X-RateLimit-Remaining") == "0" {
-		d := p.retryAfter(h)
-		if d == 0 {
-			d = secondaryRateLimitWait
-		}
-		return d, true
-	}
-	if resp.StatusCode == http.StatusTooManyRequests || mentionsRateLimit(resp.Body) {
-		return secondaryRateLimitWait, true
-	}
-	return 0, false
-}
-
-func mentionsRateLimit(r io.Reader) bool {
-	data, _ := io.ReadAll(io.LimitReader(r, maxProbeBody))
-	s := strings.ToLower(string(data))
-	return strings.Contains(s, "rate limit") || strings.Contains(s, "abuse detection")
-}
-
-// retryAfter reads Retry-After in seconds or as an HTTP date; without it, an exhausted quota with
-// X-RateLimit-Reset (Unix seconds) gives the delay until the reset. Capped at one hour; past or unparsable
-// values give zero.
-func (p *Provider) retryAfter(h http.Header) time.Duration {
-	var d time.Duration
-	if v := h.Get("Retry-After"); v != "" {
-		if secs, err := strconv.Atoi(v); err == nil {
-			d = time.Duration(min(max(secs, 0), int(maxRetryAfter/time.Second))) * time.Second
-		} else if t, err := http.ParseTime(v); err == nil {
-			d = t.Sub(p.now())
-		}
-	} else if h.Get("X-RateLimit-Remaining") == "0" {
-		if reset, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64); err == nil {
-			d = time.Unix(reset, 0).Sub(p.now())
-		}
-	}
-	return min(max(d, 0), maxRetryAfter)
 }
 
 func readBounded(resp *http.Response, limit int64) ([]byte, error) {

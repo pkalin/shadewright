@@ -626,6 +626,41 @@ func TestCommitFileGraphQLRateLimit(t *testing.T) {
 	assertSafe(t, err)
 }
 
+const (
+	hdrRemaining = "X-RateLimit-Remaining"
+	hdrReset     = "X-RateLimit-Reset"
+)
+
+func TestCommitFileGraphQLRateLimitUsesHeaders(t *testing.T) {
+	cases := map[string]struct {
+		header map[string]string
+		want   time.Duration
+	}{
+		"retry-after": {map[string]string{"Retry-After": "30"}, 30 * time.Second},
+		"quota reset": {map[string]string{
+			hdrRemaining: "0", hdrReset: strconv.FormatInt(t0.Add(90*time.Second).Unix(), 10),
+		}, 90 * time.Second},
+		"reset in the past": {map[string]string{
+			hdrRemaining: "0", hdrReset: strconv.FormatInt(t0.Add(-time.Minute).Unix(), 10),
+		}, time.Minute},
+		"nonzero quota ignores reset": {map[string]string{
+			hdrRemaining: "10", hdrReset: strconv.FormatInt(t0.Add(90*time.Second).Unix(), 10),
+		}, time.Minute},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			steps := updateSteps("graphql_rate_limited.json")
+			steps[1].header = c.header
+			h := newHarness(t, append(commitSteps(), steps...)...)
+			_, err := h.p.CommitFile(ctx, branch, shaBase, change)
+			if d, ok := providers.RetryAfter(err); !ok || d != c.want {
+				t.Fatalf("got %v, want a delay of %v", err, c.want)
+			}
+			assertSafe(t, err)
+		})
+	}
+}
+
 func TestCommitFileRefusesOtherRepository(t *testing.T) {
 	other := step{method: http.MethodGet, path: "", status: http.StatusOK,
 		raw: strings.ReplaceAll(mustRead(t, "repo.json"), "acme/fleet", "acme/other")}
@@ -935,7 +970,7 @@ func TestRetryAfterIsHonoured(t *testing.T) {
 		step{method: http.MethodGet, path: mainRef, status: http.StatusTooManyRequests,
 			header: map[string]string{hRetry: "3"}},
 		step{method: http.MethodGet, path: mainRef, status: http.StatusForbidden,
-			header: map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset}, file: "error_forbidden.json"},
+			header: map[string]string{hdrRemaining: "0", "X-RateLimit-Reset": reset}, file: "error_forbidden.json"},
 		step{method: http.MethodGet, path: mainRef, status: http.StatusServiceUnavailable,
 			header: map[string]string{hRetry: t0.Add(2 * time.Second).Format(http.TimeFormat)}},
 		get(mainRef, "ref_main.json"))

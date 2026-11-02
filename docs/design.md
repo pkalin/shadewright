@@ -90,7 +90,7 @@ The analyzer and the remediation controller are separate binaries in one Go modu
 The collector, the incident store and the analyzer run in the analyzer binary; the policy engine, the remediation controller, the GitOps adapter and the verifier run in the executor (`cmd/main.go`). Their roles are generated from kubebuilder RBAC markers (`internal/analyzer`, `internal/controller`):
 
 - **Analyzer:** reads events (`events.k8s.io/v1`), pods and workloads; creates and updates `Incident` objects and their status; creates `RemediationRequest` objects in the operator namespace only (a Role). It cannot update, delete or write the status of a request.
-- **Executor:** reads incidents, policies and settings; reads requests and writes their status in the operator namespace only (a Role), and its cache watches requests only there. It cannot create requests or write incidents.
+- **Executor:** reads incidents, policies and settings; reads (`get` only, no list or watch) the target kinds (Deployments, StatefulSets, KEDA ScaledObjects) and the Flux Kustomizations and GitRepositories that deliver them, for source mapping; reads requests and writes their status in the operator namespace only (a Role), and its cache watches requests only there. It cannot create requests or write incidents.
 - Neither can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
 
 No model runs in the cluster and no GPU is needed: the analyzer calls a managed model endpoint (Microsoft Foundry first). The tool loop is our own code, not a hosted agent service.
@@ -353,7 +353,7 @@ One cluster-scoped object named `default`. It holds the kill switch (`paused`, c
 
 Other terminal or waiting phases: `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded`, `NeedsIntervention`. Conditions explain why; `phase` is a summary for humans.
 
-The transitions between phases. The API defines every phase below; no controller sets them yet, so the whole lifecycle is designed but not built.
+The transitions between phases. The API defines every phase below. The executor sets the first step only: a `Pending` request (or one without a phase yet) becomes `PolicyChecked`, `Denied` or `NeedsIntervention` in one status write; the later phases are designed but not built.
 
 ```mermaid
 stateDiagram-v2
@@ -371,6 +371,7 @@ stateDiagram-v2
         WaitingForDelivery --> Verifying: Flux applied the merge commit
     }
     Pending --> Denied: policy refuses
+    Pending --> NeedsIntervention: source cannot be mapped
     Verifying --> Succeeded: checks held for stableFor
     BeforeMerge --> Cancelled: cancelled before merge
     BeforeMerge --> Superseded: a plan digest input changed
@@ -384,6 +385,17 @@ stateDiagram-v2
     Cancelled --> [*]
     Superseded --> [*]
 ```
+
+The policy check, the first step, loads the policy the request names, the `default` RemediationSettings and the live target, and then maps the target to its file in Git (ADR-0012). It stores `status.source`, `policyUID`, `policyRevision` (`name/generation`), `effectiveApprovalRequired` and the `PolicyAllowed` condition together with the phase, through the status subresource with the resourceVersion it read, so a stale read ends in a conflict and a decided request is never decided again.
+
+| Finding | Phase | `PolicyAllowed` |
+| --- | --- | --- |
+| Policy or settings object missing, target UID differs from the live object | `Denied` (`PolicyNotFound`, `SettingsNotFound`, `TargetMismatch`) | `False` |
+| Source mapping denies (repository, branch, path or inventory) or `policy.Decide` denies | `Denied`, reason of the check | `False` |
+| Source mapping needs a human (Helm, patches, missing target, unknown Flux shape) | `NeedsIntervention`, reason of the mapping | `Unknown` |
+| All checks pass | `PolicyChecked`, `WithinApprovedBounds` | `True` |
+
+Only a failure worth retrying (API server or Git host) is returned as an error and retried with backoff; every permanent refusal is a final phase. Messages and conditions never carry Git URLs or provider text.
 
 Each reconcile:
 
@@ -543,13 +555,13 @@ flowchart TB
     rr -- read --> ex
     set -- read --> ex
     pol -- read --> ex
-    tgt -. read .-> ex
+    tgt -- read --> ex
     ex -- update --> rrs
     ex -. sign .-> kv
     sec -- no access --x an
     sec -- no access --x ex
     classDef planned stroke-dasharray: 5 5
-    class fm,tgt,kv planned
+    class fm,kv planned
 ```
 
 Each identity also has its own leader election Lease, which only it can renew.

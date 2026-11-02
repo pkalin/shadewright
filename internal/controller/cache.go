@@ -33,6 +33,15 @@ import (
 // +kubebuilder:rbac:groups=remediation.shadewright.io,resources=incidents,verbs=get;list;watch
 // +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationpolicies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationsettings,verbs=get;list;watch
+//
+// Source mapping (ADR-0012) reads the target and the Flux objects that deliver it, one object at a time through
+// the uncached client, so get is enough: no list, no watch. The kinds are the action catalog's targets and the
+// Flux Kustomization and GitRepository; Secrets are never granted.
+//
+// +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get
+// +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects,verbs=get
+// +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=get
+// +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories,verbs=get
 
 // CacheOptions restricts the executor's cache so that RemediationRequests are watched only in the operator
 // namespace. A request created anywhere else is never seen, so it can never be acted on (ADR-0011).

@@ -269,6 +269,29 @@ func TestPermissionBoundary(t *testing.T) {
 		{"executor", "update", group, "remediationpolicies", "", "", false},
 		{"executor", "get", "", "secrets", "", operatorNS, false},
 		{"executor", "list", "", "secrets", "", otherNS, false},
+		// Executor source mapping: get on the target kinds and the Flux objects, nothing more.
+		{"executor", "get", "apps", "deployments", "", otherNS, true},
+		{"executor", "get", "apps", "statefulsets", "", otherNS, true},
+		{"executor", "get", "keda.sh", "scaledobjects", "", otherNS, true},
+		{"executor", "get", "kustomize.toolkit.fluxcd.io", "kustomizations", "", otherNS, true},
+		{"executor", "get", "source.toolkit.fluxcd.io", "gitrepositories", "", otherNS, true},
+		{"executor", "list", "apps", "deployments", "", otherNS, false},
+		{"executor", "watch", "apps", "statefulsets", "", otherNS, false},
+		{"executor", "list", "keda.sh", "scaledobjects", "", otherNS, false},
+		{"executor", "list", "kustomize.toolkit.fluxcd.io", "kustomizations", "", otherNS, false},
+		{"executor", "watch", "source.toolkit.fluxcd.io", "gitrepositories", "", otherNS, false},
+		{"executor", "update", "apps", "deployments", "", otherNS, false},
+		{"executor", "patch", "apps", "deployments", "", otherNS, false},
+		{"executor", "update", "apps", "deployments", "scale", otherNS, false},
+		{"executor", "update", "keda.sh", "scaledobjects", "", otherNS, false},
+		{"executor", "patch", "kustomize.toolkit.fluxcd.io", "kustomizations", "", otherNS, false},
+		{"executor", "update", "source.toolkit.fluxcd.io", "gitrepositories", "", otherNS, false},
+		{"executor", "get", "", "configmaps", "", otherNS, false},
+		{"executor", "get", "helm.toolkit.fluxcd.io", "helmreleases", "", otherNS, false},
+		{"executor", "get", "", "secrets", "", otherNS, false},
+		// The analyzer gets none of it through the executor's role.
+		{"analyzer", "get", "kustomize.toolkit.fluxcd.io", "kustomizations", "", otherNS, false},
+		{"analyzer", "get", "source.toolkit.fluxcd.io", "gitrepositories", "", otherNS, false},
 	}
 	for _, c := range cases {
 		if got := can(t, c.id, c.verb, c.group, c.resource, c.sub, c.ns); got != c.want {

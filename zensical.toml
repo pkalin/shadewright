@@ -10,6 +10,8 @@ repo_name = "pkalin/shadewright"
 edit_uri = "edit/main/docs/"
 copyright = "Copyright 2026 The Shadewright Authors. Apache-2.0."
 extra_css = ["stylesheets/brand.css"]
+# Pinned, self-hosted Mermaid; without it Zensical fetches mermaid@12 from unpkg (see README.txt next to it).
+extra_javascript = ["assets/javascripts/mermaid/mermaid-12.2.0.min.js"]
 nav = [
   { "Home" = "index.md" },
   { "Design" = "design.md" },

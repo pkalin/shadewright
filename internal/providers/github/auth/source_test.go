@@ -398,7 +398,9 @@ func TestStatusMapping(t *testing.T) {
 		{name: "401", status: 401},
 		{name: "403", status: 403},
 		{name: "403 rate limited", status: 403, header: map[string]string{retryAfterHeader: "30"}, retryable: true, after: 30 * time.Second},
-		{name: "403 quota exhausted", status: 403, header: map[string]string{rlRemaining: "0"}, retryable: true},
+		{name: "403 quota exhausted", status: 403, header: map[string]string{rlRemaining: "0"}, retryable: true, after: time.Minute},
+		{name: "429 without headers waits a minute", status: 429, retryable: true, after: time.Minute},
+		{name: "429 garbage retry-after", status: 429, header: map[string]string{retryAfterHeader: "soon"}, retryable: true, after: time.Minute},
 		{name: "404", status: 404, notFound: true},
 		{name: "422", status: 422},
 		{name: "429", status: 429, header: map[string]string{retryAfterHeader: "7"}, retryable: true, after: 7 * time.Second},
@@ -410,8 +412,8 @@ func TestStatusMapping(t *testing.T) {
 		{name: "599", status: 599, retryable: true},
 		{name: "reset only", status: 403, header: map[string]string{rlRemaining: "0", rlReset: strconv.FormatInt(t0.Add(90*time.Second).Unix(), 10)}, retryable: true, after: 90 * time.Second},
 		{name: "reset capped", status: 403, header: map[string]string{rlRemaining: "0", rlReset: strconv.FormatInt(t0.Add(5*time.Hour).Unix(), 10)}, retryable: true, after: time.Hour},
-		{name: "reset past", status: 403, header: map[string]string{rlRemaining: "0", rlReset: strconv.FormatInt(t0.Add(-time.Minute).Unix(), 10)}, retryable: true},
-		{name: "reset garbage", status: 403, header: map[string]string{rlRemaining: "0", rlReset: "soon"}, retryable: true},
+		{name: "reset past", status: 403, header: map[string]string{rlRemaining: "0", rlReset: strconv.FormatInt(t0.Add(-time.Minute).Unix(), 10)}, retryable: true, after: time.Minute},
+		{name: "reset garbage", status: 403, header: map[string]string{rlRemaining: "0", rlReset: "soon"}, retryable: true, after: time.Minute},
 		{name: "retry-after wins", status: 403, header: map[string]string{retryAfterHeader: "5", rlRemaining: "0", rlReset: strconv.FormatInt(t0.Add(90*time.Second).Unix(), 10)}, retryable: true, after: 5 * time.Second},
 	}
 	for _, c := range cases {
@@ -864,5 +866,115 @@ func TestRepositoryNameNotInErrors(t *testing.T) {
 		if err == nil || strings.Contains(fmt.Sprintf("%v|%+v|%#v", err, err, err), name) {
 			t.Fatalf("status %d: %v", status, err)
 		}
+	}
+}
+
+// A secondary rate limit answers 403 with nonzero quota and no Retry-After; only the body says so.
+func TestSecondaryRateLimitIsRetryable(t *testing.T) {
+	for name, body := range map[string]string{
+		"secondary": `{"message":"You have exceeded a secondary rate limit. SECRET-RESPONSE-TEXT ` + testToken + `"}`,
+		"abuse":     `{"message":"You have triggered an abuse detection mechanism. SECRET-RESPONSE-TEXT ` + testToken + `"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := setup(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set(rlRemaining, "4000")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = io.WriteString(w, body)
+			})
+			_, err := e.src.Token(context.Background())
+			if d, ok := providers.RetryAfter(err); !providers.IsRetryable(err) || !ok || d != time.Minute {
+				t.Fatalf("err = %v, want retryable after a minute", err)
+			}
+			for u := err; u != nil; u = errors.Unwrap(u) {
+				if s := u.Error(); strings.Contains(s, "SECRET-RESPONSE-TEXT") || strings.Contains(s, testToken) || strings.Contains(s, "secondary") {
+					t.Fatalf("response text in chain: %v", u)
+				}
+			}
+			if s := fmt.Sprintf("%v|%+v|%#v", err, err, err); strings.Contains(s, "SECRET-RESPONSE-TEXT") || strings.Contains(s, testToken) {
+				t.Fatalf("response text in formatted error: %s", s)
+			}
+		})
+	}
+}
+
+// A plain permission failure whose body merely looks unrelated stays permanent, and the search for a rate
+// limit reads a bounded part of the body only.
+func TestRateLimitProbeIsBounded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		chunk := bytes.Repeat([]byte("A"), 32<<10)
+		for range 256 {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+		_, _ = io.WriteString(w, "secondary rate limit")
+	}))
+	t.Cleanup(srv.Close)
+	u, _ := url.Parse(srv.URL)
+	signer, _ := fake.NewSigner()
+	var n atomic.Int64
+	src, err := newSource(Config{ClientID: testClientID, InstallationID: 1, RepositoryURL: testRepoURL, Signer: signer},
+		testHooks{transport: countingTransport{rewrite{t, u}, &n}, now: (&clock{t: t0}).now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = src.Token(context.Background())
+	if err == nil || providers.IsRetryable(err) {
+		t.Fatalf("err = %v, want a permanent failure", err)
+	}
+	if got := n.Load(); got > 16<<10 {
+		t.Fatalf("read %d bytes of the error body, want at most %d", got, 16<<10)
+	}
+}
+
+// The timeout bounds the whole call: abandoned leaders hand the refresh over again and again, and the
+// waiter still returns by its own deadline, as the source's timeout, not as a cancellation.
+func TestTimeoutBoundsWaitsOnAbandonedLeaders(t *testing.T) {
+	entered := make(chan struct{}, 16)
+	e := setup(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		entered <- struct{}{}
+		<-r.Context().Done()
+	})
+	const timeout = 400 * time.Millisecond
+	e.src.timeout = timeout
+	go func() {
+		for range 3 {
+			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+			_, _ = e.src.Token(ctx)
+			cancel()
+		}
+	}()
+	<-entered
+	start := time.Now()
+	_, err := e.src.Token(context.Background())
+	elapsed := time.Since(start)
+	if elapsed > timeout+100*time.Millisecond {
+		t.Fatalf("call took %v, want at most about %v", elapsed, timeout)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || !providers.IsRetryable(err) || errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the source's retryable timeout", err)
+	}
+}
+
+// The caller's cancellation is not the source's timeout, whether it hits a wait or the refresh itself.
+func TestCallerCancellationIsDistinct(t *testing.T) {
+	entered := make(chan struct{}, 4)
+	e := setup(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		entered <- struct{}{}
+		<-r.Context().Done()
+	})
+	go func() { _, _ = e.src.Token(t.Context()) }()
+	<-entered
+	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() { _, err := e.src.Token(waiterCtx); errc <- err }()
+	time.Sleep(50 * time.Millisecond)
+	cancelWaiter()
+	err := <-errc
+	if !errors.Is(err, context.Canceled) || providers.IsRetryable(err) || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waiter err = %v, want a plain cancellation", err)
 	}
 }

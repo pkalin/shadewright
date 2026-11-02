@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/providers/github/ratelimit"
 )
 
 var _ interface {
@@ -41,7 +42,7 @@ var _ interface {
 
 // Defaults for [Config].
 const (
-	// DefaultTimeout bounds one Token call that refreshes, signing included.
+	// DefaultTimeout bounds one Token call, including waits for another caller's refresh.
 	DefaultTimeout = 30 * time.Second
 	// DefaultRefreshBefore is how long before expiry a cached token is replaced.
 	DefaultRefreshBefore = 5 * time.Minute
@@ -72,7 +73,7 @@ type Config struct {
 	RepositoryURL string
 	// Signer signs the JWT digest; the private key stays behind it.
 	Signer providers.Signer
-	// Timeout bounds one refresh. Zero means DefaultTimeout.
+	// Timeout bounds one Token call. Zero means DefaultTimeout.
 	Timeout time.Duration
 	// RefreshBefore is how long before expiry the token is replaced. Zero means DefaultRefreshBefore.
 	RefreshBefore time.Duration
@@ -193,10 +194,38 @@ func newHTTPClient(rt http.RoundTripper) *http.Client {
 // Concurrent callers share one refresh. A failed refresh leaves the cached token untouched, so a later
 // call tries again.
 //
+// Config.Timeout bounds the whole call, not one refresh: waiting for another caller's refresh and leading
+// a new one after that caller gave up count against it, so a call never outlasts the timeout.
+//
 // Errors: ErrNotFound when the installation does not exist; a retryable error (with Retry-After when
-// GitHub sent one) on throttling, server errors, timeouts and network failures; other errors otherwise.
-// No error contains the token, the JWT or response text.
+// GitHub sent one) on throttling, server errors, the source's own timeout and network failures; the
+// caller's own cancellation or deadline wrapping the context error, not retryable by this package; other
+// errors otherwise. No error contains the token, the JWT, the URL, the repository name or response text.
 func (s *Source) Token(ctx context.Context) (Token, error) {
+	callCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	tok, err := s.token(callCtx)
+	if err != nil {
+		return Token{}, s.callError(ctx, callCtx, err)
+	}
+	return tok, nil
+}
+
+// callError tells the end of the caller's context from the end of the source's own timeout. The first is
+// reported with the caller's context error; the second is a transient failure of the source. Both carry
+// fixed text only.
+func (s *Source) callError(ctx, callCtx context.Context, err error) error {
+	const op = "GitHub installation token"
+	if cerr := ctx.Err(); cerr != nil {
+		return fmt.Errorf("%s: %w", op, cerr)
+	}
+	if callCtx.Err() != nil {
+		return &providers.RetryableError{Err: fmt.Errorf("%s: %w", op, context.DeadlineExceeded)}
+	}
+	return err
+}
+
+func (s *Source) token(ctx context.Context) (Token, error) {
 	for {
 		s.mu.Lock()
 		if s.valid() {
@@ -209,10 +238,10 @@ func (s *Source) Token(ctx context.Context) (Token, error) {
 			select {
 			case <-f.done:
 			case <-ctx.Done():
-				return Token{}, fmt.Errorf("wait for installation token: %w", ctx.Err())
+				return Token{}, ctx.Err()
 			}
 			// The leader's own cancellation or deadline says nothing about this caller: go around and lead
-			// or follow. The source's own refresh timeout is a real failure and is returned.
+			// or follow, within this call's own deadline. Any other failure is shared.
 			if f.err != nil && !f.abandoned {
 				return Token{}, f.err
 			}
@@ -246,9 +275,6 @@ func (s *Source) valid() bool {
 }
 
 func (s *Source) fetch(ctx context.Context) (Token, time.Time, error) {
-	ctx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-
 	jwt, err := buildJWT(ctx, s.signer, s.clientID, s.now())
 	if err != nil {
 		return Token{}, time.Time{}, s.classifyCtx(err)
@@ -282,7 +308,7 @@ func (s *Source) fetch(ctx context.Context) (Token, time.Time, error) {
 	// reach an error.
 	const op = "GitHub installation token"
 	if resp.StatusCode != http.StatusCreated {
-		// Drain nothing: the body is never read on failure, so no response text can reach an error.
+		// Only a 403 body is read, in a bounded search that keeps nothing: no response text reaches an error.
 		return Token{}, time.Time{}, s.statusError(op, resp)
 	}
 	data, err := readBounded(resp)
@@ -341,17 +367,18 @@ func (s *Source) statusError(op string, resp *http.Response) error {
 		return fmt.Errorf("%w: %w", msg, providers.ErrNotFound)
 	case http.StatusUnauthorized:
 		return fmt.Errorf("%w: GitHub rejected the App JWT", msg)
-	case http.StatusForbidden:
-		// A rate limit also answers 403; it comes with Retry-After or an exhausted quota.
-		if resp.Header.Get("Retry-After") != "" || resp.Header.Get("X-RateLimit-Remaining") == "0" {
-			return &providers.RetryableError{RetryAfter: s.retryAfter(resp), Err: msg}
+	case http.StatusForbidden, http.StatusTooManyRequests:
+		// A rate limit also answers 403: with Retry-After or an exhausted quota, or, for a secondary limit,
+		// with neither and a body that says so. The body is searched in a bounded read, never kept.
+		if d, limited := ratelimit.Limited(resp, s.now()); limited {
+			return &providers.RetryableError{RetryAfter: d, Err: msg}
 		}
 		return fmt.Errorf("%w: the App may not create tokens for this installation", msg)
-	case http.StatusRequestTimeout, http.StatusTooManyRequests:
-		return &providers.RetryableError{RetryAfter: s.retryAfter(resp), Err: msg}
+	case http.StatusRequestTimeout:
+		return &providers.RetryableError{RetryAfter: ratelimit.RetryAfter(resp.Header, s.now()), Err: msg}
 	}
 	if code >= 500 && code <= 599 {
-		return &providers.RetryableError{RetryAfter: s.retryAfter(resp), Err: msg}
+		return &providers.RetryableError{RetryAfter: ratelimit.RetryAfter(resp.Header, s.now()), Err: msg}
 	}
 	return msg
 }
@@ -399,23 +426,4 @@ func validToken(t string) bool {
 		}
 	}
 	return true
-}
-
-// retryAfter reads a Retry-After header in seconds or as an HTTP date. Without one, an exhausted quota
-// (X-RateLimit-Remaining 0) with X-RateLimit-Reset (Unix seconds) gives the delay until the reset. The
-// result is capped at one hour; past or unparsable values give zero.
-func (s *Source) retryAfter(resp *http.Response) time.Duration {
-	var d time.Duration
-	if v := resp.Header.Get("Retry-After"); v != "" {
-		if secs, err := strconv.Atoi(v); err == nil {
-			d = time.Duration(min(secs, 3600)) * time.Second
-		} else if t, err := http.ParseTime(v); err == nil {
-			d = t.Sub(s.now())
-		}
-	} else if resp.Header.Get("X-RateLimit-Remaining") == "0" {
-		if reset, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
-			d = time.Unix(reset, 0).Sub(s.now())
-		}
-	}
-	return min(max(d, 0), time.Hour)
 }

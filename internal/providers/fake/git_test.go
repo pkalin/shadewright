@@ -30,11 +30,12 @@ const (
 	base   = "main"
 	branch = "shadewright/0f8e2c1a"
 	path   = "apps/demo/web.yaml"
+	oldVal = "memory: 128Mi\n"
 )
 
 func newRepo(t *testing.T) (*fake.Git, string) {
 	t.Helper()
-	g := fake.NewGit(base, map[string][]byte{path: []byte("memory: 128Mi\n")})
+	g := fake.NewGit(base, map[string][]byte{path: []byte(oldVal)})
 	head, err := g.BranchHead(context.Background(), base)
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +64,7 @@ func TestGitReadFile(t *testing.T) {
 	g, head := newRepo(t)
 	ctx := context.Background()
 	f, err := g.ReadFile(ctx, head, path)
-	if err != nil || string(f.Data) != "memory: 128Mi\n" || f.Commit != head {
+	if err != nil || string(f.Data) != oldVal || f.Commit != head {
 		t.Fatalf("ReadFile = %+v, %v", f, err)
 	}
 	if _, err := g.ReadFile(ctx, head, "nope.yaml"); !providers.IsNotFound(err) {
@@ -114,7 +115,7 @@ func TestGitCommitNeedsExpectedHead(t *testing.T) {
 		t.Errorf("content after commit = %q", f.Data)
 	}
 	old, _ := g.ReadFile(ctx, head, path)
-	if string(old.Data) != "memory: 128Mi\n" {
+	if string(old.Data) != oldVal {
 		t.Errorf("old commit changed: %q", old.Data)
 	}
 }
@@ -275,5 +276,59 @@ func TestGitMergeConflict(t *testing.T) {
 	}
 	if _, err := g.Merge(cr.Number); !providers.IsConflict(err) {
 		t.Errorf("merge with the file changed on both sides: %v", err)
+	}
+}
+
+func TestGitFixtureIsCopied(t *testing.T) {
+	data := []byte(oldVal)
+	g := fake.NewGit(base, map[string][]byte{path: data})
+	head, _ := g.BranchHead(context.Background(), base)
+	data[0] = 'X'
+	f, _ := g.ReadFile(context.Background(), head, path)
+	if string(f.Data) != oldVal {
+		t.Errorf("changing the fixture changed the commit: %q", f.Data)
+	}
+}
+
+func TestGitAutoMergeLostResponse(t *testing.T) {
+	g, head := newRepo(t)
+	c, cr := mustOpen(t, g, head)
+	lost := errors.New("timeout")
+	g.SetAfter(func(op string) error {
+		if op == "EnableAutoMerge" {
+			return lost
+		}
+		return nil
+	})
+	if err := g.EnableAutoMerge(context.Background(), cr.Number, c); !errors.Is(err, lost) {
+		t.Fatalf("want the injected error, got %v", err)
+	}
+	if !g.AutoMergeEnabled(cr.Number) {
+		t.Error("auto-merge not recorded although the operation ran")
+	}
+}
+
+func TestGitMergeMovesHeadsOfOtherRequests(t *testing.T) {
+	g, head := newRepo(t)
+	ctx := context.Background()
+	_, cr := mustOpen(t, g, head)
+	// A second change request whose head branch is main (for example a release branch merge back).
+	if err := g.CreateBranch(ctx, "release", head); err != nil {
+		t.Fatal(err)
+	}
+	other, err := g.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: base, BaseBranch: "release"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mc, err := g.Merge(cr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := g.FindChangeRequest(ctx, base)
+	if got.Number != other.Number || got.HeadSHA != mc {
+		t.Errorf("head of the request on main = %s, want the merge commit %s", got.HeadSHA, mc)
+	}
+	if err := g.EnableAutoMerge(ctx, other.Number, head); !providers.IsConflict(err) {
+		t.Errorf("auto-merge accepted the stale head: %v", err)
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"crypto"
 	"crypto/rsa"
 	"crypto/sha256"
+	"errors"
 	"strings"
 	"testing"
 
@@ -28,7 +29,10 @@ import (
 	"github.com/pkalin/shadewright/internal/providers/fake"
 )
 
-const web = "web"
+const (
+	web    = "web"
+	memory = "memory"
+)
 
 func TestDelivery(t *testing.T) {
 	var d fake.Delivery
@@ -61,15 +65,38 @@ func TestModel(t *testing.T) {
 	}
 }
 
+func TestModelLostResponse(t *testing.T) {
+	var m fake.Model
+	m.Script(providers.Completion{Content: "lost"}, providers.Completion{Content: "next"})
+	m.SetAfter(func(string) error { return &providers.RetryableError{Err: errors.New("reset")} })
+	ctx := context.Background()
+	if _, err := m.Complete(ctx, providers.CompletionRequest{}); !providers.IsRetryable(err) {
+		t.Fatalf("want the injected error, got %v", err)
+	}
+	m.SetAfter(nil)
+	c, err := m.Complete(ctx, providers.CompletionRequest{})
+	if err != nil || c.Content != "next" {
+		t.Errorf("the lost reply was not consumed: %q, %v", c.Content, err)
+	}
+	if n := len(m.Requests()); n != 2 {
+		t.Errorf("%d requests recorded, want 2", n)
+	}
+}
+
 func TestMetricsAndLogs(t *testing.T) {
 	ctx := context.Background()
 	var m fake.Metrics
-	if _, err := m.Query(ctx, providers.MetricsQuery{Template: "memory"}); !providers.IsNotFound(err) {
+	if _, err := m.Query(ctx, providers.MetricsQuery{Template: memory}); !providers.IsNotFound(err) {
 		t.Errorf("unknown template: %v", err)
 	}
-	m.Set("memory", []providers.Series{{Labels: map[string]string{"pod": web}}})
-	if s, err := m.Query(ctx, providers.MetricsQuery{Template: "memory"}); err != nil || len(s) != 1 {
-		t.Errorf("query = %v, %v", s, err)
+	m.Set(memory, []providers.Series{{Labels: map[string]string{"pod": web}}})
+	s, err := m.Query(ctx, providers.MetricsQuery{Template: memory})
+	if err != nil || len(s) != 1 {
+		t.Fatalf("query = %v, %v", s, err)
+	}
+	s[0].Labels["pod"] = "changed"
+	if again, _ := m.Query(ctx, providers.MetricsQuery{Template: memory}); again[0].Labels["pod"] != web {
+		t.Error("changing a result changed the stored series")
 	}
 
 	var l fake.Logs
@@ -123,8 +150,13 @@ func TestStoreWriteOnce(t *testing.T) {
 	if _, err := s.Put(ctx, rec); !providers.IsConflict(err) {
 		t.Errorf("same ID, other data: %v", err)
 	}
-	if len(s.Records()) != 1 {
-		t.Error("record count")
+	recs := s.Records()
+	if len(recs) != 1 {
+		t.Fatal("record count")
+	}
+	recs["a1"].Data[0] = 'X'
+	if _, err := s.Put(ctx, providers.AnalysisRecord{ID: "a1", Fingerprint: "sha256:x", Data: []byte("{}")}); err != nil {
+		t.Errorf("changing Records() output changed the stored record: %v", err)
 	}
 }
 

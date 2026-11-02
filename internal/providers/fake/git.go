@@ -58,7 +58,11 @@ func NewGit(base string, files map[string][]byte) *Git {
 		branches: map[string]string{},
 		auto:     map[int64]bool{},
 	}
-	sha := g.store("", maps.Clone(files))
+	own := make(map[string][]byte, len(files))
+	for p, data := range files {
+		own[p] = slices.Clone(data)
+	}
+	sha := g.store("", own)
 	g.branches[base] = sha
 	return g
 }
@@ -260,6 +264,13 @@ func (g *Git) EnableAutoMerge(ctx context.Context, n int64, expectedHeadSHA stri
 	if err := g.before("EnableAutoMerge"); err != nil {
 		return err
 	}
+	if err := g.enableAutoMerge(n, expectedHeadSHA); err != nil {
+		return err
+	}
+	return g.after("EnableAutoMerge")
+}
+
+func (g *Git) enableAutoMerge(n int64, expectedHeadSHA string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if !g.caps.AutoMerge {
@@ -339,6 +350,7 @@ func (g *Git) Merge(n int64) (string, error) {
 	}
 	sha := g.store(baseSHA, next)
 	g.branches[cr.BaseBranch] = sha
+	g.syncHeads(cr.BaseBranch, sha)
 	cr.State = providers.ChangeRequestMerged
 	cr.MergeCommit = sha
 	return sha, nil

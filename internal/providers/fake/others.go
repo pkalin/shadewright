@@ -100,13 +100,17 @@ func (m *Model) Complete(ctx context.Context, req providers.CompletionRequest) (
 		return providers.Completion{}, err
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.requests = append(m.requests, req)
 	if len(m.replies) == 0 {
+		m.mu.Unlock()
 		return providers.Completion{}, &providers.RetryableError{Err: fmt.Errorf("fake model has no scripted reply")}
 	}
 	c := m.replies[0]
 	m.replies = m.replies[1:]
+	m.mu.Unlock()
+	if err := m.after("Complete"); err != nil {
+		return providers.Completion{}, err
+	}
 	return c, nil
 }
 
@@ -124,7 +128,7 @@ func (m *Metrics) Set(template string, s []providers.Series) {
 	if m.results == nil {
 		m.results = map[string][]providers.Series{}
 	}
-	m.results[template] = s
+	m.results[template] = cloneSeries(s)
 }
 
 // Query returns the registered result for the template.
@@ -138,7 +142,15 @@ func (m *Metrics) Query(ctx context.Context, q providers.MetricsQuery) ([]provid
 	if !ok {
 		return nil, fmt.Errorf("template %q: %w", q.Template, providers.ErrNotFound)
 	}
-	return slices.Clone(s), nil
+	return cloneSeries(s), nil
+}
+
+func cloneSeries(in []providers.Series) []providers.Series {
+	out := make([]providers.Series, len(in))
+	for i, s := range in {
+		out[i] = providers.Series{Labels: maps.Clone(s.Labels), Samples: slices.Clone(s.Samples)}
+	}
+	return out
 }
 
 // LogKey identifies one container's logs in the Logs fake.
@@ -268,11 +280,16 @@ func (s *Store) Put(ctx context.Context, rec providers.AnalysisRecord) (string, 
 	return ref, s.after("Put")
 }
 
-// Records returns a copy of every record by ID.
+// Records returns a deep copy of every record by ID.
 func (s *Store) Records() map[string]providers.AnalysisRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return maps.Clone(s.recs)
+	out := make(map[string]providers.AnalysisRecord, len(s.recs))
+	for id, rec := range s.recs {
+		rec.Data = slices.Clone(rec.Data)
+		out[id] = rec
+	}
+	return out
 }
 
 // Signer signs RS256 with an RSA key generated in memory; the public key is exposed for verification.

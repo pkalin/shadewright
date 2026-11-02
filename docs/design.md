@@ -391,11 +391,13 @@ The policy check, the first step, loads the policy the request names, the `defau
 | Finding | Phase | `PolicyAllowed` |
 | --- | --- | --- |
 | Policy or settings object missing, target UID differs from the live object | `Denied` (`PolicyNotFound`, `SettingsNotFound`, `TargetMismatch`) | `False` |
+| The previous value in the request is not the live value (the policy measures increases and decreases from it) | `Denied` (`PreviousValueMismatch`) | `False` |
+| The live object does not set the field the action changes | `NeedsIntervention` (`FieldNotFound`) | `Unknown` |
 | Source mapping denies (repository, branch, path or inventory) or `policy.Decide` denies | `Denied`, reason of the check | `False` |
 | Source mapping needs a human (Helm, patches, missing target, unknown Flux shape) | `NeedsIntervention`, reason of the mapping | `Unknown` |
 | All checks pass | `PolicyChecked`, `WithinApprovedBounds` | `True` |
 
-Only a failure worth retrying (API server or Git host) is returned as an error and retried with backoff; every permanent refusal is a final phase. Messages and conditions never carry Git URLs or provider text.
+Only a failure worth retrying (API server or Git host) is retried, with backoff, or after the delay the host asked for (`Retry-After`); every permanent refusal is a final phase. A policy or settings object the cache has not seen yet is looked up on the API server before a request is denied for its absence. Messages and conditions never carry Git URLs or provider text.
 
 Each reconcile:
 

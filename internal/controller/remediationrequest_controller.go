@@ -48,6 +48,9 @@ const (
 	ReasonSettingsNotFound = "SettingsNotFound"
 	// ReasonTargetMismatch: the live target has another UID than the request names (Denied).
 	ReasonTargetMismatch = "TargetMismatch"
+	// ReasonPreviousValueMismatch means the previous value the request claims is not the live value, so
+	// the policy's increase and decrease limits would be measured from a wrong baseline.
+	ReasonPreviousValueMismatch = "PreviousValueMismatch"
 )
 
 // SourceResolver maps the target to its file in Git (ADR-0012). [sourcemap.Resolver] implements it.
@@ -110,6 +113,13 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	out, err := r.check(ctx, rr)
 	if err != nil {
+		// A remote system that asked for a delay (Retry-After) gets it; controller-runtime's error backoff
+		// does not read it and could retry sooner.
+		if te, ok := errors.AsType[*sourcemap.TransientError](err); ok && te.RetryAfter > 0 {
+			log.Info("Waiting before retrying RemediationRequest", "remediationRequest", req.NamespacedName,
+				"error", err.Error(), "retryAfter", te.RetryAfter)
+			return ctrl.Result{RequeueAfter: te.RetryAfter}, nil
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -176,7 +186,8 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 	ref := rr.Spec.TargetRef
 	// Refuse kinds the action may not change before reading anything, so the executor never reads, for
 	// example, a Secret that a request names.
-	if _, err := sourcemap.FieldFor(rr.Spec.Action, ref); err != nil {
+	field, err := sourcemap.FieldFor(rr.Spec.Action, ref)
+	if err != nil {
 		return needsIntervention(string(sourcemap.ReasonInvalidInput), "The action does not fit the target"), nil
 	}
 	live, ok, err := r.target(ctx, ref)
@@ -190,6 +201,9 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 	if live.GetUID() != types.UID(ref.UID) {
 		return denied(ReasonTargetMismatch,
 			fmt.Sprintf("%s %s/%s has another UID than the request names", ref.Kind, ref.Namespace, ref.Name)), nil
+	}
+	if o, stop := checkBaseline(rr.Spec.Action, field, live); stop {
+		return o, nil
 	}
 
 	res, err := r.Source.Resolve(ctx, sourcemap.Input{
@@ -275,4 +289,32 @@ func (r *RemediationRequestReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		For(&remediationv1alpha1.RemediationRequest{}).
 		Named("remediationrequest").
 		Complete(r)
+}
+
+// checkBaseline compares the previous value the request claims with the live value of the field. The policy
+// measures increases and decreases from the claimed value, so a forged or stale one could pass a change that
+// is far larger than the limit allows (invariant 1). A missing field needs a person; a different value is
+// refused.
+func checkBaseline(action remediationv1alpha1.Action, field sourcemap.Field, live *unstructured.Unstructured) (
+	outcome, bool) {
+	var claimed any
+	switch {
+	case action.SetContainerMemoryLimit != nil:
+		q := action.SetContainerMemoryLimit.Previous.DeepCopy() // String caches into its receiver
+		claimed = q.String()
+	case action.AdjustKedaMaxReplicas != nil:
+		claimed = int64(action.AdjustKedaMaxReplicas.PreviousValue)
+	default:
+		return needsIntervention(string(sourcemap.ReasonInvalidInput), "The action has no previous value"), true
+	}
+	got, ok := field.Get(live.Object)
+	if !ok {
+		return needsIntervention(string(sourcemap.ReasonFieldNotFound),
+			fmt.Sprintf("%s is not set on the live object", field)), true
+	}
+	if !field.Equals(got, claimed) {
+		return denied(ReasonPreviousValueMismatch,
+			fmt.Sprintf("The previous value in the request is not the live value of %s", field)), true
+	}
+	return outcome{}, false
 }

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -252,6 +253,48 @@ var _ = Describe("RemediationRequest Controller", func() {
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseDenied))
 		Expect(condition(got).Reason).To(Equal(ReasonTargetMismatch))
 		Expect(stub.calls.Load()).To(BeZero())
+	})
+
+	It("denies a request whose previous value is not the live value", func() {
+		// Live is 256Mi. Claiming 1000Mi makes 1024Mi look like a 2.4% increase; it is a 300% one.
+		create(func() {
+			policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 10
+			request.Spec.Action.SetContainerMemoryLimit.Previous = resource.MustParse("1000Mi")
+			request.Spec.Action.SetContainerMemoryLimit.Desired = resource.MustParse("1024Mi")
+		})
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseDenied))
+		Expect(condition(got).Reason).To(Equal(ReasonPreviousValueMismatch))
+		Expect(stub.calls.Load()).To(BeZero())
+	})
+
+	It("accepts a previous value written in another unit", func() {
+		create(func() {
+			request.Spec.Action.SetContainerMemoryLimit.Previous = resource.MustParse("268435456") // 256Mi
+		})
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+	})
+
+	It("sends a target without the field to NeedsIntervention", func() {
+		create(func() { deployment.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{} })
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(condition(got).Reason).To(Equal(string(sourcemap.ReasonFieldNotFound)))
+	})
+
+	It("waits as long as the Git host asked before retrying", func() {
+		create(func() {})
+		stub.err = &sourcemap.TransientError{Op: "read head of branch main", RetryAfter: 42 * time.Second}
+		res, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(42 * time.Second))
+		Expect(fetch().Status.Phase).To(BeEmpty())
 	})
 
 	It("sends a missing target to NeedsIntervention", func() {

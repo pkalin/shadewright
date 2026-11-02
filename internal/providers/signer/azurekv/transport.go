@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -37,9 +38,10 @@ const maxResponseBody = 64 << 10
 //
 //   - It reads at most maxResponseBody+1 bytes of a body and refuses a larger one, so azcore's body
 //     download policy never buffers an unbounded response (success or error).
-//   - It refuses a 401 challenge that the Key Vault SDK would parse unsafely: keyvault/internal v1.2.0
-//     takes the tenant as strings.Split(authorization, "/")[3] without a length check, so a challenge
-//     like authorization="not-a-url" would panic inside Sign.
+//   - It refuses a 401 challenge that the Key Vault SDK would parse unsafely or reject with an error that
+//     quotes it: keyvault/internal v1.2.0 takes the tenant as strings.Split(authorization, "/")[3] without
+//     a length check, so authorization="not-a-url" would panic inside Sign, and it copies an unparsable or
+//     foreign resource into an error message that azcore's retry policy logs.
 //
 // Both refusals are fixed errors that carry no response text and are not retried.
 type guardTransport struct {
@@ -52,7 +54,7 @@ func (g guardTransport) Do(req *http.Request) (*http.Response, error) {
 	if err != nil || resp == nil {
 		return resp, err
 	}
-	if resp.StatusCode == http.StatusUnauthorized && !safeChallenge(resp.Header.Get("WWW-Authenticate")) {
+	if resp.StatusCode == http.StatusUnauthorized && !safeChallenge(resp.Header.Get("WWW-Authenticate"), req.URL.Host) {
 		closeBody(resp)
 		return nil, errMalformedChallenge
 	}
@@ -84,11 +86,13 @@ func closeBody(resp *http.Response) {
 	}
 }
 
-// safeChallenge reports whether the Key Vault SDK can parse a WWW-Authenticate value without panicking.
-// It splits the value exactly as keyvault/internal v1.2.0 does and then requires that a present
-// authorization parameter is an https URL with a tenant segment. An empty header or a missing resource is
-// left to the SDK, which returns an error for both.
-func safeChallenge(header string) bool {
+// safeChallenge reports whether the Key Vault SDK can handle a WWW-Authenticate value without panicking
+// and without copying response text into an error. It splits the value exactly as keyvault/internal v1.2.0
+// does, then requires that a present authorization parameter is an https URL with a tenant segment, and
+// that the scope (or resource) is an https URL whose host is a parent domain of vaultHost, which is the
+// SDK's own resource check. An empty header or a missing resource is left to the SDK, whose errors for both
+// are fixed text.
+func safeChallenge(header, vaultHost string) bool {
 	vals := map[string]string{}
 	for part := range strings.SplitSeq(strings.ReplaceAll(header, "Bearer ", ""), " ") {
 		sub := strings.Split(part, "=")
@@ -96,12 +100,22 @@ func safeChallenge(header string) bool {
 			vals[sub[0]] = strings.TrimSuffix(strings.ReplaceAll(sub[1], `"`, ""), ",")
 		}
 	}
-	auth, ok := vals["authorization"]
-	if !ok || auth == "" {
+	if auth := vals["authorization"]; auth != "" {
+		parts := strings.Split(auth, "/")
+		if len(parts) < 4 || parts[0] != "https:" || parts[1] != "" || parts[2] == "" || parts[3] == "" {
+			return false
+		}
+	}
+	scope := vals["scope"]
+	if scope == "" {
+		scope = vals["resource"]
+	}
+	if scope == "" {
 		return true
 	}
-	parts := strings.Split(auth, "/")
-	return len(parts) >= 4 && parts[0] == "https:" && parts[1] == "" && parts[2] != "" && parts[3] != ""
+	u, err := url.Parse(scope)
+	return err == nil && u.Scheme == "https" && u.User == nil && u.Host != "" &&
+		strings.HasSuffix(vaultHost, "."+u.Host)
 }
 
 // guardError is a fixed refusal that azcore's retry policy does not retry.

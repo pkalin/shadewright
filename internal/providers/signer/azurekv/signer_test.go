@@ -512,6 +512,19 @@ func TestSDKLogsStayClean(t *testing.T) {
 		t.Fatal("no error with a 403")
 	}
 
+	// Challenges the transport refuses never reach the SDK's parser or its retry log.
+	for _, challenge := range []string{
+		`Bearer authorization="https://login.microsoftonline.com/x", resource="https://` + bodySecret + `.attacker.example"`,
+		`Bearer authorization="` + bodySecret + `", resource="https://vault.azure.net"`,
+		`Bearer resource="%` + bodySecret + `"`,
+	} {
+		s, v, _ := setup(t, "https://"+testHost+"/keys/github-app", Options{MaxRetries: 1})
+		v.challenge = challenge
+		if _, err := s.Sign(context.Background(), digestOf("x")); !errors.Is(err, errMalformedChallenge) {
+			t.Errorf("challenge %q: got %v, want the malformed challenge error", challenge, err)
+		}
+	}
+
 	mu.Lock()
 	defer mu.Unlock()
 	if logs.Len() == 0 {
@@ -544,7 +557,7 @@ func TestSignMalformedChallenge(t *testing.T) {
 			continue
 		}
 		assertClean(t, err)
-		if strings.HasPrefix(name, "authorization") && !errors.Is(err, errMalformedChallenge) {
+		if (strings.HasPrefix(name, "authorization") || name == "foreign resource") && !errors.Is(err, errMalformedChallenge) {
 			t.Errorf("%s: got %v, want the malformed challenge error", name, err)
 		}
 		if name == "foreign resource" && len(v.authorized()) != 0 {
@@ -554,17 +567,25 @@ func TestSignMalformedChallenge(t *testing.T) {
 }
 
 func TestSafeChallenge(t *testing.T) {
+	const vault = `resource="https://vault.azure.net"`
 	for header, want := range map[string]bool{
-		"": true,
-		`Bearer resource="https://vault.azure.net"`:                                                           true,
-		`Bearer authorization="https://login.microsoftonline.com/tenant", resource="https://vault.azure.net"`: true,
-		`Bearer authorization="", resource="https://vault.azure.net"`:                                         true,
-		`Bearer authorization="not-a-url", resource="https://vault.azure.net"`:                                false,
-		`Bearer authorization="https://login.microsoftonline.com/", resource="https://vault.azure.net"`:       false,
-		`Bearer authorization="http://login.microsoftonline.com/tenant", resource="https://vault.azure.net"`:  false,
-		`Bearer authorization="https:///tenant", resource="https://vault.azure.net"`:                          false,
+		"":                true,
+		`Bearer ` + vault: true,
+		`Bearer authorization="https://login.microsoftonline.com/tenant", ` + vault:                            true,
+		`Bearer authorization="", ` + vault:                                                                    true,
+		`Bearer authorization="https://login.microsoftonline.com/t", scope="https://vault.azure.net/.default"`: true,
+		`Bearer authorization="not-a-url", ` + vault:                                                           false,
+		`Bearer authorization="https://login.microsoftonline.com/", ` + vault:                                  false,
+		`Bearer authorization="http://login.microsoftonline.com/tenant", ` + vault:                             false,
+		`Bearer authorization="https:///tenant", ` + vault:                                                     false,
+		`Bearer resource="https://attacker.example"`:                                                           false,
+		`Bearer resource="https://azure.net.attacker.example"`:                                                 false,
+		`Bearer resource="http://vault.azure.net"`:                                                             false,
+		`Bearer resource="https://user@vault.azure.net"`:                                                       false,
+		`Bearer resource="%zz"`:                                                                                false,
+		`Bearer scope="https://attacker.example/.default", ` + vault:                                           false,
 	} {
-		if got := safeChallenge(header); got != want {
+		if got := safeChallenge(header, testHost); got != want {
 			t.Errorf("safeChallenge(%q) = %v, want %v", header, got, want)
 		}
 	}

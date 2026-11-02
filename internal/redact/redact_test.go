@@ -50,6 +50,9 @@ var (
 	storageKey = rep("RmFrZUFjY291bnRLZXk=", 4)
 	sasSig     = "Fake" + rep("Sig0", 8) + "%3D"
 	dbPassword = "Synthetic-Pa55-" + rep("x", 6)
+	// tail is secret material that must not survive after an escape, punctuation, a space or a line break.
+	tail  = "Remaining" + "SyntheticValue" + "42"
+	tail2 = "Second" + "SyntheticValue" + "43"
 )
 
 type corpusCase struct {
@@ -106,6 +109,28 @@ func corpus() []corpusCase {
 		{"ipv4", "connection refused from 203.0.113.42:443", []string{"203.0.113.42"}, []string{KindIP}},
 		{"ipv6", "dial tcp [2001:db8::1]:443: i/o timeout", []string{"2001:db8::1"}, []string{KindIP}},
 		{"ipv6 full", "peer fe80:0000:0000:0000:0202:b3ff:fe1e:8329 lost", []string{"fe1e:8329"}, []string{KindIP}},
+		// Regression cases from review: secret material after an escape, punctuation, a space or a newline.
+		{"json escaped quote", `{"password":"prefix\"` + tail + `"}`, []string{tail}, []string{KindCredential}},
+		{"yaml doubled single quote", "password: 'prefix''" + tail + "'", []string{tail}, nil},
+		{"ampersand in env value", "DB_PASSWORD=prefix&" + tail, []string{tail}, nil},
+		{"comma and semicolon in value", "API_TOKEN=prefix," + tail + ";" + tail2, []string{tail, tail2}, nil},
+		{"quoted account key", `AccountName=synthetic;AccountKey="` + tail + `";EndpointSuffix=core.windows.net`,
+			[]string{tail}, []string{KindConnectionString}},
+		{"password with space in connection string", "Server=example;Password=prefix " + tail + ";Encrypt=True",
+			[]string{tail}, nil},
+		{"sigv4 authorization", "Authorization: AWS4-HMAC-SHA256 Credential=synthetic/scope, SignedHeaders=host, Signature=" + tail,
+			[]string{tail}, []string{KindCredential}},
+		{"digest authorization", `Authorization: Digest username="synthetic", realm="r", nonce="` + tail2 +
+			`", uri="/", response="` + tail + `"`, []string{tail, tail2}, []string{KindCredential}},
+		{"quoted authorization in json", `{"Authorization":"Digest nonce=\"` + tail2 + `\", response=\"` + tail + `\"","x":1}`,
+			[]string{tail, tail2}, nil},
+		{"yaml literal block", "password: |-\n  synthetic-" + tail + "\nnext: field", []string{tail}, []string{KindCredential}},
+		{"yaml folded block nested", "db:\n  password: >2+ # comment\n     one-" + tail + "\n\n     two-" + tail2 + "\n  user: app",
+			[]string{tail, tail2}, nil},
+		{"yaml block in list item", "- token: |\n    " + tail + "\n- token: x", []string{tail}, nil},
+		{"ipv6 trailing double colon", "peer 2001:db8:1:2:3:4:5:: lost", []string{"2001:db8:1:2:3:4:5"}, []string{KindIP}},
+		{"ipv6 leading double colon", "peer ::1:2:3:4:5:6:7 lost", []string{"1:2:3:4:5:6:7"}, nil},
+		{"ipv6 followed by colon", "dial 2001:db8::7: refused", []string{"2001:db8::7"}, nil},
 		{"several in one line",
 			"user synthetic@example.org from 198.51.100.7 used " + ghToken + " and " + jwtToken,
 			[]string{"synthetic@example.org", "198.51.100.7", ghToken, jwtToken},
@@ -150,6 +175,21 @@ func TestKeepsUsefulText(t *testing.T) {
 	} {
 		if out := String(in); out != in {
 			t.Errorf("changed useful text:\n in: %s\nout: %s", in, out)
+		}
+	}
+}
+
+// Text around a redacted value must survive: the next YAML field, the next connection string field.
+func TestKeepsTextAroundValues(t *testing.T) {
+	for in, want := range map[string]string{
+		"password: |-\n  synthetic-" + tail + "\nnext: field":        "password: |-\n  [REDACTED:credential]\nnext: field",
+		"db:\n  password: |\n    a-" + tail + "\n    b\n  user: app": "db:\n  password: |\n    [REDACTED:credential]\n  user: app",
+		"Server=example;Password=prefix " + tail + ";Encrypt=True":   "Server=example;Password=[REDACTED:connection-string];Encrypt=True",
+		"password: |\nnext: field":                                   "password: *\nnext: field",
+		"secretName: |\n  orders-tls\n":                              "secretName: |\n  orders-tls\n",
+	} {
+		if got := String(in); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
 		}
 	}
 }
@@ -220,6 +260,7 @@ func FuzzString(f *testing.F) {
 	for _, s := range []string{
 		"", "\x00", "\xff\xfe", "::", ":::::::::", "-----BEGIN PRIVATE KEY-----", "a@b.c", "password=",
 		"eyJ.eyJ.", "postgres://:@", "authorization: ", "?sig=&key=", "1.1.1.1.1.1", "[REDACTED:ip]",
+		"password: |\n", "a:\n password: >-\n  x\n password: |\n   y", "Authorization: \"\\", "1:2:3:4:5:6:7:8:",
 	} {
 		f.Add(s)
 	}

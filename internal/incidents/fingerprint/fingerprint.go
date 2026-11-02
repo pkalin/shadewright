@@ -19,7 +19,7 @@ limitations under the License.
 //
 // Both functions are pure: no I/O, no clock, no randomness. The observation text comes from the cluster
 // and is untrusted (invariant 4); [Normalize] redacts anything that looks like a token or connection string
-// before the text can be stored or shown to a model.
+// with package redact before the text can be stored or shown to a model.
 package fingerprint
 
 import (
@@ -56,6 +56,11 @@ type Observation struct {
 	ReportingController string
 	// Note is the free-text message (event note or status message). It is untrusted and not redacted.
 	Note string
+	// RegardingKind and RegardingName name the object the observation is about (an event's regarding
+	// object), when known. They are not hashed; they only let [Normalize] strip a generated Pod or
+	// ReplicaSet name from the note.
+	RegardingKind string
+	RegardingName string
 }
 
 // Fingerprint returns "sha256:" followed by 64 lowercase hex digits, computed from the cluster ID,

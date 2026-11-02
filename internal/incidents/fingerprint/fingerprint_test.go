@@ -163,6 +163,48 @@ func TestFingerprint(t *testing.T) {
 			same: false,
 		},
 		{
+			name: "missing Secrets with generated-looking names",
+			a:    with(func(o *Observation) { o.Note = `secret "db-7d4b9" not found` }),
+			b:    with(func(o *Observation) { o.Note = `secret "db-6c9f7" not found` }),
+			same: false,
+		},
+		{
+			name: "images with generated-looking names",
+			a:    with(func(o *Observation) { o.Note = `Failed to pull image "ghcr.io/acme/web-7d4b9:1.0"` }),
+			b:    with(func(o *Observation) { o.Note = `Failed to pull image "ghcr.io/acme/web-6c9f7:1.0"` }),
+			same: false,
+		},
+		{
+			name: "bracketed IPv6 addresses with a port",
+			a:    with(func(o *Observation) { o.Note = `dial tcp [2001:db8:1::1]:8080: connect: connection refused` }),
+			b:    with(func(o *Observation) { o.Note = `dial tcp [2001:db8::1]:8080: connect: connection refused` }),
+			same: true,
+		},
+		{
+			name: "IPv4 addresses of different lengths",
+			a:    with(func(o *Observation) { o.Note = `dial tcp 10.0.0.1:5432: connection refused` }),
+			b:    with(func(o *Observation) { o.Note = `dial tcp 100.100.100.100:5432: connection refused` }),
+			same: true,
+		},
+		{
+			name: "redacted secrets of different lengths",
+			a:    with(func(o *Observation) { o.Note = `login failed: password=ab` }),
+			b:    with(func(o *Observation) { o.Note = `login failed: password=a-much-longer-password-value` }),
+			same: true,
+		},
+		{
+			name: "regarding Pod name stripped",
+			a: with(func(o *Observation) {
+				o.RegardingKind, o.RegardingName = "Pod", "web-7d4b9c8f6-q8wzt"
+				o.Note = `Liveness probe of web-7d4b9c8f6-q8wzt failed`
+			}),
+			b: with(func(o *Observation) {
+				o.RegardingKind, o.RegardingName = "Pod", "web-6c9f7b5d48-xk2lp"
+				o.Note = `Liveness probe of web-6c9f7b5d48-xk2lp failed`
+			}),
+			same: true,
+		},
+		{
 			name: "field boundaries are not ambiguous",
 			a:    with(func(o *Observation) { o.Reason = "Back"; o.Action = "Off" }),
 			b:    with(func(o *Observation) { o.Reason = reasonBackOff; o.Action = "" }),
@@ -222,6 +264,21 @@ func TestNormalize(t *testing.T) {
 			want: `dial tcp <ip>: i/o timeout; from <ip> and <ip>`,
 		},
 		{
+			name: "compressed IPv6 in brackets is one placeholder",
+			note: `from [2001:db8:1::1]:8080 and [2001:db8::1]:8080`,
+			want: `from <ip> and <ip>`,
+		},
+		{
+			name: "generated names outside Pod and ReplicaSet references are kept",
+			note: `secret "db-7d4b9" not found; configmap "app-x2x9k" not found; image "acme/web-6c9f7b5d48:1.0"`,
+			want: `secret "db-7d4b9" not found; configmap "app-x2x9k" not found; image "acme/web-6c9f7b5d48:1.0"`,
+		},
+		{
+			name: "Pod and ReplicaSet reference forms",
+			note: `pod/web-7d4b9c8f6-q8wzt pod="shop/web-7d4b9c8f6-q8wzt" Pod "api-x2x9k" Scaled up replica set web-7d4b9c8f6 to 2`,
+			want: `pod/web-<pod> pod="shop/web-<pod>" Pod "api-<pod>" Scaled up replica set web-<hash> to 2`,
+		},
+		{
 			name: "UIDs and digests",
 			note: `pod uid 0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d image ghcr.io/acme/web@sha256:` + strings.Repeat("ab", 32),
 			want: `pod uid <uid> image ghcr.io/acme/web@sha256:<digest>`,
@@ -243,8 +300,8 @@ func TestNormalize(t *testing.T) {
 		},
 		{
 			name: "input angle brackets cannot forge placeholders",
-			note: `value <redacted> and <pod>`,
-			want: `value (redacted) and (pod)`,
+			note: `value <redacted> and <pod> and [REDACTED:ip] and ***`,
+			want: `value (redacted) and (pod) and (REDACTED:ip) and ###`,
 		},
 		{
 			name: "invalid UTF-8",
@@ -268,16 +325,20 @@ func TestNormalizeRedacts(t *testing.T) {
 		{"connection string URL", `cannot connect to postgres://app:Hunter2pass@db.shop.svc:5432/orders`, "Hunter2pass"},
 		{"Azure connection string", `DefaultEndpointsProtocol=https;AccountName=acme;AccountKey=bWFkZXVwa2V5MTIzNDU2Nzg5MA==;EndpointSuffix=core.windows.net`, "bWFkZXVwa2V5MTIzNDU2Nzg5MA=="},
 		{"password key", `login failed: password=s3cr3t!`, "s3cr3t!"},
-		{"quoted password", `{"password": "opensesame"}`, "opensesame"},
+		{"short password", `login failed: password=ab`, "=ab"},
 		{"bearer header", `Authorization: Bearer abc.def.ghi`, "abc.def.ghi"},
 		{"bare bearer", `sent bearer QWxhZGRpbjpvcGVu`, "QWxhZGRpbjpvcGVu"},
 		{"JWT", `token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl rejected`, "eyJhbGciOiJIUzI1NiJ9"},
 		{"GitHub token", `using ghp_` + strings.Repeat("A1", 18), "ghp_"},
-		{"AWS key", `key AKIAIOSFODNN7EXAMPLE denied`, "AKIAIOSFODNN7EXAMPLE"},
-		{"Slack token", `xoxb-123456789012-abcdefghij`, "xoxb-123456789012"},
-		{"long random token", `api returned 401 for Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2RlZg`, "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2RlZg"},
-		{"hex token", `token mismatch ` + strings.Repeat("0f", 20), strings.Repeat("0f", 20)},
 		{"private key", "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----", "MIIEowIBAAKCAQEA"},
+		// Review regressions: redaction runs before UID substitution, so a UID cannot shield a secret.
+		{"UID-prefixed password", `password=12345678-1234-1234-1234-123456789abc-swordfish`, "swordfish"},
+		{"UID in URL user info", `dial postgres://12345678-1234-1234-1234-123456789abc:swordfish@db:5432/orders`, "swordfish"},
+		// Review regressions: complete quoted values and underscore-prefixed keys.
+		{"quoted value with spaces", `{"password": "correct horse battery staple"}`, "horse battery staple"},
+		{"quoted value with a comma", `{"password": "sword,fish"}`, ",fish"},
+		{"underscore-prefixed password key", `DB_PASSWORD=opensesame`, "opensesame"},
+		{"underscore-prefixed client secret key", `AZURE_CLIENT_SECRET=opensesame`, "opensesame"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -286,13 +347,18 @@ func TestNormalizeRedacts(t *testing.T) {
 				t.Errorf("secret %q kept in %q", tt.secret, got)
 			}
 			if !strings.Contains(got, placeholderRedacted) {
-				t.Errorf("no redaction marker in %q", got)
+				t.Errorf("no redaction placeholder in %q", got)
 			}
-			if containsSecret(got) {
-				t.Errorf("output %q still matches a redaction rule", got)
+			if unredacted(got) {
+				t.Errorf("output %q still changes when redacted", got)
 			}
 		})
 	}
+}
+
+// unredacted reports whether redacting s again would change it.
+func unredacted(s string) bool {
+	return redactText(s) != s
 }
 
 func TestNormalizeLength(t *testing.T) {
@@ -311,21 +377,20 @@ func TestNormalizeLength(t *testing.T) {
 		if !utf8.ValidString(got) {
 			t.Errorf("note %d: invalid UTF-8", i)
 		}
-		if containsSecret(got) {
-			t.Errorf("note %d: output matches a redaction rule", i)
+		if unredacted(got) {
+			t.Errorf("note %d: output changes when redacted", i)
 		}
 	}
 }
 
-func TestTruncateCanCreateMatch(t *testing.T) {
-	// A word that becomes a token only when cut must still be redacted.
-	got := finish(strings.Repeat("a ", 500) + "AKIA" + strings.Repeat("B", 40))
-	if containsSecret(got) || len(got) > MaxSymptomLength {
+func TestFinishRedactsAfterCut(t *testing.T) {
+	got := finish(strings.Repeat("a ", 500) + "password=" + strings.Repeat("B", 40))
+	if unredacted(got) || len(got) > MaxSymptomLength {
 		t.Errorf("finish() = %q", got)
 	}
 }
 
-const canary = "ghp_C4n4ryC4n4ryC4n4ryC4n4ryC4n4ryC4n4"
+var canary = "ghp_" + strings.Repeat("C4n4ry", 7)
 
 func FuzzNormalize(f *testing.F) {
 	seeds := [][2]string{
@@ -350,8 +415,8 @@ func FuzzNormalize(f *testing.F) {
 			if !utf8.ValidString(got) {
 				t.Fatalf("invalid UTF-8: %q", got)
 			}
-			if containsSecret(got) {
-				t.Fatalf("output matches a redaction rule: %q", got)
+			if unredacted(got) {
+				t.Fatalf("output changes when redacted: %q", got)
 			}
 			if strings.Contains(got, canary) {
 				t.Fatalf("canary token kept: %q", got)

@@ -32,31 +32,33 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 )
 
-// A policy created together with its request may not be in the cache yet. getFresh must find it on the API
-// server instead of letting the request be denied for good.
-func TestGetFreshFallsBackToAPIServer(t *testing.T) {
+// The policy and settings authorize a request, so they are read from the API server, never from the cache.
+// A policy only on the API server is found, and a policy the cache still holds after its deletion is not used.
+func TestGetLiveIgnoresTheCache(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := remediationv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	key := types.NamespacedName{Name: "p"}
 	notFound := apierrors.NewNotFound(schema.GroupResource{Group: "remediation.shadewright.io", Resource: "remediationpolicies"}, "p")
-	staleCache := clientfake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+	cacheMiss := clientfake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
 		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
 			return notFound
 		},
 	}).Build()
-	key := types.NamespacedName{Name: "p"}
-
-	apiServer := clientfake.NewClientBuilder().WithScheme(scheme).
+	staleHit := clientfake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(&remediationv1alpha1.RemediationPolicy{ObjectMeta: metav1.ObjectMeta{Name: "p"}}).Build()
-	r := &RemediationRequestReconciler{Client: staleCache, APIReader: apiServer}
-	if err := r.getFresh(context.Background(), key, &remediationv1alpha1.RemediationPolicy{}); err != nil {
+	withPolicy := clientfake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(&remediationv1alpha1.RemediationPolicy{ObjectMeta: metav1.ObjectMeta{Name: "p"}}).Build()
+	empty := clientfake.NewClientBuilder().WithScheme(scheme).Build()
+
+	r := &RemediationRequestReconciler{Client: cacheMiss, APIReader: withPolicy}
+	if err := r.getLive(context.Background(), key, &remediationv1alpha1.RemediationPolicy{}); err != nil {
 		t.Errorf("policy only on the API server: got %v, want it found", err)
 	}
 
-	empty := clientfake.NewClientBuilder().WithScheme(scheme).Build()
-	r.APIReader = empty
-	if err := r.getFresh(context.Background(), key, &remediationv1alpha1.RemediationPolicy{}); !apierrors.IsNotFound(err) {
-		t.Errorf("policy nowhere: got %v, want NotFound", err)
+	r = &RemediationRequestReconciler{Client: staleHit, APIReader: empty}
+	if err := r.getLive(context.Background(), key, &remediationv1alpha1.RemediationPolicy{}); !apierrors.IsNotFound(err) {
+		t.Errorf("policy deleted but still cached: got %v, want NotFound", err)
 	}
 }

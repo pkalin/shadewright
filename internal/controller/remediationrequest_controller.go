@@ -67,8 +67,8 @@ type RemediationRequestReconciler struct {
 	Source SourceResolver
 	// APIReader reads straight from the API server (mgr.GetAPIReader()). The live target is read through it,
 	// so the executor needs only get on target kinds and never starts an informer that would need list and
-	// watch; and a policy or settings object the cache has not seen yet is looked up again before a request
-	// is denied for its absence. Nil means the client is used (tests).
+	// watch; and the policy and settings are read through it, so a decision never rests on a stale cached
+	// copy. Nil means the client is used (tests).
 	APIReader client.Reader
 }
 
@@ -80,14 +80,13 @@ func (r *RemediationRequestReconciler) reader() client.Reader {
 	return r.Client
 }
 
-// getFresh reads a cluster-scoped object from the cache and, when the cache says it does not exist, once more
-// from the API server, so an object created together with the request is not missed.
-func (r *RemediationRequestReconciler) getFresh(ctx context.Context, key types.NamespacedName, obj client.Object) error {
-	err := r.Get(ctx, key, obj)
-	if apierrors.IsNotFound(err) {
-		return r.reader().Get(ctx, key, obj)
-	}
-	return err
+// getLive reads a cluster-scoped authorizing object (the policy or the settings) straight from the API server.
+// The cache is not used: a cached copy can still hold a deleted policy, an older approval mode or a repository
+// removed from the settings, and the request's resourceVersion does not change when either of them does, so a
+// stale copy would authorize a request the live configuration refuses. A policy created together with the
+// request is found as well.
+func (r *RemediationRequestReconciler) getLive(ctx context.Context, key types.NamespacedName, obj client.Object) error {
+	return r.reader().Get(ctx, key, obj)
 }
 
 // Reconcile runs the policy check on a Pending request (design section 6, step 1 to 6).
@@ -169,14 +168,14 @@ func needsIntervention(reason, message string) outcome {
 func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	outcome, error) {
 	pol := &remediationv1alpha1.RemediationPolicy{}
-	switch err := r.getFresh(ctx, types.NamespacedName{Name: string(rr.Spec.PolicyRef)}, pol); {
+	switch err := r.getLive(ctx, types.NamespacedName{Name: string(rr.Spec.PolicyRef)}, pol); {
 	case apierrors.IsNotFound(err):
 		return denied(ReasonPolicyNotFound, fmt.Sprintf("Policy %q does not exist", rr.Spec.PolicyRef)), nil
 	case err != nil:
 		return outcome{}, fmt.Errorf("get RemediationPolicy %s: %w", rr.Spec.PolicyRef, err)
 	}
 	settings := &remediationv1alpha1.RemediationSettings{}
-	switch err := r.getFresh(ctx, types.NamespacedName{Name: settingsName}, settings); {
+	switch err := r.getLive(ctx, types.NamespacedName{Name: settingsName}, settings); {
 	case apierrors.IsNotFound(err):
 		return denied(ReasonSettingsNotFound, "RemediationSettings default does not exist"), nil
 	case err != nil:

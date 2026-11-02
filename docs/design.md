@@ -397,7 +397,7 @@ The policy check, the first step, loads the policy the request names, the `defau
 | Source mapping needs a human (Helm, patches, missing target, unknown Flux shape) | `NeedsIntervention`, reason of the mapping | `Unknown` |
 | All checks pass | `PolicyChecked`, `WithinApprovedBounds` | `True` |
 
-Only a failure worth retrying (API server or Git host) is retried, with backoff, or after the delay the host asked for (`Retry-After`); every permanent refusal is a final phase. A policy or settings object the cache has not seen yet is looked up on the API server before a request is denied for its absence. Messages and conditions never carry Git URLs or provider text.
+Only a failure worth retrying (API server or Git host) is retried, with backoff, or after the delay the host asked for (`Retry-After`); every permanent refusal is a final phase. The policy and settings are read from the API server on every check, never from the cache, so a deleted policy or a tightened setting takes effect at once. Messages and conditions never carry Git URLs or provider text.
 
 Each reconcile:
 

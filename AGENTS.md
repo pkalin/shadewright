@@ -26,9 +26,20 @@ These are the reason the project exists. A change that weakens one needs an ADR 
 
 Work is tracked as GitHub issues, written with the "Task" template so that any contributor or coding agent
 can work on one without further context. Milestones follow the stages in `docs/design.md` section 13.
+Feature sets are `epic` issues (the "Epic" template) and tasks are their sub-issues. Issues for all three
+repositories live here; a task for `shadewright-azure` or `shadewright-fleet` names that repository in its
+scope, and its pull request says `Closes pkalin/shadewright#<n>`.
+
+Every issue names the ADRs it is tied to:
+
+- An epic's "ADRs" section lists every ADR the feature set implements or must respect.
+- A task's "ADRs" field lists the ADRs it implements or must respect, or says "As epic #<n>" when its parent's
+  list covers it. A task never contradicts an ADR it lists.
+- If the work needs a decision no ADR covers, or would change an accepted one, the first task is to write
+  that ADR (status Proposed), and the dependent tasks list it under "Depends on".
 
 - Pick an open issue labelled `agent-ready` whose "Depends on" issues are closed. Read the linked design
-  sections and ADRs first.
+  sections and the ADRs the issue and its epic list first.
 - One issue, one branch (`<issue-number>-<short-slug>`), one pull request with `Closes #<n>` in the body.
 - Stay inside the issue's scope. If something outside it needs to change, or the issue is ambiguous, say so
   in the pull request or the issue instead of guessing.

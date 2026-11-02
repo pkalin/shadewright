@@ -17,6 +17,13 @@ body:
     validations:
       required: true
   - type: textarea
+    id: adrs
+    attributes:
+      label: ADRs
+      description: The ADRs this task implements or must respect, as links to docs/adr, or "As epic #123" when the parent epic's list covers it.
+    validations:
+      required: true
+  - type: textarea
     id: scope
     attributes:
       label: Scope

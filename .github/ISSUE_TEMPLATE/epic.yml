@@ -1,0 +1,32 @@
+name: Epic
+description: A feature set with one outcome; its tasks are sub-issues written with the Task template.
+labels: ["epic"]
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: What is true for a user or operator when the feature set is done.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What belongs to this feature set, with links to the design sections.
+    validations:
+      required: true
+  - type: textarea
+    id: adrs
+    attributes:
+      label: ADRs
+      description: Every ADR this feature set implements or must respect, as links to docs/adr. Name decisions that still need an ADR.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: Checkable result, usually a stage from design section 13.
+    validations:
+      required: true

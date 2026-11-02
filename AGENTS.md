@@ -118,6 +118,11 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-docs.txt
 
 - `docs/design.md` is the system design; its section 15 lists decisions made and open questions. `docs/adr/` holds decisions (template and index there). A new page or ADR must also be added to `nav` in `zensical.toml`.
 - When a change implements or alters a design decision, update the design or add an ADR in the same PR.
+- Docs are written with the code, in the same PR, not later:
+  - Every package has a doc comment, and every exported identifier is documented.
+  - A change that users see (CRD fields and their validation, flags, permissions, metrics, install or upgrade steps, behaviour of an action) updates the user docs under `docs/` in the same PR. Fields are documented in the Go types; the generated API reference picks them up.
+  - A feature that can be tried in the lab comes with its runbook, or an update to an existing one.
+  - The PR description says which docs changed, or why none needed to.
 - Diagrams are hand-written SVG in `docs/assets/diagrams/`, in the style of `architecture.svg`: dark background `#0e0e16`, boxes `#1d1b2b`, violet `#7c24fc` and `#a879ff` for the main flow, teal for systems outside the cluster, a `<title>` and `<desc>`, and alt text in the page. Wrap the image in a link to itself so it opens full size. No ASCII art and no Mermaid; formulas stay as code blocks. Render with headless Chrome and look at the result before committing.
 
 ## Kubebuilder rules

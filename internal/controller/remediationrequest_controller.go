@@ -111,10 +111,8 @@ func bound(ctx context.Context, d, def time.Duration) (context.Context, context.
 func boundErr(parent, phase context.Context, name string, err error) error {
 	switch {
 	case parent.Err() != nil:
-		if err == nil {
-			err = parent.Err()
-		}
-		return fmt.Errorf("%s cancelled: %w", name, err)
+		// The callee's error is sanitised and may have lost context.Canceled, so the parent's error is wrapped.
+		return fmt.Errorf("%s cancelled: %w", name, parent.Err())
 	case phase.Err() != nil:
 		return fmt.Errorf("%s: %w", name, ErrTimeout)
 	}
@@ -436,10 +434,16 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		return ctrl.Result{RequeueAfter: freshRecheckDelay}, nil
 	default:
 		// A host that asked for a delay (Retry-After) gets it; the error backoff does not read it.
-		if pe, ok := errors.AsType[*freshness.ProviderError](err); ok && pe.RetryAfter > 0 {
+		retryAfter := time.Duration(0)
+		if pe, ok := errors.AsType[*freshness.ProviderError](err); ok {
+			retryAfter = pe.RetryAfter
+		} else if te, ok := errors.AsType[*sourcemap.TransientError](err); ok {
+			retryAfter = te.RetryAfter
+		}
+		if retryAfter > 0 {
 			logf.FromContext(ctx).Info("Waiting before re-checking RemediationRequest",
-				"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", pe.RetryAfter)
-			return ctrl.Result{RequeueAfter: pe.RetryAfter}, nil
+				"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", retryAfter)
+			return ctrl.Result{RequeueAfter: retryAfter}, nil
 		}
 		return ctrl.Result{}, err
 	}
@@ -463,7 +467,8 @@ func (r *RemediationRequestReconciler) EnsureFresh(ctx context.Context, rr *reme
 	}
 	freshCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	err := freshness.Checker{Reader: r.reader(), OpenRepository: r.OpenRepository, Source: r.Source}.Fresh(freshCtx, rr)
-	if _, isStale := errors.AsType[*freshness.StaleError](err); !isStale {
+	// A verdict that arrives after the deadline, stale included, is not acted on: a read may have been cut short.
+	if err != nil {
 		err = boundErr(ctx, freshCtx, "freshness check", err)
 	}
 	cancel()
@@ -476,9 +481,9 @@ func (r *RemediationRequestReconciler) EnsureFresh(ctx context.Context, rr *reme
 	// the change request.
 	cleanCtx, cleanCancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	closeErr := r.closeChangeRequest(cleanCtx, rr)
-	if closeErr != nil && !errors.Is(closeErr, errRepositoryGone) && !errors.Is(closeErr, freshness.ErrPaused) {
-		closeErr = boundErr(ctx, cleanCtx, "cleanup of the change request", closeErr)
-	}
+	// Every result, nil and errRepositoryGone included, is checked against the deadline before a final phase is
+	// written from it.
+	closeErr = boundErr(ctx, cleanCtx, "cleanup of the change request", closeErr)
 	cleanCancel()
 	switch err := closeErr; {
 	case errors.Is(err, errRepositoryGone):

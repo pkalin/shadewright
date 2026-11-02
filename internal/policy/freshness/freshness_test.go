@@ -29,6 +29,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -78,7 +79,11 @@ type world struct {
 	target   *appsv1.Deployment
 	git      *fakegit.Git
 	getErr   func(key client.ObjectKey, obj client.Object) error
-	open     freshness.RepositoryOpener
+	// afterGet runs on every object read, to change what the next read sees.
+	afterGet func(obj client.Object)
+	// ctx is the context of the check; nil means Background.
+	ctx  context.Context
+	open freshness.RepositoryOpener
 	// resolve is the source mapping run again before the write; newWorld maps to the recorded source.
 	resolve func(ctx context.Context, in sourcemap.Input) (sourcemap.Result, error)
 }
@@ -125,7 +130,7 @@ func newWorld(t *testing.T) *world {
 	w.resolve = func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
 		// A merge moved the base commit; the repository, branch and file are the recorded ones.
 		moved := *src
-		moved.BaseCommit = "fedcba9876543210fedcba9876543210fedcba98"
+		moved.BaseCommit, _ = w.git.BranchHead(context.Background(), "main")
 		return sourcemap.Result{Outcome: sourcemap.Resolved, Reason: sourcemap.ReasonResolved, Source: &moved}, nil
 	}
 	return w
@@ -155,14 +160,22 @@ func (w *world) fresh(t *testing.T) error {
 					return err
 				}
 			}
-			return cl.Get(ctx, key, obj, opts...)
+			err := cl.Get(ctx, key, obj, opts...)
+			if err == nil && w.afterGet != nil {
+				w.afterGet(obj)
+			}
+			return err
 		},
 	}).Build()
+	ctx := w.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var src freshness.SourceResolver
 	if w.resolve != nil {
 		src = resolverFunc(w.resolve)
 	}
-	return freshness.Checker{Reader: c, OpenRepository: w.open, Source: src}.Fresh(context.Background(), w.rr)
+	return freshness.Checker{Reader: c, OpenRepository: w.open, Source: src}.Fresh(ctx, w.rr)
 }
 
 func isNil(o client.Object) bool {
@@ -560,5 +573,62 @@ func TestNoResolverFailsClosed(t *testing.T) {
 	w.resolve = nil
 	if err := w.fresh(t); err == nil {
 		t.Fatal("want an error without a resolver")
+	}
+}
+
+func wantRetry(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("want an error: the check must not pass")
+	}
+	if _, ok := errors.AsType[*freshness.StaleError](err); ok {
+		t.Fatalf("want a retry, not a stale verdict: %v", err)
+	}
+}
+
+// The target changed while the mapping ran: the mapping and the earlier checks describe different objects.
+func TestTargetChangedDuringTheMappingIsRetried(t *testing.T) {
+	w := newWorld(t)
+	mapped := false
+	inner := w.resolve
+	w.resolve = func(ctx context.Context, in sourcemap.Input) (sourcemap.Result, error) {
+		mapped = true
+		return inner(ctx, in)
+	}
+	w.afterGet = func(obj client.Object) {
+		if _, ok := obj.(*unstructured.Unstructured); ok && mapped {
+			obj.SetResourceVersion("424242")
+		}
+	}
+	wantRetry(t, w.fresh(t))
+}
+
+// The mapping and the file read must see one commit.
+func TestBranchMovedDuringTheMappingIsRetried(t *testing.T) {
+	w := newWorld(t)
+	w.resolve = func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
+		moved := *w.rr.Status.Source
+		moved.BaseCommit = "fedcba9876543210fedcba9876543210fedcba98"
+		return sourcemap.Result{Outcome: sourcemap.Resolved, Source: &moved}, nil
+	}
+	wantRetry(t, w.fresh(t))
+}
+
+// The whole mapping runs under the caller's deadline, not a fixed shorter one.
+func TestMappingUsesTheCallersDeadline(t *testing.T) {
+	w := newWorld(t)
+	parent, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	w.ctx = parent
+	want, _ := parent.Deadline()
+	inner := w.resolve
+	w.resolve = func(ctx context.Context, in sourcemap.Input) (sourcemap.Result, error) {
+		if got, ok := ctx.Deadline(); !ok || !got.Equal(want) {
+			t.Errorf("the mapping deadline is %v, want the caller's %v", got, want)
+		}
+		return inner(ctx, in)
+	}
+	if err := w.fresh(t); err != nil {
+		t.Fatal(err)
 	}
 }

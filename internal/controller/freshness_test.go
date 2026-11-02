@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
@@ -83,7 +84,12 @@ spec:
 	}
 	reconciler := func() *RemediationRequestReconciler {
 		return &RemediationRequestReconciler{
-			Client: k8sClient, Scheme: k8sClient.Scheme(), Source: &stubResolver{result: resolved()},
+			Client: k8sClient, Scheme: k8sClient.Scheme(), Source: sourceFunc(func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
+				// Like the real resolver, report the head of the branch as it is now.
+				res := resolved()
+				res.Source.BaseCommit, _ = git.BranchHead(ctx, mainBranch)
+				return res, nil
+			}),
 			OpenRepository: func(_ context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
 				g, ok := byURL[repo.URL]
 				if !ok {
@@ -464,4 +470,11 @@ func (f readerFunc) Get(ctx context.Context, key client.ObjectKey, obj client.Ob
 
 func (readerFunc) List(context.Context, client.ObjectList, ...client.ListOption) error {
 	return errors.New("not used")
+}
+
+// sourceFunc adapts a function to SourceResolver.
+type sourceFunc func(ctx context.Context, in sourcemap.Input) (sourcemap.Result, error)
+
+func (f sourceFunc) Resolve(ctx context.Context, in sourcemap.Input) (sourcemap.Result, error) {
+	return f(ctx, in)
 }

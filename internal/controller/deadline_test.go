@@ -19,14 +19,17 @@ package controller
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -36,6 +39,7 @@ import (
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
+	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
 )
 
@@ -53,7 +57,8 @@ func (b *blockingResolver) Resolve(ctx context.Context, _ sourcemap.Input) (sour
 	close(b.started)
 	<-ctx.Done()
 	b.ended <- ctx.Err()
-	return sourcemap.Result{}, ctx.Err()
+	// Like the real resolver, return a sanitised error that has lost the context error.
+	return sourcemap.Result{}, &sourcemap.TransientError{Op: "map the target"}
 }
 
 func deadlineScheme(t *testing.T) *runtime.Scheme {
@@ -173,7 +178,7 @@ func TestCleanupDeadlineIsRetryable(t *testing.T) {
 			close(started)
 			<-ctx.Done()
 			ended <- ctx.Err()
-			return nil, ctx.Err()
+			return nil, errors.New("sanitised")
 		}}
 
 	var err error
@@ -197,7 +202,7 @@ func TestCleanupCallerCancellationIsDistinct(t *testing.T) {
 		OpenRepository: func(ctx context.Context, _ remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
 			close(started)
 			<-ctx.Done()
-			return nil, ctx.Err()
+			return nil, errors.New("sanitised")
 		}}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { <-started; cancel() }()
@@ -206,5 +211,110 @@ func TestCleanupCallerCancellationIsDistinct(t *testing.T) {
 	within(t, "EnsureFresh", func() { err = r.EnsureFresh(ctx, rr) })
 	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrTimeout) {
 		t.Fatalf("want context.Canceled and not ErrTimeout, got %v", err)
+	}
+}
+
+// plannedWorld is a PolicyChecked request whose plan is fresh, so Fresh reaches the source resolver.
+func plannedWorld(t *testing.T) (client.Client, *remediationv1alpha1.RemediationRequest) {
+	t.Helper()
+	c, rr := deadlineWorld(t)
+	ctx := context.Background()
+	pol := &remediationv1alpha1.RemediationPolicy{}
+	settings := &remediationv1alpha1.RemediationSettings{}
+	if err := c.Get(ctx, client.ObjectKey{Name: "mem"}, pol); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKey{Name: settingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings.Spec.Repositories[0].TargetBranch = mainBranch
+	if err := c.Update(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	src := &remediationv1alpha1.ResolvedSource{RepositoryRef: fx.RepositoryName, TargetBranch: mainBranch,
+		Path: sourcePath, BaseCommit: baseCommit}
+	digest, err := freshness.ComputeDigest(rr, src, pol, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr.Status = remediationv1alpha1.RemediationRequestStatus{Phase: remediationv1alpha1.PhasePolicyChecked,
+		Source: src, PlanDigest: digest, PolicyUID: remediationv1alpha1.UID(pol.UID),
+		PolicyRevision: freshness.RevisionOf(pol), PlanRepository: freshness.RepositoryOf(settings.Spec.Repositories[0])}
+	if err := c.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	return c, rr
+}
+
+// The re-check honours the delay the source mapping's host asked for, as it does for the Git provider.
+func TestRecheckHonoursTheResolverRetryAfter(t *testing.T) {
+	c, rr := plannedWorld(t)
+	r := &RemediationRequestReconciler{Client: c, Scheme: c.Scheme(),
+		Source: &stubResolver{err: &sourcemap.TransientError{Op: "read head", RetryAfter: 7 * time.Second}},
+		OpenRepository: func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return nil, errors.New("not reached")
+		}}
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
+	if err != nil || res.RequeueAfter != 7*time.Second {
+		t.Fatalf("want a requeue after 7s, got %v, %v", res, err)
+	}
+}
+
+// A stale verdict that arrives after the deadline is not acted on: the request is not superseded.
+func TestStaleVerdictAfterTheDeadlineDoesNotSupersede(t *testing.T) {
+	c, rr := staleWorld(t)
+	r := &RemediationRequestReconciler{Client: c, Scheme: c.Scheme(), Source: newBlockingResolver(),
+		CleanupTimeout: 50 * time.Millisecond,
+		APIReader: readerFunc(func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+			if _, ok := obj.(*remediationv1alpha1.RemediationPolicy); ok {
+				<-ctx.Done()
+				return apierrors.NewNotFound(schema.GroupResource{Resource: "remediationpolicies"}, key.Name)
+			}
+			return c.Get(ctx, key, obj)
+		}),
+		OpenRepository: func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return nil, errors.New("not reached")
+		}}
+	var err error
+	within(t, "EnsureFresh", func() { err = r.EnsureFresh(context.Background(), rr) })
+	if !errors.Is(err, ErrTimeout) || errors.Is(err, ErrSuperseded) {
+		t.Fatalf("want ErrTimeout, got %v", err)
+	}
+	if rr.Status.Phase != remediationv1alpha1.PhasePolicyChecked {
+		t.Fatalf("phase %q", rr.Status.Phase)
+	}
+}
+
+// A cleanup that ended without error, or with errRepositoryGone, but after its deadline, writes no final phase.
+func TestCleanupResultAfterTheDeadlineIsNotFinal(t *testing.T) {
+	for name, gone := range map[string]bool{"nil": false, "repository gone": true} {
+		t.Run(name, func(t *testing.T) {
+			c, rr := staleWorld(t)
+			if gone {
+				rr.Status.PlanRepository = nil
+			}
+			var settingsReads atomic.Int32
+			r := &RemediationRequestReconciler{Client: c, Scheme: c.Scheme(), Source: newBlockingResolver(),
+				CleanupTimeout: 50 * time.Millisecond,
+				APIReader: readerFunc(func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+					// The freshness check reads the settings first; the cleanup reads them second and stalls.
+					if _, ok := obj.(*remediationv1alpha1.RemediationSettings); ok && settingsReads.Add(1) >= 2 {
+						<-ctx.Done()
+					}
+					return c.Get(context.Background(), key, obj)
+				}),
+				OpenRepository: func(ctx context.Context, _ remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+					<-ctx.Done()
+					return fakegit.NewGit(mainBranch, nil), nil
+				}}
+			var err error
+			within(t, "EnsureFresh", func() { err = r.EnsureFresh(context.Background(), rr) })
+			if !errors.Is(err, ErrTimeout) || errors.Is(err, ErrSuperseded) {
+				t.Fatalf("want ErrTimeout, got %v", err)
+			}
+			if rr.Status.Phase != remediationv1alpha1.PhasePolicyChecked {
+				t.Fatalf("phase %q", rr.Status.Phase)
+			}
+		})
 	}
 }

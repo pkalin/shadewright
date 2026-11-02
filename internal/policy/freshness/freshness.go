@@ -280,13 +280,41 @@ func (c Checker) Fresh(ctx context.Context, rr *v1alpha1.RemediationRequest) err
 		return stale(ReasonPlanChanged, "The plan, its source or the repository settings changed")
 	}
 
-	if err := c.checkTarget(ctx, rr, pol); err != nil {
+	live, err := c.checkTarget(ctx, rr, pol)
+	if err != nil {
 		return err
 	}
-	if err := c.checkSource(ctx, rr, pol, settings); err != nil {
+	commit, err := c.checkSource(ctx, rr, pol, settings)
+	if err != nil {
 		return err
 	}
-	return c.checkFile(ctx, rr, repo)
+	// The mapping compared the live object with Git. If the object changed while it ran, the mapping and the
+	// checks above describe different objects: not fresh, not stale; the caller retries.
+	again, err := c.readTarget(ctx, rr.Spec.TargetRef)
+	if err != nil {
+		return err
+	}
+	if again.GetUID() != live.GetUID() || again.GetResourceVersion() != live.GetResourceVersion() {
+		return errors.New("the target changed while its source was mapped, checking again")
+	}
+	return c.checkFile(ctx, rr, repo, commit)
+}
+
+// readTarget reads the live target straight from the API server.
+func (c Checker) readTarget(ctx context.Context, ref v1alpha1.ObjectRef) (*unstructured.Unstructured, error) {
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return nil, fmt.Errorf("invalid target apiVersion: %w", err)
+	}
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(gv.WithKind(ref.Kind))
+	switch err := c.Reader.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, live); {
+	case apierrors.IsNotFound(err) || meta.IsNoMatchError(err):
+		return nil, stale(ReasonTargetChanged, "%s %s/%s no longer exists", ref.Kind, ref.Namespace, ref.Name)
+	case err != nil:
+		return nil, fmt.Errorf("get %s %s/%s: %w", ref.Kind, ref.Namespace, ref.Name, err)
+	}
+	return live, nil
 }
 
 // checkSource runs the source mapping again (ADR-0012) and compares it with status.source. The repository,
@@ -294,12 +322,11 @@ func (c Checker) Fresh(ctx context.Context, rr *v1alpha1.RemediationRequest) err
 // to the target branch and checkFile decides whether such a merge touched the file. A failed mapping is not
 // stale (the caller retries); a mapping that now denies or needs a person never passes as fresh.
 func (c Checker) checkSource(ctx context.Context, rr *v1alpha1.RemediationRequest, pol *v1alpha1.RemediationPolicy,
-	settings *v1alpha1.RemediationSettings) error {
+	settings *v1alpha1.RemediationSettings) (string, error) {
 	if c.Source == nil {
-		return errors.New("no source resolver is available")
+		return "", errors.New("no source resolver is available")
 	}
-	ctx, cancel := context.WithTimeout(ctx, readTimeout)
-	defer cancel()
+	// The whole mapping runs under the caller's deadline (the controller's freshness deadline), not a fixed one.
 	res, err := c.Source.Resolve(ctx, sourcemap.Input{
 		Target:       rr.Spec.TargetRef,
 		Action:       rr.Spec.Action,
@@ -308,62 +335,57 @@ func (c Checker) checkSource(ctx context.Context, rr *v1alpha1.RemediationReques
 	})
 	if err != nil {
 		// The resolver sanitises its errors; the caller sees "not fresh" and retries.
-		return fmt.Errorf("resolve the source again: %w", err)
+		return "", fmt.Errorf("resolve the source again: %w", err)
 	}
 	if res.Outcome != sourcemap.Resolved {
 		// Denied, NeedsIntervention or anything unknown. Only the reason is reported: the message may hold
 		// paths or text from Git.
-		return stale(ReasonSourceChanged, "Mapping the target to its source again no longer resolves it (%s)", res.Reason)
+		return "", stale(ReasonSourceChanged, "Mapping the target to its source again no longer resolves it (%s)", res.Reason)
 	}
 	got, want := res.Source, rr.Status.Source
 	if got == nil || got.RepositoryRef != want.RepositoryRef || got.TargetBranch != want.TargetBranch ||
 		got.Path != want.Path {
-		return stale(ReasonSourceChanged, "The target is no longer declared in the repository, branch and file of the plan")
+		return "", stale(ReasonSourceChanged, "The target is no longer declared in the repository, branch and file of the plan")
 	}
-	return nil
+	return got.BaseCommit, nil
 }
 
-// checkTarget checks that the live target is still the object the plan is about.
-func (c Checker) checkTarget(ctx context.Context, rr *v1alpha1.RemediationRequest, pol *v1alpha1.RemediationPolicy) error {
+// checkTarget checks that the live target is still the object the plan is about. It returns the object read,
+// so the caller can tell whether it changed later.
+func (c Checker) checkTarget(ctx context.Context, rr *v1alpha1.RemediationRequest, pol *v1alpha1.RemediationPolicy) (
+	*unstructured.Unstructured, error) {
 	ref := rr.Spec.TargetRef
-	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	live, err := c.readTarget(ctx, ref)
 	if err != nil {
-		return fmt.Errorf("invalid target apiVersion: %w", err)
-	}
-	live := &unstructured.Unstructured{}
-	live.SetGroupVersionKind(gv.WithKind(ref.Kind))
-	switch err := c.Reader.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, live); {
-	case apierrors.IsNotFound(err) || meta.IsNoMatchError(err):
-		return stale(ReasonTargetChanged, "%s %s/%s no longer exists", ref.Kind, ref.Namespace, ref.Name)
-	case err != nil:
-		return fmt.Errorf("get %s %s/%s: %w", ref.Kind, ref.Namespace, ref.Name, err)
+		return nil, err
 	}
 	if string(live.GetUID()) != string(ref.UID) {
-		return stale(ReasonTargetChanged, "%s %s/%s has another UID than the plan names", ref.Kind, ref.Namespace, ref.Name)
+		return nil, stale(ReasonTargetChanged, "%s %s/%s has another UID than the plan names", ref.Kind, ref.Namespace, ref.Name)
 	}
 	// The policy decided on the labels and on the previous value measured from the live field. Either may
 	// have changed since, while the UID and the file in Git stayed the same.
 	if reason, msg := policy.CheckObjectSelector(pol, live.GetLabels()); reason != "" {
-		return stale(ReasonTargetChanged, "%s", msg)
+		return nil, stale(ReasonTargetChanged, "%s", msg)
 	}
 	field, err := sourcemap.FieldFor(rr.Spec.Action, ref)
 	if err != nil {
-		return fmt.Errorf("locate the field of the action: %w", err)
+		return nil, fmt.Errorf("locate the field of the action: %w", err)
 	}
 	previous, ok := sourcemap.PreviousValue(rr.Spec.Action)
 	if !ok {
-		return errors.New("the action has no previous value")
+		return nil, errors.New("the action has no previous value")
 	}
 	if got, found := field.Get(live.Object); !found || !field.Equals(got, previous) {
-		return stale(ReasonTargetChanged, "%s %s/%s no longer holds the previous value of %s on the live object",
+		return nil, stale(ReasonTargetChanged, "%s %s/%s no longer holds the previous value of %s on the live object",
 			ref.Kind, ref.Namespace, ref.Name, field)
 	}
-	return nil
+	return live, nil
 }
 
 // checkFile reads the target file at the head of the target branch, not of the pull request branch, so a merge
 // that changed the value is seen, and checks that it still holds the previous value.
-func (c Checker) checkFile(ctx context.Context, rr *v1alpha1.RemediationRequest, repo v1alpha1.GitRepository) error {
+func (c Checker) checkFile(ctx context.Context, rr *v1alpha1.RemediationRequest, repo v1alpha1.GitRepository,
+	mapped string) error {
 	src := rr.Status.Source
 	field, err := sourcemap.FieldFor(rr.Spec.Action, rr.Spec.TargetRef)
 	if err != nil {
@@ -385,6 +407,11 @@ func (c Checker) checkFile(ctx context.Context, rr *v1alpha1.RemediationRequest,
 	head, err := git.BranchHead(ctx, string(src.TargetBranch))
 	if err != nil {
 		return provider("read the head of the target branch", err)
+	}
+	// The mapping and this read must see one commit. If the branch moved since the mapping, the mapped source
+	// may describe another tree than the file read here: not fresh, not stale; the caller retries.
+	if head != mapped {
+		return errors.New("the target branch moved while its source was mapped, checking again")
 	}
 	file, err := git.ReadFile(ctx, head, string(src.Path))
 	switch {

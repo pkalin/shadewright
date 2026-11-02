@@ -44,8 +44,10 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+manifests: controller-gen ## Generate WebhookConfiguration, the executor and analyzer roles, and CustomResourceDefinition objects.
+	"$(CONTROLLER_GEN)" crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	"$(CONTROLLER_GEN)" rbac:roleName=executor-role paths="./internal/controller/..." output:rbac:artifacts:config=config/rbac/executor
+	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-role paths="./internal/analyzer/..." output:rbac:artifacts:config=config/rbac/analyzer
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -109,12 +111,17 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
+build: manifests generate fmt vet ## Build the executor (bin/manager) and analyzer binaries.
 	go build -o bin/manager cmd/main.go
+	go build -o bin/analyzer ./cmd/analyzer
 
 .PHONY: run
-run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go
+run: manifests generate fmt vet ## Run the executor from your host (operator namespace from NAMESPACE).
+	go run ./cmd/main.go --namespace=$(or $(NAMESPACE),shadewright-system)
+
+.PHONY: run-analyzer
+run-analyzer: manifests generate fmt vet ## Run the analyzer from your host.
+	go run ./cmd/analyzer
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.

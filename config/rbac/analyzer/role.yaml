@@ -1,0 +1,75 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: analyzer-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - replicasets
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - incidents
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - incidents/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - remediationsettings
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: analyzer-role
+  namespace: system
+rules:
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - remediationrequests
+  verbs:
+  - create
+  - get
+  - list
+  - watch

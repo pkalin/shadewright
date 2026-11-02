@@ -2,10 +2,11 @@ apiVersion: v1
 kind: Service
 metadata:
   labels:
-    control-plane: controller-manager
+    control-plane: executor
+    app.kubernetes.io/component: executor
     app.kubernetes.io/name: shadewright
     app.kubernetes.io/managed-by: kustomize
-  name: controller-manager-metrics-service
+  name: executor-metrics-service
   namespace: system
 spec:
   ports:
@@ -14,5 +15,25 @@ spec:
     protocol: TCP
     targetPort: 8443
   selector:
-    control-plane: controller-manager
+    control-plane: executor
+    app.kubernetes.io/name: shadewright
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    control-plane: analyzer
+    app.kubernetes.io/component: analyzer
+    app.kubernetes.io/name: shadewright
+    app.kubernetes.io/managed-by: kustomize
+  name: analyzer-metrics-service
+  namespace: system
+spec:
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  selector:
+    control-plane: analyzer
     app.kubernetes.io/name: shadewright

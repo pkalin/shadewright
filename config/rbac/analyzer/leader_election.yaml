@@ -1,0 +1,59 @@
+# Leader election for the analyzer only. The Lease is created here, not at runtime: the analyzer may get,
+# update and patch only its own Lease and may create none, so it cannot squat the other identity's Lease
+# (for example with a huge leaseDurationSeconds). The name must equal cmdutil.AnalyzerLease; resourceNames
+# below are not rewritten by the kustomize name prefix, so they carry the full name.
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  labels:
+    app.kubernetes.io/name: shadewright
+    app.kubernetes.io/component: analyzer
+    app.kubernetes.io/managed-by: kustomize
+  name: analyzer-leader-election
+  namespace: system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/name: shadewright
+    app.kubernetes.io/component: analyzer
+    app.kubernetes.io/managed-by: kustomize
+  name: analyzer-leader-election-role
+  namespace: system
+rules:
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  resourceNames:
+  - shadewright-analyzer-leader-election
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: shadewright
+    app.kubernetes.io/component: analyzer
+    app.kubernetes.io/managed-by: kustomize
+  name: analyzer-leader-election-rolebinding
+  namespace: system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: analyzer-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: analyzer
+  namespace: system

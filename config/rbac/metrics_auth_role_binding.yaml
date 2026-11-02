@@ -8,5 +8,8 @@ roleRef:
   name: metrics-auth-role
 subjects:
 - kind: ServiceAccount
-  name: controller-manager
+  name: executor
+  namespace: system
+- kind: ServiceAccount
+  name: analyzer
   namespace: system

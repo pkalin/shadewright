@@ -193,6 +193,12 @@ func (r *Resolver) delivery(ctx context.Context, in Input, id identity, live *un
 func (r *Resolver) declaration(ctx context.Context, fld Field, gitOps v1alpha1.PolicyGitOps, id identity,
 	live *unstructured.Unstructured, d delivery) (Result, error) {
 	git, err := r.OpenRepository(ctx, d.repo)
+	if providers.IsInvalidConfig(err) {
+		// Permanent: retrying cannot help, an administrator has to fix the settings. The text of err is
+		// dropped, it is not needed to say what to look at.
+		return needsIntervention(ReasonRepositoryUnusable,
+			"the settings of repository %s cannot be used to open it", d.repo.Name), nil
+	}
 	if err != nil {
 		return Result{}, transient("open repository "+string(d.repo.Name), err)
 	}

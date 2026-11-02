@@ -33,6 +33,9 @@ var (
 	ErrRetryable = errors.New("retryable")
 	// ErrTooLarge means a file is larger than MaxFileBytes; its content was not downloaded.
 	ErrTooLarge = errors.New("too large")
+	// ErrInvalidConfig means the settings an adapter is built from cannot be used (wrong provider, missing
+	// signer, malformed key ID or URL). It is permanent: the same settings fail the same way on every retry.
+	ErrInvalidConfig = errors.New("invalid configuration")
 )
 
 // RetryableError is a transient failure with an optional delay requested by the remote system, for example
@@ -68,6 +71,9 @@ func IsTooLarge(err error) bool { return errors.Is(err, ErrTooLarge) }
 
 // IsRetryable reports whether err is a transient failure.
 func IsRetryable(err error) bool { return errors.Is(err, ErrRetryable) }
+
+// IsInvalidConfig reports whether err means the settings an adapter is built from cannot be used.
+func IsInvalidConfig(err error) bool { return errors.Is(err, ErrInvalidConfig) }
 
 // RetryAfter returns the delay requested by the remote system, if err carries one.
 func RetryAfter(err error) (time.Duration, bool) {

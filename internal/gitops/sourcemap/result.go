@@ -102,6 +102,9 @@ const (
 	// ReasonRepositoryNotInPolicy means the matching repository is not the policy's gitOps.repositoryRef
 	// (Denied).
 	ReasonRepositoryNotInPolicy Reason = "RepositoryNotInPolicy"
+	// ReasonRepositoryUnusable means the matching repository's settings cannot be used to open a Git provider:
+	// a provider other than GitHub, no GitHub block, no signer or a malformed key ID (NeedsIntervention).
+	ReasonRepositoryUnusable Reason = "RepositoryUnusable"
 	// ReasonBranchMismatch means the branch Flux tracks is not the repository's targetBranch (Denied).
 	ReasonBranchMismatch Reason = "BranchMismatch"
 	// ReasonBranchNotFound means the target branch does not exist in the repository (NeedsIntervention).

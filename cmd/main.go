@@ -20,7 +20,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"os"
 
@@ -32,6 +31,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
@@ -39,7 +39,7 @@ import (
 	"github.com/pkalin/shadewright/internal/cmdutil"
 	"github.com/pkalin/shadewright/internal/controller"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/providers/registry"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -47,12 +47,6 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
-
-// openRepository opens a repository named in RemediationSettings. The GitHub adapter exists but is not wired
-// here yet, so it fails; the source mapping reports that as a retryable error, without any provider text.
-func openRepository(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
-	return nil, errors.New("no Git provider adapter is available")
-}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -106,11 +100,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	// One registry for the source mapping and the freshness check, so the installation token cache is shared.
+	// It builds a GitHub provider per settings entry on first use, signs through Key Vault with workload
+	// identity and reaches neither Azure nor GitHub at startup. Entries that left the settings are dropped.
+	repos := &registry.Registry{Current: func(ctx context.Context) ([]remediationv1alpha1.GitRepository, error) {
+		settings := &remediationv1alpha1.RemediationSettings{}
+		if err := mgr.GetAPIReader().Get(ctx, client.ObjectKey{Name: controller.SettingsName}, settings); err != nil {
+			return nil, err
+		}
+		return settings.Spec.Repositories, nil
+	}}
+
 	if err := (&controller.RemediationRequestReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		APIReader: mgr.GetAPIReader(),
-		Source:    &sourcemap.Resolver{Client: mgr.GetAPIReader(), OpenRepository: openRepository},
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		APIReader:      mgr.GetAPIReader(),
+		Source:         &sourcemap.Resolver{Client: mgr.GetAPIReader(), OpenRepository: repos.Open},
+		OpenRepository: repos.Open,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "remediationrequest")
 		os.Exit(1)

@@ -1,6 +1,6 @@
 # Design
 
-Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the GitHub and Key Vault adapters (not yet called by the executor) and the RBAC of sections 2.2 and 10. Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
+Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the GitHub and Key Vault adapters (the executor uses them to read Git; it does not write to Git yet) and the RBAC of sections 2.2 and 10. Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
 
 ## 1. Goals
 
@@ -395,9 +395,10 @@ The policy check, the first step, loads the policy the request names, the `defau
 | The live object does not set the field the action changes | `NeedsIntervention` (`FieldNotFound`) | `Unknown` |
 | Source mapping denies (repository, branch, path or inventory) or `policy.Decide` denies | `Denied`, reason of the check | `False` |
 | Source mapping needs a human (Helm, patches, missing target, unknown Flux shape), or the target got another UID while the mapping ran (`TargetChanged`) | `NeedsIntervention`, reason of the mapping | `Unknown` |
+| The matching repository's settings cannot open a Git provider (not GitHub, no signer, malformed key ID) | `NeedsIntervention`, `RepositoryUnusable` | `Unknown` |
 | All checks pass | `PolicyChecked`, `WithinApprovedBounds` | `True` |
 
-Only a failure worth retrying (API server or Git host) is retried, with backoff, or after the delay the host asked for (`Retry-After`); every permanent refusal is a final phase. While a retry is pending the request keeps no phase (or `Pending`) and no `PolicyAllowed` condition. The retry limit is planned, and so is the executor's connection to the GitHub adapter: until it is wired in `cmd/main.go`, every request that passes the cluster-side checks fails to read Git and is retried with backoff. The policy and settings are read from the API server on every check, never from the cache, so a deleted policy or a tightened setting takes effect at once. Messages and conditions never carry Git URLs or provider text.
+Only a failure worth retrying (API server or Git host) is retried, with backoff, or after the delay the host asked for (`Retry-After`); every permanent refusal is a final phase, settings that can never open a Git provider included (the same refusal ends a later freshness check in `NeedsIntervention`, `PlanFresh` reason `RepositoryUnusable`, without closing anything). While a retry is pending the request keeps no phase (or `Pending`) and no `PolicyAllowed` condition. The retry limit is planned. The policy and settings are read from the API server on every check, never from the cache, so a deleted policy or a tightened setting takes effect at once. Messages and conditions never carry Git URLs or provider text.
 
 Every external call of a step runs under the step's own deadline: the policy check (the uncached reads and the source resolver together) and, separately, the freshness check and the cleanup of a stale plan (open the repository, find and close the change request, as one sequence). A step that reaches its deadline returns a retryable error and keeps the request in its phase; it never ends in a final phase. The caller's own cancellation stays a different error, so shutdown is not reported as a timeout.
 
@@ -464,17 +465,17 @@ Fully automatic merges happen only where the repository owner deliberately allow
 7. Bind the PR to the request UID and plan digest. Any new push to the branch invalidates the plan.
 8. After merge, follow delivery and the success criteria instead of stopping at "merged".
 
-Opening the change on GitHub, steps 2 to 7 above. Steps marked *(planned)* are designed but not built yet. Signing, the token exchange, reading the head, creating the branch, committing and opening the pull request are built as adapters (`internal/providers/signer/azurekv`, `internal/providers/github/auth`, `internal/providers/github`) with their own tests, but the executor does not call them yet. Auto-merge is not built in any adapter (`EnableAutoMerge` returns an error and `Capabilities()` reports no auto-merge, #20). *(planned)* means not called by the running operator. The GitHub App key never leaves Key Vault ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)); every write names the state it expects, so a restart or a race finds the existing work instead of repeating it.
+Opening the change on GitHub, steps 2 to 7 above. Steps marked *(planned)* are designed but not built yet. Signing, the token exchange and reading the head are called by the executor, for the source mapping and the freshness check. Creating the branch, committing and opening the pull request are built in the adapter (`internal/providers/github`) with its own tests, but the executor does not call them yet. Auto-merge is not built in any adapter (`EnableAutoMerge` returns an error and `Capabilities()` reports no auto-merge, #20). *(planned)* means not called by the running operator. The GitHub App key never leaves Key Vault ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)); every write names the state it expects, so a restart or a race finds the existing work instead of repeating it.
 
 ```mermaid
 sequenceDiagram
     participant E as Executor
     participant V as Key Vault
     participant G as GitHub
-    E->>V: Sign the App JWT, RS256 (planned)
+    E->>V: Sign the App JWT, RS256
     V-->>E: Signature
-    E->>G: Exchange the JWT for a one-hour installation token, scoped to the one repository (planned)
-    E->>G: Read the head SHA of targetBranch (planned)
+    E->>G: Exchange the JWT for a one-hour installation token, scoped to the one repository
+    E->>G: Read the head SHA of targetBranch
     E->>G: Create branch shadewright/#lt;request-uid#gt; at that SHA (planned)
     Note over E,G: An existing branch at that SHA is success, at another SHA a conflict
     E->>G: Commit the file, expecting that head (planned)
@@ -494,7 +495,7 @@ sequenceDiagram
     end
 ```
 
-The GitHub steps are done by the `GitProvider` adapter in `internal/providers/github`; the executor phase that drives them (`PRCreated`) is not wired yet. The adapter is bound to one repository and its `targetBranch`, and refuses anything else before sending a request:
+The GitHub steps are done by the `GitProvider` adapter in `internal/providers/github`; the executor already uses it to read Git (head of the branch and files) for the source mapping and the freshness check, signing through Key Vault with workload identity; the phase that writes (`PRCreated`: branch, commit, pull request, auto-merge) is not wired yet. One provider per repository entry is kept across reconciles, so the token cache survives; it is built on first use from the entry (URL, installation ID, App client ID, key ID, target branch), rebuilt when the entry changes and dropped when it leaves the settings (`internal/providers/registry`). The adapter is bound to one repository and its `targetBranch`, and refuses anything else before sending a request:
 
 - It writes only to branches named `shadewright/<name>`. A new branch must start at the head of `targetBranch` or an ancestor of it, so a commit of a fork or another branch cannot become the base.
 - The commit is built with the Git data API (blob, tree, commit, keeping the file mode) on top of the expected head, and the branch moves with GraphQL `updateRefs`: an atomic compare-and-swap on the expected head, without force. A head that moved in any direction, a rewind to an ancestor included, is a conflict; the update never forces.
@@ -570,11 +571,11 @@ flowchart TB
     pol -- read --> ex
     tgt -- read --> ex
     ex -- update --> rrs
-    ex -. sign .-> kv
+    ex -- sign --> kv
     sec -- no access --x an
     sec -- no access --x ex
     classDef planned stroke-dasharray: 5 5
-    class fm,kv planned
+    class fm planned
 ```
 
 Each identity also has its own leader election Lease, which only it can renew.

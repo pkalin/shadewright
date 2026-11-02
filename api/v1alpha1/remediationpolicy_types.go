@@ -138,7 +138,9 @@ const (
 	ApprovalOptional ApprovalMode = "Optional"
 )
 
-// RemediationPolicySpec is owned by the cluster admin (ADR-0011).
+// RemediationPolicySpec is what a policy allows: which namespaces may use it, which targets it covers, which
+// actions within which bounds, where in Git changes may go, and whether a human must approve. It is owned by
+// the cluster admin (ADR-0011).
 type RemediationPolicySpec struct {
 	// requestNamespaces are the namespaces whose RemediationRequests may use this policy. A request from any
 	// other namespace is Denied, so being able to create requests somewhere does not grant this policy.
@@ -200,7 +202,7 @@ type RemediationPolicyStatus struct {
 type RemediationPolicy struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
+	// metadata is the standard object metadata.
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 

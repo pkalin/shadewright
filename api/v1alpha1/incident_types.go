@@ -64,11 +64,16 @@ type IncidentPhase string
 
 // Phases of an Incident.
 const (
-	IncidentOpen      IncidentPhase = "Open"
+	// IncidentOpen means symptoms are being collected and no analysis is running.
+	IncidentOpen IncidentPhase = "Open"
+	// IncidentAnalyzing means the analyzer is working on the incident.
 	IncidentAnalyzing IncidentPhase = "Analyzing"
-	IncidentProposed  IncidentPhase = "Proposed"
+	// IncidentProposed means the analysis produced a RemediationRequest.
+	IncidentProposed IncidentPhase = "Proposed"
+	// IncidentEscalated means the analysis made no proposal and handed the incident to a human.
 	IncidentEscalated IncidentPhase = "Escalated"
-	IncidentResolved  IncidentPhase = "Resolved"
+	// IncidentResolved means the symptoms stopped or a remediation succeeded.
+	IncidentResolved IncidentPhase = "Resolved"
 )
 
 // RecordID identifies an analysis record in the analysis store.
@@ -132,7 +137,7 @@ type IncidentStatus struct {
 type Incident struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
+	// metadata is the standard object metadata.
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 

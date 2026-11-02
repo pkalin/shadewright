@@ -571,7 +571,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `policyUID` | [UID](#uid) | No | policyUID is the UID of the policy the decision used. It is part of the plan digest.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists. |
 | `deadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | deadline is when the current step gives up. |
-| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered and Verified.<br>List type: map<br>List key: `type` |
+| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified and PlanFresh.<br>List type: map<br>List key: `type` |
 
 ### RemediationSettingsSpec
 

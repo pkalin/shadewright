@@ -13,6 +13,21 @@ These are the reason the project exists. A change that weakens one needs an ADR 
 5. **Reconciliation is idempotent and never assumes exactly once.** Branch names and PR markers derive from the request UID and plan digest, so a restart finds the existing PR instead of opening another.
 6. **Separate identities.** Analyzer: read-only cluster access plus model inference. Executor: CR status plus the Git App. Never `cluster-admin`, never one token for both.
 
+## Commits
+
+Every commit on `main` follows [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/):
+`type(scope)!: summary`. Pull requests are squash-merged with the pull request title as the commit message,
+so the **pull request title** is what counts; a required check (`Conventional PR title`) validates it.
+
+- Types: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`, `revert`.
+- Scope is optional; when used it is one of: `api`, `analyzer`, `policy`, `gitops`, `platforms`, `integrations`, `docs`, `ci`, `deps`.
+- Summary in English, imperative, starting lower case, no full stop: `feat(policy): refuse decreases by default`.
+- `!` after the type or scope, plus a `BREAKING CHANGE:` footer in the description, for incompatible changes
+  (API fields, CRD schema, flags, Helm values).
+- Releases are generated from these commits (release-please, epic #22): `feat` gives a minor version, `fix` and
+  `perf` a patch, `!` or a `BREAKING CHANGE:` footer a breaking release (a minor one while the version is
+  0.x). `revert` is listed too; `refactor`, `test`, `docs`, `build`, `ci` and `chore` stay out of the changelog.
+
 ## Working agreement
 
 - Every change goes through a branch and a pull request; `main` is protected by a ruleset (required checks,

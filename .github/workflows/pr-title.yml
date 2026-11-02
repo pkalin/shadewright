@@ -1,0 +1,48 @@
+name: PR title
+
+# Squash merges use the pull request title as the commit message on main, so the title must follow
+# Conventional Commits (see AGENTS.md, "Commits").
+# pull_request_target runs this file from the base branch, so a pull request cannot weaken its own check.
+# That is safe only because the job never checks out or runs pull request code and has read-only
+# permissions: keep it that way.
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  conventional-title:
+    name: Conventional PR title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            test
+            docs
+            build
+            ci
+            chore
+            revert
+          scopes: |
+            api
+            analyzer
+            policy
+            gitops
+            platforms
+            integrations
+            docs
+            ci
+            deps
+          requireScope: false
+          subjectPattern: ^[a-z].*[^.]$
+          subjectPatternError: |
+            The summary "{subject}" must start with a lower-case letter and must not end with a full stop.

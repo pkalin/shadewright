@@ -86,6 +86,8 @@ type world struct {
 	open freshness.RepositoryOpener
 	// resolve is the source mapping run again before the write; newWorld maps to the recorded source.
 	resolve func(ctx context.Context, in sourcemap.Input) (sourcemap.Result, error)
+	// extra are more objects in the cluster, such as Flux objects.
+	extra []client.Object
 }
 
 // resolverFunc adapts a function to freshness.SourceResolver.
@@ -146,7 +148,7 @@ func (w *world) fresh(t *testing.T) error {
 	if err := v1alpha1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
-	var objs []client.Object
+	objs := append([]client.Object(nil), w.extra...)
 	for _, o := range []client.Object{w.pol, w.settings, w.target} {
 		if o != nil && !isNil(o) {
 			objs = append(objs, o)
@@ -679,4 +681,112 @@ func TestPolicyChangedDuringTheScanIsRetried(t *testing.T) {
 		}
 	})
 	wantRetry(t, w.fresh(t))
+}
+
+// readHook wraps a provider and runs after after every ReadFile.
+type readHook struct {
+	providers.GitProvider
+	after func()
+}
+
+func (h readHook) ReadFile(ctx context.Context, ref, path string) (providers.File, error) {
+	f, err := h.GitProvider.ReadFile(ctx, ref, path)
+	h.after()
+	return f, err
+}
+
+func (w *world) hookRead(after func()) {
+	w.open = func(context.Context, v1alpha1.GitRepository) (providers.GitProvider, error) {
+		return readHook{GitProvider: w.git, after: after}, nil
+	}
+}
+
+// The target changed while the file was read (the Git reads are the slow part): not fresh, not stale.
+func TestTargetChangedDuringTheFileReadIsRetried(t *testing.T) {
+	read := false
+	w := newWorld(t)
+	w.hookRead(func() { read = true })
+	w.afterGet = func(obj client.Object) {
+		if _, ok := obj.(*unstructured.Unstructured); ok && read {
+			obj.SetResourceVersion("424242")
+		}
+	}
+	wantRetry(t, w.fresh(t))
+
+	read = false
+	w = newWorld(t)
+	w.hookRead(func() { read = true })
+	w.afterGet = func(obj client.Object) {
+		if _, ok := obj.(*unstructured.Unstructured); ok && read {
+			obj.SetLabels(map[string]string{tierLabel: "db"})
+			obj.SetResourceVersion("424242")
+		}
+	}
+	wantRetry(t, w.fresh(t))
+}
+
+// A Flux object the mapping saw changed while the file was read.
+func TestFluxObjectChangedDuringTheFileReadIsRetried(t *testing.T) {
+	gvk := sourcemap.KustomizationGVK
+	ks := &unstructured.Unstructured{}
+	ks.SetGroupVersionKind(gvk)
+	ks.SetNamespace("flux-system")
+	ks.SetName("apps")
+	ks.SetUID("99999999-9999-4999-8999-999999999999")
+	ks.SetResourceVersion("7")
+
+	read := false
+	w := newWorld(t)
+	w.extra = []client.Object{ks}
+	inner := w.resolve
+	w.resolve = func(ctx context.Context, in sourcemap.Input) (sourcemap.Result, error) {
+		res, err := inner(ctx, in)
+		res.Observed = []sourcemap.Observed{{GVK: gvk, Namespace: "flux-system", Name: "apps", UID: string(ks.GetUID()),
+			ResourceVersion: "7"}}
+		return res, err
+	}
+	w.hookRead(func() { read = true })
+	if err := w.fresh(t); err != nil {
+		t.Fatalf("want fresh while the Flux object is unchanged, got %v", err)
+	}
+	read = false
+	w.afterGet = func(obj client.Object) {
+		if u, ok := obj.(*unstructured.Unstructured); ok && read && u.GetKind() == gvk.Kind {
+			obj.SetResourceVersion("8")
+		}
+	}
+	wantRetry(t, w.fresh(t))
+}
+
+// The branch moved while the file was read: the file may not be the one at the head that was read first.
+func TestBranchMovedDuringTheFileReadIsRetried(t *testing.T) {
+	t.Run("the file is read", func(t *testing.T) {
+		w := newWorld(t)
+		w.hookRead(func() {
+			if _, err := w.git.Push("main", otherPath, []byte("a: 3\n")); err != nil {
+				t.Fatal(err)
+			}
+		})
+		wantRetry(t, w.fresh(t))
+	})
+	t.Run("a file that is not found is not reported as stale", func(t *testing.T) {
+		w := newWorld(t)
+		moved := false
+		w.hookRead(func() {
+			if !moved {
+				moved = true
+				if _, err := w.git.Push("main", otherPath, []byte("a: 3\n")); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+		w.rr.Status.Source.Path = "apps/missing.yaml"
+		w.rr.Status.PlanDigest = recompute(t, w)
+		w.resolve = func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
+			src := *w.rr.Status.Source
+			src.BaseCommit, _ = w.git.BranchHead(context.Background(), "main")
+			return sourcemap.Result{Outcome: sourcemap.Resolved, Source: &src}, nil
+		}
+		wantRetry(t, w.fresh(t))
+	})
 }

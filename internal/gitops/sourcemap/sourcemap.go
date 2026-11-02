@@ -96,6 +96,10 @@ func (r *Resolver) Resolve(ctx context.Context, in Input) (Result, error) {
 				errors.New("changed"))
 		}
 	}
+	for _, o := range d.seen {
+		res.Observed = append(res.Observed, Observed{GVK: o.gvk, Namespace: o.namespace, Name: o.name,
+			UID: o.uid, ResourceVersion: o.resourceVersion})
+	}
 	return res, nil
 }
 

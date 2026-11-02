@@ -18,6 +18,8 @@ package sourcemap
 import (
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"github.com/pkalin/shadewright/api/v1alpha1"
 )
 
@@ -143,6 +145,17 @@ type Result struct {
 	Message string
 	// Source is set only when Outcome is Resolved.
 	Source *v1alpha1.ResolvedSource
+	// Observed lists the Flux objects (Kustomization, GitRepository) the mapping read, as it read them. It is
+	// set only when Outcome is Resolved. A caller that does slow work after the mapping reads them again and
+	// compares UID and resource version.
+	Observed []Observed
+}
+
+// Observed is a Flux object as the mapping read it: its identity and version.
+type Observed struct {
+	GVK                  schema.GroupVersionKind
+	Namespace, Name      string
+	UID, ResourceVersion string
 }
 
 func needsIntervention(reason Reason, format string, args ...any) Result {

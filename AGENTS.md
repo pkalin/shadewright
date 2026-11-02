@@ -73,6 +73,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-docs.txt
 
 - `docs/design.md` is the system design; its section 15 lists decisions made and open questions. `docs/adr/` holds decisions (template and index there). A new page or ADR must also be added to `nav` in `zensical.toml`.
 - When a change implements or alters a design decision, update the design or add an ADR in the same PR.
+- Diagrams are hand-written SVG in `docs/assets/diagrams/`, in the style of `architecture.svg`: dark background `#0e0e16`, boxes `#1d1b2b`, violet `#7c24fc` and `#a879ff` for the main flow, teal for systems outside the cluster, a `<title>` and `<desc>`, and alt text in the page. Wrap the image in a link to itself so it opens full size. No ASCII art and no Mermaid; formulas stay as code blocks. Render with headless Chrome and look at the result before committing.
 
 ## Kubebuilder rules
 

@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 760" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Shadewright architecture</title>
+  <desc id="d">Events from the cluster become durable incidents. The analyzer, with read-only access and the model, proposes a typed RemediationRequest. A deterministic policy engine decides; the remediation controller opens a pull request on the Git host; after human review and required checks the change merges, Flux applies it, and the verifier confirms the symptom is gone.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .id{fill:none;stroke:#7c24fc;stroke-opacity:.55;stroke-dasharray:5 5;stroke-width:1.2}
+      .idt{fill:#a879ff;font-size:11.5px;font-weight:600;letter-spacing:.06em}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .r{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .no{fill:#ff8fa3;font-size:11.5px;font-weight:600}
+    </style>
+  </defs>
+
+  <rect width="1120" height="760" rx="18" fill="#0e0e16"/>
+
+  <!-- lanes -->
+  <rect class="lane" x="24" y="24" width="250" height="712" rx="14"/>
+  <text class="lanet" x="44" y="54">CLUSTER</text>
+  <rect class="lane" x="292" y="24" width="536" height="712" rx="14"/>
+  <text class="lanet" x="312" y="54">SHADEWRIGHT</text>
+  <rect class="lane" x="846" y="24" width="250" height="712" rx="14"/>
+  <text class="lanet" x="866" y="54">OUTSIDE THE CLUSTER</text>
+
+  <!-- identities -->
+  <rect class="id" x="312" y="74" width="496" height="268" rx="12"/>
+  <text class="idt" x="794" y="94" text-anchor="end">ANALYZER IDENTITY · read-only + model</text>
+  <rect class="id" x="312" y="424" width="496" height="292" rx="12"/>
+  <text class="idt" x="794" y="444" text-anchor="end">EXECUTOR IDENTITY · CR status + Git App</text>
+
+  <!-- cluster lane -->
+  <rect class="box" x="44" y="110" width="210" height="64" rx="10"/>
+  <text class="h" x="60" y="136">Workloads</text>
+  <text class="s" x="60" y="157">events · status · logs · metrics</text>
+
+  <rect class="box" x="44" y="452" width="210" height="64" rx="10"/>
+  <text class="h" x="60" y="478">Policy &amp; settings</text>
+  <text class="s" x="60" y="499">owned by the cluster admin</text>
+
+  <rect class="box" x="44" y="600" width="210" height="64" rx="10"/>
+  <text class="h" x="60" y="626">Flux</text>
+  <text class="s" x="60" y="647">applies the merged revision</text>
+
+  <!-- shadewright: analyzer side -->
+  <rect class="box" x="332" y="110" width="210" height="64" rx="10"/>
+  <text class="h" x="348" y="136">Collector</text>
+  <text class="s" x="348" y="157">normalize · correlate · dedupe</text>
+
+  <rect class="box" x="578" y="110" width="210" height="64" rx="10"/>
+  <text class="h" x="594" y="136">Incident</text>
+  <text class="s" x="594" y="157">durable CR · fingerprint</text>
+
+  <rect class="box" x="578" y="250" width="210" height="72" rx="10"/>
+  <text class="h" x="594" y="276">Analyzer</text>
+  <text class="s" x="594" y="296">rules first, then the model</text>
+  <text class="s" x="594" y="313">with read-only tools</text>
+
+  <!-- handoff -->
+  <rect class="key" x="420" y="356" width="280" height="56" rx="12"/>
+  <text class="h" x="440" y="381">RemediationRequest</text>
+  <text class="s" x="440" y="400">a typed proposal, never authority</text>
+
+  <!-- executor side -->
+  <rect class="box" x="332" y="462" width="210" height="64" rx="10"/>
+  <text class="h" x="348" y="488">Policy engine</text>
+  <text class="s" x="348" y="509">deterministic · plan digest</text>
+
+  <rect class="box" x="578" y="462" width="210" height="64" rx="10"/>
+  <text class="h" x="594" y="488">Remediation controller</text>
+  <text class="s" x="594" y="509">idempotent state machine</text>
+
+  <rect class="box" x="578" y="610" width="210" height="64" rx="10"/>
+  <text class="h" x="594" y="636">Verifier</text>
+  <text class="s" x="594" y="657">revision applied · symptom gone</text>
+
+  <!-- outside -->
+  <rect class="ext" x="866" y="250" width="210" height="72" rx="10"/>
+  <text class="h" x="882" y="276">Model provider</text>
+  <text class="s" x="882" y="296">redacted, bounded context</text>
+  <text class="s" x="882" y="313">no tools with write access</text>
+
+  <rect class="ext" x="866" y="462" width="210" height="64" rx="10"/>
+  <text class="h" x="882" y="488">Git host</text>
+  <text class="s" x="882" y="509">branch · commit · pull request</text>
+
+  <rect class="ext" x="866" y="580" width="210" height="64" rx="10"/>
+  <text class="h" x="882" y="606">Review &amp; checks</text>
+  <text class="s" x="882" y="627">humans and rulesets merge</text>
+
+  <!-- flow -->
+  <path class="f" d="M254 142H326" marker-end="url(#a)"/>
+  <path class="f" d="M542 142H572" marker-end="url(#a)"/>
+  <path class="f" d="M683 174V244" marker-end="url(#a)"/>
+  <path class="r" d="M788 278H860" marker-end="url(#m)" marker-start="url(#m)"/>
+  <path class="f" d="M640 322V350" marker-end="url(#a)"/>
+  <text class="lbl" x="650" y="342">proposes</text>
+  <path class="f" d="M480 412V456" marker-end="url(#a)"/>
+  <path class="r" d="M254 484H326" marker-end="url(#m)"/>
+  <text class="lbl" x="262" y="476">reads</text>
+  <path class="f" d="M542 494H572" marker-end="url(#a)"/>
+  <text class="lbl" x="546" y="486">allowed</text>
+  <path class="f" d="M788 494H860" marker-end="url(#a)"/>
+  <text class="lbl" x="796" y="486">opens PR</text>
+  <path class="f" d="M971 526V574" marker-end="url(#a)"/>
+  <path class="f" d="M971 644V712H149V670" marker-end="url(#a)"/>
+  <text class="lbl" x="560" y="704">merge to the protected branch</text>
+  <path class="r" d="M254 640H572" marker-end="url(#m)"/>
+  <text class="lbl" x="430" y="660">observes rollout</text>
+
+  <path class="f" d="M683 526V604" marker-end="url(#a)"/>
+  <text class="lbl" x="692" y="570">after merge</text>
+
+  <!-- refusal -->
+  <text class="no" x="332" y="550">denied or stale → stop, explain, no PR</text>
+</svg>

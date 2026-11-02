@@ -27,6 +27,8 @@ import (
 var crdPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 const (
+	kindPod       = "Pod"
+	tail          = "SyntheticTail"
 	reasonBackOff = "BackOff"
 	deploymentUID = "4f1c2b9e-0d6a-4c1e-9b7d-2a5e8f3c6d10"
 	podAUID       = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
@@ -195,13 +197,44 @@ func TestFingerprint(t *testing.T) {
 		{
 			name: "regarding Pod name stripped",
 			a: with(func(o *Observation) {
-				o.RegardingKind, o.RegardingName = "Pod", "web-7d4b9c8f6-q8wzt"
+				o.RegardingKind, o.RegardingName = kindPod, "web-7d4b9c8f6-q8wzt"
 				o.Note = `Liveness probe of web-7d4b9c8f6-q8wzt failed`
 			}),
 			b: with(func(o *Observation) {
-				o.RegardingKind, o.RegardingName = "Pod", "web-6c9f7b5d48-xk2lp"
+				o.RegardingKind, o.RegardingName = kindPod, "web-6c9f7b5d48-xk2lp"
 				o.Note = `Liveness probe of web-6c9f7b5d48-xk2lp failed`
 			}),
+			same: true,
+		},
+		// Last review round.
+		{
+			name: "five-character segments inside a pod name are not suffixes",
+			a:    with(func(o *Observation) { o.Note = `pod web-q8wzt-debug failed` }),
+			b:    with(func(o *Observation) { o.Note = `pod web-xk2lp-debug failed` }),
+			same: false,
+		},
+		{
+			name: "duration-looking Secret names",
+			a:    with(func(o *Observation) { o.Note = `secret "db-10s" not found` }),
+			b:    with(func(o *Observation) { o.Note = `secret "db-20s" not found` }),
+			same: false,
+		},
+		{
+			name: "regarding Pod name inside a longer ConfigMap name",
+			a: with(func(o *Observation) {
+				o.RegardingKind, o.RegardingName = kindPod, "web-q8wzt"
+				o.Note = `configmap "settings-web-q8wzt" not found`
+			}),
+			b: with(func(o *Observation) {
+				o.RegardingKind, o.RegardingName = kindPod, "web-x2x9k"
+				o.Note = `configmap "settings-web-x2x9k" not found`
+			}),
+			same: false,
+		},
+		{
+			name: "compressed and expanded IPv6 loopback",
+			a:    with(func(o *Observation) { o.Note = `dial tcp [::1]:5432: connect: connection refused` }),
+			b:    with(func(o *Observation) { o.Note = `dial tcp [0:0:0:0:0:0:0:1]:5432: connect: connection refused` }),
 			same: true,
 		},
 		{
@@ -334,6 +367,11 @@ func TestNormalizeRedacts(t *testing.T) {
 		// Review regressions: redaction runs before UID substitution, so a UID cannot shield a secret.
 		{"UID-prefixed password", `password=12345678-1234-1234-1234-123456789abc-swordfish`, "swordfish"},
 		{"UID in URL user info", `dial postgres://12345678-1234-1234-1234-123456789abc:swordfish@db:5432/orders`, "swordfish"},
+		// Last review round: YAML layout survives until redaction, and long notes are not cut first.
+		{"nested YAML block scalar", "db:\n  password: |-\n    " + tail + "\n  user: app", tail},
+		{"YAML plain continuation", "auth:\n  token: prefix\n    " + tail + "\n  user: app", tail},
+		{"quoted value past the old 64 KiB cut", `{"password": "prefix,` + tail + ` ` + strings.Repeat("word ", 14000) + `"}`, tail},
+		{"note over the input limit", `{"password": "prefix,` + tail + ` ` + strings.Repeat("word ", maxInputLength/5) + `"}`, tail},
 		// Review regressions: complete quoted values and underscore-prefixed keys.
 		{"quoted value with spaces", `{"password": "correct horse battery staple"}`, "horse battery staple"},
 		{"quoted value with a comma", `{"password": "sword,fish"}`, ",fish"},

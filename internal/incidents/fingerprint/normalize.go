@@ -17,6 +17,7 @@ limitations under the License.
 package fingerprint
 
 import (
+	"net/netip"
 	"regexp"
 	"strings"
 	"unicode"
@@ -31,8 +32,9 @@ const (
 	MaxSymptomLength = 1024
 
 	// maxInputLength bounds the work done on a single note. Kubernetes caps event notes at 1 KiB, so this
-	// only matters for status messages or hostile input.
-	maxInputLength = 64 * 1024
+	// only matters for status messages or hostile input. A longer note is withheld whole, never cut before
+	// redaction: a cut could drop the closing quote of a secret and leak its tail.
+	maxInputLength = 1 << 20
 )
 
 // Placeholders. Input angle brackets, square brackets and asterisks are replaced before any rule runs, so
@@ -100,9 +102,10 @@ const k8sAlphabet = `[bcdfghjklmnpqrstvwxz2456789]`
 const (
 	// workloadName is the part of a generated name that is kept.
 	workloadName = `([a-z0-9](?:[-a-z0-9.]*[a-z0-9])?)`
-	// nameEnd captures the character after a generated name, so that it can be put back. Kubelet writes
+	// nameEnd captures the character after a generated name, so that it can be put back. "-" and "."
+	// belong to names, so a suffix is stripped only at the end of the complete name. Kubelet writes
 	// "<pod>_<namespace>(<uid>)".
-	nameEnd = `([^A-Za-z0-9]|$)`
+	nameEnd = `([^-.A-Za-z0-9]|$)`
 	// refSep is what joins a kind to a name: "pod/web-x", "pod web-x", `pod "web-x"`, `pod="shop/web-x"`,
 	// "Created pod: web-x".
 	refSep = `(?:\s*[:=/]\s*|\s+)["']?(?:[a-z0-9][-a-z0-9]*/)?`
@@ -129,8 +132,9 @@ var regardingNames = map[string]rule{
 
 var durationRules = []rule{
 	// Go style (1m30s, 250ms) and words (30 seconds).
-	{regexp.MustCompile(`\b\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h)(?:\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h))*\b`), placeholderDuration},
-	{regexp.MustCompile(`(?i)\b\d+(?:\.\d+)?\s?(?:nanoseconds?|microseconds?|milliseconds?|seconds?|secs?|minutes?|mins?|hours?|days?)\b`), placeholderDuration},
+	// A duration glued to a name ("db-10s", "app.5m") is part of the name and is kept.
+	{regexp.MustCompile(`(^|[^-./\w])\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h)(?:\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h))*\b`), "${1}" + placeholderDuration},
+	{regexp.MustCompile(`(?i)(^|[^-./\w])\d+(?:\.\d+)?\s?(?:nanoseconds?|microseconds?|milliseconds?|seconds?|secs?|minutes?|mins?|hours?|days?)\b`), "${1}" + placeholderDuration},
 }
 
 // Normalize returns the symptom of o. Its note is first redacted with package redact. Then the variable
@@ -139,16 +143,56 @@ var durationRules = []rule{
 // error codes, the names of missing Secrets or ConfigMaps and dependency kinds are kept. Nothing in the
 // result is changed by redacting it again, apart from placeholders.
 func Normalize(o Observation) string {
+	if len(o.Note) > maxInputLength {
+		return placeholderRedacted
+	}
 	s := sanitize(o.Note)
+	s = expandShortIPv6(s)
+	// Redact while line breaks and indentation are still there: YAML block scalars and continuation
+	// lines are recognized by their layout.
 	s = redactText(s)
+	s = flatten(s)
 	s = apply(s, identifierRules)
 	s = apply(s, timeRules)
 	s = apply(s, ipRules)
 	s = stripRegarding(s, o.RegardingKind, o.RegardingName)
 	s = apply(s, generatedNameRules)
-	s = apply(s, durationRules)
+	s = applyOutsideQuotes(s, durationRules)
 	s = strings.Join(strings.Fields(s), " ")
 	return finish(s)
+}
+
+// shortIPv6Re finds IPv6 candidates shorter than the "[ip]" marker, such as "::1".
+var shortIPv6Re = regexp.MustCompile(`(?i)(^|[^0-9a-z:.])([0-9a-f]?::[0-9a-f]?)($|[^0-9a-z:.])`)
+
+// expandShortIPv6 writes IPv6 addresses shorter than four bytes in full. Package redact replaces them with
+// "***" (no shorter marker names the kind), which would make "::1" and "0:0:0:0:0:0:0:1" differ.
+func expandShortIPv6(s string) string {
+	return shortIPv6Re.ReplaceAllStringFunc(s, func(m string) string {
+		sub := shortIPv6Re.FindStringSubmatch(m)
+		addr, err := netip.ParseAddr(sub[2])
+		if err != nil || !addr.Is6() || sub[2] == "::" {
+			return m
+		}
+		return sub[1] + addr.StringExpanded() + sub[3]
+	})
+}
+
+// quotedRe matches a double-quoted span, such as an object or image name in an event note.
+var quotedRe = regexp.MustCompile(`"[^"]*"`)
+
+// applyOutsideQuotes applies rules to the text outside double-quoted spans, so that names such as
+// secret "db-10s" are never rewritten.
+func applyOutsideQuotes(s string, rules []rule) string {
+	var b strings.Builder
+	pos := 0
+	for _, m := range quotedRe.FindAllStringIndex(s, -1) {
+		b.WriteString(apply(s[pos:m[0]], rules))
+		b.WriteString(s[m[0]:m[1]])
+		pos = m[1]
+	}
+	b.WriteString(apply(s[pos:], rules))
+	return b.String()
 }
 
 // redactText redacts s and turns the markers into placeholders.
@@ -156,28 +200,43 @@ func redactText(s string) string {
 	return apply(redact.String(s), markerRules)
 }
 
-// stripRegarding replaces the generated suffix of the regarding object's name wherever the name appears.
+// stripRegarding replaces the generated suffix of the regarding object's name wherever the whole name
+// appears, never inside a longer name such as a ConfigMap "settings-web-q8wzt".
 func stripRegarding(s, kind, name string) string {
 	r, ok := regardingNames[kind]
 	if !ok || name == "" || !r.re.MatchString(name) {
 		return s
 	}
-	return strings.ReplaceAll(s, name, r.re.ReplaceAllString(name, r.repl))
+	repl := r.re.ReplaceAllString(name, r.repl)
+	var b strings.Builder
+	pos := 0
+	for {
+		i := strings.Index(s[pos:], name)
+		if i < 0 {
+			break
+		}
+		start, end := pos+i, pos+i+len(name)
+		b.WriteString(s[pos:start])
+		if (start == 0 || !isNameChar(s[start-1])) && (end == len(s) || !isNameChar(s[end])) {
+			b.WriteString(repl)
+		} else {
+			b.WriteString(name)
+		}
+		pos = end
+	}
+	b.WriteString(s[pos:])
+	return b.String()
 }
 
-// sanitize bounds the input, makes it valid UTF-8, turns control and format characters into spaces and
-// replaces angle brackets, square brackets and asterisks, so that placeholders and redaction markers cannot
-// be forged by the input.
+// isNameChar reports whether c can appear in a Kubernetes object name.
+func isNameChar(c byte) bool {
+	return c == '-' || c == '.' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z'
+}
+
+// sanitize makes the input valid UTF-8, turns control and format characters other than line breaks and
+// tabs into spaces, and replaces angle brackets, square brackets and asterisks, so that placeholders and
+// redaction markers cannot be forged by the input. Layout is kept for redaction.
 func sanitize(s string) string {
-	if len(s) > maxInputLength {
-		s = s[:maxInputLength]
-		// Drop the last, possibly cut, word: a cut secret might no longer match a redaction rule.
-		if i := strings.LastIndexFunc(s, unicode.IsSpace); i >= 0 {
-			s = s[:i]
-		} else {
-			s = ""
-		}
-	}
 	s = strings.ToValidUTF8(s, "?")
 	return strings.Map(func(r rune) rune {
 		switch {
@@ -187,7 +246,19 @@ func sanitize(s string) string {
 			return ')'
 		case r == '*':
 			return '#'
+		case r == '\n' || r == '\r' || r == '\t':
+			return r
 		case unicode.IsControl(r), unicode.Is(unicode.Cf, r), unicode.IsSpace(r):
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+// flatten turns all remaining whitespace into spaces, after redaction.
+func flatten(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
 			return ' '
 		}
 		return r

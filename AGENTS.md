@@ -27,6 +27,9 @@ so the **pull request title** is what counts; a required check (`Conventional PR
 - Releases are generated from these commits (release-please, epic #22): `feat` gives a minor version, `fix` and
   `perf` a patch, `!` or a `BREAKING CHANGE:` footer a breaking release (a minor one while the version is
   0.x). `revert` is listed too; `refactor`, `test`, `docs`, `build`, `ci` and `chore` stay out of the changelog.
+- The release workflow keeps one release pull request open (opened by the `shadewright-release` App). Merging it
+  is the release: it tags `vX.Y.Z`, updates `CHANGELOG.md` and creates the GitHub release. Never tag by hand and
+  never edit `CHANGELOG.md` or `.release-please-manifest.json` outside that pull request.
 
 ## Working agreement
 

@@ -53,8 +53,8 @@ type Resolver struct {
 type Input struct {
 	// Target is the request's targetRef. A non-empty UID must equal the live object's.
 	Target v1alpha1.ObjectRef
-	// Field is the value the action changes; see [FieldFor].
-	Field Field
+	// Action is the request's action. It fixes the kinds the target may have and the field compared.
+	Action v1alpha1.Action
 	// Repositories is RemediationSettings spec.repositories.
 	Repositories []v1alpha1.GitRepository
 	// GitOps is the policy's spec.gitOps.
@@ -62,9 +62,14 @@ type Input struct {
 }
 
 // Resolve finds the repository, branch, file and base commit that declare in.Target, or returns why not.
-// The error is non-nil only for failures that may succeed on retry, such as an API or Git host error; every
+// The error is non-nil only for failures that may succeed on retry, such as an API or Git host error; it is
+// then a [*TransientError] matching [ErrTransient] and holds no text from the cluster or the provider. Every
 // stop condition of ADR-0012 is a Result with Outcome NeedsIntervention or Denied.
 func (r *Resolver) Resolve(ctx context.Context, in Input) (Result, error) {
+	fld, err := FieldFor(in.Action, in.Target)
+	if err != nil {
+		return needsIntervention(ReasonInvalidInput, "the action does not fit the target: %v", err), nil
+	}
 	id, live, stop, err := r.target(ctx, in)
 	if stop != nil || err != nil {
 		return deref(stop), err
@@ -73,22 +78,22 @@ func (r *Resolver) Resolve(ctx context.Context, in Input) (Result, error) {
 	if stop != nil || err != nil {
 		return deref(stop), err
 	}
-	return r.declaration(ctx, in, id, live, d)
+	return r.declaration(ctx, fld, in.GitOps, id, live, d)
 }
 
 // target validates the request's target and reads the live object.
 func (r *Resolver) target(ctx context.Context, in Input) (identity, *unstructured.Unstructured, *Result, error) {
 	gv, err := schema.ParseGroupVersion(in.Target.APIVersion)
-	if err != nil || in.Target.Kind == "" || in.Target.Name == "" || in.Target.Namespace == "" || !in.Field.valid() {
+	if err != nil || in.Target.Kind == "" || in.Target.Name == "" || in.Target.Namespace == "" || in.Target.UID == "" {
 		return identity{}, nil, new(needsIntervention(ReasonInvalidInput,
-			"the target must be a namespaced object and the field set")), nil
+			"the target must be a namespaced object pinned by UID")), nil
 	}
 	id := identity{gvk: gv.WithKind(in.Target.Kind), namespace: in.Target.Namespace, name: in.Target.Name}
 	live, stop, err := r.get(ctx, id.gvk, id.namespace, id.name, ReasonTargetNotFound)
 	if stop != nil || err != nil {
 		return identity{}, nil, stop, err
 	}
-	if in.Target.UID != "" && live.GetUID() != types.UID(in.Target.UID) {
+	if live.GetUID() != types.UID(in.Target.UID) {
 		return identity{}, nil, new(needsIntervention(ReasonTargetChanged,
 			"%s has another UID than the request names", id)), nil
 	}
@@ -136,6 +141,9 @@ func (r *Resolver) delivery(ctx context.Context, in Input, id identity, live *un
 	if stop != nil {
 		return delivery{}, stop, nil
 	}
+	if stop := checkRevision(ks, src); stop != nil {
+		return delivery{}, stop, nil
+	}
 	repo, stop := matchRepository(in, url, branch, srcNamespace, srcName)
 	if stop != nil {
 		return delivery{}, stop, nil
@@ -145,11 +153,11 @@ func (r *Resolver) delivery(ctx context.Context, in Input, id identity, live *un
 
 // declaration finds the one document in the Kustomization's path that declares the target and holds the live
 // value, and checks the file against the policy (ADR-0012 step 3).
-func (r *Resolver) declaration(ctx context.Context, in Input, id identity, live *unstructured.Unstructured,
-	d delivery) (Result, error) {
+func (r *Resolver) declaration(ctx context.Context, fld Field, gitOps v1alpha1.PolicyGitOps, id identity,
+	live *unstructured.Unstructured, d delivery) (Result, error) {
 	git, err := r.OpenRepository(ctx, d.repo)
 	if err != nil {
-		return Result{}, fmt.Errorf("open repository %s: %w", d.repo.Name, err)
+		return Result{}, transient("open repository "+string(d.repo.Name), err)
 	}
 	head, err := git.BranchHead(ctx, d.branch)
 	if providers.IsNotFound(err) {
@@ -157,7 +165,7 @@ func (r *Resolver) declaration(ctx context.Context, in Input, id identity, live 
 			"branch %s does not exist in repository %s", d.branch, d.repo.Name), nil
 	}
 	if err != nil {
-		return Result{}, fmt.Errorf("read head of %s in repository %s: %w", d.branch, d.repo.Name, err)
+		return Result{}, transient("read head of branch "+d.branch+" in repository "+string(d.repo.Name), err)
 	}
 	dir := "."
 	if d.path != "" {
@@ -175,17 +183,17 @@ func (r *Resolver) declaration(ctx context.Context, in Input, id identity, live 
 	if stop != nil || err != nil {
 		return deref(stop), err
 	}
-	inGit, okGit := in.Field.Get(decl.doc)
-	inCluster, okLive := in.Field.Get(live.Object)
+	inGit, okGit := fld.Get(decl.doc)
+	inCluster, okLive := fld.Get(live.Object)
 	if !okGit || !okLive {
-		return needsIntervention(ReasonFieldNotFound, "%s is not set in both %s and the live %s", in.Field, decl.path, id), nil
+		return needsIntervention(ReasonFieldNotFound, "%s is not set in both %s and the live %s", fld, decl.path, id), nil
 	}
-	if !in.Field.equal(inGit, inCluster) {
+	if !fld.equal(inGit, inCluster) {
 		return needsIntervention(ReasonValueMismatch,
-			"%s in %s differs from the live value; something such as a patch changes it", in.Field, decl.path), nil
+			"%s in %s differs from the live value; something such as a patch changes it", fld, decl.path), nil
 	}
 	file := v1alpha1.GitFilePath(decl.path)
-	if !pathAllowed(in.GitOps.AllowedPaths, file) {
+	if !pathAllowed(gitOps.AllowedPaths, file) {
 		return denied(ReasonPathNotAllowed, "%s matches none of the policy's allowedPaths", decl.path), nil
 	}
 	return Result{
@@ -212,7 +220,7 @@ func (r *Resolver) get(ctx context.Context, gvk schema.GroupVersionKind, namespa
 		return nil, new(needsIntervention(notFound, "%s %s/%s does not exist", gvk.Kind, namespace, name)), nil
 	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("get %s %s/%s: %w", gvk.Kind, namespace, name, err)
+		return nil, nil, transient(fmt.Sprintf("get %s %s/%s", gvk.Kind, namespace, name), err)
 	}
 	return obj, nil, nil
 }

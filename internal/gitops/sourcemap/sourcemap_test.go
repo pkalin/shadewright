@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -38,6 +39,8 @@ import (
 const (
 	fleetURL  = "https://github.com/example/fleet"
 	targetUID = "22222222-2222-4222-8222-222222222222"
+	webUID    = "55555555-5555-4555-8555-555555555555"
+	revision  = "main@sha1:0123456789abcdef0123456789abcdef01234567"
 	soFile    = "apps/orders/scaledobject.yaml"
 	ksFile    = "apps/orders/kustomization.yaml"
 )
@@ -132,6 +135,7 @@ func newFixture() *fixture {
 		}}}},
 	})
 	dep.SetLabels(fluxLabels())
+	dep.SetUID(webUID)
 
 	ks := obj("kustomize.toolkit.fluxcd.io/v1", "Kustomization", "flux-system", "apps", map[string]any{
 		"spec": map[string]any{
@@ -140,7 +144,8 @@ func newFixture() *fixture {
 			"sourceRef": map[string]any{"kind": "GitRepository", "name": "fleet"},
 		},
 		"status": map[string]any{
-			"observedGeneration": int64(2),
+			"lastAppliedRevision": revision,
+			"observedGeneration":  int64(2),
 			"conditions": []any{
 				map[string]any{"type": "Ready", "status": "True", "observedGeneration": int64(2)},
 			},
@@ -154,7 +159,8 @@ func newFixture() *fixture {
 	ks.SetGeneration(2)
 
 	src := obj("source.toolkit.fluxcd.io/v1", "GitRepository", "flux-system", "fleet", map[string]any{
-		"spec": map[string]any{"url": fleetURL, "ref": map[string]any{"branch": "main"}},
+		"spec":   map[string]any{"url": fleetURL, "ref": map[string]any{"branch": "main"}},
+		"status": map[string]any{"artifact": map[string]any{"revision": revision}},
 	})
 
 	return &fixture{
@@ -175,7 +181,10 @@ func newFixture() *fixture {
 				APIVersion: "keda.sh/v1alpha1", Kind: "ScaledObject",
 				Namespace: "orders", Name: "orders-worker", UID: targetUID,
 			},
-			Field: sourcemap.Field{Steps: []sourcemap.Step{{Key: "spec"}, {Key: "maxReplicaCount"}}},
+			Action: v1alpha1.Action{
+				Type:                  v1alpha1.ActionAdjustKedaMaxReplicas,
+				AdjustKedaMaxReplicas: &v1alpha1.AdjustKedaMaxReplicas{PreviousValue: 10, DesiredValue: 15},
+			},
 			Repositories: []v1alpha1.GitRepository{
 				{Name: "other", URL: "https://github.com/example/other", TargetBranch: "main", Provider: v1alpha1.GitProviderGitHub},
 				{Name: "fleet", URL: fleetURL, TargetBranch: "main", Provider: v1alpha1.GitProviderGitHub},
@@ -186,16 +195,14 @@ func newFixture() *fixture {
 }
 
 // targetDeployment makes the Deployment's web container memory limit the target.
+//
+//nolint:goconst // literal identities keep the fixture readable
 func (f *fixture) targetDeployment() {
-	f.in.Target = v1alpha1.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "orders", Name: "web"}
-	field, err := sourcemap.FieldFor(v1alpha1.Action{
+	f.in.Target = v1alpha1.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "orders", Name: "web", UID: webUID}
+	f.in.Action = v1alpha1.Action{
 		Type:                    v1alpha1.ActionSetContainerMemoryLimit,
 		SetContainerMemoryLimit: &v1alpha1.SetContainerMemoryLimit{Container: "web"},
-	})
-	if err != nil {
-		panic(err)
 	}
-	f.in.Field = field
 }
 
 func set(u *unstructured.Unstructured, value any, fields ...string) {
@@ -299,13 +306,6 @@ func TestResolveFindsTheSource(t *testing.T) {
 			},
 			path: soFile,
 		},
-		{
-			name: "target without a UID",
-			change: func(f *fixture) {
-				f.in.Target.UID = ""
-			},
-			path: soFile,
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -343,7 +343,27 @@ func TestResolveStops(t *testing.T) {
 		// Input and target.
 		{"target without a namespace", func(f *fixture) { f.in.Target.Namespace = "" }, ni, sourcemap.ReasonInvalidInput},
 		{"invalid apiVersion", func(f *fixture) { f.in.Target.APIVersion = "a/b/c" }, ni, sourcemap.ReasonInvalidInput},
-		{"no field", func(f *fixture) { f.in.Field = sourcemap.Field{} }, ni, sourcemap.ReasonInvalidInput},
+		{"target without a UID", func(f *fixture) { f.in.Target.UID = "" }, ni, sourcemap.ReasonInvalidInput},
+		{"memory action without parameters", func(f *fixture) {
+			f.targetDeployment()
+			f.in.Action.SetContainerMemoryLimit = nil
+		}, ni, sourcemap.ReasonInvalidInput},
+		{"memory action on a ScaledObject, refused before any read", func(f *fixture) {
+			f.in.Action = v1alpha1.Action{
+				Type:                    v1alpha1.ActionSetContainerMemoryLimit,
+				SetContainerMemoryLimit: &v1alpha1.SetContainerMemoryLimit{Container: "web"},
+			}
+			f.getErr = errors.New("the cluster must not be read")
+		}, ni, sourcemap.ReasonInvalidInput},
+		{"KEDA action on a Deployment", func(f *fixture) {
+			f.targetDeployment()
+			f.in.Action = newFixture().in.Action
+		}, ni, sourcemap.ReasonInvalidInput},
+		{"memory action on a Deployment of another group", func(f *fixture) {
+			f.targetDeployment()
+			f.in.Target.APIVersion = "example.com/v1"
+		}, ni, sourcemap.ReasonInvalidInput},
+		{"unknown action", func(f *fixture) { f.in.Action = v1alpha1.Action{Type: "DeleteNamespace"} }, ni, sourcemap.ReasonInvalidInput},
 		{"target missing", func(f *fixture) { f.target = nil }, ni, sourcemap.ReasonTargetNotFound},
 		{"target recreated", func(f *fixture) { f.target.SetUID("33333333-3333-4333-8333-333333333333") }, ni, sourcemap.ReasonTargetChanged},
 
@@ -406,6 +426,12 @@ func TestResolveStops(t *testing.T) {
 			set(f.ks, "OCIRepository", "spec", "sourceRef", "kind")
 		}, ni, sourcemap.ReasonUnsupportedSource},
 		{"GitRepository missing", func(f *fixture) { f.src = nil }, ni, sourcemap.ReasonSourceNotFound},
+		{"sourceRef name is not a valid name", func(f *fixture) {
+			set(f.ks, "Fleet_1", "spec", "sourceRef", "name")
+		}, ni, sourcemap.ReasonUnsupportedSource},
+		{"sourceRef namespace is not a valid name", func(f *fixture) {
+			set(f.ks, "flux.system", "spec", "sourceRef", "namespace")
+		}, ni, sourcemap.ReasonUnsupportedSource},
 		{"GitRepository in another namespace is missing", func(f *fixture) {
 			set(f.ks, "other", "spec", "sourceRef", "namespace")
 		}, ni, sourcemap.ReasonSourceNotFound},
@@ -424,6 +450,23 @@ func TestResolveStops(t *testing.T) {
 		{"GitRepository uses a ref name", func(f *fixture) {
 			set(f.src, map[string]any{"branch": "main", "name": "refs/heads/other"}, "spec", "ref")
 		}, ni, sourcemap.ReasonSourceNotBranch},
+		{"GitRepository suspended", func(f *fixture) { set(f.src, true, "spec", "suspend") }, ni, sourcemap.ReasonSourceOptions},
+		{"GitRepository ignores files", func(f *fixture) { set(f.src, "apps/orders/*.yaml\n", "spec", "ignore") }, ni, sourcemap.ReasonSourceOptions},
+		{"GitRepository recurses into submodules", func(f *fixture) {
+			set(f.src, true, "spec", "recurseSubmodules")
+		}, ni, sourcemap.ReasonSourceOptions},
+		{"GitRepository sparse checkout", func(f *fixture) {
+			set(f.src, []any{"apps/"}, "spec", "sparseCheckout")
+		}, ni, sourcemap.ReasonSourceOptions},
+		{"Kustomization applied an older revision", func(f *fixture) {
+			set(f.ks, "main@sha1:89abcdef0123456789abcdef0123456789abcdef", "status", "lastAppliedRevision")
+		}, ni, sourcemap.ReasonRevisionMismatch},
+		{"Kustomization has applied nothing", func(f *fixture) {
+			unstructured.RemoveNestedField(f.ks.Object, "status", "lastAppliedRevision")
+		}, ni, sourcemap.ReasonRevisionMismatch},
+		{"GitRepository has no artifact", func(f *fixture) {
+			unstructured.RemoveNestedField(f.src.Object, "status", "artifact")
+		}, ni, sourcemap.ReasonRevisionMismatch},
 		{"GitRepository includes another source", func(f *fixture) {
 			set(f.src, []any{map[string]any{"repository": map[string]any{"name": "x"}}}, "spec", "include")
 		}, ni, sourcemap.ReasonSourceIncludes},
@@ -503,6 +546,15 @@ func TestResolveStops(t *testing.T) {
 			b.WriteString("resources:\n")
 			for i := range sourcemap.MaxFiles + 1 {
 				fmt.Fprintf(&b, "  - f%d.yaml\n", i)
+			}
+			f.files[ksFile] = b.String()
+		}, ni, sourcemap.ReasonTooManyFiles},
+		{"too many directories", func(f *fixture) {
+			var b strings.Builder
+			b.WriteString("resources:\n")
+			for i := range sourcemap.MaxReads / 2 {
+				fmt.Fprintf(&b, "  - d%d\n", i)
+				f.files[fmt.Sprintf("apps/orders/d%d/kustomization.yaml", i)] = "resources: []\n"
 			}
 			f.files[ksFile] = b.String()
 		}, ni, sourcemap.ReasonTooManyFiles},
@@ -590,37 +642,47 @@ func TestResolveStops(t *testing.T) {
 	}
 }
 
+// TestResolveReturnsTransientErrors checks that failed reads come back as ErrTransient without the provider's
+// text, which may hold a repository URL with credentials.
 func TestResolveReturnsTransientErrors(t *testing.T) {
-	transient := errors.New("connection refused")
+	const secret = "ghs_s3cr3tT0ken"
+	leaky := errors.New("GET https://x-access-token:" + secret + "@github.com/example/fleet.git: 502 Bad Gateway")
+	failOn := func(op string) func(string) error {
+		return func(got string) error {
+			if got == op {
+				return &providers.RetryableError{RetryAfter: 30 * time.Second, Err: leaky}
+			}
+			return nil
+		}
+	}
 	tests := []struct {
-		name   string
-		change func(f *fixture)
+		name       string
+		change     func(f *fixture)
+		retryAfter time.Duration
 	}{
-		{"cluster read fails", func(f *fixture) { f.getErr = transient }},
-		{"branch head fails", func(f *fixture) {
-			f.gitFail = func(op string) error {
-				if op == "BranchHead" {
-					return &providers.RetryableError{Err: transient}
-				}
-				return nil
-			}
-		}},
-		{"file read fails", func(f *fixture) {
-			f.gitFail = func(op string) error {
-				if op == "ReadFile" {
-					return &providers.RetryableError{Err: transient}
-				}
-				return nil
-			}
-		}},
+		{"cluster read fails", func(f *fixture) { f.getErr = leaky }, 0},
+		{"branch head fails", func(f *fixture) { f.gitFail = failOn("BranchHead") }, 30 * time.Second},
+		{"file read fails", func(f *fixture) { f.gitFail = failOn("ReadFile") }, 30 * time.Second},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture()
 			tc.change(f)
 			res, _, err := f.run(t)
-			if !errors.Is(err, transient) {
-				t.Fatalf("error = %v, want the transient error", err)
+			if !errors.Is(err, sourcemap.ErrTransient) {
+				t.Fatalf("error = %v, want ErrTransient", err)
+			}
+			if errors.Is(err, leaky) {
+				t.Error("the provider error is wrapped")
+			}
+			for _, leak := range []string{secret, "github.com", "x-access-token", "502"} {
+				if strings.Contains(err.Error(), leak) {
+					t.Errorf("error %q contains %q", err, leak)
+				}
+			}
+			var te *sourcemap.TransientError
+			if !errors.As(err, &te) || te.RetryAfter != tc.retryAfter {
+				t.Errorf("error = %#v, want RetryAfter %s", err, tc.retryAfter)
 			}
 			if res.Outcome != "" {
 				t.Errorf("outcome %s returned with an error", res.Outcome)
@@ -629,23 +691,61 @@ func TestResolveReturnsTransientErrors(t *testing.T) {
 	}
 }
 
+// TestResolveKeepsSourceURLOutOfMessages checks that a Flux URL with credentials never reaches the result.
+func TestResolveKeepsSourceURLOutOfMessages(t *testing.T) {
+	const secret = "ghp_s3cr3tT0ken"
+	f := newFixture()
+	set(f.src, "https://deploy:"+secret+"@git.example.test/example/fleet", "spec", "url")
+	res, _, err := f.run(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Outcome != sourcemap.Denied || res.Reason != sourcemap.ReasonRepositoryNotConfigured {
+		t.Fatalf("result = %+v", res)
+	}
+	for _, leak := range []string{secret, "deploy:", "git.example.test", "://"} {
+		if strings.Contains(res.Message, leak) {
+			t.Errorf("message %q contains %q", res.Message, leak)
+		}
+	}
+}
+
+//nolint:goconst // literal identities keep the cases readable
 func TestFieldFor(t *testing.T) {
-	keda, err := sourcemap.FieldFor(v1alpha1.Action{Type: v1alpha1.ActionAdjustKedaMaxReplicas})
+	so := v1alpha1.ObjectRef{APIVersion: "keda.sh/v1alpha1", Kind: "ScaledObject"}
+	dep := v1alpha1.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment"}
+	sts := v1alpha1.ObjectRef{APIVersion: "apps/v1", Kind: "StatefulSet"}
+	kedaAction := v1alpha1.Action{Type: v1alpha1.ActionAdjustKedaMaxReplicas}
+	memAction := v1alpha1.Action{
+		Type:                    v1alpha1.ActionSetContainerMemoryLimit,
+		SetContainerMemoryLimit: &v1alpha1.SetContainerMemoryLimit{Container: "web"},
+	}
+	keda, err := sourcemap.FieldFor(kedaAction, so)
 	if err != nil || keda.String() != "spec.maxReplicaCount" || keda.Quantity {
 		t.Errorf("keda field = %+v, %v", keda, err)
 	}
-	mem, err := sourcemap.FieldFor(v1alpha1.Action{
-		Type:                    v1alpha1.ActionSetContainerMemoryLimit,
-		SetContainerMemoryLimit: &v1alpha1.SetContainerMemoryLimit{Container: "web"},
-	})
-	if err != nil || mem.String() != "spec.template.spec.containers[name=web].resources.limits.memory" || !mem.Quantity {
-		t.Errorf("memory field = %+v, %v", mem, err)
+	for _, target := range []v1alpha1.ObjectRef{dep, sts} {
+		mem, err := sourcemap.FieldFor(memAction, target)
+		if err != nil || mem.String() != "spec.template.spec.containers[name=web].resources.limits.memory" || !mem.Quantity {
+			t.Errorf("memory field for %s = %+v, %v", target.Kind, mem, err)
+		}
 	}
-	if _, err := sourcemap.FieldFor(v1alpha1.Action{Type: v1alpha1.ActionSetContainerMemoryLimit}); err == nil {
-		t.Error("memory action without parameters accepted")
+	refused := []struct {
+		action v1alpha1.Action
+		target v1alpha1.ObjectRef
+	}{
+		{kedaAction, dep},
+		{memAction, so},
+		{memAction, v1alpha1.ObjectRef{APIVersion: "apps/v1", Kind: "DaemonSet"}},
+		{memAction, v1alpha1.ObjectRef{APIVersion: "example.com/v1", Kind: "Deployment"}},
+		{v1alpha1.Action{Type: v1alpha1.ActionSetContainerMemoryLimit}, dep},
+		{v1alpha1.Action{Type: "DeleteNamespace"}, dep},
+		{kedaAction, v1alpha1.ObjectRef{APIVersion: "a/b/c", Kind: "ScaledObject"}},
 	}
-	if _, err := sourcemap.FieldFor(v1alpha1.Action{Type: "DeleteNamespace"}); err == nil {
-		t.Error("unknown action accepted")
+	for _, r := range refused {
+		if _, err := sourcemap.FieldFor(r.action, r.target); err == nil {
+			t.Errorf("%s on %s %s accepted", r.action.Type, r.target.APIVersion, r.target.Kind)
+		}
 	}
 }
 

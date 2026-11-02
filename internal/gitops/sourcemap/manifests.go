@@ -41,6 +41,9 @@ const (
 	MaxDepth = 8
 	// MaxFiles is how many manifest files are read.
 	MaxFiles = 256
+	// MaxReads is how many ReadFile calls one mapping makes in all, kustomization file lookups included, so
+	// a build cannot fan out into many directories.
+	MaxReads = 512
 	// MaxFileBytes is the largest file read.
 	MaxFileBytes = 1 << 20
 	// maxRefLen is the longest path accepted, the MaxLength of GitFilePath.
@@ -91,6 +94,7 @@ type walker struct {
 	dirs   map[string]bool
 	files  []string
 	seen   map[string]bool
+	reads  int
 }
 
 func newWalker(git providers.GitProvider, commit string) *walker {
@@ -199,13 +203,18 @@ const reasonFileNotFound Reason = "fileNotFound"
 
 // read returns a file at the walker's commit, or a stop result when it is missing or too large.
 func (w *walker) read(ctx context.Context, p string) (providers.File, *Result, error) {
+	if w.reads >= MaxReads {
+		return providers.File{}, new(needsIntervention(ReasonTooManyFiles,
+			"the build needs more than %d file reads", MaxReads)), nil
+	}
+	w.reads++
 	f, err := w.git.ReadFile(ctx, w.commit, p)
 	if providers.IsNotFound(err) {
 		r := needsIntervention(reasonFileNotFound, "%s does not exist", p)
 		return providers.File{}, &r, nil
 	}
 	if err != nil {
-		return providers.File{}, nil, fmt.Errorf("read %s: %w", p, err)
+		return providers.File{}, nil, transient("read "+p, err)
 	}
 	if len(f.Data) > MaxFileBytes {
 		r := needsIntervention(ReasonFileNotReadable, "%s is larger than %d bytes", p, MaxFileBytes)

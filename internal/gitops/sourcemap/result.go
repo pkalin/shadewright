@@ -42,7 +42,8 @@ const (
 	// ReasonResolved goes with the Resolved outcome.
 	ReasonResolved Reason = "SourceResolved"
 
-	// ReasonInvalidInput means the target reference or field is not usable (NeedsIntervention).
+	// ReasonInvalidInput means the target reference is not usable: not namespaced, not pinned by UID, or of a
+	// kind the action may not change (NeedsIntervention).
 	ReasonInvalidInput Reason = "InvalidInput"
 	// ReasonTargetNotFound means the target object does not exist (NeedsIntervention).
 	ReasonTargetNotFound Reason = "TargetNotFound"
@@ -77,6 +78,12 @@ const (
 	ReasonSourceNotBranch Reason = "SourceNotBranch"
 	// ReasonSourceIncludes means the GitRepository includes other sources (NeedsIntervention).
 	ReasonSourceIncludes Reason = "SourceIncludes"
+	// ReasonSourceOptions means the GitRepository is suspended, or ignores, sparsely checks out or recurses
+	// into files, so the branch head may not be what Flux applies (NeedsIntervention).
+	ReasonSourceOptions Reason = "SourceOptions"
+	// ReasonRevisionMismatch means the Kustomization's lastAppliedRevision is not the revision its
+	// GitRepository last fetched (NeedsIntervention).
+	ReasonRevisionMismatch Reason = "RevisionMismatch"
 	// ReasonRepositoryNotConfigured means the source URL equals no repository in RemediationSettings, or more
 	// than one (Denied).
 	ReasonRepositoryNotConfigured Reason = "RepositoryNotConfigured"
@@ -100,7 +107,8 @@ const (
 	// ReasonFileNotReadable means a file the build needs is missing, too large or not valid YAML
 	// (NeedsIntervention).
 	ReasonFileNotReadable Reason = "FileNotReadable"
-	// ReasonTooManyFiles means the build is deeper or wider than the mapping reads (NeedsIntervention).
+	// ReasonTooManyFiles means the build is deeper or wider than the mapping reads: too many nested
+	// directories, manifests or file reads (NeedsIntervention).
 	ReasonTooManyFiles Reason = "TooManyFiles"
 	// ReasonDeclarationNotFound means no document declares the object, for example because a generator or
 	// patch produces it (NeedsIntervention).

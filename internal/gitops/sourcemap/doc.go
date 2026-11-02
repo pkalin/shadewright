@@ -19,10 +19,14 @@ limitations under the License.
 // The mapping only supports plain manifests delivered by a Flux Kustomization from a GitRepository that tracks
 // a branch:
 //
+//  0. The target must be pinned by UID and have a kind the action may change ([FieldFor]); this is checked
+//     before anything is read.
 //  1. The Flux labels on the live object (kustomize.toolkit.fluxcd.io/name and /namespace) name its
 //     Kustomization. The labels are untrusted, so the Kustomization must be Ready for its current generation
 //     and list the object in status.inventory.
-//  2. The Kustomization's source must be a GitRepository that tracks only spec.ref.branch. Its URL must equal,
+//  2. The Kustomization's source must be a GitRepository that tracks only spec.ref.branch, with no
+//     suspend, ignore, include, sparse checkout or submodules, and the Kustomization must have applied the
+//     revision the GitRepository last fetched. Its URL must equal,
 //     byte for byte, exactly one repository in RemediationSettings, that repository must be the one the
 //     policy names, and the branch must equal the repository's targetBranch.
 //  3. The files the Kustomization builds are read through a [providers.GitProvider] at the head of that
@@ -34,6 +38,11 @@ limitations under the License.
 // kustomization file, two declarations, a value changed after the build) stops with [NeedsIntervention] or
 // [Denied] and a [Reason]. [Resolver.Resolve] returns an error only for failures worth retrying, such as an
 // unreachable API server or Git host.
+//
+// Git is read only through ReadFile and BranchHead, relying on the ReadFile contract: only regular files
+// are returned and symbolic links are never followed. Reads are bounded by [MaxDepth], [MaxFiles],
+// [MaxReads] and [MaxFileBytes], whatever cap the provider enforces itself. Errors carry no provider text
+// ([TransientError]), since it may hold a repository URL with credentials.
 //
 // Everything read here is untrusted input: cluster objects, Flux status and Git contents. Paths are built
 // only from validated segments with package path, never by concatenating strings, and stay inside the

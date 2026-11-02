@@ -20,6 +20,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // Labels Flux sets on the objects it applies.
@@ -50,6 +51,10 @@ var kustomizationTransforms = []string{
 	"patches", "patchesStrategicMerge", "patchesJson6902", "images", "components",
 	"namePrefix", "nameSuffix", "targetNamespace", "postBuild",
 }
+
+// gitRepositoryOptions are GitRepository spec fields that change which files the artifact holds, or stop it
+// from following the branch, so the file read from the branch head might not be what Flux applies.
+var gitRepositoryOptions = []string{"suspend", "ignore", "recurseSubmodules", "sparseCheckout"}
 
 // gitRefOthers are spec.ref fields that take precedence over spec.ref.branch in Flux.
 var gitRefOthers = []string{"tag", "semver", "name", "commit"}
@@ -94,6 +99,10 @@ func checkKustomization(ks *unstructured.Unstructured, target schema.GroupVersio
 	}
 	if srcNamespace == "" {
 		srcNamespace = ks.GetNamespace()
+	}
+	if len(validation.IsDNS1123Subdomain(srcName)) > 0 || len(validation.IsDNS1123Label(srcNamespace)) > 0 {
+		r := needsIntervention(ReasonUnsupportedSource, "spec.sourceRef of %s is not a valid object reference", ref)
+		return "", "", "", &r
 	}
 	path, found, err := unstructured.NestedString(ks.Object, "spec", "path")
 	if err != nil {
@@ -153,6 +162,13 @@ func checkGitRepository(src *unstructured.Unstructured) (url, branch string, sto
 		r := needsIntervention(ReasonSourceIncludes, "%s includes other sources", ref)
 		return "", "", &r
 	}
+	for _, f := range gitRepositoryOptions {
+		if v, ok := field(src.Object, "spec", f); ok && !empty(v) {
+			r := needsIntervention(ReasonSourceOptions,
+				"%s sets spec.%s, so the branch head may not be what Flux applies", ref, f)
+			return "", "", &r
+		}
+	}
 	gitRef, found, err := unstructured.NestedMap(src.Object, "spec", "ref")
 	branch, isString := gitRef["branch"].(string)
 	if err != nil || !found || !isString || branch == "" {
@@ -170,6 +186,20 @@ func checkGitRepository(src *unstructured.Unstructured) (url, branch string, sto
 		url = ""
 	}
 	return url, branch, nil
+}
+
+// checkRevision requires the Kustomization to have applied the revision its GitRepository last fetched, so
+// the object's live state comes from the source as it is now and not from an older or failed fetch.
+func checkRevision(ks, src *unstructured.Unstructured) *Result {
+	applied, _, errA := unstructured.NestedString(ks.Object, "status", "lastAppliedRevision")
+	fetched, _, errF := unstructured.NestedString(src.Object, "status", "artifact", "revision")
+	if errA != nil || errF != nil || applied == "" || applied != fetched {
+		r := needsIntervention(ReasonRevisionMismatch,
+			"Kustomization %s/%s has not applied the revision GitRepository %s/%s last fetched",
+			ks.GetNamespace(), ks.GetName(), src.GetNamespace(), src.GetName())
+		return &r
+	}
+	return nil
 }
 
 // field returns the value at a path of keys, without copying it.

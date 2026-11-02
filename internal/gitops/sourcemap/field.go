@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
 )
@@ -46,14 +47,26 @@ type Field struct {
 	Quantity bool
 }
 
-// FieldFor returns the field an action of the catalog changes.
-func FieldFor(action v1alpha1.Action) (Field, error) {
+// FieldFor returns the field an action of the catalog changes, after checking that the target has a kind
+// the action may change: a keda.sh ScaledObject for AdjustKedaMaxReplicas, an apps/v1 Deployment or
+// StatefulSet for SetContainerMemoryLimit.
+func FieldFor(action v1alpha1.Action, target v1alpha1.ObjectRef) (Field, error) {
+	gv, err := schema.ParseGroupVersion(target.APIVersion)
+	if err != nil {
+		return Field{}, fmt.Errorf("invalid apiVersion")
+	}
 	switch action.Type {
 	case v1alpha1.ActionAdjustKedaMaxReplicas:
+		if gv.Group != "keda.sh" || target.Kind != "ScaledObject" {
+			return Field{}, fmt.Errorf("%s changes only a keda.sh ScaledObject", action.Type)
+		}
 		return Field{Steps: []Step{{Key: keySpec}, {Key: "maxReplicaCount"}}}, nil
 	case v1alpha1.ActionSetContainerMemoryLimit:
+		if target.APIVersion != "apps/v1" || (target.Kind != "Deployment" && target.Kind != "StatefulSet") {
+			return Field{}, fmt.Errorf("%s changes only an apps/v1 Deployment or StatefulSet", action.Type)
+		}
 		if action.SetContainerMemoryLimit == nil || action.SetContainerMemoryLimit.Container == "" {
-			return Field{}, fmt.Errorf("action %s has no container", action.Type)
+			return Field{}, fmt.Errorf("%s has no container", action.Type)
 		}
 		return Field{
 			Steps: []Step{
@@ -64,7 +77,7 @@ func FieldFor(action v1alpha1.Action) (Field, error) {
 			Quantity: true,
 		}, nil
 	default:
-		return Field{}, fmt.Errorf("unknown action type %q", action.Type)
+		return Field{}, fmt.Errorf("unknown action type")
 	}
 }
 
@@ -81,18 +94,6 @@ func (f Field) String() string {
 		}
 	}
 	return b.String()
-}
-
-func (f Field) valid() bool {
-	if len(f.Steps) == 0 {
-		return false
-	}
-	for _, s := range f.Steps {
-		if s.Key == "" {
-			return false
-		}
-	}
-	return true
 }
 
 // Get returns the value of the field in an object decoded from JSON or YAML. It reports false when any step

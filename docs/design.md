@@ -139,6 +139,8 @@ hash(clusterID, namespace, ownerUID-or-resourceUID,
 
 Normalization removes variable parts (random pod suffixes, timestamps) but keeps what matters: image name, error code, the name of the missing Secret, the kind of dependency. Secrets are redacted before storage and before anything reaches the model.
 
+Both are pure functions in `internal/incidents/fingerprint`. Normalization also replaces ReplicaSet hashes, durations, IPs, object UIDs and image digests with placeholders, redacts anything that looks like a token, key or connection string, and cuts the symptom to the 1024 characters `spec.symptom` allows. Every field is length-prefixed in the hash, and a version string is hashed first so that changed rules give new fingerprints instead of merging old and new incidents.
+
 Starting values, to be tuned on real traffic:
 
 | Mechanism | MVP value |

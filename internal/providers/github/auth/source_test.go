@@ -94,6 +94,16 @@ type env struct {
 
 func setup(t *testing.T, h http.HandlerFunc) *env {
 	t.Helper()
+	return setupRepo(t, "", h)
+}
+
+// setupRepo is setup with another repository name in acme; "" keeps testRepoURL.
+func setupRepo(t *testing.T, name string, h http.HandlerFunc) *env {
+	t.Helper()
+	repoURL := testRepoURL
+	if name != "" {
+		repoURL = "https://github.com/acme/" + name
+	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	u, _ := url.Parse(srv.URL)
@@ -103,7 +113,7 @@ func setup(t *testing.T, h http.HandlerFunc) *env {
 	}
 	clk := &clock{t: t0}
 	src, err := newSource(Config{
-		ClientID: testClientID, InstallationID: 4242, RepositoryURL: testRepoURL, Signer: signer,
+		ClientID: testClientID, InstallationID: 4242, RepositoryURL: repoURL, Signer: signer,
 	}, testHooks{transport: rewrite{t, u}, now: clk.now})
 	if err != nil {
 		t.Fatal(err)
@@ -820,6 +830,10 @@ func TestSignerErrorTextIsDropped(t *testing.T) {
 		"not found": {fmt.Errorf("%s: %w", echoed, providers.ErrNotFound), providers.IsNotFound},
 		"canceled":  {fmt.Errorf("%s: %w", echoed, context.Canceled), func(err error) bool { return errors.Is(err, context.Canceled) }},
 		"deadline":  {fmt.Errorf("%s: %w", echoed, context.DeadlineExceeded), func(err error) bool { return providers.IsRetryable(err) && errors.Is(err, context.DeadlineExceeded) }},
+		"deadline with delay": {&providers.RetryableError{RetryAfter: 5 * time.Second, Err: fmt.Errorf("%s: %w", echoed, context.DeadlineExceeded)}, func(err error) bool {
+			d, ok := providers.RetryAfter(err)
+			return ok && d == 5*time.Second && errors.Is(err, context.DeadlineExceeded)
+		}},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -838,5 +852,17 @@ func TestSignerErrorTextIsDropped(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The repository name comes from configuration. A credential pasted there by mistake must not reach an error.
+func TestRepositoryNameNotInErrors(t *testing.T) {
+	const name = "ghp_MISPLACEDSECRET0123456789"
+	for _, status := range []int{401, 403, 404, 422, 500} {
+		e := setupRepo(t, name, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) })
+		_, err := e.src.Token(context.Background())
+		if err == nil || strings.Contains(fmt.Sprintf("%v|%+v|%#v", err, err, err), name) {
+			t.Fatalf("status %d: %v", status, err)
+		}
 	}
 }

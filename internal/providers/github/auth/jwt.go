@@ -86,7 +86,8 @@ func signerError(err error) error {
 	case errors.Is(err, context.Canceled):
 		return fmt.Errorf("%s: %w", msg, context.Canceled)
 	case errors.Is(err, context.DeadlineExceeded):
-		return &providers.RetryableError{Err: fmt.Errorf("%s: %w", msg, context.DeadlineExceeded)}
+		after, _ := providers.RetryAfter(err)
+		return &providers.RetryableError{RetryAfter: after, Err: fmt.Errorf("%s: %w", msg, context.DeadlineExceeded)}
 	case providers.IsRetryable(err):
 		after, _ := providers.RetryAfter(err)
 		return &providers.RetryableError{RetryAfter: after, Err: errors.New(msg)}

@@ -278,7 +278,9 @@ func (s *Source) fetch(ctx context.Context) (Token, time.Time, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	op := "installation token for " + s.repo.String()
+	// A fixed label: the repository name comes from configuration, and a misplaced credential there must not
+	// reach an error.
+	const op = "GitHub installation token"
 	if resp.StatusCode != http.StatusCreated {
 		// Drain nothing: the body is never read on failure, so no response text can reach an error.
 		return Token{}, time.Time{}, s.statusError(op, resp)
@@ -296,14 +298,16 @@ func (s *Source) fetch(ctx context.Context) (Token, time.Time, error) {
 
 // classifyCtx marks a deadline hit while signing as retryable.
 func (s *Source) classifyCtx(err error) error {
-	if errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.DeadlineExceeded) && !providers.IsRetryable(err) {
 		return &providers.RetryableError{Err: err}
 	}
 	return err
 }
 
 func (s *Source) requestError(ctx context.Context, err error) error {
-	op := "installation token for " + s.repo.String()
+	// A fixed label: the repository name comes from configuration, and a misplaced credential there must not
+	// reach an error.
+	const op = "GitHub installation token"
 	switch {
 	case errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return &providers.RetryableError{Err: fmt.Errorf("%s: %w", op, context.DeadlineExceeded)}

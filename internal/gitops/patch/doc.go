@@ -24,6 +24,7 @@ limitations under the License.
 //
 // Anything the splice cannot do safely is refused with an [Error] and never guessed: an anchor, alias, merge
 // key or flow collection on the path, a tag on the value, a value that is not a plain, single-quoted or
-// double-quoted scalar, a duplicate key, no or several matching objects or containers, and input over
+// double-quoted scalar, a duplicate key, an identity field (apiVersion, kind, metadata, name, namespace) of any
+// document that uses an anchor, alias, merge key or explicit tag, no or several matching objects or containers, and input over
 // [MaxBytes]. Errors never contain text from the document, which may be untrusted.
 package patch

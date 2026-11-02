@@ -184,16 +184,19 @@ func findDocument(docs []*yaml.Node, target v1alpha1.ObjectRef) (int, error) {
 // checkIdentity refuses a document whose apiVersion, kind or metadata.name and namespace come from an
 // anchor, alias or merge key, since reading the source text would then miss what the object really is.
 func checkIdentity(root *yaml.Node) error {
-	unsupported := refuse(ReasonUnsupported, "a document takes its identity from an anchor, alias or merge key")
+	unsupported := refuse(ReasonUnsupported, "a document takes its identity from an anchor, alias, merge key or explicit tag")
+	// An explicit tag changes what a scalar decodes to (!!binary turns base64 text into the name), so the
+	// source text the matching reads would not be the identity Kubernetes sees.
+	tagged := func(n *yaml.Node) bool { return n.Style&yaml.TaggedStyle != 0 }
 	merged := func(m *yaml.Node) bool {
 		for i := 0; i+1 < len(m.Content); i += 2 {
-			if k := m.Content[i]; k.Tag == "!!merge" || k.Kind != yaml.ScalarNode || k.Anchor != "" {
+			if k := m.Content[i]; k.Tag == "!!merge" || k.Kind != yaml.ScalarNode || k.Anchor != "" || tagged(k) {
 				return true
 			}
 		}
 		return false
 	}
-	indirect := func(n *yaml.Node) bool { return n.Kind == yaml.AliasNode || n.Anchor != "" }
+	indirect := func(n *yaml.Node) bool { return n.Kind == yaml.AliasNode || n.Anchor != "" || tagged(n) }
 	if merged(root) {
 		return unsupported
 	}

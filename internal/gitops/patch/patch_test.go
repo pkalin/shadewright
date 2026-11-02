@@ -278,11 +278,14 @@ func TestInvalidInput(t *testing.T) {
 func TestIdentityFromAliasOrMergeRefused(t *testing.T) {
 	dep := string(read(t, "deployment.yaml"))
 	docs := map[string]string{
-		"alias name":     "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: *n\n  namespace: orders\n",
-		"merge name":     "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  <<: {name: orders-worker}\n  namespace: orders\n",
-		"alias metadata": "apiVersion: apps/v1\nkind: Deployment\nmetadata: *m\n",
-		"merge at root":  "<<: {kind: Deployment}\napiVersion: apps/v1\nmetadata:\n  name: orders-worker\n  namespace: orders\n",
-		"anchored kind":  "apiVersion: apps/v1\nkind: &k Deployment\nmetadata:\n  name: orders-worker\n  namespace: orders\n",
+		"alias name":      "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: *n\n  namespace: orders\n",
+		"merge name":      "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  <<: {name: orders-worker}\n  namespace: orders\n",
+		"alias metadata":  "apiVersion: apps/v1\nkind: Deployment\nmetadata: *m\n",
+		"merge at root":   "<<: {kind: Deployment}\napiVersion: apps/v1\nmetadata:\n  name: orders-worker\n  namespace: orders\n",
+		"anchored kind":   "apiVersion: apps/v1\nkind: &k Deployment\nmetadata:\n  name: orders-worker\n  namespace: orders\n",
+		"binary name":     "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: !!binary b3JkZXJzLXdvcmtlcg==\n  namespace: orders\n",
+		"tagged str name": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: !!str orders-worker\n  namespace: orders\n",
+		"binary key":      "apiVersion: apps/v1\nkind: Deployment\n!!binary bWV0YWRhdGE=:\n  name: orders-worker\n  namespace: orders\n",
 	}
 	for name, doc := range docs {
 		t.Run(name, func(t *testing.T) {

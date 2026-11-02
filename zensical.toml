@@ -14,6 +14,9 @@ nav = [
   { "Home" = "index.md" },
   { "Design" = "design.md" },
   { "The name" = "name.md" },
+  { "Reference" = [
+    { "API" = "reference/api.md" },
+  ] },
   { "Decisions" = [
     { "Overview" = "adr/index.md" },
     { "0001 Record decisions" = "adr/0001-record-architecture-decisions.md" },

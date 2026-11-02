@@ -76,6 +76,10 @@ type ChangeRequest struct {
 	MergeCommit string
 }
 
+// MaxFileBytes is the largest file GitProvider.ReadFile returns. Shadewright edits small manifests; a
+// larger file is refused with ErrTooLarge before its content is downloaded.
+const MaxFileBytes = 1 << 20
+
 // GitProvider is one repository on a Git host. An instance is bound to exactly one repository at
 // construction, so no method can reach another repository.
 //
@@ -85,7 +89,11 @@ type GitProvider interface {
 	// Capabilities reports what this host supports.
 	Capabilities() GitCapabilities
 
-	// ReadFile returns a file at a commit. ErrNotFound when the commit or path does not exist.
+	// ReadFile returns the content of a regular file at a commit. ErrNotFound when the commit or path does
+	// not exist, or when the path is not a regular file: a directory, a submodule or a symbolic link, which is
+	// never followed. ErrTooLarge when the file is larger than MaxFileBytes: implementations check the size
+	// the host reports before downloading the content, and stop reading a stream after MaxFileBytes+1 bytes,
+	// so a large file in the repository cannot exhaust memory.
 	ReadFile(ctx context.Context, commit, path string) (File, error)
 
 	// BranchHead returns the commit at the head of a branch. ErrNotFound when the branch does not exist.

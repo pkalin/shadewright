@@ -1,0 +1,12 @@
+# Copyright 2026 The Shadewright Authors.
+# SPDX-License-Identifier: Apache-2.0
+#
+# crd-ref-docs configuration for docs/reference/api.md (make api-docs).
+processor:
+  ignoreTypes:
+    - "List$"
+  ignoreFields:
+    - "TypeMeta$"
+render:
+  # Links to the Kubernetes API reference; keep in step with k8s.io/api in go.mod.
+  kubernetesVersion: "1.37"

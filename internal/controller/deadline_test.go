@@ -156,6 +156,7 @@ func TestPolicyCheckCallerCancellationIsDistinct(t *testing.T) {
 func staleWorld(t *testing.T) (client.Client, *remediationv1alpha1.RemediationRequest) {
 	t.Helper()
 	settings := fx.RemediationSettings()
+	settings.Spec.Repositories[0].TargetBranch = mainBranch // the API server's default; the fake client sets none
 	rr := fx.MemoryLimitRequest(requestNamespace, "rr")
 	rr.Spec.PolicyRef = "gone"
 	rr.Status.Phase = remediationv1alpha1.PhasePolicyChecked

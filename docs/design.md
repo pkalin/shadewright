@@ -1,6 +1,6 @@
 # Design
 
-Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the GitHub and Key Vault adapters (not yet called by the executor) and the RBAC of sections 2.2 and 10. Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
+Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the GitHub and Key Vault adapters (the executor uses them to read Git; it does not write to Git yet) and the RBAC of sections 2.2 and 10. Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
 
 ## 1. Goals
 
@@ -286,7 +286,7 @@ Schema and admission rules:
 - `policyRef` points to admin-managed configuration, and the policy decides which namespaces may use it (`requestNamespaces`). The model never chooses a URL, host, branch or credential reference.
 - The target namespace and object are authorized independently, including cross-namespace references.
 - Any change to the plan, resolved source, repository settings or policy invalidates an earlier approval. The digest covers the semantic change, the target UID, the resolved source with the repository URL and installation from settings, and the policy UID and generation (a recreated policy can reach the same generation again, never the same UID). It is `sha256:` over a versioned canonical encoding: every field labelled, length-prefixed and in a fixed order, and memory quantities written by value, so `256Mi` and `268435456` give the same digest (`internal/policy/digest`).
-- The digest is fixed when the branch is created: the policy check stores it in `status.planDigest` in the same status write that sets `PolicyChecked`, from the very policy, settings and source the decision was made on, and the branch is created from `status.source.baseCommit`. Later merges to the target branch do not change it: before each write the controller checks that the target file at the branch head still holds the previous value. If an input of the digest changes, the request becomes `Superseded`, its PR is closed and a new request is needed; the branch is never rebuilt or force-pushed. The check (`internal/policy/freshness`) reads the policy and settings from the API server, never the cache, compares the policy UID and generation and recomputes the digest from the live settings, confirms the target still has the planned UID, and reads the target file at the head of the target branch (not of the PR branch). Any error reading an input is "not fresh": the write waits and is retried, and only a definite change supersedes. While `RemediationSettings.spec.paused` is set the write waits too. Closing the change request is idempotent and happens before the status write, and the condition `PlanFresh` records the reason.
+- The digest is fixed when the branch is created: the policy check stores it in `status.planDigest` in the same status write that sets `PolicyChecked`, from the very policy, settings and source the decision was made on, and the branch is created from `status.source.baseCommit`. Later merges to the target branch do not change it: before each write the controller checks that the target file at the branch head still holds the previous value. If an input of the digest changes, the request becomes `Superseded`, its PR is closed and a new request is needed; the branch is never rebuilt or force-pushed. The check (`internal/policy/freshness`) reads the policy and settings from the API server, never the cache, compares the policy UID and generation and recomputes the digest from the live settings, confirms the target still has the planned UID, and reads the target file at the head of the target branch (not of the PR branch). Any error reading an input is "not fresh": the write waits and is retried, and only a definite change supersedes. The one exception is repository settings that can never open a Git provider: they end the request in `NeedsIntervention` (`RepositoryUnusable`) without closing anything. While `RemediationSettings.spec.paused` is set the write waits too. Closing the change request is idempotent and happens before the status write, and the condition `PlanFresh` records the reason.
 - Verification can only be made stricter: the controller always runs the checks the action needs, `stableFor` is at least 1m, and `timeout` is at most 24h and longer than `stableFor`.
 - `approvalRequired: false` is a request for automation, not a way to lower central policy.
 - The whole spec is immutable: a different plan is a new request, so an approval can never carry over to a changed plan.
@@ -353,7 +353,7 @@ One cluster-scoped object named `default`. It holds the kill switch (`paused`, c
 
 Other terminal or waiting phases: `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded`, `NeedsIntervention`. Conditions explain why; `phase` is a summary for humans.
 
-The transitions between phases. The API defines every phase below. The executor sets the first step only: a `Pending` request (or one without a phase yet) becomes `PolicyChecked`, `Denied` or `NeedsIntervention` in one status write; the later phases are designed but not built.
+The transitions between phases. The API defines every phase below. The executor sets the first step: a `Pending` request (or one without a phase yet) becomes `PolicyChecked`, `Denied` or `NeedsIntervention` in one status write. It also re-checks the freshness of a decided request before merge every five minutes (and at once on any change to the request), so a stale plan becomes `Superseded`, or `NeedsIntervention` if its repository settings became unusable, without waiting for a write. The other later phases are designed but not built.
 
 ```mermaid
 stateDiagram-v2
@@ -395,9 +395,10 @@ The policy check, the first step, loads the policy the request names, the `defau
 | The live object does not set the field the action changes | `NeedsIntervention` (`FieldNotFound`) | `Unknown` |
 | Source mapping denies (repository, branch, path or inventory) or `policy.Decide` denies | `Denied`, reason of the check | `False` |
 | Source mapping needs a human (Helm, patches, missing target, unknown Flux shape), or the target got another UID while the mapping ran (`TargetChanged`) | `NeedsIntervention`, reason of the mapping | `Unknown` |
+| The matching repository's settings cannot open a Git provider (a value the schema accepts but the adapter refuses, such as an App client ID outside `[A-Za-z0-9._-]` or a target branch starting with `_` or longer than 200 characters) | `NeedsIntervention`, `RepositoryUnusable` | `Unknown` |
 | All checks pass | `PolicyChecked`, `WithinApprovedBounds` | `True` |
 
-Only a failure worth retrying (API server or Git host) is retried, with backoff, or after the delay the host asked for (`Retry-After`); every permanent refusal is a final phase. While a retry is pending the request keeps no phase (or `Pending`) and no `PolicyAllowed` condition. The retry limit is planned, and so is the executor's connection to the GitHub adapter: until it is wired in `cmd/main.go`, every request that passes the cluster-side checks fails to read Git and is retried with backoff. The policy and settings are read from the API server on every check, never from the cache, so a deleted policy or a tightened setting takes effect at once. Messages and conditions never carry Git URLs or provider text.
+Only a failure worth retrying (API server, Git host, or a signer that cannot get a token yet) is retried, with backoff, or after the delay the host asked for (`Retry-After`); every permanent refusal is a final phase, settings that can never open a Git provider included (the same refusal ends a later freshness check in `NeedsIntervention`, `PlanFresh` reason `RepositoryUnusable`, without closing anything). While a retry is pending the request keeps no phase (or `Pending`) and no `PolicyAllowed` condition. The retry limit is planned. The policy and settings are read from the API server on every check, never from the cache, so a deleted policy or a tightened setting takes effect at once. Messages and conditions never carry Git URLs or provider text.
 
 Every external call of a step runs under the step's own deadline: the policy check (the uncached reads and the source resolver together) and, separately, the freshness check and the cleanup of a stale plan (open the repository, find and close the change request, as one sequence). A step that reaches its deadline returns a retryable error and keeps the request in its phase; it never ends in a final phase. The caller's own cancellation stays a different error, so shutdown is not reported as a timeout.
 
@@ -419,7 +420,7 @@ Required mechanisms:
 - Retries with exponential backoff, jitter and `Retry-After`, with a limit (the limit is planned).
 - Deadlines for policy, PR, delivery and verification, stored in status.
 - No model call during reconcile when the context did not change.
-- Policy and plan freshness re-checked right before every write: same policy UID and generation, same settings, the source mapping (ADR-0012) run again with the policy check's resolver still gives the recorded repository, branch and file (the base commit is not compared, because it moves with every merge), and the target file still holds the previous value. The mapping reads the Flux Kustomization and GitRepository again after scanning Git and retries if either changed, and the freshness check, after its last Git read, reads the branch head again, then the target and those Flux objects, and last the policy and settings (a pause returns "paused", any other change a retry) before it says fresh. A mapping error is "not fresh" and is retried, never stale; a mapping that now denies or needs a person is stale (`SourceChanged`), never fresh. A stale plan becomes `Superseded` and its change request is closed (once, idempotently), never a rebuilt branch. The step is `EnsureFresh` in the controller; the later state machine calls it before each write.
+- Policy and plan freshness re-checked right before every write: same policy UID and generation, same settings, the source mapping (ADR-0012) run again with the policy check's resolver still gives the recorded repository, branch and file (the base commit is not compared, because it moves with every merge), and the target file still holds the previous value. The mapping reads the Flux Kustomization and GitRepository again after scanning Git and retries if either changed, and the freshness check, after its last Git read, reads the branch head again, then the target and those Flux objects, and last the policy and settings (a pause returns "paused", any other change a retry) before it says fresh. A mapping error is "not fresh" and is retried, never stale; a mapping that now denies or needs a person is stale (`SourceChanged`), never fresh. A stale plan becomes `Superseded` and its change request is closed (once, idempotently), never a rebuilt branch. The close happens only in the repository the plan was made for (same URL and installation) and against its recorded target branch: if that entry is gone or now names another target branch, nothing is closed and the request ends in `NeedsIntervention` (`RepositoryUnavailable` or `TargetBranchChanged`). The step is `EnsureFresh` in the controller; the later state machine calls it before each write, and the reconcile runs it every five minutes for a decided request before merge.
 - Auto-merge disabled when the request is cancelled before merge. After merge, undoing needs a separate revert PR.
 
 A finalizer is used only where deleting the CR needs bounded external cleanup (closing an open PR, disabling auto-merge). Deleting the CR never rolls back a deployment.
@@ -464,17 +465,17 @@ Fully automatic merges happen only where the repository owner deliberately allow
 7. Bind the PR to the request UID and plan digest. Any new push to the branch invalidates the plan.
 8. After merge, follow delivery and the success criteria instead of stopping at "merged".
 
-Opening the change on GitHub, steps 2 to 7 above. Steps marked *(planned)* are designed but not built yet. Signing, the token exchange, reading the head, creating the branch, committing and opening the pull request are built as adapters (`internal/providers/signer/azurekv`, `internal/providers/github/auth`, `internal/providers/github`) with their own tests, but the executor does not call them yet. Auto-merge is not built in any adapter (`EnableAutoMerge` returns an error and `Capabilities()` reports no auto-merge, #20). *(planned)* means not called by the running operator. The GitHub App key never leaves Key Vault ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)); every write names the state it expects, so a restart or a race finds the existing work instead of repeating it.
+Opening the change on GitHub, steps 2 to 7 above. Steps marked *(planned)* are designed but not built yet. Signing, the token exchange and reading the head are called by the executor, for the source mapping and the freshness check. Creating the branch, committing and opening the pull request are built in the adapter (`internal/providers/github`) with its own tests, but the executor does not call them yet. Auto-merge is not built in any adapter (`EnableAutoMerge` returns an error and `Capabilities()` reports no auto-merge, #20). *(planned)* means not called by the running operator. The GitHub App key never leaves Key Vault ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)); every write names the state it expects, so a restart or a race finds the existing work instead of repeating it.
 
 ```mermaid
 sequenceDiagram
     participant E as Executor
     participant V as Key Vault
     participant G as GitHub
-    E->>V: Sign the App JWT, RS256 (planned)
+    E->>V: Sign the App JWT, RS256
     V-->>E: Signature
-    E->>G: Exchange the JWT for a one-hour installation token, scoped to the one repository (planned)
-    E->>G: Read the head SHA of targetBranch (planned)
+    E->>G: Exchange the JWT for a one-hour installation token, scoped to the one repository
+    E->>G: Read the head SHA of targetBranch
     E->>G: Create branch shadewright/#lt;request-uid#gt; at that SHA (planned)
     Note over E,G: An existing branch at that SHA is success, at another SHA a conflict
     E->>G: Commit the file, expecting that head (planned)
@@ -494,7 +495,7 @@ sequenceDiagram
     end
 ```
 
-The GitHub steps are done by the `GitProvider` adapter in `internal/providers/github`; the executor phase that drives them (`PRCreated`) is not wired yet. The adapter is bound to one repository and its `targetBranch`, and refuses anything else before sending a request:
+The GitHub steps are done by the `GitProvider` adapter in `internal/providers/github`; the executor already uses it to read Git (head of the branch and files) for the source mapping and the freshness check, signing through Key Vault with workload identity; the phase that writes (`PRCreated`: branch, commit, pull request, auto-merge) is not wired yet. One provider per repository entry is kept across reconciles, so the token cache survives; it is built on first use from the entry (URL, installation ID, App client ID, key ID, target branch), rebuilt when the entry changes and dropped when it leaves the settings (`internal/providers/registry`). The adapter is bound to one repository and its `targetBranch`, and refuses anything else before sending a request:
 
 - It writes only to branches named `shadewright/<name>`. A new branch must start at the head of `targetBranch` or an ancestor of it, so a commit of a fork or another branch cannot become the base.
 - The commit is built with the Git data API (blob, tree, commit, keeping the file mode) on top of the expected head, and the branch moves with GraphQL `updateRefs`: an atomic compare-and-swap on the expected head, without force. A head that moved in any direction, a rewind to an ancestor included, is a conflict; the update never forces.
@@ -522,7 +523,8 @@ The GitHub App enables auto-merge (GraphQL `enablePullRequestAutoMerge`, squash)
 
 - **Analyzer:** its own managed identity with only the inference role on the model deployment and permission to create blobs in the analysis records container (ADR-0015). Token audience must match the endpoint.
 - **Executor:** its own managed identity with permission to *sign* with one Key Vault key. The GitHub App private key is imported into Key Vault as a non-exportable key; the executor signs the App JWT through Key Vault and exchanges it for a one-hour installation token. The private key never exists in the pod or in a Kubernetes Secret ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)). The JWT is issued 60 seconds in the past and lives 10 minutes in total; the token request names the one repository and the four permissions of section 8.4, and the response is refused unless it lists exactly that repository. The token is cached until 5 minutes before it expires, concurrent callers share one refresh, and it prints as a placeholder (`internal/providers/github/auth`).
-- Federated credentials use subject `system:serviceaccount:<namespace>:<serviceaccount>` and audience `api://AzureADTokenExchange` ([AKS workload identity](https://learn.microsoft.com/en-us/azure/aks/workload-identity-overview)).
+- Federated credentials use subject `system:serviceaccount:<namespace>:<serviceaccount>` and audience `api://AzureADTokenExchange` ([AKS workload identity](https://learn.microsoft.com/en-us/azure/aks/workload-identity-overview)). With `config/` the executor's subject is `system:serviceaccount:shadewright-system:shadewright-executor` (the lab default once pkalin/shadewright-azure#7 is merged; until then set `executor_service_account` to `shadewright-executor` in the lab tfvars).
+- The executor pod carries the label `azure.workload.identity/use: "true"` and its ServiceAccount the annotation `azure.workload.identity/client-id` with the executor identity's client ID (a placeholder in `config/`, set by the deployer). Without them the executor cannot sign, and every repository open fails as a transient error that is retried with backoff, so requests wait in their phase and the log shows the failure. The repository settings are validated before the signer is built, so an entry the adapter refuses is still reported as `RepositoryUnusable`, not retried.
 - In Go: `azidentity.WorkloadIdentityCredential` (or a deliberately configured `DefaultAzureCredential`).
 - No PATs, no client secrets, no long-lived API keys. Tokens for Foundry, Key Vault and GitHub are never interchangeable.
 
@@ -570,11 +572,11 @@ flowchart TB
     pol -- read --> ex
     tgt -- read --> ex
     ex -- update --> rrs
-    ex -. sign .-> kv
+    ex -- sign --> kv
     sec -- no access --x an
     sec -- no access --x ex
     classDef planned stroke-dasharray: 5 5
-    class fm,kv planned
+    class fm planned
 ```
 
 Each identity also has its own leader election Lease, which only it can renew.

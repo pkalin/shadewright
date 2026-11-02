@@ -21,7 +21,8 @@ limitations under the License.
 // [Checker.Fresh] runs right before every write and answers one question: is the world still the one the
 // digest was made for? It is fail closed. Only a definite change is a [StaleError], which makes the request
 // Superseded; any other error (an API or Git host failure, a paused system, a missing digest) also stops the
-// write but says nothing about the plan, so the caller retries.
+// write but says nothing about the plan, so the caller retries. The exception is [ErrRepositoryUnusable]:
+// settings that can never open the repository end the request in NeedsIntervention without closing anything.
 package freshness
 
 import (
@@ -62,6 +63,11 @@ const (
 
 // readTimeout bounds the reads one check makes of the Git host.
 const readTimeout = 30 * time.Second
+
+// ErrRepositoryUnusable means the settings entry of the plan's repository cannot be used to open a Git
+// provider (wrong provider, no signer, malformed key ID). It is permanent: the plan can be neither checked nor
+// closed until an administrator fixes the settings, so retrying would never end.
+var ErrRepositoryUnusable = errors.New("the repository settings cannot be used to open it")
 
 // ErrPaused means RemediationSettings pauses every write. The plan is not stale; the write waits.
 var ErrPaused = errors.New("remediation is paused")
@@ -456,6 +462,9 @@ func (c Checker) checkFile(ctx context.Context, rr *v1alpha1.RemediationRequest,
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	git, err := c.OpenRepository(ctx, repo)
+	if providers.IsInvalidConfig(err) {
+		return ErrRepositoryUnusable
+	}
 	if err != nil {
 		return provider("open the repository", err)
 	}

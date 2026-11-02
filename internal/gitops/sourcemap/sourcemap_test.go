@@ -104,6 +104,8 @@ type fixture struct {
 	// gitWrap, when set, wraps the fake repository, for providers that break the GitProvider contract.
 	gitWrap func(providers.GitProvider) providers.GitProvider
 	getErr  error
+	// openErr, when set, is what the repository opener returns.
+	openErr error
 	// duringGit runs on the first read of the branch head, to change the cluster while Git is scanned.
 	duringGit func(c client.Client)
 }
@@ -267,6 +269,9 @@ func (f *fixture) run(t *testing.T) (sourcemap.Result, string, error) {
 		OpenRepository: func(_ context.Context, repo v1alpha1.GitRepository) (providers.GitProvider, error) {
 			if repo.Name != "fleet" {
 				return nil, fmt.Errorf("opened repository %s", repo.Name)
+			}
+			if f.openErr != nil {
+				return nil, f.openErr
 			}
 			if f.duringGit != nil {
 				return onHead{GitProvider: git, fn: func() { f.duringGit(cl) }}, nil
@@ -980,5 +985,36 @@ func TestResolveRetriesWhenFluxObjectsChangeDuringTheScan(t *testing.T) {
 				t.Error("a source was returned with the error")
 			}
 		})
+	}
+}
+
+// TestResolveStopsOnUnusableRepositorySettings checks that settings the opener calls permanently unusable end
+// in NeedsIntervention at once, not in an endless retry, and that the opener's text never reaches the result.
+func TestResolveStopsOnUnusableRepositorySettings(t *testing.T) {
+	const secret = "ghp_s3cr3tT0ken"
+	f := newFixture()
+	f.openErr = fmt.Errorf("https://x-access-token:%s@github.com/example/fleet: %w", secret, providers.ErrInvalidConfig)
+	res, _, err := f.run(t)
+	if err != nil {
+		t.Fatalf("error = %v, want none: a permanent refusal is a result, not a retry", err)
+	}
+	if res.Outcome != sourcemap.NeedsIntervention || res.Reason != sourcemap.ReasonRepositoryUnusable {
+		t.Fatalf("result = %+v", res)
+	}
+	for _, leak := range []string{secret, "github.com", "x-access-token", "://"} {
+		if strings.Contains(res.Message, leak) {
+			t.Errorf("message %q contains %q", res.Message, leak)
+		}
+	}
+}
+
+// TestResolveRetriesOtherOpenerErrors checks that an opener error that is not a settings refusal is still
+// retried.
+func TestResolveRetriesOtherOpenerErrors(t *testing.T) {
+	f := newFixture()
+	f.openErr = errors.New("workload identity is not available")
+	_, _, err := f.run(t)
+	if !errors.Is(err, sourcemap.ErrTransient) {
+		t.Fatalf("error = %v, want ErrTransient", err)
 	}
 }

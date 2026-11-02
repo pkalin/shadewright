@@ -40,8 +40,18 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
+// The repository settings cannot be used to open a Git provider: permanent, so the request stops.
+const (
+	reasonRepositoryUnusable  = "RepositoryUnusable"
+	messageRepositoryUnusable = "The plan cannot be checked and its change request, if any, was not closed: " +
+		"the settings of its repository cannot be used to open it"
+)
+
 // settingsName is the name of the one RemediationSettings object.
-const settingsName = "default"
+const settingsName = SettingsName
+
+// SettingsName is the name of the one RemediationSettings object, for the executor's wiring.
+const SettingsName = "default"
 
 // Reasons the controller itself gives for a refusal, next to the reasons of package policy and sourcemap.
 const (
@@ -133,6 +143,10 @@ const freshRecheckInterval = 5 * time.Minute
 // errRepositoryGone means the repository a plan was made for is not in the settings any more (or was never
 // recorded), so its change request cannot be closed safely.
 var errRepositoryGone = errors.New("the repository of the plan is not configured")
+
+// errTargetBranchChanged means the repository entry of the plan now names another target branch. Its provider
+// is bound to the new branch and must not touch a change request against the old one, so nothing is closed.
+var errTargetBranchChanged = errors.New("the target branch of the plan's repository changed")
 
 // reader returns the uncached reader, or the client when none is set.
 func (r *RemediationRequestReconciler) reader() client.Reader {
@@ -467,33 +481,45 @@ func (r *RemediationRequestReconciler) EnsureFresh(ctx context.Context, rr *reme
 	}
 	freshCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	err := freshness.Checker{Reader: r.reader(), OpenRepository: r.OpenRepository, Source: r.Source}.Fresh(freshCtx, rr)
-	// A verdict that arrives after the deadline, stale included, is not acted on: a read may have been cut short.
+	// A verdict that arrives after the deadline, stale and unusable included, is not acted on: a read may have
+	// been cut short.
 	if err != nil {
 		err = boundErr(ctx, freshCtx, "freshness check", err)
 	}
 	cancel()
-	staleErr, ok := errors.AsType[*freshness.StaleError](err)
-	if !ok {
-		return err
-	}
-	phase, reason, message := remediationv1alpha1.PhaseSuperseded, staleErr.Reason, staleErr.Message
-	// The whole cleanup shares one deadline: reading the settings, opening the repository, finding and closing
-	// the change request.
-	cleanCtx, cleanCancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
-	closeErr := r.closeChangeRequest(cleanCtx, rr)
-	// Every result, nil and errRepositoryGone included, is checked against the deadline before a final phase is
-	// written from it.
-	closeErr = boundErr(ctx, cleanCtx, "cleanup of the change request", closeErr)
-	cleanCancel()
-	switch err := closeErr; {
-	case errors.Is(err, errRepositoryGone):
-		// Nothing is closed: the only change request this plan could have is in a repository that cannot be
-		// reached through the settings any more, and closing a number elsewhere could close someone else's.
-		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, "RepositoryUnavailable"
-		message = "The plan is stale and the repository it was made for is not configured any more; " +
-			"its change request, if any, was not closed"
-	case err != nil:
-		return err
+	phase, reason, message := remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnusable, messageRepositoryUnusable
+	if !errors.Is(err, freshness.ErrRepositoryUnusable) {
+		staleErr, ok := errors.AsType[*freshness.StaleError](err)
+		if !ok {
+			return err
+		}
+		phase, reason, message = remediationv1alpha1.PhaseSuperseded, staleErr.Reason, staleErr.Message
+		// The whole cleanup shares one deadline: reading the settings, opening the repository, finding and
+		// closing the change request.
+		cleanCtx, cleanCancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
+		closeErr := r.closeChangeRequest(cleanCtx, rr)
+		// Every result, nil and errRepositoryGone included, is checked against the deadline before a final phase
+		// is written from it.
+		closeErr = boundErr(ctx, cleanCtx, "cleanup of the change request", closeErr)
+		cleanCancel()
+		switch err := closeErr; {
+		case errors.Is(err, freshness.ErrRepositoryUnusable):
+			// The settings of the repository cannot be used, so the change request cannot be closed either.
+			phase, reason, message = remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnusable,
+				messageRepositoryUnusable
+		case errors.Is(err, errTargetBranchChanged):
+			phase, reason = remediationv1alpha1.PhaseNeedsIntervention, "TargetBranchChanged"
+			message = "The plan is stale and its repository now targets another branch; " +
+				"its change request, if any, was not closed"
+		case errors.Is(err, errRepositoryGone):
+			// Nothing is closed: the only change request this plan could have is in a repository that cannot be
+			// reached through the settings any more, and closing a number elsewhere could close someone else's.
+			phase, reason = remediationv1alpha1.PhaseNeedsIntervention, "RepositoryUnavailable"
+			message = "The plan is stale and the repository it was made for is not configured any more; " +
+				"its change request, if any, was not closed"
+		case err != nil:
+			return err
+		}
 	}
 	rr.Status.Phase = phase
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
@@ -514,7 +540,7 @@ func (r *RemediationRequestReconciler) EnsureFresh(ctx context.Context, rr *reme
 // closeChangeRequest closes the request's change request, if it has one, in the repository the plan was made
 // for and nowhere else. A change request that is already closed, or that was never opened, is not an error; a
 // merged one is, because the change landed. It returns [errRepositoryGone] when that repository is not in the
-// settings, and [freshness.ErrPaused] when the settings read now pause writes.
+// settings, [errTargetBranchChanged] when its entry now names another target branch, and [freshness.ErrPaused] when the settings read now pause writes.
 func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	if r.OpenRepository == nil {
 		return errors.New("cannot close the change request: no Git provider")
@@ -533,7 +559,13 @@ func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, r
 	if !ok {
 		return errRepositoryGone
 	}
+	if src := rr.Status.Source; src != nil && repo.TargetBranch != src.TargetBranch {
+		return errTargetBranchChanged
+	}
 	git, err := r.OpenRepository(ctx, repo)
+	if providers.IsInvalidConfig(err) {
+		return freshness.ErrRepositoryUnusable
+	}
 	if err != nil {
 		return freshness.WrapProvider("open the repository", err)
 	}

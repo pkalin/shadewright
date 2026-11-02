@@ -9,7 +9,7 @@ The executor changes one field of one manifest per request ([design 8.2](../desi
 
 The design left the library open, leaning towards `kyaml`. Four approaches were compared with a spike (`hack/yamlpatch-spike`, its own Go module, not shipped). It patches `resources.limits.memory` of container `web` from `512Mi` to `768Mi` in a two-document file with comments, a blank line, a flow map and sequence, quoted and literal block scalars, a non-indented sequence and an anchor, then decodes both files to check that only the target value changed. A second sample puts the target inside an anchored map that another container reuses through an alias, where any edit also changes the alias.
 
-| | Typed round-trip (`sigs.k8s.io/yaml` v1.6.0) | `kyaml` v0.21.3 | `goccy/go-yaml` v1.19.2 | Splice (`go.yaml.in/yaml/v3` v3.0.6) |
+| | Typed round-trip (`sigs.k8s.io/yaml` v1.6.0) | `kyaml` v0.21.2 | `goccy/go-yaml` v1.19.2 | Splice (`go.yaml.in/yaml/v3` v3.0.6) |
 | --- | --- | --- | --- | --- |
 | Lines changed in the diff | 40 | 4 | 4 | 2 |
 | Comments | All lost | Kept, spacing before them collapsed | The one on the changed line lost | Kept |

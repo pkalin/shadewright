@@ -17,6 +17,7 @@ package sourcemap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -78,7 +79,28 @@ func (r *Resolver) Resolve(ctx context.Context, in Input) (Result, error) {
 	if stop != nil || err != nil {
 		return deref(stop), err
 	}
-	return r.declaration(ctx, fld, in.GitOps, id, live, d)
+	res, err := r.declaration(ctx, fld, in.GitOps, id, live, d)
+	if err != nil || res.Outcome != Resolved {
+		return res, err
+	}
+	// Scanning Git can take long. The Kustomization and GitRepository chose the repository, branch and path that
+	// were scanned; if either changed meanwhile, the result describes a delivery that no longer exists. A
+	// transient error makes the caller read everything again.
+	for _, o := range d.seen {
+		now, stop, err := r.get(ctx, o.gvk, o.namespace, o.name, ReasonSourceNotFound)
+		if err != nil {
+			return Result{}, err
+		}
+		if stop != nil || string(now.GetUID()) != o.uid || now.GetResourceVersion() != o.resourceVersion {
+			return Result{}, transient(fmt.Sprintf("%s %s/%s changed while Git was scanned", o.gvk.Kind, o.namespace, o.name),
+				errors.New("changed"))
+		}
+	}
+	for _, o := range d.seen {
+		res.Observed = append(res.Observed, Observed{GVK: o.gvk, Namespace: o.namespace, Name: o.name,
+			UID: o.uid, ResourceVersion: o.resourceVersion})
+	}
+	return res, nil
 }
 
 // target validates the request's target and reads the live object.
@@ -107,6 +129,20 @@ type delivery struct {
 	branch string
 	ks     string
 	path   string
+	// seen are the Flux objects as read, to tell whether they changed while Git was scanned.
+	seen []seenObject
+}
+
+// seenObject is an object as it was read: its identity and version.
+type seenObject struct {
+	gvk                  schema.GroupVersionKind
+	namespace, name      string
+	uid, resourceVersion string
+}
+
+func seen(gvk schema.GroupVersionKind, namespace, name string, o *unstructured.Unstructured) seenObject {
+	return seenObject{gvk: gvk, namespace: namespace, name: name, uid: string(o.GetUID()),
+		resourceVersion: o.GetResourceVersion()}
 }
 
 // delivery follows the Flux labels to the Kustomization and its GitRepository (ADR-0012 steps 1 and 2).
@@ -148,7 +184,8 @@ func (r *Resolver) delivery(ctx context.Context, in Input, id identity, live *un
 	if stop != nil {
 		return delivery{}, stop, nil
 	}
-	return delivery{repo: repo, branch: branch, ks: ksNamespace + "/" + ksName, path: ksPath}, nil, nil
+	return delivery{repo: repo, branch: branch, ks: ksNamespace + "/" + ksName, path: ksPath, seen: []seenObject{
+		seen(KustomizationGVK, ksNamespace, ksName, ks), seen(GitRepositoryGVK, srcNamespace, srcName, src)}}, nil, nil
 }
 
 // declaration finds the one document in the Kustomization's path that declares the target and holds the live

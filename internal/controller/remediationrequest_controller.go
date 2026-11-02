@@ -77,6 +77,48 @@ type RemediationRequestReconciler struct {
 	// write and to close the change request of a superseded one. Nil disables the freshness step of Reconcile
 	// (no Git adapter yet); [RemediationRequestReconciler.EnsureFresh] then fails closed.
 	OpenRepository freshness.RepositoryOpener
+	// CheckTimeout bounds the policy check phase: the uncached reads and the source resolver together. Zero
+	// means [DefaultCheckTimeout].
+	CheckTimeout time.Duration
+	// CleanupTimeout bounds each of the freshness check and the cleanup of a stale plan (open the repository,
+	// find and close the change request), as a whole. Zero means [DefaultCleanupTimeout].
+	CleanupTimeout time.Duration
+}
+
+// Default deadlines of the phases that call external systems. Reconcile workers are bounded, so a stalled
+// read must not hold one for long.
+const (
+	DefaultCheckTimeout   = 2 * time.Minute
+	DefaultCleanupTimeout = 2 * time.Minute
+)
+
+// ErrTimeout means a phase reached its own deadline while the reconcile was still wanted. It is retryable: the
+// request keeps its phase and is tried again with backoff, never ended. A cancelled reconcile context is a
+// different error (context.Canceled).
+var ErrTimeout = errors.New("the step reached its deadline")
+
+// bound returns a context with the deadline d (def when d is zero).
+func bound(ctx context.Context, d, def time.Duration) (context.Context, context.CancelFunc) {
+	if d <= 0 {
+		d = def
+	}
+	return context.WithTimeout(ctx, d)
+}
+
+// boundErr tells the caller's cancellation from the phase's own deadline. parent is the reconcile context,
+// phase the bounded one derived from it. It returns err unchanged when neither ended; when the phase deadline
+// ended it, the result matches ErrTimeout (and context.DeadlineExceeded only through the original error).
+func boundErr(parent, phase context.Context, name string, err error) error {
+	switch {
+	case parent.Err() != nil:
+		if err == nil {
+			err = parent.Err()
+		}
+		return fmt.Errorf("%s cancelled: %w", name, err)
+	case phase.Err() != nil:
+		return fmt.Errorf("%s: %w", name, ErrTimeout)
+	}
+	return err
 }
 
 // ErrSuperseded is returned by EnsureFresh when the plan went stale: the request is now Superseded and its
@@ -132,7 +174,11 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return r.recheck(ctx, rr)
 	}
 
-	out, err := r.check(ctx, rr)
+	checkCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
+	out, err := r.check(checkCtx, rr)
+	// A decision made after the deadline is not trusted: a read or the resolver may have been cut short.
+	err = boundErr(ctx, checkCtx, "policy check", err)
+	cancel()
 	if err != nil {
 		// A remote system that asked for a delay (Retry-After) gets it; controller-runtime's error backoff
 		// does not read it and could retry sooner.
@@ -415,13 +461,26 @@ func (r *RemediationRequestReconciler) EnsureFresh(ctx context.Context, rr *reme
 	if !beforeMerge(rr.Status.Phase) {
 		return fmt.Errorf("a request in phase %q takes no write that needs a fresh plan", rr.Status.Phase)
 	}
-	err := freshness.Checker{Reader: r.reader(), OpenRepository: r.OpenRepository}.Fresh(ctx, rr)
+	freshCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
+	err := freshness.Checker{Reader: r.reader(), OpenRepository: r.OpenRepository, Source: r.Source}.Fresh(freshCtx, rr)
+	if _, isStale := errors.AsType[*freshness.StaleError](err); !isStale {
+		err = boundErr(ctx, freshCtx, "freshness check", err)
+	}
+	cancel()
 	staleErr, ok := errors.AsType[*freshness.StaleError](err)
 	if !ok {
 		return err
 	}
 	phase, reason, message := remediationv1alpha1.PhaseSuperseded, staleErr.Reason, staleErr.Message
-	switch err := r.closeChangeRequest(ctx, rr); {
+	// The whole cleanup shares one deadline: reading the settings, opening the repository, finding and closing
+	// the change request.
+	cleanCtx, cleanCancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
+	closeErr := r.closeChangeRequest(cleanCtx, rr)
+	if closeErr != nil && !errors.Is(closeErr, errRepositoryGone) && !errors.Is(closeErr, freshness.ErrPaused) {
+		closeErr = boundErr(ctx, cleanCtx, "cleanup of the change request", closeErr)
+	}
+	cleanCancel()
+	switch err := closeErr; {
 	case errors.Is(err, errRepositoryGone):
 		// Nothing is closed: the only change request this plan could have is in a repository that cannot be
 		// reached through the settings any more, and closing a number elsewhere could close someone else's.

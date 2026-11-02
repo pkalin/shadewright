@@ -399,6 +399,8 @@ The policy check, the first step, loads the policy the request names, the `defau
 
 Only a failure worth retrying (API server or Git host) is retried, with backoff, or after the delay the host asked for (`Retry-After`); every permanent refusal is a final phase. The policy and settings are read from the API server on every check, never from the cache, so a deleted policy or a tightened setting takes effect at once. Messages and conditions never carry Git URLs or provider text.
 
+Every external call of a step runs under the step's own deadline: the policy check (the uncached reads and the source resolver together) and, separately, the freshness check and the cleanup of a stale plan (open the repository, find and close the change request, as one sequence). A step that reaches its deadline returns a retryable error and keeps the request in its phase; it never ends in a final phase. The caller's own cancellation stays a different error, so shutdown is not reported as a timeout.
+
 Each reconcile:
 
 1. Gets the current CR and checks generation, plan validity and cancellation.
@@ -417,7 +419,7 @@ Required mechanisms:
 - Retries with exponential backoff, jitter and `Retry-After`, with a limit.
 - Deadlines for policy, PR, delivery and verification, stored in status.
 - No model call during reconcile when the context did not change.
-- Policy and plan freshness re-checked right before every write: same policy UID and generation, same settings, and the target file still holds the previous value. A stale plan becomes `Superseded` and its change request is closed (once, idempotently), never a rebuilt branch. The step is `EnsureFresh` in the controller; the later state machine calls it before each write.
+- Policy and plan freshness re-checked right before every write: same policy UID and generation, same settings, the source mapping (ADR-0012) run again with the policy check's resolver still gives the recorded repository, branch and file (the base commit is not compared, because it moves with every merge), and the target file still holds the previous value. A mapping error is "not fresh" and is retried, never stale; a mapping that now denies or needs a person is stale (`SourceChanged`), never fresh. A stale plan becomes `Superseded` and its change request is closed (once, idempotently), never a rebuilt branch. The step is `EnsureFresh` in the controller; the later state machine calls it before each write.
 - Auto-merge disabled when the request is cancelled before merge. After merge, undoing needs a separate revert PR.
 
 A finalizer is used only where deleting the CR needs bounded external cleanup (closing an open PR, disabling auto-merge). Deleting the CR never rolls back a deployment.

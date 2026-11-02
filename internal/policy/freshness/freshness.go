@@ -55,6 +55,9 @@ const (
 	ReasonTargetFileChanged = "TargetFileChanged"
 	// ReasonPlanChanged: the inputs recorded in the request no longer give the recorded digest.
 	ReasonPlanChanged = "PlanChanged"
+	// ReasonSourceChanged: mapping the target to its source again gives another repository, branch or file,
+	// or the mapping now denies the change or needs a person.
+	ReasonSourceChanged = "SourceChanged"
 )
 
 // readTimeout bounds the reads one check makes of the Git host.
@@ -209,6 +212,12 @@ func ComputeDigest(rr *v1alpha1.RemediationRequest, src *v1alpha1.ResolvedSource
 // RepositoryOpener opens the Git repository a settings entry names.
 type RepositoryOpener func(ctx context.Context, repo v1alpha1.GitRepository) (providers.GitProvider, error)
 
+// SourceResolver maps the target to its file in Git (ADR-0012). It is the resolver the policy check uses;
+// [sourcemap.Resolver] implements it.
+type SourceResolver interface {
+	Resolve(ctx context.Context, in sourcemap.Input) (sourcemap.Result, error)
+}
+
 // Checker answers whether a request's plan is still fresh.
 type Checker struct {
 	// Reader must read straight from the API server, never from a cache: a cached copy can still hold a
@@ -216,6 +225,9 @@ type Checker struct {
 	Reader client.Reader
 	// OpenRepository opens the repository of the request's source.
 	OpenRepository RepositoryOpener
+	// Source is the resolver the policy check used. Fresh maps the target again with it before the file is
+	// read, so a write never goes to a file that no longer declares the target. Nil fails closed.
+	Source SourceResolver
 }
 
 // Fresh returns nil only when every input of the plan is unchanged since the digest was made: the same policy
@@ -271,7 +283,44 @@ func (c Checker) Fresh(ctx context.Context, rr *v1alpha1.RemediationRequest) err
 	if err := c.checkTarget(ctx, rr, pol); err != nil {
 		return err
 	}
+	if err := c.checkSource(ctx, rr, pol, settings); err != nil {
+		return err
+	}
 	return c.checkFile(ctx, rr, repo)
+}
+
+// checkSource runs the source mapping again (ADR-0012) and compares it with status.source. The repository,
+// branch and path must be the recorded ones; the base commit is not compared, because it moves with every merge
+// to the target branch and checkFile decides whether such a merge touched the file. A failed mapping is not
+// stale (the caller retries); a mapping that now denies or needs a person never passes as fresh.
+func (c Checker) checkSource(ctx context.Context, rr *v1alpha1.RemediationRequest, pol *v1alpha1.RemediationPolicy,
+	settings *v1alpha1.RemediationSettings) error {
+	if c.Source == nil {
+		return errors.New("no source resolver is available")
+	}
+	ctx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	res, err := c.Source.Resolve(ctx, sourcemap.Input{
+		Target:       rr.Spec.TargetRef,
+		Action:       rr.Spec.Action,
+		Repositories: settings.Spec.Repositories,
+		GitOps:       pol.Spec.GitOps,
+	})
+	if err != nil {
+		// The resolver sanitises its errors; the caller sees "not fresh" and retries.
+		return fmt.Errorf("resolve the source again: %w", err)
+	}
+	if res.Outcome != sourcemap.Resolved {
+		// Denied, NeedsIntervention or anything unknown. Only the reason is reported: the message may hold
+		// paths or text from Git.
+		return stale(ReasonSourceChanged, "Mapping the target to its source again no longer resolves it (%s)", res.Reason)
+	}
+	got, want := res.Source, rr.Status.Source
+	if got == nil || got.RepositoryRef != want.RepositoryRef || got.TargetBranch != want.TargetBranch ||
+		got.Path != want.Path {
+		return stale(ReasonSourceChanged, "The target is no longer declared in the repository, branch and file of the plan")
+	}
+	return nil
 }
 
 // checkTarget checks that the live target is still the object the plan is about.

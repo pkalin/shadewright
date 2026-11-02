@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
@@ -44,11 +45,12 @@ import (
 )
 
 const (
-	sourcePath = "apps/orders/deployment.yaml"
-	otherPath  = "docs/readme.yaml"
-	tierLabel  = "tier"
-	targetUID  = "33333333-3333-4333-8333-333333333333"
-	policyUID  = "44444444-4444-4444-8444-444444444444"
+	sourcePath  = "apps/orders/deployment.yaml"
+	otherPath   = "docs/readme.yaml"
+	otherBranch = "release"
+	tierLabel   = "tier"
+	targetUID   = "33333333-3333-4333-8333-333333333333"
+	policyUID   = "44444444-4444-4444-8444-444444444444"
 )
 
 func manifest(limit string) []byte {
@@ -77,6 +79,15 @@ type world struct {
 	git      *fakegit.Git
 	getErr   func(key client.ObjectKey, obj client.Object) error
 	open     freshness.RepositoryOpener
+	// resolve is the source mapping run again before the write; newWorld maps to the recorded source.
+	resolve func(ctx context.Context, in sourcemap.Input) (sourcemap.Result, error)
+}
+
+// resolverFunc adapts a function to freshness.SourceResolver.
+type resolverFunc func(ctx context.Context, in sourcemap.Input) (sourcemap.Result, error)
+
+func (f resolverFunc) Resolve(ctx context.Context, in sourcemap.Input) (sourcemap.Result, error) {
+	return f(ctx, in)
 }
 
 // newWorld builds a fresh plan: the digest is computed from the objects as they are at the start.
@@ -111,6 +122,12 @@ func newWorld(t *testing.T) *world {
 		PolicyUID: policyUID, PolicyRevision: freshness.RevisionOf(w.pol),
 	}
 	w.open = func(context.Context, v1alpha1.GitRepository) (providers.GitProvider, error) { return w.git, nil }
+	w.resolve = func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
+		// A merge moved the base commit; the repository, branch and file are the recorded ones.
+		moved := *src
+		moved.BaseCommit = "fedcba9876543210fedcba9876543210fedcba98"
+		return sourcemap.Result{Outcome: sourcemap.Resolved, Reason: sourcemap.ReasonResolved, Source: &moved}, nil
+	}
 	return w
 }
 
@@ -141,7 +158,11 @@ func (w *world) fresh(t *testing.T) error {
 			return cl.Get(ctx, key, obj, opts...)
 		},
 	}).Build()
-	return freshness.Checker{Reader: c, OpenRepository: w.open}.Fresh(context.Background(), w.rr)
+	var src freshness.SourceResolver
+	if w.resolve != nil {
+		src = resolverFunc(w.resolve)
+	}
+	return freshness.Checker{Reader: c, OpenRepository: w.open, Source: src}.Fresh(context.Background(), w.rr)
 }
 
 func isNil(o client.Object) bool {
@@ -202,7 +223,7 @@ func TestStalePerDigestInput(t *testing.T) {
 		{"target labels removed", func(w *world) { w.target.Labels = nil }, freshness.ReasonTargetChanged},
 		{"target deleted", func(w *world) { w.target = nil }, freshness.ReasonTargetChanged},
 		{"source repositoryRef", func(w *world) { w.rr.Status.Source.RepositoryRef = "other" }, freshness.ReasonSettingsChanged},
-		{"source target branch", func(w *world) { w.rr.Status.Source.TargetBranch = "release" }, freshness.ReasonSettingsChanged},
+		{"source target branch", func(w *world) { w.rr.Status.Source.TargetBranch = otherBranch }, freshness.ReasonSettingsChanged},
 		{"source path", func(w *world) { w.rr.Status.Source.Path = otherPath }, freshness.ReasonPlanChanged},
 		{"source base commit", func(w *world) {
 			w.rr.Status.Source.BaseCommit = "89abcdef0123456789abcdef0123456789abcdef"
@@ -212,7 +233,7 @@ func TestStalePerDigestInput(t *testing.T) {
 		}, freshness.ReasonPlanChanged},
 		{"installation in settings", func(w *world) { w.settings.Spec.Repositories[0].GitHub.InstallationID = 2 },
 			freshness.ReasonPlanChanged},
-		{"target branch in settings", func(w *world) { w.settings.Spec.Repositories[0].TargetBranch = "release" },
+		{"target branch in settings", func(w *world) { w.settings.Spec.Repositories[0].TargetBranch = otherBranch },
 			freshness.ReasonSettingsChanged},
 		{"repository removed from settings", func(w *world) { w.settings.Spec.Repositories = nil },
 			freshness.ReasonSettingsChanged},
@@ -462,5 +483,82 @@ func TestProviderErrorsKeepNoText(t *testing.T) {
 				t.Fatalf("want the class and delay kept, got %#v", err)
 			}
 		})
+	}
+}
+
+func TestSourceMappedAgainstTheSettingsAndPolicy(t *testing.T) {
+	w := newWorld(t)
+	inner := w.resolve
+	w.resolve = func(ctx context.Context, in sourcemap.Input) (sourcemap.Result, error) {
+		if in.Target != w.rr.Spec.TargetRef || in.Action != w.rr.Spec.Action ||
+			len(in.Repositories) != len(w.settings.Spec.Repositories) {
+			t.Errorf("the mapping got another input than the policy check gives: %+v", in)
+		}
+		return inner(ctx, in)
+	}
+	if err := w.fresh(t); err != nil {
+		t.Fatalf("want fresh, got %v", err)
+	}
+}
+
+// The mapping is run again before the write; a different source supersedes the request.
+func TestStaleWhenTheSourceMovesAway(t *testing.T) {
+	cases := map[string]func(src *v1alpha1.ResolvedSource){
+		"other file":       func(src *v1alpha1.ResolvedSource) { src.Path = otherPath },
+		"other branch":     func(src *v1alpha1.ResolvedSource) { src.TargetBranch = otherBranch },
+		"other repository": func(src *v1alpha1.ResolvedSource) { src.RepositoryRef = "elsewhere" },
+	}
+	for name, move := range cases {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld(t)
+			w.resolve = func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
+				moved := *w.rr.Status.Source
+				move(&moved)
+				return sourcemap.Result{Outcome: sourcemap.Resolved, Source: &moved}, nil
+			}
+			wantStale(t, w.fresh(t), freshness.ReasonSourceChanged)
+		})
+	}
+}
+
+// A mapping that stops (Denied, NeedsIntervention, anything else, or Resolved without a source) never passes
+// as fresh, and its message, which may hold text from Git, is not copied into the reason.
+func TestMappingThatStopsIsNeverFresh(t *testing.T) {
+	for _, res := range []sourcemap.Result{
+		{Outcome: sourcemap.Denied, Reason: sourcemap.ReasonPathNotAllowed, Message: "secret/path.yaml"},
+		{Outcome: sourcemap.NeedsIntervention, Reason: sourcemap.ReasonHelmManaged, Message: "secret/path.yaml"},
+		{Outcome: "Unknown"},
+		{Outcome: sourcemap.Resolved},
+	} {
+		w := newWorld(t)
+		w.resolve = func(context.Context, sourcemap.Input) (sourcemap.Result, error) { return res, nil }
+		err := w.fresh(t)
+		wantStale(t, err, freshness.ReasonSourceChanged)
+		if strings.Contains(err.Error(), "secret/path.yaml") {
+			t.Fatalf("the mapping message leaked into %q", err)
+		}
+	}
+}
+
+// A transient resolver error says nothing about the plan: not fresh, but not stale either.
+func TestResolverErrorIsNotFreshAndNotStale(t *testing.T) {
+	w := newWorld(t)
+	w.resolve = func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
+		return sourcemap.Result{}, errors.New("host unavailable")
+	}
+	err := w.fresh(t)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if _, ok := errors.AsType[*freshness.StaleError](err); ok {
+		t.Fatalf("a resolver failure must not supersede the request: %v", err)
+	}
+}
+
+func TestNoResolverFailsClosed(t *testing.T) {
+	w := newWorld(t)
+	w.resolve = nil
+	if err := w.fresh(t); err == nil {
+		t.Fatal("want an error without a resolver")
 	}
 }

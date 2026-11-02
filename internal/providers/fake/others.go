@@ -84,14 +84,56 @@ type Model struct {
 func (m *Model) Script(c ...providers.Completion) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.replies = append(m.replies, c...)
+	for _, x := range c {
+		m.replies = append(m.replies, cloneCompletion(x))
+	}
 }
 
 // Requests returns the requests received so far.
 func (m *Model) Requests() []providers.CompletionRequest {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return slices.Clone(m.requests)
+	out := make([]providers.CompletionRequest, len(m.requests))
+	for i, r := range m.requests {
+		out[i] = cloneRequest(r)
+	}
+	return out
+}
+
+func cloneCalls(in []providers.ToolCall) []providers.ToolCall {
+	if in == nil {
+		return nil
+	}
+	out := make([]providers.ToolCall, len(in))
+	for i, c := range in {
+		c.Arguments = slices.Clone(c.Arguments)
+		out[i] = c
+	}
+	return out
+}
+
+func cloneCompletion(c providers.Completion) providers.Completion {
+	c.ToolCalls = cloneCalls(c.ToolCalls)
+	return c
+}
+
+func cloneRequest(r providers.CompletionRequest) providers.CompletionRequest {
+	msgs := make([]providers.Message, len(r.Messages))
+	for i, m := range r.Messages {
+		m.ToolCalls = cloneCalls(m.ToolCalls)
+		msgs[i] = m
+	}
+	r.Messages = msgs
+	if r.Tools != nil {
+		tools := make([]providers.ToolDefinition, len(r.Tools))
+		for i, t := range r.Tools {
+			t.Parameters = slices.Clone(t.Parameters)
+			tools[i] = t
+		}
+		r.Tools = tools
+	}
+	r.ResponseSchema = slices.Clone(r.ResponseSchema)
+	return r
 }
 
 // Complete returns the next scripted completion, or a retryable error when the script is exhausted.
@@ -100,7 +142,7 @@ func (m *Model) Complete(ctx context.Context, req providers.CompletionRequest) (
 		return providers.Completion{}, err
 	}
 	m.mu.Lock()
-	m.requests = append(m.requests, req)
+	m.requests = append(m.requests, cloneRequest(req))
 	if len(m.replies) == 0 {
 		m.mu.Unlock()
 		return providers.Completion{}, &providers.RetryableError{Err: fmt.Errorf("fake model has no scripted reply")}
@@ -111,7 +153,7 @@ func (m *Model) Complete(ctx context.Context, req providers.CompletionRequest) (
 	if err := m.after("Complete"); err != nil {
 		return providers.Completion{}, err
 	}
-	return c, nil
+	return cloneCompletion(c), nil
 }
 
 // Metrics answers queries from results registered per template.
@@ -159,7 +201,10 @@ type LogKey struct {
 	Previous                  bool
 }
 
-// Logs returns logs registered per container, honouring MaxBytes.
+// DefaultLogBytes is the excerpt size the Logs fake uses when a query sets no MaxBytes.
+const DefaultLogBytes = 64 << 10
+
+// Logs returns logs registered per container, honouring MaxBytes (DefaultLogBytes when zero).
 type Logs struct {
 	Hook
 	mu   sync.Mutex
@@ -187,8 +232,12 @@ func (l *Logs) Logs(ctx context.Context, q providers.LogQuery) (providers.LogExc
 	if !ok {
 		return providers.LogExcerpt{}, fmt.Errorf("logs of %s/%s/%s: %w", q.Namespace, q.Pod, q.Container, providers.ErrNotFound)
 	}
-	if q.MaxBytes > 0 && int64(len(t)) > q.MaxBytes {
-		return providers.LogExcerpt{Text: t[int64(len(t))-q.MaxBytes:], Truncated: true}, nil
+	limit := q.MaxBytes
+	if limit <= 0 {
+		limit = DefaultLogBytes
+	}
+	if int64(len(t)) > limit {
+		return providers.LogExcerpt{Text: t[int64(len(t))-limit:], Truncated: true}, nil
 	}
 	return providers.LogExcerpt{Text: t}, nil
 }

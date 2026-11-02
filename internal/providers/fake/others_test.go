@@ -65,6 +65,33 @@ func TestModel(t *testing.T) {
 	}
 }
 
+func TestModelCopiesData(t *testing.T) {
+	reply := providers.Completion{ToolCalls: []providers.ToolCall{{Name: "get_resource", Arguments: []byte(`{"a":1}`)}}}
+	var m1, m2 fake.Model
+	m1.Script(reply)
+	m2.Script(reply)
+	ctx := context.Background()
+	req := providers.CompletionRequest{
+		Messages: []providers.Message{{Role: providers.RoleUser, Content: "hi"}},
+		Tools:    []providers.ToolDefinition{{Name: "t", Parameters: []byte(`{}`)}},
+	}
+	got, _ := m1.Complete(ctx, req)
+	got.ToolCalls[0].Arguments[2] = 'X'
+	req.Messages[0].Content = "changed"
+	req.Tools[0].Parameters[0] = 'X'
+	if again, _ := m2.Complete(ctx, providers.CompletionRequest{}); string(again.ToolCalls[0].Arguments) != `{"a":1}` {
+		t.Errorf("changing one model's reply changed another's: %s", again.ToolCalls[0].Arguments)
+	}
+	h := m1.Requests()
+	if h[0].Messages[0].Content != "hi" || string(h[0].Tools[0].Parameters) != "{}" {
+		t.Errorf("changing the request changed the history: %+v", h[0])
+	}
+	h[0].Messages[0].Content = "edited"
+	if m1.Requests()[0].Messages[0].Content != "hi" {
+		t.Error("changing the returned history changed the recorded request")
+	}
+}
+
 func TestModelLostResponse(t *testing.T) {
 	var m fake.Model
 	m.Script(providers.Completion{Content: "lost"}, providers.Completion{Content: "next"})
@@ -106,6 +133,11 @@ func TestMetricsAndLogs(t *testing.T) {
 	e, err := l.Logs(ctx, q)
 	if err != nil || e.Text != "6789" || !e.Truncated {
 		t.Errorf("bounded logs = %+v, %v", e, err)
+	}
+	l.Set(k, strings.Repeat("x", fake.DefaultLogBytes+10))
+	q.MaxBytes = 0
+	if e, _ := l.Logs(ctx, q); len(e.Text) != fake.DefaultLogBytes || !e.Truncated {
+		t.Errorf("zero MaxBytes returned %d bytes, truncated=%v", len(e.Text), e.Truncated)
 	}
 	q.Previous = true
 	if _, err := l.Logs(ctx, q); !providers.IsNotFound(err) {

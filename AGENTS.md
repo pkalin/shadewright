@@ -22,6 +22,19 @@ These are the reason the project exists. A change that weakens one needs an ADR 
   or raise it in the pull request, do not ignore it.
 - Prefer boring, well-known solutions and the project's existing patterns over new dependencies or clever code.
 
+## Taking a task
+
+Work is tracked as GitHub issues, written with the "Task" template so that any contributor or coding agent
+can work on one without further context. Milestones follow the stages in `docs/design.md` section 13.
+
+- Pick an open issue labelled `agent-ready` whose "Depends on" issues are closed. Read the linked design
+  sections and ADRs first.
+- One issue, one branch (`<issue-number>-<short-slug>`), one pull request with `Closes #<n>` in the body.
+- Stay inside the issue's scope. If something outside it needs to change, or the issue is ambiguous, say so
+  in the pull request or the issue instead of guessing.
+- Meet every acceptance criterion and run the "How to verify" commands before opening the pull request.
+- If the work touches an invariant, say which one and how it still holds.
+
 ## Engineering and security practices
 
 - **Untrusted input everywhere.** Validate at the boundary: CRD schema and CEL first, then typed parsing in

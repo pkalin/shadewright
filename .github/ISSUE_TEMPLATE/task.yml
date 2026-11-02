@@ -1,0 +1,65 @@
+name: Task
+description: A unit of work small enough for one pull request, written so any contributor or coding agent can pick it up.
+labels: ["task"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should be true when this is done, in one or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Links to the design sections and ADRs this follows, and to related issues or pull requests.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Packages, files or kinds to change, and what is explicitly out of scope.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Checkable statements, including the tests that must exist.
+      placeholder: |
+        - [ ] ...
+        - [ ] A test shows that ... is refused
+    validations:
+      required: true
+  - type: textarea
+    id: verify
+    attributes:
+      label: How to verify
+      description: Commands to run locally.
+      value: |
+        make lint test
+    validations:
+      required: true
+  - type: dropdown
+    id: invariants
+    attributes:
+      label: Invariants touched
+      description: Which AGENTS.md invariants this work could weaken. Anything but "None" needs a human reviewer.
+      multiple: true
+      options:
+        - None
+        - 1 Model output is never authorization
+        - 2 Closed action catalog
+        - 3 Changes go through Git only
+        - 4 Untrusted input
+        - 5 Idempotent reconciliation
+        - 6 Separate identities
+    validations:
+      required: true
+  - type: textarea
+    id: depends
+    attributes:
+      label: Depends on
+      description: Issues that must be merged first, as "#123". Leave empty if none.

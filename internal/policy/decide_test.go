@@ -19,6 +19,7 @@ package policy_test
 import (
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -212,6 +213,28 @@ func TestDecide(t *testing.T) {
 		{name: "memory container empty", base: memoryInput,
 			mutate:  func(in *policy.DecisionInput) { in.Request.Spec.Action.SetContainerMemoryLimit.Container = "" },
 			outcome: denied, reason: policy.ReasonInvalidParameters},
+		{name: "memory container not a DNS label", base: memoryInput,
+			mutate:  func(in *policy.DecisionInput) { in.Request.Spec.Action.SetContainerMemoryLimit.Container = "Worker" },
+			outcome: denied, reason: policy.ReasonInvalidParameters},
+		{name: "memory container with a slash", base: memoryInput,
+			mutate:  func(in *policy.DecisionInput) { in.Request.Spec.Action.SetContainerMemoryLimit.Container = "a/b" },
+			outcome: denied, reason: policy.ReasonInvalidParameters},
+		{name: "memory container starting with a dash", base: memoryInput,
+			mutate:  func(in *policy.DecisionInput) { in.Request.Spec.Action.SetContainerMemoryLimit.Container = "-worker" },
+			outcome: denied, reason: policy.ReasonInvalidParameters},
+		{name: "memory container ending with a dash", base: memoryInput,
+			mutate:  func(in *policy.DecisionInput) { in.Request.Spec.Action.SetContainerMemoryLimit.Container = "worker-" },
+			outcome: denied, reason: policy.ReasonInvalidParameters},
+		{name: "memory container longer than 63", base: memoryInput,
+			mutate: func(in *policy.DecisionInput) {
+				in.Request.Spec.Action.SetContainerMemoryLimit.Container = strings.Repeat("a", 64)
+			},
+			outcome: denied, reason: policy.ReasonInvalidParameters},
+		{name: "memory container of 63 characters", base: memoryInput,
+			mutate: func(in *policy.DecisionInput) {
+				in.Request.Spec.Action.SetContainerMemoryLimit.Container = "a-" + strings.Repeat("0", 61)
+			},
+			outcome: allowed, reason: policy.ReasonWithinApprovedBounds},
 		{name: "memory not whole bytes", base: memoryInput,
 			mutate:  func(in *policy.DecisionInput) { memoryParams(in, "256Mi", "300000000.5") },
 			outcome: denied, reason: policy.ReasonInvalidParameters},
@@ -317,6 +340,74 @@ func TestDecide(t *testing.T) {
 			mutate:  func(in *policy.DecisionInput) { in.Policy.Spec.Actions[0].SetContainerMemoryLimit = nil },
 			outcome: denied, reason: policy.ReasonPolicyInvalid},
 
+		// Policy bounds outside the schema's limits.
+		{name: "keda negative min", base: kedaInput,
+			mutate:  func(in *policy.DecisionInput) { kedaBounds(in).Min = -1 },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "keda min above 1000", base: kedaInput,
+			mutate:  func(in *policy.DecisionInput) { kedaBounds(in).Min = 1001 },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "keda max 0", base: kedaInput,
+			mutate:  func(in *policy.DecisionInput) { kedaBounds(in).Max = 0 },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "keda negative max", base: kedaInput,
+			mutate:  func(in *policy.DecisionInput) { kedaBounds(in).Max = -5 },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "keda max above 1000", base: kedaInput,
+			mutate:  func(in *policy.DecisionInput) { kedaBounds(in).Max = 1001 },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "keda min greater than max", base: kedaInput,
+			mutate:  func(in *policy.DecisionInput) { kedaBounds(in).Min = 21 },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "keda negative maxIncreasePercent", base: kedaInput,
+			mutate:  func(in *policy.DecisionInput) { kedaBounds(in).MaxIncreasePercent = -1 },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "keda maxIncreasePercent above 1000", base: kedaInput,
+			mutate:  func(in *policy.DecisionInput) { kedaBounds(in).MaxIncreasePercent = 1001 },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "keda maxIncreasePercent at 1000", base: kedaInput,
+			mutate:  func(in *policy.DecisionInput) { kedaBounds(in).MaxIncreasePercent = 1000 },
+			outcome: allowed, reason: policy.ReasonWithinApprovedBounds},
+		{name: "keda negative maxDecreasePercent", base: kedaInput,
+			mutate:  func(in *policy.DecisionInput) { kedaBounds(in).MaxDecreasePercent = new(int32(-1)) },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "keda maxDecreasePercent above 90", base: kedaInput,
+			mutate:  func(in *policy.DecisionInput) { kedaBounds(in).MaxDecreasePercent = new(int32(91)) },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "memory min below 1Mi", base: memoryInput,
+			mutate:  func(in *policy.DecisionInput) { memoryBounds(in).Min = resource.MustParse("512Ki") },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "memory min unset", base: memoryInput,
+			mutate:  func(in *policy.DecisionInput) { memoryBounds(in).Min = resource.Quantity{} },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "memory negative min", base: memoryInput,
+			mutate:  func(in *policy.DecisionInput) { memoryBounds(in).Min = resource.MustParse("-1Gi") },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "memory max above 1Ti", base: memoryInput,
+			mutate:  func(in *policy.DecisionInput) { memoryBounds(in).Max = resource.MustParse("2Ti") },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "memory max not whole bytes", base: memoryInput,
+			mutate:  func(in *policy.DecisionInput) { memoryBounds(in).Max = resource.MustParse("2000000000.5") },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "memory min greater than max", base: memoryInput,
+			mutate:  func(in *policy.DecisionInput) { memoryBounds(in).Min = resource.MustParse("3Gi") },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "memory negative maxIncreasePercent", base: memoryInput,
+			mutate:  func(in *policy.DecisionInput) { memoryBounds(in).MaxIncreasePercent = -1 },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "memory maxIncreasePercent above 1000", base: memoryInput,
+			mutate:  func(in *policy.DecisionInput) { memoryBounds(in).MaxIncreasePercent = 1001 },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "memory maxDecreasePercent above 90", base: memoryInput,
+			mutate:  func(in *policy.DecisionInput) { memoryBounds(in).MaxDecreasePercent = new(int32(91)) },
+			outcome: denied, reason: policy.ReasonPolicyInvalid},
+		{name: "memory decimal bounds", base: memoryInput,
+			mutate: func(in *policy.DecisionInput) {
+				memoryBounds(in).Min = resource.MustParse("0.125Gi")
+				memoryBounds(in).Max = resource.MustParse("2G")
+			},
+			outcome: allowed, reason: policy.ReasonWithinApprovedBounds},
+
 		// KEDA bounds.
 		{name: "keda below min", base: kedaInput,
 			mutate: func(in *policy.DecisionInput) {
@@ -375,12 +466,12 @@ func TestDecide(t *testing.T) {
 				kedaParams(in, 2, 1)
 			},
 			outcome: allowed, reason: policy.ReasonWithinApprovedBounds},
-		{name: "keda huge percentages do not overflow", base: kedaInput,
+		{name: "keda largest percentages", base: kedaInput,
 			mutate: func(in *policy.DecisionInput) {
 				kedaBounds(in).Max = 1000
-				kedaBounds(in).MaxIncreasePercent = math.MaxInt32
+				kedaBounds(in).MaxIncreasePercent = 1000
 				kedaParams(in, 1000, 999)
-				kedaBounds(in).MaxDecreasePercent = new(int32(math.MaxInt32))
+				kedaBounds(in).MaxDecreasePercent = new(int32(90))
 			},
 			outcome: allowed, reason: policy.ReasonWithinApprovedBounds},
 
@@ -433,11 +524,11 @@ func TestDecide(t *testing.T) {
 				memoryParams(in, "1Gi", "768Mi")
 			},
 			outcome: allowed, reason: policy.ReasonWithinApprovedBounds},
-		{name: "memory near 1Ti with large percentages does not overflow", base: memoryInput,
+		{name: "memory up to 1Ti with the largest increase percentage", base: memoryInput,
 			mutate: func(in *policy.DecisionInput) {
 				memoryBounds(in).Max = resource.MustParse("1Ti")
-				memoryBounds(in).MaxIncreasePercent = math.MaxInt32
-				memoryParams(in, "1Mi", "1Ti")
+				memoryBounds(in).MaxIncreasePercent = 1000
+				memoryParams(in, "512Gi", "1Ti")
 			},
 			outcome: allowed, reason: policy.ReasonWithinApprovedBounds},
 
@@ -597,12 +688,29 @@ func TestUnknownActionNeverAllowed(t *testing.T) {
 	}
 }
 
-// TestDecideDoesNotModifyInput checks that Decide only reads its input.
+// TestDecideDoesNotModifyInput checks that Decide only reads its input, including quantities written in
+// mixed representations, which Quantity.Cmp would otherwise re-cache in place.
 func TestDecideDoesNotModifyInput(t *testing.T) {
-	for _, base := range []func() policy.DecisionInput{kedaInput, memoryInput} {
+	mixed := func() policy.DecisionInput {
+		in := memoryInput()
+		memoryParams(&in, "256Mi", "0.375Gi")
+		memoryBounds(&in).Min = resource.MustParse("0.125Gi")
+		memoryBounds(&in).Max = resource.MustParse("2G")
+		return in
+	}
+	mixedDecrease := func() policy.DecisionInput {
+		in := mixed()
+		memoryParams(&in, "0.5Gi", "400M")
+		memoryBounds(&in).MaxDecreasePercent = new(int32(30))
+		return in
+	}
+	for _, base := range []func() policy.DecisionInput{kedaInput, memoryInput, mixed, mixedDecrease} {
 		in := base()
 		want := base()
-		_ = policy.Decide(in)
+		got := policy.Decide(in)
+		if got.Outcome != policy.OutcomeAllowed {
+			t.Fatalf("Decide() = %s/%s (%s), want Allowed", got.Outcome, got.Reason, got.Message)
+		}
 		if !reflect.DeepEqual(in.Request, want.Request) || !reflect.DeepEqual(in.Policy, want.Policy) ||
 			!reflect.DeepEqual(in.Settings, want.Settings) || !reflect.DeepEqual(in.Source, want.Source) ||
 			!reflect.DeepEqual(in.Target, want.Target) {

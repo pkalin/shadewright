@@ -29,6 +29,8 @@ limitations under the License.
 //     would refuse is refused here too, and an unset field is read in its strictest sense: no request
 //     namespaces allows no namespace, an unset approval mode is Required, an unset maxIncreasePercent
 //     refuses every increase and an unset maxDecreasePercent refuses every decrease.
+//     Policy bounds outside the schema's limits (a negative value, a percentage above its maximum, min
+//     greater than max) make the policy [ReasonPolicyInvalid].
 //   - The path match ([pathmatch.Match]) is purely lexical, so it is not trusted to keep a change away from
 //     sensitive objects. The live target's kind must also be one the action type allows, and kinds excluded
 //     from remediation (design section 10, item 10: Secrets, RBAC, network policy, namespaces, volumes,
@@ -249,13 +251,13 @@ func checkAction(in DecisionInput) (Reason, string) {
 		if p == nil || a.AdjustKedaMaxReplicas != nil {
 			return ReasonInvalidParameters, "Exactly the setContainerMemoryLimit parameters must be set"
 		}
-		if p.Container == "" {
-			return ReasonInvalidParameters, "container must be set"
+		if !validDNSLabel(p.Container) {
+			return ReasonInvalidParameters, "container must be a DNS label"
 		}
 		if !validMemory(p.Previous) || !validMemory(p.Desired) {
 			return ReasonInvalidParameters, "previous and desired must be whole bytes between 1Mi and 1Ti"
 		}
-		if p.Previous.Cmp(p.Desired) == 0 {
+		if cmpQuantity(p.Previous, p.Desired) == 0 {
 			return ReasonInvalidParameters, "desired must differ from previous"
 		}
 	}
@@ -318,6 +320,9 @@ func checkPolicyAction(in DecisionInput) (Reason, string) {
 		if b == nil {
 			return ReasonPolicyInvalid, fmt.Sprintf("Policy %q has no bounds for %s", p.Name, a.Type)
 		}
+		if !validKedaBounds(b) {
+			return ReasonPolicyInvalid, fmt.Sprintf("Policy %q has bounds for %s outside the schema's limits", p.Name, a.Type)
+		}
 		prev, desired := a.AdjustKedaMaxReplicas.PreviousValue, a.AdjustKedaMaxReplicas.DesiredValue
 		return checkBounds(int64(prev), int64(desired),
 			cmp.Compare(desired, max(b.Min, 1)), cmp.Compare(desired, b.Max),
@@ -327,10 +332,14 @@ func checkPolicyAction(in DecisionInput) (Reason, string) {
 		if b == nil {
 			return ReasonPolicyInvalid, fmt.Sprintf("Policy %q has no bounds for %s", p.Name, a.Type)
 		}
+		if !validMemoryBounds(b) {
+			return ReasonPolicyInvalid, fmt.Sprintf("Policy %q has bounds for %s outside the schema's limits", p.Name, a.Type)
+		}
 		params := a.SetContainerMemoryLimit
 		// checkAction has made sure both values are whole bytes between 1Mi and 1Ti, so they fit in an int64.
-		return checkBounds(params.Previous.Value(), params.Desired.Value(),
-			params.Desired.Cmp(b.Min), params.Desired.Cmp(b.Max),
+		previous, desired := params.Previous.DeepCopy(), params.Desired.DeepCopy()
+		return checkBounds(previous.Value(), desired.Value(),
+			cmpQuantity(params.Desired, b.Min), cmpQuantity(params.Desired, b.Max),
 			b.MaxIncreasePercent, b.MaxDecreasePercent)
 	}
 	// Unreachable: checkAction refuses every type not handled above.
@@ -481,9 +490,64 @@ var (
 
 // validMemory reports whether q is a whole number of bytes between 1Mi and 1Ti, compared by value.
 func validMemory(q resource.Quantity) bool {
-	if q.Cmp(minMemory) < 0 || q.Cmp(maxMemory) > 0 {
+	if cmpQuantity(q, minMemory) < 0 || cmpQuantity(q, maxMemory) > 0 {
 		return false
 	}
 	// Value rounds up to a whole number, so it equals q only when q is whole.
-	return resource.NewQuantity(q.Value(), resource.BinarySI).Cmp(q) == 0
+	c := q.DeepCopy()
+	return cmpQuantity(*resource.NewQuantity(c.Value(), resource.BinarySI), q) == 0
+}
+
+// cmpQuantity compares two quantities by value. Quantity.Cmp may cache a new representation in its receiver
+// and argument, and a copied Quantity shares its decimal with the original, so it compares deep copies and
+// never changes the input.
+func cmpQuantity(a, b resource.Quantity) int {
+	x, y := a.DeepCopy(), b.DeepCopy()
+	return x.Cmp(y)
+}
+
+// Limits of the policy bounds in the CRD schema (KedaMaxReplicasBounds, MemoryLimitBounds).
+const (
+	maxReplicaBound   = 1000
+	maxIncreaseLimit  = 1000
+	maxDecreaseLimit  = 90
+	dnsLabelMaxLength = 63
+)
+
+// validKedaBounds reports whether b is within the schema's limits. An unset min (0) reads as 1 and an unset
+// maxIncreasePercent (0) refuses increases, so 0 is accepted for both.
+func validKedaBounds(b *v1alpha1.KedaMaxReplicasBounds) bool {
+	return b.Min >= 0 && b.Min <= maxReplicaBound && b.Max >= 1 && b.Max <= maxReplicaBound &&
+		max(b.Min, 1) <= b.Max && validPercents(b.MaxIncreasePercent, b.MaxDecreasePercent)
+}
+
+// validMemoryBounds reports whether b is within the schema's limits: whole bytes, min at least 1Mi, max at
+// most 1Ti, min not greater than max.
+func validMemoryBounds(b *v1alpha1.MemoryLimitBounds) bool {
+	return validMemory(b.Min) && validMemory(b.Max) && cmpQuantity(b.Min, b.Max) <= 0 &&
+		validPercents(b.MaxIncreasePercent, b.MaxDecreasePercent)
+}
+
+// validPercents reports whether maxIncreasePercent is 0 (unset) or 1 to 1000, and maxDecreasePercent is
+// unset or 0 to 90.
+func validPercents(increase int32, decrease *int32) bool {
+	if increase < 0 || increase > maxIncreaseLimit {
+		return false
+	}
+	return decrease == nil || (*decrease >= 0 && *decrease <= maxDecreaseLimit)
+}
+
+// validDNSLabel reports whether s is a DNS label as the schema of SetContainerMemoryLimit.container defines
+// it: 1 to 63 lower-case letters, digits and dashes, starting and ending with a letter or digit.
+func validDNSLabel(s string) bool {
+	if len(s) == 0 || len(s) > dnsLabelMaxLength || s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return false
+		}
+	}
+	return true
 }

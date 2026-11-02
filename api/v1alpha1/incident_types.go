@@ -36,6 +36,7 @@ type IncidentSpec struct {
 	Subject ObjectRef `json:"subject"`
 
 	// reason is the event reason or status reason, for example FailedScheduling or OOMKilled.
+	// Deliberately stale: this line is not in docs/reference/api.md.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
 	// +required

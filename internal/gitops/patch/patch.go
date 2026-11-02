@@ -22,6 +22,7 @@ import (
 	"io"
 	"reflect"
 	"regexp"
+	"strconv"
 	"unicode/utf8"
 
 	yaml "go.yaml.in/yaml/v3"
@@ -147,6 +148,9 @@ func findDocument(docs []*yaml.Node, target v1alpha1.ObjectRef) (int, error) {
 		if root == nil || root.Kind != yaml.MappingNode {
 			continue
 		}
+		if err := checkIdentity(root); err != nil {
+			return 0, err
+		}
 		apiVersion, _ := scalarAt(root, "apiVersion")
 		kind, _ := scalarAt(root, "kind")
 		var name, namespace string
@@ -175,6 +179,49 @@ func findDocument(docs []*yaml.Node, target v1alpha1.ObjectRef) (int, error) {
 	default:
 		return 0, refuse(ReasonAmbiguousTarget, what+" may be declared more than once")
 	}
+}
+
+// checkIdentity refuses a document whose apiVersion, kind or metadata.name and namespace come from an
+// anchor, alias or merge key, since reading the source text would then miss what the object really is.
+func checkIdentity(root *yaml.Node) error {
+	unsupported := refuse(ReasonUnsupported, "a document takes its identity from an anchor, alias or merge key")
+	merged := func(m *yaml.Node) bool {
+		for i := 0; i+1 < len(m.Content); i += 2 {
+			if k := m.Content[i]; k.Tag == "!!merge" || k.Kind != yaml.ScalarNode || k.Anchor != "" {
+				return true
+			}
+		}
+		return false
+	}
+	indirect := func(n *yaml.Node) bool { return n.Kind == yaml.AliasNode || n.Anchor != "" }
+	if merged(root) {
+		return unsupported
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		switch root.Content[i].Value {
+		case "apiVersion", "kind":
+			if indirect(root.Content[i+1]) {
+				return unsupported
+			}
+		case "metadata":
+			meta := root.Content[i+1]
+			if indirect(meta) {
+				return unsupported
+			}
+			if meta.Kind != yaml.MappingNode {
+				continue
+			}
+			if merged(meta) {
+				return unsupported
+			}
+			for j := 0; j+1 < len(meta.Content); j += 2 {
+				if k := meta.Content[j].Value; (k == "name" || k == "namespace") && indirect(meta.Content[j+1]) {
+					return unsupported
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func documentRoot(d *yaml.Node) *yaml.Node {
@@ -293,6 +340,9 @@ func checkScalar(n *yaml.Node, field sourcemap.Field, previous string) error {
 	case n.Style&(yaml.LiteralStyle|yaml.FoldedStyle|yaml.FlowStyle) != 0:
 		return refuse(ReasonUnsupported, "the value is a block scalar")
 	}
+	if err := checkPlainNumber(n); err != nil {
+		return err
+	}
 	if field.Quantity {
 		if !field.Equals(n.Value, previous) {
 			return refuse(ReasonPreviousValueDiffers, "the file holds another value than the plan")
@@ -305,6 +355,33 @@ func checkScalar(n *yaml.Node, field sourcemap.Field, previous string) error {
 	}
 	if n.Value != previous {
 		return refuse(ReasonPreviousValueDiffers, "the file holds another value than the plan")
+	}
+	return nil
+}
+
+// checkPlainNumber refuses a plain scalar that YAML reads as something other than text, unless it is a
+// decimal integer written the way Go formats it. 010000000 is octal 2097152 to YAML but 10M to a quantity,
+// and 0x, 0o, underscores and exponents have the same problem, so what the file means is not what its text
+// says. Quoted scalars are strings and are fine.
+func checkPlainNumber(n *yaml.Node) error {
+	if n.Style != 0 || n.ShortTag() == "!!str" {
+		return nil
+	}
+	var v any
+	if err := n.Decode(&v); err != nil {
+		return refuse(ReasonUnsupported, "the value cannot be decoded")
+	}
+	var text string
+	switch x := v.(type) {
+	case int:
+		text = strconv.Itoa(x)
+	case int64:
+		text = strconv.FormatInt(x, 10)
+	case uint64:
+		text = strconv.FormatUint(x, 10)
+	}
+	if text == "" || text != n.Value {
+		return refuse(ReasonUnsupported, "the value is a number whose text and meaning may differ")
 	}
 	return nil
 }

@@ -274,6 +274,45 @@ func TestInvalidInput(t *testing.T) {
 	}
 }
 
+// second returns a minimal second document that declares the same Deployment through an alias or a merge key.
+func TestIdentityFromAliasOrMergeRefused(t *testing.T) {
+	dep := string(read(t, "deployment.yaml"))
+	docs := map[string]string{
+		"alias name":     "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: *n\n  namespace: orders\n",
+		"merge name":     "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  <<: {name: orders-worker}\n  namespace: orders\n",
+		"alias metadata": "apiVersion: apps/v1\nkind: Deployment\nmetadata: *m\n",
+		"merge at root":  "<<: {kind: Deployment}\napiVersion: apps/v1\nmetadata:\n  name: orders-worker\n  namespace: orders\n",
+		"anchored kind":  "apiVersion: apps/v1\nkind: &k Deployment\nmetadata:\n  name: orders-worker\n  namespace: orders\n",
+	}
+	for name, doc := range docs {
+		t.Run(name, func(t *testing.T) {
+			in := "x: &n orders-worker\nmeta: &m {name: orders-worker, namespace: orders}\n---\n" + doc + "---\n" + dep
+			if _, err := SetContainerMemoryLimit([]byte(in), deployment, mem("web", "512Mi", "768Mi")); !errors.Is(err, ErrUnsupported) {
+				t.Fatalf("got %v, want %v", err, ErrUnsupported)
+			}
+		})
+	}
+}
+
+func TestAmbiguousNumberSyntaxRefused(t *testing.T) {
+	dep := string(read(t, "deployment.yaml"))
+	for _, written := range []string{"010000000", "0o10000000", "0x800000", "1_000_000", "2e6", "0b1"} {
+		for _, prev := range []string{"2Mi", "10M", "2097152", "1000000", "8388608"} {
+			in := strings.Replace(dep, `"512Mi"`, written, 1)
+			if _, err := SetContainerMemoryLimit([]byte(in), deployment, mem("web", prev, "768Mi")); !errors.Is(err, ErrUnsupported) {
+				t.Errorf("%s with previous %s: got %v, want %v", written, prev, err, ErrUnsupported)
+			}
+		}
+	}
+	sc := string(read(t, "scaledobject.yaml"))
+	for _, written := range []string{"010", "0o12", "1_0", "1e1"} {
+		in := strings.Replace(sc, "maxReplicaCount: 10", "maxReplicaCount: "+written, 1)
+		if _, err := AdjustKedaMaxReplicas([]byte(in), scaled, v1alpha1.AdjustKedaMaxReplicas{PreviousValue: 10, DesiredValue: 20}); !errors.Is(err, ErrUnsupported) {
+			t.Errorf("%s: got %v, want %v", written, err, ErrUnsupported)
+		}
+	}
+}
+
 // FuzzPatch feeds arbitrary documents to both patchers: they must never panic, and when they accept an
 // input, only the target line may differ.
 func FuzzPatch(f *testing.F) {

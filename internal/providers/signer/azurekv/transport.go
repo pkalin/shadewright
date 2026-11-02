@@ -132,11 +132,18 @@ const (
 )
 
 // defaultTransport is the HTTP client used when tests do not replace it: the standard transport with
-// TLS 1.2 or later and bounded connection setup.
+// TLS 1.2 or later, bounded connection setup, and no redirects. Key Vault never redirects, and Go's client
+// keeps the Authorization header on a redirect to the same host even from https to http, so a redirect is
+// returned as a response (and fails as an unexpected status) instead of being followed.
 func defaultTransport() policy.Transporter {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	t.TLSHandshakeTimeout = 10 * time.Second
 	t.ResponseHeaderTimeout = tryTimeout
-	return &http.Client{Transport: t}
+	return &http.Client{
+		Transport: t,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }

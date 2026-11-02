@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -688,5 +689,32 @@ func assertClean(t *testing.T, err error) {
 		if strings.Contains(err.Error(), bad) {
 			t.Errorf("error leaks %q: %v", bad, err)
 		}
+	}
+}
+
+// TestDefaultTransportDoesNotFollowRedirects checks that a redirect, which Go's client would follow with the
+// Authorization header when only the scheme changes, is returned instead of followed.
+func TestDefaultTransportDoesNotFollowRedirects(t *testing.T) {
+	var followed atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/next" {
+			followed.Store(true)
+			return
+		}
+		http.Redirect(w, r, "/next", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(srv.Close)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/keys/github-app/sign", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := defaultTransport().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusTemporaryRedirect || followed.Load() {
+		t.Errorf("status %d, followed %v; want the 307 returned and not followed", resp.StatusCode, followed.Load())
 	}
 }

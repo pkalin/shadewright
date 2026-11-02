@@ -17,7 +17,7 @@ The executor must create branches, commits and PRs, and enable auto-merge, in on
 
 - The private key never exists in a pod, a Kubernetes Secret, a file or CI.
 - Every token is short-lived and repository-scoped; Key Vault logs every signing.
-- The executor asks for exactly these four permissions when it requests a token, and refuses a token that comes back with any other set. An App registered with fewer permissions therefore gets no token at all; register it with all four even before notifications are used.
+- The executor names exactly these four permissions when it requests a token, so the token never carries more. GitHub refuses the request when the App lacks one of them, so register the App with all four even before notifications are used.
 - One extra network call per token (about once an hour).
 - Other clouds need their own `Signer` (KMS, Vault transit); the interface is small.
 

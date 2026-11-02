@@ -38,6 +38,7 @@ import (
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/pkalin/shadewright/internal/policy"
 	"github.com/pkalin/shadewright/internal/policy/digest"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -267,14 +268,14 @@ func (c Checker) Fresh(ctx context.Context, rr *v1alpha1.RemediationRequest) err
 		return stale(ReasonPlanChanged, "The plan, its source or the repository settings changed")
 	}
 
-	if err := c.checkTarget(ctx, rr); err != nil {
+	if err := c.checkTarget(ctx, rr, pol); err != nil {
 		return err
 	}
 	return c.checkFile(ctx, rr, repo)
 }
 
 // checkTarget checks that the live target is still the object the plan is about.
-func (c Checker) checkTarget(ctx context.Context, rr *v1alpha1.RemediationRequest) error {
+func (c Checker) checkTarget(ctx context.Context, rr *v1alpha1.RemediationRequest, pol *v1alpha1.RemediationPolicy) error {
 	ref := rr.Spec.TargetRef
 	gv, err := schema.ParseGroupVersion(ref.APIVersion)
 	if err != nil {
@@ -290,6 +291,23 @@ func (c Checker) checkTarget(ctx context.Context, rr *v1alpha1.RemediationReques
 	}
 	if string(live.GetUID()) != string(ref.UID) {
 		return stale(ReasonTargetChanged, "%s %s/%s has another UID than the plan names", ref.Kind, ref.Namespace, ref.Name)
+	}
+	// The policy decided on the labels and on the previous value measured from the live field. Either may
+	// have changed since, while the UID and the file in Git stayed the same.
+	if reason, msg := policy.CheckObjectSelector(pol, live.GetLabels()); reason != "" {
+		return stale(ReasonTargetChanged, "%s", msg)
+	}
+	field, err := sourcemap.FieldFor(rr.Spec.Action, ref)
+	if err != nil {
+		return fmt.Errorf("locate the field of the action: %w", err)
+	}
+	previous, ok := sourcemap.PreviousValue(rr.Spec.Action)
+	if !ok {
+		return errors.New("the action has no previous value")
+	}
+	if got, found := field.Get(live.Object); !found || !field.Equals(got, previous) {
+		return stale(ReasonTargetChanged, "%s %s/%s no longer holds the previous value of %s on the live object",
+			ref.Kind, ref.Namespace, ref.Name, field)
 	}
 	return nil
 }

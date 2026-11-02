@@ -25,6 +25,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,6 +46,7 @@ import (
 const (
 	sourcePath = "apps/orders/deployment.yaml"
 	otherPath  = "docs/readme.yaml"
+	tierLabel  = "tier"
 	targetUID  = "33333333-3333-4333-8333-333333333333"
 	policyUID  = "44444444-4444-4444-8444-444444444444"
 )
@@ -84,10 +86,15 @@ func newWorld(t *testing.T) *world {
 		pol:      fx.RemediationPolicy("mem"),
 		settings: fx.RemediationSettings(),
 		target: &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
-			Namespace: fx.TargetNamespace, Name: fx.WorkloadName, UID: targetUID}},
+			Namespace: fx.TargetNamespace, Name: fx.WorkloadName, UID: targetUID,
+			Labels: map[string]string{tierLabel: "web"}},
+			Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "worker", Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")}}}}}}}},
 		git: fakegit.NewGit("main", map[string][]byte{sourcePath: manifest("256Mi"), otherPath: []byte("a: 1\n")}),
 	}
 	w.pol.UID, w.pol.Generation = policyUID, 3
+	w.pol.Spec.Targets.ObjectSelector = &metav1.LabelSelector{MatchLabels: map[string]string{tierLabel: "web"}}
 	w.settings.Spec.Repositories[0].TargetBranch = "main"
 	w.rr = fx.MemoryLimitRequest("default", "rr")
 	w.rr.UID = "55555555-5555-4555-8555-555555555555"
@@ -184,6 +191,15 @@ func TestStalePerDigestInput(t *testing.T) {
 		}, freshness.ReasonPlanChanged},
 		{"target recreated with another UID", func(w *world) { w.target.UID = "66666666-6666-4666-8666-666666666666" },
 			freshness.ReasonTargetChanged},
+		{"live limit changed, UID and Git unchanged", func(w *world) {
+			w.target.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = resource.MustParse("512Mi")
+		}, freshness.ReasonTargetChanged},
+		{"live limit removed", func(w *world) {
+			w.target.Spec.Template.Spec.Containers[0].Resources.Limits = nil
+		}, freshness.ReasonTargetChanged},
+		{"target relabelled out of the policy selector", func(w *world) { w.target.Labels = map[string]string{tierLabel: "db"} },
+			freshness.ReasonTargetChanged},
+		{"target labels removed", func(w *world) { w.target.Labels = nil }, freshness.ReasonTargetChanged},
 		{"target deleted", func(w *world) { w.target = nil }, freshness.ReasonTargetChanged},
 		{"source repositoryRef", func(w *world) { w.rr.Status.Source.RepositoryRef = "other" }, freshness.ReasonSettingsChanged},
 		{"source target branch", func(w *world) { w.rr.Status.Source.TargetBranch = "release" }, freshness.ReasonSettingsChanged},

@@ -13,9 +13,9 @@ The design left the library open, leaning towards `kyaml`. Four approaches were 
 | --- | --- | --- | --- | --- |
 | Lines changed in the diff | 40 | 4 | 4 | 2 |
 | Comments | All lost | Kept, spacing before them collapsed | The one on the changed line lost | Kept |
-| Key order, blank lines, quoting | Reordered, flow styles and quotes rewritten | Blank line dropped | Trailing blank line added | Unchanged |
-| Other data changed | Yes: literal block `\|` became `\|-`, dropping the ConfigMap value's final newline | No | No | No |
-| Target inside an anchor | Patched; the alias was already expanded into a copy | Patched, and the alias changed silently | Refused, because its path query cannot pass an anchor | Refused on purpose |
+| Key order, blank lines, quoting | Reordered, flow styles and quotes rewritten | Blank line dropped | Spacing before a comment collapsed | Unchanged |
+| Other data changed | No | No | No | No |
+| Target inside an anchor | Patched; anchor and alias replaced by two separate copies | Patched, and the alias changed silently | Refused, because its path query cannot pass an anchor | Refused on purpose |
 | Multi-document files | Manual split | Yes | Yes | Yes |
 | Licence | MIT and BSD-3-Clause | Apache-2.0 | MIT | MIT and Apache-2.0 |
 | New modules for the operator | None | 4 (`kyaml`, `go-errors`, `go-gitignore`, `treeprint`) | None (already in the module graph) | None (already indirect) |
@@ -71,25 +71,25 @@ The code lives in the patcher package (#55); the spike stays under `hack/` as th
          resources:
 ```
 
-- **Typed round-trip** with `sigs.k8s.io/yaml`. It loses every comment, reorders keys and rewrote a literal block so that the ConfigMap's data changed. Unusable for files people maintain.
+- **Typed round-trip** with `sigs.k8s.io/yaml`. The data survives, but it loses every comment, reorders keys, rewrites flow and quoting styles and turns anchors into copies: a 40-line diff for a one-value change. Unusable for files people maintain.
 
 ```diff
 @@ -1,44 +1,47 @@
 -# Orders worker: memory raised after the October load test.
  apiVersion: v1
-+data:
-+  worker.conf: |-
-+    batch = 50
-+      indent = kept
- kind: ConfigMap
- metadata:
-   name: orders-worker
-   namespace: orders
--data:
+-kind: ConfigMap
+-metadata:
+-  name: orders-worker
+-  namespace: orders
+ data:
 -  # Literal block: must stay byte for byte.
--  worker.conf: |
--    batch = 50
--      indent = kept
+   worker.conf: |
+     batch = 50
+       indent = kept
++kind: ConfigMap
++metadata:
++  name: orders-worker
++  namespace: orders
  ---
  apiVersion: apps/v1
  kind: Deployment
@@ -103,10 +103,10 @@ The code lives in the patcher package (#55); the spike stays under `hack/` as th
 ...
 ```
 
-- **`goccy/go-yaml`.** Its AST keeps comments and positions, but replacing a node through a path dropped the comment on the changed line and added a trailing blank line, and its path language has no filter by name, so the container index must be looked up first. Its token API could do a splice too, but `go.yaml.in/yaml/v3` is already a dependency and the splice needs only positions.
+- **`goccy/go-yaml`.** Its AST keeps comments and positions, but replacing a node through a path dropped the comment on the changed line and collapsed the spacing before another comment, and its path language has no filter by name, so the container index must be looked up first. Its token API could do a splice too, but `go.yaml.in/yaml/v3` is already a dependency and the splice needs only positions.
 
 ```diff
-@@ -31,14 +31,15 @@
+@@ -31,13 +31,13 @@
      spec:
        containers:
        - name: web
@@ -122,8 +122,6 @@ The code lives in the patcher package (#55); the spike stays under `hack/` as th
        - name: sidecar
          image: ghcr.io/example/log-shipper:0.9.0
          resources:
-           requests: *req
-+
 ```
 
 - **Splice** (chosen), for comparison:

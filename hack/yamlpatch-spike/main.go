@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 
 	goccy "github.com/goccy/go-yaml"
@@ -76,7 +77,12 @@ func run(sample string) {
 		if err := os.WriteFile(filepath.Join("out", sample+"-"+name+".yaml"), out, 0o644); err != nil {
 			fail(err)
 		}
-		fmt.Printf("  %-6s patched, only the target changed: %v\n", name, onlyTargetChanged(src, out))
+		ok, err := onlyTargetChanged(src, out)
+		if err != nil {
+			fmt.Printf("  %-6s patched, output does not decode: %v\n", name, err)
+			continue
+		}
+		fmt.Printf("  %-6s patched, only the target changed: %v\n", name, ok)
 	}
 }
 
@@ -89,9 +95,10 @@ func fail(err error) {
 // (sigs.k8s.io/yaml, the way most Kubernetes code reads manifests).
 func typedRoundTrip(src []byte) ([]byte, error) {
 	var out [][]byte
-	for _, doc := range bytes.Split(src, []byte("\n---\n")) {
+	// Split at "---" lines and keep each document's final newline, so a literal block keeps its content.
+	for _, doc := range docSeparator.Split(string(src), -1) {
 		var obj map[string]any
-		if err := k8syaml.Unmarshal(doc, &obj); err != nil {
+		if err := k8syaml.Unmarshal([]byte(doc), &obj); err != nil {
 			return nil, err
 		}
 		if obj["kind"] == "Deployment" {
@@ -113,6 +120,9 @@ func typedRoundTrip(src []byte) ([]byte, error) {
 	}
 	return bytes.Join(out, []byte("---\n")), nil
 }
+
+// docSeparator matches a document separator line.
+var docSeparator = regexp.MustCompile(`(?m)^---\n`)
 
 func web(obj map[string]any) map[string]any {
 	spec := obj["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
@@ -197,7 +207,8 @@ func goccyPatch(src []byte) ([]byte, error) {
 			return nil, err
 		}
 	}
-	return []byte(file.String() + "\n"), nil
+	// String already ends with a newline.
+	return []byte(file.String()), nil
 }
 
 // splice finds the scalar with a node parser (go.yaml.in/yaml/v3, the maintained yaml.v3) and replaces
@@ -279,27 +290,37 @@ func offset(src []byte, line, col int) int {
 	return off + col - 1
 }
 
-// onlyTargetChanged decodes both files and reports whether the data differs only in the target field.
-func onlyTargetChanged(before, after []byte) bool {
-	a, b := decodeAll(before), decodeAll(after)
+// onlyTargetChanged decodes both files and reports whether the data differs only in the target field. A file
+// that does not decode completely is an error, never a match of the documents read so far.
+func onlyTargetChanged(before, after []byte) (bool, error) {
+	a, err := decodeAll(before)
+	if err != nil {
+		return false, err
+	}
+	b, err := decodeAll(after)
+	if err != nil {
+		return false, err
+	}
 	if len(a) != len(b) {
-		return false
+		return false, nil
 	}
 	for _, d := range a {
 		if d["kind"] == "Deployment" {
 			web(d)["resources"].(map[string]any)["limits"].(map[string]any)["memory"] = newValue
 		}
 	}
-	return reflect.DeepEqual(a, b)
+	return reflect.DeepEqual(a, b), nil
 }
 
-func decodeAll(src []byte) []map[string]any {
+func decodeAll(src []byte) ([]map[string]any, error) {
 	var out []map[string]any
 	dec := yamlv3.NewDecoder(bytes.NewReader(src))
 	for {
 		var m map[string]any
-		if err := dec.Decode(&m); err != nil {
-			return out
+		if err := dec.Decode(&m); errors.Is(err, io.EOF) {
+			return out, nil
+		} else if err != nil {
+			return nil, err
 		}
 		out = append(out, m)
 	}

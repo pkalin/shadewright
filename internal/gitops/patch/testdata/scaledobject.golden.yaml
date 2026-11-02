@@ -1,0 +1,22 @@
+# Orders worker autoscaling. Edited by the platform team.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: orders-worker
+  namespace: orders
+spec:
+  scaleTargetRef:
+    name: orders-worker
+  minReplicaCount: 1
+  maxReplicaCount: 20 # capped by the node pool size
+  triggers:
+  - type: cpu
+    metadata: {type: Utilization, value: "60"}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: orders-worker
+  namespace: staging
+spec:
+  maxReplicaCount: 10

@@ -12,7 +12,7 @@ The design left the library open, leaning towards `kyaml`. Four approaches were 
 | | Typed round-trip (`sigs.k8s.io/yaml` v1.6.0) | `kyaml` v0.21.2 | `goccy/go-yaml` v1.19.2 | Splice (`go.yaml.in/yaml/v3` v3.0.6) |
 | --- | --- | --- | --- | --- |
 | Lines changed in the diff | 40 | 4 | 4 | 2 |
-| Comments | All lost | Kept, spacing before them collapsed | The one on the changed line lost | Kept |
+| Comments | All lost | Kept, spacing before them collapsed | The one on the changed line lost with the path replace the spike used; kept when the node's value is set directly | Kept |
 | Key order, blank lines, quoting | Reordered, flow styles and quotes rewritten | Blank line dropped | Spacing before a comment collapsed | Unchanged |
 | Other data changed | No | No | No | No |
 | Target inside an anchor | Patched; anchor and alias replaced by two separate copies | Patched, and the alias changed silently | Refused, because its path query cannot pass an anchor | Refused on purpose |
@@ -25,12 +25,12 @@ The design left the library open, leaning towards `kyaml`. Four approaches were 
 
 Patch by replacing the bytes of one scalar:
 
-1. Parse the file with `go.yaml.in/yaml/v3` (the maintained successor of `gopkg.in/yaml.v3`) into nodes, only to find the document and the scalar node of the field, using the same lookup rules as the source mapping (kind, namespace, name; container by name).
+1. Parse the file with `go.yaml.in/yaml/v3` (the maintained successor of `gopkg.in/yaml.v3`) into nodes, only to find the document and the scalar node of the field, using the same identity as the source mapping (apiVersion, kind, namespace and name; exactly one container of that name). The node tree is used only for positions; the source mapping stays the authority on which document declares the target.
 2. Refuse with `NeedsIntervention` when the scalar or any node on its path has an anchor or is an alias, when there is a merge key (`<<`) or a flow-style collection on the path, when a path mapping repeats a key, or when the scalar is not plain, single-quoted or double-quoted (no block or flow scalar, no tag). The same applies to the identity fields of every document in the file (`apiVersion`, `kind`, `metadata.name`, `metadata.namespace`), so another declaration of the target cannot hide behind an alias, a merge key or a tag such as `!!binary`.
-3. Turn the node's line and column into a byte offset, check that the bytes there are exactly the old value in its quoting, and replace only those bytes, keeping the quote style. Columns count characters, not bytes; if the check fails, refuse instead of guessing.
-4. Decode the original and the patched file and require that they differ only in the target value. This also catches any case the rules above miss, such as an alias elsewhere that points into the target.
+3. Turn the node's line and column into a byte offset, check that the bytes there are exactly the old value in its quoting, and replace only those bytes, keeping the quote style. Columns count characters, not bytes; if the check fails, refuse instead of guessing. This is a check of the position only: whether the file still holds the request's previous value is decided by value, as in [ADR-0012](0012-object-to-source-mapping.md) (`256Mi` equals `268435456`). The new value is written in its canonical form: `Quantity.String()` for memory, a decimal integer for replicas. A plain scalar that YAML reads as a number other than its text (a leading zero, `0x`, `0o`, an underscore or an exponent) is refused.
+4. Decode the original and the patched file and require that they differ only in the target value. This also catches any case the rules above miss, such as an alias elsewhere that points into the target. A parse error in either file, or a target whose decoded value is not the desired value, refuses with `NeedsIntervention`.
 
-The code lives in the patcher package (#55); the spike stays under `hack/` as the record of the comparison.
+The code lives in `internal/gitops/patch` (#55); the spike stays under `hack/` as the record of the comparison.
 
 ## Consequences
 

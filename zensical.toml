@@ -41,6 +41,7 @@ nav = [
     { "0018 Pluggability" = "adr/0018-three-axes-of-pluggability.md" },
     { "0019 Extension packaging" = "adr/0019-extension-packaging.md" },
     { "0020 YAML patching" = "adr/0020-yaml-patching.md" },
+    { "0021 Amending ADRs" = "adr/0021-amending-accepted-adrs.md" },
     { "Template" = "adr/template.md" },
   ] },
 ]

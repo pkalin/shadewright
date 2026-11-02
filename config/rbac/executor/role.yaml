@@ -31,8 +31,6 @@ rules:
   - remediationsettings
   verbs:
   - get
-  - list
-  - watch
 - apiGroups:
   - source.toolkit.fluxcd.io
   resources:

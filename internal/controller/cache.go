@@ -30,9 +30,9 @@ import (
 //
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=remediationrequests,verbs=get;list;watch
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=remediationrequests/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=remediation.shadewright.io,resources=incidents,verbs=get;list;watch
-// +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationpolicies,verbs=get;list;watch
-// +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationsettings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=remediation.shadewright.io,resources=incidents,verbs=get
+// +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationpolicies,verbs=get
+// +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationsettings,verbs=get
 //
 // Source mapping (ADR-0012) reads the target and the Flux objects that deliver it, one object at a time through
 // the manager's API reader (never the cache), so get is enough: no list, no watch. The kinds are the action catalog's targets and the

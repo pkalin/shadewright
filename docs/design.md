@@ -1,6 +1,6 @@
 # Design
 
-Status: draft for the MVP. Nothing here is implemented yet. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
+Status: draft for the MVP. Steps and parts marked *(planned)* are designed but not built yet; everything else describes the code as it is. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
 
 ## 1. Goals
 
@@ -54,12 +54,12 @@ sequenceDiagram
     A->>M: Redacted context, bounded tool loop (planned)
     M-->>A: Diagnosis and a proposed typed action (planned)
     A->>R: Create the request: what to change, never where (planned)
-    E->>R: Reconcile the request (planned)
+    E->>R: Reconcile the request
     E->>K: Read the live target and its Flux objects
     E->>E: Map the object to its file in Git (ADR-0012)
     E->>E: Policy decision and plan digest
     alt Denied or NeedsIntervention
-        E->>R: Status with the reason, no pull request (planned)
+        E->>R: Status with the reason, no pull request
     else Allowed
         E->>G: Branch, commit and pull request (planned)
         G->>G: Review and required checks, then merge
@@ -90,7 +90,7 @@ The analyzer and the remediation controller are separate binaries in one Go modu
 The collector, the incident store and the analyzer run in the analyzer binary; the policy engine, the remediation controller, the GitOps adapter and the verifier run in the executor (`cmd/main.go`). Their roles are generated from kubebuilder RBAC markers (`internal/analyzer`, `internal/controller`):
 
 - **Analyzer:** reads events (`events.k8s.io/v1`), pods and workloads; creates and updates `Incident` objects and their status; creates `RemediationRequest` objects in the operator namespace only (a Role). It cannot update, delete or write the status of a request.
-- **Executor:** reads incidents, policies and settings; reads (`get` only, no list or watch) the target kinds (Deployments, StatefulSets, KEDA ScaledObjects) and the Flux Kustomizations and GitRepositories that deliver them, for source mapping; reads requests and writes their status in the operator namespace only (a Role), and its cache watches requests only there. It cannot create requests or write incidents.
+- **Executor:** reads (`get` only) incidents, policies and settings, always from the API server, never through a cache; reads (`get` only, no list or watch) the target kinds (Deployments, StatefulSets, KEDA ScaledObjects) and the Flux Kustomizations and GitRepositories that deliver them, for source mapping; reads requests and writes their status in the operator namespace only (a Role), and its cache watches requests only there. It cannot create requests or write incidents.
 - Neither can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
 
 No model runs in the cluster and no GPU is needed: the analyzer calls a managed model endpoint (Microsoft Foundry first). The tool loop is our own code, not a hosted agent service.
@@ -394,10 +394,10 @@ The policy check, the first step, loads the policy the request names, the `defau
 | The previous value in the request is not the live value (the policy measures increases and decreases from it) | `Denied` (`PreviousValueMismatch`) | `False` |
 | The live object does not set the field the action changes | `NeedsIntervention` (`FieldNotFound`) | `Unknown` |
 | Source mapping denies (repository, branch, path or inventory) or `policy.Decide` denies | `Denied`, reason of the check | `False` |
-| Source mapping needs a human (Helm, patches, missing target, unknown Flux shape) | `NeedsIntervention`, reason of the mapping | `Unknown` |
+| Source mapping needs a human (Helm, patches, missing target, unknown Flux shape), or the target got another UID while the mapping ran (`TargetChanged`) | `NeedsIntervention`, reason of the mapping | `Unknown` |
 | All checks pass | `PolicyChecked`, `WithinApprovedBounds` | `True` |
 
-Only a failure worth retrying (API server or Git host) is retried, with backoff, or after the delay the host asked for (`Retry-After`); every permanent refusal is a final phase. The policy and settings are read from the API server on every check, never from the cache, so a deleted policy or a tightened setting takes effect at once. Messages and conditions never carry Git URLs or provider text.
+Only a failure worth retrying (API server or Git host) is retried, with backoff, or after the delay the host asked for (`Retry-After`); every permanent refusal is a final phase. While a retry is pending the request stays `Pending` without a `PolicyAllowed` condition. The retry limit is planned, and so is the executor's connection to the GitHub adapter: until it is wired in `cmd/main.go`, every request that passes the cluster-side checks fails to read Git and is retried with backoff. The policy and settings are read from the API server on every check, never from the cache, so a deleted policy or a tightened setting takes effect at once. Messages and conditions never carry Git URLs or provider text.
 
 Each reconcile:
 
@@ -414,7 +414,7 @@ Required mechanisms:
 
 - Leader election, bounded concurrency, a lock per target object.
 - Optimistic concurrency on Kubernetes objects and a base SHA check on every Git write.
-- Retries with exponential backoff, jitter and `Retry-After`, with a limit.
+- Retries with exponential backoff, jitter and `Retry-After`, with a limit (the limit is planned).
 - Deadlines for policy, PR, delivery and verification, stored in status.
 - No model call during reconcile when the context did not change.
 - Policy and plan freshness re-checked right before every write: same policy UID and generation, same settings, and the target file still holds the previous value. A stale plan becomes `Superseded` and its change request is closed (once, idempotently), never a rebuilt branch. The step is `EnsureFresh` in the controller; the later state machine calls it before each write.
@@ -462,22 +462,22 @@ Fully automatic merges happen only where the repository owner deliberately allow
 7. Bind the PR to the request UID and plan digest. Any new push to the branch invalidates the plan.
 8. After merge, follow delivery and the success criteria instead of stopping at "merged".
 
-Opening the change on GitHub, steps 2 to 7 above. Steps marked *(planned)* are designed but not built yet. The GitHub App key never leaves Key Vault ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)); every write names the state it expects, so a restart or a race finds the existing work instead of repeating it.
+Opening the change on GitHub, steps 2 to 7 above. Steps marked *(planned)* are designed but not built yet. Here they are built as adapters (`internal/providers/signer/azurekv`, `internal/providers/github/auth`, `internal/providers/github`) with their own tests, but the executor does not call them yet; *(planned)* means not called by the running operator. The GitHub App key never leaves Key Vault ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)); every write names the state it expects, so a restart or a race finds the existing work instead of repeating it.
 
 ```mermaid
 sequenceDiagram
     participant E as Executor
     participant V as Key Vault
     participant G as GitHub
-    E->>V: Sign the App JWT, RS256
+    E->>V: Sign the App JWT, RS256 (planned)
     V-->>E: Signature
-    E->>G: Exchange the JWT for a one-hour installation token, scoped to the one repository
-    E->>G: Read the head SHA of targetBranch
-    E->>G: Create branch shadewright/#lt;request-uid#gt; at that SHA
+    E->>G: Exchange the JWT for a one-hour installation token, scoped to the one repository (planned)
+    E->>G: Read the head SHA of targetBranch (planned)
+    E->>G: Create branch shadewright/#lt;request-uid#gt; at that SHA (planned)
     Note over E,G: An existing branch at that SHA is success, at another SHA a conflict
-    E->>G: Commit the file, expecting that head
+    E->>G: Commit the file, expecting that head (planned)
     Note over E,G: A moved head is a conflict, never a force push
-    E->>G: Open the pull request with the request UID and plan digest marker
+    E->>G: Open the pull request with the request UID and plan digest marker (planned)
     Note over E,G: An open pull request for the branch is returned, not duplicated
     alt Approval required
         G->>G: Wait for a human approval of the head commit

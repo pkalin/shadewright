@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -68,10 +69,29 @@ func buildJWT(ctx context.Context, signer providers.Signer, clientID string, now
 	digest := sha256.Sum256([]byte(input))
 	sig, err := signer.Sign(ctx, digest[:])
 	if err != nil {
-		return "", fmt.Errorf("sign GitHub App JWT: %w", err)
+		return "", signerError(err)
 	}
 	if len(sig) == 0 {
 		return "", fmt.Errorf("sign GitHub App JWT: signer returned an empty signature")
 	}
 	return input + "." + b64.EncodeToString(sig), nil
+}
+
+// signerError replaces a signer error with fixed text. A signer's error can carry SDK or transport text that
+// came from the key store's response, so only its class is kept: retryable (with the requested delay), not
+// found, canceled or past its deadline.
+func signerError(err error) error {
+	const msg = "sign GitHub App JWT: signer failed"
+	switch {
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("%s: %w", msg, context.Canceled)
+	case errors.Is(err, context.DeadlineExceeded):
+		return &providers.RetryableError{Err: fmt.Errorf("%s: %w", msg, context.DeadlineExceeded)}
+	case providers.IsRetryable(err):
+		after, _ := providers.RetryAfter(err)
+		return &providers.RetryableError{RetryAfter: after, Err: errors.New(msg)}
+	case providers.IsNotFound(err):
+		return fmt.Errorf("%s: %w", msg, providers.ErrNotFound)
+	}
+	return errors.New(msg)
 }

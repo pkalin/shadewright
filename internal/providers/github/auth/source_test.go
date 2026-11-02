@@ -554,9 +554,9 @@ func TestParseRepositoryURL(t *testing.T) {
 }
 
 func TestSecretsNeverInLogsOrErrors(t *testing.T) {
-	var jwt string
+	var jwts []string
 	e := setup(t, func(w http.ResponseWriter, r *http.Request) {
-		jwt = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		jwts = append(jwts, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, okBody(t0.Add(time.Hour)))
 	})
@@ -580,20 +580,25 @@ func TestSecretsNeverInLogsOrErrors(t *testing.T) {
 	for _, status := range []int{401, 403, 404, 429, 500} {
 		fresh := setup(t, func(w http.ResponseWriter, r *http.Request) {
 			j := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			jwt = j
+			jwts = append(jwts, j)
 			w.WriteHeader(status)
 			_, _ = io.WriteString(w, `{"message":"bad `+j+` `+testToken+`"}`)
 		})
 		tok, err := fresh.src.Token(context.Background())
 		record(tok, err)
 	}
-	if jwt == "" {
-		t.Fatal("no JWT captured")
+	if len(jwts) < 6 {
+		t.Fatalf("captured %d JWTs, want one per request", len(jwts))
 	}
 	all = append(all, logs.String())
 	for _, s := range all {
-		if strings.Contains(s, testToken) || strings.Contains(s, jwt) || strings.Contains(s, "SECRETINSTALLATION") {
-			t.Fatalf("secret in output: %.200s", s)
+		if strings.Contains(s, testToken) || strings.Contains(s, "SECRETINSTALLATION") {
+			t.Fatalf("token in output: %.200s", s)
+		}
+		for _, jwt := range jwts {
+			if jwt == "" || strings.Contains(s, jwt) {
+				t.Fatalf("JWT in output (or none captured): %.200s", s)
+			}
 		}
 	}
 	if !strings.Contains(logs.String(), "redacted") {
@@ -779,4 +784,59 @@ func TestBodyReadFailureIsRetryable(t *testing.T) {
 			t.Fatalf("err = %v, want retryable deadline", err)
 		}
 	})
+}
+
+// fmt and slog walk an unexported field without calling its methods, so a Token inside another struct must
+// not print its value either.
+func TestTokenInPrivateFieldStaysHidden(t *testing.T) {
+	type holder struct {
+		name string
+		tok  Token
+	}
+	h := holder{name: "x", tok: newToken(testToken)}
+	var logs bytes.Buffer
+	slog.New(slog.NewTextHandler(&logs, nil)).Info("h", "holder", h, "ptr", &h)
+	slog.New(slog.NewJSONHandler(&logs, nil)).Info("h", "holder", h, "ptr", &h)
+	out := []string{logs.String(), fmt.Sprintf("%v|%+v|%#v|%v|%+v|%#v", h, h, h, &h, &h, &h)}
+	for _, s := range out {
+		if strings.Contains(s, testToken) {
+			t.Fatalf("token in output: %.200s", s)
+		}
+	}
+	if h.tok.Reveal() != testToken || (Token{}).Reveal() != "" {
+		t.Fatal("Reveal does not return the value")
+	}
+}
+
+// A signer error can carry text from the key store's response. Only its class reaches the caller.
+func TestSignerErrorTextIsDropped(t *testing.T) {
+	const echoed = "SECRETFROMVAULT"
+	cases := map[string]struct {
+		err   error
+		check func(error) bool
+	}{
+		"plain":     {errors.New("vault said " + echoed), func(err error) bool { return !providers.IsRetryable(err) }},
+		"retryable": {&providers.RetryableError{RetryAfter: 7 * time.Second, Err: errors.New(echoed)}, func(err error) bool { d, ok := providers.RetryAfter(err); return ok && d == 7*time.Second }},
+		"not found": {fmt.Errorf("%s: %w", echoed, providers.ErrNotFound), providers.IsNotFound},
+		"canceled":  {fmt.Errorf("%s: %w", echoed, context.Canceled), func(err error) bool { return errors.Is(err, context.Canceled) }},
+		"deadline":  {fmt.Errorf("%s: %w", echoed, context.DeadlineExceeded), func(err error) bool { return providers.IsRetryable(err) && errors.Is(err, context.DeadlineExceeded) }},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := setup(t, func(http.ResponseWriter, *http.Request) { t.Error("request sent") })
+			e.signer.Fail = func(string) error { return c.err }
+			_, err := e.src.Token(context.Background())
+			if err == nil || !c.check(err) {
+				t.Fatalf("class lost: %v", err)
+			}
+			if s := fmt.Sprintf("%v|%+v|%#v", err, err, err); strings.Contains(s, echoed) {
+				t.Fatalf("signer text in error: %s", s)
+			}
+			for u := err; u != nil; u = errors.Unwrap(u) {
+				if strings.Contains(u.Error(), echoed) {
+					t.Fatalf("signer text in chain: %v", u)
+				}
+			}
+		})
+	}
 }

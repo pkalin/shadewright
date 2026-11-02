@@ -242,7 +242,7 @@ func (s *Source) Token(ctx context.Context) (Token, error) {
 
 // valid reports whether the cached token may still be used; s.mu must be held.
 func (s *Source) valid() bool {
-	return s.tok.value != "" && s.now().Add(s.margin).Before(s.expires)
+	return s.tok.Reveal() != "" && s.now().Add(s.margin).Before(s.expires)
 }
 
 func (s *Source) fetch(ctx context.Context) (Token, time.Time, error) {
@@ -381,7 +381,7 @@ func (s *Source) parse(op string, data []byte) (Token, time.Time, error) {
 	if len(r.Repositories) != 1 || !strings.EqualFold(r.Repositories[0].FullName, s.repo.String()) {
 		return Token{}, time.Time{}, fmt.Errorf("%s: token is not scoped to exactly this repository", op)
 	}
-	return Token{value: r.Token}, exp, nil
+	return newToken(r.Token), exp, nil
 }
 
 // validToken accepts printable ASCII without spaces, so the token cannot break out of a header.

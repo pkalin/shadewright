@@ -387,6 +387,23 @@ spec:
                   branch is created; if any input changes later, the request becomes Superseded and its PR is closed.
                 pattern: ^sha256:[0-9a-f]{64}$
                 type: string
+              planRepository:
+                description: planRepository is the repository and installation the
+                  plan digest covers, set together with planDigest.
+                properties:
+                  installationID:
+                    description: installationID is the provider installation that
+                      covers the repository; 0 when the provider has none.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  url:
+                    description: url is the repository URL from RemediationSettings.
+                    maxLength: 512
+                    type: string
+                required:
+                - url
+                type: object
               policyRevision:
                 description: |-
                   policyRevision is the policy name and generation the decision used, as name/generation. The policy UID

@@ -86,6 +86,14 @@ var ErrSuperseded = errors.New("the plan is superseded")
 // freshRecheckDelay is how long a request waits to be re-checked when writes are paused.
 const freshRecheckDelay = time.Minute
 
+// freshRecheckInterval is how often a fresh request before merge is looked at again. It bounds how long a
+// stale plan keeps an open change request when nothing else wakes the request.
+const freshRecheckInterval = 5 * time.Minute
+
+// errRepositoryGone means the repository a plan was made for is not in the settings any more (or was never
+// recorded), so its change request cannot be closed safely.
+var errRepositoryGone = errors.New("the repository of the plan is not configured")
+
 // reader returns the uncached reader, or the client when none is set.
 func (r *RemediationRequestReconciler) reader() client.Reader {
 	if r.APIReader != nil {
@@ -142,6 +150,7 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	rr.Status.PolicyUID = out.policyUID
 	rr.Status.PolicyRevision = out.policyRevision
 	rr.Status.PlanDigest = out.planDigest
+	rr.Status.PlanRepository = out.planRepository
 	rr.Status.EffectiveApprovalRequired = out.approval
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPolicyAllowed,
@@ -167,6 +176,7 @@ type outcome struct {
 	source         *remediationv1alpha1.ResolvedSource
 	policyUID      remediationv1alpha1.UID
 	policyRevision string
+	planRepository *remediationv1alpha1.PlanRepository
 	approval       *bool
 	planDigest     string
 }
@@ -288,6 +298,11 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 			return needsIntervention(string(sourcemap.ReasonInvalidInput), "The plan digest cannot be computed"), nil
 		}
 		o.planDigest = digest
+		for _, repo := range settings.Spec.Repositories {
+			if repo.Name == res.Source.RepositoryRef {
+				o.planRepository = freshness.RepositoryOf(repo)
+			}
+		}
 	case policy.OutcomeDenied:
 		o.phase, o.status = remediationv1alpha1.PhaseDenied, metav1.ConditionFalse
 	default:
@@ -367,11 +382,19 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		return ctrl.Result{}, nil
 	}
 	switch err := r.EnsureFresh(ctx, rr); {
-	case err == nil || errors.Is(err, ErrSuperseded):
+	case errors.Is(err, ErrSuperseded):
 		return ctrl.Result{}, nil
+	case err == nil:
+		return ctrl.Result{RequeueAfter: freshRecheckInterval}, nil
 	case errors.Is(err, freshness.ErrPaused):
 		return ctrl.Result{RequeueAfter: freshRecheckDelay}, nil
 	default:
+		// A host that asked for a delay (Retry-After) gets it; the error backoff does not read it.
+		if pe, ok := errors.AsType[*freshness.ProviderError](err); ok && pe.RetryAfter > 0 {
+			logf.FromContext(ctx).Info("Waiting before re-checking RemediationRequest",
+				"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", pe.RetryAfter)
+			return ctrl.Result{RequeueAfter: pe.RetryAfter}, nil
+		}
 		return ctrl.Result{}, err
 	}
 }
@@ -389,54 +412,66 @@ func (r *RemediationRequestReconciler) EnsureFresh(ctx context.Context, rr *reme
 	if rr.Status.Phase == remediationv1alpha1.PhaseSuperseded {
 		return ErrSuperseded
 	}
+	if !beforeMerge(rr.Status.Phase) {
+		return fmt.Errorf("a request in phase %q takes no write that needs a fresh plan", rr.Status.Phase)
+	}
 	err := freshness.Checker{Reader: r.reader(), OpenRepository: r.OpenRepository}.Fresh(ctx, rr)
 	staleErr, ok := errors.AsType[*freshness.StaleError](err)
 	if !ok {
 		return err
 	}
-	if err := r.closeChangeRequest(ctx, rr); err != nil {
+	phase, reason, message := remediationv1alpha1.PhaseSuperseded, staleErr.Reason, staleErr.Message
+	switch err := r.closeChangeRequest(ctx, rr); {
+	case errors.Is(err, errRepositoryGone):
+		// Nothing is closed: the only change request this plan could have is in a repository that cannot be
+		// reached through the settings any more, and closing a number elsewhere could close someone else's.
+		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, "RepositoryUnavailable"
+		message = "The plan is stale and the repository it was made for is not configured any more; " +
+			"its change request, if any, was not closed"
+	case err != nil:
 		return err
 	}
-	rr.Status.Phase = remediationv1alpha1.PhaseSuperseded
+	rr.Status.Phase = phase
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPlanFresh,
 		Status:             metav1.ConditionFalse,
-		Reason:             staleErr.Reason,
-		Message:            staleErr.Message,
+		Reason:             reason,
+		Message:            message,
 		ObservedGeneration: rr.Generation,
 	})
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
 	logf.FromContext(ctx).Info("Superseded RemediationRequest", "remediationRequest", client.ObjectKeyFromObject(rr),
-		"reason", staleErr.Reason)
+		"phase", phase, "reason", reason)
 	return ErrSuperseded
 }
 
-// closeChangeRequest closes the request's change request, if it has one. A change request that is already
-// closed, or that was never opened, is not an error; a merged one is, because the change landed.
+// closeChangeRequest closes the request's change request, if it has one, in the repository the plan was made
+// for and nowhere else. A change request that is already closed, or that was never opened, is not an error; a
+// merged one is, because the change landed. It returns [errRepositoryGone] when that repository is not in the
+// settings, and [freshness.ErrPaused] when the settings read now pause writes.
 func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	src := rr.Status.Source
-	if src == nil || r.OpenRepository == nil {
-		return errors.New("cannot close the change request: no source or Git provider")
+	if r.OpenRepository == nil {
+		return errors.New("cannot close the change request: no Git provider")
 	}
 	settings := &remediationv1alpha1.RemediationSettings{}
-	if err := r.getLive(ctx, types.NamespacedName{Name: settingsName}, settings); err != nil {
+	switch err := r.getLive(ctx, types.NamespacedName{Name: settingsName}, settings); {
+	case apierrors.IsNotFound(err):
+		return errRepositoryGone
+	case err != nil:
 		return fmt.Errorf("get RemediationSettings %s: %w", settingsName, err)
 	}
-	var repo *remediationv1alpha1.GitRepository
-	for i := range settings.Spec.Repositories {
-		if settings.Spec.Repositories[i].Name == src.RepositoryRef {
-			repo = &settings.Spec.Repositories[i]
-		}
+	if freshness.Paused(settings) {
+		return freshness.ErrPaused
 	}
-	if repo == nil {
-		// The repository left the settings: nothing identifies where the change request lives.
-		return fmt.Errorf("repository %q is not in the settings, cannot close its change request", src.RepositoryRef)
+	repo, ok := freshness.FindRepository(settings, rr.Status.PlanRepository)
+	if !ok {
+		return errRepositoryGone
 	}
-	git, err := r.OpenRepository(ctx, *repo)
+	git, err := r.OpenRepository(ctx, repo)
 	if err != nil {
-		return fmt.Errorf("open repository %q: %w", repo.Name, err)
+		return freshness.WrapProvider("open the repository", err)
 	}
 	number := int64(0)
 	if rr.Status.PullRequest != nil {
@@ -448,12 +483,12 @@ func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, r
 		case errors.Is(err, providers.ErrNotFound):
 			return nil
 		case err != nil:
-			return fmt.Errorf("find the change request of %q: %w", repo.Name, err)
+			return freshness.WrapProvider("find the change request", err)
 		}
 		number = cr.Number
 	}
 	if err := git.CloseChangeRequest(ctx, number); err != nil {
-		return fmt.Errorf("close change request %d of %q: %w", number, repo.Name, err)
+		return freshness.WrapProvider("close the change request", err)
 	}
 	return nil
 }

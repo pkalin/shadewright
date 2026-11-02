@@ -393,6 +393,20 @@ Used by: [IncidentSpec](#incidentspec), [RemediationRequestSpec](#remediationreq
 | `name` | string | Yes | name of the object.<br>Maximum length: 253<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` |
 | `uid` | [UID](#uid) | No | uid of the object.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 
+### PlanRepository
+
+PlanRepository identifies the repository a plan was made for: the URL and provider installation taken from
+RemediationSettings when planDigest was fixed. Cleanup of a superseded plan touches only this repository, so a
+settings entry that now points elsewhere can never get an unrelated pull request closed.
+
+
+Used by: [RemediationRequestStatus](#remediationrequeststatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `url` | string | Yes | url is the repository URL from RemediationSettings.<br>Maximum length: 512 |
+| `installationID` | integer | No | installationID is the provider installation that covers the repository; 0 when the provider has none.<br>Minimum: 0 |
+
 ### PolicyAction
 
 PolicyAction allows one action type within bounds. Exactly the bounds member named by type is set.
@@ -567,6 +581,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `effectiveApprovalRequired` | boolean | No | effectiveApprovalRequired is what policy decided, which may be stricter than spec.approvalRequired. |
 | `source` | [ResolvedSource](#resolvedsource) | No | source is where the change is made, resolved by the controller before the policy check. |
 | `planDigest` | string | No | planDigest covers the semantic change, the target UID, the resolved source with the repository URL and provider installation from RemediationSettings, and the policy UID and generation. It is fixed when the branch is created; if any input changes later, the request becomes Superseded and its PR is closed.<br>Pattern: `^sha256:[0-9a-f]{64}$` |
+| `planRepository` | [PlanRepository](#planrepository) | No | planRepository is the repository and installation the plan digest covers, set together with planDigest. |
 | `policyRevision` | string | No | policyRevision is the policy name and generation the decision used, as name/generation. The policy UID is recorded next to it, because a deleted and recreated policy can reach the same generation again.<br>Maximum length: 128 |
 | `policyUID` | [UID](#uid) | No | policyUID is the UID of the policy the decision used. It is part of the plan digest.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists. |

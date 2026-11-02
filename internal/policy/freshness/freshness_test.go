@@ -19,7 +19,10 @@ package freshness_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -372,4 +375,76 @@ func recompute(t *testing.T, w *world) string {
 func resourceQuantity(s string) *resource.Quantity {
 	q := resource.MustParse(s)
 	return &q
+}
+
+func TestPausedWinsOverStale(t *testing.T) {
+	w := newWorld(t)
+	w.settings.Spec.Paused = new(true)
+	w.pol = nil // stale as well
+	if err := w.fresh(t); !errors.Is(err, freshness.ErrPaused) {
+		t.Fatalf("want ErrPaused before any stale verdict, got %v", err)
+	}
+}
+
+// chain returns the text of err and of everything reachable through Unwrap, single or joined.
+func chain(err error) []string {
+	if err == nil {
+		return nil
+	}
+	out := []string{err.Error()}
+	switch u := err.(type) {
+	case interface{ Unwrap() error }:
+		out = append(out, chain(u.Unwrap())...)
+	case interface{ Unwrap() []error }:
+		for _, e := range u.Unwrap() {
+			out = append(out, chain(e)...)
+		}
+	}
+	return out
+}
+
+func TestProviderErrorsKeepNoText(t *testing.T) {
+	const secret = "ghs_supersecrettoken"
+	leaky := &providers.RetryableError{RetryAfter: 4 * time.Second,
+		Err: fmt.Errorf("GET https://x-access-token:%s@github.com/o/r: 502", secret)}
+	cases := map[string]func(w *world){
+		"open": func(w *world) {
+			w.open = func(context.Context, v1alpha1.GitRepository) (providers.GitProvider, error) { return nil, leaky }
+		},
+		"branch head": func(w *world) {
+			w.git.SetFail(func(op string) error {
+				if op == "BranchHead" {
+					return leaky
+				}
+				return nil
+			})
+		},
+		"read file": func(w *world) {
+			w.git.SetFail(func(op string) error {
+				if op == "ReadFile" {
+					return leaky
+				}
+				return nil
+			})
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld(t)
+			setup(w)
+			err := w.fresh(t)
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			for _, text := range chain(err) {
+				if strings.Contains(text, secret) || strings.Contains(text, "github.com") {
+					t.Fatalf("the chain leaks provider text: %q", text)
+				}
+			}
+			pe, ok := errors.AsType[*freshness.ProviderError](err)
+			if !ok || pe.RetryAfter != 4*time.Second || !errors.Is(err, providers.ErrRetryable) {
+				t.Fatalf("want the class and delay kept, got %#v", err)
+			}
+		})
+	}
 }

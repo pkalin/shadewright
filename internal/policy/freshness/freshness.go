@@ -76,6 +76,74 @@ func stale(reason, format string, args ...any) error {
 	return &StaleError{Reason: reason, Message: fmt.Sprintf(format, args...)}
 }
 
+// Paused reports whether the settings pause every write.
+func Paused(settings *v1alpha1.RemediationSettings) bool {
+	return settings.Spec.Paused != nil && *settings.Spec.Paused
+}
+
+// RepositoryOf returns the identity recorded in status.planRepository for a settings entry.
+func RepositoryOf(repo v1alpha1.GitRepository) *v1alpha1.PlanRepository {
+	pr := &v1alpha1.PlanRepository{URL: repo.URL}
+	if repo.GitHub != nil {
+		pr.InstallationID = repo.GitHub.InstallationID
+	}
+	return pr
+}
+
+// FindRepository returns the settings entry that is the repository a plan was made for: the same URL and
+// installation, whatever its name is now. It reports false when there is none, or when the plan recorded none.
+func FindRepository(settings *v1alpha1.RemediationSettings, want *v1alpha1.PlanRepository) (v1alpha1.GitRepository, bool) {
+	if want == nil {
+		return v1alpha1.GitRepository{}, false
+	}
+	for _, r := range settings.Spec.Repositories {
+		if *RepositoryOf(r) == *want {
+			return r, true
+		}
+	}
+	return v1alpha1.GitRepository{}, false
+}
+
+// ProviderError is a failed call to the Git provider. It deliberately wraps nothing: the text of a provider
+// or transport error may hold a repository URL with credentials. It keeps only the class of the failure and
+// the delay the remote system asked for.
+type ProviderError struct {
+	// Op says what failed, a fixed text.
+	Op string
+	// Class is the sentinel the failure matches (providers.ErrNotFound, ErrConflict, ErrRetryable, ErrTooLarge,
+	// context.Canceled, context.DeadlineExceeded), or nil for an unclassified failure.
+	Class error
+	// RetryAfter is the delay the remote system asked for; zero when it gave none.
+	RetryAfter time.Duration
+}
+
+func (e *ProviderError) Error() string {
+	if e.Class == nil {
+		return e.Op + " failed"
+	}
+	return e.Op + " failed: " + e.Class.Error()
+}
+
+// Is matches the class, so errors.Is(err, providers.ErrRetryable) works on the sanitised error.
+func (e *ProviderError) Is(target error) bool { return e.Class != nil && target == e.Class }
+
+// provider replaces err by a ProviderError for op, dropping its text and chain.
+func provider(op string, err error) error {
+	pe := &ProviderError{Op: op}
+	for _, class := range []error{providers.ErrNotFound, providers.ErrConflict, providers.ErrRetryable,
+		providers.ErrTooLarge, context.Canceled, context.DeadlineExceeded} {
+		if errors.Is(err, class) {
+			pe.Class = class
+			break
+		}
+	}
+	pe.RetryAfter, _ = providers.RetryAfter(err)
+	return pe
+}
+
+// WrapProvider is provider for callers outside the package.
+func WrapProvider(op string, err error) error { return provider(op, err) }
+
 // BranchName is the branch that carries the plan: shadewright/<request-uid> (design section 6).
 func BranchName(rr *v1alpha1.RemediationRequest) string {
 	return "shadewright/" + string(rr.UID)
@@ -162,6 +230,13 @@ func (c Checker) Fresh(ctx context.Context, rr *v1alpha1.RemediationRequest) err
 		return errors.New("the request has no plan digest")
 	}
 
+	// Settings first: while writes are paused nothing else is decided, because a stale plan leads to a
+	// write (closing its change request).
+	settings := &v1alpha1.RemediationSettings{}
+	settingsErr := c.Reader.Get(ctx, client.ObjectKey{Name: "default"}, settings)
+	if settingsErr == nil && Paused(settings) {
+		return ErrPaused
+	}
 	pol := &v1alpha1.RemediationPolicy{}
 	switch err := c.Reader.Get(ctx, client.ObjectKey{Name: string(rr.Spec.PolicyRef)}, pol); {
 	case apierrors.IsNotFound(err):
@@ -169,12 +244,11 @@ func (c Checker) Fresh(ctx context.Context, rr *v1alpha1.RemediationRequest) err
 	case err != nil:
 		return fmt.Errorf("get RemediationPolicy %s: %w", rr.Spec.PolicyRef, err)
 	}
-	settings := &v1alpha1.RemediationSettings{}
-	switch err := c.Reader.Get(ctx, client.ObjectKey{Name: "default"}, settings); {
-	case apierrors.IsNotFound(err):
+	switch {
+	case apierrors.IsNotFound(settingsErr):
 		return stale(ReasonSettingsChanged, "RemediationSettings default no longer exists")
-	case err != nil:
-		return fmt.Errorf("get RemediationSettings default: %w", err)
+	case settingsErr != nil:
+		return fmt.Errorf("get RemediationSettings default: %w", settingsErr)
 	}
 
 	if v1alpha1.UID(pol.UID) != rr.Status.PolicyUID || RevisionOf(pol) != rr.Status.PolicyRevision {
@@ -195,9 +269,6 @@ func (c Checker) Fresh(ctx context.Context, rr *v1alpha1.RemediationRequest) err
 
 	if err := c.checkTarget(ctx, rr); err != nil {
 		return err
-	}
-	if settings.Spec.Paused != nil && *settings.Spec.Paused {
-		return ErrPaused
 	}
 	return c.checkFile(ctx, rr, repo)
 }
@@ -242,18 +313,18 @@ func (c Checker) checkFile(ctx context.Context, rr *v1alpha1.RemediationRequest,
 	defer cancel()
 	git, err := c.OpenRepository(ctx, repo)
 	if err != nil {
-		return fmt.Errorf("open repository %q: %w", repo.Name, err)
+		return provider("open the repository", err)
 	}
 	head, err := git.BranchHead(ctx, string(src.TargetBranch))
 	if err != nil {
-		return fmt.Errorf("read the head of the target branch of %q: %w", repo.Name, err)
+		return provider("read the head of the target branch", err)
 	}
 	file, err := git.ReadFile(ctx, head, string(src.Path))
 	switch {
 	case errors.Is(err, providers.ErrNotFound):
 		return stale(ReasonTargetFileChanged, "%s no longer exists on the target branch", src.Path)
 	case err != nil:
-		return fmt.Errorf("read %s on the target branch of %q: %w", src.Path, repo.Name, err)
+		return provider("read the target file on the target branch", err)
 	}
 	got, found, err := sourcemap.ReadField(file.Data, rr.Spec.TargetRef, field)
 	if err != nil {

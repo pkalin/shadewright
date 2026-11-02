@@ -213,6 +213,21 @@ type PullRequestStatus struct {
 	HeadSHA string `json:"headSHA"`
 }
 
+// PlanRepository identifies the repository a plan was made for: the URL and provider installation taken from
+// RemediationSettings when planDigest was fixed. Cleanup of a superseded plan touches only this repository, so a
+// settings entry that now points elsewhere can never get an unrelated pull request closed.
+type PlanRepository struct {
+	// url is the repository URL from RemediationSettings.
+	// +kubebuilder:validation:MaxLength=512
+	// +required
+	URL string `json:"url"`
+
+	// installationID is the provider installation that covers the repository; 0 when the provider has none.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	InstallationID int64 `json:"installationID,omitempty"`
+}
+
 // RemediationRequestStatus is written only by the remediation controller.
 type RemediationRequestStatus struct {
 	// observedGeneration is the generation the status describes.
@@ -237,6 +252,10 @@ type RemediationRequestStatus struct {
 	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
 	// +optional
 	PlanDigest string `json:"planDigest,omitempty"`
+
+	// planRepository is the repository and installation the plan digest covers, set together with planDigest.
+	// +optional
+	PlanRepository *PlanRepository `json:"planRepository,omitempty"`
 
 	// policyRevision is the policy name and generation the decision used, as name/generation. The policy UID
 	// is recorded next to it, because a deleted and recreated policy can reach the same generation again.

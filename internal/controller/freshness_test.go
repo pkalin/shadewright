@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -46,6 +47,7 @@ const (
 	appName         = "web"
 	workerContainer = "worker"
 	mainBranch      = "main"
+	opClose         = "CloseChangeRequest"
 )
 
 var _ = Describe("RemediationRequest plan freshness", func() {
@@ -57,8 +59,10 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		settings   *remediationv1alpha1.RemediationSettings
 		request    *remediationv1alpha1.RemediationRequest
 		git        *fakegit.Git
-		closes     atomic.Int32
-		cr         providers.ChangeRequest
+		// byURL holds one fake repository per URL, so a call can only reach the repository it names.
+		byURL  map[string]*fakegit.Git
+		closes atomic.Int32
+		cr     providers.ChangeRequest
 	)
 
 	manifest := func(limit string) []byte {
@@ -80,8 +84,12 @@ spec:
 	reconciler := func() *RemediationRequestReconciler {
 		return &RemediationRequestReconciler{
 			Client: k8sClient, Scheme: k8sClient.Scheme(), Source: &stubResolver{result: resolved()},
-			OpenRepository: func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
-				return git, nil
+			OpenRepository: func(_ context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+				g, ok := byURL[repo.URL]
+				if !ok {
+					return nil, errors.New("unknown repository")
+				}
+				return g, nil
 			},
 		}
 	}
@@ -133,9 +141,10 @@ spec:
 		Expect(k8sClient.Create(ctx, request)).To(Succeed())
 
 		git = fakegit.NewGit(mainBranch, map[string][]byte{sourcePath: manifest("256Mi"), "README.yaml": []byte("a: 1\n")})
+		byURL = map[string]*fakegit.Git{settings.Spec.Repositories[0].URL: git}
 		closes.Store(0)
 		git.SetFail(func(op string) error {
-			if op == "CloseChangeRequest" {
+			if op == opClose {
 				closes.Add(1)
 			}
 			return nil
@@ -177,8 +186,10 @@ spec:
 		return got
 	}
 
-	It("records the plan digest with the decision", func() {
+	It("records the plan digest and the repository it covers with the decision", func() {
 		got := fetch()
+		Expect(got.Status.PlanRepository).To(Equal(&remediationv1alpha1.PlanRepository{
+			URL: settings.Spec.Repositories[0].URL, InstallationID: 1}))
 		Expect(got.Status.PlanDigest).To(MatchRegexp(`^sha256:[0-9a-f]{64}$`))
 		want, err := freshness.ComputeDigest(got, got.Status.Source, policy, settings)
 		Expect(err).NotTo(HaveOccurred())
@@ -231,7 +242,11 @@ spec:
 	It("supersedes when the repository installation changes in the settings", func() {
 		settings.Spec.Repositories[0].GitHub.InstallationID = 2
 		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
-		supersedes(freshness.ReasonPlanChanged)
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		// The installation is part of the repository identity: the old one is not configured any more.
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(closes.Load()).To(BeZero())
 	})
 
 	It("supersedes when the target file changed on the target branch", func() {
@@ -258,7 +273,7 @@ spec:
 		Expect(err).NotTo(HaveOccurred())
 		crash := true
 		git.SetAfter(func(op string) error {
-			if op == "CloseChangeRequest" && crash {
+			if op == opClose && crash {
 				crash = false
 				return errors.New("connection lost after the close")
 			}
@@ -303,4 +318,150 @@ spec:
 		Expect(r.EnsureFresh(ctx, fetch())).NotTo(Succeed())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePRCreated))
 	})
+
+	// other opens a pull request with the same number in another repository, which must never be touched.
+	otherRepo := func(url string) *fakegit.Git {
+		other := fakegit.NewGit("main", map[string][]byte{sourcePath: manifest("256Mi")})
+		head, err := other.BranchHead(ctx, "main")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(other.CreateBranch(ctx, "unrelated", head)).To(Succeed())
+		_, err = other.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: "unrelated", BaseBranch: "main", Title: "u"})
+		Expect(err).NotTo(HaveOccurred())
+		other.SetFail(func(op string) error {
+			if op == opClose {
+				closes.Add(1)
+			}
+			return nil
+		})
+		byURL[url] = other
+		return other
+	}
+
+	It("closes nothing when the settings entry now points to another repository", func() {
+		const moved = "https://github.com/example/moved"
+		other := otherRepo(moved)
+		settings.Spec.Repositories[0].URL = moved
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+		Expect(c).NotTo(BeNil())
+		Expect(c.Reason).To(Equal("RepositoryUnavailable"))
+		Expect(closes.Load()).To(BeZero())
+		Expect(other.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen), "the unrelated pull request stays open")
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+	})
+
+	It("closes nothing and does not block when the repository is removed from the settings", func() {
+		settings.Spec.Repositories = nil
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(closes.Load()).To(BeZero())
+	})
+
+	It("closes in the recorded repository when the entry is only renamed", func() {
+		settings.Spec.Repositories[0].Name = "renamed"
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		supersedes(freshness.ReasonSettingsChanged)
+		Expect(closes.Load()).To(Equal(int32(1)))
+	})
+
+	It("does nothing while writes are paused, even for a stale plan", func() {
+		Expect(k8sClient.Delete(ctx, policy)).To(Succeed())
+		settings.Spec.Paused = new(true)
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		res, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(freshRecheckDelay))
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePRCreated))
+		Expect(closes.Load()).To(BeZero())
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+		Expect(reconciler().EnsureFresh(ctx, fetch())).To(MatchError(freshness.ErrPaused))
+	})
+
+	It("does not close when writes are paused between the check and the close", func() {
+		// The check sees a stale plan on an unpaused read; the close reads the settings again.
+		Expect(k8sClient.Delete(ctx, policy)).To(Succeed())
+		r := reconciler()
+		calls := 0
+		r.APIReader = readerFunc(func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+			if _, ok := obj.(*remediationv1alpha1.RemediationSettings); ok {
+				calls++
+				if calls > 1 {
+					settings.Spec.Paused = new(true)
+					Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+				}
+			}
+			return k8sClient.Get(ctx, key, obj)
+		})
+		Expect(r.EnsureFresh(ctx, fetch())).To(MatchError(freshness.ErrPaused))
+		Expect(closes.Load()).To(BeZero())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePRCreated))
+	})
+
+	It("keeps credentials out of the error when the cleanup call fails", func() {
+		const secret = "ghs_supersecrettoken"
+		_, err := git.Push(mainBranch, sourcePath, manifest("512Mi"))
+		Expect(err).NotTo(HaveOccurred())
+		git.SetFail(func(op string) error {
+			if op == opClose {
+				return &providers.RetryableError{RetryAfter: 9 * time.Second,
+					Err: fmt.Errorf("PATCH https://x-access-token:%s@github.com/example/fleet: 502", secret)}
+			}
+			return nil
+		})
+		res, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(9*time.Second), "the delay the host asked for is honoured")
+
+		err = reconciler().EnsureFresh(ctx, fetch())
+		Expect(err).To(HaveOccurred())
+		for e := err; e != nil; e = errors.Unwrap(e) {
+			Expect(e.Error()).NotTo(ContainSubstring(secret))
+		}
+		Expect(errors.Is(err, providers.ErrRetryable)).To(BeTrue())
+	})
+
+	It("honours the delay a Git host asks for while checking", func() {
+		git.SetFail(func(op string) error {
+			if op == "BranchHead" {
+				return &providers.RetryableError{RetryAfter: 7 * time.Second, Err: errors.New("rate limited")}
+			}
+			return nil
+		})
+		res, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(7 * time.Second))
+	})
+
+	It("schedules the next check of a fresh plan", func() {
+		res, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(freshRecheckInterval))
+	})
+
+	It("does not schedule anything for a superseded request", func() {
+		Expect(k8sClient.Delete(ctx, policy)).To(Succeed())
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		res, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).To(Equal(reconcile.Result{}))
+	})
 })
+
+// readerFunc adapts a function to the part of client.Reader the controller uses.
+type readerFunc func(ctx context.Context, key client.ObjectKey, obj client.Object) error
+
+func (f readerFunc) Get(ctx context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+	return f(ctx, key, obj)
+}
+
+func (readerFunc) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return errors.New("not used")
+}

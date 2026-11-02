@@ -1,0 +1,44 @@
+# Orders worker: memory raised after the October load test.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orders-worker
+  namespace: orders
+data:
+  # Literal block: must stay byte for byte.
+  worker.conf: |
+    batch = 50
+      indent = kept
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-worker
+  namespace: orders
+  labels: {app: orders-worker, tier: "backend"}
+  annotations:
+    note: 'single quoted'
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: orders-worker
+
+  template:
+    metadata:
+      labels:
+        app: orders-worker
+    spec:
+      containers:
+      - name: web
+        image: ghcr.io/example/orders-worker:1.4.2   # pinned by the release job
+        args: ["--queue", "orders", "--concurrency=8"]
+        resources:
+          requests: &req
+            memory: 256Mi
+          limits:
+            memory: "512Mi" # raised from 384Mi on 2026-10-14
+      - name: sidecar
+        image: ghcr.io/example/log-shipper:0.9.0
+        resources:
+          requests: *req

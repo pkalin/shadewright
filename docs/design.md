@@ -656,7 +656,7 @@ Decided on 2026-11-01:
 Still open:
 
 1. **Helm-rendered and patched objects.** How to map and patch objects that come from Helm charts, Kustomize patches or generators. Revisit when a real case needs it.
-2. **YAML patching library.** `kyaml` (keeps comments, used by Kustomize) or a typed round-trip. *Leaning:* `kyaml`. Decide at stage 2.
+2. **YAML patching.** Proposed in [ADR-0020](adr/0020-yaml-patching.md): replace the bytes of one scalar found with `go.yaml.in/yaml/v3`, then check that only that value changed. A spike showed that `kyaml` reformats the file and changes aliased values. Open until the ADR is accepted.
 3. **Model choice.** Benchmark on the scenario set at stage 1: a small model for triage and a stronger one for escalation.
 4. **Teams.** Whether the maintainer's Microsoft account can receive Teams Workflows webhooks. If not, GitHub issues stay the only notifier for now.
 5. **Required checks in policy.** Whether a policy should name verification checks a request cannot drop, beyond the ones each action always runs.

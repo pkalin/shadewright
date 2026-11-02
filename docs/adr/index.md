@@ -21,5 +21,6 @@
 | [0017](0017-prometheus-in-the-lab.md) | Prometheus in the lab | Accepted |
 | [0018](0018-three-axes-of-pluggability.md) | Three axes of pluggability | Accepted |
 | [0019](0019-extension-packaging.md) | Packaging extensions: compiled in now, signed OCI packs later | Accepted |
+| [0020](0020-yaml-patching.md) | Patching YAML by replacing one scalar in place | Proposed |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

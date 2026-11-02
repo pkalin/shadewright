@@ -40,6 +40,7 @@ nav = [
     { "0017 Prometheus in the lab" = "adr/0017-prometheus-in-the-lab.md" },
     { "0018 Pluggability" = "adr/0018-three-axes-of-pluggability.md" },
     { "0019 Extension packaging" = "adr/0019-extension-packaging.md" },
+    { "0020 YAML patching" = "adr/0020-yaml-patching.md" },
     { "Template" = "adr/template.md" },
   ] },
 ]

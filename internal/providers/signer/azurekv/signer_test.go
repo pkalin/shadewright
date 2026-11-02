@@ -29,12 +29,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	azlog "github.com/Azure/azure-sdk-for-go/sdk/azcore/log"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 
@@ -48,6 +50,7 @@ const (
 	// bodySecret stands for anything in a Key Vault response body; it must never reach an error.
 	bodySecret = "response-body-text-must-never-appear"
 	kidField   = "kid"
+	valueField = "value"
 )
 
 // fakeCredential hands out a fixed token and records the scopes asked for.
@@ -92,10 +95,12 @@ type seen struct {
 // fakeVault is a Key Vault keys endpoint. It answers the first unauthenticated request with a challenge,
 // then calls respond for every authorized request.
 type fakeVault struct {
-	key     *rsa.PrivateKey
-	mu      sync.Mutex
-	reqs    []seen
-	respond func(n int, w http.ResponseWriter, r *http.Request, body []byte)
+	// challenge, when set, replaces the WWW-Authenticate header of the challenge response.
+	challenge string
+	key       *rsa.PrivateKey
+	mu        sync.Mutex
+	reqs      []seen
+	respond   func(n int, w http.ResponseWriter, r *http.Request, body []byte)
 }
 
 func (v *fakeVault) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -113,9 +118,12 @@ func (v *fakeVault) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	v.mu.Unlock()
 	if r.Header.Get("Authorization") == "" {
-		w.Header().Set("WWW-Authenticate",
-			`Bearer authorization="https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000", `+
-				`resource="https://vault.azure.net"`)
+		challenge := `Bearer authorization="https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000", ` +
+			`resource="https://vault.azure.net"`
+		if v.challenge != "" {
+			challenge = v.challenge
+		}
+		w.Header().Set("WWW-Authenticate", challenge)
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -155,7 +163,7 @@ func (v *fakeVault) signOK(kid string) func(int, http.ResponseWriter, *http.Requ
 			http.Error(w, "sign failed", http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{kidField: kid, "value": base64.RawURLEncoding.EncodeToString(sig)})
+		writeJSON(w, http.StatusOK, map[string]string{kidField: kid, valueField: base64.RawURLEncoding.EncodeToString(sig)})
 	}
 }
 
@@ -399,8 +407,21 @@ func TestSignValidatesResponse(t *testing.T) {
 		},
 		"short signature": func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
 			writeJSON(w, http.StatusOK, map[string]string{
-				kidField: "https://" + testHost + "/keys/github-app/" + testVersion,
-				"value":  base64.RawURLEncoding.EncodeToString([]byte("short")),
+				kidField:   "https://" + testHost + "/keys/github-app/" + testVersion,
+				valueField: base64.RawURLEncoding.EncodeToString([]byte("short")),
+			})
+		},
+		"missing kid": func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
+			writeJSON(w, http.StatusOK, map[string]string{valueField: base64.RawURLEncoding.EncodeToString(make([]byte, 256))})
+		},
+		"null kid": func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
+			writeJSON(w, http.StatusOK, map[string]any{
+				kidField: nil, valueField: base64.RawURLEncoding.EncodeToString(make([]byte, 256)),
+			})
+		},
+		"empty kid": func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
+			writeJSON(w, http.StatusOK, map[string]string{
+				kidField: "", valueField: base64.RawURLEncoding.EncodeToString(make([]byte, 256)),
 			})
 		},
 		"no signature": func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
@@ -415,20 +436,113 @@ func TestSignValidatesResponse(t *testing.T) {
 	}
 }
 
-func TestSignCredentialFailure(t *testing.T) {
-	s, v, cred := setup(t, "https://"+testHost+"/keys/github-app", Options{MaxRetries: -1})
-	v.respond = v.signOK("https://" + testHost + "/keys/github-app/" + testVersion)
-	cred.err = &azidentity.AuthenticationFailedError{RawResponse: &http.Response{
-		StatusCode: http.StatusBadRequest,
+// authFailure builds the error azidentity returns when Entra answers a token request with status.
+func authFailure(status int, retryAfter string) error {
+	h := http.Header{}
+	if retryAfter != "" {
+		h.Set("Retry-After", retryAfter)
+	}
+	req, _ := http.NewRequest(http.MethodPost, "https://login.microsoftonline.com/example/oauth2/v2.0/token", nil)
+	return &azidentity.AuthenticationFailedError{RawResponse: &http.Response{
+		StatusCode: status,
+		Header:     h,
+		Request:    req,
 		Body:       io.NopCloser(strings.NewReader(bodySecret)),
 	}}
-	_, err := s.Sign(context.Background(), digestOf("x"))
-	if err == nil || !strings.Contains(err.Error(), "status 400") {
-		t.Fatalf("err = %v, want a token request failure with its status", err)
+}
+
+func TestSignCredentialFailure(t *testing.T) {
+	for _, tc := range []struct {
+		status     int
+		retryAfter string
+		retryable  bool
+		wantDelay  time.Duration
+	}{
+		{http.StatusBadRequest, "", false, 0},
+		{http.StatusUnauthorized, "", false, 0},
+		{http.StatusTooManyRequests, "30", true, 30 * time.Second},
+		{http.StatusServiceUnavailable, "5", true, 5 * time.Second},
+		{http.StatusInternalServerError, "", true, 0},
+	} {
+		s, v, cred := setup(t, "https://"+testHost+"/keys/github-app", Options{MaxRetries: -1})
+		v.respond = v.signOK("https://" + testHost + "/keys/github-app/" + testVersion)
+		cred.err = authFailure(tc.status, tc.retryAfter)
+		_, err := s.Sign(context.Background(), digestOf("x"))
+		if err == nil || !strings.Contains(err.Error(), "status "+strconv.Itoa(tc.status)) {
+			t.Errorf("%d: err = %v, want a token request failure with its status", tc.status, err)
+			continue
+		}
+		if providers.IsRetryable(err) != tc.retryable {
+			t.Errorf("%d: retryable = %v, want %v", tc.status, providers.IsRetryable(err), tc.retryable)
+		}
+		if d, _ := providers.RetryAfter(err); d != tc.wantDelay {
+			t.Errorf("%d: RetryAfter = %v, want %v", tc.status, d, tc.wantDelay)
+		}
+		assertClean(t, err)
+		if n := len(v.authorized()); n != 0 {
+			t.Errorf("%d: authorized requests = %d, want none without a token", tc.status, n)
+		}
 	}
-	assertClean(t, err)
-	if n := len(v.authorized()); n != 0 {
-		t.Errorf("authorized requests = %d, want none without a token", n)
+}
+
+// TestSDKLogsStayClean captures everything azcore logs while a token request fails and Key Vault returns
+// an error, and checks that neither the token nor any response text reaches the log.
+func TestSDKLogsStayClean(t *testing.T) {
+	var mu sync.Mutex
+	var logs strings.Builder
+	azlog.SetListener(func(_ azlog.Event, msg string) {
+		mu.Lock()
+		defer mu.Unlock()
+		logs.WriteString(msg + "\n")
+	})
+	t.Cleanup(func() { azlog.SetListener(nil) })
+
+	s, v, cred := setup(t, "https://"+testHost+"/keys/github-app", Options{MaxRetries: 1})
+	v.respond = func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
+		writeError(w, http.StatusForbidden, "Forbidden")
+	}
+	cred.err = authFailure(http.StatusServiceUnavailable, "")
+	if _, err := s.Sign(context.Background(), digestOf("x")); err == nil {
+		t.Fatal("no error with a failing credential")
+	}
+	cred.mu.Lock()
+	cred.err = nil
+	cred.mu.Unlock()
+	if _, err := s.Sign(context.Background(), digestOf("x")); err == nil {
+		t.Fatal("no error with a 403")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if logs.Len() == 0 {
+		t.Fatal("captured no SDK logs; the test would prove nothing")
+	}
+	for _, bad := range []string{bodySecret, testToken} {
+		if strings.Contains(logs.String(), bad) {
+			t.Errorf("SDK log contains %q:\n%s", bad, logs.String())
+		}
+	}
+}
+
+func TestSignMalformedChallenge(t *testing.T) {
+	for name, challenge := range map[string]string{
+		"foreign resource": `Bearer authorization="https://login.microsoftonline.com/x", resource="https://` +
+			bodySecret + `.attacker.example"`,
+		"no resource":    `Bearer authorization="https://login.microsoftonline.com/` + bodySecret + `"`,
+		"garbage claims": `Bearer claims="` + bodySecret + `" resource="https://vault.azure.net/` + bodySecret + `"`,
+	} {
+		s, v, _ := setup(t, "https://"+testHost+"/keys/github-app", Options{MaxRetries: -1})
+		v.challenge = challenge
+		v.respond = v.signOK("https://" + testHost + "/keys/github-app/" + testVersion)
+		_, err := s.Sign(context.Background(), digestOf("x"))
+		if err == nil {
+			// A challenge the SDK tolerates must still not let a token reach another resource.
+			continue
+		}
+		assertClean(t, err)
+		if name == "foreign resource" && len(v.authorized()) != 0 {
+			t.Errorf("%s: a token was sent after a foreign challenge", name)
+		}
 	}
 }
 

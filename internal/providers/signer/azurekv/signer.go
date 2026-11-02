@@ -19,12 +19,15 @@ package azurekv
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -111,14 +114,17 @@ func newSigner(key KeyID, cred azcore.TokenCredential, opts Options, cc clientCo
 				RetryDelay:    delay,
 				MaxRetryDelay: max(maxRetryDelay, delay),
 			},
-			// Never log request or response bodies, even if a log listener is configured elsewhere.
-			Logging: policy.LogOptions{IncludeBody: false},
+			// Never log request or response bodies. This package never sets an azcore log listener; if a
+			// process sets one, it sees only cleaned credential errors (cleanCredential) and cleaned error
+			// responses (errorBodyPolicy).
+			Logging:         policy.LogOptions{IncludeBody: false},
+			PerCallPolicies: []policy.Policy{errorBodyPolicy{}},
 		},
 	}
 	if cc.transport != nil {
 		co.Transport = cc.transport
 	}
-	client, err := azkeys.NewClient(key.VaultURL(), cred, co)
+	client, err := azkeys.NewClient(key.VaultURL(), cleanCredential{cred}, co)
 	if err != nil {
 		return nil, fmt.Errorf("key vault client for %s: %w", key, err)
 	}
@@ -150,7 +156,10 @@ func (s *Signer) Sign(ctx context.Context, digest []byte) ([]byte, error) {
 	if err != nil {
 		return nil, s.mapError(err)
 	}
-	if resp.KID != nil && !s.key.matches(string(*resp.KID)) {
+	if resp.KID == nil || *resp.KID == "" {
+		return nil, fmt.Errorf("sign with %s: response does not name the key", s.key)
+	}
+	if !s.key.matches(string(*resp.KID)) {
 		return nil, fmt.Errorf("sign with %s: response names another key", s.key)
 	}
 	sig := resp.Result
@@ -192,12 +201,12 @@ func (s *Signer) mapError(err error) error {
 		}
 	}
 
-	if af, ok := errors.AsType[*azidentity.AuthenticationFailedError](err); ok {
-		status := 0
-		if af.RawResponse != nil {
-			status = af.RawResponse.StatusCode
+	if ce, ok := errors.AsType[*credentialError](err); ok {
+		msg := fmt.Errorf("%s: %w", op, ce)
+		if ce.transient() {
+			return &providers.RetryableError{RetryAfter: ce.retryAfter, Err: msg}
 		}
-		return fmt.Errorf("%s: workload identity token request failed with status %d", op, status)
+		return msg
 	}
 
 	switch {
@@ -206,12 +215,112 @@ func (s *Signer) mapError(err error) error {
 	case errors.Is(err, context.Canceled):
 		return fmt.Errorf("%s: %w", op, context.Canceled)
 	}
-	// Network errors (DNS, TLS, connection reset) name only the URL, which holds no secret, and are
-	// transient as far as the caller can tell.
+	// Anything else may carry response-controlled text (for example a malformed WWW-Authenticate
+	// challenge), so its message is replaced by a fixed one. The original stays reachable through
+	// errors.Is and errors.As, never through Error().
 	if _, ok := errors.AsType[net.Error](err); ok {
-		return &providers.RetryableError{Err: fmt.Errorf("%s: %w", op, err)}
+		return &providers.RetryableError{Err: &opaqueError{msg: op + ": key vault request failed (network)", err: err}}
 	}
-	return fmt.Errorf("%s: %w", op, err)
+	return &opaqueError{msg: op + ": key vault request failed (sdk)", err: err}
+}
+
+// maxErrorBody bounds how much of an error response is read to find its error code.
+const maxErrorBody = 64 << 10
+
+// errorBodyPolicy replaces the body of every error response with one that holds only the Key Vault error
+// code, when that code is a short identifier. azcore copies error bodies into ResponseError messages and
+// logs them; after this policy there is no response text left to copy.
+type errorBodyPolicy struct{}
+
+// Do sends the request and cleans an error response.
+func (errorBodyPolicy) Do(req *policy.Request) (*http.Response, error) {
+	resp, err := req.Next()
+	if err != nil || resp.StatusCode < http.StatusBadRequest {
+		return resp, err
+	}
+	var parsed struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if resp.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(resp.Body, maxErrorBody)).Decode(&parsed)
+		_ = resp.Body.Close()
+	}
+	body := "{}"
+	if errorCodePattern.MatchString(parsed.Error.Code) {
+		body = `{"error":{"code":"` + parsed.Error.Code + `"}}`
+	}
+	if !errorCodePattern.MatchString(resp.Header.Get("x-ms-error-code")) {
+		resp.Header.Del("x-ms-error-code")
+	}
+	resp.Body = io.NopCloser(strings.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	return resp, nil
+}
+
+// opaqueError hides the text of an SDK error behind a fixed message.
+type opaqueError struct {
+	msg string
+	err error
+}
+
+func (e *opaqueError) Error() string { return e.msg }
+func (e *opaqueError) Unwrap() error { return e.err }
+
+// cleanCredential wraps a token credential so that its errors are cleaned before azcore sees them: azcore
+// formats credential errors in its own log messages, and an AuthenticationFailedError includes the Entra
+// response body. Only the status code and the Retry-After delay survive.
+type cleanCredential struct {
+	inner azcore.TokenCredential
+}
+
+// GetToken returns a token from the wrapped credential, or a cleaned error.
+func (c cleanCredential) GetToken(ctx context.Context, o policy.TokenRequestOptions) (azcore.AccessToken, error) {
+	tok, err := c.inner.GetToken(ctx, o)
+	if err == nil {
+		return tok, nil
+	}
+	ce := &credentialError{}
+	if af, ok := errors.AsType[*azidentity.AuthenticationFailedError](err); ok && af.RawResponse != nil {
+		ce.status = af.RawResponse.StatusCode
+		ce.retryAfter = retryAfter(af.RawResponse)
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		ce.cause = context.DeadlineExceeded
+	case errors.Is(err, context.Canceled):
+		ce.cause = context.Canceled
+	}
+	return azcore.AccessToken{}, ce
+}
+
+// credentialError is a token request failure with every piece of response text removed.
+type credentialError struct {
+	status     int
+	retryAfter time.Duration
+	// cause is a context error, when the failure was a deadline or a cancellation.
+	cause error
+}
+
+func (e *credentialError) Error() string {
+	if e.status == 0 {
+		return "workload identity token request failed"
+	}
+	return fmt.Sprintf("workload identity token request failed with status %d", e.status)
+}
+
+func (e *credentialError) Unwrap() error { return e.cause }
+
+// transient reports whether the token request may succeed later.
+func (e *credentialError) transient() bool {
+	switch e.status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError,
+		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return errors.Is(e.cause, context.DeadlineExceeded)
 }
 
 // retryAfter reads a Retry-After header in seconds or as an HTTP date, capped at one hour.

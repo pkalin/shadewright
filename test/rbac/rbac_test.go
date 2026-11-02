@@ -264,7 +264,7 @@ func TestPermissionBoundary(t *testing.T) {
 		{"executor", "get", "", "configmaps", "", operatorNS, false},
 		{"executor", "create", group, "incidents", "", otherNS, false},
 		{"executor", "update", group, "incidents", "status", otherNS, false},
-		{"executor", "get", group, "incidents", "", otherNS, true},
+		{"executor", "get", group, "incidents", "", otherNS, false},
 		{"executor", "list", group, "incidents", "", otherNS, false},
 		{"executor", "watch", group, "remediationpolicies", "", "", false},
 		{"executor", "list", group, "remediationsettings", "", "", false},

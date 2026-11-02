@@ -14,7 +14,9 @@ An accepted ADR may be amended when the change clarifies it, records what a late
 - The text may be updated in place, so a reader of the Decision sees what holds now.
 - Every amendment gets a dated entry in an `## Amendments` section at the end of the ADR: the date, what changed, and why (with a link to the later ADR or the PR).
 - A later ADR that changes an earlier one links to it, and the earlier one links back.
+- An amendment never widens what is allowed, granted or refused on its own authority: such a change is either decided by another accepted ADR, which the amendment links, or it needs a new ADR.
 - Reversing or replacing a decision still needs a new ADR that supersedes the old one, as ADR-0001 says.
+- The ADR index marks an amended ADR as `Accepted, amended`, so amendments are visible without opening each page.
 
 ## Consequences
 

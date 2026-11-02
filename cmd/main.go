@@ -48,8 +48,8 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
-// openRepository opens a repository named in RemediationSettings. No GitProvider adapter is built yet, so it
-// fails; the source mapping reports that as a retryable error, without any provider text.
+// openRepository opens a repository named in RemediationSettings. The GitHub adapter exists but is not wired
+// here yet, so it fails; the source mapping reports that as a retryable error, without any provider text.
 func openRepository(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
 	return nil, errors.New("no Git provider adapter is available")
 }

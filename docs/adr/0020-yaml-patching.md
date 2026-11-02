@@ -12,7 +12,7 @@ The design left the library open, leaning towards `kyaml`. Four approaches were 
 | | Typed round-trip (`sigs.k8s.io/yaml` v1.6.0) | `kyaml` v0.21.2 | `goccy/go-yaml` v1.19.2 | Splice (`go.yaml.in/yaml/v3` v3.0.6) |
 | --- | --- | --- | --- | --- |
 | Lines changed in the diff | 40 | 4 | 4 | 2 |
-| Comments | All lost | Kept, spacing before them collapsed | The one on the changed line lost with the path replace the spike used; kept when the node's value is set directly | Kept |
+| Comments | All lost | Kept, spacing before them collapsed | The one on the changed line lost (with the path replace the spike uses) | Kept |
 | Key order, blank lines, quoting | Reordered, flow styles and quotes rewritten | Blank line dropped | Spacing before a comment collapsed | Unchanged |
 | Other data changed | No | No | No | No |
 | Target inside an anchor | Patched; anchor and alias replaced by two separate copies | Patched, and the alias changed silently | Refused, because its path query cannot pass an anchor | Refused on purpose |

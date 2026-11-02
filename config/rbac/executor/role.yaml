@@ -26,7 +26,6 @@ rules:
 - apiGroups:
   - remediation.shadewright.io
   resources:
-  - incidents
   - remediationpolicies
   - remediationsettings
   verbs:

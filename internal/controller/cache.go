@@ -30,7 +30,6 @@ import (
 //
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=remediationrequests,verbs=get;list;watch
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=remediationrequests/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=remediation.shadewright.io,resources=incidents,verbs=get
 // +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationpolicies,verbs=get
 // +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationsettings,verbs=get
 //

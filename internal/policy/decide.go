@@ -213,10 +213,10 @@ func check(in DecisionInput) (Reason, string) {
 // checkRequest checks that the request may use the policy at all.
 func checkRequest(in DecisionInput) (Reason, string) {
 	rr, p := in.Request, in.Policy
-	if string(rr.Spec.PolicyRef) != p.Name {
+	if p.Name == "" || string(rr.Spec.PolicyRef) != p.Name {
 		return ReasonPolicyMismatch, fmt.Sprintf("The request names policy %q, not %q", rr.Spec.PolicyRef, p.Name)
 	}
-	if !slices.Contains(p.Spec.RequestNamespaces, v1alpha1.Name(rr.Namespace)) {
+	if rr.Namespace == "" || !slices.Contains(p.Spec.RequestNamespaces, v1alpha1.Name(rr.Namespace)) {
 		return ReasonRequestNamespaceNotAllowed,
 			fmt.Sprintf("Policy %q does not accept requests from namespace %q", p.Name, rr.Namespace)
 	}

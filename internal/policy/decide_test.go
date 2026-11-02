@@ -151,6 +151,18 @@ func TestDecide(t *testing.T) {
 		{name: "request from a namespace the policy does not list", base: kedaInput,
 			mutate:  func(in *policy.DecisionInput) { in.Request.Namespace = testfixtures.TargetNamespace },
 			outcome: denied, reason: policy.ReasonRequestNamespaceNotAllowed},
+		{name: "empty policyRef and empty policy name", base: kedaInput,
+			mutate: func(in *policy.DecisionInput) {
+				in.Request.Spec.PolicyRef = ""
+				in.Policy.Name = ""
+			},
+			outcome: denied, reason: policy.ReasonPolicyMismatch},
+		{name: "empty request namespace listed as empty", base: kedaInput,
+			mutate: func(in *policy.DecisionInput) {
+				in.Request.Namespace = ""
+				in.Policy.Spec.RequestNamespaces = []v1alpha1.Name{""}
+			},
+			outcome: denied, reason: policy.ReasonRequestNamespaceNotAllowed},
 		{name: "requestNamespaces unset allows no namespace", base: kedaInput,
 			mutate:  func(in *policy.DecisionInput) { in.Policy.Spec.RequestNamespaces = nil },
 			outcome: denied, reason: policy.ReasonRequestNamespaceNotAllowed},
@@ -497,6 +509,9 @@ func TestAllowedPathHoldsDisallowedKind(t *testing.T) {
 		{"v1", "Secret", "apps/orders/secret.yaml", policy.ReasonKindExcluded},
 		{"v1", "ServiceAccount", "apps/orders/sa.yaml", policy.ReasonKindExcluded},
 		{"v1", "PersistentVolumeClaim", "apps/orders/pvc.yaml", policy.ReasonKindExcluded},
+		{"v1", "PersistentVolume", "apps/orders/pv.yaml", policy.ReasonKindExcluded},
+		{"v1", "Namespace", "apps/orders/namespace.yaml", policy.ReasonKindExcluded},
+		{"helm.toolkit.fluxcd.io/v2", "HelmRelease", "apps/orders/release.yaml", policy.ReasonKindExcluded},
 		{"networking.k8s.io/v1", "NetworkPolicy", "apps/orders/netpol.yaml", policy.ReasonKindExcluded},
 		{"kustomize.toolkit.fluxcd.io/v1", "Kustomization", "apps/orders/flux.yaml", policy.ReasonKindExcluded},
 		{"source.toolkit.fluxcd.io/v1", "GitRepository", "apps/orders/flux.yaml", policy.ReasonKindExcluded},

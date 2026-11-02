@@ -234,8 +234,12 @@ spec:
                     description: checks to run in addition to the ones the action
                       type always needs.
                     items:
-                      description: VerificationCheck is a named, deterministic check
-                        run after delivery.
+                      description: |-
+                        VerificationCheck is a named, deterministic check run after delivery. DeliveryRevisionApplied: the GitOps
+                        controller has applied the revision that contains the merged change. WorkloadHealthy: the target workload
+                        is available and its rollout is complete. KedaReady: the KEDA ScaledObject reports Ready.
+                        QueueBacklogDecreasing: the backlog that drives the ScaledObject is going down. NoNewOOMKills: no container
+                        of the target is OOMKilled after the change.
                       enum:
                       - DeliveryRevisionApplied
                       - WorkloadHealthy
@@ -284,7 +288,9 @@ spec:
             description: status is the progress, written by the controller.
             properties:
               conditions:
-                description: conditions explain the phase.
+                description: |-
+                  conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered and
+                  Verified.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

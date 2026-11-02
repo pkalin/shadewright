@@ -25,8 +25,10 @@ import (
 // +kubebuilder:validation:Enum=GitHub
 type GitProviderType string
 
-// GitProviderGitHub uses a GitHub App.
-const GitProviderGitHub GitProviderType = "GitHub"
+const (
+	// GitProviderGitHub uses a GitHub App.
+	GitProviderGitHub GitProviderType = "GitHub"
+)
 
 // AzureKeyVaultKey is a key in Azure Key Vault that may only sign (ADR-0006).
 type AzureKeyVaultKey struct {
@@ -151,7 +153,7 @@ type RemediationSettingsStatus struct {
 type RemediationSettings struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
+	// metadata is the standard object metadata.
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 

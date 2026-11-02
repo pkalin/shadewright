@@ -25,8 +25,10 @@ import (
 // +kubebuilder:validation:Enum=GitOps
 type RemediationMode string
 
-// RemediationModeGitOps changes the cluster only through a pull request to the GitOps repository.
-const RemediationModeGitOps RemediationMode = "GitOps"
+const (
+	// RemediationModeGitOps changes the cluster only through a pull request to the GitOps repository.
+	RemediationModeGitOps RemediationMode = "GitOps"
+)
 
 // IncidentRef points to the Incident a request answers, in the same namespace.
 type IncidentRef struct {
@@ -65,7 +67,11 @@ type ResolvedSource struct {
 	BaseCommit string `json:"baseCommit"`
 }
 
-// VerificationCheck is a named, deterministic check run after delivery.
+// VerificationCheck is a named, deterministic check run after delivery. DeliveryRevisionApplied: the GitOps
+// controller has applied the revision that contains the merged change. WorkloadHealthy: the target workload
+// is available and its rollout is complete. KedaReady: the KEDA ScaledObject reports Ready.
+// QueueBacklogDecreasing: the backlog that drives the ScaledObject is going down. NoNewOOMKills: no container
+// of the target is OOMKilled after the change.
 // +kubebuilder:validation:Enum=DeliveryRevisionApplied;WorkloadHealthy;KedaReady;QueueBacklogDecreasing;NoNewOOMKills
 type VerificationCheck string
 
@@ -142,21 +148,38 @@ type RemediationPhase string
 
 // Phases of a RemediationRequest (design section 6).
 const (
-	PhasePending            RemediationPhase = "Pending"
-	PhasePolicyChecked      RemediationPhase = "PolicyChecked"
-	PhasePRCreated          RemediationPhase = "PRCreated"
-	PhaseAwaitingApproval   RemediationPhase = "AwaitingApproval"
-	PhaseAutoMergeQueued    RemediationPhase = "AutoMergeQueued"
-	PhaseMerged             RemediationPhase = "Merged"
+	// PhasePending means the request was accepted and is waiting for the policy check.
+	PhasePending RemediationPhase = "Pending"
+	// PhasePolicyChecked means the policy allows the plan and the source in Git is resolved.
+	PhasePolicyChecked RemediationPhase = "PolicyChecked"
+	// PhasePRCreated means the branch and pull request exist.
+	PhasePRCreated RemediationPhase = "PRCreated"
+	// PhaseAwaitingApproval means the pull request waits for human review.
+	PhaseAwaitingApproval RemediationPhase = "AwaitingApproval"
+	// PhaseAutoMergeQueued means policy allowed automation and auto-merge is enabled on the pull request.
+	PhaseAutoMergeQueued RemediationPhase = "AutoMergeQueued"
+	// PhaseMerged means the pull request is merged.
+	PhaseMerged RemediationPhase = "Merged"
+	// PhaseWaitingForDelivery means the change is merged and the GitOps controller has not applied it yet.
 	PhaseWaitingForDelivery RemediationPhase = "WaitingForDelivery"
-	PhaseVerifying          RemediationPhase = "Verifying"
-	PhaseSucceeded          RemediationPhase = "Succeeded"
-	PhaseDenied             RemediationPhase = "Denied"
-	PhaseFailed             RemediationPhase = "Failed"
-	PhaseExpired            RemediationPhase = "Expired"
-	PhaseCancelled          RemediationPhase = "Cancelled"
-	PhaseSuperseded         RemediationPhase = "Superseded"
-	PhaseNeedsIntervention  RemediationPhase = "NeedsIntervention"
+	// PhaseVerifying means the change is delivered and the verification checks are running.
+	PhaseVerifying RemediationPhase = "Verifying"
+	// PhaseSucceeded means every verification check held for stableFor. Terminal.
+	PhaseSucceeded RemediationPhase = "Succeeded"
+	// PhaseDenied means policy refused the plan; no pull request is opened. Terminal.
+	PhaseDenied RemediationPhase = "Denied"
+	// PhaseFailed means a step failed, for example verification did not pass before the timeout. Terminal.
+	PhaseFailed RemediationPhase = "Failed"
+	// PhaseExpired means a step reached its deadline. Terminal.
+	PhaseExpired RemediationPhase = "Expired"
+	// PhaseCancelled means the request was cancelled before the change was merged. Terminal.
+	PhaseCancelled RemediationPhase = "Cancelled"
+	// PhaseSuperseded means an input of the plan digest changed, so the pull request is closed and a new
+	// request is needed. Terminal.
+	PhaseSuperseded RemediationPhase = "Superseded"
+	// PhaseNeedsIntervention means the controller cannot continue on its own, for example because the target
+	// is not declared in a plain manifest; a human must act.
+	PhaseNeedsIntervention RemediationPhase = "NeedsIntervention"
 )
 
 // Condition types on a RemediationRequest.
@@ -230,7 +253,8 @@ type RemediationRequestStatus struct {
 	// +optional
 	Deadline *metav1.Time `json:"deadline,omitempty"`
 
-	// conditions explain the phase.
+	// conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered and
+	// Verified.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -251,7 +275,7 @@ type RemediationRequestStatus struct {
 type RemediationRequest struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
+	// metadata is the standard object metadata.
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 

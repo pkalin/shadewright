@@ -95,10 +95,12 @@ type walker struct {
 	files  []string
 	seen   map[string]bool
 	reads  int
+	// ignoreChecked holds the directories already checked for a .sourceignore file.
+	ignoreChecked map[string]bool
 }
 
 func newWalker(git providers.GitProvider, commit string) *walker {
-	return &walker{git: git, commit: commit, dirs: map[string]bool{}, seen: map[string]bool{}}
+	return &walker{git: git, commit: commit, dirs: map[string]bool{}, seen: map[string]bool{}, ignoreChecked: map[string]bool{}}
 }
 
 // walk adds the files built from dir. A directory reached twice is read once.
@@ -112,6 +114,9 @@ func (w *walker) walk(ctx context.Context, dir string, depth int) (*Result, erro
 	}
 	w.dirs[dir] = true
 
+	if stop, err := w.checkIgnore(ctx, dir); stop != nil || err != nil {
+		return stop, err
+	}
 	file, stop, err := w.kustomizationFile(ctx, dir)
 	if stop != nil || err != nil {
 		return stop, err
@@ -159,12 +164,43 @@ func (w *walker) walk(ctx context.Context, dir string, depth int) (*Result, erro
 		if w.seen[p] {
 			continue
 		}
+		if stop, err := w.checkIgnore(ctx, path.Dir(p)); stop != nil || err != nil {
+			return stop, err
+		}
 		if len(w.files) >= MaxFiles {
 			r := needsIntervention(ReasonTooManyFiles, "the build lists more than %d files", MaxFiles)
 			return &r, nil
 		}
 		w.seen[p] = true
 		w.files = append(w.files, p)
+	}
+	return nil, nil
+}
+
+// sourceIgnoreFile is the file whose rules Flux applies to a GitRepository artifact.
+const sourceIgnoreFile = ".sourceignore"
+
+// checkIgnore stops when dir or any directory above it, up to the repository root, holds a .sourceignore
+// file. Flux would drop the files it matches from the artifact while this walker reads the full tree, so the
+// rules are not interpreted: any such file fails closed. Each directory costs one read from the budget.
+func (w *walker) checkIgnore(ctx context.Context, dir string) (*Result, error) {
+	for d := dir; !w.ignoreChecked[d]; d = path.Dir(d) {
+		w.ignoreChecked[d] = true
+		p := path.Join(d, sourceIgnoreFile)
+		_, stop, err := w.read(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case stop == nil:
+			return new(needsIntervention(ReasonSourceOptions,
+				"%s exists, so Flux may leave files out of what it applies", p)), nil
+		case stop.Reason != reasonFileNotFound:
+			return stop, nil
+		}
+		if d == "." {
+			break
+		}
 	}
 	return nil, nil
 }

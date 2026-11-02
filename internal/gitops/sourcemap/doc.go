@@ -25,14 +25,15 @@ limitations under the License.
 //     Kustomization. The labels are untrusted, so the Kustomization must be Ready for its current generation
 //     and list the object in status.inventory.
 //  2. The Kustomization's source must be a GitRepository that tracks only spec.ref.branch, with no
-//     suspend, ignore, include, sparse checkout or submodules, and the Kustomization must have applied the
-//     revision the GitRepository last fetched. Its URL must equal,
+//     suspend, ignore, include, sparse checkout or submodules. It must be Ready for its current generation,
+//     its artifact must come from that branch, and the Kustomization must have applied that revision. Its URL must equal,
 //     byte for byte, exactly one repository in RemediationSettings, that repository must be the one the
 //     policy names, and the branch must equal the repository's targetBranch.
 //  3. The files the Kustomization builds are read through a [providers.GitProvider] at the head of that
 //     branch, starting from the kustomization file in spec.path and following its resources. Exactly one
 //     YAML document in them must declare the object (apiVersion, kind, namespace, name), the value the action
 //     changes must equal the live value, and the file must match the policy's allowedPaths.
+//     A .sourceignore file on the searched paths stops the mapping, since Flux would filter by it.
 //
 // Anything else (no labels, Helm, a tag or commit ref, Kustomize patches or generators, a directory without a
 // kustomization file, two declarations, a value changed after the build) stops with [NeedsIntervention] or

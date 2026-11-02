@@ -79,10 +79,14 @@ const (
 	// ReasonSourceIncludes means the GitRepository includes other sources (NeedsIntervention).
 	ReasonSourceIncludes Reason = "SourceIncludes"
 	// ReasonSourceOptions means the GitRepository is suspended, or ignores, sparsely checks out or recurses
-	// into files, so the branch head may not be what Flux applies (NeedsIntervention).
+	// into files, or the repository holds a .sourceignore file on the searched paths, so the branch head may
+	// not be what Flux applies (NeedsIntervention).
 	ReasonSourceOptions Reason = "SourceOptions"
+	// ReasonSourceNotReady means the GitRepository is not Ready for its current generation, so its artifact
+	// may come from an older URL or branch (NeedsIntervention).
+	ReasonSourceNotReady Reason = "SourceNotReady"
 	// ReasonRevisionMismatch means the Kustomization's lastAppliedRevision is not the revision its
-	// GitRepository last fetched (NeedsIntervention).
+	// GitRepository last fetched, or that revision is not from the tracked branch (NeedsIntervention).
 	ReasonRevisionMismatch Reason = "RevisionMismatch"
 	// ReasonRepositoryNotConfigured means the source URL equals no repository in RemediationSettings, or more
 	// than one (Denied).

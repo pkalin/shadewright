@@ -159,9 +159,14 @@ func newFixture() *fixture {
 	ks.SetGeneration(2)
 
 	src := obj("source.toolkit.fluxcd.io/v1", "GitRepository", "flux-system", "fleet", map[string]any{
-		"spec":   map[string]any{"url": fleetURL, "ref": map[string]any{"branch": "main"}},
-		"status": map[string]any{"artifact": map[string]any{"revision": revision}},
+		"spec": map[string]any{"url": fleetURL, "ref": map[string]any{"branch": "main"}},
+		"status": map[string]any{
+			"observedGeneration": int64(4),
+			"conditions":         []any{map[string]any{"type": "Ready", "status": "True", "observedGeneration": int64(4)}},
+			"artifact":           map[string]any{"revision": revision},
+		},
 	})
+	src.SetGeneration(4)
 
 	return &fixture{
 		target:     target,
@@ -467,6 +472,44 @@ func TestResolveStops(t *testing.T) {
 		{"GitRepository has no artifact", func(f *fixture) {
 			unstructured.RemoveNestedField(f.src.Object, "status", "artifact")
 		}, ni, sourcemap.ReasonRevisionMismatch},
+		{"GitRepository not Ready", func(f *fixture) {
+			set(f.src, []any{map[string]any{"type": "Ready", "status": "False"}}, "status", "conditions")
+		}, ni, sourcemap.ReasonSourceNotReady},
+		{"GitRepository URL changed and status is stale", func(f *fixture) {
+			// The old artifact still equals lastAppliedRevision, but it was fetched for the previous spec.
+			f.src.SetGeneration(5)
+		}, ni, sourcemap.ReasonSourceNotReady},
+		{"Ready condition of the GitRepository for an older generation", func(f *fixture) {
+			set(f.src, []any{map[string]any{"type": "Ready", "status": "True", "observedGeneration": int64(3)}}, "status", "conditions")
+		}, ni, sourcemap.ReasonSourceNotReady},
+		{"artifact fetched from another branch", func(f *fixture) {
+			other := "release@sha1:0123456789abcdef0123456789abcdef01234567"
+			set(f.src, other, "status", "artifact", "revision")
+			set(f.ks, other, "status", "lastAppliedRevision")
+		}, ni, sourcemap.ReasonRevisionMismatch},
+		{"artifact revision without a digest", func(f *fixture) {
+			set(f.src, "main", "status", "artifact", "revision")
+			set(f.ks, "main", "status", "lastAppliedRevision")
+		}, ni, sourcemap.ReasonRevisionMismatch},
+		{".sourceignore at the repository root", func(f *fixture) {
+			f.files[".sourceignore"] = "apps/orders/kustomization.yaml\n"
+		}, ni, sourcemap.ReasonSourceOptions},
+		{".sourceignore in the Kustomization path", func(f *fixture) {
+			f.files["apps/orders/.sourceignore"] = "decoy.yaml\n"
+		}, ni, sourcemap.ReasonSourceOptions},
+		{".sourceignore above the Kustomization path", func(f *fixture) {
+			f.files["apps/.sourceignore"] = "*\n"
+		}, ni, sourcemap.ReasonSourceOptions},
+		{".sourceignore in a directory a resource file lives in", func(f *fixture) {
+			f.files[ksFile] = "resources:\n  - ../base/so.yaml\n"
+			f.files["apps/base/so.yaml"] = scaledObjectYAML
+			f.files["apps/base/.sourceignore"] = "so.yaml\n"
+		}, ni, sourcemap.ReasonSourceOptions},
+		{".sourceignore in a nested kustomization directory", func(f *fixture) {
+			f.files[ksFile] = "resources:\n  - workers\n"
+			f.files["apps/orders/workers/kustomization.yaml"] = "resources:\n  - ../scaledobject.yaml\n"
+			f.files["apps/orders/workers/.sourceignore"] = "kustomization.yaml\n"
+		}, ni, sourcemap.ReasonSourceOptions},
 		{"GitRepository includes another source", func(f *fixture) {
 			set(f.src, []any{map[string]any{"repository": map[string]any{"name": "x"}}}, "spec", "include")
 		}, ni, sourcemap.ReasonSourceIncludes},
@@ -486,6 +529,9 @@ func TestResolveStops(t *testing.T) {
 		{"policy names another repository", func(f *fixture) { f.in.GitOps.RepositoryRef = "other" }, dn, sourcemap.ReasonRepositoryNotInPolicy},
 		{"Flux tracks another branch than targetBranch", func(f *fixture) {
 			set(f.src, map[string]any{"branch": "release"}, "spec", "ref")
+			other := "release@sha1:0123456789abcdef0123456789abcdef01234567"
+			set(f.src, other, "status", "artifact", "revision")
+			set(f.ks, other, "status", "lastAppliedRevision")
 		}, dn, sourcemap.ReasonBranchMismatch},
 		{"branch missing in Git", func(f *fixture) { f.gitBranch = "trunk" }, ni, sourcemap.ReasonBranchNotFound},
 

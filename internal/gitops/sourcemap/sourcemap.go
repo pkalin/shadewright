@@ -141,7 +141,7 @@ func (r *Resolver) delivery(ctx context.Context, in Input, id identity, live *un
 	if stop != nil {
 		return delivery{}, stop, nil
 	}
-	if stop := checkRevision(ks, src); stop != nil {
+	if stop := checkRevision(ks, src, branch); stop != nil {
 		return delivery{}, stop, nil
 	}
 	repo, stop := matchRepository(in, url, branch, srcNamespace, srcName)

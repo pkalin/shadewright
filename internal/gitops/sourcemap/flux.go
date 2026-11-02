@@ -17,6 +17,7 @@ package sourcemap
 
 import (
 	"fmt"
+	"regexp"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -115,7 +116,7 @@ func checkKustomization(ks *unstructured.Unstructured, target schema.GroupVersio
 	return srcNamespace, srcName, path, nil
 }
 
-// ready reports whether the Kustomization's status describes its current generation and says Ready=True.
+// ready reports whether a Flux object's status describes its current generation and says Ready=True.
 func ready(ks *unstructured.Unstructured) bool {
 	observed, found, err := unstructured.NestedInt64(ks.Object, "status", "observedGeneration")
 	if err != nil || !found || observed != ks.GetGeneration() {
@@ -190,16 +191,35 @@ func checkGitRepository(src *unstructured.Unstructured) (url, branch string, sto
 
 // checkRevision requires the Kustomization to have applied the revision its GitRepository last fetched, so
 // the object's live state comes from the source as it is now and not from an older or failed fetch.
-func checkRevision(ks, src *unstructured.Unstructured) *Result {
+//
+// The GitRepository must also be Ready for its current generation, so its artifact was fetched for its
+// current spec (a changed URL or branch raises the generation), and the artifact revision must name the
+// branch: Flux writes it as <branch>@sha1:<commit> or <branch>@sha256:<commit>. Flux status records no
+// observed URL, so the generation is what ties the artifact to spec.url.
+func checkRevision(ks, src *unstructured.Unstructured, branch string) *Result {
+	if !ready(src) {
+		r := needsIntervention(ReasonSourceNotReady, "GitRepository %s/%s is not Ready for its current generation",
+			src.GetNamespace(), src.GetName())
+		return &r
+	}
 	applied, _, errA := unstructured.NestedString(ks.Object, "status", "lastAppliedRevision")
 	fetched, _, errF := unstructured.NestedString(src.Object, "status", "artifact", "revision")
-	if errA != nil || errF != nil || applied == "" || applied != fetched {
+	if errA != nil || errF != nil || applied == "" || applied != fetched || !revisionOfBranch(fetched, branch) {
 		r := needsIntervention(ReasonRevisionMismatch,
 			"Kustomization %s/%s has not applied the revision GitRepository %s/%s last fetched",
 			ks.GetNamespace(), ks.GetName(), src.GetNamespace(), src.GetName())
 		return &r
 	}
 	return nil
+}
+
+// revisionRE is a Flux artifact revision for a branch: the branch, then the commit digest.
+var revisionRE = regexp.MustCompile(`^(.+)@(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$`)
+
+// revisionOfBranch reports whether a Flux artifact revision was fetched from branch.
+func revisionOfBranch(revision, branch string) bool {
+	m := revisionRE.FindStringSubmatch(revision)
+	return m != nil && m[1] == branch
 }
 
 // field returns the value at a path of keys, without copying it.

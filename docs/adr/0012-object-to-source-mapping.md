@@ -44,4 +44,4 @@ If any step is ambiguous (no labels, several matches, the object comes from a pa
 
 ## Amendments
 
-- 2026-11-02: added the "Implementation details" section, which fixes details the decision left open as `internal/gitops/sourcemap` was built ([#106](https://github.com/pkalin/shadewright/issues/106), [#120](https://github.com/pkalin/shadewright/pull/120)). The decision is unchanged.
+- 2026-11-02: added the "Implementation details" section, which fixes details the decision left open as `internal/gitops/sourcemap` was built ([#120](https://github.com/pkalin/shadewright/pull/120)). The decision is unchanged.

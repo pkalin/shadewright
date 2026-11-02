@@ -462,7 +462,7 @@ Fully automatic merges happen only where the repository owner deliberately allow
 7. Bind the PR to the request UID and plan digest. Any new push to the branch invalidates the plan.
 8. After merge, follow delivery and the success criteria instead of stopping at "merged".
 
-Opening the change on GitHub, steps 2 to 7 above. Steps marked *(planned)* are designed but not built yet. Here they are built as adapters (`internal/providers/signer/azurekv`, `internal/providers/github/auth`, `internal/providers/github`) with their own tests, but the executor does not call them yet; *(planned)* means not called by the running operator. The GitHub App key never leaves Key Vault ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)); every write names the state it expects, so a restart or a race finds the existing work instead of repeating it.
+Opening the change on GitHub, steps 2 to 7 above. Steps marked *(planned)* are designed but not built yet. Signing, the token exchange, reading the head, creating the branch, committing and opening the pull request are built as adapters (`internal/providers/signer/azurekv`, `internal/providers/github/auth`, `internal/providers/github`) with their own tests, but the executor does not call them yet. Auto-merge is not built in any adapter (`EnableAutoMerge` returns an error and `Capabilities()` reports no auto-merge, #20). *(planned)* means not called by the running operator. The GitHub App key never leaves Key Vault ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)); every write names the state it expects, so a restart or a race finds the existing work instead of repeating it.
 
 ```mermaid
 sequenceDiagram

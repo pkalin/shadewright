@@ -284,12 +284,19 @@ func checkTarget(in DecisionInput) (Reason, string) {
 		return ReasonTargetNamespaceNotAllowed,
 			fmt.Sprintf("Policy %q does not cover target namespace %q", p.Name, t.Namespace)
 	}
+	return CheckObjectSelector(p, t.Labels)
+}
+
+// CheckObjectSelector checks the labels of a target against the policy's targets.objectSelector. It returns an
+// empty reason when they match or the policy has no selector. The freshness check uses it too, so a target
+// relabelled after the decision is judged by the same code.
+func CheckObjectSelector(p *v1alpha1.RemediationPolicy, targetLabels map[string]string) (Reason, string) {
 	if sel := p.Spec.Targets.ObjectSelector; sel != nil {
 		s, err := metav1.LabelSelectorAsSelector(sel)
 		if err != nil {
 			return ReasonPolicyInvalid, fmt.Sprintf("Policy %q has an invalid objectSelector", p.Name)
 		}
-		if !s.Matches(labels.Set(t.Labels)) {
+		if !s.Matches(labels.Set(targetLabels)) {
 			return ReasonTargetLabelsNotMatched,
 				fmt.Sprintf("The target's labels do not match the objectSelector of policy %q", p.Name)
 		}

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -35,6 +36,8 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy"
+	"github.com/pkalin/shadewright/internal/policy/freshness"
+	"github.com/pkalin/shadewright/internal/providers"
 )
 
 // settingsName is the name of the one RemediationSettings object.
@@ -70,7 +73,26 @@ type RemediationRequestReconciler struct {
 	// watch; and the policy and settings are read through it, so a decision never rests on a stale cached
 	// copy. Nil means the client is used (tests).
 	APIReader client.Reader
+	// OpenRepository opens the Git repository a settings entry names. It is used to re-check a plan before a
+	// write and to close the change request of a superseded one. Nil disables the freshness step of Reconcile
+	// (no Git adapter yet); [RemediationRequestReconciler.EnsureFresh] then fails closed.
+	OpenRepository freshness.RepositoryOpener
 }
+
+// ErrSuperseded is returned by EnsureFresh when the plan went stale: the request is now Superseded and its
+// change request is closed. The caller must not write.
+var ErrSuperseded = errors.New("the plan is superseded")
+
+// freshRecheckDelay is how long a request waits to be re-checked when writes are paused.
+const freshRecheckDelay = time.Minute
+
+// freshRecheckInterval is how often a fresh request before merge is looked at again. It bounds how long a
+// stale plan keeps an open change request when nothing else wakes the request.
+const freshRecheckInterval = 5 * time.Minute
+
+// errRepositoryGone means the repository a plan was made for is not in the settings any more (or was never
+// recorded), so its change request cannot be closed safely.
+var errRepositoryGone = errors.New("the repository of the plan is not configured")
 
 // reader returns the uncached reader, or the client when none is set.
 func (r *RemediationRequestReconciler) reader() client.Reader {
@@ -107,7 +129,7 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if rr.Status.Phase != "" && rr.Status.Phase != remediationv1alpha1.PhasePending {
-		return ctrl.Result{}, nil
+		return r.recheck(ctx, rr)
 	}
 
 	out, err := r.check(ctx, rr)
@@ -127,6 +149,8 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	rr.Status.Source = out.source
 	rr.Status.PolicyUID = out.policyUID
 	rr.Status.PolicyRevision = out.policyRevision
+	rr.Status.PlanDigest = out.planDigest
+	rr.Status.PlanRepository = out.planRepository
 	rr.Status.EffectiveApprovalRequired = out.approval
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPolicyAllowed,
@@ -152,7 +176,9 @@ type outcome struct {
 	source         *remediationv1alpha1.ResolvedSource
 	policyUID      remediationv1alpha1.UID
 	policyRevision string
+	planRepository *remediationv1alpha1.PlanRepository
 	approval       *bool
+	planDigest     string
 }
 
 func denied(reason, message string) outcome {
@@ -265,6 +291,18 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 	case policy.OutcomeAllowed:
 		o.phase, o.status = remediationv1alpha1.PhasePolicyChecked, metav1.ConditionTrue
 		o.approval = &d.EffectiveApprovalRequired
+		// The plan is fixed here, from the very objects the decision was made on, so no later read of the
+		// policy or the settings can slip in between the decision and the digest.
+		digest, err := freshness.ComputeDigest(rr, res.Source, pol, settings)
+		if err != nil {
+			return needsIntervention(string(sourcemap.ReasonInvalidInput), "The plan digest cannot be computed"), nil
+		}
+		o.planDigest = digest
+		for _, repo := range settings.Spec.Repositories {
+			if repo.Name == res.Source.RepositoryRef {
+				o.planRepository = freshness.RepositoryOf(repo)
+			}
+		}
 	case policy.OutcomeDenied:
 		o.phase, o.status = remediationv1alpha1.PhaseDenied, metav1.ConditionFalse
 	default:
@@ -309,18 +347,12 @@ func (r *RemediationRequestReconciler) SetupWithManager(mgr ctrl.Manager) error 
 // refused.
 func checkBaseline(action remediationv1alpha1.Action, field sourcemap.Field, live *unstructured.Unstructured) (
 	outcome, bool) {
-	var claimed any
-	switch {
-	case action.SetContainerMemoryLimit != nil:
-		q := action.SetContainerMemoryLimit.Previous.DeepCopy() // String caches into its receiver
-		claimed = q.String()
-	case action.AdjustKedaMaxReplicas != nil:
-		claimed = int64(action.AdjustKedaMaxReplicas.PreviousValue)
-	default:
+	claimed, ok := sourcemap.PreviousValue(action)
+	if !ok {
 		return needsIntervention(string(sourcemap.ReasonInvalidInput), "The action has no previous value"), true
 	}
-	got, ok := field.Get(live.Object)
-	if !ok {
+	got, found := field.Get(live.Object)
+	if !found {
 		return needsIntervention(string(sourcemap.ReasonFieldNotFound),
 			fmt.Sprintf("%s is not set on the live object", field)), true
 	}
@@ -329,4 +361,134 @@ func checkBaseline(action remediationv1alpha1.Action, field sourcemap.Field, liv
 			fmt.Sprintf("The previous value in the request is not the live value of %s", field)), true
 	}
 	return outcome{}, false
+}
+
+// beforeMerge reports whether a phase is one in which the plan can still be superseded.
+func beforeMerge(p remediationv1alpha1.RemediationPhase) bool {
+	switch p {
+	case remediationv1alpha1.PhasePolicyChecked, remediationv1alpha1.PhasePRCreated,
+		remediationv1alpha1.PhaseAwaitingApproval, remediationv1alpha1.PhaseAutoMergeQueued:
+		return true
+	}
+	return false
+}
+
+// recheck is the freshness step of Reconcile for a request that has left the policy check but has not merged.
+// Git writes are made by a later step, which calls EnsureFresh itself before each of them; this step makes a
+// stale plan visible (and closes its change request) without waiting for the next write.
+func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	ctrl.Result, error) {
+	if r.OpenRepository == nil || !beforeMerge(rr.Status.Phase) || rr.Status.PlanDigest == "" {
+		return ctrl.Result{}, nil
+	}
+	switch err := r.EnsureFresh(ctx, rr); {
+	case errors.Is(err, ErrSuperseded):
+		return ctrl.Result{}, nil
+	case err == nil:
+		return ctrl.Result{RequeueAfter: freshRecheckInterval}, nil
+	case errors.Is(err, freshness.ErrPaused):
+		return ctrl.Result{RequeueAfter: freshRecheckDelay}, nil
+	default:
+		// A host that asked for a delay (Retry-After) gets it; the error backoff does not read it.
+		if pe, ok := errors.AsType[*freshness.ProviderError](err); ok && pe.RetryAfter > 0 {
+			logf.FromContext(ctx).Info("Waiting before re-checking RemediationRequest",
+				"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", pe.RetryAfter)
+			return ctrl.Result{RequeueAfter: pe.RetryAfter}, nil
+		}
+		return ctrl.Result{}, err
+	}
+}
+
+// EnsureFresh must run right before every Git write of a request (design section 6). It returns nil only when
+// the plan is fresh. When an input of the plan digest changed, it closes the request's change request through
+// the provider, sets the phase to Superseded and returns ErrSuperseded; the branch is never rebuilt or
+// force-pushed. Any other error (an input could not be read, writes are paused) means "not fresh": the caller
+// must not write and may retry.
+//
+// It is idempotent (invariant 5): closing a closed change request succeeds, and a request that is already
+// Superseded returns ErrSuperseded without calling the provider again. The change request is closed before
+// the status is written, so a crash in between leaves a retry that closes it again as a no-op.
+func (r *RemediationRequestReconciler) EnsureFresh(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	if rr.Status.Phase == remediationv1alpha1.PhaseSuperseded {
+		return ErrSuperseded
+	}
+	if !beforeMerge(rr.Status.Phase) {
+		return fmt.Errorf("a request in phase %q takes no write that needs a fresh plan", rr.Status.Phase)
+	}
+	err := freshness.Checker{Reader: r.reader(), OpenRepository: r.OpenRepository}.Fresh(ctx, rr)
+	staleErr, ok := errors.AsType[*freshness.StaleError](err)
+	if !ok {
+		return err
+	}
+	phase, reason, message := remediationv1alpha1.PhaseSuperseded, staleErr.Reason, staleErr.Message
+	switch err := r.closeChangeRequest(ctx, rr); {
+	case errors.Is(err, errRepositoryGone):
+		// Nothing is closed: the only change request this plan could have is in a repository that cannot be
+		// reached through the settings any more, and closing a number elsewhere could close someone else's.
+		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, "RepositoryUnavailable"
+		message = "The plan is stale and the repository it was made for is not configured any more; " +
+			"its change request, if any, was not closed"
+	case err != nil:
+		return err
+	}
+	rr.Status.Phase = phase
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type:               remediationv1alpha1.ConditionPlanFresh,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: rr.Generation,
+	})
+	if err := r.Status().Update(ctx, rr); err != nil {
+		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	logf.FromContext(ctx).Info("Superseded RemediationRequest", "remediationRequest", client.ObjectKeyFromObject(rr),
+		"phase", phase, "reason", reason)
+	return ErrSuperseded
+}
+
+// closeChangeRequest closes the request's change request, if it has one, in the repository the plan was made
+// for and nowhere else. A change request that is already closed, or that was never opened, is not an error; a
+// merged one is, because the change landed. It returns [errRepositoryGone] when that repository is not in the
+// settings, and [freshness.ErrPaused] when the settings read now pause writes.
+func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	if r.OpenRepository == nil {
+		return errors.New("cannot close the change request: no Git provider")
+	}
+	settings := &remediationv1alpha1.RemediationSettings{}
+	switch err := r.getLive(ctx, types.NamespacedName{Name: settingsName}, settings); {
+	case apierrors.IsNotFound(err):
+		return errRepositoryGone
+	case err != nil:
+		return fmt.Errorf("get RemediationSettings %s: %w", settingsName, err)
+	}
+	if freshness.Paused(settings) {
+		return freshness.ErrPaused
+	}
+	repo, ok := freshness.FindRepository(settings, rr.Status.PlanRepository)
+	if !ok {
+		return errRepositoryGone
+	}
+	git, err := r.OpenRepository(ctx, repo)
+	if err != nil {
+		return freshness.WrapProvider("open the repository", err)
+	}
+	number := int64(0)
+	if rr.Status.PullRequest != nil {
+		number = rr.Status.PullRequest.Number
+	} else {
+		// The pull request may exist although the status write that records it failed (design section 6).
+		cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
+		switch {
+		case errors.Is(err, providers.ErrNotFound):
+			return nil
+		case err != nil:
+			return freshness.WrapProvider("find the change request", err)
+		}
+		number = cr.Number
+	}
+	if err := git.CloseChangeRequest(ctx, number); err != nil {
+		return freshness.WrapProvider("close the change request", err)
+	}
+	return nil
 }

@@ -32,6 +32,7 @@ import (
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"
 
+	"github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
@@ -381,4 +382,37 @@ func decodeDocuments(data []byte) ([]map[string]any, error) {
 			docs = append(docs, doc)
 		}
 	}
+}
+
+// ReadField returns the value of field in the one document of data that declares target. It is an error when
+// no document declares the target, when more than one may (another version, a missing namespace, a second
+// copy) or when a List holds it, because the value could then belong to another object. found is false when
+// the document does not set the field.
+func ReadField(data []byte, target v1alpha1.ObjectRef, field Field) (value any, found bool, err error) {
+	gv, err := schema.ParseGroupVersion(target.APIVersion)
+	if err != nil {
+		return nil, false, fmt.Errorf("invalid apiVersion")
+	}
+	id := identity{gvk: gv.WithKind(target.Kind), namespace: target.Namespace, name: target.Name}
+	docs, err := decodeDocuments(data)
+	if err != nil {
+		return nil, false, fmt.Errorf("the file is not valid YAML")
+	}
+	var exact map[string]any
+	for _, doc := range docs {
+		switch match(doc, id) {
+		case matchExact:
+			if exact != nil {
+				return nil, false, fmt.Errorf("%s is declared more than once", id)
+			}
+			exact = doc
+		case matchNear, matchList:
+			return nil, false, fmt.Errorf("%s may be declared more than once", id)
+		}
+	}
+	if exact == nil {
+		return nil, false, fmt.Errorf("%s is not declared in the file", id)
+	}
+	value, found = field.Get(exact)
+	return value, found, nil
 }

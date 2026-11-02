@@ -162,3 +162,18 @@ func toQuantity(v any) (resource.Quantity, bool) {
 		return resource.Quantity{}, false
 	}
 }
+
+// PreviousValue returns the previous value an action claims for its field, in the form Field.Equals compares:
+// a canonical quantity string for a memory limit, an int64 for a replica count. It reports false for an action
+// of no known type.
+func PreviousValue(action v1alpha1.Action) (any, bool) {
+	switch {
+	case action.SetContainerMemoryLimit != nil:
+		q := action.SetContainerMemoryLimit.Previous.DeepCopy() // String caches into its receiver
+		return q.String(), true
+	case action.AdjustKedaMaxReplicas != nil:
+		return int64(action.AdjustKedaMaxReplicas.PreviousValue), true
+	default:
+		return nil, false
+	}
+}

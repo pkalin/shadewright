@@ -1,0 +1,7 @@
+## Append samples of your project ##
+resources:
+- remediation_v1alpha1_remediationrequest.yaml
+- remediation_v1alpha1_incident.yaml
+- remediation_v1alpha1_remediationpolicy.yaml
+- remediation_v1alpha1_remediationsettings.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

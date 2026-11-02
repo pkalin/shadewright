@@ -1,0 +1,20 @@
+# The one cluster-wide settings object. Set paused: true to stop every write at once (the kill switch).
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: RemediationSettings
+metadata:
+  name: default
+spec:
+  paused: false
+  maxConcurrentRemediations: 1
+  maxAnalysesPerDay: 100
+  repositories:
+    - name: fleet
+      url: https://github.com/example/fleet
+      targetBranch: main
+      provider: GitHub
+      github:
+        appClientID: Iv23exampleclientid
+        installationID: 12345678
+        signer:
+          azureKeyVault:
+            keyID: https://kv-example.vault.azure.net/keys/github-app

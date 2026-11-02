@@ -1,0 +1,211 @@
+/*
+ * Shadewright brand for the docs site.
+ * Colours are sampled from the mark (docs/assets/logo.png): violet #7c24fc on near-black.
+ * Headings use Chakra Petch (SIL OFL 1.1, see docs/assets/fonts/OFL.txt), self-hosted so
+ * the site makes no third-party font requests.
+ */
+
+@font-face {
+  font-family: "Chakra Petch";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("../assets/fonts/chakra-petch-600-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Chakra Petch";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("../assets/fonts/chakra-petch-600-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Chakra Petch";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("../assets/fonts/chakra-petch-700-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Chakra Petch";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("../assets/fonts/chakra-petch-700-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+:root {
+  --sw-violet: #7c24fc;
+  --sw-violet-light: #a879ff;
+  --sw-violet-soft: #9b5cff;
+  --sw-ink: #0e0e16;
+  --sw-ink-raised: #181723;
+  --sw-ink-line: #2a2740;
+  --sw-heading-font: "Chakra Petch", var(--md-text-font-family, sans-serif);
+}
+
+[data-md-color-scheme="slate"] {
+  --md-hue: 252;
+  --md-primary-fg-color: var(--sw-ink-raised);
+  --md-primary-fg-color--light: #24223a;
+  --md-primary-fg-color--dark: var(--sw-ink);
+  --md-primary-bg-color: #ece6ff;
+  --md-primary-bg-color--light: #ece6ffb3;
+  --md-accent-fg-color: var(--sw-violet-soft);
+  --md-accent-fg-color--transparent: #9b5cff1f;
+  --md-default-bg-color: var(--sw-ink);
+  --md-typeset-a-color: var(--sw-violet-light);
+  --md-code-bg-color: #16151f;
+  --md-code-fg-color: #ddd8f0;
+  --md-code-hl-keyword-color: #b48cff;
+  --md-code-hl-string-color: #7fd6c2;
+  --md-code-hl-number-color: #ffb86b;
+  --md-code-hl-comment-color: #8a86a3;
+  --md-footer-bg-color: var(--sw-ink-raised);
+  --md-footer-bg-color--dark: var(--sw-ink);
+}
+
+/* Header: dark bar, larger glowing mark, violet hairline. */
+.md-header {
+  background-color: var(--sw-ink-raised);
+  box-shadow: 0 1px 0 0 #7c24fc66;
+}
+.md-header__button.md-logo img {
+  height: 1.9rem;
+  filter: drop-shadow(0 0 0.35rem #7c24fc99);
+}
+.md-header__title {
+  font-family: var(--sw-heading-font);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.md-tabs {
+  background-color: var(--sw-ink-raised);
+}
+
+/* Headings. */
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  font-family: var(--sw-heading-font);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.md-typeset h1 {
+  color: #f1edff;
+  font-weight: 700;
+}
+.md-typeset h2 {
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--sw-ink-line);
+}
+
+/* Navigation: violet marker on the active page. */
+.md-nav__link--active {
+  color: var(--sw-violet-light);
+}
+.md-sidebar--primary .md-nav__link--active {
+  box-shadow: inset 2px 0 0 var(--sw-violet);
+  padding-left: 0.4rem;
+}
+
+/* Links and inline code. */
+.md-typeset a:hover {
+  color: #c6a8ff;
+}
+.md-typeset :not(pre) > code {
+  background-color: #1d1b2b;
+  box-shadow: inset 0 0 0 1px var(--sw-ink-line);
+}
+
+/* Tables. */
+.md-typeset table:not([class]) {
+  border: 1px solid var(--sw-ink-line);
+}
+.md-typeset table:not([class]) th {
+  background-color: #1d1b2b;
+  color: #f1edff;
+  font-family: var(--sw-heading-font);
+  font-weight: 600;
+}
+.md-typeset table:not([class]) tr:hover {
+  background-color: #7c24fc14;
+}
+
+/* Buttons. */
+.md-typeset .md-button {
+  border-color: var(--sw-violet);
+  color: var(--sw-violet-light);
+  font-family: var(--sw-heading-font);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+.md-typeset .md-button--primary {
+  background-color: var(--sw-violet);
+  border-color: var(--sw-violet);
+  color: #fff;
+}
+.md-typeset .md-button:hover,
+.md-typeset .md-button:focus {
+  background-color: var(--sw-violet-soft);
+  border-color: var(--sw-violet-soft);
+  color: #fff;
+}
+
+/* Home page hero. */
+.sw-hero {
+  position: relative;
+  isolation: isolate;
+  margin: 0.5rem 0 2.5rem;
+  padding: 2.5rem 1rem 2rem;
+  text-align: center;
+}
+.sw-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: radial-gradient(ellipse 45% 55% at 50% 38%, #7c24fc40, transparent 70%);
+}
+.sw-hero img {
+  width: min(34rem, 90%);
+  height: auto;
+}
+.md-typeset .sw-hero .sw-tagline {
+  max-width: 38rem;
+  margin: 1.2rem auto 1.6rem;
+  font-size: 1.05rem;
+  color: var(--md-default-fg-color--light);
+}
+.sw-hero .md-button {
+  margin: 0.25rem 0.3rem;
+}
+.md-typeset h1.sw-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Cards on the home page. */
+.md-typeset .grid.cards > ul > li {
+  border-color: var(--sw-ink-line);
+  background-color: var(--sw-ink-raised);
+}
+.md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--sw-violet);
+  box-shadow: 0 0 0 1px #7c24fc55, 0 0.4rem 1.2rem #7c24fc22;
+}
+.md-typeset .grid.cards > ul > li > p:first-child > strong {
+  color: var(--sw-violet-light);
+  font-family: var(--sw-heading-font);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}

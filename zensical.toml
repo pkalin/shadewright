@@ -1,0 +1,59 @@
+# Docs site for shadewright.io, built with Zensical (ADR-0010).
+# Local preview: pip install -r requirements-docs.txt && zensical serve
+
+[project]
+site_name = "Shadewright"
+site_description = "A Kubernetes operator that diagnoses incidents with an LLM and proposes fixes only as reviewed GitOps pull requests"
+site_url = "https://shadewright.io/"
+repo_url = "https://github.com/pkalin/shadewright"
+repo_name = "pkalin/shadewright"
+edit_uri = "edit/main/docs/"
+copyright = "Copyright 2026 The Shadewright Authors. Apache-2.0."
+extra_css = ["stylesheets/brand.css"]
+nav = [
+  { "Home" = "index.md" },
+  { "Design" = "design.md" },
+  { "Decisions" = [
+    { "Overview" = "adr/index.md" },
+    { "0001 Record decisions" = "adr/0001-record-architecture-decisions.md" },
+    { "0002 Three repositories" = "adr/0002-three-repositories.md" },
+    { "0003 GitOps-only remediation" = "adr/0003-gitops-only-typed-remediation.md" },
+    { "0004 GitHub and Flux first" = "adr/0004-github-and-flux-first.md" },
+    { "0005 Go and Kubebuilder" = "adr/0005-go-kubebuilder-single-module.md" },
+    { "0006 App key in Key Vault" = "adr/0006-github-app-key-in-key-vault.md" },
+    { "0007 Incident state in CRDs" = "adr/0007-incident-state-in-crds.md" },
+    { "0008 Disposable Azure lab" = "adr/0008-disposable-azure-lab.md" },
+    { "0009 API group and domain" = "adr/0009-api-group-and-docs-domain.md" },
+    { "0010 Docs on Zensical" = "adr/0010-docs-site-zensical.md" },
+    { "0011 Policy CRD" = "adr/0011-policy-as-cluster-scoped-crd.md" },
+    { "0012 Object to Git source" = "adr/0012-object-to-source-mapping.md" },
+    { "0013 Adapters everywhere" = "adr/0013-adapters-for-every-external-system.md" },
+    { "0014 Issues for notifications" = "adr/0014-notifications-github-issues-first.md" },
+    { "0015 Analysis records kept" = "adr/0015-analysis-records-outlive-the-lab.md" },
+    { "0016 Sweden Central" = "adr/0016-lab-region-sweden-central.md" },
+    { "0017 Prometheus in the lab" = "adr/0017-prometheus-in-the-lab.md" },
+    { "Template" = "adr/template.md" },
+  ] },
+]
+
+[project.theme]
+language = "en"
+logo = "assets/logo.png"
+favicon = "assets/favicon.png"
+features = [
+  "content.code.copy",
+  "content.action.edit",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+]
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "custom"
+accent = "custom"

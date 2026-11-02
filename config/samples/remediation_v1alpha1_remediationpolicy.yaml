@@ -1,0 +1,23 @@
+# Allows raising KEDA capacity in one namespace, in steps of at most 50%, between 2 and 20 replicas, in one
+# file pattern of the fleet repository. Decreases are refused. Only requests from shadewright-system may use
+# it, and a human must approve every PR.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: RemediationPolicy
+metadata:
+  name: keda-capacity
+spec:
+  requestNamespaces: [shadewright-system]
+  targets:
+    namespaces: [orders]
+  actions:
+    - type: AdjustKedaMaxReplicas
+      adjustKedaMaxReplicas:
+        min: 2
+        max: 20
+        maxIncreasePercent: 50
+        maxDecreasePercent: 0
+  gitOps:
+    repositoryRef: fleet
+    allowedPaths:
+      - apps/*/scaledobject.yaml
+  approval: Required

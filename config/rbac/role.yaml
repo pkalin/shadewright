@@ -1,0 +1,30 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - remediationrequests
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - remediationrequests/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - remediationrequests/status
+  verbs:
+  - get
+  - patch
+  - update

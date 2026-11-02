@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make manifests*)",
+      "Bash(make generate*)",
+      "Bash(make fmt*)",
+      "Bash(make vet*)",
+      "Bash(make lint*)",
+      "Bash(make test)",
+      "Bash(make build*)",
+      "Bash(go test *)",
+      "Bash(go build *)",
+      "Bash(go vet *)"
+    ],
+    "ask": [
+      "Bash(kubectl apply *)",
+      "Bash(kubectl delete *)",
+      "Bash(kubectl exec *)",
+      "Bash(kubectl patch *)",
+      "Bash(make deploy*)",
+      "Bash(make undeploy*)",
+      "Bash(make install*)",
+      "Bash(make docker-push*)",
+      "Bash(git push*)",
+      "Bash(gh pr merge*)",
+      "Bash(gh release *)"
+    ]
+  }
+}

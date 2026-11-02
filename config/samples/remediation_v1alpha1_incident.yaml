@@ -1,0 +1,17 @@
+# Normally written by the collector, not by hand.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: orders-worker-backlog
+  namespace: shadewright-system
+spec:
+  fingerprint: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  subject:
+    apiVersion: keda.sh/v1alpha1
+    kind: ScaledObject
+    namespace: orders
+    name: orders-worker
+    uid: 22222222-2222-4222-8222-222222222222
+  reason: ScaledObjectAtMaxReplicas
+  reportingController: shadewright-collector
+  symptom: "ScaledObject at maxReplicaCount 10 for 15m while queue backlog grows"

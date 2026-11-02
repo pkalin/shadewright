@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 300" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Workload identity chain</title>
+  <desc id="d">Each component's pod uses its own ServiceAccount. A projected token from the cluster's OIDC issuer is exchanged through a federated credential in Microsoft Entra ID for a user-assigned managed identity. The analyzer's identity may only call the model in Foundry; the executor's identity may only sign with the GitHub App key in Key Vault.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .h{fill:#f1edff;font-size:14.5px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12px}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .lanet{fill:#7d7999;font-size:12.5px;font-weight:600;letter-spacing:.14em}
+      .bad{fill:#2a1720;stroke:#7a3348;stroke-width:1.2}
+      .badt{fill:#ff8fa3;font-size:13px;font-weight:600}
+    </style>
+  </defs>
+  <rect width="1120" height="300" rx="18" fill="#0e0e16"/>
+  <text class="lanet" x="40" y="44">ANALYZER</text>
+  <text class="lanet" x="40" y="174">EXECUTOR</text>
+  <rect class="box" x="40" y="60" width="190" height="64" rx="10"/><text class="h" x="54" y="86">Pod</text><text class="s" x="54" y="107">SA shadewright-analyzer</text>
+  <rect class="box" x="262" y="60" width="190" height="64" rx="10"/><text class="h" x="276" y="86">Projected token</text><text class="s" x="276" y="107">cluster OIDC issuer</text>
+  <rect class="box" x="484" y="60" width="190" height="64" rx="10"/><text class="h" x="498" y="86">Federated credential</text><text class="s" x="498" y="107">Microsoft Entra ID</text>
+  <rect class="box" x="706" y="60" width="190" height="64" rx="10"/><text class="h" x="720" y="86">Managed identity</text><text class="s" x="720" y="107">one per component</text>
+  <rect class="ext" x="928" y="60" width="160" height="64" rx="10"/><text class="h" x="942" y="86">Foundry model</text><text class="s" x="942" y="107">inference only</text>
+  <path class="f" d="M230 92H256" marker-end="url(#a)"/>
+  <path class="f" d="M452 92H478" marker-end="url(#a)"/>
+  <path class="f" d="M674 92H700" marker-end="url(#a)"/>
+  <path class="f" d="M896 92H922" marker-end="url(#a)"/>
+  <rect class="box" x="40" y="190" width="190" height="64" rx="10"/><text class="h" x="54" y="216">Pod</text><text class="s" x="54" y="237">SA controller-manager</text>
+  <rect class="box" x="262" y="190" width="190" height="64" rx="10"/><text class="h" x="276" y="216">Projected token</text><text class="s" x="276" y="237">cluster OIDC issuer</text>
+  <rect class="box" x="484" y="190" width="190" height="64" rx="10"/><text class="h" x="498" y="216">Federated credential</text><text class="s" x="498" y="237">Microsoft Entra ID</text>
+  <rect class="box" x="706" y="190" width="190" height="64" rx="10"/><text class="h" x="720" y="216">Managed identity</text><text class="s" x="720" y="237">one per component</text>
+  <rect class="ext" x="928" y="190" width="160" height="64" rx="10"/><text class="h" x="942" y="216">Key Vault key</text><text class="s" x="942" y="237">sign only, no export</text>
+  <path class="f" d="M230 222H256" marker-end="url(#a)"/>
+  <path class="f" d="M452 222H478" marker-end="url(#a)"/>
+  <path class="f" d="M674 222H700" marker-end="url(#a)"/>
+  <path class="f" d="M896 222H922" marker-end="url(#a)"/>
+  <text class="lbl" x="40" y="282">No client secrets anywhere; the two identities never share a token.</text>
+</svg>

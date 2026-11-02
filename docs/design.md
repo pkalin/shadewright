@@ -32,38 +32,9 @@ One cluster, a few namespaces, one GitOps repository on GitHub synced by Flux, a
 
 ### 2.1. Flow
 
-```text
-Kubernetes Events, object status, metrics, logs
-                      |
-                      v
-     Collector: normalize, correlate, deduplicate
-                      |
-                      v
-          Incident (durable) + bounded context
-                      |
-                      v
-     Analyzer: rules first, then the model with read-only tools
-                      |
-                      v
-                Proposed action
-                      |
-                      v
-      RemediationRequest  ->  policy check (deterministic)
-                      |
-                      v
-            Remediation controller
-                      |
-                      v
-          Branch + commit + PR on GitHub
-                      |
-          review / required checks / auto-merge
-                      |
-                      v
-             Merge -> Flux -> cluster
-                      |
-                      v
-       Verify effect / escalate / propose a revert PR
-```
+[![Shadewright architecture: cluster signals become incidents; the analyzer proposes a typed RemediationRequest; deterministic policy decides; the controller opens a pull request; review and checks merge it; Flux applies it; the verifier confirms the effect.](assets/diagrams/architecture.svg)](assets/diagrams/architecture.svg "Open full size")
+
+The dashed boxes are the two identities: the analyzer can read and call the model, the executor can write request status and use the Git App. The `RemediationRequest` between them is the only thing the analyzer can hand over.
 
 ### 2.2. Components
 
@@ -302,13 +273,7 @@ One cluster-scoped object named `default`. It holds the kill switch (`paused`, c
 
 ## 6. Reconciliation
 
-Main path:
-
-```text
-Pending -> PolicyChecked -> PRCreated
-        -> AwaitingApproval or AutoMergeQueued
-        -> Merged -> WaitingForDelivery -> Verifying -> Succeeded
-```
+[![RemediationRequest phases: Pending, PolicyChecked, PRCreated, AwaitingApproval or AutoMergeQueued, Merged, WaitingForDelivery, Verifying, Succeeded; any step can end in Denied, Failed, Expired, Cancelled, Superseded or NeedsIntervention.](assets/diagrams/phases.svg)](assets/diagrams/phases.svg "Open full size")
 
 Other terminal or waiting phases: `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded`, `NeedsIntervention`. Conditions explain why; `phase` is a summary for humans.
 
@@ -390,13 +355,7 @@ The GitHub App enables auto-merge (GraphQL `enablePullRequestAutoMerge`, squash)
 
 ## 9. Identity
 
-```text
-Pod + ServiceAccount
-    -> projected token from the cluster's OIDC issuer
-    -> federated credential in Microsoft Entra ID
-    -> user-assigned managed identity
-    -> Azure resource (Foundry for the analyzer, Key Vault for the executor)
-```
+[![Workload identity chain for the analyzer and the executor: pod and ServiceAccount, projected token, federated credential in Entra ID, managed identity, then Foundry or a sign-only Key Vault key.](assets/diagrams/identity.svg)](assets/diagrams/identity.svg "Open full size")
 
 - **Analyzer:** its own managed identity with only the inference role on the model deployment and permission to create blobs in the analysis records container (ADR-0015). Token audience must match the endpoint.
 - **Executor:** its own managed identity with permission to *sign* with one Key Vault key. The GitHub App private key is imported into Key Vault as a non-exportable key; the executor signs the App JWT through Key Vault and exchanges it for a one-hour installation token. The private key never exists in the pod or in a Kubernetes Secret ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)).

@@ -189,6 +189,9 @@ const (
 	ConditionApproved      = "Approved"
 	ConditionDelivered     = "Delivered"
 	ConditionVerified      = "Verified"
+	// ConditionPlanFresh is False, with the reason, when an input of the plan digest changed and the request
+	// was superseded.
+	ConditionPlanFresh = "PlanFresh"
 )
 
 // PullRequestStatus records the pull request that carries the plan.
@@ -253,8 +256,8 @@ type RemediationRequestStatus struct {
 	// +optional
 	Deadline *metav1.Time `json:"deadline,omitempty"`
 
-	// conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered and
-	// Verified.
+	// conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
+	// Verified and PlanFresh.
 	// +listType=map
 	// +listMapKey=type
 	// +optional

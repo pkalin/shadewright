@@ -289,8 +289,8 @@ spec:
             properties:
               conditions:
                 description: |-
-                  conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered and
-                  Verified.
+                  conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
+                  Verified and PlanFresh.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

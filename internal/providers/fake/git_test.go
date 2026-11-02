@@ -332,3 +332,35 @@ func TestGitMergeMovesHeadsOfOtherRequests(t *testing.T) {
 		t.Errorf("auto-merge accepted the stale head: %v", err)
 	}
 }
+
+func TestGitMergeKeepsNewEmptyFile(t *testing.T) {
+	g, head := newRepo(t)
+	_, cr := mustOpen(t, g, head)
+	if _, err := g.Push(branch, "apps/demo/empty.yaml", nil); err != nil {
+		t.Fatal(err)
+	}
+	mc, err := g.Merge(cr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.ReadFile(context.Background(), mc, "apps/demo/empty.yaml"); err != nil {
+		t.Errorf("empty file added on the head branch is missing after merge: %v", err)
+	}
+}
+
+func TestGitMergeSameChangeAlreadyOnBase(t *testing.T) {
+	g, head := newRepo(t)
+	_, cr := mustOpen(t, g, head)
+	// Another change with the same value merged first.
+	if _, err := g.Push(base, path, []byte("memory: 256Mi\n")); err != nil {
+		t.Fatal(err)
+	}
+	mc, err := g.Merge(cr.Number)
+	if err != nil {
+		t.Fatalf("identical change already on the base: %v", err)
+	}
+	f, _ := g.ReadFile(context.Background(), mc, path)
+	if string(f.Data) != "memory: 256Mi\n" {
+		t.Errorf("merged content %q", f.Data)
+	}
+}

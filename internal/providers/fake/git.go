@@ -17,6 +17,7 @@ limitations under the License.
 package fake
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -340,10 +341,15 @@ func (g *Git) Merge(n int64) (string, error) {
 	forkFiles := g.commits[g.mergeBase(baseSHA, g.branches[cr.HeadBranch])].files
 	next := maps.Clone(baseFiles)
 	for p, data := range headFiles {
-		if string(forkFiles[p]) == string(data) {
-			continue
+		fork, inFork := forkFiles[p]
+		if inFork && bytes.Equal(fork, data) {
+			continue // unchanged on the head branch
 		}
-		if string(baseFiles[p]) != string(forkFiles[p]) {
+		cur, inBase := baseFiles[p]
+		switch {
+		case inBase && bytes.Equal(cur, data):
+			continue // the base already has the same change
+		case inBase != inFork || (inBase && !bytes.Equal(cur, fork)):
 			return "", fmt.Errorf("file %q changed on both sides: %w", p, providers.ErrConflict)
 		}
 		next[p] = data

@@ -21,7 +21,8 @@ limitations under the License.
 // [Checker.Fresh] runs right before every write and answers one question: is the world still the one the
 // digest was made for? It is fail closed. Only a definite change is a [StaleError], which makes the request
 // Superseded; any other error (an API or Git host failure, a paused system, a missing digest) also stops the
-// write but says nothing about the plan, so the caller retries.
+// write but says nothing about the plan, so the caller retries. The exception is [ErrRepositoryUnusable]:
+// settings that can never open the repository end the request in NeedsIntervention without closing anything.
 package freshness
 
 import (

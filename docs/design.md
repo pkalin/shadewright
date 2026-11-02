@@ -469,9 +469,9 @@ sequenceDiagram
     participant E as Executor
     participant V as Key Vault
     participant G as GitHub
-    E->>V: Sign the App JWT, RS256 (planned)
+    E->>V: Sign the App JWT, RS256
     V-->>E: Signature
-    E->>G: Exchange the JWT for a one-hour installation token (planned)
+    E->>G: Exchange the JWT for a one-hour installation token, scoped to the one repository
     E->>G: Read the head SHA of targetBranch (planned)
     E->>G: Create branch shadewright/#lt;request-uid#gt; at that SHA (planned)
     Note over E,G: An existing branch at that SHA is success, at another SHA a conflict
@@ -510,7 +510,7 @@ The GitHub App enables auto-merge (GraphQL `enablePullRequestAutoMerge`, squash)
 [![Workload identity chain for the analyzer and the executor: pod and ServiceAccount, projected token, federated credential in Entra ID, managed identity, then Foundry or a sign-only Key Vault key.](assets/diagrams/identity.svg)](assets/diagrams/identity.svg "Open full size")
 
 - **Analyzer:** its own managed identity with only the inference role on the model deployment and permission to create blobs in the analysis records container (ADR-0015). Token audience must match the endpoint.
-- **Executor:** its own managed identity with permission to *sign* with one Key Vault key. The GitHub App private key is imported into Key Vault as a non-exportable key; the executor signs the App JWT through Key Vault and exchanges it for a one-hour installation token. The private key never exists in the pod or in a Kubernetes Secret ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)).
+- **Executor:** its own managed identity with permission to *sign* with one Key Vault key. The GitHub App private key is imported into Key Vault as a non-exportable key; the executor signs the App JWT through Key Vault and exchanges it for a one-hour installation token. The private key never exists in the pod or in a Kubernetes Secret ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)). The JWT is issued 60 seconds in the past and lives 10 minutes in total; the token request names the one repository and the four permissions of section 8.4, and the response is refused unless it lists exactly that repository. The token is cached until 5 minutes before it expires, concurrent callers share one refresh, and it prints as a placeholder (`internal/providers/github/auth`).
 - Federated credentials use subject `system:serviceaccount:<namespace>:<serviceaccount>` and audience `api://AzureADTokenExchange` ([AKS workload identity](https://learn.microsoft.com/en-us/azure/aks/workload-identity-overview)).
 - In Go: `azidentity.WorkloadIdentityCredential` (or a deliberately configured `DefaultAzureCredential`).
 - No PATs, no client secrets, no long-lived API keys. Tokens for Foundry, Key Vault and GitHub are never interchangeable.

@@ -30,6 +30,7 @@ so the **pull request title** is what counts; a required check (`Conventional PR
 - The release workflow keeps one release pull request open (opened by the `shadewright-release` App). Merging it
   is the release: it tags `vX.Y.Z`, updates `CHANGELOG.md` and creates the GitHub release. Never tag by hand and
   never edit `CHANGELOG.md` or `.release-please-manifest.json` outside that pull request.
+- Merge the release pull request when the milestone of that version is done, not on every change.
 
 ## Working agreement
 
@@ -43,7 +44,9 @@ so the **pull request title** is what counts; a required check (`Conventional PR
 ## Taking a task
 
 Work is tracked as GitHub issues, written with the "Task" template so that any contributor or coding agent
-can work on one without further context. Milestones follow the stages in `docs/design.md` section 13.
+can work on one without further context. Milestones are releases (`v0.1.0`, `v0.2.0`, ...), each with a due
+date and a one-line goal; the design stages (`docs/design.md` section 13) are tracked by the epics instead.
+A task takes the milestone of the release it is needed for, which may be earlier than its epic's.
 Feature sets are `epic` issues (the "Epic" template) and tasks are their sub-issues. Issues for all three
 repositories live here; a task for `shadewright-azure` or `shadewright-fleet` names that repository in its
 scope, and its pull request says `Closes pkalin/shadewright#<n>`.

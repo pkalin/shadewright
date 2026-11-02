@@ -530,6 +530,10 @@ func TestSignMalformedChallenge(t *testing.T) {
 			bodySecret + `.attacker.example"`,
 		"no resource":    `Bearer authorization="https://login.microsoftonline.com/` + bodySecret + `"`,
 		"garbage claims": `Bearer claims="` + bodySecret + `" resource="https://vault.azure.net/` + bodySecret + `"`,
+		// keyvault/internal v1.2.0 indexes strings.Split(authorization, "/")[3]; these would panic in Sign.
+		"authorization not a url": `Bearer authorization="not-a-url", resource="https://vault.azure.net"`,
+		"authorization no tenant": `Bearer authorization="https://login.microsoftonline.com", resource="https://vault.azure.net"`,
+		"authorization one slash": `Bearer authorization="a/b", resource="https://vault.azure.net"`,
 	} {
 		s, v, _ := setup(t, "https://"+testHost+"/keys/github-app", Options{MaxRetries: -1})
 		v.challenge = challenge
@@ -540,9 +544,85 @@ func TestSignMalformedChallenge(t *testing.T) {
 			continue
 		}
 		assertClean(t, err)
+		if strings.HasPrefix(name, "authorization") && !errors.Is(err, errMalformedChallenge) {
+			t.Errorf("%s: got %v, want the malformed challenge error", name, err)
+		}
 		if name == "foreign resource" && len(v.authorized()) != 0 {
 			t.Errorf("%s: a token was sent after a foreign challenge", name)
 		}
+	}
+}
+
+func TestSafeChallenge(t *testing.T) {
+	for header, want := range map[string]bool{
+		"": true,
+		`Bearer resource="https://vault.azure.net"`:                                                           true,
+		`Bearer authorization="https://login.microsoftonline.com/tenant", resource="https://vault.azure.net"`: true,
+		`Bearer authorization="", resource="https://vault.azure.net"`:                                         true,
+		`Bearer authorization="not-a-url", resource="https://vault.azure.net"`:                                false,
+		`Bearer authorization="https://login.microsoftonline.com/", resource="https://vault.azure.net"`:       false,
+		`Bearer authorization="http://login.microsoftonline.com/tenant", resource="https://vault.azure.net"`:  false,
+		`Bearer authorization="https:///tenant", resource="https://vault.azure.net"`:                          false,
+	} {
+		if got := safeChallenge(header); got != want {
+			t.Errorf("safeChallenge(%q) = %v, want %v", header, got, want)
+		}
+	}
+}
+
+// TestSignRefusesLargeResponses checks that oversized bodies are refused at the transport, before azcore
+// buffers them, for success and error responses, with and without a Content-Length, and without retries.
+func TestSignRefusesLargeResponses(t *testing.T) {
+	big := strings.Repeat("a", maxResponseBody+1)
+	kid := "https://" + testHost + "/keys/github-app/" + testVersion
+	for name, respond := range map[string]func(int, http.ResponseWriter, *http.Request, []byte){
+		"success with length": func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
+			writeJSON(w, http.StatusOK, map[string]string{kidField: kid, valueField: big})
+		},
+		"success chunked": func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"kid":"`+kid+`","value":"`)
+			w.(http.Flusher).Flush()
+			_, _ = io.WriteString(w, big+`"}`)
+		},
+		"error with length": func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "x", "message": big}})
+		},
+		"error chunked": func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.(http.Flusher).Flush()
+			_, _ = io.WriteString(w, big)
+		},
+	} {
+		s, v, _ := setup(t, kid, Options{})
+		v.respond = respond
+		_, err := s.Sign(context.Background(), digestOf("x"))
+		if !errors.Is(err, errResponseTooLarge) {
+			t.Errorf("%s: got %v, want the response too large error", name, err)
+			continue
+		}
+		assertClean(t, err)
+		if n := len(v.authorized()); n != 1 {
+			t.Errorf("%s: %d authorized requests, want 1 (no retry)", name, n)
+		}
+	}
+}
+
+func TestSignAcceptsBodyAtLimit(t *testing.T) {
+	kid := "https://" + testHost + "/keys/github-app/" + testVersion
+	s, v, _ := setup(t, kid, Options{})
+	sign := v.signOK(kid)
+	v.respond = func(n int, w http.ResponseWriter, r *http.Request, b []byte) {
+		rec := httptest.NewRecorder()
+		sign(n, rec, r, b)
+		body := strings.TrimSuffix(rec.Body.String(), "\n")
+		pad := maxResponseBody - len(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, strings.Repeat(" ", pad)+body)
+	}
+	if _, err := s.Sign(context.Background(), digestOf("x")); err != nil {
+		t.Fatalf("a %d-byte response was refused: %v", maxResponseBody, err)
 	}
 }
 

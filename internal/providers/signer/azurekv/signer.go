@@ -121,9 +121,11 @@ func newSigner(key KeyID, cred azcore.TokenCredential, opts Options, cc clientCo
 			PerCallPolicies: []policy.Policy{errorBodyPolicy{}},
 		},
 	}
-	if cc.transport != nil {
-		co.Transport = cc.transport
+	transport := cc.transport
+	if transport == nil {
+		transport = defaultTransport()
 	}
+	co.Transport = guardTransport{inner: transport}
 	client, err := azkeys.NewClient(key.VaultURL(), cleanCredential{cred}, co)
 	if err != nil {
 		return nil, fmt.Errorf("key vault client for %s: %w", key, err)
@@ -199,6 +201,10 @@ func (s *Signer) mapError(err error) error {
 		default:
 			return msg
 		}
+	}
+
+	if ge, ok := errors.AsType[guardError](err); ok {
+		return fmt.Errorf("%s: %w", op, ge)
 	}
 
 	if ce, ok := errors.AsType[*credentialError](err); ok {

@@ -17,6 +17,7 @@ limitations under the License.
 package pathmatch_test
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -162,8 +163,72 @@ func TestMatchManyGlobstars(t *testing.T) {
 	}
 }
 
+// TestRefusesLookalikes covers inputs that a looser regex or input normalisation could let through.
+func TestRefusesLookalikes(t *testing.T) {
+	cases := [][2]string{
+		{"apps/**", "apps/x.yaml\n"},
+		{"apps/**", "apps/x.yaml\x00"},
+		{"apps/**", "apps/x\x00.yaml"},
+		{"apps/**", "apps/x\uff0eyaml"},
+		{"apps/**", "apps\u2215x.yaml"},
+		{"apps/**", "apps/x.YAML"},
+		{"apps/*.yaml", "apps/x.YAML"},
+		{"apps/**", "apps/\uff0egithub/x.yaml"},
+		{"apps/**", "Apps/x.yaml"},
+		{"apps/**\n", "apps/x.yaml"},
+	}
+	for _, c := range cases {
+		if pathmatch.Match(v1alpha1.GitPathPattern(c[0]), v1alpha1.GitFilePath(c[1])) {
+			t.Errorf("Match(%q, %q) = true, want false", c[0], c[1])
+		}
+	}
+}
+
+// refMatch is a deliberately simple recursive reference for short inputs: "**" matches zero or more
+// non-hidden segments, other segments are path.Match-style globs where "*" never crosses "/" and never
+// matches a segment starting with a dot.
+func refMatch(pat, segs []string) bool {
+	if len(pat) == 0 {
+		return len(segs) == 0
+	}
+	if pat[0] == "**" {
+		if refMatch(pat[1:], segs) {
+			return true
+		}
+		return len(segs) > 0 && !strings.HasPrefix(segs[0], ".") && refMatch(pat, segs[1:])
+	}
+	if len(segs) == 0 {
+		return false
+	}
+	if strings.Contains(pat[0], "*") && strings.HasPrefix(segs[0], ".") {
+		return false
+	}
+	return refGlob(pat[0], segs[0]) && refMatch(pat[1:], segs[1:])
+}
+
+func refGlob(p, s string) bool {
+	if p == "" {
+		return s == ""
+	}
+	if p[0] == '*' {
+		for i := 0; i <= len(s); i++ {
+			if refGlob(p[1:], s[i:]) {
+				return true
+			}
+		}
+		return false
+	}
+	return s != "" && p[0] == s[0] && refGlob(p[1:], s[1:])
+}
+
+var pathRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.ya?ml$`)
+
 func FuzzMatch(f *testing.F) {
 	seeds := [][2]string{
+		{"apps/**", "apps/x.yaml\n"},
+		{"apps/**", "apps/\uff0egithub/x.yaml"},
+		{"apps/*.yaml", "apps/x.YAML"},
+		{"apps/**", "apps\u2215x.yaml"},
 		{"apps/*/scaledobject.yaml", "apps/orders/scaledobject.yaml"},
 		{"apps/**/*.yaml", "apps/a/b/x.yaml"},
 		{"apps/**", "apps/.hidden/x.yaml"},
@@ -184,6 +249,26 @@ func FuzzMatch(f *testing.F) {
 		for seg := range strings.SplitSeq(path, "/") {
 			if seg == "" || strings.HasPrefix(seg, ".") || strings.HasPrefix(seg, "-") {
 				t.Fatalf("Match(%q, %q) matched an invalid path", pattern, path)
+			}
+		}
+		// A match implies a path the API server would accept.
+		if len(path) > 512 || !pathRE.MatchString(path) || strings.Contains(path, "..") {
+			t.Fatalf("Match(%q, %q) matched a path the schema refuses", pattern, path)
+		}
+		// The reference matcher agrees (short inputs only, it is exponential).
+		if len(pattern) <= 64 && len(path) <= 64 && strings.Count(pattern, "*") <= 6 {
+			// "**" inside a longer segment counts as "*" in both implementations.
+			pat := strings.Split(pattern, "/")
+			for i, p := range pat {
+				if p != "**" {
+					for strings.Contains(p, "**") {
+						p = strings.ReplaceAll(p, "**", "*")
+					}
+					pat[i] = p
+				}
+			}
+			if !refMatch(pat, strings.Split(path, "/")) {
+				t.Fatalf("Match(%q, %q) = true but the reference matcher says false", pattern, path)
 			}
 		}
 		// A wildcard-free pattern matches only itself.

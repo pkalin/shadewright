@@ -52,10 +52,15 @@ type stubResolver struct {
 	result sourcemap.Result
 	err    error
 	calls  atomic.Int32
+	// during runs inside Resolve, to change the cluster while the mapping runs.
+	during func()
 }
 
 func (s *stubResolver) Resolve(context.Context, sourcemap.Input) (sourcemap.Result, error) {
 	s.calls.Add(1)
+	if s.during != nil {
+		s.during()
+	}
 	return s.result, s.err
 }
 
@@ -330,6 +335,31 @@ var _ = Describe("RemediationRequest Controller", func() {
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseDenied))
 		Expect(condition(got).Reason).To(Equal(string(sourcemap.ReasonNotInInventory)))
+	})
+
+	It("checks again when the target changes while the source is resolved", func() {
+		// The baseline passes on 256Mi; Flux then sets 512Mi, so 256Mi -> 384Mi in Git would be a decrease.
+		create(func() {
+			request.Spec.Action.SetContainerMemoryLimit.Previous = resource.MustParse("256Mi")
+			request.Spec.Action.SetContainerMemoryLimit.Desired = resource.MustParse("384Mi")
+		})
+		stub.during = func() {
+			live := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(deployment), live)).To(Succeed())
+			live.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = resource.MustParse("512Mi")
+			Expect(k8sClient.Update(ctx, live)).To(Succeed())
+		}
+		_, err := reconcileOnce()
+		Expect(err).To(MatchError(ContainSubstring("changed during the policy check")))
+		Expect(fetch().Status.Phase).To(BeEmpty())
+
+		// The next attempt sees 512Mi and refuses the stale baseline.
+		stub.during = nil
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseDenied))
+		Expect(condition(got).Reason).To(Equal(ReasonPreviousValueMismatch))
 	})
 
 	It("retries a transient mapping error and writes nothing", func() {

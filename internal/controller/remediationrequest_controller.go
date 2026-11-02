@@ -227,6 +227,19 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 		return needsIntervention(string(res.Reason), res.Message), nil
 	}
 
+	// The baseline was checked on the first read, and the resolver read the target again to compare it with
+	// Git. If the target changed in between (Flux applied a new revision), the baseline and the resolved source
+	// describe different objects, and a change the policy refuses could pass. Read once more and start over
+	// when the object is not the one checked: an unchanged resourceVersion means nothing changed in between.
+	again, ok, err := r.target(ctx, ref)
+	if err != nil {
+		return outcome{}, err
+	}
+	if !ok || again.GetUID() != live.GetUID() || again.GetResourceVersion() != live.GetResourceVersion() {
+		return outcome{}, fmt.Errorf("%s %s/%s changed during the policy check, checking again",
+			ref.Kind, ref.Namespace, ref.Name)
+	}
+
 	d := policy.Decide(policy.DecisionInput{
 		Request:  rr,
 		Policy:   pol,

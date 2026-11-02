@@ -31,6 +31,7 @@ const (
 	branch = "shadewright/0f8e2c1a"
 	path   = "apps/demo/web.yaml"
 	oldVal = "memory: 128Mi\n"
+	newVal = "memory: 256Mi\n"
 )
 
 func newRepo(t *testing.T) (*fake.Git, string) {
@@ -49,7 +50,7 @@ func mustOpen(t *testing.T, g *fake.Git, head string) (string, providers.ChangeR
 	if err := g.CreateBranch(ctx, branch, head); err != nil {
 		t.Fatal(err)
 	}
-	c, err := g.CommitFile(ctx, branch, head, providers.FileChange{Path: path, Content: []byte("memory: 256Mi\n")})
+	c, err := g.CommitFile(ctx, branch, head, providers.FileChange{Path: path, Content: []byte(newVal)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +100,7 @@ func TestGitCommitNeedsExpectedHead(t *testing.T) {
 	if err := g.CreateBranch(ctx, branch, head); err != nil {
 		t.Fatal(err)
 	}
-	ch := providers.FileChange{Path: path, Content: []byte("memory: 256Mi\n")}
+	ch := providers.FileChange{Path: path, Content: []byte(newVal)}
 	c1, err := g.CommitFile(ctx, branch, head, ch)
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +112,7 @@ func TestGitCommitNeedsExpectedHead(t *testing.T) {
 		t.Errorf("commit to a missing file: %v", err)
 	}
 	f, _ := g.ReadFile(ctx, c1, path)
-	if string(f.Data) != "memory: 256Mi\n" {
+	if string(f.Data) != newVal {
 		t.Errorf("content after commit = %q", f.Data)
 	}
 	old, _ := g.ReadFile(ctx, head, path)
@@ -257,7 +258,7 @@ func TestGitCloseAndMerge(t *testing.T) {
 		t.Errorf("base head %s, want merge commit %s", h, mc)
 	}
 	f, _ := g.ReadFile(ctx, mc, path)
-	if string(f.Data) != "memory: 256Mi\n" {
+	if string(f.Data) != newVal {
 		t.Errorf("merged content %q", f.Data)
 	}
 	if err := g.CloseChangeRequest(ctx, reopened.Number); !providers.IsConflict(err) {
@@ -352,7 +353,7 @@ func TestGitMergeSameChangeAlreadyOnBase(t *testing.T) {
 	g, head := newRepo(t)
 	_, cr := mustOpen(t, g, head)
 	// Another change with the same value merged first.
-	if _, err := g.Push(base, path, []byte("memory: 256Mi\n")); err != nil {
+	if _, err := g.Push(base, path, []byte(newVal)); err != nil {
 		t.Fatal(err)
 	}
 	mc, err := g.Merge(cr.Number)
@@ -360,7 +361,7 @@ func TestGitMergeSameChangeAlreadyOnBase(t *testing.T) {
 		t.Fatalf("identical change already on the base: %v", err)
 	}
 	f, _ := g.ReadFile(context.Background(), mc, path)
-	if string(f.Data) != "memory: 256Mi\n" {
+	if string(f.Data) != newVal {
 		t.Errorf("merged content %q", f.Data)
 	}
 }

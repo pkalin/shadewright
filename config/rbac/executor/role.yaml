@@ -26,13 +26,10 @@ rules:
 - apiGroups:
   - remediation.shadewright.io
   resources:
-  - incidents
   - remediationpolicies
   - remediationsettings
   verbs:
   - get
-  - list
-  - watch
 - apiGroups:
   - source.toolkit.fluxcd.io
   resources:

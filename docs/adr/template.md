@@ -18,3 +18,7 @@ What becomes easier, what becomes harder, and what we accept.
 ## Alternatives considered
 
 - Option, and why not.
+
+## Amendments
+
+None.

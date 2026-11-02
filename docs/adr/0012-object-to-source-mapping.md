@@ -19,7 +19,7 @@ The resolved repository, branch, file and base commit are written to the request
 
 If any step is ambiguous (no labels, several matches, the object comes from a patch, generator or Helm chart), stop with `NeedsIntervention` and explain why. Helm values and overlays are designed later, when a real case needs them.
 
-### Implementation details (clarified 2026-11-02)
+### Implementation details
 
 `internal/gitops/sourcemap` implements this decision. It refines details the steps above leave open, always failing closed:
 
@@ -41,3 +41,7 @@ If any step is ambiguous (no labels, several matches, the object comes from a pa
 
 - Require a `shadewright.io/source` annotation on every object: precise, but a burden on users and itself untrusted input.
 - Render everything and diff back to the source: correct in general, much more work.
+
+## Amendments
+
+- 2026-11-02: added the "Implementation details" section, which fixes details the decision left open as `internal/gitops/sourcemap` was built ([#120](https://github.com/pkalin/shadewright/pull/120)). The decision is unchanged.

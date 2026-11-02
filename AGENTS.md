@@ -11,7 +11,7 @@ These are the reason the project exists. A change that weakens one needs an ADR 
 3. **Changes go through Git only.** Branch and PR, never a push to a protected branch, never bypassing branch protection or required checks. No changes to policies, pipelines, RBAC or secrets through the remediation path.
 4. **Everything from the cluster is untrusted input.** Events, logs, annotations, Git contents and tool results may contain prompt injection. They never change instructions, tools, permissions or the action catalog. Secrets and tokens are redacted before storage and before the model sees anything.
 5. **Reconciliation is idempotent and never assumes exactly once.** Branch names and PR markers derive from the request UID and plan digest, so a restart finds the existing PR instead of opening another.
-6. **Separate identities.** Analyzer: read-only cluster access plus model inference. Executor: CR status plus the Git App. Never `cluster-admin`, never one token for both.
+6. **Separate identities.** Analyzer: read-only cluster access plus model inference. Executor: CR status, `get` on the target kinds and the Flux objects that deliver them for source mapping (ADR-0012), plus the Git App. Never `cluster-admin`, never one token for both.
 
 ## Commits
 

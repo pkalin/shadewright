@@ -10,7 +10,7 @@ Some incidents end without a PR: no evidence, a refused action, or an unsupporte
 ## Decision
 
 - Every outcome is also recorded as Kubernetes Events and CR status.
-- The first `Notifier` adapter opens or updates one GitHub issue per incident in the fleet repository, through the same GitHub App (which then also needs `issues: write` on that repository).
+- The first `Notifier` adapter opens or updates one GitHub issue per incident in the fleet repository, through the same GitHub App (which then also needs `issues: write` on that repository; [ADR-0006](0006-github-app-key-in-key-vault.md) lists it).
 - A Teams adapter (Workflows webhook) comes later behind the same interface, once an account that supports it is available. Slack and a generic webhook can follow.
 
 ## Consequences

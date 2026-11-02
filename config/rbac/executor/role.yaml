@@ -28,15 +28,7 @@ rules:
   verbs:
   - get
   - list
-  - patch
-  - update
   - watch
-- apiGroups:
-  - remediation.shadewright.io
-  resources:
-  - remediationrequests/finalizers
-  verbs:
-  - update
 - apiGroups:
   - remediation.shadewright.io
   resources:

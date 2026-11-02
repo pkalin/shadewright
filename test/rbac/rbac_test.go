@@ -113,7 +113,21 @@ func setup(ctx context.Context) error {
 		if err := admin.Create(ctx, sa); err != nil {
 			return err
 		}
-		f, err := os.Open(filepath.Join("..", "..", "config", "rbac", id, "role.yaml"))
+		if err := applyRoles(ctx, id, "role.yaml"); err != nil {
+			return err
+		}
+		if err := applyRoles(ctx, id, "leader_election.yaml"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applyRoles creates the roles in one file of config/rbac/<id>. Roles from role.yaml are bound to the
+// ServiceAccount here, as role_binding.yaml does; RoleBindings in the file are applied as written.
+func applyRoles(ctx context.Context, id, file string) error {
+	{
+		f, err := os.Open(filepath.Join("..", "..", "config", "rbac", id, file))
 		if err != nil {
 			return err
 		}
@@ -141,6 +155,18 @@ func setup(ctx context.Context) error {
 				if err := admin.Create(ctx, b); err != nil {
 					return err
 				}
+			case "RoleBinding":
+				var b rbacv1.RoleBinding
+				if err := decodeInto(u, &b); err != nil {
+					return err
+				}
+				b.Namespace = operatorNS
+				for i := range b.Subjects {
+					b.Subjects[i].Namespace = operatorNS
+				}
+				if err := admin.Create(ctx, &b); err != nil {
+					return err
+				}
 			case "Role":
 				var r rbacv1.Role
 				if err := decodeInto(u, &r); err != nil {
@@ -149,6 +175,9 @@ func setup(ctx context.Context) error {
 				r.Namespace = operatorNS
 				if err := admin.Create(ctx, &r); err != nil {
 					return err
+				}
+				if file != "role.yaml" {
+					continue
 				}
 				b := &rbacv1.RoleBinding{
 					ObjectMeta: metav1.ObjectMeta{Name: r.Name, Namespace: operatorNS},
@@ -174,11 +203,18 @@ func user(id string) string { return "system:serviceaccount:" + operatorNS + ":"
 // can asks the API server's authorizer whether the ServiceAccount may perform the action.
 func can(t *testing.T, id, verb, apiGroup, resource, subresource, namespace string) bool {
 	t.Helper()
+	return canNamed(t, id, verb, apiGroup, resource, subresource, namespace, "")
+}
+
+// canNamed is can for one named object.
+func canNamed(t *testing.T, id, verb, apiGroup, resource, subresource, namespace, name string) bool {
+	t.Helper()
 	sar := &authorizationv1.SubjectAccessReview{Spec: authorizationv1.SubjectAccessReviewSpec{
 		User:   user(id),
 		Groups: []string{"system:serviceaccounts", "system:serviceaccounts:" + operatorNS, "system:authenticated"},
 		ResourceAttributes: &authorizationv1.ResourceAttributes{
 			Verb: verb, Group: apiGroup, Resource: resource, Subresource: subresource, Namespace: namespace,
+			Name: name,
 		},
 	}}
 	if err := admin.Create(context.Background(), sar); err != nil {
@@ -209,6 +245,9 @@ func TestPermissionBoundary(t *testing.T) {
 		{"analyzer", "get", "", "secrets", "", otherNS, false},
 		{"analyzer", "list", "", "secrets", "", operatorNS, false},
 		{"analyzer", "create", group, "remediationpolicies", "", "", false},
+		{"analyzer", "update", group, "remediationrequests", "finalizers", operatorNS, false},
+		{"analyzer", "delete", group, "incidents", "", otherNS, false},
+		{"analyzer", "get", "", "configmaps", "", operatorNS, false},
 		// Executor: writes request status in its namespace only, reads the rest, never creates requests or
 		// writes incidents.
 		{"executor", "update", group, "remediationrequests", "status", operatorNS, true},
@@ -216,6 +255,11 @@ func TestPermissionBoundary(t *testing.T) {
 		{"executor", "update", group, "remediationrequests", "status", otherNS, false},
 		{"executor", "list", group, "remediationrequests", "", otherNS, false},
 		{"executor", "create", group, "remediationrequests", "", operatorNS, false},
+		{"executor", "update", group, "remediationrequests", "", operatorNS, false},
+		{"executor", "patch", group, "remediationrequests", "", operatorNS, false},
+		{"executor", "delete", group, "remediationrequests", "", operatorNS, false},
+		{"executor", "get", group, "incidents", "status", otherNS, false},
+		{"executor", "get", "", "configmaps", "", operatorNS, false},
 		{"executor", "create", group, "incidents", "", otherNS, false},
 		{"executor", "update", group, "incidents", "status", otherNS, false},
 		{"executor", "list", group, "incidents", "", otherNS, true},
@@ -227,6 +271,27 @@ func TestPermissionBoundary(t *testing.T) {
 	for _, c := range cases {
 		if got := can(t, c.id, c.verb, c.group, c.resource, c.sub, c.ns); got != c.want {
 			t.Errorf("%s %s %s/%s %q in %q: allowed=%v, want %v", c.id, c.verb, c.group, c.resource, c.sub, c.ns, got, c.want)
+		}
+	}
+}
+
+// TestLeasesAreSeparate checks that each identity can renew only its own leader election Lease.
+func TestLeasesAreSeparate(t *testing.T) {
+	leases := map[string]string{executor: "fbfbf7ca.shadewright.io", analyzer: "analyzer.shadewright.io"}
+	for id, own := range leases {
+		for other, lease := range leases {
+			want := other == id
+			for _, verb := range []string{"get", "update", "patch"} {
+				if got := canNamed(t, id, verb, "coordination.k8s.io", "leases", "", operatorNS, lease); got != want {
+					t.Errorf("%s %s lease %s: allowed=%v, want %v", id, verb, lease, got, want)
+				}
+			}
+		}
+		if !can(t, id, "create", "coordination.k8s.io", "leases", "", operatorNS) {
+			t.Errorf("%s cannot create its lease %s", id, own)
+		}
+		if canNamed(t, id, "delete", "coordination.k8s.io", "leases", "", operatorNS, own) {
+			t.Errorf("%s can delete leases", id)
 		}
 	}
 }

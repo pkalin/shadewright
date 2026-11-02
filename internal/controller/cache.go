@@ -24,11 +24,12 @@ import (
 )
 
 // The executor's permissions. Requests are reachable only in the operator namespace (a Role, not a
-// ClusterRole); everything else is read-only. The executor never creates requests and never writes incidents.
+// ClusterRole), and only their status is writable; everything else is read-only. The executor never creates
+// requests and never writes incidents. The finalizer that closes a change request on deletion (design 6)
+// adds update on remediationrequests and remediationrequests/finalizers when it lands, with a test.
 //
-// +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=remediationrequests,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=remediationrequests,verbs=get;list;watch
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=remediationrequests/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=remediationrequests/finalizers,verbs=update
 // +kubebuilder:rbac:groups=remediation.shadewright.io,resources=incidents,verbs=get;list;watch
 // +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationpolicies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationsettings,verbs=get;list;watch

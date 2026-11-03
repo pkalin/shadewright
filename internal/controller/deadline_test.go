@@ -162,7 +162,7 @@ func staleWorld(t *testing.T) (client.Client, *remediationv1alpha1.RemediationRe
 	rr.Status.Phase = remediationv1alpha1.PhasePolicyChecked
 	rr.Status.PlanDigest = "digest"
 	rr.Status.Source = &remediationv1alpha1.ResolvedSource{RepositoryRef: fx.RepositoryName, TargetBranch: mainBranch,
-		Path: sourcePath, BaseCommit: baseCommit}
+		Path: sourcePath, BuildPath: buildPath, BaseCommit: baseCommit}
 	rr.Status.PlanRepository = freshness.RepositoryOf(settings.Spec.Repositories[0])
 	c := clientfake.NewClientBuilder().WithScheme(deadlineScheme(t)).WithObjects(settings, rr).
 		WithStatusSubresource(&remediationv1alpha1.RemediationRequest{}).Build()
@@ -233,7 +233,7 @@ func plannedWorld(t *testing.T) (client.Client, *remediationv1alpha1.Remediation
 		t.Fatal(err)
 	}
 	src := &remediationv1alpha1.ResolvedSource{RepositoryRef: fx.RepositoryName, TargetBranch: mainBranch,
-		Path: sourcePath, BaseCommit: baseCommit}
+		Path: sourcePath, BuildPath: buildPath, BaseCommit: baseCommit}
 	digest, err := freshness.ComputeDigest(rr, src, pol, settings)
 	if err != nil {
 		t.Fatal(err)

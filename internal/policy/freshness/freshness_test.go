@@ -119,7 +119,7 @@ func newWorld(t *testing.T) *world {
 	w.rr.Spec.PolicyRef = "mem"
 	w.rr.Spec.TargetRef.UID = targetUID
 	src := &v1alpha1.ResolvedSource{RepositoryRef: fx.RepositoryName, TargetBranch: "main", Path: sourcePath,
-		BaseCommit: "0123456789abcdef0123456789abcdef01234567"}
+		BuildPath: "apps/orders", BaseCommit: "0123456789abcdef0123456789abcdef01234567"}
 	digest, err := freshness.ComputeDigest(w.rr, src, w.pol, w.settings)
 	if err != nil {
 		t.Fatal(err)

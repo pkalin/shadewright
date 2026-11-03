@@ -35,6 +35,8 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/patch"
+	"github.com/pkalin/shadewright/internal/gitops/semdiff"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/redact"
@@ -92,6 +94,8 @@ const (
 	ReasonPullRequestDeadline = "PullRequestDeadline"
 	// ReasonChangeRequestGone: the recorded pull request cannot be found any more.
 	ReasonChangeRequestGone = "ChangeRequestGone"
+	// ReasonPlanIncomplete: the request's status.source has no buildPath, so the change cannot be rendered.
+	ReasonPlanIncomplete = "PlanIncomplete"
 
 	reasonTargetBranchChanged   = "TargetBranchChanged"
 	reasonRepositoryUnavailable = "RepositoryUnavailable"
@@ -249,11 +253,8 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 	switch state {
 	case fileHoldsPrevious:
 		// Steps 3 to 6: one commit that changes the one value, on top of the head just read.
-		if r.Validate != nil {
-			if err := r.Validate(ctx, file.Data, changed, rr); err != nil {
-				return reconcile.Result{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonPatchRefused,
-					"The change did not pass validation")
-			}
+		if err := r.checkRender(ctx, git, head, changed, rr); err != nil {
+			return reconcile.Result{}, err
 		}
 		if _, err := git.CommitFile(ctx, branch, head, providers.FileChange{
 			Path: string(src.Path), Content: changed, Message: commitTitle(rr),
@@ -333,6 +334,31 @@ func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr
 	logf.FromContext(ctx).Info("Opened pull request for RemediationRequest", "remediationRequest",
 		client.ObjectKeyFromObject(rr), "pullRequest", cr.Number)
 	return nil
+}
+
+// checkRender renders the Kustomization's directory at head with and without the change and stops the
+// request unless the one difference is the planned field of the target (design 8.2, steps 4 and 5). A
+// refusal is written with the check's stable reason and fixed text, never with file content; Git that
+// cannot be read is retried.
+func (r *RemediationRequestReconciler) checkRender(ctx context.Context, git providers.GitProvider, head string,
+	changed []byte, rr *remediationv1alpha1.RemediationRequest) error {
+	src := rr.Status.Source
+	if src.BuildPath == "" {
+		return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonPlanIncomplete,
+			"The plan does not record the directory Flux builds; the request has to be decided again")
+	}
+	files, err := semdiff.Load(ctx, git, head, string(src.BuildPath))
+	if err == nil {
+		_, err = semdiff.Check(ctx, semdiff.Input{
+			Files: files, Path: string(src.BuildPath), File: string(src.Path), Patched: changed,
+			Target: rr.Spec.TargetRef, Action: rr.Spec.Action,
+		})
+	}
+	if se, ok := errors.AsType[*semdiff.Error](err); ok {
+		return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, string(se.Reason),
+			"The rendered change is not exactly the planned one ("+string(se.Reason)+"); nothing was committed")
+	}
+	return err
 }
 
 // prOutcome is what watchPullRequest found.
@@ -485,6 +511,9 @@ func (r *RemediationRequestReconciler) retry(ctx context.Context, rr *remediatio
 	case errors.Is(err, errRepositoryGone):
 		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 			reasonRepositoryUnavailable, "The repository of the plan is not configured any more"))
+	}
+	if te, ok := errors.AsType[*sourcemap.TransientError](err); ok && te.RetryAfter > 0 {
+		return reconcile.Result{RequeueAfter: te.RetryAfter}, nil
 	}
 	if pe, ok := errors.AsType[*freshness.ProviderError](err); ok && pe.RetryAfter > 0 {
 		logf.FromContext(ctx).Info("Waiting before retrying RemediationRequest", "remediationRequest",

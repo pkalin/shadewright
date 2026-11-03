@@ -60,6 +60,13 @@ type ResolvedSource struct {
 	// +required
 	Path GitFilePath `json:"path"`
 
+	// buildPath is the directory the Flux Kustomization builds (its spec.path, "." for the repository root).
+	// Before every commit the pull request step renders it with and without the change and refuses anything
+	// but the planned difference (design 8.2, steps 4 and 5). The policy check always sets it; a request
+	// without it stops before any commit.
+	// +optional
+	BuildPath GitDirPath `json:"buildPath,omitempty"`
+
 	// baseCommit is the full SHA of the target branch the change was made against. It is fixed when the branch
 	// is created; later merges to the target branch do not change it.
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`

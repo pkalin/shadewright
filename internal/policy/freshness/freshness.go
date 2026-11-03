@@ -409,7 +409,7 @@ func (c Checker) checkSource(ctx context.Context, rr *v1alpha1.RemediationReques
 	}
 	got, want := res.Source, rr.Status.Source
 	if got == nil || got.RepositoryRef != want.RepositoryRef || got.TargetBranch != want.TargetBranch ||
-		got.Path != want.Path {
+		got.Path != want.Path || got.BuildPath != want.BuildPath {
 		return "", nil, stale(ReasonSourceChanged, "The target is no longer declared in the repository, branch and file of the plan")
 	}
 	return got.BaseCommit, res.Observed, nil

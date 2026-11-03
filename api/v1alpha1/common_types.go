@@ -138,6 +138,14 @@ type SetContainerMemoryLimit struct {
 // +kubebuilder:validation:Pattern=`^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.ya?ml$`
 type GitFilePath string
 
+// GitDirPath is a directory relative to a repository root, "." for the root itself. Every segment follows
+// the rule of GitFilePath, so absolute paths, parent references, hidden directories and option-like names
+// are refused.
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=512
+// +kubebuilder:validation:Pattern=`^(\.|[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)$`
+type GitDirPath string
+
 // GitPathPattern is a glob, relative to a repository root, for files a policy may patch. `*` matches within one
 // path segment and `**` across segments; neither matches a segment that starts with a dot. The first segment
 // must be literal, so a pattern cannot cover the whole repository, and no segment may start with a dot or a

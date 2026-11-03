@@ -100,10 +100,6 @@ type RemediationRequestReconciler struct {
 	// PullRequestTimeout is how long a request may take from PolicyChecked to an open pull request; it is
 	// stored in status.deadline. Zero means [DefaultPullRequestTimeout].
 	PullRequestTimeout time.Duration
-	// Validate, when set, checks the changed file before it is committed (design 8.2 steps 4 and 5). An error
-	// stops the request in NeedsIntervention. The typed patcher already refuses a change to anything but the
-	// one value.
-	Validate func(ctx context.Context, before, after []byte, rr *remediationv1alpha1.RemediationRequest) error
 	// Now is the clock; nil means time.Now (tests set it).
 	Now func() time.Time
 }

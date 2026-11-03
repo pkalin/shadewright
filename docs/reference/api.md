@@ -181,6 +181,19 @@ Validation rules:
 
 Used by: [GitRepository](#gitrepository), [ResolvedSource](#resolvedsource).
 
+### GitDirPath
+
+GitDirPath is a directory relative to a repository root, "." for the root itself. Every segment follows
+the rule of GitFilePath, so absolute paths, parent references, hidden directories and option-like names
+are refused.
+
+- Underlying type: string
+- Maximum length: 512
+- Minimum length: 1
+- Pattern: `^(\.|[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)$`
+
+Used by: [ResolvedSource](#resolvedsource).
+
 ### GitFilePath
 
 GitFilePath is one YAML file, relative to a repository root. Every segment starts with a letter, digit or
@@ -627,6 +640,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `repositoryRef` | [Name](#name) | Yes | repositoryRef is the RemediationSettings entry whose URL matches the Flux source.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 | `targetBranch` | [GitBranch](#gitbranch) | Yes | targetBranch is the branch the pull request targets: the branch Flux tracks, which must equal the repository's targetBranch in RemediationSettings.<br>Maximum length: 255<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$`<br>Rule: must be a plain branch name, not HEAD, refs/..., shadewright/... or one containing '..' or '.lock' |
 | `path` | [GitFilePath](#gitfilepath) | Yes | path is the file that declares the target.<br>Maximum length: 512<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.ya?ml$` |
+| `buildPath` | [GitDirPath](#gitdirpath) | No | buildPath is the directory the Flux Kustomization builds (its spec.path, "." for the repository root). Before every commit the pull request step renders it with and without the change and refuses anything but the planned difference (design 8.2, steps 4 and 5). The policy check always sets it; a request without it stops before any commit.<br>Maximum length: 512<br>Minimum length: 1<br>Pattern: `^(\.|[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)$` |
 | `baseCommit` | string | Yes | baseCommit is the full SHA of the target branch the change was made against. It is fixed when the branch is created; later merges to the target branch do not change it.<br>Pattern: `^[0-9a-f]{40}$` |
 
 ### SetContainerMemoryLimit

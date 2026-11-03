@@ -1,0 +1,29 @@
+{
+  "apiVersion": "events.k8s.io/v1",
+  "kind": "Event",
+  "metadata": {
+    "name": "web-7d4b9c-x2x8q.18a1b2c3d4e5f600",
+    "namespace": "demo"
+  },
+  "eventTime": null,
+  "reportingController": "kubelet",
+  "reportingInstance": "aks-system-12345678-vmss000000",
+  "reason": "FailedMount",
+  "type": "Warning",
+  "regarding": {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "namespace": "demo",
+    "name": "web-7d4b9c-x2x8q",
+    "uid": "3b4c5d6e-7f80-4192-a3b4-c5d6e7f8091a",
+    "resourceVersion": "48213"
+  },
+  "note": "MountVolume.SetUp failed for volume \"secrets-store-inline\" : kubernetes.io/csi: mounter.SetUpAt failed to get CSI client: driver name secrets-store.csi.k8s.io not found in the list of registered CSI drivers",
+  "deprecatedSource": {
+    "component": "kubelet",
+    "host": "aks-system-12345678-vmss000000"
+  },
+  "deprecatedFirstTimestamp": "2026-11-03T08:10:00Z",
+  "deprecatedLastTimestamp": "2026-11-03T08:14:16Z",
+  "deprecatedCount": 7
+}

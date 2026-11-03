@@ -1,0 +1,29 @@
+{
+  "apiVersion": "events.k8s.io/v1",
+  "kind": "Event",
+  "metadata": {
+    "name": "web-7d4b9c-x2x8q.18a1b2c3d4e5f604",
+    "namespace": "demo"
+  },
+  "eventTime": null,
+  "reportingController": "kubelet",
+  "reportingInstance": "aks-system-12345678-vmss000000",
+  "reason": "FailedMount",
+  "type": "Warning",
+  "regarding": {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "namespace": "demo",
+    "name": "web-7d4b9c-x2x8q",
+    "uid": "3b4c5d6e-7f80-4192-a3b4-c5d6e7f8091a",
+    "resourceVersion": "48213"
+  },
+  "note": "MountVolume.SetUp failed for volume \"secrets-store-inline\" : rpc error: code = Unknown desc = failed to mount secrets store objects for pod demo/web-7d4b9c-x2x8q, err: rpc error: code = Unknown desc = failed to mount objects, error: failed to get objectType:secret, objectName:db-password, objectVersion:: GET https://kv-demo.vault.azure.net/secrets/db-password/\n--------------------------------------------------------------------------------\nRESPONSE 404: 404 Not Found\nERROR CODE: SecretNotFound\n--------------------------------------------------------------------------------\n{\n  \"error\": {\n    \"code\": \"SecretNotFound\",\n    \"message\": \"A secret with (name/id) db-password was not found in this key vault. If you recently deleted this secret you may be able to recover it using the correct recovery command. For help resolving this issue, please see https://go.microsoft.com/fwlink/?linkid=2125182\"\n  }\n}\n--------------------------------------------------------------------------------\n",
+  "deprecatedSource": {
+    "component": "kubelet",
+    "host": "aks-system-12345678-vmss000000"
+  },
+  "deprecatedFirstTimestamp": "2026-11-03T08:10:00Z",
+  "deprecatedLastTimestamp": "2026-11-03T08:14:16Z",
+  "deprecatedCount": 7
+}

@@ -22,27 +22,28 @@ import (
 )
 
 func TestRevisionOfBranch(t *testing.T) {
+	const br = "main"
 	sha1 := strings.Repeat("0123456789abcdef", 2) + "01234567"
 	sha256 := strings.Repeat("0123456789abcdef", 4)
 	for _, tc := range []struct {
 		revision, branch string
 		want             bool
 	}{
-		{"main@sha1:" + sha1, "main", true},
-		{"main@sha256:" + sha256, "main", true},
+		{br + "@sha1:" + sha1, br, true},
+		{br + "@sha256:" + sha256, br, true},
 		{"release/v1@sha1:" + sha1, "release/v1", true},
 		{"a@b@sha1:" + sha1, "a@b", true},
-		{"main@sha1:" + sha1, "release", false},
-		{"main@sha1:" + sha1, "", false},
+		{br + "@sha1:" + sha1, "release", false},
+		{br + "@sha1:" + sha1, "", false},
 		{"@sha1:" + sha1, "", false},
-		{"main", "main", false},
-		{"main@" + sha1, "main", false},
-		{"main@sha1:" + sha256, "main", false},
-		{"main@sha256:" + sha1, "main", false},
-		{"main@sha1:" + sha1[:39], "main", false},
-		{"main@sha1:" + strings.ToUpper(sha1), "main", false},
-		{"main@md5:" + sha1, "main", false},
-		{"main@sha1:" + sha1 + "\n", "main", false},
+		{br, br, false},
+		{br + "@" + sha1, br, false},
+		{br + "@sha1:" + sha256, br, false},
+		{br + "@sha256:" + sha1, br, false},
+		{br + "@sha1:" + sha1[:39], br, false},
+		{br + "@sha1:" + strings.ToUpper(sha1), br, false},
+		{br + "@md5:" + sha1, br, false},
+		{br + "@sha1:" + sha1 + "\n", br, false},
 	} {
 		if got := revisionOfBranch(tc.revision, tc.branch); got != tc.want {
 			t.Errorf("revisionOfBranch(%q, %q) = %v, want %v", tc.revision, tc.branch, got, tc.want)

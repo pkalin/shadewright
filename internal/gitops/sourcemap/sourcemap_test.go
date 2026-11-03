@@ -349,7 +349,7 @@ func TestResolveFindsTheSource(t *testing.T) {
 			name: "same directory listed twice is read once",
 			change: func(f *fixture) {
 				f.files[ksFile] = "resources:\n  - sub\n  - ./sub/\n"
-				f.files["apps/orders/sub/Kustomization"] = "resources:\n  - ../scaledobject.yaml\n"
+				f.files["apps/orders/sub/Kustomization"] = ksParentScaledObject
 			},
 			path: soFile,
 		},
@@ -569,8 +569,8 @@ func TestResolveStops(t *testing.T) {
 			f.files["apps/base/.sourceignore"] = "so.yaml\n"
 		}, ni, sourcemap.ReasonSourceOptions},
 		{".sourceignore in a nested kustomization directory", func(f *fixture) {
-			f.files[ksFile] = "resources:\n  - workers\n"
-			f.files["apps/orders/workers/kustomization.yaml"] = "resources:\n  - ../scaledobject.yaml\n"
+			f.files[ksFile] = ksWorkers
+			f.files["apps/orders/workers/kustomization.yaml"] = ksParentScaledObject
 			f.files["apps/orders/workers/.sourceignore"] = "kustomization.yaml\n"
 		}, ni, sourcemap.ReasonSourceOptions},
 		{"GitRepository includes another source", func(f *fixture) {
@@ -607,10 +607,10 @@ func TestResolveStops(t *testing.T) {
 		}, ni, sourcemap.ReasonInvalidPath},
 		{"no kustomization file", func(f *fixture) { delete(f.files, ksFile) }, ni, sourcemap.ReasonNoKustomizationFile},
 		{"nested directory without a kustomization file", func(f *fixture) {
-			f.files[ksFile] = "resources:\n  - workers\n"
+			f.files[ksFile] = ksWorkers
 		}, ni, sourcemap.ReasonNoKustomizationFile},
 		{"two kustomization files", func(f *fixture) {
-			f.files["apps/orders/kustomization.yml"] = "resources: []\n"
+			f.files["apps/orders/kustomization.yml"] = ksEmpty
 		}, ni, sourcemap.ReasonUnsupportedKustomization},
 		{"kustomization file with patches", func(f *fixture) {
 			f.files[ksFile] += "patches:\n  - path: patch.yaml\n"
@@ -668,7 +668,7 @@ func TestResolveStops(t *testing.T) {
 			b.WriteString("resources:\n")
 			for i := range sourcemap.MaxReads / 2 {
 				fmt.Fprintf(&b, "  - d%d\n", i)
-				f.files[fmt.Sprintf("apps/orders/d%d/kustomization.yaml", i)] = "resources: []\n"
+				f.files[fmt.Sprintf("apps/orders/d%d/kustomization.yaml", i)] = ksEmpty
 			}
 			f.files[ksFile] = b.String()
 		}, ni, sourcemap.ReasonTooManyFiles},
@@ -678,7 +678,7 @@ func TestResolveStops(t *testing.T) {
 				f.files[dir+"/kustomization.yaml"] = fmt.Sprintf("resources:\n  - d%d\n", i)
 				dir = fmt.Sprintf("%s/d%d", dir, i)
 			}
-			f.files[dir+"/kustomization.yaml"] = "resources: []\n"
+			f.files[dir+"/kustomization.yaml"] = ksEmpty
 		}, ni, sourcemap.ReasonTooManyFiles},
 
 		// Step 3: the declaration.
@@ -777,7 +777,7 @@ func TestResolveReturnsTransientErrors(t *testing.T) {
 	}{
 		{"cluster read fails", func(f *fixture) { f.getErr = leaky }, 0},
 		{"branch head fails", func(f *fixture) { f.gitFail = failOn("BranchHead") }, 30 * time.Second},
-		{"file read fails", func(f *fixture) { f.gitFail = failOn("ReadFile") }, 30 * time.Second},
+		{"file read fails", func(f *fixture) { f.gitFail = failOn(opReadFile) }, 30 * time.Second},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -812,7 +812,7 @@ func TestResolveReturnsTransientErrors(t *testing.T) {
 func TestResolveKeepsFinalRefusals(t *testing.T) {
 	const secret = "ghs_s3cr3tT0ken"
 	for _, class := range []error{providers.ErrForbidden, providers.ErrRejected} {
-		for _, op := range []string{"BranchHead", "ReadFile"} {
+		for _, op := range []string{"BranchHead", opReadFile} {
 			t.Run(class.Error()+" "+op, func(t *testing.T) {
 				f := newFixture()
 				f.gitFail = func(got string) error {

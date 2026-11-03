@@ -115,7 +115,7 @@ func TestResolveReusesFileReadsAtTheSameCommit(t *testing.T) {
 	if err != nil || first.Outcome != sourcemap.Resolved {
 		t.Fatalf("first run = %+v, %v", first, err)
 	}
-	firstReads, firstGets := c.of("ReadFile"), c.gets()
+	firstReads, firstGets := c.of(opReadFile), c.gets()
 	if firstReads == 0 || c.of("BranchHead") != 1 {
 		t.Fatalf("first run: %d file reads, %d head reads", firstReads, c.of("BranchHead"))
 	}
@@ -137,8 +137,8 @@ func TestResolveReusesFileReadsAtTheSameCommit(t *testing.T) {
 		if c.gets() != firstGets {
 			t.Errorf("run %d read %d cluster objects, want %d as in the first run", run, c.gets(), firstGets)
 		}
-		if c.of("ReadFile") != 0 {
-			t.Errorf("run %d read %d files, want 0", run, c.of("ReadFile"))
+		if c.of(opReadFile) != 0 {
+			t.Errorf("run %d read %d files, want 0", run, c.of(opReadFile))
 		}
 	}
 }
@@ -198,7 +198,7 @@ func TestResolveKeepsCachedReadsPerRepositoryEntry(t *testing.T) {
 					t.Fatalf("run = %+v, %v", res, err)
 				}
 				if i == 0 {
-					cold = c.of("ReadFile")
+					cold = c.of(opReadFile)
 				}
 			}
 			tc.change(f)
@@ -207,9 +207,9 @@ func TestResolveKeepsCachedReadsPerRepositoryEntry(t *testing.T) {
 			if err != nil || res.Outcome != sourcemap.Resolved {
 				t.Fatalf("run through the other entry = %+v, %v", res, err)
 			}
-			if c.of("ReadFile") != cold {
+			if c.of(opReadFile) != cold {
 				t.Errorf("the other entry read %d files, want %d as a mapping with an empty cache: "+
-					"it was answered from the first entry's reads", c.of("ReadFile"), cold)
+					"it was answered from the first entry's reads", c.of(opReadFile), cold)
 			}
 		})
 	}
@@ -230,7 +230,7 @@ func TestResolveDoesNotKeepReadsThatMayChange(t *testing.T) {
 			f := newFixture()
 			f.cache = newCache()
 			counted(f, func(op string) error {
-				if op == "ReadFile" {
+				if op == opReadFile {
 					return tc.fail
 				}
 				return nil
@@ -248,6 +248,14 @@ func TestResolveDoesNotKeepReadsThatMayChange(t *testing.T) {
 	}
 }
 
+// Strings the tests share.
+const (
+	opReadFile           = "ReadFile"
+	ksWorkers            = "resources:\n  - workers\n"
+	ksParentScaledObject = "resources:\n  - ../scaledobject.yaml\n"
+	ksEmpty              = "resources: []\n"
+)
+
 // errHost404 is what the GitHub adapter returns for HTTP 404 on any read, and for a token or tree it cannot
 // get: ErrNotFound, although the path may well be in the tree. Only ErrPathNotInTree says it is not.
 var errHost404 = fmt.Errorf("ReadFile: GitHub returned status 404: %w", providers.ErrNotFound)
@@ -262,8 +270,8 @@ func TestResolveDoesNotKeepNotFoundsFromAHostOutage(t *testing.T) {
 	}{
 		{"unchanged delivery", nil},
 		{".sourceignore in a nested kustomization directory", func(f *fixture) {
-			f.files[ksFile] = "resources:\n  - workers\n"
-			f.files["apps/orders/workers/kustomization.yaml"] = "resources:\n  - ../scaledobject.yaml\n"
+			f.files[ksFile] = ksWorkers
+			f.files["apps/orders/workers/kustomization.yaml"] = ksParentScaledObject
 			f.files["apps/orders/workers/.sourceignore"] = "kustomization.yaml\n"
 		}},
 		{".sourceignore in a directory a resource file lives in", func(f *fixture) {
@@ -272,7 +280,7 @@ func TestResolveDoesNotKeepNotFoundsFromAHostOutage(t *testing.T) {
 			f.files["apps/base/.sourceignore"] = "so.yaml\n"
 		}},
 		{"two kustomization files", func(f *fixture) {
-			f.files["apps/orders/kustomization.yml"] = "resources: []\n"
+			f.files["apps/orders/kustomization.yml"] = ksEmpty
 		}},
 	}
 	for _, tc := range tests {
@@ -290,14 +298,14 @@ func TestResolveDoesNotKeepNotFoundsFromAHostOutage(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			total := c.of("ReadFile")
+			total := c.of(opReadFile)
 			// The outage starts after each number of served reads in turn.
-			for served := 0; served < total; served++ {
+			for served := range total {
 				f := setup()
 				f.cache = newCache()
 				reads := 0
 				counted(f, func(op string) error {
-					if op != "ReadFile" {
+					if op != opReadFile {
 						return nil
 					}
 					if reads++; reads > served {

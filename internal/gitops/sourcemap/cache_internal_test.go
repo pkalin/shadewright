@@ -131,7 +131,7 @@ func TestReadCacheStaysWithinItsBytes(t *testing.T) {
 // Only a full commit ID addresses content that never changes; a branch name or a short ID is read every time.
 func TestReadCacheKeepsOnlyReadsAtAFullCommitID(t *testing.T) {
 	ctx := context.Background()
-	for _, ref := range []string{"main", commitA[:12], strings.ToUpper(commitA), commitA + "0"} {
+	for _, ref := range []string{defaultTargetBranch, commitA[:12], strings.ToUpper(commitA), commitA + "0"} {
 		c := NewReadCache(10, 1<<20)
 		git := newCountingGit(1)
 		for range 2 {

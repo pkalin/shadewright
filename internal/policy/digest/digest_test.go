@@ -32,8 +32,8 @@ var planDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 // Golden digests. They must never change: a changed value means every stored plan digest is superseded.
 // If the encoding has to change, bump encodingVersion and update these values in the same change.
 const (
-	goldenKeda   = "sha256:f6ae179c7e5ea1854e162c55f9822312339d41f96838a27546e74d1a1b542594"
-	goldenMemory = "sha256:5c4134c11003ed2ee651dffa226555cff6a3b79cdb9edd0324c14ab8b4f991c1"
+	goldenKeda   = "sha256:99c0ff41a8f7ca8c680a06302e665cc77e9d60a20037272294cee2e3031f3570"
+	goldenMemory = "sha256:75ba5ff32fb8fc2252992bd5277ab8c27765e1461b01162dd214292914dbfaa2"
 )
 
 func source() Source {
@@ -43,6 +43,7 @@ func source() Source {
 		InstallationID: 12345678,
 		TargetBranch:   "main",
 		Path:           "apps/orders/scaledobject.yaml",
+		BuildPath:      "apps/orders",
 		BaseCommit:     "0123456789abcdef0123456789abcdef01234567",
 	}
 }
@@ -153,6 +154,9 @@ func TestEveryFieldChangesDigest(t *testing.T) {
 		"source.path": {kedaInput, func(in *Input) {
 			in.Source.Path = "apps/orders/other.yaml"
 		}},
+		"source.buildPath": {kedaInput, func(in *Input) {
+			in.Source.BuildPath = "apps"
+		}},
 		"source.baseCommit": {kedaInput, func(in *Input) {
 			in.Source.BaseCommit = "89abcdef0123456789abcdef0123456789abcdef"
 		}},
@@ -182,7 +186,7 @@ func memoryBase() Input { return memoryInput("256Mi", "512Mi") }
 func TestFieldsCovered(t *testing.T) {
 	want := map[reflect.Type]int{
 		reflect.TypeFor[Input]():                            5,
-		reflect.TypeFor[Source]():                           6,
+		reflect.TypeFor[Source]():                           7,
 		reflect.TypeFor[v1alpha1.Action]():                  3,
 		reflect.TypeFor[v1alpha1.AdjustKedaMaxReplicas]():   2,
 		reflect.TypeFor[v1alpha1.SetContainerMemoryLimit](): 3,

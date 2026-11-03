@@ -42,7 +42,8 @@ import (
 const Prefix = "sha256:"
 
 // encodingVersion labels the canonical encoding. Change it whenever the encoding changes.
-const encodingVersion = "remediation.shadewright.io/plan-digest/v1"
+// v2 adds source.buildPath.
+const encodingVersion = "remediation.shadewright.io/plan-digest/v2"
 
 // Input holds everything a plan digest covers.
 type Input struct {
@@ -80,6 +81,9 @@ type Source struct {
 
 	// Path is the file that declares the target.
 	Path v1alpha1.GitFilePath
+
+	// BuildPath is the directory the Flux Kustomization builds, which the render check renders.
+	BuildPath v1alpha1.GitDirPath
 
 	// BaseCommit is the full SHA of the target branch the change is made against.
 	BaseCommit string
@@ -122,6 +126,7 @@ func encode(in Input) []byte {
 	e.field("source.installationID", strconv.FormatInt(in.Source.InstallationID, 10))
 	e.field("source.targetBranch", string(in.Source.TargetBranch))
 	e.field("source.path", string(in.Source.Path))
+	e.field("source.buildPath", string(in.Source.BuildPath))
 	e.field("source.baseCommit", in.Source.BaseCommit)
 
 	e.field("policy.uid", string(in.PolicyUID))

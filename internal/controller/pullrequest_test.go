@@ -306,6 +306,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		build = "apps"
 		got := fetch()
 		got.Status.Source.BuildPath = build
+		// The digest covers the build directory, so the plan is digested again, as the policy check would.
+		got.Status.PlanDigest, err = freshness.ComputeDigest(got, got.Status.Source, policy, settings)
+		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
 		drive(remediationv1alpha1.PhaseNeedsIntervention)
 		got = fetch()

@@ -198,6 +198,7 @@ func DigestInput(rr *v1alpha1.RemediationRequest, src *v1alpha1.ResolvedSource, 
 			InstallationID: installation,
 			TargetBranch:   src.TargetBranch,
 			Path:           src.Path,
+			BuildPath:      src.BuildPath,
 			BaseCommit:     src.BaseCommit,
 		},
 		PolicyUID:        v1alpha1.UID(pol.UID),
@@ -383,7 +384,7 @@ func (c Checker) readTarget(ctx context.Context, ref v1alpha1.ObjectRef) (*unstr
 }
 
 // checkSource runs the source mapping again (ADR-0012) and compares it with status.source. The repository,
-// branch and path must be the recorded ones; the base commit is not compared, because it moves with every merge
+// branch, path and build directory must be the recorded ones; the base commit is not compared, because it moves with every merge
 // to the target branch and checkFile decides whether such a merge touched the file. A failed mapping is not
 // stale (the caller retries); a mapping that now denies or needs a person never passes as fresh.
 func (c Checker) checkSource(ctx context.Context, rr *v1alpha1.RemediationRequest, pol *v1alpha1.RemediationPolicy,

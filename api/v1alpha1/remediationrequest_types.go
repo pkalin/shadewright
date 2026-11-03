@@ -62,8 +62,8 @@ type ResolvedSource struct {
 
 	// buildPath is the directory the Flux Kustomization builds (its spec.path, "." for the repository root).
 	// Before every commit the pull request step renders it with and without the change and refuses anything
-	// but the planned difference (design 8.2, steps 4 and 5). The policy check always sets it; a request
-	// without it stops before any commit.
+	// but the planned difference (design 8.2, steps 4 and 5). The policy check always sets it, and the plan
+	// digest covers it; a request without it is never committed.
 	// +optional
 	BuildPath GitDirPath `json:"buildPath,omitempty"`
 

@@ -477,19 +477,7 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 	case errors.Is(err, freshness.ErrPaused):
 		return ctrl.Result{RequeueAfter: freshRecheckDelay}, nil
 	default:
-		// A host that asked for a delay (Retry-After) gets it; the error backoff does not read it.
-		retryAfter := time.Duration(0)
-		if pe, ok := errors.AsType[*freshness.ProviderError](err); ok {
-			retryAfter = pe.RetryAfter
-		} else if te, ok := errors.AsType[*sourcemap.TransientError](err); ok {
-			retryAfter = te.RetryAfter
-		}
-		if retryAfter > 0 {
-			logf.FromContext(ctx).Info("Waiting before re-checking RemediationRequest",
-				"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", retryAfter)
-			return ctrl.Result{RequeueAfter: retryAfter}, nil
-		}
-		return ctrl.Result{}, err
+		return waitOrFail(ctx, rr, err)
 	}
 }
 

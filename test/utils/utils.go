@@ -28,9 +28,6 @@ import (
 )
 
 const (
-	certmanagerVersion = "v1.21.1"
-	certmanagerURLTmpl = "https://github.com/cert-manager/cert-manager/releases/download/%s/cert-manager.yaml"
-
 	defaultKindBinary  = "kind"
 	defaultKindCluster = "kind"
 )
@@ -61,8 +58,13 @@ func Run(cmd *exec.Cmd) (string, error) {
 
 // UninstallCertManager uninstalls the cert manager
 func UninstallCertManager() {
-	url := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
-	cmd := exec.Command("kubectl", "delete", "-f", url)
+	manifest, err := fetchCertManagerManifest()
+	if err != nil {
+		warnError(err)
+		return
+	}
+	cmd := exec.Command("kubectl", "delete", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
 	if _, err := Run(cmd); err != nil {
 		warnError(err)
 	}
@@ -83,8 +85,14 @@ func UninstallCertManager() {
 
 // InstallCertManager installs the cert manager bundle.
 func InstallCertManager() error {
-	url := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
-	cmd := exec.Command("kubectl", "apply", "-f", url)
+	// Fail closed: the manifest is verified by checksum and its images are pinned by digest
+	// before anything is applied.
+	manifest, err := fetchCertManagerManifest()
+	if err != nil {
+		return fmt.Errorf("cert-manager manifest rejected: %w", err)
+	}
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
 	if _, err := Run(cmd); err != nil {
 		return err
 	}
@@ -96,7 +104,7 @@ func InstallCertManager() error {
 		"--timeout", "5m",
 	)
 
-	_, err := Run(cmd)
+	_, err = Run(cmd)
 	return err
 }
 

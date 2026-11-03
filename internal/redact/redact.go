@@ -25,8 +25,10 @@ limitations under the License.
 // taken is linear in the input and no input can make the redactor backtrack or allocate without bound.
 //
 // Redaction is best effort and errs on the side of removing too much: an IP address or an email in a log
-// line is removed even when it is harmless. Values that look like references rather than secrets, such as
-// "secretName: db-creds", are kept, because the name of a missing Secret is what a diagnosis needs.
+// line is removed even when it is harmless, and so are the user name of any URL ("ssh://git@host"), the word
+// after "Basic" or "Bearer", and long runs that mix letters and digits, such as Git commit hashes and
+// container IDs. Values that look like references rather than secrets, such as "secretName: db-creds", are
+// kept, because the name of a missing Secret is what a diagnosis needs, and so is the hex of an image digest.
 package redact
 
 import (
@@ -289,6 +291,90 @@ func blockScalarSpan(s string, m []int, prevEnd int) (int, int, bool) {
 	return start, end, true
 }
 
+// nestedStart matches the start of a line that opens a nested mapping: a key followed by a colon and a blank
+// or the line end, also as a list item, or a flow mapping.
+var nestedStart = regexp.MustCompile(`^(?:-[ \t]+)*(?:\{|(?:"[^"]*"|'[^']*'|[^\s"'#:][^#\r\n]*?)[ \t]*:(?:[ \t]|\r?$))`)
+
+// nextLineSpan returns the value of a YAML key with nothing after its colon, written on the following lines
+// indented deeper than the key: a plain or quoted scalar, or a list of them. A key with no such lines is
+// truly empty and kept, and so is a nested mapping, whose own keys the other rules judge. Only the first
+// content line is read before deciding, so a chain of nested mappings costs one line per key. Headers inside
+// a value already redacted are skipped, so each byte is scanned once.
+func nextLineSpan(s string, m []int, prevEnd int) (int, int, bool) {
+	if m[0] < prevEnd || keepReference(s, m) {
+		return 0, 0, false
+	}
+	keyCol := m[2] - m[0]
+	pos := m[1]
+	for pos < len(s) && (s[pos] == '\n' || s[pos] == '\r') {
+		if s[pos] == '\r' {
+			pos++
+			continue
+		}
+		line := pos + 1
+		le := lineEnd(s, line)
+		text := s[line:le]
+		trimmed := strings.TrimLeft(text, " \t")
+		if trimmed == "" {
+			pos = le
+			continue
+		}
+		if len(text)-len(trimmed) <= keyCol || nestedStart.MatchString(trimmed) {
+			return 0, 0, false
+		}
+		start, end := indentedLines(s, m[1], keyCol)
+		if c := s[start]; c == '"' || c == '\'' {
+			// A quoted scalar that is the whole value keeps its quotes.
+			if qe := quotedEnd(s, start); qe > 0 && strings.TrimRight(s[qe:end], " \t") == "" {
+				return start + 1, qe - 1, true
+			}
+		}
+		return start, end, true
+	}
+	return 0, 0, false
+}
+
+// minTokenLength is the shortest part of a run of base64 or hex characters that is taken for a random token.
+const minTokenLength = 24
+
+// longTokenSpan redacts a run of base64 or hex characters when some part of it between slashes is at least
+// minTokenLength long and mixes letters and digits. Paths and image names (short parts between slashes),
+// long names made of letters only and the hex of an image digest ("sha256:...", which identifies a build,
+// not a credential) are kept.
+func longTokenSpan(s string, m []int, _ int) (int, int, bool) {
+	run := s[m[0]:m[1]]
+	if prefix := strings.ToLower(s[max(0, m[0]-7):m[0]]); (prefix == "sha256:" || prefix == "sha512:") && isHex(run) {
+		return 0, 0, false
+	}
+	for part := range strings.SplitSeq(run, "/") {
+		if len(part) >= minTokenLength && mixesLettersAndDigits(part) {
+			return m[0], m[1], true
+		}
+	}
+	return 0, 0, false
+}
+
+// isHex reports whether s holds only hexadecimal digits.
+func isHex(s string) bool {
+	for i := range len(s) {
+		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// mixesLettersAndDigits reports whether s holds both an ASCII letter and a digit.
+func mixesLettersAndDigits(s string) bool {
+	var letter, digit bool
+	for i := range len(s) {
+		c := s[i]
+		letter = letter || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+		digit = digit || c >= '0' && c <= '9'
+	}
+	return letter && digit
+}
+
 // quotedEnd returns the index just past the closing quote of the quoted value starting at pos, honouring
 // backslash escapes in double quotes and doubled quotes in single quotes, or -1 if the line ends first.
 func quotedEnd(s string, pos int) int {
@@ -310,6 +396,40 @@ func quotedEnd(s string, pos int) int {
 	return -1
 }
 
+// escapedQuotedSpan returns the value of a double-quoted string escaped once inside another JSON string,
+// such as the value in "{\"clientSecret\":\"a,b\"}", whose escaped opening quote starts at pos. The text is
+// read at the outer level first (every backslash escapes the next byte) and then at the inner one, so the
+// value ends at its own escaped closing quote: a comma, or an inner escaped quote (\\\"), does not end it.
+// If the outer string or the line ends first, the value runs up to there.
+func escapedQuotedSpan(s string, pos int) (int, int) {
+	start := pos + 2
+	innerEscape := false
+	for i := start; i < len(s); {
+		c := s[i]
+		if c == '"' || c == '\n' || c == '\r' {
+			return start, i
+		}
+		if c != '\\' {
+			innerEscape = false
+			i++
+			continue
+		}
+		if i+1 >= len(s) {
+			return start, len(s)
+		}
+		switch decoded := s[i+1]; {
+		case innerEscape:
+			innerEscape = false
+		case decoded == '\\':
+			innerEscape = true
+		case decoded == '"':
+			return start, i
+		}
+		i += 2
+	}
+	return start, len(s)
+}
+
 // Value boundaries for the key-value rules, one per format.
 const (
 	// boundaryWhitespace: env files, logfmt and free text. The value runs to the next whitespace, so
@@ -323,10 +443,14 @@ const (
 )
 
 // valueSpan returns the value that starts at pos, after a key and its separator, for the given format.
-// A quoted value is the text between its quotes; an unterminated quote is redacted to the boundary.
+// A quoted value is the text between its quotes; an unterminated quote is redacted to the boundary. A value
+// in escaped quotes (JSON inside a JSON string) ends at its escaped closing quote.
 func valueSpan(s string, pos, boundary, keyCol int) (int, int) {
 	if pos >= len(s) {
 		return pos, pos
+	}
+	if s[pos] == '\\' && pos+1 < len(s) && s[pos+1] == '"' {
+		return escapedQuotedSpan(s, pos)
 	}
 	if c := s[pos]; c == '"' || c == '\'' {
 		if end := quotedEnd(s, pos); end > 0 {
@@ -406,11 +530,15 @@ func keyValueSpan(boundary int) func(s string, m []int, prevEnd int) (int, int, 
 
 // Key names that hold secrets, in three forms: bare, optionally quoted (YAML block mappings), and quoted
 // or bare after "{" or "," (JSON and YAML flow mappings, also with escaped quotes inside a JSON string).
+// The short names in shortKeyExpr count only as a whole key.
 const (
 	secretWordExpr = `(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?|connection[_-]?string|conn[_-]?str)`
-	bareKeyExpr    = `[A-Za-z0-9_.-]*` + secretWordExpr + `[A-Za-z0-9_.-]*`
-	secretKeyExpr  = `["']?` + bareKeyExpr + `["']?`
-	flowKeyExpr    = `\\?["']` + bareKeyExpr + `\\?["']|` + bareKeyExpr
+	bareKeyExpr    = `(?:[A-Za-z0-9_.-]*` + secretWordExpr + `[A-Za-z0-9_.-]*|` + shortKeyExpr + `)`
+	// shortKeyExpr names short keys that hold secrets but are also parts of other words ("bypass",
+	// "author", "signal"), so they count only as a whole key.
+	shortKeyExpr  = `\b(?:pass|auth|sig)`
+	secretKeyExpr = `["']?` + bareKeyExpr + `["']?`
+	flowKeyExpr   = `\\?["']` + bareKeyExpr + `\\?["']|` + bareKeyExpr
 )
 
 // Quoted value forms for the Authorization rule: double-quoted with backslash escapes, and single-quoted
@@ -425,8 +553,8 @@ func builtinRules() []rule {
 		// PEM private keys, also when truncated before the END line.
 		{kind: KindPrivateKey, re: regexp.MustCompile(
 			`(?s)-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY( BLOCK)?-----.*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY( BLOCK)?-----|\z)`)},
-		// JSON Web Tokens: base64url header and payload starting with '{"', optional signature.
-		{kind: KindJWT, re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*`)},
+		// JSON Web Tokens: a base64url header starting with '{"', any payload, optional signature.
+		{kind: KindJWT, re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*`)},
 		// Well-known token formats with a recognisable prefix.
 		{kind: KindToken, re: regexp.MustCompile(`\b(?:` + strings.Join([]string{
 			`gh[pousr]_[A-Za-z0-9]{36,255}`,                 // GitHub
@@ -444,9 +572,10 @@ func builtinRules() []rule {
 			`dop_v1_[a-f0-9]{64}`,                           // DigitalOcean
 			`hv[sb]\.[A-Za-z0-9_-]{20,}`,                    // HashiCorp Vault
 		}, "|") + `)`)},
-		// URLs with credentials in the userinfo part, such as postgres://user:pass@host/db.
+		// URLs with any userinfo part, such as postgres://user:pass@host/db, https://token:@host/repo or
+		// https://token@host/repo: a user name alone may be a token.
 		{kind: KindConnectionString, re: regexp.MustCompile(
-			`(?i)\b[a-z][a-z0-9+.-]{1,30}://[^\s/:@'"<>]*:[^\s@'"<>/]+@[^\s'"<>]+`)},
+			`(?i)\b[a-z][a-z0-9+.-]{1,30}://[^\s/?#@'"<>]+@[^\s'"<>]+`)},
 		// Secret fields of semicolon-separated connection strings (Azure Storage, Service Bus, SQL Server):
 		// quoted with doubled quotes, or bare up to the next ";" or line end, spaces included.
 		{kind: KindConnectionString, groups: []int{1, 2, 3}, re: regexp.MustCompile(
@@ -458,7 +587,7 @@ func builtinRules() []rule {
 			`(?i)\b(?:proxy-)?authorization["']?[ \t]*[:=][ \t]*(?:` + doubleQuotedExpr + `|` + singleQuotedExpr + `|([^\r\n]+))`)},
 		// Bearer and Basic credentials outside an Authorization header.
 		{kind: KindCredential, groups: []int{1}, re: regexp.MustCompile(
-			`(?i)\b(?:bearer|basic)[ \t]+([A-Za-z0-9._~+/-]{8,}=*)`)},
+			`(?i)\b(?:bearer|basic)[ \t]+([A-Za-z0-9._~+/-]+=*)`)},
 		// Credentials in URL query strings, such as Azure SAS signatures and presigned URLs.
 		{kind: KindCredential, groups: []int{1}, re: regexp.MustCompile(
 			`(?i)[?&](?:sig|signature|token|access_token|refresh_token|id_token|api_key|apikey|key|code|password|secret|client_secret|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature)=([^&\s#"'<>]+)`)},
@@ -467,8 +596,9 @@ func builtinRules() []rule {
 		{kind: KindCredential, span: keyValueSpan(boundaryWhitespace), re: regexp.MustCompile(
 			`(?i)(` + bareKeyExpr + `)[ \t]*[:=][ \t]*`)},
 		// JSON and YAML flow mappings: a field after "{" or ",", ending at its closing quote or at , } ].
+		// JSON whitespace, newlines included, may surround the colon.
 		{kind: KindCredential, span: keyValueSpan(boundaryFlow), re: regexp.MustCompile(
-			`(?i)[{,][ \t\r\n]*(` + flowKeyExpr + `)[ \t]*:[ \t]*`)},
+			`(?i)[{,][ \t\r\n]*(` + flowKeyExpr + `)[ \t\r\n]*:[ \t\r\n]*`)},
 		// YAML block mappings: a key at the start of a line, its value to the line end plus continuation
 		// lines indented deeper than the key.
 		{kind: KindCredential, span: keyValueSpan(boundaryLine), re: regexp.MustCompile(
@@ -476,6 +606,13 @@ func builtinRules() []rule {
 		// YAML literal and folded block scalars under a secret key, with chomping and indentation indicators.
 		{kind: KindCredential, span: blockScalarSpan, re: regexp.MustCompile(
 			`(?im)^[ \t]*(?:-[ \t]+)?(` + secretKeyExpr + `)[ \t]*:[ \t]*([|>][1-9+-]{0,2})[ \t]*(?:#[^\r\n]*)?\r?$`)},
+		// YAML block mappings: a key with nothing after its colon but blanks or a comment, its value on the
+		// following lines indented deeper than the key.
+		{kind: KindCredential, span: nextLineSpan, re: regexp.MustCompile(
+			`(?im)^[ \t]*(?:-[ \t]+)?(` + secretKeyExpr + `)[ \t]*:(?:[ \t]+#[^\r\n]*)?[ \t]*\r?$`)},
+		// Long random tokens without a known prefix: a run of base64 or hex characters with a part between
+		// slashes of at least 24 characters that mixes letters and digits.
+		{kind: KindToken, span: longTokenSpan, re: regexp.MustCompile(`[A-Za-z0-9+/_]{24,}=*`)},
 		// Email addresses.
 		{kind: KindEmail, re: regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b`)},
 		// IPv4 addresses.

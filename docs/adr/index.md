@@ -23,5 +23,6 @@
 | [0019](0019-extension-packaging.md) | Packaging extensions: compiled in now, signed OCI packs later | Accepted |
 | [0020](0020-yaml-patching.md) | Patching YAML by replacing one scalar in place | Proposed |
 | [0021](0021-amending-accepted-adrs.md) | Amending accepted ADRs | Accepted |
+| [0022](0022-scenario-switch-and-clusters.md) | Switching a scenario on with a per-cluster branch, on Kind and the lab | Proposed |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

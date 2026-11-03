@@ -652,7 +652,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			// A refusal GitHub gives for good (a 403 that is no rate limit, a 422 the adapter cannot resolve) stops
 			// the request at once, with a fixed reason, long before its deadline. The render check's reads are not
 			// in the table: semdiff reports any failed read as transient.
-			refusals := []TableEntry{}
+			refusals := make([]TableEntry, 0, 16)
 			for _, c := range []struct{ name, op, after string }{
 				{"reading the target branch head in the freshness check", opBranchHead, ""},
 				{"reading the target file in the freshness check", opReadFile + " " + sourcePath, ""},

@@ -62,6 +62,10 @@ const (
 	hRetry     = "Retry-After"
 	// graphQLPath stands for the GraphQL endpoint in steps.
 	graphQLPath = "/graphql"
+	pullsPath   = "/pulls"
+	// Error fixtures in testdata.
+	fxForbidden = "error_forbidden.json"
+	fxSecondary = "error_secondary.json"
 )
 
 var t0 = time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
@@ -275,7 +279,7 @@ func TestCapabilities(t *testing.T) {
 
 func TestBranchHead(t *testing.T) {
 	h := newHarness(t, get(mainRef, "ref_main.json"), get(branchRef, "ref_branch.json"),
-		status(http.MethodGet, "/git/ref/heads/shadewright/req-2", http.StatusNotFound, "error_forbidden.json"))
+		status(http.MethodGet, "/git/ref/heads/shadewright/req-2", http.StatusNotFound, fxForbidden))
 	if sha, err := h.p.BranchHead(ctx, target); err != nil || sha != shaBase {
 		t.Fatalf("BranchHead(main) = %q, %v", sha, err)
 	}
@@ -337,7 +341,7 @@ func TestReadFileNotRegular(t *testing.T) {
 }
 
 func TestReadFileMissingCommit(t *testing.T) {
-	h := newHarness(t, status(http.MethodGet, "/git/trees/"+shaOld, http.StatusNotFound, "error_forbidden.json"))
+	h := newHarness(t, status(http.MethodGet, "/git/trees/"+shaOld, http.StatusNotFound, fxForbidden))
 	_, err := h.p.ReadFile(ctx, shaOld, "apps/deploy.yaml")
 	if !providers.IsNotFound(err) {
 		t.Fatalf("got %v", err)
@@ -709,7 +713,7 @@ func TestCommitFileChecksStoredBlob(t *testing.T) {
 const pullsQuery = "direction=desc&head=acme%3Ashadewright%2Freq-1&per_page=100&sort=created&state="
 
 func listPulls(state, file string) step {
-	s := get("/pulls", file)
+	s := get(pullsPath, file)
 	s.query = pullsQuery + state
 	return s
 }
@@ -735,7 +739,7 @@ func TestOpenChangeRequestExistingIsReturned(t *testing.T) {
 }
 
 func TestOpenChangeRequestCreates(t *testing.T) {
-	create := status(http.MethodPost, "/pulls", http.StatusCreated, "pull_open.json")
+	create := status(http.MethodPost, pullsPath, http.StatusCreated, "pull_open.json")
 	create.check = func(t *testing.T, b map[string]any) {
 		want := `{"base":"main","body":"marker","head":"shadewright/req-1","maintainer_can_modify":false,` +
 			`"title":"fix(apps): raise replicas"}`
@@ -752,7 +756,7 @@ func TestOpenChangeRequestCreates(t *testing.T) {
 
 func TestOpenChangeRequestAlreadyExistsAfterRace(t *testing.T) {
 	h := newHarness(t, listPulls("open", "pulls_empty.json"),
-		status(http.MethodPost, "/pulls", http.StatusUnprocessableEntity, "error_pr_exists.json"),
+		status(http.MethodPost, pullsPath, http.StatusUnprocessableEntity, "error_pr_exists.json"),
 		listPulls("open", "pulls_open.json"))
 	cr, err := h.p.OpenChangeRequest(ctx, newCR)
 	if err != nil || cr.Number != 12 {
@@ -763,7 +767,7 @@ func TestOpenChangeRequestAlreadyExistsAfterRace(t *testing.T) {
 func TestOpenChangeRequestIgnoresForks(t *testing.T) {
 	// A fork's pull request from a branch of the same name is not ours: open our own.
 	h := newHarness(t, listPulls("open", "pulls_open_fork.json"),
-		status(http.MethodPost, "/pulls", http.StatusCreated, "pull_open.json"))
+		status(http.MethodPost, pullsPath, http.StatusCreated, "pull_open.json"))
 	cr, err := h.p.OpenChangeRequest(ctx, newCR)
 	if err != nil || cr.Number != 12 {
 		t.Fatalf("got %+v, %v", cr, err)
@@ -804,9 +808,9 @@ func TestOpenChangeRequestMixedBasesIsConflict(t *testing.T) {
 
 func TestOpenChangeRequestMissingBranch(t *testing.T) {
 	h := newHarness(t, listPulls("open", "pulls_empty.json"),
-		status(http.MethodPost, "/pulls", http.StatusUnprocessableEntity, "error_pr_exists.json"),
+		status(http.MethodPost, pullsPath, http.StatusUnprocessableEntity, "error_pr_exists.json"),
 		listPulls("open", "pulls_empty.json"),
-		status(http.MethodGet, branchRef, http.StatusNotFound, "error_forbidden.json"))
+		status(http.MethodGet, branchRef, http.StatusNotFound, fxForbidden))
 	_, err := h.p.OpenChangeRequest(ctx, newCR)
 	if !providers.IsNotFound(err) {
 		t.Fatalf("got %v", err)
@@ -887,7 +891,7 @@ func TestCloseChangeRequestMergedIsConflict(t *testing.T) {
 
 func TestCloseChangeRequestMergedMeanwhile(t *testing.T) {
 	h := newHarness(t, get("/pulls/12", "pull_open.json"),
-		status(http.MethodPatch, "/pulls/12", http.StatusUnprocessableEntity, "error_forbidden.json"),
+		status(http.MethodPatch, "/pulls/12", http.StatusUnprocessableEntity, fxForbidden),
 		get("/pulls/12", "pull_merged.json"))
 	if err := h.p.CloseChangeRequest(ctx, 12); !providers.IsConflict(err) {
 		t.Fatalf("got %v", err)
@@ -915,7 +919,7 @@ func TestCloseChangeRequestNumberMismatch(t *testing.T) {
 
 func TestRetriesServerErrorsWithBackoff(t *testing.T) {
 	h := newHarness(t,
-		status(http.MethodGet, mainRef, http.StatusBadGateway, "error_forbidden.json"),
+		status(http.MethodGet, mainRef, http.StatusBadGateway, fxForbidden),
 		step{method: http.MethodGet, path: mainRef, err: errors.New("dial tcp: " + bodyMarker)},
 		status(http.MethodGet, mainRef, http.StatusServiceUnavailable, ""),
 		get(mainRef, "ref_main.json"))
@@ -970,7 +974,7 @@ func TestRetryAfterIsHonoured(t *testing.T) {
 		step{method: http.MethodGet, path: mainRef, status: http.StatusTooManyRequests,
 			header: map[string]string{hRetry: "3"}},
 		step{method: http.MethodGet, path: mainRef, status: http.StatusForbidden,
-			header: map[string]string{hdrRemaining: "0", "X-RateLimit-Reset": reset}, file: "error_forbidden.json"},
+			header: map[string]string{hdrRemaining: "0", "X-RateLimit-Reset": reset}, file: fxForbidden},
 		step{method: http.MethodGet, path: mainRef, status: http.StatusServiceUnavailable,
 			header: map[string]string{hRetry: t0.Add(2 * time.Second).Format(http.TimeFormat)}},
 		get(mainRef, "ref_main.json"))
@@ -984,8 +988,8 @@ func TestRetryAfterIsHonoured(t *testing.T) {
 }
 
 func TestLongRetryAfterIsReturned(t *testing.T) {
-	h := newHarness(t, step{method: http.MethodPost, path: "/pulls", status: http.StatusForbidden,
-		header: map[string]string{hRetry: "120"}, file: "error_secondary.json"})
+	h := newHarness(t, step{method: http.MethodPost, path: pullsPath, status: http.StatusForbidden,
+		header: map[string]string{hRetry: "120"}, file: fxSecondary})
 	h.s.steps = append([]step{listPulls("open", "pulls_empty.json")}, h.s.steps...)
 	_, err := h.p.OpenChangeRequest(ctx, newCR)
 	if d, ok := providers.RetryAfter(err); !ok || d != 2*time.Minute {
@@ -1000,7 +1004,7 @@ func TestLongRetryAfterIsReturned(t *testing.T) {
 func TestSecondaryRateLimitWithoutHeaders(t *testing.T) {
 	for _, code := range []int{http.StatusForbidden, http.StatusTooManyRequests} {
 		t.Run(strconv.Itoa(code), func(t *testing.T) {
-			h := newHarness(t, status(http.MethodGet, mainRef, code, "error_secondary.json"))
+			h := newHarness(t, status(http.MethodGet, mainRef, code, fxSecondary))
 			_, err := h.p.BranchHead(ctx, target)
 			if d, ok := providers.RetryAfter(err); !ok || d != time.Minute {
 				t.Fatalf("RetryAfter = %v, %v (%v)", d, ok, err)
@@ -1011,7 +1015,7 @@ func TestSecondaryRateLimitWithoutHeaders(t *testing.T) {
 }
 
 func TestForbiddenIsNotRetried(t *testing.T) {
-	h := newHarness(t, status(http.MethodGet, mainRef, http.StatusForbidden, "error_forbidden.json"))
+	h := newHarness(t, status(http.MethodGet, mainRef, http.StatusForbidden, fxForbidden))
 	_, err := h.p.BranchHead(ctx, target)
 	if err == nil || providers.IsRetryable(err) || providers.IsNotFound(err) {
 		t.Fatalf("got %v", err)
@@ -1059,7 +1063,7 @@ func commitFile(p *Provider) error {
 // read and on every kind of write.
 func TestForbiddenIsFinal(t *testing.T) {
 	forbidden := func(method, path string) step {
-		return status(method, path, http.StatusForbidden, "error_forbidden.json")
+		return status(method, path, http.StatusForbidden, fxForbidden)
 	}
 	for name, c := range map[string]finalCase{
 		"read the branch head": {[]step{forbidden(http.MethodGet, mainRef)}, func(p *Provider) error {
@@ -1071,9 +1075,9 @@ func TestForbiddenIsFinal(t *testing.T) {
 		"store the blob": {append(append([]step{get(branchRef, "ref_branch.json")}, readSteps()...),
 			forbidden(http.MethodPost, "/git/blobs")), commitFile, providers.IsForbidden},
 		"move the branch": {append(commitSteps(), forbidden(http.MethodGet, "")), commitFile, providers.IsForbidden},
-		"list pull requests": {[]step{{method: http.MethodGet, path: "/pulls", query: pullsQuery + "open",
-			status: http.StatusForbidden, file: "error_forbidden.json"}}, openCR, providers.IsForbidden},
-		"open the pull request": {[]step{listPulls("open", "pulls_empty.json"), forbidden(http.MethodPost, "/pulls")},
+		"list pull requests": {[]step{{method: http.MethodGet, path: pullsPath, query: pullsQuery + "open",
+			status: http.StatusForbidden, file: fxForbidden}}, openCR, providers.IsForbidden},
+		"open the pull request": {[]step{listPulls("open", "pulls_empty.json"), forbidden(http.MethodPost, pullsPath)},
 			openCR, providers.IsForbidden},
 		"close the pull request": {[]step{get("/pulls/12", "pull_open.json"), forbidden(http.MethodPatch, "/pulls/12")},
 			func(p *Provider) error { return p.CloseChangeRequest(ctx, 12) }, providers.IsForbidden},
@@ -1091,10 +1095,10 @@ func TestUnresolvedValidationIsFinal(t *testing.T) {
 	for name, c := range map[string]finalCase{
 		"create the branch, which does not exist": {[]step{get(mainRef, "ref_main.json"),
 			refused(http.MethodPost, "/git/refs", "error_rule_violation.json"),
-			status(http.MethodGet, branchRef, http.StatusNotFound, "error_forbidden.json")},
+			status(http.MethodGet, branchRef, http.StatusNotFound, fxForbidden)},
 			createBranch, providers.IsRejected},
 		"open the pull request, with none open and the branch there": {[]step{listPulls("open", "pulls_empty.json"),
-			refused(http.MethodPost, "/pulls", "error_validation.json"), listPulls("open", "pulls_empty.json"),
+			refused(http.MethodPost, pullsPath, "error_validation.json"), listPulls("open", "pulls_empty.json"),
 			get(branchRef, "ref_branch.json")}, openCR, providers.IsRejected},
 		"store the commit": {append(append([]step{get(branchRef, "ref_branch.json")}, readSteps()...),
 			status(http.MethodPost, "/git/blobs", http.StatusCreated, "blob_created.json"),
@@ -1112,7 +1116,7 @@ func TestValidationResolvedByTheStateIsNotRejected(t *testing.T) {
 		status(http.MethodPost, "/git/refs", http.StatusUnprocessableEntity, "error_ref_exists.json"),
 		get(branchRef, "ref_branch.json"),
 		listPulls("open", "pulls_empty.json"),
-		status(http.MethodPost, "/pulls", http.StatusUnprocessableEntity, "error_pr_exists.json"),
+		status(http.MethodPost, pullsPath, http.StatusUnprocessableEntity, "error_pr_exists.json"),
 		listPulls("open", "pulls_open.json"))
 	if err := h.p.CreateBranch(ctx, branch, shaBase); err != nil {
 		t.Fatalf("CreateBranch: %v", err)
@@ -1134,15 +1138,15 @@ func TestRateLimitIsNotForbidden(t *testing.T) {
 		file   string
 		want   time.Duration
 	}{
-		"403 with Retry-After":        {http.StatusForbidden, map[string]string{hRetry: "120"}, "error_secondary.json", 2 * time.Minute},
+		"403 with Retry-After":        {http.StatusForbidden, map[string]string{hRetry: "120"}, fxSecondary, 2 * time.Minute},
 		"429 with Retry-After":        {http.StatusTooManyRequests, map[string]string{hRetry: "90"}, "", 90 * time.Second},
-		"403 with an exhausted quota": {http.StatusForbidden, map[string]string{hdrRemaining: "0", hdrReset: reset}, "error_forbidden.json", 10 * time.Minute},
+		"403 with an exhausted quota": {http.StatusForbidden, map[string]string{hdrRemaining: "0", hdrReset: reset}, fxForbidden, 10 * time.Minute},
 		"429 with an exhausted quota": {http.StatusTooManyRequests, map[string]string{hdrRemaining: "0", hdrReset: reset}, "", 10 * time.Minute},
-		"403 secondary message only":  {http.StatusForbidden, nil, "error_secondary.json", time.Minute},
+		"403 secondary message only":  {http.StatusForbidden, nil, fxSecondary, time.Minute},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, listPulls("open", "pulls_empty.json"),
-				step{method: http.MethodPost, path: "/pulls", status: c.code, header: c.header, file: c.file})
+				step{method: http.MethodPost, path: pullsPath, status: c.code, header: c.header, file: c.file})
 			h.p.attempts = 1
 			err := openCR(h.p)
 			if providers.IsForbidden(err) || providers.IsRejected(err) {

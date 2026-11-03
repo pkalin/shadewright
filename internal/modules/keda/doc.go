@@ -54,8 +54,8 @@ limitations under the License.
 // what to change. The ceiling symptom is only a candidate: the source sees the HPA, not the owning
 // ScaledObject, and a ScaledObject paused for scale-in or scale-out only, or on fallback (with a fallback
 // above maxReplicaCount the HPA reports TooManyReplicas while the triggers fail), keeps an HPA that may report
-// the limit. A full pause deletes the HPA. The deterministic gate for AdjustKedaMaxReplicas (#228) refuses the
-// action unless the ScaledObject itself is ready ([KedaReady]).
+// the limit. A full pause deletes the HPA. The deterministic gate for AdjustKedaMaxReplicas refuses the action
+// unless the ScaledObject itself is ready ([KedaReady]), in the policy check and again before every write.
 //
 // Trigger metadata and TriggerAuthentications are never read: spec.triggers[].metadata may hold addresses,
 // queries and credentials, and a TriggerAuthentication names Secrets and keys. status.authenticationsTypes,
@@ -70,9 +70,10 @@ limitations under the License.
 // The symptom's reason and summary are written here, never taken from the cluster. Symptoms meet
 // [modules.ValidSymptom].
 //
-// The module contributes the KedaReady verification check ([KedaReady]) and no tools. It lists no action:
-// AdjustKedaMaxReplicas has its patcher, and the module lists it once the deterministic gate (#228) exists.
-// Nothing here writes to the cluster or holds a client.
+// The module contributes the KedaReady verification check ([KedaReady]), the AdjustKedaMaxReplicas action and
+// no tools. The policy check refuses that action unless the ScaledObject is ready by the same rule
+// (internal/kedaready), at the decision and before every write, so whether a trigger error may be answered by
+// raising replicas is never left to model output. Nothing here writes to the cluster or holds a client.
 //
 // This package imports only the standard library and this module (ADR-0013): KEDA and HPA objects are read as
 // plain JSON maps, so no KEDA or Kubernetes API package is needed.

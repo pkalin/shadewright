@@ -18,25 +18,26 @@ package keda
 
 import (
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/kedaready"
 	"github.com/pkalin/shadewright/internal/modules"
 )
 
 // Name is the module's name in RemediationSettings and its status.
-const Name = "keda"
+const Name = kedaready.ModuleName
 
 // API groups, versions and kinds the module reads. KEDA 2.x serves ScaledObject, ScaledJob and
 // TriggerAuthentication in keda.sh/v1alpha1 only (kedacore/keda v2.21.0 apis/keda/v1alpha1/groupversion_info.go
 // and config/crd/bases). The HorizontalPodAutoscaler is the one KEDA creates and owns for each ScaledObject
 // (controllers/keda/hpa.go at the same tag), read in autoscaling/v2, which every supported Kubernetes serves.
 const (
-	Group   = "keda.sh"
-	Version = "v1alpha1"
+	Group   = kedaready.Group
+	Version = kedaready.Version
 
 	AutoscalingGroup   = "autoscaling"
 	AutoscalingVersion = "v2"
 
-	KindScaledObject = "ScaledObject"
-	KindScaledJob    = "ScaledJob"
+	KindScaledObject = kedaready.KindScaledObject
+	KindScaledJob    = kedaready.KindScaledJob
 	KindHPA          = "HorizontalPodAutoscaler"
 )
 
@@ -53,10 +54,11 @@ func (module) Detection() modules.IntegrationDetection {
 	return modules.IntegrationDetection{GroupVersions: []string{Group + "/" + Version}}
 }
 
-// Hooks contributes the symptom sources for ScaledObject, ScaledJob and the HPAs KEDA owns, and the KedaReady
-// verification check. It lists no action: AdjustKedaMaxReplicas has its patcher, but the module lists it only
-// once the deterministic gate that refuses it unless the ScaledObject is ready exists (#228). It offers no
-// tool.
+// Hooks contributes the symptom sources for ScaledObject, ScaledJob and the HPAs KEDA owns, the KedaReady
+// verification check and the AdjustKedaMaxReplicas action, which has its typed parameters, policy rule, GitOps
+// patcher and refusal tests. The policy check refuses the action unless the ScaledObject is ready by the same
+// rule as KedaReady (CheckTargetReady in internal/policy), at the decision and before every write. It offers
+// no tool.
 func (module) Hooks() modules.Hooks {
 	return modules.Hooks{
 		Symptoms: []modules.SymptomSource{
@@ -76,6 +78,7 @@ func (module) Hooks() modules.Hooks {
 				Symptoms: hpaSymptoms,
 			},
 		},
+		Actions: []v1alpha1.ActionType{v1alpha1.ActionAdjustKedaMaxReplicas},
 		Checks: []modules.VerificationCheck{
 			{Name: v1alpha1.CheckKedaReady, Group: Group, Kind: KindScaledObject, Holds: KedaReady},
 		},

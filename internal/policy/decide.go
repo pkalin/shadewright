@@ -23,8 +23,12 @@ limitations under the License.
 //
 // The decision fails closed:
 //
-//   - Only [OutcomeAllowed] lets a plan proceed. Every check that fails gives [OutcomeDenied], and input the
-//     controller could not gather gives [OutcomeNeedsIntervention]; neither is ever turned into Allowed.
+//   - Only [OutcomeAllowed] lets a plan proceed. Every check that fails gives [OutcomeDenied], with three
+//     exceptions: input the controller could not gather gives [OutcomeNeedsIntervention]; a target whose state
+//     rules the action out until a person fixes it (a ScaledObject that is not ready) gives
+//     [OutcomeNeedsIntervention] too; and a target whose state is not known yet (a ScaledObject KEDA has not
+//     reported on) gives [OutcomeWait], which the controller decides again later. None is ever turned into
+//     Allowed.
 //   - Decide does not rely on the API server having validated or defaulted its input. A value the schema
 //     would refuse is refused here too, and an unset field is read in its strictest sense: no request
 //     namespaces allows no namespace, an unset approval mode is Required, an unset maxIncreasePercent
@@ -36,6 +40,14 @@ limitations under the License.
 //     from remediation (design section 10, item 10: Secrets, RBAC, network policy, namespaces, volumes,
 //     admission and CRDs, Flux pipelines and Shadewright's own policy objects) are refused by name, whatever
 //     the path.
+//   - An action an integration module contributes (AdjustKedaMaxReplicas, from the keda module) is refused
+//     unless the cluster admin enabled that module in RemediationSettings spec.modules.integrations (design
+//     2.4 and 2.5, ADR-0018). Only the spec is read, never the status (ADR-0024).
+//   - AdjustKedaMaxReplicas is refused unless the live ScaledObject is ready by the KedaReady rule
+//     ([kedaready.Readiness]): a trigger error, a fallback, a pause (partial pauses and pause annotations
+//     included), a deletion or an HPA that cannot read its metrics is never answered by raising replicas
+//     (design section 7). The rule reads only the live object the controller read, never model output, and a
+//     missing or malformed object is not ready.
 //
 // Checks run in a fixed order and the first that fails gives the reason, so a given input always yields the
 // same reason.
@@ -53,6 +65,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/kedaready"
 	"github.com/pkalin/shadewright/internal/policy/pathmatch"
 )
 
@@ -66,6 +79,9 @@ const (
 	OutcomeDenied Outcome = "Denied"
 	// OutcomeNeedsIntervention means the decision could not be made from the input, so a human must look.
 	OutcomeNeedsIntervention Outcome = "NeedsIntervention"
+	// OutcomeWait means the target's state is not known yet (a ScaledObject KEDA has not reported on), so
+	// the decision is to be made again later. It is never Allowed.
+	OutcomeWait Outcome = "Wait"
 )
 
 // Reason is a machine-readable cause of a decision, suitable for a condition reason.
@@ -123,6 +139,18 @@ const (
 	ReasonBranchNotAllowed Reason = "BranchNotAllowed"
 	// ReasonPathNotAllowed: the resolved file matches none of the policy's allowedPaths.
 	ReasonPathNotAllowed Reason = "PathNotAllowed"
+	// ReasonModuleNotEnabled: the action is contributed by an integration module that RemediationSettings
+	// spec.modules.integrations does not enable.
+	ReasonModuleNotEnabled Reason = "ModuleNotEnabled"
+	// ReasonScaledObjectNotReady: the action is AdjustKedaMaxReplicas and the live ScaledObject is definitely
+	// not ready by the KedaReady rule (Ready False, PartialTriggerError, paused, on fallback, HPAActive False,
+	// being deleted), or is missing or malformed. Its outcome is NeedsIntervention: the plan may be within
+	// bounds, but raising replicas does not fix a broken autoscaler, and no catalog action edits a trigger, so a
+	// person must look.
+	ReasonScaledObjectNotReady Reason = "ScaledObjectNotReady"
+	// ReasonScaledObjectReadinessUnknown: the action is AdjustKedaMaxReplicas and KEDA has not reported on the
+	// ScaledObject yet (no status, no Ready condition, Ready Unknown). Its outcome is Wait.
+	ReasonScaledObjectReadinessUnknown Reason = "ScaledObjectReadinessUnknown"
 )
 
 // defaultTargetBranch is the schema default of GitRepository.targetBranch.
@@ -144,6 +172,11 @@ type Target struct {
 	UID v1alpha1.UID
 	// Labels of the object, matched against the policy's objectSelector.
 	Labels map[string]string
+	// Object is the whole live object as decoded from JSON (unstructured content), for the checks that read
+	// its status, such as the readiness of a ScaledObject. Its apiVersion, kind, namespace, name and UID must be
+	// the fields above. Decide only reads it. Nil is a missing object, which an action with a state check
+	// refuses.
+	Object map[string]any
 }
 
 // DecisionInput is everything a decision reads. Decide does not modify it.
@@ -178,8 +211,11 @@ type Decision struct {
 func Decide(in DecisionInput) Decision {
 	if r, msg := check(in); r != "" {
 		outcome := OutcomeDenied
-		if r == ReasonIncompleteInput {
+		switch r {
+		case ReasonIncompleteInput, ReasonScaledObjectNotReady:
 			outcome = OutcomeNeedsIntervention
+		case ReasonScaledObjectReadinessUnknown:
+			outcome = OutcomeWait
 		}
 		return Decision{Outcome: outcome, Reason: r, Message: msg, EffectiveApprovalRequired: true}
 	}
@@ -203,7 +239,7 @@ func check(in DecisionInput) (Reason, string) {
 		return ReasonIncompleteInput, "The request, policy, settings, resolved source and live target are all needed"
 	}
 	for _, c := range []func(DecisionInput) (Reason, string){
-		checkRequest, checkAction, checkTarget, checkPolicyAction, checkSource,
+		checkRequest, checkAction, checkModule, checkTarget, checkPolicyAction, checkSource, checkTargetState,
 	} {
 		if r, msg := c(in); r != "" {
 			return r, msg
@@ -272,6 +308,9 @@ func checkTarget(in DecisionInput) (Reason, string) {
 		t.Namespace != ref.Namespace || t.Name != ref.Name {
 		return ReasonTargetMismatch, "The live target is not the object the request's targetRef names"
 	}
+	if t.Object != nil && !sameObject(t) {
+		return ReasonTargetMismatch, "The live object is not the live target it was given for"
+	}
 	group := apiGroup(t.APIVersion)
 	if excluded(group, t.Kind) {
 		return ReasonKindExcluded, fmt.Sprintf("Kind %q in API group %q is excluded from remediation", t.Kind, group)
@@ -302,6 +341,60 @@ func CheckObjectSelector(p *v1alpha1.RemediationPolicy, targetLabels map[string]
 		}
 	}
 	return "", ""
+}
+
+// checkModule checks that the module contributing the action, if any, is enabled.
+func checkModule(in DecisionInput) (Reason, string) {
+	return CheckModuleEnabled(in.Settings, in.Request.Spec.Action.Type)
+}
+
+// CheckModuleEnabled checks that the integration module that contributes an action of type actionType is
+// enabled in settings spec.modules.integrations (design 2.4 and 2.5). A core action has no module and passes.
+// It reads the spec only, never the status (ADR-0024). It returns an empty reason when the action may be used.
+// The freshness check uses it too, so a module disabled after the decision makes the plan stale.
+func CheckModuleEnabled(settings *v1alpha1.RemediationSettings, actionType v1alpha1.ActionType) (Reason, string) {
+	entry, ok := catalog[actionType]
+	if !ok || entry.module == "" {
+		return "", ""
+	}
+	if m := settings.Spec.Modules; m == nil || !slices.Contains(m.Integrations, entry.module) {
+		return ReasonModuleNotEnabled,
+			fmt.Sprintf("Action %s needs the %s integration enabled in RemediationSettings spec.modules", actionType, entry.module)
+	}
+	return "", ""
+}
+
+// checkTargetState checks that the live target is in a state the action may be applied to. It runs last, so
+// a plan the policy refuses is Denied, a final answer, whatever state its target is in.
+func checkTargetState(in DecisionInput) (Reason, string) {
+	return CheckTargetState(in.Request.Spec.Action.Type, in.Target.Object)
+}
+
+// CheckTargetState runs the state check of an action of type actionType on its live target object, the
+// object as decoded from JSON. For AdjustKedaMaxReplicas the object must be a ScaledObject that is ready by the
+// KedaReady rule ([kedaready.Readiness], the function the KEDA module's verification check uses too): a
+// definite not-ready state, or a nil, missing or malformed object, gives [ReasonScaledObjectNotReady], and a
+// ScaledObject KEDA has not reported on yet gives [ReasonScaledObjectReadinessUnknown]. Other action types have
+// no state check. It returns an empty reason when the target passes. The freshness check uses it too, so
+// readiness lost after the decision makes the plan stale by the same code.
+func CheckTargetState(actionType v1alpha1.ActionType, obj map[string]any) (Reason, string) {
+	if entry, ok := catalog[actionType]; ok && entry.state != nil {
+		return entry.state(obj)
+	}
+	return "", ""
+}
+
+// scaledObjectState is the state check of AdjustKedaMaxReplicas.
+func scaledObjectState(obj map[string]any) (Reason, string) {
+	switch kedaready.Readiness(obj) {
+	case kedaready.Ready:
+		return "", ""
+	case kedaready.Pending:
+		return ReasonScaledObjectReadinessUnknown, "KEDA has not reported the ScaledObject ready yet; the check is made again later"
+	default:
+		return ReasonScaledObjectNotReady, "The ScaledObject is not ready (Ready=True, not paused, not being deleted, " +
+			"not on fallback, HPAActive not False), so raising maxReplicaCount is not the fix; a person must look"
+	}
 }
 
 // checkPolicyAction checks that the policy allows the action type and that the change is within its bounds.
@@ -424,12 +517,24 @@ func checkSource(in DecisionInput) (Reason, string) {
 	return "", ""
 }
 
-// actionKinds lists what one action type may target: an API group (any version, or exactly the given
-// apiVersion when apiVersion is set) and a set of kinds.
+// sameObject reports whether t.Object has t's apiVersion, kind, namespace, name and UID.
+func sameObject(t *Target) bool {
+	o := t.Object
+	meta, _ := o["metadata"].(map[string]any)
+	str := func(m map[string]any, k string) string { v, _ := m[k].(string); return v }
+	return str(o, "apiVersion") == t.APIVersion && str(o, "kind") == t.Kind && str(meta, "namespace") == t.Namespace &&
+		str(meta, "name") == t.Name && str(meta, "uid") == string(t.UID)
+}
+
+// actionKinds is one action type's catalog entry: what it may target (an API group, any version or exactly
+// apiVersion when it is set, and a set of kinds), the integration module that contributes it ("" for a core
+// action) and the state check its live target must pass (nil for none).
 type actionKinds struct {
 	group      string
 	apiVersion string
 	kinds      []string
+	module     v1alpha1.ModuleName
+	state      func(obj map[string]any) (Reason, string)
 }
 
 func (k actionKinds) allows(apiVersion, kind string) bool {
@@ -443,9 +548,12 @@ func (k actionKinds) allows(apiVersion, kind string) bool {
 }
 
 // catalog is the closed action catalog with the kinds each action may target. It mirrors the CEL rules on
-// RemediationRequestSpec. A type missing here is unknown and always Denied.
+// RemediationRequestSpec, and is stricter in one place: AdjustKedaMaxReplicas may target only a keda.sh/v1alpha1
+// ScaledObject, the only version KEDA 2.x serves and the one its readiness rule reads. A type missing here is
+// unknown and always Denied.
 var catalog = map[v1alpha1.ActionType]actionKinds{
-	v1alpha1.ActionAdjustKedaMaxReplicas:   {group: "keda.sh", kinds: []string{"ScaledObject"}},
+	v1alpha1.ActionAdjustKedaMaxReplicas: {group: kedaready.Group, apiVersion: kedaready.APIVersion,
+		kinds: []string{kedaready.KindScaledObject}, module: kedaready.ModuleName, state: scaledObjectState},
 	v1alpha1.ActionSetContainerMemoryLimit: {group: "apps", apiVersion: "apps/v1", kinds: []string{"Deployment", "StatefulSet"}},
 }
 

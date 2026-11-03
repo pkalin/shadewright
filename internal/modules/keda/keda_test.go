@@ -402,8 +402,9 @@ func TestTriggerErrorIsNoCapacityProblem(t *testing.T) {
 	if n < 5 {
 		t.Errorf("only %d trigger-error symptoms checked; the fixtures give at least 5", n)
 	}
-	if h := Module().Hooks(); len(h.Actions) != 0 {
-		t.Errorf("the module lists actions %v; AdjustKedaMaxReplicas is listed only once the gate (#228) exists", h.Actions)
+	// The only action is the one the policy gate refuses unless the ScaledObject is ready (#228).
+	if h := Module().Hooks(); !slices.Equal(h.Actions, []v1alpha1.ActionType{v1alpha1.ActionAdjustKedaMaxReplicas}) {
+		t.Errorf("the module lists actions %v, want only AdjustKedaMaxReplicas", h.Actions)
 	}
 }
 

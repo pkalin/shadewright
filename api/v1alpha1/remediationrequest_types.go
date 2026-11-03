@@ -198,8 +198,8 @@ const (
 	PhaseExpired RemediationPhase = "Expired"
 	// PhaseCancelled means the request was cancelled before the change was merged. Terminal.
 	PhaseCancelled RemediationPhase = "Cancelled"
-	// PhaseSuperseded means an input of the plan digest changed, so the pull request is closed and a new
-	// request is needed. Terminal.
+	// PhaseSuperseded means a plan input changed, or the ScaledObject is no longer ready, or the module that
+	// contributes the action was disabled, so the pull request is closed and a new request is needed. Terminal.
 	PhaseSuperseded RemediationPhase = "Superseded"
 	// PhaseNeedsIntervention means the controller cannot continue on its own, for example because the target
 	// is not declared in a plain manifest; a human must act.
@@ -213,8 +213,8 @@ const (
 	ConditionApproved      = "Approved"
 	ConditionDelivered     = "Delivered"
 	ConditionVerified      = "Verified"
-	// ConditionPlanFresh is False, with the reason, when an input of the plan digest changed and the request
-	// was superseded (or stopped because its change request could not be closed). It is also False, with the
+	// ConditionPlanFresh is False, with the reason, when an input of the plan digest changed, the ScaledObject
+	// is no longer ready or the action's module was disabled, and the request was superseded (or stopped because its change request could not be closed). It is also False, with the
 	// stale reason and the phase unchanged, once the cleanup of a stale plan has started: it is written before
 	// the change request is closed, so a close whose answer was lost is known on the next reconcile to be
 	// Shadewright's own, and the request ends Superseded rather than NeedsIntervention. It is Unknown, with reason

@@ -271,15 +271,15 @@ func looksLikeSecret(v string) bool {
 	return letter && other
 }
 
+// minSchemeWord is the length from which any value after Basic or Bearer counts: longer than the words
+// that follow them in prose ("authentication").
+const minSchemeWord = 16
+
 // schemeSpan judges the value after "Basic" or "Bearer" (group 2) outside an Authorization header. Prose
 // follows these words too ("failed basic health check", "missing Bearer token"), so the value counts when it
 // looks like a credential (looksLikeSecret), is at least minSchemeWord bytes long (an opaque token of
 // letters only), or, after Basic, is padded base64 of "user:password" in printable text, which catches
 // short ones such as "dTpw" ("u:p").
-// minSchemeWord is the length from which any value after Basic or Bearer counts: longer than the words
-// that follow them in prose ("authentication").
-const minSchemeWord = 16
-
 func schemeSpan(s string, m []int, _ int) (int, int, bool) {
 	v := s[m[4]:m[5]]
 	if looksLikeSecret(v) || len(v) >= minSchemeWord || strings.EqualFold(s[m[2]:m[3]], "basic") && isBasicCredential(v) {

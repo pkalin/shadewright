@@ -17,8 +17,6 @@ limitations under the License.
 package flux
 
 import (
-	"encoding/json"
-	"math"
 	"strings"
 
 	"github.com/pkalin/shadewright/internal/modules"
@@ -243,7 +241,7 @@ func newestDeployed(status map[string]any) map[string]any {
 		if s, _ := snap["status"].(string); s != helmDeployed {
 			continue
 		}
-		v, _ := integer(snap["version"])
+		v, _ := modules.JSONInteger(snap["version"])
 		if best == nil || v > bestVersion {
 			best, bestVersion = snap, v
 		}
@@ -282,7 +280,7 @@ func symptoms(obj map[string]any, apiVersion, kind string,
 		return nil
 	}
 	meta, _ := obj["metadata"].(map[string]any)
-	generation, hasGeneration := integer(meta["generation"])
+	generation, hasGeneration := modules.JSONInteger(meta["generation"])
 	spec, _ := obj["spec"].(map[string]any)
 	if suspended, _ := spec["suspend"].(bool); suspended {
 		return nil
@@ -330,7 +328,7 @@ func failing(status map[string]any, generation int64, hasGeneration bool) (map[s
 	var ready map[string]any
 	for _, c := range conds {
 		cond, _ := c.(map[string]any)
-		if observed, set := integer(cond["observedGeneration"]); hasGeneration && set && observed != generation {
+		if observed, set := modules.JSONInteger(cond["observedGeneration"]); hasGeneration && set && observed != generation {
 			continue
 		}
 		typ, _ := cond["type"].(string)
@@ -346,24 +344,4 @@ func failing(status map[string]any, generation int64, hasGeneration bool) (map[s
 		return nil, ""
 	}
 	return ready, conditionReady
-}
-
-// integer reads a JSON integer as decoded by encoding/json (float64 or json.Number) or by the Kubernetes
-// decoder (int64). It reports false for anything else, a fraction included.
-func integer(v any) (int64, bool) {
-	switch n := v.(type) {
-	case int64:
-		return n, true
-	case int:
-		return int64(n), true
-	case float64:
-		if n != math.Trunc(n) || n < math.MinInt64 || n >= math.MaxInt64 {
-			return 0, false
-		}
-		return int64(n), true
-	case json.Number:
-		i, err := n.Int64()
-		return i, err == nil
-	}
-	return 0, false
 }

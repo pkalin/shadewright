@@ -1,0 +1,7 @@
+{
+  "apiVersion": "keda.sh/v1alpha1",
+  "kind": "TriggerAuthentication",
+  "metadata": {"name": "rabbitmq-auth", "namespace": "shop", "uid": "2c4e6a8b-0d1f-4a3c-9e5b-7d9f1b3d5e7a", "generation": 1},
+  "spec": {"secretTargetRef": [{"parameter": "host", "name": "rabbitmq-connection", "key": "host"}]},
+  "status": {"scaledobjects": "orders"}
+}

@@ -1,0 +1,27 @@
+{
+  "apiVersion": "keda.sh/v1alpha1",
+  "kind": "ScaledObject",
+  "metadata": {"name": "orders", "namespace": "shop", "uid": "8d2e4f60-1a3b-4c5d-9e7f-a0b1c2d3e4f5", "generation": 5},
+  "spec": {
+    "scaleTargetRef": {"name": "orders-consumer"},
+    "maxReplicaCount": 20,
+    "triggers": [
+      {"type": "rabbitmq", "metadata": {"queueName": "orders", "mode": "QueueLength", "value": "50"}, "authenticationRef": {"name": "rabbitmq-auth"}},
+      {"type": "cpu", "metricType": "Utilization", "metadata": {"value": "70"}}
+    ]
+  },
+  "status": {
+    "scaleTargetKind": "apps/v1.Deployment",
+    "externalMetricNames": ["s0-rabbitmq-orders"],
+    "resourceMetricNames": ["cpu"],
+    "hpaName": "keda-hpa-orders",
+    "triggersTypes": "rabbitmq,cpu",
+    "authenticationsTypes": "rabbitmq-auth",
+    "conditions": [
+      {"type": "Ready", "status": "Unknown", "reason": "PartialTriggerError", "message": "Some triggers defined in ScaledObject are not working correctly"},
+      {"type": "Active", "status": "True", "reason": "ScalerActive", "message": "Scaling is performed because triggers are active"},
+      {"type": "Fallback", "status": "False", "reason": "NoFallbackFound", "message": "No fallbacks are active on this scaled object"},
+      {"type": "Paused", "status": "False"}
+    ]
+  }
+}

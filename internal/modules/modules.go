@@ -79,6 +79,27 @@ type Hooks struct {
 	// Actions are the catalog actions the module may propose. Each still needs its typed parameters, policy
 	// rule, GitOps patcher and refusal test (invariant 2); a security integration lists none.
 	Actions []v1alpha1.ActionType
+	// Checks are verification checks the module implements, for verification (planned, #19).
+	Checks []VerificationCheck
+}
+
+// VerificationCheck implements one of the API's verification checks for one kind: after a change is
+// delivered, verification (planned, #19) reads the object the request targets and asks Holds whether the
+// check holds. Verification runs in the executor, which is to resolve a check by name in its own registry,
+// built from the same compiled-in modules as the analyzer's, among the integrations enabled in
+// RemediationSettings. It fails closed: a check the request needs that no enabled module implements fails
+// verification (NeedsIntervention) and never counts as passed. [New] refuses a check with an empty Group or
+// Kind, no Holds, or a Name outside the API's VerificationCheck values, and a name declared by two modules.
+// It is a minimal contract, to be widened when verification is built.
+type VerificationCheck struct {
+	// Name is the check, one of the API's VerificationCheck values, for example KedaReady.
+	Name v1alpha1.VerificationCheck
+	// Group and Kind are those of the object the check reads, for example "keda.sh" and "ScaledObject".
+	Group string
+	Kind  string
+	// Holds reports whether the check holds for obj, the object as decoded from JSON. Everything in it is
+	// untrusted. Holds only reads obj, never changes it, and does no I/O.
+	Holds func(obj map[string]any) bool
 }
 
 // SymptomSource turns objects of one watched kind into symptoms. It is declarative apart from Symptoms, a

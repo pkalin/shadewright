@@ -1,0 +1,31 @@
+{
+  "apiVersion": "autoscaling/v2",
+  "kind": "HorizontalPodAutoscaler",
+  "metadata": {
+    "name": "keda-hpa-orders", "namespace": "shop", "uid": "9b1d3f5a-7c9e-4b2d-8f60-1a3c5e7f9b1d", "generation": 3,
+    "labels": {"app.kubernetes.io/managed-by": "keda-operator", "app.kubernetes.io/name": "keda-hpa-orders", "scaledobject.keda.sh/name": "orders"},
+    "ownerReferences": [{"apiVersion": "keda.sh/v1alpha1", "kind": "ScaledObject", "name": "orders", "uid": "8d2e4f60-1a3b-4c5d-9e7f-a0b1c2d3e4f5", "controller": true, "blockOwnerDeletion": true}]
+  },
+  "spec": {
+    "scaleTargetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": "orders-consumer"},
+    "minReplicas": 1,
+    "maxReplicas": 20,
+    "metrics": [
+      {"type": "External", "external": {"metric": {"name": "s0-rabbitmq-orders", "selector": {"matchLabels": {"scaledobject.keda.sh/name": "orders"}}}, "target": {"type": "AverageValue", "averageValue": "50"}}}
+    ]
+  },
+  "status": {
+    "observedGeneration": 3,
+    "lastScaleTime": "2026-11-03T08:10:00Z",
+    "currentReplicas": 20,
+    "desiredReplicas": 20,
+    "currentMetrics": [
+      {"type": "External", "external": {"metric": {"name": "s0-rabbitmq-orders", "selector": {"matchLabels": {"scaledobject.keda.sh/name": "orders"}}}, "current": {"averageValue": "212500m"}}}
+    ],
+    "conditions": [
+      {"type": "AbleToScale", "status": "True", "reason": "ReadyForNewScale", "message": "recommended size matches current size", "lastTransitionTime": "2026-11-03T08:10:00Z"},
+      {"type": "ScalingActive", "status": "True", "reason": "ValidMetricFound", "message": "the HPA was able to successfully calculate a replica count from external metric s0-rabbitmq-orders(&LabelSelector{MatchLabels:map[string]string{scaledobject.keda.sh/name: orders,},MatchExpressions:[]LabelSelectorRequirement{},})", "lastTransitionTime": "2026-11-03T07:40:00Z"},
+      {"type": "ScalingLimited", "status": "True", "reason": "TooManyReplicas", "message": "the desired replica count is more than the maximum replica count", "lastTransitionTime": "2026-11-03T08:10:00Z"}
+    ]
+  }
+}

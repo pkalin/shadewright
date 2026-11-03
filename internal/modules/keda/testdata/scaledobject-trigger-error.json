@@ -1,0 +1,29 @@
+{
+  "apiVersion": "keda.sh/v1alpha1",
+  "kind": "ScaledObject",
+  "metadata": {"name": "worker", "namespace": "demo", "uid": "3c1f5a7e-2b4d-4e6f-8a9b-0c1d2e3f4a5b", "generation": 1, "labels": {"app.kubernetes.io/name": "worker", "app.kubernetes.io/part-of": "demo", "scaledobject.keda.sh/name": "worker"}},
+  "spec": {
+    "scaleTargetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": "worker"},
+    "pollingInterval": 30,
+    "minReplicaCount": 1,
+    "maxReplicaCount": 3,
+    "triggers": [
+      {"type": "prometheus", "metadata": {"serverAddress": "http://prometheus-server.monitoring.svc.cluster.local", "query": "sum(rate(http_requests_total{namespace=\"demo\", app_kubernetes_io_name=\"worker\"}[1m]))", "threshold": "5", "ignoreNullValues": "false"}}
+    ]
+  },
+  "status": {
+    "scaleTargetKind": "apps/v1.Deployment",
+    "scaleTargetGVKR": {"group": "apps", "version": "v1", "kind": "Deployment", "resource": "deployments"},
+    "originalReplicaCount": 1,
+    "externalMetricNames": ["s0-prometheus"],
+    "hpaName": "keda-hpa-worker",
+    "triggersTypes": "prometheus",
+    "conditions": [
+      {"type": "Ready", "status": "False", "reason": "TriggerError", "message": "Triggers defined in ScaledObject are not working correctly"},
+      {"type": "Active", "status": "False", "reason": "ScalerNotActive", "message": "Scaling is not performed because triggers are not active"},
+      {"type": "Fallback", "status": "False", "reason": "NoFallbackFound", "message": "No fallbacks are active on this scaled object"},
+      {"type": "Paused", "status": "False"},
+      {"type": "HPAActive", "status": "False", "reason": "FailedGetExternalMetric", "message": "HPA is not actively scaling: the HPA was unable to compute the replica count: unable to get external metric demo/s0-prometheus/&LabelSelector{MatchLabels:map[string]string{scaledobject.keda.sh/name: worker,},MatchExpressions:[]LabelSelectorRequirement{},}: unable to fetch metrics from external metrics API: rpc error: code = Unknown desc = error when getting metric values metric:s0-prometheus encountered error"}
+    ]
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "apiVersion": "keda.sh/v1alpha1",
+  "kind": "ScaledObject",
+  "metadata": {"name": "orders", "namespace": "shop", "uid": "8d2e4f60-1a3b-4c5d-9e7f-a0b1c2d3e4f5", "generation": 4},
+  "spec": {
+    "scaleTargetRef": {"name": "orders-consumer"},
+    "maxReplicaCount": 20,
+    "fallback": {"failureThreshold": 3, "replicas": 6},
+    "triggers": [
+      {"type": "rabbitmq", "metadata": {"queueName": "orders", "mode": "QueueLength", "value": "50"}, "authenticationRef": {"name": "rabbitmq-auth"}}
+    ]
+  },
+  "status": {
+    "scaleTargetKind": "apps/v1.Deployment",
+    "originalReplicaCount": 2,
+    "externalMetricNames": ["s0-rabbitmq-orders"],
+    "hpaName": "keda-hpa-orders",
+    "triggersTypes": "rabbitmq",
+    "authenticationsTypes": "rabbitmq-auth",
+    "health": {"s0-rabbitmq-orders": {"numberOfFailures": 7, "status": "Failing"}},
+    "conditions": [
+      {"type": "Ready", "status": "True", "reason": "ScaledObjectReady", "message": "ScaledObject is defined correctly and is ready for scaling"},
+      {"type": "Active", "status": "False", "reason": "ScalerNotActive", "message": "Scaling is not performed because triggers are not active"},
+      {"type": "Fallback", "status": "True", "reason": "FallbackExists", "message": "At least one trigger is falling back on this scaled object"},
+      {"type": "Paused", "status": "False"}
+    ]
+  }
+}

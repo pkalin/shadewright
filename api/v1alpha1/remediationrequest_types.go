@@ -76,11 +76,28 @@ type ResolvedSource struct {
 
 // VerificationCheck is a named, deterministic check run after delivery. DeliveryRevisionApplied: the GitOps
 // controller has applied the revision that contains the merged change. WorkloadHealthy: the target workload
-// is available and its rollout is complete. KedaReady: the KEDA ScaledObject reports Ready.
-// QueueBacklogDecreasing: the backlog that drives the ScaledObject is going down. NoNewOOMKills: no container
-// of the target is OOMKilled after the change.
+// is available and its rollout is complete. KedaReady: the KEDA ScaledObject reports Ready=True, is not
+// paused (Paused=True, which a scale-in or scale-out pause also sets), is not on fallback (Fallback=True) and
+// its HPA can read its metrics (HPAActive is not False). QueueBacklogDecreasing: the backlog that drives the
+// ScaledObject is going down. NoNewOOMKills: no container of the target is OOMKilled after the change.
 // +kubebuilder:validation:Enum=DeliveryRevisionApplied;WorkloadHealthy;KedaReady;QueueBacklogDecreasing;NoNewOOMKills
 type VerificationCheck string
+
+// The verification checks, one per value of the VerificationCheck enum.
+const (
+	CheckDeliveryRevisionApplied VerificationCheck = "DeliveryRevisionApplied"
+	CheckWorkloadHealthy         VerificationCheck = "WorkloadHealthy"
+	CheckKedaReady               VerificationCheck = "KedaReady"
+	CheckQueueBacklogDecreasing  VerificationCheck = "QueueBacklogDecreasing"
+	CheckNoNewOOMKills           VerificationCheck = "NoNewOOMKills"
+)
+
+// VerificationChecks returns every value of the VerificationCheck enum, in the enum's order.
+func VerificationChecks() []VerificationCheck {
+	return []VerificationCheck{
+		CheckDeliveryRevisionApplied, CheckWorkloadHealthy, CheckKedaReady, CheckQueueBacklogDecreasing, CheckNoNewOOMKills,
+	}
+}
 
 // Verification says when a delivered change counts as a success. The controller always adds the checks the
 // action type needs (DeliveryRevisionApplied, plus KedaReady or NoNewOOMKills), so a request can only make

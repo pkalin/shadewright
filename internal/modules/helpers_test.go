@@ -27,6 +27,7 @@ const (
 	fluxName    = "flux"
 	sharedName  = "shared"
 	kedaGV      = "keda.sh/v1alpha1"
+	kedaGroup   = "keda.sh"
 	appsGV      = "apps/v1"
 	helmGV      = "helm.toolkit.fluxcd.io/v2"
 	kustomizeGV = "kustomize.toolkit.fluxcd.io/v1"

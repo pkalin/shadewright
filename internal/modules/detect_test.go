@@ -145,7 +145,7 @@ func TestDetectIntegrations(t *testing.T) {
 		{"core only", []string{"v1", appsGV}, nil},
 		{"KEDA", []string{"v1", appsGV, kedaGV}, []string{kedaName + "=" + kedaGV}},
 		{"another KEDA version", []string{"keda.sh/v1beta9"}, nil},
-		{"group only", []string{"keda.sh"}, nil},
+		{"group only", []string{kedaGroup}, nil},
 		{"any version of Flux", []string{helmGV}, []string{fluxName + "=" + helmGV}},
 		{"both, sorted by name", []string{kedaGV, kustomizeGV},
 			[]string{fluxName + "=" + kustomizeGV, kedaName + "=" + kedaGV}},

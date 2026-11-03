@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -50,8 +51,14 @@ const (
 const retryAfter = 5 * time.Second
 
 // MaxCount is the most occurrences one observation stands for. A series count is written by whoever can
-// create events in the namespace, so a forged jump (to 2^31, say) adds at most this much to an Incident.
+// create events in the namespace, so one forged jump (to 2^31, say) adds at most this much. The cap is per
+// observation: every further forged update can add as much again, and nothing in the collector bounds an
+// Incident's total; bounding that is the Incident controller's (#42).
 const MaxCount = 1000
+
+// AllHandled is the answer of a [HandledFunc] for an occurrence whose record the Incident controller
+// dropped to stay within its bounds: everything in it counts as counted, so a bound never counts twice.
+const AllHandled int64 = math.MaxInt64
 
 // Observation is one symptom ready for the Incident controller: the fingerprint and the normalized,
 // redacted symptom are computed here, so no raw event or status text ever leaves the collector.
@@ -74,8 +81,13 @@ type Observation struct {
 	Occurrence string
 	// Total is how many times the occurrence happened as the cluster reports it: the event's series count
 	// (or the count of an older recorder, or 1), or 1 for a container termination. It is cumulative and not
-	// capped; a consumer that computes an increase from it must cap that at MaxCount too.
+	// capped: a consumer computes an increase from it only with [Observation.Increase], which applies
+	// MaxCount.
 	Total int64
+	// Began is when the occurrence began, as the cluster reports it: the event's creation time, or the
+	// termination's finish time (zero when the cluster did not report one), never later than the collector's
+	// clock. It orders occurrences for a consumer that keeps a bounded number of them.
+	Began time.Time
 	// Count is how many new occurrences this observation stands for: the increase of Total since this
 	// collector last handled it, at most MaxCount, never the total of a series the collector cannot account
 	// for. It is 0 exactly when MayRepeat is set.
@@ -86,18 +98,28 @@ type Observation struct {
 	// MayRepeat is set when the collector cannot tell how much of Total is new: the occurrence is older than
 	// this collector's first reconcile (a restart or a new leader), or the collector dropped state of
 	// occurrences at least as old to stay within its bounds, and no HandledFunc settled it. The consumer must
-	// then count Total minus what it already counted for this Occurrence, capped at MaxCount.
+	// then count Increase(what it already counted for this Occurrence).
 	MayRepeat bool
 }
 
-// HandledFunc returns how much of an occurrence's Total the Incident with this fingerprint has already
-// counted: the highest Total it recorded for the occurrence, and found false only when it never counted the
-// occurrence at all. The Incident controller (#42) supplies it, and to answer it must persist, per
-// occurrence, the highest Total it counted for as long as the cluster can still report the occurrence (an
-// event's retention, a pod's lifetime). The collector asks only for observations it would otherwise mark
-// MayRepeat, so the dedup state of an occurrence that started before a restart lives in the Incident, not
-// in memory alone.
-type HandledFunc func(ctx context.Context, fingerprint, occurrence string) (handled int64, found bool, err error)
+// Increase returns how many of the occurrence's Total are new when handled of them were counted before:
+// the difference, never below 0 and at most MaxCount. A consumer uses it, never Total itself, for an
+// observation marked MayRepeat.
+func (o Observation) Increase(handled int64) int64 {
+	return min(max(o.Total-handled, 0), MaxCount)
+}
+
+// HandledFunc returns how much of an occurrence's Total has already been counted, by any Incident: the
+// lookup does not take the fingerprint, because the fingerprint depends on owner correlation, which can
+// differ after a restart, while the occurrence does not. It returns the highest Total recorded for the
+// occurrence, and found false only when the occurrence was never counted. The Incident controller (#42)
+// supplies it. To answer it keeps, per occurrence, the highest Total it counted and when the occurrence
+// began, for at most a fixed number of occurrences, newest first. For an occurrence it has no record of
+// that began no later than the newest one it dropped, it answers found with [AllHandled], so a bound never
+// counts twice. The collector asks only for observations it would otherwise mark MayRepeat, with the
+// deadline of an owner lookup, so the dedup state of an occurrence that started before a restart lives in
+// the Incident, not in memory alone.
+type HandledFunc func(ctx context.Context, occurrence string, began time.Time) (handled int64, found bool, err error)
 
 // Config configures a [Collector]. Zero values take the defaults above.
 type Config struct {
@@ -115,7 +137,8 @@ type Config struct {
 	// OwnerTTL is how long a verified owner is reused before it is read again. An owner that could not be
 	// verified is read again after 5 seconds.
 	OwnerTTL time.Duration
-	// LookupTimeout is the deadline of each read of an owner from the API server.
+	// LookupTimeout is the deadline of each read of an owner from the API server, and of each call of
+	// Handled.
 	LookupTimeout time.Duration
 	// SendTimeout is how long a reconcile waits for room in the channel before it tries again, 5 seconds
 	// later.
@@ -235,17 +258,23 @@ func capCount(n int64) int64 {
 
 // deliver settles an observation marked MayRepeat with the Handled func, when there is one, and hands the
 // observation to the consumer. It returns true when the observation was handed over or there was nothing
-// new in it, so the caller may record it as handled, and false when the channel stayed full.
+// new in it, so the caller may record it as handled, and false when the caller should try again later: the
+// channel stayed full or Handled did not answer within its deadline.
 func (c *Collector) deliver(ctx context.Context, o Observation) (bool, error) {
 	if o.MayRepeat && c.cfg.Handled != nil {
-		handled, found, err := c.cfg.Handled(ctx, o.Fingerprint, o.Occurrence)
+		hctx, cancel := context.WithTimeout(ctx, c.cfg.LookupTimeout)
+		handled, found, err := c.cfg.Handled(hctx, o.Occurrence, o.Began)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return false, nil
+		}
 		if err != nil {
-			return false, fmt.Errorf("reading what an incident has counted: %w", err)
+			return false, fmt.Errorf("reading what the incidents have counted: %w", err)
 		}
 		if !found {
 			handled = 0
 		}
-		o.Count, o.MayRepeat = capCount(o.Total-handled), false
+		o.Count, o.MayRepeat = o.Increase(handled), false
 		if o.Count == 0 {
 			return true, nil
 		}

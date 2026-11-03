@@ -29,6 +29,7 @@ import (
 	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
@@ -221,7 +222,7 @@ func TestPreexistingEventMayRepeat(t *testing.T) {
 
 // handledBy returns a Handled func that answers from counted, keyed by occurrence.
 func handledBy(counted map[string]int64) HandledFunc {
-	return func(_ context.Context, _ string, occurrence string) (int64, bool, error) {
+	return func(_ context.Context, occurrence string, _ time.Time) (int64, bool, error) {
 		n, ok := counted[occurrence]
 		return n, ok, nil
 	}
@@ -271,7 +272,7 @@ func TestHandledSettlesRepeats(t *testing.T) {
 }
 
 func TestHandledErrorRetries(t *testing.T) {
-	h := newHarness(t, Config{Handled: func(context.Context, string, string) (int64, bool, error) {
+	h := newHarness(t, Config{Handled: func(context.Context, string, time.Time) (int64, bool, error) {
 		return 0, false, errors.New("cache not synced")
 	}})
 	ev := warning("err", 2)
@@ -404,5 +405,67 @@ func TestCollectorBoundsEventsUnderLoad(t *testing.T) {
 	}
 	if got := len(h.drain()); got != events {
 		t.Fatalf("got %d observations, want %d", got, events)
+	}
+}
+
+// A Handled func that does not answer within the lookup deadline makes the reconcile try again later,
+// without recording anything as handled.
+func TestHandledHasADeadline(t *testing.T) {
+	h := newHarness(t, Config{LookupTimeout: 20 * time.Millisecond,
+		Handled: func(ctx context.Context, _ string, _ time.Time) (int64, bool, error) {
+			<-ctx.Done()
+			return 0, false, ctx.Err()
+		}})
+	ev := warning("slow", 2)
+	ev.CreationTimestamp = metav1.NewTime(t0.Add(-time.Hour))
+	h.create(ev)
+	done := make(chan ctrl.Result, 1)
+	go func() {
+		res, err := h.events.Reconcile(context.Background(), reqFor(ev.Name))
+		if err != nil {
+			t.Errorf("a Handled timeout is retried, not an error: %v", err)
+		}
+		done <- res
+	}()
+	select {
+	case res := <-done:
+		if res.RequeueAfter == 0 {
+			t.Fatal("no retry after Handled timed out")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Handled has no deadline")
+	}
+	h.none()
+	if n := h.c.series.len(); n != 0 {
+		t.Fatal("state committed although nothing was handled")
+	}
+}
+
+// The Handled lookup is by occurrence and when it began, not by fingerprint, which depends on owner
+// correlation.
+func TestHandledIsAskedByOccurrence(t *testing.T) {
+	var gotOccurrence string
+	var gotBegan time.Time
+	h := newHarness(t, Config{Handled: func(_ context.Context, occurrence string, began time.Time) (int64, bool, error) {
+		gotOccurrence, gotBegan = occurrence, began
+		return 0, false, nil
+	}})
+	ev := warning("asked", 2)
+	ev.CreationTimestamp = metav1.NewTime(t0.Add(-time.Hour))
+	h.create(ev)
+	h.reconcileEvent(ev.Name)
+	got := h.one()
+	if gotOccurrence != "event:"+string(ev.UID) || !gotBegan.Equal(t0.Add(-time.Hour)) || !got.Began.Equal(gotBegan) {
+		t.Fatalf("Handled asked for %q began %v, observation %+v", gotOccurrence, gotBegan, got)
+	}
+}
+
+func TestIncreaseIsCapped(t *testing.T) {
+	o := Observation{Total: 5000}
+	cases := []struct{ handled, want int64 }{{0, MaxCount}, {4500, 500}, {5000, 0}, {6000, 0}, {AllHandled, 0}}
+	for _, c := range cases {
+		if got := o.Increase(c.handled); got != c.want {
+			t.Errorf("Increase(%d) of a total of 5000 = %d, want %d", c.handled, got, c.want)
+		}
 	}
 }

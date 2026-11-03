@@ -287,6 +287,8 @@ func TestPermissionBoundary(t *testing.T) {
 		{"analyzer", "list", "apps", "deployments", "", otherNS, false},
 		{"analyzer", "watch", "apps", "replicasets", "", otherNS, false},
 		{"analyzer", "list", "apps", "statefulsets", "", otherNS, false},
+		{"analyzer", "get", "apps", "daemonsets", "", otherNS, false},
+		{"analyzer", "get", "batch", "jobs", "", otherNS, false},
 		{"analyzer", "list", "events.k8s.io", "events", "", unwatched, false},
 		{"analyzer", "get", "", "pods", "", unwatched, false},
 		{"analyzer", "get", "apps", "replicasets", "", unwatched, false},

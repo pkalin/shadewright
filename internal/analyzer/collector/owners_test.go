@@ -315,9 +315,10 @@ func TestOwnerCacheNeedsTheWholeReference(t *testing.T) {
 	subjectIs(t, h.one().Subject, kindPod, forged.Name, forged.UID)
 }
 
-// A forged reference that copies a real ReplicaSet's name and UID under another API version is not
-// followed, and does not keep real pods of that ReplicaSet from being correlated.
-func TestForgedAPIVersionDoesNotPoisonTheCache(t *testing.T) {
+// A forged reference that copies a real ReplicaSet's name and UID under another API version is refused
+// before the owner cache is consulted (which is why the cache key needs no API version): it is never read
+// or cached, and real pods of that ReplicaSet are still correlated.
+func TestOtherAPIGroupIsNeitherReadNorCached(t *testing.T) {
 	d, rs, pod := workload()
 	forged := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name: intruder, Namespace: testNS, UID: "2a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", Labels: pod.Labels,
@@ -329,6 +330,10 @@ func TestForgedAPIVersionDoesNotPoisonTheCache(t *testing.T) {
 	h.create(forgedEv)
 	h.reconcileEvent(forgedEv.Name)
 	subjectIs(t, h.one().Subject, kindPod, forged.Name, forged.UID)
+	if n := h.gets.Load(); n != 0 || len(h.c.owners.cache.Keys()) != 0 {
+		t.Fatalf("reference in another API group: %d reads, %d cache entries, want none", n,
+			len(h.c.owners.cache.Keys()))
+	}
 	genuine := warning("real", 0)
 	h.create(genuine)
 	h.reconcileEvent(genuine.Name)
@@ -394,4 +399,51 @@ func TestEventAfterThePodIsGone(t *testing.T) {
 	h.create(other)
 	h.reconcileEvent(other.Name)
 	subjectIs(t, h.one().Subject, kindPod, otherPod, otherUID)
+}
+
+// An event that names a Deployment or a StatefulSet is kept only when the object exists with the UID the
+// event gives: the analyzer can read both, so it does not take the event's word for it.
+func TestRegardingWorkloadIsVerified(t *testing.T) {
+	d, _, _ := workload()
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: testNS, UID: stsUID},
+		Spec:       appsv1.StatefulSetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{labelApp: "db"}}},
+	}
+	cases := []struct {
+		name string
+		reg  corev1.ObjectReference
+		ok   bool
+	}{
+		{"Deployment", corev1.ObjectReference{APIVersion: apiApps, Kind: kindDeployment, Name: web, UID: deployUID}, true},
+		{"StatefulSet", corev1.ObjectReference{APIVersion: apiApps, Kind: kindStatefulSet, Name: "db", UID: stsUID}, true},
+		{"Deployment with another UID", corev1.ObjectReference{APIVersion: apiApps, Kind: kindDeployment, Name: web, UID: rsUID}, false},
+		{"StatefulSet that does not exist", corev1.ObjectReference{APIVersion: apiApps, Kind: kindStatefulSet, Name: "gone", UID: stsUID}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t, Config{}, d, sts)
+			ev := warning("workload", 0)
+			ev.Reason = "ProgressDeadlineExceeded"
+			ev.Regarding = c.reg
+			h.create(ev)
+			h.reconcileEvent(ev.Name)
+			if !c.ok {
+				h.none()
+				return
+			}
+			subjectIs(t, h.one().Subject, c.reg.Kind, c.reg.Name, c.reg.UID)
+		})
+	}
+}
+
+// Pods are controlled by ReplicaSets and StatefulSets; a pod whose controller reference names a Deployment
+// directly is its own subject, even when the Deployment selects it.
+func TestPodNamingADeploymentIsItsOwnSubject(t *testing.T) {
+	d, _, pod := workload()
+	pod.OwnerReferences = controllerRef(apiApps, kindDeployment, web, deployUID)
+	h := newHarness(t, Config{}, d, pod)
+	ev := warning("direct", 0)
+	h.create(ev)
+	h.reconcileEvent(ev.Name)
+	subjectIs(t, h.one().Subject, kindPod, webPod, podUID)
 }

@@ -108,12 +108,12 @@ const (
 	ownerMissTTL = 5 * time.Second
 )
 
-// ownerKey identifies one owner reference: a hit needs the same API version, kind, namespace, name and UID,
-// so a forged reference that copies a real name and UID under another API version or name never shares an
-// entry with the real one.
+// ownerKey identifies one owner reference: a hit needs the same kind, namespace, name and UID, so a forged
+// reference that copies a real UID under another name never shares an entry with the real one. The API
+// version is always apps/v1: facts refuses any other before it looks at the cache.
 type ownerKey struct {
-	apiVersion, kind, namespace, name string
-	uid                               types.UID
+	kind, namespace, name string
+	uid                   types.UID
 }
 
 // ownerFacts is what one read of an owner established.
@@ -206,7 +206,19 @@ func (r *ownerResolver) subjectOf(ctx context.Context, eventNS string, reg corev
 			return self, "", true, nil
 		}
 		return r.ownedSubject(ctx, self, *facts.parent, facts.labels)
+	case (self.Kind == kindDeployment || self.Kind == kindStatefulSet) && self.APIVersion == apiApps:
+		// A workload the analyzer can read is the subject only as it exists: the UID in the event is
+		// whatever its writer put there.
+		facts, err := r.facts(ctx, self.Namespace, metav1.OwnerReference{
+			APIVersion: apiApps, Kind: self.Kind, Name: self.Name, UID: reg.UID,
+		})
+		if err != nil || !facts.found {
+			return remediationv1alpha1.ObjectRef{}, "", false, err
+		}
+		return self, "", true, nil
 	}
+	// Other kinds the analyzer cannot read, so it cannot check their UID; such a subject is only ever the
+	// object the event itself names.
 	return self, "", true, nil
 }
 
@@ -221,9 +233,11 @@ func (r *ownerResolver) podSubject(ctx context.Context, pod *corev1.Pod) (
 	if !validRef(self) {
 		return remediationv1alpha1.ObjectRef{}, "", false, nil
 	}
-	// Only a reference marked controller is followed: GetControllerOf ignores the others.
+	// Only a reference marked controller is followed (GetControllerOf ignores the others), and only to a
+	// ReplicaSet or a StatefulSet: those are the controllers of pods. A Deployment is reached only as the
+	// controller of a ReplicaSet, never named by a pod directly.
 	ref := metav1.GetControllerOf(pod)
-	if ref == nil || len(pod.Labels) > maxLabels {
+	if ref == nil || (ref.Kind != kindReplicaSet && ref.Kind != kindStatefulSet) || len(pod.Labels) > maxLabels {
 		return self, "", true, nil
 	}
 	r.mu.Lock()
@@ -306,7 +320,7 @@ func (r *ownerResolver) facts(ctx context.Context, ns string, ref metav1.OwnerRe
 		// cannot be verified and the pod stays the subject.
 		return ownerFacts{}, nil
 	}
-	key := ownerKey{apiVersion: ref.APIVersion, kind: ref.Kind, namespace: ns, name: ref.Name, uid: ref.UID}
+	key := ownerKey{kind: ref.Kind, namespace: ns, name: ref.Name, uid: ref.UID}
 	if v, ok := r.cache.Get(key); ok {
 		return v.(ownerFacts), nil
 	}
@@ -324,7 +338,10 @@ func (r *ownerResolver) facts(ctx context.Context, ns string, ref metav1.OwnerRe
 
 // read gets the referenced object with a deadline (a get, never a list or a watch) and keeps only the
 // result of its UID check, its selector, its labels and, for a ReplicaSet, its controller reference to a
-// Deployment.
+// Deployment. The whole object, pod template included, is decoded for the moment of the read, because
+// metadata alone has no selector; nothing else of it is kept. A NotFound is final for ownerMissTTL: the
+// read goes to the API server, not to a cache, and a controller exists before the pods it creates, so a
+// missing owner is not a lag to wait out.
 func (r *ownerResolver) read(ctx context.Context, ns string, ref metav1.OwnerReference) (ownerFacts, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()

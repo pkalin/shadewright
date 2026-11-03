@@ -58,9 +58,12 @@ type termination struct {
 
 // terminations returns the abnormal terminations in a pod's status: OOMKilled or a non-zero exit code, in
 // init and app containers, from the current and the last state. A termination is identified by its
-// container ID, so the same termination seen again is the same one; without one, by its finish time, exit
-// code and reason, which stay the same when it moves from the current to the last state (the restart count
-// does not). The termination message is never read: it is free text written by the container.
+// container ID, so the same termination seen again is the same one; without one, by its start and finish
+// times, exit code and reason, which stay the same when it moves from the current to the last state (the
+// restart count does not). Two terminations of one container without container IDs that started and
+// finished in the same seconds with the same exit code and reason are taken for one, so they count once;
+// the API reports those times in whole seconds, and nothing else tells them apart. The termination message
+// is never read: it is free text written by the container.
 func terminations(pod *corev1.Pod) []termination {
 	var out []termination
 	for _, st := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
@@ -74,7 +77,8 @@ func terminations(pod *corev1.Pod) []termination {
 			}
 			id := t.ContainerID
 			if id == "" {
-				id = fmt.Sprintf("finished-%d-exit-%d-%s", t.FinishedAt.Unix(), t.ExitCode, reason)
+				id = fmt.Sprintf("started-%d-finished-%d-exit-%d-%s", t.StartedAt.Unix(), t.FinishedAt.Unix(),
+					t.ExitCode, reason)
 			}
 			out = append(out, termination{
 				container: st.Name, id: id, reason: reason, exitCode: t.ExitCode, finished: t.FinishedAt.Time,
@@ -99,10 +103,9 @@ type podState struct {
 	uid     types.UID
 	handled map[string][]string // container name to the IDs of its newest handled terminations
 	newest  time.Time
-	// repeatBefore and repeatThrough are fixed when the collector first sees the pod: its terminations that
-	// finished before repeatBefore (the collector's start), or no later than repeatThrough (the newest
-	// finish time dropped from the state until then), may have been emitted by an earlier process.
-	repeatBefore, repeatThrough time.Time
+	// repeatThrough is fixed when the collector first sees the pod: the newest finish time dropped from the
+	// state until then. Terminations of the pod that finished no later may have been emitted before.
+	repeatThrough time.Time
 }
 
 // pendingTermination is a termination not handled yet.
@@ -131,16 +134,18 @@ func newTerminationTracker(maxPods int) *terminationTracker {
 }
 
 // pending returns the terminations of the pod not yet handled, each with whether it may have been emitted
-// before (see Observation.MayRepeat). That is decided from the bounds recorded when the collector first saw
-// the pod, so it is the same for every termination of the pod and does not change when some of them are
-// committed and the rest wait for a retry.
+// before (see Observation.MayRepeat): it finished before start, the collector's first reconcile, which is
+// fixed for the process, or no later than the eviction bound recorded when the collector first saw the pod.
+// So the answer is the same for every termination of the pod and does not change when some of them are
+// committed and the rest wait for a retry. A termination without a finish time may always repeat: nothing
+// tells when it happened.
 func (tr *terminationTracker) pending(key types.NamespacedName, uid types.UID, ts []termination,
 	start time.Time) []pendingTermination {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	s, ok := tr.seen.get(key)
 	if !ok || s.uid != uid {
-		s = podState{uid: uid, handled: map[string][]string{}, repeatBefore: start, repeatThrough: tr.evictedHigh}
+		s = podState{uid: uid, handled: map[string][]string{}, repeatThrough: tr.evictedHigh}
 		tr.seen.put(key, s)
 	}
 	var out []pendingTermination
@@ -148,7 +153,7 @@ func (tr *terminationTracker) pending(key types.NamespacedName, uid types.UID, t
 		if slices.Contains(s.handled[t.container], t.id) {
 			continue
 		}
-		mayRepeat := t.finished.Before(s.repeatBefore) ||
+		mayRepeat := t.finished.Before(start) ||
 			(!s.repeatThrough.IsZero() && !t.finished.After(s.repeatThrough))
 		out = append(out, pendingTermination{termination: t, mayRepeat: mayRepeat})
 	}
@@ -240,7 +245,7 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			RegardingName:       pod.Name,
 		}
 		obs := r.c.observation(fo, subject, t.finished)
-		obs.Occurrence, obs.Total, obs.MayRepeat = t.occurrence(pod.UID), 1, t.mayRepeat
+		obs.Occurrence, obs.Began, obs.Total, obs.MayRepeat = t.occurrence(pod.UID), t.finished, 1, t.mayRepeat
 		if !t.mayRepeat {
 			obs.Count = 1
 		}

@@ -161,7 +161,7 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		r.c.series.commit(req.NamespacedName, ev.UID, created, n)
 		return ctrl.Result{}, nil
 	}
-	obs.Occurrence = "event:" + string(ev.UID)
+	obs.Occurrence, obs.Began = "event:"+string(ev.UID), r.c.notFuture(created)
 	obs.Total, obs.Count, obs.MayRepeat = n, capCount(delta), mayRepeat
 	sent, err := r.c.deliver(ctx, obs)
 	if err != nil {

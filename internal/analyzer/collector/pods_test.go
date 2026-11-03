@@ -265,3 +265,62 @@ func TestFutureFinishTimeDoesNotPinEviction(t *testing.T) {
 		t.Fatalf("termination newer than everything dropped: %+v, want no MayRepeat", got)
 	}
 }
+
+// The Handled lookup does not depend on the fingerprint: after a restart in which the pod's owner cannot be
+// verified any more, the fingerprint changes (pod instead of Deployment), but a termination counted before
+// is still recognised and not counted again.
+func TestHandledSurvivesAChangedFingerprint(t *testing.T) {
+	d, rs, pod := workload()
+	withTermination(pod, "containerd://once", ReasonOOMKilled, 137, t0)
+	counted := map[string]int64{}
+	first := newHarness(t, Config{Handled: handledBy(counted)}, d, rs, pod)
+	first.reconcilePod(pod.Name)
+	o := first.one()
+	counted[o.Occurrence] = o.Total
+	subjectIs(t, o.Subject, kindDeployment, web, deployUID)
+
+	// A new process, later, where the ReplicaSet is gone: the same termination is older than its start.
+	_, _, again := workload()
+	withTermination(again, "containerd://once", ReasonOOMKilled, 137, t0)
+	second := newHarness(t, Config{Handled: handledBy(counted)}, again)
+	second.clock.add(time.Hour)
+	second.reconcilePod(again.Name)
+	second.none()
+}
+
+// Without container IDs, terminations that finished in the same second with the same exit code and reason
+// are still told apart by when they started.
+func TestTerminationsWithoutContainerIDsInOneSecond(t *testing.T) {
+	_, _, pod := workload()
+	finished := metav1.NewTime(t0)
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: containerApp,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			Reason: reasonError, ExitCode: 1, StartedAt: metav1.NewTime(t0.Add(-time.Second)), FinishedAt: finished,
+		}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			Reason: reasonError, ExitCode: 1, StartedAt: metav1.NewTime(t0.Add(-3 * time.Second)), FinishedAt: finished,
+		}},
+	}}
+	got := terminations(pod)
+	if len(got) != 2 || got[0].id == got[1].id {
+		t.Fatalf("terminations = %+v, want two with distinct IDs", got)
+	}
+}
+
+// Whether a termination may repeat is judged against the collector's start, fixed for the process, also
+// when the pod's state had to be rebuilt between pending and commit.
+func TestRebuiltPodStateKeepsTheStartBound(t *testing.T) {
+	tr := newTerminationTracker(1)
+	a := types.NamespacedName{Namespace: testNS, Name: "a"}
+	b := types.NamespacedName{Namespace: testNS, Name: "b"}
+	old1 := termination{container: containerApp, id: "1", finished: t0.Add(-time.Hour)}
+	old2 := termination{container: "sidecar", id: "2", finished: t0.Add(-time.Hour)}
+	tr.pending(a, "a", []termination{old1, old2}, t0)
+	tr.pending(b, "b", nil, t0) // drops the state of a
+	tr.commit(a, "a", old1)     // rebuilds it
+	got := tr.pending(a, "a", []termination{old1, old2}, t0)
+	if len(got) != 1 || !got[0].mayRepeat {
+		t.Fatalf("pending after a rebuilt state = %+v, want the second termination marked mayRepeat", got)
+	}
+}

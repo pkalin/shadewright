@@ -80,7 +80,7 @@ func main() {
 	}
 
 	// The collector (internal/analyzer/collector) is added here with the Incident controller (#42), which
-	// consumes its observations and supplies the cluster ID and the count each Incident handled per occurrence; the
+	// consumes its observations and supplies the cluster ID and the count handled per occurrence; the
 	// analysis trigger (#43) follows.
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

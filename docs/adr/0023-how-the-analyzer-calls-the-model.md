@@ -1,6 +1,6 @@
 # ADR-0023: How the analyzer calls the model: prompts as code, context first, one structured call
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-03
 
 ## Context
@@ -57,8 +57,9 @@ The analyzer is the only component that talks to a model, and everything it send
 
 9. **Spend accounting.**
    - A failed or timed-out call is charged at its upper bound: the input estimate plus `MaxOutputTokens`.
-   - The daily count of analyses is kept in the status of the cluster-scoped `RemediationSettings` (`status.analysisBudget`), which only the analyzer writes ([#43](https://github.com/pkalin/shadewright/issues/43)). Where the daily spend is counted is still open.
-   - A counter that cannot be read or written means refuse, not allow.
+   - The daily count of analyses is kept in the operator namespace, in an object the analyzer owns: the ConfigMap `shadewright-analysis-budget` (the UTC day and the analyses started on it), shipped empty with the analyzer and checked by typed parsing in Go ([#43](https://github.com/pkalin/shadewright/issues/43), design 3.2). The analyzer may `get` and `update` that one ConfigMap, named in `resourceNames`, and may not create it, so deleting it stops analysis instead of resetting the count. Every write uses the resourceVersion read.
+   - Where the daily spend is counted, and in what unit, is open ([#208](https://github.com/pkalin/shadewright/issues/208)).
+   - A counter that is missing, cannot be read or written, or holds a value that cannot be trusted (a future day, a count out of bounds) means refuse, not allow.
 
 ## Consequences
 
@@ -71,6 +72,7 @@ The analyzer is the only component that talks to a model, and everything it send
 - Hand-off on a denial means the analyzer does not try again with a different proposal; a person decides what to do next.
 - Admins cannot tune prompts for their cluster without a new release or, later, a signed extension. That is intended.
 - Prompt caching depends on the provider and the deployment type; the structure allows it but does not require it.
+- The analyzer gains one write beyond Incidents and requests: `update` on its budget ConfigMap. Invariant 6 in `AGENTS.md` names it. Whoever may write that ConfigMap (the analyzer, admins) can reset the count, and whoever may create ConfigMaps in the operator namespace can recreate it after a deletion (threat model, section 6).
 
 ## Alternatives considered
 
@@ -83,4 +85,4 @@ The analyzer is the only component that talks to a model, and everything it send
 
 ## Amendments
 
-- 2026-11-03: point 9 now names the object of the daily count of analyses: the status of `RemediationSettings` (`status.analysisBudget`: the UTC day and the analyses started on it), not an object in the operator namespace. The settings are cluster-scoped, so this adds one cluster-wide grant to the analyzer: `get`, `update` and `patch` on `remediationsettings/status`, and nothing on the settings themselves. Whoever can write that status can reset the count (threat model, section 6). Where the daily spend is counted is still open ([#43](https://github.com/pkalin/shadewright/issues/43)).
+None.

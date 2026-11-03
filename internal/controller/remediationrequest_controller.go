@@ -94,6 +94,18 @@ type RemediationRequestReconciler struct {
 	// CleanupTimeout bounds each of the freshness check and the cleanup of a stale plan (open the repository,
 	// find and close the change request), as a whole. Zero means [DefaultCleanupTimeout].
 	CleanupTimeout time.Duration
+	// WriteTimeout bounds one Git step of the pull request phase (rebuild the state, one write). Zero means
+	// [DefaultWriteTimeout].
+	WriteTimeout time.Duration
+	// PullRequestTimeout is how long a request may take from PolicyChecked to an open pull request; it is
+	// stored in status.deadline. Zero means [DefaultPullRequestTimeout].
+	PullRequestTimeout time.Duration
+	// Validate, when set, checks the changed file before it is committed (design 8.2 steps 4 and 5). An error
+	// stops the request in NeedsIntervention. The typed patcher already refuses a change to anything but the
+	// one value.
+	Validate func(ctx context.Context, before, after []byte, rr *remediationv1alpha1.RemediationRequest) error
+	// Now is the clock; nil means time.Now (tests set it).
+	Now func() time.Time
 }
 
 // Default deadlines of the phases that call external systems. Reconcile workers are bounded, so a stalled
@@ -108,7 +120,10 @@ const (
 // different error (context.Canceled).
 var ErrTimeout = errors.New("the step reached its deadline")
 
-// bound returns a context with the deadline d (def when d is zero).
+// bound returns a context with the deadline d (def when d is zero). The defaults of the phases happen to be
+// equal today; each phase still names its own.
+//
+//nolint:unparam // def is the phase's own default, see above
 func bound(ctx context.Context, d, def time.Duration) (context.Context, context.CancelFunc) {
 	if d <= 0 {
 		d = def
@@ -182,6 +197,9 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	rr := &remediationv1alpha1.RemediationRequest{}
 	if err := r.Get(ctx, req.NamespacedName, rr); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if !rr.DeletionTimestamp.IsZero() {
+		return r.finalize(ctx, rr)
 	}
 	if rr.Status.Phase != "" && rr.Status.Phase != remediationv1alpha1.PhasePending {
 		return r.recheck(ctx, rr)
@@ -433,8 +451,8 @@ func beforeMerge(p remediationv1alpha1.RemediationPhase) bool {
 }
 
 // recheck is the freshness step of Reconcile for a request that has left the policy check but has not merged.
-// Git writes are made by a later step, which calls EnsureFresh itself before each of them; this step makes a
-// stale plan visible (and closes its change request) without waiting for the next write.
+// It makes a stale plan visible (and closes its change request) without waiting for the next write, and on a
+// fresh plan runs the pull request step, which makes at most one Git write right after this check.
 func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	ctrl.Result, error) {
 	if r.OpenRepository == nil || !beforeMerge(rr.Status.Phase) || rr.Status.PlanDigest == "" {
@@ -444,7 +462,7 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 	case errors.Is(err, ErrSuperseded):
 		return ctrl.Result{}, nil
 	case err == nil:
-		return ctrl.Result{RequeueAfter: freshRecheckInterval}, nil
+		return r.advance(ctx, rr)
 	case errors.Is(err, freshness.ErrPaused):
 		return ctrl.Result{RequeueAfter: freshRecheckDelay}, nil
 	default:

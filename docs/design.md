@@ -1,6 +1,6 @@
 # Design
 
-Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the GitHub and Key Vault adapters (the executor uses them to read Git and to close the pull request of a stale plan; it does not open one yet) and the RBAC of sections 2.2 and 10. Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
+Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the GitHub and Key Vault adapters, the pull request step of section 6 (branch, commit and pull request, up to `AwaitingApproval`) and the RBAC of sections 2.2 and 10. Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
 
 ## 1. Goals
 
@@ -90,7 +90,7 @@ The analyzer and the remediation controller are separate binaries in one Go modu
 The collector, the incident store and the analyzer run in the analyzer binary; the policy engine, the remediation controller, the GitOps adapter and the verifier run in the executor (`cmd/main.go`). Their roles are generated from kubebuilder RBAC markers (`internal/analyzer`, `internal/analyzer/collector`, `internal/controller`):
 
 - **Analyzer:** reads events (`events.k8s.io/v1`), pods and workloads only in the namespaces it is started with (`--watch-namespaces`): a ClusterRole that is only a catalogue of verbs, bound by one RoleBinding per watched namespace and never cluster-wide, and a cache restricted to the same list for those kinds, and to the operator namespace for Incidents and requests. Incidents live in the operator namespace, next to the requests that point at them: it creates and updates `Incident` objects and their status, and creates `RemediationRequest` objects, there only (a Role). Its one cluster-wide grant is reading the cluster-scoped `RemediationSettings`. The watched namespaces are a deployer setting (`demo` is the lab default). The RoleBindings are built from `config/watch` (separately from `config/default`, in namespaces that must already exist) and must match `--watch-namespaces`; `test/rbac` checks that they do. The operator namespace comes from `--namespace`, defaulting to `POD_NAMESPACE`, and the analyzer refuses to start without it or with an empty list. It cannot update, delete or write the status of a request.
-- **Executor:** reads (`get` only) policies and settings, always from the API server, never through a cache (reading incidents for verification is planned); reads (`get` only, no list or watch) the target kinds (Deployments, StatefulSets, KEDA ScaledObjects) and the Flux Kustomizations and GitRepositories that deliver them, for source mapping; reads requests and writes their status in the operator namespace only (a Role), and its cache watches requests only there. It cannot create requests or write incidents.
+- **Executor:** reads (`get` only) policies and settings, always from the API server, never through a cache (reading incidents for verification is planned); reads (`get` only, no list or watch) the target kinds (Deployments, StatefulSets, KEDA ScaledObjects) and the Flux Kustomizations and GitRepositories that deliver them, for source mapping; reads requests, writes their status and patches them to add or remove its finalizer in the operator namespace only (a Role), and its cache watches requests only there; the spec of a request is immutable (CEL), so the patch cannot change what was decided. It cannot create requests or write incidents.
 - Neither can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
 
 No model runs in the cluster and no GPU is needed: the analyzer calls a managed model endpoint (Microsoft Foundry first). The tool loop is our own code, not a hosted agent service.
@@ -353,7 +353,7 @@ One cluster-scoped object named `default`. It holds the kill switch (`paused`, c
 
 Other terminal or waiting phases: `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded`, `NeedsIntervention`. Conditions explain why; `phase` is a summary for humans.
 
-The transitions between phases. The API defines every phase below. The executor sets the first step: a `Pending` request (or one without a phase yet) becomes `PolicyChecked`, `Denied` or `NeedsIntervention` in one status write. It also re-checks the freshness of a decided request before merge every five minutes (and at once on any change to the request), so a stale plan becomes `Superseded`, or `NeedsIntervention` if its repository settings became unusable, without waiting for a write. The other later phases are designed but not built.
+The transitions between phases. The API defines every phase below. The executor sets the first step: a `Pending` request (or one without a phase yet) becomes `PolicyChecked`, `Denied` or `NeedsIntervention` in one status write. It also re-checks the freshness of a decided request before merge every five minutes (and at once on any change to the request), so a stale plan becomes `Superseded`, or `NeedsIntervention` if its repository settings became unusable, without waiting for a write. A fresh `PolicyChecked` request then opens its pull request and moves to `PRCreated` and `AwaitingApproval` (below). Merge, delivery and verification are designed but not built.
 
 ```mermaid
 stateDiagram-v2
@@ -413,6 +413,15 @@ Each reconcile:
 
 Never assume exactly-once execution. A PR can be created while the status write that records its number fails. The branch name `shadewright/<request-uid>` and a marker in the PR body (request UID and plan digest) let the controller find the existing operation after a restart.
 
+The pull request step (`internal/controller/pullrequest.go`) runs for a fresh request in `PolicyChecked` and does at most one write per reconcile, after the freshness check:
+
+1. It stores `status.deadline` (30 minutes by default) and adds the finalizer `remediation.shadewright.io/close-pull-request`, each in its own write.
+2. It looks for a change request on `shadewright/<request-uid>` first. One that carries the request's exact marker and holds the desired value at its head is adopted; a merged one becomes `Merged`, a closed one or one without the marker `NeedsIntervention` (`ChangeRequestClosed`, `ForeignChangeRequest`).
+3. Without one, it creates the branch at the head of the target branch, then commits the typed change on top of the head it read (the patch checks the previous value), then opens the pull request with the evidence, scope, expected effect, risk, rollback and the marker. The title and body are built from validated fields and redacted. Every write names the head it expects, so a lost status write or a concurrent reconcile finds the work instead of repeating it.
+4. Recording the pull request sets `PRCreated` with its number, URL and head commit and clears the deadline; the next reconcile moves it to `AwaitingApproval` (`Approved` `False`, `WaitingForReview`). Auto-merge is not built yet, so a request whose policy allows automation also waits for a person.
+
+A branch whose file holds neither the previous nor the desired value, a head that moved away from the recorded commit, or a patch the patcher refuses stops automation with `NeedsIntervention` (`BranchDiverged`, `HeadMoved`, `PatchRefused`); nothing is force-pushed or rebuilt. A request that has not opened its pull request by its deadline closes what it opened and becomes `Expired` (`PullRequestDeadline`). Rendering and the semantic diff of 8.2 steps 4 and 5 are planned (#56); the step has a hook for them. One known limit: after a lost status write the step checks the file at the branch head, not that the head is its own commit, because the provider interface has no commit-parent read yet; a later push that keeps the desired value is caught only once the pull request is recorded.
+
 Required mechanisms:
 
 - Leader election, bounded concurrency, a lock per target object.
@@ -423,7 +432,7 @@ Required mechanisms:
 - Policy and plan freshness re-checked right before every write: same policy UID and generation, same settings, the source mapping (ADR-0012) run again with the policy check's resolver still gives the recorded repository, branch and file (the base commit is not compared, because it moves with every merge), and the target file still holds the previous value. The mapping reads the Flux Kustomization and GitRepository again after scanning Git and retries if either changed, and the freshness check, after its last Git read, reads the branch head again, then the target and those Flux objects, and last the policy and settings (a pause returns "paused", any other change a retry) before it says fresh. A mapping error is "not fresh" and is retried, never stale; a mapping that now denies or needs a person is stale (`SourceChanged`), never fresh. A stale plan becomes `Superseded` and its change request is closed (once, idempotently), never a rebuilt branch. The close happens only in the repository the plan was made for (same URL and installation) and against its recorded target branch: if that entry is gone or now names another target branch, nothing is closed and the request ends in `NeedsIntervention` (`RepositoryUnavailable` or `TargetBranchChanged`). The step is `EnsureFresh` in the controller; the later state machine calls it before each write, and the reconcile runs it every five minutes for a decided request before merge.
 - Auto-merge disabled when the request is cancelled before merge. After merge, undoing needs a separate revert PR.
 
-A finalizer is used only where deleting the CR needs bounded external cleanup (closing an open PR, disabling auto-merge). Deleting the CR never rolls back a deployment.
+A finalizer is used only where deleting the CR needs bounded external cleanup (closing an open PR, disabling auto-merge). The pull request step adds it before its first Git write; deleting a request before merge closes its pull request (a repository that left the settings or changed its target branch, or a pull request that is already gone, does not block the deletion) and then removes the finalizer. Deleting the CR never rolls back a deployment.
 
 ## 7. Existing controllers
 
@@ -465,7 +474,7 @@ Fully automatic merges happen only where the repository owner deliberately allow
 7. Bind the PR to the request UID and plan digest. Any new push to the branch invalidates the plan.
 8. After merge, follow delivery and the success criteria instead of stopping at "merged".
 
-Opening the change on GitHub, steps 2 to 7 above. Steps marked *(planned)* are designed but not built yet. Signing, the token exchange and reading the head are called by the executor, for the source mapping and the freshness check. Creating the branch, committing and opening the pull request are built in the adapter (`internal/providers/github`) with its own tests, but the executor does not call them yet. Auto-merge is not built in any adapter (`EnableAutoMerge` returns an error and `Capabilities()` reports no auto-merge, #20). *(planned)* means not called by the running operator. The GitHub App key never leaves Key Vault ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)); every write names the state it expects, so a restart or a race finds the existing work instead of repeating it.
+Opening the change on GitHub, steps 2 to 7 above. Steps marked *(planned)* are designed but not built yet. The executor signs, exchanges the token and reads the head for the source mapping and the freshness check, and creates the branch, commits and opens the pull request in the pull request step (section 6). Auto-merge is not built in any adapter (`EnableAutoMerge` returns an error and `Capabilities()` reports no auto-merge, #20). *(planned)* means not called by the running operator. The GitHub App key never leaves Key Vault ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)); every write names the state it expects, so a restart or a race finds the existing work instead of repeating it.
 
 ```mermaid
 sequenceDiagram
@@ -476,11 +485,11 @@ sequenceDiagram
     V-->>E: Signature
     E->>G: Exchange the JWT for a one-hour installation token, scoped to the one repository
     E->>G: Read the head SHA of targetBranch
-    E->>G: Create branch shadewright/#lt;request-uid#gt; at that SHA (planned)
+    E->>G: Create branch shadewright/#lt;request-uid#gt; at that SHA
     Note over E,G: An existing branch at that SHA is success, at another SHA a conflict
-    E->>G: Commit the file, expecting that head (planned)
+    E->>G: Commit the file, expecting that head
     Note over E,G: A moved head is a conflict, never a force push
-    E->>G: Open the pull request with the request UID and plan digest marker (planned)
+    E->>G: Open the pull request with the request UID and plan digest marker
     Note over E,G: An open pull request for the branch is returned, not duplicated
     alt Approval required
         G->>G: Wait for a human approval of the head commit
@@ -488,14 +497,14 @@ sequenceDiagram
         E->>G: Enable auto-merge (squash) if the head is still our commit (planned)
     end
     opt Conflict, extra commits or a digest mismatch
-        E->>E: Stop automation: Superseded or NeedsIntervention (planned)
+        E->>E: Stop automation: Superseded or NeedsIntervention
     end
     opt Throttling or a transient error
         E->>E: Back off with jitter and Retry-After, a bounded number of times
     end
 ```
 
-The GitHub steps are done by the `GitProvider` adapter in `internal/providers/github`; the executor already uses it to read Git (head of the branch and files) for the source mapping and the freshness check, and to close the pull request of a stale plan, signing through Key Vault with workload identity; the phase that writes (`PRCreated`: branch, commit, pull request, auto-merge) is not wired yet. One provider per repository entry is kept across reconciles, so the token cache survives; it is built on first use from the entry (URL, installation ID, App client ID, key ID, target branch), rebuilt when the entry changes and dropped when it leaves the settings (`internal/providers/registry`). The adapter is bound to one repository and its `targetBranch`, and refuses anything else before sending a request:
+The GitHub steps are done by the `GitProvider` adapter in `internal/providers/github`; the executor already uses it to read Git (head of the branch and files) for the source mapping and the freshness check, to write the branch, commit and pull request, and to close the pull request of a stale plan, signing through Key Vault with workload identity; auto-merge is not wired yet. One provider per repository entry is kept across reconciles, so the token cache survives; it is built on first use from the entry (URL, installation ID, App client ID, key ID, target branch), rebuilt when the entry changes and dropped when it leaves the settings (`internal/providers/registry`). The adapter is bound to one repository and its `targetBranch`, and refuses anything else before sending a request:
 
 - It writes only to branches named `shadewright/<name>`. A new branch must start at the head of `targetBranch` or an ancestor of it, so a commit of a fork or another branch cannot become the base.
 - The commit is built with the Git data API (blob, tree, commit, keeping the file mode) on top of the expected head, and the branch moves with GraphQL `updateRefs`: an atomic compare-and-swap on the expected head, without force. A head that moved in any direction, a rewind to an ancestor included, is a conflict; the update never forces.
@@ -574,6 +583,7 @@ flowchart TB
     pol -- read --> ex
     tgt -- read --> ex
     ex -- update --> rrs
+    ex -- add, remove finalizer --> rr
     ex -- sign --> kv
     sec -- no access --x an
     sec -- no access --x ex

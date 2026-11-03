@@ -9,7 +9,7 @@ Deduplication state (fingerprints, counters, cooldowns) must survive restarts, o
 
 ## Decision
 
-Store incidents as a namespaced `Incident` CR in the operator namespace, with bounded retention: fingerprint, counters, first and last seen, correlated owner, and references to analyses and requests. No raw logs, transcripts or large payloads in etcd. Revisit when incident volume or retention needs grow.
+Store incidents as a namespaced `Incident` CR in the operator namespace, bounded in number: fingerprint, counters, first and last seen, correlated owner, and references to analyses and requests. No raw logs, transcripts or large payloads in etcd. Revisit when incident volume or retention needs grow.
 
 ## Consequences
 
@@ -25,3 +25,4 @@ Store incidents as a namespaced `Incident` CR in the operator namespace, with bo
 ## Amendments
 
 - 2026-11-03: the decision now says where Incidents live: in the operator namespace, next to the requests that point at them (`IncidentRef` is same-namespace), not in the namespace of the target. The analyzer may write them only there; the target's namespace is part of the fingerprint, not of the object's location ([#155](https://github.com/pkalin/shadewright/issues/155)). This narrows a grant; nothing is widened.
+- 2026-11-03: "bounded retention" in the decision is now "bounded in number". The Incident controller keeps at most `--max-incidents` Incidents (500 by default) and refuses a new fingerprint at that cap; it deletes none, and the analyzer has no `delete` on them. When old Incidents should go, and who deletes them, is open (design section 15, question 8). This corrects the text to what is built ([#196](https://github.com/pkalin/shadewright/pull/196)); nothing is widened.

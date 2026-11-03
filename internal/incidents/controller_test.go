@@ -185,6 +185,10 @@ func startWith(t *testing.T, ns string, cfg Config, setup func(*Controller, *cou
 	if cfg.Window == 0 {
 		cfg.Window = time.Second
 	}
+	if cfg.SettleLimit == 0 {
+		// The short test window would otherwise make the settle limit 1 s too.
+		cfg.SettleLimit = DefaultWindow
+	}
 	c, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)

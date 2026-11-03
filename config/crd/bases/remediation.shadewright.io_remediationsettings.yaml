@@ -181,31 +181,6 @@ spec:
           status:
             description: status reports whether the settings are usable.
             properties:
-              analysisBudget:
-                description: |-
-                  analysisBudget is the count of analyses of the current UTC day, written only by the analyzer: it adds
-                  one before each model-backed analysis and starts again at 0 on a new day. It lives here, not in the
-                  Incidents, so neither a restart nor deleting Incidents frees budget. A missing value means none used
-                  today; a day in the future or a value the analyzer cannot read means the budget is spent (fail
-                  closed). Whoever can write this status can reset the count: grant it to the analyzer and admins only.
-                properties:
-                  day:
-                    description: day is the UTC day the count belongs to, as YYYY-MM-DD.
-                    maxLength: 10
-                    minLength: 10
-                    pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}$
-                    type: string
-                  used:
-                    description: used is the number of analyses started on day, at
-                      most the largest maxAnalysesPerDay.
-                    format: int32
-                    maximum: 10000
-                    minimum: 0
-                    type: integer
-                required:
-                - day
-                - used
-                type: object
               conditions:
                 description: conditions report problems such as an unreachable signer.
                 items:

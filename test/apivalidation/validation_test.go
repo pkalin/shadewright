@@ -553,31 +553,4 @@ var _ = Describe("RemediationSettings", func() {
 		s.Spec.Repositories[0].GitHub.Signer.AzureKeyVault.KeyID = "https://evil.example.com/keys/github-app"
 		expectRefused(s, "keyID")
 	})
-
-	// setBudget creates the settings, sets the analysis budget in their status and returns the status
-	// update's error. The settings are deleted afterwards.
-	setBudget := func(day string, used int32) error {
-		s := fx.RemediationSettings()
-		Expect(k8sClient.Create(ctx, s)).To(Succeed())
-		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, s)).To(Succeed()) })
-		s.Status.AnalysisBudget = &v1alpha1.AnalysisBudget{Day: day, Used: used}
-		return k8sClient.Status().Update(ctx, s)
-	}
-
-	It("accepts an analysis budget at its bounds", func() {
-		Expect(setBudget("2026-11-03", 10000)).To(Succeed())
-	})
-
-	DescribeTable("refuses an analysis budget out of its bounds",
-		func(day string, used int32, msg string) {
-			err := setBudget(day, used)
-			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
-			Expect(err.Error()).To(ContainSubstring(msg))
-		},
-		Entry("a count above the largest daily budget", "2026-11-03", int32(10001), "status.analysisBudget.used"),
-		Entry("a negative count", "2026-11-03", int32(-1), "status.analysisBudget.used"),
-		Entry("a day that is not YYYY-MM-DD", "3 Nov 2026", int32(1), "status.analysisBudget.day"),
-		Entry("a day with a time", "2026-11-03T00:00", int32(1), "status.analysisBudget.day"),
-		Entry("no day", "", int32(1), "status.analysisBudget.day"),
-	)
 })

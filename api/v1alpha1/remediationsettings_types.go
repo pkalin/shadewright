@@ -131,35 +131,11 @@ type RemediationSettingsSpec struct {
 // SettingsName is the name of the one RemediationSettings object.
 const SettingsName = "default"
 
-// AnalysisBudget counts the model-backed analyses of one UTC day against spec.maxAnalysesPerDay.
-type AnalysisBudget struct {
-	// day is the UTC day the count belongs to, as YYYY-MM-DD.
-	// +kubebuilder:validation:MinLength=10
-	// +kubebuilder:validation:MaxLength=10
-	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`
-	// +required
-	Day string `json:"day"`
-
-	// used is the number of analyses started on day, at most the largest maxAnalysesPerDay.
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=10000
-	// +required
-	Used int32 `json:"used"`
-}
-
 // RemediationSettingsStatus reports whether the settings are usable.
 type RemediationSettingsStatus struct {
 	// observedGeneration is the generation the status describes.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-
-	// analysisBudget is the count of analyses of the current UTC day, written only by the analyzer: it adds
-	// one before each model-backed analysis and starts again at 0 on a new day. It lives here, not in the
-	// Incidents, so neither a restart nor deleting Incidents frees budget. A missing value means none used
-	// today; a day in the future or a value the analyzer cannot read means the budget is spent (fail
-	// closed). Whoever can write this status can reset the count: grant it to the analyzer and admins only.
-	// +optional
-	AnalysisBudget *AnalysisBudget `json:"analysisBudget,omitempty"`
 
 	// conditions report problems such as an unreachable signer.
 	// +listType=map

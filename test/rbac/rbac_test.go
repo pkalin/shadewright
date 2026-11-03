@@ -31,6 +31,7 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
@@ -44,6 +45,7 @@ import (
 	analyzerpkg "github.com/pkalin/shadewright/internal/analyzer"
 	"github.com/pkalin/shadewright/internal/cmdutil"
 	"github.com/pkalin/shadewright/internal/controller"
+	"github.com/pkalin/shadewright/internal/incidents"
 	"github.com/pkalin/shadewright/internal/testfixtures"
 )
 
@@ -308,11 +310,11 @@ func TestPermissionBoundary(t *testing.T) {
 		{"analyzer", "list", "events.k8s.io", "events", "", "", false},
 		{"analyzer", "list", "", "pods", "", operatorNS, false},
 		{"analyzer", "list", group, "remediationsettings", "", "", true},
-		// The daily analysis budget lives in the RemediationSettings status: the analyzer writes it, nothing
-		// else of the settings, and the executor cannot write it.
-		{"analyzer", "get", group, "remediationsettings", "status", "", true},
-		{"analyzer", "update", group, "remediationsettings", "status", "", true},
-		{"analyzer", "patch", group, "remediationsettings", "status", "", true},
+		// Nothing of the settings is written by the analyzer, status included: the daily analysis budget is
+		// a ConfigMap of its own (TestAnalysisBudgetIsTheOnlyConfigMap).
+		{"analyzer", "get", group, "remediationsettings", "status", "", false},
+		{"analyzer", "update", group, "remediationsettings", "status", "", false},
+		{"analyzer", "patch", group, "remediationsettings", "status", "", false},
 		{"analyzer", "update", group, "remediationsettings", "", "", false},
 		{"analyzer", "patch", group, "remediationsettings", "", "", false},
 		{"analyzer", "create", group, "remediationsettings", "", "", false},
@@ -345,8 +347,6 @@ func TestPermissionBoundary(t *testing.T) {
 		{"executor", "list", group, "incidents", "", otherNS, false},
 		{"executor", "watch", group, "remediationpolicies", "", "", false},
 		{"executor", "list", group, "remediationsettings", "", "", false},
-		{"executor", "update", group, "remediationsettings", "status", "", false},
-		{"executor", "patch", group, "remediationsettings", "status", "", false},
 		{"executor", "get", group, "remediationpolicies", "", "", true},
 		{"executor", "update", group, "remediationpolicies", "", "", false},
 		{"executor", "get", "", "secrets", "", operatorNS, false},
@@ -440,6 +440,118 @@ func TestLeaseNamesMatchTheBinaries(t *testing.T) {
 		if len(resourceNames) != 1 || resourceNames[0] != want {
 			t.Errorf("%s: Role may renew %v, binary uses %q", id, resourceNames, want)
 		}
+	}
+}
+
+// TestAnalysisBudgetIsTheOnlyConfigMap checks that the analyzer may get and update its analysis budget
+// ConfigMap in the operator namespace and nothing else on ConfigMaps: no other name, no other namespace, no
+// list, watch, create, patch or delete, so it can neither read other ConfigMaps nor recreate a deleted
+// budget. The executor has no grant on it.
+func TestAnalysisBudgetIsTheOnlyConfigMap(t *testing.T) {
+	budget := incidents.BudgetName
+	cases := []struct {
+		id, verb, ns, name string
+		want               bool
+	}{
+		{analyzer, "get", operatorNS, budget, true},
+		{analyzer, "update", operatorNS, budget, true},
+		{analyzer, "patch", operatorNS, budget, false},
+		{analyzer, "delete", operatorNS, budget, false},
+		{analyzer, "create", operatorNS, "", false},
+		{analyzer, "create", operatorNS, budget, false},
+		{analyzer, "list", operatorNS, "", false},
+		{analyzer, "watch", operatorNS, "", false},
+		{analyzer, "deletecollection", operatorNS, "", false},
+		{analyzer, "get", operatorNS, "", false},
+		{analyzer, "get", operatorNS, "kube-root-ca.crt", false},
+		{analyzer, "update", operatorNS, "other", false},
+		{analyzer, "get", otherNS, budget, false},
+		{analyzer, "update", otherNS, budget, false},
+		{analyzer, "update", unwatched, budget, false},
+		{executor, "get", operatorNS, budget, false},
+		{executor, "update", operatorNS, budget, false},
+	}
+	for _, c := range cases {
+		if got := canNamed(t, c.id, c.verb, "", "configmaps", "", c.ns, c.name); got != c.want {
+			t.Errorf("%s %s configmap %q in %q: allowed=%v, want %v", c.id, c.verb, c.name, c.ns, got, c.want)
+		}
+	}
+}
+
+// TestAnalysisBudgetRealCalls makes the analyzer's own calls on ConfigMaps as its ServiceAccount: an update
+// of the budget with the resourceVersion read succeeds, the same update of another ConfigMap and the
+// creation of the budget after it was deleted are refused.
+func TestAnalysisBudgetRealCalls(t *testing.T) {
+	ctx := t.Context()
+	asAnalyzer := impersonate(t, analyzer)
+	for _, name := range []string{incidents.BudgetName, "other"} {
+		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: operatorNS, Name: name}}
+		if err := admin.Create(ctx, cm); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = admin.Delete(context.Background(), cm) })
+	}
+	budget := &corev1.ConfigMap{}
+	if err := asAnalyzer.Get(ctx, client.ObjectKey{Namespace: operatorNS, Name: incidents.BudgetName}, budget); err != nil {
+		t.Fatalf("analyzer cannot read its budget: %v", err)
+	}
+	budget.Data = map[string]string{incidents.BudgetDayKey: "2026-11-03", incidents.BudgetUsedKey: "1"}
+	if err := asAnalyzer.Update(ctx, budget); err != nil {
+		t.Fatalf("analyzer cannot update its budget: %v", err)
+	}
+	other := &corev1.ConfigMap{}
+	if err := admin.Get(ctx, client.ObjectKey{Namespace: operatorNS, Name: "other"}, other); err != nil {
+		t.Fatal(err)
+	}
+	other.Data = map[string]string{"used": "0"}
+	if err := asAnalyzer.Update(ctx, other); !apierrors.IsForbidden(err) {
+		t.Errorf("analyzer updating another ConfigMap = %v, want forbidden", err)
+	}
+	if err := asAnalyzer.Get(ctx, client.ObjectKeyFromObject(other), &corev1.ConfigMap{}); !apierrors.IsForbidden(err) {
+		t.Errorf("analyzer reading another ConfigMap = %v, want forbidden", err)
+	}
+	if err := admin.Delete(ctx, budget); err != nil {
+		t.Fatal(err)
+	}
+	recreated := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: operatorNS, Name: incidents.BudgetName}}
+	if err := asAnalyzer.Create(ctx, recreated); !apierrors.IsForbidden(err) {
+		t.Errorf("analyzer recreating its budget = %v, want forbidden", err)
+	}
+}
+
+// TestBudgetNameMatchesTheBinary guards against drift between the budget ConfigMap shipped with the analyzer,
+// the Role that may update it, and the name compiled into the binary. The kustomize name prefix
+// "shadewright-" is applied to the ConfigMap name; the Role carries the full name, which no object of the
+// build has before the prefix, so kustomize leaves it as written.
+func TestBudgetNameMatchesTheBinary(t *testing.T) {
+	f, err := os.Open(filepath.Join("..", "..", "config", "manager", "analysis_budget.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cm corev1.ConfigMap
+	err = utilyaml.NewYAMLOrJSONDecoder(f, 4096).Decode(&cm)
+	_ = f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := "shadewright-" + cm.Name; got != incidents.BudgetName {
+		t.Errorf("manifest ConfigMap is %q after the prefix, binary uses %q", got, incidents.BudgetName)
+	}
+	if len(cm.Data) > 0 || len(cm.BinaryData) > 0 {
+		t.Errorf("the shipped budget holds data %v, so a GitOps apply would reset the count", cm.Data)
+	}
+	var role rbacv1.Role
+	if err := admin.Get(t.Context(), client.ObjectKey{Namespace: operatorNS, Name: "analyzer-role"}, &role); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, rule := range role.Rules {
+		if slices.Contains(rule.Resources, "configmaps") {
+			names = append(names, rule.ResourceNames...)
+		}
+	}
+	if len(names) != 1 || names[0] != incidents.BudgetName {
+		t.Errorf("the analyzer Role may update ConfigMaps %v, binary uses %q", names, incidents.BudgetName)
 	}
 }
 

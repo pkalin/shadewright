@@ -37,13 +37,17 @@ const (
 	// ReasonCooldownExpired: the symptom was seen again after the last analysis and the cooldown has passed.
 	ReasonCooldownExpired = "CooldownExpired"
 	// ReasonAnalysisTimedOut: the incident has been in phase Analyzing for longer than the analysis timeout
-	// since its last analysis began, so that analysis is taken as lost.
+	// and the cooldown since its last analysis began, so that analysis is taken as lost.
 	ReasonAnalysisTimedOut = "AnalysisTimedOut"
 
 	// ReasonNotObserved: the status records no observation yet.
 	ReasonNotObserved = "NotObserved"
 	// ReasonAnalyzing: an analysis is running and has not reached the analysis timeout.
 	ReasonAnalyzing = "Analyzing"
+	// ReasonAnalysisStartUnknown: the incident is in phase Analyzing without a lastAnalysisTime, so neither
+	// the analysis timeout nor the cooldown can be placed. It stays not due until the status is repaired, so
+	// that a status without the time never starts analyses faster than the cooldown.
+	ReasonAnalysisStartUnknown = "AnalysisStartUnknown"
 	// ReasonProposed: the last analysis made a proposal; leaving phase Proposed is later work.
 	ReasonProposed = "Proposed"
 	// ReasonEscalated: the last analysis handed the incident to a person; leaving phase Escalated is later
@@ -55,15 +59,20 @@ const (
 	// analysis has not passed.
 	ReasonCoolingDown = "CoolingDown"
 	// ReasonDebouncing: the incident would be due, but its last observation, written or still held by the
-	// controller, is more recent than the debounce.
+	// controller, is more recent than the debounce, and the settle limit since its first unsettled
+	// observation has not passed.
 	ReasonDebouncing = "Debouncing"
 	// ReasonAnalysisDisabled: RemediationSettings maxAnalysesPerDay is 0.
 	ReasonAnalysisDisabled = "AnalysisDisabled"
 	// ReasonDailyBudgetReached: the analyses of the current UTC day reached maxAnalysesPerDay.
 	ReasonDailyBudgetReached = "DailyBudgetReached"
-	// ReasonBudgetUnreadable: the analysis budget in the RemediationSettings status is from a future day or
-	// out of bounds, so the budget is taken as spent.
+	// ReasonBudgetUnreadable: the budget ConfigMap holds a day in the future, a count out of bounds or keys
+	// it should not, so the budget is taken as spent.
 	ReasonBudgetUnreadable = "BudgetUnreadable"
+	// ReasonBudgetNotFound: the budget ConfigMap does not exist, so the budget is unknown.
+	ReasonBudgetNotFound = "BudgetNotFound"
+	// ReasonBudgetReadFailed: the budget ConfigMap could not be read, so the budget is unknown.
+	ReasonBudgetReadFailed = "BudgetReadFailed"
 	// ReasonSettingsNotFound: the RemediationSettings object does not exist, so the budget is unknown.
 	ReasonSettingsNotFound = "SettingsNotFound"
 	// ReasonSettingsUnreadable: the RemediationSettings object could not be read, so the budget is unknown.
@@ -85,11 +94,15 @@ const (
 type TriggerSettings struct {
 	// Debounce is how long an incident must go without a new observation before it is due.
 	Debounce time.Duration
+	// SettleLimit bounds the debounce: an incident is due at the latest SettleLimit after its first unsettled
+	// observation ([unsettledSince]), even if observations keep arriving less than Debounce apart. Zero means
+	// no bound.
+	SettleLimit time.Duration
 	// Cooldown is the least time between the start of an analysis of an incident and the next one, whatever
-	// new data arrives.
+	// new data arrives, a timed-out analysis included.
 	Cooldown time.Duration
 	// AnalysisTimeout is how long an incident may stay in phase Analyzing after its last analysis began
-	// before it is due again.
+	// before that analysis is taken as lost. It is due again at the later of AnalysisTimeout and Cooldown.
 	AnalysisTimeout time.Duration
 	// MaxAnalysesPerDay is RemediationSettings maxAnalysesPerDay: the analyses allowed per UTC day across all
 	// Incidents. 0 disables analysis.
@@ -98,16 +111,20 @@ type TriggerSettings struct {
 
 // Due decides whether an incident is due for analysis at now, and gives the reason (one of the Reason
 // constants). held is the newest observation of the incident the controller holds but has not written yet
-// (zero when none). usedToday is the number of analyses already counted against the current UTC day, read
-// from the RemediationSettings status ([UsedToday]), not from memory. Due reads only its arguments.
+// (zero when none). waiting is when the controller first found the incident waiting only to settle or for
+// budget, in this process (zero when not); [unsettledSince] uses it when the status does not tell. usedToday
+// is the number of analyses already counted against the current UTC day, read from the budget ConfigMap
+// ([UsedToday]), not from memory. Due reads only its arguments.
 //
-// An incident is due when it has data the last analysis did not see, it has settled, the cooldown has
-// passed and the budget allows:
+// An incident is due when it has data the last analysis did not see, it has settled (or the settle limit has
+// passed), the cooldown has passed and the budget allows:
 //
+//   - nothing observed yet (no lastSeen): not due (NotObserved);
 //   - in phase Proposed or Escalated: not due (Proposed, Escalated);
-//   - in phase Analyzing: not due (Analyzing) until AnalysisTimeout after lastAnalysisTime, then due again
-//     (AnalysisTimedOut), without a cooldown; without a lastAnalysisTime it has timed out;
-//   - never analyzed: due (FirstAnalysis);
+//   - in phase Analyzing: not due (Analyzing) until AnalysisTimeout after lastAnalysisTime, then not due
+//     (CoolingDown) until the cooldown has passed too, then due again (AnalysisTimedOut); without a
+//     lastAnalysisTime not due (AnalysisStartUnknown), since neither can be placed;
+//   - in phase Open or Resolved (or none), never analyzed: due (FirstAnalysis);
 //   - nothing seen since the last analysis: not due (NoNewData);
 //   - seen again, within the cooldown since the last analysis: not due (CoolingDown), even with a new
 //     occurrence, so a crash loop is analyzed at most once per cooldown;
@@ -115,12 +132,12 @@ type TriggerSettings struct {
 //     occurrences count, not status.count, which any update of an event series raises), else
 //     CooldownExpired;
 //   - due by the above, but last seen (in the status or held) less than the debounce ago: not due yet
-//     (Debouncing);
+//     (Debouncing), unless SettleLimit has passed since the first unsettled observation;
 //   - due by the above, but the budget is 0 (AnalysisDisabled) or used up (DailyBudgetReached): not due.
 //
 // An occurrence without a known begin time is never taken as new, since it cannot be placed after the last
 // analysis; its observation still counts as seen again.
-func Due(inc *remediationv1alpha1.Incident, held, now time.Time, s TriggerSettings, usedToday int) (bool, string) {
+func Due(inc *remediationv1alpha1.Incident, held, waiting, now time.Time, s TriggerSettings, usedToday int) (bool, string) {
 	st := &inc.Status
 	if st.LastSeen == nil {
 		return false, ReasonNotObserved
@@ -132,8 +149,15 @@ func Due(inc *remediationv1alpha1.Incident, held, now time.Time, s TriggerSettin
 	case remediationv1alpha1.IncidentEscalated:
 		return false, ReasonEscalated
 	case remediationv1alpha1.IncidentAnalyzing:
-		if st.LastAnalysisTime != nil && now.Before(st.LastAnalysisTime.Add(s.AnalysisTimeout)) {
+		if st.LastAnalysisTime == nil {
+			return false, ReasonAnalysisStartUnknown
+		}
+		last := st.LastAnalysisTime.Time
+		switch {
+		case now.Before(last.Add(s.AnalysisTimeout)):
 			return false, ReasonAnalyzing
+		case now.Before(last.Add(s.Cooldown)):
+			return false, ReasonCoolingDown
 		}
 		reason = ReasonAnalysisTimedOut
 	default:
@@ -153,7 +177,10 @@ func Due(inc *remediationv1alpha1.Incident, held, now time.Time, s TriggerSettin
 		}
 	}
 	if seen := latest(st.LastSeen.Time, held); now.Before(seen.Add(s.Debounce)) {
-		return false, ReasonDebouncing
+		since := unsettledSince(st, waiting)
+		if s.SettleLimit <= 0 || since.IsZero() || now.Before(since.Add(s.SettleLimit)) {
+			return false, ReasonDebouncing
+		}
 	}
 	if s.MaxAnalysesPerDay <= 0 {
 		return false, ReasonAnalysisDisabled
@@ -162,6 +189,51 @@ func Due(inc *remediationv1alpha1.Incident, held, now time.Time, s TriggerSettin
 		return false, ReasonDailyBudgetReached
 	}
 	return true, reason
+}
+
+// unsettledSince returns when the incident's first observation that the last analysis did not see was made,
+// as far as it is known, or zero: firstSeen for an incident never analyzed; else the begin of the earliest
+// occurrence that began after lastAnalysisTime (the drop mark standing in for the dropped records). waiting,
+// the controller's own first sight of the incident waiting, is taken when it is earlier, or when the status
+// does not tell (a recurrence of an occurrence the last analysis already counted). The status values survive
+// a restart; waiting does not.
+func unsettledSince(st *remediationv1alpha1.IncidentStatus, waiting time.Time) time.Time {
+	var since time.Time
+	earliest := func(t time.Time) {
+		if !t.IsZero() && (since.IsZero() || t.Before(since)) {
+			since = t
+		}
+	}
+	switch {
+	case st.LastAnalysisTime == nil && st.Phase != remediationv1alpha1.IncidentAnalyzing:
+		if st.FirstSeen != nil {
+			earliest(st.FirstSeen.Time)
+		}
+	case st.LastAnalysisTime != nil:
+		last := st.LastAnalysisTime.Time
+		for _, r := range st.Occurrences {
+			if r.Began != nil && r.Began.After(last) {
+				earliest(r.Began.Time)
+			}
+		}
+		if st.OccurrencesDroppedThrough != nil && st.OccurrencesDroppedThrough.After(last) {
+			earliest(st.OccurrencesDroppedThrough.Time)
+		}
+	}
+	earliest(waiting)
+	return since
+}
+
+// waitsForData reports whether reason comes from the checks of the incident's own data, before the debounce
+// (Due's not-due reasons up to CoolingDown). An incident with such a reason is not waiting to settle, so the
+// controller forgets when it first saw it waiting.
+func waitsForData(reason string) bool {
+	switch reason {
+	case ReasonNotObserved, ReasonProposed, ReasonEscalated, ReasonAnalyzing, ReasonAnalysisStartUnknown,
+		ReasonNoNewData, ReasonCoolingDown, ReasonForeignFingerprint:
+		return true
+	}
+	return false
 }
 
 // newOccurrences returns the number of distinct occurrences that began after since: the records that did,

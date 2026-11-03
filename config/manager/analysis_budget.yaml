@@ -1,0 +1,15 @@
+# The analyzer's daily analysis budget (design 3.2, package incidents): the analyses started on the current UTC
+# day, as the keys "day" (YYYY-MM-DD) and "used" (0 to 10000). It ships empty, which means none used yet; keep
+# "data" out of this manifest, so a GitOps apply never resets the count. The analyzer may get and update this
+# one ConfigMap (resourceNames in config/rbac/analyzer/role.yaml) and may not create it: if it is deleted,
+# nothing is due for analysis until it is created again. The name must equal incidents.BudgetName after the
+# "shadewright-" name prefix.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/name: shadewright
+    app.kubernetes.io/component: analyzer
+    app.kubernetes.io/managed-by: kustomize
+  name: analysis-budget
+  namespace: system

@@ -85,11 +85,13 @@ type Config struct {
 	// StopTimeout bounds the last writes when the controller stops (shutdown or lost leadership): batches
 	// still unwritten then are logged and counted as lost.
 	StopTimeout time.Duration
-	// Debounce, Cooldown, AnalysisTimeout and TriggerInterval drive the analysis trigger ([Due]): how long an
-	// Incident must go without a new observation, the least time between the start of one analysis and the
-	// next, how long an analysis may run before the Incident is due again, and how often the Incidents are
-	// decided again.
+	// Debounce, SettleLimit, Cooldown, AnalysisTimeout and TriggerInterval drive the analysis trigger
+	// ([Due]): how long an Incident must go without a new observation, the longest it waits to settle after
+	// its first unsettled observation (the aggregation window by default), the least time between the start
+	// of one analysis and the next, how long an analysis may run before it is taken as lost, and how often
+	// the Incidents are decided again.
 	Debounce        time.Duration
+	SettleLimit     time.Duration
 	Cooldown        time.Duration
 	AnalysisTimeout time.Duration
 	TriggerInterval time.Duration
@@ -129,6 +131,9 @@ type Controller struct {
 	// write are pruned.
 	nextWrite map[string]time.Time
 	refused   *boundedSet
+	// waiting holds, per Incident name, when the analysis trigger first saw the Incident waiting only to
+	// settle or for budget ([Controller.rememberWaiting]). Only the trigger goroutine uses it.
+	waiting map[string]time.Time
 	// lastEvent is when the last Warning event at the cap was written.
 	lastEvent time.Time
 }
@@ -165,6 +170,9 @@ func New(cfg Config) (*Controller, error) {
 	if cfg.Debounce <= 0 {
 		cfg.Debounce = DefaultDebounce
 	}
+	if cfg.SettleLimit <= 0 {
+		cfg.SettleLimit = cfg.Window
+	}
 	if cfg.Cooldown <= 0 {
 		cfg.Cooldown = DefaultCooldown
 	}
@@ -187,6 +195,7 @@ func New(cfg Config) (*Controller, error) {
 		kick:      make(chan struct{}, 1),
 		nextWrite: map[string]time.Time{},
 		refused:   newBoundedSet(refusedRemembered),
+		waiting:   map[string]time.Time{},
 	}, nil
 }
 

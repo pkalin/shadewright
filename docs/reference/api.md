@@ -139,18 +139,6 @@ Used by: [Action](#action).
 | `previousValue` | integer | Yes | previousValue is the value the plan was made against.<br>Maximum: 1000<br>Minimum: 1 |
 | `desiredValue` | integer | Yes | desiredValue is the new maxReplicaCount.<br>Maximum: 1000<br>Minimum: 1 |
 
-### AnalysisBudget
-
-AnalysisBudget counts the model-backed analyses of one UTC day against spec.maxAnalysesPerDay.
-
-
-Used by: [RemediationSettingsStatus](#remediationsettingsstatus).
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `day` | string | Yes | day is the UTC day the count belongs to, as YYYY-MM-DD.<br>Maximum length: 10<br>Minimum length: 10<br>Pattern: `^[0-9]{4}-[0-9]{2}-[0-9]{2}$` |
-| `used` | integer | Yes | used is the number of analyses started on day, at most the largest maxAnalysesPerDay.<br>Maximum: 10000<br>Minimum: 0 |
-
 ### ApprovalMode
 
 ApprovalMode says whether a human must approve.
@@ -653,7 +641,6 @@ Used by: [RemediationSettings](#remediationsettings).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `observedGeneration` | integer | No | observedGeneration is the generation the status describes. |
-| `analysisBudget` | [AnalysisBudget](#analysisbudget) | No | analysisBudget is the count of analyses of the current UTC day, written only by the analyzer: it adds one before each model-backed analysis and starts again at 0 on a new day. It lives here, not in the Incidents, so neither a restart nor deleting Incidents frees budget. A missing value means none used today; a day in the future or a value the analyzer cannot read means the budget is spent (fail closed). Whoever can write this status can reset the count: grant it to the analyzer and admins only. |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions report problems such as an unreachable signer.<br>List type: map<br>List key: `type` |
 
 ### ResolvedSource

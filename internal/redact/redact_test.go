@@ -336,8 +336,9 @@ func gapCases() []gapCase {
 		{"kubernetes env json", `[{"name":"API_TOKEN","value":"` + opaque + `"},{"name":"MODE","value":"debug"}]`,
 			[]string{opaque}, []string{`{"name":"MODE","value":"debug"}`}},
 		{"kubernetes env yaml flow", "env: [{name: DB_PASSWORD, value: " + opaque + "}]", []string{opaque}, nil},
-		// Review of #192: a secret key nested below a kept reference child, block values of a bare short
-		// key, a quoted passphrase after a bare short key and a token after an image digest.
+		// Review of #192: a secret key nested below a kept reference child or a bare short key, block
+		// values of a bare short key, a quoted passphrase after one, a value starting with "#" after "="
+		// and a token after an image digest.
 		{"secret key below a reference child", "credentials:\n  secretRef:\n    name: db-creds\n    token:\n      - " + opaque + nextField,
 			[]string{opaque}, []string{"secretRef:\n    name: db-creds\n    token:\n      - ", nextField}},
 		{"secret key below a reference child at the end", "credentials:\n  secretRef:\n    token:\n      - abc123secret\n",

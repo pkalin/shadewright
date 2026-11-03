@@ -21,8 +21,8 @@ hide:
 
 Shadewright watches your cluster, groups repeated symptoms into incidents, asks an LLM for a diagnosis, and proposes a fix as a pull request to your GitOps repository. It never changes the cluster directly: your review rules decide what merges, and your GitOps controller delivers it.
 
-!!! warning "Early design"
-    Nothing is implemented yet. This site holds the [design](design.md) and the [decisions](adr/index.md) behind it.
+!!! warning "Early"
+    Built so far: the API and its validation, the policy check with source mapping and the freshness check, the YAML patchers, and the GitHub and Key Vault adapters (used to read Git and to close the pull request of a stale plan; none is opened yet). Not built: the collector, the analysis, the pull request itself and the verification. The [design](design.md) says what holds at each step, the [decisions](adr/index.md) say why, and the [threat model](threat-model.md) lists each guarantee as built or planned.
 
 ## How it works
 

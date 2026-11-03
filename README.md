@@ -7,7 +7,7 @@
 </p>
 
 > [!WARNING]
-> Early. Built so far: the API and its validation, the policy check with source mapping and the freshness check, the YAML patchers, and the GitHub and Key Vault adapters (used to read Git; no pull request is opened yet). Not built: the collector, the analysis, the pull request itself and the verification. The [design](docs/design.md) says what holds at each step; the [decisions](docs/adr/index.md) say why.
+> Early. Built so far: the API and its validation, the policy check with source mapping and the freshness check, the YAML patchers, and the GitHub and Key Vault adapters (used to read Git and to close the pull request of a stale plan; none is opened yet). Not built: the collector, the analysis, the pull request itself and the verification. The [design](docs/design.md) says what holds at each step; the [decisions](docs/adr/index.md) say why.
 
 ## What it does
 

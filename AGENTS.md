@@ -94,6 +94,8 @@ Every issue names the ADRs it is tied to:
 
 ## Commands
 
+Go toolchain: the Dockerfile builder stage (`golang:<x.y.z>`, bumped by Dependabot) and the `toolchain` line of `go.mod` (read by setup-go in CI for lint, tests and govulncheck) must name the same release; `make lint` runs `hack/check-go-toolchain.sh` and fails when they differ, so a Dependabot bump of the image needs the `toolchain` line changed in the same pull request. Never raise the `go` line for this. Locally run `GOTOOLCHAIN=go<x.y.z> make lint test` with that release (a newer local Go can report different lint and vet results).
+
 ```bash
 make manifests generate   # after editing api/**/*_types.go or markers
 make api-docs             # regenerate docs/reference/api.md from the API types

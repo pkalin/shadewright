@@ -112,8 +112,12 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter
+lint: check-go-toolchain golangci-lint ## Run golangci-lint linter (and check the Go toolchain matches the Dockerfile builder)
 	"$(GOLANGCI_LINT)" run
+
+.PHONY: check-go-toolchain
+check-go-toolchain: ## Fail if go.mod's toolchain line differs from the Go release of the Dockerfile builder stage.
+	hack/check-go-toolchain.sh
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes

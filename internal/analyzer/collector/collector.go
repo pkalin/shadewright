@@ -53,7 +53,8 @@ const retryAfter = 5 * time.Second
 // MaxCount is the most occurrences one observation stands for. A series count is written by whoever can
 // create events in the namespace, so one forged jump (to 2^31, say) adds at most this much. The cap is per
 // observation: every further forged update can add as much again, and nothing in the collector bounds an
-// Incident's total; bounding that is the Incident controller's (#42).
+// Incident's total; the Incident controller (package incidents) saturates it at
+// [remediationv1alpha1.MaxIncidentCount].
 const MaxCount = 1000
 
 // AllHandled is the answer of a [HandledFunc] for an occurrence whose record the Incident controller
@@ -112,9 +113,10 @@ func (o Observation) Increase(handled int64) int64 {
 // HandledFunc returns how much of an occurrence's Total has already been counted, by any Incident: the
 // lookup does not take the fingerprint, because the fingerprint depends on owner correlation, which can
 // differ after a restart, while the occurrence does not. It returns the highest Total recorded for the
-// occurrence, and found false only when the occurrence was never counted. The Incident controller (#42)
-// supplies it. To answer it keeps, per occurrence, the highest Total it counted and when the occurrence
-// began, for at most a fixed number of occurrences, newest first. For an occurrence it has no record of
+// occurrence, and found false only when the occurrence was never counted. The Incident controller (package
+// incidents) supplies it. To answer it keeps, per occurrence, the highest Total it counted and when the
+// occurrence began, for at most [remediationv1alpha1.MaxOccurrenceRecords] occurrences per Incident, newest
+// first. For an occurrence it has no record of
 // that began no later than the newest one it dropped, it answers found with [AllHandled], so a bound never
 // counts twice. The collector asks only for observations it would otherwise mark MayRepeat, with the
 // deadline of an owner lookup, so the dedup state of an occurrence that started before a restart lives in

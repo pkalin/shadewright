@@ -273,10 +273,22 @@ func TestPermissionBoundary(t *testing.T) {
 		{"analyzer", "delete", group, "remediationrequests", "", operatorNS, false},
 		// Incidents live in the operator namespace only.
 		{"analyzer", "create", group, "incidents", "", operatorNS, true},
-		{"analyzer", "patch", group, "incidents", "status", operatorNS, true},
+		{"analyzer", "update", group, "incidents", "status", operatorNS, true},
+		{"analyzer", "patch", group, "incidents", "status", operatorNS, false},
+		{"analyzer", "get", group, "incidents", "status", operatorNS, false},
+		{"analyzer", "update", group, "incidents", "", operatorNS, false},
+		{"analyzer", "patch", group, "incidents", "", operatorNS, false},
 		{"analyzer", "create", group, "incidents", "", otherNS, false},
 		{"analyzer", "patch", group, "incidents", "status", otherNS, false},
 		{"analyzer", "create", group, "incidents", "", unwatched, false},
+		// The Warning event at the Incident cap is a core Event, written with the leader election Role's grant
+		// in the operator namespace; there is no grant on events.k8s.io Events to write.
+		{"analyzer", "create", "", "events", "", operatorNS, true},
+		{"analyzer", "create", "", "events", "", otherNS, false},
+		{"analyzer", "delete", "", "events", "", operatorNS, false},
+		{"analyzer", "create", "events.k8s.io", "events", "", operatorNS, false},
+		{"analyzer", "patch", "events.k8s.io", "events", "", operatorNS, false},
+		{"analyzer", "create", "events.k8s.io", "events", "", otherNS, false},
 		// Reads only in the watched namespaces, never cluster-wide.
 		{"analyzer", "list", "events.k8s.io", "events", "", otherNS, true},
 		{"analyzer", "watch", "", "pods", "", otherNS, true},

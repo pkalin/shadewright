@@ -23,27 +23,15 @@ rules:
   - remediation.shadewright.io
   resources:
   - incidents
-  verbs:
-  - create
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - remediation.shadewright.io
-  resources:
-  - incidents/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - remediation.shadewright.io
-  resources:
   - remediationrequests
   verbs:
   - create
   - get
   - list
   - watch
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - incidents/status
+  verbs:
+  - update

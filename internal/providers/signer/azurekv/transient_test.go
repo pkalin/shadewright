@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -145,6 +146,65 @@ func TestSignCredentialTryTimeout(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(50*time.Millisecond, cancel)
+	_, err = s.Sign(ctx, digestOf("x"))
+	if !errors.Is(err, context.Canceled) || providers.IsRetryable(err) {
+		t.Errorf("caller cancel: err = %v, want a non-retryable cancellation", err)
+	}
+}
+
+// cutBody returns a cut JSON body and a clean EOF once ctx ends, as an HTTP/1.1 response does when the
+// client's close_notify reaches the server before the socket closes and the server ends a chunked response.
+type cutBody struct {
+	ctx  context.Context
+	data io.Reader
+}
+
+func (b *cutBody) Read(p []byte) (int, error) {
+	<-b.ctx.Done()
+	return b.data.Read(p)
+}
+
+func (*cutBody) Close() error { return nil }
+
+// TestSignTryTimeoutWithCleanlyEndedBody covers a per-try deadline after which the body read still ends
+// without an error but with a cut body: it is the try's retryable deadline error, not a final SDK error
+// from decoding the cut JSON. A caller that cancels in the same place still gets a non-retryable
+// cancellation.
+func TestSignTryTimeoutWithCleanlyEndedBody(t *testing.T) {
+	kid := "https://" + testHost + "/keys/github-app/" + testVersion
+	cut := func(onAuthorized func()) func(policy.Transporter) policy.Transporter {
+		return func(inner policy.Transporter) policy.Transporter {
+			return transporterFunc(func(req *http.Request) (*http.Response, error) {
+				resp, err := inner.Do(req)
+				if err != nil || req.Header.Get("Authorization") == "" {
+					return resp, err
+				}
+				_ = resp.Body.Close()
+				resp.Body = &cutBody{ctx: req.Context(), data: strings.NewReader(`{"kid":"` + kid + `","value":"`)}
+				resp.ContentLength = -1
+				resp.Header.Del("Content-Length")
+				if onAuthorized != nil {
+					onAuthorized()
+				}
+				return resp, nil
+			})
+		}
+	}
+
+	s, v := setupWith(t, kid, Options{Timeout: 30 * time.Second, MaxRetries: -1}, &fakeCredential{}, cut(nil),
+		clientConfig{tryTimeout: 50 * time.Millisecond})
+	v.respond = v.signOK(kid)
+	_, err := s.Sign(context.Background(), digestOf("x"))
+	if !providers.IsRetryable(err) || !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errRequestSDK) {
+		t.Errorf("try timeout: err = %v, want a retryable deadline error", err)
+	}
+	assertCleanChain(t, "try timeout with a cleanly ended body", err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, v = setupWith(t, kid, Options{Timeout: 30 * time.Second, MaxRetries: -1}, &fakeCredential{}, cut(cancel),
+		clientConfig{tryTimeout: 30 * time.Second})
+	v.respond = v.signOK(kid)
 	_, err = s.Sign(ctx, digestOf("x"))
 	if !errors.Is(err, context.Canceled) || providers.IsRetryable(err) {
 		t.Errorf("caller cancel: err = %v, want a non-retryable cancellation", err)

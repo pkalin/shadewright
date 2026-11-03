@@ -1,0 +1,25 @@
+# Lab only (docs/lab-oom-acceptance.md). Fill the REPLACE-* values before applying; every one comes from
+# terraform outputs of shadewright-azure or from the GitHub App page, and none belongs in Git.
+# The URL is the fleet repository, in lower case, without .git. targetBranch is the branch the lab's Flux tracks
+# (ADR-0022): cluster/lab, which must equal the lab's fleet_branch.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: RemediationSettings
+metadata:
+  name: default
+spec:
+  paused: false
+  maxConcurrentRemediations: 1
+  maxAnalysesPerDay: 0
+  repositories:
+    - name: fleet
+      url: https://github.com/replace-owner/shadewright-fleet # your GitHub account and the fleet repository
+      targetBranch: cluster/lab
+      provider: GitHub
+      github:
+        appClientID: REPLACE-app-client-id # GitHub App settings page, "Client ID"
+        installationID: 1 # REPLACE: the number in the URL of the App's installation (settings/installations/<id>)
+        signer:
+          azureKeyVault:
+            # REPLACE: <key_vault.uri without trailing slash>/keys/<key_vault.github_app_key>, from
+            # `terraform -chdir=foundation output -json key_vault` in shadewright-azure.
+            keyID: https://kv-replace-me.vault.azure.net/keys/github-app

@@ -40,6 +40,20 @@ var _ = Describe("config/samples", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(files).To(HaveLen(4))
 
+		// The lab samples (docs/lab-oom-acceptance.md) carry placeholders that must stay valid against the
+		// schema and must never be replaced by real values in Git.
+		lab, err := filepath.Glob(filepath.Join("..", "..", "config", "samples", "lab", "remediation_*.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lab).To(HaveLen(4))
+		for _, f := range lab {
+			data, err := os.ReadFile(f)
+			Expect(err).NotTo(HaveOccurred())
+			if filepath.Base(f) != "remediation_v1alpha1_remediationpolicy.yaml" {
+				Expect(string(data)).To(ContainSubstring("REPLACE"), f)
+			}
+		}
+		files = append(files, lab...)
+
 		for _, f := range files {
 			data, err := os.ReadFile(f)
 			Expect(err).NotTo(HaveOccurred())

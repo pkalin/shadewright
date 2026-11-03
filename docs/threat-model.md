@@ -23,7 +23,7 @@ Paths are relative to the repository root. Tests are named by file and test (Go 
 
 ## 2. Trust boundaries
 
-Each box is a party; the subgraphs are the systems they run in. Solid links are built; the dashed box and dashed links are planned. The analyzer and the executor are separate identities: separate ServiceAccounts, roles, leases and Azure identities (G6.1).
+Each box is a party; the subgraphs are the systems they run in. Solid links are built code paths; dashed boxes and links are planned (for the analyzer, only the RBAC grant exists yet). The analyzer and the executor are separate identities: separate ServiceAccounts, roles, leases and Azure identities (G6.1).
 
 ```mermaid
 flowchart TB
@@ -44,9 +44,9 @@ flowchart TB
     subgraph github [GitHub]
         repo["GitOps repository and its ruleset"]
     end
-    data -- read --> an
+    data -. read .-> an
     an -. redacted context .-> fm
-    an -- create --> rr
+    an -. create .-> rr
     rr -- read --> ex
     pol -- read --> ex
     data -- get target, Flux objects --> ex
@@ -66,7 +66,7 @@ flowchart TB
 | --- | --- | --- | --- |
 | Analyzer | Nothing that changes anything: it reads and proposes | Any of its output as authorization; it can only create a request | Binary and RBAC built; collector, incidents and analysis planned (#41, #42, #43, #76) |
 | Model | Nothing | Anything: its output is untrusted input to the analyzer | Planned (#75, #76) |
-| Executor | Writing the decision (request status) and holding the Git identity | Choosing what to change: it applies what policy decided | Policy check, source mapping and freshness check built; Git writes planned (#57) |
+| Executor | Writing the decision (request status) and holding the Git identity | Choosing what to change: it applies what policy decided | Policy check, source mapping and freshness check built; closes the pull request of a stale plan (G3.3); branch, commit and pull request planned (#57) |
 | API server and RBAC | Enforcing the CRD schema, CEL rules, RBAC and the status subresource | Nothing beyond that: it cannot judge whether a plan is wise | Kubernetes |
 | Git host (GitHub) | Enforcing the repository's rulesets, scoping installation tokens | The content and size of its responses, which the adapter bounds | GitHub |
 | Flux | Applying the tracked branch | Nothing it delivers is checked again by Shadewright before it applies it; verification after delivery is planned (#92) | Flux |

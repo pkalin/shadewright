@@ -3,11 +3,11 @@
 </h1>
 
 <p align="center">
-  A Kubernetes operator that diagnoses incidents with an LLM and proposes fixes only as reviewed GitOps pull requests.
+  A safe-remediation controller for Kubernetes clusters run with GitOps: it turns untrusted proposals, from rules or an LLM, into typed, bounded changes tied to policy and to the object's real source in Git, delivers them only as reviewed pull requests, and verifies the effect.
 </p>
 
 > [!WARNING]
-> Early design. Nothing is implemented yet; the [design](docs/design.md) and [decisions](docs/adr/index.md) come first.
+> Early. Built so far: the API and its validation, the policy check with source mapping and the freshness check, the YAML patchers, and the GitHub and Key Vault adapters (used to read Git; no pull request is opened yet). Not built: the collector, the analysis, the pull request itself and the verification. The [design](docs/design.md) says what holds at each step; the [decisions](docs/adr/index.md) say why.
 
 ## What it does
 

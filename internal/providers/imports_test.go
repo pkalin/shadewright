@@ -17,44 +17,15 @@ limitations under the License.
 package providers_test
 
 import (
-	"go/parser"
-	"go/token"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
+
+	"github.com/pkalin/shadewright/internal/testutil/importguard"
 )
 
-const module = "github.com/pkalin/shadewright/"
-
 // TestNoVendorImports enforces ADR-0013: the interfaces and the fakes import only the standard library and
-// this module, so no vendor SDK can leak into the core through them.
+// this module, and nothing they depend on, however indirectly, is a product SDK or an adapter, so no vendor
+// SDK can leak into the core through them.
 func TestNoVendorImports(t *testing.T) {
-	for _, dir := range []string{".", "fake"} {
-		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(files) == 0 {
-			t.Fatalf("no Go files in %s", dir)
-		}
-		for _, f := range files {
-			src, err := os.ReadFile(f)
-			if err != nil {
-				t.Fatal(err)
-			}
-			parsed, err := parser.ParseFile(token.NewFileSet(), f, src, parser.ImportsOnly)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, imp := range parsed.Imports {
-				path, _ := strconv.Unquote(imp.Path.Value)
-				first, _, _ := strings.Cut(path, "/")
-				if strings.Contains(first, ".") && !strings.HasPrefix(path, module) {
-					t.Errorf("%s imports %q: only the standard library and %s* are allowed here", f, path, module)
-				}
-			}
-		}
-	}
+	importguard.DirectImportsOnlyStandardOrModule(t, ".", "fake")
+	importguard.NoForbiddenDeps(t, ".", ".", "./fake")
 }

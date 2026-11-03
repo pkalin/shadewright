@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/groupversion"
 )
 
 const (
@@ -52,8 +53,8 @@ var namespacedKinds = map[string]bool{kindPod: true, kindReplicaSet: true, kindD
 // The ObjectRef patterns of the Incident schema (api/v1alpha1/common_types.go), checked here so that an
 // observation always fits the Incident it becomes.
 var (
-	apiVersionRe = regexp.MustCompile(`^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?v[0-9]+((alpha|beta)[0-9]+)?$`)
-	kindRe       = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
+	// The apiVersion pattern is in package groupversion, shared with the module registry.
+	kindRe = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
 	// reasonRe is the CamelCase form every Kubernetes component uses for reasons.
 	reasonRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*$`)
 	// controllerRe is a component name such as kubelet, default-scheduler or example.com/operator. It is
@@ -66,7 +67,6 @@ const (
 	maxReason     = 128
 	maxAction     = 128
 	maxController = 253
-	maxAPIVersion = 253
 	maxKind       = 63
 )
 
@@ -82,7 +82,7 @@ func validController(s string) bool { return len(s) <= maxController && controll
 // validRef reports whether r fits the Incident's ObjectRef schema and carries a UID, which the fingerprint
 // needs.
 func validRef(r remediationv1alpha1.ObjectRef) bool {
-	if len(r.APIVersion) > maxAPIVersion || !apiVersionRe.MatchString(r.APIVersion) {
+	if !groupversion.Valid(r.APIVersion) {
 		return false
 	}
 	if len(r.Kind) > maxKind || !kindRe.MatchString(r.Kind) {

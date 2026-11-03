@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/gitops/repopath"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 )
 
@@ -63,7 +64,12 @@ type Result struct {
 // sets it), the desired value not reached (an overlay overrides it), a kustomization outside the allow-list,
 // a reference kustomize could read as remote, or a build kustomize refuses. Check reads nothing outside
 // in.Files and never runs a plugin or fetches a remote base.
-func Check(in Input) (Result, error) {
+//
+// Renders are serialised in the process (kustomize keeps global state). ctx bounds the wait for that turn:
+// when it ends first, Check returns ctx.Err() without rendering. A render that has started runs to its end,
+// since kustomize cannot be cancelled; the limits on the build ([MaxVisits], [MaxBuildBytes]) bound how long
+// it can take.
+func Check(ctx context.Context, in Input) (Result, error) {
 	field, previous, desired, err := plan(in)
 	if err != nil {
 		return Result{}, err
@@ -71,7 +77,7 @@ func Check(in Input) (Result, error) {
 	dir, _ := cleanPath(in.Path)
 	file, _ := cleanPath(in.File)
 
-	before, err := tree(in.Files, dir)
+	before, err := tree(ctx, in.Files, dir)
 	if err != nil {
 		return Result{}, err
 	}
@@ -81,11 +87,11 @@ func Check(in Input) (Result, error) {
 	afterFiles := maps.Clone(before.files)
 	afterFiles[file] = in.Patched
 
-	objsBefore, err := render(before.files, dir)
+	objsBefore, err := render(ctx, before.files, dir)
 	if err != nil {
 		return Result{}, err
 	}
-	objsAfter, err := render(afterFiles, dir)
+	objsAfter, err := render(ctx, afterFiles, dir)
 	if err != nil {
 		return Result{}, err
 	}
@@ -117,7 +123,7 @@ func plan(in Input) (sourcemap.Field, any, any, error) {
 		return sourcemap.Field{}, nil, nil, refuse(ReasonInvalidInput, "the target needs a namespace and a name")
 	}
 	previous, ok := sourcemap.PreviousValue(in.Action)
-	desired, ok2 := desiredValue(in.Action)
+	desired, ok2 := sourcemap.DesiredValue(in.Action)
 	if !ok || !ok2 || field.Equals(previous, desired) {
 		return sourcemap.Field{}, nil, nil, refuse(ReasonInvalidInput, "the action needs a previous and another desired value")
 	}
@@ -125,7 +131,7 @@ func plan(in Input) (sourcemap.Field, any, any, error) {
 		return sourcemap.Field{}, nil, nil, refuse(ReasonInvalidInput, "the path is not a relative path inside the repository")
 	}
 	file, ok := cleanPath(in.File)
-	if !ok || file == "." || !isManifestFile(file) || isKustomizationFile(file) {
+	if !ok || file == "." || !repopath.IsManifest(file) || repopath.IsKustomizationFile(file) {
 		return sourcemap.Field{}, nil, nil, refuse(ReasonInvalidInput, "the changed file is not a manifest path inside the repository")
 	}
 	if len(in.Patched) > MaxFileBytes {
@@ -134,26 +140,13 @@ func plan(in Input) (sourcemap.Field, any, any, error) {
 	return field, previous, desired, nil
 }
 
-// desiredValue returns the desired value of an action in the form sourcemap.Field.Equals compares.
-func desiredValue(action v1alpha1.Action) (any, bool) {
-	switch {
-	case action.SetContainerMemoryLimit != nil:
-		q := action.SetContainerMemoryLimit.Desired.DeepCopy() // String caches into its receiver
-		return q.String(), true
-	case action.AdjustKedaMaxReplicas != nil:
-		return int64(action.AdjustKedaMaxReplicas.DesiredValue), true
-	default:
-		return nil, false
-	}
-}
-
 // tree walks the build of dir in files and returns the files it reads.
-func tree(files map[string][]byte, dir string) (*walker, error) {
+func tree(ctx context.Context, files map[string][]byte, dir string) (*walker, error) {
 	w := newWalker(func(_ context.Context, p string) ([]byte, bool, error) {
 		data, ok := files[p]
 		return data, ok, nil
 	})
-	if err := w.walk(context.Background(), dir, kindKustomization, 0); err != nil {
+	if err := w.walk(ctx, dir, kindKustomization, 0); err != nil {
 		return nil, err
 	}
 	return w, nil
@@ -214,9 +207,12 @@ func compare(before, after []map[string]any, target v1alpha1.ObjectRef, field so
 		}
 	}
 	tb, ta := ib[want], ia[want]
+	if _, had := field.Get(tb); !had {
+		return nil, nil, refuse(ReasonFieldNotFound, "the rendered target does not set "+field.String()+" before the change")
+	}
 	now, ok := field.Get(ta)
-	if _, had := field.Get(tb); !had || !ok {
-		return nil, nil, refuse(ReasonDesiredValueMissing, "the rendered target does not set "+field.String())
+	if !ok {
+		return nil, nil, refuse(ReasonDesiredValueMissing, "the rendered target does not set "+field.String()+" after the change")
 	}
 	masked, ok := withField(tb, field, now)
 	if !ok || !reflect.DeepEqual(masked, ta) {

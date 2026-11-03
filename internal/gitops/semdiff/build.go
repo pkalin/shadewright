@@ -20,12 +20,11 @@ import (
 	"fmt"
 	"maps"
 	"path"
-	"regexp"
 	"slices"
-	"strings"
 
 	"sigs.k8s.io/yaml"
 
+	"github.com/pkalin/shadewright/internal/gitops/repopath"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 )
 
@@ -35,15 +34,20 @@ const (
 	MaxFileBytes = sourcemap.MaxFileBytes
 	// MaxFiles is how many files a build may hold, kustomization files included.
 	MaxFiles = sourcemap.MaxFiles
-	// MaxReads is how many reads [Load] makes in all, kustomization file lookups included.
+	// MaxReads is how many reads [Load] makes in all, kustomization and .sourceignore lookups included.
 	MaxReads = sourcemap.MaxReads
 	// MaxDepth is how many nested kustomization directories are followed.
 	MaxDepth = sourcemap.MaxDepth
-	// MaxVisits is how many times directories are visited in all, counting a directory once for every
-	// kustomization that lists it, so bases reused through many overlays cannot multiply the output.
+	// MaxVisits is how many times directories are visited in all, with repetition: a directory counts once
+	// for every reference that reaches it, so a diamond of overlays over one base counts every path through
+	// it, as kustomize builds it.
 	MaxVisits = 256
-	// maxRefLen is the longest path accepted, the MaxLength of GitFilePath.
-	maxRefLen = 512
+	// MaxBuildBytes bounds the input kustomize processes, with repetition: every visit of a directory adds
+	// the size of its kustomization file and of the resource and patch files it lists. A large base reached
+	// through many overlays is rendered once per path, so this bounds the work and memory of a render.
+	MaxBuildBytes = 16 << 20
+	// MaxObjects is the most objects one render may return.
+	MaxObjects = 4096
 )
 
 const (
@@ -55,9 +59,6 @@ const (
 	keyComponents     = "components"
 	keyPatches        = "patches"
 )
-
-// kustomizationFileNames are the names kustomize looks for in a directory.
-var kustomizationFileNames = []string{"kustomization.yaml", "kustomization.yml", kindKustomization}
 
 // allowedKeys are the kustomization fields the renderer accepts. Each is a built-in transformer that reads
 // nothing or only local files the walk validates. Everything else is refused: generators (configMapGenerator,
@@ -75,65 +76,13 @@ var allowedKeys = map[string]bool{
 // patchKeys are the fields a patches entry may use. path is a local file; patch is inline.
 var patchKeys = map[string]bool{"path": true, "patch": true, "target": true, "options": true}
 
-// segmentRE is one path segment that is neither "." nor "..": it starts with a letter, digit or underscore
-// and holds no ':', '@', '?' or '/', so it can never form a URL scheme, an SCP-style Git address or a query.
-var segmentRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*$`)
-
-// keyRE is a kustomization field name that is safe to quote in a message.
-var keyRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]{0,63}$`)
-
-// cleanPath checks that p is a clean relative path inside the repository, made of plain segments, and
-// returns it with "." for the root.
+// cleanPath checks that p is a relative path inside the repository and returns it cleaned, with "." for the
+// root (an empty spec.path means the root, as in Flux).
 func cleanPath(p string) (string, bool) {
-	if p == "" || p == "." || p == "./" {
+	if p == "" {
 		return ".", true
 	}
-	if len(p) > maxRefLen || strings.HasPrefix(p, "/") {
-		return "", false
-	}
-	c := path.Clean(p)
-	for seg := range strings.SplitSeq(c, "/") {
-		if !segmentRE.MatchString(seg) || strings.Contains(seg, "..") {
-			return "", false
-		}
-	}
-	return c, true
-}
-
-// joinRef resolves ref, a reference from a kustomization file in dir, to a clean repository path. It refuses
-// what kustomize could read as remote (a URL, an SCP-style address, a github.com path, anything with ':',
-// '@' or '?'), absolute paths, segments kustomize calls ambiguous ("a..b"), and paths that leave the
-// repository.
-func joinRef(dir, ref string) (string, bool) {
-	if ref == "" || len(ref) > maxRefLen || strings.HasPrefix(ref, "/") {
-		return "", false
-	}
-	first := true
-	for seg := range strings.SplitSeq(ref, "/") {
-		switch {
-		case seg == "" || seg == "." || seg == "..":
-			continue
-		case !segmentRE.MatchString(seg) || strings.Contains(seg, ".."):
-			return "", false
-		case first && strings.EqualFold(seg, "github.com"):
-			// kustomize reads github.com/<org>/<repo> as a remote base even without a scheme.
-			return "", false
-		}
-		first = false
-	}
-	p := path.Join(dir, ref)
-	if p == ".." || strings.HasPrefix(p, "../") || len(p) > maxRefLen {
-		return "", false
-	}
-	return p, true
-}
-
-func isManifestFile(p string) bool {
-	return strings.HasSuffix(p, ".yaml") || strings.HasSuffix(p, ".yml")
-}
-
-func isKustomizationFile(p string) bool {
-	return slices.Contains(kustomizationFileNames, path.Base(p))
+	return repopath.Join(".", p)
 }
 
 // reader returns the content of a repository file; found is false when it does not exist.
@@ -147,21 +96,32 @@ type walker struct {
 	files map[string][]byte
 	// resources holds the manifest files listed under resources.
 	resources map[string]bool
-	// parsed caches the references of each directory already read.
-	parsed map[string]*refs
-	visits int
+	// parsed caches the references of each directory already read, per kind it was reached as, so a
+	// directory reached as a Kustomization and as a Component is checked for both.
+	parsed map[dirKind]*refs
+	// ignoreChecked holds the directories already checked for a .sourceignore file.
+	ignoreChecked map[string]bool
+	visits        int
+	buildBytes    int
 }
 
-// refs are the references of one kustomization file.
+type dirKind struct{ dir, kind string }
+
+// refs are the references of one kustomization file, and the bytes one visit of it adds to the build.
 type refs struct {
 	dirs, components, files []string
+	bytes                   int
 }
 
 func newWalker(read reader) *walker {
-	return &walker{read: read, files: map[string][]byte{}, resources: map[string]bool{}, parsed: map[string]*refs{}}
+	return &walker{
+		read: read, files: map[string][]byte{}, resources: map[string]bool{},
+		parsed: map[dirKind]*refs{}, ignoreChecked: map[string]bool{},
+	}
 }
 
-// walk visits dir, which must hold a kustomization file of kind want, and everything it refers to.
+// walk visits dir, which must hold a kustomization file of kind want, and everything it refers to. Every
+// visit counts against MaxVisits and MaxBuildBytes, also when the directory was read before.
 func (w *walker) walk(ctx context.Context, dir, want string, depth int) error {
 	if depth > MaxDepth {
 		return refuse(ReasonTooLarge, fmt.Sprintf("kustomization directories are nested deeper than %d", MaxDepth))
@@ -169,18 +129,23 @@ func (w *walker) walk(ctx context.Context, dir, want string, depth int) error {
 	if w.visits++; w.visits > MaxVisits {
 		return refuse(ReasonTooLarge, fmt.Sprintf("the build visits directories more than %d times", MaxVisits))
 	}
-	r, ok := w.parsed[dir]
+	key := dirKind{dir, want}
+	r, ok := w.parsed[key]
 	if !ok {
 		var err error
 		if r, err = w.parse(ctx, dir, want); err != nil {
 			return err
 		}
-		w.parsed[dir] = r
-	}
-	for _, f := range r.files {
-		if err := w.file(ctx, f); err != nil {
-			return err
+		for _, f := range r.files {
+			if err := w.file(ctx, f); err != nil {
+				return err
+			}
+			r.bytes += len(w.files[f])
 		}
+		w.parsed[key] = r
+	}
+	if w.buildBytes += r.bytes; w.buildBytes > MaxBuildBytes {
+		return refuse(ReasonTooLarge, fmt.Sprintf("the build processes more than %d bytes", MaxBuildBytes))
 	}
 	for _, d := range r.dirs {
 		if err := w.walk(ctx, d, kindKustomization, depth+1); err != nil {
@@ -195,10 +160,13 @@ func (w *walker) walk(ctx context.Context, dir, want string, depth int) error {
 	return nil
 }
 
-// file records a file the build reads. It must exist.
+// file records a file the build reads. It must exist, and no .sourceignore may apply to it.
 func (w *walker) file(ctx context.Context, p string) error {
 	if _, ok := w.files[p]; ok {
 		return nil
+	}
+	if err := w.checkIgnore(ctx, path.Dir(p)); err != nil {
+		return err
 	}
 	data, found, err := w.get(ctx, p)
 	if err != nil {
@@ -208,6 +176,27 @@ func (w *walker) file(ctx context.Context, p string) error {
 		return refuse(ReasonFileMissing, p+" is listed in the build but does not exist")
 	}
 	w.files[p] = data
+	return nil
+}
+
+// checkIgnore refuses when dir or any directory above it holds a .sourceignore file, as the source mapping
+// does: Flux would drop the files it matches from what it applies, so a render of the full tree could
+// differ from what Flux builds. The rules are not interpreted.
+func (w *walker) checkIgnore(ctx context.Context, dir string) error {
+	for d := dir; !w.ignoreChecked[d]; d = path.Dir(d) {
+		w.ignoreChecked[d] = true
+		p := path.Join(d, repopath.SourceIgnoreFile)
+		_, found, err := w.get(ctx, p)
+		if err != nil {
+			return err
+		}
+		if found {
+			return refuse(ReasonSourceIgnored, p+" exists, so Flux may leave files out of what it builds")
+		}
+		if d == "." {
+			break
+		}
+	}
 	return nil
 }
 
@@ -227,9 +216,12 @@ func (w *walker) get(ctx context.Context, p string) ([]byte, bool, error) {
 
 // parse reads the one kustomization file in dir and returns its validated references.
 func (w *walker) parse(ctx context.Context, dir, want string) (*refs, error) {
+	if err := w.checkIgnore(ctx, dir); err != nil {
+		return nil, err
+	}
 	var name string
 	var data []byte
-	for _, n := range kustomizationFileNames {
+	for _, n := range repopath.KustomizationFileNames {
 		p := path.Join(dir, n)
 		d, found, err := w.get(ctx, p)
 		if err != nil {
@@ -244,7 +236,7 @@ func (w *walker) parse(ctx context.Context, dir, want string) (*refs, error) {
 		name, data = p, d
 	}
 	if name == "" {
-		return nil, refuse(ReasonFileMissing, "directory "+dir+" has no kustomization file")
+		return nil, w.noKustomization(ctx, dir)
 	}
 	w.files[name] = data
 	var k map[string]any
@@ -254,7 +246,24 @@ func (w *walker) parse(ctx context.Context, dir, want string) (*refs, error) {
 	if err := checkHeader(name, k, want); err != nil {
 		return nil, err
 	}
-	return collectRefs(name, dir, k, w.resources)
+	r, err := collectRefs(name, dir, k, w.resources)
+	if err != nil {
+		return nil, err
+	}
+	r.bytes = len(data)
+	return r, nil
+}
+
+// noKustomization explains why dir has no kustomization file. A resource that does not end in .yaml or .yml
+// is followed as a directory; when it is in fact a file (deploy.json, say), the reason says so.
+func (w *walker) noKustomization(ctx context.Context, dir string) error {
+	if _, found, err := w.read(ctx, dir); err != nil {
+		return err
+	} else if found {
+		return refuse(ReasonUnsupportedKustomization,
+			dir+" is listed as a resource but is a file without a .yaml or .yml extension; only YAML files are supported")
+	}
+	return refuse(ReasonFileMissing, "directory "+dir+" has no kustomization file")
 }
 
 // checkHeader refuses fields outside the allow-list and a kind or apiVersion other than want's.
@@ -264,7 +273,7 @@ func checkHeader(name string, k map[string]any, want string) error {
 			continue
 		}
 		what := "an unsupported field"
-		if keyRE.MatchString(key) {
+		if repopath.SafeKey(key) {
 			what = fmt.Sprintf("%q", key)
 		}
 		return refuse(ReasonUnsupportedKustomization, name+" uses "+what)
@@ -298,7 +307,7 @@ func collectRefs(name, dir string, k map[string]any, resources map[string]bool) 
 		out := make([]string, 0, len(items))
 		for _, it := range items {
 			s, isString := it.(string)
-			p, valid := joinRef(dir, s)
+			p, valid := repopath.Join(dir, s)
 			if !isString || !valid {
 				return nil, bad
 			}
@@ -311,7 +320,7 @@ func collectRefs(name, dir string, k map[string]any, resources map[string]bool) 
 		return nil, err
 	}
 	for _, p := range res {
-		if isManifestFile(p) {
+		if repopath.IsManifest(p) {
 			r.files = append(r.files, p)
 			resources[p] = true
 		} else {
@@ -351,7 +360,7 @@ func patchFiles(name, dir string, raw any, bad error) ([]string, error) {
 		}
 		if raw, ok := m["path"]; ok {
 			s, isString := raw.(string)
-			p, valid := joinRef(dir, s)
+			p, valid := repopath.Join(dir, s)
 			if !isString || !valid {
 				return nil, bad
 			}

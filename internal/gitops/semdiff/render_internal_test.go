@@ -16,11 +16,15 @@ limitations under the License.
 package semdiff
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"sigs.k8s.io/kustomize/api/types"
 )
+
+const rootKust = "kustomization.yaml"
 
 func TestOptionsAreLockedDown(t *testing.T) {
 	o := options()
@@ -43,7 +47,7 @@ func TestOptionsAreLockedDown(t *testing.T) {
 func TestRenderRefusesPluginsEvenWithoutTheWalk(t *testing.T) {
 	for name, files := range map[string]map[string][]byte{
 		"exec function": {
-			"kustomization.yaml": []byte("transformers: [fn.yaml]\n"),
+			rootKust: []byte("transformers: [fn.yaml]\n"),
 			"fn.yaml": []byte(`apiVersion: example.com/v1
 kind: Run
 metadata:
@@ -55,14 +59,27 @@ metadata:
 `),
 		},
 		"helm chart": {
-			"kustomization.yaml": []byte("helmCharts:\n  - name: x\n    repo: https://charts.example.invalid\n"),
+			rootKust: []byte("helmCharts:\n  - name: x\n    repo: https://charts.example.invalid\n"),
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := render(files, ".")
+			_, err := render(context.Background(), files, ".")
 			if !errors.Is(err, ErrRenderFailed) {
 				t.Fatalf("got %v, want RenderFailed", err)
 			}
 		})
+	}
+}
+
+// TestRenderWaitHonoursTheContext holds the render slot, as a stuck render would, and checks that another
+// caller gives up when its context ends instead of waiting forever.
+func TestRenderWaitHonoursTheContext(t *testing.T) {
+	renderSlot <- struct{}{}
+	defer func() { <-renderSlot }()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	files := map[string][]byte{rootKust: []byte("resources: []\n")}
+	if _, err := render(ctx, files, "."); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v, want context.DeadlineExceeded", err)
 	}
 }

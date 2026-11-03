@@ -58,6 +58,12 @@ const (
 	// ReasonDesiredValueMissing means the rendered target after the change does not hold the desired value,
 	// for example because a patch in an overlay overrides it.
 	ReasonDesiredValueMissing Reason = "DesiredValueMissing"
+	// ReasonFieldNotFound means the rendered target before the change does not set the field the action
+	// changes.
+	ReasonFieldNotFound Reason = "FieldNotFound"
+	// ReasonSourceIgnored means a .sourceignore file applies to a directory of the build. Flux would filter
+	// the files by it, so the render could differ from what Flux builds; the rules are not interpreted.
+	ReasonSourceIgnored Reason = "SourceIgnored"
 	// ReasonSchemaInvalid means the changed object fails the basic schema checks.
 	ReasonSchemaInvalid Reason = "SchemaInvalid"
 )
@@ -99,6 +105,8 @@ var (
 	ErrOtherFieldChanged        = &Error{Reason: ReasonOtherFieldChanged}
 	ErrPreviousValueDiffers     = &Error{Reason: ReasonPreviousValueDiffers}
 	ErrDesiredValueMissing      = &Error{Reason: ReasonDesiredValueMissing}
+	ErrFieldNotFound            = &Error{Reason: ReasonFieldNotFound}
+	ErrSourceIgnored            = &Error{Reason: ReasonSourceIgnored}
 	ErrSchemaInvalid            = &Error{Reason: ReasonSchemaInvalid}
 )
 

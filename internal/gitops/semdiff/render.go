@@ -16,8 +16,9 @@ limitations under the License.
 package semdiff
 
 import (
+	"context"
+	"fmt"
 	"path"
-	"sync"
 
 	utiljson "k8s.io/apimachinery/pkg/util/json"
 	"sigs.k8s.io/kustomize/api/krusty"
@@ -25,9 +26,10 @@ import (
 	"sigs.k8s.io/kustomize/kyaml/filesys"
 )
 
-// renderMu serialises builds. kustomize keeps global state (the OpenAPI schema it sets on every run), so
-// concurrent builds in one process can race.
-var renderMu sync.Mutex
+// renderSlot serialises builds: kustomize keeps global state (the OpenAPI schema it sets on every run), so
+// concurrent builds in one process can race. It is a one-slot channel rather than a mutex so that a caller
+// waiting for its turn can give up when its context ends.
+var renderSlot = make(chan struct{}, 1)
 
 // options returns the locked-down kustomize options: built-in transformers only (no exec or container
 // plugins, no KRM functions), Helm off, no managed-by label. Loading is not restricted to the kustomization
@@ -46,7 +48,9 @@ func options() *krusty.Options {
 // decodes JSON (whole numbers as int64). Remote bases and remote files cannot be reached: the walk has
 // refused every reference that kustomize could read as a URL or Git address, and the file system holds
 // only the given files. The kustomize error text is dropped, since it may quote file contents.
-func render(files map[string][]byte, dir string) (objs []map[string]any, err error) {
+//
+// The wait for the render slot honours ctx; the render itself cannot be cancelled once it has started.
+func render(ctx context.Context, files map[string][]byte, dir string) (objs []map[string]any, err error) {
 	failed := refuse(ReasonRenderFailed, "kustomize could not build "+dir)
 	defer func() {
 		if recover() != nil {
@@ -59,11 +63,21 @@ func render(files map[string][]byte, dir string) (objs []map[string]any, err err
 			return nil, failed
 		}
 	}
-	renderMu.Lock()
-	defer renderMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case renderSlot <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-renderSlot }()
 	m, err := krusty.MakeKustomizer(options()).Run(fs, path.Join("/", dir))
 	if err != nil {
 		return nil, failed
+	}
+	if m.Size() > MaxObjects {
+		return nil, refuse(ReasonTooLarge, fmt.Sprintf("the build renders more than %d objects", MaxObjects))
 	}
 	for _, r := range m.Resources() {
 		b, err := r.MarshalJSON()

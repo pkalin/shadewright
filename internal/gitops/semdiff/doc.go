@@ -25,8 +25,15 @@ limitations under the License.
 // built from, or a patch in an overlay that overrides the new value.
 //
 // [Load] reads the files of a build from a [providers.GitProvider], bounded by [MaxReads], [MaxFiles],
-// [MaxFileBytes], [MaxDepth] and [MaxVisits]; [Check] applies the same walk and limits to the files it is
-// given.
+// [MaxFileBytes], [MaxDepth], [MaxVisits] and [MaxBuildBytes]; [Check] applies the same walk and limits to
+// the files it is given, and caps a render at [MaxObjects]. Visits and build bytes count with repetition, so
+// a diamond of overlays over a large base is refused before kustomize builds it once per path. A
+// .sourceignore file in any directory of the build, or above one, is refused as in the source mapping,
+// since Flux would filter the files by it. Path rules are shared with the source mapping
+// (internal/gitops/repopath).
+//
+// Renders are serialised in the process; the wait for a turn honours the context, the render itself cannot
+// be cancelled.
 //
 // Rendering is locked down. Every kustomization file is checked against an allow-list before kustomize
 // sees it: plain resources, components, patches (inline or from a local file) and the built-in name,

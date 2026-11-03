@@ -155,7 +155,7 @@ func wantReason(t *testing.T, err error, want *semdiff.Error) {
 }
 
 func TestCheckAcceptsTheOneChange(t *testing.T) {
-	res, err := semdiff.Check(soInput(t, ordersRepo(), "./apps/orders", 15))
+	res, err := semdiff.Check(context.Background(), soInput(t, ordersRepo(), "./apps/orders", 15))
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestCheckAcceptsMemoryThroughABase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := semdiff.Check(semdiff.Input{
+	res, err := semdiff.Check(context.Background(), semdiff.Input{
 		Files: files, Path: "clusters/lab", File: depFile, Patched: patched, Target: depTarget(), Action: act,
 	})
 	if err != nil {
@@ -207,7 +207,7 @@ func TestCheckRefusesAChangeToAnotherObjectThroughASharedBase(t *testing.T) {
 	files := sharedBase()
 	base := "apps/base/scaledobject.yaml"
 	patched := []byte(strings.Replace(string(files[base]), "maxReplicaCount: 10", "maxReplicaCount: 15", 1))
-	_, err := semdiff.Check(semdiff.Input{
+	_, err := semdiff.Check(context.Background(), semdiff.Input{
 		Files: files, Path: "apps", File: base, Patched: patched,
 		Target: soTarget("a-orders-worker"), Action: replicas(15),
 	})
@@ -217,33 +217,33 @@ func TestCheckRefusesAChangeToAnotherObjectThroughASharedBase(t *testing.T) {
 func TestCheckRefusesAChangeToAnotherDocumentOfTheFile(t *testing.T) {
 	in := soInput(t, ordersRepo(), "apps/orders", 15)
 	in.Patched = []byte(strings.Replace(string(in.Patched), "port: 80", "port: 81", 1))
-	_, err := semdiff.Check(in)
+	_, err := semdiff.Check(context.Background(), in)
 	wantReason(t, err, semdiff.ErrOtherObjectChanged)
 }
 
 func TestCheckRefusesAnotherFieldOfTheTarget(t *testing.T) {
 	in := soInput(t, ordersRepo(), "apps/orders", 15)
 	in.Patched = []byte(strings.Replace(string(in.Patched), "minReplicaCount: 1", "minReplicaCount: 2", 1))
-	_, err := semdiff.Check(in)
+	_, err := semdiff.Check(context.Background(), in)
 	wantReason(t, err, semdiff.ErrOtherFieldChanged)
 }
 
 func TestCheckRefusesAddedOrRemovedObjects(t *testing.T) {
 	in := soInput(t, ordersRepo(), "apps/orders", 15)
 	in.Patched = append(in.Patched, []byte("---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: extra\n  namespace: orders\n")...)
-	_, err := semdiff.Check(in)
+	_, err := semdiff.Check(context.Background(), in)
 	wantReason(t, err, semdiff.ErrObjectsAddedOrRemoved)
 
 	in = soInput(t, ordersRepo(), "apps/orders", 15)
 	in.Patched = in.Patched[strings.Index(string(in.Patched), "---"):]
-	_, err = semdiff.Check(in)
+	_, err = semdiff.Check(context.Background(), in)
 	wantReason(t, err, semdiff.ErrObjectsAddedOrRemoved)
 }
 
 func TestCheckRefusesAnUnchangedFile(t *testing.T) {
 	in := soInput(t, ordersRepo(), "apps/orders", 15)
 	in.Patched = in.Files[soFile]
-	_, err := semdiff.Check(in)
+	_, err := semdiff.Check(context.Background(), in)
 	wantReason(t, err, semdiff.ErrDesiredValueMissing)
 }
 
@@ -270,27 +270,27 @@ spec:
 
 func TestCheckRefusesWhenAnOverlayOverridesTheValue(t *testing.T) {
 	// The overlay pins 10, so the patched file renders 10 again.
-	_, err := semdiff.Check(soInput(t, overlayPatch(), "clusters/lab", 15))
+	_, err := semdiff.Check(context.Background(), soInput(t, overlayPatch(), "clusters/lab", 15))
 	wantReason(t, err, semdiff.ErrDesiredValueMissing)
 
 	// The overlay pins another value than the plan's previous one.
 	files := overlayPatch()
 	files["clusters/lab/max.yaml"] = []byte(strings.Replace(string(files["clusters/lab/max.yaml"]), "10", "12", 1))
-	_, err = semdiff.Check(soInput(t, files, "clusters/lab", 15))
+	_, err = semdiff.Check(context.Background(), soInput(t, files, "clusters/lab", 15))
 	wantReason(t, err, semdiff.ErrPreviousValueDiffers)
 }
 
 func TestCheckRefusesAFileOutsideTheBuild(t *testing.T) {
 	files := ordersRepo()
 	files[soKust] = kust()
-	_, err := semdiff.Check(soInput(t, files, "apps/orders", 15))
+	_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
 	wantReason(t, err, semdiff.ErrFileNotInBuild)
 
 	// A file used only as a patch is not a resource either.
 	files = overlayPatch()
 	in := soInput(t, files, "clusters/lab", 15)
 	in.File = "clusters/lab/max.yaml"
-	_, err = semdiff.Check(in)
+	_, err = semdiff.Check(context.Background(), in)
 	wantReason(t, err, semdiff.ErrFileNotInBuild)
 }
 
@@ -302,7 +302,7 @@ func TestCheckRefusesSchemaViolations(t *testing.T) {
 		t.Fatal(err)
 	}
 	in := semdiff.Input{Files: files, Path: "apps/web", File: depFile, Patched: patched, Target: depTarget(), Action: act}
-	_, err = semdiff.Check(in)
+	_, err = semdiff.Check(context.Background(), in)
 	wantReason(t, err, semdiff.ErrSchemaInvalid)
 
 	// An unknown field in the Deployment fails the strict conversion.
@@ -314,13 +314,13 @@ func TestCheckRefusesSchemaViolations(t *testing.T) {
 		t.Fatal(err)
 	}
 	in.Action = act
-	_, err = semdiff.Check(in)
+	_, err = semdiff.Check(context.Background(), in)
 	wantReason(t, err, semdiff.ErrSchemaInvalid)
 
 	// maxReplicaCount below minReplicaCount.
 	sof := ordersRepo()
 	sof[soFile] = []byte(strings.Replace(scaledObjectYAML, "minReplicaCount: 1", "minReplicaCount: 5", 1))
-	_, err = semdiff.Check(soInput(t, sof, "apps/orders", 3))
+	_, err = semdiff.Check(context.Background(), soInput(t, sof, "apps/orders", 3))
 	wantReason(t, err, semdiff.ErrSchemaInvalid)
 }
 
@@ -329,14 +329,14 @@ func TestCheckRefusesAnAmbiguousTarget(t *testing.T) {
 	files[soKust] = kust("scaledobject.yaml", "old.yaml")
 	files["apps/orders/old.yaml"] = []byte("apiVersion: keda.sh/v1beta1\nkind: ScaledObject\nmetadata:\n" +
 		"  name: orders-worker\n  namespace: orders\nspec:\n  maxReplicaCount: 10\n")
-	_, err := semdiff.Check(soInput(t, files, "apps/orders", 15))
+	_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
 	wantReason(t, err, semdiff.ErrAmbiguousTarget)
 }
 
 func TestCheckRefusesWhenTheTargetIsNotRendered(t *testing.T) {
 	in := soInput(t, ordersRepo(), "apps/orders", 15)
 	in.Target = soTarget("other")
-	_, err := semdiff.Check(in)
+	_, err := semdiff.Check(context.Background(), in)
 	wantReason(t, err, semdiff.ErrTargetNotFound)
 }
 
@@ -344,7 +344,7 @@ func TestCheckRefusesABuildKustomizeRejects(t *testing.T) {
 	files := ordersRepo()
 	files[soKust] = kust("scaledobject.yaml", "copy.yaml")
 	files["apps/orders/copy.yaml"] = files[soFile] // the same objects twice
-	_, err := semdiff.Check(soInput(t, files, "apps/orders", 15))
+	_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
 	wantReason(t, err, semdiff.ErrRenderFailed)
 }
 
@@ -362,7 +362,7 @@ func TestCheckRefusesInvalidInput(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			in := soInput(t, ordersRepo(), "apps/orders", 15)
 			mutate(&in)
-			_, err := semdiff.Check(in)
+			_, err := semdiff.Check(context.Background(), in)
 			var e *semdiff.Error
 			if !errors.As(err, &e) || (e.Reason != semdiff.ReasonInvalidInput && e.Reason != semdiff.ReasonTooLarge) {
 				t.Fatalf("got %v, want InvalidInput or TooLarge", err)
@@ -398,7 +398,7 @@ func TestCheckNeverReachesRemoteOrPlugins(t *testing.T) {
 					files[soKust] = fmt.Appendf(nil,
 						"resources:\n  - scaledobject.yaml\ncomponents:\n  - %q\n", ref)
 				}
-				_, err := semdiff.Check(soInput(t, files, "apps/orders", 15))
+				_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
 				wantReason(t, err, semdiff.ErrInvalidReference)
 			})
 		}
@@ -406,7 +406,7 @@ func TestCheckNeverReachesRemoteOrPlugins(t *testing.T) {
 			files := ordersRepo()
 			files[soKust] = fmt.Appendf(nil,
 				"resources:\n  - scaledobject.yaml\npatches:\n  - path: %q\n", ref)
-			_, err := semdiff.Check(soInput(t, files, "apps/orders", 15))
+			_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
 			wantReason(t, err, semdiff.ErrInvalidReference)
 		})
 	}
@@ -422,7 +422,7 @@ func TestCheckNeverReachesRemoteOrPlugins(t *testing.T) {
 		t.Run(field, func(t *testing.T) {
 			files := ordersRepo()
 			files[soKust] = []byte("resources:\n  - scaledobject.yaml\n" + field + "\n")
-			_, err := semdiff.Check(soInput(t, files, "apps/orders", 15))
+			_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
 			wantReason(t, err, semdiff.ErrUnsupportedKustomization)
 		})
 	}
@@ -471,7 +471,7 @@ func TestCheckRefusesBadKustomizationFiles(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			in := soInput(t, map[string][]byte{soFile: []byte(scaledObjectYAML)}, "apps/orders", 15)
 			in.Files = tc.files
-			_, err := semdiff.Check(in)
+			_, err := semdiff.Check(context.Background(), in)
 			wantReason(t, err, tc.want)
 		})
 	}
@@ -482,7 +482,7 @@ func TestCheckAcceptsAComponent(t *testing.T) {
 	files[soKust] = []byte("resources: [scaledobject.yaml]\ncomponents: [../comp]\n")
 	files["apps/comp/kustomization.yaml"] = []byte("apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n" +
 		"labels:\n  - pairs:\n      team: orders\n")
-	if _, err := semdiff.Check(soInput(t, files, "apps/orders", 15)); err != nil {
+	if _, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15)); err != nil {
 		t.Fatalf("Check: %v", err)
 	}
 }
@@ -507,7 +507,7 @@ func fanOut(levels int) map[string][]byte {
 func TestCheckBoundsTheBuild(t *testing.T) {
 	in := soInput(t, ordersRepo(), "apps/orders", 15)
 	in.Files, in.Path, in.File = fanOut(5), "l0", "l5/so.yaml"
-	_, err := semdiff.Check(in)
+	_, err := semdiff.Check(context.Background(), in)
 	wantReason(t, err, semdiff.ErrTooLarge) // nested deeper than MaxDepth
 
 	in.Files, in.File = fanOut(3), "l3/so.yaml"
@@ -521,7 +521,7 @@ func TestCheckBoundsTheBuild(t *testing.T) {
 		}
 		files[fmt.Sprintf("l%d/kustomization.yaml", i)] = fmt.Appendf(nil, "resources: [%s]\n", strings.Join(refs, ", "))
 	}
-	_, err = semdiff.Check(in)
+	_, err = semdiff.Check(context.Background(), in)
 	wantReason(t, err, semdiff.ErrTooLarge)
 	if !strings.Contains(err.Error(), "visits") {
 		t.Fatalf("got %v, want the visit limit", err)
@@ -547,7 +547,7 @@ func TestLoadReadsTheBuild(t *testing.T) {
 	}
 	in := soInput(t, got, "./clusters/lab", 15)
 	in.Files[soFile] = files[soFile]
-	if _, err := semdiff.Check(in); !errors.Is(err, semdiff.ErrDesiredValueMissing) {
+	if _, err := semdiff.Check(context.Background(), in); !errors.Is(err, semdiff.ErrDesiredValueMissing) {
 		t.Fatalf("Check of the loaded build: %v", err)
 	}
 }
@@ -603,7 +603,7 @@ func TestCheckAcceptsAStatefulSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := semdiff.Check(semdiff.Input{
+	res, err := semdiff.Check(context.Background(), semdiff.Input{
 		Files: files, Path: "apps/web", File: depFile, Patched: patched, Target: target, Action: act,
 	})
 	if err != nil || res.Desired != `"1Gi"` {
@@ -614,19 +614,120 @@ func TestCheckAcceptsAStatefulSet(t *testing.T) {
 func TestCheckRefusesAScaledObjectWithoutScaleTarget(t *testing.T) {
 	files := ordersRepo()
 	files[soFile] = []byte(strings.Replace(scaledObjectYAML, "  scaleTargetRef:\n    name: orders-worker\n", "", 1))
-	_, err := semdiff.Check(soInput(t, files, "apps/orders", 15))
+	_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
 	wantReason(t, err, semdiff.ErrSchemaInvalid)
 }
 
 func TestCheckRefusesARemovedField(t *testing.T) {
 	in := soInput(t, ordersRepo(), "apps/orders", 15)
 	in.Patched = []byte(strings.Replace(string(in.Files[soFile]), "  maxReplicaCount: 10\n", "", 1))
-	_, err := semdiff.Check(in)
+	_, err := semdiff.Check(context.Background(), in)
 	wantReason(t, err, semdiff.ErrDesiredValueMissing)
 }
 
 func TestErrorText(t *testing.T) {
 	if got := semdiff.ErrTooLarge.Error(); got != "semdiff: TooLarge" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// diamond builds levels of overlays where each lists the next level three times under three name
+// prefixes, over one base file of size bytes. Directories are few, but kustomize builds the base once per
+// path.
+func diamond(levels, size int) map[string][]byte {
+	files := map[string][]byte{}
+	for i := range levels {
+		files[fmt.Sprintf("d%d/kustomization.yaml", i)] = fmt.Appendf(nil, "resources: [../d%dx, ../d%dy, ../d%dz]\n", i, i, i)
+		for _, s := range []string{"x", "y", "z"} {
+			files[fmt.Sprintf("d%d%s/kustomization.yaml", i, s)] = fmt.Appendf(nil,
+				"namePrefix: %s%d-\nresources: [../d%d]\n", s, i, i+1)
+		}
+	}
+	files[fmt.Sprintf("d%d/kustomization.yaml", levels)] = kust("so.yaml")
+	pad := "# " + strings.Repeat("x", size) + "\n"
+	files[fmt.Sprintf("d%d/so.yaml", levels)] = []byte(pad + scaledObjectYAML)
+	return files
+}
+
+func TestCheckBoundsADiamondOfOverlays(t *testing.T) {
+	in := soInput(t, ordersRepo(), "apps/orders", 15)
+	// 3 levels: 3^3 = 27 paths to a base of almost 1 MiB, within MaxVisits but over MaxBuildBytes.
+	in.Files, in.Path, in.File = diamond(3, semdiff.MaxFileBytes-1024), "d0", "d3/so.yaml"
+	_, err := semdiff.Check(context.Background(), in)
+	wantReason(t, err, semdiff.ErrTooLarge)
+	if !strings.Contains(err.Error(), "bytes") {
+		t.Fatalf("got %v, want the byte limit", err)
+	}
+	// The same diamond over a small base is within every limit and renders 27 copies; the target is
+	// one of them, the others change too.
+	in.Files = diamond(3, 10)
+	in.Target = soTarget("x0-x1-x2-orders-worker")
+	in.Patched = []byte(strings.Replace(string(in.Files["d3/so.yaml"]), "maxReplicaCount: 10", "maxReplicaCount: 15", 1))
+	_, err = semdiff.Check(context.Background(), in)
+	wantReason(t, err, semdiff.ErrOtherObjectChanged)
+}
+
+func TestCheckChecksADirectoryForEveryKindItIsReachedAs(t *testing.T) {
+	files := ordersRepo()
+	// apps/shared is a valid Kustomization, listed first as a resource and then as a component.
+	files[soKust] = []byte("resources: [scaledobject.yaml, ../shared]\ncomponents: [../shared]\n")
+	files["apps/shared/kustomization.yaml"] = []byte("resources: []\n")
+	_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
+	wantReason(t, err, semdiff.ErrUnsupportedKustomization)
+}
+
+func TestCheckRefusesAFieldMissingBefore(t *testing.T) {
+	files := ordersRepo()
+	files[soFile] = []byte(strings.Replace(scaledObjectYAML, "  maxReplicaCount: 10\n", "", 1))
+	in := soInput(t, ordersRepo(), "apps/orders", 15)
+	in.Files = files
+	_, err := semdiff.Check(context.Background(), in)
+	wantReason(t, err, semdiff.ErrFieldNotFound)
+}
+
+func TestCheckRefusesASourceIgnoreFile(t *testing.T) {
+	for _, p := range []string{".sourceignore", "apps/.sourceignore", "apps/orders/.sourceignore", "apps/comp/.sourceignore"} {
+		t.Run(p, func(t *testing.T) {
+			files := ordersRepo()
+			files[soKust] = []byte("resources: [scaledobject.yaml]\ncomponents: [../comp]\n")
+			files["apps/comp/kustomization.yaml"] = []byte("apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n")
+			files[p] = []byte("*.yaml\n")
+			_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
+			wantReason(t, err, semdiff.ErrSourceIgnored)
+			git := fake.NewGit("main", files)
+			_, err = semdiff.Load(context.Background(), git, head(t, git), "apps/orders")
+			wantReason(t, err, semdiff.ErrSourceIgnored)
+		})
+	}
+	// A patch file in a directory with its own .sourceignore.
+	files := overlayPatch()
+	files["clusters/lab/kustomization.yaml"] = []byte(strings.Replace(string(files["clusters/lab/kustomization.yaml"]),
+		"path: max.yaml", "path: ../../patches/max.yaml", 1))
+	files["patches/max.yaml"] = files["clusters/lab/max.yaml"]
+	files["patches/.sourceignore"] = []byte("x\n")
+	_, err := semdiff.Check(context.Background(), soInput(t, files, "clusters/lab", 15))
+	wantReason(t, err, semdiff.ErrSourceIgnored)
+}
+
+func TestCheckRefusesANonYAMLResourceFile(t *testing.T) {
+	files := ordersRepo()
+	files[soKust] = kust("scaledobject.yaml", "deploy.json")
+	files["apps/orders/deploy.json"] = []byte("{}")
+	_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
+	wantReason(t, err, semdiff.ErrUnsupportedKustomization)
+	if !strings.Contains(err.Error(), ".yaml") {
+		t.Fatalf("the reason does not say why: %v", err)
+	}
+	git := fake.NewGit("main", files)
+	_, err = semdiff.Load(context.Background(), git, head(t, git), "apps/orders")
+	wantReason(t, err, semdiff.ErrUnsupportedKustomization)
+}
+
+func TestCheckHonoursTheContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	in := soInput(t, ordersRepo(), "apps/orders", 15)
+	if _, err := semdiff.Check(ctx, in); !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want context.Canceled", err)
 	}
 }

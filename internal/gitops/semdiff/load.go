@@ -28,7 +28,7 @@ import (
 // the Files of an [Input]. dir is the Kustomization's spec.path, relative to the repository root.
 //
 // It refuses with an [*Error] what [Check] would refuse in the tree itself (a field outside the allow-list,
-// a remote or escaping reference, a missing file, a limit), and returns a [*sourcemap.TransientError]
+// a remote or escaping reference, a missing file, a .sourceignore file, a limit), and returns a [*sourcemap.TransientError]
 // (matching [sourcemap.ErrTransient]) when Git cannot be read; that error carries no provider text.
 func Load(ctx context.Context, git providers.GitProvider, commit, dir string) (map[string][]byte, error) {
 	root, ok := cleanPath(dir)

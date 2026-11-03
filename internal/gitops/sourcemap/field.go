@@ -177,3 +177,17 @@ func PreviousValue(action v1alpha1.Action) (any, bool) {
 		return nil, false
 	}
 }
+
+// DesiredValue returns the desired value an action sets for its field, in the same form as PreviousValue.
+// It reports false for an action of no known type.
+func DesiredValue(action v1alpha1.Action) (any, bool) {
+	switch {
+	case action.SetContainerMemoryLimit != nil:
+		q := action.SetContainerMemoryLimit.Desired.DeepCopy() // String caches into its receiver
+		return q.String(), true
+	case action.AdjustKedaMaxReplicas != nil:
+		return int64(action.AdjustKedaMaxReplicas.DesiredValue), true
+	default:
+		return nil, false
+	}
+}

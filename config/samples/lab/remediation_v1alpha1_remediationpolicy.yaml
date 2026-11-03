@@ -1,0 +1,24 @@
+# Lab only (docs/lab-oom-acceptance.md). Allows raising the memory limit of containers in the demo namespace
+# to between 64Mi and 128Mi, in steps of at most 50%, in the demo Deployments of the fleet repository. Decreases
+# are refused. A person must approve every pull request. The bounds are the ones of the OOM scenario
+# (shadewright-fleet scenarios/oom/expected.yaml). No value here is personal, so nothing needs filling.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: RemediationPolicy
+metadata:
+  name: demo-memory
+spec:
+  requestNamespaces: [shadewright-system]
+  targets:
+    namespaces: [demo]
+  actions:
+    - type: SetContainerMemoryLimit
+      setContainerMemoryLimit:
+        min: 64Mi
+        max: 128Mi
+        maxIncreasePercent: 50
+        maxDecreasePercent: 0
+  gitOps:
+    repositoryRef: fleet
+    allowedPaths:
+      - apps/demo/*-deployment.yaml
+  approval: Required

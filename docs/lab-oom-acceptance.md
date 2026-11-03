@@ -1,0 +1,296 @@
+---
+title: "Lab runbook: the OOM scenario produces one reviewed pull request"
+---
+
+# Lab runbook: the OOM scenario produces one reviewed pull request
+
+This is the acceptance run for v0.1.0 ([design 13](design.md#13-milestones), stage 2): on the lab cluster, a
+hand-written `RemediationRequest` for the OOM scenario produces exactly one correct pull request in the fleet
+repository, applying it again opens nothing new, and a change of the policy's bounds closes the pull request and
+ends the request `Superseded`. Decisions behind it: [ADR-0006](adr/0006-github-app-key-in-key-vault.md) (the GitHub
+App and its Key Vault key), [ADR-0008](adr/0008-disposable-azure-lab.md) (the lab is applied for a session and
+destroyed after), [ADR-0012](adr/0012-object-to-source-mapping.md) (finding the file in Git) and
+[ADR-0022](adr/0022-scenario-switch-and-clusters.md) (the scenario switch and the `cluster/lab` branch).
+
+There is no analyzer in this run: the request is written by hand, so the model is never called
+(`maxAnalysesPerDay: 0` in the settings sample).
+
+!!! warning "Costs money and changes real systems"
+    Steps 1 and 10 create and destroy Azure resources (about 0.10 EUR per hour while the lab is up, see
+    [shadewright-azure, Cost](https://github.com/pkalin/shadewright-azure#cost)). Steps 5 to 8 open and close a real
+    pull request in your fleet repository. Run them yourself; nothing here is meant for CI or an agent.
+
+Commands run from the repository named at the start of each step. `<owner>` is your GitHub account. Nothing below
+puts a subscription, tenant or object ID, a vault name or a URL of yours into a Git-tracked file: the values go
+into the samples on your machine only, and the samples in Git keep their `REPLACE` placeholders.
+
+## Before you start
+
+- The one-time setup of [shadewright-azure](https://github.com/pkalin/shadewright-azure#first-run) is done: state
+  storage, foundation, and the GitHub App registered with its key imported and the executor's `sign` grant
+  (`github_app_key_imported = true`).
+- The fleet repository has the branch `cluster/lab` and its two rulesets (ADR-0022, decision 5). The scenario
+  harness never creates a branch, so create it once from `main` if it is missing.
+- `lab/terraform.tfvars` in `shadewright-azure` (git-ignored) has `flux_enabled = true`, `fleet_repository_url`
+  set to your fleet repository and `fleet_branch = "cluster/lab"`. Flux must track `cluster/lab`, and
+  the settings sample's `targetBranch` must be the same branch, or the source mapping ends in `NeedsIntervention`.
+- `az`, `kubectl`, `kubelogin`, `gh`, `jq` and `make` are installed, and `gh auth status` shows an account that can
+  read your fleet repository.
+
+## 1. Bring the lab up
+
+In `shadewright-azure`:
+
+```bash
+make lab-cost    # price per hour for the current settings; changes nothing
+make lab-up      # init, plan, plan summary and price, then asks
+```
+
+Expect a plan with only creates (the cluster, the federated credentials, the Flux extension and configuration),
+the price per hour, and the prompt. Read the plan, then type `yes` (lower case) to apply exactly that saved plan.
+Anything else applies nothing. Then fetch credentials for the session:
+
+```bash
+eval "$(terraform -chdir=lab output -raw get_credentials)"
+kubelogin convert-kubeconfig -l azurecli
+kubectl get nodes
+```
+
+Expect one node in `Ready`. Note the time: the lab bills until step 10.
+
+## 2. Check Flux and the cluster
+
+```bash
+kubectl -n flux-system get gitrepository fleet -o jsonpath='{.spec.ref.branch}{"\n"}'
+kubectl -n flux-system get kustomizations
+kubectl -n demo get pods
+```
+
+Expect `cluster/lab`; `lab`, `infrastructure` and `apps` all `Ready=True` (the first sync takes a few minutes);
+and the demo pods `web` and `worker` running. If `infrastructure` is not ready, wait: `apps` depends on it.
+
+## 3. Install or check the agent
+
+```bash
+kubectl get crd | grep remediation.shadewright.io
+kubectl -n shadewright-system get deploy,sa
+kubectl -n shadewright-system get sa executor -o jsonpath='{.metadata.annotations}{"\n"}'
+```
+
+Expect the four CRDs (`incidents`, `remediationpolicies`, `remediationrequests`, `remediationsettings`), an
+`executor` Deployment with all pods ready, and an `executor` ServiceAccount annotated with the executor identity's
+client ID (`terraform -chdir=foundation output -json executor_identity | jq -r .client_id` in `shadewright-azure`).
+
+The fleet repository does not install the agent yet: the Helm chart that Flux would install comes with v0.2.0
+([#83](https://github.com/pkalin/shadewright/issues/83), [#86](https://github.com/pkalin/shadewright/issues/86)).
+Until then, installing the released images and the CRDs into the lab is a manual step outside this runbook. Whatever
+way you use, the executor must run as the `executor` ServiceAccount with the workload identity annotation and
+label, in the namespace `shadewright-system`, with the `demo` namespace watched (`config/watch`). Stop here if the
+checks above do not pass.
+
+## 4. Switch the OOM scenario on
+
+In `shadewright-fleet`, with the kube context of the lab:
+
+```bash
+make tools
+make scenario-oom CLUSTER=lab
+```
+
+Expect the harness to confirm that the `GitRepository` tracks exactly `cluster/lab`, render the result and push one
+commit to `cluster/lab`. It refuses on any other branch. Within about two minutes:
+
+```bash
+kubectl -n demo get pods -l app.kubernetes.io/name=web
+kubectl -n demo get pods -l app.kubernetes.io/name=web \
+  -o jsonpath='{.items[*].status.containerStatuses[*].lastState.terminated.reason}{"\n"}'
+kubectl -n demo get deployment web -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}{"\n"}'
+```
+
+Expect a pod in `CrashLoopBackOff` with a growing restart count, the last state reason `OOMKilled`, and the limit
+`48Mi`. That `48Mi` is the `previous` value of the request.
+
+## 5. Fill and apply the samples
+
+In `shadewright`, copy the lab samples to a directory outside Git (so the real values never reach a commit) and fill
+them. Each value comes from here:
+
+| Placeholder | Where | Value from |
+| --- | --- | --- |
+| `url` in the settings | `remediationsettings.yaml` | `https://github.com/<owner>/shadewright-fleet`, lower case, no `.git` (`fleet_repository_url` of `lab/terraform.tfvars`) |
+| `appClientID` | `remediationsettings.yaml` | The GitHub App's settings page, "Client ID" |
+| `installationID` | `remediationsettings.yaml` | The number at the end of the URL of the App's installation page (`gh api` cannot read it without the App's JWT) |
+| `keyID` | `remediationsettings.yaml` | `<uri>keys/<github_app_key>` from `terraform -chdir=foundation output -json key_vault` (`uri` ends with `/`; `github_app_key` is the key name, `github-app` by default) |
+| `incidentRef.uid`, `targetRef.uid` | `incident.yaml`, `remediationrequest.yaml` | Commands in the file's header comment, after step 4 and the Incident below |
+
+```bash
+mkdir -p /tmp/shadewright-lab && cp config/samples/lab/*.yaml /tmp/shadewright-lab/
+# edit remediationsettings.yaml (url, appClientID, installationID, keyID)
+kubectl apply -f /tmp/shadewright-lab/remediation_v1alpha1_remediationsettings.yaml
+kubectl apply -f /tmp/shadewright-lab/remediation_v1alpha1_remediationpolicy.yaml
+kubectl get remediationsettings default
+kubectl get remediationpolicy demo-memory
+```
+
+Expect both created and, in their `status.conditions`, no problem reported (an unknown `repositoryRef` or an
+unusable signer would show there).
+
+The Incident: if the collector already made one for the OOMKilled `web` container
+(`kubectl -n shadewright-system get incidents`), use its name and UID in the request. Otherwise write the sample:
+
+```bash
+UID_WEB=$(kubectl -n demo get deployment web -o jsonpath='{.metadata.uid}')
+# put $UID_WEB in incident.yaml (subject.uid) and remediationrequest.yaml (targetRef.uid)
+kubectl apply -f /tmp/shadewright-lab/remediation_v1alpha1_incident.yaml
+INC_UID=$(kubectl -n shadewright-system get incident web-oomkilled -o jsonpath='{.metadata.uid}')
+# put $INC_UID in remediationrequest.yaml (incidentRef.uid)
+```
+
+Then the request:
+
+```bash
+kubectl apply -f /tmp/shadewright-lab/remediation_v1alpha1_remediationrequest.yaml
+kubectl -n shadewright-system get remediationrequest web-memory-001 -w
+```
+
+Expect the phases `Pending`, `PolicyChecked`, `PRCreated`, then `AwaitingApproval`, in well under a minute. Any
+other end (`Denied`, `NeedsIntervention`) names its reason in the conditions:
+
+```bash
+kubectl -n shadewright-system get remediationrequest web-memory-001 -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'
+```
+
+`rr` is the short name of `remediationrequest`. Do not delete the request until step 9.
+
+## 6. Check that there is exactly one pull request, and that it is correct
+
+```bash
+kubectl -n shadewright-system get rr web-memory-001 -o jsonpath='{.status.pullRequest.url}{"\n"}{.status.pullRequest.headSHA}{"\n"}'
+gh pr list --repo <owner>/shadewright-fleet --state all --json number,title,headRefName,baseRefName,state
+```
+
+Expect exactly one pull request:
+
+- Head branch `shadewright/<request UID>`, base `cluster/lab`, state open, title
+  `fix: set the memory limit of container web of demo/web to 64Mi`.
+- `headRefName` equal to `shadewright/` plus `kubectl -n shadewright-system get rr web-memory-001 -o jsonpath='{.metadata.uid}'`.
+
+```bash
+gh pr diff <number> --repo <owner>/shadewright-fleet
+gh pr view <number> --repo <owner>/shadewright-fleet --json body,files,commits --jq '{files: [.files[].path], commits: (.commits|length)}'
+gh pr view <number> --repo <owner>/shadewright-fleet --json body --jq .body
+```
+
+Expect:
+
+- One file, `apps/demo/web-deployment.yaml`, one commit, and a diff of exactly one line pair:
+  `-              memory: 48Mi` and `+              memory: 64Mi` under `resources.limits` of container `web`. The memory
+  request (`32Mi`) and everything else are untouched.
+- A body with the change, scope, evidence (the request, its UID, the incident, the policy revision
+  `demo-memory/1`, the plan digest), expected effect, risk, rollback and `Approval required: yes`, and a last line
+  `<!-- shadewright request-uid=... plan-digest=sha256:... -->` whose UID and digest match
+  `.metadata.uid` and `.status.planDigest` of the request.
+- The required checks run on the pull request, and it is not merged: a person reviews it. Do not merge it before
+  step 8 (merge, delivery and verification are out of scope for v0.1.0).
+
+Also check that the head SHA in the request status equals the pull request's head (`gh pr view <number> --json headRefOid`).
+
+## 7. Apply the request again and see nothing new
+
+```bash
+kubectl apply -f /tmp/shadewright-lab/remediation_v1alpha1_remediationrequest.yaml
+kubectl -n shadewright-system rollout restart deployment/executor
+kubectl -n shadewright-system rollout status deployment/executor
+gh pr list --repo <owner>/shadewright-fleet --state all --json number,headRefName
+gh api repos/<owner>/shadewright-fleet/branches --paginate --jq '.[].name'
+```
+
+Expect `kubectl apply` to report `unchanged` (the spec is immutable, so a changed file would be refused, not
+applied). After the restart the executor finds the existing branch and pull request through the branch name and the
+marker (invariant 5), so the list still shows the one pull request, the same head SHA, and one `shadewright/` branch.
+The request is back in `AwaitingApproval`.
+
+## 8. Change the policy bounds and see `Superseded`
+
+Narrow the bounds so that the plan's digest changes (the policy's generation is part of it):
+
+```bash
+kubectl patch remediationpolicy demo-memory --type json \
+  -p '[{"op":"replace","path":"/spec/actions/0/setContainerMemoryLimit/max","value":"96Mi"}]'
+kubectl -n shadewright-system get rr web-memory-001 -w
+```
+
+The freshness check runs every five minutes and at once on a change to the request, so allow up to five minutes;
+you can nudge it with `kubectl -n shadewright-system annotate rr web-memory-001 touched=$(date +%s) --overwrite`.
+Expect the phase `Superseded`, the condition `PlanFresh=False` with the reason and message naming the policy, and
+the pull request closed, not merged, with its branch left in place:
+
+```bash
+gh pr view <number> --repo <owner>/shadewright-fleet --json state,closedAt,mergedAt
+kubectl -n shadewright-system get rr web-memory-001 -o jsonpath='{.status.phase}{"\n"}'
+```
+
+Expect `state` `CLOSED` and `mergedAt` null. A new plan is a new request (a new name, same sample).
+
+## 9. Check the App's permissions against ADR-0006
+
+ADR-0006 lists exactly four: `contents: write`, `pull_requests: write`, `issues: write`, `metadata: read`, on the
+fleet repository only, with no webhook and never on a ruleset bypass list. In `shadewright-azure`:
+
+```bash
+KV=$(terraform -chdir=foundation output -json key_vault | jq -r .name)
+scripts/github-app-check.sh "$KV" <app-client-id>
+```
+
+Expect the App's name, the permissions above and no others, no events, and one installation with
+`repository_selection` `selected`. The script builds the App's JWT with the key in Key Vault, which `gh` cannot do
+for you, because `/app` endpoints do not accept a user token. If you export that JWT as `JWT`, the same data with `gh`:
+
+```bash
+gh api /app/installations/<installation-id> -H "Authorization: Bearer $JWT" \
+  --jq '{permissions, events, repository_selection, suspended_at}'
+```
+
+The rulesets of the fleet repository, as you:
+
+```bash
+gh api repos/<owner>/shadewright-fleet/rulesets --jq '.[] | {id, name, target, enforcement}'
+gh api repos/<owner>/shadewright-fleet/rulesets/<id> --jq '{name, conditions, bypass_actors}'
+```
+
+Expect: none of the rulesets (for `main` and for `cluster/*`)
+listing the App among `bypass_actors`, and the maintainer's role as the only bypass actor of the two pull request
+rulesets. Write down any difference; it is a finding, not something to fix inside this run.
+
+## 10. Record the run and tear down
+
+Before the lab is destroyed, collect the facts for the field log:
+
+```bash
+kubectl -n shadewright-system get rr web-memory-001 -o yaml > /tmp/shadewright-lab/rr-final.yaml
+```
+
+Remove the personal values from anything you quote. In the field log of the day, record: the date and times (lab
+up, scenario on, pull request opened, `Superseded`, lab down), the cost shown by `make lab-up`, the pull request
+number and head SHA, the one-line diff, the phase sequence of the request, the result of step 7 (one pull request
+before and after), the observed time to `Superseded`, the permissions found in step 9 and every deviation. The log
+links public commits and pull requests by URL.
+
+Then reset the scenario and destroy the lab. In `shadewright-fleet`:
+
+```bash
+make scenario-reset CLUSTER=lab
+```
+
+Expect one commit on `cluster/lab` with `main`'s tree. Close the pull request of the run if it is still open
+(`gh pr close <number> --repo <owner>/shadewright-fleet`), which leaves its branch; delete the branch
+`shadewright/<uid>` by hand if you want it gone. In `shadewright-azure`:
+
+```bash
+make lab-down    # plan of the destroy, asks; applies on "yes", then lab-check
+```
+
+Expect a destroy plan for the `lab` root only and, after `yes`, a passing `lab-check`: nothing of the lab left, and
+no hourly-billed resource outside it. Remove `/tmp/shadewright-lab`, which holds your filled samples.
+
+Issue [#58](https://github.com/pkalin/shadewright/issues/58) closes once the field log holds the recorded run.

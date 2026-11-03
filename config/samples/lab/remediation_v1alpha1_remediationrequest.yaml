@@ -1,0 +1,31 @@
+# Lab only: the hand-written request of the v0.1.0 acceptance (docs/lab-oom-acceptance.md). The spec is
+# immutable, so a different plan is a new request. Fill the two REPLACE-* UIDs:
+#   incidentRef.uid: kubectl -n shadewright-system get incident web-oomkilled -o jsonpath='{.metadata.uid}'
+#   targetRef.uid:   kubectl -n demo get deployment web -o jsonpath='{.metadata.uid}'
+# previous is the value in the file on cluster/lab while the OOM scenario is on (48Mi); desired is within the
+# demo-memory policy (64Mi is +33%, bounds 64Mi to 128Mi).
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: RemediationRequest
+metadata:
+  name: web-memory-001
+  namespace: shadewright-system
+spec:
+  incidentRef:
+    name: web-oomkilled
+    uid: 00000000-0000-4000-8000-000000000000 # REPLACE
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+    uid: 00000000-0000-4000-8000-000000000000 # REPLACE
+  policyRef: demo-memory
+  approvalRequired: true
+  action:
+    type: SetContainerMemoryLimit
+    setContainerMemoryLimit:
+      container: web
+      previous: 48Mi
+      desired: 64Mi
+  verification:
+    checks: [DeliveryRevisionApplied, NoNewOOMKills]

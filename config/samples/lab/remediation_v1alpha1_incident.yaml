@@ -1,0 +1,21 @@
+# Lab only. Normally written by the collector: if `kubectl -n shadewright-system get incidents` already lists one
+# for the OOMKilled web container, use that and skip this file. Fill REPLACE-* from the live web Deployment:
+#   kubectl -n demo get deployment web -o jsonpath='{.metadata.uid}'
+# The fingerprint only has to be a sha256 of your choosing when you write the Incident by hand.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: web-oomkilled
+  namespace: shadewright-system
+spec:
+  fingerprint: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  subject:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+    uid: 00000000-0000-4000-8000-000000000000 # REPLACE: UID of the live web Deployment
+  reason: OOMKilled
+  type: Warning
+  reportingController: shadewright-collector
+  symptom: "Container web in demo/web was OOMKilled at its 48Mi memory limit and keeps restarting"

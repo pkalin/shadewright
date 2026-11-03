@@ -1,0 +1,232 @@
+# Threat model
+
+This page says what Shadewright guarantees, against whom, and how each guarantee is enforced and tested, so a reader can tell a promise from a plan. It records the state of `main` on 2026-11-03; it does not decide anything. Decisions are in the [design](design.md) and the [ADRs](adr/index.md), and a change that weakens an invariant still needs an ADR first.
+
+Every guarantee in the [table](#4-guarantees) names the code that enforces it and the tests that show it works and that it refuses. Three words mark how far each one is built:
+
+- **Built:** the running operator does it, and a test on `main` shows it.
+- **Built, not wired:** the code and its tests exist, but the running operator does not call it yet. It is a promise about a library, not about the system.
+- **Planned:** designed, not built. The row links its issue.
+
+Paths are relative to the repository root. Tests are named by file and test (Go `TestX`, or the Ginkgo `It` text in quotes).
+
+## 1. What is protected
+
+| Asset | Property | Why it matters |
+| --- | --- | --- |
+| Workloads and configuration in the cluster | Integrity | The point of the project: they change only through a merged commit that Flux applies |
+| The protected branch of the GitOps repository (`targetBranch`, `main` in the lab) | Integrity | Flux applies whatever lands there, with Flux's own permissions |
+| The GitHub App private key and its installation tokens | Confidentiality | They are the only write access to Git |
+| Secrets and personal data in the cluster | Confidentiality | Cluster data goes to a model and to analysis records (planned) |
+| `RemediationPolicy` and `RemediationSettings` | Integrity | They decide what may change, where, and whether a human reviews it |
+| The status of a `RemediationRequest` | Integrity | It is the decision: phase, resolved source, plan digest, effective approval |
+
+## 2. Trust boundaries
+
+Each box is a party; the subgraphs are the systems they run in. Solid links are built; the dashed box and dashed links are planned. The analyzer and the executor are separate identities: separate ServiceAccounts, roles, leases and Azure identities (G6.1).
+
+```mermaid
+flowchart TB
+    admin([Maintainer])
+    subgraph cluster [Kubernetes cluster]
+        data["Cluster data: events, pods, workloads, labels"]
+        an([Analyzer])
+        rr["RemediationRequest spec"]
+        pol["Policy and settings"]
+        ex([Executor])
+        st["RemediationRequest status"]
+        flux([Flux])
+    end
+    subgraph azure [Azure]
+        fm[Foundry model]
+        kv["Key Vault key, sign only"]
+    end
+    subgraph github [GitHub]
+        repo["GitOps repository and its ruleset"]
+    end
+    data -- read --> an
+    an -. redacted context .-> fm
+    an -- create --> rr
+    rr -- read --> ex
+    pol -- read --> ex
+    data -- get target, Flux objects --> ex
+    ex -- write --> st
+    ex -- sign --> kv
+    ex -- read, close own PRs --> repo
+    ex -. branch, commit, PR .-> repo
+    repo -- tracked branch --> flux
+    flux -- apply --> data
+    admin -- write --> pol
+    admin -- ruleset, merge --> repo
+    classDef planned stroke-dasharray: 5 5
+    class fm planned
+```
+
+| Party | Trusted for | Not trusted for | State |
+| --- | --- | --- | --- |
+| Analyzer | Nothing that changes anything: it reads and proposes | Any of its output as authorization; it can only create a request | Binary and RBAC built; collector, incidents and analysis planned (#41, #42, #43, #76) |
+| Model | Nothing | Anything: its output is untrusted input to the analyzer | Planned (#75, #76) |
+| Executor | Writing the decision (request status) and holding the Git identity | Choosing what to change: it applies what policy decided | Policy check, source mapping and freshness check built; Git writes planned (#57) |
+| API server and RBAC | Enforcing the CRD schema, CEL rules, RBAC and the status subresource | Nothing beyond that: it cannot judge whether a plan is wise | Kubernetes |
+| Git host (GitHub) | Enforcing the repository's rulesets, scoping installation tokens | The content and size of its responses, which the adapter bounds | GitHub |
+| Flux | Applying the tracked branch | Nothing it delivers is checked again by Shadewright before it applies it; verification after delivery is planned (#92) | Flux |
+| Key Vault | Keeping the App key non-exportable, allowing only the executor to sign | Nothing else | Lab Terraform in [shadewright-azure](https://github.com/pkalin/shadewright-azure) |
+| Maintainer | Everything: cluster admin, policy author, repository admin, App owner, Key Vault owner | | Out of scope as an adversary, see 3.5 |
+
+**Trusted computing base.** The guarantees below hold only while these hold: the API server and its RBAC; the executor binary, its image and its ServiceAccount (the only identity that may write a request's status); Key Vault and the executor's sign-only role; the GitOps repository's ruleset on GitHub; Flux; and the maintainer. The analyzer, the model, cluster data, request authors and repository content are outside it: the design assumes any of them may be hostile.
+
+The plan digest is not a signature. It is a SHA-256 of the plan's inputs, computable by anyone who can read them. It proves that the inputs did not change after the decision; it does not prove who decided. That proof comes only from RBAC on `remediationrequests/status`.
+
+## 3. Adversaries
+
+Each adversary lists what it can do on `main` today and what stops it. The row numbers (G1.1 and so on) point to the [guarantees](#4-guarantees).
+
+### 3.1. Cluster data
+
+Anyone who can create events, pods or workloads in a watched namespace, write logs, set annotations or labels, or patch a target object. Also anything that reaches the cluster from outside and shows up in an event or a log.
+
+- **Can:** put any text in events, logs and annotations, including instructions addressed to a model; set Flux labels on an object so that they name another Kustomization; change a target's live value between reads.
+- **Cannot:** make the executor change a file the target is not delivered from: the Kustomization's inventory must list the object (G4.1). Make a change pass from a forged baseline: the request's previous value must equal the live value and the value in Git (G1.4). Make the check use two versions of the target: it reads the target again after the mapping and starts over if it changed (G1.4).
+- **Not yet stopped:** text reaching a model unredacted, and prompt injection. Nothing sends cluster text anywhere today (no collector, no model call), so there is no path to stop yet; the redaction library is built but has no caller and five known gaps (G4.4, #114), and the injection corpus is planned (G4.6, #79).
+
+### 3.2. A request author
+
+Anyone who can create a `RemediationRequest`: the analyzer in the operator namespace, and any person or ServiceAccount an admin grants `create` (the scaffolded `remediationrequest-editor-role` and `-admin-role` grant it when bound; neither grants a status write). The model is a request author too, once the analysis is built.
+
+- **Can:** create a request in the operator namespace with any action from the catalog, any target, any policy name and `approvalRequired: false`.
+- **Cannot:** use an action outside the catalog, parameters out of the schema's bounds, or a kind the action may not target (G2.1); change the plan after creation (G2.2); name the repository, branch or file (G3.8); get a request outside the operator namespace acted on (G1.8); lower approval below what the policy requires (G1.3); exceed the policy's bounds (G2.3); write the decision (G1.1).
+- **Not yet stopped:** creating many requests. Concurrency limits, a per-target lock and the analysis budget are planned (#88, #43).
+
+### 3.3. A compromised analyzer
+
+Code running as the analyzer's ServiceAccount or its Azure identity.
+
+- **Can:** everything a request author can (3.2); read events, pods, ReplicaSets, Deployments and StatefulSets in the watched namespaces, including values written in pod specs (environment variables); create and update Incidents in the operator namespace; read `RemediationSettings` (repository URLs, App client and installation IDs, key ID: none of them secret); call the model and create analysis records with its Azure identity (lab Terraform).
+- **Cannot:** read Secrets (G4.5); read anything outside the watched namespaces (G6.2); update, delete or write the status of a request (G1.1); renew the executor's Lease (G6.1); sign with the App key or reach Git (G6.4).
+- **Not yet stopped:** its analysis-record role can also overwrite records; making it create-only is #154.
+
+### 3.4. A compromised executor
+
+Code running as the executor's ServiceAccount or its Azure identity. The executor is in the trusted computing base, so this is the adversary the system is weakest against; this section says how weak.
+
+- **Can:** write the status of any request in the operator namespace, including a `PolicyChecked` phase with a matching digest for a plan no policy allows (the digest is not a signature, section 2); `get` Deployments, StatefulSets, ScaledObjects, Kustomizations and GitRepositories in every namespace (G6.3), including values written in pod templates; read policies and settings; sign any payload with the App key, and so get installation tokens with all of the App's permissions (`contents`, `pull_requests`, `issues` write, `metadata` read) on every repository the App is installed on. The code asks for one repository and four permissions (G3.5), but a compromised executor is not bound by its own code.
+- **Cannot:** write any cluster object other than request status (G3.1); read Secrets (G4.5); create requests or write Incidents (G6.1); export the App key (G6.4); push to the protected branch, force-push it or delete it, or bypass its required check: the App is not on the ruleset's bypass list (G3.6).
+- **Not yet stopped:** a merge of its own pull request. On 2026-11-03 the fleet repository's ruleset on `main` requires a pull request and the `Conventional PR title` check, but zero approvals and no code owner review. With `contents: write` the App could merge a pull request it opened, and Flux would apply it with Flux's permissions. A required human approval and a render check on `main` are #156, CODEOWNERS and a trusted path guard #28 and #99. Until #156 lands, the pull request is a record of a change, not a review gate (section 5).
+
+### 3.5. A compromised maintainer account
+
+The maintainer is cluster admin, writes policies and settings, administers the GitOps repository and its rulesets, owns the GitHub App and the Key Vault. A compromised account can do all of that: write a policy that allows anything, add a bypass to the ruleset, merge any pull request, sign with the App key.
+
+This is out of scope as an adversary, as [SECURITY.md](https://github.com/pkalin/shadewright/blob/main/SECURITY.md) says. Two things limit it after the fact: the App key is non-exportable, so it cannot be copied out of Key Vault, and every signing is recorded as a Key Vault `AuditEvent` in a Log Analytics workspace that outlives the lab ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)). Shadewright adds no protection against its own admin; rulesets that require a second person are the repository owner's choice.
+
+### 3.6. Malicious repository content
+
+Anyone who can commit to the GitOps repository, directly or through a merged pull request, and so control the files the executor reads: kustomization files, manifests, `.sourceignore`, symbolic links, large files.
+
+- **Can:** shape the files and directories under the Kustomization's path; put text in manifests and comments that a model may later read.
+- **Cannot:** make the mapping read outside the repository, follow a symbolic link, read more than its bounds, or interpret Kustomize features it does not support: the mapping stops with `NeedsIntervention` instead (G4.2). Hide a second declaration of the target, or make the patcher edit an aliased or tagged value (G2.4, G4.2). Get its text into a status, a condition or an error message (G4.3).
+- **Not yet stopped:** content a model reads through `read_git_file` (planned, #74) is untrusted input like any cluster data (3.1). And content that is merged to the protected branch is applied by Flux whether or not Shadewright touched it: that is the repository's own review, not Shadewright's.
+
+## 4. Guarantees
+
+One table per invariant of [AGENTS.md](https://github.com/pkalin/shadewright/blob/main/AGENTS.md), then the guarantees that support several of them. Test files are under `internal/` unless they start with `test/`.
+
+### 4.1. Model output is never authorization
+
+| # | Guarantee | Enforced by | Positive test | Refusal test | Known limit |
+| --- | --- | --- | --- | --- | --- |
+| G1.1 | The analyzer can create a request but never update it, delete it or write its status. **Built.** | RBAC markers in `internal/analyzer/doc.go`, `config/rbac/analyzer/role.yaml` | `test/rbac/rbac_test.go` `TestRealCallsMatchTheBoundary` (create succeeds) | `test/rbac/rbac_test.go` `TestPermissionBoundary` (update, patch, delete, status), `TestRealCallsMatchTheBoundary` (status write fails) | Only as strong as RBAC: anyone else bound to a role with `remediationrequests/status` write can decide too |
+| G1.2 | Only a pure function decides: the same request, policy, settings, source and target always give the same outcome, and it reads no client and no clock. **Built.** | `internal/policy/decide.go` `Decide` | `policy/decide_test.go` `TestDecide` (baselines) | `policy/decide_test.go` `TestDecide` (one case per reason), `TestDecideDoesNotModifyInput` | The decision is as good as the policy the admin writes |
+| G1.3 | A request cannot lower approval below the policy: approval is waived only when the outcome is Allowed, the policy is `Optional` and the request asked. **Built** (recorded in status; nothing acts on it yet, #57, #98). | `internal/policy/decide.go` | `controller/remediationrequest_controller_test.go` "lowers approval only when the policy is Optional and the request asks" | `policy/decide_test.go` `TestEffectiveApprovalNeverLessStrict`; `controller/remediationrequest_controller_test.go` "keeps approval required when the policy requires it, whatever the request says" | `effectiveApprovalRequired` is a field of our CRD; review on GitHub depends on the ruleset (G3.6) |
+| G1.4 | The policy measures a change from the live value, not from the value the request claims, and the live object, the file in Git and the decision describe the same object. **Built.** | `internal/controller/remediationrequest_controller.go` `checkBaseline` and the second target read; `internal/gitops/sourcemap` value check | `controller/remediationrequest_controller_test.go` "accepts a previous value written in another unit" | `controller/remediationrequest_controller_test.go` "denies a request whose previous value is not the live value", "checks again when the target changes while the source is resolved"; `controller/baseline_test.go` `TestCheckBaselineKeda`; `gitops/sourcemap/sourcemap_test.go` `TestResolveStops` (`ValueMismatch`) | |
+| G1.5 | The plan is bound to a digest over the change, the target UID, the resolved source with the repository URL and installation, and the policy UID and generation, fixed in the same status write as the decision. **Built.** | `internal/policy/digest`, `internal/policy/freshness` `ComputeDigest`, `internal/controller/remediationrequest_controller.go` `check` | `policy/digest/digest_test.go` `TestGolden`; `controller/freshness_test.go` "records the plan digest and the repository it covers with the decision" | `policy/digest/digest_test.go` `TestEveryFieldChangesDigest`, `TestFieldsCovered`, `TestNoFieldBoundaryCollision` | A hash, not a signature (section 2) |
+| G1.6 | A plan whose digest inputs changed becomes `Superseded` and its change request is closed; a read that fails or ends with its deadline is never "fresh". **Built** (re-checked every five minutes and on any change to the request). | `internal/policy/freshness`, `internal/controller/remediationrequest_controller.go` `EnsureFresh`, `recheck` | `policy/freshness/freshness_test.go` `TestFreshWhenNothingChanged`; `controller/freshness_test.go` "leaves a fresh plan alone, also after a merge that does not touch the file" | `policy/freshness/freshness_test.go` `TestStalePerDigestInput`, `TestFailClosed`, `TestFreshIsNotReturnedAfterTheContextEnded`; `controller/freshness_test.go` "does not supersede and does not close when an input cannot be read"; `controller/deadline_test.go` `TestFreshVerdictAfterTheDeadlineIsNotFresh` | The check "right before every write" comes with the writes (#57); edge cases at the deadline and in cleanup are #145 |
+| G1.7 | Policy and settings are read from the API server on every check, never from the cache, so a deleted policy or a tightened setting takes effect at once. **Built.** | `internal/controller/remediationrequest_controller.go` `getLive` | `controller/getlive_test.go` `TestGetLiveIgnoresTheCache` | `controller/remediationrequest_controller_test.go` "denies a request whose policy does not exist, without retrying"; `controller/freshness_test.go` "supersedes when the policy is deleted" | |
+| G1.8 | Only requests in the operator namespace are acted on, and a policy serves only the request namespaces it lists. **Built.** | `internal/controller/cache.go` `CacheOptions`; `internal/policy/decide.go` (`requestNamespaces`) | `test/rbac/rbac_test.go` `TestExecutorCacheSeesOnlyTheOperatorNamespace` (sees its own) | `test/rbac/rbac_test.go` `TestExecutorCacheSeesOnlyTheOperatorNamespace` (another namespace unseen); `controller/remediationrequest_controller_test.go` "denies a plan the policy refuses" (`RequestNamespaceNotAllowed`) | |
+| G1.9 | The model's only write is a proposal; it gets no shell, no `apply` and no way to change policy. **Planned** (#74, #76). | | | | Until then no model is called at all |
+
+### 4.2. Actions are a closed catalog
+
+| # | Guarantee | Enforced by | Positive test | Refusal test | Known limit |
+| --- | --- | --- | --- | --- | --- |
+| G2.1 | A request carries one of two actions, with typed parameters in the schema's bounds, on a namespaced target of a kind the action allows, pinned by UID. **Built.** | CEL and enums in `api/v1alpha1/common_types.go`, `api/v1alpha1/remediationrequest_types.go` | `test/apivalidation/validation_test.go` "accepts the fixture and fills in safe defaults", "accepts a memory limit action on a Deployment"; `test/apivalidation/samples_test.go` | `test/apivalidation/validation_test.go` "refuses an action type outside the catalog", "refuses KEDA values out of range", "refuses memory limits that are not whole bytes in range", "refuses an action on a kind it does not support", "refuses a target without a UID", "refuses a cluster-scoped target" | |
+| G2.2 | The whole spec is immutable: a different plan is a new request. **Built.** | CEL `self == oldSelf` in `api/v1alpha1/remediationrequest_types.go` | `test/apivalidation/validation_test.go` "accepts the fixture and fills in safe defaults" | `test/apivalidation/validation_test.go` "refuses any change to the plan after creation" | |
+| G2.3 | The change is within the policy's `min`, `max`, `maxIncreasePercent` and `maxDecreasePercent`, decreases are refused unless allowed, and an action outside the catalog is never Allowed. **Built.** | `internal/policy/decide.go`; CEL in `api/v1alpha1/remediationpolicy_types.go` | `policy/decide_test.go` `TestDecide` | `controller/remediationrequest_controller_test.go` "denies a plan the policy refuses" (`BelowMinimum`, `AboveMaximum`, `IncreaseTooLarge`, `ActionNotAllowed`); `policy/decide_test.go` `TestUnknownActionNeverAllowed`; `test/apivalidation/validation_test.go` "refuses an unbounded decrease" | Bounds are per request; a cumulative budget per target is #160 |
+| G2.4 | Each action has a patcher that replaces one scalar and nothing else, refusing anchors, aliases, merge keys, tags and ambiguous numbers. **Built, not wired** (the executor does not commit yet, #57). | `internal/gitops/patch` ([ADR-0020](adr/0020-yaml-patching.md), Proposed) | `gitops/patch/patch_test.go` `TestSetContainerMemoryLimitGolden`, `TestAdjustKedaMaxReplicasGolden`, `TestOtherDocumentsUntouched` | `gitops/patch/patch_test.go` `TestRefusals`, `TestKedaRefusals`, `TestIdentityFromAliasOrMergeRefused`, `TestAmbiguousNumberSyntaxRefused` | Rendering the result and checking the semantic diff is #56 |
+| G2.5 | No `exec` and no direct write to a workload: the executor's role grants no write verb on any workload, scale subresource or Flux object. **Built.** | `internal/controller/cache.go` markers, `config/rbac/executor/role.yaml` | `test/rbac/rbac_test.go` `TestPermissionBoundary` (`get` on target kinds allowed) | `test/rbac/rbac_test.go` `TestPermissionBoundary` (update and patch on Deployments, `deployments/scale`, ScaledObjects, Kustomizations, GitRepositories refused) | No row checks `pods/exec` by name; the role grants nothing on pods |
+
+### 4.3. Changes go through Git only
+
+| # | Guarantee | Enforced by | Positive test | Refusal test | Known limit |
+| --- | --- | --- | --- | --- | --- |
+| G3.1 | The executor writes no cluster object except request status in the operator namespace. **Built.** | `config/rbac/executor/role.yaml` | `test/rbac/rbac_test.go` `TestRealCallsMatchTheBoundary` | `test/rbac/rbac_test.go` `TestPermissionBoundary` (executor rows) | Holds while nobody binds another role to its ServiceAccount |
+| G3.2 | The adapter writes only to `shadewright/<name>` branches of its one repository, starting from the head of `targetBranch` or an ancestor, and never forces: a moved head is a conflict. **Built, not wired** (#57). | `internal/providers/github/provider.go`, `internal/providers/github/validate.go` | `providers/github/provider_test.go` `TestCreateBranch`, `TestCreateBranchFromAncestor`, `TestCommitFile` | `providers/github/provider_test.go` `TestCreateBranchRefusesOtherBranches`, `TestCreateBranchRefusesCommitOffTarget`, `TestCommitFileRefusesOtherRepository`, `TestCommitFileRaceIsConflictNeverForce`, `TestCommitFileRewindIsConflict` | Binds the adapter, not a compromised executor (3.4) |
+| G3.3 | The only Git write the running executor makes today is closing the change request of a stale plan, only in the repository the plan was made for and against its recorded target branch, and only a `shadewright/` pull request of that repository. **Built.** | `internal/controller/remediationrequest_controller.go` `closeChangeRequest`; `internal/providers/github/provider.go` `CloseChangeRequest` | `controller/freshness_test.go` "closes the change request once when the policy is edited, and not again"; `providers/github/provider_test.go` `TestCloseChangeRequest` | `controller/freshness_test.go` "closes nothing when the settings entry now points to another repository", "closes nothing when the repository entry now names another target branch"; `providers/github/provider_test.go` `TestCloseChangeRequestRefusesOthers`, `TestCloseChangeRequestMergedIsConflict` | No pull request is opened yet, so there is nothing to close in practice |
+| G3.4 | A pull request can target only the branch named in settings, which cannot be a full ref, `HEAD`, an option-like name or a `shadewright/` branch, and must equal the branch Flux tracks. **Built.** | CEL in `api/v1alpha1/common_types.go`; `internal/gitops/sourcemap`; `internal/policy/decide.go` | `test/apivalidation/validation_test.go` "defaults the target branch to main" | `test/apivalidation/validation_test.go` "refuses target branches git could misread"; `controller/remediationrequest_controller_test.go` "denies a plan the policy refuses" (`BranchNotAllowed`) | Schema and adapter rules differ in places; aligning them is #149 |
+| G3.5 | An installation token is scoped to the one repository and the four permissions of [ADR-0006](adr/0006-github-app-key-in-key-vault.md), and a response that lists any other repository is refused; tokens go only to `https://github.com/<owner>/<repo>` and redirects are not followed. **Built.** | `internal/providers/github/auth/source.go`; CEL in `api/v1alpha1/remediationsettings_types.go` | `providers/github/auth/source_test.go` `TestRequestClaimsScopeAndSignature` | `providers/github/auth/source_test.go` `TestBadResponsesRefused` (other or two repositories), `TestRedirectNotFollowed`; `test/apivalidation/validation_test.go` "refuses repository URLs that carry credentials or point elsewhere" | The App's registered permissions are the real ceiling (3.4) |
+| G3.6 | No direct push, force push or deletion of the protected branch, and the App is not on the ruleset's bypass list. **Built, outside this repository** (the fleet repository's ruleset, observed through the GitHub API on 2026-11-03). | Ruleset `main` of `shadewright-fleet` | None in this repository | None in this repository | Zero required approvals and no code owner review today: #156, #28, #99 (section 5) |
+| G3.7 | No change to policies, pipelines, RBAC or Secrets through the remediation path: `allowedPaths` cannot cover the repository, a dot directory such as `.github/` or an option-like name, and kinds such as Secrets, RBAC, Flux objects, admission and Shadewright's own are excluded whatever the path. **Built.** | CEL in `api/v1alpha1/common_types.go`; `internal/policy/pathmatch`; `internal/policy/decide.go` `excluded` | `policy/pathmatch/pathmatch_test.go` `TestMatch`; `test/apivalidation/validation_test.go` "accepts narrow path patterns" | `test/apivalidation/validation_test.go` "refuses path patterns that are too wide or escape the repository"; `policy/pathmatch/pathmatch_test.go` `TestNoPatternMatchesHidden`, `TestRefusesLookalikes`; `policy/decide_test.go` `TestAllowedPathHoldsDisallowedKind` | The checks cover the target's file; a check that the pull request touches nothing else is the trusted path guard (#28) and the render check (#56) |
+| G3.8 | A request says what to change, never where: the repository, branch and file come only from the Flux objects that deliver the target ([ADR-0012](adr/0012-object-to-source-mapping.md)). **Built.** | `api/v1alpha1/remediationrequest_types.go` (no such field); `internal/gitops/sourcemap` | `gitops/sourcemap/sourcemap_test.go` `TestResolveFindsTheSource` | `test/apivalidation/validation_test.go` "has no field that chooses the repository, branch or file"; `gitops/sourcemap/sourcemap_test.go` `TestResolveStops`, `TestResolveNeverPicksAnotherDocument` | Plain manifests only; anything else stops with `NeedsIntervention` |
+
+### 4.4. Everything from the cluster is untrusted input
+
+| # | Guarantee | Enforced by | Positive test | Refusal test | Known limit |
+| --- | --- | --- | --- | --- | --- |
+| G4.1 | Flux labels on a live object are not trusted: the Kustomization they name must be Ready and list the object in its inventory, and the GitRepository's URL must equal exactly one configured repository. **Built.** | `internal/gitops/sourcemap/flux.go` | `gitops/sourcemap/sourcemap_test.go` `TestResolveFindsTheSource` | `gitops/sourcemap/sourcemap_test.go` `TestResolveStops` (`NotInInventory`, no inventory, repository not configured) | URLs are compared byte for byte; SSH URLs do not match (#163) |
+| G4.2 | Repository content is read within bounds: one kustomization file with only `resources`, paths inside the repository, no remote resources, no `.sourceignore`, no symbolic links, bounded depth, file count, reads and size (1 MiB, checked before download), content checked against its Git object ID, duplicate keys and ambiguous declarations refused. **Built.** | `internal/gitops/sourcemap/manifests.go`; `internal/providers/github/provider.go` `ReadFile` | `gitops/sourcemap/sourcemap_test.go` `TestResolveFindsTheSource`; `providers/github/provider_test.go` `TestReadFile` | `gitops/sourcemap/sourcemap_test.go` `TestResolveStops`, `TestResolveNeverPicksAnotherDocument`; `providers/github/provider_test.go` `TestReadFileNotRegular`, `TestReadFileTooLargeBeforeDownload`, `TestReadFileStopsReadingLargeStream`, `TestReadFileChecksContentHash` | Kustomize transformations are not understood, so they stop the mapping (#166) |
+| G4.3 | No Git URL, provider response text, header, repository name or token goes into a status, a condition, an error or a log. **Built.** | `internal/gitops/sourcemap`, `internal/providers/github`, `internal/providers/github/auth`, `internal/providers/signer/azurekv`, `internal/policy/freshness` | `providers/github/auth/source_test.go` `TestSourceRedactsItself` | `controller/remediationrequest_controller_test.go` "keeps Git URLs out of the status"; `controller/freshness_test.go` "keeps credentials out of the error when the cleanup call fails"; `gitops/sourcemap/sourcemap_test.go` `TestResolveKeepsSourceURLOutOfMessages`; `providers/github/auth/source_test.go` `TestSecretsNeverInLogsOrErrors`; `providers/github/provider_test.go` `TestTransportErrorsAreReplaced`; `providers/signer/azurekv/signer_test.go` `TestSDKLogsStayClean`; `policy/freshness/freshness_test.go` `TestProviderErrorsKeepNoText` | Tests cover known paths; nothing checks every log line. Raw SDK errors in the signer's error chain are #125 |
+| G4.4 | Secrets, tokens, connection strings and personal data are redacted before storage and before a model sees anything. **Built, not wired:** the library and the fingerprint use it, but nothing collects or sends cluster text yet (#41, #70, #72, #77). | `internal/redact`; `internal/incidents/fingerprint/normalize.go` | `redact/redact_test.go` `TestKeepsUsefulText`, `TestKeepsTextAroundValues` | `redact/redact_test.go` `TestCorpusIsRedacted`; `incidents/fingerprint/fingerprint_test.go` `TestNormalizeRedacts`, `TestFinishRedactsAfterCut` | Five known formats pass through (#114), and they must be fixed before the first caller |
+| G4.5 | Neither identity can read `Secret` objects. **Built.** | `config/rbac/analyzer`, `config/rbac/executor` | | `test/rbac/rbac_test.go` `TestPermissionBoundary` (get and list on Secrets refused for both) | Secret values can also sit in pod specs and pod templates (environment variables), which the analyzer reads in watched namespaces and the executor can get in every namespace |
+| G4.6 | Text in events, logs, annotations, tool results and Git files never changes the instructions, the tools, the permissions or the catalog. **Planned** (#74, #76, the injection corpus #79). | | | | Structurally the catalog is compiled code and the policy an admin CR (G2.1, G2.3), so injected text can at most shape a request (3.2) |
+| G4.7 | Responses from GitHub and Key Vault are bounded in size and redirects are not followed. **Built.** | `internal/providers/github/client.go`, `internal/providers/github/auth`, `internal/providers/signer/azurekv/transport.go` | `providers/signer/azurekv/signer_test.go` `TestSignAcceptsBodyAtLimit` | `providers/github/provider_test.go` `TestResponseBodyIsBounded`, `TestRedirectIsNotFollowed`; `providers/github/auth/source_test.go` `TestOversizedBodyRefused`; `providers/signer/azurekv/signer_test.go` `TestSignRefusesLargeResponses`, `TestDefaultTransportDoesNotFollowRedirects` | |
+
+### 4.5. Reconciliation is idempotent and never assumes exactly once
+
+| # | Guarantee | Enforced by | Positive test | Refusal test | Known limit |
+| --- | --- | --- | --- | --- | --- |
+| G5.1 | A request is decided once: the outcome is written in one status write with the resourceVersion read, and a decided request is never decided again. **Built.** | `internal/controller/remediationrequest_controller.go` `Reconcile` | `controller/remediationrequest_controller_test.go` "changes nothing when the same request is reconciled again" | `controller/remediationrequest_controller_test.go` "rejects a status write made from a stale read", "ignores a request that is already past the policy check" | |
+| G5.2 | The branch is `shadewright/<request-uid>`, and an existing branch or pull request is found and returned instead of a second one. **Built, not wired** (#57); the marker with the request UID and digest in the pull request body is planned with it. | `internal/policy/freshness` `BranchName`; `internal/providers/github/provider.go` | `providers/github/provider_test.go` `TestCreateBranchExistingIsSuccess`, `TestOpenChangeRequestExistingIsReturned`, `TestOpenChangeRequestAlreadyExistsAfterRace`, `TestCommitFileRepeatedUpdateIsSuccess` | `providers/github/provider_test.go` `TestCreateBranchExistingElsewhereIsConflict`, `TestOpenChangeRequestIgnoresForks`, `TestOpenChangeRequestOtherBaseIsConflict` | Crash tests between a pull request and its status write are #59 |
+| G5.3 | Closing a stale plan's change request is idempotent and happens before the status write, so a crash in between closes again as a no-op. **Built.** | `internal/controller/remediationrequest_controller.go` `EnsureFresh` | `controller/freshness_test.go` "closes the change request on a retry when the first close was cut short"; `providers/github/provider_test.go` `TestCloseChangeRequestIdempotent` | `providers/github/provider_test.go` `TestCloseChangeRequestMergedIsConflict`, `TestCloseChangeRequestNumberMismatch` | |
+| G5.4 | A step that reaches its own deadline is retried and never ends in a final phase; the caller's cancellation is a different error. **Built.** | `internal/controller/remediationrequest_controller.go` `bound`, `boundErr` | `controller/deadline_test.go` `TestPolicyCheckDeadlineIsRetryable`, `TestCleanupDeadlineIsRetryable` | `controller/deadline_test.go` `TestStaleVerdictAfterTheDeadlineDoesNotSupersede`, `TestCleanupResultAfterTheDeadlineIsNotFinal`, `TestPolicyCheckCallerCancellationIsDistinct` | The retry limit is planned (#88) |
+
+### 4.6. Separate identities
+
+| # | Guarantee | Enforced by | Positive test | Refusal test | Known limit |
+| --- | --- | --- | --- | --- | --- |
+| G6.1 | The analyzer and the executor run as separate pods with separate ServiceAccounts and roles, and each can renew only its own leader election Lease. **Built.** | `config/rbac/analyzer`, `config/rbac/executor`, `config/manager`, `internal/cmdutil/manager.go` | `test/e2e/e2e_test.go` "should run the analyzer as a separate pod and identity", "should give each binary its own leader election Lease"; `test/rbac/rbac_test.go` `TestLeasesAreSeparate` | `test/rbac/rbac_test.go` `TestLeasesAreSeparate` (no cross renewal, no create, no delete), `TestLeaseNamesMatchTheBinaries`, `TestPermissionBoundary` (executor cannot create requests or write incidents) | |
+| G6.2 | The analyzer reads only in the namespaces it is started with: one RoleBinding per watched namespace, never cluster-wide, and an empty list is refused rather than read as "all". **Built.** | `internal/analyzer/cache.go` `ParseNamespaces`, `CacheOptions`; `internal/analyzer/collector/doc.go` markers; `config/watch` | `analyzer/cache_test.go` `TestParseNamespaces`, `TestCacheOptions`; `test/rbac/rbac_test.go` `TestAnalyzerCacheWorksWithItsOwnRBAC` | `test/rbac/rbac_test.go` `TestPermissionBoundary` (unwatched and cluster-wide reads refused), `TestAnalyzerCacheWorksWithItsOwnRBAC` (unwatched pod not returned), `TestWatchBindingsMatchTheFlag`; `analyzer/cache_test.go` `TestParseNamespaces` (empty, `*`) | The test checks the manifests in this repository; a deployer who changes `--watch-namespaces` must change `config/watch` too |
+| G6.3 | The executor reads target kinds and the Flux objects that deliver them with `get` only, no list or watch, and does not read HelmReleases or ConfigMaps. **Built.** | `internal/controller/cache.go` markers | `test/rbac/rbac_test.go` `TestPermissionBoundary` (get allowed) | `test/rbac/rbac_test.go` `TestPermissionBoundary` (list, watch, HelmReleases, ConfigMaps refused) | The grant is a ClusterRoleBinding: every namespace, not only the policy's targets |
+| G6.4 | The App key never exists in a pod: the executor signs the App JWT through Key Vault with workload identity, and only the executor may sign. **Built** (adapter); the sign-only role is lab Terraform. | `internal/providers/signer/azurekv`; `internal/providers/registry`; `foundation/keyvault.tf` in shadewright-azure | `providers/signer/azurekv/signer_test.go` `TestSignRequestShape`; `providers/registry/registry_test.go` `TestOpenBuildsOnceAndReuses` | `providers/signer/azurekv/keyid_test.go` `TestParseKeyIDRejects`; `providers/signer/azurekv/signer_test.go` `TestNewRejectsKeyIDBeforeAnythingElse`; `providers/registry/registry_test.go` `TestDefaultBuildersNeedWorkloadIdentity` | No test in this repository checks the Azure role; the analyzer binary does not import the signer or the GitHub adapter, but no test checks that either |
+| G6.5 | Provider SDKs are imported only in their adapters, so no vendor client leaks into the core. **Built.** | [ADR-0013](adr/0013-adapters-for-every-external-system.md) | | `providers/imports_test.go` `TestNoVendorImports`; `providers/signer/azurekv/imports_test.go` `TestAzureSDKOnlyHere` | |
+
+### 4.7. Supporting guarantees
+
+| # | Guarantee | Enforced by | Positive test | Refusal test | Known limit |
+| --- | --- | --- | --- | --- | --- |
+| S1 | While `RemediationSettings.spec.paused` is set, no plan is reported fresh and no change request is closed. **Built** where the executor writes today (G3.3); the check before every write is #87. | `internal/policy/freshness` `Paused`; `internal/controller/remediationrequest_controller.go` `closeChangeRequest` | `policy/freshness/freshness_test.go` `TestFreshWhenNothingChanged` | `policy/freshness/freshness_test.go` `TestPausedIsNotFresh`, `TestPausedWinsOverStale`, `TestPausedDuringTheScanIsNotFresh`; `controller/freshness_test.go` "does nothing while writes are paused, even for a stale plan", "does not close when writes are paused between the check and the close" | |
+| S2 | Auto-merge is never enabled: the adapter reports no support and refuses the call. **Built**; gated auto-merge is planned (#98, #99, #100). | `internal/providers/github/provider.go` `Capabilities`, `EnableAutoMerge` | | `providers/github/provider_test.go` `TestCapabilities` | |
+| S3 | `Succeeded` only after the merged revision is applied and the checks held for `stableFor`. **Planned** (#92, #93, #94). | | | | No phase after `PolicyChecked` is set today except `Superseded` and `NeedsIntervention` |
+| S4 | Loop protection: concurrency limits, a lock per target, a circuit breaker, a retry limit and an analysis budget. **Planned** (#88, #43). | | | | |
+| S5 | Egress only to the Kubernetes API, the model endpoint, Key Vault, GitHub and Entra ID. **Planned** (#91). | | | | |
+| S6 | Containers run as non-root with a read-only root filesystem and all capabilities dropped. **Built** (manifests). | `config/manager/manager.yaml`, `config/manager/analyzer.yaml` | None | None | No test checks the security context; signed images and SBOMs are #82 |
+
+## 5. What the pull request guarantees
+
+A pull request from Shadewright is a reviewable, revertible record of one change. It is a review gate only as far as the repository's ruleset makes it one, and Shadewright cannot make the ruleset stricter.
+
+On 2026-11-03 the ruleset on `main` of `shadewright-fleet` requires a pull request, squash merge, the `Conventional PR title` check and dismissal of stale approvals, forbids force pushes and deletion, and has no bypass actors. It requires zero approvals and no code owner review. So today:
+
+- A person can review a Shadewright pull request, but nothing makes them.
+- The executor does not open pull requests yet (#57), so nothing depends on this today. Before the first one, #156 adds a required human approval and a render check on `main`, and #28 and #99 add CODEOWNERS and a trusted path guard.
+- After that, a compromised executor (3.4) can still open pull requests and close its own, but not merge one without a person.
+
+## 6. Gaps recorded here
+
+These are recorded, not decided; each links the issue that tracks it, or is an open question for the maintainer.
+
+- The digest proves that the plan's inputs did not change, not who decided; the decision's authenticity rests on RBAC on `remediationrequests/status` alone (section 2).
+- A compromised executor holds the App's full registered permissions on every installation, not only the repository and permissions its code asks for (3.4).
+- The executor's `get` on target kinds and Flux objects is cluster-wide; policy `targets` narrow decisions, not reads (G6.3).
+- Values in pod specs and pod templates are readable by both identities even though Secrets are not (G4.5).
+- Redaction has five known gaps and no caller yet (G4.4, #114).
+- No test checks that the analyzer binary cannot reach the signer or the GitHub adapter, that `pods/exec` is refused, or the containers' security context (G2.5, G6.4, S6).

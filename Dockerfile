@@ -1,7 +1,9 @@
 # Build the manager binary
 # Base images are pinned by tag and digest; Dependabot (docker ecosystem) keeps both current.
-# To build from a mirror, override a base with a named build context, e.g.
-#   docker buildx build --build-context golang:1.26.10@sha256:<digest>=docker-image://<mirror>/golang:1.26.10 .
+# To build from a mirror, override a base with a named build context whose name is the FROM reference below,
+# copied exactly (tag and digest; it changes with every Dependabot bump, and a name that does not match is
+# silently ignored):
+#   make docker-build DOCKER_BUILD_ARGS='--build-context <FROM reference>=docker-image://<mirror>/<image>'
 FROM golang:1.26.10@sha256:670bb5aa5349ae03b8516764718486f4f16399134bdc9acd0c46a23f043ab05c AS builder
 ARG TARGETOS
 ARG TARGETARCH

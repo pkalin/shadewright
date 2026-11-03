@@ -14,8 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package collector watches events, pods and workloads in the namespaces the analyzer is started with
-// (--watch-namespaces) and turns them into symptoms (#41).
+// Package collector will watch events, pods and workloads in the namespaces the analyzer is started with
+// (--watch-namespaces) and turn them into symptoms (#41, not built yet). For now it holds only the RBAC
+// markers of those reads.
 //
 // Its markers generate the ClusterRole analyzer-watch-role (config/rbac/analyzer/watch). That role is only a
 // catalogue of verbs: it is bound by one RoleBinding per watched namespace (config/watch), never by a

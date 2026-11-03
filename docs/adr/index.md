@@ -8,7 +8,7 @@
 | [0004](0004-github-and-flux-first.md) | GitHub and Flux first, behind interfaces | Accepted |
 | [0005](0005-go-kubebuilder-single-module.md) | Go, Kubebuilder, one module with two binaries | Accepted |
 | [0006](0006-github-app-key-in-key-vault.md) | GitHub App with its private key in Key Vault | Accepted, amended |
-| [0007](0007-incident-state-in-crds.md) | Incident state in CRDs for the MVP | Accepted |
+| [0007](0007-incident-state-in-crds.md) | Incident state in CRDs for the MVP | Accepted, amended |
 | [0008](0008-disposable-azure-lab.md) | A disposable Azure lab in its own subscription | Accepted |
 | [0009](0009-api-group-and-docs-domain.md) | API group and docs domain | Accepted |
 | [0010](0010-docs-site-zensical.md) | Docs site built with Zensical on GitHub Pages | Accepted |

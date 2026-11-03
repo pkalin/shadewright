@@ -89,7 +89,7 @@ The analyzer and the remediation controller are separate binaries in one Go modu
 
 The collector, the incident store and the analyzer run in the analyzer binary; the policy engine, the remediation controller, the GitOps adapter and the verifier run in the executor (`cmd/main.go`). Their roles are generated from kubebuilder RBAC markers (`internal/analyzer`, `internal/analyzer/collector`, `internal/controller`):
 
-- **Analyzer:** reads events (`events.k8s.io/v1`), pods and workloads only in the namespaces it is started with (`--watch-namespaces`): a ClusterRole that is only a catalogue of verbs, bound by one RoleBinding per watched namespace and never cluster-wide, and a cache restricted to the same list. Incidents live in the operator namespace, next to the requests that point at them: it creates and updates `Incident` objects and their status, and creates `RemediationRequest` objects, there only (a Role). Its one cluster-wide grant is reading the cluster-scoped `RemediationSettings`. It cannot update, delete or write the status of a request.
+- **Analyzer:** reads events (`events.k8s.io/v1`), pods and workloads only in the namespaces it is started with (`--watch-namespaces`): a ClusterRole that is only a catalogue of verbs, bound by one RoleBinding per watched namespace and never cluster-wide, and a cache restricted to the same list for those kinds, and to the operator namespace for Incidents and requests. Incidents live in the operator namespace, next to the requests that point at them: it creates and updates `Incident` objects and their status, and creates `RemediationRequest` objects, there only (a Role). Its one cluster-wide grant is reading the cluster-scoped `RemediationSettings`. The watched namespaces are a deployer setting (`demo` is the lab default). The RoleBindings are built from `config/watch` (separately from `config/default`, in namespaces that must already exist) and must match `--watch-namespaces`; `test/rbac` checks that they do. The operator namespace comes from `--namespace`, defaulting to `POD_NAMESPACE`, and the analyzer refuses to start without it or with an empty list. It cannot update, delete or write the status of a request.
 - **Executor:** reads (`get` only) policies and settings, always from the API server, never through a cache (reading incidents for verification is planned); reads (`get` only, no list or watch) the target kinds (Deployments, StatefulSets, KEDA ScaledObjects) and the Flux Kustomizations and GitRepositories that deliver them, for source mapping; reads requests and writes their status in the operator namespace only (a Role), and its cache watches requests only there. It cannot create requests or write incidents.
 - Neither can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
 
@@ -298,7 +298,7 @@ Raising `maxReplicaCount` makes sense only after confirming that the replica cap
 
 ### 5.2. Incident
 
-A namespaced CR that holds the fingerprint, counters, first and last seen, the correlated owner, and references to analyses and requests. Large data (log excerpts, full model transcripts) lives outside etcd, or is dropped after analysis in the MVP.
+A namespaced CR in the operator namespace, next to the requests that point at it ([ADR-0007](adr/0007-incident-state-in-crds.md)), that holds the fingerprint, counters, first and last seen, the correlated owner, and references to analyses and requests. Large data (log excerpts, full model transcripts) lives outside etcd, or is dropped after analysis in the MVP.
 
 ### 5.3. RemediationPolicy
 
@@ -543,7 +543,7 @@ The GitHub App enables auto-merge (GraphQL `enablePullRequestAutoMerge`, squash)
 
 Emergency direct actions on the cluster could come later as a separate catalog with separate authorization. They are never an automatic fallback after a failed PR.
 
-What each identity can read and write. Arrows show where data goes: a read points at the identity, a write away from it. The cluster roles come from kubebuilder markers in `internal/analyzer` and `internal/controller`, and `test/rbac` checks them against a real API server. Dashed boxes and links are designed but not built yet.
+What each identity can read and write. Arrows show where data goes: a read points at the identity, a write away from it. The roles come from kubebuilder markers in `internal/analyzer`, `internal/analyzer/collector` and `internal/controller`, the analyzer's namespaced reads are bound per watched namespace in `config/watch`, and `test/rbac` checks them against a real API server. Dashed boxes and links are designed but not built yet.
 
 ```mermaid
 flowchart TB
@@ -678,7 +678,7 @@ Decided on 2026-11-01:
 | Packaging | Kubebuilder's Helm plugin; images on GHCR, signed keyless, with SBOMs |
 | Pluggability | Three axes: platform services, cluster platforms, cluster integrations ([ADR-0018](adr/0018-three-axes-of-pluggability.md)); security integrations diagnose only |
 | Extension packaging | Compiled in now; signed declarative OCI packs later ([ADR-0019](adr/0019-extension-packaging.md)) |
-| Controller identities | Separate analyzer and executor ServiceAccounts and roles; requests reachable only in the operator namespace (2.2) |
+| Controller identities | Separate analyzer and executor ServiceAccounts and roles; incidents and requests reachable only in the operator namespace, the analyzer's reads only in the watched namespaces (2.2) |
 
 Still open:
 

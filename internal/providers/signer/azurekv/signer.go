@@ -23,8 +23,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -75,12 +76,64 @@ func New(keyID string, opts Options) (*Signer, error) {
 	if err != nil {
 		return nil, err
 	}
-	cred, err := azidentity.NewWorkloadIdentityCredential(nil)
+	wi, err := workloadIdentityFromEnv()
 	if err != nil {
-		// The azidentity error names the variable at fault but is SDK text; the class is enough.
-		return nil, errNoWorkloadIdentity
+		return nil, err
+	}
+	cred, err := azidentity.NewWorkloadIdentityCredential(&azidentity.WorkloadIdentityCredentialOptions{
+		ClientID:      wi.clientID,
+		TenantID:      wi.tenantID,
+		TokenFilePath: wi.tokenFile,
+	})
+	if err != nil {
+		// Not wrapped: the azidentity error is SDK text that can quote the configured values. The variables
+		// were checked above, so only a case those checks do not cover gets here.
+		return nil, fmt.Errorf("%w: azidentity refused the configuration", errNoWorkloadIdentity)
 	}
 	return newSigner(key, cred, opts, clientConfig{})
+}
+
+// Workload identity variables, as the workload identity webhook injects them.
+const (
+	envClientID      = "AZURE_CLIENT_ID"
+	envTenantID      = "AZURE_TENANT_ID"
+	envTokenFile     = "AZURE_FEDERATED_TOKEN_FILE"
+	envAuthorityHost = "AZURE_AUTHORITY_HOST"
+)
+
+// tenantIDPattern is the set of characters azidentity accepts in a tenant ID.
+var tenantIDPattern = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+
+// workloadIdentity is the configuration read from the workload identity variables.
+type workloadIdentity struct {
+	clientID, tenantID, tokenFile string
+}
+
+// workloadIdentityFromEnv reads and checks the workload identity variables. An error names the variable at
+// fault, never its value.
+func workloadIdentityFromEnv() (workloadIdentity, error) {
+	wi := workloadIdentity{
+		clientID:  os.Getenv(envClientID),
+		tenantID:  os.Getenv(envTenantID),
+		tokenFile: os.Getenv(envTokenFile),
+	}
+	for _, v := range []struct{ name, value string }{
+		{envClientID, wi.clientID}, {envTenantID, wi.tenantID}, {envTokenFile, wi.tokenFile},
+	} {
+		if v.value == "" {
+			return workloadIdentity{}, fmt.Errorf("%w: %s is not set", errNoWorkloadIdentity, v.name)
+		}
+	}
+	if !tenantIDPattern.MatchString(wi.tenantID) {
+		return workloadIdentity{}, fmt.Errorf("%w: %s is not a valid tenant ID", errNoWorkloadIdentity, envTenantID)
+	}
+	if host := os.Getenv(envAuthorityHost); host != "" {
+		if u, err := url.Parse(host); err != nil || u.Scheme != schemeHTTPS || u.Host == "" {
+			return workloadIdentity{}, fmt.Errorf("%w: %s is not an https URL", errNoWorkloadIdentity,
+				envAuthorityHost)
+		}
+	}
+	return wi, nil
 }
 
 // clientConfig carries what tests replace: the HTTP transport and the delay between retries.
@@ -116,8 +169,8 @@ func newSigner(key KeyID, cred azcore.TokenCredential, opts Options, cc clientCo
 				MaxRetryDelay: max(maxRetryDelay, delay),
 			},
 			// Never log request or response bodies. This package never sets an azcore log listener; if a
-			// process sets one, it sees only cleaned credential errors (cleanCredential) and cleaned error
-			// responses (errorBodyPolicy).
+			// process sets one, it sees only cleaned credential errors (cleanCredential), fixed transport
+			// errors (guardTransport) and cleaned error responses (errorBodyPolicy).
 			Logging:         policy.LogOptions{IncludeBody: false},
 			PerCallPolicies: []policy.Policy{errorBodyPolicy{}},
 		},
@@ -129,6 +182,7 @@ func newSigner(key KeyID, cred azcore.TokenCredential, opts Options, cc clientCo
 	co.Transport = guardTransport{inner: transport}
 	client, err := azkeys.NewClient(key.VaultURL(), cleanCredential{cred}, co)
 	if err != nil {
+		// Not wrapped: the azkeys error is SDK text, and the options are built here, so the class is enough.
 		return nil, fmt.Errorf("key vault client for %s: %w", key, errClientSetup)
 	}
 	return &Signer{key: key, client: client, timeout: timeout}, nil
@@ -179,9 +233,10 @@ func (s *Signer) Sign(ctx context.Context, digest []byte) ([]byte, error) {
 // response text beyond it can reach logs or status.
 var errorCodePattern = regexp.MustCompile(`^[A-Za-z0-9.]{1,64}$`)
 
-// mapError turns an SDK error into an error with a providers kind. It never wraps an SDK or network error:
-// response and authentication errors include response bodies, and transport errors include URLs. Only the
-// providers kind, the retry delay, the status code and a short error code are kept.
+// mapError turns an SDK error into an error with a providers kind. It never wraps an SDK error: response
+// and authentication errors include response bodies, and the SDK's own errors can quote URLs and headers.
+// It keeps the providers kind and, as fixed text, the status code, short error code and retry delay of a
+// response, or the message of a credential error, a guardTransport error or a context error.
 func (s *Signer) mapError(err error) error {
 	op := "sign with " + s.key.String()
 
@@ -190,6 +245,7 @@ func (s *Signer) mapError(err error) error {
 		if errorCodePattern.MatchString(re.ErrorCode) {
 			code = " (" + re.ErrorCode + ")"
 		}
+		// Not wrapped: a ResponseError quotes the request URL and the response body.
 		msg := fmt.Errorf("%s: key vault returned status %d%s", op, re.StatusCode, code)
 		switch re.StatusCode {
 		case http.StatusNotFound:
@@ -202,10 +258,6 @@ func (s *Signer) mapError(err error) error {
 		default:
 			return msg
 		}
-	}
-
-	if ge, ok := errors.AsType[guardError](err); ok {
-		return fmt.Errorf("%s: %w", op, ge)
 	}
 
 	if ce, ok := errors.AsType[*credentialError](err); ok {
@@ -222,31 +274,46 @@ func (s *Signer) mapError(err error) error {
 	case errors.Is(err, context.Canceled):
 		return fmt.Errorf("%s: %w", op, context.Canceled)
 	}
-	// Anything else may carry response-controlled text (for example a malformed WWW-Authenticate
-	// challenge), request URLs or headers, so it is dropped: only its class survives, as a fixed error.
-	if _, ok := errors.AsType[net.Error](err); ok {
-		return &providers.RetryableError{Err: fmt.Errorf("%s: %w", op, errRequestNetwork)}
+	// guardTransport has already replaced every transport error with a fixed error or a context error.
+	if fe, ok := errors.AsType[fixedError](err); ok {
+		msg := fmt.Errorf("%s: %w", op, fe)
+		if fe.retryable() {
+			return &providers.RetryableError{Err: msg}
+		}
+		return msg
 	}
+	// Not wrapped: anything else comes from SDK code (for example the challenge policy) and may quote
+	// response text, request URLs or headers, so only its class survives.
 	return fmt.Errorf("%s: %w", op, errRequestSDK)
 }
 
 // fixedError is an error whose text is a constant of this package. Errors that leave this package wrap
-// only fixed errors, providers sentinels and context errors, never an SDK or network error, so neither
-// Error() nor a caller that unwraps the chain and prints every link can reach SDK, URL, header or token
-// text.
+// only fixed errors, credential errors, providers sentinels and context errors, never an SDK or network
+// error, so neither Error() nor a caller that unwraps the chain and prints every link can reach SDK, URL,
+// header or token text. guardTransport marks the final ones for azcore with [final].
 type fixedError string
 
 func (e fixedError) Error() string { return string(e) }
 
+// retryable reports whether Sign returns the error as retryable.
+func (e fixedError) retryable() bool { return e == errRequestNetwork }
+
 const (
-	// errRequestNetwork is a request that failed in the network stack (dial, TLS, connection reset). It is
-	// returned as retryable.
+	// errRequestNetwork is a request that failed in the network stack (DNS, dial, timeout, connection
+	// reset). azcore retries it, and Sign returns it as retryable.
 	errRequestNetwork fixedError = "key vault request failed (network)"
-	// errRequestSDK is any other failure inside the Azure SDK. It is final.
+	// errRequestTLS is a TLS or certificate failure (unknown authority, hostname mismatch, a handshake the
+	// server or the client refused). No retry fixes it, so it is final.
+	errRequestTLS fixedError = "key vault request failed (tls)"
+	// errRequestSDK is any other failure inside the Azure SDK or the HTTP client. It is final.
 	errRequestSDK fixedError = "key vault request failed (sdk)"
-	// errNoWorkloadIdentity means the workload identity variables are missing or invalid.
-	errNoWorkloadIdentity fixedError = "workload identity credential: AZURE_CLIENT_ID, AZURE_TENANT_ID or " +
-		"AZURE_FEDERATED_TOKEN_FILE is missing or invalid"
+	// errMalformedChallenge is a 401 challenge that guardTransport refused. It is final.
+	errMalformedChallenge fixedError = "key vault sent a malformed authentication challenge"
+	// errResponseTooLarge is a response body larger than maxResponseBody. It is final.
+	errResponseTooLarge fixedError = "key vault response is larger than 64 KiB"
+	// errNoWorkloadIdentity means the workload identity variables are missing or invalid. New wraps it with
+	// the name of the variable at fault, never its value.
+	errNoWorkloadIdentity fixedError = "workload identity is not configured"
 	// errClientSetup means the Key Vault client could not be built from the options.
 	errClientSetup fixedError = "the key vault client could not be built"
 )
@@ -300,6 +367,8 @@ func (c cleanCredential) GetToken(ctx context.Context, o policy.TokenRequestOpti
 	if err == nil {
 		return tok, nil
 	}
+	// Not wrapped: an AuthenticationFailedError prints the Entra response body, and azcore logs credential
+	// errors. Only the status, the Retry-After delay and a context error are kept.
 	ce := &credentialError{}
 	if af, ok := errors.AsType[*azidentity.AuthenticationFailedError](err); ok && af.RawResponse != nil {
 		ce.status = af.RawResponse.StatusCode

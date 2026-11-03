@@ -45,6 +45,7 @@ const (
 	DefaultWindow       = 5 * time.Minute
 	DefaultMaxIncidents = 500
 	DefaultWriteTimeout = 10 * time.Second
+	DefaultRetryAfter   = 5 * time.Second
 )
 
 // refusedRemembered bounds the fingerprints refused at the cap that are remembered, so each gets one
@@ -63,6 +64,8 @@ type Config struct {
 	MaxIncidents int
 	// WriteTimeout is the deadline of each write of one Incident, with its retries on conflict.
 	WriteTimeout time.Duration
+	// RetryAfter is how long a batch whose write failed waits before it is tried again.
+	RetryAfter time.Duration
 	// Recorder and Regarding report a refused fingerprint as a Warning event about Regarding (the analyzer's
 	// Pod). No event is written when either is nil.
 	Recorder  events.EventRecorder
@@ -92,7 +95,9 @@ type Controller struct {
 	// names are the Incidents that exist or are pending; their number is held to MaxIncidents.
 	names     map[string]struct{}
 	pending   map[string]*batch
-	lastWrite map[string]time.Time
+	// nextWrite is when an Incident's pending batch is due: the window after its last write, or RetryAfter
+	// after a failed one. An Incident without an entry is written at once.
+	nextWrite map[string]time.Time
 	refused   *boundedSet
 }
 
@@ -116,6 +121,9 @@ func New(cfg Config) (*Controller, error) {
 	if cfg.WriteTimeout <= 0 {
 		cfg.WriteTimeout = DefaultWriteTimeout
 	}
+	if cfg.RetryAfter <= 0 {
+		cfg.RetryAfter = DefaultRetryAfter
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -125,7 +133,7 @@ func New(cfg Config) (*Controller, error) {
 		records:   map[string]record{},
 		names:     map[string]struct{}{},
 		pending:   map[string]*batch{},
-		lastWrite: map[string]time.Time{},
+		nextWrite: map[string]time.Time{},
 		refused:   newBoundedSet(refusedRemembered),
 	}, nil
 }
@@ -161,7 +169,9 @@ func (c *Controller) Start(ctx context.Context) error {
 	for {
 		select {
 		case o := <-c.obs:
-			c.consume(ctx, o)
+			if c.consume(ctx, o) {
+				c.flush(ctx, o.Fingerprint)
+			}
 		case <-tick.C:
 			c.flushDue(ctx, false)
 		case <-ctx.Done():
@@ -231,7 +241,9 @@ func (c *Controller) handled(occurrence string, began time.Time) (int64, bool) {
 // is new), but never more than Increase of the occurrence's record, so an occurrence another process
 // already counted is not counted again; the drop bound does not apply to it. A new fingerprint at the cap
 // is refused.
-func (c *Controller) consume(ctx context.Context, o collector.Observation) {
+//
+// It reports whether the batch is due at once: the Incident has not been written by this process yet.
+func (c *Controller) consume(ctx context.Context, o collector.Observation) bool {
 	o.Began = o.Began.Truncate(time.Second)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -243,13 +255,13 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) {
 		n = min(n, o.Increase(r.total))
 	}
 	if n <= 0 {
-		return
+		return false
 	}
 	name := Name(o.Fingerprint)
 	if _, ok := c.names[name]; !ok {
 		if len(c.names) >= c.cfg.MaxIncidents {
 			c.refuse(ctx, o)
-			return
+			return false
 		}
 		c.names[name] = struct{}{}
 	}
@@ -264,6 +276,8 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) {
 	}})
 	cur := c.records[o.Occurrence]
 	c.records[o.Occurrence] = record{counted: higher(cur.counted, counted{total: o.Total, began: o.Began}), incident: name}
+	_, scheduled := c.nextWrite[o.Fingerprint]
+	return !scheduled
 }
 
 // refuse counts and reports an observation of a new fingerprint at the cap. The event names the subject and
@@ -311,7 +325,7 @@ func (c *Controller) flushDue(ctx context.Context, all bool) {
 	now := c.cfg.Now()
 	var due []string
 	for fp := range c.pending {
-		if last, ok := c.lastWrite[fp]; all || !ok || now.Sub(last) >= c.cfg.Window {
+		if next, ok := c.nextWrite[fp]; all || !ok || !now.Before(next) {
 			due = append(due, fp)
 		}
 	}
@@ -343,10 +357,11 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 			b.add(p)
 		}
 		c.pending[fp] = b
+		c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.RetryAfter)
 		logf.FromContext(ctx).Error(err, "Failed to write the Incident status, will retry", "incident", Name(fp))
 		return
 	}
-	c.lastWrite[fp] = c.cfg.Now()
+	c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.Window)
 	for _, id := range dropped {
 		if r, ok := c.records[id]; ok && r.incident == inc.Name {
 			delete(c.records, id)

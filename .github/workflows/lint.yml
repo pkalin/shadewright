@@ -29,6 +29,25 @@ jobs:
       - name: Run linter
         run: make lint
 
+      - name: Check the generated manifests and code are up to date
+        run: |
+          # Keep the year of the committed boilerplate header, so the check does not start failing on 1 January.
+          year="$(sed -n -E 's/^Copyright ([0-9]{4}) The Shadewright Authors\.$/\1/p' api/v1alpha1/zz_generated.deepcopy.go)"
+          test -n "$year" || {
+            echo "::error::could not read the copyright year from api/v1alpha1/zz_generated.deepcopy.go"
+            exit 1
+          }
+          make manifests generate YEAR="$year"
+          git diff --exit-code -- config/ api/ || {
+            echo "::error::config/ or api/ is stale: run 'make manifests generate' and commit the result"
+            exit 1
+          }
+          test -z "$(git status --porcelain -- config/ api/)" || {
+            echo "::error::make manifests generate wrote files that are not committed"
+            git status --porcelain -- config/ api/
+            exit 1
+          }
+
       - name: Check the API reference is up to date
         run: |
           make api-docs

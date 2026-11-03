@@ -38,6 +38,11 @@ const (
 	otherNamespace   = "billing"
 	deploymentPath   = "apps/orders/deployment.yaml"
 	allApps          = "apps/**"
+	condTrue         = "True"
+	kedaModule       = "keda"
+	condFalse        = "False"
+	keyStatus        = "status"
+	keyConditions    = "conditions"
 )
 
 // kedaInput returns an input that is Allowed: raise a ScaledObject's maxReplicaCount from 10 to 15 under a
@@ -51,10 +56,12 @@ func kedaInput() policy.DecisionInput {
 		Min: 1, Max: 20, MaxIncreasePercent: 50, MaxDecreasePercent: new(int32(0)),
 	}
 	p.Spec.Targets.ObjectSelector = &metav1.LabelSelector{MatchLabels: map[string]string{teamLabel: team}}
+	settings := testfixtures.RemediationSettings()
+	settings.Spec.Modules = &v1alpha1.Modules{Integrations: []v1alpha1.ModuleName{kedaModule}}
 	return policy.DecisionInput{
 		Request:  rr,
 		Policy:   p,
-		Settings: testfixtures.RemediationSettings(),
+		Settings: settings,
 		Source: &v1alpha1.ResolvedSource{
 			RepositoryRef: testfixtures.RepositoryName,
 			TargetBranch:  "main",
@@ -83,16 +90,63 @@ func memoryInput() policy.DecisionInput {
 func targetOf(ref v1alpha1.ObjectRef, labels map[string]string) *policy.Target {
 	return &policy.Target{
 		APIVersion: ref.APIVersion, Kind: ref.Kind, Namespace: ref.Namespace, Name: ref.Name, UID: ref.UID,
-		Labels: labels,
+		Labels: labels, Object: liveObject(ref, readyConditions()),
 	}
 }
 
-// setTarget points both the request and the live target at the given kind.
+// readyConditions are the conditions of a ScaledObject that scales on its metrics, as KEDA v2.21.0 writes them.
+func readyConditions() []any {
+	return []any{
+		kcond("Ready", condTrue, "ScaledObjectReady"),
+		kcond("Active", condTrue, "ScalerActive"),
+		kcond("Fallback", condFalse, "NoFallbackFound"),
+		kcond("Paused", condFalse, ""),
+		kcond("HPAActive", condTrue, "HPAActive"),
+	}
+}
+
+// kcond is a status condition as decoded from JSON; an empty reason is left out.
+func kcond(typ, status, reason string) map[string]any {
+	c := map[string]any{"type": typ, keyStatus: status}
+	if reason != "" {
+		c["reason"] = reason
+	}
+	return c
+}
+
+// liveObject is the live object of ref as decoded from JSON, with the given status conditions.
+func liveObject(ref v1alpha1.ObjectRef, conditions []any) map[string]any {
+	return map[string]any{
+		"apiVersion": ref.APIVersion, "kind": ref.Kind,
+		"metadata": map[string]any{"namespace": ref.Namespace, "name": ref.Name, "uid": string(ref.UID)},
+		"spec":     map[string]any{"maxReplicaCount": int64(10)},
+		keyStatus:  map[string]any{keyConditions: conditions},
+	}
+}
+
+// setCondition sets the status (and reason) of the first condition of the type on the live target, adding the
+// condition when it is missing.
+func setCondition(in *policy.DecisionInput, typ, status, reason string) {
+	st := in.Target.Object[keyStatus].(map[string]any)
+	conds, _ := st[keyConditions].([]any)
+	for _, c := range conds {
+		if c.(map[string]any)["type"] == typ {
+			c.(map[string]any)[keyStatus], c.(map[string]any)["reason"] = status, reason
+			return
+		}
+	}
+	st[keyConditions] = append(conds, kcond(typ, status, reason))
+}
+
+// setTarget points the request, the live target and the live object at the given kind.
 func setTarget(in *policy.DecisionInput, apiVersion, kind string) {
 	in.Request.Spec.TargetRef.APIVersion = apiVersion
 	in.Request.Spec.TargetRef.Kind = kind
 	in.Target.APIVersion = apiVersion
 	in.Target.Kind = kind
+	if in.Target.Object != nil {
+		in.Target.Object["apiVersion"], in.Target.Object["kind"] = apiVersion, kind
+	}
 }
 
 func kedaParams(in *policy.DecisionInput, previous, desired int32) {
@@ -276,9 +330,10 @@ func TestDecide(t *testing.T) {
 		{name: "keda action on a core-group ScaledObject", base: kedaInput,
 			mutate:  func(in *policy.DecisionInput) { setTarget(in, "v1", "ScaledObject") },
 			outcome: denied, reason: policy.ReasonKindNotAllowed},
+		// KEDA 2.x serves only v1alpha1, and the readiness rule is defined for it alone.
 		{name: "keda action on another keda version", base: kedaInput,
 			mutate:  func(in *policy.DecisionInput) { setTarget(in, "keda.sh/v1beta1", "ScaledObject") },
-			outcome: allowed, reason: policy.ReasonWithinApprovedBounds},
+			outcome: denied, reason: policy.ReasonKindNotAllowed},
 		{name: "memory action on a StatefulSet", base: memoryInput,
 			mutate:  func(in *policy.DecisionInput) { setTarget(in, "apps/v1", "StatefulSet") },
 			outcome: allowed, reason: policy.ReasonWithinApprovedBounds},
@@ -294,12 +349,14 @@ func TestDecide(t *testing.T) {
 			mutate: func(in *policy.DecisionInput) {
 				in.Request.Spec.TargetRef.Namespace = otherNamespace
 				in.Target.Namespace = otherNamespace
+				in.Target.Object["metadata"].(map[string]any)["namespace"] = otherNamespace
 			},
 			outcome: denied, reason: policy.ReasonTargetNamespaceNotAllowed},
 		{name: "cluster-scoped target", base: kedaInput,
 			mutate: func(in *policy.DecisionInput) {
 				in.Request.Spec.TargetRef.Namespace = ""
 				in.Target.Namespace = ""
+				in.Target.Object["metadata"].(map[string]any)["namespace"] = ""
 			},
 			outcome: denied, reason: policy.ReasonTargetNamespaceNotAllowed},
 		{name: "target labels do not match", base: kedaInput,
@@ -715,6 +772,182 @@ func TestDecideDoesNotModifyInput(t *testing.T) {
 			!reflect.DeepEqual(in.Settings, want.Settings) || !reflect.DeepEqual(in.Source, want.Source) ||
 			!reflect.DeepEqual(in.Target, want.Target) {
 			t.Error("Decide modified its input")
+		}
+	}
+}
+
+// TestKedaRefusedUnlessReady checks the gate of AdjustKedaMaxReplicas (#228, design 7): a plan within every
+// bound is refused, NeedsIntervention with ScaledObjectNotReady, unless the live ScaledObject is ready by the
+// KedaReady rule, and waits (OutcomeWait, ScaledObjectReadinessUnknown) while KEDA has not reported on it. Only
+// the live object decides; nothing in the request can lift the refusal.
+func TestKedaRefusedUnlessReady(t *testing.T) {
+	const (
+		allowed = policy.OutcomeAllowed
+		needs   = policy.OutcomeNeedsIntervention
+		wait    = policy.OutcomeWait
+	)
+	annotate := func(key string) func(in *policy.DecisionInput) {
+		return func(in *policy.DecisionInput) {
+			in.Target.Object["metadata"].(map[string]any)["annotations"] = map[string]any{key: "true"}
+		}
+	}
+	tests := []struct {
+		name   string
+		mutate func(in *policy.DecisionInput)
+		want   policy.Outcome
+	}{
+		{"ready", func(*policy.DecisionInput) {}, allowed},
+		{"HPAActive Unknown", func(in *policy.DecisionInput) { setCondition(in, "HPAActive", "Unknown", "") }, allowed},
+		{"no HPAActive condition yet", func(in *policy.DecisionInput) {
+			in.Target.Object[keyStatus].(map[string]any)[keyConditions] = readyConditions()[:4]
+		}, allowed},
+		{"trigger error", func(in *policy.DecisionInput) {
+			setCondition(in, "Ready", condFalse, "TriggerError")
+			setCondition(in, "Active", condFalse, "ScalerNotActive")
+		}, needs},
+		{"partial trigger error", func(in *policy.DecisionInput) { setCondition(in, "Ready", "Unknown", "PartialTriggerError") },
+			needs},
+		{"on fallback, though Ready", func(in *policy.DecisionInput) { setCondition(in, "Fallback", condTrue, "FallbackExists") },
+			needs},
+		{"paused", func(in *policy.DecisionInput) {
+			setCondition(in, "Ready", condFalse, "ScaledObjectPaused")
+			setCondition(in, "Paused", condTrue, "ScaledObjectPaused")
+		}, needs},
+		{"paused for scale-in only, though Ready", func(in *policy.DecisionInput) {
+			setCondition(in, "Paused", condTrue, "ScaledObjectScaleInPaused")
+		}, needs},
+		{"paused for scale-out only, though Ready", func(in *policy.DecisionInput) {
+			setCondition(in, "Paused", condTrue, "ScaledObjectScaleOutPaused")
+		}, needs},
+		{"pause annotation, before KEDA set Paused", annotate("autoscaling.keda.sh/paused"), needs},
+		{"paused-replicas annotation", annotate("autoscaling.keda.sh/paused-replicas"), needs},
+		{"paused-scale-in annotation", annotate("autoscaling.keda.sh/paused-scale-in"), needs},
+		{"paused-scale-out annotation", annotate("autoscaling.keda.sh/paused-scale-out"), needs},
+		{"being deleted", func(in *policy.DecisionInput) {
+			in.Target.Object["metadata"].(map[string]any)["deletionTimestamp"] = "2026-11-03T10:00:00Z"
+		}, needs},
+		{"HPA cannot read its metrics, though Ready", func(in *policy.DecisionInput) {
+			setCondition(in, "HPAActive", condFalse, "HPAMetricsUnavailable")
+		}, needs},
+		{"missing object", func(in *policy.DecisionInput) { in.Target.Object = nil }, needs},
+		{"malformed conditions", func(in *policy.DecisionInput) {
+			in.Target.Object[keyStatus] = map[string]any{keyConditions: "Ready=True"}
+		}, needs},
+		// The request cannot lift the refusal: an Optional policy with approvalRequired: false still refuses.
+		{"trigger error under an Optional policy without approval", func(in *policy.DecisionInput) {
+			in.Policy.Spec.Approval = v1alpha1.ApprovalOptional
+			in.Request.Spec.ApprovalRequired = new(false)
+			setCondition(in, "Ready", condFalse, "TriggerError")
+		}, needs},
+
+		{"no status yet", func(in *policy.DecisionInput) { delete(in.Target.Object, keyStatus) }, wait},
+		{"no Ready condition yet", func(in *policy.DecisionInput) {
+			in.Target.Object[keyStatus].(map[string]any)[keyConditions] = readyConditions()[1:]
+		}, wait},
+		{"Ready Unknown, as KEDA initialises it", func(in *policy.DecisionInput) { setCondition(in, "Ready", "Unknown", "") },
+			wait},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := kedaInput()
+			tt.mutate(&in)
+			got := policy.Decide(in)
+			if got.Outcome != tt.want {
+				t.Fatalf("Decide() = %s/%s (%s), want %s", got.Outcome, got.Reason, got.Message, tt.want)
+			}
+			want := map[policy.Outcome]policy.Reason{allowed: policy.ReasonWithinApprovedBounds,
+				needs: policy.ReasonScaledObjectNotReady, wait: policy.ReasonScaledObjectReadinessUnknown}[tt.want]
+			if got.Reason != want || (tt.want != allowed && !got.EffectiveApprovalRequired) {
+				t.Fatalf("Decide() = %s/%s, approval %v; want %s with approval required",
+					got.Outcome, got.Reason, got.EffectiveApprovalRequired, want)
+			}
+		})
+	}
+}
+
+// TestKedaGateComesAfterTheDenials checks the order: a plan the policy refuses is Denied, final, whatever the
+// state of its ScaledObject, and the gate applies only to AdjustKedaMaxReplicas.
+func TestKedaGateComesAfterTheDenials(t *testing.T) {
+	for _, change := range []func(in *policy.DecisionInput){
+		func(in *policy.DecisionInput) { setCondition(in, "Ready", condFalse, "TriggerError") },
+		func(in *policy.DecisionInput) { setCondition(in, "Ready", "Unknown", "") },
+	} {
+		in := kedaInput()
+		change(&in)
+		kedaParams(&in, 10, 30)
+		if got := policy.Decide(in); got.Outcome != policy.OutcomeDenied || got.Reason != policy.ReasonAboveMaximum {
+			t.Fatalf("Decide() = %s/%s, want Denied/%s", got.Outcome, got.Reason, policy.ReasonAboveMaximum)
+		}
+	}
+	mem := memoryInput()
+	mem.Target.Object = nil
+	if got := policy.Decide(mem); got.Outcome != policy.OutcomeAllowed {
+		t.Fatalf("memory action without a live object: Decide() = %s/%s, want Allowed", got.Outcome, got.Reason)
+	}
+	if r, _ := policy.CheckTargetState(v1alpha1.ActionSetContainerMemoryLimit, nil); r != "" {
+		t.Fatalf("CheckTargetState(SetContainerMemoryLimit) = %s, want no state check", r)
+	}
+}
+
+// TestKedaNeedsTheModuleEnabled checks that AdjustKedaMaxReplicas, which the keda integration module contributes,
+// is Denied (ModuleNotEnabled) unless RemediationSettings spec.modules.integrations lists keda (design 2.4 and
+// 2.5). Only the spec counts: a status that reports keda detected enables nothing (ADR-0024). The core memory
+// action needs no module.
+func TestKedaNeedsTheModuleEnabled(t *testing.T) {
+	cases := []struct {
+		name   string
+		change func(s *v1alpha1.RemediationSettings)
+	}{
+		{"no modules", func(s *v1alpha1.RemediationSettings) { s.Spec.Modules = nil }},
+		{"no integrations", func(s *v1alpha1.RemediationSettings) { s.Spec.Modules = &v1alpha1.Modules{} }},
+		{"other integrations only", func(s *v1alpha1.RemediationSettings) {
+			s.Spec.Modules = &v1alpha1.Modules{Integrations: []v1alpha1.ModuleName{"flux", "kyverno"}}
+		}},
+		{"keda as a platform", func(s *v1alpha1.RemediationSettings) {
+			s.Spec.Modules = &v1alpha1.Modules{Platforms: []v1alpha1.ModuleName{kedaModule}}
+		}},
+		{"keda only in the status", func(s *v1alpha1.RemediationSettings) {
+			s.Spec.Modules = nil
+			s.Status.Integrations = []v1alpha1.IntegrationStatus{{Name: kedaModule, Detected: true}}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := kedaInput()
+			c.change(in.Settings)
+			got := policy.Decide(in)
+			if got.Outcome != policy.OutcomeDenied || got.Reason != policy.ReasonModuleNotEnabled {
+				t.Fatalf("Decide() = %s/%s, want Denied/%s", got.Outcome, got.Reason, policy.ReasonModuleNotEnabled)
+			}
+		})
+	}
+	mem := memoryInput()
+	mem.Settings.Spec.Modules = nil
+	if got := policy.Decide(mem); got.Outcome != policy.OutcomeAllowed {
+		t.Fatalf("memory action without modules: Decide() = %s/%s, want Allowed", got.Outcome, got.Reason)
+	}
+}
+
+// TestLiveObjectMustBeTheTarget checks that a live object whose identity is not the live target's is a
+// refusal (TargetMismatch), never a pass, so the state check always reads the object that was authorized.
+func TestLiveObjectMustBeTheTarget(t *testing.T) {
+	meta := func(in *policy.DecisionInput) map[string]any { return in.Target.Object["metadata"].(map[string]any) }
+	cases := map[string]func(in *policy.DecisionInput){
+		"apiVersion":  func(in *policy.DecisionInput) { in.Target.Object["apiVersion"] = "keda.sh/v1beta1" },
+		"kind":        func(in *policy.DecisionInput) { in.Target.Object["kind"] = "ScaledJob" },
+		"namespace":   func(in *policy.DecisionInput) { meta(in)["namespace"] = otherNamespace },
+		"name":        func(in *policy.DecisionInput) { meta(in)["name"] = otherName },
+		"uid":         func(in *policy.DecisionInput) { meta(in)["uid"] = "66666666-6666-4666-8666-666666666666" },
+		"no uid":      func(in *policy.DecisionInput) { delete(meta(in), "uid") },
+		"no metadata": func(in *policy.DecisionInput) { delete(in.Target.Object, "metadata") },
+	}
+	for name, change := range cases {
+		for _, base := range []func() policy.DecisionInput{kedaInput, memoryInput} {
+			in := base()
+			change(&in)
+			if got := policy.Decide(in); got.Outcome != policy.OutcomeDenied || got.Reason != policy.ReasonTargetMismatch {
+				t.Errorf("%s: Decide() = %s/%s, want Denied/%s", name, got.Outcome, got.Reason, policy.ReasonTargetMismatch)
+			}
 		}
 	}
 }

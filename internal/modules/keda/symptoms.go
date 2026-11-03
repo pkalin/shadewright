@@ -20,23 +20,23 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/pkalin/shadewright/internal/kedaready"
 	"github.com/pkalin/shadewright/internal/modules"
 )
 
-// Condition types and statuses the rules read. KEDA's are those of kedacore/keda v2.21.0
-// apis/keda/v1alpha1/condition_types.go (ConditionReady, ConditionActive, ConditionFallback, ConditionPaused,
-// ConditionHPAActive); the HPA's are those of Kubernetes v1.37.2 pkg/controller/podautoscaler/horizontal.go.
+// Condition types and statuses the rules read. KEDA's come from internal/kedaready, the one definition the
+// policy gate uses too; the HPA's are those of Kubernetes v1.37.2 pkg/controller/podautoscaler/horizontal.go.
 const (
-	conditionReady          = "Ready"
-	conditionFallback       = "Fallback"
-	conditionPaused         = "Paused"
-	conditionHPAActive      = "HPAActive"
+	conditionReady          = kedaready.ConditionReady
+	conditionFallback       = kedaready.ConditionFallback
+	conditionPaused         = kedaready.ConditionPaused
+	conditionHPAActive      = kedaready.ConditionHPAActive
 	conditionScalingLimited = "ScalingLimited"
 	conditionScalingActive  = "ScalingActive"
 
-	statusTrue    = "True"
-	statusFalse   = "False"
-	statusUnknown = "Unknown"
+	statusTrue    = kedaready.StatusTrue
+	statusFalse   = kedaready.StatusFalse
+	statusUnknown = kedaready.StatusUnknown
 )
 
 // KEDA reasons the rules write as they are, read from kedacore/keda v2.21.0 (see [notReadyReasons] for the
@@ -46,7 +46,7 @@ const (
 	// fallback is set.
 	ReasonTriggerError = "TriggerError"
 	// ReasonPartialTriggerError: Ready=Unknown, some triggers fail while another one is active.
-	ReasonPartialTriggerError = "PartialTriggerError"
+	ReasonPartialTriggerError = kedaready.ReasonPartialTriggerError
 	// ReasonFallbackExists: Fallback=True, a trigger has failed more often than spec.fallback.failureThreshold
 	// (pkg/fallback/fallback.go).
 	ReasonFallbackExists = "FallbackExists"
@@ -152,21 +152,21 @@ func kedaSymptoms(obj map[string]any, kind string) []modules.Symptom {
 	var typ string
 	switch {
 	case conditionIs(status, conditionReady, statusFalse):
-		cond, typ = modules.FirstCondition(status, conditionReady), conditionReady
+		cond, typ = kedaready.FirstCondition(status, conditionReady), conditionReady
 		reason, _ := cond["reason"].(string)
 		s = modules.Symptom{Reason: ReasonNotReady, Summary: summaryNotReady}
 		if summary, ok := notReadyReasons[kind][reason]; ok {
 			s = modules.Symptom{Reason: reason, Summary: summary}
 		}
 	case kind == KindScaledObject && conditionIs(status, conditionFallback, statusTrue):
-		cond, typ = modules.FirstCondition(status, conditionFallback), conditionFallback
+		cond, typ = kedaready.FirstCondition(status, conditionFallback), conditionFallback
 		s = modules.Symptom{Reason: ReasonFallbackExists, Summary: summaryFallbackExists}
 	case kind == KindScaledObject && conditionIs(status, conditionHPAActive, statusFalse):
-		cond, typ = modules.FirstCondition(status, conditionHPAActive), conditionHPAActive
+		cond, typ = kedaready.FirstCondition(status, conditionHPAActive), conditionHPAActive
 		s = modules.Symptom{Reason: ReasonHPAMetricsUnavailable, Summary: summaryHPAMetricsUnavailable}
 	case conditionIs(status, conditionReady, statusUnknown) &&
-		modules.FirstCondition(status, conditionReady)["reason"] == ReasonPartialTriggerError:
-		cond, typ = modules.FirstCondition(status, conditionReady), conditionReady
+		kedaready.FirstCondition(status, conditionReady)["reason"] == ReasonPartialTriggerError:
+		cond, typ = kedaready.FirstCondition(status, conditionReady), conditionReady
 		s = modules.Symptom{Reason: ReasonPartialTriggerError, Summary: summaryPartialTriggerError}
 	default:
 		return nil
@@ -231,7 +231,7 @@ func hpaSymptoms(obj map[string]any) []modules.Symptom {
 	if conditionIs(status, conditionScalingActive, statusFalse) || !conditionIs(status, conditionScalingLimited, statusTrue) {
 		return nil
 	}
-	limited := modules.FirstCondition(status, conditionScalingLimited)
+	limited := kedaready.FirstCondition(status, conditionScalingLimited)
 	if limited["reason"] != hpaTooManyReplicas {
 		return nil
 	}
@@ -343,6 +343,5 @@ func is(obj map[string]any, apiVersion, kind string) bool {
 
 // conditionIs reports whether the first condition of the type has the status.
 func conditionIs(status map[string]any, typ, want string) bool {
-	st, _ := modules.FirstCondition(status, typ)["status"].(string)
-	return st == want
+	return kedaready.ConditionIs(status, typ, want)
 }

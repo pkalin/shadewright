@@ -617,7 +617,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `Failed` | PhaseFailed means a step failed, for example verification did not pass before the timeout. Terminal. |
 | `Expired` | PhaseExpired means a step reached its deadline. Terminal. |
 | `Cancelled` | PhaseCancelled means the request was cancelled before the change was merged. Terminal. |
-| `Superseded` | PhaseSuperseded means an input of the plan digest changed, so the pull request is closed and a new request is needed. Terminal. |
+| `Superseded` | PhaseSuperseded means a plan input changed, or the ScaledObject is no longer ready, or the module that contributes the action was disabled, so the pull request is closed and a new request is needed. Terminal. |
 | `NeedsIntervention` | PhaseNeedsIntervention means the controller cannot continue on its own, for example because the target is not declared in a plain manifest; a human must act. |
 
 ### RemediationPolicySpec

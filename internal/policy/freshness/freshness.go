@@ -59,6 +59,13 @@ const (
 	// ReasonSourceChanged: mapping the target to its source again gives another repository, branch or file,
 	// or the mapping now denies the change or needs a person.
 	ReasonSourceChanged = "SourceChanged"
+	// ReasonScaledObjectNotReady: the plan is AdjustKedaMaxReplicas and the live ScaledObject is no longer ready
+	// by the rule the policy check applied ([policy.CheckTargetState]), on two reads with the rest of the check
+	// in between.
+	ReasonScaledObjectNotReady = "ScaledObjectNotReady"
+	// ReasonModuleNotEnabled: the plan's action is contributed by an integration module that RemediationSettings
+	// spec.modules no longer enables ([policy.CheckModuleEnabled]).
+	ReasonModuleNotEnabled = "ModuleNotEnabled"
 )
 
 // readTimeout bounds the reads one check makes of the Git host.
@@ -252,9 +259,9 @@ type Result struct {
 }
 
 // Check returns a Result and a nil error only when every input of the plan is unchanged since the digest
-// was made: the same policy UID and generation, the same settings entry, the same target object, and the
-// target file on the target branch still holds the previous value. A merge to the target branch that does
-// not touch the file leaves the plan fresh.
+// was made: the same policy UID and generation, the same settings entry, the module that contributes the action
+// still enabled, the same target object (for AdjustKedaMaxReplicas, a ScaledObject that is still ready), and the
+// target file on the target branch still holds the previous value. A merge to the target branch that does not touch the file leaves the plan fresh.
 //
 // It returns a [*StaleError] when an input definitely changed, [ErrPaused] when settings pause writes, and
 // another error when an input could not be read. In every case except nil the caller must not write, and the
@@ -270,7 +277,7 @@ func (c Checker) Check(ctx context.Context, rr *v1alpha1.RemediationRequest) (Re
 		return Result{}, err
 	}
 
-	live, err := c.checkTarget(ctx, rr, pol)
+	live, notReady, err := c.checkTarget(ctx, rr, pol)
 	if err != nil {
 		return Result{}, err
 	}
@@ -285,6 +292,11 @@ func (c Checker) Check(ctx context.Context, rr *v1alpha1.RemediationRequest) (Re
 	git, file, err := c.checkFile(ctx, rr, repo, mapped.Source.BaseCommit)
 	if err != nil {
 		return Result{}, err
+	}
+	if notReady {
+		// The target failed its state check on the first read. The mapping and the Git reads above took a
+		// while; one blip of the target's status must not close an approved plan, so it is read again.
+		return Result{}, c.confirmNotReady(ctx, rr, pol)
 	}
 	// The mapping and the Git reads (up to readTimeout each) take long. Revalidate last what they were based
 	// on: the target (UID and resource version, since the mapping compared the live object with Git) and the
@@ -314,6 +326,34 @@ func (c Checker) Check(ctx context.Context, rr *v1alpha1.RemediationRequest) (Re
 		}
 		return Result{}, err
 	}
+}
+
+// confirmNotReady decides on a target that failed its state check on the first read of the check: the target
+// is read and checked again (UID, labels, previous value, then state), and the plan is stale only when the
+// state check fails again; a target that passes now is a retry, not fresh, because the rest of the check ran
+// on the first read. Last, as for every stale verdict, the policy and the settings are read again: a pause
+// returns ErrPaused and any change a retry, so nothing is closed while writes are paused.
+func (c Checker) confirmNotReady(ctx context.Context, rr *v1alpha1.RemediationRequest, pol *v1alpha1.RemediationPolicy) error {
+	_, notReady, err := c.checkTarget(ctx, rr, pol)
+	if err != nil {
+		return err
+	}
+	if !notReady {
+		return errors.New("the target's state changed while the plan was checked, checking again")
+	}
+	switch polNow, _, _, err := c.loadPlan(ctx, rr); {
+	case errors.Is(err, ErrPaused):
+		return err
+	case err != nil:
+		if _, isStale := errors.AsType[*StaleError](err); isStale {
+			return errors.New("the policy or the settings changed while the plan was checked, checking again")
+		}
+		return err
+	case polNow.UID != pol.UID || polNow.Generation != pol.Generation:
+		return errors.New("the policy changed while the plan was checked, checking again")
+	}
+	return stale(ReasonScaledObjectNotReady, "%s %s/%s is not ready on two reads, so the raised ceiling is not the fix",
+		rr.Spec.TargetRef.Kind, rr.Spec.TargetRef.Namespace, rr.Spec.TargetRef.Name)
 }
 
 // confirmStale returns staleErr, the verdict of a mapping that no longer gives the plan's source, only when
@@ -454,6 +494,10 @@ func (c Checker) loadPlan(ctx context.Context, rr *v1alpha1.RemediationRequest) 
 	if v1alpha1.UID(pol.UID) != rr.Status.PolicyUID || RevisionOf(pol) != rr.Status.PolicyRevision {
 		return nil, nil, v1alpha1.GitRepository{}, stale(ReasonPolicyChanged, "The policy %q is not the one that allowed the plan", rr.Spec.PolicyRef)
 	}
+	// The action's module must still be enabled: a cluster admin who disables it withdraws the action.
+	if reason, msg := policy.CheckModuleEnabled(settings, rr.Spec.Action.Type); reason != "" {
+		return nil, nil, v1alpha1.GitRepository{}, stale(ReasonModuleNotEnabled, "%s", msg)
+	}
 	repo, ok := repository(settings, src.RepositoryRef)
 	if !ok || repo.TargetBranch != src.TargetBranch {
 		return nil, nil, v1alpha1.GitRepository{}, stale(ReasonSettingsChanged, "The repository %q or its target branch changed in the settings",
@@ -521,35 +565,41 @@ func (c Checker) checkSource(ctx context.Context, rr *v1alpha1.RemediationReques
 }
 
 // checkTarget checks that the live target is still the object the plan is about. It returns the object read,
-// so the caller can tell whether it changed later.
+// so the caller can tell whether it changed later, and whether it failed the action's state check (for
+// AdjustKedaMaxReplicas, a ScaledObject that is not ready), which the caller confirms before it calls the plan
+// stale. The state is checked after the previous value, so a changed value is reported as TargetChanged.
 func (c Checker) checkTarget(ctx context.Context, rr *v1alpha1.RemediationRequest, pol *v1alpha1.RemediationPolicy) (
-	*unstructured.Unstructured, error) {
+	*unstructured.Unstructured, bool, error) {
 	ref := rr.Spec.TargetRef
 	live, err := c.readTarget(ctx, ref)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if string(live.GetUID()) != string(ref.UID) {
-		return nil, stale(ReasonTargetChanged, "%s %s/%s has another UID than the plan names", ref.Kind, ref.Namespace, ref.Name)
+		return nil, false, stale(ReasonTargetChanged, "%s %s/%s has another UID than the plan names", ref.Kind, ref.Namespace, ref.Name)
 	}
 	// The policy decided on the labels and on the previous value measured from the live field. Either may
 	// have changed since, while the UID and the file in Git stayed the same.
 	if reason, msg := policy.CheckObjectSelector(pol, live.GetLabels()); reason != "" {
-		return nil, stale(ReasonTargetChanged, "%s", msg)
+		return nil, false, stale(ReasonTargetChanged, "%s", msg)
 	}
 	field, err := sourcemap.FieldFor(rr.Spec.Action, ref)
 	if err != nil {
-		return nil, fmt.Errorf("locate the field of the action: %w", err)
+		return nil, false, fmt.Errorf("locate the field of the action: %w", err)
 	}
 	previous, ok := sourcemap.PreviousValue(rr.Spec.Action)
 	if !ok {
-		return nil, errors.New("the action has no previous value")
+		return nil, false, errors.New("the action has no previous value")
 	}
 	if got, found := field.Get(live.Object); !found || !field.Equals(got, previous) {
-		return nil, stale(ReasonTargetChanged, "%s %s/%s no longer holds the previous value of %s on the live object",
+		return nil, false, stale(ReasonTargetChanged, "%s %s/%s no longer holds the previous value of %s on the live object",
 			ref.Kind, ref.Namespace, ref.Name, field)
 	}
-	return live, nil
+	// The policy check refused AdjustKedaMaxReplicas on a ScaledObject that is not ready. A trigger that breaks
+	// after the decision must not let the raised ceiling through, so the same rule runs before every write; a
+	// state not known yet counts as not ready here.
+	reason, _ := policy.CheckTargetState(rr.Spec.Action.Type, live.Object)
+	return live, reason != "", nil
 }
 
 // checkFile reads the target file at the head of the target branch, not of the pull request branch, so a merge

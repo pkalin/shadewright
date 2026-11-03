@@ -94,9 +94,29 @@ type RemediationRequestReconciler struct {
 	// PullRequestTimeout is how long a request may take from PolicyChecked to an open pull request; it is
 	// stored in status.deadline. Zero means [DefaultPullRequestTimeout].
 	PullRequestTimeout time.Duration
+	// TargetStateTimeout is how long the policy check waits for a target whose state is not known yet (a
+	// ScaledObject KEDA has not reported on) before it ends the request in NeedsIntervention. Zero means
+	// [DefaultTargetStateTimeout].
+	TargetStateTimeout time.Duration
 	// Now is the clock; nil means time.Now (tests set it).
 	Now func() time.Time
 }
+
+// DefaultTargetStateTimeout is how long the policy check waits by default for KEDA to report on a
+// ScaledObject. KEDA reconciles a new or changed ScaledObject within seconds; ten minutes covers an operator
+// restart without leaving a request undecided for long.
+const DefaultTargetStateTimeout = 10 * time.Minute
+
+// Retry delays while the policy check waits for a target's state: the delay doubles with the time waited, from
+// targetStateMinDelay to targetStateMaxDelay, and never passes the end of TargetStateTimeout.
+const (
+	targetStateMinDelay = 15 * time.Second
+	targetStateMaxDelay = 2 * time.Minute
+)
+
+// messageTargetStateTimeout is the fixed message of a request whose target's state stayed unknown too long.
+const messageTargetStateTimeout = "KEDA did not report the ScaledObject ready or not ready within the time the " +
+	"policy check waits; a person must look"
 
 // Default deadlines of the phases that call external systems. Reconcile workers are bounded, so a stalled
 // read must not hold one for long.
@@ -183,7 +203,9 @@ func (r *RemediationRequestReconciler) getLive(ctx context.Context, key types.Na
 // decision. Only deterministic code decides (invariant 1): the request's own fields never lower the policy.
 //
 // A missing policy or settings object and a target with another UID end the request as Denied at once, so a
-// permanent refusal never becomes a retry loop. Only errors worth retrying (an API or Git host failure) are
+// permanent refusal never becomes a retry loop. A target whose state is not known yet (a ScaledObject KEDA has
+// not reported on) is checked again after a delay, with PolicyAllowed Unknown and no phase, for at most
+// TargetStateTimeout. Only errors worth retrying (an API or Git host failure) are
 // returned.
 func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -208,6 +230,12 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// The Git host refused the source mapping's reads for good (a permission the App lacks, a rule of the
 		// repository): a person has to act, so the request is decided now instead of retried without end.
 		out, err = needsIntervention(reason, message), nil
+	}
+	if err == nil && out.wait {
+		var wait time.Duration
+		if out, wait = r.waitForTarget(rr, out); wait > 0 {
+			return r.recordWait(ctx, rr, out, wait)
+		}
 	}
 	if err != nil {
 		// A remote system that asked for a delay (Retry-After) gets it; controller-runtime's error backoff
@@ -258,6 +286,57 @@ type outcome struct {
 	planDigest     string
 	// deadline is the pull request step's deadline, started with an allowed decision unless writes are paused.
 	deadline *metav1.Time
+	// wait means the target's state is not known yet (policy.OutcomeWait): the request is decided again later,
+	// and only the PolicyAllowed condition (Unknown, reason and message) is written meanwhile.
+	wait bool
+}
+
+// waitForTarget handles a decision to wait for the target's state. While the PolicyAllowed condition has said
+// so for less than TargetStateTimeout it returns the delay before the next check; the clock starts with the
+// condition's lastTransitionTime, which only this controller writes. Past the timeout it returns a
+// NeedsIntervention outcome and no delay.
+func (r *RemediationRequestReconciler) waitForTarget(rr *remediationv1alpha1.RemediationRequest, out outcome) (
+	outcome, time.Duration) {
+	timeout := r.TargetStateTimeout
+	if timeout <= 0 {
+		timeout = DefaultTargetStateTimeout
+	}
+	var waited time.Duration
+	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPolicyAllowed); c != nil &&
+		c.Status == metav1.ConditionUnknown && c.Reason == out.reason {
+		waited = max(r.now().Sub(c.LastTransitionTime.Time), 0)
+	}
+	if waited >= timeout {
+		return needsIntervention(string(policy.ReasonScaledObjectNotReady), messageTargetStateTimeout), 0
+	}
+	delay := min(max(waited, targetStateMinDelay), targetStateMaxDelay, timeout-waited)
+	return out, delay
+}
+
+// recordWait writes the PolicyAllowed condition of a request that waits for its target's state, unless it
+// already says so, and requeues it after delay. The phase is left as it is (none or Pending), so the next
+// reconcile runs the policy check again.
+func (r *RemediationRequestReconciler) recordWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	out outcome, delay time.Duration) (ctrl.Result, error) {
+	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPolicyAllowed); c != nil &&
+		c.Status == metav1.ConditionUnknown && c.Reason == out.reason && c.Message == out.message &&
+		c.ObservedGeneration == rr.Generation {
+		return ctrl.Result{RequeueAfter: delay}, nil
+	}
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type:               remediationv1alpha1.ConditionPolicyAllowed,
+		Status:             metav1.ConditionUnknown,
+		Reason:             out.reason,
+		Message:            out.message,
+		ObservedGeneration: rr.Generation,
+		LastTransitionTime: metav1.Time{Time: r.now()},
+	})
+	if err := r.Status().Update(ctx, rr); err != nil {
+		return ctrl.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	logf.FromContext(ctx).Info("Waiting for the target's state before deciding RemediationRequest",
+		"remediationRequest", client.ObjectKeyFromObject(rr), "reason", out.reason, "retryAfter", delay)
+	return ctrl.Result{RequeueAfter: delay}, nil
 }
 
 func denied(reason, message string) outcome {
@@ -359,6 +438,7 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 			Name:       live.GetName(),
 			UID:        remediationv1alpha1.UID(live.GetUID()),
 			Labels:     live.GetLabels(),
+			Object:     live.Object,
 		},
 	})
 	o := outcome{
@@ -392,6 +472,8 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 		}
 	case policy.OutcomeDenied:
 		o.phase, o.status = remediationv1alpha1.PhaseDenied, metav1.ConditionFalse
+	case policy.OutcomeWait:
+		o.wait = true
 	default:
 		o.phase, o.status = remediationv1alpha1.PhaseNeedsIntervention, metav1.ConditionUnknown
 	}
@@ -581,6 +663,7 @@ func (r *RemediationRequestReconciler) ensureFresh(ctx context.Context, rr *reme
 var staleReasons = map[string]bool{
 	freshness.ReasonPolicyChanged: true, freshness.ReasonSettingsChanged: true, freshness.ReasonTargetChanged: true,
 	freshness.ReasonTargetFileChanged: true, freshness.ReasonPlanChanged: true, freshness.ReasonSourceChanged: true,
+	freshness.ReasonScaledObjectNotReady: true, freshness.ReasonModuleNotEnabled: true,
 }
 
 // staleMark returns the PlanFresh condition that ensureFresh writes before it closes a stale plan's change

@@ -1,6 +1,6 @@
 # Design
 
-Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the semantic diff check of section 8.2, the GitHub and Key Vault adapters, the pull request step of section 6 (branch, commit and pull request, up to `AwaitingApproval`), the collector of section 3.1 with the observation-level deduplication of section 3.2 (built, started by the analyzer together with the Incident controller, #42) and the RBAC of sections 2.2 and 10. Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
+Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the semantic diff check of section 8.2, the GitHub and Key Vault adapters, the pull request step of section 6 (branch, commit and pull request, up to `AwaitingApproval`), the collector of section 3.1 and both levels of deduplication of section 3.2, with the Incident controller that keeps them in `Incident` objects, and the RBAC of sections 2.2 and 10. Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
 
 ## 1. Goals
 
@@ -48,9 +48,9 @@ sequenceDiagram
     participant E as Executor
     participant G as GitHub
     participant F as Flux
-    K->>A: Warning events, pod status and owners (planned)
+    K->>A: Warning events, pod status and owners
     A->>A: Redact and fingerprint the symptoms
-    A->>K: Group them into an Incident (planned)
+    A->>K: Group them into an Incident
     A->>M: Redacted context, bounded tool loop (planned)
     M-->>A: Diagnosis and a proposed typed action (planned)
     A->>R: Create the request: what to change, never where (planned)
@@ -89,7 +89,7 @@ The analyzer and the remediation controller are separate binaries in one Go modu
 
 The collector, the incident store and the analyzer run in the analyzer binary; the policy engine, the remediation controller, the GitOps adapter and the verifier run in the executor (`cmd/main.go`). Their roles are generated from kubebuilder RBAC markers (`internal/analyzer`, `internal/analyzer/collector`, `internal/controller`):
 
-- **Analyzer:** reads events (`events.k8s.io/v1`) and pods (`get`, `list`, `watch`) and workloads (ReplicaSets, Deployments and StatefulSets, `get` only) only in the namespaces it is started with (`--watch-namespaces`): a ClusterRole that is only a catalogue of verbs, bound by one RoleBinding per watched namespace and never cluster-wide, and a cache restricted to the same list for those kinds, and to the operator namespace for Incidents and requests. Incidents live in the operator namespace, next to the requests that point at them: it creates and updates `Incident` objects and their status, and creates `RemediationRequest` objects, there only (a Role). Its one cluster-wide grant is reading the cluster-scoped `RemediationSettings`. The cache drops managed fields before it stores an object. The collector uses list and watch only on events and pods; it reads a pod's owners with a `get`, one object at a time, and starts no informer for workloads, which it could not: the role grants no `list` or `watch` on them. The watched namespaces are a deployer setting (`demo` is the lab default). The RoleBindings are built from `config/watch` (separately from `config/default`, in namespaces that must already exist) and must match `--watch-namespaces`; `test/rbac` checks that they do. The operator namespace comes from `--namespace`, defaulting to `POD_NAMESPACE`, and the analyzer refuses to start without it or with an empty list. It cannot update, delete or write the status of a request.
+- **Analyzer:** reads events (`events.k8s.io/v1`) and pods (`get`, `list`, `watch`) and workloads (ReplicaSets, Deployments and StatefulSets, `get` only) only in the namespaces it is started with (`--watch-namespaces`): a ClusterRole that is only a catalogue of verbs, bound by one RoleBinding per watched namespace and never cluster-wide, and a cache restricted to the same list for those kinds, and to the operator namespace for Incidents and requests. Incidents live in the operator namespace, next to the requests that point at them: it creates and updates `Incident` objects and their status, creates `RemediationRequest` objects, and creates and patches `events.k8s.io` Events for the Warning event about its own Pod when the Incident cap is reached (3.2), there only (a Role). Its one cluster-wide grant is reading the cluster-scoped `RemediationSettings`. The cache drops managed fields before it stores an object. The collector uses list and watch only on events and pods; it reads a pod's owners with a `get`, one object at a time, and starts no informer for workloads, which it could not: the role grants no `list` or `watch` on them. The watched namespaces are a deployer setting (`demo` is the lab default). The RoleBindings are built from `config/watch` (separately from `config/default`, in namespaces that must already exist) and must match `--watch-namespaces`; `test/rbac` checks that they do. The operator namespace comes from `--namespace`, defaulting to `POD_NAMESPACE`, and the analyzer refuses to start without it or with an empty list. The cluster ID hashed into every fingerprint comes from the required `--cluster-id` flag (1 to 63 letters, digits, `.`, `_` or `-`), set by whoever installs the analyzer, so it needs no permission to read the cluster. It cannot update, delete or write the status of a request.
 - **Executor:** reads (`get` only) policies and settings, always from the API server, never through a cache (reading incidents for verification is planned); reads (`get` only, no list or watch) the target kinds (Deployments, StatefulSets, KEDA ScaledObjects) and the Flux Kustomizations and GitRepositories that deliver them, for source mapping; reads requests, writes their status and patches them to add or remove its finalizer in the operator namespace only (a Role), and its cache watches requests only there; the spec of a request is immutable (CEL), so the patch cannot change what was decided. It cannot create requests or write incidents.
 - Neither can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
 
@@ -173,7 +173,7 @@ Reasons differ by component and version. `OOMKilled`, for example, comes from co
 
 The collector keeps this state in memory, in maps with a fixed capacity (10,000 events and 5,000 pods by default) that drop the least recently used entry. Memory alone does not survive a restart, so the collector cannot tell how much of an occurrence is new when the event or termination is older than its first reconcile (a restart, or a new leader), or no newer than state it dropped to stay within its capacity. A pod's terminations are judged against the collector's start and the eviction bound as it was when the collector first saw the pod, so committing one does not make the others look new. A termination without a finish time always counts as possibly repeated. For those occurrences the Incident controller tells the collector how much of that occurrence was already counted, and the collector emits only the rest (capped as above), or nothing. The question names the occurrence (the event UID, or a hash of pod UID, container and termination) and when it began, not the fingerprint: several pods or events share one fingerprint, and the fingerprint depends on owner correlation, which can differ after a restart (an owner deleted in between), while the occurrence does not. So the answer is looked up across Incidents.
 
-The Incident controller (#42) must therefore persist, per occurrence, the highest total it counted and when the occurrence began. That is a new field of the `Incident` status and so an API change, part of #42. The Incident keeps at most a fixed number of occurrences, newest first. For an occurrence older than the oldest one it kept, it answers that the occurrence was counted in full, so a bound never counts twice; it answers that it never counted an occurrence only when that is true. Without an answer the collector does not guess: it emits the observation with a new count of 0, the cluster's total and *may repeat*, and the consumer subtracts what it holds. The consumer caps that difference at 1,000 as well (`Observation.Increase`). The cap is per observation: every further forged update of a series can add up to 1,000 again, and only the Incident controller can bound what an Incident accumulates.
+The Incident controller (`internal/incidents`) therefore persists, per occurrence, the highest total it counted and when the occurrence began, in `status.occurrences` of the `Incident`. An Incident keeps at most 32 occurrences, newest first by when they began (an occurrence without a known beginning goes first); when it drops older ones, `status.occurrencesDroppedThrough` records when the newest dropped one began. The controller answers from memory, loaded from the Incidents when it starts, and a question waits until they are loaded, so a restart never reads as "never counted". For an occurrence it kept it answers the recorded total. For one it has no record of that began no later than the latest drop mark of any Incident, it answers that the occurrence was counted in full, so a bound never counts twice; the mark is shared across Incidents because the question does not name the fingerprint, so a busy Incident can make an old occurrence of another look counted (an undercount, never an overcount). It answers that it never counted an occurrence only when that is true. Without an answer the collector does not guess: it emits the observation with a new count of 0, the cluster's total and *may repeat*, and the consumer subtracts what it holds. The consumer caps that difference at 1,000 as well (`Observation.Increase`), and an observation of an occurrence it holds a record of adds at most the increase over that record, so a collector that lost its state does not count the same occurrence again. The cap is per observation: every further forged update of a series can add up to 1,000 again, so `status.count` saturates at 1,000,000 (the schema refuses more). It is a bounded count of reported occurrences, not a count of distinct ones.
 
 **Incident level:** group similar observations by fingerprint:
 
@@ -198,7 +198,9 @@ Starting values, to be tuned on real traffic:
 | Concurrent actions | One per target object |
 | Re-analysis trigger | New symptom, significant context change, or cooldown expired |
 
-Deduplication state must survive restarts. In the MVP it lives in a namespaced `Incident` CR with bounded retention ([ADR-0007](adr/0007-incident-state-in-crds.md)). Raw logs never go into a CR.
+Deduplication state must survive restarts. In the MVP it lives in a namespaced `Incident` CR in the operator namespace ([ADR-0007](adr/0007-incident-state-in-crds.md)), one per fingerprint, named `incident-` and the hex of the fingerprint. Its spec holds the fingerprint, the subject and the normalized, redacted symptom; raw logs never go into a CR. The Incident controller runs in the analyzer, in the leader only, and writes in batches: the first observation of an Incident in a process is written at once, later ones are gathered and written once per aggregation window (5 min), so a burst costs a few writes, not one per observation. Each write reads the Incident from the API server, not the cache, retries on a conflict, and is skipped when every occurrence of the batch is already recorded with at least its total: a write whose answer was lost (a timeout after the API server stored it) is not counted twice when it is tried again, 5 s later. Pending batches are written once more on shutdown.
+
+The number of Incidents is bounded instead of retained for a time: at most 500 in the operator namespace (`--max-incidents`), counting those that exist when the analyzer starts. At the cap a new fingerprint is not stored. Its observations are counted in the Prometheus counter `shadewright_incident_observations_refused_total`, and the first one per fingerprint in each process is logged and reported in a Warning event (reason `IncidentCapReached`) about the analyzer's Pod, whose name comes from `POD_NAME`. Fingerprints that already have an Incident are still counted. Nothing deletes Incidents yet, so once reached the cap stays reached until someone deletes some; retention by age is not built.
 
 ### 3.3. Analysis
 
@@ -580,6 +582,7 @@ flowchart TB
     an([Analyzer])
     fm[Foundry model]
     inc["Incident and its status, shadewright-system only"]
+    aev["Warning event about its own Pod, shadewright-system only"]
     rr["RemediationRequest, shadewright-system only"]
     set[RemediationSettings]
     pol[RemediationPolicy]
@@ -593,6 +596,7 @@ flowchart TB
     set -- read --> an
     an -. inference .-> fm
     an -- create, update --> inc
+    an -- create, patch --> aev
     an -- create --> rr
     inc -. read .-> ex
     rr -- read --> ex
@@ -717,6 +721,7 @@ Still open:
 4. **Teams.** Whether the maintainer's Microsoft account can receive Teams Workflows webhooks. If not, GitHub issues stay the only notifier for now.
 5. **Required checks in policy.** Whether a policy should name verification checks a request cannot drop, beyond the ones each action always runs.
 6. **Scenario switch.** Proposed in [ADR-0022](adr/0022-scenario-switch-and-clusters.md): Flux on each cluster tracks a `cluster/<cluster>` branch that the scenario harness moves forward with one scenario or reset commit at a time, and the agent's pull requests target that branch. Open until the ADR is accepted.
+7. **Incident retention.** Incidents are bounded by a count (3.2), not deleted: the analyzer has no `delete` on them. When old Incidents should go, and who deletes them, is open (#42).
 
 ## 16. Prior art
 

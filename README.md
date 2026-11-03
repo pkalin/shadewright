@@ -7,7 +7,7 @@
 </p>
 
 > [!WARNING]
-> Early. Built so far: the API and its validation, the policy check with source mapping and the freshness check, the YAML patchers, the semantic diff check, the GitHub and Key Vault adapters, the pull request step (branch, commit and pull request, up to a person's review), and the collector (events and pod status to deduplicated observations, not started until the Incident controller lands). Not built: the Incident controller, the analysis, auto-merge, delivery and the verification. The [design](docs/design.md) says what holds at each step; the [decisions](docs/adr/index.md) say why.
+> Early. Built so far: the API and its validation, the policy check with source mapping and the freshness check, the YAML patchers, the semantic diff check, the GitHub and Key Vault adapters, the pull request step (branch, commit and pull request, up to a person's review), the collector (events and pod status to deduplicated observations) and the Incident controller (one bounded `Incident` per fingerprint). Not built: the analysis, auto-merge, delivery and the verification. The [design](docs/design.md) says what holds at each step; the [decisions](docs/adr/index.md) say why.
 
 ## What it does
 

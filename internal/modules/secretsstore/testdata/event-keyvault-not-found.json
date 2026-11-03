@@ -1,0 +1,29 @@
+{
+  "apiVersion": "events.k8s.io/v1",
+  "kind": "Event",
+  "metadata": {
+    "name": "web-7d4b9c-x2x8q.18a1b2c3d4e5f603",
+    "namespace": "demo"
+  },
+  "eventTime": null,
+  "reportingController": "kubelet",
+  "reportingInstance": "aks-system-12345678-vmss000000",
+  "reason": "FailedMount",
+  "type": "Warning",
+  "regarding": {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "namespace": "demo",
+    "name": "web-7d4b9c-x2x8q",
+    "uid": "3b4c5d6e-7f80-4192-a3b4-c5d6e7f8091a",
+    "resourceVersion": "48213"
+  },
+  "note": "MountVolume.SetUp failed for volume \"secrets-store-inline\" : rpc error: code = Unknown desc = failed to mount secrets store objects for pod demo/web-7d4b9c-x2x8q, err: rpc error: code = Unknown desc = failed to mount objects, error: failed to get objectType:secret, objectName:db-password, objectVersion:: Get \"https://kv-missing.vault.azure.net/secrets/db-password/?api-version=7.6\": dial tcp: lookup kv-missing.vault.azure.net on 192.0.2.10:53: no such host",
+  "deprecatedSource": {
+    "component": "kubelet",
+    "host": "aks-system-12345678-vmss000000"
+  },
+  "deprecatedFirstTimestamp": "2026-11-03T08:10:00Z",
+  "deprecatedLastTimestamp": "2026-11-03T08:14:16Z",
+  "deprecatedCount": 7
+}

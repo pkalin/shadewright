@@ -1,0 +1,29 @@
+{
+  "apiVersion": "events.k8s.io/v1",
+  "kind": "Event",
+  "metadata": {
+    "name": "web-7d4b9c-x2x8q.18a1b2c3d4e5f601",
+    "namespace": "demo"
+  },
+  "eventTime": null,
+  "reportingController": "kubelet",
+  "reportingInstance": "aks-system-12345678-vmss000000",
+  "reason": "FailedMount",
+  "type": "Warning",
+  "regarding": {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "namespace": "demo",
+    "name": "web-7d4b9c-x2x8q",
+    "uid": "3b4c5d6e-7f80-4192-a3b4-c5d6e7f8091a",
+    "resourceVersion": "48213"
+  },
+  "note": "MountVolume.SetUp failed for volume \"secrets-store-inline\" : rpc error: code = Unknown desc = failed to mount secrets store objects for pod demo/web-7d4b9c-x2x8q, err: rpc error: code = Unknown desc = failed to mount objects, error: failed to get objectType:secret, objectName:db-password, objectVersion:: GET https://kv-demo.vault.azure.net/secrets/db-password/\n--------------------------------------------------------------------------------\nRESPONSE 403: 403 Forbidden\nERROR CODE: Forbidden\n--------------------------------------------------------------------------------\n{\n  \"error\": {\n    \"code\": \"Forbidden\",\n    \"message\": \"Caller is not authorized to perform action on resource.\\r\\nIf role assignments, deny assignments or role definitions were changed recently, please observe propagation time.\\r\\nCaller: appid=00000000-0000-0000-0000-000000000000;oid=00000000-0000-0000-0000-000000000000;iss=https://sts.windows.net/00000000-0000-0000-0000-000000000000/\\r\\nAction: 'Microsoft.KeyVault/vaults/secrets/getSecret/action'\\r\\nResource: '/subscriptions/00000000-0000-0000-0000-000000000000/resourcegroups/rg-demo/providers/microsoft.keyvault/vaults/kv-demo/secrets/db-password'\\r\\nAssignment: (not found)\\r\\nDenyAssignmentId: null\\r\\nDecisionReason: null \\r\\nVault: kv-demo;location=westeurope\\r\\n\",\n    \"innererror\": {\n      \"code\": \"ForbiddenByRbac\"\n    }\n  }\n}\n--------------------------------------------------------------------------------\n",
+  "deprecatedSource": {
+    "component": "kubelet",
+    "host": "aks-system-12345678-vmss000000"
+  },
+  "deprecatedFirstTimestamp": "2026-11-03T08:10:00Z",
+  "deprecatedLastTimestamp": "2026-11-03T08:14:16Z",
+  "deprecatedCount": 7
+}

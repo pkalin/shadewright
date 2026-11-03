@@ -316,12 +316,22 @@ func (r *RemediationRequestReconciler) waitForTarget(rr *remediationv1alpha1.Rem
 // recordWait writes the PolicyAllowed condition of a request that waits for its target's state, unless it
 // already says so, and requeues it after delay. The phase is left as it is (none or Pending), so the next
 // reconcile runs the policy check again.
+//
+// The wait clock (lastTransitionTime) starts when the wait's reason is first written. meta.SetStatusCondition
+// keeps the old time while the status stays Unknown, so a condition that is Unknown with another reason is
+// removed first: otherwise the time it has spent with that reason would count against this wait. A condition
+// that already has this reason keeps its time when its message or generation is rewritten, so the wait still
+// ends after TargetStateTimeout.
 func (r *RemediationRequestReconciler) recordWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	out outcome, delay time.Duration) (ctrl.Result, error) {
-	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPolicyAllowed); c != nil &&
-		c.Status == metav1.ConditionUnknown && c.Reason == out.reason && c.Message == out.message &&
-		c.ObservedGeneration == rr.Generation {
-		return ctrl.Result{RequeueAfter: delay}, nil
+	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPolicyAllowed); c != nil {
+		if c.Status == metav1.ConditionUnknown && c.Reason == out.reason && c.Message == out.message &&
+			c.ObservedGeneration == rr.Generation {
+			return ctrl.Result{RequeueAfter: delay}, nil
+		}
+		if c.Reason != out.reason {
+			meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPolicyAllowed)
+		}
 	}
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPolicyAllowed,

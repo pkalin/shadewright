@@ -471,6 +471,86 @@ func TestKedaReadinessUnknownTimesOut(t *testing.T) {
 	}
 }
 
+// setPolicyAllowed writes a PolicyAllowed condition to the request's status, as an earlier reconcile left it.
+func (w *kedaWorld) setPolicyAllowed(t *testing.T, c metav1.Condition) {
+	t.Helper()
+	rr := w.fetch(t)
+	c.Type = remediationv1alpha1.ConditionPolicyAllowed
+	rr.Status.Conditions = []metav1.Condition{c}
+	if err := w.c.Status().Update(context.Background(), rr); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// expectWaiting checks that the request still waits: a requeue, no phase, and PolicyAllowed Unknown with
+// ScaledObjectReadinessUnknown whose lastTransitionTime is since.
+func (w *kedaWorld) expectWaiting(t *testing.T, since time.Time) {
+	t.Helper()
+	if res, err := w.reconcileResult(t); err != nil || res.RequeueAfter <= 0 {
+		t.Fatalf("Reconcile = %+v, %v; want a requeue", res, err)
+	}
+	got := w.fetch(t)
+	c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPolicyAllowed)
+	if got.Status.Phase != "" || c == nil || c.Status != metav1.ConditionUnknown ||
+		c.Reason != string(policy.ReasonScaledObjectReadinessUnknown) || !c.LastTransitionTime.Time.Equal(since) {
+		t.Fatalf("phase %q, PolicyAllowed %+v; want no phase and Unknown/%s since %v", got.Status.Phase, c,
+			policy.ReasonScaledObjectReadinessUnknown, since)
+	}
+}
+
+// expectTimedOut checks that the reconcile ends the wait in NeedsIntervention (ScaledObjectNotReady).
+func (w *kedaWorld) expectTimedOut(t *testing.T) {
+	t.Helper()
+	if err := w.reconcile(t); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	got := w.fetch(t)
+	c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPolicyAllowed)
+	if got.Status.Phase != remediationv1alpha1.PhaseNeedsIntervention || c == nil ||
+		c.Reason != string(policy.ReasonScaledObjectNotReady) || c.Message != messageTargetStateTimeout {
+		t.Fatalf("phase %q, PolicyAllowed %+v; want NeedsIntervention/ScaledObjectNotReady after the wait", got.Status.Phase, c)
+	}
+}
+
+// An earlier Unknown PolicyAllowed with another reason does not shorten the wait (#232): the wait clock starts
+// when ScaledObjectReadinessUnknown is first written, not at the old condition's lastTransitionTime, so the
+// request still waits the full TargetStateTimeout and is never allowed meanwhile.
+func TestKedaWaitClockStartsWithItsReason(t *testing.T) {
+	w := newKedaWorld(t, []any{kcond("Ready", "Unknown", "")})
+	start := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	w.setPolicyAllowed(t, metav1.Condition{Status: metav1.ConditionUnknown, Reason: "SomeEarlierWait",
+		Message: "An earlier wait", ObservedGeneration: w.rr.Generation,
+		LastTransitionTime: metav1.Time{Time: start.Add(-time.Hour)}})
+
+	w.now = start
+	w.expectWaiting(t, start)
+	w.now = start.Add(time.Minute)
+	w.expectWaiting(t, start)
+	w.now = start.Add(DefaultTargetStateTimeout - time.Second)
+	w.expectWaiting(t, start)
+	w.now = start.Add(DefaultTargetStateTimeout)
+	w.expectTimedOut(t)
+}
+
+// A wait that keeps its reason keeps its clock (#232), even when the condition is rewritten for a new message:
+// otherwise the timeout would never fire. Here the wait started nine minutes ago with another message, and the
+// request ends in NeedsIntervention once TargetStateTimeout has passed since then.
+func TestKedaWaitClockKeepsItsStartAcrossReconciles(t *testing.T) {
+	w := newKedaWorld(t, []any{kcond("Ready", "Unknown", "")})
+	start := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	w.setPolicyAllowed(t, metav1.Condition{Status: metav1.ConditionUnknown,
+		Reason: string(policy.ReasonScaledObjectReadinessUnknown), Message: "An older message",
+		ObservedGeneration: w.rr.Generation, LastTransitionTime: metav1.Time{Time: start}})
+
+	for _, after := range []time.Duration{9 * time.Minute, 9*time.Minute + 30*time.Second,
+		DefaultTargetStateTimeout - time.Second} {
+		w.now = start.Add(after)
+		w.expectWaiting(t, start)
+	}
+	w.now = start.Add(DefaultTargetStateTimeout)
+	w.expectTimedOut(t)
+}
+
 // AdjustKedaMaxReplicas needs the keda integration enabled in RemediationSettings spec.modules: without it the
 // request is Denied (ModuleNotEnabled), and disabling it after approval supersedes the plan.
 func TestKedaNeedsTheModule(t *testing.T) {

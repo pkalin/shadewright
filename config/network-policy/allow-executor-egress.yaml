@@ -1,0 +1,44 @@
+# Egress of the executor (reads target objects, signs through Key Vault and Entra ID, calls the GitHub API).
+# A NetworkPolicy cannot match host names: the destinations are only reachable by port. 443 is the model
+# endpoint, Key Vault, Entra ID, GitHub and the Kubernetes API on managed clusters; 6443 is the API server
+# on kubeadm and kind. The API server address is not selectable by label, so both ports are open to any
+# address. To narrow this to addresses or names see design section 10.6 (Network).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: shadewright
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/component: executor
+  name: allow-executor-egress
+  namespace: system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: shadewright
+      app.kubernetes.io/component: executor
+  policyTypes:
+    - Egress
+  egress:
+    # Cluster DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Kubernetes API and HTTPS endpoints outside the cluster.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP

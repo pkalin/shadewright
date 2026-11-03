@@ -19,8 +19,8 @@ package modules
 import "github.com/pkalin/shadewright/api/v1alpha1"
 
 // GenericPlatform is the name of the generic platform, which is always registered and is detected whenever no
-// other platform is certain.
-const GenericPlatform = "generic"
+// other platform is certain. It is the API's name for it, which settings may not list.
+const GenericPlatform = string(v1alpha1.GenericPlatform)
 
 // Platform is a cluster platform module (design 2.4). Implementations must be safe for concurrent use and
 // return the same values on every call.

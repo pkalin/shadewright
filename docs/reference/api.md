@@ -343,6 +343,25 @@ Used by: [Incident](#incident).
 | `remediationRequests` | [Name](#name) array | No | remediationRequests are the names of requests made for this incident, oldest first.<br>Maximum items: 20<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`<br>List type: atomic |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase.<br>List type: map<br>List key: `type` |
 
+### IntegrationStatus
+
+IntegrationStatus reports one integration module that is enabled, detected or both.
+
+
+Validation rules:
+
+- version is set if and only if the integration is detected: `self.detected == has(self.version)`
+- an integration that is not detected is not active: `!self.active || self.detected`
+
+Used by: [RemediationSettingsStatus](#remediationsettingsstatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | [ModuleName](#modulename) | Yes | name is the integration module.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$` |
+| `detected` | boolean | Yes | detected is true when the cluster serves one of the group versions the module declares. An enabled name that no compiled-in module has is never detected. |
+| `version` | string | No | version is the group version that detected the add-on, in discovery form (keda.sh/v1alpha1). Set if and only if the add-on is detected.<br>Maximum length: 253<br>Minimum length: 1<br>Pattern: `^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?v[0-9]+((alpha|beta)[0-9]+)?$` |
+| `active` | boolean | Yes | active is true when the module contributes hooks: it is enabled in spec.modules.integrations and detected. |
+
 ### KedaMaxReplicasBounds
 
 KedaMaxReplicasBounds bounds AdjustKedaMaxReplicas. Decreases are refused unless maxDecreasePercent is set.
@@ -381,6 +400,41 @@ Used by: [PolicyAction](#policyaction).
 | `max` | [Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#quantity-resource-core) | Yes | max is the highest memory limit the policy allows. |
 | `maxIncreasePercent` | integer | No | maxIncreasePercent limits one increase relative to the previous value.<br>Default: `50`<br>Maximum: 1000<br>Minimum: 1 |
 | `maxDecreasePercent` | integer | No | maxDecreasePercent limits one decrease relative to the previous value; 0 refuses every decrease.<br>Default: `0`<br>Maximum: 90<br>Minimum: 0 |
+
+### ModuleName
+
+ModuleName names a cluster platform or integration module (design 2.4 and 2.5): a DNS label that starts with
+a letter, at most 63 characters, the rule internal/modules checks when it builds its registry (a test keeps
+the two equal). It is a pattern, not a list of known names, so a module compiled into a later release, or
+shipped as a pack (ADR-0019), needs no schema change. A name that no compiled-in module has is accepted and
+contributes nothing.
+
+- Underlying type: string
+- Maximum length: 63
+- Minimum length: 1
+- Pattern: `^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`
+
+Used by: [IntegrationStatus](#integrationstatus), [Modules](#modules), [PlatformStatus](#platformstatus).
+
+| Value | Description |
+| --- | --- |
+| `generic` |  |
+
+### Modules
+
+Modules says which platform and integration modules the cluster admin enables (ADR-0018). Platform and
+integration names are separate namespaces, so they are enabled in separate lists. A module contributes hooks
+(symptom sources, diagnosis rules, tools, actions) only when it is enabled here and the analyzer detects it:
+detection only reports and narrows, it never enables a module, and a module that is enabled but not
+detected contributes nothing.
+
+
+Used by: [RemediationSettingsSpec](#remediationsettingsspec).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `platforms` | [ModuleName](#modulename) array | No | platforms are the platform modules enabled besides generic, which is always on and is not listed. More than one may be listed, so one settings file can serve clusters on different platforms: only the one the analyzer detects is active. Empty means generic only.<br>Maximum items: 8<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`<br>List type: set<br>Rule: the generic platform is always on and is not listed (`!self.exists(p, p == 'generic')`) |
+| `integrations` | [ModuleName](#modulename) array | No | integrations are the integration modules enabled. Each is active only while the analyzer detects its add-on. Empty means none.<br>Maximum items: 32<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`<br>List type: set |
 
 ### Name
 
@@ -435,6 +489,22 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | --- | --- | --- | --- |
 | `url` | string | Yes | url is the repository URL from RemediationSettings.<br>Maximum length: 512 |
 | `installationID` | integer | No | installationID is the provider installation that covers the repository; 0 when the provider has none.<br>Minimum: 0 |
+
+### PlatformStatus
+
+PlatformStatus reports the platform the analyzer detected.
+
+
+Validation rules:
+
+- the generic platform is always active: `self.name != 'generic' || self.active`
+
+Used by: [RemediationSettingsStatus](#remediationsettingsstatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | [ModuleName](#modulename) | Yes | name is the detected platform: generic when no other platform claims every node with certainty.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$` |
+| `active` | boolean | Yes | active is true when the platform's module contributes hooks: it is detected and enabled in spec.modules.platforms (generic always is). A detected platform that is not enabled is reported with active false, and the analyzer then uses the generic platform. |
 
 ### PolicyAction
 
@@ -631,6 +701,7 @@ Used by: [RemediationSettings](#remediationsettings).
 | `maxConcurrentRemediations` | integer | No | maxConcurrentRemediations limits requests between PolicyChecked and a terminal phase.<br>Default: `1`<br>Maximum: 20<br>Minimum: 1 |
 | `maxAnalysesPerDay` | integer | No | maxAnalysesPerDay limits model-backed analyses per UTC day; 0 disables the model.<br>Default: `100`<br>Maximum: 10000<br>Minimum: 0 |
 | `repositories` | [GitRepository](#gitrepository) array | No | repositories Shadewright may open pull requests in. URLs are unique, so a Flux source matches at most one entry.<br>Maximum items: 16<br>List type: map<br>List key: `name`<br>Rule: repository URLs must be unique (`self.all(r, self.exists_one(s, s.url == r.url))`) |
+| `modules` | [Modules](#modules) | No | modules enables platform and integration modules. Left out, only the generic platform is on and no integration is: nothing is enabled because it was detected. |
 
 ### RemediationSettingsStatus
 
@@ -643,6 +714,8 @@ Used by: [RemediationSettings](#remediationsettings).
 | --- | --- | --- | --- |
 | `observedGeneration` | integer | No | observedGeneration is the generation the status describes. |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions report problems such as an unreachable signer.<br>List type: map<br>List key: `type` |
+| `platform` | [PlatformStatus](#platformstatus) | No | platform is the platform the analyzer detected and whether its module is active. To be written by the analyzer once detection is wired (planned, #61); no identity may write it yet, so it stays unset.<br>Rule: the generic platform is always active |
+| `integrations` | [IntegrationStatus](#integrationstatus) array | No | integrations lists every integration module that is enabled or detected, with whether it is active. A detected add-on whose module is not enabled is listed too, so the cluster admin sees what could be enabled. Written like platform; empty until then. At most 32 enabled and 32 more detected.<br>Maximum items: 64<br>List type: map<br>List key: `name`<br>Rule: version is set if and only if the integration is detected<br>Rule: an integration that is not detected is not active |
 
 ### ResolvedSource
 

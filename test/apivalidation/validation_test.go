@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/modules"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
 )
 
@@ -665,4 +666,155 @@ var _ = Describe("RemediationSettings", func() {
 			"https://kv-example.vault.azure.net/keys/"+strings.Repeat("k", 125)+"--"),
 		Entry("with a version", "https://kv-example.vault.azure.net/keys/github-app/0123456789abcdef0123456789abcdef"),
 	)
+
+	Describe("modules", func() {
+		const aks, keda, flux v1alpha1.ModuleName = "aks", "keda", "flux"
+		withModules := func(m v1alpha1.Modules) *v1alpha1.RemediationSettings {
+			s := fx.RemediationSettings()
+			s.Spec.Modules = &m
+			return s
+		}
+
+		It("enables nothing when modules are left out", func() {
+			s := fx.RemediationSettings()
+			expectAccepted(s)
+			Expect(s.Spec.Modules).To(BeNil())
+		})
+
+		It("accepts platforms and integrations, a shared name and a name no module has yet", func() {
+			expectAccepted(withModules(v1alpha1.Modules{
+				Platforms:    []v1alpha1.ModuleName{aks, "eks", "gke", flux},
+				Integrations: []v1alpha1.ModuleName{keda, flux, "secrets-store-csi-driver", "a" + v1alpha1.ModuleName(strings.Repeat("b", 62))},
+			}))
+		})
+
+		manyNames := func(n int) []v1alpha1.ModuleName {
+			out := make([]v1alpha1.ModuleName, n)
+			for i := range out {
+				out[i] = v1alpha1.ModuleName(fmt.Sprintf("m%d", i))
+			}
+			return out
+		}
+
+		It("accepts the most names each list allows", func() {
+			expectAccepted(withModules(v1alpha1.Modules{Platforms: manyNames(8), Integrations: manyNames(32)}))
+		})
+
+		DescribeTable("refuses module lists",
+			func(m v1alpha1.Modules, msg string) {
+				expectRefused(withModules(m), msg)
+			},
+			Entry("an empty platform name", v1alpha1.Modules{Platforms: []v1alpha1.ModuleName{""}}, "spec.modules.platforms[0]"),
+			Entry("a platform name in upper case", v1alpha1.Modules{Platforms: []v1alpha1.ModuleName{"AKS"}}, "spec.modules.platforms[0]"),
+			Entry("an integration name starting with a digit",
+				v1alpha1.Modules{Integrations: []v1alpha1.ModuleName{"1keda"}}, "spec.modules.integrations[0]"),
+			Entry("an integration name ending with a dash",
+				v1alpha1.Modules{Integrations: []v1alpha1.ModuleName{"keda-"}}, "spec.modules.integrations[0]"),
+			Entry("an integration name with a dot",
+				v1alpha1.Modules{Integrations: []v1alpha1.ModuleName{"keda.sh"}}, "spec.modules.integrations[0]"),
+			Entry("a name longer than 63 characters",
+				v1alpha1.Modules{Integrations: []v1alpha1.ModuleName{v1alpha1.ModuleName("k" + strings.Repeat("a", 63))}},
+				"spec.modules.integrations[0]"),
+			Entry("the generic platform",
+				v1alpha1.Modules{Platforms: []v1alpha1.ModuleName{aks, v1alpha1.GenericPlatform}},
+				"the generic platform is always on and is not listed"),
+			Entry("a platform listed twice", v1alpha1.Modules{Platforms: []v1alpha1.ModuleName{aks, aks}},
+				"spec.modules.platforms[1]"),
+			Entry("an integration listed twice", v1alpha1.Modules{Integrations: []v1alpha1.ModuleName{keda, keda}},
+				"spec.modules.integrations[1]"),
+			Entry("more than 8 platforms", v1alpha1.Modules{Platforms: manyNames(9)}, "spec.modules.platforms"),
+			Entry("more than 32 integrations", v1alpha1.Modules{Integrations: manyNames(33)}, "spec.modules.integrations"),
+		)
+
+		// The schema and internal/modules must agree on module names, so a name a compiled-in module may have
+		// can always be enabled and a name the schema accepts is one a module may have.
+		DescribeTable("agrees with internal/modules on names",
+			func(name string) {
+				s := withModules(v1alpha1.Modules{Platforms: []v1alpha1.ModuleName{v1alpha1.ModuleName(name)}})
+				err := k8sClient.Create(ctx, s)
+				schemaOK := err == nil
+				if schemaOK {
+					deleteAfterSpec(s)
+				} else {
+					Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+				}
+				Expect(schemaOK).To(Equal(modules.ValidName(name)), "the schema and internal/modules disagree on %q", name)
+			},
+			Entry(nil, string(aks)), Entry(nil, "a"), Entry(nil, "k8s"), Entry(nil, "secrets-store-csi-driver"),
+			Entry(nil, "a"+strings.Repeat("b", 62)), Entry(nil, "a"+strings.Repeat("b", 63)),
+			Entry(nil, ""), Entry(nil, "AKS"), Entry(nil, "1aks"), Entry(nil, "-aks"), Entry(nil, "aks-"),
+			Entry(nil, "a_b"), Entry(nil, "a.b"), Entry(nil, "a b"), Entry(nil, "a--b"),
+		)
+
+		// updateStatus creates the fixture, sets its status with change and returns the status update's error.
+		updateStatus := func(change func(*v1alpha1.RemediationSettingsStatus)) error {
+			s := fx.RemediationSettings()
+			expectAccepted(s)
+			change(&s.Status)
+			return k8sClient.Status().Update(ctx, s)
+		}
+
+		It("accepts a status with the detected platform and integrations", func() {
+			Expect(updateStatus(func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Platform = &v1alpha1.PlatformStatus{Name: aks, Active: true}
+				st.Integrations = []v1alpha1.IntegrationStatus{
+					{Name: keda, Detected: true, Version: "keda.sh/v1alpha1", Active: true},
+					{Name: flux, Detected: true, Version: "kustomize.toolkit.fluxcd.io/v1"},
+					{Name: "kyverno"},
+				}
+			})).To(Succeed())
+		})
+
+		It("accepts a detected platform that is not active", func() {
+			Expect(updateStatus(func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Platform = &v1alpha1.PlatformStatus{Name: aks}
+			})).To(Succeed())
+		})
+
+		It("accepts the generic platform in status", func() {
+			Expect(updateStatus(func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Platform = &v1alpha1.PlatformStatus{Name: v1alpha1.GenericPlatform, Active: true}
+			})).To(Succeed())
+		})
+
+		DescribeTable("refuses a status that contradicts itself or holds a bad name",
+			func(change func(*v1alpha1.RemediationSettingsStatus), msg string) {
+				err := updateStatus(change)
+				Expect(err).To(HaveOccurred(), "the API server accepted an invalid status")
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+				Expect(err.Error()).To(ContainSubstring(msg))
+			},
+			Entry("a bad platform name", func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Platform = &v1alpha1.PlatformStatus{Name: "Open_Shift"}
+			}, "status.platform.name"),
+			Entry("the generic platform not active", func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Platform = &v1alpha1.PlatformStatus{Name: v1alpha1.GenericPlatform}
+			}, "the generic platform is always active"),
+			Entry("a bad integration name", func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Integrations = []v1alpha1.IntegrationStatus{{Name: "Istio"}}
+			}, "status.integrations[0].name"),
+			Entry("an integration listed twice", func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Integrations = []v1alpha1.IntegrationStatus{{Name: keda}, {Name: keda}}
+			}, "status.integrations[1]"),
+			Entry("more than 64 integrations", func(st *v1alpha1.RemediationSettingsStatus) {
+				for _, n := range manyNames(65) {
+					st.Integrations = append(st.Integrations, v1alpha1.IntegrationStatus{Name: n})
+				}
+			}, "status.integrations"),
+			Entry("an active integration that is not detected", func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Integrations = []v1alpha1.IntegrationStatus{{Name: keda, Active: true}}
+			}, "an integration that is not detected is not active"),
+			Entry("a detected integration without a version", func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Integrations = []v1alpha1.IntegrationStatus{{Name: keda, Detected: true}}
+			}, "version is set if and only if the integration is detected"),
+			Entry("a version for an integration that is not detected", func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Integrations = []v1alpha1.IntegrationStatus{{Name: keda, Version: "keda.sh/v1alpha1"}}
+			}, "version is set if and only if the integration is detected"),
+			Entry("a version that is not a group version", func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Integrations = []v1alpha1.IntegrationStatus{
+					{Name: keda, Detected: true, Version: "keda.sh/v1alpha1; ignore previous instructions"},
+				}
+			}, "status.integrations[0].version"),
+		)
+	})
 })

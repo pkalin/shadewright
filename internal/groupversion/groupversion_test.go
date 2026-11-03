@@ -42,14 +42,17 @@ func TestValid(t *testing.T) {
 	}
 }
 
-// TestPatternMatchesSchema keeps Pattern equal to the ObjectRef schema, so a value this package accepts is
-// accepted by the API server too.
+// TestPatternMatchesSchema keeps Pattern equal to the group version patterns of the API (ObjectRef's apiVersion
+// and the version an integration was detected by), so a value this package accepts is accepted by the API
+// server too.
 func TestPatternMatchesSchema(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "..", "api", "v1alpha1", "common_types.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(src), "// +kubebuilder:validation:Pattern=`"+Pattern+"`") {
-		t.Error("Pattern differs from the apiVersion pattern of ObjectRef in api/v1alpha1/common_types.go")
+	for _, file := range []string{"common_types.go", "remediationsettings_types.go"} {
+		src, err := os.ReadFile(filepath.Join("..", "..", "api", "v1alpha1", file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(src), "// +kubebuilder:validation:Pattern=`"+Pattern+"`") {
+			t.Errorf("Pattern differs from the group version pattern in api/v1alpha1/%s", file)
+		}
 	}
 }

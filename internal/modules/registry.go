@@ -26,9 +26,15 @@ import (
 	"github.com/pkalin/shadewright/internal/groupversion"
 )
 
-// namePattern is the form of a module name: a DNS label that starts with a letter, so it fits a CRD enum, a
-// status field and a metric label as it is.
-var namePattern = regexp.MustCompile(`^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`)
+// NamePattern is the form of a module name: a DNS label that starts with a letter, at most 63 characters, so
+// it fits a settings list, a status field and a metric label as it is. It is the pattern of ModuleName in
+// api/v1alpha1/remediationsettings_types.go; a test keeps the two equal.
+const NamePattern = `^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`
+
+var namePattern = regexp.MustCompile(NamePattern)
+
+// ValidName reports whether name is a valid module name, on either axis.
+func ValidName(name string) bool { return namePattern.MatchString(name) }
 
 // schemePattern is the form of a provider ID scheme (RFC 3986, lower case).
 var schemePattern = regexp.MustCompile(`^[a-z][a-z0-9+.-]{0,62}$`)
@@ -152,7 +158,7 @@ func isNil(module any) bool {
 
 // checkName validates a module name and fails on one already in seen.
 func checkName[V any](axis, name string, seen map[string]V) error {
-	if !namePattern.MatchString(name) {
+	if !ValidName(name) {
 		return fmt.Errorf("%s module name %q is invalid", axis, name)
 	}
 	if _, ok := seen[name]; ok {

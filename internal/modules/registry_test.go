@@ -17,6 +17,8 @@ limitations under the License.
 package modules
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -182,5 +184,30 @@ func TestGenericContributesNothing(t *testing.T) {
 	if g.Detection().ProviderIDScheme != "" || len(g.Detection().NodeLabels) != 0 ||
 		len(h.Symptoms)+len(h.Rules)+len(h.Tools)+len(h.Actions) != 0 {
 		t.Errorf("generic = %+v, %+v; want no detection and no hooks", g.Detection(), h)
+	}
+}
+
+// TestNamePatternMatchesSchema keeps NamePattern equal to the ModuleName schema, so a name the registry accepts
+// can be enabled in RemediationSettings and a name the schema accepts is one a module may have.
+func TestNamePatternMatchesSchema(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "api", "v1alpha1", "remediationsettings_types.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "// +kubebuilder:validation:Pattern=`"+NamePattern+"`\ntype ModuleName string") {
+		t.Error("NamePattern differs from the ModuleName pattern in api/v1alpha1/remediationsettings_types.go")
+	}
+}
+
+func TestValidName(t *testing.T) {
+	for _, s := range []string{"a", "aks", "secrets-store-csi-driver", "k8s", "a" + strings.Repeat("b", 62)} {
+		if !ValidName(s) {
+			t.Errorf("ValidName(%q) = false, want true", s)
+		}
+	}
+	for _, s := range []string{"", "AKS", "1aks", "-aks", "aks-", "a_b", "a.b", "a b", "a" + strings.Repeat("b", 63)} {
+		if ValidName(s) {
+			t.Errorf("ValidName(%q) = true, want false", s)
+		}
 	}
 }

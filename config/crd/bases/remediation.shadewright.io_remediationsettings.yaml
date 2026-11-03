@@ -68,6 +68,52 @@ spec:
                 maximum: 20
                 minimum: 1
                 type: integer
+              modules:
+                description: |-
+                  modules enables platform and integration modules. Left out, only the generic platform is on and no
+                  integration is: nothing is enabled because it was detected.
+                properties:
+                  integrations:
+                    description: |-
+                      integrations are the integration modules enabled. Each is active only while the analyzer detects its
+                      add-on. Empty means none.
+                    items:
+                      description: |-
+                        ModuleName names a cluster platform or integration module (design 2.4 and 2.5): a DNS label that starts with
+                        a letter, at most 63 characters, the rule internal/modules checks when it builds its registry (a test keeps
+                        the two equal). It is a pattern, not a list of known names, so a module compiled into a later release, or
+                        shipped as a pack (ADR-0019), needs no schema change. A name that no compiled-in module has is accepted and
+                        contributes nothing.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$
+                      type: string
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-type: set
+                  platforms:
+                    description: |-
+                      platforms are the platform modules enabled besides generic, which is always on and is not listed.
+                      More than one may be listed, so one settings file can serve clusters on different platforms: only the
+                      one the analyzer detects is active. Empty means generic only.
+                    items:
+                      description: |-
+                        ModuleName names a cluster platform or integration module (design 2.4 and 2.5): a DNS label that starts with
+                        a letter, at most 63 characters, the rule internal/modules checks when it builds its registry (a test keeps
+                        the two equal). It is a pattern, not a list of known names, so a module compiled into a later release, or
+                        shipped as a pack (ADR-0019), needs no schema change. A name that no compiled-in module has is accepted and
+                        contributes nothing.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$
+                      type: string
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-type: set
+                    x-kubernetes-validations:
+                    - message: the generic platform is always on and is not listed
+                      rule: '!self.exists(p, p == ''generic'')'
+                type: object
               paused:
                 default: false
                 description: |-
@@ -259,10 +305,83 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              integrations:
+                description: |-
+                  integrations lists every integration module that is enabled or detected, with whether it is active.
+                  A detected add-on whose module is not enabled is listed too, so the cluster admin sees what could be
+                  enabled. Written like platform; empty until then. At most 32 enabled and 32 more detected.
+                items:
+                  description: IntegrationStatus reports one integration module that
+                    is enabled, detected or both.
+                  properties:
+                    active:
+                      description: |-
+                        active is true when the module contributes hooks: it is enabled in spec.modules.integrations and
+                        detected.
+                      type: boolean
+                    detected:
+                      description: |-
+                        detected is true when the cluster serves one of the group versions the module declares. An enabled
+                        name that no compiled-in module has is never detected.
+                      type: boolean
+                    name:
+                      description: name is the integration module.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$
+                      type: string
+                    version:
+                      description: |-
+                        version is the group version that detected the add-on, in discovery form (keda.sh/v1alpha1). Set if
+                        and only if the add-on is detected.
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?v[0-9]+((alpha|beta)[0-9]+)?$
+                      type: string
+                  required:
+                  - active
+                  - detected
+                  - name
+                  type: object
+                  x-kubernetes-validations:
+                  - message: version is set if and only if the integration is detected
+                    rule: self.detected == has(self.version)
+                  - message: an integration that is not detected is not active
+                    rule: '!self.active || self.detected'
+                maxItems: 64
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               observedGeneration:
                 description: observedGeneration is the generation the status describes.
                 format: int64
                 type: integer
+              platform:
+                description: |-
+                  platform is the platform the analyzer detected and whether its module is active. To be written by the
+                  analyzer once detection is wired (planned, #61); no identity may write it yet, so it stays unset.
+                properties:
+                  active:
+                    description: |-
+                      active is true when the platform's module contributes hooks: it is detected and enabled in
+                      spec.modules.platforms (generic always is). A detected platform that is not enabled is reported with
+                      active false, and the analyzer then uses the generic platform.
+                    type: boolean
+                  name:
+                    description: 'name is the detected platform: generic when no other
+                      platform claims every node with certainty.'
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$
+                    type: string
+                required:
+                - active
+                - name
+                type: object
+                x-kubernetes-validations:
+                - message: the generic platform is always active
+                  rule: self.name != 'generic' || self.active
             type: object
         required:
         - spec

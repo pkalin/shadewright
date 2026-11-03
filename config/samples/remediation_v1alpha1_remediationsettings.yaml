@@ -18,3 +18,8 @@ spec:
         signer:
           azureKeyVault:
             keyID: https://kv-example.vault.azure.net/keys/github-app
+  # Modules contribute only when enabled here and detected in the cluster; status shows what was detected.
+  # The generic platform is always on and is not listed.
+  modules:
+    platforms: [aks]
+    integrations: [keda, flux]

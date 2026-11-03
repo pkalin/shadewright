@@ -1,0 +1,15 @@
+# Deny all ingress and egress for every pod in the operator namespace. The other policies in this directory
+# add back exactly what each component needs (design section 10.6, threat model S5).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: shadewright
+    app.kubernetes.io/managed-by: kustomize
+  name: default-deny
+  namespace: system
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

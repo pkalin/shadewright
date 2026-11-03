@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -261,6 +262,31 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(verifyMetricsServerStarted, 3*time.Minute, time.Second).Should(Succeed())
 
 			// +kubebuilder:scaffold:e2e-metrics-webhooks-readiness
+
+			By("letting the curl-metrics pod reach the metrics port through the default-deny policies (config/network-policy)")
+			cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace, "metrics=enabled")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to label namespace for metrics scraping")
+			cmd = exec.Command("kubectl", "apply", "-n", namespace, "-f", "-")
+			cmd.Stdin = strings.NewReader(`apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: curl-metrics-egress
+spec:
+  podSelector:
+    matchLabels:
+      run: curl-metrics
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - {port: 8443, protocol: TCP}
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+`)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the curl-metrics egress policy")
 
 			By("creating the curl-metrics pod to access the metrics endpoint")
 			cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",

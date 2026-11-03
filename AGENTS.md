@@ -80,8 +80,8 @@ Every issue names the ADRs it is tied to:
   `cluster-admin`, no wildcard verbs or resources.
 - **Supply chain.** Pin GitHub Actions by commit SHA, keep `go.sum` committed, prefer the standard library and
   existing dependencies, and check new ones for maintenance and licence (Apache-2.0 compatible). Run
-  `make vulncheck` (govulncheck) when dependencies change; the `govulncheck` CI job runs it with the Go
-  release of the Dockerfile's builder stage and fails on any finding the code reaches.
+  `make vulncheck` (govulncheck) when dependencies change; the `govulncheck` CI job (Vulncheck workflow, also
+  weekly) runs it with the Go release of the Dockerfile's builder stage and fails on any finding the code reaches.
 - **Containers.** Distroless or scratch base images, non-root user, read-only root filesystem, all
   capabilities dropped, resource requests and limits set.
 - **Tests.** Every bug fix gets a test that fails without it; every new API rule gets a refusal test.
@@ -95,8 +95,9 @@ Every issue names the ADRs it is tied to:
 ## Commands
 
 ```bash
-make manifests generate   # after editing api/**/*_types.go or markers; CI fails if config/ or api/ is stale
-make api-docs             # regenerate docs/reference/api.md from the API types; CI fails if it is stale
+make manifests generate   # after editing api/**/*_types.go or markers
+make api-docs             # regenerate docs/reference/api.md from the API types
+make verify-generated     # regenerate all of the above from scratch; fails on any diff, new or deleted file (CI runs it)
 make lint-fix             # golangci-lint, config in .golangci.yml
 make vulncheck            # govulncheck ./...; standard library findings depend on the local Go patch release
 make test                 # unit + envtest (real kube-apiserver and etcd, no cluster needed)

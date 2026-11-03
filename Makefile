@@ -1,7 +1,14 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
-YEAR ?= $(shell date +%Y)
+# It defaults to the year in the committed deepcopy header, so regenerating does not rewrite every header
+# on 1 January; the current year is used only if that file has none. Evaluated once, when make starts.
+ifeq ($(origin YEAR),undefined)
+YEAR := $(shell sed -n -E 's/^Copyright ([0-9]{4}) The Shadewright Authors\.$$/\1/p' api/v1alpha1/zz_generated.deepcopy.go 2>/dev/null | head -n1)
+ifeq ($(YEAR),)
+YEAR := $(shell date +%Y)
+endif
+endif
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -118,6 +125,24 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 .PHONY: vulncheck
 vulncheck: govulncheck ## Report known vulnerabilities reached from the code (Go standard library of the current toolchain included)
 	"$(GOVULNCHECK)" ./...
+
+# Generated outputs owned by manifests, generate and api-docs. verify-generated deletes them first, because
+# controller-gen never deletes a file it no longer generates.
+GENERATED_FILES = 'config/crd/bases/*.yaml' config/rbac/executor/role.yaml config/rbac/analyzer/role.yaml \
+	config/rbac/analyzer/watch/role.yaml config/webhook/manifests.yaml '*zz_generated.deepcopy.go' \
+	docs/reference/api.md
+
+.PHONY: verify-generated
+verify-generated: ## Regenerate all generated files from scratch and fail if the working tree then differs from Git.
+	git ls-files -z -- $(GENERATED_FILES) | xargs -0 rm -f --
+	$(MAKE) manifests generate api-docs YEAR=$(YEAR)
+	@status="$$(git status --porcelain)"; \
+	if [ -n "$$status" ]; then \
+		echo "error: generated files are stale, or the working tree was not clean." >&2; \
+		echo "Run 'make manifests generate api-docs' and commit the result, deletions included:" >&2; \
+		echo "$$status" >&2; \
+		exit 1; \
+	fi
 
 ##@ Build
 

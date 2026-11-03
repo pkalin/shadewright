@@ -44,12 +44,29 @@ func unique(prefix string) string {
 	return fmt.Sprintf("%s-%d", prefix, seq)
 }
 
-// expectRefused asserts the API server refuses obj as invalid, with msg in the error.
+// expectRefused asserts the API server refuses obj as invalid, with msg in the error. An object the server
+// accepted by mistake is deleted after the spec, so one failure does not make the next spec's Create fail.
 func expectRefused(obj client.Object, msg string) {
 	err := k8sClient.Create(ctx, obj)
+	if err == nil {
+		deleteAfterSpec(obj)
+	}
 	ExpectWithOffset(1, err).To(HaveOccurred(), "the API server accepted an invalid object")
 	ExpectWithOffset(1, apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
 	ExpectWithOffset(1, err.Error()).To(ContainSubstring(msg))
+}
+
+// expectAccepted asserts the API server accepts obj and deletes it after the spec, whatever the outcome.
+func expectAccepted(obj client.Object) {
+	ExpectWithOffset(1, k8sClient.Create(ctx, obj)).To(Succeed())
+	deleteAfterSpec(obj)
+}
+
+// deleteAfterSpec deletes obj when the current spec ends, even if the spec failed.
+func deleteAfterSpec(obj client.Object) {
+	DeferCleanup(func() {
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, obj))).To(Succeed())
+	})
 }
 
 var _ = Describe("RemediationRequest", func() {
@@ -475,11 +492,10 @@ var _ = Describe("RemediationPolicy", func() {
 var _ = Describe("RemediationSettings", func() {
 	It("accepts the fixture with automation enabled and conservative limits", func() {
 		s := fx.RemediationSettings()
-		Expect(k8sClient.Create(ctx, s)).To(Succeed())
+		expectAccepted(s)
 		Expect(*s.Spec.Paused).To(BeFalse())
 		Expect(s.Spec.MaxConcurrentRemediations).To(BeEquivalentTo(1))
 		Expect(*s.Spec.MaxAnalysesPerDay).To(BeEquivalentTo(100))
-		Expect(k8sClient.Delete(ctx, s)).To(Succeed())
 	})
 
 	It("refuses any name but default", func() {
@@ -496,9 +512,8 @@ var _ = Describe("RemediationSettings", func() {
 
 	It("defaults the target branch to main", func() {
 		s := fx.RemediationSettings()
-		Expect(k8sClient.Create(ctx, s)).To(Succeed())
+		expectAccepted(s)
 		Expect(s.Spec.Repositories[0].TargetBranch).To(BeEquivalentTo("main"))
-		Expect(k8sClient.Delete(ctx, s)).To(Succeed())
 	})
 
 	DescribeTable("refuses target branches git could misread",
@@ -532,8 +547,7 @@ var _ = Describe("RemediationSettings", func() {
 		func(branch string) {
 			s := fx.RemediationSettings()
 			s.Spec.Repositories[0].TargetBranch = v1alpha1.GitBranch(branch)
-			Expect(k8sClient.Create(ctx, s)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, s)).To(Succeed())
+			expectAccepted(s)
 		},
 		Entry("200 characters", "b"+strings.Repeat("x", 199)),
 		Entry("nested with dots and underscores", "release/v1.2_rc"),
@@ -555,7 +569,9 @@ var _ = Describe("RemediationSettings", func() {
 		Entry(".git suffix", "https://github.com/example/fleet.git", githubURLMsg),
 		Entry("upper case", "https://github.com/Example/fleet", githubURLMsg),
 		Entry("dot owner", "https://github.com/./fleet", "spec.repositories[0].url"),
+		Entry("dot repository", "https://github.com/example/.", "spec.repositories[0].url"),
 		Entry("parent repository", "https://github.com/example/..", "spec.repositories[0].url"),
+		Entry("dot-led .git name", "https://github.com/example/.git", githubURLMsg),
 		Entry("dot in owner", "https://github.com/ex.ample/fleet", githubURLMsg),
 		Entry("owner starting with a hyphen", "https://github.com/-example/fleet", githubURLMsg),
 		Entry("owner longer than 39 characters", "https://github.com/"+strings.Repeat("o", 40)+"/fleet", githubURLMsg),
@@ -566,13 +582,13 @@ var _ = Describe("RemediationSettings", func() {
 		func(url string) {
 			s := fx.RemediationSettings()
 			s.Spec.Repositories[0].URL = url
-			Expect(k8sClient.Create(ctx, s)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, s)).To(Succeed())
+			expectAccepted(s)
 		},
 		Entry("owner of 39 characters", "https://github.com/"+strings.Repeat("o", 39)+"/fleet"),
 		Entry("name of 100 characters", "https://github.com/example/"+strings.Repeat("n", 100)),
 		Entry("one-character owner and name", "https://github.com/e/f"),
 		Entry("digit-first owner with hyphens", "https://github.com/1-example/fleet_repo.v2"),
+		Entry("name starting with a dot", "https://github.com/example/.github"),
 	)
 
 	DescribeTable("refuses App client IDs the GitHub adapter refuses",
@@ -592,8 +608,7 @@ var _ = Describe("RemediationSettings", func() {
 		func(id string) {
 			s := fx.RemediationSettings()
 			s.Spec.Repositories[0].GitHub.AppClientID = id
-			Expect(k8sClient.Create(ctx, s)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, s)).To(Succeed())
+			expectAccepted(s)
 		},
 		Entry("classic", "Iv1.0123456789abcdef"),
 		Entry("all allowed characters", "Iv23li.A_b-9"),
@@ -642,8 +657,7 @@ var _ = Describe("RemediationSettings", func() {
 		func(keyID string) {
 			s := fx.RemediationSettings()
 			s.Spec.Repositories[0].GitHub.Signer.AzureKeyVault.KeyID = keyID
-			Expect(k8sClient.Create(ctx, s)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, s)).To(Succeed())
+			expectAccepted(s)
 		},
 		Entry("vault name of 3 characters", "https://kv1.vault.azure.net/keys/github-app"),
 		Entry("vault name of 24 characters", "https://k"+strings.Repeat("v", 23)+".vault.azure.net/keys/github-app"),

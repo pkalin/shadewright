@@ -261,14 +261,14 @@ Validation rules:
 
 - github must be set if and only if provider is GitHub: `self.provider == 'GitHub' ? has(self.github) : !has(self.github)`
 - a GitHub repository URL must be https://github.com/&lt;owner>/&lt;repo> in lower case, without .git: `self.provider != 'GitHub' || (self.url.matches('^https://github[.]com/[a-z0-9][a-z0-9-]{0,38}/[a-z0-9_.-]{1,100}$') && !self.url.endsWith('.git') && !self.url.endsWith('/.') && !self.url.endsWith('/..'))`
-- a GitHub target branch must start with a letter or digit, have at most 200 characters and not end with '.': `self.provider != 'GitHub' || !has(self.targetBranch) || (self.targetBranch.matches('^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$') && !self.targetBranch.endsWith('.'))`
+- a GitHub target branch must start with a letter or digit, have at most 200 characters and not end with '.': `self.provider != 'GitHub' || (self.targetBranch.matches('^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$') && !self.targetBranch.endsWith('.'))`
 
 Used by: [RemediationSettingsSpec](#remediationsettingsspec).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | [Name](#name) | Yes | name is how policies and requests refer to the repository.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
-| `url` | string | Yes | url is the HTTPS clone URL, without credentials, query or fragment. It must match the URL of the Flux source that delivers a target, or no change is made. For GitHub it is https://github.com/&lt;owner>/&lt;repo> in lower case, without .git: an owner of 1 to 39 letters, digits and hyphens that starts with a letter or digit, and a repository name of 1 to 100 letters, digits, '.', '_' or '-' other than '.' and '..'.<br>Maximum length: 512<br>Pattern: `^https://[a-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9_~-][A-Za-z0-9_.~-]*)+$` |
+| `url` | string | Yes | url is the HTTPS clone URL, without credentials, query or fragment, and without a path segment that is '.' or '..'. It must match the URL of the Flux source that delivers a target, or no change is made. For GitHub it is https://github.com/&lt;owner>/&lt;repo> in lower case, without .git: an owner of 1 to 39 letters, digits and hyphens that starts with a letter or digit, and a repository name of 1 to 100 letters, digits, '.', '_' or '-' other than '.' and '..' (it may start with '.', as in .github).<br>Maximum length: 512<br>Pattern: `^https://[a-z0-9.-]+(:[0-9]+)?(/(\.?[A-Za-z0-9_~-][A-Za-z0-9_.~-]*|\.\.[A-Za-z0-9_.~-]+))+$` |
 | `targetBranch` | [GitBranch](#gitbranch) | No | targetBranch is the only branch pull requests may target. The branch Flux tracks must equal it. For GitHub it starts with a letter or digit, has at most 200 characters and does not end with '.'.<br>Default: `main`<br>Maximum length: 255<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$`<br>Rule: must be a plain branch name, not HEAD, refs/..., shadewright/... or one containing '..' or '.lock' |
 | `provider` | [GitProviderType](#gitprovidertype) | Yes | provider selects the Git hosting adapter.<br>One of `GitHub` |
 | `github` | [GitHubRepository](#githubrepository) | No | github holds GitHub App settings. |

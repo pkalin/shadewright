@@ -161,12 +161,13 @@ spec:
                           && !self.startsWith(''shadewright/'')'
                     url:
                       description: |-
-                        url is the HTTPS clone URL, without credentials, query or fragment. It must match the URL of the Flux
-                        source that delivers a target, or no change is made. For GitHub it is https://github.com/<owner>/<repo>
-                        in lower case, without .git: an owner of 1 to 39 letters, digits and hyphens that starts with a letter or
-                        digit, and a repository name of 1 to 100 letters, digits, '.', '_' or '-' other than '.' and '..'.
+                        url is the HTTPS clone URL, without credentials, query or fragment, and without a path segment that is
+                        '.' or '..'. It must match the URL of the Flux source that delivers a target, or no change is made. For
+                        GitHub it is https://github.com/<owner>/<repo> in lower case, without .git: an owner of 1 to 39 letters,
+                        digits and hyphens that starts with a letter or digit, and a repository name of 1 to 100 letters, digits,
+                        '.', '_' or '-' other than '.' and '..' (it may start with '.', as in .github).
                       maxLength: 512
-                      pattern: ^https://[a-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9_~-][A-Za-z0-9_.~-]*)+$
+                      pattern: ^https://[a-z0-9.-]+(:[0-9]+)?(/(\.?[A-Za-z0-9_~-][A-Za-z0-9_.~-]*|\.\.[A-Za-z0-9_.~-]+))+$
                       type: string
                   required:
                   - name
@@ -184,8 +185,7 @@ spec:
                   - fieldPath: .targetBranch
                     message: a GitHub target branch must start with a letter or digit,
                       have at most 200 characters and not end with '.'
-                    rule: self.provider != 'GitHub' || !has(self.targetBranch) ||
-                      (self.targetBranch.matches('^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$')
+                    rule: self.provider != 'GitHub' || (self.targetBranch.matches('^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$')
                       && !self.targetBranch.endsWith('.'))
                 maxItems: 16
                 type: array

@@ -75,18 +75,19 @@ type GitHubRepository struct {
 // name, so the model never chooses a URL or credentials.
 // +kubebuilder:validation:XValidation:rule="self.provider == 'GitHub' ? has(self.github) : !has(self.github)",message="github must be set if and only if provider is GitHub"
 // +kubebuilder:validation:XValidation:rule="self.provider != 'GitHub' || (self.url.matches('^https://github[.]com/[a-z0-9][a-z0-9-]{0,38}/[a-z0-9_.-]{1,100}$') && !self.url.endsWith('.git') && !self.url.endsWith('/.') && !self.url.endsWith('/..'))",message="a GitHub repository URL must be https://github.com/<owner>/<repo> in lower case, without .git"
-// +kubebuilder:validation:XValidation:rule="self.provider != 'GitHub' || !has(self.targetBranch) || (self.targetBranch.matches('^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$') && !self.targetBranch.endsWith('.'))",message="a GitHub target branch must start with a letter or digit, have at most 200 characters and not end with '.'",fieldPath=".targetBranch"
+// +kubebuilder:validation:XValidation:rule="self.provider != 'GitHub' || (self.targetBranch.matches('^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$') && !self.targetBranch.endsWith('.'))",message="a GitHub target branch must start with a letter or digit, have at most 200 characters and not end with '.'",fieldPath=".targetBranch"
 type GitRepository struct {
 	// name is how policies and requests refer to the repository.
 	// +required
 	Name Name `json:"name"`
 
-	// url is the HTTPS clone URL, without credentials, query or fragment. It must match the URL of the Flux
-	// source that delivers a target, or no change is made. For GitHub it is https://github.com/<owner>/<repo>
-	// in lower case, without .git: an owner of 1 to 39 letters, digits and hyphens that starts with a letter or
-	// digit, and a repository name of 1 to 100 letters, digits, '.', '_' or '-' other than '.' and '..'.
+	// url is the HTTPS clone URL, without credentials, query or fragment, and without a path segment that is
+	// '.' or '..'. It must match the URL of the Flux source that delivers a target, or no change is made. For
+	// GitHub it is https://github.com/<owner>/<repo> in lower case, without .git: an owner of 1 to 39 letters,
+	// digits and hyphens that starts with a letter or digit, and a repository name of 1 to 100 letters, digits,
+	// '.', '_' or '-' other than '.' and '..' (it may start with '.', as in .github).
 	// +kubebuilder:validation:MaxLength=512
-	// +kubebuilder:validation:Pattern=`^https://[a-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9_~-][A-Za-z0-9_.~-]*)+$`
+	// +kubebuilder:validation:Pattern=`^https://[a-z0-9.-]+(:[0-9]+)?(/(\.?[A-Za-z0-9_~-][A-Za-z0-9_.~-]*|\.\.[A-Za-z0-9_.~-]+))+$`
 	// +required
 	URL string `json:"url"`
 

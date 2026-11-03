@@ -11,7 +11,7 @@ hide:
 
 ![Shadewright](assets/wordmark.png)
 
-<p class="sw-tagline">A Kubernetes operator that diagnoses incidents with an LLM and proposes fixes only as reviewed GitOps pull requests.</p>
+<p class="sw-tagline">A safe-remediation controller for Kubernetes clusters run with GitOps: it turns untrusted proposals, from rules or an LLM, into typed, bounded changes tied to policy and to the object's real source in Git, delivers them only as reviewed pull requests, and verifies the effect.</p>
 
 [Read the design](design.md){ .md-button .md-button--primary }
 [Decisions](adr/index.md){ .md-button }
@@ -21,8 +21,8 @@ hide:
 
 Shadewright watches your cluster, groups repeated symptoms into incidents, asks an LLM for a diagnosis, and proposes a fix as a pull request to your GitOps repository. It never changes the cluster directly: your review rules decide what merges, and your GitOps controller delivers it.
 
-!!! warning "Early design"
-    Nothing is implemented yet. This site holds the [design](design.md) and the [decisions](adr/index.md) behind it.
+!!! warning "Early"
+    Built so far: the API and its validation, the policy check with source mapping and the freshness check, the YAML patchers, the fingerprint and redaction functions (not called by any binary yet), the GitHub and Key Vault adapters (used to read Git; no pull request is opened yet) and the RBAC of both identities. Not built: the collector, the analysis, the pull request itself and the verification. The [design](design.md) says what holds at each step; the [decisions](adr/index.md) say why.
 
 ## How it works
 

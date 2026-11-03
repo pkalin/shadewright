@@ -82,7 +82,7 @@ func New(keyID string, opts Options) (*Signer, error) {
 	if err != nil {
 		return nil, err
 	}
-	cred, err := newWorkloadCredential(wi, azcore.ClientOptions{})
+	cred, err := newWorkloadCredential(wi, azcore.ClientOptions{}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -213,9 +213,9 @@ func (s *Signer) Algorithm() providers.SignatureAlgorithm { return providers.RS2
 //
 // Errors: ErrNotFound when the key or version does not exist; a retryable error, with the delay Key Vault
 // asked for when it gave one, on throttling, transient server errors, network failures, a response body
-// that breaks off, a token request that gets no answer or a timeout; other errors otherwise. TLS and
-// certificate failures, a local configuration error (a federated token file that cannot be read) and a
-// cancelled context are not retryable.
+// that breaks off, a token request that gets no answer or a timeout; other errors otherwise. A refused
+// certificate, a local configuration error (a federated token file that cannot be read) and a cancelled
+// context are not retryable.
 func (s *Signer) Sign(ctx context.Context, digest []byte) ([]byte, error) {
 	if len(digest) != sha256.Size {
 		return nil, fmt.Errorf("digest is %d bytes, want %d", len(digest), sha256.Size)
@@ -380,43 +380,50 @@ func (errorBodyPolicy) Do(req *policy.Request) (*http.Response, error) {
 
 // cleanCredential wraps a token credential so that its errors are cleaned before azcore sees them: azcore
 // formats credential errors in its own log messages, and an AuthenticationFailedError includes the Entra
-// response body. Only the status code, the Retry-After delay, a context or token file error and whether
-// the failure is transient survive.
+// response body. Only the status code, the Retry-After delay, a fixed cause and whether the failure is
+// transient survive.
 type cleanCredential struct {
 	inner azcore.TokenCredential
 }
 
-// GetToken returns a token from the wrapped credential, or a cleaned error.
+// GetToken returns a token from the wrapped credential, or a cleaned error. The class is decided in this
+// order:
+//
+//  1. A caller that cancelled gets a final cancellation, whatever else happened.
+//  2. When Entra ID answered, its status decides, even if the deadline has passed by now.
+//  3. Otherwise the last thing recorded for this request decides (tokenRequest): a token file that could
+//     not be read is final; an exchange with Entra ID is classed as guardTransport classed it, and a
+//     successful answer that still failed is transient.
+//  4. Otherwise a deadline (the pinned azidentity drops the context error, so ctx is checked too) is
+//     transient.
+//  5. Anything else is final. That includes a credential that is not newWorkloadCredential's (for example
+//     a deliberately configured DefaultAzureCredential), whose failures this package cannot see into.
 func (c cleanCredential) GetToken(ctx context.Context, o policy.TokenRequestOptions) (azcore.AccessToken, error) {
-	read := &tokenFileRead{}
-	tok, err := c.inner.GetToken(context.WithValue(ctx, tokenFileReadKey{}, read), o)
+	tr := &tokenRequest{}
+	tok, err := c.inner.GetToken(context.WithValue(ctx, tokenRequestKey{}, tr), o)
 	if err == nil {
 		return tok, nil
 	}
 	// Not wrapped: an AuthenticationFailedError prints the Entra response body, and azcore logs credential
-	// errors. Only the status, the Retry-After delay, a context error and a token file error are kept.
+	// errors. Only the status, the Retry-After delay and a fixed or context cause are kept.
 	ce := &credentialError{}
 	af, isAuth := errors.AsType[*azidentity.AuthenticationFailedError](err)
-	if isAuth && af.RawResponse != nil {
-		// Entra answered, so its status decides, even when the deadline has passed by now.
-		ce.status = af.RawResponse.StatusCode
-		ce.retryAfter = retryAfter(af.RawResponse)
-		return azcore.AccessToken{}, ce
-	}
-	// The pinned azidentity drops the context error when a token request times out, so the context of this
-	// try (azcore's per-try timeout or the Sign deadline) is checked as well as the chain.
 	switch {
 	case errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled):
 		ce.cause = context.Canceled
-	case read.err() != nil:
-		// The federated token file could not be read: a local configuration error no retry fixes.
-		ce.cause = read.err()
+	case isAuth && af.RawResponse != nil:
+		ce.status = af.RawResponse.StatusCode
+		ce.retryAfter = retryAfter(af.RawResponse)
+	case tr.seen && tr.read && tr.readErr != nil:
+		ce.cause = tr.readErr
+	case tr.seen && !tr.read && tr.transportErr != nil:
+		ce.cause, ce.retry = entraCause(tr.transportErr)
+	case tr.seen && !tr.read && tr.status >= 200 && tr.status < 300:
+		ce.cause, ce.retry = errEntraAnswer, true
+	case tr.seen && !tr.read && tr.status != 0:
+		ce.status = tr.status
 	case errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded):
-		ce.cause = context.DeadlineExceeded
-	case isAuth:
-		// No answer from Entra, no cause, and the token file was read or not needed: the request failed in
-		// the network (DNS, a refused or reset connection).
-		ce.network = true
+		ce.cause, ce.retry = context.DeadlineExceeded, true
 	}
 	return azcore.AccessToken{}, ce
 }
@@ -425,10 +432,10 @@ func (c cleanCredential) GetToken(ctx context.Context, o policy.TokenRequestOpti
 type credentialError struct {
 	status     int
 	retryAfter time.Duration
-	// cause is a context error or a token file error.
+	// cause is a context error or a fixed error of this package.
 	cause error
-	// network is set when the request got no answer from Entra while the token file could be read.
-	network bool
+	// retry is set when the failure without a usable status may pass later.
+	retry bool
 }
 
 func (e *credentialError) Error() string {
@@ -451,7 +458,11 @@ func (e *credentialError) transient() bool {
 		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return true
 	}
-	return e.network || errors.Is(e.cause, context.DeadlineExceeded)
+	if e.status >= 200 && e.status < 300 {
+		// Entra ID said yes, but the answer could not be used.
+		return true
+	}
+	return e.retry
 }
 
 // retryAfter reads a Retry-After header in seconds or as an HTTP date, capped at one hour.

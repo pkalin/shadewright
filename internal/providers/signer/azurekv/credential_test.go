@@ -18,6 +18,8 @@ package azurekv
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -33,6 +35,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -49,11 +52,13 @@ const (
 )
 
 // fakeEntra answers the OpenID configuration and the token requests of a client assertion credential.
-// tokenErr fails the token request in the network; status, when set, is the token endpoint's answer.
+// tokenErr fails the token request in the transport; status, when set, is the token endpoint's answer;
+// badAnswer makes it a 200 whose body does not parse.
 type fakeEntra struct {
 	mu         sync.Mutex
 	tokenErr   error
 	status     int
+	badAnswer  bool
 	assertions []string
 }
 
@@ -77,6 +82,10 @@ func (e *fakeEntra) Do(req *http.Request) (*http.Response, error) {
 		e.assertions = append(e.assertions, form.Get("client_assertion"))
 		if e.tokenErr != nil {
 			return nil, e.tokenErr
+		}
+		if e.badAnswer {
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Request: req,
+				Body: io.NopCloser(strings.NewReader("{" + bodySecret))}, nil
 		}
 		if e.status != 0 {
 			return jsonResponse(req, e.status, struct {
@@ -112,14 +121,14 @@ func writeTokenFile(t *testing.T, content string) string {
 	return p
 }
 
-// realCredential builds the credential New builds, with Entra replaced by entra and no retries inside the
-// credential.
+// realCredential builds the credential New builds, with the HTTP client below guardTransport replaced by
+// entra and no retries inside the credential.
 func realCredential(t *testing.T, path string, entra *fakeEntra) azcore.TokenCredential {
 	t.Helper()
 	t.Setenv(envAuthorityHost, "")
 	cred, err := newWorkloadCredential(
 		workloadIdentity{clientID: testClientID, tenantID: testTenant, tokenFile: path},
-		azcore.ClientOptions{Transport: entra, Retry: policy.RetryOptions{MaxRetries: -1}},
+		azcore.ClientOptions{Retry: policy.RetryOptions{MaxRetries: -1}}, entra,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -129,13 +138,15 @@ func realCredential(t *testing.T, path string, entra *fakeEntra) azcore.TokenCre
 
 // TestSignWithTheWorkloadCredential checks that the credential New builds sends the token file's content
 // as the client assertion, and that its failures are classed exactly: Entra's answer decides when there is
-// one, a token file that cannot be read is final, and a token request that gets no answer after the file was
-// read is transient.
+// one, a token file that cannot be read is final, a token request that gets no answer is transient, a
+// certificate of Entra ID the client refuses is final, and a 200 that cannot be used is transient.
 func TestSignWithTheWorkloadCredential(t *testing.T) {
 	kid := "https://" + testHost + "/keys/github-app"
 	dir := t.TempDir()
 	network := &url.Error{Op: http.MethodPost, URL: "https://" + entraHost + "/x?sig=" + bodySecret,
 		Err: &net.OpError{Op: opDial, Net: netTCP, Err: errors.New("no such host " + bodySecret)}}
+	certificate := &url.Error{Op: http.MethodPost, URL: "https://" + entraHost + "/x?sig=" + bodySecret,
+		Err: &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}}
 
 	for _, tc := range []struct {
 		name      string
@@ -147,12 +158,16 @@ func TestSignWithTheWorkloadCredential(t *testing.T) {
 	}{
 		{name: "token issued", path: writeTokenFile(t, testAssertion), entra: &fakeEntra{}, ok: true},
 		{name: "no answer from Entra", path: writeTokenFile(t, testAssertion), entra: &fakeEntra{tokenErr: network},
-			retryable: true},
+			retryable: true, class: errEntraNetwork},
+		{name: "certificate refused", path: writeTokenFile(t, testAssertion), entra: &fakeEntra{tokenErr: certificate},
+			class: errEntraTLS},
+		{name: "answer does not parse", path: writeTokenFile(t, testAssertion), entra: &fakeEntra{badAnswer: true},
+			retryable: true, class: errEntraAnswer},
 		{name: "Entra refuses", path: writeTokenFile(t, testAssertion), entra: &fakeEntra{status: http.StatusBadRequest}},
 		{name: "Entra throttles", path: writeTokenFile(t, testAssertion),
 			entra: &fakeEntra{status: http.StatusTooManyRequests}, retryable: true},
 		{name: "file missing", path: filepath.Join(dir, "missing"), entra: &fakeEntra{tokenErr: network},
-			class: errTokenFileUnreadable},
+			class: errTokenFileMissing},
 		{name: "file is a directory", path: dir, entra: &fakeEntra{tokenErr: network}, class: errTokenFileNotRegular},
 		{name: "file too large", path: writeTokenFile(t, strings.Repeat("a", maxTokenFile+1)),
 			entra: &fakeEntra{tokenErr: network}, class: errTokenFileTooLarge},
@@ -176,7 +191,7 @@ func TestSignWithTheWorkloadCredential(t *testing.T) {
 		if tc.class != nil && !errors.Is(err, tc.class) {
 			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.class)
 		}
-		if tc.class != nil && len(tc.entra.assertions) != 0 {
+		if tc.class != nil && strings.Contains(tc.class.Error(), "token file") && len(tc.entra.assertions) != 0 {
 			t.Errorf("%s: a token request was sent without an assertion", tc.name)
 		}
 	}
@@ -198,12 +213,85 @@ func TestTokenFileIsReused(t *testing.T) {
 		t.Errorf("second read = %q, %v; want the reused token", got, err)
 	}
 	tf.expiresAt = time.Time{}
-	read := &tokenFileRead{}
-	if _, err := tf.assertion(context.WithValue(context.Background(), tokenFileReadKey{}, read)); !errors.Is(err, errTokenFileUnreadable) {
-		t.Errorf("read after expiry = %v, want the unreadable error", err)
+	tr := &tokenRequest{}
+	ctx := context.WithValue(context.Background(), tokenRequestKey{}, tr)
+	if _, err := tf.assertion(ctx); !errors.Is(err, errTokenFileMissing) {
+		t.Errorf("read after expiry = %v, want the missing error", err)
 	}
-	if !errors.Is(read.err(), errTokenFileUnreadable) {
-		t.Errorf("recorded error = %v, want the unreadable error", read.err())
+	if !tr.read || !errors.Is(tr.readErr, errTokenFileMissing) {
+		t.Errorf("recorded = %+v, want the missing error", tr)
+	}
+
+	// A later good read in the same token request replaces the failure.
+	if err := os.WriteFile(path, []byte(testAssertion), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tf.assertion(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !tr.read || tr.readErr != nil {
+		t.Errorf("recorded = %+v after a good read, want no error", tr)
+	}
+}
+
+// TestTokenFileMissingForAMoment checks that a token file that appears within the retry delay, as during
+// the kubelet's swap of the ..data link, is read, and that a caller who gives up during the wait gets its
+// context error with nothing recorded.
+func TestTokenFileMissingForAMoment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "azure-identity-token")
+	time.AfterFunc(tokenFileRetryDelay/3, func() { _ = os.WriteFile(path, []byte(testAssertion), 0o600) })
+	tr := &tokenRequest{}
+	got, err := (&tokenFile{path: path}).assertion(context.WithValue(context.Background(), tokenRequestKey{}, tr))
+	if err != nil || got != testAssertion || tr.readErr != nil {
+		t.Errorf("assertion = %q, %v, recorded %+v; want the token", got, err, tr)
+	}
+
+	*tr = tokenRequest{}
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), tokenRequestKey{}, tr))
+	cancel()
+	_, err = (&tokenFile{path: filepath.Join(t.TempDir(), "missing")}).assertion(ctx)
+	if !errors.Is(err, context.Canceled) || tr.seen {
+		t.Errorf("cancelled wait: err = %v, recorded %+v; want the cancellation and no record", err, tr)
+	}
+}
+
+// TestCredentialWeCannotSeeIntoIsFinal checks that a token failure without a response from a credential
+// this package did not build (no file read and no exchange recorded) is final: it cannot be told apart from
+// a configuration error.
+func TestCredentialWeCannotSeeIntoIsFinal(t *testing.T) {
+	kid := "https://" + testHost + "/keys/github-app"
+	cred := &fakeCredential{err: &azidentity.AuthenticationFailedError{}}
+	s, v := setupWith(t, kid, Options{MaxRetries: -1}, cred, nil, clientConfig{})
+	v.respond = v.signOK(kid + "/" + testVersion)
+	_, err := s.Sign(context.Background(), digestOf("x"))
+	if err == nil || providers.IsRetryable(err) {
+		t.Errorf("err = %v, want a final token request failure", err)
+	}
+	assertCleanChain(t, "foreign credential", err)
+}
+
+// answerThenCancel cancels the caller's context and then returns Entra's answer with status.
+type answerThenCancel struct {
+	cancel context.CancelFunc
+	status int
+}
+
+func (a answerThenCancel) GetToken(context.Context, policy.TokenRequestOptions) (azcore.AccessToken, error) {
+	a.cancel()
+	return azcore.AccessToken{}, authFailure(a.status, "")
+}
+
+// TestCredentialCancelBeatsAnswer checks that a caller who cancelled gets a final cancellation from the
+// credential even when Entra answered, also with a status that would be retryable.
+func TestCredentialCancelBeatsAnswer(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusServiceUnavailable} {
+		ctx, cancel := context.WithCancel(context.Background())
+		_, err := cleanCredential{inner: answerThenCancel{cancel: cancel, status: status}}.GetToken(ctx,
+			policy.TokenRequestOptions{Scopes: []string{testScope}})
+		ce, ok := errors.AsType[*credentialError](err)
+		if !ok || !errors.Is(err, context.Canceled) || ce.transient() {
+			t.Errorf("%d: err = %v, want a final cancellation", status, err)
+		}
 	}
 }
 

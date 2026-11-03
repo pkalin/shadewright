@@ -426,7 +426,7 @@ Each reconcile:
 
 Never assume exactly-once execution. A PR can be created while the status write that records its number fails. The branch name `shadewright/<request-uid>` and a marker in the PR body (request UID and plan digest) let the controller find the existing operation after a restart.
 
-The pull request step (`internal/controller/pullrequest.go`) runs for a fresh request in `PolicyChecked` and does at most one write per reconcile, after the freshness check:
+The pull request step (`internal/controller/pullrequest.go`) runs for a fresh request in `PolicyChecked` and does at most one write per reconcile, right after the freshness check (the first reconcile only stores the deadline, step 1):
 
 1. It stores `status.deadline` (30 minutes by default) and adds the finalizer `remediation.shadewright.io/close-pull-request`, each in its own write. The deadline is stored before the first freshness check, since it is not a Git write, so it also ends a request whose freshness check never passes (a Git host that stays down).
 2. It looks for a change request on `shadewright/<request-uid>` first. One that carries the request's exact marker and holds the desired value at its head is adopted; a merged one becomes `Merged`, a closed one or one without the marker `NeedsIntervention` (`ChangeRequestClosed`, `ForeignChangeRequest`).

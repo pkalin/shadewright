@@ -50,9 +50,11 @@ import (
 // on it), checks the plan's freshness, and makes at most one write. A restart or a second reconcile at any
 // point finds the work already done instead of repeating it: the branch name and the marker come from the
 // request, the branch is created only at the target branch's head, the commit names the head it expects, and
-// opening a pull request for a branch that has one returns it.
+// opening a pull request for a branch that has one returns it. The first reconcile of a PolicyChecked request
+// only stores status.deadline (startDeadline, called by recheck before the first freshness check), so the
+// deadline also ends a request whose freshness check never passes.
 //
-// The finalizer that closes the pull request on deletion is added before the first write, so no branch or
+// The finalizer that closes the pull request on deletion is added before the first Git write, so no branch or
 // pull request exists without it.
 //
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=remediationrequests,verbs=patch
@@ -68,7 +70,7 @@ const DefaultPullRequestTimeout = 30 * time.Minute
 // DefaultWriteTimeout bounds one Git step: opening the repository, rebuilding the state and one write.
 const DefaultWriteTimeout = 2 * time.Minute
 
-// stepDelay is how soon the next step runs after a write that changed only Git, not the request.
+// stepDelay is how soon the next step runs after a single write of the step.
 const stepDelay = time.Second
 
 // Reasons of the pull request step.

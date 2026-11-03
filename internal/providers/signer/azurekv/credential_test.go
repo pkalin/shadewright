@@ -53,12 +53,14 @@ const (
 
 // fakeEntra answers the OpenID configuration and the token requests of a client assertion credential.
 // tokenErr fails the token request in the transport; status, when set, is the token endpoint's answer;
-// badAnswer makes it a 200 whose body does not parse.
+// badAnswer makes it a 200 whose body does not parse; cutAnswer makes it a 200 whose body is cut and ends
+// cleanly once the request's context ends.
 type fakeEntra struct {
 	mu         sync.Mutex
 	tokenErr   error
 	status     int
 	badAnswer  bool
+	cutAnswer  bool
 	assertions []string
 }
 
@@ -86,6 +88,10 @@ func (e *fakeEntra) Do(req *http.Request) (*http.Response, error) {
 		if e.badAnswer {
 			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Request: req,
 				Body: io.NopCloser(strings.NewReader("{" + bodySecret))}, nil
+		}
+		if e.cutAnswer {
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Request: req, ContentLength: -1,
+				Body: &cutBody{ctx: req.Context(), data: strings.NewReader(`{"token_type":"Bearer","access_token":"`)}}, nil
 		}
 		if e.status != 0 {
 			return jsonResponse(req, e.status, struct {
@@ -201,6 +207,27 @@ func TestSignWithTheWorkloadCredential(t *testing.T) {
 		if tc.class != nil && strings.Contains(tc.class.Error(), "token file") && len(tc.entra.assertions) != 0 {
 			t.Errorf("%s: a token request was sent without an assertion", tc.name)
 		}
+	}
+}
+
+// TestTokenRequestTryTimeoutWithCleanlyEndedBody covers a token request whose answer is cut by the per-try
+// deadline of the Key Vault request and still ends cleanly: guardTransport on the credential's client
+// returns the deadline, so the failure is a retryable timeout, not an answer that could not be used or a
+// client failure.
+func TestTokenRequestTryTimeoutWithCleanlyEndedBody(t *testing.T) {
+	kid := "https://" + testHost + "/keys/github-app"
+	entra := &fakeEntra{cutAnswer: true}
+	s, v := setupWith(t, kid, Options{Timeout: 30 * time.Second, MaxRetries: -1},
+		realCredential(t, writeTokenFile(t, testAssertion), entra), nil, clientConfig{tryTimeout: 50 * time.Millisecond})
+	v.respond = v.signOK(kid + "/" + testVersion)
+	_, err := s.Sign(context.Background(), digestOf("x"))
+	if !providers.IsRetryable(err) || !errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, errEntraAnswer) || errors.Is(err, errEntraClient) {
+		t.Errorf("err = %v, want a retryable deadline error", err)
+	}
+	assertCleanChain(t, "token request cut at the try deadline", err)
+	if len(entra.assertions) != 1 {
+		t.Errorf("%d token requests, want 1", len(entra.assertions))
 	}
 }
 

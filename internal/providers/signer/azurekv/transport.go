@@ -96,17 +96,22 @@ func (g guardTransport) do(req *http.Request) (*http.Response, error) {
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
 	closeBody(resp)
-	if err != nil {
-		// A read that failed because the try or the caller gave up keeps its context error: the HTTP
-		// client's read error does not match it, and azcore reports a parent context error itself but a
-		// per-try deadline only as returned here.
-		if ctxErr := req.Context().Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-		return nil, cleanBodyError(err)
-	}
+	// An oversized body is final whenever the read ended: a try that runs out while it is read must not
+	// turn it into a retryable timeout.
 	if len(body) > maxResponseBody {
 		return nil, final{errResponseTooLarge}
+	}
+	// A read that ended after the try or the caller gave up returns the context error, whether or not
+	// the read itself failed: the HTTP client's read error does not match it, and a read can also end
+	// cleanly with a cut body (closing a TLS connection sends close_notify before the socket closes, and a
+	// server that sees it may end a chunked response early). azcore reports a parent context error
+	// itself but a per-try deadline only as returned here, so a cut body would otherwise reach the JSON
+	// decoder and come back as a final SDK error instead of a retryable timeout.
+	if ctxErr := req.Context().Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	if err != nil {
+		return nil, cleanBodyError(err)
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	resp.ContentLength = int64(len(body))

@@ -1,0 +1,20 @@
+{
+  "apiVersion": "keda.sh/v1alpha1",
+  "kind": "ScaledJob",
+  "metadata": {"name": "thumbnails", "namespace": "media", "uid": "5a7c9e1b-3d5f-4a60-8b2c-4d6e8f0a2b3c", "generation": 1},
+  "spec": {
+    "jobTargetRef": {"template": {"spec": {"containers": [{"name": "thumb", "image": "ghcr.io/example/thumb:1.4.2"}], "restartPolicy": "Never"}}},
+    "maxReplicaCount": 10,
+    "triggers": [{"type": "azure-queue", "metadata": {"queueName": "thumbnails", "queueLength": "5", "accountName": "examplestore"}, "authenticationRef": {"name": "azure-queue-auth"}}]
+  },
+  "status": {
+    "triggersTypes": "azure-queue",
+    "authenticationsTypes": "azure-queue-auth",
+    "conditions": [
+      {"type": "Ready", "status": "False", "reason": "TriggerError", "message": "Triggers defined in ScaledJob are not working correctly"},
+      {"type": "Active", "status": "False", "reason": "ScalerNotActive", "message": "Scaling is not performed because triggers are not active"},
+      {"type": "Fallback", "status": "Unknown"},
+      {"type": "Paused", "status": "False"}
+    ]
+  }
+}

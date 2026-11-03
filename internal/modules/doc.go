@@ -19,9 +19,9 @@ limitations under the License.
 //
 // A [Platform] is one cluster platform (AKS, EKS, GKE, Cluster API); an [Integration] is one add-on in the
 // cluster (KEDA, Flux, Kyverno). Each module declares its name, how it is detected and what it contributes
-// ([Hooks]). A module contributes hooks (symptom sources, rules, tools, actions) only when the cluster admin
-// enabled it in RemediationSettings and it is detected; detection alone never adds a tool or an action, and an
-// enabled but undetected module contributes nothing (invariant 4).
+// ([Hooks]). A module contributes hooks (symptom sources, rules, tools, actions, verification checks) only when
+// the cluster admin enabled it in RemediationSettings and it is detected; detection alone never adds a tool or
+// an action, and an enabled but undetected module contributes nothing (invariant 4).
 //
 // The core works with no module at all: the generic platform is always present and is the answer
 // whenever detection is not certain, and an integration only adds knowledge or capabilities.

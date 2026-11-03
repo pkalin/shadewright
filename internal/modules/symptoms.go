@@ -97,6 +97,7 @@ func cloneHooks(h Hooks) Hooks {
 		Rules:    slices.Clone(h.Rules),
 		Tools:    slices.Clone(h.Tools),
 		Actions:  slices.Clone(h.Actions),
+		Checks:   slices.Clone(h.Checks),
 	}
 	for i := range out.Symptoms {
 		out.Symptoms[i].Versions = slices.Clone(out.Symptoms[i].Versions)

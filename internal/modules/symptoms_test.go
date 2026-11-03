@@ -158,3 +158,22 @@ func TestRegistryKeepsTheValidatedHooks(t *testing.T) {
 		t.Error("IntegrationHooks found a module that is not registered")
 	}
 }
+
+// TestRegistryKeepsTheChecks checks that the verification checks a module declares are copied like the rest
+// of its hooks: neither the module nor a caller can change the registry's list after New.
+func TestRegistryKeepsTheChecks(t *testing.T) {
+	const kedaReady = "KedaReady"
+	holds := func(map[string]any) bool { return true }
+	checks := []VerificationCheck{{Name: kedaReady, Group: "keda.sh", Kind: "ScaledObject", Holds: holds}}
+	r := mustNew(t, nil, []Integration{stubIntegration{name: kedaName, hooks: Hooks{Checks: checks}}})
+	checks[0].Name = "Changed"
+
+	h, ok := r.IntegrationHooks(kedaName)
+	if !ok || len(h.Checks) != 1 || h.Checks[0].Name != kedaReady || h.Checks[0].Holds == nil {
+		t.Fatalf("IntegrationHooks = %#v, %v; want the KedaReady check as declared", h, ok)
+	}
+	h.Checks[0].Name = "Changed"
+	if again, _ := r.IntegrationHooks(kedaName); again.Checks[0].Name != kedaReady {
+		t.Errorf("a caller changed the registry's checks: %#v", again.Checks)
+	}
+}

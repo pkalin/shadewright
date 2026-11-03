@@ -1,0 +1,17 @@
+{
+  "apiVersion": "keda.sh/v1alpha1",
+  "kind": "ScaledObject",
+  "metadata": {"name": "billing", "namespace": "shop", "uid": "1e3f5a7c-9b2d-4f60-8a1c-3e5f7a9b1d2c", "generation": 2},
+  "spec": {
+    "scaleTargetRef": {"name": "billing-worker"},
+    "triggers": [{"type": "prometheus", "metadata": {"serverAddress": "http://prometheus.monitoring.svc:9090", "query": "sum(billing_backlog)", "threshold": "10"}}]
+  },
+  "status": {
+    "conditions": [
+      {"type": "Ready", "status": "False", "reason": "ScaledObjectCheckFailed", "message": "ScaledObject doesn't have correct scaleTargetRef specification: deployments.apps \"billing-worker\" not found"},
+      {"type": "Active", "status": "Unknown", "reason": "UnknownState", "message": "ScaledObject check failed"},
+      {"type": "Fallback", "status": "False", "reason": "NoFallbackFound", "message": "No fallbacks are active on this scaled object"},
+      {"type": "Paused", "status": "False"}
+    ]
+  }
+}

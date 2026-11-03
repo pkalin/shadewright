@@ -1,0 +1,19 @@
+{
+  "apiVersion": "keda.sh/v1alpha1",
+  "kind": "ScaledObject",
+  "metadata": {"name": "worker", "namespace": "demo", "uid": "3c1f5a7e-2b4d-4e6f-8a9b-0c1d2e3f4a5b", "generation": 2, "annotations": {"autoscaling.keda.sh/paused": "true"}},
+  "spec": {
+    "scaleTargetRef": {"name": "worker"},
+    "maxReplicaCount": 3,
+    "triggers": [{"type": "prometheus", "metadata": {"serverAddress": "http://prometheus-server.monitoring.svc.cluster.local", "query": "sum(rate(http_requests_total[1m]))", "threshold": "5"}}]
+  },
+  "status": {
+    "triggersTypes": "prometheus",
+    "conditions": [
+      {"type": "Ready", "status": "False", "reason": "TriggerError", "message": "Triggers defined in ScaledObject are not working correctly"},
+      {"type": "Active", "status": "False", "reason": "ScalerNotActive", "message": "Scaling is not performed because triggers are not active"},
+      {"type": "Fallback", "status": "False", "reason": "NoFallbackFound", "message": "No fallbacks are active on this scaled object"},
+      {"type": "Paused", "status": "True", "reason": "ScaledObjectPaused", "message": "ScaledObject is paused"}
+    ]
+  }
+}

@@ -25,7 +25,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
 	"github.com/pkalin/shadewright/internal/modules"
 	"github.com/pkalin/shadewright/internal/redact"
 	"github.com/pkalin/shadewright/internal/testutil/importguard"
@@ -186,13 +185,11 @@ func TestInvalidManifestScenario(t *testing.T) {
 	if ev[fieldApplied] != "cluster/kind@sha1:"+revOld {
 		t.Errorf("applied revision %q", ev[fieldApplied])
 	}
-	// The revisions must survive the redaction the evaluator applies, or the diagnosis loses them.
+	// The revisions must be whole Flux revisions, so the evaluator may keep them unredacted (redact.IsFluxRevision);
+	// inside text, redaction still removes the commit.
 	for _, f := range []string{fieldAttempted, fieldApplied} {
-		if out := redact.String(ev[f]); out != ev[f] {
-			t.Errorf("redaction changed the revision %q to %q", ev[f], out)
-		}
-		if out := fingerprint.Normalize(fingerprint.Observation{Note: ev[f]}); out != ev[f] {
-			t.Errorf("normalization changed the revision %q to %q", ev[f], out)
+		if !redact.IsFluxRevision(ev[f]) {
+			t.Errorf("the revision %q is not a whole Flux revision", ev[f])
 		}
 	}
 }

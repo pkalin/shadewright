@@ -26,11 +26,10 @@ limitations under the License.
 //
 // Redaction is best effort and errs on the side of removing too much: an IP address or an email in a log
 // line is removed even when it is harmless, and so are the user name of any URL ("ssh://git@host"), long
-// runs that mix letters and digits, such as bare Git commit hashes and container IDs, and every scalar value
+// runs that mix letters and digits, such as Git commit hashes and container IDs, and every scalar value
 // under a secret-named YAML key ("credentials:\n  user: admin" loses "admin"). Values that look like
 // references rather than secrets, such as "secretName: db-creds", are kept, because the name of a missing
-// Secret is what a diagnosis needs, and so are the hex of an image digest and a commit in the form Flux
-// writes revisions ("main@sha1:" and 40 lower-case hex digits).
+// Secret is what a diagnosis needs, and so is the hex of an image digest.
 //
 // Where a rule would also match prose, it asks the value to look like a credential: the word after "Basic"
 // or "Bearer", and the value of the short keys "pass", "auth" and "sig" before a colon, on their own ("pass:
@@ -721,18 +720,12 @@ const minTokenLength = 24
 // hyphenated part of at least that length that mixes upper case, lower case and digits (base64url).
 // Paths and image names (short parts between slashes), long names made of letters only, Kubernetes names
 // and UUIDs (lower case, short pieces between hyphens) and the hex of an image digest ("sha256:...", which
-// identifies a build, not a credential, also with a suffix such as "-amd64") are kept, and so is a Git commit
-// in the form Flux writes revisions ("main@sha1:" and exactly 40 lower-case hex digits), which names a commit
-// in a repository, not a credential. What follows the digest's or commit's hex is judged on its own. A bare
-// 40-digit hex run, without "sha1:" right before it, is still redacted.
+// identifies a build, not a credential, also with a suffix such as "-amd64") are kept; what follows the
+// digest's hex is judged on its own.
 func longTokenSpan(s string, m []int, _ int) (int, int, bool) {
 	start, run := m[0], s[m[0]:m[1]]
 	if prefix := strings.ToLower(s[max(0, m[0]-7):m[0]]); prefix == "sha256:" || prefix == "sha512:" {
 		if digest, rest, _ := strings.Cut(run, "-"); isHex(digest) {
-			start, run = m[1]-len(rest), rest
-		}
-	} else if sha1Prefix(s, m[0]) {
-		if commit, rest, _ := strings.Cut(run, "-"); isSHA1(commit) {
 			start, run = m[1]-len(rest), rest
 		}
 	}
@@ -740,28 +733,6 @@ func longTokenSpan(s string, m []int, _ int) (int, int, bool) {
 		return start, m[1], true
 	}
 	return 0, 0, false
-}
-
-// sha1Prefix reports whether "sha1:" (lower case) ends at pos and does not continue a longer word.
-func sha1Prefix(s string, pos int) bool {
-	const prefix = "sha1:"
-	if pos < len(prefix) || s[pos-len(prefix):pos] != prefix {
-		return false
-	}
-	return pos == len(prefix) || !isAlnum(s[pos-len(prefix)-1])
-}
-
-// isSHA1 reports whether s is exactly 40 lower-case hex digits, a SHA-1 commit hash.
-func isSHA1(s string) bool {
-	if len(s) != 40 {
-		return false
-	}
-	for i := range len(s) {
-		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
 }
 
 // randomRun reports whether some part of run between slashes looks random, as described for longTokenSpan.

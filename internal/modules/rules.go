@@ -53,7 +53,8 @@ type Evidence struct {
 	Field string
 	// Value is the value read, as the rule found it. It is untrusted. The evaluator (planned, #61) redacts it
 	// with fingerprint.Normalize, which by itself caps a value at 1024 bytes, and then cuts it to
-	// [MaxEvidenceValueLength] bytes.
+	// [MaxEvidenceValueLength] bytes. The one exception is a value that is a whole Flux revision
+	// (redact.IsFluxRevision), which holds only a reference name and a commit and is kept as it is.
 	Value string
 }
 

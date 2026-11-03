@@ -666,26 +666,41 @@ func FuzzString(f *testing.F) {
 	})
 }
 
-// A Flux revision names a Git commit as "sha1:" and exactly 40 lower-case hex digits. It is kept; the same hex
-// without that prefix, a longer or upper-case run, or a token after the commit is still redacted.
+// A Flux revision is kept only when it is the whole value (IsFluxRevision); inside text, the commit hash is
+// redacted like any other long hex run, so "sha1:" written in front of a secret keeps nothing.
 func TestFluxRevisions(t *testing.T) {
 	const commit = "1f3c5e7a9b2d4f6081a3c5e7f9b1d3f5a7c9e1b3"
 	for _, in := range []string{
 		"main@sha1:" + commit,
-		"Applied revision: cluster/kind@sha1:" + commit,
+		"refs/heads/main@sha1:" + commit,
+		"cluster/kind@sha1:" + commit,
 		"sha1:" + commit,
-		"refs/heads/main@sha1:" + commit + " failed",
 	} {
-		if out := String(in); out != in {
-			t.Errorf("changed a revision:\n in: %q\nout: %q", in, out)
+		if !IsFluxRevision(in) {
+			t.Errorf("IsFluxRevision(%q) = false", in)
+		}
+	}
+	for _, in := range []string{
+		"",
+		commit,
+		"main@sha1:" + commit + "a",
+		"main@sha1:" + strings.ToUpper(commit),
+		"main@sha1:" + commit + " failed",
+		"token main@sha1:" + commit,
+		"main@sha1:" + commit + "-" + randomToken,
+		"main@sha1:" + commit + "\n",
+		"ma in@sha1:" + commit,
+		"main@@sha1:" + commit,
+		"main@sha256:" + commit,
+		strings.Repeat("a", 256) + "@sha1:" + commit,
+	} {
+		if IsFluxRevision(in) {
+			t.Errorf("IsFluxRevision(%q) = true", in)
 		}
 	}
 	checkGapCases(t, []gapCase{
-		{name: "bare commit hash", input: "token " + commit, secrets: []string{commit}},
-		{name: "one digit too many", input: "main@sha1:" + commit + "a", secrets: []string{commit}},
-		{name: "upper-case hex", input: "main@sha1:" + strings.ToUpper(commit), secrets: []string{strings.ToUpper(commit)}},
-		{name: "prefix inside a word", input: "xsha1:" + commit, secrets: []string{commit}},
-		{name: "token after the commit", input: "main@sha1:" + commit + "-" + randomToken + endText,
-			secrets: []string{randomToken}, kept: []string{"main@sha1:" + commit + "-", endText}},
+		{name: "sha1 prefix written before a secret", input: "Bearer sha1:" + commit, secrets: []string{commit}},
+		{name: "revision inside a message", input: "Applied revision: main@sha1:" + commit, secrets: []string{commit}},
+		{name: "at sign and prefix before a secret", input: "x@sha1:" + commit + " end", secrets: []string{commit}},
 	})
 }

@@ -1,7 +1,8 @@
 # Build the manager binary
-# Override BASE_IMAGE to build from another registry, e.g. docker.io/library/golang:1.26
-ARG BASE_IMAGE=golang:1.26
-FROM ${BASE_IMAGE} AS builder
+# Base images are pinned by tag and digest; Dependabot (docker ecosystem) keeps both current.
+# To build from a mirror, override a base with a named build context, e.g.
+#   docker buildx build --build-context golang:1.26.10@sha256:<digest>=docker-image://<mirror>/golang:1.26.10 .
+FROM golang:1.26.10@sha256:670bb5aa5349ae03b8516764718486f4f16399134bdc9acd0c46a23f043ab05c AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -26,7 +27,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/analyzer .

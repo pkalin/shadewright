@@ -260,6 +260,28 @@ func eventually(t *testing.T, ns string, f int, cond func(*remediationv1alpha1.I
 	}
 }
 
+// remembered waits until the controller's memory holds the drop mark of inc, the Incident as read from the
+// API server. The controller updates its memory only after the status write returns, so a test that saw the
+// write on the API server may otherwise ask Handled before then. The drop mark is set under mu together with
+// the removal of the records the write dropped, so once it is there, so is the rest of that write.
+func remembered(t *testing.T, r *running, inc *remediationv1alpha1.Incident) {
+	t.Helper()
+	want := timeFrom(inc.Status.OccurrencesDroppedThrough)
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		r.mu.Lock()
+		got := r.droppedThrough
+		r.mu.Unlock()
+		if !got.Before(want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the controller remembers records dropped through %v, want %v", got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func countIs(n int64) func(*remediationv1alpha1.Incident) bool {
 	return func(inc *remediationv1alpha1.Incident) bool { return inc.Status.Count == n }
 }
@@ -289,6 +311,10 @@ func TestBurstMakesOneIncidentWithFewWrites(t *testing.T) {
 
 	// The records the bound dropped are answered as counted in full; so is an unknown occurrence that began
 	// before them, while a newer unknown one was never counted.
+	if inc.Status.OccurrencesDroppedThrough == nil {
+		t.Fatal("no drop mark after 100 occurrences")
+	}
+	remembered(t, r, inc)
 	for _, q := range []struct {
 		id    string
 		began time.Time

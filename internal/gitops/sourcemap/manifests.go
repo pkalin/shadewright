@@ -24,7 +24,6 @@ import (
 	"io"
 	"maps"
 	"path"
-	"regexp"
 	"slices"
 	"strings"
 
@@ -33,6 +32,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/gitops/repopath"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
@@ -48,46 +48,11 @@ const (
 	// MaxFileBytes is the largest file read. The provider refuses larger files before downloading them
 	// (providers.ErrTooLarge); the mapping checks the size again in case an adapter does not.
 	MaxFileBytes = providers.MaxFileBytes
-	// maxRefLen is the longest path accepted, the MaxLength of GitFilePath.
-	maxRefLen = 512
 )
-
-// kustomizationFileNames are the names kustomize looks for in a directory.
-var kustomizationFileNames = []string{"kustomization.yaml", "kustomization.yml", kindKustomization}
 
 // kustomizationKeys are the only fields a kustomization file may use: anything else (patches, generators,
 // components, transformers, namespace, name prefix, images, replicas, labels) changes what is built.
 var kustomizationKeys = map[string]bool{"apiVersion": true, "kind": true, "metadata": true, "resources": true}
-
-// segmentRE is one path segment that is neither "." nor "..": it starts with a letter, digit or underscore
-// and holds no characters that could make it a URL, an option or a hidden file.
-var segmentRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*$`)
-
-// keyRE is a kustomization field name that is safe to quote in a message.
-var keyRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]{0,63}$`)
-
-// joinRel resolves ref, a relative path from a kustomization file or a Kustomization, against dir, a clean
-// path inside the repository ("." for its root). It refuses absolute paths, URLs, segments that are not
-// plain names, and results outside the repository.
-func joinRel(dir, ref string) (string, bool) {
-	if ref == "" || len(ref) > maxRefLen || strings.HasPrefix(ref, "/") {
-		return "", false
-	}
-	for seg := range strings.SplitSeq(ref, "/") {
-		if seg != "" && seg != "." && seg != ".." && !segmentRE.MatchString(seg) {
-			return "", false
-		}
-	}
-	p := path.Join(dir, ref)
-	if p == ".." || strings.HasPrefix(p, "../") || len(p) > maxRefLen {
-		return "", false
-	}
-	return p, true
-}
-
-func isManifestFile(p string) bool {
-	return strings.HasSuffix(p, ".yaml") || strings.HasSuffix(p, ".yml")
-}
 
 // walker collects the manifest files a kustomization directory builds, following its resources.
 type walker struct {
@@ -133,7 +98,7 @@ func (w *walker) walk(ctx context.Context, dir string, depth int) (*Result, erro
 			continue
 		}
 		what := "an unsupported field"
-		if keyRE.MatchString(key) {
+		if repopath.SafeKey(key) {
 			what = fmt.Sprintf("%q", key)
 		}
 		r := needsIntervention(ReasonUnsupportedKustomization,
@@ -151,13 +116,13 @@ func (w *walker) walk(ctx context.Context, dir string, depth int) (*Result, erro
 	}
 	for _, res := range resources {
 		ref, isString := res.(string)
-		p, valid := joinRel(dir, ref)
+		p, valid := repopath.Join(dir, ref)
 		if !isString || !valid {
 			r := needsIntervention(ReasonUnsupportedKustomization,
 				"%s lists a resource that is not a relative path inside the repository", file.Path)
 			return &r, nil
 		}
-		if !isManifestFile(p) {
+		if !repopath.IsManifest(p) {
 			if stop, err := w.walk(ctx, p, depth+1); stop != nil || err != nil {
 				return stop, err
 			}
@@ -180,7 +145,7 @@ func (w *walker) walk(ctx context.Context, dir string, depth int) (*Result, erro
 }
 
 // sourceIgnoreFile is the file whose rules Flux applies to a GitRepository artifact.
-const sourceIgnoreFile = ".sourceignore"
+const sourceIgnoreFile = repopath.SourceIgnoreFile
 
 // checkIgnore stops when dir or any directory above it, up to the repository root, holds a .sourceignore
 // file. Flux would drop the files it matches from the artifact while this walker reads the full tree, so the
@@ -210,7 +175,7 @@ func (w *walker) checkIgnore(ctx context.Context, dir string) (*Result, error) {
 // kustomizationFile reads the one kustomization file in dir.
 func (w *walker) kustomizationFile(ctx context.Context, dir string) (providers.File, *Result, error) {
 	var found []providers.File
-	for _, name := range kustomizationFileNames {
+	for _, name := range repopath.KustomizationFileNames {
 		f, stop, err := w.read(ctx, path.Join(dir, name))
 		if stop != nil {
 			if stop.Reason == reasonFileNotFound {

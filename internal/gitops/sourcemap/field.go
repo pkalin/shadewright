@@ -129,11 +129,12 @@ func (f Field) Get(obj map[string]any) (any, bool) {
 	return cur, cur != nil
 }
 
-// equal reports whether two field values are the same. Without Quantity they must have the same JSON form,
-// so the number 15 equals 15 decoded either as an integer or a float, but not the string "15".
 // Equals reports whether two decoded values are the same value of this field: as quantities for a Quantity
 // field (256Mi equals 268435456), otherwise by their JSON encoding.
 func (f Field) Equals(a, b any) bool { return f.equal(a, b) }
+
+// equal reports whether two field values are the same. Without Quantity they must have the same JSON form,
+// so the number 15 equals 15 decoded either as an integer or a float, but not the string "15".
 
 func (f Field) equal(a, b any) bool {
 	if f.Quantity {
@@ -173,6 +174,20 @@ func PreviousValue(action v1alpha1.Action) (any, bool) {
 		return q.String(), true
 	case action.AdjustKedaMaxReplicas != nil:
 		return int64(action.AdjustKedaMaxReplicas.PreviousValue), true
+	default:
+		return nil, false
+	}
+}
+
+// DesiredValue returns the desired value an action sets for its field, in the same form as PreviousValue.
+// It reports false for an action of no known type.
+func DesiredValue(action v1alpha1.Action) (any, bool) {
+	switch {
+	case action.SetContainerMemoryLimit != nil:
+		q := action.SetContainerMemoryLimit.Desired.DeepCopy() // String caches into its receiver
+		return q.String(), true
+	case action.AdjustKedaMaxReplicas != nil:
+		return int64(action.AdjustKedaMaxReplicas.DesiredValue), true
 	default:
 		return nil, false
 	}

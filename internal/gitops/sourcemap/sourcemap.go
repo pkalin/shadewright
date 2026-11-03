@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/gitops/repopath"
 	"github.com/pkalin/shadewright/internal/policy/pathmatch"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -213,7 +214,7 @@ func (r *Resolver) declaration(ctx context.Context, fld Field, gitOps v1alpha1.P
 	dir := "."
 	if d.path != "" {
 		var ok bool
-		if dir, ok = joinRel(".", d.path); !ok {
+		if dir, ok = repopath.Join(".", d.path); !ok {
 			return needsIntervention(ReasonInvalidPath,
 				"spec.path of Kustomization %s is not a relative path inside the repository", d.ks), nil
 		}

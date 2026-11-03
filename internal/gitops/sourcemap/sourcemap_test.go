@@ -607,8 +607,9 @@ func TestResolveStops(t *testing.T) {
 			f.files[ksFile] = "resources:\n  - https://github.com/example/fleet//apps?ref=main\n"
 		}, ni, sourcemap.ReasonUnsupportedKustomization},
 		{"remote resource without a scheme", func(f *fixture) {
+			// kustomize reads github.com/<org>/<repo> as a remote base, so it is refused as a reference.
 			f.files[ksFile] = "resources:\n  - github.com/example/fleet/apps\n"
-		}, ni, sourcemap.ReasonNoKustomizationFile},
+		}, ni, sourcemap.ReasonUnsupportedKustomization},
 		{"resource outside the repository", func(f *fixture) {
 			f.files[ksFile] = "resources:\n  - ../../../etc/passwd.yaml\n"
 		}, ni, sourcemap.ReasonUnsupportedKustomization},

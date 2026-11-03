@@ -79,7 +79,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The collector (#41), the Incident controller (#42) and the analysis trigger (#43) are added here.
+	// The collector (internal/analyzer/collector) is added here with the Incident controller (#42), which
+	// consumes its observations and supplies the cluster ID and the last counted time of each Incident; the
+	// analysis trigger (#43) follows.
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")

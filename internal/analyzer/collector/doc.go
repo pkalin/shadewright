@@ -14,9 +14,33 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package collector will watch events, pods and workloads in the namespaces the analyzer is started with
-// (--watch-namespaces) and turn them into symptoms (#41, not built yet). For now it holds only the RBAC
-// markers of those reads.
+// Package collector watches events and pods in the namespaces the analyzer is started with
+// (--watch-namespaces) and turns them into observations for the Incident controller (design 3.1, 3.2).
+//
+// What it watches: events.k8s.io/v1 Events of type Warning, and Pods with an abnormal container
+// termination (OOMKilled or a non-zero exit code). OOMKilled comes from container status, never from an
+// event reason, so the pod watch is how it is seen. There is no core/v1 Event watch: those are the same
+// objects in an older version, and watching both would count each event twice. Both watches use the
+// manager's cache, which the analyzer restricts to the watched namespaces.
+//
+// Observation-level deduplication: per event the collector remembers the UID and the last handled
+// occurrence count (the series count, or the count of an older recorder, or one), and emits only the
+// increase. Per pod it remembers the container IDs of handled terminations. Both are LRU maps with a fixed
+// capacity. Anything older than the first reconcile (a restart or a new leader), or as old as state that was
+// dropped to stay within the capacity, is marked MayRepeat, and a LastSeenFunc from the Incident controller
+// suppresses what the Incident already counted, so restarts are absorbed by the Incident counters, not by
+// memory alone.
+//
+// Owner correlation follows controller owner references from Pod to ReplicaSet to Deployment and from Pod
+// to StatefulSet. Owner references are untrusted: each hop is a metadata read through the API reader, with a
+// deadline, and must have the referenced UID, or the chain stops at the last verified object. Kinds the
+// analyzer cannot read (DaemonSets, Jobs) are not followed. Results are kept in a bounded cache with a TTL.
+//
+// Untrusted input: notes go through package fingerprint, which redacts before it normalizes, and only the
+// fingerprint and the normalized symptom leave the collector; termination messages are never read.
+// Reasons, references and timestamps are checked against the Incident schema and the collector's clock.
+// Observations go to a bounded channel; when it stays full, the reconcile retries later without
+// committing its state, so nothing is lost or counted twice within one process.
 //
 // Its markers generate the ClusterRole analyzer-watch-role (config/rbac/analyzer/watch). That role is only a
 // catalogue of verbs: it is bound by one RoleBinding per watched namespace (config/watch), never by a

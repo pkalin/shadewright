@@ -54,7 +54,9 @@ func ParseNamespaces(flag string) ([]string, error) {
 
 // CacheOptions bounds the analyzer's cache to what its RBAC grants: namespaced objects only in the watched
 // namespaces, Incidents and RemediationRequests only in the operator namespace. Cluster-scoped objects
-// (RemediationSettings) are not affected by namespace restrictions.
+// (RemediationSettings) are not affected by namespace restrictions. Managed fields are dropped before an
+// object enters the cache: nothing in the analyzer reads them, and they are often the largest part of an
+// event or a pod.
 func CacheOptions(operatorNamespace string, watched []string) cache.Options {
 	defaults := make(map[string]cache.Config, len(watched))
 	for _, ns := range watched {
@@ -63,6 +65,7 @@ func CacheOptions(operatorNamespace string, watched []string) cache.Options {
 	operator := map[string]cache.Config{operatorNamespace: {}}
 	return cache.Options{
 		DefaultNamespaces: defaults,
+		DefaultTransform:  cache.TransformStripManagedFields(),
 		ByObject: map[client.Object]cache.ByObject{
 			&remediationv1alpha1.Incident{}:           {Namespaces: operator},
 			&remediationv1alpha1.RemediationRequest{}: {Namespaces: operator},

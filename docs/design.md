@@ -1,6 +1,6 @@
 # Design
 
-Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the semantic diff check of section 8.2, the GitHub and Key Vault adapters, the pull request step of section 6 (branch, commit and pull request, up to `AwaitingApproval`) and the RBAC of sections 2.2 and 10. Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
+Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the semantic diff check of section 8.2, the GitHub and Key Vault adapters, the pull request step of section 6 (branch, commit and pull request, up to `AwaitingApproval`), the collector of section 3.1 with the observation-level deduplication of section 3.2 (built, started by the analyzer together with the Incident controller, #42) and the RBAC of sections 2.2 and 10. Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
 
 ## 1. Goals
 
@@ -48,7 +48,7 @@ sequenceDiagram
     participant E as Executor
     participant G as GitHub
     participant F as Flux
-    K->>A: Events, pods and workloads (planned)
+    K->>A: Warning events, pod status and owners (planned)
     A->>A: Redact and fingerprint the symptoms
     A->>K: Group them into an Incident (planned)
     A->>M: Redacted context, bounded tool loop (planned)
@@ -89,7 +89,7 @@ The analyzer and the remediation controller are separate binaries in one Go modu
 
 The collector, the incident store and the analyzer run in the analyzer binary; the policy engine, the remediation controller, the GitOps adapter and the verifier run in the executor (`cmd/main.go`). Their roles are generated from kubebuilder RBAC markers (`internal/analyzer`, `internal/analyzer/collector`, `internal/controller`):
 
-- **Analyzer:** reads events (`events.k8s.io/v1`), pods and workloads only in the namespaces it is started with (`--watch-namespaces`): a ClusterRole that is only a catalogue of verbs, bound by one RoleBinding per watched namespace and never cluster-wide, and a cache restricted to the same list for those kinds, and to the operator namespace for Incidents and requests. Incidents live in the operator namespace, next to the requests that point at them: it creates and updates `Incident` objects and their status, and creates `RemediationRequest` objects, there only (a Role). Its one cluster-wide grant is reading the cluster-scoped `RemediationSettings`. The watched namespaces are a deployer setting (`demo` is the lab default). The RoleBindings are built from `config/watch` (separately from `config/default`, in namespaces that must already exist) and must match `--watch-namespaces`; `test/rbac` checks that they do. The operator namespace comes from `--namespace`, defaulting to `POD_NAMESPACE`, and the analyzer refuses to start without it or with an empty list. It cannot update, delete or write the status of a request.
+- **Analyzer:** reads events (`events.k8s.io/v1`), pods and workloads only in the namespaces it is started with (`--watch-namespaces`): a ClusterRole that is only a catalogue of verbs, bound by one RoleBinding per watched namespace and never cluster-wide, and a cache restricted to the same list for those kinds, and to the operator namespace for Incidents and requests. Incidents live in the operator namespace, next to the requests that point at them: it creates and updates `Incident` objects and their status, and creates `RemediationRequest` objects, there only (a Role). Its one cluster-wide grant is reading the cluster-scoped `RemediationSettings`. The cache drops managed fields before it stores an object. The collector uses list and watch only on events and pods; it reads a pod's owners with a `get` of their metadata, one object at a time, and starts no informer for workloads. The watched namespaces are a deployer setting (`demo` is the lab default). The RoleBindings are built from `config/watch` (separately from `config/default`, in namespaces that must already exist) and must match `--watch-namespaces`; `test/rbac` checks that they do. The operator namespace comes from `--namespace`, defaulting to `POD_NAMESPACE`, and the analyzer refuses to start without it or with an empty list. It cannot update, delete or write the status of a request.
 - **Executor:** reads (`get` only) policies and settings, always from the API server, never through a cache (reading incidents for verification is planned); reads (`get` only, no list or watch) the target kinds (Deployments, StatefulSets, KEDA ScaledObjects) and the Flux Kustomizations and GitRepositories that deliver them, for source mapping; reads requests, writes their status and patches them to add or remove its finalizer in the operator namespace only (a Role), and its cache watches requests only there; the spec of a request is immutable (CEL), so the patch cannot change what was decided. It cannot create requests or write incidents.
 - Neither can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
 
@@ -146,9 +146,16 @@ Later candidates: External Secrets Operator, Reloader, cert-manager, Trivy Opera
 
 ### 3.1. Collecting
 
-Use `events.k8s.io/v1`. Handle both new events and updates to an event series. Fields read: `regarding`, `related`, `reason`, `action`, `type`, `reportingController`, `reportingInstance`, `note`, `eventTime`, `series.count`, `series.lastObservedTime` ([Event API](https://kubernetes.io/docs/reference/kubernetes-api/events/event-v1/)). Do not also watch `core/v1` events, or each event is counted twice.
+Use `events.k8s.io/v1`. Handle both new events and updates to an event series. Fields read: `regarding`, `reason`, `action`, `type`, `reportingController`, `note`, `eventTime`, `series.count`, `series.lastObservedTime`, and `deprecatedCount` and `deprecatedLastTimestamp` for events written by older recorders ([Event API](https://kubernetes.io/docs/reference/kubernetes-api/events/event-v1/)). Do not also watch `core/v1` events: they are the same objects in an older version, so each event would be counted twice.
 
-Events detect symptoms; they are not a durable audit log. The collector keeps what it needs beyond event retention and also reads current object state periodically.
+Events detect symptoms; they are not a durable audit log. The collector keeps what it needs beyond event retention and also reads current object state.
+
+The collector (`internal/analyzer/collector`) runs in the analyzer and reads through its cache, so it sees only the watched namespaces:
+
+- **Events:** only type `Warning`. A reason that is not a plain CamelCase word, a reporting controller that is not a plain component name, fields longer than the `Incident` schema allows, a regarding object in another namespace than the event, or a regarding reference without a UID make the event unusable, and it is dropped.
+- **Pod status:** every abnormal container termination, in init and app containers, from the current and the last state: `OOMKilled`, or any other reason with a non-zero exit code. A termination is one observation, identified by its container ID; the symptom is the container name and the exit code. The termination message is never read: the container writes it.
+- **Owners:** the subject of an observation is the owning workload, following controller owner references from Pod to ReplicaSet to Deployment and from Pod to StatefulSet. Owner references are untrusted, so each hop is read from the API server (metadata only, with a deadline) and must carry the referenced UID; otherwise the chain stops at the last verified object. DaemonSets and Jobs are not followed, because the analyzer cannot read them, so their pods are their own subjects. Results are cached, a bounded number for a bounded time.
+- **Output:** each observation carries the fingerprint and the normalized, redacted symptom from `internal/incidents/fingerprint`, the subject, the new occurrence count and when it happened (never later than the collector's clock). No raw note leaves the collector. Observations go to a bounded channel read by the Incident controller; when it stays full, the reconcile tries again later without recording anything as handled.
 
 First cases:
 
@@ -161,7 +168,9 @@ Reasons differ by component and version. `OOMKilled`, for example, comes from co
 
 ### 3.2. Two levels of deduplication
 
-**Observation level:** remember the event UID and the last handled count. On a series update, process the increase, not the total. A single event without a series counts once.
+**Observation level:** remember the event UID and the last handled count. On a series update, process the increase, not the total. A single event without a series counts once, or as its `deprecatedCount` when an older recorder kept one; the series count includes the first occurrence, so a single event that becomes a series of 2 adds 1.
+
+The collector keeps this state in memory, in maps with a fixed capacity (10,000 events and 5,000 pods by default) that drop the least recently used entry. Memory alone does not survive a restart, so an observation is marked *may repeat* when the collector cannot rule out that it was counted before: the event or termination is older than the collector's first reconcile (a restart, or a new leader), or no newer than state it dropped to stay within its capacity. For those the Incident controller supplies when the Incident last counted an observation, and the collector drops the observation if nothing in it is newer. The dedup state of a series that started before a restart therefore lives in the Incident counters. What remains is the part of a series that grew while no collector ran: it is counted in full once, as the series total, because the API server keeps only the total.
 
 **Incident level:** group similar observations by fingerprint:
 

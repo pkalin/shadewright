@@ -1,0 +1,15 @@
+{
+  "apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+  "kind": "Kustomization",
+  "metadata": {"name": "apps", "namespace": "flux-system", "uid": "6a1f0c2e-3b4d-4e5f-8a7b-9c0d1e2f3a4b", "generation": 1},
+  "spec": {"interval": "1m", "path": "./apps", "prune": true, "sourceRef": {"kind": "GitRepository", "name": "flux-system"}},
+  "status": {
+    "observedGeneration": 1,
+    "lastAttemptedRevision": "cluster/kind@sha1:1f3c5e7a9b2d4f6081a3c5e7f9b1d3f5a7c9e1b3",
+    "lastAppliedRevision": "cluster/kind@sha1:0e2d4c6b8a9f7e5d3c1b0a9f8e7d6c5b4a3f2e1d",
+    "conditions": [
+      {"type": "Reconciling", "status": "True", "reason": "ProgressingWithRetry", "message": "Detecting drift for revision cluster/kind@sha1:1f3c5e7a9b2d4f6081a3c5e7f9b1d3f5a7c9e1b3 with a timeout of 50s", "observedGeneration": 1, "lastTransitionTime": "2026-11-03T09:12:41Z"},
+      {"type": "Ready", "status": "False", "reason": "ReconciliationFailed", "message": "Service/demo/web dry-run failed: failed to create typed patch object (demo/web; /v1, Kind=Service): .spec.ports[0].port: expected numeric (int or float), got string", "observedGeneration": 1, "lastTransitionTime": "2026-11-03T09:12:41Z"}
+    ]
+  }
+}

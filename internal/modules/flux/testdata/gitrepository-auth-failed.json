@@ -1,0 +1,14 @@
+{
+  "apiVersion": "source.toolkit.fluxcd.io/v1",
+  "kind": "GitRepository",
+  "metadata": {"name": "flux-system", "namespace": "flux-system", "uid": "9d4a3f5b-6e7a-4b82-9dae-2f3a4b5c6d7e", "generation": 2},
+  "spec": {"interval": "1m", "url": "https://github.com/example/fleet", "ref": {"branch": "cluster/kind"}, "secretRef": {"name": "flux-system"}},
+  "status": {
+    "observedGeneration": 2,
+    "artifact": {"path": "gitrepository/flux-system/flux-system/0e2d4c6b8a9f7e5d3c1b0a9f8e7d6c5b4a3f2e1d.tar.gz", "revision": "cluster/kind@sha1:0e2d4c6b8a9f7e5d3c1b0a9f8e7d6c5b4a3f2e1d", "digest": "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"},
+    "conditions": [
+      {"type": "FetchFailed", "status": "True", "reason": "AuthenticationFailed", "message": "failed to checkout and determine revision: unable to clone 'https://github.com/example/fleet': authentication required", "observedGeneration": 2, "lastTransitionTime": "2026-11-03T11:00:00Z"},
+      {"type": "Ready", "status": "False", "reason": "AuthenticationFailed", "message": "failed to checkout and determine revision: unable to clone 'https://github.com/example/fleet': authentication required", "observedGeneration": 2, "lastTransitionTime": "2026-11-03T11:00:00Z"}
+    ]
+  }
+}

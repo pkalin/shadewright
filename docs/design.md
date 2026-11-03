@@ -160,7 +160,7 @@ An `Integration` module per add-on: detection (API groups, CRDs, versions), watc
 | --- | --- | --- |
 | Core workloads (Deployment, StatefulSet, PDB, NetworkPolicy, ResourceQuota) | OOM, crash loops, unschedulable pods, quota | `SetContainerMemoryLimit` |
 | KEDA | trigger errors, `ScaledObject` not ready, replica ceiling | `AdjustKedaMaxReplicas` |
-| Flux | failing `Kustomization` or `HelmRelease`, drift | none: Flux is the delivery path |
+| Flux | failing `Kustomization`, `HelmRelease` or `GitRepository`, drift from Git | none: Flux is the delivery path |
 | Kyverno | a deployment refused by a policy, policy reports | diagnosis only |
 | Secrets Store CSI driver | pods stuck on a missing secret or identity | diagnosis only |
 | cloudflared | tunnel down, so the application is unreachable | none |
@@ -168,6 +168,16 @@ An `Integration` module per add-on: detection (API groups, CRDs, versions), watc
 Later candidates: External Secrets Operator, Reloader, cert-manager, Trivy Operator, Karpenter. Modules are enabled per cluster in `RemediationSettings` (5.4), and the analyzer is to report what it detected in status (planned, [#61](https://github.com/pkalin/shadewright/issues/61)).
 
 An integration is detected when the discovery API serves any of the group versions it declares (KEDA: `keda.sh/v1alpha1`), again as a pure function of the list the caller collected. Detection returns, with each integration, the first of its declared group versions that is served, the value status reports. Detection by other signals, such as the image of a Deployment for cloudflared, comes with the module that needs it. As in 2.4, an integration contributes hooks only when it is enabled and detected. A module's contributions (symptom sources, diagnosis rules, read-only tools, catalog actions) are declared in one value whose zero value contributes nothing, so a detection-only module is a name and its detection.
+
+A symptom source names one watched kind (group, the versions it can read in order of preference, kind, plural resource and the controller whose status it reads) and a pure function from one object, as decoded from JSON, to symptoms. A symptom has a reason and a summary that the rule writes itself, never cluster text, and evidence: values read from the object, each with the field it came from, which are untrusted and redacted and bounded where they are evaluated. `New` refuses a source with an invalid group version, kind, resource or controller, without a function, or a kind one module watches twice.
+
+**Flux** (`internal/modules/flux`, built; it contributes once the analyzer wires symptom sources, planned): detected by `kustomize.toolkit.fluxcd.io/v1`, `helm.toolkit.fluxcd.io/v2` or `source.toolkit.fluxcd.io/v1` (Flux 2.3 and later; beta versions are not read). It watches `Kustomization`, `HelmRelease` and `GitRepository` and reports at most one symptom per object:
+
+- `Stalled=True` first, otherwise `Ready=False`; `Ready=True`, `Ready=Unknown` (reconciling), a condition for an older generation, a suspended object and `DependencyNotReady` (the dependency has its own symptom) show nothing.
+- The reason is the Flux reason when it is one the module knows for the kind (build and apply errors such as `BuildFailed` and `ReconciliationFailed`, `HealthCheckFailed`, Helm `InstallFailed` and `UpgradeFailed`, Git `GitOperationFailed` and `AuthenticationFailed`), `Stalled`, or `NotReady` otherwise.
+- The evidence is the condition's reason and message, the last attempted revision and, when it differs, the revision the cluster still runs (`lastAppliedRevision`, the newest deployed Helm release, or the artifact a GitRepository still serves); the summary then says the cluster runs an older revision than Git, which is how drift from Git shows.
+
+The Flux module has no actions and no tools, and reads objects only: a fix is a pull request to the manifest, values or Kustomization (section 7), never a change to a Flux object. The read-only access to these kinds comes with the wiring; Flux objects usually live in `flux-system`, which then has to be among the analyzer's watched namespaces.
 
 ## 3. Observation and deduplication
 

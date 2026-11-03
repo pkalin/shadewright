@@ -1,0 +1,14 @@
+{
+  "apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+  "kind": "Kustomization",
+  "metadata": {"name": "infrastructure", "namespace": "flux-system", "uid": "7b2e1d3f-4c5e-4f60-9b8c-0d1e2f3a4b5c", "generation": 3},
+  "spec": {"interval": "10m", "path": "./infrastructure", "sourceRef": {"kind": "GitRepository", "name": "flux-system"}},
+  "status": {
+    "observedGeneration": 3,
+    "lastAttemptedRevision": "main@sha1:1f3c5e7a9b2d4f6081a3c5e7f9b1d3f5a7c9e1b3",
+    "lastAppliedRevision": "main@sha1:1f3c5e7a9b2d4f6081a3c5e7f9b1d3f5a7c9e1b3",
+    "conditions": [
+      {"type": "Ready", "status": "False", "reason": "BuildFailed", "message": "kustomize build failed: accumulating resources: accumulation err='accumulating resources from 'keda.yaml': open /tmp/kustomization-1234/infrastructure/keda.yaml: no such file or directory'", "observedGeneration": 3, "lastTransitionTime": "2026-11-03T08:00:00Z"}
+    ]
+  }
+}

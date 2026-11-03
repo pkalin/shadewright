@@ -83,8 +83,9 @@ type integrationEntry struct {
 // platform is always added and must not be passed. New fails on more than [MaxPlatforms] platforms or
 // [MaxIntegrations] integrations, a nil module (a typed nil included), an invalid name or detection, a name
 // given twice on one axis, a node label listed twice by one platform, a provider ID scheme without node labels,
-// or two platforms with the same provider ID scheme and the same node labels, which could never be told apart. Platform and integration names are separate: one of each may share
-// a name.
+// two platforms with the same provider ID scheme and the same node labels, which could never be told apart, or
+// a symptom source that [SymptomSource.Validate] refuses or a kind one module watches twice. Platform and
+// integration names are separate: one of each may share a name.
 func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 	if len(platforms) > MaxPlatforms {
 		return nil, fmt.Errorf("%d platform modules given, at most %d are allowed besides generic", len(platforms), MaxPlatforms)
@@ -119,6 +120,9 @@ func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 			}
 			claims[key] = name
 		}
+		if err := validateSources(p.Hooks().Symptoms); err != nil {
+			return nil, fmt.Errorf("platform module %q: %w", name, err)
+		}
 		e.module = p
 		r.addPlatform(e)
 	}
@@ -137,6 +141,9 @@ func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 			if !groupversion.Valid(gv) {
 				return nil, fmt.Errorf("integration module %q: group version %q is invalid", name, gv)
 			}
+		}
+		if err := validateSources(in.Hooks().Symptoms); err != nil {
+			return nil, fmt.Errorf("integration module %q: %w", name, err)
 		}
 		e := integrationEntry{name: name, module: in, detection: d}
 		r.integrations = append(r.integrations, e)

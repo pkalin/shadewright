@@ -1,0 +1,22 @@
+{
+  "apiVersion": "helm.toolkit.fluxcd.io/v2",
+  "kind": "HelmRelease",
+  "metadata": {"name": "keda", "namespace": "keda", "uid": "8c3f2e4a-5d6f-4a71-8c9d-1e2f3a4b5c6d", "generation": 5},
+  "spec": {"interval": "10m", "chart": {"spec": {"chart": "keda", "version": "2.18.1", "sourceRef": {"kind": "HelmRepository", "name": "kedacore"}}}},
+  "status": {
+    "observedGeneration": 5,
+    "lastAttemptedRevision": "2.18.1",
+    "lastAttemptedReleaseAction": "upgrade",
+    "failures": 1,
+    "upgradeFailures": 1,
+    "history": [
+      {"name": "keda", "namespace": "keda", "version": 4, "status": "failed", "chartName": "keda", "chartVersion": "2.18.1", "appVersion": "2.18.1"},
+      {"name": "keda", "namespace": "keda", "version": 3, "status": "superseded", "chartName": "keda", "chartVersion": "2.17.2", "appVersion": "2.17.2"},
+      {"name": "keda", "namespace": "keda", "version": 2, "status": "deployed", "chartName": "keda", "chartVersion": "2.17.2", "appVersion": "2.17.2"}
+    ],
+    "conditions": [
+      {"type": "Ready", "status": "False", "reason": "UpgradeFailed", "message": "Helm upgrade failed for release keda/keda with chart keda@2.18.1: context deadline exceeded", "observedGeneration": 5, "lastTransitionTime": "2026-11-03T10:00:00Z"},
+      {"type": "Released", "status": "False", "reason": "UpgradeFailed", "message": "Helm upgrade failed for release keda/keda with chart keda@2.18.1: context deadline exceeded", "observedGeneration": 5, "lastTransitionTime": "2026-11-03T10:00:00Z"}
+    ]
+  }
+}

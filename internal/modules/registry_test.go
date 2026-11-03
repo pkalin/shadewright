@@ -83,9 +83,9 @@ func TestNewRefuses(t *testing.T) {
 		{"typed nil platform", []Platform{aks, (*ptrPlatform)(nil)}, nil, "platform module 1 is nil"},
 		{"typed nil integration", nil, []Integration{(*ptrIntegration)(nil)}, "integration module 0 is nil"},
 		{"scheme with separator", []Platform{stubPlatform{name: aksName, detection: PlatformDetection{
-			ProviderIDScheme: "azure://", NodeLabels: []string{labelX}}}}, nil, "is invalid"},
+			ProviderIDScheme: "azure://", NodeLabels: []string{labelX}}}}, nil, wantInvalid},
 		{"upper case scheme", []Platform{stubPlatform{name: aksName, detection: PlatformDetection{
-			ProviderIDScheme: "Azure", NodeLabels: []string{labelX}}}}, nil, "is invalid"},
+			ProviderIDScheme: "Azure", NodeLabels: []string{labelX}}}}, nil, wantInvalid},
 		{"bad label", []Platform{stubPlatform{name: aksName, detection: PlatformDetection{
 			NodeLabels: []string{"bad label"}}}}, nil, "node label"},
 		{"empty label", []Platform{stubPlatform{name: aksName, detection: PlatformDetection{

@@ -180,6 +180,7 @@ var _ = Describe("RemediationSettings and the GitHub adapter", func() {
 		Entry(nil, fieldTargetBranch, "HEAD", true, "GitBranch refuses HEAD"),
 		Entry(nil, fieldTargetBranch, "refs/heads/main", true, "GitBranch refuses refs/"),
 		Entry(nil, fieldTargetBranch, "a.lock/b", true, "GitBranch refuses a .lock segment"),
+		Entry(nil, fieldTargetBranch, "release/-x", true, "GitBranch refuses a segment starting with '-'"),
 		// Key Vault key ID.
 		Entry(nil, fieldKeyID, "https://kv-example.vault.azure.net/keys/github-app", true, ""),
 		Entry(nil, fieldKeyID, "https://kv1.vault.azure.net/keys/github-app", true, ""),

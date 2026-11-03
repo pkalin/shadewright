@@ -34,11 +34,12 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 )
 
-// SettingsName is the name of the one RemediationSettings object, which holds maxAnalysesPerDay.
-const SettingsName = "default"
-
 // DefaultTriggerInterval is how often the controller decides again which Incidents are due.
 const DefaultTriggerInterval = 10 * time.Second
+
+// triggerFieldOwner is the field manager of the analysis trigger's writes (the AnalysisDue condition and the
+// analysis budget), so the managed fields tell them from the observation writes.
+const triggerFieldOwner = "shadewright-analysis-trigger"
 
 // triggerLoop marks the Incidents due for analysis every TriggerInterval until ctx ends.
 func (c *Controller) triggerLoop(ctx context.Context) {
@@ -57,28 +58,42 @@ func (c *Controller) triggerLoop(ctx context.Context) {
 }
 
 // markDue decides, for every Incident in the namespace, whether it is due for analysis ([Due]) and sets its
-// AnalysisDue condition where that changed. The budget used today is summed from the Incidents' status
-// ([UsedToday]); each Incident marked due takes one more unit of it, so no more Incidents are due at once
-// than the budget has left. Those already due go first, so the same ones stay due from one pass to the
-// next. An Incident whose name does not belong to its fingerprint is left alone, but its analyses still
-// count against the budget. Without the RemediationSettings object nothing is due (fail closed); when it
-// cannot be read, nothing changes and the pass returns the error.
+// AnalysisDue condition where that changed. The budget used today is read from the RemediationSettings
+// status ([UsedToday]); each Incident marked due takes one more unit of it, so no more Incidents are due at
+// once than the budget has left. Those already due go first, so the same ones stay due from one pass to the
+// next.
+//
+// It fails closed: without the RemediationSettings object, or with a budget that cannot be trusted, nothing
+// is due; when the object cannot be read, the Incidents marked due are set not due and the pass returns the
+// error. An Incident whose name does not belong to its fingerprint is not decided: if it is marked due, it is
+// set not due.
 func (c *Controller) markDue(ctx context.Context) error {
-	var settings remediationv1alpha1.RemediationSettings
-	found := true
-	if err := c.cache.Get(ctx, types.NamespacedName{Name: SettingsName}, &settings); apierrors.IsNotFound(err) {
-		found = false
-	} else if err != nil {
-		return fmt.Errorf("reading RemediationSettings %s: %w", SettingsName, err)
-	}
 	var list remediationv1alpha1.IncidentList
 	if err := c.cache.List(ctx, &list, client.InNamespace(c.cfg.Namespace)); err != nil {
 		return fmt.Errorf("listing the Incidents: %w", err)
 	}
-	s := TriggerSettings{Debounce: c.cfg.Debounce, Cooldown: c.cfg.Cooldown, MaxAnalysesPerDay: DefaultMaxAnalysesPerDay}
-	if settings.Spec.MaxAnalysesPerDay != nil {
-		s.MaxAnalysesPerDay = int(*settings.Spec.MaxAnalysesPerDay)
+	now := c.cfg.Now()
+	s := TriggerSettings{Debounce: c.cfg.Debounce, Cooldown: c.cfg.Cooldown, AnalysisTimeout: c.cfg.AnalysisTimeout}
+	var (
+		used     int
+		closed   string // the not-due reason of every Incident when the budget is unknown
+		settings remediationv1alpha1.RemediationSettings
+	)
+	settingsErr := c.cache.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, &settings)
+	switch {
+	case apierrors.IsNotFound(settingsErr):
+		closed = ReasonSettingsNotFound
+	case settingsErr != nil:
+		closed = ReasonSettingsUnreadable
+		settingsErr = fmt.Errorf("reading RemediationSettings %s: %w", remediationv1alpha1.SettingsName, settingsErr)
+	default:
+		var ok bool
+		if used, ok = UsedToday(&settings, now); !ok {
+			closed = ReasonBudgetUnreadable
+		}
+		s.MaxAnalysesPerDay = maxAnalysesPerDay(&settings)
 	}
+
 	items := list.Items
 	slices.SortFunc(items, func(a, b remediationv1alpha1.Incident) int {
 		ad, bd := meta.IsStatusConditionTrue(a.Status.Conditions, ConditionAnalysisDue),
@@ -91,62 +106,87 @@ func (c *Controller) markDue(ctx context.Context) error {
 		}
 		return strings.Compare(a.Name, b.Name)
 	})
-	now := c.cfg.Now()
-	used := UsedToday(items, now)
 	var errs []error
 	for i := range items {
-		if items[i].Name != Name(items[i].Spec.Fingerprint) {
-			// Not an Incident this controller writes (another fingerprint holds the name): left alone.
-			continue
-		}
-		decide := func(inc *remediationv1alpha1.Incident) (bool, string) {
-			if !found {
-				return false, ReasonSettingsNotFound
+		inc := &items[i]
+		wasDue := meta.IsStatusConditionTrue(inc.Status.Conditions, ConditionAnalysisDue)
+		var decide func(*remediationv1alpha1.Incident) (bool, string)
+		switch {
+		case inc.Name != Name(inc.Spec.Fingerprint):
+			// Not an Incident this controller writes (another fingerprint holds the name): only a mark that says
+			// due is taken back.
+			if !wasDue {
+				continue
 			}
-			return Due(inc, now, s, used)
+			decide = func(*remediationv1alpha1.Incident) (bool, string) { return false, ReasonForeignFingerprint }
+		case closed != "":
+			if closed == ReasonSettingsUnreadable && !wasDue {
+				// Without the settings nothing else changes: the marks that say due are taken back, no more.
+				continue
+			}
+			decide = func(*remediationv1alpha1.Incident) (bool, string) { return false, closed }
+		default:
+			held := c.heldSince(inc.Spec.Fingerprint)
+			decide = func(fresh *remediationv1alpha1.Incident) (bool, string) {
+				return Due(fresh, held, now, s, used)
+			}
 		}
-		due, err := c.setDue(ctx, items[i].Name, &items[i], decide)
+		due, err := c.setDue(ctx, inc, decide)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			// The condition stays as it was: if it says due, it still takes its unit of the budget.
-			if meta.IsStatusConditionTrue(items[i].Status.Conditions, ConditionAnalysisDue) {
-				used++
-			}
 			errs = append(errs, err)
-			continue
 		}
-		if due {
+		// A failed write may still have landed (a lost answer), and a mark it did not change still says due:
+		// either way the Incident takes its unit of the budget.
+		if due || (err != nil && wasDue) {
 			used++
 		}
 	}
+	if settingsErr != nil && !apierrors.IsNotFound(settingsErr) {
+		errs = append([]error{settingsErr}, errs...)
+	}
 	if len(errs) > 0 {
-		return fmt.Errorf("setting AnalysisDue on %d Incidents, first: %w", len(errs), errs[0])
+		return fmt.Errorf("deciding which Incidents are due, %d errors, first: %w", len(errs), errs[0])
 	}
 	return nil
 }
 
+// heldSince returns the newest observation of the Incident of fp that the controller holds unwritten, in a
+// pending or a failed batch, or zero.
+func (c *Controller) heldSince(fp string) time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var t time.Time
+	for _, b := range []*batch{c.pending[fp], c.failed[fp]} {
+		if b != nil {
+			t = latest(t, b.last)
+		}
+	}
+	return t
+}
+
 // setDue sets the AnalysisDue condition of one Incident to what decide says. cached is the Incident as the
-// cache holds it: when its condition already says the same, nothing is written. Otherwise the Incident is
-// read fresh from the API server, decided again on that copy, and its status updated, retrying on conflict
-// (the observation writer updates the same status). It reports the decision that holds.
-func (c *Controller) setDue(ctx context.Context, name string, cached *remediationv1alpha1.Incident,
+// cache holds it: when its condition already agrees ([conditionAgrees]), nothing is written. Otherwise the
+// Incident is read fresh from the API server, decided again on that copy, and its status updated, retrying
+// on conflict (the observation writer updates the same status). It reports the decision it last made, also
+// with an error, since a write whose answer was lost may have landed.
+func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Incident,
 	decide func(*remediationv1alpha1.Incident) (bool, string)) (bool, error) {
-	if due, reason := decide(cached); conditionSays(cached, due, reason) {
+	due, reason := decide(cached)
+	if conditionAgrees(cached, due, reason) {
 		return due, nil
 	}
 	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 	defer cancel()
-	var due bool
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		inc := &remediationv1alpha1.Incident{}
-		if err := c.reader.Get(wctx, types.NamespacedName{Namespace: c.cfg.Namespace, Name: name}, inc); err != nil {
+		if err := c.reader.Get(wctx, types.NamespacedName{Namespace: c.cfg.Namespace, Name: cached.Name}, inc); err != nil {
 			return err
 		}
-		var reason string
 		due, reason = decide(inc)
-		if conditionSays(inc, due, reason) {
+		if conditionAgrees(inc, due, reason) {
 			return nil
 		}
 		status := metav1.ConditionFalse
@@ -163,41 +203,49 @@ func (c *Controller) setDue(ctx context.Context, name string, cached *remediatio
 			ObservedGeneration: inc.Generation,
 			LastTransitionTime: metav1.NewTime(c.cfg.Now()),
 		})
-		return c.marker.Status().Update(wctx, inc)
+		return c.client.Status().Update(wctx, inc, client.FieldOwner(triggerFieldOwner))
 	})
 	if apierrors.IsNotFound(err) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("setting AnalysisDue on Incident %s: %w", name, err)
+		return due, fmt.Errorf("setting AnalysisDue on Incident %s: %w", cached.Name, err)
 	}
 	return due, nil
 }
 
-// conditionSays reports whether the Incident's AnalysisDue condition already holds this decision.
-func conditionSays(inc *remediationv1alpha1.Incident, due bool, reason string) bool {
+// conditionAgrees reports whether the Incident's AnalysisDue condition already holds the decision (due,
+// reason). A condition that says due must hold the same reason. One that says not due agrees with any
+// not-due reason: the reason it gave first stays, so a change that turns every Incident's reason (the budget
+// used up, or set to 0) writes nothing.
+func conditionAgrees(inc *remediationv1alpha1.Incident, due bool, reason string) bool {
 	cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue)
-	if cond == nil {
+	if cond == nil || cond.ObservedGeneration != inc.Generation {
 		return false
 	}
-	want := metav1.ConditionFalse
 	if due {
-		want = metav1.ConditionTrue
+		return cond.Status == metav1.ConditionTrue && cond.Reason == reason
 	}
-	return cond.Status == want && cond.Reason == reason && cond.ObservedGeneration == inc.Generation
+	return cond.Status == metav1.ConditionFalse
 }
 
 // dueMessages are the fixed messages of the AnalysisDue condition. They hold nothing from the cluster.
 var dueMessages = map[string]string{
 	ReasonFirstAnalysis:      "The incident was never analyzed and has settled",
-	ReasonNewOccurrence:      "An occurrence began after the last analysis",
+	ReasonNewOccurrence:      "An occurrence began after the last analysis and the cooldown has passed",
 	ReasonCooldownExpired:    "The symptom recurred and the cooldown since the last analysis has passed",
+	ReasonAnalysisTimedOut:   "The last analysis did not finish within the analysis timeout",
 	ReasonNotObserved:        "No observation is recorded yet",
 	ReasonAnalyzing:          "An analysis is running",
+	ReasonProposed:           "The last analysis made a proposal",
+	ReasonEscalated:          "The last analysis handed the incident to a person",
 	ReasonNoNewData:          "Nothing was observed since the last analysis",
-	ReasonCoolingDown:        "The symptom recurred without a new occurrence within the cooldown",
+	ReasonCoolingDown:        "The cooldown since the last analysis has not passed",
 	ReasonDebouncing:         "Waiting for the incident to settle",
 	ReasonAnalysisDisabled:   "RemediationSettings maxAnalysesPerDay is 0",
 	ReasonDailyBudgetReached: "The analyses of the current UTC day reached maxAnalysesPerDay",
+	ReasonBudgetUnreadable:   "The analysis budget in the RemediationSettings status cannot be trusted, so it is taken as spent",
 	ReasonSettingsNotFound:   "The RemediationSettings object does not exist, so the daily budget is unknown",
+	ReasonSettingsUnreadable: "The RemediationSettings object could not be read, so the daily budget is unknown",
+	ReasonForeignFingerprint: "The Incident's name belongs to another fingerprint",
 }

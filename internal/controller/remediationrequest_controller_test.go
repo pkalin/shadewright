@@ -215,7 +215,7 @@ var _ = Describe("RemediationRequest Controller", func() {
 		}
 		// Wait for the settings to go, so the next spec can create them again.
 		Eventually(func() bool {
-			return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: SettingsName},
+			return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName},
 				&remediationv1alpha1.RemediationSettings{}))
 		}).Should(BeTrue())
 		request, policy, settings, deployment = nil, nil, nil, nil

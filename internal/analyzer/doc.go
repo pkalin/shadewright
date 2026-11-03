@@ -26,7 +26,8 @@ limitations under the License.
 //     reached (package incidents) is a core Event, written with the grant the leader election Role already
 //     holds there (config/rbac/analyzer/leader_election.yaml), so it needs no grant of its own.
 //   - Cluster-wide (a ClusterRole with a ClusterRoleBinding): read the cluster-scoped RemediationSettings,
-//     and nothing namespaced.
+//     and get, update and patch its status, which holds the daily analysis budget (package incidents,
+//     ReserveAnalysis); nothing namespaced. The executor has no grant on that status.
 //   - In each watched namespace: the reads in package collector, a ClusterRole bound by one RoleBinding per
 //     namespace in --watch-namespaces, never cluster-wide.
 //
@@ -34,4 +35,5 @@ limitations under the License.
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=incidents/status,verbs=update
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=remediationrequests,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationsettings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationsettings/status,verbs=get;update;patch
 package analyzer

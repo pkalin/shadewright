@@ -105,7 +105,8 @@ func main() {
 	// identity and reaches neither Azure nor GitHub at startup. Entries that left the settings are dropped.
 	repos := &registry.Registry{Current: func(ctx context.Context) ([]remediationv1alpha1.GitRepository, error) {
 		settings := &remediationv1alpha1.RemediationSettings{}
-		if err := mgr.GetAPIReader().Get(ctx, client.ObjectKey{Name: controller.SettingsName}, settings); err != nil {
+		key := client.ObjectKey{Name: remediationv1alpha1.SettingsName}
+		if err := mgr.GetAPIReader().Get(ctx, key, settings); err != nil {
 			return nil, err
 		}
 		return settings.Spec.Repositories, nil

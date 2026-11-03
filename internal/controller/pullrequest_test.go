@@ -197,7 +197,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, o))).To(Succeed())
 		}
 		Eventually(func() bool {
-			return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: SettingsName},
+			return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName},
 				&remediationv1alpha1.RemediationSettings{}))
 		}).Should(BeTrue())
 	})
@@ -479,14 +479,14 @@ var _ = Describe("RemediationRequest pull request step", func() {
 	It("waits with the deletion while writes are paused", func() {
 		drive(remediationv1alpha1.PhaseAwaitingApproval)
 		live := &remediationv1alpha1.RemediationSettings{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SettingsName}, live)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, live)).To(Succeed())
 		live.Spec.Paused = new(true)
 		Expect(k8sClient.Update(ctx, live)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
 		Expect(reconcileOnce()).To(Succeed(), "a pause is a wait, not an error")
 		Consistently(gone, "300ms").Should(BeFalse())
 		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SettingsName}, live)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, live)).To(Succeed())
 		live.Spec.Paused = new(false)
 		Expect(k8sClient.Update(ctx, live)).To(Succeed())
 		Expect(reconcileOnce()).To(Succeed())
@@ -496,7 +496,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 	It("writes nothing to Git while writes are paused", func() {
 		live := &remediationv1alpha1.RemediationSettings{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SettingsName}, live)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, live)).To(Succeed())
 		live.Spec.Paused = new(true)
 		Expect(k8sClient.Update(ctx, live)).To(Succeed())
 		for range 5 {
@@ -1152,7 +1152,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			It("does not start the deadline while writes are paused, so a long pause expires nothing", func() {
 				pause := func(on bool) {
 					live := &remediationv1alpha1.RemediationSettings{}
-					Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SettingsName}, live)).To(Succeed())
+					Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, live)).To(Succeed())
 					live.Spec.Paused = new(on)
 					Expect(k8sClient.Update(ctx, live)).To(Succeed())
 				}

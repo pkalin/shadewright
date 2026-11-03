@@ -111,14 +111,18 @@ func namespace(t *testing.T) string {
 }
 
 // countingClient counts the writes that reach the API server and lets a test act just before a status
-// update (before), replace its result (after), or answer it without sending it (instead).
+// update (before), replace its result (after), or answer it without sending it (instead). Those count and
+// see only the observation writes: the analysis trigger's writes (field owner triggerFieldOwner) are counted
+// in marks and go through mark instead.
 type countingClient struct {
 	client.Client
-	creates, updates atomic.Int32
-	before           func(ctx context.Context, inc *remediationv1alpha1.Incident)
-	after            func(err error) error
+	creates, updates, marks atomic.Int32
+	before                  func(ctx context.Context, inc *remediationv1alpha1.Incident)
+	after                   func(err error) error
 	// instead, when it returns an error, answers a status update with it without sending the update.
 	instead func(ctx context.Context) error
+	// mark, when it returns an error, answers a write of the analysis trigger with it without sending it.
+	mark func(obj client.Object) error
 }
 
 func (c *countingClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
@@ -136,6 +140,15 @@ type countingStatus struct {
 }
 
 func (s *countingStatus) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if (&client.SubResourceUpdateOptions{}).ApplyOptions(opts).FieldManager == triggerFieldOwner {
+		s.c.marks.Add(1)
+		if s.c.mark != nil {
+			if err := s.c.mark(obj); err != nil {
+				return err
+			}
+		}
+		return s.SubResourceWriter.Update(ctx, obj, opts...)
+	}
 	s.c.updates.Add(1)
 	if s.c.before != nil {
 		s.c.before(ctx, obj.(*remediationv1alpha1.Incident))
@@ -162,11 +175,11 @@ type running struct {
 
 func start(t *testing.T, ns string, cfg Config) *running {
 	t.Helper()
-	return startMarking(t, ns, cfg, env.admin)
+	return startWith(t, ns, cfg, nil)
 }
 
-// startMarking is start with marker writing the AnalysisDue condition.
-func startMarking(t *testing.T, ns string, cfg Config, marker client.Client) *running {
+// startWith is start with setup called on the controller and its counting client before it starts.
+func startWith(t *testing.T, ns string, cfg Config, setup func(*Controller, *countingClient)) *running {
 	t.Helper()
 	cfg.Namespace = ns
 	if cfg.Window == 0 {
@@ -177,8 +190,10 @@ func startMarking(t *testing.T, ns string, cfg Config, marker client.Client) *ru
 		t.Fatal(err)
 	}
 	r := &running{Controller: c, writes: &countingClient{Client: env.admin}, obs: make(chan collector.Observation)}
-	// The AnalysisDue condition is written apart, so the counts and hooks see only the observation writes.
-	c.client, c.marker, c.reader, c.cache, c.obs = r.writes, marker, env.admin, env.admin, r.obs
+	c.client, c.reader, c.cache, c.obs = r.writes, env.admin, env.admin, r.obs
+	if setup != nil {
+		setup(c, r.writes)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- c.Start(ctx) }()

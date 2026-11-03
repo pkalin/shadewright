@@ -102,9 +102,9 @@ const (
 	// ReasonRepositoryNotInPolicy means the matching repository is not the policy's gitOps.repositoryRef
 	// (Denied).
 	ReasonRepositoryNotInPolicy Reason = "RepositoryNotInPolicy"
-	// ReasonRepositoryUnusable means the matching repository's settings cannot be used to open a Git provider:
-	// a value the schema accepts but the adapter refuses, such as an App client ID or target branch outside
-	// the adapter's character rules (NeedsIntervention).
+	// ReasonRepositoryUnusable means the matching repository's settings cannot be used to open a Git provider
+	// (NeedsIntervention). The schema refuses what the adapter refuses, so this is the second layer: it catches an
+	// entry stored before a schema rule existed.
 	ReasonRepositoryUnusable Reason = "RepositoryUnusable"
 	// ReasonBranchMismatch means the branch Flux tracks is not the repository's targetBranch (Denied).
 	ReasonBranchMismatch Reason = "BranchMismatch"

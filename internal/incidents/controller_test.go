@@ -359,9 +359,9 @@ func TestRestartNeitherResetsNorDoubles(t *testing.T) {
 	// new, but it is recorded with that total, so it adds nothing.
 	b.obs <- observation(1, 2, 3, 3, began)
 	b.obs <- observation(1, 3, 1, 1, began)
-	inc := eventually(t, ns, 1, countIs(13))
+	eventually(t, ns, 1, countIs(13))
 	time.Sleep(500 * time.Millisecond)
-	if inc = get(t, ns, 1); inc.Status.Count != 13 {
+	if inc := get(t, ns, 1); inc.Status.Count != 13 {
 		t.Fatalf("count %d, want 13", inc.Status.Count)
 	}
 }
@@ -390,14 +390,15 @@ func TestCapRefusesNewFingerprints(t *testing.T) {
 	r.obs <- observation(3, 3, 1, 1, now)
 	r.obs <- observation(3, 4, 1, 1, now)
 	r.obs <- observation(1, 5, 1, 1, now)
+	r.obs <- observation(4, 6, 1, 1, now) // another new fingerprint, within the event interval
 	eventually(t, ns, 1, countIs(2))
 	eventually(t, ns, 2, countIs(1))
 	err := env.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: Name(fp(3))}, &remediationv1alpha1.Incident{})
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("the third fingerprint was stored (%v)", err)
 	}
-	if got := testutil.ToFloat64(refusedObservations) - before; got != 2 {
-		t.Fatalf("refused metric grew by %v, want 2", got)
+	if got := testutil.ToFloat64(refusedObservations) - before; got != 3 {
+		t.Fatalf("refused metric grew by %v, want 3", got)
 	}
 	select {
 	case e := <-rec.Events:
@@ -409,8 +410,31 @@ func TestCapRefusesNewFingerprints(t *testing.T) {
 	}
 	select {
 	case e := <-rec.Events:
-		t.Fatalf("a second event for the same fingerprint: %q", e)
+		t.Fatalf("a second event within the interval: %q", e)
 	default:
+	}
+}
+
+func TestCapEventRepeatsAfterTheInterval(t *testing.T) {
+	ns := namespace(t)
+	rec := events.NewFakeRecorder(10)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "analyzer-0"}}
+	r := start(t, ns, Config{MaxIncidents: 1, Recorder: rec, Regarding: pod, EventInterval: 200 * time.Millisecond})
+	now := time.Now().Truncate(time.Second)
+	r.obs <- observation(1, 1, 1, 1, now)
+	r.obs <- observation(2, 2, 1, 1, now)
+	time.Sleep(300 * time.Millisecond)
+	r.obs <- observation(3, 3, 1, 1, now)
+	eventually(t, ns, 1, countIs(1))
+	for _, f := range []int{2, 3} {
+		select {
+		case e := <-rec.Events:
+			if !strings.Contains(e, fp(f)) {
+				t.Fatalf("event %q, want one for %s", e, fp(f))
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no Warning event for %s", fp(f))
+		}
 	}
 }
 
@@ -481,6 +505,9 @@ func TestRefusedIncidentIsDroppedAndFreesItsPlace(t *testing.T) {
 	time.Sleep(time.Second)
 	if n := r.writes.creates.Load(); n != 1 {
 		t.Fatalf("%d creates of a refused Incident, want 1", n)
+	}
+	if total, found, err := r.Handled(t.Context(), bad.Occurrence, now); err != nil || found {
+		t.Fatalf("Handled = %d, %v, %v for an occurrence never stored: want not found", total, found, err)
 	}
 	r.obs <- observation(2, 2, 1, 1, now)
 	eventually(t, ns, 2, countIs(1))

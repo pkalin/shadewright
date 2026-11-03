@@ -50,6 +50,15 @@ type batch struct {
 	occurrences map[string]counted
 }
 
+// occurrenceOf returns what b holds of one occurrence. b may be nil.
+func (b *batch) occurrenceOf(id string) (counted, bool) {
+	if b == nil {
+		return counted{}, false
+	}
+	o, ok := b.occurrences[id]
+	return o, ok
+}
+
 // add folds other into b. Both belong to the same fingerprint.
 func (b *batch) add(other *batch) {
 	b.count += other.count

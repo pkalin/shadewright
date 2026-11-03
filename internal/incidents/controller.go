@@ -46,6 +46,8 @@ const (
 	DefaultMaxIncidents = 500
 	DefaultWriteTimeout = 10 * time.Second
 	DefaultRetryAfter   = 5 * time.Second
+	// DefaultEventInterval is the least time between two Warning events at the Incident cap.
+	DefaultEventInterval = 10 * time.Minute
 )
 
 // refusedRemembered bounds the fingerprints refused at the cap that are remembered, so each gets one
@@ -70,6 +72,10 @@ type Config struct {
 	// Pod). No event is written when either is nil.
 	Recorder  events.EventRecorder
 	Regarding runtime.Object
+	// EventInterval is the least time between two Warning events at the cap: whoever can create events in a
+	// watched namespace can make new fingerprints at will, so later refusals within it are only logged and
+	// counted.
+	EventInterval time.Duration
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
 }
@@ -93,12 +99,14 @@ type Controller struct {
 	// droppedThrough is the newest begin time of a record any Incident dropped.
 	droppedThrough time.Time
 	// names are the Incidents that exist or are pending; their number is held to MaxIncidents.
-	names     map[string]struct{}
-	pending   map[string]*batch
+	names   map[string]struct{}
+	pending map[string]*batch
 	// nextWrite is when an Incident's pending batch is due: the window after its last write, or RetryAfter
 	// after a failed one. An Incident without an entry is written at once.
 	nextWrite map[string]time.Time
 	refused   *boundedSet
+	// lastEvent is when the last Warning event at the cap was written.
+	lastEvent time.Time
 }
 
 // record is what was counted of one occurrence and by which Incident.
@@ -123,6 +131,9 @@ func New(cfg Config) (*Controller, error) {
 	}
 	if cfg.RetryAfter <= 0 {
 		cfg.RetryAfter = DefaultRetryAfter
+	}
+	if cfg.EventInterval <= 0 {
+		cfg.EventInterval = DefaultEventInterval
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -280,9 +291,10 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 	return !scheduled
 }
 
-// refuse counts and reports an observation of a new fingerprint at the cap. The event names the subject and
-// the fingerprint, nothing from the event's text, and is written once per fingerprint per process. The
-// caller holds mu.
+// refuse counts and reports an observation of a new fingerprint at the cap. It is logged once per
+// fingerprint (of the last refusedRemembered), and a Warning event is written for at most one of them per
+// EventInterval. Both name the subject and the fingerprint, nothing from the event's text. The caller holds
+// mu.
 func (c *Controller) refuse(ctx context.Context, o collector.Observation) {
 	refusedObservations.Inc()
 	if !c.refused.add(o.Fingerprint) {
@@ -291,11 +303,16 @@ func (c *Controller) refuse(ctx context.Context, o collector.Observation) {
 	s := o.Subject
 	logf.FromContext(ctx).Info("Refused a new Incident at the cap", "max", c.cfg.MaxIncidents,
 		"fingerprint", o.Fingerprint, "kind", s.Kind, "namespace", s.Namespace, "name", s.Name)
-	if c.cfg.Recorder != nil && c.cfg.Regarding != nil {
-		c.cfg.Recorder.Eventf(c.cfg.Regarding, nil, corev1.EventTypeWarning, "IncidentCapReached", "StoreIncident",
-			"The cap of %d Incidents is reached: not storing a new Incident for %s %s/%s (fingerprint %s)",
-			c.cfg.MaxIncidents, s.Kind, s.Namespace, s.Name, o.Fingerprint)
+	now := c.cfg.Now()
+	if c.cfg.Recorder == nil || c.cfg.Regarding == nil ||
+		(!c.lastEvent.IsZero() && now.Sub(c.lastEvent) < c.cfg.EventInterval) {
+		return
 	}
+	c.lastEvent = now
+	c.cfg.Recorder.Eventf(c.cfg.Regarding, nil, corev1.EventTypeWarning, "IncidentCapReached", "StoreIncident",
+		"The cap of %d Incidents is reached: not storing a new Incident for %s %s/%s (fingerprint %s); "+
+			"further refusals for %s are only logged and counted", c.cfg.MaxIncidents, s.Kind, s.Namespace, s.Name,
+		o.Fingerprint, c.cfg.EventInterval)
 }
 
 // notFuture returns t, or the clock when t is zero or later.
@@ -353,12 +370,20 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 	inc, dropped, err := c.write(wctx, b)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var refused *refusedError
-	if errors.As(err, &refused) {
-		// Trying again cannot help: the batch is dropped, and an Incident that was never created frees its
-		// place under the cap.
+	if refused, ok := errors.AsType[*refusedError](err); ok {
+		// Trying again cannot help: the batch is dropped. An Incident that was never created frees its place
+		// under the cap, and the records only this batch held go, so Handled does not answer "counted" for
+		// what was never stored.
 		if !refused.exists {
-			delete(c.names, Name(fp))
+			p := c.pending[fp]
+			for id := range b.occurrences {
+				if _, again := p.occurrenceOf(id); !again && c.records[id].incident == Name(fp) {
+					delete(c.records, id)
+				}
+			}
+			if p == nil {
+				delete(c.names, Name(fp))
+			}
 		}
 		c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.Window)
 		logf.FromContext(ctx).Error(err, "Dropped observations the API server refuses to store", "incident", Name(fp),

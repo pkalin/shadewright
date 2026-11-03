@@ -34,7 +34,8 @@ limitations under the License.
 // is done. The memory is bounded by the cap on Incidents times the records each keeps.
 //
 // At the cap on Incidents (500 by default, --max-incidents), an observation of a new fingerprint is not
-// stored: it is counted in shadewright_incident_observations_refused_total and reported once per
-// fingerprint in a Warning event about the analyzer's Pod. Existing Incidents keep their records, so
-// nothing is counted again.
+// stored: it is counted in shadewright_incident_observations_refused_total, logged once per fingerprint,
+// and reported in a Warning event about the analyzer's Pod at most once per EventInterval (10 minutes by
+// default). Existing Incidents keep their records, so nothing is counted again. A batch the API server
+// refuses as invalid is dropped, not retried.
 package incidents

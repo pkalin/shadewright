@@ -31,6 +31,14 @@ const (
 	helmGV      = "helm.toolkit.fluxcd.io/v2"
 	kustomizeGV = "kustomize.toolkit.fluxcd.io/v1"
 	wantName    = "name"
+	azureScheme = "azure"
+	aksLabel    = "kubernetes.azure.com/cluster"
+	eksLabel    = "eks.amazonaws.com/nodegroup"
+	gkeLabel    = "cloud.google.com/gke-nodepool"
+	labelX      = "a.example/x"
+	labelY      = "a.example/y"
+	twoName     = "two"
+	capzName    = "capz"
 )
 
 // stubPlatform and stubIntegration are detection-only modules for the tests.
@@ -55,16 +63,16 @@ func (i stubIntegration) Hooks() Hooks                    { return i.hooks }
 
 var (
 	aks = stubPlatform{name: aksName, detection: PlatformDetection{
-		ProviderIDScheme: "azure",
-		NodeLabels:       []string{"kubernetes.azure.com/cluster"},
+		ProviderIDScheme: azureScheme,
+		NodeLabels:       []string{aksLabel},
 	}}
 	eks = stubPlatform{name: eksName, detection: PlatformDetection{
 		ProviderIDScheme: "aws",
-		NodeLabels:       []string{"eks.amazonaws.com/nodegroup"},
+		NodeLabels:       []string{eksLabel},
 	}}
 	gke = stubPlatform{name: gkeName, detection: PlatformDetection{
 		ProviderIDScheme: "gce",
-		NodeLabels:       []string{"cloud.google.com/gke-nodepool"},
+		NodeLabels:       []string{gkeLabel},
 	}}
 	keda = stubIntegration{
 		name:      kedaName,

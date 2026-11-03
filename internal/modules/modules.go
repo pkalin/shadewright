@@ -34,13 +34,16 @@ type Platform interface {
 	Hooks() Hooks
 }
 
-// PlatformDetection says how a node is recognised as running on a platform.
+// PlatformDetection says how a node is recognised as running on a platform. A platform with no node labels
+// claims no node.
 type PlatformDetection struct {
 	// ProviderIDScheme is the scheme of the node's spec.providerID, without "://", for example "azure" for
-	// "azure:///subscriptions/...". It decides for every node whose provider ID is set.
+	// "azure:///subscriptions/...". It is an extra condition, checked for a node whose provider ID is set:
+	// a scheme names the cloud, not the platform, so it never claims a node on its own and needs NodeLabels.
+	// Two platforms may declare the same scheme with different labels.
 	ProviderIDScheme string
-	// NodeLabels are label keys that mark a node as running on this platform. They are read only for a
-	// node without a provider ID.
+	// NodeLabels are the label keys a node must all carry to run on this platform, set by the managed
+	// service itself, for example "kubernetes.azure.com/cluster" on AKS. Only the keys are read.
 	NodeLabels []string
 }
 

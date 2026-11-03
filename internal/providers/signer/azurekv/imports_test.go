@@ -17,14 +17,11 @@ limitations under the License.
 package azurekv
 
 import (
-	"go/parser"
-	"go/token"
-	"io/fs"
-	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/pkalin/shadewright/internal/testutil/importguard"
 )
 
 // azureSDK is the import path prefix of the Azure SDK for Go, including Entra ID and MSAL.
@@ -37,41 +34,12 @@ func TestAzureSDKOnlyHere(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := here
-	for {
-		if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
-			break
+	root := importguard.ModuleRoot(t)
+	checked := importguard.WalkGoFiles(t, root, func(path string) {
+		if filepath.Dir(path) == here {
+			return
 		}
-		parent := filepath.Dir(root)
-		if parent == root {
-			t.Fatal("go.mod not found")
-		}
-		root = parent
-	}
-
-	checked := 0
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			name := d.Name()
-			if path != root && (strings.HasPrefix(name, ".") || name == "bin" || name == "vendor" ||
-				name == "testdata" || name == "node_modules") {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".go") || filepath.Dir(path) == here {
-			return nil
-		}
-		parsed, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
-		if err != nil {
-			return err
-		}
-		checked++
-		for _, imp := range parsed.Imports {
-			p, _ := strconv.Unquote(imp.Path.Value)
+		for _, p := range importguard.FileImports(t, path) {
 			for _, prefix := range azureSDK {
 				if strings.HasPrefix(p, prefix) {
 					rel, _ := filepath.Rel(root, path)
@@ -79,11 +47,7 @@ func TestAzureSDKOnlyHere(t *testing.T) {
 				}
 			}
 		}
-		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if checked == 0 {
 		t.Fatal("no Go files checked")
 	}

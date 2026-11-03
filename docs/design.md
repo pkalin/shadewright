@@ -131,7 +131,13 @@ A `Platform` module per provider, detected from node `providerID` and labels. Th
 
 Order: generic and AKS first; EKS and GKE as detection-only skeletons; Cluster API when a real case needs it.
 
-The registries are built (`internal/modules`); no module is wired into the operator yet. There is no global registry: each binary builds one immutable registry at start-up from an explicit list of compiled-in modules ([ADR-0019](adr/0019-extension-packaging.md)), and a name given twice, or a provider ID scheme or node label claimed by two platforms, stops the start. Detection is a pure function of the nodes' `providerID` values and labels: a node's provider ID scheme (`azure`, `aws`, `gce`) decides, its labels only when it has no provider ID. The cluster is on a platform only when every node is; no nodes, a node no module claims, or nodes on different platforms give generic, since diagnosis for the wrong platform is worse than none.
+The registries are built (`internal/modules`); no module is wired into the operator yet. There is no global registry: each binary builds one immutable registry at start-up from an explicit list of compiled-in modules ([ADR-0019](adr/0019-extension-packaging.md)), and a name given twice, or two platforms with the same provider ID scheme and the same node labels, stops the start.
+
+Detection is a pure function of the nodes' `providerID` values and label keys. A provider ID scheme (`azure`, `aws`, `gce`) names the cloud, not the managed service: a self-managed cluster on cloud machines (Cluster API, kubeadm) has the same scheme as AKS, EKS or GKE. So a platform is recognised by the node labels its managed service sets (AKS `kubernetes.azure.com/cluster`, GKE `cloud.google.com/gke-nodepool`, EKS managed node groups `eks.amazonaws.com/nodegroup`), and the scheme is an extra condition for a node whose provider ID is set; a scheme alone claims nothing. Two platforms may share a scheme (AKS and a Cluster API platform on Azure) as long as their labels differ.
+
+- A node is on a platform when it carries every label the platform requires and, if it has a provider ID and the platform declares a scheme, that scheme.
+- Nodes no platform could claim, with neither a provider ID nor any label a platform requires (a node still joining, a virtual node), are left out.
+- The cluster is on a platform when every remaining node is on it. No remaining node, a node on no platform or on two, or nodes on different platforms give generic, since diagnosis for the wrong platform is worse than none.
 
 ### 2.5. Cluster integrations
 

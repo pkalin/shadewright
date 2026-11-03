@@ -26,13 +26,22 @@ type Node struct {
 	Labels map[string]string
 }
 
-// DetectPlatform returns the platform every node runs on. A node is on a platform when its provider ID has
-// that platform's scheme or, for a node without a provider ID, when exactly one platform claims its labels.
-// The generic platform is the answer for no nodes, for a node no platform claims, and for nodes on different
-// platforms: a guess would bring diagnosis that does not fit the cluster. The function reads only its input.
+// DetectPlatform returns the platform the cluster runs on. A node is on a platform when it carries every node
+// label that platform requires and, if the node has a provider ID and the platform declares a scheme, its
+// provider ID has that scheme. The scheme alone never decides: it names the cloud, not the managed service, so
+// a self-managed cluster on cloud machines (Cluster API, kubeadm) stays generic.
+//
+// Nodes no platform could claim, because they have neither a provider ID nor any label a platform requires
+// (a node still joining, a virtual node), are left out. The cluster is on a platform when every remaining
+// node is on it. The generic platform is the answer when no node remains, when a remaining node is on no
+// platform or on more than one, and when nodes are on different platforms: a guess would bring diagnosis that
+// does not fit the cluster. The function reads only its input.
 func (r *Registry) DetectPlatform(nodes []Node) Platform {
 	found := ""
 	for _, n := range nodes {
+		if r.unclaimable(n) {
+			continue
+		}
 		name := r.platformOf(n)
 		if name == "" || (found != "" && name != found) {
 			found = ""
@@ -43,31 +52,54 @@ func (r *Registry) DetectPlatform(nodes []Node) Platform {
 	if found == "" {
 		found = GenericPlatform
 	}
-	p, _ := r.Platform(found)
-	return p
+	return r.platformByName[found].module
 }
 
-// platformOf returns the name of the platform that claims the node, or "" when none or more than one does.
-func (r *Registry) platformOf(n Node) string {
+// unclaimable reports whether no platform could claim the node: it has no provider ID and no label any
+// platform requires.
+func (r *Registry) unclaimable(n Node) bool {
 	if n.ProviderID != "" {
-		scheme, _, ok := strings.Cut(n.ProviderID, "://")
-		if !ok {
-			return ""
+		return false
+	}
+	for key := range n.Labels {
+		if r.platformLabels[key] {
+			return false
 		}
-		return r.byScheme[scheme]
+	}
+	return true
+}
+
+// platformOf returns the name of the one platform that claims the node, or "" when none or more than one does.
+func (r *Registry) platformOf(n Node) string {
+	// A provider ID without "://" has no scheme, so it fits no platform that declares one.
+	scheme, _, ok := strings.Cut(n.ProviderID, "://")
+	if !ok {
+		scheme = ""
 	}
 	found := ""
-	for key := range n.Labels {
-		name, ok := r.byLabel[key]
-		if !ok {
+	for _, e := range r.platforms {
+		if len(e.labels) == 0 || !hasLabels(n, e.labels) {
 			continue
 		}
-		if found != "" && name != found {
+		if n.ProviderID != "" && e.scheme != "" && scheme != e.scheme {
+			continue
+		}
+		if found != "" {
 			return ""
 		}
-		found = name
+		found = e.name
 	}
 	return found
+}
+
+// hasLabels reports whether the node has every one of the label keys.
+func hasLabels(n Node, keys []string) bool {
+	for _, k := range keys {
+		if _, ok := n.Labels[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // DetectIntegrations returns the integrations whose add-on the cluster serves, sorted by name. groupVersions

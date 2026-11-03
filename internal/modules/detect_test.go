@@ -27,6 +27,8 @@ func TestDetectPlatform(t *testing.T) {
 		awsID   = "aws:///eu-west-1a/i-0123456789abcdef0"
 		gceID   = "gce://project/europe-west1-b/node-1"
 		kindID  = "kind://docker/kind/kind-control-plane"
+		// capiLabel stands for the labels of a self-managed node; no platform here requires it.
+		capiLabel = "node.cluster.x-k8s.io/machine"
 	)
 	node := func(id string, labels ...string) Node {
 		n := Node{ProviderID: id, Labels: map[string]string{}}
@@ -35,6 +37,11 @@ func TestDetectPlatform(t *testing.T) {
 		}
 		return n
 	}
+	aksNode := node(azureID, aksLabel, "kubernetes.io/os")
+	// A node still joining has no provider ID yet and none of the managed service's labels.
+	joining := node("", "kubernetes.io/hostname")
+	// A virtual node (virtual-kubelet) has no provider ID and no node pool labels.
+	virtual := node("", "type", "kubernetes.io/role")
 	cases := []struct {
 		name  string
 		nodes []Node
@@ -42,22 +49,30 @@ func TestDetectPlatform(t *testing.T) {
 	}{
 		{"no nodes", nil, GenericPlatform},
 		{"empty list", []Node{}, GenericPlatform},
-		{"AKS", []Node{node(azureID), node(azureID)}, aksName},
-		{"EKS", []Node{node(awsID)}, eksName},
-		{"GKE", []Node{node(gceID), node(gceID)}, gkeName},
+		{"AKS", []Node{aksNode, aksNode}, aksName},
+		{"EKS", []Node{node(awsID, eksLabel)}, eksName},
+		{"GKE", []Node{node(gceID, gkeLabel), node(gceID, gkeLabel)}, gkeName},
+		{"CAPZ-like: azure scheme without the AKS label", []Node{node(azureID, capiLabel), node(azureID)}, GenericPlatform},
+		{"kubeadm on EC2", []Node{node(awsID)}, GenericPlatform},
+		{"self-managed GCE", []Node{node(gceID, capiLabel)}, GenericPlatform},
+		{"AKS with a self-managed node", []Node{aksNode, node(azureID)}, GenericPlatform},
+		{"AKS with a joining node", []Node{aksNode, joining}, aksName},
+		{"joining node first", []Node{joining, aksNode}, aksName},
+		{"AKS with a virtual node", []Node{aksNode, virtual, aksNode}, aksName},
+		{"only joining and virtual nodes", []Node{joining, virtual}, GenericPlatform},
+		{"node with nothing is left out", []Node{aksNode, {}}, aksName},
+		{"only a node with nothing", []Node{{}}, GenericPlatform},
 		{"unknown scheme", []Node{node(kindID)}, GenericPlatform},
-		{"scheme is case sensitive", []Node{node("AZURE:///x")}, GenericPlatform},
-		{"no scheme separator", []Node{node("azure")}, GenericPlatform},
-		{"mixed providers", []Node{node(azureID), node(awsID)}, GenericPlatform},
-		{"mixed with an unknown provider", []Node{node(azureID), node(kindID)}, GenericPlatform},
-		{"unknown provider first", []Node{node(kindID), node(azureID)}, GenericPlatform},
-		{"no provider ID and no labels", []Node{{}}, GenericPlatform},
-		{"one node without anything", []Node{node(azureID), {}}, GenericPlatform},
-		{"label without provider ID", []Node{node("", "kubernetes.azure.com/cluster", "other")}, aksName},
-		{"label and provider ID agree", []Node{node(azureID), node("", "kubernetes.azure.com/cluster")}, aksName},
-		{"labels of two platforms", []Node{node("", "kubernetes.azure.com/cluster", "eks.amazonaws.com/nodegroup")}, GenericPlatform},
-		{"provider ID wins over labels", []Node{node(awsID, "kubernetes.azure.com/cluster")}, eksName},
-		{"label value is not read", []Node{node("", "unrelated")}, GenericPlatform},
+		{"AKS with an unknown provider", []Node{aksNode, node(kindID)}, GenericPlatform},
+		{"unknown provider first", []Node{node(kindID), aksNode}, GenericPlatform},
+		{"mixed platforms", []Node{aksNode, node(awsID, eksLabel)}, GenericPlatform},
+		{"scheme is case sensitive", []Node{node("AZURE:///x", aksLabel)}, GenericPlatform},
+		{"no scheme separator", []Node{node("azure", aksLabel)}, GenericPlatform},
+		{"AKS label without provider ID", []Node{node("", aksLabel)}, aksName},
+		{"AKS label and AKS node agree", []Node{aksNode, node("", aksLabel)}, aksName},
+		{"labels of two platforms", []Node{node("", aksLabel, eksLabel)}, GenericPlatform},
+		{"AKS label on another cloud", []Node{node(awsID, aksLabel)}, GenericPlatform},
+		{"label value is not read", []Node{node(azureID, "unrelated")}, GenericPlatform},
 	}
 	r := mustNew(t, []Platform{gke, aks, eks}, nil)
 	for _, c := range cases {
@@ -70,9 +85,51 @@ func TestDetectPlatform(t *testing.T) {
 	}
 }
 
+// TestDetectPlatformSharedScheme covers two platforms on one cloud, such as AKS and a Cluster API platform on
+// Azure: the scheme is shared and the labels tell them apart.
+func TestDetectPlatformSharedScheme(t *testing.T) {
+	const (
+		azureID   = "azure:///subscriptions/sub/x"
+		capiLabel = "cluster.x-k8s.io/cluster-name"
+	)
+	capz := stubPlatform{name: capzName, detection: PlatformDetection{ProviderIDScheme: azureScheme, NodeLabels: []string{capiLabel}}}
+	r := mustNew(t, []Platform{aks, capz}, nil)
+	cases := []struct {
+		name string
+		node Node
+		want string
+	}{
+		{"AKS node", Node{ProviderID: azureID, Labels: map[string]string{aksLabel: "c"}}, aksName},
+		{"CAPZ node", Node{ProviderID: azureID, Labels: map[string]string{capiLabel: "c"}}, capzName},
+		{"node with both labels", Node{ProviderID: azureID, Labels: map[string]string{aksLabel: "c", capiLabel: "c"}},
+			GenericPlatform},
+		{"azure node with neither", Node{ProviderID: azureID}, GenericPlatform},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := r.DetectPlatform([]Node{c.node}); got.Name() != c.want {
+				t.Errorf("DetectPlatform = %s, want %s", got.Name(), c.want)
+			}
+		})
+	}
+}
+
+// TestDetectPlatformNeedsEveryLabel covers a platform that requires more than one label.
+func TestDetectPlatformNeedsEveryLabel(t *testing.T) {
+	two := stubPlatform{name: twoName, detection: PlatformDetection{NodeLabels: []string{labelX, labelY}}}
+	r := mustNew(t, []Platform{two}, nil)
+	if got := r.DetectPlatform([]Node{{Labels: map[string]string{labelX: ""}}}); got.Name() != GenericPlatform {
+		t.Errorf("one of two labels: DetectPlatform = %s, want generic", got.Name())
+	}
+	both := Node{ProviderID: "metal://rack/1", Labels: map[string]string{labelX: "", labelY: ""}}
+	if got := r.DetectPlatform([]Node{both}); got.Name() != twoName {
+		t.Errorf("both labels, any scheme: DetectPlatform = %s, want two", got.Name())
+	}
+}
+
 func TestDetectPlatformWithOnlyGeneric(t *testing.T) {
 	r := mustNew(t, nil, nil)
-	if got := r.DetectPlatform([]Node{{ProviderID: "azure:///x"}}); got.Name() != GenericPlatform {
+	if got := r.DetectPlatform([]Node{{ProviderID: "azure:///x", Labels: map[string]string{aksLabel: ""}}}); got.Name() != GenericPlatform {
 		t.Errorf("DetectPlatform = %s, want generic", got.Name())
 	}
 }

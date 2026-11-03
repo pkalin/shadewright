@@ -24,6 +24,20 @@ import (
 	"github.com/pkalin/shadewright/api/v1alpha1"
 )
 
+// ptrPlatform and ptrIntegration have pointer receivers that read their fields, so a nil one panics when
+// called.
+type ptrPlatform struct{ name string }
+
+func (p *ptrPlatform) Name() string               { return p.name }
+func (*ptrPlatform) Detection() PlatformDetection { return PlatformDetection{} }
+func (*ptrPlatform) Hooks() Hooks                 { return Hooks{} }
+
+type ptrIntegration struct{ name string }
+
+func (i *ptrIntegration) Name() string                  { return i.name }
+func (*ptrIntegration) Detection() IntegrationDetection { return IntegrationDetection{} }
+func (*ptrIntegration) Hooks() Hooks                    { return Hooks{} }
+
 func names[T interface{ Name() string }](mods []T) []string {
 	out := make([]string, 0, len(mods))
 	for _, m := range mods {
@@ -52,14 +66,24 @@ func TestNewRefuses(t *testing.T) {
 		{"trailing dash", nil, []Integration{stubIntegration{name: "keda-"}}, wantName},
 		{"space", nil, []Integration{stubIntegration{name: "ke da"}}, wantName},
 		{"too long", nil, []Integration{stubIntegration{name: "k" + strings.Repeat("a", 63)}}, wantName},
-		{"scheme claimed twice", []Platform{aks, stubPlatform{name: "azure-stack", detection: PlatformDetection{
-			ProviderIDScheme: "azure"}}}, nil, `platform modules "aks" and "azure-stack" both claim provider ID scheme`},
-		{"label claimed twice", []Platform{aks, stubPlatform{name: "other", detection: PlatformDetection{
-			NodeLabels: []string{"kubernetes.azure.com/cluster"}}}}, nil, "both claim node label"},
+		{"same claim twice", []Platform{aks, stubPlatform{name: "azure-stack", detection: PlatformDetection{
+			ProviderIDScheme: azureScheme, NodeLabels: []string{aksLabel}}}}, nil,
+			`platform modules "aks" and "azure-stack" both claim provider ID scheme "azure"`},
+		{"same claim in another label order", []Platform{
+			stubPlatform{name: "one", detection: PlatformDetection{NodeLabels: []string{labelX, labelY}}},
+			stubPlatform{name: twoName, detection: PlatformDetection{NodeLabels: []string{labelY, labelX}}}},
+			nil, `platform modules "one" and "two" both claim`},
+		{"label listed twice", []Platform{stubPlatform{name: aksName, detection: PlatformDetection{
+			ProviderIDScheme: azureScheme, NodeLabels: []string{aksLabel, aksLabel}}}},
+			nil, `platform module "aks": node label "kubernetes.azure.com/cluster" is listed twice`},
+		{"scheme without labels", []Platform{stubPlatform{name: aksName, detection: PlatformDetection{
+			ProviderIDScheme: azureScheme}}}, nil, "needs at least one node label"},
+		{"typed nil platform", []Platform{aks, (*ptrPlatform)(nil)}, nil, "platform module 1 is nil"},
+		{"typed nil integration", nil, []Integration{(*ptrIntegration)(nil)}, "integration module 0 is nil"},
 		{"scheme with separator", []Platform{stubPlatform{name: aksName, detection: PlatformDetection{
-			ProviderIDScheme: "azure://"}}}, nil, "scheme"},
+			ProviderIDScheme: "azure://", NodeLabels: []string{labelX}}}}, nil, "is invalid"},
 		{"upper case scheme", []Platform{stubPlatform{name: aksName, detection: PlatformDetection{
-			ProviderIDScheme: "Azure"}}}, nil, "scheme"},
+			ProviderIDScheme: "Azure", NodeLabels: []string{labelX}}}}, nil, "is invalid"},
 		{"bad label", []Platform{stubPlatform{name: aksName, detection: PlatformDetection{
 			NodeLabels: []string{"bad label"}}}}, nil, "node label"},
 		{"empty label", []Platform{stubPlatform{name: aksName, detection: PlatformDetection{
@@ -79,7 +103,8 @@ func TestNewRefuses(t *testing.T) {
 }
 
 func TestNewRefusesBadGroupVersions(t *testing.T) {
-	for _, gv := range []string{"", "keda.sh/", "/v1", "Keda.sh/v1", "keda.sh/v1/x", "keda.sh/v 1"} {
+	for _, gv := range []string{"", "keda.sh/", "/v1", "Keda.sh/v1", "keda.sh/v1/x", "keda.sh/v 1", "keda.sh/foo",
+		"a..b/v1"} {
 		in := stubIntegration{name: kedaName, detection: IntegrationDetection{GroupVersions: []string{kedaGV, gv}}}
 		r, err := New(nil, []Integration{in})
 		if err == nil || r != nil || !strings.Contains(err.Error(), "group version") {
@@ -89,13 +114,19 @@ func TestNewRefusesBadGroupVersions(t *testing.T) {
 }
 
 func TestNewAccepts(t *testing.T) {
-	// A platform and an integration may share a name; a module may declare no detection at all.
+	// A platform and an integration may share a name; a module may declare no detection at all; two platforms
+	// may share a provider ID scheme or a label as long as their claims differ.
+	capz := stubPlatform{name: capzName, detection: PlatformDetection{ProviderIDScheme: azureScheme,
+		NodeLabels: []string{"cluster.x-k8s.io/cluster-name"}}}
+	aksOnly := stubPlatform{name: "aks-labels", detection: PlatformDetection{
+		NodeLabels: []string{aksLabel}}}
 	r := mustNew(t,
-		[]Platform{stubPlatform{name: "capi"}, stubPlatform{name: sharedName}},
+		[]Platform{stubPlatform{name: "capi"}, stubPlatform{name: sharedName}, aks, capz, aksOnly},
 		[]Integration{stubIntegration{name: sharedName}, stubIntegration{name: "cloudflared"},
 			stubIntegration{name: "core", detection: IntegrationDetection{GroupVersions: []string{"v1", appsGV}}}})
-	if got := names(r.Platforms()); !slices.Equal(got, []string{"capi", GenericPlatform, sharedName}) {
-		t.Errorf("Platforms = %v", got)
+	want := []string{aksName, "aks-labels", "capi", capzName, GenericPlatform, sharedName}
+	if got := names(r.Platforms()); !slices.Equal(got, want) {
+		t.Errorf("Platforms = %v, want %v", got, want)
 	}
 	if got := names(r.DetectIntegrations([]string{"v1"})); !slices.Equal(got, []string{"core"}) {
 		t.Errorf("DetectIntegrations = %v, want [core]", got)

@@ -17,42 +17,15 @@ limitations under the License.
 package modules_test
 
 import (
-	"go/parser"
-	"go/token"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
+
+	"github.com/pkalin/shadewright/internal/testutil/importguard"
 )
 
-const module = "github.com/pkalin/shadewright/"
-
 // TestNoVendorImports enforces ADR-0013 for the module registry: it imports only the standard library and
-// this module, so no product SDK reaches the core through it.
+// this module, and nothing it depends on, however indirectly, is a product SDK or an adapter, so no product SDK
+// reaches the core through it.
 func TestNoVendorImports(t *testing.T) {
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(files) == 0 {
-		t.Fatal("no Go files")
-	}
-	for _, f := range files {
-		src, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		parsed, err := parser.ParseFile(token.NewFileSet(), f, src, parser.ImportsOnly)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, imp := range parsed.Imports {
-			path, _ := strconv.Unquote(imp.Path.Value)
-			first, _, _ := strings.Cut(path, "/")
-			if strings.Contains(first, ".") && !strings.HasPrefix(path, module) {
-				t.Errorf("%s imports %q: only the standard library and %s* are allowed here", f, path, module)
-			}
-		}
-	}
+	importguard.DirectImportsOnlyStandardOrModule(t, ".")
+	importguard.NoForbiddenDeps(t, ".", ".")
 }

@@ -24,15 +24,22 @@ limitations under the License.
 //
 // Modules are Go packages compiled into the operator (ADR-0019). There is no global registry and no init-time
 // registration: the binary builds one immutable [Registry] at start-up with [New] from an explicit list of
-// modules, and passes it to whoever needs it. A name given twice, or two modules claiming the same detection
-// key, makes [New] fail, so a clash is found when the operator starts instead of shadowing a module. Lists
-// are sorted by name, so every caller sees the same order.
+// modules, and passes it to whoever needs it. A name given twice, or two platforms with the same scheme and
+// node labels, makes [New] fail, so a clash is found when the operator starts instead of shadowing a module.
+// Lists are sorted by name, so every caller sees the same order.
 //
-// Detection is pure: [Registry.DetectPlatform] reads node provider IDs and labels, and
+// Detection is pure: [Registry.DetectPlatform] reads node provider IDs and label keys, and
 // [Registry.DetectIntegrations] reads the group versions served by the discovery API. Neither reads the cluster
 // itself; the caller collects the input. Detection data is declarative ([PlatformDetection],
 // [IntegrationDetection]), so a compiled module can later be expressed as a signed declarative pack.
 //
-// This package imports only the standard library and this module; product SDKs stay in adapter packages
-// (ADR-0013).
+// A provider ID scheme names the cloud, not the managed platform: a Cluster API or kubeadm cluster on Azure
+// machines has the "azure" scheme too. A platform is therefore recognised by the labels its managed service
+// puts on nodes, every one of which a node must carry, with the scheme as an extra condition for a node whose
+// provider ID is set. Nodes without a provider ID and without any label a platform requires (a node still
+// joining, a virtual node) are left out; the cluster is on a platform when every other node is, and generic
+// otherwise.
+//
+// This package imports only the standard library and this module, and nothing it depends on is a product SDK
+// or an adapter (ADR-0013).
 package modules

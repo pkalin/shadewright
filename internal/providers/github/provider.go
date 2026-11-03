@@ -144,7 +144,8 @@ func (p *Provider) tree(ctx context.Context, op, sha string) (treeJSON, error) {
 }
 
 // lookup resolves path at commit through one tree per directory and returns the root tree and the file's
-// entry. ErrNotFound when the commit or path does not exist, or the path is not a regular file.
+// entry. ErrPathNotInTree when a tree it read has no such entry, or the path is not a regular file; any other
+// failure to read a tree (including a 404 or 422 for the commit) is returned as it is.
 func (p *Provider) lookup(ctx context.Context, op, commit, path string) (string, treeEntry, error) {
 	segs := strings.Split(path, "/")
 	t, err := p.tree(ctx, op, commit)
@@ -158,7 +159,7 @@ func (p *Provider) lookup(ctx context.Context, op, commit, path string) (string,
 			if t.Truncated {
 				return "", treeEntry{}, errors.New(op + ": directory listing is truncated")
 			}
-			return "", treeEntry{}, fmt.Errorf("%s: file %w", op, providers.ErrNotFound)
+			return "", treeEntry{}, fmt.Errorf("%s: file %w", op, providers.ErrPathNotInTree)
 		}
 		e := t.Tree[idx]
 		if !validSHA(e.SHA) {
@@ -167,18 +168,18 @@ func (p *Provider) lookup(ctx context.Context, op, commit, path string) (string,
 		if i == len(segs)-1 {
 			// Only regular files: never a directory, a submodule (type commit) or a symbolic link (120000).
 			if e.Type != "blob" || (e.Mode != modeFile && e.Mode != modeExecutable) {
-				return "", treeEntry{}, fmt.Errorf("%s: not a regular file: %w", op, providers.ErrNotFound)
+				return "", treeEntry{}, fmt.Errorf("%s: not a regular file: %w", op, providers.ErrPathNotInTree)
 			}
 			return root, e, nil
 		}
 		if e.Type != "tree" || e.Mode != modeTree {
-			return "", treeEntry{}, fmt.Errorf("%s: file %w", op, providers.ErrNotFound)
+			return "", treeEntry{}, fmt.Errorf("%s: file %w", op, providers.ErrPathNotInTree)
 		}
 		if t, err = p.tree(ctx, op, e.SHA); err != nil {
 			return "", treeEntry{}, err
 		}
 	}
-	return "", treeEntry{}, fmt.Errorf("%s: file %w", op, providers.ErrNotFound)
+	return "", treeEntry{}, fmt.Errorf("%s: file %w", op, providers.ErrPathNotInTree)
 }
 
 // ReadFile returns a regular file at a commit. The size GitHub reports is checked before the content is

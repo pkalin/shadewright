@@ -68,11 +68,11 @@ func TestGitReadFile(t *testing.T) {
 	if err != nil || string(f.Data) != oldVal || f.Commit != head {
 		t.Fatalf("ReadFile = %+v, %v", f, err)
 	}
-	if _, err := g.ReadFile(ctx, head, "nope.yaml"); !providers.IsNotFound(err) {
-		t.Errorf("missing file: %v", err)
+	if _, err := g.ReadFile(ctx, head, "nope.yaml"); !providers.IsPathNotInTree(err) || !providers.IsNotFound(err) {
+		t.Errorf("missing file: %v, want a path not in the tree", err)
 	}
-	if _, err := g.ReadFile(ctx, "deadbeef", path); !providers.IsNotFound(err) {
-		t.Errorf("missing commit: %v", err)
+	if _, err := g.ReadFile(ctx, "deadbeef", path); !providers.IsNotFound(err) || providers.IsPathNotInTree(err) {
+		t.Errorf("missing commit: %v, want a plain not found", err)
 	}
 	if _, err := g.BranchHead(ctx, "nope"); !providers.IsNotFound(err) {
 		t.Errorf("missing branch: %v", err)

@@ -120,8 +120,8 @@ func TestResolveReusesFileReadsAtTheSameCommit(t *testing.T) {
 		t.Fatalf("first run: %d file reads, %d head reads", firstReads, c.of("BranchHead"))
 	}
 
-	// The second run still reads the .sourceignore lookups made before any file at the commit was found; from
-	// the third run on, nothing at the commit is read again.
+	// From the second run on, nothing at the commit is read again: neither the files nor the .sourceignore
+	// and kustomization file names the adapter found absent from the tree.
 	for run := 2; run <= 3; run++ {
 		c.reset()
 		got, _, err := f.run(t)
@@ -137,11 +137,8 @@ func TestResolveReusesFileReadsAtTheSameCommit(t *testing.T) {
 		if c.gets() != firstGets {
 			t.Errorf("run %d read %d cluster objects, want %d as in the first run", run, c.gets(), firstGets)
 		}
-		if run == 3 && c.of("ReadFile") != 0 {
+		if c.of("ReadFile") != 0 {
 			t.Errorf("run %d read %d files, want 0", run, c.of("ReadFile"))
-		}
-		if c.of("ReadFile") >= firstReads {
-			t.Errorf("run %d read %d files, the first run %d", run, c.of("ReadFile"), firstReads)
 		}
 	}
 }
@@ -218,8 +215,8 @@ func TestResolveKeepsCachedReadsPerRepositoryEntry(t *testing.T) {
 	}
 }
 
-// Only reads that can never change are kept. A failed read is read again, and so is a file not found before
-// any file at that commit was: GitProvider gives ErrNotFound for a commit the host does not have yet.
+// Only reads that can never change are kept. A failed read is read again, and so is a plain not found:
+// GitProvider gives ErrNotFound for a commit the host does not have yet.
 func TestResolveDoesNotKeepReadsThatMayChange(t *testing.T) {
 	tests := []struct {
 		name string
@@ -246,6 +243,81 @@ func TestResolveDoesNotKeepReadsThatMayChange(t *testing.T) {
 			if err != nil || res.Outcome != sourcemap.Resolved {
 				t.Fatalf("run after the host recovered = %s/%s (%s), %v; want Resolved",
 					res.Outcome, res.Reason, res.Message, err)
+			}
+		})
+	}
+}
+
+// errHost404 is what the GitHub adapter returns for HTTP 404 on any read, and for a token or tree it cannot
+// get: ErrNotFound, although the path may well be in the tree. Only ErrPathNotInTree says it is not.
+var errHost404 = fmt.Errorf("ReadFile: GitHub returned status 404: %w", providers.ErrNotFound)
+
+// A host that serves files and then answers 404 to every read (an outage, a revoked installation) must not
+// leave its not founds in the cache: once it recovers, the next mapping reads again and gives the verdict an
+// uncached mapping gives, so a missing .sourceignore or a second kustomization file never fails open.
+func TestResolveDoesNotKeepNotFoundsFromAHostOutage(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(f *fixture)
+	}{
+		{"unchanged delivery", nil},
+		{".sourceignore in a nested kustomization directory", func(f *fixture) {
+			f.files[ksFile] = "resources:\n  - workers\n"
+			f.files["apps/orders/workers/kustomization.yaml"] = "resources:\n  - ../scaledobject.yaml\n"
+			f.files["apps/orders/workers/.sourceignore"] = "kustomization.yaml\n"
+		}},
+		{".sourceignore in a directory a resource file lives in", func(f *fixture) {
+			f.files[ksFile] = "resources:\n  - ../base/so.yaml\n"
+			f.files["apps/base/so.yaml"] = scaledObjectYAML
+			f.files["apps/base/.sourceignore"] = "so.yaml\n"
+		}},
+		{"two kustomization files", func(f *fixture) {
+			f.files["apps/orders/kustomization.yml"] = "resources: []\n"
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setup := func() *fixture {
+				f := newFixture()
+				if tc.change != nil {
+					tc.change(f)
+				}
+				return f
+			}
+			uncached := setup()
+			c := counted(uncached, nil)
+			want, _, err := uncached.run(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			total := c.of("ReadFile")
+			// The outage starts after each number of served reads in turn.
+			for served := 0; served < total; served++ {
+				f := setup()
+				f.cache = newCache()
+				reads := 0
+				counted(f, func(op string) error {
+					if op != "ReadFile" {
+						return nil
+					}
+					if reads++; reads > served {
+						return errHost404
+					}
+					return nil
+				})
+				_, _, _ = f.run(t)
+				f.gitFail = nil
+				for run := 1; run <= 2; run++ {
+					got, _, err := f.run(t)
+					if err != nil {
+						t.Fatalf("outage after %d reads, run %d after recovery: %v", served, run, err)
+					}
+					if !reflect.DeepEqual(got, want) {
+						t.Fatalf("outage after %d reads, run %d after recovery = %s/%s (%s), want %s/%s (%s) "+
+							"as without the cache", served, run, got.Outcome, got.Reason, got.Message,
+							want.Outcome, want.Reason, want.Message)
+					}
+				}
 			}
 		})
 	}

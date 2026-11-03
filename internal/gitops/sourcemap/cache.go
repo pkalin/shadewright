@@ -22,7 +22,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sync"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
@@ -35,25 +34,22 @@ const (
 	DefaultCacheEntries = 4096
 	// DefaultCacheBytes is how many bytes the cache keeps, file contents and keys together.
 	DefaultCacheBytes = 16 << 20
-	// cacheEntryOverhead is what one entry is counted for besides its content, path and commit, so that
-	// entries without content (a file not found) are bounded by bytes too.
+	// cacheEntryOverhead is what one entry is counted for besides its content, commit and path, so that
+	// entries without content (a file not in the tree) are bounded by bytes too.
 	cacheEntryOverhead = 256
 )
 
-// commitPattern is a full Git object ID (SHA-1 or SHA-256). Only reads at such a commit are cached: a branch,
-// a tag or an abbreviated ID can name other content later.
-var commitPattern = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
-
-// ReadCache keeps the outcome of ReadFile calls at a commit, which never changes: the content of a file, or
-// that the file does not exist or is too large. It is bounded by entries and bytes and evicts the least
-// recently used entry first. It is safe for concurrent use.
+// ReadCache keeps the outcome of ReadFile calls at a full commit ID, which never changes: the content of a
+// file, that the path is not a regular file in the commit's tree ([providers.ErrPathNotInTree]), or that the
+// file is too large. It is bounded by entries and bytes and evicts the least recently used entry first. It is
+// safe for concurrent use.
 //
 // An entry is keyed by the whole RemediationSettings repository entry (URL, provider, target branch and
 // credentials), the commit and the path, so a read through one entry is never answered from another's, even
-// for the same URL. A file not found is kept only when it was read after a file at the same commit was found
-// through the same entry: GitProvider answers ErrNotFound for a missing commit too, which a host that has not
-// yet replicated a new commit may return for a while. Branch heads and cluster objects are never cached: the mapping reads them every time.
-// Every read, served from the cache or not, counts against [MaxReads], so the cache never changes a result.
+// for the same URL. A plain ErrNotFound is never kept: GitProvider also answers it for a commit the host does
+// not have yet, and the GitHub adapter for any 404 or a token it cannot get, so it may not hold on the next
+// read. Branch heads and cluster objects are never cached: the mapping reads them every time. Every read,
+// served from the cache or not, counts against [MaxReads], so the cache never changes a result.
 type ReadCache struct {
 	maxEntries int
 	maxBytes   int64
@@ -62,21 +58,12 @@ type ReadCache struct {
 	lru   *list.List // of *cacheEntry, most recently used first
 	items map[cacheKey]*list.Element
 	bytes int64
-	// found counts the kept files per entry and commit: a commit with one is known to exist.
-	found map[commitKey]int
 }
 
 // NewReadCache returns a cache that keeps at most maxEntries reads and maxBytes bytes. A bound of zero or
 // less keeps nothing.
 func NewReadCache(maxEntries int, maxBytes int64) *ReadCache {
-	return &ReadCache{maxEntries: maxEntries, maxBytes: maxBytes, lru: list.New(), items: map[cacheKey]*list.Element{},
-		found: map[commitKey]int{}}
-}
-
-// commitKey names one commit as read through one settings entry.
-type commitKey struct {
-	repo   [sha256.Size]byte
-	commit string
+	return &ReadCache{maxEntries: maxEntries, maxBytes: maxBytes, lru: list.New(), items: map[cacheKey]*list.Element{}}
 }
 
 // cacheKey names one read: the settings entry it went through (a digest of the whole entry), the commit and
@@ -91,21 +78,22 @@ type cacheOutcome int
 
 const (
 	cachedFile cacheOutcome = iota
-	cachedNotFound
+	cachedNotInTree
 	cachedTooLarge
 )
 
+// cacheEntry is one kept read. Only the content is stored: the path and commit of the file are the key's.
 type cacheEntry struct {
 	key     cacheKey
 	outcome cacheOutcome
-	file    providers.File
+	data    []byte
 	cost    int64
 }
 
 // Fixed errors for cached outcomes. The walker looks only at their class, never at their text.
 var (
-	errCachedNotFound = fmt.Errorf("file at commit: %w", providers.ErrNotFound)
-	errCachedTooLarge = fmt.Errorf("file at commit: %w", providers.ErrTooLarge)
+	errCachedNotInTree = fmt.Errorf("file at commit: %w", providers.ErrPathNotInTree)
+	errCachedTooLarge  = fmt.Errorf("file at commit: %w", providers.ErrTooLarge)
 )
 
 // repoKey is the digest of a settings repository entry. ok is false when it cannot be encoded, and then the
@@ -119,11 +107,11 @@ func repoKey(repo v1alpha1.GitRepository) (key [sha256.Size]byte, ok bool) {
 }
 
 // readFile reads p at commit through git, answering from the cache when it can. A nil cache, or a commit that
-// is not a full object ID, always reads through git. Only a file, ErrNotFound and ErrTooLarge are kept; any
-// other error is returned and never kept.
+// is not a full object ID, always reads through git. Only a file, ErrPathNotInTree and ErrTooLarge are kept;
+// any other error, a plain ErrNotFound included, is returned and never kept.
 func (c *ReadCache) readFile(ctx context.Context, git providers.GitProvider, repo [sha256.Size]byte, commit, p string) (
 	providers.File, error) {
-	if c == nil || !commitPattern.MatchString(commit) {
+	if c == nil || !providers.IsObjectID(commit) {
 		return git.ReadFile(ctx, commit, p)
 	}
 	k := cacheKey{repo: repo, commit: commit, path: p}
@@ -134,61 +122,56 @@ func (c *ReadCache) readFile(ctx context.Context, git providers.GitProvider, rep
 		}
 		return e.result()
 	}
-	// Whether the commit was known to exist before the read started, so a not found is about the path.
-	exists := c.exists(commitKey{repo: repo, commit: commit})
 	f, err := git.ReadFile(ctx, commit, p)
-	c.put(k, f, err, exists)
+	c.put(k, f, err)
 	return f, err
 }
 
-func (c *ReadCache) exists(k commitKey) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.found[k] > 0
-}
-
-// result returns the cached outcome, with a copy of the content so a caller cannot change the cache.
-func (e *cacheEntry) result() (providers.File, error) {
-	switch e.outcome {
-	case cachedNotFound:
-		return providers.File{}, errCachedNotFound
-	case cachedTooLarge:
-		return providers.File{}, errCachedTooLarge
-	}
-	return providers.File{Path: e.file.Path, Commit: e.file.Commit, Data: bytes.Clone(e.file.Data)}, nil
-}
-
-func (c *ReadCache) get(k cacheKey) (cacheEntry, bool) {
+// get returns the entry for k and marks it used. An entry never changes once kept, so it can be read without
+// the lock.
+func (c *ReadCache) get(k cacheKey) (*cacheEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	el, ok := c.items[k]
 	if !ok {
-		return cacheEntry{}, false
+		return nil, false
 	}
 	c.lru.MoveToFront(el)
-	return *el.Value.(*cacheEntry), true
+	return el.Value.(*cacheEntry), true
 }
 
-// put keeps the outcome of a read, if it is one that never changes, and evicts until the bounds hold. A not
-// found is kept only when the commit was known to exist before the read started.
-func (c *ReadCache) put(k cacheKey, f providers.File, err error, commitExists bool) {
+// result returns the kept outcome, with a copy of the content so a caller cannot change the cache.
+func (e *cacheEntry) result() (providers.File, error) {
+	switch e.outcome {
+	case cachedNotInTree:
+		return providers.File{}, errCachedNotInTree
+	case cachedTooLarge:
+		return providers.File{}, errCachedTooLarge
+	}
+	return providers.File{Path: e.key.path, Commit: e.key.commit, Data: bytes.Clone(e.data)}, nil
+}
+
+// put keeps the outcome of a read, if it is one that never changes, and evicts until the bounds hold.
+func (c *ReadCache) put(k cacheKey, f providers.File, err error) {
 	e := &cacheEntry{key: k}
 	switch {
-	case err == nil && len(f.Data) <= MaxFileBytes:
+	case err == nil && len(f.Data) <= MaxFileBytes && f.Path == k.path && f.Commit == k.commit:
 		e.outcome = cachedFile
-		e.file = providers.File{Path: f.Path, Commit: f.Commit, Data: bytes.Clone(f.Data)}
-	case providers.IsNotFound(err) && commitExists:
-		e.outcome = cachedNotFound
+	case providers.IsPathNotInTree(err):
+		e.outcome = cachedNotInTree
 	case providers.IsTooLarge(err):
 		e.outcome = cachedTooLarge
 	default:
-		// A transient or refused read, a not found at a commit that may not exist yet, or a file over the
-		// limit that the adapter did not refuse.
+		// A transient or refused read, a plain not found (a missing commit, a failing host), a file over the
+		// limit that the adapter did not refuse, or a file the adapter labelled with another path or commit.
 		return
 	}
-	e.cost = int64(len(e.file.Data)+len(e.file.Path)+len(e.file.Commit)+len(k.commit)+len(k.path)) + cacheEntryOverhead
+	e.cost = int64(len(f.Data)+len(k.commit)+len(k.path)) + cacheEntryOverhead
 	if c.maxEntries <= 0 || e.cost > c.maxBytes {
 		return
+	}
+	if e.outcome == cachedFile {
+		e.data = bytes.Clone(f.Data)
 	}
 
 	c.mu.Lock()
@@ -200,21 +183,12 @@ func (c *ReadCache) put(k cacheKey, f providers.File, err error, commitExists bo
 	}
 	c.items[k] = c.lru.PushFront(e)
 	c.bytes += e.cost
-	if e.outcome == cachedFile {
-		c.found[commitKey{repo: k.repo, commit: k.commit}]++
-	}
 	for c.lru.Len() > c.maxEntries || c.bytes > c.maxBytes {
 		oldest := c.lru.Back()
 		old := oldest.Value.(*cacheEntry)
 		c.lru.Remove(oldest)
 		delete(c.items, old.key)
 		c.bytes -= old.cost
-		if old.outcome == cachedFile {
-			ck := commitKey{repo: old.key.repo, commit: old.key.commit}
-			if c.found[ck]--; c.found[ck] <= 0 {
-				delete(c.found, ck)
-			}
-		}
 	}
 }
 

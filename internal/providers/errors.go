@@ -26,6 +26,11 @@ import (
 var (
 	// ErrNotFound means the object asked for does not exist.
 	ErrNotFound = errors.New("not found")
+	// ErrPathNotInTree means the adapter read the tree at the commit asked for and the path is not a regular
+	// file in it: absent, a directory, a submodule or a symbolic link. It wraps ErrNotFound, so IsNotFound
+	// holds too. Unlike a plain ErrNotFound, which an adapter also returns for a commit the host does not have
+	// (yet) or a 404 from a host that is failing, it never changes for the same commit and path.
+	ErrPathNotInTree = fmt.Errorf("path not in tree: %w", ErrNotFound)
 	// ErrConflict means the request was based on stale state, for example a commit whose expected base is no
 	// longer the head of the branch, or an object that already exists with different content.
 	ErrConflict = errors.New("conflict")
@@ -70,6 +75,10 @@ func (e *RetryableError) Is(target error) bool { return target == ErrRetryable }
 
 // IsNotFound reports whether err means the object does not exist.
 func IsNotFound(err error) bool { return errors.Is(err, ErrNotFound) }
+
+// IsPathNotInTree reports whether err means the path is not a regular file in the tree of the commit, as read
+// from the host. Such an answer can be kept for that commit and path.
+func IsPathNotInTree(err error) bool { return errors.Is(err, ErrPathNotInTree) }
 
 // IsConflict reports whether err means the request was based on stale state.
 func IsConflict(err error) bool { return errors.Is(err, ErrConflict) }

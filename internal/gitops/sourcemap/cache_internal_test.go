@@ -43,8 +43,12 @@ func (g *countingGit) ReadFile(_ context.Context, commit, p string) (providers.F
 	g.mu.Lock()
 	g.reads[p]++
 	g.mu.Unlock()
-	if strings.HasPrefix(p, "missing") {
-		return providers.File{}, fmt.Errorf("file: %w", providers.ErrNotFound)
+	switch {
+	case strings.HasPrefix(p, "missing"):
+		return providers.File{}, fmt.Errorf("file: %w", providers.ErrPathNotInTree)
+	case strings.HasPrefix(p, "gone"):
+		// What a host answers for a missing commit, or a 404 from a host that is failing.
+		return providers.File{}, fmt.Errorf("GitHub returned status 404: %w", providers.ErrNotFound)
 	}
 	return providers.File{Path: p, Commit: commit, Data: bytes.Repeat([]byte{'x'}, g.size)}, nil
 }
@@ -88,10 +92,18 @@ func TestReadCacheStaysWithinItsEntries(t *testing.T) {
 
 func TestReadCacheStaysWithinItsBytes(t *testing.T) {
 	const size = 1000
-	limit := int64(2*(size+cacheEntryOverhead+2*len(commitA)+2*len("f0")) + 10)
+	// The commit and the path are counted once, as part of the key; the file is stored without them.
+	entry := int64(size + len(commitA) + len("f0") + cacheEntryOverhead)
+	limit := 2*entry + 10
 	c := NewReadCache(100, limit)
 	git := newCountingGit(size)
 	ctx := context.Background()
+	if _, err := c.readFile(ctx, git, repoA, commitA, "f0"); err != nil {
+		t.Fatal(err)
+	}
+	if c.Bytes() != entry {
+		t.Fatalf("Bytes = %d after one read, want %d", c.Bytes(), entry)
+	}
 	for i := range 5 {
 		if _, err := c.readFile(ctx, git, repoA, commitA, fmt.Sprintf("f%d", i)); err != nil {
 			t.Fatal(err)
@@ -143,42 +155,37 @@ func TestReadCacheReturnsCopies(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(f.Data) != "xxxx" {
-			t.Fatalf("content = %q, want xxxx", f.Data)
+		if string(f.Data) != "xxxx" || f.Path != "f" || f.Commit != commitA {
+			t.Fatalf("file = %+v, want xxxx at f and %s", f, commitA)
 		}
 		f.Data[0] = 'y'
 	}
 }
 
-// A file not found is kept only once a file at the same commit was found through the same entry.
-func TestReadCacheKeepsNotFoundOnlyAtAKnownCommit(t *testing.T) {
+// A path the adapter found absent from the commit's tree is kept; a plain not found, which a missing commit or
+// a failing host also gives, is read again every time.
+func TestReadCacheKeepsOnlyAPathNotInTheTree(t *testing.T) {
 	c := NewReadCache(10, 1<<20)
 	git := newCountingGit(1)
 	ctx := context.Background()
-	read := func(p string) {
-		t.Helper()
-		_, err := c.readFile(ctx, git, repoA, commitA, p)
-		if strings.HasPrefix(p, "missing") != providers.IsNotFound(err) {
-			t.Fatalf("read %s: %v", p, err)
+	for range 2 {
+		_, err := c.readFile(ctx, git, repoA, commitA, "gone")
+		if !providers.IsNotFound(err) || providers.IsPathNotInTree(err) {
+			t.Fatalf("read gone: %v", err)
+		}
+		_, err = c.readFile(ctx, git, repoA, commitA, "missing")
+		if !providers.IsPathNotInTree(err) || !providers.IsNotFound(err) {
+			t.Fatalf("read missing: %v", err)
 		}
 	}
-	read("missing1")
-	read("missing1")
-	if git.count("missing1") != 2 {
-		t.Fatalf("a not found at an unknown commit was kept: %d reads", git.count("missing1"))
+	if git.count("gone") != 2 {
+		t.Errorf("a plain not found was read %d times, want 2: it was kept", git.count("gone"))
 	}
-	read("f")
-	read("missing2")
-	read("missing2")
-	if git.count("missing2") != 1 {
-		t.Errorf("a not found at a known commit was read %d times, want 1", git.count("missing2"))
+	if git.count("missing") != 1 {
+		t.Errorf("a path not in the tree was read %d times, want 1", git.count("missing"))
 	}
-	// Through another entry the commit is not known yet.
-	if _, err := c.readFile(ctx, git, sha256.Sum256([]byte("b")), commitA, "missing3"); !providers.IsNotFound(err) {
-		t.Fatal(err)
-	}
-	if c.exists(commitKey{repo: sha256.Sum256([]byte("b")), commit: commitA}) {
-		t.Error("a commit found through one entry counts as known through another")
+	if c.Len() != 1 {
+		t.Errorf("Len = %d, want 1", c.Len())
 	}
 }
 

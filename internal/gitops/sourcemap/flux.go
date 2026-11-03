@@ -17,11 +17,13 @@ package sourcemap
 
 import (
 	"fmt"
-	"regexp"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
+
+	"github.com/pkalin/shadewright/internal/providers"
 )
 
 // Labels Flux sets on the objects it applies.
@@ -225,13 +227,16 @@ func checkRevision(ks, src *unstructured.Unstructured, branch string) *Result {
 	return nil
 }
 
-// revisionRE is a Flux artifact revision for a branch: the branch, then the commit digest.
-var revisionRE = regexp.MustCompile(`^(.+)@(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$`)
-
-// revisionOfBranch reports whether a Flux artifact revision was fetched from branch.
+// revisionOfBranch reports whether a Flux artifact revision was fetched from branch: the revision is the
+// branch, "@", then the commit digest (sha1:<40 hex> or sha256:<64 hex>).
 func revisionOfBranch(revision, branch string) bool {
-	m := revisionRE.FindStringSubmatch(revision)
-	return m != nil && m[1] == branch
+	i := strings.LastIndexByte(revision, '@')
+	if i <= 0 || revision[:i] != branch {
+		return false
+	}
+	algo, id, ok := strings.Cut(revision[i+1:], ":")
+	return ok && providers.IsObjectID(id) &&
+		(algo == "sha1" && len(id) == providers.SHA1HexLen || algo == "sha256" && len(id) == providers.SHA256HexLen)
 }
 
 // field returns the value at a path of keys, without copying it.

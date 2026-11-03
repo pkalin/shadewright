@@ -24,6 +24,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/pkalin/shadewright/internal/providers"
 )
 
 // HeadBranchPrefix starts the name of every branch the provider writes to.
@@ -39,7 +41,6 @@ const (
 )
 
 var (
-	shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	// nodeIDPattern bounds a GraphQL node ID taken from a response.
 	nodeIDPattern = regexp.MustCompile(`^[A-Za-z0-9_=-]{1,100}$`)
 	// headNamePattern is the part after shadewright/: one path segment, as a request UID is.
@@ -48,7 +49,8 @@ var (
 	targetPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$`)
 )
 
-func validSHA(s string) bool { return shaPattern.MatchString(s) }
+// validSHA reports whether s is a full SHA-1 commit ID, the only object format GitHub serves.
+func validSHA(s string) bool { return len(s) == providers.SHA1HexLen && providers.IsObjectID(s) }
 
 // isHeadBranch reports whether b is shadewright/<name> with one safe segment.
 func isHeadBranch(b string) bool {

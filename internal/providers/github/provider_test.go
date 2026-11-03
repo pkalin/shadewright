@@ -333,8 +333,9 @@ func TestReadFileNotRegular(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			h := newHarness(t, get("/git/trees/"+shaBase, "tree_root.json"))
 			_, err := h.p.ReadFile(ctx, shaBase, path)
-			if !providers.IsNotFound(err) {
-				t.Fatalf("ReadFile(%s) = %v, want not found", path, err)
+			// Read from the commit's tree, so the answer holds for good: a cache may keep it.
+			if !providers.IsPathNotInTree(err) || !providers.IsNotFound(err) {
+				t.Fatalf("ReadFile(%s) = %v, want a path not in the tree", path, err)
 			}
 			assertSafe(t, err)
 		})
@@ -344,10 +345,33 @@ func TestReadFileNotRegular(t *testing.T) {
 func TestReadFileMissingCommit(t *testing.T) {
 	h := newHarness(t, status(http.MethodGet, "/git/trees/"+shaOld, http.StatusNotFound, fxForbidden))
 	_, err := h.p.ReadFile(ctx, shaOld, "apps/deploy.yaml")
-	if !providers.IsNotFound(err) {
-		t.Fatalf("got %v", err)
+	if !providers.IsNotFound(err) || providers.IsPathNotInTree(err) {
+		t.Fatalf("got %v, want a plain not found", err)
 	}
 	assertSafe(t, err)
+}
+
+// A 404 or 422 from GitHub on a tree or blob read is a not found, but not a path known to be absent from the
+// tree: the host may have failed, or not have the commit yet, so a cache must not keep it.
+func TestReadFileHostNotFoundIsNotAPathNotInTree(t *testing.T) {
+	blob := status(http.MethodGet, "/git/blobs/"+shaDeploy, http.StatusNotFound, fxForbidden)
+	for name, steps := range map[string][]step{
+		"root tree 422": {status(http.MethodGet, "/git/trees/"+shaBase, http.StatusUnprocessableEntity, fxForbidden)},
+		"subtree 404": {get("/git/trees/"+shaBase, "tree_root.json"),
+			status(http.MethodGet, "/git/trees/"+shaApps, http.StatusNotFound, fxForbidden)},
+		"subtree 410": {get("/git/trees/"+shaBase, "tree_root.json"),
+			status(http.MethodGet, "/git/trees/"+shaApps, http.StatusGone, fxForbidden)},
+		"blob 404": append(readSteps(), blob),
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, steps...)
+			_, err := h.p.ReadFile(ctx, shaBase, "apps/deploy.yaml")
+			if !providers.IsNotFound(err) || providers.IsPathNotInTree(err) {
+				t.Fatalf("ReadFile = %v, want a plain not found", err)
+			}
+			assertSafe(t, err)
+		})
+	}
 }
 
 func TestReadFileTooLargeBeforeDownload(t *testing.T) {
@@ -1301,6 +1325,10 @@ func TestTokenSourceErrorsAreReplaced(t *testing.T) {
 	}{
 		"plain":     {leak, func(err error) bool { return !providers.IsRetryable(err) && !providers.IsNotFound(err) }},
 		"not found": {fmt.Errorf("%w: %w", leak, providers.ErrNotFound), providers.IsNotFound},
+		// A token it cannot get says nothing about a tree, so a cache must never keep the answer.
+		"path not in tree": {fmt.Errorf("%w: %w", leak, providers.ErrPathNotInTree), func(err error) bool {
+			return providers.IsNotFound(err) && !providers.IsPathNotInTree(err)
+		}},
 		"retryable": {&providers.RetryableError{RetryAfter: 5 * time.Minute, Err: leak}, func(err error) bool {
 			d, ok := providers.RetryAfter(err)
 			return ok && d == 5*time.Minute

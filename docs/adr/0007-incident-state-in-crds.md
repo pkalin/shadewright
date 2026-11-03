@@ -9,7 +9,7 @@ Deduplication state (fingerprints, counters, cooldowns) must survive restarts, o
 
 ## Decision
 
-Store incidents as a namespaced `Incident` CR with bounded retention: fingerprint, counters, first and last seen, correlated owner, and references to analyses and requests. No raw logs, transcripts or large payloads in etcd. Revisit when incident volume or retention needs grow.
+Store incidents as a namespaced `Incident` CR in the operator namespace, with bounded retention: fingerprint, counters, first and last seen, correlated owner, and references to analyses and requests. No raw logs, transcripts or large payloads in etcd. Revisit when incident volume or retention needs grow.
 
 ## Consequences
 
@@ -21,3 +21,7 @@ Store incidents as a namespaced `Incident` CR with bounded retention: fingerprin
 
 - External database (PostgreSQL, Table Storage): more durable and queryable, but more cost and another dependency for a lab.
 - In-memory only: loses state on restart.
+
+## Amendments
+
+- 2026-11-03: the decision now says where Incidents live: in the operator namespace, next to the requests that point at them (`IncidentRef` is same-namespace), not in the namespace of the target. The analyzer may write them only there; the target's namespace is part of the fingerprint, not of the object's location ([#155](https://github.com/pkalin/shadewright/issues/155)). This narrows a grant; nothing is widened.

@@ -1,5 +1,7 @@
 resources:
 - service_account.yaml
 - role.yaml
+# The catalogue of reads in watched namespaces; bound per namespace in config/watch, never cluster-wide.
+- watch/role.yaml
 - role_binding.yaml
 - leader_election.yaml

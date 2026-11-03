@@ -1,0 +1,7 @@
+# The namespaces the analyzer watches (#155): one RoleBinding per namespace in the analyzer's
+# --watch-namespaces (config/manager/analyzer.yaml), each binding the read-only analyzer-watch-role there.
+# Built on its own, not from config/default: that one sets every namespace to shadewright-system, and these
+# bindings must stay in the watched namespaces. Names are final (prefix applied), so keep them in step with
+# config/default. The namespaces must exist before this is applied. test/rbac checks the list against the flag.
+resources:
+- role_binding_demo.yaml

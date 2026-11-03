@@ -18,13 +18,17 @@ limitations under the License.
 // analysis. It may write Incidents and create RemediationRequests in the operator namespace, and nothing
 // else. It can never write a request's status, so nothing it produces is ever an authorization.
 //
-// The analyzer's permissions (design 2.2, 10.1):
+// The analyzer's permissions (design 2.2, 10.1) come in three parts:
 //
-// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups=apps,resources=replicasets;deployments;statefulsets,verbs=get;list;watch
-// +kubebuilder:rbac:groups=remediation.shadewright.io,resources=incidents,verbs=get;list;watch;create;update;patch
-// +kubebuilder:rbac:groups=remediation.shadewright.io,resources=incidents/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationsettings,verbs=get;list;watch
+//   - In the operator namespace (a Role): Incidents and their status, and create on RemediationRequests.
+//     Incidents live there, next to the requests that point at them (IncidentRef is same-namespace).
+//   - Cluster-wide (a ClusterRole with a ClusterRoleBinding): read the cluster-scoped RemediationSettings,
+//     and nothing namespaced.
+//   - In each watched namespace: the reads in package collector, a ClusterRole bound by one RoleBinding per
+//     namespace in --watch-namespaces, never cluster-wide.
+//
+// +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=incidents,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=incidents/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=remediationrequests,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationsettings,verbs=get;list;watch
 package analyzer

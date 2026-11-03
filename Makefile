@@ -47,7 +47,8 @@ help: ## Display this help.
 manifests: controller-gen ## Generate WebhookConfiguration, the executor and analyzer roles, and CustomResourceDefinition objects.
 	"$(CONTROLLER_GEN)" crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	"$(CONTROLLER_GEN)" rbac:roleName=executor-role paths="./internal/controller/..." output:rbac:artifacts:config=config/rbac/executor
-	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-role paths="./internal/analyzer/..." output:rbac:artifacts:config=config/rbac/analyzer
+	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-role paths="./internal/analyzer" output:rbac:artifacts:config=config/rbac/analyzer
+	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-watch-role paths="./internal/analyzer/collector/..." output:rbac:artifacts:config=config/rbac/analyzer/watch
 
 .PHONY: api-docs
 api-docs: crd-ref-docs ## Generate the API reference (docs/reference/api.md) from the Go types in api/.
@@ -163,7 +164,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
-	"$(KUSTOMIZE)" build config/default > dist/install.yaml
+	{ "$(KUSTOMIZE)" build config/default; echo "---"; "$(KUSTOMIZE)" build config/watch; } > dist/install.yaml
 
 ##@ Deployment
 
@@ -185,9 +186,11 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
+	"$(KUSTOMIZE)" build config/watch | "$(KUBECTL)" apply -f -
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	"$(KUSTOMIZE)" build config/watch | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
 ##@ Dependencies

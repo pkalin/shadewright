@@ -69,9 +69,10 @@ func (s SymptomSource) Validate() error {
 	return nil
 }
 
-// validateSources checks every symptom source of a module and that no kind is watched twice.
-func validateSources(sources []SymptomSource) error {
-	seen := map[string]bool{}
+// validateSources checks every symptom source of one module. watched maps each group and kind already watched
+// to the module that watches it, across both axes; a kind watched twice, by this module or another one, is
+// refused, so no object gives two symptoms from two sources. The module's kinds are added to watched.
+func validateSources(module string, sources []SymptomSource, watched map[string]string) error {
 	var errs []error
 	for _, s := range sources {
 		if err := s.Validate(); err != nil {
@@ -79,10 +80,26 @@ func validateSources(sources []SymptomSource) error {
 			continue
 		}
 		key := s.Group + "/" + s.Kind
-		if seen[key] {
-			errs = append(errs, fmt.Errorf("kind %s %q is watched twice", s.Group, s.Kind))
+		if other, ok := watched[key]; ok {
+			errs = append(errs, fmt.Errorf("kind %s %q is watched twice, by %s and %s", s.Group, s.Kind, other, module))
+			continue
 		}
-		seen[key] = true
+		watched[key] = module
 	}
 	return errors.Join(errs...)
+}
+
+// cloneHooks copies what a module contributed, down to the slices in each symptom source, so a module that
+// keeps and later changes the slices it returned cannot change the registry.
+func cloneHooks(h Hooks) Hooks {
+	out := Hooks{
+		Symptoms: slices.Clone(h.Symptoms),
+		Rules:    slices.Clone(h.Rules),
+		Tools:    slices.Clone(h.Tools),
+		Actions:  slices.Clone(h.Actions),
+	}
+	for i := range out.Symptoms {
+		out.Symptoms[i].Versions = slices.Clone(out.Symptoms[i].Versions)
+	}
+	return out
 }

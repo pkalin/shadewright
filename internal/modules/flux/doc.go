@@ -24,21 +24,27 @@ limitations under the License.
 //
 //   - The object must have the watched apiVersion and kind. A suspended object (spec.suspend) shows nothing:
 //     its status describes the past, and suspending is a person's choice.
+//   - When metadata.generation is an integer, conditions whose observedGeneration is set and differs from it
+//     describe an older spec and are skipped before anything is chosen. Without a usable generation no
+//     condition is skipped for its generation.
 //   - Stalled=True is reported first: Flux has stopped retrying. Otherwise the first Ready=False is reported.
-//     Ready=True, Ready=Unknown (still reconciling) and no Ready condition show nothing.
-//   - A condition whose observedGeneration is set and differs from metadata.generation describes an older spec
-//     and shows nothing until Flux catches up.
-//   - Ready=False with reason DependencyNotReady shows nothing: the dependency is the failing object, and it
-//     has a symptom of its own.
-//   - The symptom's reason and summary are written here. The reason is Stalled for Stalled=True, the Flux reason
-//     when it is one this package knows for the kind (BuildFailed, ReconciliationFailed, UpgradeFailed,
-//     GitOperationFailed and so on), and NotReady otherwise. Cluster text never goes into either.
-//   - The evidence is the condition's reason and message, status.lastAttemptedRevision (Kustomization,
-//     HelmRelease), and the revision still in use when it differs from that one: status.lastAppliedRevision
-//     (Kustomization) or the chart version of the newest deployed release in status.history (HelmRelease), in
-//     which case the summary says the cluster still runs an older revision than Git, which is how drift from
-//     Git shows. A GitRepository gives status.artifact.revision, the artifact it still serves. Evidence is
-//     untrusted: the evaluator redacts and bounds it, this package copies it as it is.
+//     Ready=True, Ready=Unknown (still reconciling), no Ready condition and HealthCheckCanceled (a new
+//     reconciliation replaced the running one) show nothing.
+//   - The symptom's reason and summary are written here, never taken from the cluster. The reason is Stalled
+//     for Stalled=True, DependencyNotReady for a Kustomization or HelmRelease waiting for a dependency (so a
+//     missing, suspended or unwatched dependency does not fail silently), the Flux reason when it is one the
+//     controllers set for the kind (see [reasons] for the sources and tags they were read from), and
+//     NotReady otherwise.
+//   - Evidence is the condition's reason and message and the revisions: for a Kustomization
+//     status.lastAttemptedRevision, plus status.lastAppliedRevision when it differs; for a HelmRelease
+//     status.lastAttemptedRevision, plus the chart version of the newest deployed release in status.history
+//     when it differs without its "+" build suffix, and status.lastAttemptedConfigDigest with that release's
+//     configDigest when they differ; for a GitRepository status.artifact.revision, the artifact it still
+//     serves. When a Kustomization or HelmRelease comparison differs, the summary says the cluster runs a
+//     different revision than its source declares, naming the source kind when it is a Flux one: that is how
+//     drift from the source shows.
+//   - Evidence is untrusted and copied as it is: the evaluator redacts and bounds it. Symptoms meet
+//     [modules.ValidSymptom].
 //
 // The module has no actions and no tools: Flux is the delivery path, so a fix is a pull request to the
 // manifest, values or Kustomization in Git, never a change to a Flux object (design 7). Nothing here writes to

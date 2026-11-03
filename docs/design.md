@@ -1,6 +1,6 @@
 # Design
 
-Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the semantic diff check of section 8.2, the GitHub and Key Vault adapters, the pull request step of section 6 (branch, commit and pull request, up to `AwaitingApproval`), the collector of section 3.1 and both levels of deduplication of section 3.2, with the Incident controller that keeps them in `Incident` objects, the RBAC of sections 2.2 and 10, and the registries of platform and integration modules of sections 2.4 and 2.5 (built, not yet wired into a binary). Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
+Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the semantic diff check of section 8.2, the GitHub and Key Vault adapters, the pull request step of section 6 (branch, commit and pull request, up to `AwaitingApproval`), the collector of section 3.1 and both levels of deduplication of section 3.2, with the Incident controller that keeps them in `Incident` objects, the RBAC of sections 2.2 and 10, the registries of platform and integration modules of sections 2.4 and 2.5 with the symptom source contract, and the Flux integration module of section 2.5 (built, not yet wired into a binary). Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
 
 ## 1. Goals
 
@@ -160,7 +160,7 @@ An `Integration` module per add-on: detection (API groups, CRDs, versions), watc
 | --- | --- | --- |
 | Core workloads (Deployment, StatefulSet, PDB, NetworkPolicy, ResourceQuota) | OOM, crash loops, unschedulable pods, quota | `SetContainerMemoryLimit` |
 | KEDA | trigger errors, `ScaledObject` not ready, replica ceiling | `AdjustKedaMaxReplicas` |
-| Flux | failing `Kustomization`, `HelmRelease` or `GitRepository`, drift from Git | none: Flux is the delivery path |
+| Flux | failing `Kustomization`, `HelmRelease` or `GitRepository`, drift from the source | none: Flux is the delivery path |
 | Kyverno | a deployment refused by a policy, policy reports | diagnosis only |
 | Secrets Store CSI driver | pods stuck on a missing secret or identity | diagnosis only |
 | cloudflared | tunnel down, so the application is unreachable | none |
@@ -169,15 +169,20 @@ Later candidates: External Secrets Operator, Reloader, cert-manager, Trivy Opera
 
 An integration is detected when the discovery API serves any of the group versions it declares (KEDA: `keda.sh/v1alpha1`), again as a pure function of the list the caller collected. Detection returns, with each integration, the first of its declared group versions that is served, the value status reports. Detection by other signals, such as the image of a Deployment for cloudflared, comes with the module that needs it. As in 2.4, an integration contributes hooks only when it is enabled and detected. A module's contributions (symptom sources, diagnosis rules, read-only tools, catalog actions) are declared in one value whose zero value contributes nothing, so a detection-only module is a name and its detection.
 
-A symptom source names one watched kind (group, the versions it can read in order of preference, kind, plural resource and the controller whose status it reads) and a pure function from one object, as decoded from JSON, to symptoms. A symptom has a reason and a summary that the rule writes itself, never cluster text, and evidence: values read from the object, each with the field it came from, which are untrusted and redacted and bounded where they are evaluated. `New` refuses a source with an invalid group version, kind, resource or controller, without a function, or a kind one module watches twice.
+A symptom source names one watched kind (group, the versions it can read in order of preference, kind, plural resource and the controller whose status it reads) and a pure function from one object, as decoded from JSON, to symptoms. A symptom has a reason (a CamelCase word of at most 128 characters) and a summary (at most 256 bytes) that the rule writes itself, never cluster text, and at most 8 evidence entries: values read from the object, each with the field it came from. Evidence values are untrusted and left as read; the planned evaluator ([#61](https://github.com/pkalin/shadewright/issues/61)) checks each symptom against these limits (`ValidSymptom`), redacts every value with the fingerprint normalization and cuts it to 256 bytes. `New` refuses a source with an invalid group version, kind, resource or controller, or without a function, and a kind watched twice, by one module or by two on either axis. It keeps a copy of each module's hooks as validated, and lookups return that copy.
 
 **Flux** (`internal/modules/flux`, built; it contributes once the analyzer wires symptom sources, planned): detected by `kustomize.toolkit.fluxcd.io/v1`, `helm.toolkit.fluxcd.io/v2` or `source.toolkit.fluxcd.io/v1` (Flux 2.3 and later; beta versions are not read). It watches `Kustomization`, `HelmRelease` and `GitRepository` and reports at most one symptom per object:
 
-- `Stalled=True` first, otherwise `Ready=False`; `Ready=True`, `Ready=Unknown` (reconciling), a condition for an older generation, a suspended object and `DependencyNotReady` (the dependency has its own symptom) show nothing.
-- The reason is the Flux reason when it is one the module knows for the kind (build and apply errors such as `BuildFailed` and `ReconciliationFailed`, `HealthCheckFailed`, Helm `InstallFailed` and `UpgradeFailed`, Git `GitOperationFailed` and `AuthenticationFailed`), `Stalled`, or `NotReady` otherwise.
-- The evidence is the condition's reason and message, the last attempted revision and, when it differs, the revision the cluster still runs (`lastAppliedRevision`, the newest deployed Helm release, or the artifact a GitRepository still serves); the summary then says the cluster runs an older revision than Git, which is how drift from Git shows.
+- Conditions for an older generation (a set `observedGeneration` that differs from `metadata.generation`, when the object has one) are skipped first. Then `Stalled=True` is reported, otherwise `Ready=False`. `Ready=True`, `Ready=Unknown` (reconciling), a suspended object and `HealthCheckCanceled` (a new reconciliation replaced the running one) show nothing.
+- `DependencyNotReady` is reported with that reason, so a dependency that is missing, suspended or not watched does not fail silently.
+- Otherwise the reason is the Flux reason when it is one the controllers set for the kind (read from kustomize-controller v1.10.1, helm-controller v1.7.1 and source-controller v1.10.1: for example `BuildFailed`, `ReconciliationFailed`, `HealthCheckFailed`, `UpgradeFailed`, `RollbackSucceeded`, `GitOperationFailed`, `AuthenticationFailed`), `Stalled`, or `NotReady`.
+- Evidence always holds the condition's reason and message. By kind:
+    - `Kustomization`: `status.lastAttemptedRevision`, and `status.lastAppliedRevision` when it differs.
+    - `HelmRelease`: `status.lastAttemptedRevision`, compared with the chart version of the newest deployed release in `status.history` without its `+` build suffix (so an OCI digest suffix is no difference), and `status.lastAttemptedConfigDigest` compared with that release's `configDigest` (a values-only failed upgrade); each one that differs is added.
+    - `GitRepository`: `status.artifact.revision`, the artifact it still serves; a failing GitRepository does not say which revision it tried, so nothing is compared.
+- When the Kustomization or HelmRelease comparison differs, the summary says the cluster runs a different revision (for a HelmRelease, chart version or values) than its source declares, naming the source kind when it is a Flux source kind. That is how drift from the source shows.
 
-The Flux module has no actions and no tools, and reads objects only: a fix is a pull request to the manifest, values or Kustomization (section 7), never a change to a Flux object. The read-only access to these kinds comes with the wiring; Flux objects usually live in `flux-system`, which then has to be among the analyzer's watched namespaces.
+The Flux module has no actions and no tools, and reads objects only: a fix is a pull request to the manifest, values or Kustomization (section 7), never a change to a Flux object. The read-only access to these kinds comes with the wiring; Flux objects usually live in `flux-system`, which then has to be among the analyzer's watched namespaces. Redaction keeps a commit in the form Flux writes revisions (`main@sha1:` and 40 lower-case hex digits), so revisions survive into the diagnosis; a bare 40-digit hex run is still redacted.
 
 ## 3. Observation and deduplication
 
@@ -536,7 +541,7 @@ Rule: change the declaration in its real source, and leave execution to the cont
 | Controller | What we analyse | Fix path |
 | --- | --- | --- |
 | KEDA | `ScaledObject` conditions, trigger errors, the HPA, backlog and available capacity | PR changing a justified `ScaledObject` field or the Helm values behind it |
-| Flux | Kustomization and HelmRelease readiness, revision, build and apply errors | PR fixing the manifest, values or Kustomization |
+| Flux | Kustomization and HelmRelease readiness, revision, build and apply errors, GitRepository fetch and authentication errors, drift from the source | PR fixing the manifest, values or Kustomization |
 | Crossplane (later) | `Ready` and `Synced`, provider messages, XR dependencies | PR changing the XR or its parameters |
 
 **KEDA:** never set Deployment replicas by hand when an autoscaler owns them. `cooldownPeriod` applies to scaling to zero; scaling from one to many is the HPA's job. A broken trigger authentication is not fixed by raising `maxReplicaCount` ([ScaledObject spec](https://keda.sh/docs/2.21/reference/scaledobject-spec/)). Match the adapter to the installed version.

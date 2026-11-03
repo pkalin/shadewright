@@ -7,7 +7,7 @@
 </p>
 
 > [!WARNING]
-> Early. Built so far: the API and its validation, the policy check with source mapping and the freshness check, the YAML patchers, the semantic diff check, the GitHub and Key Vault adapters, the pull request step (branch, commit and pull request, up to a person's review), the collector (events and pod status to deduplicated observations) and the Incident controller (one bounded `Incident` per fingerprint, marked due for analysis within a daily budget). Not built: the analysis, auto-merge, delivery and the verification. The [design](docs/design.md) says what holds at each step; the [decisions](docs/adr/index.md) say why.
+> Early. Built so far: the API and its validation, the policy check with source mapping and the freshness check, the YAML patchers, the semantic diff check, the GitHub and Key Vault adapters, the pull request step (branch, commit and pull request, up to a person's review), the collector (events and pod status to deduplicated observations) and the Incident controller (one bounded `Incident` per fingerprint, marked due for analysis within a daily budget), and the module registries with the Flux integration module (failing Flux objects as symptoms; not yet wired into the analyzer). Not built: the analysis, auto-merge, delivery and the verification. The [design](docs/design.md) says what holds at each step; the [decisions](docs/adr/index.md) say why.
 
 ## What it does
 

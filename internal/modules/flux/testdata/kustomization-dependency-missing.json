@@ -1,0 +1,38 @@
+{
+  "apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+  "kind": "Kustomization",
+  "metadata": {
+    "name": "apps",
+    "namespace": "flux-system",
+    "uid": "6a1f0c2e-3b4d-4e5f-8a7b-9c0d1e2f3a4b",
+    "generation": 1
+  },
+  "spec": {
+    "dependsOn": [
+      {
+        "name": "infrastructure"
+      }
+    ],
+    "interval": "1m",
+    "path": "./apps",
+    "sourceRef": {
+      "kind": "GitRepository",
+      "name": "flux-system"
+    }
+  },
+  "status": {
+    "observedGeneration": 1,
+    "lastAppliedRevision": "cluster/kind@sha1:0e2d4c6b8a9f7e5d3c1b0a9f8e7d6c5b4a3f2e1d",
+    "conditions": [
+      {
+        "type": "Ready",
+        "status": "False",
+        "reason": "DependencyNotReady",
+        "message": "unable to get 'flux-system/infrastructure' dependency: Kustomization.kustomize.toolkit.fluxcd.io \"infrastructure\" not found",
+        "observedGeneration": 1,
+        "lastTransitionTime": "2026-11-03T09:00:00Z"
+      }
+    ],
+    "lastAttemptedRevision": "cluster/kind@sha1:0e2d4c6b8a9f7e5d3c1b0a9f8e7d6c5b4a3f2e1d"
+  }
+}

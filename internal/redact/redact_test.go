@@ -665,3 +665,27 @@ func FuzzString(f *testing.F) {
 		}
 	})
 }
+
+// A Flux revision names a Git commit as "sha1:" and exactly 40 lower-case hex digits. It is kept; the same hex
+// without that prefix, a longer or upper-case run, or a token after the commit is still redacted.
+func TestFluxRevisions(t *testing.T) {
+	const commit = "1f3c5e7a9b2d4f6081a3c5e7f9b1d3f5a7c9e1b3"
+	for _, in := range []string{
+		"main@sha1:" + commit,
+		"Applied revision: cluster/kind@sha1:" + commit,
+		"sha1:" + commit,
+		"refs/heads/main@sha1:" + commit + " failed",
+	} {
+		if out := String(in); out != in {
+			t.Errorf("changed a revision:\n in: %q\nout: %q", in, out)
+		}
+	}
+	checkGapCases(t, []gapCase{
+		{name: "bare commit hash", input: "token " + commit, secrets: []string{commit}},
+		{name: "one digit too many", input: "main@sha1:" + commit + "a", secrets: []string{commit}},
+		{name: "upper-case hex", input: "main@sha1:" + strings.ToUpper(commit), secrets: []string{strings.ToUpper(commit)}},
+		{name: "prefix inside a word", input: "xsha1:" + commit, secrets: []string{commit}},
+		{name: "token after the commit", input: "main@sha1:" + commit + "-" + randomToken + endText,
+			secrets: []string{randomToken}, kept: []string{"main@sha1:" + commit + "-", endText}},
+	})
+}

@@ -64,19 +64,21 @@ type Registry struct {
 	platformLabels map[string]bool
 }
 
-// platformEntry and integrationEntry keep the name and the detection a module declared when the registry
+// platformEntry and integrationEntry keep the name, the detection and the hooks a module declared when the registry
 // was built, so lookups and detection do not depend on a module returning the same values twice.
 type platformEntry struct {
 	name   string
 	module Platform
 	scheme string
 	labels []string // sorted, without duplicates
+	hooks  Hooks    // validated copy
 }
 
 type integrationEntry struct {
 	name      string
 	module    Integration
 	detection IntegrationDetection
+	hooks     Hooks // validated copy
 }
 
 // New builds a registry from the platform and integration modules compiled into the binary. The generic
@@ -84,8 +86,10 @@ type integrationEntry struct {
 // [MaxIntegrations] integrations, a nil module (a typed nil included), an invalid name or detection, a name
 // given twice on one axis, a node label listed twice by one platform, a provider ID scheme without node labels,
 // two platforms with the same provider ID scheme and the same node labels, which could never be told apart, or
-// a symptom source that [SymptomSource.Validate] refuses or a kind one module watches twice. Platform and
-// integration names are separate: one of each may share a name.
+// a symptom source that [SymptomSource.Validate] refuses, or a kind watched twice, by one module or by two (on
+// either axis). Platform and integration names are separate: one of each may share a name. The registry keeps
+// a copy of each module's hooks as they were validated; [Registry.PlatformHooks] and
+// [Registry.IntegrationHooks] return that copy.
 func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 	if len(platforms) > MaxPlatforms {
 		return nil, fmt.Errorf("%d platform modules given, at most %d are allowed besides generic", len(platforms), MaxPlatforms)
@@ -99,7 +103,8 @@ func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 		platformLabels:    map[string]bool{},
 	}
 	r.addPlatform(platformEntry{name: GenericPlatform, module: generic{}})
-	claims := map[string]string{} // scheme and labels to platform name
+	claims := map[string]string{}  // scheme and labels to platform name
+	watched := map[string]string{} // group and kind to the module that watches it
 	for i, p := range platforms {
 		if isNil(p) {
 			return nil, fmt.Errorf("platform module %d is nil", i)
@@ -120,8 +125,10 @@ func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 			}
 			claims[key] = name
 		}
-		if err := validateSources(p.Hooks().Symptoms); err != nil {
-			return nil, fmt.Errorf("platform module %q: %w", name, err)
+		label := fmt.Sprintf("platform module %q", name)
+		e.hooks = cloneHooks(p.Hooks())
+		if err := validateSources(label, e.hooks.Symptoms, watched); err != nil {
+			return nil, fmt.Errorf("%s: %w", label, err)
 		}
 		e.module = p
 		r.addPlatform(e)
@@ -142,10 +149,12 @@ func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 				return nil, fmt.Errorf("integration module %q: group version %q is invalid", name, gv)
 			}
 		}
-		if err := validateSources(in.Hooks().Symptoms); err != nil {
-			return nil, fmt.Errorf("integration module %q: %w", name, err)
+		label := fmt.Sprintf("integration module %q", name)
+		hooks := cloneHooks(in.Hooks())
+		if err := validateSources(label, hooks.Symptoms, watched); err != nil {
+			return nil, fmt.Errorf("%s: %w", label, err)
 		}
-		e := integrationEntry{name: name, module: in, detection: d}
+		e := integrationEntry{name: name, module: in, detection: d, hooks: hooks}
 		r.integrations = append(r.integrations, e)
 		r.integrationByName[name] = e
 	}
@@ -241,4 +250,18 @@ func (r *Registry) Platform(name string) (Platform, bool) {
 func (r *Registry) Integration(name string) (Integration, bool) {
 	e, ok := r.integrationByName[name]
 	return e.module, ok
+}
+
+// PlatformHooks returns a copy of the hooks the platform module with the given name declared when the
+// registry was built.
+func (r *Registry) PlatformHooks(name string) (Hooks, bool) {
+	e, ok := r.platformByName[name]
+	return cloneHooks(e.hooks), ok
+}
+
+// IntegrationHooks returns a copy of the hooks the integration module with the given name declared when the
+// registry was built.
+func (r *Registry) IntegrationHooks(name string) (Hooks, bool) {
+	e, ok := r.integrationByName[name]
+	return cloneHooks(e.hooks), ok
 }

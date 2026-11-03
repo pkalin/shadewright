@@ -93,6 +93,14 @@ func TestNewRefusesBadSymptomSources(t *testing.T) {
 			hooks: Hooks{Symptoms: []SymptomSource{validSource(), validSource()}}}}, "watched twice"},
 		{"platform with a bad source", []Platform{hookPlatform{stubPlatform: aks,
 			hooks: Hooks{Symptoms: []SymptomSource{bad}}}}, nil, `platform module "aks": symptom source`},
+		{"kind watched by two integrations", nil, []Integration{
+			stubIntegration{name: fluxName, hooks: Hooks{Symptoms: []SymptomSource{validSource()}}},
+			stubIntegration{name: kedaName, hooks: Hooks{Symptoms: []SymptomSource{validSource()}}},
+		}, `watched twice, by integration module "flux" and integration module "keda"`},
+		{"kind watched by a platform and an integration", []Platform{hookPlatform{stubPlatform: aks,
+			hooks: Hooks{Symptoms: []SymptomSource{validSource()}}}},
+			[]Integration{stubIntegration{name: fluxName, hooks: Hooks{Symptoms: []SymptomSource{validSource()}}}},
+			`watched twice, by platform module "aks" and integration module "flux"`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -105,5 +113,48 @@ func TestNewRefusesBadSymptomSources(t *testing.T) {
 	if _, err := New(nil, []Integration{stubIntegration{name: fluxName,
 		hooks: Hooks{Symptoms: []SymptomSource{validSource()}}}}); err != nil {
 		t.Errorf("New refuses a valid source: %v", err)
+	}
+}
+
+// changingIntegration returns hooks backed by slices it keeps, so a test can change them after New.
+type changingIntegration struct {
+	stubIntegration
+	sources []SymptomSource
+}
+
+func (c changingIntegration) Hooks() Hooks { return Hooks{Symptoms: c.sources} }
+
+func TestRegistryKeepsTheValidatedHooks(t *testing.T) {
+	sources := []SymptomSource{validSource()}
+	in := changingIntegration{stubIntegration: stubIntegration{name: fluxName}, sources: sources}
+	r := mustNew(t, nil, []Integration{in})
+	sources[0].Symptoms = nil
+	sources[0].Versions[0] = "not a version"
+
+	h, ok := r.IntegrationHooks(fluxName)
+	if !ok || len(h.Symptoms) != 1 {
+		t.Fatalf("IntegrationHooks = %#v, %v", h, ok)
+	}
+	if err := h.Symptoms[0].Validate(); err != nil {
+		t.Errorf("the module changed the registry's hooks after New: %v", err)
+	}
+	h.Symptoms[0].Versions[0] = "v9"
+	if again, _ := r.IntegrationHooks(fluxName); again.Symptoms[0].Versions[0] != "v1" {
+		t.Errorf("a caller changed the registry's hooks: versions %v", again.Symptoms[0].Versions)
+	}
+
+	p := hookPlatform{stubPlatform: aks, hooks: Hooks{Symptoms: []SymptomSource{validSource()}}}
+	r = mustNew(t, []Platform{p}, nil)
+	p.hooks.Symptoms[0].Versions[0] = "not a version"
+	ph, ok := r.PlatformHooks(aksName)
+	if !ok || ph.Symptoms[0].Versions[0] != "v1" {
+		t.Errorf("PlatformHooks = %#v, %v; want the copy taken by New", ph, ok)
+	}
+	ph.Symptoms[0].Versions[0] = "v9"
+	if again, _ := r.PlatformHooks(aksName); again.Symptoms[0].Versions[0] != "v1" {
+		t.Errorf("a caller changed the registry's platform hooks: versions %v", again.Symptoms[0].Versions)
+	}
+	if _, ok := r.IntegrationHooks("missing"); ok {
+		t.Error("IntegrationHooks found a module that is not registered")
 	}
 }

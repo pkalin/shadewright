@@ -1,0 +1,15 @@
+{
+  "apiVersion": "kyverno.io/v1",
+  "kind": "ClusterPolicy",
+  "metadata": {"name": "require-run-as-nonroot", "uid": "2a3b4c5d-6e7f-4081-92a3-b4c5d6e7f809", "generation": 2,
+    "annotations": {"policies.kyverno.io/category": "Pod Security Standards (Restricted)", "policies.kyverno.io/severity": "medium"}},
+  "spec": {"validationFailureAction": "Enforce", "background": true, "rules": [{"name": "run-as-non-root", "match": {"any": [{"resources": {"kinds": ["Pod"]}}]}, "validate": {"message": "Running as root is not allowed.", "anyPattern": [{"spec": {"securityContext": {"runAsNonRoot": true}}}]}}]},
+  "status": {
+    "conditions": [
+      {"type": "Ready", "status": "False", "reason": "Failed", "message": "Not Ready", "lastTransitionTime": "2026-11-03T08:00:00Z"}
+    ],
+    "autogen": {},
+    "rulecount": {"validate": 1, "generate": 0, "mutate": 0, "verifyimages": 0},
+    "validatingadmissionpolicy": {"generated": false, "message": ""}
+  }
+}

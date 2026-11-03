@@ -26,7 +26,7 @@ import (
 // EventOf returns what a diagnosis rule reads from an event. The fields are copied as they are: rules treat
 // them as untrusted, and the evaluation redacts and bounds what it keeps.
 func EventOf(ev *eventsv1.Event) modules.Event {
-	return modules.Event{
+	out := modules.Event{
 		Namespace:           ev.Namespace,
 		Reason:              ev.Reason,
 		Type:                ev.Type,
@@ -39,6 +39,10 @@ func EventOf(ev *eventsv1.Event) modules.Event {
 			Name:       ev.Regarding.Name,
 		},
 	}
+	if r := ev.Related; r != nil {
+		out.Related = modules.ObjectRef{APIVersion: r.APIVersion, Kind: r.Kind, Namespace: r.Namespace, Name: r.Name}
+	}
+	return out
 }
 
 // NodeOf returns what a diagnosis rule reads from a node: its name, labels and conditions.

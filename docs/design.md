@@ -369,7 +369,7 @@ stateDiagram-v2
             AutoMergeQueued --> Merged: checks pass
         }
         Merged --> WaitingForDelivery
-        WaitingForDelivery --> Verifying: Flux applied the merge commit
+        WaitingForDelivery --> Verifying: the GitOps controller applied the merge commit
     }
     Pending --> Denied: policy refuses
     Pending --> NeedsIntervention: source cannot be mapped

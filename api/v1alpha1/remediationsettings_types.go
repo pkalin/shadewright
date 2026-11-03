@@ -124,19 +124,23 @@ const GenericPlatform ModuleName = "generic"
 // integration names are separate namespaces, so they are enabled in separate lists. A module contributes hooks
 // (symptom sources, diagnosis rules, tools, actions) only when it is enabled here and the analyzer detects it:
 // detection only reports and narrows, it never enables a module, and a module that is enabled but not
-// detected contributes nothing.
+// detected contributes nothing. Which modules are active is always worked out again from these lists and live
+// detection, never read back from status, which is only a report.
 type Modules struct {
 	// platforms are the platform modules enabled besides generic, which is always on and is not listed.
 	// More than one may be listed, so one settings file can serve clusters on different platforms: only the
-	// one the analyzer detects is active. Empty means generic only.
+	// one the analyzer detects is active. Empty means generic only. The cap of 8 is also the most platform
+	// modules besides generic one binary may compile in (internal/modules refuses more), so every one of them
+	// can be enabled.
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=8
-	// +kubebuilder:validation:XValidation:rule="!self.exists(p, p == 'generic')",message="the generic platform is always on and is not listed"
+	// +kubebuilder:validation:XValidation:rule="!('generic' in self)",message="the generic platform is always on and is not listed"
 	// +optional
 	Platforms []ModuleName `json:"platforms,omitempty"`
 
 	// integrations are the integration modules enabled. Each is active only while the analyzer detects its
-	// add-on. Empty means none.
+	// add-on. Empty means none. The cap of 32 is also the most integration modules one binary may compile in
+	// (internal/modules refuses more), so every one of them can be enabled.
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=32
 	// +optional
@@ -183,21 +187,27 @@ type RemediationSettingsSpec struct {
 // SettingsName is the name of the one RemediationSettings object.
 const SettingsName = "default"
 
-// PlatformStatus reports the platform the analyzer detected.
-// +kubebuilder:validation:XValidation:rule="self.name != 'generic' || self.active",message="the generic platform is always active"
+// PlatformStatus reports which platform the analyzer detected and which one it uses. They differ when the
+// detected platform is not enabled in spec.modules.platforms: the analyzer then falls back to generic. So the
+// three cases are: nothing detected (detected left out, active generic), detected and enabled (active equal to
+// detected), and detected but not enabled (active generic). It is a report only: the analyzer never reads it
+// back to decide which platform to use, it decides again from spec.modules and live detection each time.
+// +kubebuilder:validation:XValidation:rule="!has(self.detected) || self.detected != 'generic'",message="detected is left out, not generic, when no platform claims the cluster"
+// +kubebuilder:validation:XValidation:rule="self.active == 'generic' || (has(self.detected) && self.active == self.detected)",message="active is generic or the detected platform"
 type PlatformStatus struct {
-	// name is the detected platform: generic when no other platform claims every node with certainty.
-	// +required
-	Name ModuleName `json:"name"`
+	// detected is the platform that claims every node with certainty. Left out when none does.
+	// +optional
+	Detected ModuleName `json:"detected,omitempty"`
 
-	// active is true when the platform's module contributes hooks: it is detected and enabled in
-	// spec.modules.platforms (generic always is). A detected platform that is not enabled is reported with
-	// active false, and the analyzer then uses the generic platform.
+	// active is the platform whose module contributes hooks: detected when it is enabled in
+	// spec.modules.platforms, generic otherwise.
 	// +required
-	Active bool `json:"active"`
+	Active ModuleName `json:"active"`
 }
 
-// IntegrationStatus reports one integration module that is enabled, detected or both.
+// IntegrationStatus reports one integration module that is enabled, detected or both. It is a report only:
+// the analyzer never reads it back to decide which integrations are active, it decides again from
+// spec.modules and live detection each time.
 // +kubebuilder:validation:XValidation:rule="self.detected == has(self.version)",message="version is set if and only if the integration is detected"
 // +kubebuilder:validation:XValidation:rule="!self.active || self.detected",message="an integration that is not detected is not active"
 type IntegrationStatus struct {
@@ -219,7 +229,7 @@ type IntegrationStatus struct {
 	Version string `json:"version,omitempty"`
 
 	// active is true when the module contributes hooks: it is enabled in spec.modules.integrations and
-	// detected.
+	// detected. It reports that decision and never feeds it.
 	// +required
 	Active bool `json:"active"`
 }
@@ -236,14 +246,17 @@ type RemediationSettingsStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// platform is the platform the analyzer detected and whether its module is active. To be written by the
-	// analyzer once detection is wired (planned, #61); no identity may write it yet, so it stays unset.
+	// platform is the platform the analyzer detected and the one it uses. To be written by the analyzer once
+	// detection is wired (planned, #61); no identity may write it yet, so it stays unset. The analyzer only
+	// reads RemediationSettings today (AGENTS.md invariant 6): the status write #61 needs changes that
+	// invariant and needs an ADR first. Status is a report, never an input.
 	// +optional
 	Platform *PlatformStatus `json:"platform,omitempty"`
 
 	// integrations lists every integration module that is enabled or detected, with whether it is active.
 	// A detected add-on whose module is not enabled is listed too, so the cluster admin sees what could be
-	// enabled. Written like platform; empty until then. At most 32 enabled and 32 more detected.
+	// enabled. Written like platform; empty until then. At most 64: 32 enabled (the spec cap) and 32 more
+	// detected, since a detected add-on needs a compiled-in module and internal/modules refuses more than 32.
 	// +listType=map
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=64

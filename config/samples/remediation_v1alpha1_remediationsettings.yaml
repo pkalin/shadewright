@@ -18,7 +18,9 @@ spec:
         signer:
           azureKeyVault:
             keyID: https://kv-example.vault.azure.net/keys/github-app
-  # Modules contribute only when enabled here and detected in the cluster; status shows what was detected.
+  # Modules contribute only when enabled here and detected in the cluster. Once the analyzer writes status
+  # (planned, #61), status.platform shows the detected platform and the one in use (generic when the detected
+  # one is not enabled here) and status.integrations each integration. Status is a report, never an input.
   # The generic platform is always on and is not listed.
   modules:
     platforms: [aks]

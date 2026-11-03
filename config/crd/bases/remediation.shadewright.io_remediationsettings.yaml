@@ -76,7 +76,8 @@ spec:
                   integrations:
                     description: |-
                       integrations are the integration modules enabled. Each is active only while the analyzer detects its
-                      add-on. Empty means none.
+                      add-on. Empty means none. The cap of 32 is also the most integration modules one binary may compile in
+                      (internal/modules refuses more), so every one of them can be enabled.
                     items:
                       description: |-
                         ModuleName names a cluster platform or integration module (design 2.4 and 2.5): a DNS label that starts with
@@ -95,7 +96,9 @@ spec:
                     description: |-
                       platforms are the platform modules enabled besides generic, which is always on and is not listed.
                       More than one may be listed, so one settings file can serve clusters on different platforms: only the
-                      one the analyzer detects is active. Empty means generic only.
+                      one the analyzer detects is active. Empty means generic only. The cap of 8 is also the most platform
+                      modules besides generic one binary may compile in (internal/modules refuses more), so every one of them
+                      can be enabled.
                     items:
                       description: |-
                         ModuleName names a cluster platform or integration module (design 2.4 and 2.5): a DNS label that starts with
@@ -112,7 +115,7 @@ spec:
                     x-kubernetes-list-type: set
                     x-kubernetes-validations:
                     - message: the generic platform is always on and is not listed
-                      rule: '!self.exists(p, p == ''generic'')'
+                      rule: '!(''generic'' in self)'
                 type: object
               paused:
                 default: false
@@ -309,15 +312,18 @@ spec:
                 description: |-
                   integrations lists every integration module that is enabled or detected, with whether it is active.
                   A detected add-on whose module is not enabled is listed too, so the cluster admin sees what could be
-                  enabled. Written like platform; empty until then. At most 32 enabled and 32 more detected.
+                  enabled. Written like platform; empty until then. At most 64: 32 enabled (the spec cap) and 32 more
+                  detected, since a detected add-on needs a compiled-in module and internal/modules refuses more than 32.
                 items:
-                  description: IntegrationStatus reports one integration module that
-                    is enabled, detected or both.
+                  description: |-
+                    IntegrationStatus reports one integration module that is enabled, detected or both. It is a report only:
+                    the analyzer never reads it back to decide which integrations are active, it decides again from
+                    spec.modules and live detection each time.
                   properties:
                     active:
                       description: |-
                         active is true when the module contributes hooks: it is enabled in spec.modules.integrations and
-                        detected.
+                        detected. It reports that decision and never feeds it.
                       type: boolean
                     detected:
                       description: |-
@@ -359,29 +365,36 @@ spec:
                 type: integer
               platform:
                 description: |-
-                  platform is the platform the analyzer detected and whether its module is active. To be written by the
-                  analyzer once detection is wired (planned, #61); no identity may write it yet, so it stays unset.
+                  platform is the platform the analyzer detected and the one it uses. To be written by the analyzer once
+                  detection is wired (planned, #61); no identity may write it yet, so it stays unset. The analyzer only
+                  reads RemediationSettings today (AGENTS.md invariant 6): the status write #61 needs changes that
+                  invariant and needs an ADR first. Status is a report, never an input.
                 properties:
                   active:
                     description: |-
-                      active is true when the platform's module contributes hooks: it is detected and enabled in
-                      spec.modules.platforms (generic always is). A detected platform that is not enabled is reported with
-                      active false, and the analyzer then uses the generic platform.
-                    type: boolean
-                  name:
-                    description: 'name is the detected platform: generic when no other
-                      platform claims every node with certainty.'
+                      active is the platform whose module contributes hooks: detected when it is enabled in
+                      spec.modules.platforms, generic otherwise.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$
+                    type: string
+                  detected:
+                    description: detected is the platform that claims every node with
+                      certainty. Left out when none does.
                     maxLength: 63
                     minLength: 1
                     pattern: ^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$
                     type: string
                 required:
                 - active
-                - name
                 type: object
                 x-kubernetes-validations:
-                - message: the generic platform is always active
-                  rule: self.name != 'generic' || self.active
+                - message: detected is left out, not generic, when no platform claims
+                    the cluster
+                  rule: '!has(self.detected) || self.detected != ''generic'''
+                - message: active is generic or the detected platform
+                  rule: self.active == 'generic' || (has(self.detected) && self.active
+                    == self.detected)
             type: object
         required:
         - spec

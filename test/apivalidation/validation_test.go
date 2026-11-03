@@ -756,7 +756,7 @@ var _ = Describe("RemediationSettings", func() {
 
 		It("accepts a status with the detected platform and integrations", func() {
 			Expect(updateStatus(func(st *v1alpha1.RemediationSettingsStatus) {
-				st.Platform = &v1alpha1.PlatformStatus{Name: aks, Active: true}
+				st.Platform = &v1alpha1.PlatformStatus{Detected: aks, Active: aks}
 				st.Integrations = []v1alpha1.IntegrationStatus{
 					{Name: keda, Detected: true, Version: "keda.sh/v1alpha1", Active: true},
 					{Name: flux, Detected: true, Version: "kustomize.toolkit.fluxcd.io/v1"},
@@ -765,15 +765,15 @@ var _ = Describe("RemediationSettings", func() {
 			})).To(Succeed())
 		})
 
-		It("accepts a detected platform that is not active", func() {
+		It("accepts a detected platform that is not enabled, with generic in use", func() {
 			Expect(updateStatus(func(st *v1alpha1.RemediationSettingsStatus) {
-				st.Platform = &v1alpha1.PlatformStatus{Name: aks}
+				st.Platform = &v1alpha1.PlatformStatus{Detected: aks, Active: v1alpha1.GenericPlatform}
 			})).To(Succeed())
 		})
 
-		It("accepts the generic platform in status", func() {
+		It("accepts no detected platform, with generic in use", func() {
 			Expect(updateStatus(func(st *v1alpha1.RemediationSettingsStatus) {
-				st.Platform = &v1alpha1.PlatformStatus{Name: v1alpha1.GenericPlatform, Active: true}
+				st.Platform = &v1alpha1.PlatformStatus{Active: v1alpha1.GenericPlatform}
 			})).To(Succeed())
 		})
 
@@ -784,12 +784,24 @@ var _ = Describe("RemediationSettings", func() {
 				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
 				Expect(err.Error()).To(ContainSubstring(msg))
 			},
-			Entry("a bad platform name", func(st *v1alpha1.RemediationSettingsStatus) {
-				st.Platform = &v1alpha1.PlatformStatus{Name: "Open_Shift"}
-			}, "status.platform.name"),
-			Entry("the generic platform not active", func(st *v1alpha1.RemediationSettingsStatus) {
-				st.Platform = &v1alpha1.PlatformStatus{Name: v1alpha1.GenericPlatform}
-			}, "the generic platform is always active"),
+			Entry("a bad detected platform name", func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Platform = &v1alpha1.PlatformStatus{Detected: "Open_Shift", Active: v1alpha1.GenericPlatform}
+			}, "status.platform.detected"),
+			Entry("a bad active platform name", func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Platform = &v1alpha1.PlatformStatus{Active: "Open_Shift"}
+			}, "status.platform.active"),
+			Entry("no active platform", func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Platform = &v1alpha1.PlatformStatus{Detected: aks}
+			}, "status.platform.active"),
+			Entry("generic reported as detected", func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Platform = &v1alpha1.PlatformStatus{Detected: v1alpha1.GenericPlatform, Active: v1alpha1.GenericPlatform}
+			}, "detected is left out, not generic, when no platform claims the cluster"),
+			Entry("an active platform that was not detected", func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Platform = &v1alpha1.PlatformStatus{Active: aks}
+			}, "active is generic or the detected platform"),
+			Entry("an active platform other than the detected one", func(st *v1alpha1.RemediationSettingsStatus) {
+				st.Platform = &v1alpha1.PlatformStatus{Detected: aks, Active: "eks"}
+			}, "active is generic or the detected platform"),
 			Entry("a bad integration name", func(st *v1alpha1.RemediationSettingsStatus) {
 				st.Integrations = []v1alpha1.IntegrationStatus{{Name: "Istio"}}
 			}, "status.integrations[0].name"),

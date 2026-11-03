@@ -29,6 +29,12 @@ import (
 
 func rep(s string, n int) string { return strings.Repeat(s, n) }
 
+// Text that must survive after a redacted value.
+const (
+	nextField = "\nnext: field"
+	endText   = " end"
+)
+
 func b64(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
 
 var (
@@ -129,7 +135,7 @@ func corpus() []corpusCase {
 			`", uri="/", response="` + tail + `"`, []string{tail, tail2}, []string{KindCredential}},
 		{"quoted authorization in json", `{"Authorization":"Digest nonce=\"` + tail2 + `\", response=\"` + tail + `\"","x":1}`,
 			[]string{tail, tail2}, nil},
-		{"yaml literal block", "password: |-\n  synthetic-" + tail + "\nnext: field", []string{tail}, []string{KindCredential}},
+		{"yaml literal block", "password: |-\n  synthetic-" + tail + nextField, []string{tail}, []string{KindCredential}},
 		{"yaml folded block nested", "db:\n  password: >2+ # comment\n     one-" + tail + "\n\n     two-" + tail2 + "\n  user: app",
 			[]string{tail, tail2}, nil},
 		{"yaml block in list item", "- token: |\n    " + tail + "\n- token: x", []string{tail}, nil},
@@ -202,7 +208,7 @@ func TestKeepsUsefulText(t *testing.T) {
 // Text around a redacted value must survive: the next YAML field, the next connection string field.
 func TestKeepsTextAroundValues(t *testing.T) {
 	for in, want := range map[string]string{
-		"password: |-\n  synthetic-" + tail + "\nnext: field":        "password: |-\n  [REDACTED:credential]\nnext: field",
+		"password: |-\n  synthetic-" + tail + nextField:              "password: |-\n  [REDACTED:credential]\nnext: field",
 		"db:\n  password: |\n    a-" + tail + "\n    b\n  user: app": "db:\n  password: |\n    [REDACTED:credential]\n  user: app",
 		"Server=example;Password=prefix " + tail + ";Encrypt=True":   "Server=example;Password=[REDACTED:connection-string];Encrypt=True",
 		"password: |\nnext: field":                                   "password: *\nnext: field",
@@ -215,16 +221,16 @@ func TestKeepsTextAroundValues(t *testing.T) {
 		"src 2001:db8::1, ok":                                        "src [ip], ok",
 		"secretName: |\n  orders-tls\n":                              "secretName: |\n  orders-tls\n",
 		// Issue #114.
-		`"{\"clientSecret\":\"prefix,` + tail + `\"}"`:          `"{\"clientSecret\":\"[REDACTED:credential]\"}"`,
-		"password:\n  " + opaque + "\nnext: field":              "password:\n  [REDACTED:credential]\nnext: field",
-		"password:  # set by CI\n  " + opaque + "\nnext: field": "password:  [REDACTED:credential]\nnext: field",
-		"token:\n  \"" + opaque + "\"\nnext: field":             "token:\n  \"[REDACTED:credential]\"\nnext: field",
-		"{\"password\":\n  \"" + opaque + "\"}":                 "{\"password\":\n  \"[REDACTED:credential]\"}",
-		"retry with Basic " + b64("u:p") + " now":               "retry with Basic *** now",
-		"secretName:\n  orders-tls\n":                           "secretName:\n  orders-tls\n",
+		`"{\"clientSecret\":\"prefix,` + tail + `\"}"`:    `"{\"clientSecret\":\"[REDACTED:credential]\"}"`,
+		"password:\n  " + opaque + nextField:              "password:\n  [REDACTED:credential]\nnext: field",
+		"password:  # set by CI\n  " + opaque + nextField: "password:  [REDACTED:credential]\nnext: field",
+		"token:\n  \"" + opaque + "\"\nnext: field":       "token:\n  \"[REDACTED:credential]\"\nnext: field",
+		"{\"password\":\n  \"" + opaque + "\"}":           "{\"password\":\n  \"[REDACTED:credential]\"}",
+		"retry with Basic " + b64("u:p") + " now":         "retry with Basic *** now",
+		"secretName:\n  orders-tls\n":                     "secretName:\n  orders-tls\n",
 		// Second review of #189.
-		"password:\n- " + opaque + "\n- " + tail + "\nnext: field":                                    "password:\n- [REDACTED:credential]\nnext: field",
-		"password:\n# set by CI\n  " + opaque + "\nnext: field":                                       "password:\n# set by CI\n  [REDACTED:credential]\nnext: field",
+		"password:\n- " + opaque + "\n- " + tail + nextField:                                          "password:\n- [REDACTED:credential]\nnext: field",
+		"password:\n# set by CI\n  " + opaque + nextField:                                             "password:\n# set by CI\n  [REDACTED:credential]\nnext: field",
 		"credentials:\n  user: admin\n  secretRef:\n    name: db\n  value: '" + opaque + "'\nnext: x": "credentials:\n  user: ***\n  secretRef:\n    name: db\n  value: '[REDACTED:credential]'\nnext: x",
 		"- name: DB_PASSWORD\n  value: " + opaque + "\n- name: MODE\n  value: debug":                  "- name: DB_PASSWORD\n  value: [REDACTED:credential]\n- name: MODE\n  value: debug",
 		`{"name":"DB_PASSWORD","value":"` + opaque + `"}`:                                             `{"name":"DB_PASSWORD","value":"[REDACTED:credential]"}`,
@@ -265,8 +271,8 @@ func gapCases() []gapCase {
 		{"unterminated escaped json value", `"{\"clientSecret\":\"prefix,` + tail + `" next`,
 			[]string{tail}, []string{`" next`}},
 		// YAML value on the next line, with and without trailing spaces after the colon.
-		{"yaml value on next line", "password:\n  " + opaque + "\nnext: field",
-			[]string{opaque}, []string{"password:\n  ", "\nnext: field"}},
+		{"yaml value on next line", "password:\n  " + opaque + nextField,
+			[]string{opaque}, []string{"password:\n  ", nextField}},
 		{"yaml value on next line after spaces", "db:\n  password:   \n    " + opaque + "\n    " + tail + "\n  user: app",
 			[]string{opaque, tail}, []string{"db:\n  password:   \n    ", "\n  user: app"}},
 		{"yaml quoted value on next line", "- token:\n    '" + opaque + "'\n- token: x",
@@ -293,36 +299,36 @@ func gapCases() []gapCase {
 		// From #111: short key names.
 		{"pass key", "login pass=" + opaque + " user=app", []string{opaque}, []string{"login pass=", " user=app"}},
 		{"auth key", "auth=" + opaque + " ok", []string{opaque}, []string{" ok"}},
-		{"auth yaml key", "auth: " + opaque + "\nnext: field", []string{opaque}, []string{"\nnext: field"}},
-		{"sig key outside query", "webhook rejected with sig: " + opaque + " end", []string{opaque},
-			[]string{"webhook rejected with sig: ", " end"}},
+		{"auth yaml key", "auth: " + opaque + nextField, []string{opaque}, []string{nextField}},
+		{"sig key outside query", "webhook rejected with sig: " + opaque + endText, []string{opaque},
+			[]string{"webhook rejected with sig: ", endText}},
 		// From #111: a JWT whose payload does not start with "eyJ".
 		{"jwt with other payload", "token " + otherJWT + " expired", []string{otherJWT}, []string{" expired"}},
 		// Second review of #189: YAML layouts the next-line rule missed.
-		{"compact sequence at key indent", "password:\n- " + opaque + "\nnext: field",
-			[]string{opaque}, []string{"password:\n- ", "\nnext: field"}},
-		{"comment before next-line value", "password:\n# set by CI\n  " + opaque + "\nnext: field",
-			[]string{opaque}, []string{"\nnext: field"}},
+		{"compact sequence at key indent", "password:\n- " + opaque + nextField,
+			[]string{opaque}, []string{"password:\n- ", nextField}},
+		{"comment before next-line value", "password:\n# set by CI\n  " + opaque + nextField,
+			[]string{opaque}, []string{nextField}},
 		// Short keys as the last segment of an env or snake key.
 		{"db pass env", "DB_PASS=" + opaque + " next", []string{opaque}, []string{"DB_PASS=", " next"}},
-		{"mysql root pass yaml", "MYSQL_ROOT_PASS: " + opaque + "\nnext: field", []string{opaque}, []string{"\nnext: field"}},
-		{"basic auth key", "basic_auth: " + opaque + "\nnext: field", []string{opaque}, []string{"\nnext: field"}},
-		{"bare auth with secret-shaped value", "auth: " + opaque + "\nnext: field", []string{opaque}, []string{"\nnext: field"}},
+		{"mysql root pass yaml", "MYSQL_ROOT_PASS: " + opaque + nextField, []string{opaque}, []string{nextField}},
+		{"basic auth key", "basic_auth: " + opaque + nextField, []string{opaque}, []string{nextField}},
+		{"bare auth with secret-shaped value", "auth: " + opaque + nextField, []string{opaque}, []string{nextField}},
 		{"quoted bare auth key", `{"auth": "failed for ` + tail + `"}`, []string{tail}, nil},
 		// base64url tokens hold "-".
-		{"base64url token with hyphens", "token rejected: " + base64URLToken + " end",
-			[]string{"Synth3ticAbC", "dEf0123XyZ98", "76QwErTy54321"}, []string{"token rejected: ", " end"}},
-		{"hex token after a hyphen", "id key-" + hexToken + " end", []string{hexToken}, []string{" end"}},
+		{"base64url token with hyphens", "token rejected: " + base64URLToken + endText,
+			[]string{"Synth3ticAbC", "dEf0123XyZ98", "76QwErTy54321"}, []string{"token rejected: ", endText}},
+		{"hex token after a hyphen", "id key-" + hexToken + endText, []string{hexToken}, []string{endText}},
 		// Escaped embedded JSON, pretty-printed and escaped twice.
 		{"pretty escaped json", `"{\n  \"clientSecret\": \"` + opaque + `\"\n}"`, []string{opaque}, []string{`\"\n}"`}},
 		{"tab escaped json", `"{\t\"token\" : \"` + opaque + `\"}"`, []string{opaque}, nil},
 		{"double escaped json", `"{\\\"clientSecret\\\":\\\"prefix,` + wordTail + `\\\",\\\"x\\\":1}"`,
 			[]string{wordTail}, []string{`\\\",\\\"x\\\":1}"`}},
 		// Generic children of a secret key, and the Kubernetes env forms.
-		{"children of a secret mapping", "credentials:\n  user: admin\n  value: " + opaque + "\nnext: field",
-			[]string{opaque, "admin"}, []string{"credentials:\n  user: ", "\nnext: field"}},
-		{"children of a secret sequence", "tokens:\n  - id: 1\n    value: '" + opaque + "'\n  - " + tail + "\nnext: field",
-			[]string{opaque, tail}, []string{"\nnext: field"}},
+		{"children of a secret mapping", "credentials:\n  user: admin\n  value: " + opaque + nextField,
+			[]string{opaque, "admin"}, []string{"credentials:\n  user: ", nextField}},
+		{"children of a secret sequence", "tokens:\n  - id: 1\n    value: '" + opaque + "'\n  - " + tail + nextField,
+			[]string{opaque, tail}, []string{nextField}},
 		{"kubernetes env yaml", "env:\n- name: DB_PASSWORD\n  value: " + opaque + "\n- name: LOG_LEVEL\n  value: debug",
 			[]string{opaque}, []string{"- name: DB_PASSWORD\n  value: ", "- name: LOG_LEVEL\n  value: debug"}},
 		{"kubernetes env yaml quoted and indented", "    env:\n      - name: \"API_TOKEN\"\n        value: \"" + opaque + "\"\n",

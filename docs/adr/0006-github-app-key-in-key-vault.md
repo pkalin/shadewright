@@ -16,7 +16,7 @@ The executor must create branches, commits and PRs, and enable auto-merge, in on
 ## Consequences
 
 - The private key never exists in a pod, a Kubernetes Secret or CI. The `.pem` file downloaded from GitHub at setup is imported and deleted right away.
-- Every token is short-lived and repository-scoped. Key Vault logs every signing as an `AuditEvent`; the lab sends them to a Log Analytics workspace that outlives the cluster (table `AZKVAuditLogs`, operation `Sign`; [shadewright-azure#7](https://github.com/pkalin/shadewright-azure/pull/7)).
+- Every token is short-lived and repository-scoped. Key Vault logs every signing as an `AuditEvent`; the lab sends them to a Log Analytics workspace that outlives the cluster (table `AZKVAuditLogs`, operation `KeySign`; [shadewright-azure#7](https://github.com/pkalin/shadewright-azure/pull/7)).
 - The executor names exactly these four permissions when it requests a token, so the token never carries more. GitHub refuses the request when the App lacks one of them, so register the App with all four even before notifications are used.
 - One extra network call per token (about once an hour).
 - Other clouds need their own `Signer` (KMS, Vault transit); the interface is small.
@@ -31,3 +31,4 @@ The executor must create branches, commits and PRs, and enable auto-merge, in on
 - 2026-11-02: `issues: write` added to the permissions, as [ADR-0014](0014-notifications-github-issues-first.md) requires for notifications, with the consequence that the App must be registered with all four ([#134](https://github.com/pkalin/shadewright/pull/134)).
 - 2026-11-02: the key does exist as a file briefly at setup; the consequence now says so. Key Vault audit logging is not enabled in the lab yet; the consequence now says so and links the issue.
 - 2026-11-03: the audit events are routed since [shadewright-azure#7](https://github.com/pkalin/shadewright-azure/pull/7); the consequence now says where they go.
+- 2026-11-03: the audit operation is named `KeySign`, not `Sign`, as Key Vault logs key operations in `Key<action>` form ([Azure Key Vault logging](https://learn.microsoft.com/azure/key-vault/general/logging)); the consequence now names it correctly ([#169](https://github.com/pkalin/shadewright/pull/169)).

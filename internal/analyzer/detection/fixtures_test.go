@@ -153,3 +153,20 @@ func TestFixtureNodesDetection(t *testing.T) {
 		}
 	}
 }
+
+// TestEventOfRelated checks that EventOf copies the related object when the event has one, and leaves it
+// empty when it has none.
+func TestEventOfRelated(t *testing.T) {
+	ev := eventsv1.Event{
+		Regarding: corev1.ObjectReference{Kind: "ClusterPolicy", Name: "require-run-as-nonroot"},
+		Related:   &corev1.ObjectReference{APIVersion: "batch/v1", Kind: "Job", Namespace: "demo", Name: "migrate"},
+	}
+	want := modules.ObjectRef{APIVersion: "batch/v1", Kind: "Job", Namespace: "demo", Name: "migrate"}
+	if got := EventOf(&ev).Related; got != want {
+		t.Errorf("related = %+v, want %+v", got, want)
+	}
+	ev.Related = nil
+	if got := EventOf(&ev).Related; got != (modules.ObjectRef{}) {
+		t.Errorf("related = %+v, want empty", got)
+	}
+}

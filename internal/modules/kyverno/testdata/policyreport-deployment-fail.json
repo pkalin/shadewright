@@ -1,0 +1,21 @@
+{
+  "apiVersion": "wgpolicyk8s.io/v1alpha2",
+  "kind": "PolicyReport",
+  "metadata": {
+    "name": "5f2c8a1e-6b3d-4c7e-9a0f-1d2e3f4a5b6c",
+    "namespace": "demo",
+    "labels": {"app.kubernetes.io/managed-by": "kyverno"},
+    "ownerReferences": [{"apiVersion": "apps/v1", "kind": "Deployment", "name": "web", "uid": "5f2c8a1e-6b3d-4c7e-9a0f-1d2e3f4a5b6c"}]
+  },
+  "scope": {"apiVersion": "apps/v1", "kind": "Deployment", "namespace": "demo", "name": "web", "uid": "5f2c8a1e-6b3d-4c7e-9a0f-1d2e3f4a5b6c"},
+  "summary": {"pass": 2, "fail": 1, "warn": 1, "error": 1, "skip": 1},
+  "results": [
+    {"source": "kyverno", "policy": "disallow-latest-tag", "rule": "autogen-validate-image-tag", "result": "pass", "scored": true, "message": "validation rule 'autogen-validate-image-tag' passed.", "properties": {"process": "background scan"}, "timestamp": {"seconds": 1793692800, "nanos": 0}, "category": "Best Practices", "severity": "medium"},
+    {"source": "kyverno", "policy": "require-requests-limits", "rule": "autogen-validate-resources", "result": "warn", "scored": false, "message": "validation error: CPU and memory resource requests and memory limits are required for containers. rule autogen-validate-resources failed at path /spec/template/spec/containers/0/resources/limits/", "properties": {"process": "background scan"}, "timestamp": {"seconds": 1793692800, "nanos": 0}, "category": "Best Practices", "severity": "medium"},
+    {"source": "kyverno", "policy": "require-run-as-nonroot", "rule": "autogen-run-as-non-root", "result": "fail", "scored": true, "message": "validation error: Running as root is not allowed. Either the field spec.securityContext.runAsNonRoot must be set to `true`, or the fields spec.containers[*].securityContext.runAsNonRoot, spec.initContainers[*].securityContext.runAsNonRoot, and spec.ephemeralContainers[*].securityContext.runAsNonRoot must be set to `true`. rule autogen-run-as-non-root[0] failed at path /spec/template/spec/securityContext/runAsNonRoot/ rule autogen-run-as-non-root[1] failed at path /spec/template/spec/containers/0/securityContext/runAsNonRoot/", "properties": {"process": "background scan"}, "timestamp": {"seconds": 1793692800, "nanos": 0}, "category": "Pod Security Standards (Restricted)", "severity": "medium"},
+    {"source": "kyverno", "policy": "demo/check-image-registry", "rule": "autogen-registry", "result": "error", "scored": true, "message": "failed to evaluate preconditions: failed to substitute variables in condition key: variable substitution failed for rule autogen-registry: failed to resolve allowedRegistries at path : JMESPath query failed: Unknown key \"allowedRegistries\" in path", "properties": {"process": "background scan"}, "timestamp": {"seconds": 1793692800, "nanos": 0}},
+    {"source": "kyverno", "policy": "restrict-node-port", "rule": "validate-nodeport", "result": "skip", "scored": true, "message": "rule skipped due to policy exception demo/allow-nodeport", "properties": {"process": "background scan"}, "timestamp": {"seconds": 1793692800, "nanos": 0}},
+    {"source": "kube-bench-adapter", "policy": "cis-5.2.6", "rule": "minimize-root-containers", "result": "fail", "scored": true, "message": "another engine's result, not Kyverno's", "timestamp": {"seconds": 1793692800, "nanos": 0}},
+    {"source": "kyverno", "policy": "require-pod-probes", "rule": "autogen-validate-probes", "result": "pass", "scored": true, "message": "validation rule 'autogen-validate-probes' passed.", "properties": {"process": "background scan"}, "timestamp": {"seconds": 1793692800, "nanos": 0}}
+  ]
+}

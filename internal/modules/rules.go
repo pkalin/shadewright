@@ -92,6 +92,9 @@ type Event struct {
 	// Note is the event's note, or "" when it is longer than [MaxRuleInput].
 	Note      string
 	Regarding ObjectRef
+	// Related is the event's secondary object (events.k8s.io/v1 related), the zero value when it has none,
+	// sanitized like Regarding. A policy engine, for example, regards its policy and relates the resource.
+	Related ObjectRef
 }
 
 // NodeCondition is one entry of a node's status.conditions. Every field is untrusted: whoever can write node
@@ -192,6 +195,7 @@ func boundInput(s string) string {
 func evaluateEvent(module string, rules []DiagnosisRule, ev Event) []Finding {
 	ev.Note = boundInput(ev.Note)
 	ev.Regarding = ev.Regarding.sanitize()
+	ev.Related = ev.Related.sanitize()
 	if len(ev.Namespace) > 63 || !namespacePattern.MatchString(ev.Namespace) {
 		ev.Namespace = ""
 	}

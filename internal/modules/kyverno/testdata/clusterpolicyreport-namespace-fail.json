@@ -1,0 +1,14 @@
+{
+  "apiVersion": "wgpolicyk8s.io/v1alpha2",
+  "kind": "ClusterPolicyReport",
+  "metadata": {
+    "name": "8e1d2c3b-4a5f-4e6d-8c7b-9a0b1c2d3e4f",
+    "labels": {"app.kubernetes.io/managed-by": "kyverno"},
+    "ownerReferences": [{"apiVersion": "v1", "kind": "Namespace", "name": "demo", "uid": "8e1d2c3b-4a5f-4e6d-8c7b-9a0b1c2d3e4f"}]
+  },
+  "scope": {"apiVersion": "v1", "kind": "Namespace", "name": "demo", "uid": "8e1d2c3b-4a5f-4e6d-8c7b-9a0b1c2d3e4f"},
+  "summary": {"pass": 0, "fail": 1, "warn": 0, "error": 0, "skip": 0},
+  "results": [
+    {"source": "kyverno", "policy": "require-namespace-owner", "rule": "check-owner-label", "result": "fail", "scored": true, "message": "validation error: The label `owner` is required on every namespace. rule check-owner-label failed at path /metadata/labels/owner/", "properties": {"process": "background scan"}, "timestamp": {"seconds": 1793692800, "nanos": 0}, "category": "Multi-Tenancy", "severity": "low"}
+  ]
+}

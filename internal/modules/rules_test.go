@@ -161,13 +161,17 @@ func TestSubjectIsSanitized(t *testing.T) {
 		Namespace:  "Demo_NS",
 		Name:       strings.Repeat("a", 254),
 	}
-	got := evaluateEvent("m", []DiagnosisRule{r}, Event{Namespace: "x y", Regarding: hostile})
+	got := evaluateEvent("m", []DiagnosisRule{r}, Event{Namespace: "x y", Regarding: hostile, Related: hostile})
 	if len(got) != 1 || got[0].Subject != (ObjectRef{}) || seen.Regarding != (ObjectRef{}) || seen.Namespace != "" {
 		t.Errorf("subject = %+v, rule saw %+v in %q; want every field empty", got, seen.Regarding, seen.Namespace)
 	}
+	if seen.Related != (ObjectRef{}) {
+		t.Errorf("rule saw related %+v, want every field empty", seen.Related)
+	}
 	ok := ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "demo", Name: "web.v2"}
-	if got := evaluateEvent("m", []DiagnosisRule{r}, Event{Regarding: ok}); len(got) != 1 || got[0].Subject != ok {
-		t.Errorf("a valid subject was changed: %+v", got)
+	if got := evaluateEvent("m", []DiagnosisRule{r}, Event{Regarding: ok, Related: ok}); len(got) != 1 || got[0].Subject != ok ||
+		seen.Related != ok {
+		t.Errorf("a valid subject or related object was changed: %+v, related %+v", got, seen.Related)
 	}
 	n := DiagnosisRule{Name: "n", Node: func(NodeState) []Symptom { return []Symptom{{Reason: "Echo", Summary: "s"}} }}
 	fs := evaluateNode("m", []DiagnosisRule{n}, NodeState{Name: "Node One"})

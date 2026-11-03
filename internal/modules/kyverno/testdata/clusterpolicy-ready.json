@@ -1,0 +1,14 @@
+{
+  "apiVersion": "kyverno.io/v1",
+  "kind": "ClusterPolicy",
+  "metadata": {"name": "disallow-latest-tag", "uid": "3b4c5d6e-7f80-4192-a3b4-c5d6e7f8091a", "generation": 1},
+  "spec": {"validationFailureAction": "Audit", "background": true, "rules": [{"name": "validate-image-tag", "match": {"any": [{"resources": {"kinds": ["Pod"]}}]}, "validate": {"message": "Using a mutable image tag e.g. 'latest' is not allowed.", "pattern": {"spec": {"containers": [{"image": "!*:latest"}]}}}}]},
+  "status": {
+    "conditions": [
+      {"type": "Ready", "status": "True", "reason": "Succeeded", "message": "Ready", "lastTransitionTime": "2026-11-03T07:00:00Z"}
+    ],
+    "autogen": {},
+    "rulecount": {"validate": 1, "generate": 0, "mutate": 0, "verifyimages": 0},
+    "validatingadmissionpolicy": {"generated": false, "message": ""}
+  }
+}

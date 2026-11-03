@@ -1,0 +1,13 @@
+{
+  "apiVersion": "kyverno.io/v1",
+  "kind": "Policy",
+  "metadata": {"name": "check-image-registry", "namespace": "demo", "uid": "4c5d6e7f-8091-42a3-b4c5-d6e7f8091a2b", "generation": 1},
+  "spec": {"validationFailureAction": "Enforce", "rules": [{"name": "registry", "match": {"any": [{"resources": {"kinds": ["Pod"]}}]}, "validate": {"message": "Images must come from the allowed registry.", "pattern": {"spec": {"containers": [{"image": "registry.example/*"}]}}}}]},
+  "status": {
+    "conditions": [
+      {"type": "Ready", "status": "False", "reason": "Failed", "message": "Not Ready", "lastTransitionTime": "2026-11-03T08:05:00Z"}
+    ],
+    "autogen": {},
+    "rulecount": {"validate": 1, "generate": 0, "mutate": 0, "verifyimages": 0}
+  }
+}

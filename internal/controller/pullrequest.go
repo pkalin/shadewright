@@ -50,9 +50,9 @@ import (
 // on it), checks the plan's freshness, and makes at most one write. A restart or a second reconcile at any
 // point finds the work already done instead of repeating it: the branch name and the marker come from the
 // request, the branch is created only at the target branch's head, the commit names the head it expects, and
-// opening a pull request for a branch that has one returns it. The first reconcile of a PolicyChecked request
-// only stores status.deadline (startDeadline, called by recheck before the first freshness check), so the
-// deadline also ends a request whose freshness check never passes.
+// opening a pull request for a branch that has one returns it. The policy check stores status.deadline with an
+// allowed decision, so the deadline also ends a request whose freshness check never passes; a request decided
+// while writes were paused gets it from recheck (startDeadline) once the pause has ended.
 //
 // The finalizer that closes the pull request on deletion is added before the first Git write, so no branch or
 // pull request exists without it.
@@ -170,9 +170,9 @@ func (r *RemediationRequestReconciler) advance(ctx context.Context, rr *remediat
 	return reconcile.Result{RequeueAfter: freshRecheckInterval}, nil
 }
 
-// startDeadline stores status.deadline of the pull request step, in its own status write. recheck calls it
-// before the first freshness check of a PolicyChecked request, so the deadline also bounds a freshness check
-// that never passes.
+// startDeadline stores status.deadline of the pull request step, in its own status write. The policy check
+// stores it with the decision; recheck calls this only for a request decided while writes were paused, once
+// the freshness check finds them allowed again.
 func (r *RemediationRequestReconciler) startDeadline(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	rr.Status.Deadline = &metav1.Time{Time: r.now().Add(r.pullRequestTimeout())}
@@ -183,12 +183,12 @@ func (r *RemediationRequestReconciler) startDeadline(ctx context.Context, rr *re
 }
 
 // openPullRequest does the next step towards an open pull request: add the finalizer, create the branch,
-// commit the change or open the pull request, one of them per call. The deadline is already stored.
+// commit the change or open the pull request, one of them per call. recheck has stored the deadline.
 func (r *RemediationRequestReconciler) openPullRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if rr.Status.Deadline == nil {
-		// recheck stores it before the freshness check; kept so a later caller cannot skip it.
-		return r.startDeadline(ctx, rr)
+		// Unreachable through recheck; no Git write without a deadline.
+		return reconcile.Result{}, errors.New("the pull request step has no deadline")
 	}
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
 		base := rr.DeepCopy()
@@ -525,7 +525,7 @@ func (r *RemediationRequestReconciler) retry(ctx context.Context, rr *remediatio
 		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 			reasonRepositoryUnavailable, "The repository of the plan is not configured any more"))
 	}
-	return waitOrFail(ctx, rr, err)
+	return r.waitOrFail(ctx, rr, err)
 }
 
 // retryAfterOf returns the delay a host asked for (Retry-After), from a provider error or a transient error
@@ -541,14 +541,22 @@ func retryAfterOf(err error) time.Duration {
 }
 
 // waitOrFail requeues after the delay a host asked for, with a log line saying why, or returns err to the
-// error backoff, which does not read Retry-After.
-func waitOrFail(ctx context.Context, rr *remediationv1alpha1.RemediationRequest, err error) (reconcile.Result, error) {
-	if d := retryAfterOf(err); d > 0 {
-		logf.FromContext(ctx).Info("Waiting before retrying RemediationRequest", "remediationRequest",
-			client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", d)
-		return reconcile.Result{RequeueAfter: d}, nil
+// error backoff, which does not read Retry-After. For a request in PolicyChecked the delay ends at
+// status.deadline at the latest, so the request expires on time; expiring makes no branch, commit or pull
+// request.
+func (r *RemediationRequestReconciler) waitOrFail(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	err error) (reconcile.Result, error) {
+	d := retryAfterOf(err)
+	if d <= 0 {
+		return reconcile.Result{}, err
 	}
-	return reconcile.Result{}, err
+	if rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked && rr.Status.Deadline != nil {
+		// A deadline already passed (during a long step) still needs a positive requeue to reach expire.
+		d = min(d, max(rr.Status.Deadline.Sub(r.now()), stepDelay))
+	}
+	logf.FromContext(ctx).Info("Waiting before retrying RemediationRequest", "remediationRequest",
+		client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", d)
+	return reconcile.Result{RequeueAfter: d}, nil
 }
 
 func (r *RemediationRequestReconciler) ignoreStopped(err error) error {
@@ -581,7 +589,7 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		case errors.Is(err, freshness.ErrPaused):
 			return reconcile.Result{RequeueAfter: freshRecheckDelay}, nil
 		default:
-			return waitOrFail(ctx, rr, err)
+			return r.waitOrFail(ctx, rr, err)
 		}
 	}
 	base := rr.DeepCopy()

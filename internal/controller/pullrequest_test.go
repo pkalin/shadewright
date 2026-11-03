@@ -341,7 +341,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 	It("does not commit on a branch that holds something else", func() {
 		// The branch exists with another value in the file, as if someone created it by hand.
-		Expect(reconcileOnce()).To(Succeed()) // deadline
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
 		base, err := git.BranchHead(ctx, mainBranch)
 		Expect(err).NotTo(HaveOccurred())
@@ -358,7 +357,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 	})
 
 	It("leaves a pull request without its marker alone", func() {
-		Expect(reconcileOnce()).To(Succeed()) // deadline
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
 		base, err := git.BranchHead(ctx, mainBranch)
 		Expect(err).NotTo(HaveOccurred())
@@ -397,7 +395,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 	})
 
 	It("expires a request whose freshness check keeps failing", func() {
-		Expect(reconcileOnce()).To(Succeed()) // deadline
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
 		Expect(reconcileOnce()).To(Succeed()) // branch
 		git.SetFail(func(op string) error {
@@ -413,7 +410,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 	})
 
 	It("expires a request that did not open its pull request before the deadline", func() {
-		Expect(reconcileOnce()).To(Succeed()) // deadline
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
 		Expect(reconcileOnce()).To(Succeed()) // branch
 		clock = clock.Add(DefaultPullRequestTimeout + time.Minute)
@@ -458,7 +454,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 	})
 
 	It("never closes a pull request without its marker, also on deletion", func() {
-		Expect(reconcileOnce()).To(Succeed()) // deadline
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
 		base, err := git.BranchHead(ctx, mainBranch)
 		Expect(err).NotTo(HaveOccurred())

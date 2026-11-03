@@ -216,7 +216,7 @@ func TestCleanupCallerCancellationIsDistinct(t *testing.T) {
 }
 
 // plannedWorld is a PolicyChecked request whose plan is fresh, so Fresh reaches the source resolver, and whose
-// pull request step has stored its deadline, so a reconcile goes on to the freshness check.
+// deadline the policy check stored with the decision, as for a request decided while writes were not paused.
 func plannedWorld(t *testing.T) (client.Client, *remediationv1alpha1.RemediationRequest) {
 	t.Helper()
 	c, rr := deadlineWorld(t)

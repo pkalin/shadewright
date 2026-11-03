@@ -83,7 +83,9 @@ client ID (`terraform -chdir=foundation output -json executor_identity | jq -r .
 
 The fleet repository does not install the agent yet: the Helm chart that Flux would install comes with v0.2.0
 ([#83](https://github.com/pkalin/shadewright/issues/83), [#86](https://github.com/pkalin/shadewright/issues/86)).
-Until then, installing the released images and the CRDs into the lab is a manual step outside this runbook. Whatever
+Until then the fleet is to install it from manifests vendored at a pinned commit, with images by digest
+([#223](https://github.com/pkalin/shadewright/issues/223), planned); before that lands, installing the images and
+the CRDs into the lab is a manual step outside this runbook. Whatever
 way you use, the executor must run as the `executor` ServiceAccount with the workload identity annotation and
 label, in the namespace `shadewright-system`, with the `demo` namespace watched (`config/watch`). Stop here if the
 checks above do not pass.

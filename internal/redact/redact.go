@@ -31,21 +31,18 @@ limitations under the License.
 // references rather than secrets, such as "secretName: db-creds", are kept, because the name of a missing
 // Secret is what a diagnosis needs, and so is the hex of an image digest.
 //
-// Where a rule would also match prose, it asks the value to look like a credential: the word after "Basic"
-// or "Bearer", and the value of the short keys "pass", "auth" and "sig" before a colon, on their own ("pass:
-// 12 fail: 0") or after lower-case words joined by hyphens ("pre-auth: ok", but not "x-auth" or a key holding
-// a secret word), inline or in a block on the following lines, count only with a value of at least 8 bytes
-// that mixes letters of any script with digits or symbols (blanks too when the value is quoted, as in a
-// passphrase; one ",", ".", ";" or ":" at the end of an unquoted value is punctuation, not a symbol). After
-// Basic or Bearer a value also counts from 16 bytes unless it has the shape of a word: lower case after an
-// optional capital, ASCII letters only, shorter than 24 bytes, at most three consonants in a row and at least
-// three eighths vowels ("internationalization"); and after Basic, base64 of "user:password". So "Bearer
-// abc12", "auth: hunter2", "auth: unauthorized," and "basic internationalization" pass through.
+// Where a rule would also match prose, it asks the value to look like a credential. The value of the short
+// keys "pass", "auth" and "sig" before a colon, on their own ("pass: 12 fail: 0") or after lower-case words
+// joined by hyphens ("pre-auth: ok", but not "x-auth" or a key holding a secret word), inline or in a block on
+// the following lines, counts only with at least 8 bytes that mix letters of any script with digits or
+// symbols (blanks too when the value is quoted, as in a passphrase; one ",", ".", ";" or ":" at the end of an
+// unquoted value is punctuation, not a symbol). The word after "Basic" or "Bearer" counts with at least 8
+// bytes that mix letters with digits or symbols (a full stop at the end included), with 16 bytes of anything,
+// or, after Basic, as base64 of "user:password". So "Bearer abc12", "auth: hunter2" and "auth: unauthorized,"
+// pass through, while "basic internationalization" is redacted: an over-redaction kept by decision (#194).
 //
 // Known gaps: JSON escaped more than three times, a Kubernetes environment entry whose "value" comes before
-// its "name" or more than 16 lines after it, a secret of letters a-z only after Basic or Bearer that has the
-// shape of a word (a random one of 16 to 23 such letters does about one time in 20 to 50), and a secret in a
-// format no rule knows.
+// its "name" or more than 16 lines after it, and a secret in a format no rule knows.
 package redact
 
 import (
@@ -333,62 +330,24 @@ func blockLooksLikeSecret(s string, start, end int) bool {
 	return false
 }
 
-// minSchemeWord is the length from which a value of letters only after Basic or Bearer counts unless it
-// looks like a word: longer than the words that most often follow them in prose ("authentication").
+// minSchemeWord is the length from which any value after Basic or Bearer counts: longer than the words
+// that follow them in prose ("authentication"). Longer words ("basic internationalization") are redacted
+// too, an over-redaction kept by decision (#194): telling a long word from an opaque token of letters only
+// would let some tokens through.
 const minSchemeWord = 16
 
 // schemeSpan judges the value after "Basic" or "Bearer" (group 2) outside an Authorization header. Prose
 // follows these words too ("failed basic health check", "missing Bearer token"), so the value counts when it
-// looks like a credential (looksLikeSecret), is at least minSchemeWord bytes long and, without one full stop
-// at the end, not a word (looksLikeWord: an opaque token of letters only), or, after Basic, is padded base64
-// of "user:password" in printable text, which catches short ones such as "dTpw" ("u:p").
+// has at least 8 bytes that mix letters with digits or symbols (looksLikeQuotedSecret: the value holds no
+// blank or non-ASCII byte, and unlike looksLikeSecret a full stop at its end counts as a symbol), is at least
+// minSchemeWord bytes long (an opaque token of letters only), or, after Basic, is padded base64 of
+// "user:password" in printable text, which catches short ones such as "dTpw" ("u:p").
 func schemeSpan(s string, m []int, _ int) (int, int, bool) {
 	v := s[m[4]:m[5]]
-	if looksLikeSecret(v) || len(v) >= minSchemeWord && !looksLikeWord(strings.TrimSuffix(v, ".")) ||
-		strings.EqualFold(s[m[2]:m[3]], "basic") && isBasicCredential(v) {
+	if looksLikeQuotedSecret(v) || len(v) >= minSchemeWord || strings.EqualFold(s[m[2]:m[3]], "basic") && isBasicCredential(v) {
 		return m[4], m[5], true
 	}
 	return 0, 0, false
-}
-
-// Shape of a word for looksLikeWord. Long words of prose rarely hold more than three consonants in a row
-// ("instrumentation" holds four) and are at least three eighths vowels ("internationalization": half), while
-// a run of random letters from a-z, where a letter is a vowel with odds 6 in 26, passes both checks only
-// about one time in 20 at 16 letters and one in 50 at 20.
-const (
-	maxConsonantRun = 3
-	minVowelEighths = 3
-)
-
-// looksLikeWord reports whether v, after Basic or Bearer, has the shape of a long word of prose
-// ("internationalization") rather than of an opaque token: shorter than minTokenLength, only ASCII letters,
-// lower case after an optional capital, no run of more than maxConsonantRun consonants, and at least
-// minVowelEighths eighths vowels (a, e, i, o, u and y). Mixed or upper case, a digit or a symbol makes it a
-// token, so a letters-only token is kept only when it is lower case and pronounceable, and a word of
-// unusual shape ("acknowledgements") is redacted.
-func looksLikeWord(v string) bool {
-	if len(v) >= minTokenLength {
-		return false
-	}
-	run, vowels := 0, 0
-	for i := range len(v) {
-		c := v[i]
-		if i == 0 && c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		switch {
-		case c < 'a' || c > 'z':
-			return false
-		case strings.IndexByte("aeiouy", c) >= 0:
-			run = 0
-			vowels++
-		default:
-			if run++; run > maxConsonantRun {
-				return false
-			}
-		}
-	}
-	return 8*vowels >= minVowelEighths*len(v)
 }
 
 // isBasicCredential reports whether v is standard padded base64 of printable text holding a colon.

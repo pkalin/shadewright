@@ -158,7 +158,9 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(git.CreateBranch(ctx, branch, head)).To(Succeed())
 		_, err = git.CommitFile(ctx, branch, head, providers.FileChange{Path: sourcePath, Content: manifest("384Mi")})
 		Expect(err).NotTo(HaveOccurred())
-		cr, err = git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: branch, BaseBranch: mainBranch, Title: "t"})
+		cr, err = git.OpenChangeRequest(ctx, providers.NewChangeRequest{
+			HeadBranch: branch, BaseBranch: mainBranch, Title: "t", Body: pullRequestBody(got),
+		})
 		Expect(err).NotTo(HaveOccurred())
 		got.Status.Phase = remediationv1alpha1.PhaseAwaitingApproval
 		got.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{
@@ -349,6 +351,84 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(err).NotTo(HaveOccurred())
 		supersedes(freshness.ReasonTargetFileChanged)
 		Expect(closes.Load()).To(Equal(int32(1)))
+	})
+
+	// markCleanup writes the mark of a started cleanup (PlanFresh False with a stale reason, phase unchanged),
+	// after edit has changed the stored request.
+	markCleanup := func(edit func(*remediationv1alpha1.RemediationRequest)) {
+		got := fetch()
+		edit(got)
+		meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{
+			Type: remediationv1alpha1.ConditionPlanFresh, Status: metav1.ConditionFalse,
+			Reason: freshness.ReasonTargetFileChanged, Message: "The target file changed",
+		})
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+	}
+
+	It("honours the delay a Git host asks for while a marked cleanup waits, also near the deadline", func() {
+		_, err := git.Push(mainBranch, sourcePath, manifest("512Mi"))
+		Expect(err).NotTo(HaveOccurred())
+		markCleanup(func(got *remediationv1alpha1.RemediationRequest) {
+			got.Status.Phase = remediationv1alpha1.PhasePolicyChecked
+			got.Status.PullRequest = nil
+			got.Status.Deadline = &metav1.Time{Time: time.Now().Add(20 * time.Second)}
+		})
+		git.SetFail(func(op string) error {
+			if op == opClose {
+				return &providers.RetryableError{RetryAfter: 10 * time.Minute, Err: errors.New("rate limited")}
+			}
+			return nil
+		})
+		res, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(10*time.Minute), "a marked request never expires, so the delay is not cut")
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+	})
+
+	It("does not close a recorded pull request that is not the branch's own when it resumes a marked cleanup", func() {
+		head, err := git.BranchHead(ctx, mainBranch)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(git.CreateBranch(ctx, "someone-else", head)).To(Succeed())
+		foreign, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{
+			HeadBranch: "someone-else", BaseBranch: mainBranch, Title: "f", Body: pullRequestBody(fetch()),
+		})
+		Expect(err).NotTo(HaveOccurred())
+		markCleanup(func(got *remediationv1alpha1.RemediationRequest) {
+			got.Status.PullRequest.Number = foreign.Number
+		})
+		// The look at the recorded pull request fails once, so the cleanup is reached with the forged number.
+		finds := 0
+		git.SetFail(func(op string) error {
+			switch op {
+			case opFind:
+				if finds++; finds == 1 {
+					return &providers.RetryableError{Err: errors.New("connection reset")}
+				}
+			case opClose:
+				closes.Add(1)
+			}
+			return nil
+		})
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(planFresh().Reason).To(Equal(ReasonForeignChangeRequest))
+		Expect(closes.Load()).To(BeZero())
+		other, err := git.FindChangeRequest(ctx, "someone-else")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(other.State).To(Equal(providers.ChangeRequestOpen))
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+	})
+
+	It("drops the mark when the pull request merges before the cleanup closes it", func() {
+		markCleanup(func(*remediationv1alpha1.RemediationRequest) {})
+		_, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(planFresh()).To(BeNil(), "no stale condition is left on a merged request")
 	})
 
 	It("still ends a fresh request whose pull request a person closed in NeedsIntervention", func() {

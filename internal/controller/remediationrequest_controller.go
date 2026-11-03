@@ -156,6 +156,10 @@ const freshRecheckInterval = 5 * time.Minute
 // recorded), so its change request cannot be closed safely.
 var errRepositoryGone = errors.New("the repository of the plan is not configured")
 
+// errChangeRequestNotOurs means a pull request is recorded, but the branch's pull request is not that number
+// with this request's marker (or there is none), so the recorded number is not closed.
+var errChangeRequestNotOurs = errors.New("the recorded change request is not the request's own")
+
 // errTargetBranchChanged means the repository entry of the plan now names another target branch. Its provider
 // is bound to the new branch and must not touch a change request against the old one, so nothing is closed.
 var errTargetBranchChanged = errors.New("the target branch of the plan's repository changed")
@@ -620,6 +624,10 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, reasonTargetBranchChanged
 		message = "The plan is stale and its repository now targets another branch; " +
 			"its change request, if any, was not closed"
+	case errors.Is(err, errChangeRequestNotOurs):
+		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, ReasonForeignChangeRequest
+		message = "The plan is stale and the pull request recorded for it is not the branch's pull request " +
+			"with this request's marker; it was not closed"
 	case errors.Is(err, errRepositoryGone):
 		// Nothing is closed: the only change request this plan could have is in a repository that cannot be
 		// reached through the settings any more, and closing a number elsewhere could close someone else's.
@@ -663,7 +671,9 @@ func (r *RemediationRequestReconciler) endFreshness(ctx context.Context, rr *rem
 // closeChangeRequest closes the request's change request, if it has one, in the repository the plan was made
 // for and nowhere else. A change request that is already closed, or that was never opened, is not an error; a
 // merged one is, because the change landed. It returns [errRepositoryGone] when that repository is not in the
-// settings, [errTargetBranchChanged] when its entry now names another target branch, and [freshness.ErrPaused] when the settings read now pause writes.
+// settings, [errTargetBranchChanged] when its entry now names another target branch, [errChangeRequestNotOurs]
+// when a recorded pull request is not the branch's own, and [freshness.ErrPaused] when the settings read now
+// pause writes.
 func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	if r.OpenRepository == nil {
 		return errors.New("cannot close the change request: no Git provider")
@@ -692,25 +702,27 @@ func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, r
 	if err != nil {
 		return freshness.WrapProvider("open the repository", err)
 	}
-	number := int64(0)
-	if rr.Status.PullRequest != nil {
-		number = rr.Status.PullRequest.Number
-	} else {
-		// The pull request may exist although the status write that records it failed (design section 6).
-		cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
-		switch {
-		case errors.Is(err, providers.ErrNotFound):
-			return nil
-		case err != nil:
-			return freshness.WrapProvider("find the change request", err)
-		}
-		if !hasMarker(cr.Body, rr) {
+	// The pull request is found by the request's branch, also when one is recorded: it may exist although the
+	// status write that records it failed (design section 6), and a recorded number is closed only when the
+	// branch's pull request is that number and carries this request's marker.
+	cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
+	recorded := rr.Status.PullRequest
+	switch {
+	case errors.Is(err, providers.ErrNotFound) && recorded == nil:
+		return nil
+	case errors.Is(err, providers.ErrNotFound):
+		return errChangeRequestNotOurs
+	case err != nil:
+		return freshness.WrapProvider("find the change request", err)
+	}
+	if !hasMarker(cr.Body, rr) || (recorded != nil && cr.Number != recorded.Number) {
+		if recorded == nil {
 			// Someone else's pull request on our branch name, or one of another plan: never ours to close.
 			return nil
 		}
-		number = cr.Number
+		return errChangeRequestNotOurs
 	}
-	if err := git.CloseChangeRequest(ctx, number); err != nil {
+	if err := git.CloseChangeRequest(ctx, cr.Number); err != nil {
 		return freshness.WrapProvider("close the change request", err)
 	}
 	return nil

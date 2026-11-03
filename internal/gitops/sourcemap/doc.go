@@ -43,9 +43,12 @@ limitations under the License.
 //
 // Git is read only through ReadFile and BranchHead, relying on the ReadFile contract: only regular files
 // are returned, symbolic links are never followed, and files over providers.MaxFileBytes are refused before
-// they are downloaded. Reads are bounded by [MaxDepth], [MaxFiles],
-// [MaxReads] and [MaxFileBytes], whatever cap the provider enforces itself. Errors carry no provider text
-// ([TransientError], [RefusedError]), since it may hold a repository URL with credentials.
+// they are downloaded. Reads are bounded by [MaxDepth], [MaxFiles], [MaxReads] and [MaxFileBytes], whatever
+// cap the provider enforces itself. A [ReadCache], when the [Resolver] has one, keeps reads at a full commit
+// ID across mappings, keyed by the whole settings repository entry: files, files too large and paths not in
+// the commit's tree (providers.ErrPathNotInTree), never a plain not found or a failed read. Branch heads and
+// cluster objects are read every time, and cached reads count against [MaxReads] like any other. Errors carry
+// no provider text ([TransientError], [RefusedError]), since it may hold a repository URL with credentials.
 //
 // Everything read here is untrusted input: cluster objects, Flux status and Git contents. Paths are built
 // only from validated segments with package path, never by concatenating strings, and stay inside the

@@ -1,0 +1,207 @@
+/*
+Copyright 2026 The Shadewright Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+package sourcemap
+
+import (
+	"bytes"
+	"container/list"
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"sync"
+
+	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/providers"
+)
+
+// Bounds of the read cache the executor shares between the policy check and the freshness rechecks.
+const (
+	// DefaultCacheEntries is how many file reads the cache keeps, found or not.
+	DefaultCacheEntries = 4096
+	// DefaultCacheBytes is how many bytes the cache keeps, file contents and keys together.
+	DefaultCacheBytes = 16 << 20
+	// cacheEntryOverhead is what one entry is counted for besides its content, commit and path, so that
+	// entries without content (a file not in the tree) are bounded by bytes too.
+	cacheEntryOverhead = 256
+)
+
+// ReadCache keeps the outcome of ReadFile calls at a full commit ID, which never changes: the content of a
+// file, that the path is not a regular file in the commit's tree ([providers.ErrPathNotInTree]), or that the
+// file is too large. It is bounded by entries and bytes and evicts the least recently used entry first. It is
+// safe for concurrent use.
+//
+// An entry is keyed by the whole RemediationSettings repository entry (URL, provider, target branch and
+// credentials), the commit and the path, so a read through one entry is never answered from another's, even
+// for the same URL. A plain ErrNotFound is never kept: GitProvider also answers it for a commit the host does
+// not have yet, and the GitHub adapter for any 404 or a token it cannot get, so it may not hold on the next
+// read. Branch heads and cluster objects are never cached: the mapping reads them every time. Every read,
+// served from the cache or not, counts against [MaxReads], so the cache never changes a result.
+type ReadCache struct {
+	maxEntries int
+	maxBytes   int64
+
+	mu    sync.Mutex
+	lru   *list.List // of *cacheEntry, most recently used first
+	items map[cacheKey]*list.Element
+	bytes int64
+}
+
+// NewReadCache returns a cache that keeps at most maxEntries reads and maxBytes bytes. A bound of zero or
+// less keeps nothing.
+func NewReadCache(maxEntries int, maxBytes int64) *ReadCache {
+	return &ReadCache{maxEntries: maxEntries, maxBytes: maxBytes, lru: list.New(), items: map[cacheKey]*list.Element{}}
+}
+
+// cacheKey names one read: the settings entry it went through (a digest of the whole entry), the commit and
+// the path.
+type cacheKey struct {
+	repo   [sha256.Size]byte
+	commit string
+	path   string
+}
+
+type cacheOutcome int
+
+const (
+	cachedFile cacheOutcome = iota
+	cachedNotInTree
+	cachedTooLarge
+)
+
+// cacheEntry is one kept read. Only the content is stored: the path and commit of the file are the key's.
+type cacheEntry struct {
+	key     cacheKey
+	outcome cacheOutcome
+	data    []byte
+	cost    int64
+}
+
+// Fixed errors for cached outcomes. The walker looks only at their class, never at their text.
+var (
+	errCachedNotInTree = fmt.Errorf("file at commit: %w", providers.ErrPathNotInTree)
+	errCachedTooLarge  = fmt.Errorf("file at commit: %w", providers.ErrTooLarge)
+)
+
+// repoKey is the digest of a settings repository entry. ok is false when it cannot be encoded, and then the
+// cache must not be used.
+func repoKey(repo v1alpha1.GitRepository) (key [sha256.Size]byte, ok bool) {
+	b, err := json.Marshal(repo)
+	if err != nil {
+		return key, false
+	}
+	return sha256.Sum256(b), true
+}
+
+// readFile reads p at commit through git, answering from the cache when it can. A nil cache, or a commit that
+// is not a full object ID, always reads through git. Only a file, ErrPathNotInTree and ErrTooLarge are kept;
+// any other error, a plain ErrNotFound included, is returned and never kept.
+func (c *ReadCache) readFile(ctx context.Context, git providers.GitProvider, repo [sha256.Size]byte, commit, p string) (
+	providers.File, error) {
+	if c == nil || !providers.IsObjectID(commit) {
+		return git.ReadFile(ctx, commit, p)
+	}
+	k := cacheKey{repo: repo, commit: commit, path: p}
+	if e, ok := c.get(k); ok {
+		// A cancelled read fails as an uncached one would.
+		if err := ctx.Err(); err != nil {
+			return providers.File{}, err
+		}
+		return e.result()
+	}
+	f, err := git.ReadFile(ctx, commit, p)
+	c.put(k, f, err)
+	return f, err
+}
+
+// get returns the entry for k and marks it used. An entry never changes once kept, so it can be read without
+// the lock.
+func (c *ReadCache) get(k cacheKey) (*cacheEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el, ok := c.items[k]
+	if !ok {
+		return nil, false
+	}
+	c.lru.MoveToFront(el)
+	return el.Value.(*cacheEntry), true
+}
+
+// result returns the kept outcome, with a copy of the content so a caller cannot change the cache.
+func (e *cacheEntry) result() (providers.File, error) {
+	switch e.outcome {
+	case cachedNotInTree:
+		return providers.File{}, errCachedNotInTree
+	case cachedTooLarge:
+		return providers.File{}, errCachedTooLarge
+	}
+	return providers.File{Path: e.key.path, Commit: e.key.commit, Data: bytes.Clone(e.data)}, nil
+}
+
+// put keeps the outcome of a read, if it is one that never changes, and evicts until the bounds hold.
+func (c *ReadCache) put(k cacheKey, f providers.File, err error) {
+	e := &cacheEntry{key: k}
+	switch {
+	case err == nil && len(f.Data) <= MaxFileBytes && f.Path == k.path && f.Commit == k.commit:
+		e.outcome = cachedFile
+	case providers.IsPathNotInTree(err):
+		e.outcome = cachedNotInTree
+	case providers.IsTooLarge(err):
+		e.outcome = cachedTooLarge
+	default:
+		// A transient or refused read, a plain not found (a missing commit, a failing host), a file over the
+		// limit that the adapter did not refuse, or a file the adapter labelled with another path or commit.
+		return
+	}
+	e.cost = int64(len(f.Data)+len(k.commit)+len(k.path)) + cacheEntryOverhead
+	if c.maxEntries <= 0 || e.cost > c.maxBytes {
+		return
+	}
+	if e.outcome == cachedFile {
+		e.data = bytes.Clone(f.Data)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.items[k]; ok {
+		// Another reconcile read the same file meanwhile; the outcome is the same.
+		c.lru.MoveToFront(el)
+		return
+	}
+	c.items[k] = c.lru.PushFront(e)
+	c.bytes += e.cost
+	for c.lru.Len() > c.maxEntries || c.bytes > c.maxBytes {
+		oldest := c.lru.Back()
+		old := oldest.Value.(*cacheEntry)
+		c.lru.Remove(oldest)
+		delete(c.items, old.key)
+		c.bytes -= old.cost
+	}
+}
+
+// Len returns how many reads the cache keeps.
+func (c *ReadCache) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lru.Len()
+}
+
+// Bytes returns how many bytes the cache counts for what it keeps.
+func (c *ReadCache) Bytes() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.bytes
+}

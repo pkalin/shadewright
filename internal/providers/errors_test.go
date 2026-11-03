@@ -60,3 +60,37 @@ func TestErrorKinds(t *testing.T) {
 		t.Error("plain ErrRetryable not retryable")
 	}
 }
+
+// A path not in the tree is a not found too, so existing callers keep working; a plain not found is not one.
+func TestPathNotInTreeIsANotFound(t *testing.T) {
+	pt := fmt.Errorf("read file: %w", providers.ErrPathNotInTree)
+	if !providers.IsPathNotInTree(pt) || !providers.IsNotFound(pt) || providers.IsRetryable(pt) {
+		t.Error("path not in tree misclassified")
+	}
+	if providers.IsPathNotInTree(fmt.Errorf("read file: %w", providers.ErrNotFound)) {
+		t.Error("a plain not found counts as a path not in the tree")
+	}
+}
+
+func TestIsObjectID(t *testing.T) {
+	sha1 := "0123456789abcdef0123456789abcdef01234567"
+	sha256 := sha1 + "89abcdef0123456789abcdef"
+	for s, want := range map[string]bool{
+		sha1:               true,
+		sha256:             true,
+		"":                 false,
+		sha1[:39]:          false,
+		sha1 + "0":         false,
+		sha256 + "0":       false,
+		sha1[:39] + "A":    false,
+		sha1[:39] + "g":    false,
+		sha1[:39] + "/":    false,
+		sha1[:39] + ":":    false,
+		"main":             false,
+		sha1[:39] + "\x00": false,
+	} {
+		if got := providers.IsObjectID(s); got != want {
+			t.Errorf("IsObjectID(%q) = %v, want %v", s, got, want)
+		}
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -58,16 +59,19 @@ var kustomizationKeys = map[string]bool{"apiVersion": true, "kind": true, "metad
 type walker struct {
 	git    providers.GitProvider
 	commit string
-	dirs   map[string]bool
-	files  []string
-	seen   map[string]bool
-	reads  int
+	// cache, when set, answers reads at commit already made through the settings entry whose digest is repo.
+	cache *ReadCache
+	repo  [sha256.Size]byte
+	dirs  map[string]bool
+	files []string
+	seen  map[string]bool
+	reads int
 	// ignoreChecked holds the directories already checked for a .sourceignore file.
 	ignoreChecked map[string]bool
 }
 
-func newWalker(git providers.GitProvider, commit string) *walker {
-	return &walker{git: git, commit: commit, dirs: map[string]bool{}, seen: map[string]bool{}, ignoreChecked: map[string]bool{}}
+func newWalker(git providers.GitProvider, commit string, cache *ReadCache, repo [sha256.Size]byte) *walker {
+	return &walker{git: git, commit: commit, cache: cache, repo: repo, dirs: map[string]bool{}, seen: map[string]bool{}, ignoreChecked: map[string]bool{}}
 }
 
 // walk adds the files built from dir. A directory reached twice is read once.
@@ -210,8 +214,9 @@ func (w *walker) read(ctx context.Context, p string) (providers.File, *Result, e
 		return providers.File{}, new(needsIntervention(ReasonTooManyFiles,
 			"the build needs more than %d file reads", MaxReads)), nil
 	}
+	// A read from the cache counts too, so the cache never changes where the budget runs out.
 	w.reads++
-	f, err := w.git.ReadFile(ctx, w.commit, p)
+	f, err := w.cache.readFile(ctx, w.git, w.repo, w.commit, p)
 	if providers.IsNotFound(err) {
 		r := needsIntervention(reasonFileNotFound, "%s does not exist", p)
 		return providers.File{}, &r, nil

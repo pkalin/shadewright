@@ -80,6 +80,27 @@ type ChangeRequest struct {
 // larger file is refused with ErrTooLarge before its content is downloaded.
 const MaxFileBytes = 1 << 20
 
+// Lengths of a full Git object ID in lowercase hexadecimal.
+const (
+	SHA1HexLen   = 40
+	SHA256HexLen = 64
+)
+
+// IsObjectID reports whether s is a full Git object ID: SHA1HexLen or SHA256HexLen lowercase hexadecimal
+// characters. Content addressed by one never changes; a branch, a tag or an abbreviated ID can name other
+// content later.
+func IsObjectID(s string) bool {
+	if len(s) != SHA1HexLen && len(s) != SHA256HexLen {
+		return false
+	}
+	for i := range len(s) {
+		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // GitProvider is one repository on a Git host. An instance is bound to exactly one repository at
 // construction, so no method can reach another repository.
 //
@@ -95,9 +116,11 @@ type GitProvider interface {
 
 	// ReadFile returns the content of a regular file at a commit. ErrNotFound when the commit or path does
 	// not exist, or when the path is not a regular file: a directory, a submodule or a symbolic link, which is
-	// never followed. ErrTooLarge when the file is larger than MaxFileBytes: implementations check the size
-	// the host reports before downloading the content, and stop reading a stream after MaxFileBytes+1 bytes,
-	// so a large file in the repository cannot exhaust memory.
+	// never followed. Only when the implementation read the tree at that commit and the path is not a regular
+	// file in it is the error ErrPathNotInTree (which wraps ErrNotFound); a missing commit or a host that
+	// answers not found for another reason gives a plain ErrNotFound. ErrTooLarge when the file is larger than
+	// MaxFileBytes: implementations check the size the host reports before downloading the content, and stop
+	// reading a stream after MaxFileBytes+1 bytes, so a large file in the repository cannot exhaust memory.
 	ReadFile(ctx context.Context, commit, path string) (File, error)
 
 	// BranchHead returns the commit at the head of a branch. ErrNotFound when the branch does not exist.

@@ -109,7 +109,7 @@ func (g *Git) ReadFile(ctx context.Context, sha, path string) (providers.File, e
 	}
 	data, ok := c.files[path]
 	if !ok {
-		return providers.File{}, fmt.Errorf("file %q at %s: %w", path, sha, providers.ErrNotFound)
+		return providers.File{}, fmt.Errorf("file %q at %s: %w", path, sha, providers.ErrPathNotInTree)
 	}
 	if len(data) > providers.MaxFileBytes {
 		return providers.File{}, fmt.Errorf("file %q at %s: %w", path, sha, providers.ErrTooLarge)
@@ -171,7 +171,7 @@ func (g *Git) CommitFile(ctx context.Context, branch, expectedHead string, ch pr
 	files := g.commits[cur].files
 	if _, ok := files[ch.Path]; !ok {
 		g.mu.Unlock()
-		return "", fmt.Errorf("file %q at %s: %w", ch.Path, cur, providers.ErrNotFound)
+		return "", fmt.Errorf("file %q at %s: %w", ch.Path, cur, providers.ErrPathNotInTree)
 	}
 	next := maps.Clone(files)
 	next[ch.Path] = slices.Clone(ch.Content)

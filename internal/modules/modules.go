@@ -85,7 +85,12 @@ type Hooks struct {
 
 // VerificationCheck implements one of the API's verification checks for one kind: after a change is
 // delivered, verification (planned, #19) reads the object the request targets and asks Holds whether the
-// check holds. It is a minimal contract, to be widened when verification is built.
+// check holds. Verification runs in the executor, which is to resolve a check by name in its own registry,
+// built from the same compiled-in modules as the analyzer's, among the integrations enabled in
+// RemediationSettings. It fails closed: a check the request needs that no enabled module implements fails
+// verification (NeedsIntervention) and never counts as passed. [New] refuses a check with an empty Group or
+// Kind, no Holds, or a Name outside the API's VerificationCheck values, and a name declared by two modules.
+// It is a minimal contract, to be widened when verification is built.
 type VerificationCheck struct {
 	// Name is the check, one of the API's VerificationCheck values, for example KedaReady.
 	Name v1alpha1.VerificationCheck

@@ -17,8 +17,12 @@ limitations under the License.
 package modules
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/pkalin/shadewright/api/v1alpha1"
 )
 
 // hookPlatform is a platform module with hooks, for the symptom source checks.
@@ -162,9 +166,9 @@ func TestRegistryKeepsTheValidatedHooks(t *testing.T) {
 // TestRegistryKeepsTheChecks checks that the verification checks a module declares are copied like the rest
 // of its hooks: neither the module nor a caller can change the registry's list after New.
 func TestRegistryKeepsTheChecks(t *testing.T) {
-	const kedaReady = "KedaReady"
+	const kedaReady = v1alpha1.CheckKedaReady
 	holds := func(map[string]any) bool { return true }
-	checks := []VerificationCheck{{Name: kedaReady, Group: "keda.sh", Kind: "ScaledObject", Holds: holds}}
+	checks := []VerificationCheck{{Name: kedaReady, Group: kedaGroup, Kind: "ScaledObject", Holds: holds}}
 	r := mustNew(t, nil, []Integration{stubIntegration{name: kedaName, hooks: Hooks{Checks: checks}}})
 	checks[0].Name = "Changed"
 
@@ -176,4 +180,84 @@ func TestRegistryKeepsTheChecks(t *testing.T) {
 	if again, _ := r.IntegrationHooks(kedaName); again.Checks[0].Name != kedaReady {
 		t.Errorf("a caller changed the registry's checks: %#v", again.Checks)
 	}
+}
+
+// validCheck is a verification check New accepts.
+func validCheck() VerificationCheck {
+	return VerificationCheck{Name: v1alpha1.CheckKedaReady, Group: kedaGroup, Kind: "ScaledObject",
+		Holds: func(map[string]any) bool { return true }}
+}
+
+func TestNewRefusesInvalidChecks(t *testing.T) {
+	cases := []struct {
+		name   string
+		change func(c *VerificationCheck)
+		want   string
+	}{
+		{"name outside the API", func(c *VerificationCheck) { c.Name = "KedaHappy" }, "not one of the API's"},
+		{"empty name", func(c *VerificationCheck) { c.Name = "" }, "not one of the API's"},
+		{"no group", func(c *VerificationCheck) { c.Group = "" }, "no group or kind"},
+		{"no kind", func(c *VerificationCheck) { c.Kind = "" }, "no group or kind"},
+		{"no Holds", func(c *VerificationCheck) { c.Holds = nil }, "no Holds function"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			check := validCheck()
+			c.change(&check)
+			_, err := New(nil, []Integration{stubIntegration{name: kedaName, hooks: Hooks{Checks: []VerificationCheck{check}}}})
+			if err == nil || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), `integration module "keda"`) {
+				t.Errorf("New = %v, want an error naming the module and %q", err, c.want)
+			}
+		})
+	}
+	twice := []struct {
+		name         string
+		platforms    []Platform
+		integrations []Integration
+	}{
+		{"one module", nil, []Integration{stubIntegration{name: kedaName, hooks: Hooks{Checks: []VerificationCheck{validCheck(), validCheck()}}}}},
+		{"two integrations", nil, []Integration{
+			stubIntegration{name: kedaName, hooks: Hooks{Checks: []VerificationCheck{validCheck()}}},
+			stubIntegration{name: fluxName, hooks: Hooks{Checks: []VerificationCheck{validCheck()}}},
+		}},
+		{"a platform and an integration", []Platform{hookPlatform{stubPlatform: aks, hooks: Hooks{Checks: []VerificationCheck{validCheck()}}}},
+			[]Integration{stubIntegration{name: kedaName, hooks: Hooks{Checks: []VerificationCheck{validCheck()}}}}},
+	}
+	for _, c := range twice {
+		t.Run("declared twice by "+c.name, func(t *testing.T) {
+			if _, err := New(c.platforms, c.integrations); err == nil || !strings.Contains(err.Error(), "declared twice") {
+				t.Errorf("New = %v, want a check declared twice refused", err)
+			}
+		})
+	}
+	if _, err := New(nil, []Integration{stubIntegration{name: kedaName, hooks: Hooks{Checks: []VerificationCheck{validCheck()}}}}); err != nil {
+		t.Errorf("New refused a valid check: %v", err)
+	}
+}
+
+// TestVerificationChecksMatchTheEnum checks that v1alpha1.VerificationChecks lists exactly the values of the
+// VerificationCheck enum marker, in order, so New compares check names with what the API accepts.
+func TestVerificationChecksMatchTheEnum(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "api", "v1alpha1", "remediationrequest_types.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(b), "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "type VerificationCheck string") && i > 0 {
+			enum, ok := strings.CutPrefix(strings.TrimSpace(lines[i-1]), "// +kubebuilder:validation:Enum=")
+			if !ok {
+				t.Fatalf("no enum marker above VerificationCheck: %q", lines[i-1])
+			}
+			got := make([]string, 0, len(v1alpha1.VerificationChecks()))
+			for _, c := range v1alpha1.VerificationChecks() {
+				got = append(got, string(c))
+			}
+			if strings.Join(got, ";") != enum {
+				t.Errorf("VerificationChecks() = %v, the enum is %s", got, enum)
+			}
+			return
+		}
+	}
+	t.Fatal("type VerificationCheck not found")
 }

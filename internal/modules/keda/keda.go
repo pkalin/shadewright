@@ -54,7 +54,8 @@ func (module) Detection() modules.IntegrationDetection {
 }
 
 // Hooks contributes the symptom sources for ScaledObject, ScaledJob and the HPAs KEDA owns, and the KedaReady
-// verification check. It lists no action: AdjustKedaMaxReplicas comes with its patcher (#18). It offers no
+// verification check. It lists no action: AdjustKedaMaxReplicas has its patcher, but the module lists it only
+// once the deterministic gate that refuses it unless the ScaledObject is ready exists (#228). It offers no
 // tool.
 func (module) Hooks() modules.Hooks {
 	return modules.Hooks{
@@ -76,10 +77,7 @@ func (module) Hooks() modules.Hooks {
 			},
 		},
 		Checks: []modules.VerificationCheck{
-			{Name: CheckKedaReady, Group: Group, Kind: KindScaledObject, Holds: KedaReady},
+			{Name: v1alpha1.CheckKedaReady, Group: Group, Kind: KindScaledObject, Holds: KedaReady},
 		},
 	}
 }
-
-// CheckKedaReady is the name of the verification check [KedaReady] implements.
-const CheckKedaReady v1alpha1.VerificationCheck = "KedaReady"

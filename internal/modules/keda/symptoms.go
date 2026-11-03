@@ -17,21 +17,20 @@ limitations under the License.
 package keda
 
 import (
-	"encoding/json"
 	"fmt"
-	"math"
 	"strconv"
 
 	"github.com/pkalin/shadewright/internal/modules"
 )
 
 // Condition types and statuses the rules read. KEDA's are those of kedacore/keda v2.21.0
-// apis/keda/v1alpha1/condition_types.go (ConditionReady, ConditionActive, ConditionFallback, ConditionPaused);
-// the HPA's are those of Kubernetes v1.37.2 pkg/controller/podautoscaler/horizontal.go.
+// apis/keda/v1alpha1/condition_types.go (ConditionReady, ConditionActive, ConditionFallback, ConditionPaused,
+// ConditionHPAActive); the HPA's are those of Kubernetes v1.37.2 pkg/controller/podautoscaler/horizontal.go.
 const (
 	conditionReady          = "Ready"
 	conditionFallback       = "Fallback"
 	conditionPaused         = "Paused"
+	conditionHPAActive      = "HPAActive"
 	conditionScalingLimited = "ScalingLimited"
 	conditionScalingActive  = "ScalingActive"
 
@@ -43,13 +42,21 @@ const (
 // KEDA reasons the rules write as they are, read from kedacore/keda v2.21.0 (see [notReadyReasons] for the
 // files).
 const (
-	// ReasonTriggerError: Ready=False, every trigger fails and no fallback is set.
+	// ReasonTriggerError: Ready=False, no trigger is active and at least one fails; for a ScaledObject, no
+	// fallback is set.
 	ReasonTriggerError = "TriggerError"
 	// ReasonPartialTriggerError: Ready=Unknown, some triggers fail while another one is active.
 	ReasonPartialTriggerError = "PartialTriggerError"
 	// ReasonFallbackExists: Fallback=True, a trigger has failed more often than spec.fallback.failureThreshold
 	// (pkg/fallback/fallback.go).
 	ReasonFallbackExists = "FallbackExists"
+	// ReasonHPAMetricsUnavailable: HPAActive=False on a ScaledObject, the HPA cannot read its metrics and does
+	// not scale, while Ready may still be True. KEDA mirrors the HPA's ScalingActive condition into HPAActive
+	// and passes the HPA's reason through (pkg/scaling/executor/scale_scaledobjects.go, getHPAHealth);
+	// HPAMetricsUnavailable is KEDA's own reason for it (apis/keda/v1alpha1/condition_types.go,
+	// ScaledObjectConditionHPAMetricsUnavailableReason), used here for every HPAActive=False. The HPA's reason
+	// is evidence.
+	ReasonHPAMetricsUnavailable = "HPAMetricsUnavailable"
 )
 
 // Reasons the rules write themselves.
@@ -67,20 +74,18 @@ const (
 const hpaTooManyReplicas = "TooManyReplicas"
 
 // Fixed summaries. Each is written here, never taken from the cluster, and none says what to change: a
-// trigger error in particular is never answered by raising replicas (design 7).
+// trigger error in particular is never answered by raising replicas (design 7). The trigger error symptoms
+// (TriggerError, PartialTriggerError, FallbackExists, HPAMetricsUnavailable) carry no replica count and no
+// metric.
 const (
-	summaryTriggerError        = "Every trigger of this object fails and no fallback is set: KEDA cannot read the metrics it scales on."
-	summaryPartialTriggerError = "Some triggers of this object fail: KEDA scales only on the triggers that still answer."
-	summaryFallbackExists      = "A trigger of this ScaledObject has failed more often than its fallback threshold: KEDA scales to the fallback replica count, not on the metric."
-	summaryNotReady            = "KEDA reports this object not Ready."
-	summaryReplicaCeiling      = "The HPA that KEDA manages for this ScaledObject runs at its maximum replica count while its metrics ask for more replicas."
+	summaryTriggerErrorObject    = "No trigger of this ScaledObject is active and at least one fails, and no fallback is set: KEDA cannot read the metrics of the failing triggers."
+	summaryTriggerErrorJob       = "No trigger of this ScaledJob is active and at least one fails: KEDA cannot read the metrics of the failing triggers."
+	summaryPartialTriggerError   = "At least one trigger of this object fails while another one is active: KEDA scales only on the triggers that answer."
+	summaryFallbackExists        = "A trigger of this ScaledObject has failed more often than its fallback threshold: KEDA scales to the fallback replica count, not on the metric."
+	summaryHPAMetricsUnavailable = "The HPA that KEDA manages for this ScaledObject cannot read its metrics, so it does not scale the target, even if the ScaledObject reports Ready."
+	summaryNotReady              = "KEDA reports this object not Ready."
+	summaryReplicaCeiling        = "The HPA that KEDA manages for this ScaledObject runs at its maximum replica count while its metrics ask for more replicas. The ScaledObject itself is not checked here."
 )
-
-// triggerErrors are the reasons that mean a trigger fails. Their symptoms carry no replica counts: a broken
-// trigger is not a capacity problem (design 7).
-var triggerErrors = map[string]bool{
-	ReasonTriggerError: true, ReasonPartialTriggerError: true, ReasonFallbackExists: true,
-}
 
 // notReadyReasons maps, per kind, the Ready=False reasons KEDA sets to a fixed summary. They were read from
 // kedacore/keda v2.21.0:
@@ -91,18 +96,18 @@ var triggerErrors = map[string]bool{
 //   - ScaledJob: controllers/keda/scaledjob_controller.go (ScaledJobCheckFailed),
 //     pkg/scaling/executor/scale_jobs.go (TriggerError, and KEDAJobCreateFailed from pkg/eventreason).
 //
-// PartialTriggerError (Ready=Unknown, both kinds, the same executor files) and FallbackExists (Fallback=True)
-// are handled on their own. Active (ScalerActive, ScalerNotActive, ScalerCooldown, UnknownState) says whether
-// a trigger is active, which is no failure, and shows nothing.
+// PartialTriggerError (Ready=Unknown, both kinds, the same executor files), FallbackExists (Fallback=True)
+// and HPAMetricsUnavailable (HPAActive=False) are handled on their own. Active (ScalerActive, ScalerNotActive,
+// ScalerCooldown, UnknownState) says whether a trigger is active, which is no failure, and shows nothing.
 var notReadyReasons = map[string]map[string]string{
 	KindScaledObject: {
-		ReasonTriggerError:            summaryTriggerError,
+		ReasonTriggerError:            summaryTriggerErrorObject,
 		"ScaledObjectCheckFailed":     "KEDA refused the ScaledObject: its scale target, replica counts or triggers failed the operator's checks, or its HPA could not be created.",
 		"ErrorGettingCurrentReplicas": "KEDA could not read the current replica count of the ScaledObject's scale target.",
 		"ErrorScalingTarget":          "KEDA could not change the replica count of the ScaledObject's scale target.",
 	},
 	KindScaledJob: {
-		ReasonTriggerError:     summaryTriggerError,
+		ReasonTriggerError:     summaryTriggerErrorJob,
 		"ScaledJobCheckFailed": "KEDA refused the ScaledJob: its spec or triggers failed the operator's checks.",
 		"KEDAJobCreateFailed":  "KEDA could not create the Jobs the ScaledJob asks for.",
 	},
@@ -111,7 +116,6 @@ var notReadyReasons = map[string]map[string]string{
 // Evidence fields the rules write besides the conditions.
 const (
 	fieldTriggersTypes   = "status.triggersTypes"
-	fieldAuthTypes       = "status.authenticationsTypes"
 	fieldHealthFailing   = "status.health.failing"
 	fieldHealthFailures  = "status.health.numberOfFailures"
 	fieldOwner           = "metadata.ownerReferences.ScaledObject.name"
@@ -133,7 +137,8 @@ func scaledJobSymptoms(obj map[string]any) []modules.Symptom {
 }
 
 // kedaSymptoms applies the ScaledObject and ScaledJob rules of the package doc. Reason and Summary are always
-// written here; cluster text goes only into the evidence, which is read from status only.
+// written here; cluster text goes only into the evidence, which is read from status only. Fallback and
+// HPAActive exist on a ScaledObject only.
 func kedaSymptoms(obj map[string]any, kind string) []modules.Symptom {
 	if !is(obj, Group+"/"+Version, kind) {
 		return nil
@@ -147,29 +152,30 @@ func kedaSymptoms(obj map[string]any, kind string) []modules.Symptom {
 	var typ string
 	switch {
 	case conditionIs(status, conditionReady, statusFalse):
-		cond, typ = condition(status, conditionReady), conditionReady
+		cond, typ = modules.FirstCondition(status, conditionReady), conditionReady
 		reason, _ := cond["reason"].(string)
 		s = modules.Symptom{Reason: ReasonNotReady, Summary: summaryNotReady}
 		if summary, ok := notReadyReasons[kind][reason]; ok {
 			s = modules.Symptom{Reason: reason, Summary: summary}
 		}
 	case kind == KindScaledObject && conditionIs(status, conditionFallback, statusTrue):
-		cond, typ = condition(status, conditionFallback), conditionFallback
+		cond, typ = modules.FirstCondition(status, conditionFallback), conditionFallback
 		s = modules.Symptom{Reason: ReasonFallbackExists, Summary: summaryFallbackExists}
+	case kind == KindScaledObject && conditionIs(status, conditionHPAActive, statusFalse):
+		cond, typ = modules.FirstCondition(status, conditionHPAActive), conditionHPAActive
+		s = modules.Symptom{Reason: ReasonHPAMetricsUnavailable, Summary: summaryHPAMetricsUnavailable}
 	case conditionIs(status, conditionReady, statusUnknown) &&
-		condition(status, conditionReady)["reason"] == ReasonPartialTriggerError:
-		cond, typ = condition(status, conditionReady), conditionReady
+		modules.FirstCondition(status, conditionReady)["reason"] == ReasonPartialTriggerError:
+		cond, typ = modules.FirstCondition(status, conditionReady), conditionReady
 		s = modules.Symptom{Reason: ReasonPartialTriggerError, Summary: summaryPartialTriggerError}
 	default:
 		return nil
 	}
 	s.Evidence = conditionEvidence(cond, typ)
-	for _, f := range []struct{ key, field string }{
-		{"triggersTypes", fieldTriggersTypes}, {"authenticationsTypes", fieldAuthTypes},
-	} {
-		if v, _ := status[f.key].(string); v != "" {
-			s.Evidence = append(s.Evidence, modules.Evidence{Field: f.field, Value: v})
-		}
+	// The trigger type names. status.authenticationsTypes is left out: it holds the names people gave their
+	// TriggerAuthentications, which the diagnosis does not need.
+	if v, _ := status["triggersTypes"].(string); v != "" {
+		s.Evidence = append(s.Evidence, modules.Evidence{Field: fieldTriggersTypes, Value: v})
 	}
 	s.Evidence = append(s.Evidence, healthEvidence(status)...)
 	return []modules.Symptom{s}
@@ -187,7 +193,7 @@ func healthEvidence(status map[string]any) []modules.Evidence {
 			continue
 		}
 		failing++
-		if n, ok := integer(entry["numberOfFailures"]); ok && n > most {
+		if n, ok := modules.JSONInteger(entry["numberOfFailures"]); ok && n > most {
 			most = n
 		}
 	}
@@ -203,7 +209,10 @@ func healthEvidence(status map[string]any) []modules.Evidence {
 // hpaSymptoms reads a HorizontalPodAutoscaler and reports a replica ceiling for one that a ScaledObject
 // controls: ScalingLimited=True with reason TooManyReplicas, currentReplicas at or above spec.maxReplicas, a
 // status for the current spec, and no ScalingActive=False (when metrics fail, the HPA stops updating
-// ScalingLimited, so an old TooManyReplicas may remain). Any other HPA shows nothing.
+// ScalingLimited, so an old TooManyReplicas may remain). Any other HPA shows nothing. The source sees the HPA
+// only, not the owning ScaledObject, so the symptom is a candidate: a ScaledObject paused for scale-in or
+// scale-out only, or on fallback, still has an HPA that may report the limit. The policy gate for
+// AdjustKedaMaxReplicas (#228) checks the ScaledObject itself.
 func hpaSymptoms(obj map[string]any) []modules.Symptom {
 	if !is(obj, AutoscalingGroup+"/"+AutoscalingVersion, KindHPA) {
 		return nil
@@ -215,19 +224,19 @@ func hpaSymptoms(obj map[string]any) []modules.Symptom {
 	}
 	spec, _ := obj["spec"].(map[string]any)
 	status, _ := obj["status"].(map[string]any)
-	generation, hasGeneration := integer(meta["generation"])
-	if observed, ok := integer(status["observedGeneration"]); hasGeneration && ok && observed != generation {
+	generation, hasGeneration := modules.JSONInteger(meta["generation"])
+	if observed, ok := modules.JSONInteger(status["observedGeneration"]); hasGeneration && ok && observed != generation {
 		return nil
 	}
 	if conditionIs(status, conditionScalingActive, statusFalse) || !conditionIs(status, conditionScalingLimited, statusTrue) {
 		return nil
 	}
-	limited := condition(status, conditionScalingLimited)
+	limited := modules.FirstCondition(status, conditionScalingLimited)
 	if limited["reason"] != hpaTooManyReplicas {
 		return nil
 	}
-	maxReplicas, okMax := integer(spec["maxReplicas"])
-	current, okCurrent := integer(status["currentReplicas"])
+	maxReplicas, okMax := modules.JSONInteger(spec["maxReplicas"])
+	current, okCurrent := modules.JSONInteger(status["currentReplicas"])
 	if !okMax || !okCurrent || current < maxReplicas {
 		return nil
 	}
@@ -332,40 +341,8 @@ func is(obj map[string]any, apiVersion, kind string) bool {
 	return av == apiVersion && k == kind
 }
 
-// condition returns the first condition of the type in status.conditions, or nil.
-func condition(status map[string]any, typ string) map[string]any {
-	conds, _ := status["conditions"].([]any)
-	for _, c := range conds {
-		cond, _ := c.(map[string]any)
-		if t, _ := cond["type"].(string); t == typ {
-			return cond
-		}
-	}
-	return nil
-}
-
 // conditionIs reports whether the first condition of the type has the status.
 func conditionIs(status map[string]any, typ, want string) bool {
-	st, _ := condition(status, typ)["status"].(string)
+	st, _ := modules.FirstCondition(status, typ)["status"].(string)
 	return st == want
-}
-
-// integer reads a JSON integer as decoded by encoding/json (float64 or json.Number) or by the Kubernetes
-// decoder (int64). It reports false for anything else, a fraction included.
-func integer(v any) (int64, bool) {
-	switch n := v.(type) {
-	case int64:
-		return n, true
-	case int:
-		return int64(n), true
-	case float64:
-		if n != math.Trunc(n) || n < math.MinInt64 || n >= math.MaxInt64 {
-			return 0, false
-		}
-		return int64(n), true
-	case json.Number:
-		i, err := n.Int64()
-		return i, err == nil
-	}
-	return 0, false
 }

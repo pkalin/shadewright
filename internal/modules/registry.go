@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/groupversion"
 )
 
@@ -88,9 +89,10 @@ type integrationEntry struct {
 // given twice on one axis, a node label listed twice by one platform, a provider ID scheme without node labels,
 // two platforms with the same provider ID scheme and the same node labels, which could never be told apart, or
 // a symptom source that [SymptomSource.Validate] refuses, a kind watched twice, by one module or by two (on
-// either axis), or a diagnosis rule with an invalid or repeated name or with neither an event nor a node
-// function. Platform and integration names are separate: one of each may share a name. The registry keeps
-// a copy of each module's hooks as they were validated, read once, here; [Registry.PlatformHooks] and
+// either axis), a diagnosis rule with an invalid or repeated name or with neither an event nor a node
+// function, or a verification check that [VerificationCheck] does not allow or that two modules declare.
+// Platform and integration names are separate: one of each may share a name. The registry keeps a copy of
+// each module's hooks as they were validated, read once, here; [Registry.PlatformHooks] and
 // [Registry.IntegrationHooks] return that copy.
 func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 	if len(platforms) > MaxPlatforms {
@@ -110,8 +112,9 @@ func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 		return nil, fmt.Errorf("platform module %q: %w", GenericPlatform, err)
 	}
 	r.addPlatform(platformEntry{name: GenericPlatform, module: g, hooks: gh})
-	claims := map[string]string{}  // scheme and labels to platform name
-	watched := map[string]string{} // group and kind to the module that watches it
+	claims := map[string]string{}                     // scheme and labels to platform name
+	watched := map[string]string{}                    // group and kind to the module that watches it
+	checks := map[v1alpha1.VerificationCheck]string{} // check name to the module that implements it
 	for i, p := range platforms {
 		if isNil(p) {
 			return nil, fmt.Errorf("platform module %d is nil", i)
@@ -134,7 +137,8 @@ func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 		}
 		label := fmt.Sprintf("platform module %q", name)
 		e.hooks = cloneHooks(p.Hooks())
-		if err := errors.Join(validateSources(label, e.hooks.Symptoms, watched), validateRules(e.hooks.Rules)); err != nil {
+		if err := errors.Join(validateSources(label, e.hooks.Symptoms, watched), validateRules(e.hooks.Rules),
+			validateChecks(label, e.hooks.Checks, checks)); err != nil {
 			return nil, fmt.Errorf("%s: %w", label, err)
 		}
 		e.module = p
@@ -158,7 +162,8 @@ func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 		}
 		label := fmt.Sprintf("integration module %q", name)
 		hooks := cloneHooks(in.Hooks())
-		if err := errors.Join(validateSources(label, hooks.Symptoms, watched), validateRules(hooks.Rules)); err != nil {
+		if err := errors.Join(validateSources(label, hooks.Symptoms, watched), validateRules(hooks.Rules),
+			validateChecks(label, hooks.Checks, checks)); err != nil {
 			return nil, fmt.Errorf("%s: %w", label, err)
 		}
 		e := integrationEntry{name: name, module: in, detection: d, hooks: hooks}
@@ -188,6 +193,31 @@ func validateRules(rules []DiagnosisRule) error {
 		}
 	}
 	return nil
+}
+
+// validateChecks checks the verification checks of one module: each has a Name among the API's
+// VerificationCheck values, a Group and a Kind, and a Holds function. implemented maps each check name already
+// declared to the module that declared it, across both axes; a name declared twice, by this module or another
+// one, is refused, so a check never has two implementations. The module's checks are added to implemented.
+func validateChecks(module string, checks []VerificationCheck, implemented map[v1alpha1.VerificationCheck]string) error {
+	var errs []error
+	for _, c := range checks {
+		switch {
+		case !slices.Contains(v1alpha1.VerificationChecks(), c.Name):
+			errs = append(errs, fmt.Errorf("verification check %q is not one of the API's", c.Name))
+		case c.Group == "" || c.Kind == "":
+			errs = append(errs, fmt.Errorf("verification check %s names no group or kind", c.Name))
+		case c.Holds == nil:
+			errs = append(errs, fmt.Errorf("verification check %s has no Holds function", c.Name))
+		default:
+			if other, ok := implemented[c.Name]; ok {
+				errs = append(errs, fmt.Errorf("verification check %s is declared twice, by %s and %s", c.Name, other, module))
+				continue
+			}
+			implemented[c.Name] = module
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // addPlatform records a platform entry for listing, lookup and detection.

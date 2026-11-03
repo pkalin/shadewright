@@ -18,6 +18,7 @@ package keda
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -35,6 +36,7 @@ const (
 	soTriggerError = "scaledobject-trigger-error.json"
 	soReady        = "scaledobject-ready.json"
 	soFallback     = "scaledobject-fallback.json"
+	soHPAInactive  = "scaledobject-hpa-metrics-unavailable.json"
 	hpaCeiling     = "hpa-at-ceiling.json"
 	rabbitAuth     = "rabbitmq-auth"
 	keyStatus      = "status"
@@ -97,7 +99,7 @@ func TestRecordedObjects(t *testing.T) {
 	}{
 		// Scenario broken-keda-trigger (shadewright-fleet): the Prometheus address does not resolve.
 		{soTriggerError, KindScaledObject, []modules.Symptom{{
-			Reason: ReasonTriggerError, Summary: summaryTriggerError,
+			Reason: ReasonTriggerError, Summary: summaryTriggerErrorObject,
 			Evidence: []modules.Evidence{
 				{Field: condField(conditionReady, keyReason), Value: ReasonTriggerError},
 				{Field: condField(conditionReady, "message"), Value: "Triggers defined in ScaledObject are not working correctly"},
@@ -112,7 +114,6 @@ func TestRecordedObjects(t *testing.T) {
 				{Field: condField(conditionFallback, keyReason), Value: ReasonFallbackExists},
 				{Field: condField(conditionFallback, "message"), Value: "At least one trigger is falling back on this scaled object"},
 				{Field: fieldTriggersTypes, Value: "rabbitmq"},
-				{Field: fieldAuthTypes, Value: rabbitAuth},
 				{Field: fieldHealthFailing, Value: "1"},
 				{Field: fieldHealthFailures, Value: "7"},
 			},
@@ -123,7 +124,6 @@ func TestRecordedObjects(t *testing.T) {
 				{Field: condField(conditionReady, keyReason), Value: ReasonPartialTriggerError},
 				{Field: condField(conditionReady, "message"), Value: "Some triggers defined in ScaledObject are not working correctly"},
 				{Field: fieldTriggersTypes, Value: "rabbitmq,cpu"},
-				{Field: fieldAuthTypes, Value: rabbitAuth},
 			},
 		}}},
 		{"scaledobject-check-failed.json", KindScaledObject, []modules.Symptom{{
@@ -133,13 +133,23 @@ func TestRecordedObjects(t *testing.T) {
 				{Field: condField(conditionReady, "message"), Value: "ScaledObject doesn't have correct scaleTargetRef specification: deployments.apps \"billing-worker\" not found"},
 			},
 		}}},
+		{soHPAInactive, KindScaledObject, []modules.Symptom{{
+			Reason: ReasonHPAMetricsUnavailable, Summary: summaryHPAMetricsUnavailable,
+			Evidence: []modules.Evidence{
+				{Field: condField(conditionHPAActive, keyReason), Value: "FailedGetExternalMetric"},
+				{Field: condField(conditionHPAActive, "message"), Value: "HPA is not actively scaling: the HPA was unable to compute the replica count: " +
+					"unable to get external metric demo/s0-prometheus/&LabelSelector{MatchLabels:map[string]string{scaledobject.keda.sh/name: worker,}," +
+					"MatchExpressions:[]LabelSelectorRequirement{},}: unable to fetch metrics from external metrics API: the server could not find " +
+					"the requested resource (get s0-prometheus.external.metrics.k8s.io)"},
+				{Field: fieldTriggersTypes, Value: "prometheus"},
+			},
+		}}},
 		{"scaledjob-trigger-error.json", KindScaledJob, []modules.Symptom{{
-			Reason: ReasonTriggerError, Summary: summaryTriggerError,
+			Reason: ReasonTriggerError, Summary: summaryTriggerErrorJob,
 			Evidence: []modules.Evidence{
 				{Field: condField(conditionReady, keyReason), Value: ReasonTriggerError},
 				{Field: condField(conditionReady, "message"), Value: "Triggers defined in ScaledJob are not working correctly"},
 				{Field: fieldTriggersTypes, Value: "azure-queue"},
-				{Field: fieldAuthTypes, Value: "azure-queue-auth"},
 			},
 		}}},
 		{hpaCeiling, KindHPA, []modules.Symptom{{
@@ -169,7 +179,7 @@ func conds(obj map[string]any) []any { return obj[keyStatus].(map[string]any)["c
 
 // cond returns the first condition of the type in obj.
 func cond(obj map[string]any, typ string) map[string]any {
-	return condition(obj[keyStatus].(map[string]any), typ)
+	return modules.FirstCondition(obj[keyStatus].(map[string]any), typ)
 }
 
 func TestScaledObjectRules(t *testing.T) {
@@ -189,11 +199,11 @@ func TestScaledObjectRules(t *testing.T) {
 		{"reason of the ScaledJob", soTriggerError, func(o map[string]any) { cond(o, conditionReady)[keyReason] = jobCreate }, ReasonNotReady},
 		{"no reason", soTriggerError, func(o map[string]any) { delete(cond(o, conditionReady), keyReason) }, ReasonNotReady},
 		{scalingTarget, soTriggerError, func(o map[string]any) { cond(o, conditionReady)[keyReason] = scalingTarget }, scalingTarget},
-		{"Ready Unknown, not reconciled yet", soTriggerError, func(o map[string]any) {
+		{"Ready Unknown, not reconciled yet", soReady, func(o map[string]any) {
 			cond(o, conditionReady)["status"] = statusUnknown
 			delete(cond(o, conditionReady), keyReason)
 		}, ""},
-		{"Ready Unknown for a partial trigger error", soTriggerError, func(o map[string]any) {
+		{"Ready Unknown for a partial trigger error", soReady, func(o map[string]any) {
 			cond(o, conditionReady)["status"], cond(o, conditionReady)[keyReason] = statusUnknown, ReasonPartialTriggerError
 		}, ReasonPartialTriggerError},
 		{"PartialTriggerError on Ready True is not read", soReady, func(o map[string]any) {
@@ -203,6 +213,25 @@ func TestScaledObjectRules(t *testing.T) {
 		{"Ready False before Fallback", soFallback, func(o map[string]any) {
 			cond(o, conditionReady)["status"], cond(o, conditionReady)[keyReason] = statusFalse, scalingTarget
 		}, scalingTarget},
+		{"Fallback before HPAActive", soFallback, func(o map[string]any) {
+			o[keyStatus].(map[string]any)["conditions"] = append(conds(o), map[string]any{keyType: conditionHPAActive, keyStatus: statusFalse})
+		}, ReasonFallbackExists},
+		{"probe: Ready, no fallback, not paused, HPA cannot read metrics", soReady, func(o map[string]any) {
+			cond(o, conditionHPAActive)["status"], cond(o, conditionHPAActive)[keyReason] = statusFalse, "FailedGetExternalMetric"
+		}, ReasonHPAMetricsUnavailable},
+		{"HPAActive False without a reason", soReady, func(o map[string]any) {
+			cond(o, conditionHPAActive)["status"] = statusFalse
+			delete(cond(o, conditionHPAActive), keyReason)
+		}, ReasonHPAMetricsUnavailable},
+		{"HPAActive True", soHPAInactive, func(o map[string]any) { cond(o, conditionHPAActive)["status"] = statusTrue }, ""},
+		{"HPAActive Unknown", soHPAInactive, func(o map[string]any) { cond(o, conditionHPAActive)["status"] = statusUnknown }, ""},
+		{"paused hides HPAActive False", soHPAInactive, func(o map[string]any) { cond(o, conditionPaused)["status"] = statusTrue }, ""},
+		{"Ready False before HPAActive", soHPAInactive, func(o map[string]any) {
+			cond(o, conditionReady)["status"], cond(o, conditionReady)[keyReason] = statusFalse, scalingTarget
+		}, scalingTarget},
+		{"HPAActive before PartialTriggerError", soHPAInactive, func(o map[string]any) {
+			cond(o, conditionReady)["status"], cond(o, conditionReady)[keyReason] = statusUnknown, ReasonPartialTriggerError
+		}, ReasonHPAMetricsUnavailable},
 		{"Fallback False", soFallback, func(o map[string]any) { cond(o, conditionFallback)["status"] = statusFalse }, ""},
 		{"the first Ready condition counts", soReady, func(o map[string]any) {
 			o[keyStatus].(map[string]any)["conditions"] = append(conds(o),
@@ -230,8 +259,9 @@ func TestScaledJobRules(t *testing.T) {
 	obj := fixture(t, "scaledjob-trigger-error.json")
 	cond(obj, conditionReady)["status"], cond(obj, conditionReady)[keyReason] = statusTrue, "ScaledJobReady"
 	cond(obj, conditionFallback)["status"] = statusTrue
+	obj[keyStatus].(map[string]any)["conditions"] = append(conds(obj), map[string]any{keyType: conditionHPAActive, keyStatus: statusFalse})
 	if got := src.Symptoms(obj); len(got) != 0 {
-		t.Errorf("a ScaledJob has no fallback, so Fallback=True must show nothing: got %#v", got)
+		t.Errorf("a ScaledJob has no fallback and no HPA, so Fallback=True and HPAActive=False must show nothing: got %#v", got)
 	}
 	obj = fixture(t, "scaledjob-trigger-error.json")
 	cond(obj, conditionReady)[keyReason] = jobCreate
@@ -317,6 +347,12 @@ func TestHPAMetrics(t *testing.T) {
 	}
 }
 
+// triggerErrors are the reasons that mean a trigger or the metrics behind it fail. Their symptoms carry no
+// replica counts: a broken trigger is not a capacity problem (design 7).
+var triggerErrors = map[string]bool{
+	ReasonTriggerError: true, ReasonPartialTriggerError: true, ReasonFallbackExists: true, ReasonHPAMetricsUnavailable: true,
+}
+
 // actionHints are words a symptom of a trigger error must never contain: they would point at a capacity
 // change.
 var actionHints = []string{"raise", "increase", "maxReplica", "scale up", "more replicas",
@@ -363,11 +399,11 @@ func TestTriggerErrorIsNoCapacityProblem(t *testing.T) {
 			}
 		}
 	}
-	if n < 4 {
-		t.Errorf("only %d trigger-error symptoms checked; the fixtures give at least 4", n)
+	if n < 5 {
+		t.Errorf("only %d trigger-error symptoms checked; the fixtures give at least 5", n)
 	}
 	if h := Module().Hooks(); len(h.Actions) != 0 {
-		t.Errorf("the module lists actions %v; AdjustKedaMaxReplicas comes with its patcher (#18)", h.Actions)
+		t.Errorf("the module lists actions %v; AdjustKedaMaxReplicas is listed only once the gate (#228) exists", h.Actions)
 	}
 }
 
@@ -383,14 +419,22 @@ func TestTriggerMetadataNeverInSymptoms(t *testing.T) {
 	for name, obj := range fixtures(t) {
 		spec, _ := obj["spec"].(map[string]any)
 		triggers, _ := spec["triggers"].([]any)
-		for _, tr := range triggers {
+		var authNames []string
+		for i, tr := range triggers {
 			trigger := tr.(map[string]any)
 			md, _ := trigger[keyMetadata].(map[string]any)
 			for k := range md {
 				md[k] = hostile
 			}
 			md["password"], md["metricName"] = hostile, hostile
-			trigger["authenticationRef"] = map[string]any{keyName: hostile, "kind": "ClusterTriggerAuthentication"}
+			ref := fmt.Sprintf("%s-%d", hostile, i)
+			trigger["authenticationRef"] = map[string]any{keyName: ref, "kind": "ClusterTriggerAuthentication"}
+			authNames = append(authNames, ref)
+		}
+		if st, ok := obj[keyStatus].(map[string]any); ok && len(authNames) > 0 {
+			// KEDA joins the distinct authenticationRef names with ","
+			// (apis/keda/v1alpha1/scaletriggers_types.go, CombinedTriggersAndAuthenticationsTypes).
+			st["authenticationsTypes"] = strings.Join(authNames, ",")
 		}
 		if refs, ok := spec["secretTargetRef"].([]any); ok {
 			for _, r := range refs {
@@ -448,8 +492,10 @@ func asList(v any) []any { l, _ := v.([]any); return l }
 // TestReasonAndSummaryAreFixed checks that reasons and summaries come from this package only, whatever the
 // conditions say, and that every symptom fits the Symptom contract.
 func TestReasonAndSummaryAreFixed(t *testing.T) {
-	fixedReasons := map[string]bool{ReasonNotReady: true, ReasonReplicaCeiling: true, ReasonFallbackExists: true, ReasonPartialTriggerError: true}
-	fixedSummaries := map[string]bool{summaryNotReady: true, summaryReplicaCeiling: true, summaryFallbackExists: true, summaryPartialTriggerError: true}
+	fixedReasons := map[string]bool{ReasonNotReady: true, ReasonReplicaCeiling: true, ReasonFallbackExists: true,
+		ReasonPartialTriggerError: true, ReasonHPAMetricsUnavailable: true}
+	fixedSummaries := map[string]bool{summaryNotReady: true, summaryReplicaCeiling: true, summaryFallbackExists: true,
+		summaryPartialTriggerError: true, summaryHPAMetricsUnavailable: true}
 	for _, byReason := range notReadyReasons {
 		for r, s := range byReason {
 			fixedReasons[r], fixedSummaries[s] = true, true
@@ -502,6 +548,11 @@ func TestKedaReady(t *testing.T) {
 		{"on fallback, though Ready", soFallback, func(map[string]any) {}, false},
 		{"paused, though Ready", soReady, func(o map[string]any) { cond(o, conditionPaused)["status"] = statusTrue }, false},
 		{"partial trigger error", "scaledobject-partial-trigger-error.json", func(map[string]any) {}, false},
+		{"probe: Ready, no fallback, not paused, HPA cannot read metrics", soHPAInactive, func(map[string]any) {}, false},
+		{"HPAActive Unknown", soHPAInactive, func(o map[string]any) { cond(o, conditionHPAActive)["status"] = statusUnknown }, true},
+		{"no HPAActive condition", soReady, func(o map[string]any) {
+			o[keyStatus].(map[string]any)["conditions"] = conds(o)[:4]
+		}, true},
 		{"Ready Unknown", soReady, func(o map[string]any) { cond(o, conditionReady)["status"] = statusUnknown }, false},
 		{"no Ready condition", soReady, func(o map[string]any) {
 			o[keyStatus].(map[string]any)["conditions"] = conds(o)[1:]
@@ -520,29 +571,10 @@ func TestKedaReady(t *testing.T) {
 		})
 	}
 	checks := Module().Hooks().Checks
-	if len(checks) != 1 || checks[0].Name != CheckKedaReady || checks[0].Group != Group || checks[0].Kind != KindScaledObject ||
+	if len(checks) != 1 || checks[0].Name != v1alpha1.CheckKedaReady || checks[0].Group != Group || checks[0].Kind != KindScaledObject ||
 		checks[0].Holds == nil || !checks[0].Holds(fixture(t, soReady)) {
 		t.Errorf("Checks = %#v, want the KedaReady check on ScaledObject", checks)
 	}
-}
-
-// TestKedaReadyIsAnAPICheck checks that the check's name is one the API accepts, read from the enum marker of
-// VerificationCheck, so a renamed API value cannot leave the module behind.
-func TestKedaReadyIsAnAPICheck(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join("..", "..", "..", "api", "v1alpha1", "remediationrequest_types.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for line := range strings.SplitSeq(string(b), "\n") {
-		if enum, ok := strings.CutPrefix(strings.TrimSpace(line), "// +kubebuilder:validation:Enum="); ok &&
-			slices.Contains(strings.Split(enum, ";"), "DeliveryRevisionApplied") {
-			if !slices.Contains(strings.Split(enum, ";"), string(CheckKedaReady)) {
-				t.Errorf("the API's checks %s do not include %s", enum, CheckKedaReady)
-			}
-			return
-		}
-	}
-	t.Fatal("the VerificationCheck enum marker was not found")
 }
 
 // TestNoToolsAndReadOnly checks that the module offers no tool and that its rules and check leave the

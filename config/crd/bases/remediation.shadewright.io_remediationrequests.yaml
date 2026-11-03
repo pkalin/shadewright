@@ -237,9 +237,10 @@ spec:
                       description: |-
                         VerificationCheck is a named, deterministic check run after delivery. DeliveryRevisionApplied: the GitOps
                         controller has applied the revision that contains the merged change. WorkloadHealthy: the target workload
-                        is available and its rollout is complete. KedaReady: the KEDA ScaledObject reports Ready.
-                        QueueBacklogDecreasing: the backlog that drives the ScaledObject is going down. NoNewOOMKills: no container
-                        of the target is OOMKilled after the change.
+                        is available and its rollout is complete. KedaReady: the KEDA ScaledObject reports Ready=True, is not
+                        paused (Paused=True, which a scale-in or scale-out pause also sets), is not on fallback (Fallback=True) and
+                        its HPA can read its metrics (HPAActive is not False). QueueBacklogDecreasing: the backlog that drives the
+                        ScaledObject is going down. NoNewOOMKills: no container of the target is OOMKilled after the change.
                       enum:
                       - DeliveryRevisionApplied
                       - WorkloadHealthy

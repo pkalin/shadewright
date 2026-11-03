@@ -17,9 +17,11 @@ limitations under the License.
 package keda
 
 // KedaReady is the KedaReady verification check, for verification (planned, #19): it holds when obj is a
-// keda.sh/v1alpha1 ScaledObject whose Ready condition is True, which is not paused (Paused=True) and whose
-// triggers are not falling back (Fallback=True). A ScaledObject on fallback can report Ready=True while it
-// scales on the fallback replica count instead of its metrics, so it does not count as ready.
+// keda.sh/v1alpha1 ScaledObject whose Ready condition is True, which is not paused (Paused=True, which KEDA
+// also sets for a scale-in or scale-out pause), whose triggers are not falling back (Fallback=True) and whose
+// HPA can read its metrics (HPAActive is not False). A ScaledObject on fallback, or whose HPA cannot read its
+// metrics, can report Ready=True while it does not scale on its metrics, so it does not count as ready. A
+// missing HPAActive (no HPA observed yet, or a KEDA release before 2.21) does not fail the check.
 //
 // KEDA's conditions carry no observedGeneration, so the check cannot tell whether Ready describes the
 // delivered spec: verification is to run it after DeliveryRevisionApplied and require it to hold for
@@ -31,5 +33,6 @@ func KedaReady(obj map[string]any) bool {
 	status, _ := obj["status"].(map[string]any)
 	return conditionIs(status, conditionReady, statusTrue) &&
 		!conditionIs(status, conditionPaused, statusTrue) &&
-		!conditionIs(status, conditionFallback, statusTrue)
+		!conditionIs(status, conditionFallback, statusTrue) &&
+		!conditionIs(status, conditionHPAActive, statusFalse)
 }

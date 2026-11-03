@@ -47,13 +47,12 @@ echo "------------------------------------"
 echo "Installing development tools..."
 echo "------------------------------------"
 
-# Install kind
-if ! command -v kind &> /dev/null; then
-  echo "Installing kind..."
-  curl -Lo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/latest/kind-linux-${ARCH}"
-  chmod +x /usr/local/bin/kind
-  echo "kind installed successfully"
-fi
+# Install kind through the Makefile, which owns the single pinned version (KIND_VERSION)
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+echo "Installing kind..."
+make -C "${REPO_ROOT}" kind
+ln -sf "${REPO_ROOT}/bin/kind" /usr/local/bin/kind
+echo "kind installed successfully"
 
 # Generate kind bash completion
 if command -v kind &> /dev/null; then
@@ -67,8 +66,8 @@ fi
 # Install kubebuilder
 if ! command -v kubebuilder &> /dev/null; then
   echo "Installing kubebuilder..."
-  curl -Lo /usr/local/bin/kubebuilder "https://go.kubebuilder.io/dl/latest/linux/${ARCH}"
-  chmod +x /usr/local/bin/kubebuilder
+  # Pinned and checked through the Go checksum database, like the tools in the Makefile.
+  GOBIN=/usr/local/bin go install sigs.k8s.io/kubebuilder/v4@v4.16.0
   echo "kubebuilder installed successfully"
 fi
 

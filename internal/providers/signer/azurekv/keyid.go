@@ -27,6 +27,9 @@ import (
 // vaultSuffix is the only Key Vault DNS suffix accepted: the Azure public cloud.
 const vaultSuffix = ".vault.azure.net"
 
+// schemeHTTPS is the only URL scheme this package sends a request or a token to.
+const schemeHTTPS = "https"
+
 // maxKeyIDLength matches the limit on RemediationSettings keyID.
 const maxKeyIDLength = 2048
 
@@ -65,7 +68,7 @@ func ParseKeyID(s string) (KeyID, error) {
 	}
 	// Belt and braces: the standard parser must agree with the pattern.
 	u, err := url.Parse(s)
-	if err != nil || u.Scheme != "https" || u.Host != m[1]+vaultSuffix || u.User != nil ||
+	if err != nil || u.Scheme != schemeHTTPS || u.Host != m[1]+vaultSuffix || u.User != nil ||
 		u.RawQuery != "" || u.Fragment != "" || u.Port() != "" {
 		return KeyID{}, errors.New("key ID is not a plain https Key Vault URL")
 	}

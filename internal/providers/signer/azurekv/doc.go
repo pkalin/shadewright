@@ -25,10 +25,15 @@ limitations under the License.
 // https://<vault>.vault.azure.net/keys/<name>[/<version>] is accepted, so a misconfiguration cannot send a
 // token to another host.
 //
-// Every call has a deadline and a bounded number of retries on throttling and transient server errors.
-// Errors are mapped to the kinds in package providers and never carry tokens, key material or response
-// bodies from Key Vault. Responses larger than 64 KiB and authentication challenges the SDK would parse
-// unsafely are refused at the HTTP transport, before any SDK code reads them.
+// Every call has a deadline and a bounded number of retries on throttling, transient server errors and
+// network failures; a certificate the client refuses is final. Errors are mapped to the kinds in package
+// providers and never carry tokens, key material or response bodies from Key Vault. Besides the kind, an
+// error keeps the status code, a short error code and the retry delay of a Key Vault response, or the
+// fixed message of a transport refusal, a token request failure or a context error. No SDK or network
+// error stays in the chain, so unwrapping and printing every link shows no SDK, URL or header text either.
+// Transport errors are replaced at the HTTP transport, so azcore's own logs do not see them; responses
+// larger than 64 KiB and authentication challenges the SDK would parse unsafely are refused there too,
+// before any SDK code reads them.
 //
 // This is the only package allowed to import the Azure SDK for Key Vault and Entra ID.
 package azurekv

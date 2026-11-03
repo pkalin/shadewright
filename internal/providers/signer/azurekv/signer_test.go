@@ -22,10 +22,12 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -526,8 +528,36 @@ func TestSDKLogsStayClean(t *testing.T) {
 		}
 	}
 
+	// A transport error quotes the request URL; azcore's retry policy logs every transport error it gets.
+	key, err := ParseKeyID("https://" + testHost + "/keys/github-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, transportErr := range []error{
+		&url.Error{Op: http.MethodPost, URL: "https://" + testHost + "/keys/github-app/sign?sig=" + bodySecret,
+			Err: &net.OpError{Op: opDial, Net: "tcp", Err: errors.New("connection refused " + bodySecret)}},
+		&url.Error{Op: http.MethodPost, URL: "https://" + testHost + "/keys/github-app/sign?sig=" + bodySecret,
+			Err: x509.HostnameError{Host: bodySecret}},
+	} {
+		s, err := newSigner(key, &fakeCredential{}, Options{MaxRetries: 1}, clientConfig{
+			transport:  failingTransport{err: transportErr},
+			retryDelay: time.Millisecond,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Sign(context.Background(), digestOf("x")); err == nil {
+			t.Fatal("no error with a failing transport")
+		}
+	}
+
 	mu.Lock()
 	defer mu.Unlock()
+	for _, fixed := range []fixedError{errRequestNetwork, errRequestTLS} {
+		if !strings.Contains(logs.String(), string(fixed)) {
+			t.Errorf("SDK log has no %q; the transport cases would prove nothing:\n%s", fixed, logs.String())
+		}
+	}
 	if logs.Len() == 0 {
 		t.Fatal("captured no SDK logs; the test would prove nothing")
 	}

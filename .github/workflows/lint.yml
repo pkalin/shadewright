@@ -41,3 +41,36 @@ jobs:
             git status --porcelain -- docs/reference/
             exit 1
           }
+
+  vulncheck:
+    permissions:
+      contents: read
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Scan with the Go release the manager image is built with (the builder stage of the Dockerfile),
+      # so standard library findings match what ships. Dependabot keeps that tag current.
+      - name: Read the builder Go version from the Dockerfile
+        id: go
+        run: |
+          version="$(sed -n -E 's/^FROM golang:([0-9]+\.[0-9]+\.[0-9]+)@sha256:[0-9a-f]{64} AS builder$/\1/p' Dockerfile)"
+          test -n "$version" || {
+            echo "::error::could not read the Go version of the builder stage from the Dockerfile"
+            exit 1
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+
+      - name: Run govulncheck
+        env:
+          GOTOOLCHAIN: local
+        run: make vulncheck

@@ -66,7 +66,7 @@ flowchart TB
 
 | Party | Trusted for | Not trusted for | State |
 | --- | --- | --- | --- |
-| Analyzer | Nothing that changes anything: it reads and proposes | Any of its output as authorization; it can only create a request | Binary, RBAC, collector and Incident controller built; analysis planned (#43, #76) |
+| Analyzer | Nothing that changes anything: it reads and proposes | Any of its output as authorization; it can only create a request | Binary, RBAC, collector, Incident controller and analysis trigger built; analysis planned (#76) |
 | Model | Nothing | Anything: its output is untrusted input to the analyzer | Planned (#75, #76) |
 | Executor | Writing the decision (request status) and holding the Git identity | Choosing what to change: it applies what policy decided | Policy check, source mapping, freshness check and the pull request step built: branch, commit and pull request up to a person's review, closing the pull request of a stale plan (G3.3) |
 | API server and RBAC | Enforcing the CRD schema, CEL rules, RBAC and the status subresource | Nothing beyond that: it cannot judge whether a plan is wise | Kubernetes |
@@ -97,7 +97,7 @@ Anyone who can create a `RemediationRequest`: the analyzer in the operator names
 
 - **Can:** create a request in the operator namespace with any action from the catalog, any target, any policy name and `approvalRequired: false`.
 - **Cannot:** use an action outside the catalog, parameters out of the schema's bounds, or a kind the action may not target (G2.1); change the plan after creation (G2.2); name the repository, branch or file (G3.8); get a request outside the operator namespace acted on (G1.8); lower approval below what the policy requires (G1.3); exceed the policy's bounds (G2.3); write the decision (G1.1).
-- **Not yet stopped:** creating many requests. Concurrency limits, a per-target lock and the analysis budget are planned (#88, #43).
+- **Not yet stopped:** creating many requests. Concurrency limits and a per-target lock are planned (#88). The analysis trigger marks no more Incidents due than the daily budget allows (#43); the analysis that checks it again before each model call is planned (#16).
 
 ### 3.3. A compromised analyzer
 
@@ -213,7 +213,7 @@ One table per invariant of [AGENTS.md](https://github.com/pkalin/shadewright/blo
 | S1 | While `RemediationSettings.spec.paused` is set, no plan is reported fresh and no change request is closed. **Built** where the executor writes today (G3.3); the check before every write is #87. | `internal/policy/freshness` `Paused`; `internal/controller/remediationrequest_controller.go` `closeChangeRequest` | `policy/freshness/freshness_test.go` `TestFreshWhenNothingChanged` | `policy/freshness/freshness_test.go` `TestPausedIsNotFresh`, `TestPausedWinsOverStale`, `TestPausedDuringTheScanIsNotFresh`; `controller/freshness_test.go` "does nothing while writes are paused, even for a stale plan", "does not close when writes are paused between the check and the close"; `controller/pullrequest_test.go` "does not start the deadline while writes are paused, so a long pause expires nothing" | The pull request step's deadline does not start with a decision made during a pause (it starts on the first freshness check after the pause), but once started it keeps running: a request whose deadline passes during a pause becomes `Expired` when writes resume |
 | S2 | Auto-merge is never enabled: the adapter reports no support and refuses the call. **Built**; gated auto-merge is planned (#98, #99, #100). | `internal/providers/github/provider.go` `Capabilities`, `EnableAutoMerge` | | `providers/github/provider_test.go` `TestCapabilities` | |
 | S3 | `Succeeded` only after the merged revision is applied and the checks held for `stableFor`. **Planned** (#92, #93, #94). | | | | Phases set today after `PolicyChecked`: `PRCreated`, `AwaitingApproval`, `Merged`, `Expired`, `Superseded`, `NeedsIntervention`; nothing after `Merged` |
-| S4 | Loop protection: concurrency limits, a lock per target, a circuit breaker, a retry limit and an analysis budget. **Planned** (#88, #43). | | | | |
+| S4 | Loop protection: concurrency limits, a lock per target, a circuit breaker, a retry limit and an analysis budget. **Planned** (#88); of the budget, only the mark is built: the analysis trigger marks no more Incidents due than `maxAnalysesPerDay` allows, counted from the Incidents' status (#43). | | | | |
 | S5 | Egress only to the Kubernetes API, the model endpoint, Key Vault, GitHub and Entra ID. **Planned** (#91). | | | | |
 | S6 | Containers run as non-root with a read-only root filesystem and all capabilities dropped. **Built** (manifests). | `config/manager/manager.yaml`, `config/manager/analyzer.yaml` | None | None | No test checks the security context; signed images and SBOMs are #82 |
 

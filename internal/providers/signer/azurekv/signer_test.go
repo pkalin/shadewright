@@ -188,8 +188,17 @@ var testRSAKey = sync.OnceValue(func() *rsa.PrivateKey {
 	return k
 })
 
-// setup starts a fake vault and returns a Signer for keyID that talks to it.
+// setup starts a fake vault and returns a Signer for keyID that talks to it, with a fake credential.
 func setup(t *testing.T, keyID string, opts Options) (*Signer, *fakeVault, *fakeCredential) {
+	t.Helper()
+	cred := &fakeCredential{}
+	s, v := setupWith(t, keyID, opts, cred, nil, clientConfig{})
+	return s, v, cred
+}
+
+// setupWith is setup with a credential, a transport wrapper and a client configuration the test controls.
+func setupWith(t *testing.T, keyID string, opts Options, cred azcore.TokenCredential,
+	wrap func(policy.Transporter) policy.Transporter, cc clientConfig) (*Signer, *fakeVault) {
 	t.Helper()
 	v := &fakeVault{key: testRSAKey()}
 	srv := httptest.NewTLSServer(v)
@@ -199,15 +208,19 @@ func setup(t *testing.T, keyID string, opts Options) (*Signer, *fakeVault, *fake
 	if err != nil {
 		t.Fatal(err)
 	}
-	cred := &fakeCredential{}
-	s, err := newSigner(key, cred, opts, clientConfig{
-		transport:  redirect{target: target, client: srv.Client()},
-		retryDelay: time.Millisecond,
-	})
+	var transport policy.Transporter = redirect{target: target, client: srv.Client()}
+	if wrap != nil {
+		transport = wrap(transport)
+	}
+	cc.transport = transport
+	if cc.retryDelay == 0 {
+		cc.retryDelay = time.Millisecond
+	}
+	s, err := newSigner(key, cred, opts, cc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s, v, cred
+	return s, v
 }
 
 func digestOf(s string) []byte {

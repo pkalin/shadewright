@@ -25,8 +25,13 @@ limitations under the License.
 // https://<vault>.vault.azure.net/keys/<name>[/<version>] is accepted, so a misconfiguration cannot send a
 // token to another host.
 //
-// Every call has a deadline and a bounded number of retries on throttling, transient server errors and
-// network failures; a certificate the client refuses is final. Errors are mapped to the kinds in package
+// Every call has a deadline and a bounded number of retries, with exponential backoff and jitter, on
+// throttling, transient server errors, network failures and response bodies that break off; a certificate
+// the client refuses is final. The workload identity credential reads the federated token file itself (a
+// regular file of at most 64 KiB) and sends its token requests through the same HTTP transport as the Key
+// Vault requests, so a token file that cannot be read and a refused certificate of Entra ID are final, a
+// token request that gets no answer is transient, and a token failure this package cannot see into (from
+// a credential it did not build) is final. Errors are mapped to the kinds in package
 // providers and never carry tokens, key material or response bodies from Key Vault. Besides the kind, an
 // error keeps the status code, a short error code and the retry delay of a Key Vault response, or the
 // fixed message of a transport refusal, a token request failure or a context error. No SDK or network

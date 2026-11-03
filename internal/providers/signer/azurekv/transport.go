@@ -41,13 +41,16 @@ const maxResponseBody = 64 << 10
 //
 //   - It reads at most maxResponseBody+1 bytes of a body and refuses a larger one, so azcore's body
 //     download policy never buffers an unbounded response (success or error).
-//   - It refuses a 401 challenge that the Key Vault SDK would parse unsafely or reject with an error that
-//     quotes it: keyvault/internal v1.2.0 takes the tenant as strings.Split(authorization, "/")[3] without
-//     a length check, so authorization="not-a-url" would panic inside Sign, and it copies an unparsable or
-//     foreign resource into an error message that azcore's retry policy logs.
+//   - On the Key Vault client, it refuses a 401 challenge that the Key Vault SDK would parse unsafely or
+//     reject with an error that quotes it: keyvault/internal v1.2.0 takes the tenant as
+//     strings.Split(authorization, "/")[3] without a length check, so authorization="not-a-url" would panic
+//     inside Sign, and it copies an unparsable or foreign resource into an error message that azcore's
+//     retry policy logs.
 //   - It replaces every error of the HTTP client, and every body read error, with a fixed one or a context
-//     error (cleanTransportError), so neither the error chain nor azcore's retry log, which prints
-//     transport errors, sees the request URL or the network stack's text.
+//     error (cleanTransportError, cleanBodyError), so neither the error chain nor azcore's retry log, which
+//     prints transport errors, sees the request URL or the network stack's text.
+//   - On the credential's client (entra), it records the outcome of each exchange for the token request
+//     in the request's context (tokenRequest), because azidentity passes on only an error's text.
 //
 // Every error it returns carries no response, URL or network text. Each fixed error gets the same retry
 // decision from azcore and from Sign: the final ones (both refusals, a refused certificate, any other
@@ -55,10 +58,24 @@ const maxResponseBody = 64 << 10
 // that breaks off are left to azcore's retries and returned by Sign as retryable.
 type guardTransport struct {
 	inner policy.Transporter
+	// entra is set on the credential's client: Entra ID sends no Key Vault challenge, so none is checked.
+	entra bool
 }
 
-// Do sends the request and checks the response.
+// Do sends the request, checks the response and records the outcome for a token request.
 func (g guardTransport) Do(req *http.Request) (*http.Response, error) {
+	resp, err := g.do(req)
+	if r := tokenRequestFrom(req.Context()); r != nil && g.entra {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		r.recordExchange(status, err)
+	}
+	return resp, err
+}
+
+func (g guardTransport) do(req *http.Request) (*http.Response, error) {
 	resp, err := g.inner.Do(req)
 	if err != nil {
 		return nil, cleanTransportError(err)
@@ -66,7 +83,7 @@ func (g guardTransport) Do(req *http.Request) (*http.Response, error) {
 	if resp == nil {
 		return nil, final{errRequestSDK}
 	}
-	if resp.StatusCode == http.StatusUnauthorized && !safeChallenge(resp.Header.Get("WWW-Authenticate"), req.URL.Host) {
+	if !g.entra && resp.StatusCode == http.StatusUnauthorized && !safeChallenge(resp.Header.Get("WWW-Authenticate"), req.URL.Host) {
 		closeBody(resp)
 		return nil, final{errMalformedChallenge}
 	}
@@ -80,6 +97,12 @@ func (g guardTransport) Do(req *http.Request) (*http.Response, error) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
 	closeBody(resp)
 	if err != nil {
+		// A read that failed because the try or the caller gave up keeps its context error: the HTTP
+		// client's read error does not match it, and azcore reports a parent context error itself but a
+		// per-try deadline only as returned here.
+		if ctxErr := req.Context().Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, cleanBodyError(err)
 	}
 	if len(body) > maxResponseBody {

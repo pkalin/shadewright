@@ -57,8 +57,9 @@ type Options struct {
 	// Timeout bounds one Sign call, retries included. Zero means DefaultTimeout. A shorter deadline on the
 	// caller's context wins.
 	Timeout time.Duration
-	// MaxRetries is the number of retries after the first attempt on throttling (429), request timeouts and
-	// transient server errors. Zero means DefaultMaxRetries; a negative value disables retries.
+	// MaxRetries is the number of retries after the first attempt on throttling (429), request timeouts,
+	// transient server errors, network failures and response bodies that break off, with exponential backoff
+	// and jitter. Zero means DefaultMaxRetries; a negative value disables retries.
 	MaxRetries int
 }
 
@@ -81,16 +82,9 @@ func New(keyID string, opts Options) (*Signer, error) {
 	if err != nil {
 		return nil, err
 	}
-	cred, err := azidentity.NewWorkloadIdentityCredential(&azidentity.WorkloadIdentityCredentialOptions{
-		ClientID:      wi.clientID,
-		TenantID:      wi.tenantID,
-		TokenFilePath: wi.tokenFile,
-	})
+	cred, err := newWorkloadCredential(wi, azcore.ClientOptions{}, nil)
 	if err != nil {
-		// Not wrapped: the azidentity error is SDK text that can quote the configured values. Every other
-		// setting it checks was checked above, so what is left is the tenant ID's format, which is left to
-		// azidentity instead of copying its rule.
-		return nil, fmt.Errorf("%w: azidentity refused %s", errNoWorkloadIdentity, envTenantID)
+		return nil, err
 	}
 	return newSigner(key, cred, opts, clientConfig{})
 }
@@ -150,10 +144,13 @@ func workloadIdentityFromEnv() (workloadIdentity, error) {
 	return wi, nil
 }
 
-// clientConfig carries what tests replace: the HTTP transport and the delay between retries.
+// clientConfig carries what tests replace: the HTTP transport, the delay between retries and the per-try
+// timeout.
 type clientConfig struct {
 	transport  policy.Transporter
 	retryDelay time.Duration
+	// tryTimeout replaces the per-try timeout; zero means tryTimeout, capped at the Sign timeout.
+	tryTimeout time.Duration
 }
 
 func newSigner(key KeyID, cred azcore.TokenCredential, opts Options, cc clientConfig) (*Signer, error) {
@@ -174,11 +171,15 @@ func newSigner(key KeyID, cred azcore.TokenCredential, opts Options, cc clientCo
 	if cc.retryDelay != 0 {
 		delay = cc.retryDelay
 	}
+	perTry := min(tryTimeout, timeout)
+	if cc.tryTimeout != 0 {
+		perTry = cc.tryTimeout
+	}
 	co := &azkeys.ClientOptions{
 		ClientOptions: azcore.ClientOptions{
 			Retry: policy.RetryOptions{
 				MaxRetries:    int32(retries),
-				TryTimeout:    min(tryTimeout, timeout),
+				TryTimeout:    perTry,
 				RetryDelay:    delay,
 				MaxRetryDelay: max(maxRetryDelay, delay),
 			},
@@ -194,7 +195,7 @@ func newSigner(key KeyID, cred azcore.TokenCredential, opts Options, cc clientCo
 		transport = defaultTransport()
 	}
 	co.Transport = guardTransport{inner: transport}
-	client, err := azkeys.NewClient(key.VaultURL(), cleanCredential{cred}, co)
+	client, err := azkeys.NewClient(key.VaultURL(), cleanCredential{inner: cred}, co)
 	if err != nil {
 		// Not wrapped: the azkeys error is SDK text, and the options are built here, so the class is enough.
 		return nil, fmt.Errorf("key vault client for %s: %w", key, errClientSetup)
@@ -211,7 +212,10 @@ func (s *Signer) Algorithm() providers.SignatureAlgorithm { return providers.RS2
 // Sign signs a SHA-256 digest with the Key Vault key and returns the PKCS #1 v1.5 signature.
 //
 // Errors: ErrNotFound when the key or version does not exist; a retryable error, with the delay Key Vault
-// asked for when it gave one, on throttling, transient server errors or a timeout; other errors otherwise.
+// asked for when it gave one, on throttling, transient server errors, network failures, a response body
+// that breaks off, a token request that gets no answer or a timeout; other errors otherwise. A refused
+// certificate, a local configuration error (a federated token file that cannot be read) and a cancelled
+// context are not retryable.
 func (s *Signer) Sign(ctx context.Context, digest []byte) ([]byte, error) {
 	if len(digest) != sha256.Size {
 		return nil, fmt.Errorf("digest is %d bytes, want %d", len(digest), sha256.Size)
@@ -376,29 +380,50 @@ func (errorBodyPolicy) Do(req *policy.Request) (*http.Response, error) {
 
 // cleanCredential wraps a token credential so that its errors are cleaned before azcore sees them: azcore
 // formats credential errors in its own log messages, and an AuthenticationFailedError includes the Entra
-// response body. Only the status code and the Retry-After delay survive.
+// response body. Only the status code, the Retry-After delay, a fixed cause and whether the failure is
+// transient survive.
 type cleanCredential struct {
 	inner azcore.TokenCredential
 }
 
-// GetToken returns a token from the wrapped credential, or a cleaned error.
+// GetToken returns a token from the wrapped credential, or a cleaned error. The class is decided in this
+// order:
+//
+//  1. A caller that cancelled gets a final cancellation, whatever else happened.
+//  2. When Entra ID answered, its status decides, even if the deadline has passed by now.
+//  3. Otherwise the last thing recorded for this request decides (tokenRequest): a token file that could
+//     not be read is final; an exchange with Entra ID is classed as guardTransport classed it, and a
+//     successful answer that still failed is transient.
+//  4. Otherwise a deadline (the pinned azidentity drops the context error, so ctx is checked too) is
+//     transient.
+//  5. Anything else is final. That includes a credential that is not newWorkloadCredential's (for example
+//     a deliberately configured DefaultAzureCredential), whose failures this package cannot see into.
 func (c cleanCredential) GetToken(ctx context.Context, o policy.TokenRequestOptions) (azcore.AccessToken, error) {
-	tok, err := c.inner.GetToken(ctx, o)
+	tr := &tokenRequest{}
+	tok, err := c.inner.GetToken(context.WithValue(ctx, tokenRequestKey{}, tr), o)
 	if err == nil {
 		return tok, nil
 	}
 	// Not wrapped: an AuthenticationFailedError prints the Entra response body, and azcore logs credential
-	// errors. Only the status, the Retry-After delay and a context error are kept.
+	// errors. Only the status, the Retry-After delay and a fixed or context cause are kept.
 	ce := &credentialError{}
-	if af, ok := errors.AsType[*azidentity.AuthenticationFailedError](err); ok && af.RawResponse != nil {
+	af, isAuth := errors.AsType[*azidentity.AuthenticationFailedError](err)
+	switch {
+	case errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled):
+		ce.cause = context.Canceled
+	case isAuth && af.RawResponse != nil:
 		ce.status = af.RawResponse.StatusCode
 		ce.retryAfter = retryAfter(af.RawResponse)
-	}
-	switch {
-	case errors.Is(err, context.DeadlineExceeded):
-		ce.cause = context.DeadlineExceeded
-	case errors.Is(err, context.Canceled):
-		ce.cause = context.Canceled
+	case tr.seen && tr.read && tr.readErr != nil:
+		ce.cause = tr.readErr
+	case tr.seen && !tr.read && tr.transportErr != nil:
+		ce.cause, ce.retry = entraCause(tr.transportErr)
+	case tr.seen && !tr.read && tr.status >= 200 && tr.status < 300:
+		ce.cause, ce.retry = errEntraAnswer, true
+	case tr.seen && !tr.read && tr.status != 0:
+		ce.status = tr.status
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded):
+		ce.cause, ce.retry = context.DeadlineExceeded, true
 	}
 	return azcore.AccessToken{}, ce
 }
@@ -407,15 +432,21 @@ func (c cleanCredential) GetToken(ctx context.Context, o policy.TokenRequestOpti
 type credentialError struct {
 	status     int
 	retryAfter time.Duration
-	// cause is a context error, when the failure was a deadline or a cancellation.
+	// cause is a context error or a fixed error of this package.
 	cause error
+	// retry is set when the failure without a usable status may pass later.
+	retry bool
 }
 
 func (e *credentialError) Error() string {
-	if e.status == 0 {
-		return "workload identity token request failed"
+	msg := "workload identity token request failed"
+	if e.status != 0 {
+		msg = fmt.Sprintf("%s with status %d", msg, e.status)
 	}
-	return fmt.Sprintf("workload identity token request failed with status %d", e.status)
+	if e.cause != nil {
+		msg += ": " + e.cause.Error()
+	}
+	return msg
 }
 
 func (e *credentialError) Unwrap() error { return e.cause }
@@ -427,7 +458,11 @@ func (e *credentialError) transient() bool {
 		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return true
 	}
-	return errors.Is(e.cause, context.DeadlineExceeded)
+	if e.status >= 200 && e.status < 300 {
+		// Entra ID said yes, but the answer could not be used.
+		return true
+	}
+	return e.retry
 }
 
 // retryAfter reads a Retry-After header in seconds or as an HTTP date, capped at one hour.

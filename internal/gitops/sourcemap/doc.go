@@ -39,13 +39,13 @@ limitations under the License.
 // Anything else (no labels, Helm, a tag or commit ref, Kustomize patches or generators, a directory without a
 // kustomization file, two declarations, a value changed after the build) stops with [NeedsIntervention] or
 // [Denied] and a [Reason]. [Resolver.Resolve] returns an error only for failures worth retrying, such as an
-// unreachable API server or Git host.
+// unreachable API server or Git host, and for a Git read the host refuses for good ([RefusedError]).
 //
 // Git is read only through ReadFile and BranchHead, relying on the ReadFile contract: only regular files
 // are returned, symbolic links are never followed, and files over providers.MaxFileBytes are refused before
 // they are downloaded. Reads are bounded by [MaxDepth], [MaxFiles],
 // [MaxReads] and [MaxFileBytes], whatever cap the provider enforces itself. Errors carry no provider text
-// ([TransientError]), since it may hold a repository URL with credentials.
+// ([TransientError], [RefusedError]), since it may hold a repository URL with credentials.
 //
 // Everything read here is untrusted input: cluster objects, Flux status and Git contents. Paths are built
 // only from validated segments with package path, never by concatenating strings, and stay inside the

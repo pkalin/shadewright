@@ -85,6 +85,10 @@ const MaxFileBytes = 1 << 20
 //
 // Writes are idempotent where the operation allows it, so a reconcile that restarts after a crash finds the
 // work it already did instead of repeating it.
+//
+// Any method may also return ErrForbidden (the host refused the identity: a missing permission or a rule of
+// the repository) or ErrRejected (the host refused the request as invalid and the state does not explain the
+// refusal). Both are permanent; a rate limit or another transient failure is a RetryableError instead.
 type GitProvider interface {
 	// Capabilities reports what this host supports.
 	Capabilities() GitCapabilities

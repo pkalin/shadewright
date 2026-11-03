@@ -22,6 +22,7 @@ limitations under the License.
 // tests. Names are neutral (a change request, not a pull request), and adapters declare what they support
 // instead of the core assuming one product.
 //
-// Every method takes a context and returns errors that can be classified with [IsNotFound], [IsConflict]
-// and [IsRetryable], so callers can tell missing state, a stale base and a transient failure apart.
+// Every method takes a context and returns errors that can be classified with [IsNotFound], [IsConflict],
+// [IsForbidden], [IsRejected] and [IsRetryable], so callers can tell missing state, a stale base, a refusal
+// for good (of the identity, or of the request as invalid) and a transient failure apart.
 package providers

@@ -17,6 +17,7 @@ limitations under the License.
 package ratelimit
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -57,6 +58,34 @@ func TestLimited(t *testing.T) {
 		d, ok := Limited(c.r, now)
 		if ok != c.limited || d != c.want {
 			t.Errorf("%s: Limited() = %v, %v; want %v, %v", c.name, d, ok, c.want, c.limited)
+		}
+	}
+}
+
+// failingReader returns some bytes, then an error, like a connection reset or a body cut short.
+type failingReader struct {
+	data []byte
+	err  error
+}
+
+func (f *failingReader) Read(p []byte) (int, error) {
+	if len(f.data) == 0 {
+		return 0, f.err
+	}
+	n := copy(p, f.data)
+	f.data = f.data[n:]
+	return n, nil
+}
+
+// A 403 whose body cannot be read to the end of the probe may have hidden the rate limit message: it is
+// retryable, never a refusal for good.
+func TestUnreadableBodyIsALimit(t *testing.T) {
+	for _, err := range []error{io.ErrUnexpectedEOF, errors.New("connection reset by peer")} {
+		resp := &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{},
+			Body: io.NopCloser(&failingReader{data: []byte(`{"message":"You have exc`), err: err})}
+		d, limited := Limited(resp, time.Now())
+		if !limited || d != SecondaryWait {
+			t.Fatalf("%v: got (%v, %v), want a rate limit with the secondary wait", err, d, limited)
 		}
 	}
 }

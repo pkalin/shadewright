@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -72,8 +73,9 @@ func chain(err error) []error {
 
 // allowedChainPackages are the only packages whose error types may appear in a chain that leaves this
 // package: its own fixed errors, the providers kinds, the wrappers of fmt and errors, and context errors.
-// Anything else (the Azure SDK, net, net/url, net/http, crypto/tls, crypto/x509, os, syscall) is a type a
-// caller could unwrap and print.
+// It catches a typed error from anywhere else (the Azure SDK, net, net/url, net/http, crypto/tls,
+// crypto/x509, os, syscall). It cannot catch SDK text carried by an errors.New or fmt.Errorf value, since
+// those types are allowed: the text checks in assertCleanChain are what catch that.
 var allowedChainPackages = map[string]bool{
 	reflect.TypeFor[fixedError]().PkgPath():               true,
 	reflect.TypeFor[providers.RetryableError]().PkgPath(): true,
@@ -91,6 +93,17 @@ func allowedChainType(e error) bool {
 	return allowedChainPackages[typ.PkgPath()]
 }
 
+// configuredKey matches the key ID that errors name on purpose ("sign with <key ID>"). It is configuration,
+// not SDK text, so it is removed before the URL check.
+var configuredKey = regexp.MustCompile(`https://` + regexp.QuoteMeta(testHost) + `/keys/[a-z-]+(/[0-9a-f]{32})?`)
+
+// leakText is text no error may carry: the test token and response text, URL parts (a scheme, a query, a
+// user) and the names of headers that hold tokens or response data.
+var leakText = []string{
+	testToken, bodySecret, "Bearer", "sig=", "https://", "http://", "?", "@",
+	"Authorization", "WWW-Authenticate", "Content-Type", "x-ms-",
+}
+
 // assertCleanChain fails if any error in the chain of err, printed with %v or %+v, carries SDK, URL,
 // header or token text, or has a type outside allowedChainPackages.
 func assertCleanChain(t *testing.T, name string, err error) {
@@ -100,7 +113,8 @@ func assertCleanChain(t *testing.T, name string, err error) {
 	}
 	for i, e := range chain(err) {
 		text := e.Error() + "\n" + fmt.Sprintf("%v", e) + "\n" + fmt.Sprintf("%+v", e)
-		for _, bad := range []string{testToken, bodySecret, "Bearer", "sig="} {
+		text = configuredKey.ReplaceAllString(text, "<key>")
+		for _, bad := range leakText {
 			if strings.Contains(text, bad) {
 				t.Errorf("%s: chain[%d] (%T) leaks %q: %v", name, i, e, bad, e)
 				break
@@ -235,8 +249,9 @@ func (c clientTo) Do(req *http.Request) (*http.Response, error) {
 	return c.client.Do(out)
 }
 
-// TestTransportErrorClasses checks the class of real HTTP client failures: TLS and certificate failures are
-// final, a refused connection is retryable, and none leaves text in the chain.
+// TestTransportErrorClasses checks the class of real HTTP client failures: a refused certificate is final, a
+// TLS alert from the server and a refused connection are retryable, a client error such as an https request
+// to a plain HTTP server is final, and none leaves text in the chain.
 func TestTransportErrorClasses(t *testing.T) {
 	kid := "https://" + testHost + "/keys/github-app"
 	key, err := ParseKeyID(kid)
@@ -248,6 +263,11 @@ func TestTransportErrorClasses(t *testing.T) {
 
 	trusted := httpsServer(t, vault, nil)
 	tls13 := httpsServer(t, vault, &tls.Config{MinVersion: tls.VersionTLS13})
+	plain := httptest.NewServer(vault)
+	plain.Config.ErrorLog = log.New(io.Discard, "", 0)
+	t.Cleanup(plain.Close)
+	plainURL, _ := url.Parse(plain.URL)
+	plainURL.Scheme = "https"
 	closed := closedAddress(t)
 
 	trustingClient := func(srv *serverInfo, cfg func(*tls.Config)) *http.Client {
@@ -266,9 +286,10 @@ func TestTransportErrorClasses(t *testing.T) {
 		{"hostname mismatch", clientTo{trusted.url, trustingClient(trusted, func(c *tls.Config) {
 			c.ServerName = "other.example"
 		})}, false, errRequestTLS},
-		{"handshake refused", clientTo{tls13.url, trustingClient(tls13, func(c *tls.Config) {
+		{"alert from the server", clientTo{tls13.url, trustingClient(tls13, func(c *tls.Config) {
 			c.MaxVersion = tls.VersionTLS12
-		})}, false, errRequestTLS},
+		})}, true, errRequestNetwork},
+		{"https to a plain server", clientTo{plainURL, &http.Client{}}, false, errRequestSDK},
 		{"connection refused", clientTo{closed, &http.Client{}}, true, errRequestNetwork},
 	} {
 		s, err := newSigner(key, &fakeCredential{}, Options{MaxRetries: -1}, clientConfig{
@@ -287,29 +308,82 @@ func TestTransportErrorClasses(t *testing.T) {
 	}
 }
 
-// TestTLSFailuresAreNotRetried checks that azcore does not send a request again after a TLS failure, while
-// it does after a refused connection.
-func TestTLSFailuresAreNotRetried(t *testing.T) {
+// brokenBody fails every read with err, as a truncated or reset response body does.
+type brokenBody struct{ err error }
+
+func (b brokenBody) Read([]byte) (int, error) { return 0, b.err }
+func (brokenBody) Close() error               { return nil }
+
+// scriptedTransport answers every request with do and counts the requests.
+type scriptedTransport struct {
+	do func(*http.Request) (*http.Response, error)
+	n  atomic.Int32
+}
+
+func (s *scriptedTransport) Do(req *http.Request) (*http.Response, error) {
+	s.n.Add(1)
+	return s.do(req)
+}
+
+// TestRetryDecisionsAgree checks, for every class guardTransport returns, that azcore and Sign make the same
+// retry decision: a class azcore retries is retryable from Sign, and a class Sign reports as final is sent
+// once.
+func TestRetryDecisionsAgree(t *testing.T) {
 	key, err := ParseKeyID("https://" + testHost + "/keys/github-app")
 	if err != nil {
 		t.Fatal(err)
 	}
+	fail := func(inner error) func(*http.Request) (*http.Response, error) {
+		return func(*http.Request) (*http.Response, error) {
+			return nil, &url.Error{Op: http.MethodPost, URL: "https://" + testHost + "/keys?sig=" + bodySecret, Err: inner}
+		}
+	}
+	respond := func(status int, h http.Header, body io.ReadCloser, length int64) func(*http.Request) (*http.Response, error) {
+		return func(req *http.Request) (*http.Response, error) {
+			if h == nil {
+				h = http.Header{}
+			}
+			return &http.Response{StatusCode: status, Header: h.Clone(), Body: body, ContentLength: length, Request: req}, nil
+		}
+	}
 	for _, tc := range []struct {
-		name string
-		err  error
-		want int
+		name      string
+		do        func(*http.Request) (*http.Response, error)
+		retryable bool
+		class     error
 	}{
-		{"tls", &url.Error{Op: http.MethodPost, URL: "https://x", Err: x509.HostnameError{Host: testHost}}, 1},
-		{"network", &url.Error{Op: http.MethodPost, URL: "https://x", Err: &net.OpError{Op: opDial, Err: syscall.ECONNREFUSED}}, 3},
+		{"dial", fail(&net.OpError{Op: opDial, Err: syscall.ECONNREFUSED}), true, errRequestNetwork},
+		{"dns", fail(&net.DNSError{Err: "no such host", Name: testHost}), true, errRequestNetwork},
+		{"closed before the response", fail(io.EOF), true, errRequestNetwork},
+		{"tls alert", fail(&net.OpError{Op: "remote error", Err: errors.New("tls: internal error")}), true,
+			errRequestNetwork},
+		{"certificate", fail(x509.HostnameError{Host: testHost}), false, errRequestTLS},
+		{"scheme mismatch", fail(http.ErrSchemeMismatch), false, errRequestSDK},
+		{"proxy refused", fail(errors.New("proxyconnect: " + bodySecret)), false, errRequestSDK},
+		{"no response", func(*http.Request) (*http.Response, error) { return nil, nil }, false, errRequestSDK},
+		{"truncated body", respond(http.StatusOK, nil, brokenBody{io.ErrUnexpectedEOF}, -1), true, errBodyRead},
+		{"reset stream", respond(http.StatusOK, nil, brokenBody{errors.New("stream error: " + bodySecret)}, -1), true,
+			errBodyRead},
+		{"too large", respond(http.StatusOK, nil, io.NopCloser(strings.NewReader("{}")), maxResponseBody+1), false,
+			errResponseTooLarge},
+		{"malformed challenge", respond(http.StatusUnauthorized,
+			http.Header{"Www-Authenticate": []string{`Bearer authorization="x"`}}, http.NoBody, 0), false,
+			errMalformedChallenge},
 	} {
-		ct := &countingTransport{err: tc.err}
-		s, err := newSigner(key, &fakeCredential{}, Options{MaxRetries: 2}, clientConfig{transport: ct, retryDelay: time.Millisecond})
+		st := &scriptedTransport{do: tc.do}
+		s, err := newSigner(key, &fakeCredential{}, Options{MaxRetries: 2}, clientConfig{transport: st, retryDelay: time.Millisecond})
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, _ = s.Sign(context.Background(), digestOf("x"))
-		if got := int(ct.n.Load()); got != tc.want {
-			t.Errorf("%s: %d requests, want %d", tc.name, got, tc.want)
+		_, err = s.Sign(context.Background(), digestOf("x"))
+		assertCleanChain(t, tc.name, err)
+		want := int32(1)
+		if tc.retryable {
+			want = 3
+		}
+		if got := st.n.Load(); got != want || providers.IsRetryable(err) != tc.retryable || !errors.Is(err, tc.class) {
+			t.Errorf("%s: %d requests, err = %v (retryable %v); want %d requests, %v with retryable %v",
+				tc.name, got, err, providers.IsRetryable(err), want, tc.class, tc.retryable)
 		}
 	}
 }
@@ -324,14 +398,21 @@ func TestNewNamesTheMissingVariable(t *testing.T) {
 		envTokenFile:     "/var/run/secrets/azure/tokens/azure-identity-token",
 		envAuthorityHost: "",
 	}
+	const notAuthority = envAuthorityHost + " is not a known Entra ID authority host"
 	for _, tc := range []struct {
 		name, value, want string
 	}{
 		{envClientID, "", envClientID + " is not set"},
 		{envTenantID, "", envTenantID + " is not set"},
 		{envTokenFile, "", envTokenFile + " is not set"},
-		{envTenantID, secretish + "/../x", envTenantID + " is not a valid tenant ID"},
-		{envAuthorityHost, "http://" + secretish, envAuthorityHost + " is not an https URL"},
+		{envTenantID, secretish + "/../x", "azidentity refused " + envTenantID},
+		{envAuthorityHost, "http://login.microsoftonline.com/", notAuthority},
+		{envAuthorityHost, "https://" + secretish + ".example/", notAuthority},
+		{envAuthorityHost, "https://login.microsoftonline.com.example/", notAuthority},
+		{envAuthorityHost, "https://login.microsoftonline.com/" + secretish, notAuthority},
+		{envAuthorityHost, "https://" + secretish + "@login.microsoftonline.com/", notAuthority},
+		{envAuthorityHost, "https://login.microsoftonline.com/?" + secretish, notAuthority},
+		{envAuthorityHost, "https://login.microsoftonline.com:8443/", notAuthority},
 	} {
 		for k, v := range valid {
 			t.Setenv(k, v)
@@ -352,11 +433,15 @@ func TestNewNamesTheMissingVariable(t *testing.T) {
 		}
 	}
 
-	for k, v := range valid {
-		t.Setenv(k, v)
-	}
-	if _, err := New("https://"+testHost+"/keys/github-app", Options{}); err != nil {
-		t.Errorf("valid variables: %v", err)
+	for _, host := range []string{"", "https://login.microsoftonline.com/", "https://login.microsoftonline.us",
+		"https://login.chinacloudapi.cn/"} {
+		for k, v := range valid {
+			t.Setenv(k, v)
+		}
+		t.Setenv(envAuthorityHost, host)
+		if _, err := New("https://"+testHost+"/keys/github-app", Options{}); err != nil {
+			t.Errorf("valid variables with authority host %q: %v", host, err)
+		}
 	}
 }
 
@@ -389,17 +474,6 @@ func httpsServer(t *testing.T, h http.Handler, cfg *tls.Config) *serverInfo {
 	t.Cleanup(srv.Close)
 	u, _ := url.Parse(srv.URL)
 	return &serverInfo{url: u, client: srv.Client()}
-}
-
-// countingTransport fails every request with err and counts the requests.
-type countingTransport struct {
-	err error
-	n   atomic.Int32
-}
-
-func (c *countingTransport) Do(*http.Request) (*http.Response, error) {
-	c.n.Add(1)
-	return nil, c.err
 }
 
 // opDial is the operation of a *net.OpError for a failed connection.

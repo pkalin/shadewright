@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azkeys"
@@ -86,9 +87,10 @@ func New(keyID string, opts Options) (*Signer, error) {
 		TokenFilePath: wi.tokenFile,
 	})
 	if err != nil {
-		// Not wrapped: the azidentity error is SDK text that can quote the configured values. The variables
-		// were checked above, so only a case those checks do not cover gets here.
-		return nil, fmt.Errorf("%w: azidentity refused the configuration", errNoWorkloadIdentity)
+		// Not wrapped: the azidentity error is SDK text that can quote the configured values. Every other
+		// setting it checks was checked above, so what is left is the tenant ID's format, which is left to
+		// azidentity instead of copying its rule.
+		return nil, fmt.Errorf("%w: azidentity refused %s", errNoWorkloadIdentity, envTenantID)
 	}
 	return newSigner(key, cred, opts, clientConfig{})
 }
@@ -101,8 +103,25 @@ const (
 	envAuthorityHost = "AZURE_AUTHORITY_HOST"
 )
 
-// tenantIDPattern is the set of characters azidentity accepts in a tenant ID.
-var tenantIDPattern = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+// authorityHosts are the Entra ID hosts AZURE_AUTHORITY_HOST may name: the public, US Government and China
+// clouds, as azcore's cloud configurations list them.
+var authorityHosts = func() map[string]bool {
+	hosts := map[string]bool{}
+	for _, c := range []cloud.Configuration{cloud.AzurePublic, cloud.AzureGovernment, cloud.AzureChina} {
+		if u, err := url.Parse(c.ActiveDirectoryAuthorityHost); err == nil {
+			hosts[u.Host] = true
+		}
+	}
+	return hosts
+}()
+
+// knownAuthorityHost reports whether v is https://<a host in authorityHosts>, with at most a trailing
+// slash and no user, query or fragment, so a token request cannot be sent anywhere else.
+func knownAuthorityHost(v string) bool {
+	u, err := url.Parse(v)
+	return err == nil && u.Scheme == schemeHTTPS && authorityHosts[u.Host] && u.User == nil &&
+		(u.Path == "" || u.Path == "/") && u.RawQuery == "" && !u.ForceQuery && u.Fragment == "" && u.Opaque == ""
+}
 
 // workloadIdentity is the configuration read from the workload identity variables.
 type workloadIdentity struct {
@@ -124,14 +143,9 @@ func workloadIdentityFromEnv() (workloadIdentity, error) {
 			return workloadIdentity{}, fmt.Errorf("%w: %s is not set", errNoWorkloadIdentity, v.name)
 		}
 	}
-	if !tenantIDPattern.MatchString(wi.tenantID) {
-		return workloadIdentity{}, fmt.Errorf("%w: %s is not a valid tenant ID", errNoWorkloadIdentity, envTenantID)
-	}
-	if host := os.Getenv(envAuthorityHost); host != "" {
-		if u, err := url.Parse(host); err != nil || u.Scheme != schemeHTTPS || u.Host == "" {
-			return workloadIdentity{}, fmt.Errorf("%w: %s is not an https URL", errNoWorkloadIdentity,
-				envAuthorityHost)
-		}
+	if host := os.Getenv(envAuthorityHost); host != "" && !knownAuthorityHost(host) {
+		return workloadIdentity{}, fmt.Errorf("%w: %s is not a known Entra ID authority host", errNoWorkloadIdentity,
+			envAuthorityHost)
 	}
 	return wi, nil
 }
@@ -295,17 +309,23 @@ type fixedError string
 
 func (e fixedError) Error() string { return string(e) }
 
-// retryable reports whether Sign returns the error as retryable.
-func (e fixedError) retryable() bool { return e == errRequestNetwork }
+// retryable reports whether Sign returns the error as retryable. guardTransport gives azcore the same
+// answer: it wraps every fixed error for which this is false in [final].
+func (e fixedError) retryable() bool { return e == errRequestNetwork || e == errBodyRead }
 
 const (
 	// errRequestNetwork is a request that failed in the network stack (DNS, dial, timeout, connection
-	// reset). azcore retries it, and Sign returns it as retryable.
+	// reset, a TLS alert, a connection closed before the response). azcore retries it, and Sign returns it
+	// as retryable.
 	errRequestNetwork fixedError = "key vault request failed (network)"
-	// errRequestTLS is a TLS or certificate failure (unknown authority, hostname mismatch, a handshake the
-	// server or the client refused). No retry fixes it, so it is final.
+	// errBodyRead is a response body that broke off (truncated, reset). azcore retries it, and Sign returns
+	// it as retryable.
+	errBodyRead fixedError = "key vault response body could not be read"
+	// errRequestTLS is a certificate the client refused (unknown authority, hostname mismatch, an invalid
+	// certificate). No retry fixes it, so it is final.
 	errRequestTLS fixedError = "key vault request failed (tls)"
-	// errRequestSDK is any other failure inside the Azure SDK or the HTTP client. It is final.
+	// errRequestSDK is any other failure inside the Azure SDK or the HTTP client (for example a scheme or
+	// proxy error). It is final.
 	errRequestSDK fixedError = "key vault request failed (sdk)"
 	// errMalformedChallenge is a 401 challenge that guardTransport refused. It is final.
 	errMalformedChallenge fixedError = "key vault sent a malformed authentication challenge"

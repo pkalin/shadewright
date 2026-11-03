@@ -26,7 +26,7 @@ limitations under the License.
 // token to another host.
 //
 // Every call has a deadline and a bounded number of retries on throttling, transient server errors and
-// network failures; TLS and certificate failures are final. Errors are mapped to the kinds in package
+// network failures; a certificate the client refuses is final. Errors are mapped to the kinds in package
 // providers and never carry tokens, key material or response bodies from Key Vault. Besides the kind, an
 // error keeps the status code, a short error code and the retry delay of a Key Vault response, or the
 // fixed message of a transport refusal, a token request failure or a context error. No SDK or network

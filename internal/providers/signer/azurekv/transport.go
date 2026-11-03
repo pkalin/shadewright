@@ -46,11 +46,14 @@ const maxResponseBody = 64 << 10
 //     quotes it: keyvault/internal v1.2.0 takes the tenant as strings.Split(authorization, "/")[3] without
 //     a length check, so authorization="not-a-url" would panic inside Sign, and it copies an unparsable or
 //     foreign resource into an error message that azcore's retry policy logs.
-//   - It replaces every error of the HTTP client with a fixed one (cleanTransportError), so neither the
-//     error chain nor azcore's retry log, which prints transport errors, sees the request URL or the
-//     network stack's text.
+//   - It replaces every error of the HTTP client, and every body read error, with a fixed one or a context
+//     error (cleanTransportError), so neither the error chain nor azcore's retry log, which prints
+//     transport errors, sees the request URL or the network stack's text.
 //
-// Both refusals are fixed errors that carry no response text and are not retried.
+// Every error it returns carries no response, URL or network text. Each fixed error gets the same retry
+// decision from azcore and from Sign: the final ones (both refusals, a refused certificate, any other
+// client failure) are wrapped in [final], so azcore does not send them again; network failures and a body
+// that breaks off are left to azcore's retries and returned by Sign as retryable.
 type guardTransport struct {
 	inner policy.Transporter
 }
@@ -62,7 +65,7 @@ func (g guardTransport) Do(req *http.Request) (*http.Response, error) {
 		return nil, cleanTransportError(err)
 	}
 	if resp == nil {
-		return nil, errRequestSDK
+		return nil, final{errRequestSDK}
 	}
 	if resp.StatusCode == http.StatusUnauthorized && !safeChallenge(resp.Header.Get("WWW-Authenticate"), req.URL.Host) {
 		closeBody(resp)
@@ -78,7 +81,7 @@ func (g guardTransport) Do(req *http.Request) (*http.Response, error) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
 	closeBody(resp)
 	if err != nil {
-		return nil, cleanTransportError(err)
+		return nil, cleanBodyError(err)
 	}
 	if len(body) > maxResponseBody {
 		return nil, final{errResponseTooLarge}
@@ -138,37 +141,56 @@ func (final) NonRetriable() {}
 // Unwrap returns the fixed error.
 func (e final) Unwrap() error { return e.fixedError }
 
-// cleanTransportError replaces an HTTP client error with a fixed one. Not wrapped: a *url.Error quotes the
-// request URL, and the network stack's errors name addresses and certificates.
+// cleanTransportError replaces an HTTP client error with a fixed one or a context error. Not wrapped: a
+// *url.Error quotes the request URL, and the network stack's errors name addresses and certificates. The
+// class is taken from the error inside the *url.Error, which itself always implements net.Error.
 //
 //   - Context errors (the try's or the caller's deadline, a cancellation) are kept, so azcore and mapError
 //     still tell a timeout from a cancellation.
-//   - TLS and certificate failures are errRequestTLS, final: a wrong certificate or a refused handshake
-//     does not heal on retry.
-//   - Other network failures (DNS, dial, connection reset, the response header timeout) are
-//     errRequestNetwork, which azcore retries and Sign returns as retryable.
-//   - Anything else is errRequestSDK. azcore retries it as it retried the raw error before; Sign returns
-//     it as final.
+//   - A certificate the client refused is final{errRequestTLS}: it does not heal on retry.
+//   - Network failures (DNS, dial, reset, timeouts, TLS alerts from the server, a connection closed before
+//     the response) are errRequestNetwork, retried by azcore and retryable from Sign.
+//   - Anything else (a scheme mismatch, a proxy refusal, a handshake error the client raised) is
+//     final{errRequestSDK}.
 func cleanTransportError(err error) error {
 	switch {
 	case errors.Is(err, context.Canceled):
 		return context.Canceled
 	case errors.Is(err, context.DeadlineExceeded):
 		return context.DeadlineExceeded
-	case isTLSError(err):
+	case isCertificateError(err):
 		return final{errRequestTLS}
 	}
-	if _, ok := errors.AsType[net.Error](err); ok {
+	inner := err
+	if ue, ok := errors.AsType[*url.Error](err); ok {
+		inner = ue.Err
+	}
+	if _, ok := errors.AsType[net.Error](inner); ok {
 		return errRequestNetwork
 	}
-	return errRequestSDK
+	if errors.Is(inner, io.EOF) || errors.Is(inner, io.ErrUnexpectedEOF) {
+		return errRequestNetwork
+	}
+	return final{errRequestSDK}
 }
 
-// isTLSError reports whether err is a TLS or certificate failure. Certificate and record errors have types.
-// Most handshake failures do not: crypto/tls returns an untyped error, or a *net.OpError around an
-// unexported alert, whose text starts with "tls: ". So the innermost error's text decides for those. A TLS
-// handshake timeout ("net/http: TLS handshake timeout") is not matched and stays a network failure.
-func isTLSError(err error) bool {
+// cleanBodyError replaces a response body read error. Not wrapped, for the reasons of cleanTransportError.
+// Context errors are kept; anything else (a truncated body, a reset connection or HTTP/2 stream) is
+// errBodyRead, retried by azcore and retryable from Sign.
+func cleanBodyError(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	}
+	return errBodyRead
+}
+
+// isCertificateError reports whether err is a certificate the client refused. Only certificate verification
+// is final: TLS alerts (handshake_failure, internal_error) can come from a server that is restarting or
+// overloaded, so they stay network failures.
+func isCertificateError(err error) bool {
 	if _, ok := errors.AsType[*tls.CertificateVerificationError](err); ok {
 		return true
 	}
@@ -178,22 +200,8 @@ func isTLSError(err error) bool {
 	if _, ok := errors.AsType[x509.HostnameError](err); ok {
 		return true
 	}
-	if _, ok := errors.AsType[x509.CertificateInvalidError](err); ok {
-		return true
-	}
-	if _, ok := errors.AsType[tls.RecordHeaderError](err); ok {
-		return true
-	}
-	if _, ok := errors.AsType[tls.AlertError](err); ok {
-		return true
-	}
-	for {
-		next := errors.Unwrap(err)
-		if next == nil {
-			return strings.HasPrefix(err.Error(), "tls: ")
-		}
-		err = next
-	}
+	_, ok := errors.AsType[x509.CertificateInvalidError](err)
+	return ok
 }
 
 // defaultTransport is the HTTP client used when tests do not replace it: the standard transport with

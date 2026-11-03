@@ -553,8 +553,10 @@ func TestSDKLogsStayClean(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if !strings.Contains(logs.String(), string(errRequestNetwork)) {
-		t.Errorf("SDK log has no fixed network error; the transport case would prove nothing:\n%s", logs.String())
+	for _, fixed := range []fixedError{errRequestNetwork, errRequestTLS} {
+		if !strings.Contains(logs.String(), string(fixed)) {
+			t.Errorf("SDK log has no %q; the transport cases would prove nothing:\n%s", fixed, logs.String())
+		}
 	}
 	if logs.Len() == 0 {
 		t.Fatal("captured no SDK logs; the test would prove nothing")

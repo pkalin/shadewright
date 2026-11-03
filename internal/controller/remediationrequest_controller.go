@@ -206,6 +206,11 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// A decision made after the deadline is not trusted: a read or the resolver may have been cut short.
 	err = boundErr(ctx, checkCtx, "policy check", err)
 	cancel()
+	if reason, message, ok := refusal(err); ok {
+		// The Git host refused the source mapping's reads for good (a permission the App lacks, a rule of the
+		// repository): a person has to act, so the request is decided now instead of retried without end.
+		out, err = needsIntervention(reason, message), nil
+	}
 	if err != nil {
 		// A remote system that asked for a delay (Retry-After) gets it; controller-runtime's error backoff
 		// does not read it and could retry sooner.
@@ -487,15 +492,13 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		// has just found writes allowed again, so the deadline starts now, whether or not the plan was fresh.
 		return r.startDeadline(ctx, rr)
 	case err != nil:
-		if reason, message, ok := refusal(err); ok {
-			// The Git host refuses the freshness check's reads for good (a permission was removed): stop now.
-			return ctrl.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
-				reason, message))
-		}
-		return r.waitOrFail(ctx, rr, err)
+		return r.refuseOrWait(ctx, rr, err)
 	case outcome == prClosed:
 		return r.rejected(ctx, rr)
 	default:
+		if err := r.clearRefusal(ctx, rr); err != nil {
+			return ctrl.Result{}, err
+		}
 		return r.advance(ctx, rr)
 	}
 }
@@ -554,7 +557,15 @@ func (r *RemediationRequestReconciler) EnsureFresh(ctx context.Context, rr *reme
 			message = "The plan is stale and the repository it was made for is not configured any more; " +
 				"its change request, if any, was not closed"
 		case err != nil:
-			return err
+			refused, _, ok := refusal(err)
+			if !ok {
+				return err
+			}
+			// The Git host refuses the close for good (a permission the App lacks, a rule): the plan is stale
+			// and nothing more may be written for it, so a person has to close the change request.
+			phase, reason = remediationv1alpha1.PhaseNeedsIntervention, refused
+			message = "The plan is stale (" + staleErr.Reason + ") and the Git host refused to close its " +
+				"change request; it was not closed"
 		}
 	}
 	rr.Status.Phase = phase

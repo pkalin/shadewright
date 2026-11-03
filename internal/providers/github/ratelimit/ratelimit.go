@@ -65,8 +65,8 @@ func Delay(h http.Header, now time.Time) time.Duration {
 
 // Limited reports whether a 403 or 429 response is a rate limit, and the delay to wait. GitHub's advice:
 // obey Retry-After, else wait for X-RateLimit-Reset when the quota is exhausted, else wait at least a
-// minute. A 429 without those headers is a rate limit; a 403 without them only when its body says so. The
-// body is searched through a bounded reader and never kept or returned.
+// minute. A 429 without those headers is a rate limit; a 403 without them only when its body says so, or
+// when the body cannot be read. The body is searched through a bounded reader and never kept or returned.
 func Limited(resp *http.Response, now time.Time) (time.Duration, bool) {
 	h := resp.Header
 	if h.Get("Retry-After") != "" || h.Get("X-RateLimit-Remaining") == "0" {
@@ -78,8 +78,17 @@ func Limited(resp *http.Response, now time.Time) (time.Duration, bool) {
 	return 0, false
 }
 
+// mentionsRateLimit reports whether the start of a 403 body names a rate limit. A body that cannot be read to
+// the end of the probe (a reset, a stall, a truncated response) may have hidden the message, so it counts as
+// a rate limit: retrying is the safe side, a refusal for good is never assumed from a failed read.
 func mentionsRateLimit(r io.Reader) bool {
-	data, _ := io.ReadAll(io.LimitReader(r, maxProbeBody))
+	if r == nil {
+		return false
+	}
+	data, err := io.ReadAll(io.LimitReader(r, maxProbeBody))
+	if err != nil {
+		return true
+	}
 	s := strings.ToLower(string(data))
 	return strings.Contains(s, "rate limit") || strings.Contains(s, "abuse detection")
 }

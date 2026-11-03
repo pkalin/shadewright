@@ -64,8 +64,9 @@ type Input struct {
 }
 
 // Resolve finds the repository, branch, file and base commit that declare in.Target, or returns why not.
-// The error is non-nil only for failures that may succeed on retry, such as an API or Git host error; it is
-// then a [*TransientError] matching [ErrTransient] and holds no text from the cluster or the provider. Every
+// The error is non-nil for failures that may succeed on retry, such as an API or Git host error, a
+// [*TransientError] matching [ErrTransient], and for a read the Git host refused for good, a [*RefusedError]
+// matching providers.ErrForbidden or ErrRejected. Neither holds text from the cluster or the provider. Every
 // stop condition of ADR-0012 is a Result with Outcome NeedsIntervention or Denied.
 func (r *Resolver) Resolve(ctx context.Context, in Input) (Result, error) {
 	fld, err := FieldFor(in.Action, in.Target)

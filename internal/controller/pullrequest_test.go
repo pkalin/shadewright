@@ -588,6 +588,28 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(faulty.count(opOpen)).To(Equal(1))
 			})
 
+			DescribeTable("expires with a clear message when the close after the deadline is refused",
+				func(op string, class error, reason string) {
+					loseStatusWrites()
+					clock = clock.Add(DefaultPullRequestTimeout + time.Minute)
+					faulty.failOn(op, fmt.Errorf("status 403 from https://github.com/example/fleet: %w", class))
+					res, err := reconcileResult()
+					Expect(err).NotTo(HaveOccurred(), "a final refusal is not handed back for a retry")
+					Expect(res).To(Equal(reconcile.Result{}))
+					got := fetch()
+					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
+					c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+					Expect(c.Reason).To(Equal(ReasonPullRequestDeadline))
+					Expect(c.Message).To(ContainSubstring(reason))
+					Expect(c.Message).To(ContainSubstring("close it by hand"))
+					Expect(c.Message).NotTo(ContainSubstring("https://"))
+					Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen), "the refused close left it open")
+				},
+				Entry("finding it (403)", opFind, providers.ErrForbidden, ReasonGitForbidden),
+				Entry("closing it (403)", opClose, providers.ErrForbidden, ReasonGitForbidden),
+				Entry("closing it (422)", opClose, providers.ErrRejected, ReasonGitRejected),
+			)
+
 			It("closes the pull request it finds by its marker when the target file changes first", func() {
 				loseStatusWrites()
 				_, err := git.Push(mainBranch, sourcePath, manifest("512Mi"))

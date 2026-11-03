@@ -47,8 +47,11 @@ limitations under the License.
 // requeue instead of blocking.
 //
 // A 403 that is not a rate limit (a permission the App lacks, a rule of the repository) is
-// [providers.ErrForbidden], and a 422 that reading the state does not resolve (an existing branch at the same
-// commit, an open pull request of the branch) is [providers.ErrRejected]. Both are final and never retried.
+// [providers.ErrForbidden], also when the installation refuses the token, and a 422 that reading the state does
+// not resolve (an existing branch at the same commit, an open pull request of the branch) is
+// [providers.ErrRejected]. Both are final and never retried, except that a create (branch, pull request) whose
+// 422 the state does not explain is sent again with backoff, up to MaxAttempts, because a read may come from a
+// replica that lags the write. A 403 whose body cannot be read is a rate limit, so it is retried.
 //
 // Errors carry fixed text, the status code and their class (not found, conflict, forbidden, rejected, too
 // large, retryable, canceled or deadline exceeded); never a URL, a header, response text, a repository or

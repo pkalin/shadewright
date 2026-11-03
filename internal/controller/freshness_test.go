@@ -298,6 +298,88 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(reconciler().EnsureFresh(ctx, fetch())).NotTo(Succeed())
 	})
 
+	DescribeTable("stops in NeedsIntervention, saying the change request was not closed, when the close of a stale plan is refused",
+		func(class error, reason string) {
+			_, err := git.Push(mainBranch, sourcePath, manifest("512Mi"))
+			Expect(err).NotTo(HaveOccurred())
+			git.SetFail(func(op string) error {
+				if op == opClose {
+					closes.Add(1)
+					return fmt.Errorf("status 403 from https://github.com/example/fleet: %w", class)
+				}
+				return nil
+			})
+			_, err = reconcileOnce()
+			Expect(err).NotTo(HaveOccurred(), "a final refusal is not handed back for a retry")
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+			Expect(c).NotTo(BeNil())
+			Expect(c.Status).To(Equal(metav1.ConditionFalse))
+			Expect(c.Reason).To(Equal(reason))
+			Expect(c.Message).To(ContainSubstring(freshness.ReasonTargetFileChanged))
+			Expect(c.Message).To(ContainSubstring("was not closed"))
+			Expect(c.Message).NotTo(ContainSubstring("https://"))
+			Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+
+			_, err = reconcileOnce()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(closes.Load()).To(Equal(int32(1)), "the refused close is not tried again")
+		},
+		Entry("403", providers.ErrForbidden, ReasonGitForbidden),
+		Entry("422", providers.ErrRejected, ReasonGitRejected),
+	)
+
+	It("keeps watching the pull request when the Git host refuses the freshness check's reads", func() {
+		git.SetFail(func(op string) error {
+			if op == opBranchHead {
+				return fmt.Errorf("status 403 from https://github.com/example/fleet: %w", providers.ErrForbidden)
+			}
+			return nil
+		})
+		res, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(freshRecheckInterval), "the pull request is looked at again")
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "a refusal does not end the watch")
+		c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+		Expect(c).NotTo(BeNil())
+		Expect(c.Status).To(Equal(metav1.ConditionUnknown))
+		Expect(c.Reason).To(Equal(ReasonGitForbidden))
+		Expect(c.Message).NotTo(ContainSubstring("https://"))
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+
+		// A repeated refusal writes nothing new; a merge while it lasts is still recorded.
+		before := fetch().ResourceVersion
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetch().ResourceVersion).To(Equal(before))
+		_, err = git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+	})
+
+	It("clears the refusal once the freshness check passes again", func() {
+		refuse := true
+		git.SetFail(func(op string) error {
+			if op == opBranchHead && refuse {
+				return fmt.Errorf("refused: %w", providers.ErrRejected)
+			}
+			return nil
+		})
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPlanFresh)).NotTo(BeNil())
+		refuse = false
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)).To(BeNil())
+	})
+
 	It("does not touch the change request of a request that is not stale while writes are paused", func() {
 		settings.Spec.Paused = new(true)
 		Expect(k8sClient.Update(ctx, settings)).To(Succeed())

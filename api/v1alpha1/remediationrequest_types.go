@@ -197,7 +197,9 @@ const (
 	ConditionDelivered     = "Delivered"
 	ConditionVerified      = "Verified"
 	// ConditionPlanFresh is False, with the reason, when an input of the plan digest changed and the request
-	// was superseded.
+	// was superseded (or stopped because its change request could not be closed). It is Unknown, with reason
+	// GitForbidden or GitRejected, while the Git host refuses the freshness check of a request whose pull
+	// request waits for review; the pull request is still watched and nothing is written to Git.
 	ConditionPlanFresh = "PlanFresh"
 )
 

@@ -787,6 +787,48 @@ func TestResolveReturnsTransientErrors(t *testing.T) {
 	}
 }
 
+// TestResolveKeepsFinalRefusals checks that a Git read the host refuses for good (a 403 that is no rate limit,
+// a 422) keeps its class through the mapping, so the caller stops instead of retrying until a deadline, and
+// that it still carries no provider text. A rate limit stays transient whatever else it matches.
+func TestResolveKeepsFinalRefusals(t *testing.T) {
+	const secret = "ghs_s3cr3tT0ken"
+	for _, class := range []error{providers.ErrForbidden, providers.ErrRejected} {
+		for _, op := range []string{"BranchHead", "ReadFile"} {
+			t.Run(class.Error()+" "+op, func(t *testing.T) {
+				f := newFixture()
+				f.gitFail = func(got string) error {
+					if got == op {
+						return fmt.Errorf("GET https://github.com/example/fleet with token %s: 403: %w", secret, class)
+					}
+					return nil
+				}
+				_, _, err := f.run(t)
+				if !errors.Is(err, class) || errors.Is(err, sourcemap.ErrTransient) {
+					t.Fatalf("error = %#v, want the class %v and not ErrTransient", err, class)
+				}
+				for _, leak := range []string{secret, "example/fleet", "403"} {
+					if strings.Contains(err.Error(), leak) {
+						t.Errorf("error %q contains %q", err, leak)
+					}
+				}
+			})
+		}
+	}
+	t.Run("rate limit", func(t *testing.T) {
+		f := newFixture()
+		f.gitFail = func(got string) error {
+			if got == "BranchHead" {
+				return &providers.RetryableError{RetryAfter: time.Minute, Err: providers.ErrForbidden}
+			}
+			return nil
+		}
+		_, _, err := f.run(t)
+		if !errors.Is(err, sourcemap.ErrTransient) || errors.Is(err, providers.ErrForbidden) {
+			t.Fatalf("error = %#v, want a transient error", err)
+		}
+	})
+}
+
 // TestResolveKeepsSourceURLOutOfMessages checks that a Flux URL with credentials never reaches the result.
 func TestResolveKeepsSourceURLOutOfMessages(t *testing.T) {
 	const secret = "ghp_s3cr3tT0ken"

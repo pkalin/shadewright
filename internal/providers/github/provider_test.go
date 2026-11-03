@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1092,21 +1093,90 @@ func TestUnresolvedValidationIsFinal(t *testing.T) {
 	refused := func(method, path, file string) step {
 		return status(method, path, http.StatusUnprocessableEntity, file)
 	}
-	for name, c := range map[string]finalCase{
-		"create the branch, which does not exist": {[]step{get(mainRef, "ref_main.json"),
-			refused(http.MethodPost, "/git/refs", "error_rule_violation.json"),
-			status(http.MethodGet, branchRef, http.StatusNotFound, fxForbidden)},
-			createBranch, providers.IsRejected},
-		"open the pull request, with none open and the branch there": {[]step{listPulls("open", "pulls_empty.json"),
-			refused(http.MethodPost, pullsPath, "error_validation.json"), listPulls("open", "pulls_empty.json"),
-			get(branchRef, "ref_branch.json")}, openCR, providers.IsRejected},
-		"store the commit": {append(append([]step{get(branchRef, "ref_branch.json")}, readSteps()...),
-			status(http.MethodPost, "/git/blobs", http.StatusCreated, "blob_created.json"),
-			status(http.MethodPost, "/git/trees", http.StatusCreated, "tree_created.json"),
-			refused(http.MethodPost, "/git/commits", "error_validation.json")), commitFile, providers.IsRejected},
-	} {
-		t.Run(name, func(t *testing.T) { assertFinal(t, c) })
+	assertFinal(t, finalCase{append(append([]step{get(branchRef, "ref_branch.json")}, readSteps()...),
+		status(http.MethodPost, "/git/blobs", http.StatusCreated, "blob_created.json"),
+		status(http.MethodPost, "/git/trees", http.StatusCreated, "tree_created.json"),
+		refused(http.MethodPost, "/git/commits", "error_validation.json")), commitFile, providers.IsRejected})
+
+	// A create whose 422 the state does not explain is asked again, with backoff, before it is final: a read
+	// may come from a replica that does not show the branch or pull request yet.
+	repeat := func(n int, steps ...step) []step {
+		out := make([]step, 0, n*len(steps))
+		for range n {
+			out = append(out, steps...)
+		}
+		return out
 	}
+	for name, c := range map[string]finalCase{
+		"create the branch, which does not exist": {append([]step{get(mainRef, "ref_main.json")},
+			repeat(DefaultMaxAttempts, refused(http.MethodPost, "/git/refs", "error_rule_violation.json"),
+				status(http.MethodGet, branchRef, http.StatusNotFound, fxForbidden))...),
+			createBranch, providers.IsRejected},
+		"open the pull request, with none open and the branch there": {append([]step{listPulls("open", "pulls_empty.json")},
+			repeat(DefaultMaxAttempts, refused(http.MethodPost, pullsPath, "error_validation.json"),
+				listPulls("open", "pulls_empty.json"), get(branchRef, "ref_branch.json"))...), openCR, providers.IsRejected},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, c.steps...)
+			err := c.call(h.p)
+			if !c.want(err) || providers.IsRetryable(err) {
+				t.Fatalf("got %v", err)
+			}
+			want := []time.Duration{DefaultBaseDelay, 2 * DefaultBaseDelay, 4 * DefaultBaseDelay}
+			if !slices.Equal(h.sleeps, want) {
+				t.Errorf("slept %v, want %v", h.sleeps, want)
+			}
+			assertSafe(t, err)
+		})
+	}
+}
+
+// A replica that lags the write: the branch of a lost create response is not readable at once, the pull
+// request of a lost create response is not listed at once, or the commit just pushed is not seen ("No commits
+// between"). The adapter asks again instead of calling the 422 final.
+func TestUnexplainedValidationWaitsForReplicas(t *testing.T) {
+	t.Run("branch not readable yet", func(t *testing.T) {
+		h := newHarness(t, get(mainRef, "ref_main.json"),
+			status(http.MethodPost, "/git/refs", http.StatusUnprocessableEntity, "error_ref_exists.json"),
+			status(http.MethodGet, branchRef, http.StatusNotFound, fxForbidden),
+			status(http.MethodPost, "/git/refs", http.StatusUnprocessableEntity, "error_ref_exists.json"),
+			get(branchRef, "ref_branch.json"))
+		if err := createBranch(h.p); err != nil {
+			t.Fatalf("CreateBranch: %v", err)
+		}
+	})
+	t.Run("pull request not listed yet", func(t *testing.T) {
+		h := newHarness(t, listPulls("open", "pulls_empty.json"),
+			status(http.MethodPost, pullsPath, http.StatusUnprocessableEntity, "error_pr_exists.json"),
+			listPulls("open", "pulls_empty.json"), get(branchRef, "ref_branch.json"),
+			status(http.MethodPost, pullsPath, http.StatusUnprocessableEntity, "error_pr_exists.json"),
+			listPulls("open", "pulls_open.json"))
+		cr, err := h.p.OpenChangeRequest(ctx, newCR)
+		if err != nil || cr.Number != 12 {
+			t.Fatalf("OpenChangeRequest = %+v, %v", cr, err)
+		}
+	})
+	t.Run("commit not seen yet", func(t *testing.T) {
+		h := newHarness(t, listPulls("open", "pulls_empty.json"),
+			status(http.MethodPost, pullsPath, http.StatusUnprocessableEntity, "error_validation.json"),
+			listPulls("open", "pulls_empty.json"), get(branchRef, "ref_branch.json"),
+			status(http.MethodPost, pullsPath, http.StatusCreated, "pull_open.json"))
+		if _, err := h.p.OpenChangeRequest(ctx, newCR); err != nil {
+			t.Fatalf("OpenChangeRequest: %v", err)
+		}
+	})
+	t.Run("no time left for another attempt", func(t *testing.T) {
+		h := newHarness(t, listPulls("open", "pulls_empty.json"),
+			status(http.MethodPost, pullsPath, http.StatusUnprocessableEntity, "error_validation.json"),
+			listPulls("open", "pulls_empty.json"), get(branchRef, "ref_branch.json"))
+		h.p.now = time.Now
+		short, cancel := context.WithTimeout(ctx, DefaultBaseDelay/5)
+		defer cancel()
+		_, err := h.p.OpenChangeRequest(short, newCR)
+		if !providers.IsRetryable(err) || providers.IsRejected(err) {
+			t.Fatalf("got %v, want retryable", err)
+		}
+	})
 }
 
 // A 422 that the state explains is resolved by the adapter, never returned as a refusal: an existing branch at
@@ -1267,6 +1337,23 @@ func TestTokenErrorsKeepTheirClass(t *testing.T) {
 	_, err := h.p.BranchHead(ctx, target)
 	if d, ok := providers.RetryAfter(err); !ok || d != time.Hour {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// A token the installation refuses (a permission the App lacks) keeps ErrForbidden through tokenError, so the
+// caller stops instead of retrying until its deadline; no text of the token source stays reachable.
+func TestTokenRefusalIsForbidden(t *testing.T) {
+	h := newHarness(t)
+	leak := errors.New("installation token: status 403 for https://api.github.com ghs_leaked")
+	h.p.token = func(context.Context) (string, error) {
+		return "", fmt.Errorf("%w: %w", leak, providers.ErrForbidden)
+	}
+	_, err := h.p.BranchHead(ctx, target)
+	if !providers.IsForbidden(err) || providers.IsRetryable(err) || errors.Is(err, leak) {
+		t.Fatalf("got %v, want ErrForbidden only", err)
+	}
+	if strings.Contains(err.Error(), "ghs_leaked") {
+		t.Fatalf("token source text leaked: %v", err)
 	}
 }
 

@@ -512,6 +512,14 @@ func (r *RemediationRequestReconciler) expire(ctx context.Context, rr *remediati
 	err := r.closeChangeRequest(cleanCtx, rr)
 	err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
 	cancel()
+	if reason, _, ok := refusal(err); ok {
+		// The deadline has passed either way; waiting for a permission or a rule to change would only keep
+		// the request open longer. The message says that a pull request of its own may be left open.
+		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
+			ReasonPullRequestDeadline, "The pull request was not opened before the deadline, and the Git host "+
+				"refused ("+reason+") to find or close a pull request Shadewright may have opened on the branch; "+
+				"if one is open, close it by hand"))
+	}
 	if err != nil && !errors.Is(err, errRepositoryGone) && !errors.Is(err, errTargetBranchChanged) &&
 		!errors.Is(err, freshness.ErrRepositoryUnusable) {
 		return r.retry(ctx, rr, err)
@@ -537,11 +545,61 @@ func (r *RemediationRequestReconciler) retry(ctx context.Context, rr *remediatio
 		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 			reasonRepositoryUnavailable, "The repository of the plan is not configured any more"))
 	}
-	if reason, message, ok := refusal(err); ok {
+	return r.refuseOrWait(ctx, rr, err)
+}
+
+// refuseOrWait handles a step error of recheck and retry. A final refusal of the Git host (refusal) stops
+// Shadewright's writes at once instead of retrying until the deadline: a request without a recorded pull
+// request ends in NeedsIntervention, while one whose pull request waits for review (PRCreated,
+// AwaitingApproval) keeps its phase, says why on PlanFresh (Unknown) and keeps watching the pull request, so
+// a later merge is still recorded (a close without a merge is decided once the freshness check runs again).
+// Any other error goes to waitOrFail.
+func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	err error) (reconcile.Result, error) {
+	reason, message, ok := refusal(err)
+	if !ok {
+		return r.waitOrFail(ctx, rr, err)
+	}
+	if rr.Status.PullRequest == nil {
 		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 			reason, message))
 	}
-	return r.waitOrFail(ctx, rr, err)
+	// The recorded pull request is looked at first on every recheck; nothing else is written to Git while
+	// the refusal lasts, because the plan's freshness cannot be confirmed.
+	changed := meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type:               remediationv1alpha1.ConditionPlanFresh,
+		Status:             metav1.ConditionUnknown,
+		Reason:             reason,
+		Message:            refusedWhileWatching(reason),
+		ObservedGeneration: rr.Generation,
+	})
+	if changed {
+		if err := r.Status().Update(ctx, rr); err != nil {
+			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+		}
+		logf.FromContext(ctx).Info("Paused writes of RemediationRequest after a refusal of the Git host",
+			"remediationRequest", client.ObjectKeyFromObject(rr), "reason", reason)
+	}
+	return reconcile.Result{RequeueAfter: freshRecheckInterval}, nil
+}
+
+// refusedWhileWatching is the fixed PlanFresh message of a refusal while a recorded pull request waits.
+func refusedWhileWatching(reason string) string {
+	return "The Git host refused the freshness check (" + reason + "); Shadewright writes nothing and keeps " +
+		"watching the pull request"
+}
+
+// clearRefusal removes the PlanFresh condition refuseOrWait wrote, once the freshness check passes again.
+func (r *RemediationRequestReconciler) clearRefusal(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+	if c == nil || c.Status != metav1.ConditionUnknown || (c.Reason != ReasonGitForbidden && c.Reason != ReasonGitRejected) {
+		return nil
+	}
+	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+	if err := r.Status().Update(ctx, rr); err != nil {
+		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	return nil
 }
 
 // refusal returns the reason and fixed message of a final refusal of the Git host (providers.ErrForbidden or

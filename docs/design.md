@@ -202,13 +202,15 @@ Deduplication state must survive restarts. In the MVP it lives in a namespaced `
 
 ### 3.3. Analysis
 
-Deterministic rules and known runbooks run first. The model gets a bounded context: incident summary, object status and owners, a log excerpt, selected metrics and recent Git changes for the source of the object.
+Proposed in [ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md): context first, one structured call. Deterministic rules and known runbooks run first. The context builder then assembles a bounded, redacted context deterministically: incident summary, object status and owners, a log excerpt, selected metrics and recent Git changes for the source of the object. The small model makes one structured-output call on it. Read tools (section 4) are offered only on escalation, within fixed step, token and spend budgets, so the cost per incident is predictable and a recorded context can be replayed in CI.
 
-The result has a fixed schema: hypotheses, evidence, missing data, uncertainty, proposed action, expected effect and verification conditions. When the evidence is not there, the correct result is no proposal and a hand-off to a human. A model's self-reported confidence never makes an action eligible.
+The prompt is a Go `embed` template in `internal/analysis/prompts/`, reviewed like code; there is no setting, ConfigMap or CRD for it. Its catalog, the output schema and the proposal tool's argument schema are generated from the Go action and result types. It has a static system part (role, rules, catalog, schema) and then the untrusted context in delimited blocks tagged with their provenance, with a rule that their text is data, never instructions. Each analysis record stores the prompt version (a content hash), the model deployment and ID, and the token counts.
+
+The result has a fixed schema: hypotheses, evidence, missing data, uncertainty, proposed action, expected effect and verification conditions. When the evidence is not there, the correct result is no proposal and a hand-off to a human. A model's self-reported confidence never makes an action eligible, and it never triggers escalation either.
 
 ## 4. Tools
 
-The analyzer exposes tools to the model through its own adapters. MCP is optional: it can expose the same tools later, but it is not required by the controller and it does not replace Kubernetes RBAC ([ADR-0003](adr/0003-gitops-only-typed-remediation.md)).
+The analyzer exposes tools to the model through its own adapters. In the MVP loop they are offered only when an analysis escalates (3.3, 11.2); the first call runs on the prepared context alone. MCP is optional: it can expose the same tools later, but it is not required by the controller and it does not replace Kubernetes RBAC ([ADR-0003](adr/0003-gitops-only-typed-remediation.md)).
 
 | Tool | Purpose | Mode |
 | --- | --- | --- |
@@ -630,9 +632,11 @@ For the lab: Sweden Central ([ADR-0016](adr/0016-lab-region-sweden-central.md)).
 
 ### 11.2. Model strategy
 
-- Small model: summarize context, classify the symptom, propose a known runbook.
-- Stronger model: hard incidents, ambiguous dependencies, multi-step analysis. Used as an escalation, not by default.
+- Small model: summarize context, classify the symptom, propose a known runbook. One structured call on a prepared context, without tools.
+- Stronger model: hard incidents, ambiguous dependencies, multi-step analysis, with read tools and fixed step, token and spend budgets. Used as an escalation, not by default. Rules trigger it, never the model's own confidence: no runbook matched, the result has non-empty "missing data", or the proposal failed policy.
 - Deterministic code: enforce policy, compute bounds, build the diff, decide whether execution is allowed.
+
+`ModelProvider` has one operation (messages, an optional tool set and an output schema in; a structured result and token usage out), with Foundry adapters for the OpenAI and Anthropic families. Malformed output, throttling and timeouts are typed errors (11.1). A change to a prompt, model or schema must pass the scenario evaluation first: recorded contexts from the fleet scenarios, a fake model in CI and the real model on demand. Details in [ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md).
 
 Concrete models are chosen by benchmark on the scenario set. Measure diagnosis accuracy, plan usefulness, false fixes, latency and cost per resolved incident.
 
@@ -707,6 +711,7 @@ Decided on 2026-11-01:
 | Packaging | Kubebuilder's Helm plugin; images on GHCR, signed keyless, with SBOMs |
 | Pluggability | Three axes: platform services, cluster platforms, cluster integrations ([ADR-0018](adr/0018-three-axes-of-pluggability.md)); security integrations diagnose only |
 | Extension packaging | Compiled in now; signed declarative OCI packs later ([ADR-0019](adr/0019-extension-packaging.md)) |
+| Calling the model | Proposed: prompts as embedded Go templates with generated catalog and schemas, context first with one structured call, escalation by rules with tools within budgets, an evaluation gate ([ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md)) |
 | Controller identities | Separate analyzer and executor ServiceAccounts and roles; incidents and requests reachable only in the operator namespace, the analyzer's reads only in the watched namespaces (2.2) |
 
 Still open:
@@ -717,6 +722,7 @@ Still open:
 4. **Teams.** Whether the maintainer's Microsoft account can receive Teams Workflows webhooks. If not, GitHub issues stay the only notifier for now.
 5. **Required checks in policy.** Whether a policy should name verification checks a request cannot drop, beyond the ones each action always runs.
 6. **Scenario switch.** Proposed in [ADR-0022](adr/0022-scenario-switch-and-clusters.md): Flux on each cluster tracks a `cluster/<cluster>` branch that the scenario harness moves forward with one scenario or reset commit at a time, and the agent's pull requests target that branch. Open until the ADR is accepted.
+7. **Calling the model.** Proposed in [ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md): prompts are code, context first with one structured call, escalation by rules with bounded tools, an evaluation gate on prompt, model and schema changes. Open until the ADR is accepted.
 
 ## 16. Prior art
 

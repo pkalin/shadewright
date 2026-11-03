@@ -248,6 +248,7 @@ func (r *Resolver) declaration(ctx context.Context, fld Field, gitOps v1alpha1.P
 			RepositoryRef: d.repo.Name,
 			TargetBranch:  v1alpha1.GitBranch(d.branch),
 			Path:          file,
+			BuildPath:     v1alpha1.GitDirPath(dir),
 			BaseCommit:    head,
 		},
 	}, nil

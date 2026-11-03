@@ -136,7 +136,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		request.Spec.TargetRef.UID = remediationv1alpha1.UID(deployment.UID)
 		Expect(k8sClient.Create(ctx, request)).To(Succeed())
 
-		git = fakegit.NewGit(mainBranch, map[string][]byte{sourcePath: manifest("256Mi"), "README.yaml": []byte("a: 1\n")})
+		git = fakegit.NewGit(mainBranch, map[string][]byte{sourcePath: manifest("256Mi"), buildKustomize: buildFile, "README.yaml": []byte("a: 1\n")})
 		byURL = map[string]*fakegit.Git{settings.Spec.Repositories[0].URL: git}
 		closes.Store(0)
 		git.SetFail(func(op string) error {

@@ -17,8 +17,8 @@ limitations under the License.
 // (design 8.2, steps 4 and 5).
 //
 // [Check] renders the Kustomization path twice with the kustomize API, in process, from an in-memory file
-// system: once from the files at the base commit and once with the patched file in place. It compares the
-// rendered objects by identity (apiVersion, kind, namespace, name) and passes only when they are the same
+// system: once from the files at the commit the change builds on and once with the patched file in place. It
+// compares the rendered objects by identity (apiVersion, kind, namespace, name) and passes only when they are the same
 // set, every object other than the target is unchanged, and the target differs in exactly the action's
 // field, from the previous to the desired value. Then it runs basic schema checks on the changed target.
 // Because the whole path is rendered, indirect changes are caught too: a base that another object is also

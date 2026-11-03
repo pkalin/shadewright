@@ -291,6 +291,7 @@ func TestResolveFindsTheSource(t *testing.T) {
 		name   string
 		change func(f *fixture)
 		path   string
+		build  string // the build directory; empty means apps/orders
 	}{
 		{
 			name: "ScaledObject in a multi-document file",
@@ -307,7 +308,8 @@ func TestResolveFindsTheSource(t *testing.T) {
 				set(f.ks, "", "spec", "path")
 				f.files["kustomization.yaml"] = "resources:\n  - apps/orders\n"
 			},
-			path: soFile,
+			path:  soFile,
+			build: ".",
 		},
 		{
 			name: "Kustomization path without a leading dot",
@@ -355,7 +357,12 @@ func TestResolveFindsTheSource(t *testing.T) {
 			if res.Outcome != sourcemap.Resolved || res.Reason != sourcemap.ReasonResolved || res.Source == nil {
 				t.Fatalf("result = %+v", res)
 			}
-			want := v1alpha1.ResolvedSource{RepositoryRef: "fleet", TargetBranch: "main", Path: v1alpha1.GitFilePath(tc.path), BaseCommit: head}
+			build := tc.build
+			if build == "" {
+				build = "apps/orders"
+			}
+			want := v1alpha1.ResolvedSource{RepositoryRef: "fleet", TargetBranch: "main", Path: v1alpha1.GitFilePath(tc.path),
+				BuildPath: v1alpha1.GitDirPath(build), BaseCommit: head}
 			if !shaRE.MatchString(res.Source.BaseCommit) {
 				t.Errorf("base commit %q is not a full SHA", res.Source.BaseCommit)
 			}

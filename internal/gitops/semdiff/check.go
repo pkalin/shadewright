@@ -31,7 +31,7 @@ import (
 
 // Input is one planned change: the build before it, the file it replaces and what it must change.
 type Input struct {
-	// Files holds the build at the base commit, by repository path, as [Load] returns it: every kustomization
+	// Files holds the build at the commit the change builds on, by repository path, as [Load] returns it: every kustomization
 	// file and every resource or patch file the path builds from. Files outside the build are ignored.
 	Files map[string][]byte
 	// Path is the Kustomization's spec.path, the directory rendered, relative to the repository root.
@@ -66,8 +66,8 @@ type Result struct {
 // in.Files and never runs a plugin or fetches a remote base.
 //
 // The render covers the repository path only, not the Flux Kustomization's own spec fields (patches, images,
-// targetNamespace, postBuild, components): the caller must refuse a Kustomization that sets them, as the
-// source mapping does for patches, components and postBuild (#178).
+// targetNamespace, postBuild, components). The source mapping already refuses a Kustomization that sets any
+// of them, and the pull request step relies on that.
 //
 // Renders are serialised in the process (kustomize keeps global state). ctx bounds the wait for that turn:
 // when it ends first, Check returns ctx.Err() without rendering. A render that has started runs to its end,

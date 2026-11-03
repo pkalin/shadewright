@@ -35,6 +35,8 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/patch"
+	"github.com/pkalin/shadewright/internal/gitops/semdiff"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/redact"
@@ -92,6 +94,8 @@ const (
 	ReasonPullRequestDeadline = "PullRequestDeadline"
 	// ReasonChangeRequestGone: the recorded pull request cannot be found any more.
 	ReasonChangeRequestGone = "ChangeRequestGone"
+	// ReasonPlanIncomplete: the request's status.source has no buildPath, so the change cannot be rendered.
+	ReasonPlanIncomplete = "PlanIncomplete"
 
 	reasonTargetBranchChanged   = "TargetBranchChanged"
 	reasonRepositoryUnavailable = "RepositoryUnavailable"
@@ -249,11 +253,8 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 	switch state {
 	case fileHoldsPrevious:
 		// Steps 3 to 6: one commit that changes the one value, on top of the head just read.
-		if r.Validate != nil {
-			if err := r.Validate(ctx, file.Data, changed, rr); err != nil {
-				return reconcile.Result{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonPatchRefused,
-					"The change did not pass validation")
-			}
+		if err := r.checkRender(ctx, git, head, changed, rr); err != nil {
+			return reconcile.Result{}, err
 		}
 		if _, err := git.CommitFile(ctx, branch, head, providers.FileChange{
 			Path: string(src.Path), Content: changed, Message: commitTitle(rr),
@@ -333,6 +334,33 @@ func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr
 	logf.FromContext(ctx).Info("Opened pull request for RemediationRequest", "remediationRequest",
 		client.ObjectKeyFromObject(rr), "pullRequest", cr.Number)
 	return nil
+}
+
+// checkRender renders the Kustomization's directory at head with and without the change and stops the
+// request unless the one difference is the planned field of the target (design 8.2, steps 4 and 5). A
+// refusal is written with the check's stable reason and fixed text, never with file content; Git that
+// cannot be read is retried.
+func (r *RemediationRequestReconciler) checkRender(ctx context.Context, git providers.GitProvider, head string,
+	changed []byte, rr *remediationv1alpha1.RemediationRequest) error {
+	src := rr.Status.Source
+	// Defence in depth: the freshness check already supersedes a plan without a build directory, because the
+	// mapping now always returns one.
+	if src.BuildPath == "" {
+		return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonPlanIncomplete,
+			"The plan does not record the directory Flux builds; the request has to be decided again")
+	}
+	files, err := semdiff.Load(ctx, git, head, string(src.BuildPath))
+	if err == nil {
+		_, err = semdiff.Check(ctx, semdiff.Input{
+			Files: files, Path: string(src.BuildPath), File: string(src.Path), Patched: changed,
+			Target: rr.Spec.TargetRef, Action: rr.Spec.Action,
+		})
+	}
+	if se, ok := errors.AsType[*semdiff.Error](err); ok {
+		return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, string(se.Reason),
+			"The rendered change is not exactly the planned one ("+string(se.Reason)+"); nothing was committed")
+	}
+	return err
 }
 
 // prOutcome is what watchPullRequest found.
@@ -486,10 +514,28 @@ func (r *RemediationRequestReconciler) retry(ctx context.Context, rr *remediatio
 		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 			reasonRepositoryUnavailable, "The repository of the plan is not configured any more"))
 	}
-	if pe, ok := errors.AsType[*freshness.ProviderError](err); ok && pe.RetryAfter > 0 {
+	return waitOrFail(ctx, rr, err)
+}
+
+// retryAfterOf returns the delay a host asked for (Retry-After), from a provider error or a transient error
+// of the source mapping or the render check's reads; zero when there is none.
+func retryAfterOf(err error) time.Duration {
+	if pe, ok := errors.AsType[*freshness.ProviderError](err); ok {
+		return pe.RetryAfter
+	}
+	if te, ok := errors.AsType[*sourcemap.TransientError](err); ok {
+		return te.RetryAfter
+	}
+	return 0
+}
+
+// waitOrFail requeues after the delay a host asked for, with a log line saying why, or returns err to the
+// error backoff, which does not read Retry-After.
+func waitOrFail(ctx context.Context, rr *remediationv1alpha1.RemediationRequest, err error) (reconcile.Result, error) {
+	if d := retryAfterOf(err); d > 0 {
 		logf.FromContext(ctx).Info("Waiting before retrying RemediationRequest", "remediationRequest",
-			client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", pe.RetryAfter)
-		return reconcile.Result{RequeueAfter: pe.RetryAfter}, nil
+			client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", d)
+		return reconcile.Result{RequeueAfter: d}, nil
 	}
 	return reconcile.Result{}, err
 }
@@ -524,10 +570,7 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		case errors.Is(err, freshness.ErrPaused):
 			return reconcile.Result{RequeueAfter: freshRecheckDelay}, nil
 		default:
-			if pe, ok := errors.AsType[*freshness.ProviderError](err); ok && pe.RetryAfter > 0 {
-				return reconcile.Result{RequeueAfter: pe.RetryAfter}, nil
-			}
-			return reconcile.Result{}, err
+			return waitOrFail(ctx, rr, err)
 		}
 	}
 	base := rr.DeepCopy()

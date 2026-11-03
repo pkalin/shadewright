@@ -45,6 +45,8 @@ const (
 	policyBaseName   = "mem-policy"
 	baseCommit       = "0123456789abcdef0123456789abcdef01234567"
 	sourcePath       = "apps/orders/deployment.yaml"
+	buildPath        = "apps/orders"
+	buildKustomize   = "apps/orders/kustomization.yaml"
 )
 
 // stubResolver returns a canned mapping result and counts the calls.
@@ -72,10 +74,14 @@ func resolved() sourcemap.Result {
 			RepositoryRef: fx.RepositoryName,
 			TargetBranch:  "main",
 			Path:          sourcePath,
+			BuildPath:     buildPath,
 			BaseCommit:    baseCommit,
 		},
 	}
 }
+
+// buildFile is the kustomization file of buildPath: it builds the one manifest at sourcePath.
+var buildFile = []byte("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - deployment.yaml\n")
 
 var _ = Describe("RemediationRequest Controller", func() {
 	ctx := context.Background()

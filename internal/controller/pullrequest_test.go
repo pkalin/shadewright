@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/gitops/semdiff"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -60,6 +61,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		request    *remediationv1alpha1.RemediationRequest
 		git        *fakegit.Git
 		clock      time.Time
+		build      remediationv1alpha1.GitDirPath
 	)
 
 	manifest := func(limit string) []byte {
@@ -70,6 +72,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Client: k8sClient, Scheme: k8sClient.Scheme(), Source: sourceFunc(func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
 				res := resolved()
 				res.Source.BaseCommit, _ = git.BranchHead(ctx, mainBranch)
+				res.Source.BuildPath = build
 				return res, nil
 			}),
 			OpenRepository: func(_ context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
@@ -118,6 +121,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 	BeforeEach(func() {
 		seq++
 		clock = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+		build = buildPath
 		err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fx.TargetNamespace}})
 		Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
 
@@ -152,7 +156,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		request.Spec.TargetRef.UID = remediationv1alpha1.UID(deployment.UID)
 		Expect(k8sClient.Create(ctx, request)).To(Succeed())
 
-		git = fakegit.NewGit(mainBranch, map[string][]byte{sourcePath: manifest("256Mi"), "README.yaml": []byte("a: 1\n")})
+		git = fakegit.NewGit(mainBranch, map[string][]byte{sourcePath: manifest("256Mi"), buildKustomize: buildFile, "README.yaml": []byte("a: 1\n")})
 
 		Expect(reconcileOnce()).To(Succeed())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
@@ -287,6 +291,35 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)).
 			To(BeTrue(), "the pull request is still open")
 		Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen), "the pull request is left for a person")
+	})
+
+	It("stops before the commit when the change renders into another object too", func() {
+		// The patched file is a base that a second overlay builds under another name: the change would reach
+		// b-<name> as well, which the plan does not cover.
+		_, err := git.Push(mainBranch, "apps/kustomization.yaml", []byte(
+			"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - orders\n  - copy\n"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = git.Push(mainBranch, "apps/copy/kustomization.yaml", []byte(
+			"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamePrefix: b-\nresources:\n  - ../orders\n"))
+		Expect(err).NotTo(HaveOccurred())
+		// The mapping now names the parent directory as the build, as it would for a Kustomization at apps.
+		build = "apps"
+		got := fetch()
+		got.Status.Source.BuildPath = build
+		// The digest covers the build directory, so the plan is digested again, as the policy check would.
+		got.Status.PlanDigest, err = freshness.ComputeDigest(got, got.Status.Source, policy, settings)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		drive(remediationv1alpha1.PhaseNeedsIntervention)
+		got = fetch()
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
+			To(Equal(string(semdiff.ReasonOtherObjectChanged)))
+		head, err := git.BranchHead(ctx, freshness.BranchName(got))
+		Expect(err).NotTo(HaveOccurred())
+		base, err := git.BranchHead(ctx, mainBranch)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(head).To(Equal(base), "nothing was committed")
+		Expect(openRequests()).To(BeEmpty())
 	})
 
 	It("does not commit on a branch that holds something else", func() {

@@ -358,6 +358,23 @@ func gapCases() []gapCase {
 			[]string{opaque}, []string{"\n  indented: line"}},
 		{"token after an image digest", "image x@sha256:" + rep("a1", 32) + "-" + randomToken + endText,
 			[]string{randomToken}, []string{"sha256:" + rep("a1", 32) + "-", endText}},
+		// Issue #194: what stays redacted next to the prose that is now kept.
+		{"allow-listed hyphenated short key with a secret value", "pre-auth: " + opaque + nextField, []string{opaque}, []string{nextField}},
+		{"allow-listed hyphenated short key with a secret block", "two-pass:\n  " + opaque + nextField, []string{opaque}, []string{nextField}},
+		{"x header short key", "x-auth: " + wordTail + nextField, []string{wordTail}, []string{nextField}},
+		{"capitalised allow-listed prefix", "Pre-Auth: " + wordTail + nextField, []string{wordTail}, []string{nextField}},
+		{"capitalised hyphenated short key", "Proxy-Auth: " + wordTail + nextField, []string{wordTail}, []string{nextField}},
+		{"hyphenated key with a secret word", "token-auth: yes" + nextField, []string{"yes"}, []string{nextField}},
+		{"dotted short key", "app.auth: " + wordTail + nextField, []string{wordTail}, []string{nextField}},
+		{"dotted allow-listed prefix", "app.pre-auth: " + wordTail + nextField, []string{wordTail}, []string{nextField}},
+		{"short secret before a comma", "auth: hunter2," + endText, []string{"hunter2"}, []string{endText}},
+		{"symbol inside a word", "auth: unauth!orized" + endText, []string{"unauth!orized"}, []string{endText}},
+		// Basic and Bearer stay strict by decision (#194): any value of minSchemeWord bytes or more counts,
+		// so a long word after them is redacted (a known over-redaction), and a full stop after a short value
+		// of letters is a symbol there, not punctuation.
+		{"long word after basic", "basic internationalization" + endText, []string{"internationalization"}, []string{"basic ", endText}},
+		{"long lower-case letters after bearer", "bearer " + rep("opaque", 3) + endText, []string{rep("opaque", 3)}, []string{endText}},
+		{"short letters and a full stop after bearer", "Bearer abcdefghij." + endText, []string{"abcdefghij"}, []string{"Bearer ", endText}},
 	}
 }
 
@@ -365,7 +382,55 @@ func gapCases() []gapCase {
 var base64URLToken = "Synth3ticAbC-" + "dEf0123XyZ98-" + "76QwErTy54321-Zz"
 
 func TestGapCases(t *testing.T) {
-	for _, c := range gapCases() {
+	checkGapCases(t, gapCases())
+}
+
+// redactedOnMainCases are values that the redactor removed before #194 and that a review of the first
+// changes for #194 found passing through. Whatever prose they resemble, they must stay redacted: a kebab-case
+// key that names what a credential is for, letters outside ASCII, and a letter-only value with one trailing
+// punctuation mark. The last ones include prose ("auth: déjàvuxx", "auth: unauthorized,") that cannot be told
+// apart from a password: over-redaction kept by decision (#194, threat model G4.4).
+func redactedOnMainCases() []gapCase {
+	const shortPassword, letterToken, auth = "hunter2", "letteronlytoken", "auth: "
+	values := []struct{ key, value string }{
+		// Kebab-case keys ending in a short key, outside the prose prefixes.
+		{"db-pass: ", "supersecret"},
+		{"db-pass: ", shortPassword},
+		{"admin-pass: ", "s3cr3t"},
+		{"signing-key-pass: ", "correcthorse"},
+		{"db-pass:\n  ", shortPassword},
+		{"pre-x-auth: ", "secretvalue"},
+		{"proxy-auth: ", letterToken},
+		{"api-auth: ", letterToken},
+		{"two-x-pass: ", letterToken},
+		// Letters outside ASCII count as symbols.
+		{auth, "motdepassé"},
+		{auth, "Passwörter"},
+		{auth, "contraseña"},
+		{auth, "déjàvuxx"},
+		// One trailing punctuation mark counts as a symbol.
+		{auth, "Passwort."},
+		{auth, "Sunshine:"},
+		{auth, "abcdefgh;"},
+		{auth, "unauthorized,"},
+	}
+	cases := make([]gapCase, 0, len(values))
+	for _, c := range values {
+		in := c.key + c.value
+		cases = append(cases, gapCase{"redacted on main " + in, in + nextField,
+			[]string{strings.TrimRight(c.value, ",.;:")}, []string{nextField}})
+	}
+	return cases
+}
+
+// Differential check against main before #194: every input it redacted stays redacted.
+func TestStillRedactsWhatMainRedacted(t *testing.T) {
+	checkGapCases(t, redactedOnMainCases())
+}
+
+func checkGapCases(t *testing.T, cases []gapCase) {
+	t.Helper()
+	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			out := String(c.input)
 			for _, s := range c.secrets {
@@ -426,6 +491,18 @@ func TestGapRulesKeepUsefulText(t *testing.T) {
 		`auth: "failed"`,
 		"Basic\nnext",
 		`{"x":1}`,
+		// Issue #194: a short key after a prose word and a hyphen. Letter-only values with accents or a
+		// trailing punctuation mark, and a long word after Basic or Bearer, stay redacted by decision
+		// (TestStillRedactsWhatMainRedacted, TestGapCases).
+		"pre-auth: ok",
+		"two-pass: true",
+		"multi-sig: enabled",
+		"post-auth: failed for user bob",
+		"re-auth: required",
+		"single-pass:\n  12 of 12\n",
+		// Scripts without ASCII letters are not judged by letters ("auth: विफलहुआ", combining marks).
+		"auth: विफलहुआ",
+		"auth: 认证失败。",
 	} {
 		if out := String(in); out != in {
 			t.Errorf("changed useful text:\n in: %q\nout: %q", in, out)

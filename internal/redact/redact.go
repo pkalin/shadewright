@@ -32,11 +32,15 @@ limitations under the License.
 // Secret is what a diagnosis needs, and so is the hex of an image digest.
 //
 // Where a rule would also match prose, it asks the value to look like a credential: the word after "Basic"
-// or "Bearer", and the value of the short keys "pass", "auth" and "sig" on their own before a colon ("pass:
-// 12 fail: 0"), inline or in a block on the following lines, count only with a value of at least 8 bytes
-// that mixes letters with digits or symbols (blanks too when the value is quoted, as in a passphrase; 16
-// bytes of anything after Basic or Bearer, or base64 of "user:password" after Basic). So "Bearer abc12" and
-// "auth: hunter2" pass through.
+// or "Bearer", and the value of the short keys "pass", "auth" and "sig" before a colon, on their own ("pass:
+// 12 fail: 0") or after one of a few prose words and a hyphen ("pre-auth: ok", "two-pass: true"), inline or
+// in a block on the following lines, count only with a value of at least 8 bytes that mixes ASCII letters
+// with digits or symbols (blanks too when the value is quoted, as in a passphrase; 16 bytes of anything after
+// Basic or Bearer, or base64 of "user:password" after Basic). So "Bearer abc12" and "auth: hunter2" pass
+// through, while any other hyphenated key ("db-pass", "proxy-auth") always counts. Any byte that is not an
+// ASCII letter counts as a symbol, so "auth: déjàvuxx" and "auth: unauthorized," are redacted, and so is
+// "basic internationalization": over-redaction kept by decision (#194), because these cannot be told apart
+// from a password or token.
 //
 // Known gaps: JSON escaped more than three times, a Kubernetes environment entry whose "value" comes before
 // its "name" or more than 16 lines after it, and a secret in a format no rule knows.
@@ -234,14 +238,13 @@ func isReference(key string) bool {
 	return false
 }
 
-// bareShortColon reports whether the key in group 1 of m is one of the short names "pass", "auth" or "sig"
-// on its own, unquoted and followed by a colon. In that form it is as often a label in prose ("pass: 12
-// fail: 0", "auth: failed for user bob") as a key, so its value counts only when it looks like a secret.
-// As "key=value", quoted, or as the last part of a longer key ("DB_PASS", "basic_auth") it always counts.
+// bareShortColon reports whether the key in group 1 of m is a bare short key (isBareShortKey), unquoted and
+// followed by a colon. In that form it is as often a label in prose ("pass: 12 fail: 0", "auth: failed for
+// user bob", "pre-auth: ok") as a key, so its value counts only when it looks like a secret. As "key=value",
+// quoted, or as the last part of any other longer key ("DB_PASS", "basic_auth", "db-pass", "proxy-auth") it
+// always counts.
 func bareShortColon(s string, m []int) bool {
-	switch strings.ToLower(s[m[2]:m[3]]) {
-	case "pass", "auth", "sig":
-	default:
+	if !isBareShortKey(s[m[2]:m[3]]) {
 		return false
 	}
 	i := m[3]
@@ -249,6 +252,30 @@ func bareShortColon(s string, m []int) bool {
 		i++
 	}
 	return i < len(s) && s[i] == ':'
+}
+
+// proseShortKeyPrefixes are the words that, before a hyphen, make a short key read as prose ("pre-auth",
+// "two-pass", "multi-sig") rather than as a key. The list is closed and short on purpose: any other word
+// ("db-pass", "admin-pass", "proxy-auth") names what the credential is for, so such a key always counts.
+var proseShortKeyPrefixes = []string{"pre", "post", "re", "two", "multi", "single"}
+
+// isBareShortKey reports whether key is one of the short names "pass", "auth" or "sig" on its own, in any
+// case, or in lower case after exactly one word of proseShortKeyPrefixes and a hyphen ("pre-auth", but not
+// "Pre-Auth", "pre-x-auth" or "db-pass").
+func isBareShortKey(key string) bool {
+	switch strings.ToLower(key) {
+	case "pass", "auth", "sig":
+		return true
+	}
+	prefix, short, ok := strings.Cut(key, "-")
+	if !ok {
+		return false
+	}
+	switch short {
+	case "pass", "auth", "sig":
+		return slices.Contains(proseShortKeyPrefixes, prefix)
+	}
+	return false
 }
 
 // looksLikeSecret reports whether v has the shape of a credential rather than of prose: at least 8 bytes,

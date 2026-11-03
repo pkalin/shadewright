@@ -46,7 +46,7 @@ Shadewright watches your cluster, groups repeated symptoms into incidents, asks 
 
 -   **5. Verify**
 
-    After merge, it follows Flux to the applied revision and checks that the symptom is gone.
+    After merge, it follows the GitOps controller (Flux today) to the applied revision and checks that the symptom is gone.
 
 </div>
 

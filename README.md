@@ -15,7 +15,7 @@
 2. **Diagnoses** with rules first, then a model that has read-only tools and redacted context. No evidence, no proposal.
 3. **Proposes** a typed `RemediationRequest` from a closed catalog of actions, checked by deterministic policy.
 4. **Opens a pull request** in your GitOps repository, with the evidence and a rollback plan. Your branch rules decide what merges.
-5. **Verifies** the result after Flux applies it, and escalates when the symptom stays.
+5. **Verifies** the result after the GitOps controller (Flux today) applies it, and escalates when the symptom stays.
 
 It never writes to the cluster directly, and a model's answer is never authorization.
 

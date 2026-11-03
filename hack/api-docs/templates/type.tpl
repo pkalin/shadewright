@@ -65,6 +65,16 @@ Quantity under another anchor. */ -}}
 {{- . | trim | replace "\n" " " | replace "|" "\\|" | replace "<" "&lt;" -}}
 {{- end -}}
 
+{{- /* A code span for a table cell: a pipe would split the cell, and an escaped one would show its backslash
+on the docs site, so text with a pipe becomes a <code> element with the pipe as an entity. */ -}}
+{{- define "tablecode" -}}
+{{- if contains "|" . -}}
+<code>{{ . | replace "&" "&amp;" | replace "<" "&lt;" | replace "|" "&#124;" }}</code>
+{{- else -}}
+`{{ . }}`
+{{- end -}}
+{{- end -}}
+
 {{- define "validation" -}}
 {{- $parts := splitn ": " 2 . -}}
 {{- $key := $parts._0 -}}

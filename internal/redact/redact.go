@@ -626,20 +626,21 @@ func nextLineBlock(s string, pos, keyCol int, bare bool, add func(start, end int
 			addValue(inlineValue(s, vpos, l.end))
 		}
 	}
-	if mode == scalar {
-		if bare && !blockLooksLikeSecret(s, start, end) {
-			return end
-		}
-		if start < end && (s[start] == '"' || s[start] == '\'') {
-			// A quoted scalar that is the whole value keeps its quotes.
-			if qe := quotedEnd(s, start); qe > 0 && strings.TrimRight(s[qe:end], " \t") == "" {
-				add(start+1, qe-1)
-				return end
-			}
-		}
-		add(start, end)
+	if mode == scalar && (!bare || blockLooksLikeSecret(s, start, end)) {
+		add(scalarValue(s, start, end))
 	}
 	return end
+}
+
+// scalarValue returns the part of the scalar block value s[start:end] to redact: the text between the
+// quotes of a quoted scalar that is the whole value, so it keeps its quotes, otherwise all of it.
+func scalarValue(s string, start, end int) (int, int) {
+	if start < end && (s[start] == '"' || s[start] == '\'') {
+		if qe := quotedEnd(s, start); qe > 0 && strings.TrimRight(s[qe:end], " \t") == "" {
+			return start + 1, qe - 1
+		}
+	}
+	return start, end
 }
 
 // envEntryLines bounds the lines of an environment entry read to find its "value": Kubernetes writes it

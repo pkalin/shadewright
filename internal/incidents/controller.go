@@ -336,8 +336,9 @@ func (c *Controller) flushDue(ctx context.Context, all bool) {
 }
 
 // flush writes one pending batch. The batch is taken out of pending first, so observations arriving during
-// the write start a new one; if the write fails, the batch goes back and is tried again at the next tick,
-// so nothing is lost. Each attempt reads the Incident fresh: a conflict is retried on the new version, and a
+// the write start a new one; if the write fails, the batch goes back and is tried again RetryAfter later,
+// so nothing is lost. A batch the API server refuses as invalid is dropped and logged instead: trying it
+// again cannot succeed. Each attempt reads the Incident fresh: a conflict is retried on the new version, and a
 // batch the status already holds (a write that succeeded but whose answer was lost) is not added twice.
 func (c *Controller) flush(ctx context.Context, fp string) {
 	c.mu.Lock()
@@ -352,6 +353,18 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 	inc, dropped, err := c.write(wctx, b)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	var refused *refusedError
+	if errors.As(err, &refused) {
+		// Trying again cannot help: the batch is dropped, and an Incident that was never created frees its
+		// place under the cap.
+		if !refused.exists {
+			delete(c.names, Name(fp))
+		}
+		c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.Window)
+		logf.FromContext(ctx).Error(err, "Dropped observations the API server refuses to store", "incident", Name(fp),
+			"count", b.count)
+		return
+	}
 	if err != nil {
 		if p := c.pending[fp]; p != nil {
 			b.add(p)
@@ -384,25 +397,41 @@ func (c *Controller) write(ctx context.Context, b *batch) (*remediationv1alpha1.
 				ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name},
 				Spec:       b.spec,
 			}
-			err = c.client.Create(ctx, inc)
+			if err = c.client.Create(ctx, inc); apierrors.IsInvalid(err) {
+				return &refusedError{err: err}
+			}
 		}
 		if err != nil {
 			return err
 		}
 		if inc.Spec.Fingerprint != b.spec.Fingerprint {
-			return fmt.Errorf("incident %s holds fingerprint %s, not %s", key.Name, inc.Spec.Fingerprint, b.spec.Fingerprint)
+			return &refusedError{exists: true,
+				err: fmt.Errorf("incident %s holds fingerprint %s, not %s", key.Name, inc.Spec.Fingerprint, b.spec.Fingerprint)}
 		}
 		if applied(&inc.Status, b) {
 			return nil
 		}
 		dropped = merge(&inc.Status, b)
-		return c.client.Status().Update(ctx, inc)
+		if err = c.client.Status().Update(ctx, inc); apierrors.IsInvalid(err) {
+			return &refusedError{exists: true, err: err}
+		}
+		return err
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("writing Incident %s: %w", key.Name, err)
 	}
 	return inc, dropped, nil
 }
+
+// refusedError is a write that can never succeed: the API server refuses the object as invalid, or the
+// Incident of that name holds another fingerprint. exists says whether the Incident exists.
+type refusedError struct {
+	err    error
+	exists bool
+}
+
+func (e *refusedError) Error() string { return e.err.Error() }
+func (e *refusedError) Unwrap() error { return e.err }
 
 // retriable reports whether a write is tried again at once on a fresh read: a conflict, or a create that
 // lost a race to another writer.

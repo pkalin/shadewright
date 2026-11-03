@@ -469,3 +469,19 @@ func TestIncidentHoldsOnlyTheSymptom(t *testing.T) {
 		t.Fatalf("name %s, want %s", inc.Name, want)
 	}
 }
+
+// An Incident the API server refuses as invalid is not tried again and does not hold a place under the cap.
+func TestRefusedIncidentIsDroppedAndFreesItsPlace(t *testing.T) {
+	ns := namespace(t)
+	r := start(t, ns, Config{MaxIncidents: 1, Window: 100 * time.Millisecond, RetryAfter: 50 * time.Millisecond})
+	now := time.Now().Truncate(time.Second)
+	bad := observation(1, 1, 1, 1, now)
+	bad.Symptom = strings.Repeat("x", 1025) // the schema allows 1024 characters
+	r.obs <- bad
+	time.Sleep(time.Second)
+	if n := r.writes.creates.Load(); n != 1 {
+		t.Fatalf("%d creates of a refused Incident, want 1", n)
+	}
+	r.obs <- observation(2, 2, 1, 1, now)
+	eventually(t, ns, 2, countIs(1))
+}

@@ -1,0 +1,48 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "tunnel-cloudflare-tunnel-remote-7b8c9d6f4-p9z5w", "namespace": "edge", "uid": "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+    "labels": {"pod": "cloudflared", "pod-template-hash": "7b8c9d6f4"},
+    "annotations": {"checksum/secret": "5e8b2c1d0f9a8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d"},
+    "ownerReferences": [{"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "tunnel-cloudflare-tunnel-remote-7b8c9d6f4",
+      "uid": "2d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f6a", "controller": true, "blockOwnerDeletion": true}]
+  },
+  "spec": {
+    "containers": [{
+      "name": "cloudflared",
+      "image": "cloudflare/cloudflared:latest",
+      "command": ["cloudflared", "tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "run"],
+      "env": [{"name": "TUNNEL_TOKEN", "valueFrom": {"secretKeyRef": {"name": "tunnel-cloudflare-tunnel-remote", "key": "tunnelToken"}}}],
+      "livenessProbe": {"httpGet": {"path": "/ready", "port": 2000, "scheme": "HTTP"}, "initialDelaySeconds": 10,
+        "periodSeconds": 10, "timeoutSeconds": 1, "successThreshold": 1, "failureThreshold": 1}
+    }]
+  },
+  "status": {
+    "phase": "Running",
+    "conditions": [
+      {"type": "PodReadyToStartContainers", "status": "True", "lastProbeTime": null, "lastTransitionTime": "2026-11-04T08:00:03Z"},
+      {"type": "Initialized", "status": "True", "lastProbeTime": null, "lastTransitionTime": "2026-11-04T08:00:00Z"},
+      {"type": "Ready", "status": "False", "lastProbeTime": null, "lastTransitionTime": "2026-11-04T08:01:10Z",
+        "reason": "ContainersNotReady", "message": "containers with unready status: [cloudflared]"},
+      {"type": "ContainersReady", "status": "False", "lastProbeTime": null, "lastTransitionTime": "2026-11-04T08:01:10Z",
+        "reason": "ContainersNotReady", "message": "containers with unready status: [cloudflared]"},
+      {"type": "PodScheduled", "status": "True", "lastProbeTime": null, "lastTransitionTime": "2026-11-04T08:00:00Z"}
+    ],
+    "startTime": "2026-11-04T08:00:00Z", "qosClass": "BestEffort",
+    "containerStatuses": [{
+      "name": "cloudflared",
+      "state": {"waiting": {"reason": "CrashLoopBackOff",
+        "message": "back-off 2m40s restarting failed container=cloudflared pod=tunnel-cloudflare-tunnel-remote-7b8c9d6f4-p9z5w_edge(1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f)"}},
+      "lastState": {"terminated": {"exitCode": 1, "reason": "Error", "startedAt": "2026-11-04T08:09:31Z",
+        "finishedAt": "2026-11-04T08:09:32Z",
+        "containerID": "containerd://4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b"}},
+      "ready": false,
+      "restartCount": 6,
+      "image": "docker.io/cloudflare/cloudflared:latest",
+      "imageID": "docker.io/cloudflare/cloudflared@sha256:3f1b9e0c8d7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c",
+      "containerID": "containerd://4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b",
+      "started": false
+    }]
+  }
+}

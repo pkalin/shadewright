@@ -1,0 +1,48 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "cloudflared-6d9f7c8b5d-x2k8q", "namespace": "demo", "uid": "6b1f0d2e-3c4a-4b5d-8e6f-7a8b9c0d1e2f",
+    "generateName": "cloudflared-6d9f7c8b5d-",
+    "labels": {"pod": "cloudflared", "pod-template-hash": "6d9f7c8b5d"},
+    "ownerReferences": [{"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "cloudflared-6d9f7c8b5d",
+      "uid": "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", "controller": true, "blockOwnerDeletion": true}]
+  },
+  "spec": {
+    "serviceAccountName": "cloudflared",
+    "containers": [{
+      "name": "cloudflared",
+      "image": "cloudflare/cloudflared:2026.10.7",
+      "imagePullPolicy": "IfNotPresent",
+      "command": ["cloudflared", "tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "run"],
+      "env": [{"name": "TUNNEL_TOKEN", "valueFrom": {"secretKeyRef": {"name": "cloudflared", "key": "tunnelToken"}}}],
+      "readinessProbe": {"httpGet": {"path": "/ready", "port": 2000, "scheme": "HTTP"}, "periodSeconds": 10,
+        "timeoutSeconds": 1, "successThreshold": 1, "failureThreshold": 3},
+      "resources": {}
+    }]
+  },
+  "status": {
+    "phase": "Running",
+    "conditions": [
+      {"type": "PodReadyToStartContainers", "status": "True", "lastProbeTime": null, "lastTransitionTime": "2026-11-04T08:00:03Z"},
+      {"type": "Initialized", "status": "True", "lastProbeTime": null, "lastTransitionTime": "2026-11-04T08:00:00Z"},
+      {"type": "Ready", "status": "False", "lastProbeTime": null, "lastTransitionTime": "2026-11-04T09:12:40Z",
+        "reason": "ContainersNotReady", "message": "containers with unready status: [cloudflared]"},
+      {"type": "ContainersReady", "status": "False", "lastProbeTime": null, "lastTransitionTime": "2026-11-04T09:12:40Z",
+        "reason": "ContainersNotReady", "message": "containers with unready status: [cloudflared]"},
+      {"type": "PodScheduled", "status": "True", "lastProbeTime": null, "lastTransitionTime": "2026-11-04T08:00:00Z"}
+    ],
+    "startTime": "2026-11-04T08:00:00Z", "qosClass": "BestEffort",
+    "containerStatuses": [{
+      "name": "cloudflared",
+      "state": {"running": {"startedAt": "2026-11-04T08:00:04Z"}},
+      "lastState": {},
+      "ready": false,
+      "restartCount": 0,
+      "image": "docker.io/cloudflare/cloudflared:2026.10.7",
+      "imageID": "docker.io/cloudflare/cloudflared@sha256:3f1b9e0c8d7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c",
+      "containerID": "containerd://9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b",
+      "started": true
+    }]
+  }
+}

@@ -110,6 +110,8 @@ type fixture struct {
 	duringGit func(c client.Client)
 	// afterGet runs after every successful read of an object, to change the cluster between two reads.
 	afterGet func(c client.Client, obj client.Object)
+	// cache, when set, is the resolver's read cache, shared by every run of the fixture.
+	cache *sourcemap.ReadCache
 }
 
 // onHead calls fn once, when the branch head is read.
@@ -280,6 +282,7 @@ func (f *fixture) run(t *testing.T) (sourcemap.Result, string, error) {
 	cl := b.Build()
 	r := &sourcemap.Resolver{
 		Client: cl,
+		Cache:  f.cache,
 		OpenRepository: func(_ context.Context, repo v1alpha1.GitRepository) (providers.GitProvider, error) {
 			if repo.Name != "fleet" {
 				return nil, fmt.Errorf("opened repository %s", repo.Name)
@@ -383,6 +386,7 @@ func TestResolveFindsTheSource(t *testing.T) {
 			if *res.Source != want {
 				t.Errorf("source = %+v, want %+v", *res.Source, want)
 			}
+			sameWithCache(t, tc.change, res)
 		})
 	}
 }
@@ -748,6 +752,7 @@ func TestResolveStops(t *testing.T) {
 			if strings.Contains(res.Message, "://") {
 				t.Errorf("message quotes a URL: %s", res.Message)
 			}
+			sameWithCache(t, tc.change, res)
 		})
 	}
 }

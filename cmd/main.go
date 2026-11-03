@@ -112,11 +112,18 @@ func main() {
 		return settings.Spec.Repositories, nil
 	}}
 
+	// The policy check and the freshness rechecks share one resolver. Its cache keeps file reads at a commit,
+	// which never change, so a plan rechecked every five minutes does not scan the same tree again.
+	source := &sourcemap.Resolver{
+		Client:         mgr.GetAPIReader(),
+		OpenRepository: repos.Open,
+		Cache:          sourcemap.NewReadCache(sourcemap.DefaultCacheEntries, sourcemap.DefaultCacheBytes),
+	}
 	if err := (&controller.RemediationRequestReconciler{
 		Client:         mgr.GetClient(),
 		Scheme:         mgr.GetScheme(),
 		APIReader:      mgr.GetAPIReader(),
-		Source:         &sourcemap.Resolver{Client: mgr.GetAPIReader(), OpenRepository: repos.Open},
+		Source:         source,
 		OpenRepository: repos.Open,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "remediationrequest")

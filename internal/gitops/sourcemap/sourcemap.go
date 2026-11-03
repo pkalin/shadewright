@@ -48,6 +48,9 @@ type Resolver struct {
 	Client client.Reader
 	// OpenRepository opens the repository the source URL matched.
 	OpenRepository RepositoryOpener
+	// Cache, when set, keeps file reads at a commit across mappings, such as the freshness rechecks of a
+	// waiting plan. Branch heads and cluster objects are read every time. Nil reads everything every time.
+	Cache *ReadCache
 }
 
 // Input is what one mapping needs. Repositories and GitOps come from admin-owned configuration; Target and
@@ -256,7 +259,12 @@ func (r *Resolver) scan(ctx context.Context, git providers.GitProvider, head str
 				"spec.path of Kustomization %s is not a relative path inside the repository", d.ks), nil
 		}
 	}
-	w := newWalker(git, head)
+	cache := r.Cache
+	repoDigest, ok := repoKey(d.repo)
+	if !ok {
+		cache = nil
+	}
+	w := newWalker(git, head, cache, repoDigest)
 	if stop, err := w.walk(ctx, dir, 0); stop != nil || err != nil {
 		return deref(stop), err
 	}

@@ -277,6 +277,12 @@ func TestPermissionBoundary(t *testing.T) {
 		{"analyzer", "create", group, "incidents", "", otherNS, false},
 		{"analyzer", "patch", group, "incidents", "status", otherNS, false},
 		{"analyzer", "create", group, "incidents", "", unwatched, false},
+		// The Warning event at the Incident cap: written in the operator namespace only, never deleted.
+		{"analyzer", "create", "events.k8s.io", "events", "", operatorNS, true},
+		{"analyzer", "patch", "events.k8s.io", "events", "", operatorNS, true},
+		{"analyzer", "create", "events.k8s.io", "events", "", otherNS, false},
+		{"analyzer", "patch", "events.k8s.io", "events", "", otherNS, false},
+		{"analyzer", "delete", "events.k8s.io", "events", "", operatorNS, false},
 		// Reads only in the watched namespaces, never cluster-wide.
 		{"analyzer", "list", "events.k8s.io", "events", "", otherNS, true},
 		{"analyzer", "watch", "", "pods", "", otherNS, true},

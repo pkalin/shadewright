@@ -59,12 +59,19 @@ spec:
           - --health-probe-bind-address=:8081
           # One RoleBinding per namespace here, in config/watch (test/rbac checks they match).
           - --watch-namespaces=demo
+          # Hashed into every fingerprint: give each cluster its own. The Helm chart (#83) sets it from a value.
+          - --cluster-id=lab
         image: controller:latest
         env:
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        # The Warning event at the Incident cap is about this Pod.
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
         name: analyzer
         ports:
         - containerPort: 8081

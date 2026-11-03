@@ -20,8 +20,10 @@ limitations under the License.
 //
 // The analyzer's permissions (design 2.2, 10.1) come in three parts:
 //
-//   - In the operator namespace (a Role): Incidents and their status, and create on RemediationRequests.
-//     Incidents live there, next to the requests that point at them (IncidentRef is same-namespace).
+//   - In the operator namespace (a Role): Incidents and their status, create on RemediationRequests, and
+//     create and patch on events.k8s.io Events, for the Warning event about the analyzer's own Pod when the
+//     Incident cap is reached (package incidents). Incidents live there, next to the requests that point at
+//     them (IncidentRef is same-namespace).
 //   - Cluster-wide (a ClusterRole with a ClusterRoleBinding): read the cluster-scoped RemediationSettings,
 //     and nothing namespaced.
 //   - In each watched namespace: the reads in package collector, a ClusterRole bound by one RoleBinding per
@@ -30,5 +32,6 @@ limitations under the License.
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=incidents,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=incidents/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=remediationrequests,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=events.k8s.io,namespace=system,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationsettings,verbs=get;list;watch
 package analyzer

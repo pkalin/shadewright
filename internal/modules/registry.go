@@ -17,6 +17,7 @@ limitations under the License.
 package modules
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -86,9 +87,10 @@ type integrationEntry struct {
 // [MaxIntegrations] integrations, a nil module (a typed nil included), an invalid name or detection, a name
 // given twice on one axis, a node label listed twice by one platform, a provider ID scheme without node labels,
 // two platforms with the same provider ID scheme and the same node labels, which could never be told apart, or
-// a symptom source that [SymptomSource.Validate] refuses, or a kind watched twice, by one module or by two (on
-// either axis). Platform and integration names are separate: one of each may share a name. The registry keeps
-// a copy of each module's hooks as they were validated; [Registry.PlatformHooks] and
+// a symptom source that [SymptomSource.Validate] refuses, a kind watched twice, by one module or by two (on
+// either axis), or a diagnosis rule with an invalid or repeated name or with neither an event nor a node
+// function. Platform and integration names are separate: one of each may share a name. The registry keeps
+// a copy of each module's hooks as they were validated, read once, here; [Registry.PlatformHooks] and
 // [Registry.IntegrationHooks] return that copy.
 func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 	if len(platforms) > MaxPlatforms {
@@ -102,7 +104,12 @@ func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 		integrationByName: map[string]integrationEntry{},
 		platformLabels:    map[string]bool{},
 	}
-	r.addPlatform(platformEntry{name: GenericPlatform, module: generic{}})
+	g := generic{}
+	gh := cloneHooks(g.Hooks())
+	if err := validateRules(gh.Rules); err != nil {
+		return nil, fmt.Errorf("platform module %q: %w", GenericPlatform, err)
+	}
+	r.addPlatform(platformEntry{name: GenericPlatform, module: g, hooks: gh})
 	claims := map[string]string{}  // scheme and labels to platform name
 	watched := map[string]string{} // group and kind to the module that watches it
 	for i, p := range platforms {
@@ -127,7 +134,7 @@ func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 		}
 		label := fmt.Sprintf("platform module %q", name)
 		e.hooks = cloneHooks(p.Hooks())
-		if err := validateSources(label, e.hooks.Symptoms, watched); err != nil {
+		if err := errors.Join(validateSources(label, e.hooks.Symptoms, watched), validateRules(e.hooks.Rules)); err != nil {
 			return nil, fmt.Errorf("%s: %w", label, err)
 		}
 		e.module = p
@@ -151,7 +158,7 @@ func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 		}
 		label := fmt.Sprintf("integration module %q", name)
 		hooks := cloneHooks(in.Hooks())
-		if err := validateSources(label, hooks.Symptoms, watched); err != nil {
+		if err := errors.Join(validateSources(label, hooks.Symptoms, watched), validateRules(hooks.Rules)); err != nil {
 			return nil, fmt.Errorf("%s: %w", label, err)
 		}
 		e := integrationEntry{name: name, module: in, detection: d, hooks: hooks}
@@ -162,6 +169,25 @@ func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 	slices.SortFunc(r.platforms, func(a, b platformEntry) int { return strings.Compare(a.name, b.name) })
 	slices.SortFunc(r.integrations, func(a, b integrationEntry) int { return strings.Compare(a.name, b.name) })
 	return r, nil
+}
+
+// validateRules checks the diagnosis rules of one module: each has a valid name, given once, and an event or
+// a node function.
+func validateRules(rules []DiagnosisRule) error {
+	seen := map[string]bool{}
+	for _, r := range rules {
+		if !ValidName(r.Name) {
+			return fmt.Errorf("rule name %q is invalid", r.Name)
+		}
+		if seen[r.Name] {
+			return fmt.Errorf("rule %q is listed twice", r.Name)
+		}
+		seen[r.Name] = true
+		if r.Event == nil && r.Node == nil {
+			return fmt.Errorf("rule %q has neither an event nor a node function", r.Name)
+		}
+	}
+	return nil
 }
 
 // addPlatform records a platform entry for listing, lookup and detection.

@@ -34,6 +34,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -310,11 +311,22 @@ func TestPermissionBoundary(t *testing.T) {
 		{"analyzer", "list", "events.k8s.io", "events", "", "", false},
 		{"analyzer", "list", "", "pods", "", operatorNS, false},
 		{"analyzer", "list", group, "remediationsettings", "", "", true},
-		// Nothing of the settings is written by the analyzer, status included: the daily analysis budget is
-		// a ConfigMap of its own (TestAnalysisBudgetIsTheOnlyConfigMap).
+		// The analyzer's one write on the settings is an update of their status subresource, the detection
+		// report (ADR-0024); no patch, no read of the subresource, nothing on the spec. The daily analysis
+		// budget is a ConfigMap of its own (TestAnalysisBudgetIsTheOnlyConfigMap).
 		{"analyzer", "get", group, "remediationsettings", "status", "", false},
-		{"analyzer", "update", group, "remediationsettings", "status", "", false},
+		{"analyzer", "update", group, "remediationsettings", "status", "", true},
 		{"analyzer", "patch", group, "remediationsettings", "status", "", false},
+		{"analyzer", "update", group, "remediationpolicies", "", "", false},
+		{"executor", "update", group, "remediationsettings", "status", "", false},
+		// Platform detection lists nodes cluster-wide; nothing else on them, so no informer and no write.
+		{"analyzer", "list", "", "nodes", "", "", true},
+		{"analyzer", "get", "", "nodes", "", "", false},
+		{"analyzer", "watch", "", "nodes", "", "", false},
+		{"analyzer", "update", "", "nodes", "", "", false},
+		{"analyzer", "patch", "", "nodes", "status", "", false},
+		{"analyzer", "delete", "", "nodes", "", "", false},
+		{"executor", "list", "", "nodes", "", "", false},
 		{"analyzer", "update", group, "remediationsettings", "", "", false},
 		{"analyzer", "patch", group, "remediationsettings", "", "", false},
 		{"analyzer", "create", group, "remediationsettings", "", "", false},
@@ -554,6 +566,43 @@ func TestBudgetNameMatchesTheBinary(t *testing.T) {
 	}
 	if len(names) != 1 || names[0] != incidents.BudgetName {
 		t.Errorf("the analyzer Role may update ConfigMaps %v, binary uses %q", names, incidents.BudgetName)
+	}
+}
+
+// TestSettingsStatusRealCalls makes the analyzer's detection write as its ServiceAccount: an update of the
+// settings status succeeds, an update of the spec and a patch of the status are refused, and nodes can be
+// listed but not read one by one.
+func TestSettingsStatusRealCalls(t *testing.T) {
+	ctx := t.Context()
+	asAnalyzer := impersonate(t, analyzer)
+	s := &remediationv1alpha1.RemediationSettings{ObjectMeta: metav1.ObjectMeta{Name: remediationv1alpha1.SettingsName}}
+	if err := admin.Create(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Delete(context.Background(), s) })
+
+	var got remediationv1alpha1.RemediationSettings
+	if err := asAnalyzer.Get(ctx, client.ObjectKeyFromObject(s), &got); err != nil {
+		t.Fatalf("analyzer cannot read the settings: %v", err)
+	}
+	got.Status.Platform = &remediationv1alpha1.PlatformStatus{Active: remediationv1alpha1.GenericPlatform}
+	if err := asAnalyzer.Status().Update(ctx, &got); err != nil {
+		t.Fatalf("analyzer cannot update the settings status: %v", err)
+	}
+	paused := true
+	got.Spec.Paused = &paused
+	if err := asAnalyzer.Update(ctx, &got); !apierrors.IsForbidden(err) {
+		t.Errorf("analyzer updating the settings spec = %v, want forbidden", err)
+	}
+	patch := client.RawPatch(types.MergePatchType, []byte(`{"status":{"observedGeneration":7}}`))
+	if err := asAnalyzer.Status().Patch(ctx, &got, patch); !apierrors.IsForbidden(err) {
+		t.Errorf("analyzer patching the settings status = %v, want forbidden", err)
+	}
+	if err := asAnalyzer.List(ctx, &corev1.NodeList{}); err != nil {
+		t.Errorf("analyzer cannot list nodes: %v", err)
+	}
+	if err := asAnalyzer.Get(ctx, client.ObjectKey{Name: "any"}, &corev1.Node{}); !apierrors.IsForbidden(err) {
+		t.Errorf("analyzer getting a node = %v, want forbidden", err)
 	}
 }
 

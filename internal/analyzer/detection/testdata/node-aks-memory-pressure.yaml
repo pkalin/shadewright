@@ -1,0 +1,29 @@
+# An AKS node under memory pressure.
+apiVersion: v1
+kind: Node
+metadata:
+  name: aks-nodepool1-12345678-vmss000001
+  labels:
+    kubernetes.azure.com/agentpool: nodepool1
+    kubernetes.azure.com/cluster: MC_lab_shadewright_swedencentral
+    kubernetes.io/os: linux
+spec:
+  providerID: azure:///subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/mc_lab_shadewright_swedencentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-12345678-vmss/virtualMachines/1
+status:
+  conditions:
+  - type: VMEventScheduled
+    status: "False"
+    reason: NoVMEventScheduled
+    message: VM has no scheduled event
+  - type: MemoryPressure
+    status: "True"
+    reason: KubeletHasInsufficientMemory
+    message: kubelet has insufficient memory available
+  - type: DiskPressure
+    status: "False"
+    reason: KubeletHasNoDiskPressure
+    message: kubelet has no disk pressure
+  - type: Ready
+    status: "True"
+    reason: KubeletReady
+    message: kubelet is posting ready status

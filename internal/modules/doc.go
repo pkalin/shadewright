@@ -44,6 +44,13 @@ limitations under the License.
 // joining, a virtual node) are left out; the cluster is on a platform when every other node is, and generic
 // otherwise.
 //
+// [Registry.Select] works out the active modules from the names the cluster admin enabled and a detection,
+// never from a status written earlier: generic always, the detected platform when it is enabled, and the
+// detected integrations that are enabled. The [Selection] turns into RemediationSettings status and runs the
+// [DiagnosisRule] values of its active modules on events and nodes. A rule writes its own reason and summary;
+// every evidence value it read from the cluster is redacted and bounded here before it leaves the package.
+// The generic platform's rules (node pressure and capacity hints) are active on every platform.
+//
 // This package imports only the standard library and this module, and nothing it depends on is a product SDK
 // or an adapter (ADR-0013).
 package modules

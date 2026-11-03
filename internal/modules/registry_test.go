@@ -179,12 +179,49 @@ func TestLookUp(t *testing.T) {
 	}
 }
 
-func TestGenericContributesNothing(t *testing.T) {
+func TestGenericHasRulesOnly(t *testing.T) {
 	g, _ := mustNew(t, nil, nil).Platform(GenericPlatform)
 	h := g.Hooks()
 	if g.Detection().ProviderIDScheme != "" || len(g.Detection().NodeLabels) != 0 ||
-		len(h.Symptoms)+len(h.Rules)+len(h.Tools)+len(h.Actions) != 0 {
-		t.Errorf("generic = %+v, %+v; want no detection and no hooks", g.Detection(), h)
+		len(h.Symptoms)+len(h.Tools)+len(h.Actions) != 0 {
+		t.Errorf("generic = %+v, %+v; want no detection, tools, actions or symptom sources", g.Detection(), h)
+	}
+	names := make([]string, 0, len(h.Rules))
+	for _, r := range h.Rules {
+		names = append(names, r.Name)
+	}
+	if !slices.Equal(names, []string{RuleNodePressure, RuleInsufficientCapacity}) {
+		t.Errorf("generic rules = %v", names)
+	}
+}
+
+// rulePlatform is a platform with rules, for the rule checks of New.
+type rulePlatform struct {
+	stubPlatform
+	rules []DiagnosisRule
+}
+
+func (p rulePlatform) Hooks() Hooks { return Hooks{Rules: p.rules} }
+
+func TestNewRefusesBadRules(t *testing.T) {
+	ev := func(Event) (Symptom, bool) { return Symptom{}, false }
+	cases := []struct {
+		name  string
+		rules []DiagnosisRule
+		want  string
+	}{
+		{"invalid name", []DiagnosisRule{{Name: "Bad_Name", Event: ev}}, `rule name "Bad_Name" is invalid`},
+		{"name twice", []DiagnosisRule{{Name: "r", Event: ev}, {Name: "r", Event: ev}}, `rule "r" is listed twice`},
+		{"no function", []DiagnosisRule{{Name: "r"}}, `rule "r" has neither an event nor a node function`},
+	}
+	for _, c := range cases {
+		_, err := New([]Platform{rulePlatform{stubPlatform: aks, rules: c.rules}}, nil)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: New = %v, want an error with %q", c.name, err, c.want)
+		}
+	}
+	if _, err := New([]Platform{rulePlatform{stubPlatform: aks, rules: []DiagnosisRule{{Name: "r", Event: ev}}}}, nil); err != nil {
+		t.Errorf("a valid rule: New = %v", err)
 	}
 }
 

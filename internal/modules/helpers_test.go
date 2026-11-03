@@ -39,6 +39,7 @@ const (
 	labelY      = "a.example/y"
 	twoName     = "two"
 	capzName    = "capz"
+	azureID     = "azure:///x"
 )
 
 // stubPlatform and stubIntegration are detection-only modules for the tests.

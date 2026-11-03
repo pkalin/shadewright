@@ -1,0 +1,17 @@
+# The default scheduler finds no node with room for a pod.
+apiVersion: events.k8s.io/v1
+kind: Event
+metadata:
+  name: worker-5c8d9f7b6-q4w7e.18a2b3c4d5e6f7d1
+  namespace: demo
+reason: FailedScheduling
+type: Warning
+reportingController: default-scheduler
+action: Scheduling
+note: '0/3 nodes are available: 1 node(s) had untolerated taint {CriticalAddonsOnly: true}, 2 Insufficient memory. preemption: 0/3 nodes are available: 1 Preemption is not helpful for scheduling, 2 No preemption victims found for incoming pod.'
+regarding:
+  apiVersion: v1
+  kind: Pod
+  namespace: demo
+  name: worker-5c8d9f7b6-q4w7e
+  uid: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d

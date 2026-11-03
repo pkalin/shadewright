@@ -1,0 +1,17 @@
+# The cluster autoscaler reports a scale-up that Azure refused for vCPU quota.
+apiVersion: events.k8s.io/v1
+kind: Event
+metadata:
+  name: cluster-autoscaler-status.18a2b3c4d5e6f7b9
+  namespace: kube-system
+reason: FailedToScaleUpGroup
+type: Warning
+reportingController: cluster-autoscaler
+action: ""
+note: 'Scale-up failed for group aks-user-12345678-vmss: Code="QuotaExceeded" Message="Operation could not be completed as it results in exceeding approved standardDSv5Family Cores quota. Additional details - Deployment Model: Resource Manager, Location: swedencentral, Current Limit: 10, Current Usage: 8, Additional Required: 4, (Minimum) New Limit Required: 12."'
+regarding:
+  apiVersion: v1
+  kind: ConfigMap
+  namespace: kube-system
+  name: cluster-autoscaler-status
+  uid: 5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d

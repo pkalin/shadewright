@@ -358,6 +358,21 @@ func gapCases() []gapCase {
 			[]string{opaque}, []string{"\n  indented: line"}},
 		{"token after an image digest", "image x@sha256:" + rep("a1", 32) + "-" + randomToken + endText,
 			[]string{randomToken}, []string{"sha256:" + rep("a1", 32) + "-", endText}},
+		// Issue #194: what stays redacted next to the prose that is now kept.
+		{"hyphenated short key with a secret value", "pre-auth: " + opaque + nextField, []string{opaque}, []string{nextField}},
+		{"x header short key", "x-auth: " + wordTail + nextField, []string{wordTail}, []string{nextField}},
+		{"capitalised hyphenated short key", "Proxy-Auth: " + wordTail + nextField, []string{wordTail}, []string{nextField}},
+		{"hyphenated key with a secret word", "token-auth: yes" + nextField, []string{"yes"}, []string{nextField}},
+		{"dotted short key", "app.auth: " + wordTail + nextField, []string{wordTail}, []string{nextField}},
+		{"short secret before a comma", "auth: hunter2," + endText, []string{"hunter2"}, []string{endText}},
+		{"non-ascii letters with a digit", "auth: пароль12" + endText, []string{"пароль12"}, []string{endText}},
+		{"symbol inside a word", "auth: unauth!orized" + endText, []string{"unauth!orized"}, []string{endText}},
+		{"mixed-case letters after bearer", "Bearer " + wordTail + endText, []string{wordTail}, []string{"Bearer ", endText}},
+		{"upper-case letters after bearer", "Bearer " + strings.ToUpper(wordTail) + endText,
+			[]string{strings.ToUpper(wordTail)}, []string{endText}},
+		{"consonant run after bearer", "Bearer eaioustrwaeiouaeio" + endText, []string{"eaioustrwaeiouaeio"}, []string{endText}},
+		{"few vowels after bearer", "Bearer acknowledgements" + endText, []string{"acknowledgements"}, []string{endText}},
+		{"long lower-case letters after bearer", "bearer " + rep("opaque", 4) + endText, []string{rep("opaque", 4)}, []string{endText}},
 	}
 }
 
@@ -426,6 +441,18 @@ func TestGapRulesKeepUsefulText(t *testing.T) {
 		`auth: "failed"`,
 		"Basic\nnext",
 		`{"x":1}`,
+		// Issue #194: a short key after lower-case words joined by hyphens, punctuation after a word,
+		// non-ASCII letters and a long word after Basic or Bearer.
+		"pre-auth: ok",
+		"two-pass: true",
+		"multi-sig: enabled",
+		"auth: unauthorized,",
+		"auth: unauthorized, retrying",
+		"auth: déjàvuxx",
+		"basic internationalization",
+		"Bearer Internationalization failed",
+		"Bearer authentication.",
+		"no bearer internationalization.",
 	} {
 		if out := String(in); out != in {
 			t.Errorf("changed useful text:\n in: %q\nout: %q", in, out)

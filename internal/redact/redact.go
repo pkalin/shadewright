@@ -32,14 +32,20 @@ limitations under the License.
 // Secret is what a diagnosis needs, and so is the hex of an image digest.
 //
 // Where a rule would also match prose, it asks the value to look like a credential: the word after "Basic"
-// or "Bearer", and the value of the short keys "pass", "auth" and "sig" on their own before a colon ("pass:
-// 12 fail: 0"), inline or in a block on the following lines, count only with a value of at least 8 bytes
-// that mixes letters with digits or symbols (blanks too when the value is quoted, as in a passphrase; 16
-// bytes of anything after Basic or Bearer, or base64 of "user:password" after Basic). So "Bearer abc12" and
-// "auth: hunter2" pass through.
+// or "Bearer", and the value of the short keys "pass", "auth" and "sig" before a colon, on their own ("pass:
+// 12 fail: 0") or after lower-case words joined by hyphens ("pre-auth: ok", but not "x-auth" or a key holding
+// a secret word), inline or in a block on the following lines, count only with a value of at least 8 bytes
+// that mixes letters of any script with digits or symbols (blanks too when the value is quoted, as in a
+// passphrase; one ",", ".", ";" or ":" at the end of an unquoted value is punctuation, not a symbol). After
+// Basic or Bearer a value also counts from 16 bytes unless it has the shape of a word: lower case after an
+// optional capital, ASCII letters only, shorter than 24 bytes, at most three consonants in a row and at least
+// three eighths vowels ("internationalization"); and after Basic, base64 of "user:password". So "Bearer
+// abc12", "auth: hunter2", "auth: unauthorized," and "basic internationalization" pass through.
 //
 // Known gaps: JSON escaped more than three times, a Kubernetes environment entry whose "value" comes before
-// its "name" or more than 16 lines after it, and a secret in a format no rule knows.
+// its "name" or more than 16 lines after it, a secret of letters a-z only after Basic or Bearer that has the
+// shape of a word (a random one of 16 to 23 such letters does about one time in 20 to 50), and a secret in a
+// format no rule knows.
 package redact
 
 import (
@@ -51,6 +57,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -234,14 +241,13 @@ func isReference(key string) bool {
 	return false
 }
 
-// bareShortColon reports whether the key in group 1 of m is one of the short names "pass", "auth" or "sig"
-// on its own, unquoted and followed by a colon. In that form it is as often a label in prose ("pass: 12
-// fail: 0", "auth: failed for user bob") as a key, so its value counts only when it looks like a secret.
-// As "key=value", quoted, or as the last part of a longer key ("DB_PASS", "basic_auth") it always counts.
+// bareShortColon reports whether the key in group 1 of m is a bare short key (isBareShortKey), unquoted and
+// followed by a colon. In that form it is as often a label in prose ("pass: 12 fail: 0", "auth: failed for
+// user bob", "pre-auth: ok") as a key, so its value counts only when it looks like a secret. As "key=value",
+// quoted, or as the last part of any other longer key ("DB_PASS", "basic_auth", "app.auth", "X-Auth",
+// "token-auth") it always counts.
 func bareShortColon(s string, m []int) bool {
-	switch strings.ToLower(s[m[2]:m[3]]) {
-	case "pass", "auth", "sig":
-	default:
+	if !isBareShortKey(s[m[2]:m[3]]) {
 		return false
 	}
 	i := m[3]
@@ -251,22 +257,52 @@ func bareShortColon(s string, m []int) bool {
 	return i < len(s) && s[i] == ':'
 }
 
+// proseShortKey matches a short key after lower-case words joined by hyphens, as in prose ("pre-auth",
+// "two-pass", "multi-sig").
+var proseShortKey = regexp.MustCompile(`^(?:[a-z]+-)+(?:pass|auth|sig)$`)
+
+// secretWord matches a key name that holds a secret word (secretWordExpr) anywhere in it.
+var secretWord = regexp.MustCompile(`(?i)` + secretWordExpr)
+
+// isBareShortKey reports whether key is one of the short names "pass", "auth" or "sig" on its own, in any
+// case, or after lower-case words joined by hyphens (proseShortKey), unless the first word is "x" (an HTTP
+// header such as "x-auth") or the key holds a secret word ("token-auth"). Longer keys with "_", ".", digits
+// or upper case ("DB_PASS", "app.auth", "X-Auth") are not bare.
+func isBareShortKey(key string) bool {
+	switch strings.ToLower(key) {
+	case "pass", "auth", "sig":
+		return true
+	}
+	return proseShortKey.MatchString(key) && !strings.HasPrefix(key, "x-") && !secretWord.MatchString(key)
+}
+
 // looksLikeSecret reports whether v has the shape of a credential rather than of prose: at least 8 bytes,
-// no whitespace, and a letter together with a digit or a symbol.
+// no whitespace, and a letter together with a digit or a symbol. Letters are those of any script, so
+// "déjàvuxx" is a word. One ",", ".", ";" or ":" at the end is taken for the punctuation of the
+// surrounding text and is not a symbol ("unauthorized,"), but it still counts towards the length.
 func looksLikeSecret(v string) bool {
-	return !strings.ContainsFunc(v, func(r rune) bool { return r <= ' ' }) && looksLikeQuotedSecret(v)
+	if strings.ContainsFunc(v, func(r rune) bool { return r <= ' ' }) || len(v) < 8 {
+		return false
+	}
+	shape := v
+	if c := v[len(v)-1]; c == ',' || c == '.' || c == ';' || c == ':' {
+		shape = v[:len(v)-1]
+	}
+	return mixesLetterAndOther(shape)
 }
 
 // looksLikeQuotedSecret is looksLikeSecret for a quoted value, which may hold blanks (a passphrase such as
 // "correct horse battery staple"): at least 8 bytes and a letter together with a digit, a symbol or a blank.
 func looksLikeQuotedSecret(v string) bool {
-	if len(v) < 8 {
-		return false
-	}
+	return len(v) >= 8 && mixesLetterAndOther(v)
+}
+
+// mixesLetterAndOther reports whether v holds a letter of any script together with any other character, an
+// invalid UTF-8 byte included.
+func mixesLetterAndOther(v string) bool {
 	var letter, other bool
-	for i := range len(v) {
-		c := v[i]
-		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+	for _, r := range v {
+		if unicode.IsLetter(r) {
 			letter = true
 		} else {
 			other = true
@@ -297,21 +333,62 @@ func blockLooksLikeSecret(s string, start, end int) bool {
 	return false
 }
 
-// minSchemeWord is the length from which any value after Basic or Bearer counts: longer than the words
-// that follow them in prose ("authentication").
+// minSchemeWord is the length from which a value of letters only after Basic or Bearer counts unless it
+// looks like a word: longer than the words that most often follow them in prose ("authentication").
 const minSchemeWord = 16
 
 // schemeSpan judges the value after "Basic" or "Bearer" (group 2) outside an Authorization header. Prose
 // follows these words too ("failed basic health check", "missing Bearer token"), so the value counts when it
-// looks like a credential (looksLikeSecret), is at least minSchemeWord bytes long (an opaque token of
-// letters only), or, after Basic, is padded base64 of "user:password" in printable text, which catches
-// short ones such as "dTpw" ("u:p").
+// looks like a credential (looksLikeSecret), is at least minSchemeWord bytes long and, without one full stop
+// at the end, not a word (looksLikeWord: an opaque token of letters only), or, after Basic, is padded base64
+// of "user:password" in printable text, which catches short ones such as "dTpw" ("u:p").
 func schemeSpan(s string, m []int, _ int) (int, int, bool) {
 	v := s[m[4]:m[5]]
-	if looksLikeSecret(v) || len(v) >= minSchemeWord || strings.EqualFold(s[m[2]:m[3]], "basic") && isBasicCredential(v) {
+	if looksLikeSecret(v) || len(v) >= minSchemeWord && !looksLikeWord(strings.TrimSuffix(v, ".")) ||
+		strings.EqualFold(s[m[2]:m[3]], "basic") && isBasicCredential(v) {
 		return m[4], m[5], true
 	}
 	return 0, 0, false
+}
+
+// Shape of a word for looksLikeWord. Long words of prose rarely hold more than three consonants in a row
+// ("instrumentation" holds four) and are at least three eighths vowels ("internationalization": half), while
+// a run of random letters from a-z, where a letter is a vowel with odds 6 in 26, passes both checks only
+// about one time in 20 at 16 letters and one in 50 at 20.
+const (
+	maxConsonantRun = 3
+	minVowelEighths = 3
+)
+
+// looksLikeWord reports whether v, after Basic or Bearer, has the shape of a long word of prose
+// ("internationalization") rather than of an opaque token: shorter than minTokenLength, only ASCII letters,
+// lower case after an optional capital, no run of more than maxConsonantRun consonants, and at least
+// minVowelEighths eighths vowels (a, e, i, o, u and y). Mixed or upper case, a digit or a symbol makes it a
+// token, so a letters-only token is kept only when it is lower case and pronounceable, and a word of
+// unusual shape ("acknowledgements") is redacted.
+func looksLikeWord(v string) bool {
+	if len(v) >= minTokenLength {
+		return false
+	}
+	run, vowels := 0, 0
+	for i := range len(v) {
+		c := v[i]
+		if i == 0 && c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		switch {
+		case c < 'a' || c > 'z':
+			return false
+		case strings.IndexByte("aeiouy", c) >= 0:
+			run = 0
+			vowels++
+		default:
+			if run++; run > maxConsonantRun {
+				return false
+			}
+		}
+	}
+	return 8*vowels >= minVowelEighths*len(v)
 }
 
 // isBasicCredential reports whether v is standard padded base64 of printable text holding a colon.

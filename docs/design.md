@@ -131,6 +131,8 @@ A `Platform` module per provider, detected from node `providerID` and labels. Th
 
 Order: generic and AKS first; EKS and GKE as detection-only skeletons; Cluster API when a real case needs it.
 
+The registries are built (`internal/modules`); no module is wired into the operator yet. There is no global registry: each binary builds one immutable registry at start-up from an explicit list of compiled-in modules ([ADR-0019](adr/0019-extension-packaging.md)), and a name given twice, or a provider ID scheme or node label claimed by two platforms, stops the start. Detection is a pure function of the nodes' `providerID` values and labels: a node's provider ID scheme (`azure`, `aws`, `gce`) decides, its labels only when it has no provider ID. The cluster is on a platform only when every node is; no nodes, a node no module claims, or nodes on different platforms give generic, since diagnosis for the wrong platform is worse than none.
+
 ### 2.5. Cluster integrations
 
 An `Integration` module per add-on: detection (API groups, CRDs, versions), watched kinds and how their conditions become symptoms, deterministic diagnosis rules, read-only tools for the analyzer, redaction rules, verification checks, and optionally actions that follow the same rules as every action (typed, bounded, policy rule, GitOps patcher, refusal test). Integrations that guard security diagnose only: they explain a refusal or a missing secret, and never propose to relax a policy, change a secret or suppress a finding.
@@ -145,6 +147,8 @@ An `Integration` module per add-on: detection (API groups, CRDs, versions), watc
 | cloudflared | tunnel down, so the application is unreachable | none |
 
 Later candidates: External Secrets Operator, Reloader, cert-manager, Trivy Operator, Karpenter. Modules are enabled per cluster in `RemediationSettings`, and the operator reports what it detected in status.
+
+An integration is detected when the discovery API serves any of the group versions it declares (KEDA: `keda.sh/v1alpha1`), again as a pure function of the list the caller collected. Detection by other signals, such as the image of a Deployment for cloudflared, comes with the module that needs it. A module's contributions (symptom sources, diagnosis rules, read-only tools, catalog actions) are declared in one value whose zero value contributes nothing, so a detection-only module is a name and its detection.
 
 ## 3. Observation and deduplication
 

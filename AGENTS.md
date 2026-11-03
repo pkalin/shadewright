@@ -94,7 +94,7 @@ Every issue names the ADRs it is tied to:
 ## Design choices
 
 - Providers sit behind interfaces so the project stays generic: `GitProvider` (GitHub first, Azure DevOps later), `DeliveryVerifier` (Flux first, Argo CD later), `ModelProvider` (Microsoft Foundry first). Do not import a provider SDK outside its adapter package.
-- Layout beyond the Kubebuilder scaffold: `cmd/analyzer`, `internal/analyzer` (with the collector), `internal/{incidents,policy,gitops,redact,providers,cmdutil}`; planned: `internal/{context,analysis,remediation,verification,tools}`, `test/scenarios`.
+- Layout beyond the Kubebuilder scaffold: `cmd/analyzer`, `internal/analyzer` (with the collector), `internal/{incidents,policy,gitops,redact,providers,modules,cmdutil}`; planned: `internal/{context,analysis,remediation,verification,tools}`, `test/scenarios`.
 - `Incident` keeps deduplication state (fingerprint, counters, timestamps) and must survive restarts. Never put raw logs or large payloads in a CR.
 
 ## Commands

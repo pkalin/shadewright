@@ -686,6 +686,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			})
 
 			It("ends the request without a retry when the repository settings can never open a provider", func() {
+				Expect(reconcileOnce()).To(Succeed()) // deadline
 				openErr = fmt.Errorf("client ID: %w", providers.ErrInvalidConfig)
 				res, err := reconcileResult()
 				Expect(err).NotTo(HaveOccurred(), "a permanent refusal is not retried")

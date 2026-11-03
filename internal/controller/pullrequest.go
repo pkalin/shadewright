@@ -168,16 +168,25 @@ func (r *RemediationRequestReconciler) advance(ctx context.Context, rr *remediat
 	return reconcile.Result{RequeueAfter: freshRecheckInterval}, nil
 }
 
-// openPullRequest does the next step towards an open pull request: set the deadline, add the finalizer,
-// create the branch, commit the change or open the pull request, one of them per call.
+// startDeadline stores status.deadline of the pull request step, in its own status write. recheck calls it
+// before the first freshness check of a PolicyChecked request, so the deadline also bounds a freshness check
+// that never passes.
+func (r *RemediationRequestReconciler) startDeadline(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	reconcile.Result, error) {
+	rr.Status.Deadline = &metav1.Time{Time: r.now().Add(r.pullRequestTimeout())}
+	if err := r.Status().Update(ctx, rr); err != nil {
+		return reconcile.Result{}, fmt.Errorf("set the deadline of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	return reconcile.Result{RequeueAfter: stepDelay}, nil
+}
+
+// openPullRequest does the next step towards an open pull request: add the finalizer, create the branch,
+// commit the change or open the pull request, one of them per call. The deadline is already stored.
 func (r *RemediationRequestReconciler) openPullRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if rr.Status.Deadline == nil {
-		rr.Status.Deadline = &metav1.Time{Time: r.now().Add(r.pullRequestTimeout())}
-		if err := r.Status().Update(ctx, rr); err != nil {
-			return reconcile.Result{}, fmt.Errorf("set the deadline of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
-		}
-		return reconcile.Result{RequeueAfter: stepDelay}, nil
+		// recheck stores it before the freshness check; kept so a later caller cannot skip it.
+		return r.startDeadline(ctx, rr)
 	}
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
 		base := rr.DeepCopy()

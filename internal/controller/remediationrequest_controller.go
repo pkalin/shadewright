@@ -457,6 +457,11 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 	if r.OpenRepository == nil || !beforeMerge(rr.Status.Phase) || rr.Status.PlanDigest == "" {
 		return ctrl.Result{}, nil
 	}
+	if rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked && rr.Status.Deadline == nil {
+		// The deadline is stored before the first Git call, so a request whose freshness check never passes
+		// (a Git host that stays down) still ends in Expired instead of retrying for ever.
+		return r.startDeadline(ctx, rr)
+	}
 	outcome := prOpen
 	if rr.Status.PullRequest != nil {
 		if outcome = r.watchPullRequest(ctx, rr); outcome == prStopped {

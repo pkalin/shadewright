@@ -103,7 +103,7 @@ make vulncheck            # govulncheck ./...; standard library findings depend 
 make test                 # unit + envtest (real kube-apiserver and etcd, no cluster needed)
 KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.37.0 --bin-dir "$PWD/bin" -p path)" \
   go test ./internal/controller/... -ginkgo.focus "RemediationRequest"   # one spec; run `make test` once first, the bin dir must be absolute
-make test-e2e             # creates an isolated Kind cluster; CI runs it, not needed locally
+make test-e2e             # installs the pinned kind (KIND_VERSION) into bin/ and creates an isolated cluster; CI runs it, not needed locally
 make build                # bin/manager
 make run                  # controller against the current kubeconfig context
 ```

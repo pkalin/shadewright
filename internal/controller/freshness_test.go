@@ -193,9 +193,14 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 	})
 
 	It("leaves a fresh plan alone, also after a merge that does not touch the file", func() {
-		_, err := git.Push(mainBranch, "README.yaml", []byte("a: 2\n"))
+		moved, err := git.Push(mainBranch, "README.yaml", []byte("a: 2\n"))
 		Expect(err).NotTo(HaveOccurred())
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		// The moved head is rendered once and recorded; the plan itself is left as it is.
 		before := fetch()
+		Expect(before.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(before.Status.PullRequest.RenderedTargetHead).To(Equal(moved))
 		_, err = reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fetch().ResourceVersion).To(Equal(before.ResourceVersion))

@@ -428,6 +428,15 @@ spec:
                     format: int64
                     minimum: 1
                     type: integer
+                  renderedTargetHead:
+                    description: |-
+                      renderedTargetHead is the head of the target branch at which the change in the pull request was last
+                      rendered and found to be exactly the planned one. While the pull request waits, the change is rendered
+                      again only when the target branch head is another commit; empty means not rendered since it was recorded.
+                    maxLength: 40
+                    minLength: 40
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
                   url:
                     description: url of the pull request.
                     maxLength: 2048

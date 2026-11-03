@@ -245,33 +245,41 @@ type Checker struct {
 // It returns a [*StaleError] when an input definitely changed, [ErrPaused] when settings pause writes, and
 // another error when an input could not be read. In every case except nil the caller must not write.
 func (c Checker) Fresh(ctx context.Context, rr *v1alpha1.RemediationRequest) error {
+	_, err := c.FreshAt(ctx, rr)
+	return err
+}
+
+// FreshAt is [Checker.Fresh] that also returns the head of the target branch the target file was checked at,
+// so the caller can render the change at that commit without reading the head again. The head is set only
+// when the error is nil.
+func (c Checker) FreshAt(ctx context.Context, rr *v1alpha1.RemediationRequest) (string, error) {
 	src := rr.Status.Source
 	if rr.Status.PlanDigest == "" || src == nil {
-		return errors.New("the request has no plan digest")
+		return "", errors.New("the request has no plan digest")
 	}
 
 	pol, settings, repo, err := c.loadPlan(ctx, rr)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	live, err := c.checkTarget(ctx, rr, pol)
 	if err != nil {
-		return err
+		return "", err
 	}
 	commit, observed, err := c.checkSource(ctx, rr, pol, settings)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := c.checkFile(ctx, rr, repo, commit); err != nil {
-		return err
+		return "", err
 	}
 	// The mapping and the Git reads (up to readTimeout each) take long. Revalidate last what they were based
 	// on: the target (UID and resource version, since the mapping compared the live object with Git) and the
 	// Flux objects the mapping saw. If any changed meanwhile, the checks above describe different objects: not
 	// fresh, not stale; the caller retries.
 	if err := c.recheckInputs(ctx, rr, live, observed); err != nil {
-		return err
+		return "", err
 	}
 	// Read the policy and the settings once more, last, before saying "fresh": a pause, a tightened or deleted
 	// policy, or a changed repository entry meanwhile must not pass. It is not decided
@@ -281,16 +289,18 @@ func (c Checker) Fresh(ctx context.Context, rr *v1alpha1.RemediationRequest) err
 		// A read that answered as the context ended may have been cut short, and "fresh" has a deadline of its
 		// own: nil is returned only while the context is live.
 		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("the plan was checked, but the check ran out of time: %w", err)
+			return "", fmt.Errorf("the plan was checked, but the check ran out of time: %w", err)
 		}
-		return nil
+		// checkFile compared the mapped commit with the head before and after its read, so it is the head the
+		// file was checked at.
+		return commit, nil
 	case errors.Is(err, ErrPaused):
-		return err
+		return "", err
 	default:
 		if _, isStale := errors.AsType[*StaleError](err); isStale {
-			return errors.New("the policy or the settings changed while the plan was checked, checking again")
+			return "", errors.New("the policy or the settings changed while the plan was checked, checking again")
 		}
-		return err
+		return "", err
 	}
 }
 

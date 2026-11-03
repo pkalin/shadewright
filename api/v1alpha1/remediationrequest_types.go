@@ -218,6 +218,15 @@ type PullRequestStatus struct {
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
 	// +required
 	HeadSHA string `json:"headSHA"`
+
+	// renderedTargetHead is the head of the target branch at which the change in the pull request was last
+	// rendered and found to be exactly the planned one. While the pull request waits, the change is rendered
+	// again only when the target branch head is another commit; empty means not rendered since it was recorded.
+	// +kubebuilder:validation:MinLength=40
+	// +kubebuilder:validation:MaxLength=40
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	// +optional
+	RenderedTargetHead string `json:"renderedTargetHead,omitempty"`
 }
 
 // PlanRepository identifies the repository a plan was made for: the URL and provider installation taken from

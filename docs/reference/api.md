@@ -489,6 +489,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `number` | integer | Yes | number of the pull request.<br>Minimum: 1 |
 | `url` | string | Yes | url of the pull request.<br>Maximum length: 2048<br>Pattern: `^https://` |
 | `headSHA` | string | Yes | headSHA is the commit Shadewright pushed. Any other head stops automation.<br>Pattern: `^[0-9a-f]{40}$` |
+| `renderedTargetHead` | string | No | renderedTargetHead is the head of the target branch at which the change in the pull request was last rendered and found to be exactly the planned one. While the pull request waits, the change is rendered again only when the target branch head is another commit; empty means not rendered since it was recorded.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
 
 ### RecordID
 

@@ -217,14 +217,15 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			"**Risk:**", "**Rollback:**"} {
 			Expect(cr.Body).To(ContainSubstring(part))
 		}
+		main, err := git.BranchHead(ctx, mainBranch)
+		Expect(err).NotTo(HaveOccurred())
 		Expect(got.Status.PullRequest).To(Equal(&remediationv1alpha1.PullRequestStatus{
-			Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}))
+			Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA, RenderedTargetHead: main}),
+			"the change is rendered once more at the target branch head after the pull request is recorded")
 
 		file, err := git.ReadFile(ctx, cr.HeadSHA, sourcePath)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(file.Data).To(Equal(manifest("384Mi")), "one value changed, nothing else")
-		main, err := git.BranchHead(ctx, mainBranch)
-		Expect(err).NotTo(HaveOccurred())
 		onMain, err := git.ReadFile(ctx, main, sourcePath)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(onMain.Data).To(Equal(manifest("256Mi")), "the target branch is never written")
@@ -499,6 +500,150 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(openRequests()).To(BeEmpty())
 	})
 
+	// Issue #181: the target branch can move under the change twice, between cutting the branch and the commit,
+	// and while the pull request waits. Both are covered by one rule: the change is rendered at the head of the
+	// target branch, and while the pull request waits, again whenever that head moves.
+	Context("when the target branch moves under the change", func() {
+		BeforeEach(func() {
+			faulty = newFaultyGit(git)
+			// Build from apps, the parent of the target's directory, as for a Flux Kustomization at apps that
+			// lists overlays. The digest covers the build directory, so the plan is digested again, as the
+			// policy check would.
+			_, err := git.Push(mainBranch, "apps/kustomization.yaml", []byte(
+				"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - orders\n"))
+			Expect(err).NotTo(HaveOccurred())
+			build = "apps"
+			got := fetch()
+			got.Status.Source.BuildPath = build
+			got.Status.PlanDigest, err = freshness.ComputeDigest(got, got.Status.Source, policy, settings)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		})
+
+		// addOverlay merges, as someone else would, a second overlay that reuses the patched base under another
+		// name: once the pull request merges, its change reaches b-<name> as well. It returns the new head.
+		addOverlay := func() string {
+			GinkgoHelper()
+			_, err := git.Push(mainBranch, "apps/copy/kustomization.yaml", []byte(
+				"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamePrefix: b-\nresources:\n  - ../orders\n"))
+			Expect(err).NotTo(HaveOccurred())
+			head, err := git.Push(mainBranch, "apps/kustomization.yaml", []byte(
+				"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - orders\n  - copy\n"))
+			Expect(err).NotTo(HaveOccurred())
+			return head
+		}
+		// stoppedWaiting asserts that the request stopped with reason after its pull request was recorded, and
+		// that the pull request is left open for a person.
+		stoppedWaiting := func(reason string) {
+			GinkgoHelper()
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(reason))
+			for _, text := range []string{"b-", "copy", "namePrefix", "320Mi", "memory"} {
+				Expect(cond.Message).NotTo(ContainSubstring(text), "no file content in the status")
+			}
+			Expect(meta.IsStatusConditionTrue(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)).To(BeTrue())
+			crs := openRequests()
+			Expect(crs).To(HaveLen(1))
+			Expect(crs[0].State).To(Equal(providers.ChangeRequestOpen), "the pull request is left for a person")
+			Expect(crs[0].HeadSHA).To(Equal(got.Status.PullRequest.HeadSHA), "nothing is pushed or rebuilt")
+		}
+
+		It("stops a waiting pull request when a merge adds an overlay that reuses the patched base", func() {
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			rendered := got.Status.PullRequest.RenderedTargetHead
+			Expect(rendered).NotTo(BeEmpty())
+
+			addOverlay()
+			Expect(reconcileOnce()).To(Succeed())
+			stoppedWaiting(string(semdiff.ReasonOtherObjectChanged))
+			Expect(fetch().Status.PullRequest.RenderedTargetHead).To(Equal(rendered), "a refused head is not recorded")
+			Expect(reconcileOnce()).To(Succeed(), "a stopped request takes no further step")
+			stoppedWaiting(string(semdiff.ReasonOtherObjectChanged))
+		})
+
+		It("stops a waiting pull request when a merge changes another field of the target file", func() {
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			// The freshness check still sees the previous limit, but merging would combine this edit with the
+			// change, and no render saw that file.
+			_, err := git.Push(mainBranch, sourcePath, withMemoryRequest(manifest("256Mi"), "320Mi"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reconcileOnce()).To(Succeed())
+			stoppedWaiting(ReasonTargetFileDiverged)
+		})
+
+		It("renders at the target branch head when it moved between cutting the branch and the commit", func() {
+			for faulty.count(opCreateBranch) == 0 {
+				Expect(reconcileOnce()).To(Succeed())
+			}
+			branch := freshness.BranchName(fetch())
+			cut, err := git.BranchHead(ctx, branch)
+			Expect(err).NotTo(HaveOccurred())
+			// The branch was cut before the overlay was merged: its own tree still renders as planned.
+			addOverlay()
+			got := drive(remediationv1alpha1.PhaseNeedsIntervention)
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+			Expect(cond.Reason).To(Equal(string(semdiff.ReasonOtherObjectChanged)))
+			Expect(cond.Message).To(ContainSubstring("nothing was committed"))
+			head, err := git.BranchHead(ctx, branch)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(head).To(Equal(cut), "nothing was committed")
+			Expect(faulty.count(opCommit)).To(BeZero())
+			Expect(openRequests()).To(BeEmpty())
+		})
+
+		It("reads nothing more from Git while the target branch head stays where it was rendered", func() {
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			version := got.ResourceVersion
+			for range 3 {
+				reads, heads := faulty.count(opReadFile), faulty.count(opBranchHead)
+				builds := faulty.count(opReadFile + " " + buildKustomize)
+				res, err := reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res.RequeueAfter).To(Equal(freshRecheckInterval))
+				// The freshness check's own reads only: the head before and after the target file, and the file.
+				Expect(faulty.count(opReadFile)-reads).To(Equal(1), "only the freshness check reads a file")
+				Expect(faulty.count(opBranchHead)-heads).To(Equal(2), "only the freshness check reads the head")
+				Expect(faulty.count(opReadFile + " " + buildKustomize)).To(Equal(builds))
+			}
+			Expect(fetch().ResourceVersion).To(Equal(version), "nothing is written either")
+
+			// A merge elsewhere moves the head: the change is rendered once at the new head, which is recorded.
+			moved, err := git.Push(mainBranch, "README.yaml", []byte("a: 2\n"))
+			Expect(err).NotTo(HaveOccurred())
+			builds := faulty.count(opReadFile + " " + buildKustomize)
+			Expect(reconcileOnce()).To(Succeed())
+			Expect(faulty.count(opReadFile + " " + buildKustomize)).To(BeNumerically(">", builds))
+			got = fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			Expect(got.Status.PullRequest.RenderedTargetHead).To(Equal(moved))
+		})
+
+		It("retries a failed read of the render, as long as GitHub asks, without stopping the request", func() {
+			rendered := drive(remediationv1alpha1.PhaseAwaitingApproval).Status.PullRequest.RenderedTargetHead
+			moved, err := git.Push(mainBranch, "README.yaml", []byte("a: 2\n"))
+			Expect(err).NotTo(HaveOccurred())
+			faulty.failOn(opReadFile+" "+buildKustomize, &providers.RetryableError{
+				RetryAfter: 42 * time.Second, Err: errors.New("secondary rate limit")})
+			res, err := reconcileResult()
+			Expect(err).NotTo(HaveOccurred(), "a delay the host asked for is a wait, not an error")
+			Expect(res.RequeueAfter).To(Equal(42 * time.Second))
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			Expect(got.Status.PullRequest.RenderedTargetHead).To(Equal(rendered), "a head not rendered is not recorded")
+
+			faulty.failOn("", nil)
+			Expect(reconcileOnce()).To(Succeed())
+			Expect(fetch().Status.PullRequest.RenderedTargetHead).To(Equal(moved))
+		})
+	})
+
 	// The failure cases of design section 14 for the pull request step: a crash between an external call and
 	// the status write, Git host outages, and a target file that changes while the request waits.
 	Context("when something fails on the way", func() {
@@ -563,8 +708,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				crs := openRequests()
 				Expect(crs).To(HaveLen(1))
 				Expect(hasMarker(crs[0].Body, got)).To(BeTrue())
+				main, err := git.BranchHead(ctx, mainBranch)
+				Expect(err).NotTo(HaveOccurred())
 				Expect(got.Status.PullRequest).To(Equal(&remediationv1alpha1.PullRequestStatus{
-					Number: crs[0].Number, URL: crs[0].URL, HeadSHA: crs[0].HeadSHA}))
+					Number: crs[0].Number, URL: crs[0].URL, HeadSHA: crs[0].HeadSHA, RenderedTargetHead: main}))
 			})
 
 			It("adopts the pull request after the status write that records it failed, and opens no second one", func() {

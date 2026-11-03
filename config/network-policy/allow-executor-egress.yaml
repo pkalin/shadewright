@@ -2,7 +2,7 @@
 # A NetworkPolicy cannot match host names: the destinations are only reachable by port. 443 is the model
 # endpoint, Key Vault, Entra ID, GitHub and the Kubernetes API on managed clusters; 6443 is the API server
 # on kubeadm and kind. The API server address is not selectable by label, so both ports are open to any
-# address. To narrow this to addresses or names see "Network policies" in docs/design.md (section 10).
+# address. To narrow this to addresses or names see design section 10.6 (Network).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

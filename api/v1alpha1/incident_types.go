@@ -149,6 +149,15 @@ type IncidentStatus struct {
 	// +optional
 	LastAnalysisTime *metav1.Time `json:"lastAnalysisTime,omitempty"`
 
+	// lastAnalysisDayCount is how many analyses of this incident ran on the UTC day of lastAnalysisTime, the
+	// one at lastAnalysisTime included. The analyzer sums it over the Incidents analyzed today to enforce
+	// RemediationSettings maxAnalysesPerDay, so a restart does not reset the daily budget. When
+	// lastAnalysisTime is set and this is 0 or absent, it counts as 1.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=10000
+	// +optional
+	LastAnalysisDayCount int32 `json:"lastAnalysisDayCount,omitempty"`
+
 	// analysisRecords are the newest analysis record IDs, oldest first.
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=20

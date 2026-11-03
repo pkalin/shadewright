@@ -323,6 +323,8 @@ var _ = Describe("Incident", func() {
 			}
 			s.Occurrences[0] = record("termination:"+strings.Repeat("ab", 16), 1)
 			s.OccurrencesDroppedThrough = &metav1.Time{Time: time.Unix(1700000000, 0)}
+			s.LastAnalysisTime = &metav1.Time{Time: time.Unix(1700000000, 0)}
+			s.LastAnalysisDayCount = 10000
 		})).To(Succeed())
 	})
 
@@ -356,6 +358,12 @@ var _ = Describe("Incident", func() {
 		Entry("a total above a series count", func(s *v1alpha1.IncidentStatus) {
 			s.Occurrences = []v1alpha1.OccurrenceRecord{record("event:abc", 2147483648)}
 		}, "status.occurrences[0].total"),
+		Entry("a day count of analyses above the largest daily budget", func(s *v1alpha1.IncidentStatus) {
+			s.LastAnalysisDayCount = 10001
+		}, "status.lastAnalysisDayCount"),
+		Entry("a negative day count of analyses", func(s *v1alpha1.IncidentStatus) {
+			s.LastAnalysisDayCount = -1
+		}, "status.lastAnalysisDayCount"),
 	)
 })
 

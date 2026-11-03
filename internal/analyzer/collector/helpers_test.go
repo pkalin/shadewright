@@ -18,6 +18,7 @@ package collector
 
 import (
 	"context"
+	"maps"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -45,6 +46,9 @@ const (
 	reasonError = "Error"
 	// containerApp is the container name of the test pods.
 	containerApp = "app"
+	// labelApp is the label key the test workloads select on.
+	labelApp = "app.kubernetes.io/name"
+	intruder = "intruder"
 )
 
 var (
@@ -223,14 +227,25 @@ func controllerRef(apiVersion, kind, name string, uid types.UID) []metav1.OwnerR
 	return []metav1.OwnerReference{{APIVersion: apiVersion, Kind: kind, Name: name, UID: uid, Controller: new(true)}}
 }
 
-// workload returns a Deployment, its ReplicaSet and a pod of it.
+// workload returns a Deployment, its ReplicaSet and a pod of it, with the labels and selectors their
+// controllers would set.
 func workload() (*appsv1.Deployment, *appsv1.ReplicaSet, *corev1.Pod) {
-	d := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: web, Namespace: testNS, UID: deployUID}}
-	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{
-		Name: webRS, Namespace: testNS, UID: rsUID, OwnerReferences: controllerRef(apiApps, kindDeployment, web, deployUID),
-	}}
+	appLabels := map[string]string{labelApp: web}
+	rsLabels := map[string]string{labelApp: web, "pod-template-hash": "7d4b9c8f6"}
+	d := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: web, Namespace: testNS, UID: deployUID},
+		Spec:       appsv1.DeploymentSpec{Selector: &metav1.LabelSelector{MatchLabels: appLabels}},
+	}
+	rs := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: webRS, Namespace: testNS, UID: rsUID, Labels: rsLabels,
+			OwnerReferences: controllerRef(apiApps, kindDeployment, web, deployUID),
+		},
+		Spec: appsv1.ReplicaSetSpec{Selector: &metav1.LabelSelector{MatchLabels: rsLabels}},
+	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name: webPod, Namespace: testNS, UID: podUID, OwnerReferences: controllerRef(apiApps, kindReplicaSet, webRS, rsUID),
+		Name: webPod, Namespace: testNS, UID: podUID, Labels: maps.Clone(rsLabels),
+		OwnerReferences: controllerRef(apiApps, kindReplicaSet, webRS, rsUID),
 	}}
 	return d, rs, pod
 }

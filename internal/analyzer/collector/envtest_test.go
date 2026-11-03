@@ -170,6 +170,10 @@ func bootEnv() error {
 	if err := env.col.SetupWithManager(mgr); err != nil {
 		return err
 	}
+	// Every object of these tests is created after the suite starts, so the collector counts as started
+	// before them: otherwise the first reconcile would set the start time, and the API server's creation
+	// timestamps, cut to the second, would make the first objects look older than the collector.
+	env.col.once.Do(func() { env.col.start = time.Now().Add(-time.Minute) })
 	go func() { _ = mgr.Start(ctx) }()
 	syncCtx, done := context.WithTimeout(ctx, 30*time.Second)
 	defer done()
@@ -287,7 +291,7 @@ func TestEnvtestOOMKilledWithoutAnEvent(t *testing.T) {
 	}
 	rs := &appsv1.ReplicaSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "oom-7d4b9c8f6", Namespace: watchedNS,
+			Name: "oom-7d4b9c8f6", Namespace: watchedNS, Labels: labels,
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: apiApps, Kind: kindDeployment, Name: d.Name, UID: d.UID, Controller: new(true),
 			}},

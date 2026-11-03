@@ -60,8 +60,9 @@ func newSeriesTracker(maxEvents int) *seriesTracker {
 	return t
 }
 
-// pending returns how many of an event's occurrences are not yet handled, and whether some of them may
-// have been emitted before (see Observation.MayRepeat). A count that goes down is never negative.
+// pending returns how many of an event's occurrences are known not to be handled yet, uncapped, and
+// whether the collector cannot tell (see Observation.MayRepeat), in which case the count is 0. A count
+// that goes down is never negative.
 func (t *seriesTracker) pending(key types.NamespacedName, uid types.UID, created, start time.Time,
 	occurrences int64) (int64, bool) {
 	t.mu.Lock()
@@ -69,8 +70,10 @@ func (t *seriesTracker) pending(key types.NamespacedName, uid types.UID, created
 	if s, ok := t.seen.get(key); ok && s.uid == uid {
 		return max(occurrences-s.handled, 0), false
 	}
-	mayRepeat := created.Before(start) || (!t.evictedHigh.IsZero() && !created.After(t.evictedHigh))
-	return occurrences, mayRepeat
+	if created.Before(start) || (!t.evictedHigh.IsZero() && !created.After(t.evictedHigh)) {
+		return 0, true
+	}
+	return occurrences, false
 }
 
 // commit records that occurrences of the event have been handled.
@@ -145,7 +148,7 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	n := occurrences(&ev)
 	created := ev.CreationTimestamp.Time
 	delta, mayRepeat := r.c.series.pending(req.NamespacedName, ev.UID, created, start, n)
-	if delta == 0 {
+	if delta == 0 && !mayRepeat {
 		return ctrl.Result{}, nil
 	}
 	obs, ok, err := r.c.fromEvent(ctx, &ev)
@@ -158,12 +161,13 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		r.c.series.commit(req.NamespacedName, ev.UID, created, n)
 		return ctrl.Result{}, nil
 	}
-	obs.Count, obs.MayRepeat = delta, mayRepeat
-	skip, err := r.c.skipRepeat(ctx, &obs)
+	obs.Occurrence = "event:" + string(ev.UID)
+	obs.Total, obs.Count, obs.MayRepeat = n, capCount(delta), mayRepeat
+	sent, err := r.c.deliver(ctx, obs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !skip && !r.c.emit(ctx, obs) {
+	if !sent {
 		return ctrl.Result{RequeueAfter: retryAfter}, nil
 	}
 	r.c.series.commit(req.NamespacedName, ev.UID, created, n)

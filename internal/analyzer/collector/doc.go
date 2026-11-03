@@ -25,16 +25,21 @@ limitations under the License.
 //
 // Observation-level deduplication: per event the collector remembers the UID and the last handled
 // occurrence count (the series count, or the count of an older recorder, or one), and emits only the
-// increase. Per pod it remembers the container IDs of handled terminations. Both are LRU maps with a fixed
-// capacity. Anything older than the first reconcile (a restart or a new leader), or as old as state that was
-// dropped to stay within the capacity, is marked MayRepeat, and a LastSeenFunc from the Incident controller
-// suppresses what the Incident already counted, so restarts are absorbed by the Incident counters, not by
-// memory alone.
+// increase, at most MaxCount per observation. Per pod it remembers the IDs of handled terminations. Both
+// are LRU maps with a fixed capacity. When the collector cannot tell how much of an occurrence is new
+// (anything older than the first reconcile, a restart or a new leader, or as old as state that was dropped
+// to stay within the capacity), it asks a HandledFunc from the Incident controller how much of that
+// occurrence the Incident already counted; without one it emits the observation with Count 0, the
+// cluster's Total and MayRepeat, and the consumer decides. Restarts are thus absorbed by state the Incident
+// controller persists per occurrence, not by memory alone.
 //
 // Owner correlation follows controller owner references from Pod to ReplicaSet to Deployment and from Pod
-// to StatefulSet. Owner references are untrusted: each hop is a metadata read through the API reader, with a
-// deadline, and must have the referenced UID, or the chain stops at the last verified object. Kinds the
-// analyzer cannot read (DaemonSets, Jobs) are not followed. Results are kept in a bounded cache with a TTL.
+// to StatefulSet. Owner references are untrusted: each hop is a get through the API reader, with a
+// deadline, and must exist with the referenced UID and a selector that matches the labels of the object
+// below it, or the chain stops at the last verified object. Kinds the analyzer cannot read (DaemonSets,
+// Jobs) are not followed. Results are kept in a bounded cache, verified owners for OwnerTTL and the others
+// for 5 seconds, and the owner reference of each pod looked up is remembered (up to MaxPods), so an event
+// that arrives after its pod was deleted still reaches the workload.
 //
 // Untrusted input: notes go through package fingerprint, which redacts before it normalizes, and only the
 // fingerprint and the normalized symptom leave the collector; termination messages are never read.
@@ -45,9 +50,10 @@ limitations under the License.
 // Its markers generate the ClusterRole analyzer-watch-role (config/rbac/analyzer/watch). That role is only a
 // catalogue of verbs: it is bound by one RoleBinding per watched namespace (config/watch), never by a
 // ClusterRoleBinding, so the analyzer can read nothing outside the namespaces it was given. Only namespaced
-// reads belong here; anything cluster-scoped or written goes in package analyzer.
+// reads belong here; anything cluster-scoped or written goes in package analyzer. Workloads are only read
+// one at a time by name, so they get get and nothing else.
 //
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups=apps,resources=replicasets;deployments;statefulsets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=replicasets;deployments;statefulsets,verbs=get
 package collector

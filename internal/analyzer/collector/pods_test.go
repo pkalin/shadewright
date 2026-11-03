@@ -140,15 +140,128 @@ func TestPodStateIsBounded(t *testing.T) {
 		t.Fatalf("state holds %d pods, cap %d", n, capacity)
 	}
 	key := types.NamespacedName{Namespace: testNS, Name: "p0"}
-	if isNew, mayRepeat := tr.pending(key, "p0", termination{container: containerApp, id: "0", finished: t0}, t0); !isNew || !mayRepeat {
-		t.Fatalf("evicted pod: pending = %v, %v, want true, true", isNew, mayRepeat)
+	got := tr.pending(key, "p0", []termination{{container: containerApp, id: "0", finished: t0}}, t0)
+	if len(got) != 1 || !got[0].mayRepeat {
+		t.Fatalf("evicted pod: pending = %+v, want one marked mayRepeat", got)
 	}
 	// Two terminations per container are remembered; older IDs are dropped.
 	key = types.NamespacedName{Namespace: testNS, Name: "p999"}
 	for _, id := range []string{"a", "b", "c"} {
 		tr.commit(key, "p999", termination{container: containerApp, id: id})
 	}
-	if isNew, _ := tr.pending(key, "p999", termination{container: containerApp, id: "b"}, t0); isNew {
+	if got := tr.pending(key, "p999", []termination{{container: containerApp, id: "b"}}, t0); len(got) != 0 {
 		t.Error("second newest termination forgotten")
+	}
+}
+
+// preexisting returns the web pod with two containers that both terminated before the collector started.
+func preexisting() *corev1.Pod {
+	_, _, pod := workload()
+	withTermination(pod, "containerd://app-old", ReasonOOMKilled, 137, t0.Add(-time.Hour))
+	pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
+		Name: "sidecar",
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ContainerID: "containerd://sidecar-old", Reason: reasonError, ExitCode: 1,
+			FinishedAt: metav1.NewTime(t0.Add(-time.Hour)),
+		}},
+	})
+	return pod
+}
+
+// Whether a pod's terminations may repeat is decided once per pod: committing the first must not make the
+// others of the same pod look new, in the same reconcile or in a retry.
+func TestEveryPreexistingTerminationOfAPodMayRepeat(t *testing.T) {
+	pod := preexisting()
+	h := newHarness(t, Config{}, pod)
+	h.reconcilePod(pod.Name)
+	got := h.drain()
+	if len(got) != 2 || !got[0].MayRepeat || !got[1].MayRepeat || got[0].Count != 0 || got[1].Count != 0 {
+		t.Fatalf("two terminations older than the collector: %+v, want both MayRepeat with Count 0", got)
+	}
+	if got[0].Occurrence == got[1].Occurrence || got[0].Total != 1 {
+		t.Fatalf("occurrences %q and %q, Total %d: want distinct occurrences of 1", got[0].Occurrence,
+			got[1].Occurrence, got[0].Total)
+	}
+
+	// The same with a full channel: the first is handed over, the second waits for a retry.
+	h = newHarness(t, Config{Buffer: 1}, preexisting())
+	if res := h.reconcilePod(pod.Name); res.RequeueAfter == 0 {
+		t.Fatal("no retry after the send timed out")
+	}
+	if got := h.one(); !got.MayRepeat {
+		t.Fatalf("first termination: %+v, want MayRepeat", got)
+	}
+	h.reconcilePod(pod.Name)
+	if got := h.one(); !got.MayRepeat {
+		t.Fatalf("termination emitted on the retry: %+v, want MayRepeat", got)
+	}
+}
+
+func TestHandledSettlesTerminations(t *testing.T) {
+	pod := preexisting()
+	counted := map[string]int64{}
+	h := newHarness(t, Config{Handled: handledBy(counted)}, pod)
+	ts := terminations(pod)
+	counted[ts[0].occurrence(pod.UID)] = 1
+	h.reconcilePod(pod.Name)
+	got := h.one()
+	if got.MayRepeat || got.Count != 1 || got.Occurrence != ts[1].occurrence(pod.UID) {
+		t.Fatalf("observation = %+v, want only the termination the Incident never counted", got)
+	}
+	h.reconcilePod(pod.Name)
+	h.none()
+}
+
+// Without a container ID a termination is identified by what does not change when the container restarts:
+// the restart count is not part of it.
+func TestTerminationWithoutContainerIDKeepsItsID(t *testing.T) {
+	_, _, pod := workload()
+	withTermination(pod, "", reasonError, 1, t0)
+	pod.Status.ContainerStatuses[0].RestartCount = 0
+	pod.Status.ContainerStatuses[0].State.Terminated = pod.Status.ContainerStatuses[0].LastTerminationState.Terminated
+	pod.Status.ContainerStatuses[0].LastTerminationState.Terminated = nil
+	before := terminations(pod)
+	pod.Status.ContainerStatuses[0].RestartCount = 1
+	pod.Status.ContainerStatuses[0].LastTerminationState.Terminated = pod.Status.ContainerStatuses[0].State.Terminated
+	pod.Status.ContainerStatuses[0].State.Terminated = nil
+	after := terminations(pod)
+	if len(before) != 1 || len(after) != 1 || before[0].id != after[0].id {
+		t.Fatalf("termination IDs before and after the restart: %+v, %+v", before, after)
+	}
+
+	h := newHarness(t, Config{}, pod)
+	h.reconcilePod(pod.Name)
+	h.one()
+	pod.Status.ContainerStatuses[0].RestartCount = 2
+	h.update(pod)
+	h.reconcilePod(pod.Name)
+	h.none()
+}
+
+// A finish time far in the future is clamped before it enters the state, so once that state is dropped it
+// cannot mark every later termination of other pods MayRepeat.
+func TestFutureFinishTimeDoesNotPinEviction(t *testing.T) {
+	_, _, a := workload()
+	a.Name, a.UID = "web-a", "a1b2c3d4-0000-4000-8000-000000000001"
+	withTermination(a, "containerd://a", ReasonOOMKilled, 137, t0.Add(100*365*24*time.Hour))
+	h := newHarness(t, Config{MaxPods: 1}, a)
+	h.reconcilePod(a.Name)
+	h.one()
+
+	h.clock.add(time.Minute)
+	_, _, b := workload()
+	b.Name, b.UID = "web-b", "a1b2c3d4-0000-4000-8000-000000000002"
+	withTermination(b, "containerd://b", ReasonOOMKilled, 137, t0.Add(30*time.Second))
+	h.create(b)
+	h.reconcilePod(b.Name) // drops the state of web-a
+	h.one()
+
+	_, _, c := workload()
+	c.Name, c.UID = "web-c", "a1b2c3d4-0000-4000-8000-000000000003"
+	withTermination(c, "containerd://c", ReasonOOMKilled, 137, t0.Add(40*time.Second))
+	h.create(c)
+	h.reconcilePod(c.Name) // first seen after web-a was dropped
+	if got := h.one(); got.MayRepeat {
+		t.Fatalf("termination newer than everything dropped: %+v, want no MayRepeat", got)
 	}
 }

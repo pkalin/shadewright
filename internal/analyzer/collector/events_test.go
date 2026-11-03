@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -191,77 +192,131 @@ func TestRawNoteNeverLeaves(t *testing.T) {
 	}
 }
 
+// An event older than the collector's first reconcile may have been counted by an earlier process: without
+// a Handled func the collector does not claim its series total as new, it passes the total on with Count 0.
 func TestPreexistingEventMayRepeat(t *testing.T) {
 	h := newHarness(t, Config{})
 	old := warning("old", 4)
 	old.CreationTimestamp = metav1.NewTime(t0.Add(-time.Hour))
 	h.create(old)
 	h.reconcileEvent(old.Name) // the first reconcile sets the start time to t0
-	if got := h.one(); !got.MayRepeat || got.Count != 4 {
-		t.Fatalf("event older than the collector: %+v, want MayRepeat and Count 4", got)
+	got := h.one()
+	if !got.MayRepeat || got.Count != 0 || got.Total != 4 || got.Occurrence != "event:"+string(old.UID) {
+		t.Fatalf("event older than the collector: %+v, want MayRepeat, Count 0, Total 4 and its UID", got)
 	}
 	old.Series.Count = 6
 	h.update(old)
 	h.reconcileEvent(old.Name)
-	if got := h.one(); got.MayRepeat || got.Count != 2 {
-		t.Fatalf("increase seen by this collector: %+v, want Count 2 without MayRepeat", got)
+	if got := h.one(); got.MayRepeat || got.Count != 2 || got.Total != 6 {
+		t.Fatalf("increase seen by this collector: %+v, want Count 2 and Total 6 without MayRepeat", got)
 	}
-	fresh := warning("fresh", 0)
+	fresh := warning("fresh", 3)
 	fresh.CreationTimestamp = metav1.NewTime(t0.Add(time.Second))
 	h.create(fresh)
 	h.reconcileEvent(fresh.Name)
-	if got := h.one(); got.MayRepeat {
-		t.Fatalf("event created after the start: MayRepeat set")
+	if got := h.one(); got.MayRepeat || got.Count != 3 {
+		t.Fatalf("event created after the start: %+v, want Count 3 without MayRepeat", got)
 	}
 }
 
-func TestLastSeenSuppressesWhatTheIncidentCounted(t *testing.T) {
-	var lastSeen time.Time
-	h := newHarness(t, Config{LastSeen: func(_ context.Context, _ string) (time.Time, bool, error) {
-		return lastSeen, !lastSeen.IsZero(), nil
-	}})
-	ev := warning("restart", 3)
-	ev.CreationTimestamp = metav1.NewTime(t0.Add(-time.Hour))
-	ev.Series.LastObservedTime = metav1.NewMicroTime(t0.Add(-10 * time.Minute))
-	h.create(ev)
+// handledBy returns a Handled func that answers from counted, keyed by occurrence.
+func handledBy(counted map[string]int64) HandledFunc {
+	return func(_ context.Context, _ string, occurrence string) (int64, bool, error) {
+		n, ok := counted[occurrence]
+		return n, ok, nil
+	}
+}
 
-	// The Incident already counted up to the last occurrence: nothing is emitted, but the count is
-	// remembered, so the next increase is emitted as an increase.
-	lastSeen = t0.Add(-5 * time.Minute)
-	h.reconcileEvent(ev.Name)
-	h.none()
-	ev.Series.Count = 4
-	ev.Series.LastObservedTime = metav1.NewMicroTime(t0)
-	h.update(ev)
-	h.reconcileEvent(ev.Name)
-	if got := h.one(); got.Count != 1 {
-		t.Fatalf("increase after a suppressed replay: Count = %d, want 1", got.Count)
+func TestHandledSettlesRepeats(t *testing.T) {
+	counted := map[string]int64{}
+	h := newHarness(t, Config{Handled: handledBy(counted)})
+	older := func(name string, series int32) *eventsv1.Event {
+		ev := warning(name, series)
+		ev.CreationTimestamp = metav1.NewTime(t0.Add(-time.Hour))
+		return ev
 	}
 
-	// No Incident: the replayed series is emitted, marked.
-	lastSeen = time.Time{}
-	other := warning("other", 3)
-	other.CreationTimestamp = metav1.NewTime(t0.Add(-time.Hour))
+	// The Incident counted the whole series: nothing is emitted, but the count is remembered, so the next
+	// increase is emitted as an increase.
+	all := older("all", 3)
+	counted["event:"+string(all.UID)] = 3
+	h.create(all)
+	h.reconcileEvent(all.Name)
+	h.none()
+	all.Series.Count = 4
+	h.update(all)
+	h.reconcileEvent(all.Name)
+	if got := h.one(); got.Count != 1 || got.MayRepeat {
+		t.Fatalf("increase after a settled replay: %+v, want Count 1", got)
+	}
+
+	// The Incident counted part of it: only the rest is emitted.
+	part := older("part", 5)
+	counted["event:"+string(part.UID)] = 2
+	h.create(part)
+	h.reconcileEvent(part.Name)
+	if got := h.one(); got.Count != 3 || got.MayRepeat || got.Total != 5 {
+		t.Fatalf("series of 5 with 2 counted: %+v, want Count 3", got)
+	}
+
+	// The Incident never counted this occurrence: all of it is new, even when another occurrence with the
+	// same fingerprint (the same symptom of another event) was counted later than this one happened.
+	other := older("other", 3)
+	other.Series.LastObservedTime = metav1.NewMicroTime(t0.Add(-30 * time.Minute))
 	h.create(other)
 	h.reconcileEvent(other.Name)
-	if got := h.one(); !got.MayRepeat || got.Count != 3 {
-		t.Fatalf("replay without an Incident: %+v", got)
+	if got := h.one(); got.Count != 3 || got.MayRepeat {
+		t.Fatalf("occurrence the Incident never counted: %+v, want Count 3", got)
 	}
 }
 
-func TestLastSeenErrorRetries(t *testing.T) {
-	h := newHarness(t, Config{LastSeen: func(context.Context, string) (time.Time, bool, error) {
-		return time.Time{}, false, errors.New("cache not synced")
+func TestHandledErrorRetries(t *testing.T) {
+	h := newHarness(t, Config{Handled: func(context.Context, string, string) (int64, bool, error) {
+		return 0, false, errors.New("cache not synced")
 	}})
 	ev := warning("err", 2)
 	ev.CreationTimestamp = metav1.NewTime(t0.Add(-time.Hour))
 	h.create(ev)
 	if _, err := h.events.Reconcile(t.Context(), reqFor(ev.Name)); err == nil {
-		t.Fatal("LastSeen error swallowed")
+		t.Fatal("Handled error swallowed")
 	}
 	h.none()
 	if n := h.c.series.len(); n != 0 {
 		t.Fatalf("state committed although nothing was handled")
+	}
+}
+
+// Whoever can create events can write any series count: one observation adds at most MaxCount.
+func TestSeriesIncreaseIsCapped(t *testing.T) {
+	h := newHarness(t, Config{})
+	ev := warning("forged", math.MaxInt32)
+	h.create(ev)
+	h.reconcileEvent(ev.Name)
+	if got := h.one(); got.Count != MaxCount || got.Total != math.MaxInt32 {
+		t.Fatalf("series of 2^31-1: %+v, want Count %d and the real total", got, MaxCount)
+	}
+
+	small := warning("jump", 5)
+	h.create(small)
+	h.reconcileEvent(small.Name)
+	h.one()
+	small.Series.Count = 5 + 5000
+	h.update(small)
+	h.reconcileEvent(small.Name)
+	if got := h.one(); got.Count != MaxCount {
+		t.Fatalf("increase of 5000: Count = %d, want %d", got.Count, MaxCount)
+	}
+
+	// With a Handled func the settled increase is capped too.
+	counted := map[string]int64{}
+	h = newHarness(t, Config{Handled: handledBy(counted)})
+	old := warning("old", math.MaxInt32)
+	old.CreationTimestamp = metav1.NewTime(t0.Add(-time.Hour))
+	counted["event:"+string(old.UID)] = 1
+	h.create(old)
+	h.reconcileEvent(old.Name)
+	if got := h.one(); got.Count != MaxCount {
+		t.Fatalf("settled increase: Count = %d, want %d", got.Count, MaxCount)
 	}
 }
 
@@ -318,8 +373,8 @@ func TestSeriesStateIsBounded(t *testing.T) {
 	}
 	// A dropped event that comes back may already have been counted.
 	key := types.NamespacedName{Namespace: testNS, Name: "e0"}
-	if n, mayRepeat := tr.pending(key, "e0", t0, start, 2); n != 2 || !mayRepeat {
-		t.Fatalf("evicted event: pending = %d, %v, want 2, true", n, mayRepeat)
+	if n, mayRepeat := tr.pending(key, "e0", t0, start, 2); n != 0 || !mayRepeat {
+		t.Fatalf("evicted event: pending = %d, %v, want 0, true", n, mayRepeat)
 	}
 	// An event created after everything dropped cannot have been dropped.
 	key = types.NamespacedName{Namespace: testNS, Name: "new"}

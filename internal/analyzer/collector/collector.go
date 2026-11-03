@@ -49,6 +49,10 @@ const (
 // observation within the send timeout.
 const retryAfter = 5 * time.Second
 
+// MaxCount is the most occurrences one observation stands for. A series count is written by whoever can
+// create events in the namespace, so a forged jump (to 2^31, say) adds at most this much to an Incident.
+const MaxCount = 1000
+
 // Observation is one symptom ready for the Incident controller: the fingerprint and the normalized,
 // redacted symptom are computed here, so no raw event or status text ever leaves the collector.
 type Observation struct {
@@ -64,23 +68,36 @@ type Observation struct {
 	ReportingController string
 	// Symptom is the normalized, redacted note (at most 1024 bytes).
 	Symptom string
-	// Count is how many new occurrences this observation stands for, at least 1: the increase of an event
-	// series, never its total.
+	// Occurrence identifies what Total counts: "event:" and the Event UID, or "termination:" and a hash of
+	// the pod UID, the container name and the termination's ID. Several occurrences (pods, events) can share
+	// one fingerprint.
+	Occurrence string
+	// Total is how many times the occurrence happened as the cluster reports it: the event's series count
+	// (or the count of an older recorder, or 1), or 1 for a container termination. It is cumulative and not
+	// capped; a consumer that computes an increase from it must cap that at MaxCount too.
+	Total int64
+	// Count is how many new occurrences this observation stands for: the increase of Total since this
+	// collector last handled it, at most MaxCount, never the total of a series the collector cannot account
+	// for. It is 0 exactly when MayRepeat is set.
 	Count int64
 	// ObservedAt is when the latest of these occurrences happened, as reported by the cluster, never later
 	// than the collector's clock.
 	ObservedAt time.Time
-	// MayRepeat is set when the collector cannot rule out that some of Count was already emitted before:
-	// the event or termination is older than this collector's first reconcile (a restart or a new leader),
-	// or the collector dropped state of objects at least as old to stay within its bounds. The consumer
-	// compares ObservedAt with what the Incident already counted.
+	// MayRepeat is set when the collector cannot tell how much of Total is new: the occurrence is older than
+	// this collector's first reconcile (a restart or a new leader), or the collector dropped state of
+	// occurrences at least as old to stay within its bounds, and no HandledFunc settled it. The consumer must
+	// then count Total minus what it already counted for this Occurrence, capped at MaxCount.
 	MayRepeat bool
 }
 
-// LastSeenFunc returns when the Incident with this fingerprint last counted an observation, and false when
-// there is no such Incident. The Incident controller (#42) supplies it, so the dedup state of a series that
-// started before a restart lives in the Incident counters, not in memory alone.
-type LastSeenFunc func(ctx context.Context, fingerprint string) (time.Time, bool, error)
+// HandledFunc returns how much of an occurrence's Total the Incident with this fingerprint has already
+// counted: the highest Total it recorded for the occurrence, and found false only when it never counted the
+// occurrence at all. The Incident controller (#42) supplies it, and to answer it must persist, per
+// occurrence, the highest Total it counted for as long as the cluster can still report the occurrence (an
+// event's retention, a pod's lifetime). The collector asks only for observations it would otherwise mark
+// MayRepeat, so the dedup state of an occurrence that started before a restart lives in the Incident, not
+// in memory alone.
+type HandledFunc func(ctx context.Context, fingerprint, occurrence string) (handled int64, found bool, err error)
 
 // Config configures a [Collector]. Zero values take the defaults above.
 type Config struct {
@@ -90,18 +107,22 @@ type Config struct {
 	Buffer int
 	// MaxEvents bounds the number of event series whose last handled count is remembered.
 	MaxEvents int
-	// MaxPods bounds the number of pods whose handled container terminations are remembered.
+	// MaxPods bounds the number of pods whose handled container terminations are remembered, and the number
+	// of pods whose owner reference is remembered for events that arrive after the pod is gone.
 	MaxPods int
 	// MaxOwners bounds the owner correlation cache.
 	MaxOwners int
-	// OwnerTTL is how long a resolved owner is reused before it is read again.
+	// OwnerTTL is how long a verified owner is reused before it is read again. An owner that could not be
+	// verified is read again after 5 seconds.
 	OwnerTTL time.Duration
 	// LookupTimeout is the deadline of each read of an owner from the API server.
 	LookupTimeout time.Duration
-	// SendTimeout is how long a reconcile waits for room in the channel before it tries again later.
+	// SendTimeout is how long a reconcile waits for room in the channel before it tries again, 5 seconds
+	// later.
 	SendTimeout time.Duration
-	// LastSeen, when set, suppresses observations marked MayRepeat that the Incident has already counted.
-	LastSeen LastSeenFunc
+	// Handled, when set, settles observations that would be marked MayRepeat: their Count becomes what the
+	// Incident has not counted yet, and they are dropped when that is nothing.
+	Handled HandledFunc
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
 }
@@ -193,28 +214,52 @@ func (c *Collector) started() time.Time {
 // observedAt clamps a time reported by the cluster: never zero and never in the future, so a forged
 // timestamp cannot hide later occurrences from the restart check.
 func (c *Collector) observedAt(t time.Time) time.Time {
-	now := c.now()
-	if t.IsZero() || t.After(now) {
+	if t.IsZero() {
+		return c.now()
+	}
+	return c.notFuture(t)
+}
+
+// notFuture clamps a time reported by the cluster to the collector's clock, keeping a zero time zero.
+func (c *Collector) notFuture(t time.Time) time.Time {
+	if now := c.now(); t.After(now) {
 		return now
 	}
 	return t
 }
 
-// skipRepeat reports whether an observation marked MayRepeat was already counted by its Incident.
-func (c *Collector) skipRepeat(ctx context.Context, o *Observation) (bool, error) {
-	if !o.MayRepeat || c.cfg.LastSeen == nil {
-		return false, nil
+// capCount bounds the occurrences one observation stands for to [0, MaxCount].
+func capCount(n int64) int64 {
+	return min(max(n, 0), MaxCount)
+}
+
+// deliver settles an observation marked MayRepeat with the Handled func, when there is one, and hands the
+// observation to the consumer. It returns true when the observation was handed over or there was nothing
+// new in it, so the caller may record it as handled, and false when the channel stayed full.
+func (c *Collector) deliver(ctx context.Context, o Observation) (bool, error) {
+	if o.MayRepeat && c.cfg.Handled != nil {
+		handled, found, err := c.cfg.Handled(ctx, o.Fingerprint, o.Occurrence)
+		if err != nil {
+			return false, fmt.Errorf("reading what an incident has counted: %w", err)
+		}
+		if !found {
+			handled = 0
+		}
+		o.Count, o.MayRepeat = capCount(o.Total-handled), false
+		if o.Count == 0 {
+			return true, nil
+		}
 	}
-	seen, ok, err := c.cfg.LastSeen(ctx, o.Fingerprint)
-	if err != nil {
-		return false, fmt.Errorf("reading the last counted time of an incident: %w", err)
-	}
-	return ok && !o.ObservedAt.After(seen), nil
+	return c.emit(ctx, o), nil
 }
 
 // emit hands o to the consumer. It returns false when the channel stayed full for the send timeout or the
 // context ended; the caller then keeps its state unchanged and tries again later, so nothing is lost and
 // nothing is counted twice within one process.
+//
+// The send blocks the reconcile for up to SendTimeout (10 seconds by default). Each watch runs one reconcile
+// at a time, so while the consumer is slow every other event (or pod) waits too, up to that long per
+// observation; the blocked one is retried 5 seconds after its send timed out.
 func (c *Collector) emit(ctx context.Context, o Observation) bool {
 	t := time.NewTimer(c.cfg.SendTimeout)
 	defer t.Stop()

@@ -71,9 +71,14 @@ func TestSuccessivePodsShareAFingerprint(t *testing.T) {
 }
 
 func TestStatefulSetPod(t *testing.T) {
-	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: testNS, UID: stsUID}}
+	dbLabels := map[string]string{labelApp: "db"}
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: testNS, UID: stsUID},
+		Spec:       appsv1.StatefulSetSpec{Selector: &metav1.LabelSelector{MatchLabels: dbLabels}},
+	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name: "db-0", Namespace: testNS, UID: podUID, OwnerReferences: controllerRef(apiApps, kindStatefulSet, "db", stsUID),
+		Name: "db-0", Namespace: testNS, UID: podUID, Labels: dbLabels,
+		OwnerReferences: controllerRef(apiApps, kindStatefulSet, "db", stsUID),
 	}}
 	h := newHarness(t, Config{}, sts, pod)
 	ev := warning("db", 0)
@@ -149,6 +154,42 @@ func TestUnverifiedOwnersAreNotTrusted(t *testing.T) {
 			wantKind: kindPod, wantName: webPod, wantUID: podUID,
 		},
 		{
+			name: "pod whose labels the ReplicaSet does not select",
+			objs: func() []client.Object {
+				d, rs, pod := workload()
+				pod.Labels = map[string]string{labelApp: intruder}
+				return []client.Object{d, rs, pod}
+			},
+			wantKind: kindPod, wantName: webPod, wantUID: podUID,
+		},
+		{
+			name: "owner reference not marked controller",
+			objs: func() []client.Object {
+				d, rs, pod := workload()
+				pod.OwnerReferences[0].Controller = nil
+				return []client.Object{d, rs, pod}
+			},
+			wantKind: kindPod, wantName: webPod, wantUID: podUID,
+		},
+		{
+			name: "ReplicaSet whose labels the Deployment does not select",
+			objs: func() []client.Object {
+				d, rs, pod := workload()
+				d.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{labelApp: "other"}}
+				return []client.Object{d, rs, pod}
+			},
+			wantKind: kindReplicaSet, wantName: webRS, wantUID: rsUID,
+		},
+		{
+			name: "ReplicaSet with an empty selector",
+			objs: func() []client.Object {
+				d, rs, pod := workload()
+				rs.Spec.Selector = &metav1.LabelSelector{}
+				return []client.Object{d, rs, pod}
+			},
+			wantKind: kindPod, wantName: webPod, wantUID: podUID,
+		},
+		{
 			name: "pod with another UID than the event's regarding object",
 			objs: func() []client.Object {
 				d, rs, pod := workload()
@@ -188,14 +229,14 @@ func TestOwnersAreCachedAndBounded(t *testing.T) {
 		t.Fatalf("owner reads after the TTL = %d, want 4", n)
 	}
 	for i := range 20 {
-		_, _, err := h.c.owners.resolve(t.Context(), testNS, metav1.OwnerReference{
+		_, _, err := h.c.owners.chain(t.Context(), testNS, metav1.OwnerReference{
 			APIVersion: apiApps, Kind: kindStatefulSet, Name: fmt.Sprintf("s%d", i), UID: types.UID(fmt.Sprint(i)),
-		})
+		}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	if n := h.c.owners.cache.len(); n > 2 {
+	if n := len(h.c.owners.cache.Keys()); n > 2 {
 		t.Fatalf("owner cache holds %d entries, cap 2", n)
 	}
 }
@@ -259,7 +300,7 @@ func TestValidRef(t *testing.T) {
 func TestOwnerCacheNeedsTheWholeReference(t *testing.T) {
 	d, rs, pod := workload()
 	forged := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name: "intruder", Namespace: testNS, UID: "2a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+		Name: intruder, Namespace: testNS, UID: "2a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
 		OwnerReferences: controllerRef(apiApps, kindReplicaSet, "not-"+webRS, rsUID),
 	}}
 	h := newHarness(t, Config{}, d, rs, pod, forged)
@@ -272,4 +313,85 @@ func TestOwnerCacheNeedsTheWholeReference(t *testing.T) {
 	subjectIs(t, h.one().Subject, kindDeployment, web, deployUID)
 	h.reconcileEvent(forgedEv.Name)
 	subjectIs(t, h.one().Subject, kindPod, forged.Name, forged.UID)
+}
+
+// A forged reference that copies a real ReplicaSet's name and UID under another API version is not
+// followed, and does not keep real pods of that ReplicaSet from being correlated.
+func TestForgedAPIVersionDoesNotPoisonTheCache(t *testing.T) {
+	d, rs, pod := workload()
+	forged := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: intruder, Namespace: testNS, UID: "2a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", Labels: pod.Labels,
+		OwnerReferences: controllerRef("example.com/v1", kindReplicaSet, webRS, rsUID),
+	}}
+	h := newHarness(t, Config{}, d, rs, pod, forged)
+	forgedEv := warning("forged", 0)
+	forgedEv.Regarding.Name, forgedEv.Regarding.UID = forged.Name, forged.UID
+	h.create(forgedEv)
+	h.reconcileEvent(forgedEv.Name)
+	subjectIs(t, h.one().Subject, kindPod, forged.Name, forged.UID)
+	genuine := warning("real", 0)
+	h.create(genuine)
+	h.reconcileEvent(genuine.Name)
+	subjectIs(t, h.one().Subject, kindDeployment, web, deployUID)
+}
+
+// An owner that could not be verified is read again soon: a pod seen a moment before its ReplicaSet is
+// readable is correlated a few seconds later, not after the whole TTL.
+func TestUnverifiedOwnerIsCachedBriefly(t *testing.T) {
+	d, rs, pod := workload()
+	h := newHarness(t, Config{OwnerTTL: time.Hour}, pod)
+	first := warning("first", 0)
+	h.create(first)
+	h.reconcileEvent(first.Name)
+	subjectIs(t, h.one().Subject, kindPod, webPod, podUID)
+	h.create(d)
+	h.create(rs)
+
+	h.clock.add(ownerMissTTL + time.Second)
+	later := warning("later", 0)
+	h.create(later)
+	h.reconcileEvent(later.Name)
+	subjectIs(t, h.one().Subject, kindDeployment, web, deployUID)
+}
+
+// A ReplicaSet without a Deployment is its own subject, and then the owner is empty, as for any object that
+// is its own subject.
+func TestStandaloneReplicaSetHasNoOwner(t *testing.T) {
+	_, rs, _ := workload()
+	rs.OwnerReferences = nil
+	h := newHarness(t, Config{}, rs)
+	reg := corev1.ObjectReference{APIVersion: apiApps, Kind: kindReplicaSet, Name: webRS, UID: rsUID}
+	subject, owner, ok, err := h.c.owners.subjectOf(t.Context(), testNS, reg)
+	if err != nil || !ok {
+		t.Fatalf("subjectOf: %v, %v", ok, err)
+	}
+	subjectIs(t, subject, kindReplicaSet, webRS, rsUID)
+	if owner != "" {
+		t.Fatalf("owner = %q, want empty for an object that is its own subject", owner)
+	}
+}
+
+// An event about a pod that is gone reaches the pod's workload when the collector looked up the pod's owner
+// while the pod existed.
+func TestEventAfterThePodIsGone(t *testing.T) {
+	d, rs, pod := workload()
+	withTermination(pod, "containerd://gone", ReasonOOMKilled, 137, t0)
+	h := newHarness(t, Config{}, d, rs, pod)
+	h.reconcilePod(pod.Name)
+	subjectIs(t, h.one().Subject, kindDeployment, web, deployUID)
+	if err := h.cl.Delete(t.Context(), pod); err != nil {
+		t.Fatal(err)
+	}
+	ev := warning("late", 0)
+	h.create(ev)
+	h.reconcileEvent(ev.Name)
+	subjectIs(t, h.one().Subject, kindDeployment, web, deployUID)
+
+	// A pod the collector never looked up stays its own subject.
+	const otherPod, otherUID = "web-7d4b9c8f6-zzzzz", "3a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+	other := warning("unknown", 0)
+	other.Regarding.Name, other.Regarding.UID = otherPod, otherUID
+	h.create(other)
+	h.reconcileEvent(other.Name)
+	subjectIs(t, h.one().Subject, kindPod, otherPod, otherUID)
 }

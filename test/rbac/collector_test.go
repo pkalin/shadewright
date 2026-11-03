@@ -54,7 +54,7 @@ func TestCollectorRunsWithTheAnalyzerRBAC(t *testing.T) {
 		t.Fatal(err)
 	}
 	rs := &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "rbac-web-7d4b9c8f6", Namespace: otherNS,
+		ObjectMeta: metav1.ObjectMeta{Name: "rbac-web-7d4b9c8f6", Namespace: otherNS, Labels: labels,
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "apps/v1", Kind: "Deployment", Name: d.Name, UID: d.UID, Controller: new(true),
 			}}},

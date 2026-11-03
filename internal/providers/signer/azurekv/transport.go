@@ -80,7 +80,9 @@ func (g guardTransport) Do(req *http.Request) (*http.Response, error) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
 	closeBody(resp)
 	if err != nil {
-		// A read that failed because the try or the caller gave up keeps its context error.
+		// A read that failed because the try or the caller gave up keeps its context error: the HTTP
+		// client's read error does not match it, and azcore reports a parent context error itself but a
+		// per-try deadline only as returned here.
 		if ctxErr := req.Context().Err(); ctxErr != nil {
 			return nil, ctxErr
 		}

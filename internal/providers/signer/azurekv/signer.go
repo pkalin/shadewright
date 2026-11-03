@@ -82,18 +82,11 @@ func New(keyID string, opts Options) (*Signer, error) {
 	if err != nil {
 		return nil, err
 	}
-	cred, err := azidentity.NewWorkloadIdentityCredential(&azidentity.WorkloadIdentityCredentialOptions{
-		ClientID:      wi.clientID,
-		TenantID:      wi.tenantID,
-		TokenFilePath: wi.tokenFile,
-	})
+	cred, err := newWorkloadCredential(wi, azcore.ClientOptions{})
 	if err != nil {
-		// Not wrapped: the azidentity error is SDK text that can quote the configured values. Every other
-		// setting it checks was checked above, so what is left is the tenant ID's format, which is left to
-		// azidentity instead of copying its rule.
-		return nil, fmt.Errorf("%w: azidentity refused %s", errNoWorkloadIdentity, envTenantID)
+		return nil, err
 	}
-	return newSigner(key, cred, opts, clientConfig{tokenFile: wi.tokenFile})
+	return newSigner(key, cred, opts, clientConfig{})
 }
 
 // Workload identity variables, as the workload identity webhook injects them.
@@ -151,15 +144,13 @@ func workloadIdentityFromEnv() (workloadIdentity, error) {
 	return wi, nil
 }
 
-// clientConfig carries what New reads from the environment and what tests replace.
+// clientConfig carries what tests replace: the HTTP transport, the delay between retries and the per-try
+// timeout.
 type clientConfig struct {
 	transport  policy.Transporter
 	retryDelay time.Duration
 	// tryTimeout replaces the per-try timeout; zero means tryTimeout, capped at the Sign timeout.
 	tryTimeout time.Duration
-	// tokenFile is the federated token file of the credential, checked when a token request fails before
-	// Entra answers. Empty means unknown: such a failure is then final.
-	tokenFile string
 }
 
 func newSigner(key KeyID, cred azcore.TokenCredential, opts Options, cc clientConfig) (*Signer, error) {
@@ -204,7 +195,7 @@ func newSigner(key KeyID, cred azcore.TokenCredential, opts Options, cc clientCo
 		transport = defaultTransport()
 	}
 	co.Transport = guardTransport{inner: transport}
-	client, err := azkeys.NewClient(key.VaultURL(), cleanCredential{inner: cred, tokenFile: cc.tokenFile}, co)
+	client, err := azkeys.NewClient(key.VaultURL(), cleanCredential{inner: cred}, co)
 	if err != nil {
 		// Not wrapped: the azkeys error is SDK text, and the options are built here, so the class is enough.
 		return nil, fmt.Errorf("key vault client for %s: %w", key, errClientSetup)
@@ -222,8 +213,9 @@ func (s *Signer) Algorithm() providers.SignatureAlgorithm { return providers.RS2
 //
 // Errors: ErrNotFound when the key or version does not exist; a retryable error, with the delay Key Vault
 // asked for when it gave one, on throttling, transient server errors, network failures, a response body
-// that breaks off, a token request that gets no answer or a timeout; other errors otherwise. A local
-// configuration error (an unreadable federated token file) and a cancelled context are not retryable.
+// that breaks off, a token request that gets no answer or a timeout; other errors otherwise. TLS and
+// certificate failures, a local configuration error (a federated token file that cannot be read) and a
+// cancelled context are not retryable.
 func (s *Signer) Sign(ctx context.Context, digest []byte) ([]byte, error) {
 	if len(digest) != sha256.Size {
 		return nil, fmt.Errorf("digest is %d bytes, want %d", len(digest), sha256.Size)
@@ -388,70 +380,66 @@ func (errorBodyPolicy) Do(req *policy.Request) (*http.Response, error) {
 
 // cleanCredential wraps a token credential so that its errors are cleaned before azcore sees them: azcore
 // formats credential errors in its own log messages, and an AuthenticationFailedError includes the Entra
-// response body. Only the status code, the Retry-After delay and whether the failure is transient survive.
+// response body. Only the status code, the Retry-After delay, a context or token file error and whether
+// the failure is transient survive.
 type cleanCredential struct {
 	inner azcore.TokenCredential
-	// tokenFile is the federated token file; see clientConfig.
-	tokenFile string
 }
 
 // GetToken returns a token from the wrapped credential, or a cleaned error.
 func (c cleanCredential) GetToken(ctx context.Context, o policy.TokenRequestOptions) (azcore.AccessToken, error) {
-	tok, err := c.inner.GetToken(ctx, o)
+	read := &tokenFileRead{}
+	tok, err := c.inner.GetToken(context.WithValue(ctx, tokenFileReadKey{}, read), o)
 	if err == nil {
 		return tok, nil
 	}
 	// Not wrapped: an AuthenticationFailedError prints the Entra response body, and azcore logs credential
-	// errors. Only the status, the Retry-After delay and a context error are kept.
+	// errors. Only the status, the Retry-After delay, a context error and a token file error are kept.
 	ce := &credentialError{}
 	af, isAuth := errors.AsType[*azidentity.AuthenticationFailedError](err)
 	if isAuth && af.RawResponse != nil {
+		// Entra answered, so its status decides, even when the deadline has passed by now.
 		ce.status = af.RawResponse.StatusCode
 		ce.retryAfter = retryAfter(af.RawResponse)
+		return azcore.AccessToken{}, ce
 	}
 	// The pinned azidentity drops the context error when a token request times out, so the context of this
 	// try (azcore's per-try timeout or the Sign deadline) is checked as well as the chain.
 	switch {
 	case errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled):
 		ce.cause = context.Canceled
+	case read.err() != nil:
+		// The federated token file could not be read: a local configuration error no retry fixes.
+		ce.cause = read.err()
 	case errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded):
 		ce.cause = context.DeadlineExceeded
-	case isAuth && af.RawResponse == nil:
-		// No answer from Entra and no cause: a DNS failure or a reset connection, or a federated token file
-		// that cannot be read. Only the first may pass on retry, so the file decides.
-		ce.network = c.tokenFileReadable()
+	case isAuth:
+		// No answer from Entra, no cause, and the token file was read or not needed: the request failed in
+		// the network (DNS, a refused or reset connection).
+		ce.network = true
 	}
 	return azcore.AccessToken{}, ce
-}
-
-// tokenFileReadable reports whether the federated token file can be opened. It never reads the token.
-func (c cleanCredential) tokenFileReadable() bool {
-	if c.tokenFile == "" {
-		return false
-	}
-	f, err := os.Open(c.tokenFile)
-	if err != nil {
-		return false
-	}
-	_ = f.Close()
-	return true
 }
 
 // credentialError is a token request failure with every piece of response text removed.
 type credentialError struct {
 	status     int
 	retryAfter time.Duration
-	// cause is a context error, when the failure was a deadline or a cancellation.
+	// cause is a context error or a token file error.
 	cause error
-	// network is set when the request got no answer from Entra while the local setup is intact.
+	// network is set when the request got no answer from Entra while the token file could be read.
 	network bool
 }
 
 func (e *credentialError) Error() string {
-	if e.status == 0 {
-		return "workload identity token request failed"
+	msg := "workload identity token request failed"
+	if e.status != 0 {
+		msg = fmt.Sprintf("%s with status %d", msg, e.status)
 	}
-	return fmt.Sprintf("workload identity token request failed with status %d", e.status)
+	if e.cause != nil {
+		msg += ": " + e.cause.Error()
+	}
+	return msg
 }
 
 func (e *credentialError) Unwrap() error { return e.cause }

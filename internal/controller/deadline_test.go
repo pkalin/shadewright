@@ -319,3 +319,54 @@ func TestCleanupResultAfterTheDeadlineIsNotFinal(t *testing.T) {
 		})
 	}
 }
+
+// A fresh verdict (nil) that arrives after the deadline is not fresh either: the last read may have ended with
+// the deadline, and the caller must not write on it.
+func TestFreshVerdictAfterTheDeadlineIsNotFresh(t *testing.T) {
+	c, rr := plannedWorld(t)
+	git := fakegit.NewGit(mainBranch, map[string][]byte{sourcePath: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ` + appName + `
+  namespace: ` + fx.TargetNamespace + `
+spec:
+  template:
+    spec:
+      containers:
+        - name: ` + workerContainer + `
+          resources:
+            limits:
+              memory: 256Mi
+`)})
+	head, err := git.BranchHead(context.Background(), mainBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Like the real resolver, report the head of the branch as it is now, so the whole check passes.
+	res := resolved()
+	res.Source.BaseCommit = head
+	var policyReads atomic.Int32
+	r := &RemediationRequestReconciler{Client: c, Scheme: c.Scheme(), Source: &stubResolver{result: res},
+		CleanupTimeout: 50 * time.Millisecond,
+		APIReader: readerFunc(func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+			// The check reads the policy twice: once to load the plan and once more, last, before saying
+			// "fresh". The last read stalls until the deadline, then answers as if nothing changed.
+			if _, ok := obj.(*remediationv1alpha1.RemediationPolicy); ok && policyReads.Add(1) >= 2 {
+				<-ctx.Done()
+			}
+			return c.Get(context.Background(), key, obj)
+		}),
+		OpenRepository: func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return git, nil
+		}}
+	within(t, "EnsureFresh", func() { err = r.EnsureFresh(context.Background(), rr) })
+	if !errors.Is(err, ErrTimeout) || errors.Is(err, ErrSuperseded) {
+		t.Fatalf("want ErrTimeout after the final policy read crossed the deadline, got %v", err)
+	}
+	if got := policyReads.Load(); got < 2 {
+		t.Fatalf("the check should have read the policy twice, got %d", got)
+	}
+	if rr.Status.Phase != remediationv1alpha1.PhasePolicyChecked {
+		t.Fatalf("a timeout must not change the phase, got %q", rr.Status.Phase)
+	}
+}

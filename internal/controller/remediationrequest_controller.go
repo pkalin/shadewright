@@ -481,11 +481,10 @@ func (r *RemediationRequestReconciler) EnsureFresh(ctx context.Context, rr *reme
 	}
 	freshCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	err := freshness.Checker{Reader: r.reader(), OpenRepository: r.OpenRepository, Source: r.Source}.Fresh(freshCtx, rr)
-	// A verdict that arrives after the deadline, stale and unusable included, is not acted on: a read may have
-	// been cut short.
-	if err != nil {
-		err = boundErr(ctx, freshCtx, "freshness check", err)
-	}
+	// A verdict that arrives after the deadline, fresh (nil), stale and unusable included, is not acted on: a
+	// read may have been cut short, and a "fresh" from a read that ended with the deadline is not one the
+	// caller may write on.
+	err = boundErr(ctx, freshCtx, "freshness check", err)
 	cancel()
 	phase, reason, message := remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnusable, messageRepositoryUnusable
 	if !errors.Is(err, freshness.ErrRepositoryUnusable) {

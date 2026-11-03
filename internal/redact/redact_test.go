@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -211,9 +212,154 @@ func TestKeepsTextAroundValues(t *testing.T) {
 		"credentials:   \n  name: app\n":                             "credentials:   \n  name: app\n",
 		"src 2001:db8::1, ok":                                        "src [ip], ok",
 		"secretName: |\n  orders-tls\n":                              "secretName: |\n  orders-tls\n",
+		// Issue #114.
+		`"{\"clientSecret\":\"prefix,` + tail + `\"}"`:          `"{\"clientSecret\":\"[REDACTED:credential]\"}"`,
+		"password:\n  " + opaque + "\nnext: field":              "password:\n  [REDACTED:credential]\nnext: field",
+		"password:  # set by CI\n  " + opaque + "\nnext: field": "password:  [REDACTED:credential]\nnext: field",
+		"token:\n  \"" + opaque + "\"\nnext: field":             "token:\n  \"[REDACTED:credential]\"\nnext: field",
+		"{\"password\":\n  \"" + opaque + "\"}":                 "{\"password\":\n  \"[REDACTED:credential]\"}",
+		"retry with Basic " + b64("u:p") + " now":               "retry with Basic *** now",
+		"secretName:\n  orders-tls\n":                           "secretName:\n  orders-tls\n",
 	} {
 		if got := String(in); got != want {
 			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+// gapCase is a regression case from the last review of #110 and from #111 (issue #114): the secrets must be
+// gone and the neighbouring text kept.
+type gapCase struct {
+	name    string
+	input   string
+	secrets []string // must not appear in the output
+	kept    []string // must appear in the output
+}
+
+var (
+	// randomToken is a base64 token without a known prefix; hexToken a 40-character hex token.
+	randomToken = b64("synthetic-random-" + "token-0123456789")
+	hexToken    = rep("a1b2c3d4e5", 4)
+	// otherJWT is a JWT whose payload is not a JSON object, so it does not start with "eyJ".
+	otherJWT = b64(`{"alg":"HS256"}`) + "." + b64("synthetic payload") + "." + b64("not-a-signature")
+)
+
+func gapCases() []gapCase {
+	return []gapCase{
+		// Escaped embedded JSON: the value ends at its own escaped closing quote, not at a comma.
+		{"escaped json value with comma", `"{\"clientSecret\":\"prefix,` + tail + `\"}"`,
+			[]string{"prefix", tail}, []string{`"{\"clientSecret\":\"`, `\"}"`}},
+		{"escaped json value with escaped quote", `"{\"clientSecret\":\"a\\\"b,` + tail + `\",\"x\":1}"`,
+			[]string{tail}, []string{`\",\"x\":1}"`}},
+		{"unterminated escaped json value", `"{\"clientSecret\":\"prefix,` + tail + `" next`,
+			[]string{tail}, []string{`" next`}},
+		// YAML value on the next line, with and without trailing spaces after the colon.
+		{"yaml value on next line", "password:\n  " + opaque + "\nnext: field",
+			[]string{opaque}, []string{"password:\n  ", "\nnext: field"}},
+		{"yaml value on next line after spaces", "db:\n  password:   \n    " + opaque + "\n    " + tail + "\n  user: app",
+			[]string{opaque, tail}, []string{"db:\n  password:   \n    ", "\n  user: app"}},
+		{"yaml quoted value on next line", "- token:\n    '" + opaque + "'\n- token: x",
+			[]string{opaque}, []string{"- token:\n    '", "'\n- token: "}},
+		// URL credentials without a password.
+		{"url user and empty password", "git clone https://" + opaque + ":@github.com/org/repo failed",
+			[]string{opaque}, []string{"git clone ", " failed"}},
+		{"url user only", "fetch https://" + opaque + "@git-server:3000/org/repo: 403",
+			[]string{opaque}, []string{"fetch ", " 403"}},
+		// Short Basic and Bearer credentials.
+		{"short basic", "header Basic " + b64("u:p") + " rejected", []string{b64("u:p")}, []string{"header Basic ", " rejected"}},
+		{"short bearer", "with Bearer abc, retry", []string{"abc"}, []string{"with Bearer ", ", retry"}},
+		// Whitespace, including newlines, on both sides of the colon in JSON and YAML flow mappings.
+		{"json newline after colon", "{\"password\":\n  \"" + opaque + "\"}",
+			[]string{opaque}, []string{"{\"password\":\n  \"", "\"}"}},
+		{"json spaces around colon", `{"x":1, "password" : "` + opaque + `"}`, []string{opaque}, []string{`{"x":1, "password" : "`}},
+		{"yaml flow newline before colon", "{token\n: " + opaque + ", next: field}", []string{opaque}, []string{", next: field}"}},
+		// From #111: long random tokens without a known prefix.
+		{"base64 token without prefix", "api returned 401 for " + randomToken + " today",
+			[]string{randomToken}, []string{"api returned 401 for ", " today"}},
+		{"hex token", "using key " + hexToken + ".", []string{hexToken}, []string{"using key ", "."}},
+		// From #111: short key names.
+		{"pass key", "login pass=" + opaque + " user=app", []string{opaque}, []string{"login pass=", " user=app"}},
+		{"auth key", "auth=" + opaque + " ok", []string{opaque}, []string{" ok"}},
+		{"auth yaml key", "auth: " + opaque + "\nnext: field", []string{opaque}, []string{"\nnext: field"}},
+		{"sig key outside query", "webhook rejected with sig: " + opaque + " end", []string{opaque},
+			[]string{"webhook rejected with sig: ", " end"}},
+		// From #111: a JWT whose payload does not start with "eyJ".
+		{"jwt with other payload", "token " + otherJWT + " expired", []string{otherJWT}, []string{" expired"}},
+	}
+}
+
+func TestGapCases(t *testing.T) {
+	for _, c := range gapCases() {
+		t.Run(c.name, func(t *testing.T) {
+			out := String(c.input)
+			for _, s := range c.secrets {
+				if strings.Contains(out, s) {
+					t.Errorf("output still holds %q:\n%s", s, out)
+				}
+			}
+			for _, k := range c.kept {
+				if !strings.Contains(out, k) {
+					t.Errorf("output lost %q:\n%s", k, out)
+				}
+			}
+			if len(out) > len(c.input) {
+				t.Errorf("output grew from %d to %d bytes", len(c.input), len(out))
+			}
+		})
+	}
+}
+
+// The new rules keep text that only resembles a secret: empty values, nested mappings, short paths, names
+// made of words, image digests and keys that merely contain a short secret word.
+func TestGapRulesKeepUsefulText(t *testing.T) {
+	for _, in := range []string{
+		"password:\nnext: field",
+		"password:   \n",
+		"credentials:\n  - name: app\n    key: token",
+		"credentials:\n  name: app",
+		"auth:\n  {name: app}",
+		"author: someone",
+		"bypass=on",
+		"signal: SIGTERM",
+		"oauth=enabled",
+		"/var/lib/kubelet/pods/volumes/kubernetes.io~secret/tls",
+		"ReplicaSetControllerManagerDeploymentName",
+		"image ghcr.io/example/orders@sha512:" + rep("ab12", 32),
+		"Basic\nnext",
+		`{"x":1}`,
+	} {
+		if out := String(in); out != in {
+			t.Errorf("changed useful text:\n in: %q\nout: %q", in, out)
+		}
+	}
+}
+
+// Repeating the shapes the scanning rules look for must cost linear time: each value is scanned once and
+// keys inside a value already redacted are skipped. Each input takes about a second; a quadratic scan of
+// them takes minutes.
+func TestRepeatedPatternsStayLinear(t *testing.T) {
+	if testing.Short() {
+		t.Skip("large inputs")
+	}
+	const size = 1 << 20
+	for name, unit := range map[string]string{
+		"yaml empty headers":       "password:\n",
+		"yaml headers over values": "password:\n  password:\n",
+		"yaml blank lines":         "password:\n\n\n\n",
+		"escaped json values":      `,\"password\":\"x`,
+		"escaped json backslashes": `,\"token\":\"\\\\`,
+		"flow newlines":            "{password\n:\n",
+		"long token parts":         rep("ab12", 6) + "/",
+		"userinfo":                 "https://a@",
+	} {
+		in := rep(unit, size/len(unit))
+		start := time.Now()
+		out := String(in)
+		if d := time.Since(start); d > 10*time.Second {
+			t.Errorf("%s: %d bytes took %s", name, len(in), d)
+		}
+		if len(out) > len(in) {
+			t.Errorf("%s: output grew from %d to %d bytes", name, len(in), len(out))
 		}
 	}
 }
@@ -279,6 +425,9 @@ func TestExtraPatternErrors(t *testing.T) {
 
 func FuzzString(f *testing.F) {
 	for _, c := range corpus() {
+		f.Add(c.input)
+	}
+	for _, c := range gapCases() {
 		f.Add(c.input)
 	}
 	for _, s := range []string{

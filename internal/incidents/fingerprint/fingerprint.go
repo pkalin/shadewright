@@ -34,7 +34,7 @@ const Prefix = "sha256:"
 
 // version is hashed first, so a change to the inputs or the normalization rules yields new fingerprints
 // instead of silently merging old and new incidents.
-const version = "shadewright.io/fingerprint/v1"
+const version = "shadewright.io/fingerprint/v2"
 
 // Observation is one symptom as seen by the collector: an event or an object status condition.
 type Observation struct {

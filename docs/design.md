@@ -4,7 +4,7 @@ Status: draft for the MVP. Built so far: the API and its validation, the policy 
 
 ## 1. Goals
 
-Shadewright is an operations agent for Kubernetes that:
+Shadewright is a safe-remediation controller for Kubernetes clusters run with GitOps. The diagnosis, from rules or a model, is an input; the product is the control of what happens with it. It:
 
 1. Watches events, object status and basic metrics in selected namespaces.
 2. Groups repeated symptoms into incidents.
@@ -690,7 +690,7 @@ Still open:
 
 ## 16. Prior art
 
-These projects are references and integration candidates. None of them implements the whole flow above.
+These projects are references and integration candidates, not a survey of the field: other tools diagnose incidents, open pull requests or gate remediation behind a human, and the list makes no claim about them. What Shadewright adds is the combination of sections 6 to 8 (a closed catalog, a plan bound to the policy and to the object's real source in Git, a freshness check before every write, and verification of the effect), and the claim stands only as far as those sections are built.
 
 | Project | Use |
 | --- | --- |

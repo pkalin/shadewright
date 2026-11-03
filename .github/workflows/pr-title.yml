@@ -6,7 +6,7 @@ name: PR title
 # That is safe only because the job never checks out or runs pull request code and has read-only
 # permissions: keep it that way.
 on:
-  pull_request_target:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] read-only token, no checkout, never runs pull request code
     types: [opened, edited, synchronize, reopened]
 
 permissions:

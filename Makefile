@@ -63,6 +63,11 @@ api-docs: crd-ref-docs ## Generate the API reference (docs/reference/api.md) fro
 		--templates-dir=hack/api-docs/templates --renderer=markdown \
 		--output-path=docs/reference/api.md --log-level=WARN
 
+.PHONY: docs-requirements
+docs-requirements: ## Regenerate requirements-docs.txt (versions and sha256 hashes) from requirements-docs.in.
+	pipx run --spec 'pip-tools==7.6.2' pip-compile --generate-hashes --strip-extras --allow-unsafe --annotation-style=line \
+		--output-file=requirements-docs.txt requirements-docs.in
+
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt",year=$(YEAR) paths="./..."

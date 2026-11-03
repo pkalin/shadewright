@@ -113,9 +113,10 @@ Tests use Ginkgo and Gomega; envtest setup is in `internal/controller/suite_test
 Docs site (Zensical, published to shadewright.io by `.github/workflows/docs.yml`):
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements-docs.txt
+python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements-docs.txt
 .venv/bin/zensical serve    # preview on localhost:8000
 .venv/bin/zensical build --clean   # must say "No issues found"
+make docs-requirements      # after editing requirements-docs.in: regenerate the hash-locked requirements-docs.txt
 ```
 
 ## Docs and decisions

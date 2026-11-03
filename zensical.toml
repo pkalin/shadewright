@@ -1,5 +1,5 @@
 # Docs site for shadewright.io, built with Zensical (ADR-0010).
-# Local preview: pip install -r requirements-docs.txt && zensical serve
+# Local preview: pip install --require-hashes -r requirements-docs.txt && zensical serve
 
 [project]
 site_name = "Shadewright"

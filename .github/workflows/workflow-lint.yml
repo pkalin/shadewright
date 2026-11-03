@@ -1,0 +1,43 @@
+name: Workflow lint
+
+# Lints .github/workflows with actionlint (syntax, expressions, shellcheck) and zizmor (security audit:
+# template injection, excessive permissions, unpinned actions, credential persistence). Both tools are pinned;
+# actionlint's download is checked against the sha256 published with its release.
+# Run the same checks locally before changing a workflow: actionlint, then zizmor .github/workflows
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+jobs:
+  workflow-lint:
+    name: Workflow lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLo "${RUNNER_TEMP}/${archive}" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}" actionlint
+          "${RUNNER_TEMP}/actionlint" -color
+
+      # The token lets zizmor run its online audits (for example impostor commits and ref confusion).
+      - name: Run zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZIZMOR_VERSION: 1.32.0
+        run: pipx run "zizmor==${ZIZMOR_VERSION}" .github/workflows

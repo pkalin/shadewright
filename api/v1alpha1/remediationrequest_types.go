@@ -197,7 +197,10 @@ const (
 	ConditionDelivered     = "Delivered"
 	ConditionVerified      = "Verified"
 	// ConditionPlanFresh is False, with the reason, when an input of the plan digest changed and the request
-	// was superseded (or stopped because its change request could not be closed). It is Unknown, with reason
+	// was superseded (or stopped because its change request could not be closed). It is also False, with the
+	// stale reason and the phase unchanged, once the cleanup of a stale plan has started: it is written before
+	// the change request is closed, so a close whose answer was lost is known on the next reconcile to be
+	// Shadewright's own, and the request ends Superseded rather than NeedsIntervention. It is Unknown, with reason
 	// GitForbidden or GitRejected, while the Git host refuses the freshness check of a request whose pull
 	// request waits for review; the pull request is still watched and nothing is written to Git.
 	ConditionPlanFresh = "PlanFresh"

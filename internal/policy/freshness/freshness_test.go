@@ -615,6 +615,8 @@ func TestStaleWhenTheSourceMovesAway(t *testing.T) {
 			w := newWorld(t)
 			w.resolve = func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
 				moved := *w.rr.Status.Source
+				// Like the real resolver, at the head of the branch it read.
+				moved.BaseCommit, _ = w.git.BranchHead(context.Background(), "main")
 				move(&moved)
 				return sourcemap.Result{Outcome: sourcemap.Resolved, Source: &moved}, nil
 			}
@@ -815,12 +817,7 @@ func TestTargetChangedDuringTheFileReadIsRetried(t *testing.T) {
 // A Flux object the mapping saw changed while the file was read.
 func TestFluxObjectChangedDuringTheFileReadIsRetried(t *testing.T) {
 	gvk := sourcemap.KustomizationGVK
-	ks := &unstructured.Unstructured{}
-	ks.SetGroupVersionKind(gvk)
-	ks.SetNamespace("flux-system")
-	ks.SetName("apps")
-	ks.SetUID("99999999-9999-4999-8999-999999999999")
-	ks.SetResourceVersion("7")
+	ks, observed := fluxKustomization()
 
 	read := false
 	w := newWorld(t)
@@ -828,8 +825,7 @@ func TestFluxObjectChangedDuringTheFileReadIsRetried(t *testing.T) {
 	inner := w.resolve
 	w.resolve = func(ctx context.Context, in sourcemap.Input) (sourcemap.Result, error) {
 		res, err := inner(ctx, in)
-		res.Observed = []sourcemap.Observed{{GVK: gvk, Namespace: "flux-system", Name: "apps", UID: string(ks.GetUID()),
-			ResourceVersion: "7"}}
+		res.Observed = observed
 		return res, err
 	}
 	w.hookRead(func() { read = true })
@@ -905,4 +901,177 @@ func TestFreshIsNotReturnedAfterTheContextEnded(t *testing.T) {
 	if policyReads != 2 {
 		t.Fatalf("the policy should have been read twice, got %d", policyReads)
 	}
+}
+
+// staleMapping makes the mapping stop (Denied) after reading the tree at commit of the given branch of the
+// plan's repository, with the Flux Kustomization as observed; it marks the point the mapping ran in mapped.
+func staleMapping(w *world, branch v1alpha1.GitBranch, commit string, observed []sourcemap.Observed, mapped *bool) {
+	w.resolve = func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
+		*mapped = true
+		return sourcemap.Result{Outcome: sourcemap.Denied, Reason: sourcemap.ReasonPathNotAllowed,
+			Observed: observed, Scanned: &sourcemap.Scanned{RepositoryRef: fx.RepositoryName, Branch: branch, Commit: commit}}, nil
+	}
+}
+
+// fluxKustomization is a Flux Kustomization in the cluster and as the mapping observed it.
+func fluxKustomization() (*unstructured.Unstructured, []sourcemap.Observed) {
+	gvk := sourcemap.KustomizationGVK
+	ks := &unstructured.Unstructured{}
+	ks.SetGroupVersionKind(gvk)
+	ks.SetNamespace("flux-system")
+	ks.SetName("apps")
+	ks.SetUID("99999999-9999-4999-8999-999999999999")
+	ks.SetResourceVersion("7")
+	return ks, []sourcemap.Observed{{GVK: gvk, Namespace: "flux-system", Name: "apps", UID: string(ks.GetUID()),
+		ResourceVersion: "7"}}
+}
+
+// A mapping that no longer gives the plan's source closes the change request, so it is acted on only when the
+// target, the Flux objects it read and the branch tree it read are still the current ones (#145). If any
+// changed during or after the mapping, the stop may describe a delivery or a commit that has gone, while the
+// current mapping still matches the plan: not stale, not fresh; the caller retries.
+func TestStaleMappingIsCheckedBeforeItIsActedOn(t *testing.T) {
+	head := func(w *world) string {
+		h, err := w.git.BranchHead(context.Background(), "main")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	setup := func(t *testing.T) (*world, *bool) {
+		t.Helper()
+		w := newWorld(t)
+		ks, observed := fluxKustomization()
+		w.extra = []client.Object{ks}
+		mapped := new(bool)
+		staleMapping(w, "main", head(w), observed, mapped)
+		return w, mapped
+	}
+
+	t.Run("nothing changed: stale", func(t *testing.T) {
+		w, _ := setup(t)
+		wantStale(t, w.fresh(t), freshness.ReasonSourceChanged)
+	})
+	t.Run("the target changed during the mapping", func(t *testing.T) {
+		w, mapped := setup(t)
+		w.afterGet = func(obj client.Object) {
+			if _, ok := obj.(*unstructured.Unstructured); ok && *mapped && obj.GetName() == fx.WorkloadName {
+				obj.SetResourceVersion("424242")
+			}
+		}
+		wantRetry(t, w.fresh(t))
+	})
+	t.Run("a Flux object changed after the mapping", func(t *testing.T) {
+		w, mapped := setup(t)
+		w.afterGet = func(obj client.Object) {
+			if u, ok := obj.(*unstructured.Unstructured); ok && *mapped && u.GetKind() == sourcemap.KustomizationGVK.Kind {
+				obj.SetResourceVersion("8")
+			}
+		}
+		wantRetry(t, w.fresh(t))
+	})
+	t.Run("the target branch moved since the mapping read it", func(t *testing.T) {
+		w, _ := setup(t)
+		if _, err := w.git.Push("main", otherPath, []byte("a: 3\n")); err != nil {
+			t.Fatal(err)
+		}
+		wantRetry(t, w.fresh(t))
+	})
+	t.Run("the head cannot be read", func(t *testing.T) {
+		w, _ := setup(t)
+		w.git.SetFail(func(op string) error {
+			if op == opBranchHead {
+				return providers.ErrRetryable
+			}
+			return nil
+		})
+		wantRetry(t, w.fresh(t))
+	})
+	t.Run("another branch was read: the unchanged Flux objects decide, no Git read", func(t *testing.T) {
+		w, _ := setup(t)
+		_, observed := fluxKustomization()
+		staleMapping(w, otherBranch, "fedcba9876543210fedcba9876543210fedcba98", observed, new(bool))
+		w.open = func(context.Context, v1alpha1.GitRepository) (providers.GitProvider, error) {
+			t.Error("the repository was opened for a mapping of another branch")
+			return w.git, nil
+		}
+		wantStale(t, w.fresh(t), freshness.ReasonSourceChanged)
+	})
+	t.Run("the policy changed after the mapping", func(t *testing.T) {
+		w, mapped := setup(t)
+		w.afterGet = func(obj client.Object) {
+			if _, ok := obj.(*v1alpha1.RemediationPolicy); ok && *mapped {
+				obj.SetGeneration(4)
+			}
+		}
+		wantRetry(t, w.fresh(t))
+	})
+	t.Run("the settings changed after the mapping, the plan's entry unchanged", func(t *testing.T) {
+		w, mapped := setup(t)
+		w.afterGet = func(obj client.Object) {
+			if _, ok := obj.(*v1alpha1.RemediationSettings); ok && *mapped {
+				obj.SetGeneration(9)
+			}
+		}
+		wantRetry(t, w.fresh(t))
+	})
+	t.Run("the branch head is compared before the target and the Flux objects are read again", func(t *testing.T) {
+		w, mapped := setup(t)
+		var events []string
+		w.git.SetFail(func(op string) error {
+			if op == opBranchHead && *mapped {
+				events = append(events, "head")
+			}
+			return nil
+		})
+		w.afterGet = func(obj client.Object) {
+			if _, ok := obj.(*unstructured.Unstructured); ok && *mapped {
+				events = append(events, obj.GetName())
+			}
+		}
+		wantStale(t, w.fresh(t), freshness.ReasonSourceChanged)
+		if len(events) == 0 || events[0] != "head" {
+			t.Fatalf("reads after the mapping %v, want the branch head first", events)
+		}
+	})
+	t.Run("a missing GitRepository is still missing: stale", func(t *testing.T) {
+		w, _ := setup(t)
+		_, observed := fluxKustomization()
+		staleMapping(w, "main", head(w), append(observed, missingGitRepository()), new(bool))
+		wantStale(t, w.fresh(t), freshness.ReasonSourceChanged)
+	})
+	t.Run("a missing GitRepository appeared: retry", func(t *testing.T) {
+		w, _ := setup(t)
+		_, observed := fluxKustomization()
+		gr := &unstructured.Unstructured{}
+		gr.SetGroupVersionKind(sourcemap.GitRepositoryGVK)
+		gr.SetNamespace("flux-system")
+		gr.SetName("fleet")
+		w.extra = append(w.extra, gr)
+		staleMapping(w, "main", head(w), append(observed, missingGitRepository()), new(bool))
+		wantRetry(t, w.fresh(t))
+	})
+	t.Run("the target branch is still missing: stale", func(t *testing.T) {
+		w, _ := setup(t)
+		_, observed := fluxKustomization()
+		staleMapping(w, "main", "", observed, new(bool))
+		w.git.SetFail(func(op string) error {
+			if op == opBranchHead {
+				return providers.ErrNotFound
+			}
+			return nil
+		})
+		wantStale(t, w.fresh(t), freshness.ReasonSourceChanged)
+	})
+	t.Run("the target branch found missing exists now: retry", func(t *testing.T) {
+		w, _ := setup(t)
+		_, observed := fluxKustomization()
+		staleMapping(w, "main", "", observed, new(bool))
+		wantRetry(t, w.fresh(t))
+	})
+}
+
+// missingGitRepository is the GitRepository as a mapping that found it missing observed it.
+func missingGitRepository() sourcemap.Observed {
+	return sourcemap.Observed{GVK: sourcemap.GitRepositoryGVK, Namespace: "flux-system", Name: "fleet", Missing: true}
 }

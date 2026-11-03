@@ -278,6 +278,8 @@ func (r *RemediationRequestReconciler) refuseWaiting(ctx context.Context, rr *re
 	case errors.Is(err, freshness.ErrRepositoryUnusable), errors.Is(err, errTargetBranchChanged),
 		errors.Is(err, errRepositoryGone):
 		outcome = "; the settings no longer reach its repository, so the pull request was not closed"
+	case errors.Is(err, errChangeRequestNotOurs):
+		outcome = "; the recorded pull request is not the branch's own, so it was not closed"
 	default:
 		return err
 	}
@@ -609,6 +611,11 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 // request is recorded), and returns errStopped.
 func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	phase remediationv1alpha1.RemediationPhase, reason, message string) error {
+	if phase == remediationv1alpha1.PhaseMerged && staleMark(rr) != nil {
+		// The cleanup of a stale plan started, but its pull request merged before the close: the change
+		// landed, so the plan's freshness no longer says anything and the mark is not left behind.
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+	}
 	rr.Status.Phase = phase
 	status := metav1.ConditionFalse
 	if phase == remediationv1alpha1.PhaseMerged {
@@ -652,7 +659,7 @@ func (r *RemediationRequestReconciler) expire(ctx context.Context, rr *remediati
 				"if one is open, close it by hand"))
 	}
 	if err != nil && !errors.Is(err, errRepositoryGone) && !errors.Is(err, errTargetBranchChanged) &&
-		!errors.Is(err, freshness.ErrRepositoryUnusable) {
+		!errors.Is(err, freshness.ErrRepositoryUnusable) && !errors.Is(err, errChangeRequestNotOurs) {
 		return r.retry(ctx, rr, err)
 	}
 	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
@@ -765,14 +772,15 @@ func retryAfterOf(err error) time.Duration {
 // waitOrFail requeues after the delay a host asked for, with a log line saying why, or returns err to the
 // error backoff, which does not read Retry-After. For a request in PolicyChecked the delay ends at
 // status.deadline at the latest, so the request expires on time; expiring makes no branch, commit or pull
-// request.
+// request. A request whose cleanup of a stale plan has started (staleMark) never expires, so it waits as long
+// as the host asked.
 func (r *RemediationRequestReconciler) waitOrFail(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error) (reconcile.Result, error) {
 	d := retryAfterOf(err)
 	if d <= 0 {
 		return reconcile.Result{}, err
 	}
-	if rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked && rr.Status.Deadline != nil {
+	if rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked && rr.Status.Deadline != nil && staleMark(rr) == nil {
 		// A deadline already passed (during a long step) still needs a positive requeue to reach expire.
 		d = min(d, max(rr.Status.Deadline.Sub(r.now()), stepDelay))
 	}
@@ -806,8 +814,9 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		cancel()
 		switch {
 		case err == nil, errors.Is(err, errRepositoryGone), errors.Is(err, errTargetBranchChanged),
-			errors.Is(err, freshness.ErrRepositoryUnusable), errors.Is(err, providers.ErrConflict):
-			// Closed, nothing reachable to close, or already merged.
+			errors.Is(err, freshness.ErrRepositoryUnusable), errors.Is(err, providers.ErrConflict),
+			errors.Is(err, errChangeRequestNotOurs):
+			// Closed, nothing reachable to close, already merged, or not ours to close.
 		case errors.Is(err, freshness.ErrPaused):
 			return reconcile.Result{RequeueAfter: freshRecheckDelay}, nil
 		default:

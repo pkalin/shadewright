@@ -274,11 +274,15 @@ func (c Checker) Check(ctx context.Context, rr *v1alpha1.RemediationRequest) (Re
 	if err != nil {
 		return Result{}, err
 	}
-	commit, observed, err := c.checkSource(ctx, rr, pol, settings)
+	mapped, err := c.checkSource(ctx, rr, pol, settings)
+	if _, isStale := errors.AsType[*StaleError](err); isStale {
+		// A stale verdict closes the change request, so it gets the consistency checks a fresh one gets first.
+		return Result{}, c.confirmStale(ctx, rr, repo, pol, settings, live, mapped, err)
+	}
 	if err != nil {
 		return Result{}, err
 	}
-	git, file, err := c.checkFile(ctx, rr, repo, commit)
+	git, file, err := c.checkFile(ctx, rr, repo, mapped.Source.BaseCommit)
 	if err != nil {
 		return Result{}, err
 	}
@@ -286,7 +290,7 @@ func (c Checker) Check(ctx context.Context, rr *v1alpha1.RemediationRequest) (Re
 	// on: the target (UID and resource version, since the mapping compared the live object with Git) and the
 	// Flux objects the mapping saw. If any changed meanwhile, the checks above describe different objects: not
 	// fresh, not stale; the caller retries.
-	if err := c.recheckInputs(ctx, rr, live, observed); err != nil {
+	if err := c.recheckInputs(ctx, rr, live, mapped.Observed); err != nil {
 		return Result{}, err
 	}
 	// Read the policy and the settings once more, last, before saying "fresh": a pause, a tightened or deleted
@@ -301,7 +305,7 @@ func (c Checker) Check(ctx context.Context, rr *v1alpha1.RemediationRequest) (Re
 		}
 		// checkFile compared the mapped commit with the head before and after its read, so it is the head the
 		// file was read and checked at.
-		return Result{Head: commit, File: file, Git: git}, nil
+		return Result{Head: mapped.Source.BaseCommit, File: file, Git: git}, nil
 	case errors.Is(err, ErrPaused):
 		return Result{}, err
 	default:
@@ -310,6 +314,81 @@ func (c Checker) Check(ctx context.Context, rr *v1alpha1.RemediationRequest) (Re
 		}
 		return Result{}, err
 	}
+}
+
+// confirmStale returns staleErr, the verdict of a mapping that no longer gives the plan's source, only when
+// that mapping still describes the world, checked in the order of the fresh path: when it read the plan's
+// repository and target branch, that branch's head is still the commit it read (or the branch is still missing);
+// then the target and the Flux objects it read are unchanged; last, the policy and the settings it was given
+// are unchanged. Otherwise the mapping may describe a delivery, a commit or a configuration that has gone, while
+// the current one still matches the plan: not stale, not fresh; the caller retries. A mapping that read another
+// repository or branch needs no Git read: the unchanged Flux objects deliver the target from there, which is
+// stale whatever the plan's branch holds.
+func (c Checker) confirmStale(ctx context.Context, rr *v1alpha1.RemediationRequest, repo v1alpha1.GitRepository,
+	pol *v1alpha1.RemediationPolicy, settings *v1alpha1.RemediationSettings, live *unstructured.Unstructured,
+	mapped sourcemap.Result, staleErr error) error {
+	src := rr.Status.Source
+	if tree := mapped.Tree(); tree != nil && tree.RepositoryRef == src.RepositoryRef && tree.Branch == src.TargetBranch {
+		if err := c.checkHead(ctx, repo, tree.Commit); err != nil {
+			return err
+		}
+	}
+	if err := c.recheckInputs(ctx, rr, live, mapped.Observed); err != nil {
+		return err
+	}
+	// The mapping was given the repositories of these settings and the gitOps rules of this policy: an edit
+	// meanwhile (another repository with the same URL, other allowed paths) may change its verdict.
+	switch polNow, setNow, _, err := c.loadPlan(ctx, rr); {
+	case errors.Is(err, ErrPaused):
+		return err
+	case err != nil:
+		if _, isStale := errors.AsType[*StaleError](err); isStale {
+			return errors.New("the policy or the settings changed while the plan was checked, checking again")
+		}
+		return err
+	case polNow.UID != pol.UID || polNow.Generation != pol.Generation ||
+		setNow.UID != settings.UID || setNow.Generation != settings.Generation:
+		return errors.New("the policy or the settings changed while the plan was checked, checking again")
+	}
+	return staleErr
+}
+
+// checkHead reads the head of the plan's target branch and fails with a retry error unless it is want; an empty
+// want means the branch was found missing, and it must still be.
+func (c Checker) checkHead(ctx context.Context, repo v1alpha1.GitRepository, want string) error {
+	ctx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	_, head, err := c.openHead(ctx, repo)
+	switch {
+	case want == "" && errors.Is(err, providers.ErrNotFound):
+		return nil
+	case err != nil:
+		return err
+	case head != want:
+		return errors.New("the target branch moved while its source was mapped, checking again")
+	}
+	return nil
+}
+
+// openHead opens the plan's repository and reads the head of its target branch (loadPlan checked that the
+// entry still names the plan's branch). Settings that can never open the repository give ErrRepositoryUnusable;
+// a failed call gives a ProviderError, whose class (providers.ErrNotFound for a missing branch) is kept.
+func (c Checker) openHead(ctx context.Context, repo v1alpha1.GitRepository) (providers.GitProvider, string, error) {
+	if c.OpenRepository == nil {
+		return nil, "", errors.New("no Git provider is available")
+	}
+	git, err := c.OpenRepository(ctx, repo)
+	if providers.IsInvalidConfig(err) {
+		return nil, "", ErrRepositoryUnusable
+	}
+	if err != nil {
+		return nil, "", provider("open the repository", err)
+	}
+	head, err := git.BranchHead(ctx, string(repo.TargetBranch))
+	if err != nil {
+		return nil, "", provider("read the head of the target branch", err)
+	}
+	return git, head, nil
 }
 
 // recheckInputs reads the target and the Flux objects of the mapping again and fails with a retry error if
@@ -326,11 +405,17 @@ func (c Checker) recheckInputs(ctx context.Context, rr *v1alpha1.RemediationRequ
 	for _, o := range observed {
 		now := &unstructured.Unstructured{}
 		now.SetGroupVersionKind(o.GVK)
-		if err := c.Reader.Get(ctx, client.ObjectKey{Namespace: o.Namespace, Name: o.Name}, now); err != nil {
-			if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
-				return fmt.Errorf("%s %s/%s is gone, checking again", o.GVK.Kind, o.Namespace, o.Name)
-			}
+		err := c.Reader.Get(ctx, client.ObjectKey{Namespace: o.Namespace, Name: o.Name}, now)
+		missing := apierrors.IsNotFound(err) || meta.IsNoMatchError(err)
+		switch {
+		case missing && o.Missing:
+			continue
+		case missing:
+			return fmt.Errorf("%s %s/%s is gone, checking again", o.GVK.Kind, o.Namespace, o.Name)
+		case err != nil:
 			return fmt.Errorf("get %s %s/%s: %w", o.GVK.Kind, o.Namespace, o.Name, err)
+		case o.Missing:
+			return fmt.Errorf("%s %s/%s appeared while the plan was checked, checking again", o.GVK.Kind, o.Namespace, o.Name)
 		}
 		if string(now.GetUID()) != o.UID || now.GetResourceVersion() != o.ResourceVersion {
 			return fmt.Errorf("%s %s/%s changed while the plan was checked, checking again", o.GVK.Kind, o.Namespace, o.Name)
@@ -404,11 +489,12 @@ func (c Checker) readTarget(ctx context.Context, ref v1alpha1.ObjectRef) (*unstr
 // checkSource runs the source mapping again (ADR-0012) and compares it with status.source. The repository,
 // branch, path and build directory must be the recorded ones; the base commit is not compared, because it moves with every merge
 // to the target branch and checkFile decides whether such a merge touched the file. A failed mapping is not
-// stale (the caller retries); a mapping that now denies or needs a person never passes as fresh.
+// stale (the caller retries); a mapping that now denies or needs a person never passes as fresh. The mapping
+// is returned with a stale verdict too, for confirmStale; on a pass its Source is set.
 func (c Checker) checkSource(ctx context.Context, rr *v1alpha1.RemediationRequest, pol *v1alpha1.RemediationPolicy,
-	settings *v1alpha1.RemediationSettings) (string, []sourcemap.Observed, error) {
+	settings *v1alpha1.RemediationSettings) (sourcemap.Result, error) {
 	if c.Source == nil {
-		return "", nil, errors.New("no source resolver is available")
+		return sourcemap.Result{}, errors.New("no source resolver is available")
 	}
 	// The whole mapping runs under the caller's deadline (the controller's freshness deadline), not a fixed one.
 	res, err := c.Source.Resolve(ctx, sourcemap.Input{
@@ -419,19 +505,19 @@ func (c Checker) checkSource(ctx context.Context, rr *v1alpha1.RemediationReques
 	})
 	if err != nil {
 		// The resolver sanitises its errors; the caller sees "not fresh" and retries.
-		return "", nil, fmt.Errorf("resolve the source again: %w", err)
+		return sourcemap.Result{}, fmt.Errorf("resolve the source again: %w", err)
 	}
 	if res.Outcome != sourcemap.Resolved {
 		// Denied, NeedsIntervention or anything unknown. Only the reason is reported: the message may hold
 		// paths or text from Git.
-		return "", nil, stale(ReasonSourceChanged, "Mapping the target to its source again no longer resolves it (%s)", res.Reason)
+		return res, stale(ReasonSourceChanged, "Mapping the target to its source again no longer resolves it (%s)", res.Reason)
 	}
 	got, want := res.Source, rr.Status.Source
 	if got == nil || got.RepositoryRef != want.RepositoryRef || got.TargetBranch != want.TargetBranch ||
 		got.Path != want.Path || got.BuildPath != want.BuildPath {
-		return "", nil, stale(ReasonSourceChanged, "The target is no longer declared in the repository, branch, file and build directory of the plan")
+		return res, stale(ReasonSourceChanged, "The target is no longer declared in the repository, branch, file and build directory of the plan")
 	}
-	return got.BaseCommit, res.Observed, nil
+	return res, nil
 }
 
 // checkTarget checks that the live target is still the object the plan is about. It returns the object read,
@@ -481,21 +567,11 @@ func (c Checker) checkFile(ctx context.Context, rr *v1alpha1.RemediationRequest,
 	if !ok {
 		return nil, nil, errors.New("the action has no previous value")
 	}
-	if c.OpenRepository == nil {
-		return nil, nil, errors.New("no Git provider is available")
-	}
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	git, err := c.OpenRepository(ctx, repo)
-	if providers.IsInvalidConfig(err) {
-		return nil, nil, ErrRepositoryUnusable
-	}
+	git, head, err := c.openHead(ctx, repo)
 	if err != nil {
-		return nil, nil, provider("open the repository", err)
-	}
-	head, err := git.BranchHead(ctx, string(src.TargetBranch))
-	if err != nil {
-		return nil, nil, provider("read the head of the target branch", err)
+		return nil, nil, err
 	}
 	// The mapping and this read must see one commit. If the branch moved since the mapping, the mapped source
 	// may describe another tree than the file read here: not fresh, not stale; the caller retries.

@@ -423,6 +423,22 @@ var _ = Describe("RemediationRequest Controller", func() {
 		Expect(condition(got).Reason).To(Equal(ReasonPreviousValueMismatch))
 	})
 
+	It("checks again when the target changes while the mapping stops", func() {
+		// The mapping compared Git with an object that Flux has replaced since: its stop describes the old one.
+		create(func() {})
+		stub.result = sourcemap.Result{Outcome: sourcemap.NeedsIntervention, Reason: sourcemap.ReasonValueMismatch,
+			Message: "differs"}
+		stub.during = func() {
+			live := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(deployment), live)).To(Succeed())
+			live.Annotations = map[string]string{"example.invalid/touched": "yes"}
+			Expect(k8sClient.Update(ctx, live)).To(Succeed())
+		}
+		_, err := reconcileOnce()
+		Expect(err).To(MatchError(ContainSubstring("changed during the policy check")))
+		Expect(fetch().Status.Phase).To(BeEmpty(), "a stop on an object that changed is not decided")
+	})
+
 	// The real resolver, reading through a Git host that refuses for good: the class survives the mapping, so
 	// the policy check decides now instead of retrying without end (a deadline starts only with PolicyChecked).
 	DescribeTable("stops in NeedsIntervention when the Git host refuses the source mapping's reads",

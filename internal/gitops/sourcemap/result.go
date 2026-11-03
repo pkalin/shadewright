@@ -149,17 +149,42 @@ type Result struct {
 	Message string
 	// Source is set only when Outcome is Resolved.
 	Source *v1alpha1.ResolvedSource
-	// Observed lists the Flux objects (Kustomization, GitRepository) the mapping read, as it read them. It is
-	// set only when Outcome is Resolved. A caller that does slow work after the mapping reads them again and
-	// compares UID and resource version.
+	// Observed lists the Flux objects (Kustomization, GitRepository) the mapping read, as it read them, for
+	// every outcome, an object found missing included; the mapping has read them again after its last Git read. A
+	// caller that does slow work after the mapping, or acts on a stop, reads them again and compares them.
 	Observed []Observed
+	// Scanned is the repository, branch and commit whose files a stop was found in, for a stop reached after
+	// the mapping matched the repository; nil otherwise. For Resolved it is nil: Source names the tree. Use
+	// [Result.Tree], which covers both.
+	Scanned *Scanned
 }
 
-// Observed is a Flux object as the mapping read it: its identity and version.
+// Tree returns the tree the mapping read: Source's repository, branch and base commit when Resolved, Scanned
+// for a stop. Nil when the mapping stopped before it matched a repository. A caller that acts on the result
+// compares the commit with the branch head, since a stop found in an older tree may not hold at the head.
+func (r Result) Tree() *Scanned {
+	if r.Outcome == Resolved && r.Source != nil {
+		return &Scanned{RepositoryRef: r.Source.RepositoryRef, Branch: r.Source.TargetBranch, Commit: r.Source.BaseCommit}
+	}
+	return r.Scanned
+}
+
+// Scanned names the tree a mapping read: the settings repository, the branch and the commit at its head. Commit
+// is empty when the branch did not exist (ReasonBranchNotFound).
+type Scanned struct {
+	RepositoryRef v1alpha1.Name
+	Branch        v1alpha1.GitBranch
+	Commit        string
+}
+
+// Observed is a Flux object as the mapping read it: its identity and version, or that it was missing (or its
+// kind was not served), in which case its absence is what a caller checks again.
 type Observed struct {
 	GVK                  schema.GroupVersionKind
 	Namespace, Name      string
 	UID, ResourceVersion string
+	// Missing is true when the mapping found no such object; UID and ResourceVersion are then empty.
+	Missing bool
 }
 
 func needsIntervention(reason Reason, format string, args ...any) Result {

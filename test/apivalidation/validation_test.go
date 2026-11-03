@@ -53,6 +53,36 @@ func expectRefused(obj client.Object, msg string) {
 }
 
 var _ = Describe("RemediationRequest", func() {
+	DescribeTable("checks status.source.buildPath",
+		func(buildPath string, ok bool) {
+			rr := fx.RemediationRequest("default", unique("rr"))
+			Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+			rr.Status.Source = &v1alpha1.ResolvedSource{
+				RepositoryRef: "fleet", TargetBranch: "main", Path: "apps/orders/deployment.yaml",
+				BuildPath: v1alpha1.GitDirPath(buildPath), BaseCommit: "0123456789abcdef0123456789abcdef01234567",
+			}
+			err := k8sClient.Status().Update(ctx, rr)
+			if ok {
+				Expect(err).NotTo(HaveOccurred())
+				return
+			}
+			Expect(err).To(HaveOccurred(), "the API server accepted an invalid buildPath")
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+			Expect(err.Error()).To(ContainSubstring("status.source.buildPath"))
+		},
+		Entry("the repository root", ".", true),
+		Entry("a nested directory", "apps/orders", true),
+		Entry("absolute", "/apps", false),
+		Entry("parent reference", "../apps", false),
+		Entry("parent reference below", "apps/../..", false),
+		Entry("hidden directory", ".github", false),
+		Entry("hidden directory below", "apps/.github", false),
+		Entry("option-like name", "-rf", false),
+		Entry("trailing slash", "apps/", false),
+		Entry("empty segment", "apps//orders", false),
+		Entry("URL", "https://example.com/apps", false),
+	)
+
 	It("accepts the fixture and fills in safe defaults", func() {
 		rr := fx.RemediationRequest("default", unique("rr"))
 		Expect(k8sClient.Create(ctx, rr)).To(Succeed())

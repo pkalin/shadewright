@@ -36,6 +36,9 @@ import (
 // namespace where the project is deployed in
 const namespace = "shadewright-system"
 
+// watchedNamespace is the namespace in the analyzer's --watch-namespaces and config/watch.
+const watchedNamespace = "demo"
+
 // serviceAccountName created for the project
 const serviceAccountName = "shadewright-executor"
 
@@ -62,6 +65,11 @@ var _ = Describe("Manager", Ordered, func() {
 			"pod-security.kubernetes.io/enforce=restricted")
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
+
+		By("creating the namespace the analyzer watches (config/watch)")
+		cmd = exec.Command("kubectl", "create", "ns", watchedNamespace)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create the watched namespace")
 
 		By("installing CRDs")
 		cmd = exec.Command("make", "install")
@@ -91,6 +99,10 @@ var _ = Describe("Manager", Ordered, func() {
 
 		By("removing manager namespace")
 		cmd = exec.Command("kubectl", "delete", "ns", namespace)
+		_, _ = utils.Run(cmd)
+
+		By("removing the watched namespace")
+		cmd = exec.Command("kubectl", "delete", "ns", watchedNamespace)
 		_, _ = utils.Run(cmd)
 	})
 
@@ -184,6 +196,16 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(output).To(Equal("Running shadewright-analyzer"), "analyzer pod not running under its own ServiceAccount")
 			}
 			Eventually(verifyAnalyzerUp).Should(Succeed())
+
+			By("checking that the analyzer logs the namespaces it watches")
+			verifyWatchLog := func(g Gomega) {
+				cmd := exec.Command("kubectl", "logs", "-l", "control-plane=analyzer", "-n", namespace, "--tail=-1")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("Watching namespaces"))
+				g.Expect(output).To(ContainSubstring(watchedNamespace))
+			}
+			Eventually(verifyWatchLog).Should(Succeed())
 		})
 
 		It("should give each binary its own leader election Lease", func() {

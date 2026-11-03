@@ -5,31 +5,20 @@ metadata:
   name: analyzer-role
 rules:
 - apiGroups:
-  - ""
+  - remediation.shadewright.io
   resources:
-  - pods
+  - remediationsettings
   verbs:
   - get
   - list
   - watch
-- apiGroups:
-  - apps
-  resources:
-  - deployments
-  - replicasets
-  - statefulsets
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - events.k8s.io
-  resources:
-  - events
-  verbs:
-  - get
-  - list
-  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: analyzer-role
+  namespace: system
+rules:
 - apiGroups:
   - remediation.shadewright.io
   resources:
@@ -49,21 +38,6 @@ rules:
   - get
   - patch
   - update
-- apiGroups:
-  - remediation.shadewright.io
-  resources:
-  - remediationsettings
-  verbs:
-  - get
-  - list
-  - watch
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: analyzer-role
-  namespace: system
-rules:
 - apiGroups:
   - remediation.shadewright.io
   resources:

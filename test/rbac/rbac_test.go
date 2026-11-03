@@ -22,9 +22,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -38,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	analyzerpkg "github.com/pkalin/shadewright/internal/analyzer"
 	"github.com/pkalin/shadewright/internal/cmdutil"
 	"github.com/pkalin/shadewright/internal/controller"
 	"github.com/pkalin/shadewright/internal/testfixtures"
@@ -47,10 +51,15 @@ const (
 	executor   = "executor"
 	analyzer   = "analyzer"
 	operatorNS = "shadewright-system"
-	otherNS    = "team-a"
+	otherNS    = "team-a" // watched by the analyzer
+	unwatched  = "team-b" // not watched
 	group      = "remediation.shadewright.io"
 	kindRole   = "Role"
+	kindCR     = "ClusterRole"
 )
+
+// saGroups are the groups the API server gives a ServiceAccount in the operator namespace.
+var saGroups = []string{"system:serviceaccounts", "system:serviceaccounts:" + operatorNS, "system:authenticated"}
 
 var (
 	scheme = runtime.NewScheme()
@@ -105,7 +114,7 @@ func firstEnvtestBinaryDir() string {
 // setup creates the namespaces and ServiceAccounts, applies the generated roles (with the namespace that
 // kustomize would set) and binds each role to its ServiceAccount, as config/rbac does.
 func setup(ctx context.Context) error {
-	for _, ns := range []string{operatorNS, otherNS} {
+	for _, ns := range []string{operatorNS, otherNS, unwatched} {
 		if err := admin.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}); err != nil {
 			return err
 		}
@@ -122,7 +131,29 @@ func setup(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	return bindWatchRole(ctx, otherNS)
+}
+
+// bindWatchRole creates the analyzer's watch ClusterRole and binds it in one namespace with a RoleBinding,
+// as config/watch does for each namespace in --watch-namespaces.
+func bindWatchRole(ctx context.Context, ns string) error {
+	f, err := os.Open(filepath.Join("..", "..", "config", "rbac", analyzer, "watch", "role.yaml"))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	var r rbacv1.ClusterRole
+	if err := utilyaml.NewYAMLOrJSONDecoder(f, 4096).Decode(&r); err != nil {
+		return err
+	}
+	if err := admin.Create(ctx, &r); err != nil {
+		return err
+	}
+	return admin.Create(ctx, &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "analyzer-watch", Namespace: ns},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindCR, Name: r.Name},
+		Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: analyzer, Namespace: operatorNS}},
+	})
 }
 
 // applyRoles creates the roles in one file of config/rbac/<id>. Roles from role.yaml are bound to the
@@ -141,7 +172,7 @@ func applyRoles(ctx context.Context, id, file string) error {
 				break
 			}
 			switch u["kind"] {
-			case "ClusterRole":
+			case kindCR:
 				var r rbacv1.ClusterRole
 				if err := decodeInto(u, &r); err != nil {
 					return err
@@ -151,7 +182,7 @@ func applyRoles(ctx context.Context, id, file string) error {
 				}
 				b := &rbacv1.ClusterRoleBinding{
 					ObjectMeta: metav1.ObjectMeta{Name: r.Name},
-					RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: r.Name},
+					RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindCR, Name: r.Name},
 					Subjects:   subject,
 				}
 				if err := admin.Create(ctx, b); err != nil {
@@ -213,7 +244,7 @@ func canNamed(t *testing.T, id, verb, apiGroup, resource, subresource, namespace
 	t.Helper()
 	sar := &authorizationv1.SubjectAccessReview{Spec: authorizationv1.SubjectAccessReviewSpec{
 		User:   user(id),
-		Groups: []string{"system:serviceaccounts", "system:serviceaccounts:" + operatorNS, "system:authenticated"},
+		Groups: saGroups,
 		ResourceAttributes: &authorizationv1.ResourceAttributes{
 			Verb: verb, Group: apiGroup, Resource: resource, Subresource: subresource, Namespace: namespace,
 			Name: name,
@@ -240,15 +271,29 @@ func TestPermissionBoundary(t *testing.T) {
 		{"analyzer", "patch", group, "remediationrequests", "status", operatorNS, false},
 		{"analyzer", "update", group, "remediationrequests", "", operatorNS, false},
 		{"analyzer", "delete", group, "remediationrequests", "", operatorNS, false},
-		{"analyzer", "create", group, "incidents", "", otherNS, true},
-		{"analyzer", "patch", group, "incidents", "status", otherNS, true},
+		// Incidents live in the operator namespace only.
+		{"analyzer", "create", group, "incidents", "", operatorNS, true},
+		{"analyzer", "patch", group, "incidents", "status", operatorNS, true},
+		{"analyzer", "create", group, "incidents", "", otherNS, false},
+		{"analyzer", "patch", group, "incidents", "status", otherNS, false},
+		{"analyzer", "create", group, "incidents", "", unwatched, false},
+		// Reads only in the watched namespaces, never cluster-wide.
 		{"analyzer", "list", "events.k8s.io", "events", "", otherNS, true},
+		{"analyzer", "watch", "", "pods", "", otherNS, true},
+		{"analyzer", "list", "apps", "deployments", "", otherNS, true},
+		{"analyzer", "list", "events.k8s.io", "events", "", unwatched, false},
+		{"analyzer", "get", "", "pods", "", unwatched, false},
+		{"analyzer", "list", "apps", "replicasets", "", unwatched, false},
+		{"analyzer", "list", "", "pods", "", "", false},
+		{"analyzer", "list", "events.k8s.io", "events", "", "", false},
+		{"analyzer", "list", "", "pods", "", operatorNS, false},
+		{"analyzer", "list", group, "remediationsettings", "", "", true},
 		{"analyzer", "list", "", "events", "", otherNS, false},
 		{"analyzer", "get", "", "secrets", "", otherNS, false},
 		{"analyzer", "list", "", "secrets", "", operatorNS, false},
 		{"analyzer", "create", group, "remediationpolicies", "", "", false},
 		{"analyzer", "update", group, "remediationrequests", "finalizers", operatorNS, false},
-		{"analyzer", "delete", group, "incidents", "", otherNS, false},
+		{"analyzer", "delete", group, "incidents", "", operatorNS, false},
 		{"analyzer", "get", "", "configmaps", "", operatorNS, false},
 		// Executor: writes request status in its namespace only, reads the rest, never creates requests or
 		// writes incidents.
@@ -370,7 +415,7 @@ func impersonate(t *testing.T, id string) client.Client {
 	c := rest.CopyConfig(cfg)
 	c.Impersonate = rest.ImpersonationConfig{
 		UserName: user(id),
-		Groups:   []string{"system:serviceaccounts", "system:serviceaccounts:" + operatorNS, "system:authenticated"},
+		Groups:   saGroups,
 	}
 	cl, err := client.New(c, client.Options{Scheme: scheme})
 	if err != nil {
@@ -445,4 +490,141 @@ func TestExecutorCacheSeesOnlyTheOperatorNamespace(t *testing.T) {
 	if err := c.Get(ctx, client.ObjectKey{Namespace: operatorNS, Name: "seen"}, &got); err != nil {
 		t.Errorf("executor cache misses a request in its own namespace: %v", err)
 	}
+}
+
+// TestAnalyzerCacheWorksWithItsOwnRBAC starts the analyzer's cache as the analyzer itself: it must sync with
+// the RBAC it has (so it never asks for more), see Pods only in the watched namespace and Incidents only in the
+// operator namespace.
+func TestAnalyzerCacheWorksWithItsOwnRBAC(t *testing.T) {
+	ctx := t.Context()
+	const web = "web"
+	for _, ns := range []string{otherNS, unwatched} {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: web, Namespace: ns},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: web, Image: "example.invalid/web:1"}}},
+		}
+		if err := admin.Create(ctx, pod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := rest.CopyConfig(cfg)
+	c.Impersonate = rest.ImpersonationConfig{
+		UserName: user(analyzer),
+		Groups:   saGroups,
+	}
+	opts := analyzerpkg.CacheOptions(operatorNS, []string{otherNS})
+	opts.Scheme = scheme
+	ca, err := cache.New(c, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Informers for each kind the analyzer reads, so a missing grant shows up as a sync that never completes.
+	kinds := []client.Object{&corev1.Pod{}, &remediationv1alpha1.Incident{}, &remediationv1alpha1.RemediationRequest{}}
+	for _, obj := range kinds {
+		syncCtx, done := context.WithTimeout(ctx, 30*time.Second)
+		_, err := ca.GetInformer(syncCtx, obj, cache.BlockUntilSynced(false))
+		done()
+		if err != nil {
+			t.Fatalf("informer for %T: %v", obj, err)
+		}
+	}
+	go func() { _ = ca.Start(ctx) }()
+	syncCtx, done := context.WithTimeout(ctx, 30*time.Second)
+	defer done()
+	if !ca.WaitForCacheSync(syncCtx) {
+		t.Fatal("the analyzer's cache did not sync with the analyzer's own RBAC")
+	}
+	var pods corev1.PodList
+	if err := ca.List(ctx, &pods); err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 1 || pods.Items[0].Namespace != otherNS {
+		t.Errorf("analyzer cache sees %d pods, want the one in %s", len(pods.Items), otherNS)
+	}
+	var p corev1.Pod
+	if err := ca.Get(ctx, client.ObjectKey{Namespace: unwatched, Name: web}, &p); err == nil {
+		t.Error("analyzer cache returned a pod from an unwatched namespace")
+	}
+}
+
+// TestWatchBindingsMatchTheFlag guards against drift between the analyzer's --watch-namespaces
+// (config/manager/analyzer.yaml) and the RoleBindings in config/watch: one per namespace, each binding the
+// prefixed watch role to the prefixed analyzer ServiceAccount in the namespace config/default installs to.
+func TestWatchBindingsMatchTheFlag(t *testing.T) {
+	root := filepath.Join("..", "..", "config")
+
+	var flagValue string
+	for _, doc := range decodeAll(t, filepath.Join(root, "manager", "analyzer.yaml")) {
+		var d appsv1.Deployment
+		if err := decodeInto(doc, &d); err != nil {
+			t.Fatal(err)
+		}
+		for _, ct := range d.Spec.Template.Spec.Containers {
+			for _, a := range ct.Args {
+				if v, ok := strings.CutPrefix(a, "--watch-namespaces="); ok {
+					flagValue = v
+				}
+			}
+		}
+	}
+	want, err := analyzerpkg.ParseNamespaces(flagValue)
+	if err != nil {
+		t.Fatalf("config/manager/analyzer.yaml: %v", err)
+	}
+
+	var kz struct {
+		Resources []string `json:"resources"`
+	}
+	kd := decodeAll(t, filepath.Join(root, "watch", "kustomization.yaml"))
+	if len(kd) != 1 {
+		t.Fatal("config/watch/kustomization.yaml: want one document")
+	}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(kd[0], &kz); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, res := range kz.Resources {
+		for _, doc := range decodeAll(t, filepath.Join(root, "watch", res)) {
+			var b rbacv1.RoleBinding
+			if err := decodeInto(doc, &b); err != nil {
+				t.Fatal(err)
+			}
+			if b.Kind != "RoleBinding" {
+				t.Errorf("%s: %s, want only RoleBindings", res, b.Kind)
+				continue
+			}
+			if b.RoleRef.Kind != kindCR || b.RoleRef.Name != "shadewright-analyzer-watch-role" {
+				t.Errorf("%s: roleRef %s/%s, want ClusterRole/shadewright-analyzer-watch-role", res, b.RoleRef.Kind, b.RoleRef.Name)
+			}
+			if len(b.Subjects) != 1 || b.Subjects[0].Name != "shadewright-analyzer" || b.Subjects[0].Namespace != operatorNS {
+				t.Errorf("%s: subjects %v, want the ServiceAccount shadewright-analyzer in %s", res, b.Subjects, operatorNS)
+			}
+			got = append(got, b.Namespace)
+		}
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Errorf("config/watch binds %v, --watch-namespaces is %v", got, want)
+	}
+}
+
+func decodeAll(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	dec := utilyaml.NewYAMLOrJSONDecoder(f, 4096)
+	var out []map[string]any
+	for {
+		var u map[string]any
+		if err := dec.Decode(&u); err != nil {
+			break
+		}
+		if u != nil {
+			out = append(out, u)
+		}
+	}
+	return out
 }

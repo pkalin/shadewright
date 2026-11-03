@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/analyzer"
 	"github.com/pkalin/shadewright/internal/cmdutil"
 )
 
@@ -46,12 +47,33 @@ func init() {
 
 func main() {
 	var opts cmdutil.Options
+	var namespace, watchNamespaces string
 	opts.BindFlags(flag.CommandLine)
+	flag.StringVar(&namespace, "namespace", os.Getenv("POD_NAMESPACE"),
+		"The operator namespace: where Incidents and RemediationRequests are written. "+
+			"Defaults to the POD_NAMESPACE environment variable.")
+	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
+		"Comma-separated namespaces whose events, pods and workloads the analyzer reads. Required; each one "+
+			"needs a RoleBinding to the analyzer-watch-role (config/watch).")
 	flag.Parse()
 
 	ctrl.SetLogger(cmdutil.NewLogger(&opts))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), opts.ManagerOptions(setupLog, scheme, cmdutil.AnalyzerLease))
+	if namespace == "" {
+		setupLog.Error(nil, "The operator namespace is not set: use --namespace or POD_NAMESPACE")
+		os.Exit(1)
+	}
+	watched, err := analyzer.ParseNamespaces(watchNamespaces)
+	if err != nil {
+		setupLog.Error(err, "Invalid --watch-namespaces")
+		os.Exit(1)
+	}
+	setupLog.Info("Watching namespaces", "namespaces", watched, "operatorNamespace", namespace)
+
+	mgrOpts := opts.ManagerOptions(setupLog, scheme, cmdutil.AnalyzerLease)
+	mgrOpts.Cache = analyzer.CacheOptions(namespace, watched)
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
 		os.Exit(1)

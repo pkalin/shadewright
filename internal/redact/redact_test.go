@@ -223,7 +223,7 @@ func TestKeepsTextAroundValues(t *testing.T) {
 		// Issue #114.
 		`"{\"clientSecret\":\"prefix,` + tail + `\"}"`:    `"{\"clientSecret\":\"[REDACTED:credential]\"}"`,
 		"password:\n  " + opaque + nextField:              "password:\n  [REDACTED:credential]\nnext: field",
-		"password:  # set by CI\n  " + opaque + nextField: "password:  [REDACTED:credential]\nnext: field",
+		"password:  # set by CI\n  " + opaque + nextField: "password:  # set by CI\n  [REDACTED:credential]\nnext: field",
 		"token:\n  \"" + opaque + "\"\nnext: field":       "token:\n  \"[REDACTED:credential]\"\nnext: field",
 		"{\"password\":\n  \"" + opaque + "\"}":           "{\"password\":\n  \"[REDACTED:credential]\"}",
 		"retry with Basic " + b64("u:p") + " now":         "retry with Basic *** now",
@@ -336,6 +336,27 @@ func gapCases() []gapCase {
 		{"kubernetes env json", `[{"name":"API_TOKEN","value":"` + opaque + `"},{"name":"MODE","value":"debug"}]`,
 			[]string{opaque}, []string{`{"name":"MODE","value":"debug"}`}},
 		{"kubernetes env yaml flow", "env: [{name: DB_PASSWORD, value: " + opaque + "}]", []string{opaque}, nil},
+		// Review of #192: a secret key nested below a kept reference child, block values of a bare short
+		// key, a quoted passphrase after a bare short key and a token after an image digest.
+		{"secret key below a reference child", "credentials:\n  secretRef:\n    name: db-creds\n    token:\n      - " + opaque + nextField,
+			[]string{opaque}, []string{"secretRef:\n    name: db-creds\n    token:\n      - ", nextField}},
+		{"secret key below a reference child at the end", "credentials:\n  secretRef:\n    token:\n      - abc123secret\n",
+			[]string{"abc123secret"}, []string{"secretRef:\n    token:\n      - "}},
+		{"secret keys below nested reference children", "credentials:\n  secretRef:\n    token:\n      keyRef:\n        password:\n          " +
+			opaque + "\n      user: admin\n  user: root" + nextField,
+			[]string{opaque, "admin", "root"}, []string{"keyRef:\n        password:\n          ", nextField}},
+		{"bare pass block scalar", "pass: |\n  s3cr3t!pw99\n", []string{"s3cr3t!pw99"}, []string{"pass: |\n  "}},
+		{"bare auth sequence", "auth:\n  - tok3n!value99\n", []string{"tok3n!value99"}, []string{"auth:\n  - "}},
+		{"bare auth mapping", "auth:\n  mode: oidc\n  key: k3y!" + opaque + nextField,
+			[]string{opaque}, []string{"mode: oidc", nextField}},
+		{"secret key under a bare auth", "auth:\n  mode: oidc\n  password:\n    - hunter2" + nextField,
+			[]string{"hunter2"}, []string{"mode: oidc", "password:\n    - ", nextField}},
+		{"quoted passphrase after bare pass", `pass: "correct horse battery staple"` + nextField,
+			[]string{"correct horse battery staple"}, []string{`pass: "`, `"` + nextField}},
+		{"comment-like value after an equals sign", "API_TOKEN= #" + opaque + "\n  indented: line",
+			[]string{opaque}, []string{"\n  indented: line"}},
+		{"token after an image digest", "image x@sha256:" + rep("a1", 32) + "-" + randomToken + endText,
+			[]string{randomToken}, []string{"sha256:" + rep("a1", 32) + "-", endText}},
 	}
 }
 
@@ -396,6 +417,12 @@ func TestGapRulesKeepUsefulText(t *testing.T) {
 		"/var/lib/kubelet/pods/volumes/kubernetes.io~secret/tls",
 		"ReplicaSetControllerManagerDeploymentName",
 		"image ghcr.io/example/orders@sha512:" + rep("ab12", 32),
+		// Review of #192.
+		"image ghcr.io/example/orders@sha256:" + rep("a1", 32) + "-amd64",
+		"credentials: # set by CI\n  secretRef:\n    name: db-creds\n",
+		"auth:\n  - failed\n",
+		"pass: |\n  12 of 12\n",
+		`auth: "failed"`,
 		"Basic\nnext",
 		`{"x":1}`,
 	} {
@@ -426,6 +453,9 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"secret mapping children":  "credentials:\n  a: b\n  ref:\n    c: d\n",
 		"escape runs":              `{\"token\":\"\\\\\\\"`,
 		"hyphen runs":              rep("Ab1-", 8) + "/",
+		"comment headers":          "credentials: # c\n  a: b\n",
+		"bare key children":        "auth:\n  password:\n    x\n",
+		"references over headers":  "credentials:\n  secretRef:\n    token:\n      - x\n",
 	} {
 		in := rep(unit, size/len(unit))
 		start := time.Now()
@@ -444,15 +474,17 @@ func TestNestedBlocksStayLinear(t *testing.T) {
 	if testing.Short() {
 		t.Skip("large inputs")
 	}
-	for name, line := range map[string]string{
-		"env entries":   "- name: DB_PASSWORD\n",
-		"empty headers": "password:\n",
-		"references":    "secretRef:\n",
+	for name, line := range map[string]func(indent string) string{
+		"env entries":   func(in string) string { return in + "- name: DB_PASSWORD\n" },
+		"empty headers": func(in string) string { return in + "password:\n" },
+		"references":    func(in string) string { return in + "secretRef:\n" },
+		// Each secret header sits below a reference child of the one before.
+		"headers below references": func(in string) string { return in + in + "token:\n" + in + in + " secretRef:\n" },
+		"comment headers":          func(in string) string { return in + "token: # c\n" },
 	} {
 		var b strings.Builder
 		for i := 0; b.Len() < 1<<20; i++ {
-			b.WriteString(strings.Repeat(" ", i))
-			b.WriteString(line)
+			b.WriteString(line(strings.Repeat(" ", i)))
 		}
 		in := b.String()
 		start := time.Now()

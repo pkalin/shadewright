@@ -32,9 +32,10 @@ limitations under the License.
 // Secret is what a diagnosis needs, and so is the hex of an image digest.
 //
 // Where a rule would also match prose, it asks the value to look like a credential: the word after "Basic"
-// or "Bearer", and the short keys "pass", "auth" and "sig" on their own before a colon ("pass: 12 fail: 0"),
-// count only with a value of at least 8 bytes that mixes letters with digits or symbols (16 bytes of
-// anything after Basic or Bearer, or base64 of "user:password" after Basic). So "Bearer abc12" and
+// or "Bearer", and the value of the short keys "pass", "auth" and "sig" on their own before a colon ("pass:
+// 12 fail: 0"), inline or in a block on the following lines, count only with a value of at least 8 bytes
+// that mixes letters with digits or symbols (blanks too when the value is quoted, as in a passphrase; 16
+// bytes of anything after Basic or Bearer, or base64 of "user:password" after Basic). So "Bearer abc12" and
 // "auth: hunter2" pass through.
 //
 // Known gaps: JSON escaped more than three times, a Kubernetes environment entry whose "value" comes before
@@ -218,22 +219,19 @@ func keepReference(s string, m []int) bool {
 	return isReference(s[m[2]:m[3]])
 }
 
+// keySeparators removes the separators of a key name before its suffix is compared.
+var keySeparators = strings.NewReplacer("_", "", "-", "", ".", "")
+
 // isReference reports whether key, quoted or not, names or points to a secret instead of holding one.
 func isReference(key string) bool {
 	key = strings.ToLower(strings.Trim(key, `"'\`))
-	key = strings.NewReplacer("_", "", "-", "", ".", "").Replace(key)
+	key = keySeparators.Replace(key)
 	for _, suffix := range referenceSuffixes {
 		if strings.HasSuffix(key, suffix) {
 			return true
 		}
 	}
 	return false
-}
-
-// skipKey reports whether the key in group 1 of m is left alone with its value: a reference, or a bare
-// short key followed by a colon (see bareShortColon) in a rule that cannot judge the value's shape.
-func skipKey(s string, m []int) bool {
-	return keepReference(s, m) || bareShortColon(s, m)
 }
 
 // bareShortColon reports whether the key in group 1 of m is one of the short names "pass", "auth" or "sig"
@@ -256,7 +254,13 @@ func bareShortColon(s string, m []int) bool {
 // looksLikeSecret reports whether v has the shape of a credential rather than of prose: at least 8 bytes,
 // no whitespace, and a letter together with a digit or a symbol.
 func looksLikeSecret(v string) bool {
-	if len(v) < 8 || strings.ContainsFunc(v, func(r rune) bool { return r <= ' ' }) {
+	return !strings.ContainsFunc(v, func(r rune) bool { return r <= ' ' }) && looksLikeQuotedSecret(v)
+}
+
+// looksLikeQuotedSecret is looksLikeSecret for a quoted value, which may hold blanks (a passphrase such as
+// "correct horse battery staple"): at least 8 bytes and a letter together with a digit, a symbol or a blank.
+func looksLikeQuotedSecret(v string) bool {
+	if len(v) < 8 {
 		return false
 	}
 	var letter, other bool
@@ -269,6 +273,28 @@ func looksLikeSecret(v string) bool {
 		}
 	}
 	return letter && other
+}
+
+// lineLooksLikeSecret reports whether the text of one line of a block value, after any sequence entry
+// indicators, looks like a secret: as a quoted value (looksLikeQuotedSecret) when it is quoted, otherwise as
+// a plain one (looksLikeSecret).
+func lineLooksLikeSecret(text string) bool {
+	text = strings.TrimRight(text[dashes(text):], " \t")
+	if len(text) >= 2 && (text[0] == '"' || text[0] == '\'') && text[len(text)-1] == text[0] {
+		return looksLikeQuotedSecret(text[1 : len(text)-1])
+	}
+	return looksLikeSecret(text)
+}
+
+// blockLooksLikeSecret reports whether any line of the block value s[start:end] looks like a secret
+// (lineLooksLikeSecret).
+func blockLooksLikeSecret(s string, start, end int) bool {
+	for line := range strings.SplitSeq(s[start:end], "\n") {
+		if lineLooksLikeSecret(strings.TrimLeft(line, " \t\r")) {
+			return true
+		}
+	}
+	return false
 }
 
 // minSchemeWord is the length from which any value after Basic or Bearer counts: longer than the words
@@ -371,32 +397,43 @@ const (
 // are skipped without being returned. Each line is read once.
 func blockLines(s string, pos, keyCol, kind int) iter.Seq[blockLine] {
 	return func(yield func(blockLine) bool) {
-		for pos < len(s) && (s[pos] == '\n' || s[pos] == '\r') {
-			if s[pos] == '\r' {
-				pos++
-				continue
-			}
-			l := blockLine{start: pos + 1, end: lineEnd(s, pos+1)}
-			pos = l.end
-			text := s[l.start:l.end]
-			trimmed := strings.TrimLeft(text, " \t")
-			if trimmed == "" {
-				continue
-			}
-			l.text = l.start + len(text) - len(trimmed)
-			if kind == blockValue && trimmed[0] == '#' {
-				continue
-			}
-			deeper := l.indent() > keyCol
-			compactSequence := kind == blockValue && l.indent() == keyCol && dashes(trimmed) > 0
-			if !deeper && !compactSequence {
+		for {
+			l, next, ok := nextBlockLine(s, pos, keyCol, kind)
+			if !ok || !yield(l) {
 				return
 			}
-			if !yield(l) {
-				return
-			}
+			pos = next
 		}
 	}
+}
+
+// nextBlockLine returns the first line after pos (which is at a line end) that blockLines would return, and
+// the end of that line, from which the next one is read. ok is false when the block ends first.
+func nextBlockLine(s string, pos, keyCol, kind int) (blockLine, int, bool) {
+	for pos < len(s) && (s[pos] == '\n' || s[pos] == '\r') {
+		if s[pos] == '\r' {
+			pos++
+			continue
+		}
+		l := blockLine{start: pos + 1, end: lineEnd(s, pos+1)}
+		pos = l.end
+		text := s[l.start:l.end]
+		trimmed := strings.TrimLeft(text, " \t")
+		if trimmed == "" {
+			continue
+		}
+		l.text = l.start + len(text) - len(trimmed)
+		if kind == blockValue && trimmed[0] == '#' {
+			continue
+		}
+		deeper := l.indent() > keyCol
+		compactSequence := kind == blockValue && l.indent() == keyCol && dashes(trimmed) > 0
+		if !deeper && !compactSequence {
+			break
+		}
+		return l, pos, true
+	}
+	return blockLine{}, pos, false
 }
 
 // dashes returns the length of the sequence entry indicators ("- ", "- - ") at the start of text.
@@ -427,16 +464,18 @@ func indentedLines(s string, pos, keyCol int) (int, int) {
 // blockScalarSpan returns the content of a YAML literal or folded block scalar whose header line the rule
 // matched: the following lines that are blank or indented deeper than the key, up to the last non-blank
 // one. With no content, the indicator itself (group 2) is redacted. Headers inside a block already
-// redacted are skipped, so each byte is scanned once.
+// redacted are skipped, so each byte is scanned once. Under a bare short key (bareShortColon) the content
+// counts only when one of its lines looks like a secret, and an empty block is kept.
 func blockScalarSpan(s string, m []int, prevEnd int) (int, int, bool) {
-	if m[0] < prevEnd || skipKey(s, m) {
+	if m[0] < prevEnd || keepReference(s, m) {
 		return 0, 0, false
 	}
+	bare := bareShortColon(s, m)
 	start, end := indentedLines(s, m[1], m[2]-m[0])
 	if start < 0 {
-		return m[4], m[5], true
+		return m[4], m[5], !bare
 	}
-	return start, end, true
+	return start, end, !bare || blockLooksLikeSecret(s, start, end)
 }
 
 // childKey matches a mapping key at the start of a line's text, after any sequence entry indicators. Group
@@ -469,25 +508,68 @@ func inlineValue(s string, pos, le int) (int, int) {
 // A scalar value (plain, quoted, a list of scalars or a flow collection) is redacted whole. A mapping
 // keeps its keys and loses the scalar values of its children, at every depth, so "credentials:\n  user:
 // admin" loses "admin" as well as any secret-named child. Children whose key is a reference
-// ("secretRef", "name") keep their values and everything below them.
+// ("secretRef", "name") keep their values and everything below them, except the value of a secret key
+// with nothing after its colon among them, which is redacted in the same way.
+//
+// Under a bare short key (bareShortColon) a value counts only when it looks like a secret: a scalar when
+// one of its lines does, and in a mapping each value on its own.
 //
 // The block is read once and its end is returned, so headers inside it are skipped and each byte is
 // scanned once.
 func nextLineSpans(s string, m []int, prevEnd int, add func(start, end int)) int {
-	if m[0] < prevEnd || skipKey(s, m) {
+	if m[0] < prevEnd || keepReference(s, m) {
 		return prevEnd
 	}
+	return max(prevEnd, nextLineBlock(s, m[1], m[2]-m[0], bareShortColon(s, m), add))
+}
+
+// nextLineHeader matches, on one line, the header the next-line rule looks for (see builtinRules). Group 1
+// is the key.
+var nextLineHeader = regexp.MustCompile(`(?i)^` + nextLineHeaderExpr)
+
+// nestedHeader returns the submatches, as offsets into s, of the next-line rule's header on line l, or nil
+// when l holds none or its key is a reference.
+func nestedHeader(s string, l blockLine) []int {
+	hm := nextLineHeader.FindStringSubmatchIndex(s[l.start:l.end])
+	if hm == nil {
+		return nil
+	}
+	for i := range hm {
+		if hm[i] >= 0 {
+			hm[i] += l.start
+		}
+	}
+	if keepReference(s, hm) {
+		return nil
+	}
+	return hm
+}
+
+// nextLineBlock redacts the value of the key at column keyCol whose header line ends at pos, as described
+// for nextLineSpans, and returns the end of the last line of the block, or pos when it has none. With bare,
+// each value counts only when it looks like a secret.
+func nextLineBlock(s string, pos, keyCol int, bare bool, add func(start, end int)) int {
 	const (
 		undecided = iota
 		scalar
 		mapping
 	)
+	addValue := func(start, end int) {
+		if !bare || blockLooksLikeSecret(s, start, end) {
+			add(start, end)
+		}
+	}
 	mode := undecided
-	start, end := -1, -1
+	start, end := -1, pos
 	// keepBelow and redactBelow are the key columns of a reference child, whose lines below are kept, and
 	// of a child with a block scalar, whose lines below are redacted whole; -1 when there is none.
 	keepBelow, redactBelow := -1, -1
-	for l := range blockLines(s, m[1], m[2]-m[0], blockValue) {
+	for pos < len(s) {
+		l, next, ok := nextBlockLine(s, pos, keyCol, blockValue)
+		if !ok {
+			break
+		}
+		pos, end = next, l.end
 		text := s[l.text:l.end]
 		if mode == undecided {
 			start, mode = l.text+dashes(text), scalar
@@ -495,23 +577,38 @@ func nextLineSpans(s string, m []int, prevEnd int, add func(start, end int)) int
 				mode = mapping
 			}
 		}
-		end = l.end
 		if mode == scalar {
 			continue
 		}
-		if keepBelow >= 0 && l.indent() > keepBelow {
+		kept := keepBelow >= 0 && l.indent() > keepBelow
+		if !kept {
+			keepBelow = -1
+		}
+		inBlockScalar := !kept && redactBelow >= 0 && l.indent() > redactBelow
+		if !kept && !inBlockScalar {
+			redactBelow = -1
+		}
+		if kept || bare && !inBlockScalar {
+			// A secret key with nothing after its colon, below a reference or under a bare short key, is
+			// judged on its own, as a match of the rule would be. Its block is read here and skipped, so
+			// each line is still read once.
+			if hm := nestedHeader(s, l); hm != nil {
+				pos = nextLineBlock(s, l.end, hm[2]-hm[0], bareShortColon(s, hm), add)
+				end = pos
+				continue
+			}
+		}
+		if kept {
 			continue
 		}
-		keepBelow = -1
-		if redactBelow >= 0 && l.indent() > redactBelow {
-			add(inlineValue(s, l.text, l.end))
+		if inBlockScalar {
+			addValue(inlineValue(s, l.text, l.end))
 			continue
 		}
-		redactBelow = -1
 		cm := childKey.FindStringSubmatchIndex(text)
 		if cm == nil {
 			// A scalar line: a sequence entry, a flow collection or a continuation.
-			add(inlineValue(s, l.text+dashes(text), l.end))
+			addValue(inlineValue(s, l.text+dashes(text), l.end))
 			continue
 		}
 		keyCol := l.indent() + cm[2]
@@ -521,18 +618,18 @@ func nextLineSpans(s string, m []int, prevEnd int, add func(start, end int)) int
 		}
 		vpos := l.text + cm[1]
 		switch {
-		case vpos >= l.end:
-			// An empty value: its children follow on deeper lines.
+		case vpos >= l.end || s[vpos] == '#':
+			// An empty value, maybe with a comment: its children follow on deeper lines.
 		case isBlockHeader(s, vpos):
 			redactBelow = keyCol
 		default:
-			add(inlineValue(s, vpos, l.end))
+			addValue(inlineValue(s, vpos, l.end))
 		}
 	}
-	if mode == undecided {
-		return prevEnd
-	}
 	if mode == scalar {
+		if bare && !blockLooksLikeSecret(s, start, end) {
+			return end
+		}
 		if start < end && (s[start] == '"' || s[start] == '\'') {
 			// A quoted scalar that is the whole value keeps its quotes.
 			if qe := quotedEnd(s, start); qe > 0 && strings.TrimRight(s[qe:end], " \t") == "" {
@@ -595,26 +692,37 @@ const minTokenLength = 24
 // hyphenated part of at least that length that mixes upper case, lower case and digits (base64url).
 // Paths and image names (short parts between slashes), long names made of letters only, Kubernetes names
 // and UUIDs (lower case, short pieces between hyphens) and the hex of an image digest ("sha256:...", which
-// identifies a build, not a credential) are kept.
+// identifies a build, not a credential, also with a suffix such as "-amd64") are kept; what follows the
+// digest's hex is judged on its own.
 func longTokenSpan(s string, m []int, _ int) (int, int, bool) {
-	run := s[m[0]:m[1]]
-	if prefix := strings.ToLower(s[max(0, m[0]-7):m[0]]); (prefix == "sha256:" || prefix == "sha512:") && isHex(run) {
-		return 0, 0, false
+	start, run := m[0], s[m[0]:m[1]]
+	if prefix := strings.ToLower(s[max(0, m[0]-7):m[0]]); prefix == "sha256:" || prefix == "sha512:" {
+		if digest, rest, _ := strings.Cut(run, "-"); isHex(digest) {
+			start, run = m[1]-len(rest), rest
+		}
 	}
+	if randomRun(run) {
+		return start, m[1], true
+	}
+	return 0, 0, false
+}
+
+// randomRun reports whether some part of run between slashes looks random, as described for longTokenSpan.
+func randomRun(run string) bool {
 	for part := range strings.SplitSeq(run, "/") {
 		if len(part) < minTokenLength {
 			continue
 		}
 		if strings.Contains(part, "-") && mixesCase(part) && mixesLettersAndDigits(part) {
-			return m[0], m[1], true
+			return true
 		}
 		for piece := range strings.SplitSeq(part, "-") {
 			if len(piece) >= minTokenLength && mixesLettersAndDigits(piece) {
-				return m[0], m[1], true
+				return true
 			}
 		}
 	}
-	return 0, 0, false
+	return false
 }
 
 // mixesCase reports whether s holds both an upper-case and a lower-case ASCII letter.
@@ -806,22 +914,53 @@ func isSpace(c byte) bool {
 // separator; the value is found by valueSpan with the given boundary. Keys that are references are left
 // alone without reading their value, so a reference never hides a neighbouring secret. A key inside a value
 // already redacted is skipped, so each byte is scanned once. A bare YAML block scalar indicator is left to
-// the block scalar rule. A bare short key followed by a colon counts only with a value that looks like a
-// secret (bareShortColon).
+// the block scalar rule, and a YAML comment over a block on the following lines to the next-line rule
+// (commentOverBlock). A bare short key followed by a colon counts only with a value that looks like a
+// secret (bareShortColon); a quoted value may hold blanks (looksLikeQuotedSecret).
 func keyValueSpan(boundary int) func(s string, m []int, prevEnd int) (int, int, bool) {
 	return func(s string, m []int, prevEnd int) (int, int, bool) {
 		if m[2] < prevEnd || keepReference(s, m) {
 			return 0, 0, false
 		}
-		if isBlockHeader(s, m[1]) {
+		if isBlockHeader(s, m[1]) || commentOverBlock(s, m) {
 			return 0, 0, false
 		}
 		start, end := valueSpan(s, m[1], boundary, m[2]-m[0])
-		if bareShortColon(s, m) && !looksLikeSecret(s[start:end]) {
-			return 0, 0, false
+		if bareShortColon(s, m) {
+			if v := s[start:end]; start > m[1] && !looksLikeQuotedSecret(v) || start == m[1] && !looksLikeSecret(v) {
+				return 0, 0, false
+			}
 		}
 		return start, end, true
 	}
+}
+
+// commentOverBlock reports whether the value of the key in group 1 of m, at the end of m, is a YAML comment
+// ("credentials: # set by CI") over a block on the following lines, which the next-line rule redacts so
+// that reference children keep their names: a "#" after a colon and a blank, a key first on its line, and
+// a line of its block after it. A "#" with no such block, or after "=", counts as the value. Only one key
+// per line is first on it, so the line is read at most once.
+func commentOverBlock(s string, m []int) bool {
+	pos := m[1]
+	if pos >= len(s) || s[pos] != '#' || pos == 0 || (s[pos-1] != ' ' && s[pos-1] != '\t') {
+		return false
+	}
+	sep := pos - 1
+	for sep > m[3] && (s[sep] == ' ' || s[sep] == '\t') {
+		sep--
+	}
+	if s[sep] != ':' {
+		return false
+	}
+	ls := m[2]
+	for ls > 0 && (s[ls-1] == ' ' || s[ls-1] == '\t' || s[ls-1] == '-') {
+		ls--
+	}
+	if ls > 0 && s[ls-1] != '\n' {
+		return false
+	}
+	_, _, ok := nextBlockLine(s, lineEnd(s, pos), m[2]-ls, blockValue)
+	return ok
 }
 
 // Key names that hold secrets, in three forms: bare, optionally quoted (YAML block mappings), and quoted
@@ -836,6 +975,9 @@ const (
 	shortKeyExpr  = `(?:[A-Za-z0-9_.-]*[_.-]|\b)(?:pass|auth|sig)`
 	secretKeyExpr = `["']?` + bareKeyExpr + `["']?`
 	flowKeyExpr   = `\\*["']` + bareKeyExpr + `\\*["']|` + bareKeyExpr
+	// nextLineHeaderExpr is a YAML key that names a secret with nothing after its colon but blanks or a
+	// comment, after the start of a line.
+	nextLineHeaderExpr = `[ \t]*(?:-[ \t]+)?(` + secretKeyExpr + `)[ \t]*:(?:[ \t]+#[^\r\n]*)?[ \t]*\r?$`
 	// jsonSpaceExpr is JSON whitespace, also escaped inside a JSON string ("\n", "\t").
 	jsonSpaceExpr = `(?:[ \t\r\n]|\\+[nrt])*`
 )
@@ -912,8 +1054,7 @@ func builtinRules() []rule {
 			`(?im)^[ \t]*(?:-[ \t]+)?(` + secretKeyExpr + `)[ \t]*:[ \t]*([|>][1-9+-]{0,2})[ \t]*(?:#[^\r\n]*)?\r?$`)},
 		// YAML block mappings: a key with nothing after its colon but blanks or a comment, its value on the
 		// following lines indented deeper than the key.
-		{kind: KindCredential, spans: nextLineSpans, re: regexp.MustCompile(
-			`(?im)^[ \t]*(?:-[ \t]+)?(` + secretKeyExpr + `)[ \t]*:(?:[ \t]+#[^\r\n]*)?[ \t]*\r?$`)},
+		{kind: KindCredential, spans: nextLineSpans, re: regexp.MustCompile(`(?im)^` + nextLineHeaderExpr)},
 		// Kubernetes environment variables in YAML block form: "- name: DB_PASSWORD" and its "value".
 		{kind: KindCredential, span: envValueSpan, re: regexp.MustCompile(
 			`(?im)^[ \t]*-[ \t]+name[ \t]*:[ \t]*["']?(` + bareKeyExpr + `)["']?[ \t]*\r?$`)},

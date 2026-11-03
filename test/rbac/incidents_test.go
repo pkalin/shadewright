@@ -23,7 +23,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -45,7 +44,8 @@ const (
 
 // TestIncidentControllerRunsWithTheAnalyzerRBAC runs the Incident controller as the analyzer's
 // ServiceAccount: it must load, create and update Incidents in the operator namespace and, at the cap, write
-// its Warning event there. A missing grant shows up as an Incident or an event that never appears.
+// its Warning event there as a core Event, with the leader election Role's grant and no other. A missing
+// grant shows up as an Incident or an event that never appears.
 func TestIncidentControllerRunsWithTheAnalyzerRBAC(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -72,7 +72,7 @@ func TestIncidentControllerRunsWithTheAnalyzerRBAC(t *testing.T) {
 	}
 	inc, err := incidents.New(incidents.Config{
 		Namespace: operatorNS, MaxIncidents: len(existing.Items) + 1, Window: 100 * time.Millisecond,
-		Recorder: mgr.GetEventRecorder("shadewright-analyzer"), Regarding: pod,
+		Recorder: mgr.GetEventRecorderFor("shadewright-analyzer"), Regarding: pod, //nolint:staticcheck // as cmd/analyzer
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -130,12 +130,12 @@ func TestIncidentControllerRunsWithTheAnalyzerRBAC(t *testing.T) {
 	// A new fingerprint at the cap: refused, with a Warning event about the analyzer's Pod.
 	obs <- observation(2, 3, 1, 1)
 	wait("no Warning event at the cap", func() bool {
-		var events eventsv1.EventList
+		var events corev1.EventList
 		if err := admin.List(ctx, &events, client.InNamespace(operatorNS)); err != nil {
 			return false
 		}
 		for _, e := range events.Items {
-			if e.Reason == "IncidentCapReached" && e.Regarding.Name == pod.Name {
+			if e.Reason == "IncidentCapReached" && e.InvolvedObject.Name == pod.Name {
 				return true
 			}
 		}

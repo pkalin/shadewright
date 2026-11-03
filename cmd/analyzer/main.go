@@ -62,7 +62,8 @@ func main() {
 			"needs a RoleBinding to the analyzer-watch-role (config/watch).")
 	flag.StringVar(&clusterIDFlag, "cluster-id", "",
 		"A name for this cluster, hashed into every fingerprint so Incidents from two clusters never merge. "+
-			"Required: 1 to 63 letters, digits, '.', '_' or '-'. Changing it starts every Incident afresh.")
+			"Required: 1 to 63 letters, digits, '.', '_' or '-', starting and ending with a letter or digit. "+
+			"Changing it starts every Incident afresh.")
 	flag.IntVar(&maxIncidents, "max-incidents", incidents.DefaultMaxIncidents,
 		"The most Incidents kept in the operator namespace. At the cap a new fingerprint is not stored: it is "+
 			"counted in shadewright_incident_observations_refused_total and reported in a Warning event.")
@@ -105,7 +106,11 @@ func main() {
 	// Pod name (make run) the refusals are only logged and counted. The analysis trigger (#43) follows.
 	cfg := incidents.Config{Namespace: namespace, MaxIncidents: maxIncidents}
 	if pod := os.Getenv("POD_NAME"); pod != "" {
-		cfg.Recorder = mgr.GetEventRecorder("shadewright-analyzer")
+		// The core/v1 recorder writes with the grant on core Events that the leader election Role already
+		// holds in the operator namespace, so the cap event needs no grant of its own. controller-runtime
+		// deprecates it in favour of the events.k8s.io recorder; moving to that one needs a new grant on
+		// events.k8s.io Events, so it waits for a review of invariant 6 (AGENTS.md).
+		cfg.Recorder = mgr.GetEventRecorderFor("shadewright-analyzer") //nolint:staticcheck // see above
 		cfg.Regarding = &corev1.Pod{
 			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
 			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: pod},

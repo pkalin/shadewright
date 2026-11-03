@@ -33,7 +33,8 @@ import (
 var occurrenceID = regexp.MustCompile(`^(event|termination):[A-Za-z0-9-]{1,64}$`)
 
 // noBegin stands for the time an occurrence began when the cluster did not report one. Such an occurrence
-// sorts as the oldest, and dropping one still marks that something was dropped.
+// sorts as the oldest, so it is dropped first, and dropping one still marks that something was dropped. The
+// mark never answers for an occurrence without a begin time (Controller.handled).
 var noBegin = time.Unix(0, 0).UTC()
 
 // counted is what was counted of one occurrence: the highest total and when it began (zero when unknown).
@@ -69,6 +70,15 @@ func (b *batch) add(other *batch) {
 	}
 }
 
+// combine returns one batch holding all of bs, which belong to the same fingerprint, without changing them.
+func combine(bs []*batch) *batch {
+	out := &batch{spec: bs[0].spec, occurrences: map[string]counted{}}
+	for _, b := range bs {
+		out.add(b)
+	}
+	return out
+}
+
 // higher returns the record with the higher total, keeping a known begin time.
 func higher(a, b counted) counted {
 	out := a
@@ -95,21 +105,42 @@ func latest(a, b time.Time) time.Time {
 	return a
 }
 
-// applied reports whether status already holds b: every occurrence of b is recorded with at least b's total.
-// A batch always raises the total of each of its occurrences, so a write that succeeded although its
-// result was lost (a timeout) is recognised and not added twice. An occurrence b cannot record (an
-// unexpected ID) cannot be checked, so a batch with one is never taken as applied.
+// applied reports whether status already holds b. A batch always raises the total of each occurrence it
+// holds, so a write that succeeded although its answer was lost (a timeout) is recognised and not added
+// twice. Each occurrence is checked on its own:
+//
+//   - recorded with at least b's total (cut to what the schema stores): it proves b was written;
+//   - recorded lower, or not recorded although it began after occurrencesDroppedThrough: b was not written;
+//   - not recorded and began no later than occurrencesDroppedThrough, without a known begin time, or with an
+//     ID the schema refuses: it cannot tell, because merge drops or skips such a record, so it neither
+//     proves nor blocks.
+//
+// b counts as applied when no occurrence says it was not written and at least one proves it was. A batch
+// with no occurrence that can prove it is never taken as applied: a possible overcount is preferred to a
+// silent loss.
 func applied(status *remediationv1alpha1.IncidentStatus, b *batch) bool {
 	recorded := make(map[string]int64, len(status.Occurrences))
 	for _, r := range status.Occurrences {
 		recorded[r.ID] = r.Total
 	}
+	droppedThrough := timeFrom(status.OccurrencesDroppedThrough)
+	proved := false
 	for id, o := range b.occurrences {
-		if total, ok := recorded[id]; !ok || total < o.total {
+		if !occurrenceID.MatchString(id) {
+			continue
+		}
+		if total, ok := recorded[id]; ok {
+			if total < min(o.total, math.MaxInt32) {
+				return false
+			}
+			proved = true
+			continue
+		}
+		if !o.began.IsZero() && (droppedThrough.IsZero() || o.began.After(droppedThrough)) {
 			return false
 		}
 	}
-	return true
+	return proved
 }
 
 // merge adds b to status at now: the count saturates at MaxIncidentCount, first and last seen widen, and the

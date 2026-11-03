@@ -24,10 +24,12 @@ limitations under the License.
 // and the normalized, redacted symptom the collector computed.
 //
 // Writes are batched: the first observation of an Incident is written at once, and the ones that follow
-// within the aggregation window (5 minutes) go into one status write after it. Each write reads the
-// Incident fresh and retries on conflict, a write whose result was lost is recognised by its occurrence
-// totals and not added twice, and a failed write keeps its batch for the next try, so counts are neither
-// lost nor doubled. A clean stop writes what is pending.
+// within the aggregation window (5 minutes) go into one status write after it. Writes run in their own
+// goroutine, so a slow API server does not hold up the observations. Each write reads the Incident fresh
+// and retries on conflict. A write whose answer was lost is kept apart from later observations and
+// recognised, occurrence by occurrence, from the totals the status records, so it is not added twice; a
+// batch none of whose occurrences can show that is written again (an overcount rather than a loss). A stop,
+// or a lost leadership, writes what is pending and what failed within StopTimeout (5 s).
 //
 // The collector asks how much of an occurrence was counted ([Controller.Handled]); the answer comes from
 // memory, loaded from the Incidents at start and kept in step with every write, and waits until that load
@@ -37,5 +39,7 @@ limitations under the License.
 // stored: it is counted in shadewright_incident_observations_refused_total, logged once per fingerprint,
 // and reported in a Warning event about the analyzer's Pod at most once per EventInterval (10 minutes by
 // default). Existing Incidents keep their records, so nothing is counted again. A batch the API server
-// refuses as invalid is dropped, not retried.
+// refuses as invalid, or meant for an Incident whose name holds another fingerprint, is dropped, not
+// retried, and counted in shadewright_incident_batches_dropped_total by reason; so is a batch still
+// unwritten when a stop's deadline passes.
 package incidents

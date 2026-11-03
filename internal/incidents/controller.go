@@ -29,7 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/events"
+	corerecord "k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -48,6 +48,10 @@ const (
 	DefaultRetryAfter   = 5 * time.Second
 	// DefaultEventInterval is the least time between two Warning events at the Incident cap.
 	DefaultEventInterval = 10 * time.Minute
+	// DefaultStopTimeout bounds the last writes when the controller stops. It stays under the analyzer Pod's
+	// termination grace period (10 s, config/manager/analyzer.yaml), which is shorter than the manager's
+	// graceful shutdown timeout (30 s).
+	DefaultStopTimeout = 5 * time.Second
 )
 
 // refusedRemembered bounds the fingerprints refused at the cap that are remembered, so each gets one
@@ -69,13 +73,18 @@ type Config struct {
 	// RetryAfter is how long a batch whose write failed waits before it is tried again.
 	RetryAfter time.Duration
 	// Recorder and Regarding report a refused fingerprint as a Warning event about Regarding (the analyzer's
-	// Pod). No event is written when either is nil.
-	Recorder  events.EventRecorder
+	// Pod). No event is written when either is nil. It is a core/v1 recorder, so the event is written with the
+	// grant on core Events that the analyzer's leader election Role already holds in the operator namespace,
+	// and no other.
+	Recorder  corerecord.EventRecorder
 	Regarding runtime.Object
 	// EventInterval is the least time between two Warning events at the cap: whoever can create events in a
 	// watched namespace can make new fingerprints at will, so later refusals within it are only logged and
 	// counted.
 	EventInterval time.Duration
+	// StopTimeout bounds the last writes when the controller stops (shutdown or lost leadership): batches
+	// still unwritten then are logged and counted as lost.
+	StopTimeout time.Duration
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
 }
@@ -101,8 +110,15 @@ type Controller struct {
 	// names are the Incidents that exist or are pending; their number is held to MaxIncidents.
 	names   map[string]struct{}
 	pending map[string]*batch
+	// failed holds, per Incident, the batches of a status write whose answer never came: the API server may
+	// have stored them or not. They stay apart from pending, so the next write can tell from the fresh status
+	// whether they were applied (applied) without new observations hiding it.
+	failed map[string]*batch
+	// kick wakes the writer when a batch is due at once.
+	kick chan struct{}
 	// nextWrite is when an Incident's pending batch is due: the window after its last write, or RetryAfter
-	// after a failed one. An Incident without an entry is written at once.
+	// after a failed one. An Incident without an entry is written at once; entries past due with nothing to
+	// write are pruned.
 	nextWrite map[string]time.Time
 	refused   *boundedSet
 	// lastEvent is when the last Warning event at the cap was written.
@@ -135,6 +151,9 @@ func New(cfg Config) (*Controller, error) {
 	if cfg.EventInterval <= 0 {
 		cfg.EventInterval = DefaultEventInterval
 	}
+	if cfg.StopTimeout <= 0 {
+		cfg.StopTimeout = DefaultStopTimeout
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -144,6 +163,8 @@ func New(cfg Config) (*Controller, error) {
 		records:   map[string]record{},
 		names:     map[string]struct{}{},
 		pending:   map[string]*batch{},
+		failed:    map[string]*batch{},
+		kick:      make(chan struct{}, 1),
 		nextWrite: map[string]time.Time{},
 		refused:   newBoundedSet(refusedRemembered),
 	}, nil
@@ -169,27 +190,87 @@ func Name(fp string) string {
 	return "incident-" + strings.TrimPrefix(fp, fingerprint.Prefix)
 }
 
-// Start loads the Incidents, then consumes observations and writes due batches until ctx ends. Then it
-// writes what is pending, each Incident within WriteTimeout, so a clean stop loses nothing.
+// Start loads the Incidents, then consumes observations until ctx ends. Writes run in a goroutine of their
+// own, so a slow API server delays them but not the consumption of observations. When ctx ends (shutdown,
+// or a lost leadership), it writes what is pending and what failed, trying again until StopTimeout; see
+// [Controller.stop] for what can still be lost.
 func (c *Controller) Start(ctx context.Context) error {
 	if err := c.load(ctx); err != nil {
 		return err
 	}
-	tick := time.NewTicker(min(max(c.cfg.Window/10, 100*time.Millisecond), 30*time.Second))
-	defer tick.Stop()
+	written := make(chan struct{})
+	go func() {
+		defer close(written)
+		c.writeLoop(ctx)
+	}()
 	for {
 		select {
 		case o := <-c.obs:
 			if c.consume(ctx, o) {
-				c.flush(ctx, o.Fingerprint)
+				c.wake()
 			}
-		case <-tick.C:
-			c.flushDue(ctx, false)
 		case <-ctx.Done():
-			c.flushDue(context.WithoutCancel(ctx), true)
+			<-written
+			c.stop(ctx)
 			return nil
 		}
 	}
+}
+
+// wake tells the writer that a batch is due, without waiting.
+func (c *Controller) wake() {
+	select {
+	case c.kick <- struct{}{}:
+	default:
+	}
+}
+
+// writeLoop writes due batches when woken and on every tick, until ctx ends.
+func (c *Controller) writeLoop(ctx context.Context) {
+	tick := time.NewTicker(min(max(c.cfg.Window/10, 100*time.Millisecond), 30*time.Second))
+	defer tick.Stop()
+	for {
+		select {
+		case <-c.kick:
+		case <-tick.C:
+		case <-ctx.Done():
+			return
+		}
+		c.flushDue(ctx, false)
+	}
+}
+
+// stop writes every pending and failed batch within StopTimeout, trying the failed ones again until then.
+// Each write reads the Incident fresh from the API server and skips what it already holds, so after a lost
+// leadership, when a new leader may already be writing, nothing is added twice by this process. What it
+// cannot write in time is logged and counted in shadewright_incident_batches_dropped_total (reason
+// "stopped"). Also lost: observations still in the channel, and everything pending when the process is
+// killed rather than stopped. A new leader that loaded the Incidents before this stop's writes landed may
+// count those occurrences again (an overcount).
+func (c *Controller) stop(ctx context.Context) {
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.StopTimeout)
+	defer cancel()
+	for {
+		c.flushDue(sctx, true)
+		if c.unwritten() == 0 || sctx.Err() != nil {
+			break
+		}
+		select {
+		case <-time.After(min(c.cfg.RetryAfter, time.Second)):
+		case <-sctx.Done():
+		}
+	}
+	if n := c.unwritten(); n > 0 {
+		droppedBatches.WithLabelValues(dropStopped).Add(float64(n))
+		logf.FromContext(ctx).Error(sctx.Err(), "Stopped with Incident observations not written", "batches", n)
+	}
+}
+
+// unwritten returns the number of pending and failed batches.
+func (c *Controller) unwritten() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.pending) + len(c.failed)
 }
 
 // load reads every Incident in the namespace from the cache into memory: their names, their occurrence
@@ -221,9 +302,9 @@ func (c *Controller) remember(name string, status *remediationv1alpha1.IncidentS
 
 // Handled answers the collector (collector.HandledFunc): the highest total counted for the occurrence by
 // any Incident. An occurrence with no record that began no later than the newest record any Incident
-// dropped is answered as counted in full (collector.AllHandled), so the bound never counts twice; found is
-// false only for an occurrence never counted. It answers from memory, and waits until the Incidents are
-// loaded or ctx ends.
+// dropped is answered as counted in full (collector.AllHandled), so the bound never counts twice; one
+// without a begin time never is, so it may be counted again once its record is dropped. found is false
+// otherwise. It answers from memory, and waits until the Incidents are loaded or ctx ends.
 func (c *Controller) Handled(ctx context.Context, occurrence string, began time.Time) (int64, bool, error) {
 	select {
 	case <-c.ready:
@@ -241,7 +322,10 @@ func (c *Controller) handled(occurrence string, began time.Time) (int64, bool) {
 	if r, ok := c.records[occurrence]; ok {
 		return r.total, true
 	}
-	if !c.droppedThrough.IsZero() && !beganOrNone(began.Truncate(time.Second)).After(c.droppedThrough) {
+	// The drop mark answers only for an occurrence with a known begin time: without one it cannot be placed
+	// before or after the mark, and a possible overcount is preferred to a count silently lost.
+	if began = began.Truncate(time.Second); !began.IsZero() && !c.droppedThrough.IsZero() &&
+		!began.After(c.droppedThrough) {
 		return collector.AllHandled, true
 	}
 	return 0, false
@@ -285,8 +369,12 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 	b.add(&batch{count: n, first: at, last: at, occurrences: map[string]counted{
 		o.Occurrence: {total: o.Total, began: o.Began},
 	}})
-	cur := c.records[o.Occurrence]
-	c.records[o.Occurrence] = record{counted: higher(cur.counted, counted{total: o.Total, began: o.Began}), incident: name}
+	// An ID the schema refuses is counted but never stored, so it is not remembered either: nothing would
+	// ever drop its record from memory.
+	if occurrenceID.MatchString(o.Occurrence) {
+		cur := c.records[o.Occurrence]
+		c.records[o.Occurrence] = record{counted: higher(cur.counted, counted{total: o.Total, began: o.Began}), incident: name}
+	}
 	_, scheduled := c.nextWrite[o.Fingerprint]
 	return !scheduled
 }
@@ -309,7 +397,7 @@ func (c *Controller) refuse(ctx context.Context, o collector.Observation) {
 		return
 	}
 	c.lastEvent = now
-	c.cfg.Recorder.Eventf(c.cfg.Regarding, nil, corev1.EventTypeWarning, "IncidentCapReached", "StoreIncident",
+	c.cfg.Recorder.Eventf(c.cfg.Regarding, corev1.EventTypeWarning, "IncidentCapReached",
 		"The cap of %d Incidents is reached: not storing a new Incident for %s %s/%s (fingerprint %s); "+
 			"further refusals for %s are only logged and counted", c.cfg.MaxIncidents, s.Kind, s.Namespace, s.Name,
 		o.Fingerprint, c.cfg.EventInterval)
@@ -336,13 +424,28 @@ func specOf(o collector.Observation) remediationv1alpha1.IncidentSpec {
 	}
 }
 
-// flushDue writes the pending batches whose Incident was not written within the window, or all of them.
+// flushDue writes the pending and failed batches whose Incident was not written within the window (or
+// whose retry is due), or all of them. It prunes nextWrite of the Incidents past due with nothing to write.
 func (c *Controller) flushDue(ctx context.Context, all bool) {
 	c.mu.Lock()
 	now := c.cfg.Now()
+	for fp, next := range c.nextWrite {
+		if !now.Before(next) && c.pending[fp] == nil && c.failed[fp] == nil {
+			delete(c.nextWrite, fp)
+		}
+	}
 	var due []string
+	isDue := func(fp string) bool {
+		next, ok := c.nextWrite[fp]
+		return all || !ok || !now.Before(next)
+	}
 	for fp := range c.pending {
-		if next, ok := c.nextWrite[fp]; all || !ok || !now.Before(next) {
+		if isDue(fp) {
+			due = append(due, fp)
+		}
+	}
+	for fp := range c.failed {
+		if c.pending[fp] == nil && isDue(fp) {
 			due = append(due, fp)
 		}
 	}
@@ -352,107 +455,188 @@ func (c *Controller) flushDue(ctx context.Context, all bool) {
 	}
 }
 
-// flush writes one pending batch. The batch is taken out of pending first, so observations arriving during
-// the write start a new one; if the write fails, the batch goes back and is tried again RetryAfter later,
-// so nothing is lost. A batch the API server refuses as invalid is dropped and logged instead: trying it
-// again cannot succeed. Each attempt reads the Incident fresh: a conflict is retried on the new version, and a
-// batch the status already holds (a write that succeeded but whose answer was lost) is not added twice.
+// flush writes the failed and the pending batch of one Incident in one status write. Both are taken out
+// first, so observations arriving during the write start a new pending batch. Each attempt reads the
+// Incident fresh: a conflict is retried on the new version, and a batch the status already holds (a write
+// that succeeded but whose answer was lost) is not added twice.
+//
+// If the write fails, the batches it sent become the failed batch, tried again RetryAfter later; batches it
+// never sent go back to pending. A write that can never succeed (the API server refuses it as invalid, or
+// the Incident of that name holds another fingerprint) drops its batches, and the memory of their
+// occurrences goes back to what the Incident stores, so Handled does not answer "counted" for what was
+// never stored.
 func (c *Controller) flush(ctx context.Context, fp string) {
 	c.mu.Lock()
-	b := c.pending[fp]
+	f, p := c.failed[fp], c.pending[fp]
+	delete(c.failed, fp)
 	delete(c.pending, fp)
 	c.mu.Unlock()
-	if b == nil {
+	var batches []*batch
+	for _, b := range []*batch{f, p} {
+		if b != nil {
+			batches = append(batches, b)
+		}
+	}
+	if len(batches) == 0 {
 		return
 	}
 	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 	defer cancel()
-	inc, dropped, err := c.write(wctx, b)
+	res, err := c.write(wctx, batches)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	name := Name(fp)
 	if refused, ok := errors.AsType[*refusedError](err); ok {
-		// Trying again cannot help: the batch is dropped. An Incident that was never created frees its place
-		// under the cap, and the records only this batch held go, so Handled does not answer "counted" for
-		// what was never stored.
-		if !refused.exists {
-			p := c.pending[fp]
-			for id := range b.occurrences {
-				if _, again := p.occurrenceOf(id); !again && c.records[id].incident == Name(fp) {
-					delete(c.records, id)
-				}
-			}
-			if p == nil {
-				delete(c.names, Name(fp))
-			}
+		gone, stored, reason := batches, (*remediationv1alpha1.IncidentStatus)(nil), dropFingerprintConflict
+		if !refused.conflict {
+			reason = dropInvalid
+		}
+		if refused.exists && !refused.conflict {
+			// The status update was refused: only what it sent is dropped, and the status as read is what
+			// the Incident holds.
+			gone, stored = []*batch{res.sent}, res.stored
+		}
+		c.forget(fp, gone, stored)
+		if !refused.exists && c.pending[fp] == nil {
+			// An Incident that was never created frees its place under the cap.
+			delete(c.names, name)
 		}
 		c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.Window)
-		logf.FromContext(ctx).Error(err, "Dropped observations the API server refuses to store", "incident", Name(fp),
-			"count", b.count)
+		droppedBatches.WithLabelValues(reason).Add(float64(len(gone)))
+		var count int64
+		for _, b := range gone {
+			count += b.count
+		}
+		logf.FromContext(ctx).Error(err, "Dropped observations the API server refuses to store", "incident", name,
+			"reason", reason, "count", count)
 		return
 	}
 	if err != nil {
-		if p := c.pending[fp]; p != nil {
-			b.add(p)
+		if res.sent != nil {
+			// The last attempt sent these batches together and its answer is unknown: they were stored together
+			// or not at all, so they are checked together next time.
+			c.failed[fp] = res.sent
+		} else {
+			// Nothing was sent that may have been stored: the failed batch stays apart, and the pending one,
+			// never sent, takes the observations that arrived meanwhile.
+			if f != nil {
+				c.failed[fp] = f
+			}
+			if p != nil {
+				if q := c.pending[fp]; q != nil {
+					p.add(q)
+				}
+				c.pending[fp] = p
+			}
 		}
-		c.pending[fp] = b
 		c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.RetryAfter)
-		logf.FromContext(ctx).Error(err, "Failed to write the Incident status, will retry", "incident", Name(fp))
+		logf.FromContext(ctx).Error(err, "Failed to write the Incident status, will retry", "incident", name)
 		return
 	}
 	c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.Window)
-	for _, id := range dropped {
-		if r, ok := c.records[id]; ok && r.incident == inc.Name {
+	for _, id := range res.dropped {
+		if r, ok := c.records[id]; ok && r.incident == res.inc.Name {
 			delete(c.records, id)
 		}
 	}
-	c.remember(inc.Name, &inc.Status)
+	c.remember(res.inc.Name, &res.inc.Status)
 }
 
-// write creates the Incident if needed and adds b to its status, retrying on conflict. It returns the
-// Incident as written and the IDs of the records the write dropped.
-func (c *Controller) write(ctx context.Context, b *batch) (*remediationv1alpha1.Incident, []string, error) {
-	key := types.NamespacedName{Namespace: c.cfg.Namespace, Name: Name(b.spec.Fingerprint)}
-	var inc *remediationv1alpha1.Incident
-	var dropped []string
-	err := retry.OnError(retry.DefaultBackoff, retriable, func() error {
-		inc, dropped = &remediationv1alpha1.Incident{}, nil
-		err := c.reader.Get(ctx, key, inc)
-		if apierrors.IsNotFound(err) {
-			inc = &remediationv1alpha1.Incident{
-				ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name},
-				Spec:       b.spec,
+// forget takes the memory of the occurrences of dropped batches back to what stored (the Incident's status,
+// or nil when it holds none of them) records, keeping what the current pending batch holds. Only records of
+// this Incident are touched. The caller holds mu.
+func (c *Controller) forget(fp string, gone []*batch, stored *remediationv1alpha1.IncidentStatus) {
+	name := Name(fp)
+	kept := map[string]counted{}
+	if stored != nil {
+		for _, r := range stored.Occurrences {
+			kept[r.ID] = counted{total: r.Total, began: timeFrom(r.Began)}
+		}
+	}
+	p := c.pending[fp]
+	for _, b := range gone {
+		for id := range b.occurrences {
+			if r, ok := c.records[id]; !ok || r.incident != name {
+				continue
 			}
-			if err = c.client.Create(ctx, inc); apierrors.IsInvalid(err) {
+			k, has := kept[id]
+			if o, again := p.occurrenceOf(id); again {
+				k, has = higher(k, o), true
+			}
+			if has {
+				c.records[id] = record{counted: k, incident: name}
+			} else {
+				delete(c.records, id)
+			}
+		}
+	}
+}
+
+// writeResult is what write did: the Incident as written, the IDs of the records it dropped, and of its last
+// attempt the status as read (stored) and the batches it sent, combined (sent, nil when it sent none).
+type writeResult struct {
+	inc     *remediationv1alpha1.Incident
+	dropped []string
+	stored  *remediationv1alpha1.IncidentStatus
+	sent    *batch
+}
+
+// write creates the Incident if needed and adds to its status each batch it does not already hold, retrying
+// on conflict. A conflict or a lost create race means the attempt stored nothing, so only the last attempt's
+// answer can be unknown.
+func (c *Controller) write(ctx context.Context, batches []*batch) (writeResult, error) {
+	spec := batches[0].spec
+	key := types.NamespacedName{Namespace: c.cfg.Namespace, Name: Name(spec.Fingerprint)}
+	var res writeResult
+	err := retry.OnError(retry.DefaultBackoff, retriable, func() error {
+		res = writeResult{inc: &remediationv1alpha1.Incident{}}
+		err := c.reader.Get(ctx, key, res.inc)
+		if apierrors.IsNotFound(err) {
+			res.inc = &remediationv1alpha1.Incident{
+				ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name},
+				Spec:       spec,
+			}
+			if err = c.client.Create(ctx, res.inc); apierrors.IsInvalid(err) {
 				return &refusedError{err: err}
 			}
 		}
 		if err != nil {
 			return err
 		}
-		if inc.Spec.Fingerprint != b.spec.Fingerprint {
-			return &refusedError{exists: true,
-				err: fmt.Errorf("incident %s holds fingerprint %s, not %s", key.Name, inc.Spec.Fingerprint, b.spec.Fingerprint)}
+		if res.inc.Spec.Fingerprint != spec.Fingerprint {
+			return &refusedError{exists: true, conflict: true,
+				err: fmt.Errorf("incident %s holds fingerprint %s, not %s", key.Name, res.inc.Spec.Fingerprint, spec.Fingerprint)}
 		}
-		if applied(&inc.Status, b) {
+		var send []*batch
+		for _, b := range batches {
+			if !applied(&res.inc.Status, b) {
+				send = append(send, b)
+			}
+		}
+		if len(send) == 0 {
 			return nil
 		}
-		dropped = merge(&inc.Status, b)
-		if err = c.client.Status().Update(ctx, inc); apierrors.IsInvalid(err) {
+		res.stored = res.inc.Status.DeepCopy()
+		res.sent = combine(send)
+		for _, b := range send {
+			res.dropped = append(res.dropped, merge(&res.inc.Status, b)...)
+		}
+		if err = c.client.Status().Update(ctx, res.inc); apierrors.IsInvalid(err) {
 			return &refusedError{exists: true, err: err}
 		}
 		return err
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("writing Incident %s: %w", key.Name, err)
+		return res, fmt.Errorf("writing Incident %s: %w", key.Name, err)
 	}
-	return inc, dropped, nil
+	return res, nil
 }
 
 // refusedError is a write that can never succeed: the API server refuses the object as invalid, or the
-// Incident of that name holds another fingerprint. exists says whether the Incident exists.
+// Incident of that name holds another fingerprint (conflict). exists says whether the Incident exists.
 type refusedError struct {
-	err    error
-	exists bool
+	err              error
+	exists, conflict bool
 }
 
 func (e *refusedError) Error() string { return e.err.Error() }

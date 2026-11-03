@@ -37,7 +37,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/events"
+	corerecord "k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
@@ -111,12 +111,14 @@ func namespace(t *testing.T) string {
 }
 
 // countingClient counts the writes that reach the API server and lets a test act just before a status
-// update (before) or replace its result (after).
+// update (before), replace its result (after), or answer it without sending it (instead).
 type countingClient struct {
 	client.Client
 	creates, updates atomic.Int32
 	before           func(ctx context.Context, inc *remediationv1alpha1.Incident)
 	after            func(err error) error
+	// instead, when it returns an error, answers a status update with it without sending the update.
+	instead func(ctx context.Context) error
 }
 
 func (c *countingClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
@@ -137,6 +139,11 @@ func (s *countingStatus) Update(ctx context.Context, obj client.Object, opts ...
 	s.c.updates.Add(1)
 	if s.c.before != nil {
 		s.c.before(ctx, obj.(*remediationv1alpha1.Incident))
+	}
+	if s.c.instead != nil {
+		if err := s.c.instead(ctx); err != nil {
+			return err
+		}
 	}
 	err := s.SubResourceWriter.Update(ctx, obj, opts...)
 	if s.c.after != nil {
@@ -197,10 +204,11 @@ func observation(f, i int, total, count int64, began time.Time) collector.Observ
 	}
 }
 
-func get(t *testing.T, ns string, f int) *remediationv1alpha1.Incident {
+// get reads the Incident of fp(1).
+func get(t *testing.T, ns string) *remediationv1alpha1.Incident {
 	t.Helper()
 	inc := &remediationv1alpha1.Incident{}
-	if err := env.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: Name(fp(f))}, inc); err != nil {
+	if err := env.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: Name(fp(1))}, inc); err != nil {
 		t.Fatalf("reading the Incident: %v", err)
 	}
 	return inc
@@ -285,7 +293,7 @@ func TestConflictRetriesWithoutLosingCounts(t *testing.T) {
 	var once sync.Once
 	r.writes.before = func(ctx context.Context, _ *remediationv1alpha1.Incident) {
 		once.Do(func() {
-			inc := get(t, ns, 1)
+			inc := get(t, ns)
 			meta.SetStatusCondition(&inc.Status.Conditions, metav1.Condition{
 				Type: "Reviewed", Status: metav1.ConditionTrue, Reason: "Test", Message: "set by another writer",
 			})
@@ -318,14 +326,14 @@ func TestLostAnswerIsNotCountedTwice(t *testing.T) {
 	eventually(t, ns, 1, countIs(4))
 	// Let the batch that went back be tried again: it is recognised as written.
 	time.Sleep(time.Second)
-	if inc := get(t, ns, 1); inc.Status.Count != 4 {
+	if inc := get(t, ns); inc.Status.Count != 4 {
 		t.Fatalf("count %d after a lost answer, want 4", inc.Status.Count)
 	}
 	if !lost.Load() || r.writes.updates.Load() != 1 {
 		t.Fatalf("lost %v, %d status writes: want the retry to find the batch applied without writing", lost.Load(), r.writes.updates.Load())
 	}
 	r.stop()
-	if r.pending[fp(1)] != nil {
+	if r.pending[fp(1)] != nil || r.failed[fp(1)] != nil {
 		t.Fatal("the batch is still pending after the retry")
 	}
 }
@@ -361,7 +369,7 @@ func TestRestartNeitherResetsNorDoubles(t *testing.T) {
 	b.obs <- observation(1, 3, 1, 1, began)
 	eventually(t, ns, 1, countIs(13))
 	time.Sleep(500 * time.Millisecond)
-	if inc := get(t, ns, 1); inc.Status.Count != 13 {
+	if inc := get(t, ns); inc.Status.Count != 13 {
 		t.Fatalf("count %d, want 13", inc.Status.Count)
 	}
 }
@@ -380,7 +388,7 @@ func TestHandledWaitsForTheIncidents(t *testing.T) {
 
 func TestCapRefusesNewFingerprints(t *testing.T) {
 	ns := namespace(t)
-	rec := events.NewFakeRecorder(10)
+	rec := corerecord.NewFakeRecorder(10)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "analyzer-0"}}
 	r := start(t, ns, Config{MaxIncidents: 2, Recorder: rec, Regarding: pod})
 	before := testutil.ToFloat64(refusedObservations)
@@ -417,7 +425,7 @@ func TestCapRefusesNewFingerprints(t *testing.T) {
 
 func TestCapEventRepeatsAfterTheInterval(t *testing.T) {
 	ns := namespace(t)
-	rec := events.NewFakeRecorder(10)
+	rec := corerecord.NewFakeRecorder(10)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "analyzer-0"}}
 	r := start(t, ns, Config{MaxIncidents: 1, Recorder: rec, Regarding: pod, EventInterval: 200 * time.Millisecond})
 	now := time.Now().Truncate(time.Second)
@@ -511,4 +519,270 @@ func TestRefusedIncidentIsDroppedAndFreesItsPlace(t *testing.T) {
 	}
 	r.obs <- observation(2, 2, 1, 1, now)
 	eventually(t, ns, 2, countIs(1))
+}
+
+// loseAnswer makes the n-th successful status update (counted from 1) look failed, as a timeout after the API
+// server stored it does, and closes lost then.
+func loseAnswer(r *running, n int32) (lost chan struct{}) {
+	lost = make(chan struct{})
+	var seen atomic.Int32
+	r.writes.after = func(err error) error {
+		if err == nil && seen.Add(1) == n {
+			close(lost)
+			return context.DeadlineExceeded
+		}
+		return err
+	}
+	return lost
+}
+
+// settled waits until the Incident of fp(1) has count n, then a while longer, and fails if it changed.
+func settled(t *testing.T, ns string, n int64, wait time.Duration) {
+	t.Helper()
+	eventually(t, ns, 1, countIs(n))
+	time.Sleep(wait)
+	if inc := get(t, ns); inc.Status.Count != n {
+		t.Fatalf("count %d, want %d", inc.Status.Count, n)
+	}
+}
+
+func waitFor(t *testing.T, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(20 * time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+// A lost answer for a batch of more occurrences than an Incident records: the ones the cut dropped began no
+// later than the drop mark, so they do not hide that the batch was stored.
+func TestLostAnswerWithMoreOccurrencesThanRecordsIsNotCountedTwice(t *testing.T) {
+	ns := namespace(t)
+	r := start(t, ns, Config{Window: 300 * time.Millisecond, RetryAfter: 100 * time.Millisecond})
+	lost := loseAnswer(r, 2)
+	now := time.Now().Truncate(time.Second)
+	r.obs <- observation(1, 0, 1, 1, now.Add(-time.Hour))
+	eventually(t, ns, 1, countIs(1))
+	n := remediationv1alpha1.MaxOccurrenceRecords + 1
+	for i := 1; i <= n; i++ {
+		r.obs <- observation(1, i, 1, 1, now.Add(time.Duration(i)*time.Second))
+	}
+	waitFor(t, lost)
+	settled(t, ns, int64(n+1), time.Second)
+}
+
+// A lost answer for a batch holding an ID the schema refuses: that occurrence is counted but not recorded,
+// so it neither proves nor blocks.
+func TestLostAnswerWithAnInvalidIDIsNotCountedTwice(t *testing.T) {
+	ns := namespace(t)
+	r := start(t, ns, Config{Window: 300 * time.Millisecond, RetryAfter: 100 * time.Millisecond})
+	lost := loseAnswer(r, 2)
+	now := time.Now().Truncate(time.Second)
+	r.obs <- observation(1, 1, 1, 1, now)
+	eventually(t, ns, 1, countIs(1))
+	bad := observation(1, 2, 2, 2, now)
+	bad.Occurrence = invalidID
+	r.obs <- bad
+	r.obs <- observation(1, 3, 3, 3, now)
+	waitFor(t, lost)
+	settled(t, ns, 6, time.Second)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.records[bad.Occurrence]; ok {
+		t.Fatal("an ID the schema refuses is remembered, though no Incident can ever drop it")
+	}
+}
+
+// Observations arriving while a batch whose answer was lost waits for its retry stay apart from it, so the
+// retry still sees that the batch was stored.
+func TestLostAnswerWithNewObservationsDuringTheRetryWait(t *testing.T) {
+	ns := namespace(t)
+	r := start(t, ns, Config{Window: 200 * time.Millisecond, RetryAfter: 500 * time.Millisecond})
+	lost := loseAnswer(r, 2)
+	now := time.Now().Truncate(time.Second)
+	r.obs <- observation(1, 1, 1, 1, now)
+	eventually(t, ns, 1, countIs(1))
+	r.obs <- observation(1, 2, 4, 4, now)
+	waitFor(t, lost)
+	r.obs <- observation(1, 2, 6, 2, now) // two more of the occurrence whose write was lost
+	r.obs <- observation(1, 3, 1, 1, now)
+	settled(t, ns, 8, time.Second)
+}
+
+// A status update the API server refuses as invalid drops its batch, and the memory goes back to what the
+// Incident stores: the dropped increase reads as not counted.
+func TestRefusedStatusUpdateRollsTheMemoryBack(t *testing.T) {
+	ns := namespace(t)
+	r := start(t, ns, Config{Window: 100 * time.Millisecond, RetryAfter: 50 * time.Millisecond})
+	now := time.Now().Truncate(time.Second)
+	r.obs <- observation(1, 1, 1, 1, now)
+	eventually(t, ns, 1, countIs(1))
+	refused := make(chan struct{})
+	var once sync.Once
+	r.writes.instead = func(context.Context) error {
+		var err error
+		once.Do(func() {
+			err = apierrors.NewInvalid(remediationv1alpha1.GroupVersion.WithKind("Incident").GroupKind(), "x", nil)
+			close(refused)
+		})
+		return err
+	}
+	r.obs <- observation(1, 1, 3, 2, now)
+	waitFor(t, refused)
+	time.Sleep(200 * time.Millisecond)
+	if got, found, err := r.Handled(t.Context(), eventID(1), now); err != nil || !found || got != 1 {
+		t.Fatalf("Handled = %d, %v, %v after the refused update; want the stored 1", got, found, err)
+	}
+	again := observation(1, 1, 3, 0, now)
+	again.MayRepeat = true
+	r.obs <- again
+	settled(t, ns, 3, 300*time.Millisecond)
+}
+
+// An occurrence without a begin time cannot be placed against the drop mark: it is never answered as
+// counted in full only because some record was dropped.
+func TestUnknownBeginIsNotAnsweredByTheDropMark(t *testing.T) {
+	c, err := New(Config{Namespace: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.droppedThrough = t0
+	if got, found := c.handled(eventID(1), time.Time{}); found || got != 0 {
+		t.Fatalf("handled = %d, %v for an unknown begin time, want not found", got, found)
+	}
+	if got, found := c.handled(eventID(1), t0.Add(-time.Second)); !found || got != collector.AllHandled {
+		t.Fatalf("handled = %d, %v for an occurrence before the mark, want AllHandled", got, found)
+	}
+}
+
+// A slow status write does not stop the consumption of observations.
+func TestSlowWriteDoesNotBlockObservations(t *testing.T) {
+	ns := namespace(t)
+	r := start(t, ns, Config{})
+	release := make(chan struct{})
+	var once sync.Once
+	r.writes.before = func(context.Context, *remediationv1alpha1.Incident) {
+		once.Do(func() { <-release })
+	}
+	now := time.Now().Truncate(time.Second)
+	r.obs <- observation(1, 1, 1, 1, now)
+	for i := 2; i < 6; i++ {
+		select {
+		case r.obs <- observation(2, i, 1, 1, now):
+		case <-time.After(2 * time.Second):
+			close(release)
+			t.Fatal("an observation waited for a status write")
+		}
+	}
+	close(release)
+	eventually(t, ns, 1, countIs(1))
+	eventually(t, ns, 2, countIs(4))
+}
+
+// The last writes on stop try a failed write again, within StopTimeout.
+func TestStopRetriesAFailedWrite(t *testing.T) {
+	ns := namespace(t)
+	r := start(t, ns, Config{Window: time.Hour, RetryAfter: 50 * time.Millisecond, StopTimeout: 3 * time.Second})
+	now := time.Now().Truncate(time.Second)
+	r.obs <- observation(1, 1, 1, 1, now)
+	eventually(t, ns, 1, countIs(1))
+	var once sync.Once
+	r.writes.instead = func(context.Context) error {
+		var err error
+		once.Do(func() {
+			err = apierrors.NewServerTimeout(remediationv1alpha1.GroupVersion.WithResource("incidents").GroupResource(), "update", 1)
+		})
+		return err
+	}
+	r.obs <- observation(1, 2, 2, 2, now)
+	r.stop()
+	if inc := get(t, ns); inc.Status.Count != 3 {
+		t.Fatalf("count %d after stop, want 3", inc.Status.Count)
+	}
+}
+
+// The last writes on stop end at StopTimeout, and what they could not write is counted as lost.
+func TestStopIsBounded(t *testing.T) {
+	ns := namespace(t)
+	r := start(t, ns, Config{Window: time.Hour, RetryAfter: 50 * time.Millisecond, StopTimeout: 300 * time.Millisecond})
+	now := time.Now().Truncate(time.Second)
+	r.obs <- observation(1, 1, 1, 1, now)
+	eventually(t, ns, 1, countIs(1))
+	// The write hangs until its deadline, or until the test gives up on a stop that has none.
+	giveUp := make(chan struct{})
+	r.writes.instead = func(ctx context.Context) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-giveUp:
+			return errors.New("given up")
+		}
+	}
+	r.obs <- observation(1, 2, 2, 2, now)
+	before := testutil.ToFloat64(droppedBatches.WithLabelValues(dropStopped))
+	started := time.Now()
+	watchdog := time.AfterFunc(3*time.Second, func() { close(giveUp) })
+	defer watchdog.Stop()
+	r.stop()
+	if d := time.Since(started); d > 2*time.Second {
+		t.Fatalf("stop took %v with a StopTimeout of 300ms", d)
+	}
+	if got := testutil.ToFloat64(droppedBatches.WithLabelValues(dropStopped)) - before; got != 1 {
+		t.Fatalf("stopped metric grew by %v, want 1", got)
+	}
+}
+
+// Due times of Incidents with nothing to write are pruned, so they do not pile up.
+func TestNextWriteIsPruned(t *testing.T) {
+	ns := namespace(t)
+	r := start(t, ns, Config{Window: 100 * time.Millisecond})
+	now := time.Now().Truncate(time.Second)
+	for f := 1; f <= 3; f++ {
+		r.obs <- observation(f, f, 1, 1, now)
+		eventually(t, ns, f, countIs(1))
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r.mu.Lock()
+		n := len(r.nextWrite)
+		r.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d due times kept with nothing to write", n)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// An Incident of the expected name that holds another fingerprint is not written, and the occurrences of the
+// refused batch are forgotten, so they do not read as counted.
+func TestIncidentWithAnotherFingerprintIsRefused(t *testing.T) {
+	ns := namespace(t)
+	squat := &remediationv1alpha1.Incident{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: Name(fp(1))},
+		Spec:       specOf(observation(2, 1, 1, 1, time.Now())),
+	}
+	if err := env.admin.Create(t.Context(), squat); err != nil {
+		t.Fatal(err)
+	}
+	r := start(t, ns, Config{Window: 100 * time.Millisecond})
+	before := testutil.ToFloat64(droppedBatches.WithLabelValues(dropFingerprintConflict))
+	now := time.Now().Truncate(time.Second)
+	r.obs <- observation(1, 1, 1, 1, now)
+	deadline := time.Now().Add(5 * time.Second)
+	for testutil.ToFloat64(droppedBatches.WithLabelValues(dropFingerprintConflict))-before < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the batch was not dropped")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got, found, err := r.Handled(t.Context(), eventID(1), now); err != nil || found {
+		t.Fatalf("Handled = %d, %v, %v for a refused occurrence, want not found", got, found, err)
+	}
+	if r.writes.updates.Load() != 0 {
+		t.Fatal("the Incident of another fingerprint was written")
+	}
 }

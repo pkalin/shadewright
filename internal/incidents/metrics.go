@@ -28,19 +28,36 @@ var refusedObservations = prometheus.NewCounter(prometheus.CounterOpts{
 	Help: "Observations of a new fingerprint not stored because the cap on Incidents was reached.",
 })
 
+// Reasons of droppedBatches.
+const (
+	dropInvalid             = "invalid"
+	dropFingerprintConflict = "fingerprint_conflict"
+	dropStopped             = "stopped"
+)
+
+// droppedBatches counts the batches of observations that were not stored, by reason: the API server refused
+// them as invalid, an Incident of the expected name holds another fingerprint, or the process stopped
+// before they could be written.
+var droppedBatches = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "shadewright_incident_batches_dropped_total",
+	Help: "Batches of observations not stored in an Incident, by reason (invalid, fingerprint_conflict, stopped).",
+}, []string{"reason"})
+
 func init() {
-	metrics.Registry.MustRegister(refusedObservations)
+	metrics.Registry.MustRegister(refusedObservations, droppedBatches)
 }
 
-// boundedSet remembers at most n strings, forgetting the oldest first.
+// boundedSet remembers at most n strings, forgetting the oldest first. The order is a ring, so a forgotten
+// string is overwritten and not kept alive by the backing array.
 type boundedSet struct {
-	n     int
 	items map[string]struct{}
-	order []string
+	ring  []string
+	next  int
 }
 
 func newBoundedSet(n int) *boundedSet {
-	return &boundedSet{n: n, items: make(map[string]struct{}, n)}
+	n = max(n, 1)
+	return &boundedSet{items: make(map[string]struct{}, n), ring: make([]string, 0, n)}
 }
 
 // add remembers s and reports whether it was new.
@@ -48,11 +65,13 @@ func (b *boundedSet) add(s string) bool {
 	if _, ok := b.items[s]; ok {
 		return false
 	}
-	if len(b.order) >= b.n {
-		delete(b.items, b.order[0])
-		b.order = b.order[1:]
+	if len(b.ring) < cap(b.ring) {
+		b.ring = append(b.ring, s)
+	} else {
+		delete(b.items, b.ring[b.next])
+		b.ring[b.next] = s
+		b.next = (b.next + 1) % len(b.ring)
 	}
 	b.items[s] = struct{}{}
-	b.order = append(b.order, s)
 	return true
 }

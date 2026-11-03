@@ -276,6 +276,61 @@ var _ = Describe("Incident", func() {
 		inc.Spec.Fingerprint = "abc"
 		expectRefused(inc, "spec.fingerprint")
 	})
+
+	// updateStatus creates the fixture, sets its status with change and returns the status update's error.
+	updateStatus := func(change func(*v1alpha1.IncidentStatus)) error {
+		inc := fx.Incident("default", unique("inc"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		inc.Status.Phase = v1alpha1.IncidentOpen
+		change(&inc.Status)
+		return k8sClient.Status().Update(ctx, inc)
+	}
+	record := func(id string, total int64) v1alpha1.OccurrenceRecord {
+		return v1alpha1.OccurrenceRecord{ID: id, Total: total, Began: &metav1.Time{Time: time.Unix(1700000000, 0)}}
+	}
+
+	It("accepts a full status at its bounds", func() {
+		Expect(updateStatus(func(s *v1alpha1.IncidentStatus) {
+			s.Count = v1alpha1.MaxIncidentCount
+			for i := range v1alpha1.MaxOccurrenceRecords {
+				s.Occurrences = append(s.Occurrences, record(fmt.Sprintf("event:0a1b2c3d-4e5f-4a6b-8c7d-%012d", i), 2147483647))
+			}
+			s.Occurrences[0] = record("termination:"+strings.Repeat("ab", 16), 1)
+			s.OccurrencesDroppedThrough = &metav1.Time{Time: time.Unix(1700000000, 0)}
+		})).To(Succeed())
+	})
+
+	DescribeTable("refuses a status out of its bounds",
+		func(change func(*v1alpha1.IncidentStatus), msg string) {
+			err := updateStatus(change)
+			Expect(err).To(HaveOccurred(), "the API server accepted an invalid status")
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+			Expect(err.Error()).To(ContainSubstring(msg))
+		},
+		Entry("count above the saturation value", func(s *v1alpha1.IncidentStatus) {
+			s.Count = v1alpha1.MaxIncidentCount + 1
+		}, "status.count"),
+		Entry("more occurrences than the bound", func(s *v1alpha1.IncidentStatus) {
+			for i := range v1alpha1.MaxOccurrenceRecords + 1 {
+				s.Occurrences = append(s.Occurrences, record(fmt.Sprintf("event:%d", i), 1))
+			}
+		}, "status.occurrences"),
+		Entry("an occurrence of an unknown kind", func(s *v1alpha1.IncidentStatus) {
+			s.Occurrences = []v1alpha1.OccurrenceRecord{record("log:abc", 1)}
+		}, "status.occurrences[0].id"),
+		Entry("an occurrence ID with text in it", func(s *v1alpha1.IncidentStatus) {
+			s.Occurrences = []v1alpha1.OccurrenceRecord{record("event:not a uid", 1)}
+		}, "status.occurrences[0].id"),
+		Entry("an occurrence ID that is too long", func(s *v1alpha1.IncidentStatus) {
+			s.Occurrences = []v1alpha1.OccurrenceRecord{record("event:"+strings.Repeat("a", 65), 1)}
+		}, "status.occurrences[0].id"),
+		Entry("a negative total", func(s *v1alpha1.IncidentStatus) {
+			s.Occurrences = []v1alpha1.OccurrenceRecord{record("event:abc", -1)}
+		}, "status.occurrences[0].total"),
+		Entry("a total above a series count", func(s *v1alpha1.IncidentStatus) {
+			s.Occurrences = []v1alpha1.OccurrenceRecord{record("event:abc", 2147483648)}
+		}, "status.occurrences[0].total"),
+	)
 })
 
 var _ = Describe("RemediationPolicy", func() {

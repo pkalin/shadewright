@@ -211,9 +211,12 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               count:
-                description: count is the number of observations, counting event series
-                  increments, not totals.
+                description: |-
+                  count is the number of occurrences counted, counting event series increments, not totals. It
+                  saturates at 1,000,000: a series count is written by whoever can create events, so forged updates can
+                  raise it without bound otherwise. It is not a count of distinct occurrences.
                 format: int64
+                maximum: 1000000
                 minimum: 0
                 type: integer
               firstSeen:
@@ -227,6 +230,50 @@ spec:
                 type: string
               lastSeen:
                 description: lastSeen is when the latest observation arrived.
+                format: date-time
+                type: string
+              occurrences:
+                description: |-
+                  occurrences are the newest occurrences counted for this incident, newest first, at most 32: for each,
+                  the highest total the cluster reported that was counted, and when it began. After a restart the
+                  analyzer reads them to count only what is new. Older ones are dropped.
+                items:
+                  description: OccurrenceRecord is what an Incident counted of one
+                    occurrence (design 3.2). It holds no event text.
+                  properties:
+                    began:
+                      description: |-
+                        began is when the occurrence began: the event's creation time or the termination's finish time.
+                        Absent when the cluster did not report one.
+                      format: date-time
+                      type: string
+                    id:
+                      description: |-
+                        id names the occurrence: "event:" and the Event UID, or "termination:" and a hash of the pod UID, the
+                        container and the termination.
+                      maxLength: 76
+                      pattern: ^(event|termination):[A-Za-z0-9-]{1,64}$
+                      type: string
+                    total:
+                      description: |-
+                        total is the highest total of the occurrence counted: the event's series count, or 1 for a
+                        termination.
+                      format: int64
+                      maximum: 2147483647
+                      minimum: 0
+                      type: integer
+                  required:
+                  - id
+                  - total
+                  type: object
+                maxItems: 32
+                type: array
+                x-kubernetes-list-type: atomic
+              occurrencesDroppedThrough:
+                description: |-
+                  occurrencesDroppedThrough is when the newest occurrence dropped from occurrences began. An occurrence
+                  with no record that began no later than this is treated as counted in full, so the bound never counts
+                  one twice.
                 format: date-time
                 type: string
               phase:

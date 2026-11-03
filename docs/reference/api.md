@@ -334,7 +334,9 @@ Used by: [Incident](#incident).
 | `phase` | [IncidentPhase](#incidentphase) | No | phase summarizes the incident.<br>One of `Open`, `Analyzing`, `Proposed`, `Escalated`, `Resolved` |
 | `firstSeen` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | firstSeen is when the first observation arrived. |
 | `lastSeen` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | lastSeen is when the latest observation arrived. |
-| `count` | integer | No | count is the number of observations, counting event series increments, not totals.<br>Minimum: 0 |
+| `count` | integer | No | count is the number of occurrences counted, counting event series increments, not totals. It saturates at 1,000,000: a series count is written by whoever can create events, so forged updates can raise it without bound otherwise. It is not a count of distinct occurrences.<br>Maximum: 1e+06<br>Minimum: 0 |
+| `occurrences` | [OccurrenceRecord](#occurrencerecord) array | No | occurrences are the newest occurrences counted for this incident, newest first, at most 32: for each, the highest total the cluster reported that was counted, and when it began. After a restart the analyzer reads them to count only what is new. Older ones are dropped.<br>Maximum items: 32<br>List type: atomic |
+| `occurrencesDroppedThrough` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | occurrencesDroppedThrough is when the newest occurrence dropped from occurrences began. An occurrence with no record that began no later than this is treated as counted in full, so the bound never counts one twice. |
 | `lastAnalysisTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | lastAnalysisTime is when the analyzer last ran; it drives the cooldown. |
 | `analysisRecords` | [RecordID](#recordid) array | No | analysisRecords are the newest analysis record IDs, oldest first.<br>Maximum items: 20<br>Maximum length: 256<br>Minimum length: 1<br>List type: atomic |
 | `remediationRequests` | [Name](#name) array | No | remediationRequests are the names of requests made for this incident, oldest first.<br>Maximum items: 20<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`<br>List type: atomic |
@@ -405,6 +407,19 @@ Used by: [IncidentSpec](#incidentspec), [RemediationRequestSpec](#remediationreq
 | `namespace` | string | No | namespace of the object; empty for cluster-scoped objects.<br>Maximum length: 63<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 | `name` | string | Yes | name of the object.<br>Maximum length: 253<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` |
 | `uid` | [UID](#uid) | No | uid of the object.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+
+### OccurrenceRecord
+
+OccurrenceRecord is what an Incident counted of one occurrence (design 3.2). It holds no event text.
+
+
+Used by: [IncidentStatus](#incidentstatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | string | Yes | id names the occurrence: "event:" and the Event UID, or "termination:" and a hash of the pod UID, the container and the termination.<br>Maximum length: 76<br>Pattern: `^(event|termination):[A-Za-z0-9-]{1,64}$` |
+| `total` | integer | Yes | total is the highest total of the occurrence counted: the event's series count, or 1 for a termination.<br>Maximum: 2.147483647e+09<br>Minimum: 0 |
+| `began` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | began is when the occurrence began: the event's creation time or the termination's finish time. Absent when the cluster did not report one. |
 
 ### PlanRepository
 

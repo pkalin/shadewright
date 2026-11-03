@@ -81,6 +81,34 @@ const (
 // +kubebuilder:validation:MaxLength=256
 type RecordID string
 
+// MaxIncidentCount is the value at which an Incident's status.count saturates.
+const MaxIncidentCount = 1000000
+
+// MaxOccurrenceRecords is the most occurrences an Incident's status keeps.
+const MaxOccurrenceRecords = 32
+
+// OccurrenceRecord is what an Incident counted of one occurrence (design 3.2). It holds no event text.
+type OccurrenceRecord struct {
+	// id names the occurrence: "event:" and the Event UID, or "termination:" and a hash of the pod UID, the
+	// container and the termination.
+	// +kubebuilder:validation:Pattern=`^(event|termination):[A-Za-z0-9-]{1,64}$`
+	// +kubebuilder:validation:MaxLength=76
+	// +required
+	ID string `json:"id"`
+
+	// total is the highest total of the occurrence counted: the event's series count, or 1 for a
+	// termination.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=2147483647
+	// +required
+	Total int64 `json:"total"`
+
+	// began is when the occurrence began: the event's creation time or the termination's finish time.
+	// Absent when the cluster did not report one.
+	// +optional
+	Began *metav1.Time `json:"began,omitempty"`
+}
+
 // IncidentStatus holds the deduplication state that must survive restarts (ADR-0007). No logs or transcripts.
 type IncidentStatus struct {
 	// phase summarizes the incident.
@@ -95,10 +123,27 @@ type IncidentStatus struct {
 	// +optional
 	LastSeen *metav1.Time `json:"lastSeen,omitempty"`
 
-	// count is the number of observations, counting event series increments, not totals.
+	// count is the number of occurrences counted, counting event series increments, not totals. It
+	// saturates at 1,000,000: a series count is written by whoever can create events, so forged updates can
+	// raise it without bound otherwise. It is not a count of distinct occurrences.
 	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1000000
 	// +optional
 	Count int64 `json:"count,omitempty"`
+
+	// occurrences are the newest occurrences counted for this incident, newest first, at most 32: for each,
+	// the highest total the cluster reported that was counted, and when it began. After a restart the
+	// analyzer reads them to count only what is new. Older ones are dropped.
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=32
+	// +optional
+	Occurrences []OccurrenceRecord `json:"occurrences,omitempty"`
+
+	// occurrencesDroppedThrough is when the newest occurrence dropped from occurrences began. An occurrence
+	// with no record that began no later than this is treated as counted in full, so the bound never counts
+	// one twice.
+	// +optional
+	OccurrencesDroppedThrough *metav1.Time `json:"occurrencesDroppedThrough,omitempty"`
 
 	// lastAnalysisTime is when the analyzer last ran; it drives the cooldown.
 	// +optional

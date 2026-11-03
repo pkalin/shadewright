@@ -20,6 +20,9 @@ import (
 	"slices"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 )
 
@@ -77,5 +80,23 @@ func TestCacheOptions(t *testing.T) {
 	}
 	if found != 2 {
 		t.Errorf("ByObject restricts %d of Incident and RemediationRequest, want 2", found)
+	}
+}
+
+func TestCacheOptionsStripManagedFields(t *testing.T) {
+	opts := CacheOptions("shadewright-system", []string{demo})
+	if opts.DefaultTransform == nil {
+		t.Fatal("no DefaultTransform: managed fields of every event and pod would be cached")
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:          "web",
+		ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "kubelet"}},
+	}}
+	out, err := opts.DefaultTransform(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out.(*corev1.Pod); len(got.ManagedFields) != 0 {
+		t.Errorf("managed fields kept: %v", got.ManagedFields)
 	}
 }

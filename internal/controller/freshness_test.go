@@ -171,7 +171,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, o))).To(Succeed())
 		}
 		Eventually(func() bool {
-			return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: SettingsName},
+			return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName},
 				&remediationv1alpha1.RemediationSettings{}))
 		}).Should(BeTrue())
 	})

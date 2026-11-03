@@ -128,6 +128,9 @@ type RemediationSettingsSpec struct {
 	Repositories []GitRepository `json:"repositories,omitempty"`
 }
 
+// SettingsName is the name of the one RemediationSettings object.
+const SettingsName = "default"
+
 // RemediationSettingsStatus reports whether the settings are usable.
 type RemediationSettingsStatus struct {
 	// observedGeneration is the generation the status describes.

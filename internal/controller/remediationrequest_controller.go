@@ -47,12 +47,6 @@ const (
 		"the settings of its repository cannot be used to open it"
 )
 
-// settingsName is the name of the one RemediationSettings object.
-const settingsName = SettingsName
-
-// SettingsName is the name of the one RemediationSettings object, for the executor's wiring.
-const SettingsName = "default"
-
 // Reasons the controller itself gives for a refusal, next to the reasons of package policy and sourcemap.
 const (
 	// ReasonPolicyNotFound: the policy the request names does not exist (Denied).
@@ -282,11 +276,11 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 		return outcome{}, fmt.Errorf("get RemediationPolicy %s: %w", rr.Spec.PolicyRef, err)
 	}
 	settings := &remediationv1alpha1.RemediationSettings{}
-	switch err := r.getLive(ctx, types.NamespacedName{Name: settingsName}, settings); {
+	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err):
 		return denied(ReasonSettingsNotFound, "RemediationSettings default does not exist"), nil
 	case err != nil:
-		return outcome{}, fmt.Errorf("get RemediationSettings %s: %w", settingsName, err)
+		return outcome{}, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 	}
 
 	ref := rr.Spec.TargetRef
@@ -598,11 +592,11 @@ func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, r
 		return errors.New("cannot close the change request: no Git provider")
 	}
 	settings := &remediationv1alpha1.RemediationSettings{}
-	switch err := r.getLive(ctx, types.NamespacedName{Name: settingsName}, settings); {
+	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err):
 		return errRepositoryGone
 	case err != nil:
-		return fmt.Errorf("get RemediationSettings %s: %w", settingsName, err)
+		return fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 	}
 	if freshness.Paused(settings) {
 		return freshness.ErrPaused

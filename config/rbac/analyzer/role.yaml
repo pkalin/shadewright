@@ -20,6 +20,15 @@ metadata:
   namespace: system
 rules:
 - apiGroups:
+  - ""
+  resourceNames:
+  - shadewright-analysis-budget
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - update
+- apiGroups:
   - remediation.shadewright.io
   resources:
   - incidents

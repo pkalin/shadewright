@@ -348,7 +348,7 @@ func (c Checker) loadPlan(ctx context.Context, rr *v1alpha1.RemediationRequest) 
 	// Settings first: while writes are paused nothing else is decided, because a stale plan leads to a
 	// write (closing its change request).
 	settings := &v1alpha1.RemediationSettings{}
-	settingsErr := c.Reader.Get(ctx, client.ObjectKey{Name: "default"}, settings)
+	settingsErr := c.Reader.Get(ctx, client.ObjectKey{Name: v1alpha1.SettingsName}, settings)
 	if settingsErr == nil && Paused(settings) {
 		return nil, nil, v1alpha1.GitRepository{}, ErrPaused
 	}

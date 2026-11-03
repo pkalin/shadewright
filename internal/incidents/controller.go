@@ -85,6 +85,16 @@ type Config struct {
 	// StopTimeout bounds the last writes when the controller stops (shutdown or lost leadership): batches
 	// still unwritten then are logged and counted as lost.
 	StopTimeout time.Duration
+	// Debounce, SettleLimit, Cooldown, AnalysisTimeout and TriggerInterval drive the analysis trigger
+	// ([Due]): how long an Incident must go without a new observation, the longest it waits to settle after
+	// its first unsettled observation (the aggregation window by default), the least time between the start
+	// of one analysis and the next, how long an analysis may run before it is taken as lost, and how often
+	// the Incidents are decided again.
+	Debounce        time.Duration
+	SettleLimit     time.Duration
+	Cooldown        time.Duration
+	AnalysisTimeout time.Duration
+	TriggerInterval time.Duration
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
 }
@@ -121,6 +131,9 @@ type Controller struct {
 	// write are pruned.
 	nextWrite map[string]time.Time
 	refused   *boundedSet
+	// waiting holds, per Incident name, when the analysis trigger first saw the Incident waiting only to
+	// settle or for budget ([Controller.rememberWaiting]). Only the trigger goroutine uses it.
+	waiting map[string]time.Time
 	// lastEvent is when the last Warning event at the cap was written.
 	lastEvent time.Time
 }
@@ -154,6 +167,21 @@ func New(cfg Config) (*Controller, error) {
 	if cfg.StopTimeout <= 0 {
 		cfg.StopTimeout = DefaultStopTimeout
 	}
+	if cfg.Debounce <= 0 {
+		cfg.Debounce = DefaultDebounce
+	}
+	if cfg.SettleLimit <= 0 {
+		cfg.SettleLimit = cfg.Window
+	}
+	if cfg.Cooldown <= 0 {
+		cfg.Cooldown = DefaultCooldown
+	}
+	if cfg.AnalysisTimeout <= 0 {
+		cfg.AnalysisTimeout = DefaultAnalysisTimeout
+	}
+	if cfg.TriggerInterval <= 0 {
+		cfg.TriggerInterval = DefaultTriggerInterval
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -167,6 +195,7 @@ func New(cfg Config) (*Controller, error) {
 		kick:      make(chan struct{}, 1),
 		nextWrite: map[string]time.Time{},
 		refused:   newBoundedSet(refusedRemembered),
+		waiting:   map[string]time.Time{},
 	}, nil
 }
 
@@ -198,10 +227,14 @@ func (c *Controller) Start(ctx context.Context) error {
 	if err := c.load(ctx); err != nil {
 		return err
 	}
-	written := make(chan struct{})
+	written, marked := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(written)
 		c.writeLoop(ctx)
+	}()
+	go func() {
+		defer close(marked)
+		c.triggerLoop(ctx)
 	}()
 	for {
 		select {
@@ -211,6 +244,7 @@ func (c *Controller) Start(ctx context.Context) error {
 			}
 		case <-ctx.Done():
 			<-written
+			<-marked
 			c.stop(ctx)
 			return nil
 		}

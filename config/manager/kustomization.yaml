@@ -1,3 +1,4 @@
 resources:
 - manager.yaml
 - analyzer.yaml
+- analysis_budget.yaml

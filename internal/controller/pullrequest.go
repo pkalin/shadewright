@@ -141,11 +141,11 @@ func (r *RemediationRequestReconciler) now() time.Time {
 func (r *RemediationRequestReconciler) openPlanRepository(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	providers.GitProvider, remediationv1alpha1.GitRepository, error) {
 	settings := &remediationv1alpha1.RemediationSettings{}
-	switch err := r.getLive(ctx, types.NamespacedName{Name: settingsName}, settings); {
+	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err):
 		return nil, remediationv1alpha1.GitRepository{}, errRepositoryGone
 	case err != nil:
-		return nil, remediationv1alpha1.GitRepository{}, fmt.Errorf("get RemediationSettings %s: %w", settingsName, err)
+		return nil, remediationv1alpha1.GitRepository{}, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 	}
 	if freshness.Paused(settings) {
 		return nil, remediationv1alpha1.GitRepository{}, freshness.ErrPaused

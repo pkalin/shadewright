@@ -226,7 +226,7 @@ func plannedWorld(t *testing.T) (client.Client, *remediationv1alpha1.Remediation
 	if err := c.Get(ctx, client.ObjectKey{Name: "mem"}, pol); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Get(ctx, client.ObjectKey{Name: settingsName}, settings); err != nil {
+	if err := c.Get(ctx, client.ObjectKey{Name: remediationv1alpha1.SettingsName}, settings); err != nil {
 		t.Fatal(err)
 	}
 	settings.Spec.Repositories[0].TargetBranch = mainBranch

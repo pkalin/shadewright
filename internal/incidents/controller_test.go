@@ -111,14 +111,18 @@ func namespace(t *testing.T) string {
 }
 
 // countingClient counts the writes that reach the API server and lets a test act just before a status
-// update (before), replace its result (after), or answer it without sending it (instead).
+// update (before), replace its result (after), or answer it without sending it (instead). Those count and
+// see only the observation writes: the analysis trigger's writes (field owner triggerFieldOwner) are counted
+// in marks and go through mark instead.
 type countingClient struct {
 	client.Client
-	creates, updates atomic.Int32
-	before           func(ctx context.Context, inc *remediationv1alpha1.Incident)
-	after            func(err error) error
+	creates, updates, marks atomic.Int32
+	before                  func(ctx context.Context, inc *remediationv1alpha1.Incident)
+	after                   func(err error) error
 	// instead, when it returns an error, answers a status update with it without sending the update.
 	instead func(ctx context.Context) error
+	// mark, when it returns an error, answers a write of the analysis trigger with it without sending it.
+	mark func(obj client.Object) error
 }
 
 func (c *countingClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
@@ -136,6 +140,15 @@ type countingStatus struct {
 }
 
 func (s *countingStatus) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if (&client.SubResourceUpdateOptions{}).ApplyOptions(opts).FieldManager == triggerFieldOwner {
+		s.c.marks.Add(1)
+		if s.c.mark != nil {
+			if err := s.c.mark(obj); err != nil {
+				return err
+			}
+		}
+		return s.SubResourceWriter.Update(ctx, obj, opts...)
+	}
 	s.c.updates.Add(1)
 	if s.c.before != nil {
 		s.c.before(ctx, obj.(*remediationv1alpha1.Incident))
@@ -162,9 +175,19 @@ type running struct {
 
 func start(t *testing.T, ns string, cfg Config) *running {
 	t.Helper()
+	return startWith(t, ns, cfg, nil)
+}
+
+// startWith is start with setup called on the controller and its counting client before it starts.
+func startWith(t *testing.T, ns string, cfg Config, setup func(*Controller, *countingClient)) *running {
+	t.Helper()
 	cfg.Namespace = ns
 	if cfg.Window == 0 {
 		cfg.Window = time.Second
+	}
+	if cfg.SettleLimit == 0 {
+		// The short test window would otherwise make the settle limit 1 s too.
+		cfg.SettleLimit = DefaultWindow
 	}
 	c, err := New(cfg)
 	if err != nil {
@@ -172,6 +195,9 @@ func start(t *testing.T, ns string, cfg Config) *running {
 	}
 	r := &running{Controller: c, writes: &countingClient{Client: env.admin}, obs: make(chan collector.Observation)}
 	c.client, c.reader, c.cache, c.obs = r.writes, env.admin, env.admin, r.obs
+	if setup != nil {
+		setup(c, r.writes)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- c.Start(ctx) }()
@@ -234,6 +260,28 @@ func eventually(t *testing.T, ns string, f int, cond func(*remediationv1alpha1.I
 	}
 }
 
+// remembered waits until the controller's memory holds the drop mark of inc, the Incident as read from the
+// API server. The controller updates its memory only after the status write returns, so a test that saw the
+// write on the API server may otherwise ask Handled before then. The drop mark is set under mu together with
+// the removal of the records the write dropped, so once it is there, so is the rest of that write.
+func remembered(t *testing.T, r *running, inc *remediationv1alpha1.Incident) {
+	t.Helper()
+	want := timeFrom(inc.Status.OccurrencesDroppedThrough)
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		r.mu.Lock()
+		got := r.droppedThrough
+		r.mu.Unlock()
+		if !got.Before(want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the controller remembers records dropped through %v, want %v", got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func countIs(n int64) func(*remediationv1alpha1.Incident) bool {
 	return func(inc *remediationv1alpha1.Incident) bool { return inc.Status.Count == n }
 }
@@ -263,6 +311,10 @@ func TestBurstMakesOneIncidentWithFewWrites(t *testing.T) {
 
 	// The records the bound dropped are answered as counted in full; so is an unknown occurrence that began
 	// before them, while a newer unknown one was never counted.
+	if inc.Status.OccurrencesDroppedThrough == nil {
+		t.Fatal("no drop mark after 100 occurrences")
+	}
+	remembered(t, r, inc)
 	for _, q := range []struct {
 		id    string
 		began time.Time
@@ -491,7 +543,8 @@ func TestIncidentHoldsOnlyTheSymptom(t *testing.T) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatal(err)
 	}
-	allowed := []string{"phase", "firstSeen", "lastSeen", "count", "occurrences"}
+	// conditions hold AnalysisDue, whose reason and message are fixed strings.
+	allowed := []string{"phase", "firstSeen", "lastSeen", "count", "occurrences", "conditions"}
 	for k := range fields {
 		if !slices.Contains(allowed, k) {
 			t.Errorf("unexpected status field %q", k)

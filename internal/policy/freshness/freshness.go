@@ -274,11 +274,15 @@ func (c Checker) Check(ctx context.Context, rr *v1alpha1.RemediationRequest) (Re
 	if err != nil {
 		return Result{}, err
 	}
-	commit, observed, err := c.checkSource(ctx, rr, pol, settings)
+	mapped, err := c.checkSource(ctx, rr, pol, settings)
+	if _, isStale := errors.AsType[*StaleError](err); isStale {
+		// A stale verdict closes the change request, so it gets the consistency checks a fresh one gets first.
+		return Result{}, c.confirmStale(ctx, rr, repo, live, mapped, err)
+	}
 	if err != nil {
 		return Result{}, err
 	}
-	git, file, err := c.checkFile(ctx, rr, repo, commit)
+	git, file, err := c.checkFile(ctx, rr, repo, mapped.Source.BaseCommit)
 	if err != nil {
 		return Result{}, err
 	}
@@ -286,7 +290,7 @@ func (c Checker) Check(ctx context.Context, rr *v1alpha1.RemediationRequest) (Re
 	// on: the target (UID and resource version, since the mapping compared the live object with Git) and the
 	// Flux objects the mapping saw. If any changed meanwhile, the checks above describe different objects: not
 	// fresh, not stale; the caller retries.
-	if err := c.recheckInputs(ctx, rr, live, observed); err != nil {
+	if err := c.recheckInputs(ctx, rr, live, mapped.Observed); err != nil {
 		return Result{}, err
 	}
 	// Read the policy and the settings once more, last, before saying "fresh": a pause, a tightened or deleted
@@ -301,7 +305,7 @@ func (c Checker) Check(ctx context.Context, rr *v1alpha1.RemediationRequest) (Re
 		}
 		// checkFile compared the mapped commit with the head before and after its read, so it is the head the
 		// file was read and checked at.
-		return Result{Head: commit, File: file, Git: git}, nil
+		return Result{Head: mapped.Source.BaseCommit, File: file, Git: git}, nil
 	case errors.Is(err, ErrPaused):
 		return Result{}, err
 	default:
@@ -310,6 +314,43 @@ func (c Checker) Check(ctx context.Context, rr *v1alpha1.RemediationRequest) (Re
 		}
 		return Result{}, err
 	}
+}
+
+// confirmStale returns staleErr, the verdict of a mapping that no longer gives the plan's source, only when
+// that mapping still describes the world: the target and the Flux objects it read are unchanged, and when it
+// read the tree of the plan's repository and target branch, that tree is still the head of the branch. Otherwise
+// the mapping may describe a delivery or a commit that has gone, while the current one still matches the plan:
+// not stale, not fresh; the caller retries. A mapping that read another repository or branch needs no Git read:
+// the unchanged Flux objects deliver the target from there, which is stale whatever the plan's branch holds.
+func (c Checker) confirmStale(ctx context.Context, rr *v1alpha1.RemediationRequest, repo v1alpha1.GitRepository,
+	live *unstructured.Unstructured, mapped sourcemap.Result, staleErr error) error {
+	if err := c.recheckInputs(ctx, rr, live, mapped.Observed); err != nil {
+		return err
+	}
+	src, scanned := rr.Status.Source, mapped.Scanned
+	if scanned == nil || scanned.RepositoryRef != src.RepositoryRef || scanned.Branch != src.TargetBranch {
+		return staleErr
+	}
+	if c.OpenRepository == nil {
+		return errors.New("no Git provider is available")
+	}
+	ctx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	git, err := c.OpenRepository(ctx, repo)
+	if providers.IsInvalidConfig(err) {
+		return ErrRepositoryUnusable
+	}
+	if err != nil {
+		return provider("open the repository", err)
+	}
+	head, err := git.BranchHead(ctx, string(src.TargetBranch))
+	if err != nil {
+		return provider("read the head of the target branch", err)
+	}
+	if head != scanned.Commit {
+		return errors.New("the target branch moved while its source was mapped, checking again")
+	}
+	return staleErr
 }
 
 // recheckInputs reads the target and the Flux objects of the mapping again and fails with a retry error if
@@ -404,11 +445,12 @@ func (c Checker) readTarget(ctx context.Context, ref v1alpha1.ObjectRef) (*unstr
 // checkSource runs the source mapping again (ADR-0012) and compares it with status.source. The repository,
 // branch, path and build directory must be the recorded ones; the base commit is not compared, because it moves with every merge
 // to the target branch and checkFile decides whether such a merge touched the file. A failed mapping is not
-// stale (the caller retries); a mapping that now denies or needs a person never passes as fresh.
+// stale (the caller retries); a mapping that now denies or needs a person never passes as fresh. The mapping
+// is returned with a stale verdict too, for confirmStale; on a pass its Source is set.
 func (c Checker) checkSource(ctx context.Context, rr *v1alpha1.RemediationRequest, pol *v1alpha1.RemediationPolicy,
-	settings *v1alpha1.RemediationSettings) (string, []sourcemap.Observed, error) {
+	settings *v1alpha1.RemediationSettings) (sourcemap.Result, error) {
 	if c.Source == nil {
-		return "", nil, errors.New("no source resolver is available")
+		return sourcemap.Result{}, errors.New("no source resolver is available")
 	}
 	// The whole mapping runs under the caller's deadline (the controller's freshness deadline), not a fixed one.
 	res, err := c.Source.Resolve(ctx, sourcemap.Input{
@@ -419,19 +461,19 @@ func (c Checker) checkSource(ctx context.Context, rr *v1alpha1.RemediationReques
 	})
 	if err != nil {
 		// The resolver sanitises its errors; the caller sees "not fresh" and retries.
-		return "", nil, fmt.Errorf("resolve the source again: %w", err)
+		return sourcemap.Result{}, fmt.Errorf("resolve the source again: %w", err)
 	}
 	if res.Outcome != sourcemap.Resolved {
 		// Denied, NeedsIntervention or anything unknown. Only the reason is reported: the message may hold
 		// paths or text from Git.
-		return "", nil, stale(ReasonSourceChanged, "Mapping the target to its source again no longer resolves it (%s)", res.Reason)
+		return res, stale(ReasonSourceChanged, "Mapping the target to its source again no longer resolves it (%s)", res.Reason)
 	}
 	got, want := res.Source, rr.Status.Source
 	if got == nil || got.RepositoryRef != want.RepositoryRef || got.TargetBranch != want.TargetBranch ||
 		got.Path != want.Path || got.BuildPath != want.BuildPath {
-		return "", nil, stale(ReasonSourceChanged, "The target is no longer declared in the repository, branch, file and build directory of the plan")
+		return res, stale(ReasonSourceChanged, "The target is no longer declared in the repository, branch, file and build directory of the plan")
 	}
-	return got.BaseCommit, res.Observed, nil
+	return res, nil
 }
 
 // checkTarget checks that the live target is still the object the plan is about. It returns the object read,

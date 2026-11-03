@@ -149,10 +149,21 @@ type Result struct {
 	Message string
 	// Source is set only when Outcome is Resolved.
 	Source *v1alpha1.ResolvedSource
-	// Observed lists the Flux objects (Kustomization, GitRepository) the mapping read, as it read them. It is
-	// set only when Outcome is Resolved. A caller that does slow work after the mapping reads them again and
-	// compares UID and resource version.
+	// Observed lists the Flux objects (Kustomization, GitRepository) the mapping read, as it read them, for
+	// every outcome; the mapping has read them again after its last Git read. A caller that does slow work after
+	// the mapping, or acts on a stop, reads them again and compares UID and resource version.
 	Observed []Observed
+	// Scanned is the repository, branch and commit whose files the mapping read, for every outcome reached
+	// after the branch head was read; nil when the mapping stopped before. A caller that acts on the result
+	// compares the commit with the branch head, since a stop found in an older tree may not hold at the head.
+	Scanned *Scanned
+}
+
+// Scanned names the tree a mapping read: the settings repository, the branch and the commit at its head.
+type Scanned struct {
+	RepositoryRef v1alpha1.Name
+	Branch        v1alpha1.GitBranch
+	Commit        string
 }
 
 // Observed is a Flux object as the mapping read it: its identity and version.

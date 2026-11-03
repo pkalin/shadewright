@@ -108,6 +108,8 @@ type fixture struct {
 	openErr error
 	// duringGit runs on the first read of the branch head, to change the cluster while Git is scanned.
 	duringGit func(c client.Client)
+	// afterGet runs after every successful read of an object, to change the cluster between two reads.
+	afterGet func(c client.Client, obj client.Object)
 }
 
 // onHead calls fn once, when the branch head is read.
@@ -260,6 +262,18 @@ func (f *fixture) run(t *testing.T) (sourcemap.Result, string, error) {
 		b = b.WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
 				return f.getErr
+			},
+		})
+	}
+	if f.afterGet != nil {
+		b = b.WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+				opts ...client.GetOption) error {
+				err := c.Get(ctx, key, obj, opts...)
+				if err == nil {
+					f.afterGet(c, obj)
+				}
+				return err
 			},
 		})
 	}
@@ -1067,4 +1081,88 @@ func TestResolveRetriesOtherOpenerErrors(t *testing.T) {
 	if !errors.Is(err, sourcemap.ErrTransient) {
 		t.Fatalf("error = %v, want ErrTransient", err)
 	}
+}
+
+// touch updates a Flux object in the cluster, so its resource version changes.
+func touch(t *testing.T, c client.Client, gvk schema.GroupVersionKind, name string) {
+	t.Helper()
+	o := &unstructured.Unstructured{}
+	o.SetGroupVersionKind(gvk)
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "flux-system", Name: name}, o); err != nil {
+		t.Fatal(err)
+	}
+	o.SetAnnotations(map[string]string{"touched": "yes"})
+	if err := c.Update(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A stop is checked like a source (#145): a declaration not found under a Kustomization path that changed while
+// Git was scanned, or a repository refused from Flux objects that changed after they were read, describes a delivery
+// that no longer exists, and a caller would end a plan on it. The result is a retry.
+func TestResolveRetriesAStopWhenFluxObjectsChange(t *testing.T) {
+	t.Run("during the Git scan", func(t *testing.T) {
+		f := newFixture()
+		f.in.GitOps.AllowedPaths = []v1alpha1.GitPathPattern{"other/**"}
+		f.duringGit = func(c client.Client) { touch(t, c, sourcemap.KustomizationGVK, "apps") }
+		res, _, err := f.run(t)
+		if !errors.Is(err, sourcemap.ErrTransient) {
+			t.Fatalf("error = %v (outcome %s, reason %s), want ErrTransient", err, res.Outcome, res.Reason)
+		}
+	})
+	t.Run("after the delivery was read", func(t *testing.T) {
+		f := newFixture()
+		f.in.GitOps.RepositoryRef = "other"
+		touched := false
+		f.afterGet = func(c client.Client, obj client.Object) {
+			if u, ok := obj.(*unstructured.Unstructured); ok && u.GetKind() == "GitRepository" && !touched {
+				touched = true
+				touch(t, c, sourcemap.KustomizationGVK, "apps")
+			}
+		}
+		res, _, err := f.run(t)
+		if !errors.Is(err, sourcemap.ErrTransient) {
+			t.Fatalf("error = %v (outcome %s, reason %s), want ErrTransient", err, res.Outcome, res.Reason)
+		}
+	})
+}
+
+// Every outcome reports the Flux objects it was based on and, once Git was read, the tree it read, so a caller
+// that acts on a stop can check that they are still current.
+func TestResolveReportsWhatAStopWasBasedOn(t *testing.T) {
+	t.Run("a stop in the Git scan", func(t *testing.T) {
+		f := newFixture()
+		f.in.GitOps.AllowedPaths = []v1alpha1.GitPathPattern{"other/**"}
+		res, head, err := f.run(t)
+		if err != nil || res.Outcome != sourcemap.Denied || res.Reason != sourcemap.ReasonPathNotAllowed {
+			t.Fatalf("got %s %s %v, want Denied PathNotAllowed", res.Outcome, res.Reason, err)
+		}
+		if len(res.Observed) != 2 {
+			t.Fatalf("observed %+v, want the Kustomization and the GitRepository", res.Observed)
+		}
+		want := sourcemap.Scanned{RepositoryRef: "fleet", Branch: "main", Commit: head}
+		if res.Scanned == nil || *res.Scanned != want {
+			t.Fatalf("scanned %+v, want %+v", res.Scanned, want)
+		}
+	})
+	t.Run("a stop before Git was read", func(t *testing.T) {
+		f := newFixture()
+		f.in.GitOps.RepositoryRef = "other"
+		res, _, err := f.run(t)
+		if err != nil || res.Outcome != sourcemap.Denied || res.Reason != sourcemap.ReasonRepositoryNotInPolicy {
+			t.Fatalf("got %s %s %v, want Denied RepositoryNotInPolicy", res.Outcome, res.Reason, err)
+		}
+		if len(res.Observed) != 2 || res.Scanned != nil {
+			t.Fatalf("observed %+v, scanned %+v; want both Flux objects and no tree", res.Observed, res.Scanned)
+		}
+	})
+	t.Run("a source", func(t *testing.T) {
+		res, head, err := newFixture().run(t)
+		if err != nil || res.Outcome != sourcemap.Resolved {
+			t.Fatalf("got %s %v, want Resolved", res.Outcome, err)
+		}
+		if res.Scanned == nil || res.Scanned.Commit != head || res.Source.BaseCommit != head {
+			t.Fatalf("scanned %+v, base commit %s, want both at %s", res.Scanned, res.Source.BaseCommit, head)
+		}
+	})
 }

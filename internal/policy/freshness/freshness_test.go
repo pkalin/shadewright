@@ -820,3 +820,32 @@ func TestBranchMovedDuringTheFileReadIsRetried(t *testing.T) {
 		wantRetry(t, w.fresh(t))
 	})
 }
+
+// A check whose last read ends with the context does not say "fresh": the read may have been cut short, and
+// the verdict is for the caller's deadline, not after it.
+func TestFreshIsNotReturnedAfterTheContextEnded(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.ctx = ctx
+	policyReads := 0
+	w.afterGet = func(obj client.Object) {
+		// The policy is read twice: to load the plan, and once more, last, before the verdict. The context
+		// ends as the second read returns.
+		if _, ok := obj.(*v1alpha1.RemediationPolicy); ok {
+			if policyReads++; policyReads == 2 {
+				cancel()
+			}
+		}
+	}
+	err := w.fresh(t)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want the context's error, got %v", err)
+	}
+	if _, stale := errors.AsType[*freshness.StaleError](err); stale {
+		t.Fatalf("a cut-short check is not stale: %v", err)
+	}
+	if policyReads != 2 {
+		t.Fatalf("the policy should have been read twice, got %d", policyReads)
+	}
+}

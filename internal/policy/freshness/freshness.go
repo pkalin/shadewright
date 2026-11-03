@@ -277,6 +277,11 @@ func (c Checker) Fresh(ctx context.Context, rr *v1alpha1.RemediationRequest) err
 	// as stale here; the next check does that on a calm read.
 	switch _, _, _, err := c.loadPlan(ctx, rr); {
 	case err == nil:
+		// A read that answered as the context ended may have been cut short, and "fresh" has a deadline of its
+		// own: nil is returned only while the context is live.
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("the plan was checked, but the check ran out of time: %w", err)
+		}
 		return nil
 	case errors.Is(err, ErrPaused):
 		return err

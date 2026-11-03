@@ -67,20 +67,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 	)
 
 	manifest := func(limit string) []byte {
-		return []byte(fmt.Sprintf(`apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: %s
-  namespace: %s
-spec:
-  template:
-    spec:
-      containers:
-        - name: worker
-          resources:
-            limits:
-              memory: %s
-`, deployment.Name, deployment.Namespace, limit))
+		return deploymentManifest(deployment.Name, deployment.Namespace, workerContainer, limit)
 	}
 	reconciler := func() *RemediationRequestReconciler {
 		return &RemediationRequestReconciler{

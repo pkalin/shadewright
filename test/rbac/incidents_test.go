@@ -38,8 +38,9 @@ import (
 
 // The subject and reason of the observations fed to the Incident controller.
 const (
-	subjectKind = "Deployment"
-	reason      = "BackOff"
+	subjectAPIVersion = "apps/v1"
+	subjectKind       = "Deployment"
+	reason            = "BackOff"
 )
 
 // TestIncidentControllerRunsWithTheAnalyzerRBAC runs the Incident controller as the analyzer's
@@ -87,7 +88,7 @@ func TestIncidentControllerRunsWithTheAnalyzerRBAC(t *testing.T) {
 		return collector.Observation{
 			Fingerprint: fmt.Sprintf("sha256:%064x", 0xfeed00+f),
 			Subject: remediationv1alpha1.ObjectRef{
-				APIVersion: "apps/v1", Kind: subjectKind, Namespace: otherNS, Name: "rbac-orders",
+				APIVersion: subjectAPIVersion, Kind: subjectKind, Namespace: otherNS, Name: "rbac-orders",
 				UID: "44444444-4444-4444-8444-444444444444",
 			},
 			Reason: reason, Type: corev1.EventTypeWarning, ReportingController: "kubelet",

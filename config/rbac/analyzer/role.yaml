@@ -5,6 +5,12 @@ metadata:
   name: analyzer-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - list
+- apiGroups:
   - remediation.shadewright.io
   resources:
   - remediationsettings
@@ -12,6 +18,12 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - remediationsettings/status
+  verbs:
+  - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

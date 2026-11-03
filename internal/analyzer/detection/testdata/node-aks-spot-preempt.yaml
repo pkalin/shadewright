@@ -1,0 +1,32 @@
+# An AKS Spot node whose VMEventScheduled condition (node-problem-detector) names a Preempt event.
+apiVersion: v1
+kind: Node
+metadata:
+  name: aks-spot-12345678-vmss000002
+  labels:
+    agentpool: spot
+    kubernetes.azure.com/agentpool: spot
+    kubernetes.azure.com/cluster: MC_lab_shadewright_swedencentral
+    kubernetes.azure.com/mode: user
+    kubernetes.azure.com/scalesetpriority: spot
+    kubernetes.io/os: linux
+spec:
+  providerID: azure:///subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/mc_lab_shadewright_swedencentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-spot-12345678-vmss/virtualMachines/2
+  taints:
+  - key: kubernetes.azure.com/scalesetpriority
+    value: spot
+    effect: NoSchedule
+status:
+  conditions:
+  - type: VMEventScheduled
+    status: "True"
+    reason: VMEventScheduled
+    message: 'VM event scheduled: Preempt, NotBefore Mon, 03 Nov 2026 10:00:30 GMT'
+  - type: MemoryPressure
+    status: "False"
+    reason: KubeletHasSufficientMemory
+    message: kubelet has sufficient memory available
+  - type: Ready
+    status: "True"
+    reason: KubeletReady
+    message: kubelet is posting ready status

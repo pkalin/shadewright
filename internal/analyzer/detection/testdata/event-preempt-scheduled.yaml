@@ -1,0 +1,16 @@
+# node-problem-detector on AKS reports that Azure scheduled the eviction of a Spot VM.
+apiVersion: events.k8s.io/v1
+kind: Event
+metadata:
+  name: aks-spot-12345678-vmss000002.18a2b3c4d5e6f7c0
+  namespace: default
+reason: PreemptScheduled
+type: Warning
+reportingController: custom-plugin-monitor
+action: ""
+note: 'VM is scheduled for Preempt event: EventId 7E2C1A40-3B5D-4C6E-8F7A-9B0C1D2E3F4A, NotBefore Mon, 03 Nov 2026 10:00:30 GMT'
+regarding:
+  apiVersion: v1
+  kind: Node
+  name: aks-spot-12345678-vmss000002
+  uid: aks-spot-12345678-vmss000002

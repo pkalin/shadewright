@@ -249,7 +249,11 @@ spec:
             description: status reports whether the settings are usable.
             properties:
               conditions:
-                description: conditions report problems such as an unreachable signer.
+                description: |-
+                  conditions report problems. The analyzer writes UnknownModules: True when spec.modules names a module
+                  that it does not have compiled in, which then contributes nothing; and DetectionFailed: True when its
+                  last run could not list the nodes or read the discovery API, so the report is from the last run that
+                  succeeded, or shows only generic active when none has.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -312,7 +316,7 @@ spec:
                 description: |-
                   integrations lists every integration module that is enabled or detected, with whether it is active.
                   A detected add-on whose module is not enabled is listed too, so the cluster admin sees what could be
-                  enabled. Written like platform; empty until then. At most 64: 32 enabled (the spec cap) and 32 more
+                  enabled. Written like platform. At most 64: 32 enabled (the spec cap) and 32 more
                   detected, since a detected add-on needs a compiled-in module and internal/modules refuses more than 32.
                 items:
                   description: |-
@@ -365,10 +369,9 @@ spec:
                 type: integer
               platform:
                 description: |-
-                  platform is the platform the analyzer detected and the one it uses. To be written by the analyzer once
-                  detection is wired (planned, #61); no identity may write it yet, so it stays unset. The analyzer only
-                  reads RemediationSettings today (AGENTS.md invariant 6): the status write #61 needs changes that
-                  invariant and needs an ADR first. Status is a report, never an input.
+                  platform is the platform the analyzer detected and the one it uses. The analyzer writes it at start, when
+                  spec changes and every 10 minutes (ADR-0024), with the only write it has outside the operator namespace.
+                  Status is a report, never an input: no component reads any field of it to decide anything.
                 properties:
                   active:
                     description: |-

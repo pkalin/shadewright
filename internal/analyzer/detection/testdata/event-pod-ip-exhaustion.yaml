@@ -1,0 +1,20 @@
+# A pod on Azure CNI with dynamic IP allocation that waits for a pod IP (FailedCreatePodSandBox from the kubelet).
+apiVersion: events.k8s.io/v1
+kind: Event
+metadata:
+  name: web-7d4b9c6f5-x2k8p.18a2b3c4d5e6f7a8
+  namespace: demo
+eventTime: null
+reason: FailedCreatePodSandBox
+type: Warning
+reportingController: kubelet
+reportingInstance: aks-nodepool1-12345678-vmss000001
+action: ""
+note: 'Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox "4f2c9a": plugin type="azure-vnet" failed (add): IPAM Invoker Add failed with error: Failed to get IP address from CNS: http request failed: not enough IPs available of type Pod for 9f1e3c2a-0b4d-4e8f-9a7c-1d2e3f4a5b6c, waiting on Azure CNS to allocate more with NC Status: , IP config request is [{PodInterfaceID:4f2c9a-eth0 InfraContainerID:4f2c9a}]'
+regarding:
+  apiVersion: v1
+  kind: Pod
+  namespace: demo
+  name: web-7d4b9c6f5-x2k8p
+  uid: 0d1c2b3a-4f5e-6d7c-8b9a-0f1e2d3c4b5a
+deprecatedCount: 12

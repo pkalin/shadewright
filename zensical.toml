@@ -48,6 +48,7 @@ nav = [
     { "0021 Amending ADRs" = "adr/0021-amending-accepted-adrs.md" },
     { "0022 Scenario switch" = "adr/0022-scenario-switch-and-clusters.md" },
     { "0023 Calling the model" = "adr/0023-how-the-analyzer-calls-the-model.md" },
+    { "0024 Detection in settings status" = "adr/0024-analyzer-writes-detection-to-settings-status.md" },
     { "Template" = "adr/template.md" },
   ] },
 ]

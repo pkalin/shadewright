@@ -35,8 +35,12 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analyzer"
 	"github.com/pkalin/shadewright/internal/analyzer/collector"
+	"github.com/pkalin/shadewright/internal/analyzer/detection"
 	"github.com/pkalin/shadewright/internal/cmdutil"
 	"github.com/pkalin/shadewright/internal/incidents"
+	"github.com/pkalin/shadewright/internal/modules"
+	"github.com/pkalin/shadewright/internal/modules/aks"
+	"github.com/pkalin/shadewright/internal/modules/flux"
 )
 
 var (
@@ -134,6 +138,26 @@ func main() {
 	}
 	if err := inc.SetupWithManager(mgr, col.Observations()); err != nil {
 		setupLog.Error(err, "Failed to set up the Incident controller")
+		os.Exit(1)
+	}
+
+	// The compiled-in modules (ADR-0019). The generic platform is always added by modules.New; a refusal stops
+	// the start. A module is active only when RemediationSettings enables it and it is detected.
+	registry, err := modules.New([]modules.Platform{aks.Platform{}}, []modules.Integration{flux.Module()})
+	if err != nil {
+		setupLog.Error(err, "Failed to build the module registry")
+		os.Exit(1)
+	}
+	det, err := detection.New(detection.Config{
+		Registry:      registry,
+		GroupVersions: detection.DiscoveryGroupVersions(mgr.GetConfig()),
+	})
+	if err != nil {
+		setupLog.Error(err, "Failed to create platform detection")
+		os.Exit(1)
+	}
+	if err := det.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up platform detection")
 		os.Exit(1)
 	}
 

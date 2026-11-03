@@ -104,17 +104,14 @@ type SymptomSource struct {
 	Symptoms func(obj map[string]any) []Symptom
 }
 
-// DiagnosisRule is a deterministic diagnosis rule. It is a placeholder: its fields come with the first module
-// that has a rule.
-type DiagnosisRule struct{}
-
 // Tool is a read-only tool for the analyzer. It is a placeholder: its fields come with the first module that
 // offers a tool.
 type Tool struct{}
 
-// generic is the generic platform. It claims no node: it is the answer when no other platform is certain.
+// generic is the generic platform. It claims no node: it is the answer when no other platform is certain. Its
+// rules (generic.go) hold on every conformant cluster, so they are active on every platform.
 type generic struct{}
 
 func (generic) Name() string                 { return GenericPlatform }
 func (generic) Detection() PlatformDetection { return PlatformDetection{} }
-func (generic) Hooks() Hooks                 { return Hooks{} }
+func (generic) Hooks() Hooks                 { return Hooks{Rules: genericRules()} }

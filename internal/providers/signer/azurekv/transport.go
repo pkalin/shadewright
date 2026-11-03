@@ -80,6 +80,10 @@ func (g guardTransport) Do(req *http.Request) (*http.Response, error) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
 	closeBody(resp)
 	if err != nil {
+		// A read that failed because the try or the caller gave up keeps its context error.
+		if ctxErr := req.Context().Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, cleanBodyError(err)
 	}
 	if len(body) > maxResponseBody {

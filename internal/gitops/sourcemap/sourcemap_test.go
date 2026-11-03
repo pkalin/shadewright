@@ -1161,8 +1161,56 @@ func TestResolveReportsWhatAStopWasBasedOn(t *testing.T) {
 		if err != nil || res.Outcome != sourcemap.Resolved {
 			t.Fatalf("got %s %v, want Resolved", res.Outcome, err)
 		}
-		if res.Scanned == nil || res.Scanned.Commit != head || res.Source.BaseCommit != head {
-			t.Fatalf("scanned %+v, base commit %s, want both at %s", res.Scanned, res.Source.BaseCommit, head)
+		// Source names the tree; Scanned does not repeat it.
+		want := sourcemap.Scanned{RepositoryRef: "fleet", Branch: "main", Commit: head}
+		if res.Scanned != nil || res.Tree() == nil || *res.Tree() != want {
+			t.Fatalf("scanned %+v, tree %+v; want no Scanned and the tree %+v", res.Scanned, res.Tree(), want)
 		}
 	})
+	t.Run("a branch not found", func(t *testing.T) {
+		f := newFixture()
+		f.gitBranch = "trunk"
+		res, _, err := f.run(t)
+		if err != nil || res.Reason != sourcemap.ReasonBranchNotFound {
+			t.Fatalf("got %s %s %v, want BranchNotFound", res.Outcome, res.Reason, err)
+		}
+		want := sourcemap.Scanned{RepositoryRef: "fleet", Branch: "main"}
+		if res.Tree() == nil || *res.Tree() != want {
+			t.Fatalf("tree %+v, want %+v: the repository and branch found missing, no commit", res.Tree(), want)
+		}
+	})
+	t.Run("a GitRepository not found", func(t *testing.T) {
+		f := newFixture()
+		f.src = nil
+		res, _, err := f.run(t)
+		if err != nil || res.Reason != sourcemap.ReasonSourceNotFound {
+			t.Fatalf("got %s %s %v, want SourceNotFound", res.Outcome, res.Reason, err)
+		}
+		if len(res.Observed) != 2 || !res.Observed[1].Missing || res.Observed[1].Name != "fleet" ||
+			res.Observed[0].Missing {
+			t.Fatalf("observed %+v, want the Kustomization and the missing GitRepository", res.Observed)
+		}
+	})
+}
+
+// A GitRepository found missing is rechecked like one that was read: if it appears while the mapping runs,
+// SourceNotFound describes a delivery that no longer exists. The result is a retry.
+func TestResolveRetriesWhenAMissingSourceAppears(t *testing.T) {
+	f := newFixture()
+	src := f.src
+	f.src = nil
+	reads := 0
+	f.afterGet = func(c client.Client, obj client.Object) {
+		if u, ok := obj.(*unstructured.Unstructured); ok && u.GetKind() == "Kustomization" {
+			if reads++; reads == 2 { // the recheck, after the GitRepository was found missing
+				if err := c.Create(context.Background(), src.DeepCopy()); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	res, _, err := f.run(t)
+	if !errors.Is(err, sourcemap.ErrTransient) {
+		t.Fatalf("error = %v (outcome %s, reason %s), want ErrTransient", err, res.Outcome, res.Reason)
+	}
 }

@@ -286,7 +286,81 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not decided before the close was confirmed")
 
 		supersedes(freshness.ReasonTargetFileChanged)
-		Expect(closes.Load()).To(Equal(int32(2)), "the retry closes an already closed change request, a no-op")
+		Expect(closes.Load()).To(Equal(int32(1)), "the closed pull request is known to be ours and not closed again")
+	})
+
+	// planFresh returns the PlanFresh condition of the request as stored.
+	planFresh := func() *metav1.Condition {
+		return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+	}
+	// cutShortClose makes the plan stale and lets its close go through at the host while the answer is lost
+	// (the deadline, a restart), then makes the plan fresh again.
+	cutShortClose := func() {
+		_, err := git.Push(mainBranch, sourcePath, manifest("512Mi"))
+		Expect(err).NotTo(HaveOccurred())
+		lost := true
+		git.SetAfter(func(op string) error {
+			if op == opClose && lost {
+				lost = false
+				return context.DeadlineExceeded
+			}
+			return nil
+		})
+		_, err = reconcileOnce()
+		Expect(err).To(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseSuperseded))
+		c := planFresh()
+		Expect(c).NotTo(BeNil(), "the cleanup is marked before the close")
+		Expect(c.Status).To(Equal(metav1.ConditionFalse))
+		Expect(c.Reason).To(Equal(freshness.ReasonTargetFileChanged))
+		_, err = git.Push(mainBranch, sourcePath, manifest("256Mi"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+	}
+
+	It("ends Superseded when its own close went through unanswered and the plan looks fresh again", func() {
+		cutShortClose()
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded), "our close, not a person's rejection")
+		Expect(planFresh().Reason).To(Equal(freshness.ReasonTargetFileChanged))
+	})
+
+	It("finishes the cleanup after a restart between the mark and the close, though the plan looks fresh again", func() {
+		_, err := git.Push(mainBranch, sourcePath, manifest("512Mi"))
+		Expect(err).NotTo(HaveOccurred())
+		failed := false
+		git.SetFail(func(op string) error {
+			if op == opClose && !failed {
+				failed = true
+				return &providers.RetryableError{Err: errors.New("connection reset")}
+			}
+			if op == opClose {
+				closes.Add(1)
+			}
+			return nil
+		})
+		_, err = reconcileOnce()
+		Expect(err).To(HaveOccurred())
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen), "the close did not happen")
+		_, err = git.Push(mainBranch, sourcePath, manifest("256Mi"))
+		Expect(err).NotTo(HaveOccurred())
+		supersedes(freshness.ReasonTargetFileChanged)
+		Expect(closes.Load()).To(Equal(int32(1)))
+	})
+
+	It("still ends a fresh request whose pull request a person closed in NeedsIntervention", func() {
+		Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(c).NotTo(BeNil())
+		Expect(c.Reason).To(Equal(ReasonChangeRequestClosed))
+		Expect(planFresh()).To(BeNil())
 	})
 
 	It("does not supersede and does not close when an input cannot be read", func() {

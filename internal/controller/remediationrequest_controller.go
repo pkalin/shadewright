@@ -322,6 +322,21 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 		// The error is sanitised by the resolver: no provider text, no URL.
 		return outcome{}, fmt.Errorf("resolve source of %s %s/%s: %w", ref.Kind, ref.Namespace, ref.Name, err)
 	}
+	// The baseline was checked on the first read, and the resolver read the target again to compare it with
+	// Git. If the target changed in between (Flux applied a new revision), the baseline and the result describe
+	// different objects: a resolved source could let a change the policy refuses pass, and a stop (a value
+	// that differs from Git, a field not found) could end a request that the current object does not stop.
+	// Read once more, for every outcome, and start over when the object is not the one checked: an unchanged
+	// resourceVersion means nothing changed in between.
+	again, ok, err := r.target(ctx, ref)
+	if err != nil {
+		return outcome{}, err
+	}
+	if !ok || again.GetUID() != live.GetUID() || again.GetResourceVersion() != live.GetResourceVersion() {
+		return outcome{}, fmt.Errorf("%s %s/%s changed during the policy check, checking again",
+			ref.Kind, ref.Namespace, ref.Name)
+	}
+
 	switch res.Outcome {
 	case sourcemap.Resolved:
 		if res.Source == nil {
@@ -332,19 +347,6 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 	default:
 		// NeedsIntervention, and anything unknown: a person must look. Never Denied, never retried.
 		return needsIntervention(string(res.Reason), res.Message), nil
-	}
-
-	// The baseline was checked on the first read, and the resolver read the target again to compare it with
-	// Git. If the target changed in between (Flux applied a new revision), the baseline and the resolved source
-	// describe different objects, and a change the policy refuses could pass. Read once more and start over
-	// when the object is not the one checked: an unchanged resourceVersion means nothing changed in between.
-	again, ok, err := r.target(ctx, ref)
-	if err != nil {
-		return outcome{}, err
-	}
-	if !ok || again.GetUID() != live.GetUID() || again.GetResourceVersion() != live.GetResourceVersion() {
-		return outcome{}, fmt.Errorf("%s %s/%s changed during the policy check, checking again",
-			ref.Kind, ref.Namespace, ref.Name)
 	}
 
 	d := policy.Decide(policy.DecisionInput{
@@ -463,9 +465,10 @@ func beforeMerge(p remediationv1alpha1.RemediationPhase) bool {
 // recheck is the freshness step of Reconcile for a request that has left the policy check but has not merged.
 // A recorded pull request is looked at first, so a merge or a rejection is seen before the freshness check
 // (a merged change makes the plan look stale), and a request past its deadline expires even while the
-// freshness check cannot finish. It then makes a stale plan visible (and closes its change request) without
-// waiting for the next write, and on a fresh plan runs the pull request step, which makes at most one Git
-// write right after this check.
+// freshness check cannot finish. A recorded pull request found closed while the cleanup of a stale plan has
+// started (staleMark) ends Superseded: the close was ours. It then makes a stale plan visible (and closes its
+// change request) without waiting for the next write, and on a fresh plan runs the pull request step, which
+// makes at most one Git write right after this check.
 func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	ctrl.Result, error) {
 	if r.OpenRepository == nil || !beforeMerge(rr.Status.Phase) || rr.Status.PlanDigest == "" {
@@ -477,8 +480,15 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 			return ctrl.Result{}, nil
 		}
 	}
+	if mark := staleMark(rr); mark != nil && outcome == prClosed {
+		// The cleanup of a stale plan started (ensureFresh) and its pull request is closed: the close that was
+		// cut short was ours, not a person's rejection, whatever the plan looks like now.
+		return ctrl.Result{}, r.ignoreSuperseded(r.endFreshness(ctx, rr, remediationv1alpha1.PhaseSuperseded,
+			mark.Reason, mark.Message))
+	}
+	// A request whose cleanup started finishes it in ensureFresh, also past the deadline.
 	if rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked && rr.Status.Deadline != nil &&
-		r.now().After(rr.Status.Deadline.Time) {
+		staleMark(rr) == nil && r.now().After(rr.Status.Deadline.Time) {
 		return r.expire(ctx, rr)
 	}
 	fresh, err := r.ensureFresh(ctx, rr)
@@ -503,16 +513,28 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 	}
 }
 
+// ignoreSuperseded returns nil for ErrSuperseded and err otherwise.
+func (r *RemediationRequestReconciler) ignoreSuperseded(err error) error {
+	if errors.Is(err, ErrSuperseded) {
+		return nil
+	}
+	return err
+}
+
 // ensureFresh must run right before every Git write of a request (design section 6). It returns a nil error
 // only when the plan is fresh, with what the freshness check read (the target branch head, the target file
 // there and the repository), so the write and the render check work on that commit. When an input of the plan
-// digest changed, it closes the request's change request through the provider, sets the phase to Superseded
-// and returns ErrSuperseded; the branch is never rebuilt or force-pushed. Any other error (an input could not
-// be read, writes are paused) means "not fresh": the caller must not write and may retry.
+// digest changed, it marks the cleanup as started (PlanFresh False with the stale reason, phase unchanged),
+// closes the request's change request through the provider, sets the phase to Superseded and returns
+// ErrSuperseded; the branch is never rebuilt or force-pushed. Any other error (an input could not be read,
+// writes are paused) means "not fresh": the caller must not write and may retry.
 //
 // It is idempotent (invariant 5): closing a closed change request succeeds, and a request that is already
-// Superseded returns ErrSuperseded without calling the provider again. The change request is closed before
-// the status is written, so a crash in between leaves a retry that closes it again as a no-op.
+// Superseded returns ErrSuperseded without calling the provider again. The mark is written before the close and
+// the final phase after it, so a crash or a deadline anywhere in between leaves a mark that the next call
+// finishes (staleMark): it closes again, a no-op when the first close went through, and supersedes, without
+// checking the plan again. A plan that looks fresh again by then does not reopen the decision, and the closed
+// pull request is never taken for a person's rejection.
 func (r *RemediationRequestReconciler) ensureFresh(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	freshness.Result, error) {
 	if rr.Status.Phase == remediationv1alpha1.PhaseSuperseded {
@@ -520,6 +542,9 @@ func (r *RemediationRequestReconciler) ensureFresh(ctx context.Context, rr *reme
 	}
 	if !beforeMerge(rr.Status.Phase) {
 		return freshness.Result{}, fmt.Errorf("a request in phase %q takes no write that needs a fresh plan", rr.Status.Phase)
+	}
+	if mark := staleMark(rr); mark != nil {
+		return freshness.Result{}, r.cleanUpStale(ctx, rr, &freshness.StaleError{Reason: mark.Reason, Message: mark.Message})
 	}
 	freshCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	fresh, err := freshness.Checker{Reader: r.reader(), OpenRepository: r.OpenRepository, Source: r.Source}.Check(freshCtx, rr)
@@ -531,48 +556,94 @@ func (r *RemediationRequestReconciler) ensureFresh(ctx context.Context, rr *reme
 	if err == nil {
 		return fresh, nil
 	}
-	phase, reason, message := remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnusable, messageRepositoryUnusable
-	if !errors.Is(err, freshness.ErrRepositoryUnusable) {
-		staleErr, ok := errors.AsType[*freshness.StaleError](err)
-		if !ok {
-			return freshness.Result{}, err
-		}
-		phase, reason, message = remediationv1alpha1.PhaseSuperseded, staleErr.Reason, staleErr.Message
-		// The whole cleanup shares one deadline: reading the settings, opening the repository, finding and
-		// closing the change request.
-		cleanCtx, cleanCancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
-		closeErr := r.closeChangeRequest(cleanCtx, rr)
-		// Every result, nil and errRepositoryGone included, is checked against the deadline before a final phase
-		// is written from it.
-		closeErr = boundErr(ctx, cleanCtx, "cleanup of the change request", closeErr)
-		cleanCancel()
-		switch err := closeErr; {
-		case errors.Is(err, freshness.ErrRepositoryUnusable):
-			// The settings of the repository cannot be used, so the change request cannot be closed either.
-			phase, reason, message = remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnusable,
-				messageRepositoryUnusable
-		case errors.Is(err, errTargetBranchChanged):
-			phase, reason = remediationv1alpha1.PhaseNeedsIntervention, reasonTargetBranchChanged
-			message = "The plan is stale and its repository now targets another branch; " +
-				"its change request, if any, was not closed"
-		case errors.Is(err, errRepositoryGone):
-			// Nothing is closed: the only change request this plan could have is in a repository that cannot be
-			// reached through the settings any more, and closing a number elsewhere could close someone else's.
-			phase, reason = remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnavailable
-			message = "The plan is stale and the repository it was made for is not configured any more; " +
-				"its change request, if any, was not closed"
-		case err != nil:
-			refused, _, ok := refusal(err)
-			if !ok {
-				return freshness.Result{}, err
-			}
-			// The Git host refuses the close for good (a permission the App lacks, a rule): the plan is stale
-			// and nothing more may be written for it, so a person has to close the change request.
-			phase, reason = remediationv1alpha1.PhaseNeedsIntervention, refused
-			message = "The plan is stale (" + staleErr.Reason + ") and the Git host refused to close its " +
-				"change request; it was not closed"
-		}
+	if errors.Is(err, freshness.ErrRepositoryUnusable) {
+		return freshness.Result{}, r.endFreshness(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
+			reasonRepositoryUnusable, messageRepositoryUnusable)
 	}
+	staleErr, ok := errors.AsType[*freshness.StaleError](err)
+	if !ok {
+		return freshness.Result{}, err
+	}
+	// The mark comes before the close, in its own status write, so a close that goes through while its answer
+	// is lost (the deadline, a restart) is known on the next reconcile to be ours.
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type:               remediationv1alpha1.ConditionPlanFresh,
+		Status:             metav1.ConditionFalse,
+		Reason:             staleErr.Reason,
+		Message:            staleErr.Message,
+		ObservedGeneration: rr.Generation,
+	})
+	if err := r.Status().Update(ctx, rr); err != nil {
+		return freshness.Result{}, fmt.Errorf("mark the cleanup of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	return freshness.Result{}, r.cleanUpStale(ctx, rr, staleErr)
+}
+
+// staleReasons are the reasons of a stale plan (freshness.StaleError), the only ones staleMark accepts.
+var staleReasons = map[string]bool{
+	freshness.ReasonPolicyChanged: true, freshness.ReasonSettingsChanged: true, freshness.ReasonTargetChanged: true,
+	freshness.ReasonTargetFileChanged: true, freshness.ReasonPlanChanged: true, freshness.ReasonSourceChanged: true,
+}
+
+// staleMark returns the PlanFresh condition that ensureFresh writes before it closes a stale plan's change
+// request: False with a stale reason on a request that has not reached a final phase. Nil when there is none.
+// The other PlanFresh values (Unknown while the Git host refuses the check, False with another reason in a
+// final phase) are not a mark.
+func staleMark(rr *remediationv1alpha1.RemediationRequest) *metav1.Condition {
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+	if c == nil || c.Status != metav1.ConditionFalse || !staleReasons[c.Reason] || !beforeMerge(rr.Status.Phase) {
+		return nil
+	}
+	return c
+}
+
+// cleanUpStale closes the change request of a stale plan whose mark is written and ends the request: Superseded
+// with the stale reason, or NeedsIntervention when the change request cannot be closed for good. A failure
+// worth a retry is returned as it is and leaves the mark, so the retry closes again.
+func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	staleErr *freshness.StaleError) error {
+	phase, reason, message := remediationv1alpha1.PhaseSuperseded, staleErr.Reason, staleErr.Message
+	// The whole cleanup shares one deadline: reading the settings, opening the repository, finding and
+	// closing the change request.
+	cleanCtx, cleanCancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
+	closeErr := r.closeChangeRequest(cleanCtx, rr)
+	// Every result, nil and errRepositoryGone included, is checked against the deadline before a final phase
+	// is written from it.
+	closeErr = boundErr(ctx, cleanCtx, "cleanup of the change request", closeErr)
+	cleanCancel()
+	switch err := closeErr; {
+	case errors.Is(err, freshness.ErrRepositoryUnusable):
+		// The settings of the repository cannot be used, so the change request cannot be closed either.
+		phase, reason, message = remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnusable,
+			messageRepositoryUnusable
+	case errors.Is(err, errTargetBranchChanged):
+		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, reasonTargetBranchChanged
+		message = "The plan is stale and its repository now targets another branch; " +
+			"its change request, if any, was not closed"
+	case errors.Is(err, errRepositoryGone):
+		// Nothing is closed: the only change request this plan could have is in a repository that cannot be
+		// reached through the settings any more, and closing a number elsewhere could close someone else's.
+		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnavailable
+		message = "The plan is stale and the repository it was made for is not configured any more; " +
+			"its change request, if any, was not closed"
+	case err != nil:
+		refused, _, ok := refusal(err)
+		if !ok {
+			return err
+		}
+		// The Git host refuses the close for good (a permission the App lacks, a rule): the plan is stale
+		// and nothing more may be written for it, so a person has to close the change request.
+		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, refused
+		message = "The plan is stale (" + staleErr.Reason + ") and the Git host refused to close its " +
+			"change request; it was not closed"
+	}
+	return r.endFreshness(ctx, rr, phase, reason, message)
+}
+
+// endFreshness writes the final phase of a plan that is not fresh, with PlanFresh False saying why, and returns
+// ErrSuperseded (or the error of the status write).
+func (r *RemediationRequestReconciler) endFreshness(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	phase remediationv1alpha1.RemediationPhase, reason, message string) error {
 	rr.Status.Phase = phase
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPlanFresh,
@@ -582,11 +653,11 @@ func (r *RemediationRequestReconciler) ensureFresh(ctx context.Context, rr *reme
 		ObservedGeneration: rr.Generation,
 	})
 	if err := r.Status().Update(ctx, rr); err != nil {
-		return freshness.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
 	logf.FromContext(ctx).Info("Superseded RemediationRequest", "remediationRequest", client.ObjectKeyFromObject(rr),
 		"phase", phase, "reason", reason)
-	return freshness.Result{}, ErrSuperseded
+	return ErrSuperseded
 }
 
 // closeChangeRequest closes the request's change request, if it has one, in the repository the plan was made

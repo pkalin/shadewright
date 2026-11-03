@@ -96,14 +96,16 @@ func (r *Resolver) Resolve(ctx context.Context, in Input) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		if stop != nil || string(now.GetUID()) != o.uid || now.GetResourceVersion() != o.resourceVersion {
+		changed := (stop != nil) != o.missing ||
+			(!o.missing && (string(now.GetUID()) != o.uid || now.GetResourceVersion() != o.resourceVersion))
+		if changed {
 			return Result{}, transient(fmt.Sprintf("%s %s/%s changed while the source was mapped", o.gvk.Kind, o.namespace, o.name),
 				errors.New("changed"))
 		}
 	}
 	for _, o := range d.seen {
 		res.Observed = append(res.Observed, Observed{GVK: o.gvk, Namespace: o.namespace, Name: o.name,
-			UID: o.uid, ResourceVersion: o.resourceVersion})
+			UID: o.uid, ResourceVersion: o.resourceVersion, Missing: o.missing})
 	}
 	return res, nil
 }
@@ -134,7 +136,8 @@ type delivery struct {
 	branch string
 	ks     string
 	path   string
-	// seen are the Flux objects as read, to tell whether they changed while the source was mapped.
+	// seen are the Flux objects as read, to tell whether they changed while the source was mapped. One found
+	// missing is recorded as such, so its absence is checked again.
 	seen []seenObject
 }
 
@@ -143,11 +146,16 @@ type seenObject struct {
 	gvk                  schema.GroupVersionKind
 	namespace, name      string
 	uid, resourceVersion string
+	missing              bool
 }
 
+// seen records an object as read; o is nil when it was found missing.
 func seen(gvk schema.GroupVersionKind, namespace, name string, o *unstructured.Unstructured) seenObject {
-	return seenObject{gvk: gvk, namespace: namespace, name: name, uid: string(o.GetUID()),
-		resourceVersion: o.GetResourceVersion()}
+	s := seenObject{gvk: gvk, namespace: namespace, name: name, missing: o == nil}
+	if o != nil {
+		s.uid, s.resourceVersion = string(o.GetUID()), o.GetResourceVersion()
+	}
+	return s
 }
 
 // delivery follows the Flux labels to the Kustomization and its GitRepository (ADR-0012 steps 1 and 2).
@@ -167,12 +175,15 @@ func (r *Resolver) delivery(ctx context.Context, in Input, id identity, live *un
 			"the Flux labels on %s are not a valid object reference", id)), nil
 	}
 	ks, stop, err := r.get(ctx, KustomizationGVK, ksNamespace, ksName, ReasonKustomizationNotFound)
-	if stop != nil || err != nil {
-		return delivery{}, stop, err
+	if err != nil {
+		return delivery{}, nil, err
 	}
-	// The Flux objects are recorded as they are read, so the caller can check them again for a stop as well as
-	// for a source.
+	// The Flux objects are recorded as they are read, a missing one included, so the caller can check them
+	// again for a stop as well as for a source.
 	d := delivery{ks: ksNamespace + "/" + ksName, seen: []seenObject{seen(KustomizationGVK, ksNamespace, ksName, ks)}}
+	if stop != nil {
+		return d, stop, nil
+	}
 	srcNamespace, srcName, ksPath, stop := checkKustomization(ks, id.gvk, id.namespace, id.name)
 	if stop != nil {
 		return d, stop, nil
@@ -181,10 +192,10 @@ func (r *Resolver) delivery(ctx context.Context, in Input, id identity, live *un
 	if err != nil {
 		return delivery{}, nil, err
 	}
+	d.seen = append(d.seen, seen(GitRepositoryGVK, srcNamespace, srcName, src))
 	if stop != nil {
 		return d, stop, nil
 	}
-	d.seen = append(d.seen, seen(GitRepositoryGVK, srcNamespace, srcName, src))
 	url, branch, stop := checkGitRepository(src)
 	if stop != nil {
 		return d, stop, nil
@@ -214,17 +225,22 @@ func (r *Resolver) declaration(ctx context.Context, fld Field, gitOps v1alpha1.P
 	if err != nil {
 		return Result{}, transient("open repository "+string(d.repo.Name), err)
 	}
+	tree := &Scanned{RepositoryRef: d.repo.Name, Branch: v1alpha1.GitBranch(d.branch)}
 	head, err := git.BranchHead(ctx, d.branch)
 	if providers.IsNotFound(err) {
-		return needsIntervention(ReasonBranchNotFound,
-			"branch %s does not exist in repository %s", d.branch, d.repo.Name), nil
+		// No commit: a caller that acts on the stop checks that the branch is still missing.
+		res := needsIntervention(ReasonBranchNotFound, "branch %s does not exist in repository %s", d.branch, d.repo.Name)
+		res.Scanned = tree
+		return res, nil
 	}
 	if err != nil {
 		return Result{}, transient("read head of branch "+d.branch+" in repository "+string(d.repo.Name), err)
 	}
 	res, err := r.scan(ctx, git, head, fld, gitOps, id, live, d)
-	if err == nil {
-		res.Scanned = &Scanned{RepositoryRef: d.repo.Name, Branch: v1alpha1.GitBranch(d.branch), Commit: head}
+	if err == nil && res.Outcome != Resolved {
+		// A resolved result names its tree in Source (Result.Tree).
+		tree.Commit = head
+		res.Scanned = tree
 	}
 	return res, err
 }

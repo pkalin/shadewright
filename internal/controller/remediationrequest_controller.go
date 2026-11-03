@@ -225,6 +225,7 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	rr.Status.PlanDigest = out.planDigest
 	rr.Status.PlanRepository = out.planRepository
 	rr.Status.EffectiveApprovalRequired = out.approval
+	rr.Status.Deadline = out.deadline
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPolicyAllowed,
 		Status:             out.status,
@@ -252,6 +253,8 @@ type outcome struct {
 	planRepository *remediationv1alpha1.PlanRepository
 	approval       *bool
 	planDigest     string
+	// deadline is the pull request step's deadline, started with an allowed decision unless writes are paused.
+	deadline *metav1.Time
 }
 
 func denied(reason, message string) outcome {
@@ -371,6 +374,12 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 			return needsIntervention(string(sourcemap.ReasonInvalidInput), "The plan digest cannot be computed"), nil
 		}
 		o.planDigest = digest
+		// The pull request step's deadline starts with the decision, so it also ends a request whose
+		// freshness check never passes. A pause would use it up without any chance to act, so a request
+		// decided while paused gets its deadline once the pause has ended (recheck).
+		if !freshness.Paused(settings) {
+			o.deadline = &metav1.Time{Time: r.now().Add(r.pullRequestTimeout())}
+		}
 		for _, repo := range settings.Spec.Repositories {
 			if repo.Name == res.Source.RepositoryRef {
 				o.planRepository = freshness.RepositoryOf(repo)
@@ -467,17 +476,22 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		r.now().After(rr.Status.Deadline.Time) {
 		return r.expire(ctx, rr)
 	}
-	switch err := r.EnsureFresh(ctx, rr); {
+	err := r.EnsureFresh(ctx, rr)
+	switch {
 	case errors.Is(err, ErrSuperseded):
 		return ctrl.Result{}, nil
+	case errors.Is(err, freshness.ErrPaused):
+		return ctrl.Result{RequeueAfter: freshRecheckDelay}, nil
+	case rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked && rr.Status.Deadline == nil:
+		// Decided while writes were paused (the policy check starts no deadline then): the freshness check
+		// has just found writes allowed again, so the deadline starts now, whether or not the plan was fresh.
+		return r.startDeadline(ctx, rr)
 	case err == nil && outcome == prClosed:
 		return r.rejected(ctx, rr)
 	case err == nil:
 		return r.advance(ctx, rr)
-	case errors.Is(err, freshness.ErrPaused):
-		return ctrl.Result{RequeueAfter: freshRecheckDelay}, nil
 	default:
-		return waitOrFail(ctx, rr, err)
+		return r.waitOrFail(ctx, rr, err)
 	}
 }
 

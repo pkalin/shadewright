@@ -215,7 +215,8 @@ func TestCleanupCallerCancellationIsDistinct(t *testing.T) {
 	}
 }
 
-// plannedWorld is a PolicyChecked request whose plan is fresh, so Fresh reaches the source resolver.
+// plannedWorld is a PolicyChecked request whose plan is fresh, so Fresh reaches the source resolver, and whose
+// deadline the policy check stored with the decision, as for a request decided while writes were not paused.
 func plannedWorld(t *testing.T) (client.Client, *remediationv1alpha1.RemediationRequest) {
 	t.Helper()
 	c, rr := deadlineWorld(t)
@@ -240,7 +241,8 @@ func plannedWorld(t *testing.T) (client.Client, *remediationv1alpha1.Remediation
 	}
 	rr.Status = remediationv1alpha1.RemediationRequestStatus{Phase: remediationv1alpha1.PhasePolicyChecked,
 		Source: src, PlanDigest: digest, PolicyUID: remediationv1alpha1.UID(pol.UID),
-		PolicyRevision: freshness.RevisionOf(pol), PlanRepository: freshness.RepositoryOf(settings.Spec.Repositories[0])}
+		PolicyRevision: freshness.RevisionOf(pol), PlanRepository: freshness.RepositoryOf(settings.Spec.Repositories[0]),
+		Deadline: &metav1.Time{Time: time.Now().Add(DefaultPullRequestTimeout)}}
 	if err := c.Status().Update(ctx, rr); err != nil {
 		t.Fatal(err)
 	}

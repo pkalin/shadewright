@@ -79,8 +79,11 @@ const (
 var (
 	// setUpNote matches the start of the note: VolumeToMount.GenerateError("MountVolume.SetUp failed", err)
 	// in pkg/volume/util/operationexecutor/operation_executor.go builds `<prefix> for volume "<name>" : <err>`
-	// (generateVolumeMsg and errSuffix), with the pod's volume name, a DNS label. Group 1 is the volume.
-	setUpNote = regexp.MustCompile(`^MountVolume\.SetUp failed for volume "([a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)" : `)
+	// (generateVolumeMsg and errSuffix), with the pod's volume name, a DNS label. Group 1 is the volume. When
+	// the kubelet's recorder aggregates similar events it writes one with the message prefixed by
+	// "(combined from similar events): " (client-go tools/record/events_cache.go
+	// EventAggregatorByReasonMessageFunc), which is accepted too.
+	setUpNote = regexp.MustCompile(`^(?:\(combined from similar events\): )?MountVolume\.SetUp failed for volume "([a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)" : `)
 
 	// notRegistered is the error of a CSI driver the kubelet does not know on the node: pkg/volume/csi
 	// csi_mounter.go SetUpAt wraps, with the "kubernetes.io/csi: " prefix of csi_util.go log, the error of
@@ -90,23 +93,28 @@ var (
 
 	// driverError matches an error the driver returned from NodePublishVolume (secrets-store-csi-driver v1.6.1
 	// pkg/secrets-store/nodeserver.go), which gRPC carries as `rpc error: code = <code> desc = <message>`. Group
-	// 1 is the message, from the first of the driver's fixed texts on. Only these texts make the note the
-	// driver's: other CSI drivers fail with other words.
-	driverError = regexp.MustCompile(`^rpc error: code = [A-Za-z]{1,32} desc = ((?:failed to get secretproviderclass |failed to mount secrets store objects for pod |error connecting to provider |failed to create secret provider class pod status for pod |secretProviderClass is not set)(?s:.*))$`)
+	// 1 is the message, from the first of the driver's fixed texts on: those of nodeserver.go (the class, the
+	// provider's mount, the pod status, a volume without a class) and of pkg/secrets-store/utils.go
+	// getProviderFromSPC and getParametersFromSPC (spec.provider is optional in the CRD). Only these texts
+	// make the note the driver's: other CSI drivers fail with other words.
+	driverError = regexp.MustCompile(`^rpc error: code = [A-Za-z]{1,32} desc = ((?:failed to get secretproviderclass |failed to mount secrets store objects for pod |failed to create secret provider class pod status for pod |secretProviderClass is not set|provider not set in |parameters not set in )(?s:.*))$`)
 
 	// spcNotFound is getSecretProviderItem's error (pkg/secrets-store/utils.go "failed to get
 	// secretproviderclass %s/%s, error: %w") around the NotFound of the driver's cached client
 	// (controller-runtime v0.24.1 pkg/cache/internal/cache_reader.go: the kind as resource, so
-	// `SecretProviderClass.secrets-store.csi.x-k8s.io "<name>" not found`). Groups 1 and 2 are the name twice.
-	spcNotFound = regexp.MustCompile(`^failed to get secretproviderclass [a-z0-9][-a-z0-9]{0,62}/([a-z0-9][-a-z0-9.]{0,252}), error: SecretProviderClass\.secrets-store\.csi\.x-k8s\.io "([a-z0-9][-a-z0-9.]{0,252})" not found`)
+	// `SecretProviderClass.secrets-store.csi.x-k8s.io "<name>" not found`). Group 1 is the namespace, groups 2
+	// and 3 are the name twice.
+	spcNotFound = regexp.MustCompile(`^failed to get secretproviderclass ([a-z0-9][-a-z0-9]{0,62})/([a-z0-9][-a-z0-9.]{0,252}), error: SecretProviderClass\.secrets-store\.csi\.x-k8s\.io "([a-z0-9][-a-z0-9.]{0,252})" not found`)
+
+	// providerError is NodePublishVolume's error around every error of mountSecretsStoreObjectContent
+	// (nodeserver.go "failed to mount secrets store objects for pod %s/%s, err: %w"). Group 1 is the inner
+	// error: the provider's Mount error, or the driver's own when it could not reach the provider.
+	providerError = regexp.MustCompile(`^failed to mount secrets store objects for pod [a-z0-9][-a-z0-9]{0,62}/[a-z0-9][-a-z0-9.]{0,252}, err: ((?s:.*))$`)
 
 	// providerUnreachable is mountSecretsStoreObjectContent's error when the provider's socket is missing or
-	// does not answer (nodeserver.go "error connecting to provider %q: %w"). Group 1 is the provider's name.
+	// does not answer (nodeserver.go "error connecting to provider %q: %w"), the inner error of
+	// providerError. Group 1 is the provider's name.
 	providerUnreachable = regexp.MustCompile(`^error connecting to provider "([A-Za-z0-9][-A-Za-z0-9_.]{0,62})"`)
-
-	// providerError is NodePublishVolume's error around the provider's Mount error (nodeserver.go "failed to
-	// mount secrets store objects for pod %s/%s, err: %w"). Group 1 is the provider's error.
-	providerError = regexp.MustCompile(`^failed to mount secrets store objects for pod [a-z0-9][-a-z0-9]{0,62}/[a-z0-9][-a-z0-9.]{0,252}, err: ((?s:.*))$`)
 
 	// azureMount is the Azure Key Vault provider's wrapper of every mount error
 	// (secrets-store-csi-driver-provider-azure v1.8.2 pkg/server/server.go "failed to mount objects, error:
@@ -115,10 +123,14 @@ var (
 
 	// keyVaultIdentity matches the provider's identity errors: the azidentity credentials it builds
 	// (pkg/auth/auth.go: ClientAssertionCredential for workload identity, ManagedIdentityCredential,
-	// ClientSecretCredential), whose errors start with the credential's name (azidentity v1.13.1 errors.go
-	// AuthenticationFailedError), an Entra ID AADSTS code, and the fixed texts of pkg/auth/auth.go and
-	// pkg/provider/provider.go about missing tokens, client IDs and client secrets.
-	keyVaultIdentity = regexp.MustCompile(`\b(?:ClientAssertionCredential|ManagedIdentityCredential|ClientSecretCredential|WorkloadIdentityCredential)\b|\bAADSTS[0-9]{4,6}\b|failed to parse workload identity tokens|service account tokens not found|token for audience [^ ]{1,256} not found|nodePublishSecretRef secret is not set|could not find client(?:id|secret) in secrets|clientID is required for identity binding`)
+	// ClientSecretCredential), whose errors are "<credential> authentication failed. ..." or "<credential>:
+	// ..." (azidentity v1.14.0-beta.2.0.20260124023332-4c5175309ebb, the provider's pin in go.mod, errors.go
+	// AuthenticationFailedError.Error; Entra ID's AADSTS codes are inside them), and the fixed texts of
+	// pkg/auth/auth.go and pkg/provider/provider.go about missing tokens, client IDs and client secrets. It runs
+	// on the error part only, after the object part, and every alternative holds a space or a colon after the
+	// name: a Key Vault object name, which the user chooses and which azcore also prints in the request URL,
+	// holds neither.
+	keyVaultIdentity = regexp.MustCompile(`\b(?:ClientAssertionCredential|ManagedIdentityCredential|ClientSecretCredential|WorkloadIdentityCredential)(?: authentication failed|: )|failed to parse workload identity tokens|service account tokens not found|token for audience [^ ]{1,256} not found|nodePublishSecretRef secret is not set|could not find client(?:id|secret) in secrets|clientID is required for identity binding`)
 
 	// keyVaultStatus and keyVaultCode read the lines that azcore v1.20.0 (internal/exported/response_error.go
 	// ResponseError.Error) writes for a failed Key Vault call: "RESPONSE <code>: <status>" and "ERROR CODE:
@@ -127,22 +139,24 @@ var (
 	keyVaultCode   = regexp.MustCompile(`(?m)^ERROR CODE: ([A-Za-z]{1,64})\r?$`)
 
 	// keyVaultHostNotFound is Go's resolver error for the vault's host ("lookup <host>[ on <server>]: no such
-	// host", net/net.go DNSError), in any Azure cloud's vault domain. A vault name is 3 to 24 letters, digits
-	// and hyphens. Group 1 is the host.
-	keyVaultHostNotFound = regexp.MustCompile(`\blookup ([A-Za-z0-9][-A-Za-z0-9]{1,22}[A-Za-z0-9]\.vault\.[a-z0-9.-]{1,64}[a-z])(?: on [^ :]{1,64}:[0-9]{1,5})?: no such host`)
+	// host", net/net.go DNSError, where the server is host:port, bracketed for IPv6), in any Azure cloud's
+	// vault domain. A vault name is 3 to 24 letters, digits and hyphens. Group 1 is the host.
+	keyVaultHostNotFound = regexp.MustCompile(`\blookup ([A-Za-z0-9][-A-Za-z0-9]{1,22}[A-Za-z0-9]\.vault\.[a-z0-9.-]{1,64}[a-z])(?: on (?:\[[0-9A-Fa-f:.%a-z]{2,64}\]|[^ :\[\]]{1,64}):[0-9]{1,5})?: no such host`)
 
 	// keyVaultObject is the provider's wrapObjectTypeError (pkg/provider/provider.go "failed to get
-	// objectType:%s, objectName:%s, objectVersion:%s"). Groups 1 and 2 are the type and the name, a Key Vault
-	// object name of 1 to 127 letters, digits and hyphens. The version is not read.
-	keyVaultObject = regexp.MustCompile(`failed to get objectType:(secret|key|cert), objectName:([0-9A-Za-z-]{1,127}), objectVersion:`)
+	// objectType:%s, objectName:%s, objectVersion:%s: <error>", pkg/errors Wrapf). Groups 1 and 2 are the type
+	// and the name, a Key Vault object name of 1 to 127 letters, digits and hyphens. The version (an id of
+	// letters and digits, or empty) is matched to find where the error starts, never kept. It is the outermost
+	// wrapper inside azureMount, so it is anchored there: text before it stays in the error part.
+	keyVaultObject = regexp.MustCompile(`^failed to get objectType:(secret|key|cert), objectName:([0-9A-Za-z-]{1,127}), objectVersion:[0-9A-Za-z]{0,64}: `)
 )
 
 // keyVaultObjectNotFound are the error codes Key Vault answers for a missing object (azsecrets, azkeys and
 // azcertificates: SecretNotFound, KeyNotFound, CertificateNotFound).
 var keyVaultObjectNotFound = map[string]bool{"SecretNotFound": true, "KeyNotFound": true, "CertificateNotFound": true}
 
-// Evidence fields of the rule besides the event's reason, reporting controller and note. The pod is the
-// finding's subject, so it is not repeated here.
+// Evidence fields of the rule besides the event's reason and reporting controller. The pod is the finding's
+// subject, so it is not repeated here.
 const (
 	fieldVolume              = "volume.name"
 	fieldSecretProviderClass = "secretProviderClass.name"
@@ -151,13 +165,18 @@ const (
 	fieldObjectName          = "keyVault.objectName"
 	fieldErrorCode           = "keyVault.errorCode"
 	fieldVaultHost           = "keyVault.host"
+	// fieldError is the error part of the note: the note without the kubelet's, the driver's and the Azure
+	// provider's fixed prefixes and without the object part of wrapObjectTypeError (its type and name are
+	// evidence of their own, its version is not kept). The evaluator keeps 256 bytes of a value, which the
+	// prefixes alone would fill.
+	fieldError = "event.note.error"
 )
 
 // mountFailed finds the kubelet's FailedMount event of a pod whose secrets volume the Secrets Store CSI driver
 // could not set up, and says why as far as the note shows it. The event must be the kubelet's Warning about a
 // Pod (apiVersion v1, or empty), in the pod's own namespace; its note must start with the kubelet's SetUp
 // text and its error must be one of the driver's. Reason and summary are fixed; names read from the note and
-// the note itself are evidence only.
+// its error part are evidence only.
 func mountFailed(ev modules.Event) (modules.Symptom, bool) {
 	if ev.Type != eventTypeWarning || ev.Reason != eventReasonFailedMount || ev.ReportingController != reportingKubelet {
 		return modules.Symptom{}, false
@@ -172,76 +191,91 @@ func mountFailed(ev modules.Event) (modules.Symptom, bool) {
 		return modules.Symptom{}, false
 	}
 	rest := ev.Note[m[1]:]
-	var reason string
-	var extra []modules.Evidence
+	var c cause
 	if notRegistered.MatchString(rest) {
-		reason = ReasonDriverNotRegistered
+		c = cause{reason: ReasonDriverNotRegistered, detail: rest}
 	} else if d := driverError.FindStringSubmatch(rest); d != nil {
-		reason, extra = driverReason(d[1])
+		c = driverReason(d[1], reg.Namespace)
 	} else {
 		return modules.Symptom{}, false
 	}
-	evidence := make([]modules.Evidence, 0, len(extra)+4)
+	evidence := make([]modules.Evidence, 0, len(c.evidence)+4)
 	evidence = append(evidence,
 		modules.Evidence{Field: modules.EvidenceEventReason, Value: ev.Reason},
 		modules.Evidence{Field: modules.EvidenceEventReportingController, Value: ev.ReportingController},
 		modules.Evidence{Field: fieldVolume, Value: ev.Note[m[2]:m[3]]})
-	evidence = append(evidence, extra...)
-	evidence = append(evidence, modules.Evidence{Field: modules.EvidenceEventNote, Value: ev.Note})
-	return modules.Symptom{Reason: reason, Summary: summaries[reason], Evidence: evidence}, true
+	evidence = append(evidence, c.evidence...)
+	evidence = append(evidence, modules.Evidence{Field: fieldError, Value: c.detail})
+	return modules.Symptom{Reason: c.reason, Summary: summaries[c.reason], Evidence: evidence}, true
 }
 
-// driverReason picks the reason for an error the driver returned, msg, and the evidence it names.
-func driverReason(msg string) (string, []modules.Evidence) {
-	if s := spcNotFound.FindStringSubmatch(msg); s != nil && s[1] == s[2] {
-		return ReasonSecretProviderClassNotFound, []modules.Evidence{{Field: fieldSecretProviderClass, Value: s[1]}}
-	}
-	if p := providerUnreachable.FindStringSubmatch(msg); p != nil {
-		return ReasonProviderUnavailable, []modules.Evidence{{Field: fieldProvider, Value: p[1]}}
+// cause is what the error part of a note says: the reason, the evidence it names, and the error without the
+// fixed prefixes the reason was read from.
+type cause struct {
+	reason   string
+	evidence []modules.Evidence
+	detail   string
+}
+
+// driverReason picks the reason for an error the driver returned, msg, for a pod in namespace ns.
+func driverReason(msg, ns string) cause {
+	if s := spcNotFound.FindStringSubmatch(msg); s != nil && s[1] == ns && s[2] == s[3] {
+		return cause{reason: ReasonSecretProviderClassNotFound, detail: msg,
+			evidence: []modules.Evidence{{Field: fieldSecretProviderClass, Value: s[2]}}}
 	}
 	if p := providerError.FindStringSubmatch(msg); p != nil {
 		return providerReason(p[1])
 	}
-	return ReasonMountFailed, nil
+	return cause{reason: ReasonMountFailed, detail: msg}
 }
 
-// providerReason picks the reason for a provider's error, msg. The Key Vault reasons need the Azure
-// provider's wrapper; any other provider's error is ReasonProviderFailed. Identity comes first: a token is
-// fetched on the first Key Vault call, so its error is wrapped in the object's error too.
-func providerReason(msg string) (string, []modules.Evidence) {
-	if !azureMount.MatchString(msg) {
-		return ReasonProviderFailed, nil
+// providerReason picks the reason for the inner error of providerError, msg: the driver could not reach the
+// provider, or the provider's own error. The Key Vault reasons need the Azure provider's wrapper; any other
+// provider's error is ReasonProviderFailed. In the order checked: identity (a token is fetched on the first
+// Key Vault call, so its error is wrapped in the object's error too), access denied, object not found, vault
+// not found.
+func providerReason(msg string) cause {
+	if p := providerUnreachable.FindStringSubmatch(msg); p != nil {
+		return cause{reason: ReasonProviderUnavailable, detail: msg,
+			evidence: []modules.Evidence{{Field: fieldProvider, Value: p[1]}}}
 	}
+	w := azureMount.FindStringIndex(msg)
+	if w == nil {
+		return cause{reason: ReasonProviderFailed, detail: msg}
+	}
+	errPart := msg[w[1]:]
 	var evidence []modules.Evidence
-	if o := keyVaultObject.FindStringSubmatch(msg); o != nil {
+	if o := keyVaultObject.FindStringSubmatchIndex(errPart); o != nil {
 		evidence = append(evidence,
-			modules.Evidence{Field: fieldObjectType, Value: o[1]},
-			modules.Evidence{Field: fieldObjectName, Value: o[2]})
+			modules.Evidence{Field: fieldObjectType, Value: errPart[o[2]:o[3]]},
+			modules.Evidence{Field: fieldObjectName, Value: errPart[o[4]:o[5]]})
+		errPart = errPart[o[1]:]
 	}
 	code := ""
-	if c := keyVaultCode.FindStringSubmatch(msg); c != nil {
+	if c := keyVaultCode.FindStringSubmatch(errPart); c != nil {
 		code = c[1]
 	}
 	status := ""
-	if s := keyVaultStatus.FindStringSubmatch(msg); s != nil {
+	if s := keyVaultStatus.FindStringSubmatch(errPart); s != nil {
 		status = s[1]
 	}
-	withCode := func(reason string) (string, []modules.Evidence) {
+	withCode := func(reason string) cause {
 		if code != "" {
 			evidence = append(evidence, modules.Evidence{Field: fieldErrorCode, Value: code})
 		}
-		return reason, evidence
+		return cause{reason: reason, evidence: evidence, detail: errPart}
 	}
 	switch {
-	case keyVaultIdentity.MatchString(msg):
+	case keyVaultIdentity.MatchString(errPart):
 		return withCode(ReasonKeyVaultIdentityFailed)
 	case status == "403":
 		return withCode(ReasonKeyVaultAccessDenied)
 	case keyVaultObjectNotFound[code]:
 		return withCode(ReasonKeyVaultObjectNotFound)
 	}
-	if h := keyVaultHostNotFound.FindStringSubmatch(msg); h != nil {
-		return ReasonKeyVaultNotFound, append(evidence, modules.Evidence{Field: fieldVaultHost, Value: strings.ToLower(h[1])})
+	if h := keyVaultHostNotFound.FindStringSubmatch(errPart); h != nil {
+		return cause{reason: ReasonKeyVaultNotFound, detail: errPart,
+			evidence: append(evidence, modules.Evidence{Field: fieldVaultHost, Value: strings.ToLower(h[1])})}
 	}
 	return withCode(ReasonProviderFailed)
 }

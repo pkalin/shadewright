@@ -41,10 +41,10 @@ limitations under the License.
 // whose note says the Secrets Store CSI driver failed to set up the volume. The note is the kubelet's
 // "MountVolume.SetUp failed for volume <name> : <error>" (see [setUpNote] for the sources), and the error
 // part is matched against the fixed texts of the driver and of the Azure Key Vault provider to pick one of the
-// reasons below. Reasons and summaries are written here, never taken from the cluster; the names read from the
-// note (the volume, the SecretProviderClass, the provider, the vault host, the object's type and name, the
-// store's error code) and the note itself are evidence, untrusted and copied as they are: the evaluator
-// redacts and bounds them. Symptoms meet [modules.ValidSymptom].
+// reasons in events.go. Reasons and summaries are written here, never taken from the cluster; the names read
+// from the note (the volume, the SecretProviderClass, the provider, the vault host, the object's type and
+// name, the store's error code) and the note's error part without the fixed prefixes are evidence, untrusted
+// and copied as they are: the evaluator redacts and bounds them. Symptoms meet [modules.ValidSymptom].
 //
 // The module has no actions and no tools: a secrets manager guards security, so Shadewright explains why a
 // secret is missing and never proposes to change a secret, an identity or an access policy (design 2.5).

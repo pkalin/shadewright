@@ -18,7 +18,7 @@
     "uid": "3b4c5d6e-7f80-4192-a3b4-c5d6e7f8091a",
     "resourceVersion": "48213"
   },
-  "note": "MountVolume.SetUp failed for volume \"secrets-store-inline\" : rpc error: code = Unknown desc = error connecting to provider \"azure\": provider not found: provider \"azure\"",
+  "note": "MountVolume.SetUp failed for volume \"secrets-store-inline\" : rpc error: code = Unknown desc = failed to mount secrets store objects for pod demo/web-7d4b9c-x2x8q, err: error connecting to provider \"azure\": provider not found: provider \"azure\"",
   "deprecatedSource": {
     "component": "kubelet",
     "host": "aks-system-12345678-vmss000000"

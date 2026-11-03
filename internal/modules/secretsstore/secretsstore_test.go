@@ -110,18 +110,18 @@ func evaluate(t *testing.T, ev modules.Event) modules.Finding {
 	return fs[0]
 }
 
-// note returns the note evidence.
-func note(evidence []modules.Evidence) string {
+// value returns the evidence value of field, "" when there is none.
+func value(evidence []modules.Evidence, field string) string {
 	for _, e := range evidence {
-		if e.Field == modules.EvidenceEventNote {
+		if e.Field == field {
 			return e.Value
 		}
 	}
 	return ""
 }
 
-// TestRecorded checks every fixture: its reason, the fixed summary, the subject and the evidence before the
-// note, in order.
+// TestRecorded checks every fixture: its reason, the fixed summary, the subject, the evidence in order, and
+// the error part of the note, which starts after the fixed prefixes and keeps no object version.
 func TestRecorded(t *testing.T) {
 	head := []modules.Evidence{
 		{Field: modules.EvidenceEventReason, Value: "FailedMount"},
@@ -133,19 +133,24 @@ func TestRecorded(t *testing.T) {
 		fixture string
 		reason  string
 		extra   []modules.Evidence
+		detail  string // the start of the error part
 	}{
 		{"event-spc-not-found.json", ReasonSecretProviderClassNotFound,
-			[]modules.Evidence{{Field: fieldSecretProviderClass, Value: "web-kv"}}},
-		{"event-driver-not-registered.json", ReasonDriverNotRegistered, nil},
+			[]modules.Evidence{{Field: fieldSecretProviderClass, Value: "web-kv"}}, "failed to get secretproviderclass demo/web-kv"},
+		{"event-driver-not-registered.json", ReasonDriverNotRegistered, nil, "kubernetes.io/csi: mounter.SetUpAt"},
 		{"event-provider-unavailable.json", ReasonProviderUnavailable,
-			[]modules.Evidence{{Field: fieldProvider, Value: "azure"}}},
-		{"event-keyvault-identity-failed.json", ReasonKeyVaultIdentityFailed, secret},
+			[]modules.Evidence{{Field: fieldProvider, Value: "azure"}}, `error connecting to provider "azure"`},
+		{"event-keyvault-identity-failed.json", ReasonKeyVaultIdentityFailed, secret,
+			"ClientAssertionCredential authentication failed."},
 		{accessDenied, ReasonKeyVaultAccessDenied,
-			append(slices.Clone(secret), modules.Evidence{Field: fieldErrorCode, Value: "Forbidden"})},
+			append(slices.Clone(secret), modules.Evidence{Field: fieldErrorCode, Value: "Forbidden"}),
+			"GET https://kv-demo.vault.azure.net/secrets/db-password/"},
 		{"event-keyvault-object-not-found.json", ReasonKeyVaultObjectNotFound,
-			append(slices.Clone(secret), modules.Evidence{Field: fieldErrorCode, Value: "SecretNotFound"})},
+			append(slices.Clone(secret), modules.Evidence{Field: fieldErrorCode, Value: "SecretNotFound"}),
+			"GET https://kv-demo.vault.azure.net/secrets/db-password/"},
 		{"event-keyvault-not-found.json", ReasonKeyVaultNotFound,
-			append(slices.Clone(secret), modules.Evidence{Field: fieldVaultHost, Value: "kv-missing.vault.azure.net"})},
+			append(slices.Clone(secret), modules.Evidence{Field: fieldVaultHost, Value: "kv-missing.vault.azure.net"}),
+			`Get "https://kv-missing.vault.azure.net/secrets/db-password/`},
 	}
 	if len(cases) != len(fixtures(t)) {
 		t.Errorf("%d cases for %d fixtures", len(cases), len(fixtures(t)))
@@ -161,11 +166,11 @@ func TestRecorded(t *testing.T) {
 			}
 			want := append(slices.Clone(head), c.extra...)
 			if len(f.Evidence) != len(want)+1 || !slices.Equal(f.Evidence[:len(want)], want) {
-				t.Errorf("evidence\n got %#v\nwant %#v and the note", f.Evidence, want)
+				t.Errorf("evidence\n got %#v\nwant %#v and the error", f.Evidence, want)
 			}
-			if last := f.Evidence[len(f.Evidence)-1]; last.Field != modules.EvidenceEventNote ||
-				!strings.HasPrefix(last.Value, "MountVolume.SetUp failed") || len(last.Value) > modules.MaxEvidenceValueLength {
-				t.Errorf("note evidence %#v", last)
+			if last := f.Evidence[len(f.Evidence)-1]; last.Field != fieldError || !strings.HasPrefix(last.Value, c.detail) ||
+				strings.Contains(last.Value, "objectVersion") || len(last.Value) > modules.MaxEvidenceValueLength {
+				t.Errorf("error evidence %#v, want it to start with %q", last, c.detail)
 			}
 		})
 	}
@@ -208,6 +213,30 @@ func TestMountFailedRules(t *testing.T) {
 		{"SetUp text not at the start of the note", func(ev *modules.Event) {
 			ev.Note = "Warning: " + setUpPrefix + rpcUnknown + "secretProviderClass is not set"
 		}, ""},
+		{"aggregated by the kubelet's recorder", func(ev *modules.Event) {
+			ev.Note = "(combined from similar events): " + ev.Note
+		}, ReasonSecretProviderClassNotFound},
+		{"aggregation prefix not at the start", func(ev *modules.Event) {
+			ev.Note = "x (combined from similar events): " + ev.Note
+		}, ""},
+		{"SecretProviderClass of another namespace in the driver's text", func(ev *modules.Event) {
+			ev.Note = strings.Replace(ev.Note, "secretproviderclass demo/", "secretproviderclass other/", 1)
+		}, ReasonMountFailed},
+		{"no provider in the SecretProviderClass", func(ev *modules.Event) {
+			ev.Note = setUpPrefix + rpcUnknown + "provider not set in demo/web-kv"
+		}, ReasonMountFailed},
+		{"no parameters in the SecretProviderClass", func(ev *modules.Event) {
+			ev.Note = setUpPrefix + rpcUnknown + "parameters not set in demo/web-kv"
+		}, ReasonMountFailed},
+		{"Azure provider, vault host not found with an IPv6 resolver", func(ev *modules.Event) {
+			ev.Note = setUpPrefix + providerPart + "failed to get objectType:secret, objectName:db, objectVersion:: " +
+				"dial tcp: lookup kv-missing.vault.azure.net on [fd00:10::a]:53: no such host"
+		}, ReasonKeyVaultNotFound},
+		{"Azure provider, object named like an identity error", func(ev *modules.Event) {
+			ev.Note = setUpPrefix + providerPart + "failed to get objectType:secret, objectName:AADSTS1234-cache, " +
+				"objectVersion:: GET https://kv-demo.vault.azure.net/secrets/AADSTS1234-cache/\n---\n" +
+				"RESPONSE 404: 404 Not Found\nERROR CODE: SecretNotFound\n"
+		}, ReasonKeyVaultObjectNotFound},
 		{"driver text without the SetUp prefix", func(ev *modules.Event) {
 			ev.Note = rpcUnknown + "failed to get secretproviderclass demo/web-kv, error: x"
 		}, ""},
@@ -251,6 +280,14 @@ func TestMountFailedRules(t *testing.T) {
 			ev.Note = setUpPrefix + providerPart + "failed to get objectType:secret, objectName:db-password, " +
 				"objectVersion:: ManagedIdentityCredential: no default identity is assigned to this resource"
 		}, ReasonKeyVaultIdentityFailed},
+		{"Azure provider, object named like a credential", func(ev *modules.Event) {
+			ev.Note = setUpPrefix + providerPart + "failed to get objectType:secret, objectName:ClientSecretCredential, " +
+				"objectVersion:: GET https://kv-demo.vault.azure.net/secrets/ClientSecretCredential/\n---\n" +
+				"RESPONSE 403: 403 Forbidden\nERROR CODE: Forbidden\n"
+		}, ReasonKeyVaultAccessDenied},
+		{"Azure provider, identity error without an object part", func(ev *modules.Event) {
+			ev.Note = setUpPrefix + providerPart + "ClientAssertionCredential: no token: AADSTS700213 ..."
+		}, ReasonKeyVaultIdentityFailed},
 		{"Azure provider, key not found", func(ev *modules.Event) {
 			ev.Note = setUpPrefix + providerPart + "failed to get objectType:key, objectName:signing, objectVersion:: " +
 				"GET https://kv-demo.vault.azure.net/keys/signing/\n---\nRESPONSE 404: 404 Not Found\nERROR CODE: KeyNotFound\n"
@@ -279,6 +316,17 @@ func TestMountFailedRules(t *testing.T) {
 				t.Errorf("reason %q (%d findings), want %q", got, len(fs), c.want)
 			}
 		})
+	}
+}
+
+// TestObjectPartAnchored checks that the object part is read only where the Azure provider writes it, first
+// in its error, so no text before it is cut from the error evidence.
+func TestObjectPartAnchored(t *testing.T) {
+	ev := recordedEvent(t, accessDenied)
+	ev.Note = setUpPrefix + providerPart + "other: failed to get objectType:secret, objectName:db, objectVersion:: x"
+	f := evaluate(t, ev)
+	if got := value(f.Evidence, fieldError); !strings.HasPrefix(got, "other: ") || value(f.Evidence, fieldObjectName) != "" {
+		t.Errorf("error %q, object %q: want the whole error and no object", got, value(f.Evidence, fieldObjectName))
 	}
 }
 
@@ -324,13 +372,12 @@ func TestReasonAndSummaryAreFixed(t *testing.T) {
 }
 
 // TestRedactionEndToEnd runs the real evaluator (modules.Selection.EvaluateEvent, what the analyzer calls) on
-// notes that carry secrets where the provider's error would quote cluster or store text, and checks that no
-// secret survives in any evidence value. Each secret sits right after the part the rule reads, so it is inside
-// the bytes the evaluator keeps. The rule itself copies the note as it is: the test checks that too, so it
-// proves the evaluator is what redacts.
+// notes that carry secrets where the Azure provider's error would quote cluster or store text, and checks that
+// no secret survives in any evidence value. The error part starts after the fixed prefixes, so each secret is
+// inside the bytes the evaluator keeps. The rule itself copies the error part as it is: the test checks that
+// too, so it proves the evaluator is what redacts.
 func TestRedactionEndToEnd(t *testing.T) {
-	// The driver's wrapper, without the Azure provider's longer one, leaves room for the secret.
-	const prefix = setUpPrefix + rpcUnknown + "failed to mount secrets store objects for pod demo/web, err: "
+	const prefix = setUpPrefix + providerPart + "failed to get objectType:secret, objectName:db-password, objectVersion:: "
 	cases := []struct {
 		name, secret, text string
 	}{
@@ -350,13 +397,14 @@ func TestRedactionEndToEnd(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ev := recordedEvent(t, accessDenied)
-			ev.Note = prefix + strings.Replace(c.text, "%s", c.secret, 1)
-			if len(prefix)+strings.Index(c.text, "%s")+len(c.secret) > modules.MaxEvidenceValueLength {
+			errPart := strings.Replace(c.text, "%s", c.secret, 1)
+			ev.Note = prefix + errPart
+			if strings.Index(c.text, "%s")+len(c.secret) > modules.MaxEvidenceValueLength {
 				t.Fatalf("the secret ends past the %d bytes the evaluator keeps", modules.MaxEvidenceValueLength)
 			}
 			raw, ok := mountFailed(ev)
-			if !ok || note(raw.Evidence) != ev.Note {
-				t.Fatalf("the rule did not match or did not copy the note as it is: %v", ok)
+			if !ok || value(raw.Evidence, fieldError) != errPart {
+				t.Fatalf("the rule did not match or did not copy the error part as it is: %v %#v", ok, raw.Evidence)
 			}
 			f := evaluate(t, ev)
 			for _, e := range f.Evidence {
@@ -364,12 +412,11 @@ func TestRedactionEndToEnd(t *testing.T) {
 					t.Errorf("evidence %s keeps the secret: %q", e.Field, e.Value)
 				}
 			}
-			kept := note(f.Evidence)
-			if !strings.Contains(strings.ToLower(kept), "redacted") {
-				t.Errorf("note %q has no redaction marker", kept)
+			if kept := value(f.Evidence, fieldError); !strings.Contains(strings.ToLower(kept), "redacted") {
+				t.Errorf("error %q has no redaction marker", kept)
 			}
-			if !strings.Contains(kept, "failed to mount secrets store objects") {
-				t.Errorf("the redaction removed the driver's text too: %q", kept)
+			if got := value(f.Evidence, fieldObjectName); got != "db-password" {
+				t.Errorf("object name %q, want db-password", got)
 			}
 		})
 	}

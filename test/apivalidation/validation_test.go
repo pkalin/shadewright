@@ -83,6 +83,32 @@ var _ = Describe("RemediationRequest", func() {
 		Entry("URL", "https://example.com/apps", false),
 	)
 
+	DescribeTable("checks status.pullRequest.renderedTargetHead",
+		func(head string, ok bool) {
+			rr := fx.RemediationRequest("default", unique("rr"))
+			Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+			rr.Status.PullRequest = &v1alpha1.PullRequestStatus{
+				Number: 1, URL: "https://github.com/example/fleet/pull/1",
+				HeadSHA: "0123456789abcdef0123456789abcdef01234567", RenderedTargetHead: head,
+			}
+			err := k8sClient.Status().Update(ctx, rr)
+			if ok {
+				Expect(err).NotTo(HaveOccurred())
+				return
+			}
+			Expect(err).To(HaveOccurred(), "the API server accepted an invalid renderedTargetHead")
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+			Expect(err.Error()).To(ContainSubstring("status.pullRequest.renderedTargetHead"))
+		},
+		Entry("not rendered yet", "", true),
+		Entry("a full commit SHA", "89abcdef0123456789abcdef0123456789abcdef", true),
+		Entry("an abbreviated SHA", "89abcdef", false),
+		Entry("one character short", "89abcdef0123456789abcdef0123456789abcde", false),
+		Entry("a SHA-256 object name", strings.Repeat("ab", 32), false),
+		Entry("upper case", "89ABCDEF0123456789ABCDEF0123456789ABCDEF", false),
+		Entry("a branch name", "refs/heads/main-0123456789abcdef012345678", false),
+	)
+
 	It("accepts the fixture and fills in safe defaults", func() {
 		rr := fx.RemediationRequest("default", unique("rr"))
 		Expect(k8sClient.Create(ctx, rr)).To(Succeed())

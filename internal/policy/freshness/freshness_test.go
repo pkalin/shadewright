@@ -17,6 +17,7 @@ limitations under the License.
 package freshness_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -141,6 +142,13 @@ func newWorld(t *testing.T) *world {
 // fresh runs the check against the live state in w; objects set to nil are absent from the cluster.
 func (w *world) fresh(t *testing.T) error {
 	t.Helper()
+	_, err := w.check(t)
+	return err
+}
+
+// check is fresh that also returns what the check read.
+func (w *world) check(t *testing.T) (freshness.Result, error) {
+	t.Helper()
 	s := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		t.Fatal(err)
@@ -177,7 +185,7 @@ func (w *world) fresh(t *testing.T) error {
 	if w.resolve != nil {
 		src = resolverFunc(w.resolve)
 	}
-	return freshness.Checker{Reader: c, OpenRepository: w.open, Source: src}.Fresh(ctx, w.rr)
+	return freshness.Checker{Reader: c, OpenRepository: w.open, Source: src}.Check(ctx, w.rr)
 }
 
 func isNil(o client.Object) bool {
@@ -206,6 +214,31 @@ func wantStale(t *testing.T, err error, reason string) {
 func TestFreshWhenNothingChanged(t *testing.T) {
 	if err := newWorld(t).fresh(t); err != nil {
 		t.Fatalf("want fresh, got %v", err)
+	}
+}
+
+// Check returns the target branch head the file was checked at, the file and the repository, so the render
+// check can use them without reading them again (#181), and nothing with any other verdict.
+func TestCheckReturnsWhatItRead(t *testing.T) {
+	w := newWorld(t)
+	moved, err := w.git.Push("main", otherPath, []byte("a: 2\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := w.check(t)
+	if err != nil || got.Head != moved || got.Git == nil {
+		t.Fatalf("want fresh at %s with the repository, got %q, %v", moved, got.Head, err)
+	}
+	if !bytes.Equal(got.File, manifest("256Mi")) {
+		t.Fatalf("want the target file at the head, got %q", got.File)
+	}
+	if _, err := w.git.Push("main", sourcePath, manifest("512Mi")); err != nil {
+		t.Fatal(err)
+	}
+	got, err = w.check(t)
+	wantStale(t, err, freshness.ReasonTargetFileChanged)
+	if got.Head != "" || got.File != nil || got.Git != nil {
+		t.Fatalf("a stale plan returned what it read: %q", got.Head)
 	}
 }
 

@@ -193,15 +193,20 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 	})
 
 	It("leaves a fresh plan alone, also after a merge that does not touch the file", func() {
-		_, err := git.Push(mainBranch, "README.yaml", []byte("a: 2\n"))
+		moved, err := git.Push(mainBranch, "README.yaml", []byte("a: 2\n"))
 		Expect(err).NotTo(HaveOccurred())
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		// The moved head is rendered once and recorded; the plan itself is left as it is.
 		before := fetch()
+		Expect(before.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(before.Status.PullRequest.RenderedTargetHead).To(Equal(moved))
 		_, err = reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fetch().ResourceVersion).To(Equal(before.ResourceVersion))
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
 		Expect(closes.Load()).To(BeZero())
-		Expect(reconciler().EnsureFresh(ctx, fetch())).To(Succeed())
+		Expect(reconciler().freshErr(ctx, fetch())).To(Succeed())
 	})
 
 	supersedes := func(reason string) {
@@ -222,10 +227,10 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		supersedes(freshness.ReasonPolicyChanged)
 		Expect(closes.Load()).To(Equal(int32(1)))
 
-		// A repeated reconcile, and a repeated EnsureFresh, find the request decided and call nothing.
+		// A repeated reconcile, and a repeated freshness check, find the request decided and call nothing.
 		_, err := reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(reconciler().EnsureFresh(ctx, fetch())).To(MatchError(ErrSuperseded))
+		Expect(reconciler().freshErr(ctx, fetch())).To(MatchError(ErrSuperseded))
 		Expect(closes.Load()).To(Equal(int32(1)))
 	})
 
@@ -295,7 +300,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(err).To(HaveOccurred())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
-		Expect(reconciler().EnsureFresh(ctx, fetch())).NotTo(Succeed())
+		Expect(reconciler().freshErr(ctx, fetch())).NotTo(Succeed())
 	})
 
 	DescribeTable("stops in NeedsIntervention, saying the change request was not closed, when the close of a stale plan is refused",
@@ -387,13 +392,13 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.RequeueAfter).To(Equal(freshRecheckDelay))
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
-		Expect(reconciler().EnsureFresh(ctx, fetch())).To(MatchError(freshness.ErrPaused))
+		Expect(reconciler().freshErr(ctx, fetch())).To(MatchError(freshness.ErrPaused))
 	})
 
-	It("fails closed in EnsureFresh when no Git provider is configured", func() {
+	It("fails closed in the freshness check when no Git provider is configured", func() {
 		r := reconciler()
 		r.OpenRepository = nil
-		Expect(r.EnsureFresh(ctx, fetch())).NotTo(Succeed())
+		Expect(r.freshErr(ctx, fetch())).NotTo(Succeed())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 	})
 
@@ -511,7 +516,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 		Expect(closes.Load()).To(BeZero())
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
-		Expect(reconciler().EnsureFresh(ctx, fetch())).To(MatchError(freshness.ErrPaused))
+		Expect(reconciler().freshErr(ctx, fetch())).To(MatchError(freshness.ErrPaused))
 	})
 
 	It("does not close when writes are paused between the check and the close", func() {
@@ -529,7 +534,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			}
 			return k8sClient.Get(ctx, key, obj)
 		})
-		Expect(r.EnsureFresh(ctx, fetch())).To(MatchError(freshness.ErrPaused))
+		Expect(r.freshErr(ctx, fetch())).To(MatchError(freshness.ErrPaused))
 		Expect(closes.Load()).To(BeZero())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 	})
@@ -549,7 +554,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.RequeueAfter).To(Equal(9*time.Second), "the delay the host asked for is honoured")
 
-		err = reconciler().EnsureFresh(ctx, fetch())
+		err = reconciler().freshErr(ctx, fetch())
 		Expect(err).To(HaveOccurred())
 		for e := err; e != nil; e = errors.Unwrap(e) {
 			Expect(e.Error()).NotTo(ContainSubstring(secret))
@@ -601,4 +606,10 @@ type sourceFunc func(ctx context.Context, in sourcemap.Input) (sourcemap.Result,
 
 func (f sourceFunc) Resolve(ctx context.Context, in sourcemap.Input) (sourcemap.Result, error) {
 	return f(ctx, in)
+}
+
+// freshErr runs the freshness check and returns only its error.
+func (r *RemediationRequestReconciler) freshErr(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	_, err := r.ensureFresh(ctx, rr)
+	return err
 }

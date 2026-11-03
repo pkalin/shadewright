@@ -429,7 +429,7 @@ var _ = Describe("RemediationRequest Controller", func() {
 		func(class error, reason string) {
 			create(func() {
 				deployment.Labels = map[string]string{
-					sourcemap.LabelKustomizationName:      "apps",
+					sourcemap.LabelKustomizationName:      testAppsPath,
 					sourcemap.LabelKustomizationNamespace: "flux-system",
 				}
 			})

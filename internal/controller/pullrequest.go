@@ -90,7 +90,8 @@ const (
 	ReasonChangeRequestClosed = "ChangeRequestClosed"
 	// ReasonChangeRequestMerged: the pull request was merged.
 	ReasonChangeRequestMerged = "ChangeRequestMerged"
-	// ReasonPatchRefused: the typed patcher refused the file on the branch.
+	// ReasonPatchRefused: the typed patcher refused the file on the branch, or the target file at the head of
+	// the target branch while the pull request waits.
 	ReasonPatchRefused = "PatchRefused"
 	// ReasonPullRequestDeadline: the pull request was not opened before status.deadline.
 	ReasonPullRequestDeadline = "PullRequestDeadline"
@@ -98,6 +99,10 @@ const (
 	ReasonChangeRequestGone = "ChangeRequestGone"
 	// ReasonPlanIncomplete: the request's status.source has no buildPath, so the change cannot be rendered.
 	ReasonPlanIncomplete = "PlanIncomplete"
+	// ReasonTargetFileDiverged: the target file at the head of the target branch is not the file the change
+	// was made from (before the commit), or with the planned change applied is not the file of the pull request
+	// (while it waits). Merging would combine edits that no render saw, so automation stops.
+	ReasonTargetFileDiverged = "TargetFileDiverged"
 	// ReasonGitForbidden: the Git host refused the request for Shadewright's identity (a permission the App
 	// lacks, or a rule of the repository). A person must change the permission or the rule; nothing is retried.
 	ReasonGitForbidden = "GitForbidden"
@@ -163,17 +168,120 @@ func (r *RemediationRequestReconciler) openPlanRepository(ctx context.Context, r
 }
 
 // advance runs the pull request step for a fresh request in PolicyChecked, PRCreated or AwaitingApproval. It
-// is called by recheck after EnsureFresh returned nil.
-func (r *RemediationRequestReconciler) advance(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
-	reconcile.Result, error) {
+// is called by recheck after the freshness check passed; fresh is what that check read: the head of the target
+// branch the plan was found fresh at, the target file there and the repository.
+func (r *RemediationRequestReconciler) advance(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	fresh freshness.Result) (reconcile.Result, error) {
 	switch rr.Status.Phase {
 	case remediationv1alpha1.PhasePolicyChecked:
-		return r.openPullRequest(ctx, rr)
+		return r.openPullRequest(ctx, rr, fresh)
 	case remediationv1alpha1.PhasePRCreated, remediationv1alpha1.PhaseAwaitingApproval:
-		// recheck looked at the pull request before the freshness check; the next look is the periodic one.
-		return reconcile.Result{RequeueAfter: freshRecheckInterval}, nil
+		// recheck looked at the pull request before the freshness check; the change is rendered again if the
+		// target branch moved, and the next look is the periodic one.
+		return r.renderWaiting(ctx, rr, fresh)
 	}
 	return reconcile.Result{RequeueAfter: freshRecheckInterval}, nil
+}
+
+// errNoHead means the freshness check passed without returning the commit it checked. It is unreachable
+// through ensureFresh; the step fails closed on it and is retried, it never skips the render check.
+var errNoHead = errors.New("the freshness check returned no target branch head")
+
+// renderWaiting renders the change of a recorded pull request again at the head of the target branch, but only
+// when that head is not the one of the last render (status.pullRequest.renderedTargetHead), so a quiet target
+// branch costs no Git read beyond the freshness check. A pass records the head; a refusal closes the pull
+// request and stops automation in NeedsIntervention (refuseWaiting).
+func (r *RemediationRequestReconciler) renderWaiting(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	fresh freshness.Result) (reconcile.Result, error) {
+	pr := rr.Status.PullRequest
+	if pr == nil {
+		return reconcile.Result{RequeueAfter: freshRecheckInterval}, nil
+	}
+	if fresh.Head == "" || fresh.Git == nil {
+		return r.retry(ctx, rr, errNoHead)
+	}
+	if pr.RenderedTargetHead == fresh.Head {
+		return reconcile.Result{RequeueAfter: freshRecheckInterval}, nil
+	}
+	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
+	err := r.renderWaitingStep(stepCtx, rr, fresh)
+	err = boundErr(ctx, stepCtx, "render check", err)
+	cancel()
+	if ref, ok := errors.AsType[*renderRefusal](err); ok {
+		// The close has a deadline of its own, as the close of a stale plan's change request has.
+		err = r.refuseWaiting(ctx, rr, ref)
+	}
+	switch {
+	case errors.Is(err, errStopped):
+		return reconcile.Result{}, nil
+	case err != nil:
+		return r.retry(ctx, rr, err)
+	}
+	return reconcile.Result{RequeueAfter: freshRecheckInterval}, nil
+}
+
+// renderWaitingStep reads the target file at the recorded head of the pull request, checks that merging it
+// into the target branch head the freshness check read gives exactly that file, renders it there and records
+// the head as rendered. A change that does not pass is returned as a [*renderRefusal].
+func (r *RemediationRequestReconciler) renderWaitingStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	fresh freshness.Result) error {
+	git, src := fresh.Git, rr.Status.Source
+	// The recorded head is a commit, whose content never changes; whether the pull request still points at it
+	// is watchPullRequest's check (HeadMoved). It is read once per step, and this step runs only when the
+	// target branch head moved since the last render, so a quiet branch never reads it. It is not kept across
+	// reconciles: that would be state in memory that a restart loses, to save one read of a small file next to
+	// the build directory the render reads.
+	file, err := git.ReadFile(ctx, rr.Status.PullRequest.HeadSHA, string(src.Path))
+	if err != nil {
+		return freshness.WrapProvider("read the file of the pull request", err)
+	}
+	// planned splices the bytes of one scalar and keeps every other byte, so equal bytes mean the target file
+	// at the head and the file of the pull request differ in that scalar only. The patcher accepts more than one
+	// spelling of the previous value (256Mi and 268435456), so the file the branch was cut from may spell it
+	// otherwise than the head; that difference is on the line the pull request changes, so Git cannot merge the
+	// two without a conflict, and resolving one pushes to the branch, which stops automation (HeadMoved). That
+	// is why the file at the cut point, which the status does not record, need not be read.
+	want, state, err := planned(fresh.File, rr)
+	switch {
+	case err != nil:
+		return &renderRefusal{reason: ReasonPatchRefused,
+			message: "The typed patcher refused the target file on the target branch: " + patchReason(err)}
+	case state != fileHoldsPrevious || !bytes.Equal(want, file.Data):
+		return &renderRefusal{reason: ReasonTargetFileDiverged, message: "The target file changed on the target branch " +
+			"while the pull request waited, so the change was not rendered as it would merge"}
+	}
+	if err := r.checkRender(ctx, git, fresh.Head, file.Data, rr); err != nil {
+		return err
+	}
+	rr.Status.PullRequest.RenderedTargetHead = fresh.Head
+	if err := r.Status().Update(ctx, rr); err != nil {
+		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	return nil
+}
+
+// refuseWaiting ends a waiting request whose change no longer renders as planned at the head of the target
+// branch (design section 6). It closes the pull request first, through the same close as a stale plan's
+// (closeChangeRequest: only in the plan's repository, with no comment and nothing from the file), and then
+// stops the request in NeedsIntervention with the refusal's reason. A close that fails for a reason worth a
+// retry (a Git host failure, paused writes, the deadline) is returned for a retry, which renders and closes
+// again; settings that cannot reach the repository any more stop the request with the pull request left open.
+func (r *RemediationRequestReconciler) refuseWaiting(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	ref *renderRefusal) error {
+	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
+	err := r.closeChangeRequest(cleanCtx, rr)
+	err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
+	cancel()
+	outcome := "; the pull request was closed"
+	switch {
+	case err == nil:
+	case errors.Is(err, freshness.ErrRepositoryUnusable), errors.Is(err, errTargetBranchChanged),
+		errors.Is(err, errRepositoryGone):
+		outcome = "; the settings no longer reach its repository, so the pull request was not closed"
+	default:
+		return err
+	}
+	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ref.reason, ref.message+outcome)
 }
 
 // startDeadline stores status.deadline of the pull request step, in its own status write. The policy check
@@ -190,8 +298,8 @@ func (r *RemediationRequestReconciler) startDeadline(ctx context.Context, rr *re
 
 // openPullRequest does the next step towards an open pull request: add the finalizer, create the branch,
 // commit the change or open the pull request, one of them per call. recheck has stored the deadline.
-func (r *RemediationRequestReconciler) openPullRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
-	reconcile.Result, error) {
+func (r *RemediationRequestReconciler) openPullRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	fresh freshness.Result) (reconcile.Result, error) {
 	if rr.Status.Deadline == nil {
 		// Unreachable through recheck; no Git write without a deadline.
 		return reconcile.Result{}, errors.New("the pull request step has no deadline")
@@ -211,7 +319,7 @@ func (r *RemediationRequestReconciler) openPullRequest(ctx context.Context, rr *
 
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
-	res, err := r.pullRequestStep(stepCtx, rr)
+	res, err := r.pullRequestStep(stepCtx, rr, fresh)
 	err = boundErr(ctx, stepCtx, "pull request step", err)
 	switch {
 	case errors.Is(err, errStopped):
@@ -222,13 +330,14 @@ func (r *RemediationRequestReconciler) openPullRequest(ctx context.Context, rr *
 	return res, nil
 }
 
-// pullRequestStep rebuilds the state from Git and makes at most one write.
-func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
-	reconcile.Result, error) {
-	git, repo, err := r.openPlanRepository(ctx, rr)
-	if err != nil {
-		return reconcile.Result{}, err
+// pullRequestStep rebuilds the state from Git and makes at most one write, in the repository the freshness
+// check opened and at the head of the target branch it found the plan fresh at.
+func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	fresh freshness.Result) (reconcile.Result, error) {
+	if fresh.Head == "" || fresh.Git == nil {
+		return reconcile.Result{}, errNoHead
 	}
+	git := fresh.Git
 	branch := freshness.BranchName(rr)
 	src := rr.Status.Source
 
@@ -243,13 +352,11 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 	head, err := git.BranchHead(ctx, branch)
 	switch {
 	case errors.Is(err, providers.ErrNotFound):
-		// Step 2: the branch starts at the target branch's head as it is now. The freshness check has just
-		// confirmed that the file there still holds the previous value.
-		base, err := git.BranchHead(ctx, string(repo.TargetBranch))
-		if err != nil {
-			return reconcile.Result{}, freshness.WrapProvider("read the head of the target branch", err)
-		}
-		if err := git.CreateBranch(ctx, branch, base); err != nil {
+		// Step 2: the branch starts at the head the freshness check has just found the file holding the
+		// previous value at, not at a head read again, which may hold a file no check saw. A merge since then
+		// does not fail the creation (CreateBranch takes any commit of the target branch); the commit step
+		// compares the file again at the head of its own check.
+		if err := git.CreateBranch(ctx, branch, fresh.Head); err != nil {
 			return reconcile.Result{}, freshness.WrapProvider("create the branch", err)
 		}
 		logf.FromContext(ctx).Info("Created branch for RemediationRequest", "remediationRequest", client.ObjectKeyFromObject(rr))
@@ -269,8 +376,21 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 	}
 	switch state {
 	case fileHoldsPrevious:
-		// Steps 3 to 6: one commit that changes the one value, on top of the head just read.
-		if err := r.checkRender(ctx, git, head, changed, rr); err != nil {
+		// Steps 3 to 6: one commit that changes the one value, on top of the head just read. The change is
+		// rendered at the target branch head, which may have moved since the branch was cut. The target file
+		// there must be byte for byte the file the change was made from, so merging gives exactly changed: a
+		// merge elsewhere passes, an edit of the file (another field, a comment, another spelling of the
+		// previous value) stops the request.
+		if !bytes.Equal(fresh.File, file.Data) {
+			return reconcile.Result{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonTargetFileDiverged,
+				"The target file on the target branch is not the file the branch was cut from, so the change was "+
+					"not rendered as it would merge; nothing was committed")
+		}
+		if err := r.checkRender(ctx, git, fresh.Head, changed, rr); err != nil {
+			if ref, ok := errors.AsType[*renderRefusal](err); ok {
+				return reconcile.Result{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ref.reason,
+					ref.message+"; nothing was committed")
+			}
 			return reconcile.Result{}, err
 		}
 		if _, err := git.CommitFile(ctx, branch, head, providers.FileChange{
@@ -289,7 +409,7 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 
 	cr, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{
 		HeadBranch: branch,
-		BaseBranch: string(repo.TargetBranch),
+		BaseBranch: string(src.TargetBranch),
 		Title:      commitTitle(rr),
 		Body:       pullRequestBody(rr),
 	})
@@ -359,18 +479,29 @@ func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr
 	return nil
 }
 
-// checkRender renders the Kustomization's directory at head with and without the change and stops the
-// request unless the one difference is the planned field of the target (design 8.2, steps 4 and 5). A
-// refusal is written with the check's stable reason and fixed text, never with file content; Git that
-// cannot be read is retried.
+// renderRefusal is a render check that did not pass: merging the change would not build exactly the planned change.
+// It carries a stable reason and fixed text, never file content; the caller says what happened to the commit
+// or the pull request.
+type renderRefusal struct {
+	reason, message string
+}
+
+func (e *renderRefusal) Error() string { return e.reason + ": " + e.message }
+
+// checkRender proves what merging the change into the target branch would build (design 6 and 8.2, steps 4
+// and 5). It is the one render for both windows in which the target branch can move under a change: between
+// cutting the branch and the commit, and while the pull request waits for review. The caller has checked that
+// the merge result is the tree at head with changed in place of the target file; checkRender renders that tree
+// with and without the change, and the one difference must be the planned field of the target. A refusal is
+// returned as a [*renderRefusal]; Git that cannot be read is returned for a retry.
 func (r *RemediationRequestReconciler) checkRender(ctx context.Context, git providers.GitProvider, head string,
 	changed []byte, rr *remediationv1alpha1.RemediationRequest) error {
 	src := rr.Status.Source
 	// Defence in depth: the freshness check already supersedes a plan without a build directory, because the
 	// mapping now always returns one.
 	if src.BuildPath == "" {
-		return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonPlanIncomplete,
-			"The plan does not record the directory Flux builds; the request has to be decided again")
+		return &renderRefusal{reason: ReasonPlanIncomplete,
+			message: "The plan does not record the directory Flux builds; the request has to be decided again"}
 	}
 	files, err := semdiff.Load(ctx, git, head, string(src.BuildPath))
 	if err == nil {
@@ -380,8 +511,8 @@ func (r *RemediationRequestReconciler) checkRender(ctx context.Context, git prov
 		})
 	}
 	if se, ok := errors.AsType[*semdiff.Error](err); ok {
-		return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, string(se.Reason),
-			"The rendered change is not exactly the planned one ("+string(se.Reason)+"); nothing was committed")
+		return &renderRefusal{reason: string(se.Reason),
+			message: "The rendered change is not exactly the planned one (" + string(se.Reason) + ")"}
 	}
 	return err
 }

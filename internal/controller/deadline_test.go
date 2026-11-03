@@ -183,7 +183,7 @@ func TestCleanupDeadlineIsRetryable(t *testing.T) {
 		}}
 
 	var err error
-	within(t, "EnsureFresh", func() { err = r.EnsureFresh(context.Background(), rr) })
+	within(t, "ensureFresh", func() { err = r.freshErr(context.Background(), rr) })
 	if !errors.Is(err, ErrTimeout) || errors.Is(err, ErrSuperseded) {
 		t.Fatalf("want ErrTimeout, got %v", err)
 	}
@@ -209,7 +209,7 @@ func TestCleanupCallerCancellationIsDistinct(t *testing.T) {
 	go func() { <-started; cancel() }()
 
 	var err error
-	within(t, "EnsureFresh", func() { err = r.EnsureFresh(ctx, rr) })
+	within(t, "ensureFresh", func() { err = r.freshErr(ctx, rr) })
 	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrTimeout) {
 		t.Fatalf("want context.Canceled and not ErrTimeout, got %v", err)
 	}
@@ -279,7 +279,7 @@ func TestStaleVerdictAfterTheDeadlineDoesNotSupersede(t *testing.T) {
 			return nil, errors.New("not reached")
 		}}
 	var err error
-	within(t, "EnsureFresh", func() { err = r.EnsureFresh(context.Background(), rr) })
+	within(t, "ensureFresh", func() { err = r.freshErr(context.Background(), rr) })
 	if !errors.Is(err, ErrTimeout) || errors.Is(err, ErrSuperseded) {
 		t.Fatalf("want ErrTimeout, got %v", err)
 	}
@@ -311,7 +311,7 @@ func TestCleanupResultAfterTheDeadlineIsNotFinal(t *testing.T) {
 					return fakegit.NewGit(mainBranch, nil), nil
 				}}
 			var err error
-			within(t, "EnsureFresh", func() { err = r.EnsureFresh(context.Background(), rr) })
+			within(t, "ensureFresh", func() { err = r.freshErr(context.Background(), rr) })
 			if !errors.Is(err, ErrTimeout) || errors.Is(err, ErrSuperseded) {
 				t.Fatalf("want ErrTimeout, got %v", err)
 			}
@@ -368,7 +368,7 @@ func TestFreshVerdictAfterTheDeadlineIsNotFresh(t *testing.T) {
 		OpenRepository: func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
 			return git, nil
 		}}
-	within(t, "EnsureFresh", func() { err = r.EnsureFresh(context.Background(), rr) })
+	within(t, "ensureFresh", func() { err = r.freshErr(context.Background(), rr) })
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("want ErrTimeout after the final policy read crossed the deadline, got %v", err)
 	}

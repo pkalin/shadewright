@@ -268,7 +268,7 @@ Used by: [RemediationSettingsSpec](#remediationsettingsspec).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | [Name](#name) | Yes | name is how policies and requests refer to the repository.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
-| `url` | string | Yes | url is the HTTPS clone URL, without credentials, query or fragment, and without a path segment that is '.' or '..'. It must match the URL of the Flux source that delivers a target, or no change is made. For GitHub it is https://github.com/&lt;owner>/&lt;repo> in lower case, without .git: an owner of 1 to 39 letters, digits and hyphens that starts with a letter or digit, and a repository name of 1 to 100 letters, digits, '.', '_' or '-' other than '.' and '..' (it may start with '.', as in .github).<br>Maximum length: 512<br>Pattern: `^https://[a-z0-9.-]+(:[0-9]+)?(/(\.?[A-Za-z0-9_~-][A-Za-z0-9_.~-]*|\.\.[A-Za-z0-9_.~-]+))+$` |
+| `url` | string | Yes | url is the HTTPS clone URL, without credentials, query or fragment, and without a path segment that is '.' or '..'. It must match the URL of the Flux source that delivers a target, or no change is made. For GitHub it is https://github.com/&lt;owner>/&lt;repo> in lower case, without .git: an owner of 1 to 39 letters, digits and hyphens that starts with a letter or digit, and a repository name of 1 to 100 letters, digits, '.', '_' or '-' other than '.' and '..' (it may start with '.', as in .github).<br>Maximum length: 512<br>Pattern: <code>^https://[a-z0-9.-]+(:[0-9]+)?(/(\.?[A-Za-z0-9_~-][A-Za-z0-9_.~-]*&#124;\.\.[A-Za-z0-9_.~-]+))+$</code> |
 | `targetBranch` | [GitBranch](#gitbranch) | No | targetBranch is the only branch pull requests may target. The branch Flux tracks must equal it. For GitHub it starts with a letter or digit, has at most 200 characters and does not end with '.'.<br>Default: `main`<br>Maximum length: 255<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$`<br>Rule: must be a plain branch name, not HEAD, refs/..., shadewright/... or one containing '..' or '.lock' |
 | `provider` | [GitProviderType](#gitprovidertype) | Yes | provider selects the Git hosting adapter.<br>One of `GitHub` |
 | `github` | [GitHubRepository](#githubrepository) | No | github holds GitHub App settings. |
@@ -403,7 +403,7 @@ Used by: [IncidentSpec](#incidentspec), [RemediationRequestSpec](#remediationreq
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `apiVersion` | string | Yes | apiVersion of the object, for example apps/v1 or keda.sh/v1alpha1.<br>Maximum length: 253<br>Minimum length: 1<br>Pattern: `^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?v[0-9]+((alpha|beta)[0-9]+)?$` |
+| `apiVersion` | string | Yes | apiVersion of the object, for example apps/v1 or keda.sh/v1alpha1.<br>Maximum length: 253<br>Minimum length: 1<br>Pattern: <code>^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?v[0-9]+((alpha&#124;beta)[0-9]+)?$</code> |
 | `kind` | string | Yes | kind of the object.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[A-Z][A-Za-z0-9]*$` |
 | `namespace` | string | No | namespace of the object; empty for cluster-scoped objects.<br>Maximum length: 63<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 | `name` | string | Yes | name of the object.<br>Maximum length: 253<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` |
@@ -418,7 +418,7 @@ Used by: [IncidentStatus](#incidentstatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `id` | string | Yes | id names the occurrence: "event:" and the Event UID, or "termination:" and a hash of the pod UID, the container and the termination.<br>Maximum length: 76<br>Pattern: `^(event|termination):[A-Za-z0-9-]{1,64}$` |
+| `id` | string | Yes | id names the occurrence: "event:" and the Event UID, or "termination:" and a hash of the pod UID, the container and the termination.<br>Maximum length: 76<br>Pattern: <code>^(event&#124;termination):[A-Za-z0-9-]{1,64}$</code> |
 | `total` | integer | Yes | total is the highest total of the occurrence counted: the event's series count, or 1 for a termination.<br>Maximum: 2.147483647e+09<br>Minimum: 0 |
 | `began` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | began is when the occurrence began: the event's creation time or the termination's finish time. Absent when the cluster did not report one. |
 
@@ -657,7 +657,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `repositoryRef` | [Name](#name) | Yes | repositoryRef is the RemediationSettings entry whose URL matches the Flux source.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 | `targetBranch` | [GitBranch](#gitbranch) | Yes | targetBranch is the branch the pull request targets: the branch Flux tracks, which must equal the repository's targetBranch in RemediationSettings.<br>Maximum length: 255<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$`<br>Rule: must be a plain branch name, not HEAD, refs/..., shadewright/... or one containing '..' or '.lock' |
 | `path` | [GitFilePath](#gitfilepath) | Yes | path is the file that declares the target.<br>Maximum length: 512<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.ya?ml$` |
-| `buildPath` | [GitDirPath](#gitdirpath) | No | buildPath is the directory the Flux Kustomization builds (its spec.path, "." for the repository root). Before every commit the pull request step renders it with and without the change and refuses anything but the planned difference (design 8.2, steps 4 and 5). The policy check always sets it, and the plan digest covers it; a request without it is never committed.<br>Maximum length: 512<br>Minimum length: 1<br>Pattern: `^(\.|[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)$` |
+| `buildPath` | [GitDirPath](#gitdirpath) | No | buildPath is the directory the Flux Kustomization builds (its spec.path, "." for the repository root). Before every commit the pull request step renders it with and without the change and refuses anything but the planned difference (design 8.2, steps 4 and 5). The policy check always sets it, and the plan digest covers it; a request without it is never committed.<br>Maximum length: 512<br>Minimum length: 1<br>Pattern: <code>^(\.&#124;[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)$</code> |
 | `baseCommit` | string | Yes | baseCommit is the full SHA of the target branch the change was made against. It is fixed when the branch is created; later merges to the target branch do not change it.<br>Pattern: `^[0-9a-f]{40}$` |
 
 ### SetContainerMemoryLimit

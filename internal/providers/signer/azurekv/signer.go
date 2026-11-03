@@ -314,9 +314,9 @@ func (e fixedError) Error() string { return string(e) }
 func (e fixedError) retryable() bool { return e == errRequestNetwork || e == errBodyRead }
 
 const (
-	// errRequestNetwork is a request that failed in the network stack (DNS, dial, timeout, connection
-	// reset, a TLS alert, a connection closed before the response). azcore retries it, and Sign returns it
-	// as retryable.
+	// errRequestNetwork is a request that failed in the network stack or the HTTP client for a reason not
+	// known to be local (DNS, dial, timeout, reset, a TLS alert, a closed idle connection, an HTTP/2 GOAWAY
+	// or stream reset). azcore retries it, and Sign returns it as retryable.
 	errRequestNetwork fixedError = "key vault request failed (network)"
 	// errBodyRead is a response body that broke off (truncated, reset). azcore retries it, and Sign returns
 	// it as retryable.
@@ -324,8 +324,8 @@ const (
 	// errRequestTLS is a certificate the client refused (unknown authority, hostname mismatch, an invalid
 	// certificate). No retry fixes it, so it is final.
 	errRequestTLS fixedError = "key vault request failed (tls)"
-	// errRequestSDK is any other failure inside the Azure SDK or the HTTP client (for example a scheme or
-	// proxy error). It is final.
+	// errRequestSDK is any other failure inside the Azure SDK, or a known local error of the HTTP client
+	// (an https request answered in plain HTTP, no response at all). It is final.
 	errRequestSDK fixedError = "key vault request failed (sdk)"
 	// errMalformedChallenge is a 401 challenge that guardTransport refused. It is final.
 	errMalformedChallenge fixedError = "key vault sent a malformed authentication challenge"

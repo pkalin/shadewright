@@ -175,7 +175,8 @@ func TestSignErrorChainHasNoSDKText(t *testing.T) {
 		{"network", urlErr(&net.OpError{Op: "read", Net: "tcp", Err: errors.New(sdkText)}), true, errRequestNetwork},
 		{"dns", urlErr(&net.DNSError{Err: sdkText, Name: testHost, IsNotFound: true}), true, errRequestNetwork},
 		{"tls", urlErr(&tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}), false, errRequestTLS},
-		{"sdk", errors.New(sdkText), false, errRequestSDK},
+		{"unknown client error", errors.New(sdkText), true, errRequestNetwork},
+		{"scheme mismatch", urlErr(http.ErrSchemeMismatch), false, errRequestSDK},
 	} {
 		s, err := newSigner(key, &fakeCredential{}, Options{MaxRetries: -1}, clientConfig{
 			transport:  failingTransport{err: tc.err},
@@ -359,7 +360,18 @@ func TestRetryDecisionsAgree(t *testing.T) {
 			errRequestNetwork},
 		{"certificate", fail(x509.HostnameError{Host: testHost}), false, errRequestTLS},
 		{"scheme mismatch", fail(http.ErrSchemeMismatch), false, errRequestSDK},
-		{"proxy refused", fail(errors.New("proxyconnect: " + bodySecret)), false, errRequestSDK},
+		{"proxy refused (untyped)", fail(errors.New("proxyconnect: " + bodySecret)), true, errRequestNetwork},
+		// net/http's errServerClosedIdle: the server closed an idle keep-alive connection while the POST was
+		// written, and net/http does not resend a POST.
+		{"server closed idle", fail(errors.New("http: server closed idle connection")), true, errRequestNetwork},
+		// HTTP/2 failures carry types unexported in net/http's bundled http2.
+		{"http2 stream reset", fail(errors.New("stream error: stream ID 1; INTERNAL_ERROR; received from peer")),
+			true, errRequestNetwork},
+		{"http2 goaway", fail(errors.New("http2: server sent GOAWAY and closed the connection; " + bodySecret)),
+			true, errRequestNetwork},
+		{"http2 connection lost", fail(errors.New("http2: client connection lost")), true, errRequestNetwork},
+		{"client handshake error", fail(errors.New("tls: server selected unsupported protocol version 300")),
+			true, errRequestNetwork},
 		{"no response", func(*http.Request) (*http.Response, error) { return nil, nil }, false, errRequestSDK},
 		{"truncated body", respond(http.StatusOK, nil, brokenBody{io.ErrUnexpectedEOF}, -1), true, errBodyRead},
 		{"reset stream", respond(http.StatusOK, nil, brokenBody{errors.New("stream error: " + bodySecret)}, -1), true,

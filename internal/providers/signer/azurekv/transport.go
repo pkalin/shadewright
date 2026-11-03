@@ -23,7 +23,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -142,16 +141,18 @@ func (final) NonRetriable() {}
 func (e final) Unwrap() error { return e.fixedError }
 
 // cleanTransportError replaces an HTTP client error with a fixed one or a context error. Not wrapped: a
-// *url.Error quotes the request URL, and the network stack's errors name addresses and certificates. The
-// class is taken from the error inside the *url.Error, which itself always implements net.Error.
+// *url.Error quotes the request URL, and the network stack's errors name addresses and certificates.
 //
 //   - Context errors (the try's or the caller's deadline, a cancellation) are kept, so azcore and mapError
 //     still tell a timeout from a cancellation.
 //   - A certificate the client refused is final{errRequestTLS}: it does not heal on retry.
-//   - Network failures (DNS, dial, reset, timeouts, TLS alerts from the server, a connection closed before
-//     the response) are errRequestNetwork, retried by azcore and retryable from Sign.
-//   - Anything else (a scheme mismatch, a proxy refusal, a handshake error the client raised) is
-//     final{errRequestSDK}.
+//   - A known local error is final{errRequestSDK}: http.ErrSchemeMismatch (an https request answered in
+//     plain HTTP). An unsupported scheme cannot happen, because the key ID and the authority host are
+//     checked to be https, and a proxy refusal has no type to tell it from a network failure.
+//   - Anything else is errRequestNetwork, retried by azcore and retryable from Sign. net/http has no type
+//     for many transient failures (an idle connection the server closed while a POST was written, HTTP/2
+//     GOAWAY, RST_STREAM or a lost client connection, a handshake that broke off), so an unknown error is
+//     taken as transient: the retries are bounded, and a wrong guess costs one more try.
 func cleanTransportError(err error) error {
 	switch {
 	case errors.Is(err, context.Canceled):
@@ -160,18 +161,10 @@ func cleanTransportError(err error) error {
 		return context.DeadlineExceeded
 	case isCertificateError(err):
 		return final{errRequestTLS}
+	case errors.Is(err, http.ErrSchemeMismatch):
+		return final{errRequestSDK}
 	}
-	inner := err
-	if ue, ok := errors.AsType[*url.Error](err); ok {
-		inner = ue.Err
-	}
-	if _, ok := errors.AsType[net.Error](inner); ok {
-		return errRequestNetwork
-	}
-	if errors.Is(inner, io.EOF) || errors.Is(inner, io.ErrUnexpectedEOF) {
-		return errRequestNetwork
-	}
-	return final{errRequestSDK}
+	return errRequestNetwork
 }
 
 // cleanBodyError replaces a response body read error. Not wrapped, for the reasons of cleanTransportError.

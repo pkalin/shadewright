@@ -84,6 +84,11 @@ Every issue names the ADRs it is tied to:
   weekly) runs it with the Go release of the Dockerfile's builder stage and fails on any finding the code reaches.
 - **Containers.** Distroless or scratch base images, non-root user, read-only root filesystem, all
   capabilities dropped, resource requests and limits set.
+  The Dockerfile builds both binaries once (builder pinned by digest, Go release equal to go.mod's toolchain
+  line) and has the targets `executor`, `analyzer` (one binary each) and `local` (both, the default). The
+  Images workflow builds `executor` and `analyzer` for linux/amd64 and linux/arm64 on pull requests without
+  pushing, and pushes `ghcr.io/pkalin/shadewright-{executor,analyzer}` from main and `v*` tags only, in the one job
+  that has `packages: write`. `make docker-build-images` builds both for the host platform.
 - **Tests.** Every bug fix gets a test that fails without it; every new API rule gets a refusal test.
 
 ## Design choices

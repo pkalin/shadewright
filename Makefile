@@ -1,5 +1,8 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+# Names of the images CI publishes to ghcr.io/pkalin (the executor is the manager binary).
+IMG_EXECUTOR ?= ghcr.io/pkalin/shadewright-executor:dev
+IMG_ANALYZER ?= ghcr.io/pkalin/shadewright-analyzer:dev
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 # It defaults to the year in the committed deepcopy header, so regenerating does not rewrite every header
 # on 1 January; the current year is used only if that file has none. Evaluated once, when make starts.
@@ -173,6 +176,11 @@ DOCKER_BUILD_ARGS ?=
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build $(DOCKER_BUILD_ARGS) -t ${IMG} .
+
+.PHONY: docker-build-images
+docker-build-images: ## Build the executor and analyzer images (one binary each, as CI publishes them) for the host platform as IMG_EXECUTOR and IMG_ANALYZER.
+	$(CONTAINER_TOOL) build $(DOCKER_BUILD_ARGS) --target executor -t $(IMG_EXECUTOR) .
+	$(CONTAINER_TOOL) build $(DOCKER_BUILD_ARGS) --target analyzer -t $(IMG_ANALYZER) .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.

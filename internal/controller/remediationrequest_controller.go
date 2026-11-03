@@ -459,7 +459,16 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 	}
 	if rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked && rr.Status.Deadline == nil {
 		// The deadline is stored before the first Git call, so a request whose freshness check never passes
-		// (a Git host that stays down) still ends in Expired instead of retrying for ever.
+		// (a Git host that stays down) still ends in Expired instead of retrying for ever. It does not start
+		// while writes are paused, so a pause never expires a request that has not begun its step.
+		settings := &remediationv1alpha1.RemediationSettings{}
+		switch err := r.getLive(ctx, types.NamespacedName{Name: settingsName}, settings); {
+		case err == nil && freshness.Paused(settings):
+			return ctrl.Result{RequeueAfter: freshRecheckDelay}, nil
+		case err != nil && !apierrors.IsNotFound(err):
+			// Missing settings are the freshness check's to report; any other failure is retried.
+			return ctrl.Result{}, fmt.Errorf("get RemediationSettings %s: %w", settingsName, err)
+		}
 		return r.startDeadline(ctx, rr)
 	}
 	outcome := prOpen

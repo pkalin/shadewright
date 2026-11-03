@@ -534,19 +534,21 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			ExpectWithOffset(1, openRequests()).To(HaveLen(1))
 			waiting()
 		}
-		// hit makes op fail with fault and reconciles until a reconcile has called op, returning its result.
-		hit := func(op string, fault error) (reconcile.Result, error) {
-			faulty.failOn(op, fault)
+		// hitAfter makes op fail with fault where it directly follows a call starting with after ("" for any),
+		// and reconciles until a reconcile got that fault (with a nil fault: called op), returning its result.
+		hitAfter := func(op, after string, fault error) (reconcile.Result, error) {
+			faulty.failOnAfter(op, after, fault)
 			for range 10 {
-				before := faulty.count(op)
+				calls, faults := faulty.count(op), faulty.faults()
 				res, err := reconcileResult()
-				if faulty.count(op) > before {
+				if (fault == nil && faulty.count(op) > calls) || (fault != nil && faulty.faults() > faults) {
 					return res, err
 				}
 			}
 			Fail("the step never called " + op)
 			return reconcile.Result{}, nil
 		}
+		hit := func(op string, fault error) (reconcile.Result, error) { return hitAfter(op, "", fault) }
 
 		Context("between opening the pull request and writing status", func() {
 			It("finds the pull request by its branch and marker after a crash, and opens no second one", func() {
@@ -610,22 +612,27 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		})
 
 		Context("when GitHub fails", func() {
-			// Each step that calls the Git host, from the freshness check to the open.
+			// Each call to the Git host, in the freshness check and in the step. The freshness check reads the
+			// head and the target file of the target branch first; the step's own reads of the pull request
+			// branch are hit by the call they follow.
 			steps := []TableEntry{
-				Entry("finding the pull request", opFind),
-				Entry("reading a branch head", opBranchHead),
-				Entry("creating the branch", opCreateBranch),
-				Entry("reading the target file", opReadFile+" "+sourcePath),
-				Entry("reading the files of the render check", opReadFile+" "+buildKustomize),
-				Entry("committing", opCommit),
-				Entry("opening the pull request", opOpen),
+				Entry("reading the target branch head in the freshness check", opBranchHead, ""),
+				Entry("reading the target file in the freshness check", opReadFile+" "+sourcePath, ""),
+				Entry("finding the pull request", opFind, ""),
+				Entry("reading the head of the pull request branch", opBranchHead, opFind),
+				Entry("creating the branch", opCreateBranch, ""),
+				Entry("reading the target file on the pull request branch", opReadFile+" "+sourcePath,
+					opBranchHead+" shadewright/"),
+				Entry("reading the files of the render check", opReadFile+" "+buildKustomize, ""),
+				Entry("committing", opCommit, ""),
+				Entry("opening the pull request", opOpen, ""),
 			}
 
 			DescribeTable("retries a server error with backoff, writes nothing and then opens one pull request",
-				func(op string) {
+				func(op, after string) {
 					// The adapter's error text is never trusted: it could hold a URL with a token.
 					leak := "status 502 from https://github.com/example/fleet with token ghs_leaked"
-					_, err := hit(op, &providers.RetryableError{Err: errors.New(leak)})
+					_, err := hitAfter(op, after, &providers.RetryableError{Err: errors.New(leak)})
 					Expect(err).To(HaveOccurred(), "an error goes to the work queue's backoff")
 					Expect(retryable(err)).To(BeTrue(), "a server error is classed as retryable: %v", err)
 					Expect(err.Error()).NotTo(ContainSubstring("ghs_leaked"))
@@ -639,9 +646,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				}, steps)
 
 			DescribeTable("waits as long as GitHub asks (429 or a secondary rate limit with Retry-After)",
-				func(op string) {
+				func(op, after string) {
 					limited := &providers.RetryableError{RetryAfter: 42 * time.Second, Err: errors.New("secondary rate limit")}
-					res, err := hit(op, limited)
+					res, err := hitAfter(op, after, limited)
 					Expect(err).NotTo(HaveOccurred(), "a delay the host asked for is a wait, not an error")
 					Expect(res.RequeueAfter).To(Equal(42*time.Second), "neither sooner nor later than asked")
 					waiting()
@@ -710,7 +717,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					Expect(fetch().Status.Deadline).NotTo(BeNil(), "the deadline is stored before the first Git call")
 					// A delay longer than the time left is still honoured; the next reconcile then expires.
 					clock = clock.Add(max(wait, DefaultPullRequestTimeout) + time.Second)
-					before := faulty.writes()
+					before := faulty.creations()
 					res, err = reconcileResult()
 					Expect(err).NotTo(HaveOccurred())
 					Expect(res).To(Equal(reconcile.Result{}), "an expired request is not retried")
@@ -719,7 +726,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
 					Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 					Expect(cond.Reason).To(Equal(ReasonPullRequestDeadline))
-					Expect(faulty.writes()).To(Equal(before), "no Git write after the deadline")
+					Expect(faulty.creations()).To(Equal(before), "no branch, commit or pull request after the deadline")
 					Expect(openRequests()).To(BeEmpty())
 				},
 				Entry("server errors on the open", opOpen, &providers.RetryableError{Err: errors.New("status 503")},
@@ -731,6 +738,27 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					&providers.RetryableError{Err: errors.New("status 502")}, time.Duration(0)),
 			)
 
+			It("does not start the deadline while writes are paused, so a long pause expires nothing", func() {
+				pause := func(on bool) {
+					live := &remediationv1alpha1.RemediationSettings{}
+					Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SettingsName}, live)).To(Succeed())
+					live.Spec.Paused = new(on)
+					Expect(k8sClient.Update(ctx, live)).To(Succeed())
+				}
+				pause(true)
+				for range 3 {
+					res, err := reconcileResult()
+					Expect(err).NotTo(HaveOccurred(), "a pause is a wait, not an error")
+					Expect(res.RequeueAfter).To(Equal(freshRecheckDelay))
+				}
+				Expect(fetch().Status.Deadline).To(BeNil())
+				clock = clock.Add(2 * DefaultPullRequestTimeout)
+				pause(false)
+				got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+				Expect(openRequests()).To(HaveLen(1))
+			})
+
 			It("writes nothing to Git when the deadline passes while the freshness check runs", func() {
 				Expect(reconcileOnce()).To(Succeed()) // deadline
 				Expect(reconcileOnce()).To(Succeed()) // finalizer
@@ -738,7 +766,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				faulty.beforeOp(opBranchHead, func() { clock = clock.Add(DefaultPullRequestTimeout + time.Minute) })
 				Expect(reconcileOnce()).To(Succeed())
 				Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
-				Expect(faulty.writes()).To(BeZero())
+				Expect(faulty.creations()).To(BeZero())
 			})
 		})
 
@@ -835,15 +863,18 @@ const (
 )
 
 // faultyGit wraps the fake provider. It counts every call and injects faults the fake's hook cannot express:
-// a fault for one path, a crash or a response that never arrives after a call took effect, and a change
-// made by someone else right before a call.
+// a fault for one path or for the call that follows another, a crash or a response that never arrives after a
+// call took effect, and a change made by someone else right before a call.
 type faultyGit struct {
 	*fakegit.Git
 
 	mu     sync.Mutex
 	calls  map[string]int
 	failOp string
+	after  string
 	fault  error
+	hits   int
+	last   string
 	crash  string
 	block  string
 	before map[string]func()
@@ -854,10 +885,21 @@ func newFaultyGit(g *fakegit.Git) *faultyGit {
 }
 
 // failOn makes op ("ReadFile <path>" for one file) fail with fault before it runs; a nil fault fails nothing.
-func (f *faultyGit) failOn(op string, fault error) {
+func (f *faultyGit) failOn(op string, fault error) { f.failOnAfter(op, "", fault) }
+
+// failOnAfter is failOn for the calls of op that directly follow a call whose "op arg" starts with after, so a
+// fault can hit the pull request step's own read and not the freshness check's read of the same file.
+func (f *faultyGit) failOnAfter(op, after string, fault error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.failOp, f.fault = op, fault
+	f.failOp, f.after, f.fault = op, after, fault
+}
+
+// faults returns how many injected faults were returned.
+func (f *faultyGit) faults() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hits
 }
 
 // crashAfter makes the next successful call of op return an error, as a crash after the call took effect.
@@ -889,8 +931,9 @@ func (f *faultyGit) count(op string) int {
 	return f.calls[op]
 }
 
-// writes returns how many Git writes (branch, commit, pull request) were attempted.
-func (f *faultyGit) writes() int {
+// creations returns how many branch, commit and pull request writes were attempted. Closing a change request
+// is not counted: expiry may close an unrecorded pull request of its own.
+func (f *faultyGit) creations() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls[opCreateBranch] + f.calls[opCommit] + f.calls[opOpen]
@@ -903,9 +946,13 @@ func (f *faultyGit) enter(op, arg string) error {
 	do := f.before[op]
 	delete(f.before, op)
 	fault := f.fault
-	if f.failOp != op && f.failOp != op+" "+arg {
+	if (f.failOp != op && f.failOp != op+" "+arg) || !strings.HasPrefix(f.last, f.after) {
 		fault = nil
 	}
+	if fault != nil {
+		f.hits++
+	}
+	f.last = op + " " + arg
 	f.mu.Unlock()
 	if do != nil {
 		do()

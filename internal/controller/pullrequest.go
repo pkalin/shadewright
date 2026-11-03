@@ -98,6 +98,12 @@ const (
 	ReasonChangeRequestGone = "ChangeRequestGone"
 	// ReasonPlanIncomplete: the request's status.source has no buildPath, so the change cannot be rendered.
 	ReasonPlanIncomplete = "PlanIncomplete"
+	// ReasonGitForbidden: the Git host refused the request for Shadewright's identity (a permission the App
+	// lacks, or a rule of the repository). A person must change the permission or the rule; nothing is retried.
+	ReasonGitForbidden = "GitForbidden"
+	// ReasonGitRejected: the Git host refused the request as invalid and the state in Git does not explain the
+	// refusal. Nothing is retried.
+	ReasonGitRejected = "GitRejected"
 
 	reasonTargetBranchChanged   = "TargetBranchChanged"
 	reasonRepositoryUnavailable = "RepositoryUnavailable"
@@ -289,6 +295,12 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 	})
 	if err != nil {
 		return reconcile.Result{}, freshness.WrapProvider("open the pull request", err)
+	}
+	if !hasMarker(cr.Body, rr) {
+		// The host returned an open pull request of the branch that someone else opened since the look-up above
+		// (GitHub answers such a create with 422 and the adapter returns the open one): never ours to record.
+		return reconcile.Result{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonForeignChangeRequest,
+			"A pull request for the branch exists without this request's marker; it was not touched")
 	}
 	if cr.HeadSHA != head {
 		// The branch moved between the read and the open: someone else pushed.
@@ -525,7 +537,28 @@ func (r *RemediationRequestReconciler) retry(ctx context.Context, rr *remediatio
 		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 			reasonRepositoryUnavailable, "The repository of the plan is not configured any more"))
 	}
+	if reason, message, ok := refusal(err); ok {
+		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
+			reason, message))
+	}
 	return r.waitOrFail(ctx, rr, err)
+}
+
+// refusal returns the reason and fixed message of a final refusal of the Git host (providers.ErrForbidden or
+// ErrRejected), so the request stops at once instead of retrying until its deadline. A failure worth retrying
+// (a rate limit included) is never a refusal, and neither is the caller's cancellation or the step's own
+// deadline, which boundErr has replaced by then. The message names no provider text, only the class.
+func refusal(err error) (reason, message string, ok bool) {
+	switch {
+	case err == nil || providers.IsRetryable(err):
+		return "", "", false
+	case providers.IsForbidden(err):
+		return ReasonGitForbidden, "The Git host refused Shadewright's request: the App lacks a permission or a rule " +
+			"of the repository forbids it; automation stopped", true
+	case providers.IsRejected(err):
+		return ReasonGitRejected, "The Git host refused Shadewright's request as invalid; automation stopped", true
+	}
+	return "", "", false
 }
 
 // retryAfterOf returns the delay a host asked for (Retry-After), from a provider error or a transient error

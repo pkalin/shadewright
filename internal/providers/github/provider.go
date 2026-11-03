@@ -291,7 +291,8 @@ func (p *Provider) CreateBranch(ctx context.Context, branch, fromCommit string) 
 		sha, err := p.ref(ctx, opCreateBranch, branch)
 		if err != nil {
 			if providers.IsNotFound(err) {
-				return errors.New(opCreateBranch + ": GitHub refused to create the branch (status 422)")
+				// Not an existing branch: a name or rule GitHub refuses. The same request fails the same way.
+				return statusError(opCreateBranch, r.status)
 			}
 			return err
 		}
@@ -657,7 +658,8 @@ func (p *Provider) OpenChangeRequest(
 		if _, err := p.ref(ctx, opOpenCR, req.HeadBranch); err != nil {
 			return providers.ChangeRequest{}, err
 		}
-		return providers.ChangeRequest{}, errors.New(opOpenCR + ": GitHub refused to open the pull request (status 422)")
+		// No open pull request explains the refusal, and the branch exists: final.
+		return providers.ChangeRequest{}, statusError(opOpenCR, r.status)
 	}
 	return providers.ChangeRequest{}, statusError(opOpenCR, r.status)
 }

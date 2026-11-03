@@ -486,12 +486,17 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		// Decided while writes were paused (the policy check starts no deadline then): the freshness check
 		// has just found writes allowed again, so the deadline starts now, whether or not the plan was fresh.
 		return r.startDeadline(ctx, rr)
-	case err == nil && outcome == prClosed:
-		return r.rejected(ctx, rr)
-	case err == nil:
-		return r.advance(ctx, rr)
-	default:
+	case err != nil:
+		if reason, message, ok := refusal(err); ok {
+			// The Git host refuses the freshness check's reads for good (a permission was removed): stop now.
+			return ctrl.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
+				reason, message))
+		}
 		return r.waitOrFail(ctx, rr, err)
+	case outcome == prClosed:
+		return r.rejected(ctx, rr)
+	default:
+		return r.advance(ctx, rr)
 	}
 }
 

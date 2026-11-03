@@ -507,6 +507,30 @@ func TestProviderErrorsKeepNoText(t *testing.T) {
 	}
 }
 
+// A final refusal of the host keeps its class, so the caller can stop instead of retrying until a deadline.
+func TestProviderErrorsKeepFinalClasses(t *testing.T) {
+	for _, class := range []error{providers.ErrForbidden, providers.ErrRejected} {
+		t.Run(class.Error(), func(t *testing.T) {
+			w := newWorld(t)
+			w.git.SetFail(func(op string) error {
+				if op == opBranchHead {
+					return fmt.Errorf("GitHub returned status 403 for https://github.com/o/r: %w", class)
+				}
+				return nil
+			})
+			err := w.fresh(t)
+			if !errors.Is(err, class) || errors.Is(err, providers.ErrRetryable) {
+				t.Fatalf("want the class %v kept, got %#v", class, err)
+			}
+			for _, text := range chain(err) {
+				if strings.Contains(text, "github.com") {
+					t.Fatalf("the chain leaks provider text: %q", text)
+				}
+			}
+		})
+	}
+}
+
 // A failed read keeps the host's delay: the branch head is not read again before the error is returned.
 func TestFailedFileReadIsNotFollowedByAnotherHostCall(t *testing.T) {
 	w := newWorld(t)

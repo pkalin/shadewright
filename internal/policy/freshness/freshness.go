@@ -120,8 +120,8 @@ func FindRepository(settings *v1alpha1.RemediationSettings, want *v1alpha1.PlanR
 type ProviderError struct {
 	// Op says what failed, a fixed text.
 	Op string
-	// Class is the sentinel the failure matches (providers.ErrNotFound, ErrConflict, ErrRetryable, ErrTooLarge,
-	// context.Canceled, context.DeadlineExceeded), or nil for an unclassified failure.
+	// Class is the sentinel the failure matches (providers.ErrNotFound, ErrConflict, ErrForbidden, ErrRejected,
+	// ErrRetryable, ErrTooLarge, context.Canceled, context.DeadlineExceeded), or nil for an unclassified failure.
 	Class error
 	// RetryAfter is the delay the remote system asked for; zero when it gave none.
 	RetryAfter time.Duration
@@ -140,8 +140,9 @@ func (e *ProviderError) Is(target error) bool { return e.Class != nil && target 
 // provider replaces err by a ProviderError for op, dropping its text and chain.
 func provider(op string, err error) error {
 	pe := &ProviderError{Op: op}
-	for _, class := range []error{providers.ErrNotFound, providers.ErrConflict, providers.ErrRetryable,
-		providers.ErrTooLarge, context.Canceled, context.DeadlineExceeded} {
+	for _, class := range []error{providers.ErrNotFound, providers.ErrConflict, providers.ErrForbidden,
+		providers.ErrRejected, providers.ErrRetryable, providers.ErrTooLarge, context.Canceled,
+		context.DeadlineExceeded} {
 		if errors.Is(err, class) {
 			pe.Class = class
 			break

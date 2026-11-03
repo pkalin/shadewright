@@ -1019,6 +1019,143 @@ func TestForbiddenIsNotRetried(t *testing.T) {
 	assertSafe(t, err)
 }
 
+// finalCase is one refusal GitHub gives for good: the steps up to it and the call that meets it.
+type finalCase struct {
+	steps []step
+	call  func(p *Provider) error
+	want  func(error) bool
+}
+
+// assertFinal checks that a refusal is classed, final, sent once and carries nothing of the response.
+func assertFinal(t *testing.T, c finalCase) {
+	t.Helper()
+	h := newHarness(t, c.steps...)
+	err := c.call(h.p)
+	if !c.want(err) || providers.IsRetryable(err) || providers.IsNotFound(err) || providers.IsConflict(err) {
+		t.Fatalf("got %v", err)
+	}
+	if _, ok := providers.RetryAfter(err); ok {
+		t.Errorf("a final refusal carries a delay: %v", err)
+	}
+	if len(h.sleeps) != 0 {
+		t.Errorf("slept %v before a final refusal", h.sleeps)
+	}
+	assertSafe(t, err)
+}
+
+func createBranch(p *Provider) error { return p.CreateBranch(ctx, branch, shaBase) }
+
+func openCR(p *Provider) error {
+	_, err := p.OpenChangeRequest(ctx, newCR)
+	return err
+}
+
+func commitFile(p *Provider) error {
+	_, err := p.CommitFile(ctx, branch, shaBase, change)
+	return err
+}
+
+// A 403 without rate limit signals is a permission the App lacks or a rule of the repository: final, on a
+// read and on every kind of write.
+func TestForbiddenIsFinal(t *testing.T) {
+	forbidden := func(method, path string) step {
+		return status(method, path, http.StatusForbidden, "error_forbidden.json")
+	}
+	for name, c := range map[string]finalCase{
+		"read the branch head": {[]step{forbidden(http.MethodGet, mainRef)}, func(p *Provider) error {
+			_, err := p.BranchHead(ctx, target)
+			return err
+		}, providers.IsForbidden},
+		"create the branch": {[]step{get(mainRef, "ref_main.json"), forbidden(http.MethodPost, "/git/refs")},
+			createBranch, providers.IsForbidden},
+		"store the blob": {append(append([]step{get(branchRef, "ref_branch.json")}, readSteps()...),
+			forbidden(http.MethodPost, "/git/blobs")), commitFile, providers.IsForbidden},
+		"move the branch": {append(commitSteps(), forbidden(http.MethodGet, "")), commitFile, providers.IsForbidden},
+		"list pull requests": {[]step{{method: http.MethodGet, path: "/pulls", query: pullsQuery + "open",
+			status: http.StatusForbidden, file: "error_forbidden.json"}}, openCR, providers.IsForbidden},
+		"open the pull request": {[]step{listPulls("open", "pulls_empty.json"), forbidden(http.MethodPost, "/pulls")},
+			openCR, providers.IsForbidden},
+		"close the pull request": {[]step{get("/pulls/12", "pull_open.json"), forbidden(http.MethodPatch, "/pulls/12")},
+			func(p *Provider) error { return p.CloseChangeRequest(ctx, 12) }, providers.IsForbidden},
+	} {
+		t.Run(name, func(t *testing.T) { assertFinal(t, c) })
+	}
+}
+
+// A 422 the adapter cannot resolve by reading the state is final: a refused branch name or rule, a pull
+// request GitHub will not open while no open one of the branch explains it, an object it does not accept.
+func TestUnresolvedValidationIsFinal(t *testing.T) {
+	refused := func(method, path, file string) step {
+		return status(method, path, http.StatusUnprocessableEntity, file)
+	}
+	for name, c := range map[string]finalCase{
+		"create the branch, which does not exist": {[]step{get(mainRef, "ref_main.json"),
+			refused(http.MethodPost, "/git/refs", "error_rule_violation.json"),
+			status(http.MethodGet, branchRef, http.StatusNotFound, "error_forbidden.json")},
+			createBranch, providers.IsRejected},
+		"open the pull request, with none open and the branch there": {[]step{listPulls("open", "pulls_empty.json"),
+			refused(http.MethodPost, "/pulls", "error_validation.json"), listPulls("open", "pulls_empty.json"),
+			get(branchRef, "ref_branch.json")}, openCR, providers.IsRejected},
+		"store the commit": {append(append([]step{get(branchRef, "ref_branch.json")}, readSteps()...),
+			status(http.MethodPost, "/git/blobs", http.StatusCreated, "blob_created.json"),
+			status(http.MethodPost, "/git/trees", http.StatusCreated, "tree_created.json"),
+			refused(http.MethodPost, "/git/commits", "error_validation.json")), commitFile, providers.IsRejected},
+	} {
+		t.Run(name, func(t *testing.T) { assertFinal(t, c) })
+	}
+}
+
+// A 422 that the state explains is resolved by the adapter, never returned as a refusal: an existing branch at
+// the commit, or an open pull request of the branch (the controller then checks its marker).
+func TestValidationResolvedByTheStateIsNotRejected(t *testing.T) {
+	h := newHarness(t, get(mainRef, "ref_main.json"),
+		status(http.MethodPost, "/git/refs", http.StatusUnprocessableEntity, "error_ref_exists.json"),
+		get(branchRef, "ref_branch.json"),
+		listPulls("open", "pulls_empty.json"),
+		status(http.MethodPost, "/pulls", http.StatusUnprocessableEntity, "error_pr_exists.json"),
+		listPulls("open", "pulls_open.json"))
+	if err := h.p.CreateBranch(ctx, branch, shaBase); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	cr, err := h.p.OpenChangeRequest(ctx, newCR)
+	if err != nil || cr.Number != 12 || !strings.Contains(cr.Body, "shadewright: uid=req-1") {
+		t.Fatalf("OpenChangeRequest = %+v, %v", cr, err)
+	}
+}
+
+// A 403 or 429 with GitHub's rate limit signals (Retry-After, an exhausted quota, or the secondary rate limit
+// message) stays retryable with the delay GitHub asked for; it is never a final refusal. A delay longer than
+// the adapter waits in place goes back to the caller, which caps it at the request's deadline.
+func TestRateLimitIsNotForbidden(t *testing.T) {
+	reset := strconv.FormatInt(t0.Add(10*time.Minute).Unix(), 10)
+	for name, c := range map[string]struct {
+		code   int
+		header map[string]string
+		file   string
+		want   time.Duration
+	}{
+		"403 with Retry-After":        {http.StatusForbidden, map[string]string{hRetry: "120"}, "error_secondary.json", 2 * time.Minute},
+		"429 with Retry-After":        {http.StatusTooManyRequests, map[string]string{hRetry: "90"}, "", 90 * time.Second},
+		"403 with an exhausted quota": {http.StatusForbidden, map[string]string{hdrRemaining: "0", hdrReset: reset}, "error_forbidden.json", 10 * time.Minute},
+		"429 with an exhausted quota": {http.StatusTooManyRequests, map[string]string{hdrRemaining: "0", hdrReset: reset}, "", 10 * time.Minute},
+		"403 secondary message only":  {http.StatusForbidden, nil, "error_secondary.json", time.Minute},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, listPulls("open", "pulls_empty.json"),
+				step{method: http.MethodPost, path: "/pulls", status: c.code, header: c.header, file: c.file})
+			h.p.attempts = 1
+			err := openCR(h.p)
+			if providers.IsForbidden(err) || providers.IsRejected(err) {
+				t.Fatalf("a rate limit is classed as final: %v", err)
+			}
+			if d, ok := providers.RetryAfter(err); !ok || d != c.want || !providers.IsRetryable(err) {
+				t.Fatalf("RetryAfter = %v, %v (%v), want %v", d, ok, err, c.want)
+			}
+			assertSafe(t, err)
+		})
+	}
+}
+
 func TestRetryStopsBeforeTheDeadline(t *testing.T) {
 	h := newHarness(t, step{method: http.MethodGet, path: mainRef, status: http.StatusServiceUnavailable,
 		header: map[string]string{hRetry: "10"}})

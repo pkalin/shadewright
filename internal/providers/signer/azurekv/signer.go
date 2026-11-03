@@ -77,7 +77,8 @@ func New(keyID string, opts Options) (*Signer, error) {
 	}
 	cred, err := azidentity.NewWorkloadIdentityCredential(nil)
 	if err != nil {
-		return nil, fmt.Errorf("workload identity credential: %w", err)
+		// The azidentity error names the variable at fault but is SDK text; the class is enough.
+		return nil, errNoWorkloadIdentity
 	}
 	return newSigner(key, cred, opts, clientConfig{})
 }
@@ -128,7 +129,7 @@ func newSigner(key KeyID, cred azcore.TokenCredential, opts Options, cc clientCo
 	co.Transport = guardTransport{inner: transport}
 	client, err := azkeys.NewClient(key.VaultURL(), cleanCredential{cred}, co)
 	if err != nil {
-		return nil, fmt.Errorf("key vault client for %s: %w", key, err)
+		return nil, fmt.Errorf("key vault client for %s: %w", key, errClientSetup)
 	}
 	return &Signer{key: key, client: client, timeout: timeout}, nil
 }
@@ -178,9 +179,9 @@ func (s *Signer) Sign(ctx context.Context, digest []byte) ([]byte, error) {
 // response text beyond it can reach logs or status.
 var errorCodePattern = regexp.MustCompile(`^[A-Za-z0-9.]{1,64}$`)
 
-// mapError turns an SDK error into an error with a providers kind. It never wraps the SDK's response or
-// authentication errors, whose messages include response bodies; only the status code and a short error
-// code are kept.
+// mapError turns an SDK error into an error with a providers kind. It never wraps an SDK or network error:
+// response and authentication errors include response bodies, and transport errors include URLs. Only the
+// providers kind, the retry delay, the status code and a short error code are kept.
 func (s *Signer) mapError(err error) error {
 	op := "sign with " + s.key.String()
 
@@ -222,13 +223,33 @@ func (s *Signer) mapError(err error) error {
 		return fmt.Errorf("%s: %w", op, context.Canceled)
 	}
 	// Anything else may carry response-controlled text (for example a malformed WWW-Authenticate
-	// challenge), so its message is replaced by a fixed one. The original stays reachable through
-	// errors.Is and errors.As, never through Error().
+	// challenge), request URLs or headers, so it is dropped: only its class survives, as a fixed error.
 	if _, ok := errors.AsType[net.Error](err); ok {
-		return &providers.RetryableError{Err: &opaqueError{msg: op + ": key vault request failed (network)", err: err}}
+		return &providers.RetryableError{Err: fmt.Errorf("%s: %w", op, errRequestNetwork)}
 	}
-	return &opaqueError{msg: op + ": key vault request failed (sdk)", err: err}
+	return fmt.Errorf("%s: %w", op, errRequestSDK)
 }
+
+// fixedError is an error whose text is a constant of this package. Errors that leave this package wrap
+// only fixed errors, providers sentinels and context errors, never an SDK or network error, so neither
+// Error() nor a caller that unwraps the chain and prints every link can reach SDK, URL, header or token
+// text.
+type fixedError string
+
+func (e fixedError) Error() string { return string(e) }
+
+const (
+	// errRequestNetwork is a request that failed in the network stack (dial, TLS, connection reset). It is
+	// returned as retryable.
+	errRequestNetwork fixedError = "key vault request failed (network)"
+	// errRequestSDK is any other failure inside the Azure SDK. It is final.
+	errRequestSDK fixedError = "key vault request failed (sdk)"
+	// errNoWorkloadIdentity means the workload identity variables are missing or invalid.
+	errNoWorkloadIdentity fixedError = "workload identity credential: AZURE_CLIENT_ID, AZURE_TENANT_ID or " +
+		"AZURE_FEDERATED_TOKEN_FILE is missing or invalid"
+	// errClientSetup means the Key Vault client could not be built from the options.
+	errClientSetup fixedError = "the key vault client could not be built"
+)
 
 // maxErrorBody bounds how much of an error response is read to find its error code.
 const maxErrorBody = 64 << 10
@@ -265,15 +286,6 @@ func (errorBodyPolicy) Do(req *policy.Request) (*http.Response, error) {
 	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
 	return resp, nil
 }
-
-// opaqueError hides the text of an SDK error behind a fixed message.
-type opaqueError struct {
-	msg string
-	err error
-}
-
-func (e *opaqueError) Error() string { return e.msg }
-func (e *opaqueError) Unwrap() error { return e.err }
 
 // cleanCredential wraps a token credential so that its errors are cleaned before azcore sees them: azcore
 // formats credential errors in its own log messages, and an AuthenticationFailedError includes the Entra

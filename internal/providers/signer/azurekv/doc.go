@@ -27,7 +27,9 @@ limitations under the License.
 //
 // Every call has a deadline and a bounded number of retries on throttling and transient server errors.
 // Errors are mapped to the kinds in package providers and never carry tokens, key material or response
-// bodies from Key Vault. Responses larger than 64 KiB and authentication challenges the SDK would parse
+// bodies from Key Vault. They keep only the kind, the retry delay, the status code and a short error code,
+// as fixed text: no SDK or network error stays in the chain, so unwrapping and printing every link shows
+// no SDK, URL or header text either. Responses larger than 64 KiB and authentication challenges the SDK would parse
 // unsafely are refused at the HTTP transport, before any SDK code reads them.
 //
 // This is the only package allowed to import the Azure SDK for Key Vault and Entra ID.

@@ -90,10 +90,18 @@ const (
 	ReasonPatchRefused = "PatchRefused"
 	// ReasonPullRequestDeadline: the pull request was not opened before status.deadline.
 	ReasonPullRequestDeadline = "PullRequestDeadline"
+	// ReasonChangeRequestGone: the recorded pull request cannot be found any more.
+	ReasonChangeRequestGone = "ChangeRequestGone"
+
+	reasonTargetBranchChanged   = "TargetBranchChanged"
+	reasonRepositoryUnavailable = "RepositoryUnavailable"
 )
 
 // errStopped means the step ended the request in a final phase; the caller returns without requeue.
 var errStopped = errors.New("the pull request step stopped the request")
+
+// errClosed means the recorded pull request is closed without a merge; see prClosed.
+var errClosed = errors.New("the pull request is closed")
 
 // pullRequestTimeout returns the configured deadline of the step.
 func (r *RemediationRequestReconciler) pullRequestTimeout() time.Duration {
@@ -150,7 +158,8 @@ func (r *RemediationRequestReconciler) advance(ctx context.Context, rr *remediat
 	case remediationv1alpha1.PhasePolicyChecked:
 		return r.openPullRequest(ctx, rr)
 	case remediationv1alpha1.PhasePRCreated, remediationv1alpha1.PhaseAwaitingApproval:
-		return r.watchPullRequest(ctx, rr)
+		// recheck looked at the pull request before the freshness check; the next look is the periodic one.
+		return reconcile.Result{RequeueAfter: freshRecheckInterval}, nil
 	}
 	return reconcile.Result{RequeueAfter: freshRecheckInterval}, nil
 }
@@ -243,7 +252,7 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 		if r.Validate != nil {
 			if err := r.Validate(ctx, file.Data, changed, rr); err != nil {
 				return reconcile.Result{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonPatchRefused,
-					"The change did not pass validation: "+redact.String(err.Error()))
+					"The change did not pass validation")
 			}
 		}
 		if _, err := git.CommitFile(ctx, branch, head, providers.FileChange{
@@ -326,24 +335,46 @@ func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr
 	return nil
 }
 
-// watchPullRequest checks that the recorded pull request is still open with the head Shadewright pushed, and
-// moves PRCreated to AwaitingApproval. Merge, rejection and delivery are later steps (#94, #95).
-func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
-	reconcile.Result, error) {
-	if rr.Status.PullRequest == nil {
-		return reconcile.Result{}, nil
-	}
+// prOutcome is what watchPullRequest found.
+type prOutcome int
+
+const (
+	// prOpen: open with Shadewright's head, or it could not be checked; the freshness check decides next.
+	prOpen prOutcome = iota
+	// prStopped: the request ended (Merged, gone, head moved).
+	prStopped
+	// prClosed: closed without a merge. That is a rejection only if the plan is still fresh; a stale plan's
+	// own close that was cut short looks the same and ends Superseded.
+	prClosed
+)
+
+// watchPullRequest looks at the recorded pull request: a merge ends the request (Merged), a pull request
+// that is gone or a moved head too (NeedsIntervention); open with the head Shadewright pushed moves PRCreated
+// to AwaitingApproval. On an error the caller goes on to the freshness check, which owns the handling of
+// paused writes, changed settings and provider failures. Delivery after the merge is a later step (#94, #95).
+func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) prOutcome {
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
 	err := r.watchStep(stepCtx, rr)
 	err = boundErr(ctx, stepCtx, "pull request check", err)
 	switch {
 	case errors.Is(err, errStopped):
-		return reconcile.Result{}, nil
+		return prStopped
+	case errors.Is(err, errClosed):
+		return prClosed
 	case err != nil:
-		return r.retry(ctx, rr, err)
+		logf.FromContext(ctx).V(1).Info("Could not check the pull request of RemediationRequest",
+			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
 	}
-	return reconcile.Result{RequeueAfter: freshRecheckInterval}, nil
+	return prOpen
+}
+
+// rejected ends a fresh request whose pull request a person closed without a merge.
+func (r *RemediationRequestReconciler) rejected(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	reconcile.Result, error) {
+	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
+		ReasonChangeRequestClosed, "The pull request was closed without a merge; automation stopped"))
 }
 
 func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
@@ -352,15 +383,25 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		return err
 	}
 	cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
-	if err != nil {
+	switch {
+	case errors.Is(err, providers.ErrNotFound):
+		return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone,
+			"The recorded pull request cannot be found any more; automation stopped")
+	case err != nil:
 		return freshness.WrapProvider("find the change request", err)
 	}
 	if cr.Number != rr.Status.PullRequest.Number || cr.HeadSHA != rr.Status.PullRequest.HeadSHA {
 		return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonHeadMoved,
 			"The pull request's head is not the commit Shadewright pushed; automation stopped")
 	}
-	if cr.State != providers.ChangeRequestOpen || rr.Status.Phase != remediationv1alpha1.PhasePRCreated {
-		// A merged or closed pull request is handled by the later steps.
+	switch cr.State {
+	case providers.ChangeRequestMerged:
+		return r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,
+			"The pull request was merged")
+	case providers.ChangeRequestClosed:
+		return errClosed
+	}
+	if rr.Status.Phase != remediationv1alpha1.PhasePRCreated {
 		return nil
 	}
 	rr.Status.Phase = remediationv1alpha1.PhaseAwaitingApproval
@@ -382,7 +423,8 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	return nil
 }
 
-// stop ends the request in phase with a PullRequestOpened condition that says why, and returns errStopped.
+// stop ends the request in phase with a condition that says why (PullRequestOpened, or Approved once a pull
+// request is recorded), and returns errStopped.
 func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	phase remediationv1alpha1.RemediationPhase, reason, message string) error {
 	rr.Status.Phase = phase
@@ -390,8 +432,14 @@ func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediation
 	if phase == remediationv1alpha1.PhaseMerged {
 		status = metav1.ConditionTrue
 	}
+	// Before a pull request is recorded the stop explains why none was opened; after, PullRequestOpened stays
+	// true and the outcome of the review is the Approved condition.
+	conditionType := remediationv1alpha1.ConditionPROpened
+	if rr.Status.PullRequest != nil {
+		conditionType = remediationv1alpha1.ConditionApproved
+	}
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
-		Type:               remediationv1alpha1.ConditionPROpened,
+		Type:               conditionType,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
@@ -431,9 +479,12 @@ func (r *RemediationRequestReconciler) retry(ctx context.Context, rr *remediatio
 	case errors.Is(err, freshness.ErrRepositoryUnusable):
 		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 			reasonRepositoryUnusable, messageRepositoryUnusable))
-	case errors.Is(err, errRepositoryGone), errors.Is(err, errTargetBranchChanged):
+	case errors.Is(err, errTargetBranchChanged):
 		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
-			"RepositoryUnavailable", "The repository or target branch of the plan changed in the settings"))
+			reasonTargetBranchChanged, "The repository of the plan now targets another branch"))
+	case errors.Is(err, errRepositoryGone):
+		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
+			reasonRepositoryUnavailable, "The repository of the plan is not configured any more"))
 	}
 	if pe, ok := errors.AsType[*freshness.ProviderError](err); ok && pe.RetryAfter > 0 {
 		logf.FromContext(ctx).Info("Waiting before retrying RemediationRequest", "remediationRequest",
@@ -452,13 +503,16 @@ func (r *RemediationRequestReconciler) ignoreStopped(err error) error {
 
 // finalize closes the request's pull request when the request is deleted, then removes the finalizer. It
 // never touches the cluster. Settings that cannot reach the plan's repository any more do not block the
-// deletion: there is nothing this executor can close there.
+// deletion: there is nothing this executor can close there. A request that stopped (NeedsIntervention,
+// Expired) may still have an open pull request of its own, so it is closed too; a merged one refuses the
+// close with a conflict, and one without this request's marker is left alone. While writes are paused the
+// deletion waits, because closing is a write.
 func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
 		return reconcile.Result{}, nil
 	}
-	if r.OpenRepository != nil && rr.Status.PlanRepository != nil && beforeMerge(rr.Status.Phase) {
+	if r.OpenRepository != nil && rr.Status.PlanRepository != nil && closeOnDelete(rr.Status.Phase) {
 		cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 		err := r.closeChangeRequest(cleanCtx, rr)
 		err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
@@ -467,7 +521,12 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		case err == nil, errors.Is(err, errRepositoryGone), errors.Is(err, errTargetBranchChanged),
 			errors.Is(err, freshness.ErrRepositoryUnusable), errors.Is(err, providers.ErrConflict):
 			// Closed, nothing reachable to close, or already merged.
+		case errors.Is(err, freshness.ErrPaused):
+			return reconcile.Result{RequeueAfter: freshRecheckDelay}, nil
 		default:
+			if pe, ok := errors.AsType[*freshness.ProviderError](err); ok && pe.RetryAfter > 0 {
+				return reconcile.Result{RequeueAfter: pe.RetryAfter}, nil
+			}
 			return reconcile.Result{}, err
 		}
 	}
@@ -477,6 +536,12 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 	return reconcile.Result{}, nil
+}
+
+// closeOnDelete reports whether deleting a request in phase p closes its pull request: before merge, and
+// after a stop that may have left one open.
+func closeOnDelete(p remediationv1alpha1.RemediationPhase) bool {
+	return beforeMerge(p) || p == remediationv1alpha1.PhaseNeedsIntervention || p == remediationv1alpha1.PhaseExpired
 }
 
 // fileState is what the file on the branch holds.

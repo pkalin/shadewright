@@ -451,16 +451,31 @@ func beforeMerge(p remediationv1alpha1.RemediationPhase) bool {
 }
 
 // recheck is the freshness step of Reconcile for a request that has left the policy check but has not merged.
-// It makes a stale plan visible (and closes its change request) without waiting for the next write, and on a
-// fresh plan runs the pull request step, which makes at most one Git write right after this check.
+// A recorded pull request is looked at first, so a merge or a rejection is seen before the freshness check
+// (a merged change makes the plan look stale), and a request past its deadline expires even while the
+// freshness check cannot finish. It then makes a stale plan visible (and closes its change request) without
+// waiting for the next write, and on a fresh plan runs the pull request step, which makes at most one Git
+// write right after this check.
 func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	ctrl.Result, error) {
 	if r.OpenRepository == nil || !beforeMerge(rr.Status.Phase) || rr.Status.PlanDigest == "" {
 		return ctrl.Result{}, nil
 	}
+	outcome := prOpen
+	if rr.Status.PullRequest != nil {
+		if outcome = r.watchPullRequest(ctx, rr); outcome == prStopped {
+			return ctrl.Result{}, nil
+		}
+	}
+	if rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked && rr.Status.Deadline != nil &&
+		r.now().After(rr.Status.Deadline.Time) {
+		return r.expire(ctx, rr)
+	}
 	switch err := r.EnsureFresh(ctx, rr); {
 	case errors.Is(err, ErrSuperseded):
 		return ctrl.Result{}, nil
+	case err == nil && outcome == prClosed:
+		return r.rejected(ctx, rr)
 	case err == nil:
 		return r.advance(ctx, rr)
 	case errors.Is(err, freshness.ErrPaused):
@@ -526,13 +541,13 @@ func (r *RemediationRequestReconciler) EnsureFresh(ctx context.Context, rr *reme
 			phase, reason, message = remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnusable,
 				messageRepositoryUnusable
 		case errors.Is(err, errTargetBranchChanged):
-			phase, reason = remediationv1alpha1.PhaseNeedsIntervention, "TargetBranchChanged"
+			phase, reason = remediationv1alpha1.PhaseNeedsIntervention, reasonTargetBranchChanged
 			message = "The plan is stale and its repository now targets another branch; " +
 				"its change request, if any, was not closed"
 		case errors.Is(err, errRepositoryGone):
 			// Nothing is closed: the only change request this plan could have is in a repository that cannot be
 			// reached through the settings any more, and closing a number elsewhere could close someone else's.
-			phase, reason = remediationv1alpha1.PhaseNeedsIntervention, "RepositoryUnavailable"
+			phase, reason = remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnavailable
 			message = "The plan is stale and the repository it was made for is not configured any more; " +
 				"its change request, if any, was not closed"
 		case err != nil:
@@ -598,6 +613,10 @@ func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, r
 			return nil
 		case err != nil:
 			return freshness.WrapProvider("find the change request", err)
+		}
+		if !hasMarker(cr.Body, rr) {
+			// Someone else's pull request on our branch name, or one of another plan: never ours to close.
+			return nil
 		}
 		number = cr.Number
 	}

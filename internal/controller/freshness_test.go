@@ -49,6 +49,7 @@ const (
 	workerContainer = "worker"
 	mainBranch      = "main"
 	opClose         = "CloseChangeRequest"
+	opBranchHead    = "BranchHead"
 	workerImage     = "example.invalid/worker:1"
 	appsGlob        = "apps/**/*.yaml"
 )
@@ -285,7 +286,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 
 	It("does not supersede and does not close when an input cannot be read", func() {
 		git.SetFail(func(op string) error {
-			if op == "BranchHead" {
+			if op == opBranchHead {
 				return &providers.RetryableError{Err: errors.New("host down")}
 			}
 			return nil
@@ -476,7 +477,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 
 	It("honours the delay a Git host asks for while checking", func() {
 		git.SetFail(func(op string) error {
-			if op == "BranchHead" {
+			if op == opBranchHead {
 				return &providers.RetryableError{RetryAfter: 7 * time.Second, Err: errors.New("rate limited")}
 			}
 			return nil

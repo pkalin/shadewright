@@ -282,8 +282,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(reconcileOnce()).To(Succeed())
 		got = fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
-		cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
 		Expect(cond.Reason).To(Equal(ReasonHeadMoved))
+		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)).
+			To(BeTrue(), "the pull request is still open")
 		Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen), "the pull request is left for a person")
 	})
 
@@ -322,6 +324,44 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
 	})
 
+	It("records a merge by a person as Merged, before the freshness check sees the changed file", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		_, err := git.Merge(got.Status.PullRequest.Number)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, remediationv1alpha1.ConditionApproved)).To(BeTrue())
+		Expect(reconcileOnce()).To(Succeed(), "a merged request takes no further step yet")
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+	})
+
+	It("stops when a person closes the pull request without a merge", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		Expect(git.CloseChangeRequest(ctx, got.Status.PullRequest.Number)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+			To(Equal(ReasonChangeRequestClosed))
+	})
+
+	It("expires a request whose freshness check keeps failing", func() {
+		Expect(reconcileOnce()).To(Succeed()) // deadline
+		Expect(reconcileOnce()).To(Succeed()) // finalizer
+		Expect(reconcileOnce()).To(Succeed()) // branch
+		git.SetFail(func(op string) error {
+			if op == opBranchHead { // the freshness check reads it; expiring does not
+				return providers.ErrRetryable
+			}
+			return nil
+		})
+		Expect(reconcileOnce()).NotTo(Succeed(), "a failing freshness check is retried")
+		clock = clock.Add(DefaultPullRequestTimeout + time.Minute)
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
+	})
+
 	It("expires a request that did not open its pull request before the deadline", func() {
 		Expect(reconcileOnce()).To(Succeed()) // deadline
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
@@ -348,6 +388,57 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		got := &appsv1.Deployment{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(deployment), got)).To(Succeed())
 		Expect(got.DeletionTimestamp).To(BeNil(), "deleting a request never touches the cluster")
+	})
+
+	gone := func() bool {
+		return apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(request),
+			&remediationv1alpha1.RemediationRequest{}))
+	}
+
+	It("closes its own pull request on deletion after automation stopped", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		_, err := git.Push(freshness.BranchName(got), "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+	})
+
+	It("never closes a pull request without its marker, also on deletion", func() {
+		Expect(reconcileOnce()).To(Succeed()) // deadline
+		Expect(reconcileOnce()).To(Succeed()) // finalizer
+		base, err := git.BranchHead(ctx, mainBranch)
+		Expect(err).NotTo(HaveOccurred())
+		branch := freshness.BranchName(fetch())
+		Expect(git.CreateBranch(ctx, branch, base)).To(Succeed())
+		_, err = git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: branch, BaseBranch: mainBranch, Title: "someone"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reconcileOnce()).To(Succeed()) // ForeignChangeRequest
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+	})
+
+	It("waits with the deletion while writes are paused", func() {
+		drive(remediationv1alpha1.PhaseAwaitingApproval)
+		live := &remediationv1alpha1.RemediationSettings{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SettingsName}, live)).To(Succeed())
+		live.Spec.Paused = new(true)
+		Expect(k8sClient.Update(ctx, live)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed(), "a pause is a wait, not an error")
+		Consistently(gone, "300ms").Should(BeFalse())
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SettingsName}, live)).To(Succeed())
+		live.Spec.Paused = new(false)
+		Expect(k8sClient.Update(ctx, live)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
 	})
 
 	It("writes nothing to Git while writes are paused", func() {

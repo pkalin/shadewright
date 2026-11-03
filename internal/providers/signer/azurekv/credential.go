@@ -62,7 +62,8 @@ const (
 	errEntraNetwork fixedError = "no answer from Entra ID"
 	// errEntraTLS is a certificate of Entra ID that the client refused. It is final.
 	errEntraTLS fixedError = "the certificate of Entra ID was refused"
-	// errEntraClient is any other failure of the token request in the HTTP client. It is final.
+	// errEntraClient is a known local failure of the token request in the HTTP client (an https request
+	// answered in plain HTTP, no response at all). It is final.
 	errEntraClient fixedError = "the token request failed in the HTTP client"
 	// errEntraAnswer is a successful answer from Entra ID that could not be used (for example a body that
 	// does not parse). It is transient.
@@ -140,7 +141,7 @@ type tokenFile struct {
 
 // assertion returns the token in the file. The result of a read is recorded for the token request in ctx,
 // because azidentity passes on only an error's text. A file that does not exist is read once more after
-// tokenFileRetryDelay; when ctx ends first, its error is returned and nothing is recorded.
+// tokenFileRetryDelay; when ctx ends first, its error is returned and recorded.
 func (f *tokenFile) assertion(ctx context.Context) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -153,6 +154,11 @@ func (f *tokenFile) assertion(ctx context.Context) (string, error) {
 		case <-time.After(tokenFileRetryDelay):
 			content, err = readTokenFile(f.path)
 		case <-ctx.Done():
+			// Recorded as the end of the request, so the class is the context's and not that of an
+			// earlier exchange.
+			if r := tokenRequestFrom(ctx); r != nil {
+				r.recordExchange(0, ctx.Err())
+			}
 			return "", ctx.Err()
 		}
 	}

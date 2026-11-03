@@ -159,6 +159,13 @@ func TestSignWithTheWorkloadCredential(t *testing.T) {
 		{name: "token issued", path: writeTokenFile(t, testAssertion), entra: &fakeEntra{}, ok: true},
 		{name: "no answer from Entra", path: writeTokenFile(t, testAssertion), entra: &fakeEntra{tokenErr: network},
 			retryable: true, class: errEntraNetwork},
+		{name: "idle connection closed", path: writeTokenFile(t, testAssertion),
+			entra: &fakeEntra{tokenErr: &url.Error{Op: http.MethodPost, URL: "https://" + entraHost + "/x",
+				Err: errors.New("http: server closed idle connection")}},
+			retryable: true, class: errEntraNetwork},
+		{name: "http2 stream reset", path: writeTokenFile(t, testAssertion),
+			entra:     &fakeEntra{tokenErr: errors.New("stream error: stream ID 3; INTERNAL_ERROR; received from peer")},
+			retryable: true, class: errEntraNetwork},
 		{name: "certificate refused", path: writeTokenFile(t, testAssertion), entra: &fakeEntra{tokenErr: certificate},
 			class: errEntraTLS},
 		{name: "answer does not parse", path: writeTokenFile(t, testAssertion), entra: &fakeEntra{badAnswer: true},
@@ -236,7 +243,7 @@ func TestTokenFileIsReused(t *testing.T) {
 
 // TestTokenFileMissingForAMoment checks that a token file that appears within the retry delay, as during
 // the kubelet's swap of the ..data link, is read, and that a caller who gives up during the wait gets its
-// context error with nothing recorded.
+// context error, recorded in place of an earlier exchange.
 func TestTokenFileMissingForAMoment(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "azure-identity-token")
 	time.AfterFunc(tokenFileRetryDelay/3, func() { _ = os.WriteFile(path, []byte(testAssertion), 0o600) })
@@ -246,12 +253,17 @@ func TestTokenFileMissingForAMoment(t *testing.T) {
 		t.Errorf("assertion = %q, %v, recorded %+v; want the token", got, err, tr)
 	}
 
-	*tr = tokenRequest{}
-	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), tokenRequestKey{}, tr))
-	cancel()
+	// An earlier successful exchange must not decide the class once the deadline ends the wait.
+	tr.recordExchange(http.StatusOK, nil)
+	ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), tokenRequestKey{}, tr),
+		tokenFileRetryDelay/5)
+	defer cancel()
 	_, err = (&tokenFile{path: filepath.Join(t.TempDir(), "missing")}).assertion(ctx)
-	if !errors.Is(err, context.Canceled) || tr.seen {
-		t.Errorf("cancelled wait: err = %v, recorded %+v; want the cancellation and no record", err, tr)
+	if !errors.Is(err, context.DeadlineExceeded) || tr.read || !errors.Is(tr.transportErr, context.DeadlineExceeded) {
+		t.Errorf("wait cut by the deadline: err = %v, recorded %+v; want the deadline recorded", err, tr)
+	}
+	if cause, retry := entraCause(tr.transportErr); cause != context.DeadlineExceeded || !retry {
+		t.Errorf("class = %v, %v; want a transient deadline", cause, retry)
 	}
 }
 

@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	kyaml "sigs.k8s.io/kustomize/kyaml/yaml"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/semdiff"
@@ -668,6 +668,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				waiting()
 
 				faulty.blockAfter("")
+				writeTimeout = 0 // the later steps get the default deadline again
 				got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 				Expect(faulty.count(opOpen)).To(Equal(1))
@@ -693,7 +694,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			})
 
 			It("ends the request without a retry when the repository settings can never open a provider", func() {
-				Expect(reconcileOnce()).To(Succeed()) // deadline
 				openErr = fmt.Errorf("client ID: %w", providers.ErrInvalidConfig)
 				res, err := reconcileResult()
 				Expect(err).NotTo(HaveOccurred(), "a permanent refusal is not retried")
@@ -709,14 +709,15 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					res, err := hit(op, fault)
 					if wait > 0 {
 						Expect(err).NotTo(HaveOccurred())
-						Expect(res.RequeueAfter).To(Equal(wait))
+						// The clock has not moved since the decision: the whole step's time is left, and a longer
+						// delay is cut to it, so the request expires on time.
+						Expect(res.RequeueAfter).To(Equal(min(wait, DefaultPullRequestTimeout)))
 					} else {
 						Expect(retryable(err)).To(BeTrue())
 					}
 					waiting()
-					Expect(fetch().Status.Deadline).NotTo(BeNil(), "the deadline is stored before the first Git call")
-					// A delay longer than the time left is still honoured; the next reconcile then expires.
-					clock = clock.Add(max(wait, DefaultPullRequestTimeout) + time.Second)
+					Expect(fetch().Status.Deadline).NotTo(BeNil(), "the deadline is stored with the decision")
+					clock = clock.Add(DefaultPullRequestTimeout + time.Second)
 					before := faulty.creations()
 					res, err = reconcileResult()
 					Expect(err).NotTo(HaveOccurred())
@@ -738,6 +739,21 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					&providers.RetryableError{Err: errors.New("status 502")}, time.Duration(0)),
 			)
 
+			It("stores the deadline in the status write that decides the request", func() {
+				got := fetch()
+				Expect(got.Status.Deadline).NotTo(BeNil())
+				Expect(got.Status.Deadline.Time).To(BeTemporally("==", clock.Add(DefaultPullRequestTimeout)))
+			})
+
+			It("supersedes a plan that is stale right after the decision on the next reconcile", func() {
+				_, err := git.Push(mainBranch, sourcePath, manifest("512Mi"))
+				Expect(err).NotTo(HaveOccurred())
+				res, err := reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(Equal(reconcile.Result{}))
+				Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded), "no other write comes first")
+			})
+
 			It("does not start the deadline while writes are paused, so a long pause expires nothing", func() {
 				pause := func(on bool) {
 					live := &remediationv1alpha1.RemediationSettings{}
@@ -745,7 +761,15 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					live.Spec.Paused = new(on)
 					Expect(k8sClient.Update(ctx, live)).To(Succeed())
 				}
+				// Decide the request again, this time while writes are paused.
 				pause(true)
+				got := fetch()
+				got.Status = remediationv1alpha1.RemediationRequestStatus{}
+				Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+				Expect(reconcileOnce()).To(Succeed())
+				got = fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+				Expect(got.Status.Deadline).To(BeNil(), "no deadline is started during a pause")
 				for range 3 {
 					res, err := reconcileResult()
 					Expect(err).NotTo(HaveOccurred(), "a pause is a wait, not an error")
@@ -754,13 +778,15 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(fetch().Status.Deadline).To(BeNil())
 				clock = clock.Add(2 * DefaultPullRequestTimeout)
 				pause(false)
-				got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+				Expect(reconcileOnce()).To(Succeed())
+				Expect(fetch().Status.Deadline.Time).To(BeTemporally("==", clock.Add(DefaultPullRequestTimeout)),
+					"the deadline starts once the pause has ended")
+				got = drive(remediationv1alpha1.PhaseAwaitingApproval)
 				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 				Expect(openRequests()).To(HaveLen(1))
 			})
 
 			It("writes nothing to Git when the deadline passes while the freshness check runs", func() {
-				Expect(reconcileOnce()).To(Succeed()) // deadline
 				Expect(reconcileOnce()).To(Succeed()) // finalizer
 				// The freshness check is slow: the deadline passes before it returns a fresh verdict.
 				faulty.beforeOp(opBranchHead, func() { clock = clock.Add(DefaultPullRequestTimeout + time.Minute) })
@@ -828,6 +854,19 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(cond.Message).NotTo(ContainSubstring("512Mi"), "no file content in the status")
 				Expect(faulty.count(opCommit)).To(BeZero())
 				Expect(openRequests()).To(BeEmpty())
+			})
+
+			It("opens the pull request when the same edit keeps the request below the planned limit", func() {
+				// The control of the spec above: the edited file itself is fine, only the request above the
+				// planned limit is refused.
+				_, err := git.Push(mainBranch, sourcePath, withMemoryRequest(manifest("256Mi"), "320Mi"))
+				Expect(err).NotTo(HaveOccurred())
+				got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+				file, err := git.ReadFile(ctx, got.Status.PullRequest.HeadSHA, sourcePath)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(string(file.Data)).To(ContainSubstring("memory: 384Mi"))
+				Expect(string(file.Data)).To(ContainSubstring("memory: 320Mi"))
 			})
 		})
 	})
@@ -1047,9 +1086,20 @@ func retryable(err error) bool {
 	return errors.Is(err, providers.ErrRetryable) || errors.Is(err, sourcemap.ErrTransient) || errors.Is(err, ErrTimeout)
 }
 
-// withMemoryRequest adds a memory request to the container of a deploymentManifest.
+// withMemoryRequest sets a memory request on the worker container of a deploymentManifest, through the YAML
+// tree rather than by text.
 func withMemoryRequest(manifest []byte, request string) []byte {
-	return append(slices.Clone(manifest), []byte("            requests:\n              memory: "+request+"\n")...)
+	GinkgoHelper()
+	doc, err := kyaml.Parse(string(manifest))
+	Expect(err).NotTo(HaveOccurred())
+	_, err = doc.Pipe(
+		kyaml.LookupCreate(kyaml.MappingNode, "spec", "template", "spec", "containers", "[name="+workerContainer+"]",
+			"resources", "requests"),
+		kyaml.SetField("memory", kyaml.NewStringRNode(request)))
+	Expect(err).NotTo(HaveOccurred())
+	out, err := doc.String()
+	Expect(err).NotTo(HaveOccurred())
+	return []byte(out)
 }
 
 var _ = Describe("Pull request body", func() {

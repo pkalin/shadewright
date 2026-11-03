@@ -45,6 +45,17 @@ func TestErrorKinds(t *testing.T) {
 	if _, ok := providers.RetryAfter(nf); ok {
 		t.Error("RetryAfter on a non-retryable error")
 	}
+	fb := fmt.Errorf("create branch: %w", providers.ErrForbidden)
+	rj := fmt.Errorf("open: %w", providers.ErrRejected)
+	if !providers.IsForbidden(fb) || providers.IsRejected(fb) || providers.IsRetryable(fb) || providers.IsConflict(fb) {
+		t.Error("forbidden misclassified")
+	}
+	if !providers.IsRejected(rj) || providers.IsForbidden(rj) || providers.IsRetryable(rj) || providers.IsNotFound(rj) {
+		t.Error("rejected misclassified")
+	}
+	if providers.IsForbidden(rt) || providers.IsRejected(rt) {
+		t.Error("a rate limit is neither forbidden nor rejected")
+	}
 	if !providers.IsRetryable(fmt.Errorf("x: %w", providers.ErrRetryable)) {
 		t.Error("plain ErrRetryable not retryable")
 	}

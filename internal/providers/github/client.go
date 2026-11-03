@@ -374,7 +374,7 @@ func (p *Provider) transportError(ctx context.Context, op string, err error) err
 
 // tokenError replaces an error of the token source with fixed text. Config.Tokens may be any TokenSource,
 // whose errors can carry transport or SDK text, a URL or a credential, so only the class is kept: canceled,
-// past its deadline, retryable (with the requested delay) or not found. Nothing of err stays reachable.
+// past its deadline, retryable (with the requested delay), not found or forbidden. Nothing of err stays reachable.
 func tokenError(op string, err error) error {
 	msg := op + ": installation token unavailable"
 	switch {
@@ -388,6 +388,9 @@ func tokenError(op string, err error) error {
 		return &providers.RetryableError{RetryAfter: after, Err: errors.New(msg)}
 	case providers.IsNotFound(err):
 		return fmt.Errorf("%s: %w", msg, providers.ErrNotFound)
+	case providers.IsForbidden(err):
+		// The installation refuses the token (a permission the App lacks): final, like a 403 on a call.
+		return fmt.Errorf("%s: %w", msg, providers.ErrForbidden)
 	}
 	return errors.New(msg)
 }
@@ -401,7 +404,9 @@ func ctxError(op string, ctx context.Context) error {
 	return fmt.Errorf("%s: %w", op, context.Canceled)
 }
 
-// statusError classifies a status that the method did not handle itself.
+// statusError classifies a status that the method did not handle itself. A 403 or 429 that is a rate limit
+// never gets here (once returns it as retryable), so a 403 here is a missing permission or a rule of the
+// repository: final. So is a 422 the method could not resolve by reading the state.
 func statusError(op string, code int) error {
 	msg := fmt.Errorf("%s: GitHub returned status %d", op, code)
 	switch code {
@@ -409,6 +414,10 @@ func statusError(op string, code int) error {
 		return fmt.Errorf("%w: %w", msg, providers.ErrNotFound)
 	case http.StatusConflict:
 		return fmt.Errorf("%w: %w", msg, providers.ErrConflict)
+	case http.StatusForbidden:
+		return fmt.Errorf("%w: %w", msg, providers.ErrForbidden)
+	case http.StatusUnprocessableEntity:
+		return fmt.Errorf("%w: %w", msg, providers.ErrRejected)
 	}
 	return msg
 }

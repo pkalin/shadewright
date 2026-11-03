@@ -46,9 +46,16 @@ limitations under the License.
 // is short; a longer one is returned as a [providers.RetryableError] carrying the delay, so the caller can
 // requeue instead of blocking.
 //
-// Errors carry fixed text, the status code and their class (not found, conflict, too large, retryable,
-// canceled or deadline exceeded); never a URL, a header, response text, a repository or branch name, or a
-// token.
+// A 403 that is not a rate limit (a permission the App lacks, a rule of the repository) is
+// [providers.ErrForbidden], also when the installation refuses the token, and a 422 that reading the state does
+// not resolve (an existing branch at the same commit, an open pull request of the branch) is
+// [providers.ErrRejected]. Both are final and never retried, except that a create (branch, pull request) whose
+// 422 the state does not explain is sent again with backoff, up to MaxAttempts, because a read may come from a
+// replica that lags the write. A 403 whose body cannot be read is a rate limit, so it is retried.
+//
+// Errors carry fixed text, the status code and their class (not found, conflict, forbidden, rejected, too
+// large, retryable, canceled or deadline exceeded); never a URL, a header, response text, a repository or
+// branch name, or a token.
 //
 // Auto-merge (design section 8.3) is not part of this adapter yet: Capabilities reports AutoMerge false and
 // EnableAutoMerge returns an error.

@@ -269,38 +269,65 @@ func (p *Provider) CreateBranch(ctx context.Context, branch, fromCommit string) 
 	if err := p.onTarget(ctx, opCreateBranch, fromCommit); err != nil {
 		return err
 	}
-	r, err := p.do(ctx, call{
-		op: opCreateBranch, method: http.MethodPost, path: "/git/refs",
-		body: map[string]string{"ref": "refs/heads/" + branch, "sha": fromCommit},
-	})
-	if err != nil {
-		return err
-	}
-	switch r.status {
-	case http.StatusCreated:
-		sha, err := parseRef(opCreateBranch, r, branch)
+	for attempt := 0; ; attempt++ {
+		r, err := p.do(ctx, call{
+			op: opCreateBranch, method: http.MethodPost, path: "/git/refs",
+			body: map[string]string{"ref": "refs/heads/" + branch, "sha": fromCommit},
+		})
 		if err != nil {
 			return err
 		}
-		if sha != fromCommit {
-			return fmt.Errorf("%s: branch is at another commit: %w", opCreateBranch, providers.ErrConflict)
-		}
-		return nil
-	case http.StatusUnprocessableEntity:
-		// Usually "Reference already exists", for example after a retry or a restart: compare its head.
-		sha, err := p.ref(ctx, opCreateBranch, branch)
-		if err != nil {
-			if providers.IsNotFound(err) {
-				return errors.New(opCreateBranch + ": GitHub refused to create the branch (status 422)")
+		switch r.status {
+		case http.StatusCreated:
+			sha, err := parseRef(opCreateBranch, r, branch)
+			if err != nil {
+				return err
 			}
-			return err
+			if sha != fromCommit {
+				return fmt.Errorf("%s: branch is at another commit: %w", opCreateBranch, providers.ErrConflict)
+			}
+			return nil
+		case http.StatusUnprocessableEntity:
+			// Usually "Reference already exists", for example after a retry or a restart: compare its head.
+			sha, err := p.ref(ctx, opCreateBranch, branch)
+			if err != nil && !providers.IsNotFound(err) {
+				return err
+			}
+			if err == nil {
+				if sha != fromCommit {
+					return fmt.Errorf("%s: branch exists at another commit: %w", opCreateBranch, providers.ErrConflict)
+				}
+				return nil
+			}
+			// No branch to explain the refusal: a name or rule GitHub refuses, or a read from a replica that
+			// does not see the branch yet. Ask again before calling it final.
+			if err := p.awaitUnexplained(ctx, opCreateBranch, attempt); err != nil {
+				return err
+			}
+			continue
 		}
-		if sha != fromCommit {
-			return fmt.Errorf("%s: branch exists at another commit: %w", opCreateBranch, providers.ErrConflict)
-		}
-		return nil
+		return statusError(opCreateBranch, r.status)
 	}
-	return statusError(opCreateBranch, r.status)
+}
+
+// awaitUnexplained waits before the next attempt of a create that GitHub answered with a 422 the state does
+// not explain (yet). GitHub reads may come from a replica that lags the write: the branch of a lost create
+// response, its pull request, or the commit just pushed may not be visible for a moment, so the refusal
+// becomes final (ErrRejected) only after p.attempts attempts all saw the same. When the call's deadline
+// leaves no time for the next attempt it returns a retryable error instead, never an early final one. The
+// 422 body is not read.
+func (p *Provider) awaitUnexplained(ctx context.Context, op string, attempt int) error {
+	if attempt+1 >= p.attempts {
+		return statusError(op, http.StatusUnprocessableEntity)
+	}
+	d := p.jitter(min(p.base<<attempt, p.maxDelay))
+	if dl, ok := ctx.Deadline(); ok && p.now().Add(d).After(dl) {
+		return &providers.RetryableError{Err: fmt.Errorf("%s: GitHub returned status 422, not explained yet", op)}
+	}
+	if err := p.sleep(ctx, d); err != nil {
+		return ctxError(op, ctx)
+	}
+	return nil
 }
 
 type shaJSON struct {
@@ -629,37 +656,45 @@ func (p *Provider) OpenChangeRequest(
 	if cr, ok, err := p.openFor(ctx, opOpenCR, req.HeadBranch); err != nil || ok {
 		return cr, err
 	}
-	r, err := p.do(ctx, call{op: opOpenCR, method: http.MethodPost, path: "/pulls", body: struct {
-		Title               string `json:"title"`
-		Head                string `json:"head"`
-		Base                string `json:"base"`
-		Body                string `json:"body"`
-		MaintainerCanModify bool   `json:"maintainer_can_modify"`
-	}{req.Title, req.HeadBranch, p.target, req.Body, false}})
-	if err != nil {
-		return providers.ChangeRequest{}, err
-	}
-	switch r.status {
-	case http.StatusCreated:
-		var pr pullJSON
-		if err := decode(opOpenCR, r, &pr); err != nil {
+	for attempt := 0; ; attempt++ {
+		r, err := p.do(ctx, call{op: opOpenCR, method: http.MethodPost, path: "/pulls", body: struct {
+			Title               string `json:"title"`
+			Head                string `json:"head"`
+			Base                string `json:"base"`
+			Body                string `json:"body"`
+			MaintainerCanModify bool   `json:"maintainer_can_modify"`
+		}{req.Title, req.HeadBranch, p.target, req.Body, false}})
+		if err != nil {
 			return providers.ChangeRequest{}, err
 		}
-		if !p.ours(pr) || pr.Head.Ref != req.HeadBranch {
-			return providers.ChangeRequest{}, errors.New(opOpenCR + ": GitHub returned an unexpected pull request")
+		switch r.status {
+		case http.StatusCreated:
+			var pr pullJSON
+			if err := decode(opOpenCR, r, &pr); err != nil {
+				return providers.ChangeRequest{}, err
+			}
+			if !p.ours(pr) || pr.Head.Ref != req.HeadBranch {
+				return providers.ChangeRequest{}, errors.New(opOpenCR + ": GitHub returned an unexpected pull request")
+			}
+			return p.toChangeRequest(opOpenCR, pr)
+		case http.StatusUnprocessableEntity:
+			// Usually "A pull request already exists", after a lost response or a race: return that one.
+			if cr, ok, err := p.openFor(ctx, opOpenCR, req.HeadBranch); err != nil || ok {
+				return cr, err
+			}
+			if _, err := p.ref(ctx, opOpenCR, req.HeadBranch); err != nil {
+				return providers.ChangeRequest{}, err
+			}
+			// No open pull request explains the refusal, and the branch exists. A replica may not show the pull
+			// request of a lost create response yet, or the commit just pushed ("No commits between"): ask again
+			// before calling it final.
+			if err := p.awaitUnexplained(ctx, opOpenCR, attempt); err != nil {
+				return providers.ChangeRequest{}, err
+			}
+			continue
 		}
-		return p.toChangeRequest(opOpenCR, pr)
-	case http.StatusUnprocessableEntity:
-		// Usually "A pull request already exists", after a lost response or a race: return that one.
-		if cr, ok, err := p.openFor(ctx, opOpenCR, req.HeadBranch); err != nil || ok {
-			return cr, err
-		}
-		if _, err := p.ref(ctx, opOpenCR, req.HeadBranch); err != nil {
-			return providers.ChangeRequest{}, err
-		}
-		return providers.ChangeRequest{}, errors.New(opOpenCR + ": GitHub refused to open the pull request (status 422)")
+		return providers.ChangeRequest{}, statusError(opOpenCR, r.status)
 	}
-	return providers.ChangeRequest{}, statusError(opOpenCR, r.status)
 }
 
 // FindChangeRequest returns the most recent pull request, in any state, from a shadewright/ branch of this

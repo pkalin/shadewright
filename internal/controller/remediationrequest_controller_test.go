@@ -31,12 +31,18 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/yaml"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/pkalin/shadewright/internal/providers"
+	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
 )
 
@@ -64,6 +70,55 @@ func (s *stubResolver) Resolve(context.Context, sourcemap.Input) (sourcemap.Resu
 		s.during()
 	}
 	return s.result, s.err
+}
+
+// splitReader serves the Flux objects from a fake client (envtest has no Flux CRDs) and everything else from
+// the API server.
+type splitReader struct {
+	flux client.Reader
+}
+
+func (s splitReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	switch obj.GetObjectKind().GroupVersionKind().Group {
+	case sourcemap.KustomizationGVK.Group, sourcemap.GitRepositoryGVK.Group:
+		return s.flux.Get(ctx, key, obj, opts...)
+	}
+	return k8sClient.Get(ctx, key, obj, opts...)
+}
+
+func (s splitReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	return errors.New("the resolver does not list")
+}
+
+// fluxReader returns a reader with a Ready Kustomization flux-system/apps that delivers dep from path
+// apps/orders of GitRepository flux-system/fleet, branch main of url.
+func fluxReader(dep *appsv1.Deployment, url string) client.Reader {
+	revision := mainBranch + "@sha1:" + baseCommit
+	parse := func(doc string) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{}
+		ExpectWithOffset(2, yaml.Unmarshal([]byte(doc), &u.Object)).To(Succeed())
+		return u
+	}
+	ks := parse(fmt.Sprintf(`apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata: {namespace: flux-system, name: apps, generation: 1}
+spec: {path: ./%s, prune: true, sourceRef: {kind: GitRepository, name: fleet}}
+status:
+  lastAppliedRevision: %q
+  observedGeneration: 1
+  conditions: [{type: Ready, status: "True", observedGeneration: 1}]
+  inventory: {entries: [{id: %s_%s_apps_Deployment, v: v1}]}
+`, buildPath, revision, dep.Namespace, dep.Name))
+	src := parse(fmt.Sprintf(`apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata: {namespace: flux-system, name: fleet, generation: 1}
+spec: {url: %q, ref: {branch: %s}}
+status:
+  observedGeneration: 1
+  conditions: [{type: Ready, status: "True", observedGeneration: 1}]
+  artifact: {revision: %q}
+`, url, mainBranch, revision))
+	return splitReader{flux: clientfake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(ks, src).Build()}
 }
 
 func resolved() sourcemap.Result {
@@ -367,6 +422,45 @@ var _ = Describe("RemediationRequest Controller", func() {
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseDenied))
 		Expect(condition(got).Reason).To(Equal(ReasonPreviousValueMismatch))
 	})
+
+	// The real resolver, reading through a Git host that refuses for good: the class survives the mapping, so
+	// the policy check decides now instead of retrying without end (a deadline starts only with PolicyChecked).
+	DescribeTable("stops in NeedsIntervention when the Git host refuses the source mapping's reads",
+		func(class error, reason string) {
+			create(func() {
+				deployment.Labels = map[string]string{
+					sourcemap.LabelKustomizationName:      testAppsPath,
+					sourcemap.LabelKustomizationNamespace: "flux-system",
+				}
+			})
+			git := fakegit.NewGit(mainBranch, map[string][]byte{sourcePath: []byte("unused")})
+			git.SetFail(func(op string) error {
+				if op == opBranchHead {
+					return fmt.Errorf("status 403 from https://github.com/example/fleet with token ghs_leaked: %w", class)
+				}
+				return nil
+			})
+			resolver := &sourcemap.Resolver{
+				Client: fluxReader(deployment, settings.Spec.Repositories[0].URL),
+				OpenRepository: func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+					return git, nil
+				},
+			}
+			r := &RemediationRequestReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Source: resolver}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(err).NotTo(HaveOccurred(), "a final refusal is not handed back for a retry")
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			c := condition(got)
+			Expect(c.Status).To(Equal(metav1.ConditionUnknown))
+			Expect(c.Reason).To(Equal(reason))
+			Expect(c.Message).NotTo(ContainSubstring("ghs_leaked"))
+			Expect(c.Message).NotTo(ContainSubstring("https://"))
+			Expect(got.Status.Source).To(BeNil())
+		},
+		Entry("403", providers.ErrForbidden, ReasonGitForbidden),
+		Entry("422", providers.ErrRejected, ReasonGitRejected),
+	)
 
 	It("retries a transient mapping error and writes nothing", func() {
 		create(func() {})

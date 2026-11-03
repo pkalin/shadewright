@@ -36,6 +36,14 @@ var (
 	// ErrInvalidConfig means the settings an adapter is built from cannot be used (wrong provider, missing
 	// signer, malformed key ID or URL). It is permanent: the same settings fail the same way on every retry.
 	ErrInvalidConfig = errors.New("invalid configuration")
+	// ErrForbidden means the host refused the request for the identity: a permission the App or token lacks,
+	// or a rule of the repository (branch protection, a ruleset). It is permanent until a person changes the
+	// permission or the rule; a rate limit is never ErrForbidden but a [RetryableError].
+	ErrForbidden = errors.New("forbidden")
+	// ErrRejected means the host refused the request itself as invalid (validation failed, for example a
+	// branch name or pull request it does not accept) and the adapter could not resolve the refusal by reading
+	// the state. It is permanent: the same request fails the same way.
+	ErrRejected = errors.New("rejected")
 )
 
 // RetryableError is a transient failure with an optional delay requested by the remote system, for example
@@ -74,6 +82,12 @@ func IsRetryable(err error) bool { return errors.Is(err, ErrRetryable) }
 
 // IsInvalidConfig reports whether err means the settings an adapter is built from cannot be used.
 func IsInvalidConfig(err error) bool { return errors.Is(err, ErrInvalidConfig) }
+
+// IsForbidden reports whether err means the host refused the identity (a missing permission or a rule).
+func IsForbidden(err error) bool { return errors.Is(err, ErrForbidden) }
+
+// IsRejected reports whether err means the host refused the request as invalid.
+func IsRejected(err error) bool { return errors.Is(err, ErrRejected) }
 
 // RetryAfter returns the delay requested by the remote system, if err carries one.
 func RetryAfter(err error) (time.Duration, bool) {

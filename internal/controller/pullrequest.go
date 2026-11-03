@@ -103,6 +103,12 @@ const (
 	// was made from (before the commit), or with the planned change applied is not the file of the pull request
 	// (while it waits). Merging would combine edits that no render saw, so automation stops.
 	ReasonTargetFileDiverged = "TargetFileDiverged"
+	// ReasonGitForbidden: the Git host refused the request for Shadewright's identity (a permission the App
+	// lacks, or a rule of the repository). A person must change the permission or the rule; nothing is retried.
+	ReasonGitForbidden = "GitForbidden"
+	// ReasonGitRejected: the Git host refused the request as invalid and the state in Git does not explain the
+	// refusal. Nothing is retried.
+	ReasonGitRejected = "GitRejected"
 
 	reasonTargetBranchChanged   = "TargetBranchChanged"
 	reasonRepositoryUnavailable = "RepositoryUnavailable"
@@ -201,7 +207,7 @@ func (r *RemediationRequestReconciler) renderWaiting(ctx context.Context, rr *re
 	err := r.renderWaitingStep(stepCtx, rr, fresh)
 	err = boundErr(ctx, stepCtx, "render check", err)
 	cancel()
-	if ref, ok := errors.AsType[*refusal](err); ok {
+	if ref, ok := errors.AsType[*renderRefusal](err); ok {
 		// The close has a deadline of its own, as the close of a stale plan's change request has.
 		err = r.refuseWaiting(ctx, rr, ref)
 	}
@@ -216,7 +222,7 @@ func (r *RemediationRequestReconciler) renderWaiting(ctx context.Context, rr *re
 
 // renderWaitingStep reads the target file at the recorded head of the pull request, checks that merging it
 // into the target branch head the freshness check read gives exactly that file, renders it there and records
-// the head as rendered. A change that does not pass is returned as a [*refusal].
+// the head as rendered. A change that does not pass is returned as a [*renderRefusal].
 func (r *RemediationRequestReconciler) renderWaitingStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	fresh freshness.Result) error {
 	git, src := fresh.Git, rr.Status.Source
@@ -238,10 +244,10 @@ func (r *RemediationRequestReconciler) renderWaitingStep(ctx context.Context, rr
 	want, state, err := planned(fresh.File, rr)
 	switch {
 	case err != nil:
-		return &refusal{reason: ReasonPatchRefused,
+		return &renderRefusal{reason: ReasonPatchRefused,
 			message: "The typed patcher refused the target file on the target branch: " + patchReason(err)}
 	case state != fileHoldsPrevious || !bytes.Equal(want, file.Data):
-		return &refusal{reason: ReasonTargetFileDiverged, message: "The target file changed on the target branch " +
+		return &renderRefusal{reason: ReasonTargetFileDiverged, message: "The target file changed on the target branch " +
 			"while the pull request waited, so the change was not rendered as it would merge"}
 	}
 	if err := r.checkRender(ctx, git, fresh.Head, file.Data, rr); err != nil {
@@ -261,7 +267,7 @@ func (r *RemediationRequestReconciler) renderWaitingStep(ctx context.Context, rr
 // retry (a Git host failure, paused writes, the deadline) is returned for a retry, which renders and closes
 // again; settings that cannot reach the repository any more stop the request with the pull request left open.
 func (r *RemediationRequestReconciler) refuseWaiting(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	ref *refusal) error {
+	ref *renderRefusal) error {
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	err := r.closeChangeRequest(cleanCtx, rr)
 	err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
@@ -381,7 +387,7 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 					"not rendered as it would merge; nothing was committed")
 		}
 		if err := r.checkRender(ctx, git, fresh.Head, changed, rr); err != nil {
-			if ref, ok := errors.AsType[*refusal](err); ok {
+			if ref, ok := errors.AsType[*renderRefusal](err); ok {
 				return reconcile.Result{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ref.reason,
 					ref.message+"; nothing was committed")
 			}
@@ -409,6 +415,12 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 	})
 	if err != nil {
 		return reconcile.Result{}, freshness.WrapProvider("open the pull request", err)
+	}
+	if !hasMarker(cr.Body, rr) {
+		// The host returned an open pull request of the branch that someone else opened since the look-up above
+		// (GitHub answers such a create with 422 and the adapter returns the open one): never ours to record.
+		return reconcile.Result{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonForeignChangeRequest,
+			"A pull request for the branch exists without this request's marker; it was not touched")
 	}
 	if cr.HeadSHA != head {
 		// The branch moved between the read and the open: someone else pushed.
@@ -467,28 +479,28 @@ func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr
 	return nil
 }
 
-// refusal is a render check that did not pass: merging the change would not build exactly the planned change.
+// renderRefusal is a render check that did not pass: merging the change would not build exactly the planned change.
 // It carries a stable reason and fixed text, never file content; the caller says what happened to the commit
 // or the pull request.
-type refusal struct {
+type renderRefusal struct {
 	reason, message string
 }
 
-func (e *refusal) Error() string { return e.reason + ": " + e.message }
+func (e *renderRefusal) Error() string { return e.reason + ": " + e.message }
 
 // checkRender proves what merging the change into the target branch would build (design 6 and 8.2, steps 4
 // and 5). It is the one render for both windows in which the target branch can move under a change: between
 // cutting the branch and the commit, and while the pull request waits for review. The caller has checked that
 // the merge result is the tree at head with changed in place of the target file; checkRender renders that tree
 // with and without the change, and the one difference must be the planned field of the target. A refusal is
-// returned as a [*refusal]; Git that cannot be read is returned for a retry.
+// returned as a [*renderRefusal]; Git that cannot be read is returned for a retry.
 func (r *RemediationRequestReconciler) checkRender(ctx context.Context, git providers.GitProvider, head string,
 	changed []byte, rr *remediationv1alpha1.RemediationRequest) error {
 	src := rr.Status.Source
 	// Defence in depth: the freshness check already supersedes a plan without a build directory, because the
 	// mapping now always returns one.
 	if src.BuildPath == "" {
-		return &refusal{reason: ReasonPlanIncomplete,
+		return &renderRefusal{reason: ReasonPlanIncomplete,
 			message: "The plan does not record the directory Flux builds; the request has to be decided again"}
 	}
 	files, err := semdiff.Load(ctx, git, head, string(src.BuildPath))
@@ -499,7 +511,7 @@ func (r *RemediationRequestReconciler) checkRender(ctx context.Context, git prov
 		})
 	}
 	if se, ok := errors.AsType[*semdiff.Error](err); ok {
-		return &refusal{reason: string(se.Reason),
+		return &renderRefusal{reason: string(se.Reason),
 			message: "The rendered change is not exactly the planned one (" + string(se.Reason) + ")"}
 	}
 	return err
@@ -631,6 +643,14 @@ func (r *RemediationRequestReconciler) expire(ctx context.Context, rr *remediati
 	err := r.closeChangeRequest(cleanCtx, rr)
 	err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
 	cancel()
+	if reason, _, ok := refusal(err); ok {
+		// The deadline has passed either way; waiting for a permission or a rule to change would only keep
+		// the request open longer. The message says that a pull request of its own may be left open.
+		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
+			ReasonPullRequestDeadline, "The pull request was not opened before the deadline, and the Git host "+
+				"refused ("+reason+") to find or close a pull request Shadewright may have opened on the branch; "+
+				"if one is open, close it by hand"))
+	}
 	if err != nil && !errors.Is(err, errRepositoryGone) && !errors.Is(err, errTargetBranchChanged) &&
 		!errors.Is(err, freshness.ErrRepositoryUnusable) {
 		return r.retry(ctx, rr, err)
@@ -656,7 +676,78 @@ func (r *RemediationRequestReconciler) retry(ctx context.Context, rr *remediatio
 		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 			reasonRepositoryUnavailable, "The repository of the plan is not configured any more"))
 	}
-	return r.waitOrFail(ctx, rr, err)
+	return r.refuseOrWait(ctx, rr, err)
+}
+
+// refuseOrWait handles a step error of recheck and retry. A final refusal of the Git host (refusal) stops
+// Shadewright's writes at once instead of retrying until the deadline: a request without a recorded pull
+// request ends in NeedsIntervention, while one whose pull request waits for review (PRCreated,
+// AwaitingApproval) keeps its phase, says why on PlanFresh (Unknown) and keeps watching the pull request, so
+// a later merge is still recorded (a close without a merge is decided once the freshness check runs again).
+// Any other error goes to waitOrFail.
+func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	err error) (reconcile.Result, error) {
+	reason, message, ok := refusal(err)
+	if !ok {
+		return r.waitOrFail(ctx, rr, err)
+	}
+	if rr.Status.PullRequest == nil {
+		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
+			reason, message))
+	}
+	// The recorded pull request is looked at first on every recheck; nothing else is written to Git while
+	// the refusal lasts, because the plan's freshness cannot be confirmed.
+	changed := meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type:               remediationv1alpha1.ConditionPlanFresh,
+		Status:             metav1.ConditionUnknown,
+		Reason:             reason,
+		Message:            refusedWhileWatching(reason),
+		ObservedGeneration: rr.Generation,
+	})
+	if changed {
+		if err := r.Status().Update(ctx, rr); err != nil {
+			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+		}
+		logf.FromContext(ctx).Info("Paused writes of RemediationRequest after a refusal of the Git host",
+			"remediationRequest", client.ObjectKeyFromObject(rr), "reason", reason)
+	}
+	return reconcile.Result{RequeueAfter: freshRecheckInterval}, nil
+}
+
+// refusedWhileWatching is the fixed PlanFresh message of a refusal while a recorded pull request waits.
+func refusedWhileWatching(reason string) string {
+	return "The Git host refused the freshness check (" + reason + "); Shadewright writes nothing and keeps " +
+		"watching the pull request"
+}
+
+// clearRefusal removes the PlanFresh condition refuseOrWait wrote, once the freshness check passes again.
+func (r *RemediationRequestReconciler) clearRefusal(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+	if c == nil || c.Status != metav1.ConditionUnknown || (c.Reason != ReasonGitForbidden && c.Reason != ReasonGitRejected) {
+		return nil
+	}
+	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+	if err := r.Status().Update(ctx, rr); err != nil {
+		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	return nil
+}
+
+// refusal returns the reason and fixed message of a final refusal of the Git host (providers.ErrForbidden or
+// ErrRejected), so the request stops at once instead of retrying until its deadline. A failure worth retrying
+// (a rate limit included) is never a refusal, and neither is the caller's cancellation or the step's own
+// deadline, which boundErr has replaced by then. The message names no provider text, only the class.
+func refusal(err error) (reason, message string, ok bool) {
+	switch {
+	case err == nil || providers.IsRetryable(err):
+		return "", "", false
+	case providers.IsForbidden(err):
+		return ReasonGitForbidden, "The Git host refused Shadewright's request: the App lacks a permission or a rule " +
+			"of the repository forbids it; automation stopped", true
+	case providers.IsRejected(err):
+		return ReasonGitRejected, "The Git host refused Shadewright's request as invalid; automation stopped", true
+	}
+	return "", "", false
 }
 
 // retryAfterOf returns the delay a host asked for (Retry-After), from a provider error or a transient error

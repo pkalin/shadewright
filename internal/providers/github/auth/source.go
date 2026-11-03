@@ -373,7 +373,11 @@ func (s *Source) statusError(op string, resp *http.Response) error {
 		if d, limited := ratelimit.Limited(resp, s.now()); limited {
 			return &providers.RetryableError{RetryAfter: d, Err: msg}
 		}
-		return fmt.Errorf("%w: the App may not create tokens for this installation", msg)
+		// GitHub documents 403 Forbidden for this endpoint, and a token cannot be granted a permission the
+		// App was not granted: without rate limit signals the refusal is final until a person changes the
+		// App or the installation. A 422 ("Validation failed, or the endpoint has been spammed") may be
+		// either a refusal or abuse protection, so it is not classed as final.
+		return fmt.Errorf("%w: the App may not create tokens for this installation: %w", msg, providers.ErrForbidden)
 	case http.StatusRequestTimeout:
 		return &providers.RetryableError{RetryAfter: ratelimit.RetryAfter(resp.Header, s.now()), Err: msg}
 	}

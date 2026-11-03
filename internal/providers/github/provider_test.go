@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,6 +63,10 @@ const (
 	hRetry     = "Retry-After"
 	// graphQLPath stands for the GraphQL endpoint in steps.
 	graphQLPath = "/graphql"
+	pullsPath   = "/pulls"
+	// Error fixtures in testdata.
+	fxForbidden = "error_forbidden.json"
+	fxSecondary = "error_secondary.json"
 )
 
 var t0 = time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
@@ -275,7 +280,7 @@ func TestCapabilities(t *testing.T) {
 
 func TestBranchHead(t *testing.T) {
 	h := newHarness(t, get(mainRef, "ref_main.json"), get(branchRef, "ref_branch.json"),
-		status(http.MethodGet, "/git/ref/heads/shadewright/req-2", http.StatusNotFound, "error_forbidden.json"))
+		status(http.MethodGet, "/git/ref/heads/shadewright/req-2", http.StatusNotFound, fxForbidden))
 	if sha, err := h.p.BranchHead(ctx, target); err != nil || sha != shaBase {
 		t.Fatalf("BranchHead(main) = %q, %v", sha, err)
 	}
@@ -337,7 +342,7 @@ func TestReadFileNotRegular(t *testing.T) {
 }
 
 func TestReadFileMissingCommit(t *testing.T) {
-	h := newHarness(t, status(http.MethodGet, "/git/trees/"+shaOld, http.StatusNotFound, "error_forbidden.json"))
+	h := newHarness(t, status(http.MethodGet, "/git/trees/"+shaOld, http.StatusNotFound, fxForbidden))
 	_, err := h.p.ReadFile(ctx, shaOld, "apps/deploy.yaml")
 	if !providers.IsNotFound(err) {
 		t.Fatalf("got %v", err)
@@ -709,7 +714,7 @@ func TestCommitFileChecksStoredBlob(t *testing.T) {
 const pullsQuery = "direction=desc&head=acme%3Ashadewright%2Freq-1&per_page=100&sort=created&state="
 
 func listPulls(state, file string) step {
-	s := get("/pulls", file)
+	s := get(pullsPath, file)
 	s.query = pullsQuery + state
 	return s
 }
@@ -735,7 +740,7 @@ func TestOpenChangeRequestExistingIsReturned(t *testing.T) {
 }
 
 func TestOpenChangeRequestCreates(t *testing.T) {
-	create := status(http.MethodPost, "/pulls", http.StatusCreated, "pull_open.json")
+	create := status(http.MethodPost, pullsPath, http.StatusCreated, "pull_open.json")
 	create.check = func(t *testing.T, b map[string]any) {
 		want := `{"base":"main","body":"marker","head":"shadewright/req-1","maintainer_can_modify":false,` +
 			`"title":"fix(apps): raise replicas"}`
@@ -752,7 +757,7 @@ func TestOpenChangeRequestCreates(t *testing.T) {
 
 func TestOpenChangeRequestAlreadyExistsAfterRace(t *testing.T) {
 	h := newHarness(t, listPulls("open", "pulls_empty.json"),
-		status(http.MethodPost, "/pulls", http.StatusUnprocessableEntity, "error_pr_exists.json"),
+		status(http.MethodPost, pullsPath, http.StatusUnprocessableEntity, "error_pr_exists.json"),
 		listPulls("open", "pulls_open.json"))
 	cr, err := h.p.OpenChangeRequest(ctx, newCR)
 	if err != nil || cr.Number != 12 {
@@ -763,7 +768,7 @@ func TestOpenChangeRequestAlreadyExistsAfterRace(t *testing.T) {
 func TestOpenChangeRequestIgnoresForks(t *testing.T) {
 	// A fork's pull request from a branch of the same name is not ours: open our own.
 	h := newHarness(t, listPulls("open", "pulls_open_fork.json"),
-		status(http.MethodPost, "/pulls", http.StatusCreated, "pull_open.json"))
+		status(http.MethodPost, pullsPath, http.StatusCreated, "pull_open.json"))
 	cr, err := h.p.OpenChangeRequest(ctx, newCR)
 	if err != nil || cr.Number != 12 {
 		t.Fatalf("got %+v, %v", cr, err)
@@ -804,9 +809,9 @@ func TestOpenChangeRequestMixedBasesIsConflict(t *testing.T) {
 
 func TestOpenChangeRequestMissingBranch(t *testing.T) {
 	h := newHarness(t, listPulls("open", "pulls_empty.json"),
-		status(http.MethodPost, "/pulls", http.StatusUnprocessableEntity, "error_pr_exists.json"),
+		status(http.MethodPost, pullsPath, http.StatusUnprocessableEntity, "error_pr_exists.json"),
 		listPulls("open", "pulls_empty.json"),
-		status(http.MethodGet, branchRef, http.StatusNotFound, "error_forbidden.json"))
+		status(http.MethodGet, branchRef, http.StatusNotFound, fxForbidden))
 	_, err := h.p.OpenChangeRequest(ctx, newCR)
 	if !providers.IsNotFound(err) {
 		t.Fatalf("got %v", err)
@@ -887,7 +892,7 @@ func TestCloseChangeRequestMergedIsConflict(t *testing.T) {
 
 func TestCloseChangeRequestMergedMeanwhile(t *testing.T) {
 	h := newHarness(t, get("/pulls/12", "pull_open.json"),
-		status(http.MethodPatch, "/pulls/12", http.StatusUnprocessableEntity, "error_forbidden.json"),
+		status(http.MethodPatch, "/pulls/12", http.StatusUnprocessableEntity, fxForbidden),
 		get("/pulls/12", "pull_merged.json"))
 	if err := h.p.CloseChangeRequest(ctx, 12); !providers.IsConflict(err) {
 		t.Fatalf("got %v", err)
@@ -915,7 +920,7 @@ func TestCloseChangeRequestNumberMismatch(t *testing.T) {
 
 func TestRetriesServerErrorsWithBackoff(t *testing.T) {
 	h := newHarness(t,
-		status(http.MethodGet, mainRef, http.StatusBadGateway, "error_forbidden.json"),
+		status(http.MethodGet, mainRef, http.StatusBadGateway, fxForbidden),
 		step{method: http.MethodGet, path: mainRef, err: errors.New("dial tcp: " + bodyMarker)},
 		status(http.MethodGet, mainRef, http.StatusServiceUnavailable, ""),
 		get(mainRef, "ref_main.json"))
@@ -970,7 +975,7 @@ func TestRetryAfterIsHonoured(t *testing.T) {
 		step{method: http.MethodGet, path: mainRef, status: http.StatusTooManyRequests,
 			header: map[string]string{hRetry: "3"}},
 		step{method: http.MethodGet, path: mainRef, status: http.StatusForbidden,
-			header: map[string]string{hdrRemaining: "0", "X-RateLimit-Reset": reset}, file: "error_forbidden.json"},
+			header: map[string]string{hdrRemaining: "0", "X-RateLimit-Reset": reset}, file: fxForbidden},
 		step{method: http.MethodGet, path: mainRef, status: http.StatusServiceUnavailable,
 			header: map[string]string{hRetry: t0.Add(2 * time.Second).Format(http.TimeFormat)}},
 		get(mainRef, "ref_main.json"))
@@ -984,8 +989,8 @@ func TestRetryAfterIsHonoured(t *testing.T) {
 }
 
 func TestLongRetryAfterIsReturned(t *testing.T) {
-	h := newHarness(t, step{method: http.MethodPost, path: "/pulls", status: http.StatusForbidden,
-		header: map[string]string{hRetry: "120"}, file: "error_secondary.json"})
+	h := newHarness(t, step{method: http.MethodPost, path: pullsPath, status: http.StatusForbidden,
+		header: map[string]string{hRetry: "120"}, file: fxSecondary})
 	h.s.steps = append([]step{listPulls("open", "pulls_empty.json")}, h.s.steps...)
 	_, err := h.p.OpenChangeRequest(ctx, newCR)
 	if d, ok := providers.RetryAfter(err); !ok || d != 2*time.Minute {
@@ -1000,7 +1005,7 @@ func TestLongRetryAfterIsReturned(t *testing.T) {
 func TestSecondaryRateLimitWithoutHeaders(t *testing.T) {
 	for _, code := range []int{http.StatusForbidden, http.StatusTooManyRequests} {
 		t.Run(strconv.Itoa(code), func(t *testing.T) {
-			h := newHarness(t, status(http.MethodGet, mainRef, code, "error_secondary.json"))
+			h := newHarness(t, status(http.MethodGet, mainRef, code, fxSecondary))
 			_, err := h.p.BranchHead(ctx, target)
 			if d, ok := providers.RetryAfter(err); !ok || d != time.Minute {
 				t.Fatalf("RetryAfter = %v, %v (%v)", d, ok, err)
@@ -1011,12 +1016,218 @@ func TestSecondaryRateLimitWithoutHeaders(t *testing.T) {
 }
 
 func TestForbiddenIsNotRetried(t *testing.T) {
-	h := newHarness(t, status(http.MethodGet, mainRef, http.StatusForbidden, "error_forbidden.json"))
+	h := newHarness(t, status(http.MethodGet, mainRef, http.StatusForbidden, fxForbidden))
 	_, err := h.p.BranchHead(ctx, target)
 	if err == nil || providers.IsRetryable(err) || providers.IsNotFound(err) {
 		t.Fatalf("got %v", err)
 	}
 	assertSafe(t, err)
+}
+
+// finalCase is one refusal GitHub gives for good: the steps up to it and the call that meets it.
+type finalCase struct {
+	steps []step
+	call  func(p *Provider) error
+	want  func(error) bool
+}
+
+// assertFinal checks that a refusal is classed, final, sent once and carries nothing of the response.
+func assertFinal(t *testing.T, c finalCase) {
+	t.Helper()
+	h := newHarness(t, c.steps...)
+	err := c.call(h.p)
+	if !c.want(err) || providers.IsRetryable(err) || providers.IsNotFound(err) || providers.IsConflict(err) {
+		t.Fatalf("got %v", err)
+	}
+	if _, ok := providers.RetryAfter(err); ok {
+		t.Errorf("a final refusal carries a delay: %v", err)
+	}
+	if len(h.sleeps) != 0 {
+		t.Errorf("slept %v before a final refusal", h.sleeps)
+	}
+	assertSafe(t, err)
+}
+
+func createBranch(p *Provider) error { return p.CreateBranch(ctx, branch, shaBase) }
+
+func openCR(p *Provider) error {
+	_, err := p.OpenChangeRequest(ctx, newCR)
+	return err
+}
+
+func commitFile(p *Provider) error {
+	_, err := p.CommitFile(ctx, branch, shaBase, change)
+	return err
+}
+
+// A 403 without rate limit signals is a permission the App lacks or a rule of the repository: final, on a
+// read and on every kind of write.
+func TestForbiddenIsFinal(t *testing.T) {
+	forbidden := func(method, path string) step {
+		return status(method, path, http.StatusForbidden, fxForbidden)
+	}
+	for name, c := range map[string]finalCase{
+		"read the branch head": {[]step{forbidden(http.MethodGet, mainRef)}, func(p *Provider) error {
+			_, err := p.BranchHead(ctx, target)
+			return err
+		}, providers.IsForbidden},
+		"create the branch": {[]step{get(mainRef, "ref_main.json"), forbidden(http.MethodPost, "/git/refs")},
+			createBranch, providers.IsForbidden},
+		"store the blob": {append(append([]step{get(branchRef, "ref_branch.json")}, readSteps()...),
+			forbidden(http.MethodPost, "/git/blobs")), commitFile, providers.IsForbidden},
+		"move the branch": {append(commitSteps(), forbidden(http.MethodGet, "")), commitFile, providers.IsForbidden},
+		"list pull requests": {[]step{{method: http.MethodGet, path: pullsPath, query: pullsQuery + "open",
+			status: http.StatusForbidden, file: fxForbidden}}, openCR, providers.IsForbidden},
+		"open the pull request": {[]step{listPulls("open", "pulls_empty.json"), forbidden(http.MethodPost, pullsPath)},
+			openCR, providers.IsForbidden},
+		"close the pull request": {[]step{get("/pulls/12", "pull_open.json"), forbidden(http.MethodPatch, "/pulls/12")},
+			func(p *Provider) error { return p.CloseChangeRequest(ctx, 12) }, providers.IsForbidden},
+	} {
+		t.Run(name, func(t *testing.T) { assertFinal(t, c) })
+	}
+}
+
+// A 422 the adapter cannot resolve by reading the state is final: a refused branch name or rule, a pull
+// request GitHub will not open while no open one of the branch explains it, an object it does not accept.
+func TestUnresolvedValidationIsFinal(t *testing.T) {
+	refused := func(method, path, file string) step {
+		return status(method, path, http.StatusUnprocessableEntity, file)
+	}
+	assertFinal(t, finalCase{append(append([]step{get(branchRef, "ref_branch.json")}, readSteps()...),
+		status(http.MethodPost, "/git/blobs", http.StatusCreated, "blob_created.json"),
+		status(http.MethodPost, "/git/trees", http.StatusCreated, "tree_created.json"),
+		refused(http.MethodPost, "/git/commits", "error_validation.json")), commitFile, providers.IsRejected})
+
+	// A create whose 422 the state does not explain is asked again, with backoff, before it is final: a read
+	// may come from a replica that does not show the branch or pull request yet.
+	repeat := func(n int, steps ...step) []step {
+		out := make([]step, 0, n*len(steps))
+		for range n {
+			out = append(out, steps...)
+		}
+		return out
+	}
+	for name, c := range map[string]finalCase{
+		"create the branch, which does not exist": {append([]step{get(mainRef, "ref_main.json")},
+			repeat(DefaultMaxAttempts, refused(http.MethodPost, "/git/refs", "error_rule_violation.json"),
+				status(http.MethodGet, branchRef, http.StatusNotFound, fxForbidden))...),
+			createBranch, providers.IsRejected},
+		"open the pull request, with none open and the branch there": {append([]step{listPulls("open", "pulls_empty.json")},
+			repeat(DefaultMaxAttempts, refused(http.MethodPost, pullsPath, "error_validation.json"),
+				listPulls("open", "pulls_empty.json"), get(branchRef, "ref_branch.json"))...), openCR, providers.IsRejected},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, c.steps...)
+			err := c.call(h.p)
+			if !c.want(err) || providers.IsRetryable(err) {
+				t.Fatalf("got %v", err)
+			}
+			want := []time.Duration{DefaultBaseDelay, 2 * DefaultBaseDelay, 4 * DefaultBaseDelay}
+			if !slices.Equal(h.sleeps, want) {
+				t.Errorf("slept %v, want %v", h.sleeps, want)
+			}
+			assertSafe(t, err)
+		})
+	}
+}
+
+// A replica that lags the write: the branch of a lost create response is not readable at once, the pull
+// request of a lost create response is not listed at once, or the commit just pushed is not seen ("No commits
+// between"). The adapter asks again instead of calling the 422 final.
+func TestUnexplainedValidationWaitsForReplicas(t *testing.T) {
+	t.Run("branch not readable yet", func(t *testing.T) {
+		h := newHarness(t, get(mainRef, "ref_main.json"),
+			status(http.MethodPost, "/git/refs", http.StatusUnprocessableEntity, "error_ref_exists.json"),
+			status(http.MethodGet, branchRef, http.StatusNotFound, fxForbidden),
+			status(http.MethodPost, "/git/refs", http.StatusUnprocessableEntity, "error_ref_exists.json"),
+			get(branchRef, "ref_branch.json"))
+		if err := createBranch(h.p); err != nil {
+			t.Fatalf("CreateBranch: %v", err)
+		}
+	})
+	t.Run("pull request not listed yet", func(t *testing.T) {
+		h := newHarness(t, listPulls("open", "pulls_empty.json"),
+			status(http.MethodPost, pullsPath, http.StatusUnprocessableEntity, "error_pr_exists.json"),
+			listPulls("open", "pulls_empty.json"), get(branchRef, "ref_branch.json"),
+			status(http.MethodPost, pullsPath, http.StatusUnprocessableEntity, "error_pr_exists.json"),
+			listPulls("open", "pulls_open.json"))
+		cr, err := h.p.OpenChangeRequest(ctx, newCR)
+		if err != nil || cr.Number != 12 {
+			t.Fatalf("OpenChangeRequest = %+v, %v", cr, err)
+		}
+	})
+	t.Run("commit not seen yet", func(t *testing.T) {
+		h := newHarness(t, listPulls("open", "pulls_empty.json"),
+			status(http.MethodPost, pullsPath, http.StatusUnprocessableEntity, "error_validation.json"),
+			listPulls("open", "pulls_empty.json"), get(branchRef, "ref_branch.json"),
+			status(http.MethodPost, pullsPath, http.StatusCreated, "pull_open.json"))
+		if _, err := h.p.OpenChangeRequest(ctx, newCR); err != nil {
+			t.Fatalf("OpenChangeRequest: %v", err)
+		}
+	})
+	t.Run("no time left for another attempt", func(t *testing.T) {
+		h := newHarness(t, listPulls("open", "pulls_empty.json"),
+			status(http.MethodPost, pullsPath, http.StatusUnprocessableEntity, "error_validation.json"),
+			listPulls("open", "pulls_empty.json"), get(branchRef, "ref_branch.json"))
+		h.p.now = time.Now
+		short, cancel := context.WithTimeout(ctx, DefaultBaseDelay/5)
+		defer cancel()
+		_, err := h.p.OpenChangeRequest(short, newCR)
+		if !providers.IsRetryable(err) || providers.IsRejected(err) {
+			t.Fatalf("got %v, want retryable", err)
+		}
+	})
+}
+
+// A 422 that the state explains is resolved by the adapter, never returned as a refusal: an existing branch at
+// the commit, or an open pull request of the branch (the controller then checks its marker).
+func TestValidationResolvedByTheStateIsNotRejected(t *testing.T) {
+	h := newHarness(t, get(mainRef, "ref_main.json"),
+		status(http.MethodPost, "/git/refs", http.StatusUnprocessableEntity, "error_ref_exists.json"),
+		get(branchRef, "ref_branch.json"),
+		listPulls("open", "pulls_empty.json"),
+		status(http.MethodPost, pullsPath, http.StatusUnprocessableEntity, "error_pr_exists.json"),
+		listPulls("open", "pulls_open.json"))
+	if err := h.p.CreateBranch(ctx, branch, shaBase); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	cr, err := h.p.OpenChangeRequest(ctx, newCR)
+	if err != nil || cr.Number != 12 || !strings.Contains(cr.Body, "shadewright: uid=req-1") {
+		t.Fatalf("OpenChangeRequest = %+v, %v", cr, err)
+	}
+}
+
+// A 403 or 429 with GitHub's rate limit signals (Retry-After, an exhausted quota, or the secondary rate limit
+// message) stays retryable with the delay GitHub asked for; it is never a final refusal. A delay longer than
+// the adapter waits in place goes back to the caller, which caps it at the request's deadline.
+func TestRateLimitIsNotForbidden(t *testing.T) {
+	reset := strconv.FormatInt(t0.Add(10*time.Minute).Unix(), 10)
+	for name, c := range map[string]struct {
+		code   int
+		header map[string]string
+		file   string
+		want   time.Duration
+	}{
+		"403 with Retry-After":        {http.StatusForbidden, map[string]string{hRetry: "120"}, fxSecondary, 2 * time.Minute},
+		"429 with Retry-After":        {http.StatusTooManyRequests, map[string]string{hRetry: "90"}, "", 90 * time.Second},
+		"403 with an exhausted quota": {http.StatusForbidden, map[string]string{hdrRemaining: "0", hdrReset: reset}, fxForbidden, 10 * time.Minute},
+		"429 with an exhausted quota": {http.StatusTooManyRequests, map[string]string{hdrRemaining: "0", hdrReset: reset}, "", 10 * time.Minute},
+		"403 secondary message only":  {http.StatusForbidden, nil, fxSecondary, time.Minute},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, listPulls("open", "pulls_empty.json"),
+				step{method: http.MethodPost, path: pullsPath, status: c.code, header: c.header, file: c.file})
+			h.p.attempts = 1
+			err := openCR(h.p)
+			if providers.IsForbidden(err) || providers.IsRejected(err) {
+				t.Fatalf("a rate limit is classed as final: %v", err)
+			}
+			if d, ok := providers.RetryAfter(err); !ok || d != c.want || !providers.IsRetryable(err) {
+				t.Fatalf("RetryAfter = %v, %v (%v), want %v", d, ok, err, c.want)
+			}
+			assertSafe(t, err)
+		})
+	}
 }
 
 func TestRetryStopsBeforeTheDeadline(t *testing.T) {
@@ -1126,6 +1337,23 @@ func TestTokenErrorsKeepTheirClass(t *testing.T) {
 	_, err := h.p.BranchHead(ctx, target)
 	if d, ok := providers.RetryAfter(err); !ok || d != time.Hour {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// A token the installation refuses (a permission the App lacks) keeps ErrForbidden through tokenError, so the
+// caller stops instead of retrying until its deadline; no text of the token source stays reachable.
+func TestTokenRefusalIsForbidden(t *testing.T) {
+	h := newHarness(t)
+	leak := errors.New("installation token: status 403 for https://api.github.com ghs_leaked")
+	h.p.token = func(context.Context) (string, error) {
+		return "", fmt.Errorf("%w: %w", leak, providers.ErrForbidden)
+	}
+	_, err := h.p.BranchHead(ctx, target)
+	if !providers.IsForbidden(err) || providers.IsRetryable(err) || errors.Is(err, leak) {
+		t.Fatalf("got %v, want ErrForbidden only", err)
+	}
+	if strings.Contains(err.Error(), "ghs_leaked") {
+		t.Fatalf("token source text leaked: %v", err)
 	}
 }
 

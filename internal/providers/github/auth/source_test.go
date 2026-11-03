@@ -897,6 +897,26 @@ func TestSecondaryRateLimitIsRetryable(t *testing.T) {
 	}
 }
 
+// An installation that refuses the token (GitHub documents 403 Forbidden; a token cannot get a permission the
+// App was not granted) is ErrForbidden, final. A 422, which GitHub documents for validation and for a spammed
+// endpoint alike, is not classed as a final refusal.
+func TestTokenRefusalIsForbidden(t *testing.T) {
+	e := setup(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(rlRemaining, "4000")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"Resource not accessible by integration"}`)
+	})
+	_, err := e.src.Token(context.Background())
+	if !providers.IsForbidden(err) || providers.IsRetryable(err) {
+		t.Fatalf("err = %v, want ErrForbidden and not retryable", err)
+	}
+	e = setup(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnprocessableEntity) })
+	_, err = e.src.Token(context.Background())
+	if err == nil || providers.IsForbidden(err) || providers.IsRejected(err) {
+		t.Fatalf("422: err = %v, want an unclassified failure", err)
+	}
+}
+
 // A plain permission failure whose body merely looks unrelated stays permanent, and the search for a rate
 // limit reads a bounded part of the body only.
 func TestRateLimitProbeIsBounded(t *testing.T) {

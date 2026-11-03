@@ -48,6 +48,9 @@ import (
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
 )
 
+// testAppsPath is the build directory and Kustomization name the fleet fixtures use.
+const testAppsPath = "apps"
+
 const (
 	opCommit = "CommitFile"
 	opOpen   = "OpenChangeRequest"
@@ -325,7 +328,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamePrefix: b-\nresources:\n  - ../orders\n"))
 		Expect(err).NotTo(HaveOccurred())
 		// The mapping now names the parent directory as the build, as it would for a Kustomization at apps.
-		build = "apps"
+		build = testAppsPath
 		got := fetch()
 		got.Status.Source.BuildPath = build
 		// The digest covers the build directory, so the plan is digested again, as the policy check would.
@@ -516,7 +519,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			_, err := git.Push(mainBranch, "apps/kustomization.yaml", []byte(
 				"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - orders\n"))
 			Expect(err).NotTo(HaveOccurred())
-			build = "apps"
+			build = testAppsPath
 			got := fetch()
 			got.Status.Source.BuildPath = build
 			got.Status.PlanDigest, err = freshness.ComputeDigest(got, got.Status.Source, policy, settings)
@@ -895,6 +898,28 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(faulty.count(opOpen)).To(Equal(1))
 			})
 
+			DescribeTable("expires with a clear message when the close after the deadline is refused",
+				func(op string, class error, reason string) {
+					loseStatusWrites()
+					clock = clock.Add(DefaultPullRequestTimeout + time.Minute)
+					faulty.failOn(op, fmt.Errorf("status 403 from https://github.com/example/fleet: %w", class))
+					res, err := reconcileResult()
+					Expect(err).NotTo(HaveOccurred(), "a final refusal is not handed back for a retry")
+					Expect(res).To(Equal(reconcile.Result{}))
+					got := fetch()
+					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
+					c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+					Expect(c.Reason).To(Equal(ReasonPullRequestDeadline))
+					Expect(c.Message).To(ContainSubstring(reason))
+					Expect(c.Message).To(ContainSubstring("close it by hand"))
+					Expect(c.Message).NotTo(ContainSubstring("https://"))
+					Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen), "the refused close left it open")
+				},
+				Entry("finding it (403)", opFind, providers.ErrForbidden, ReasonGitForbidden),
+				Entry("closing it (403)", opClose, providers.ErrForbidden, ReasonGitForbidden),
+				Entry("closing it (422)", opClose, providers.ErrRejected, ReasonGitRejected),
+			)
+
 			It("closes the pull request it finds by its marker when the target file changes first", func() {
 				loseStatusWrites()
 				_, err := git.Push(mainBranch, sourcePath, manifest("512Mi"))
@@ -955,6 +980,74 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					Expect(res.RequeueAfter).To(Equal(42*time.Second), "neither sooner nor later than asked")
 					waiting()
 				}, steps)
+
+			// A refusal GitHub gives for good (a 403 that is no rate limit, a 422 the adapter cannot resolve) stops
+			// the request at once, with a fixed reason, long before its deadline. The render check's reads are not
+			// in the table: semdiff reports any failed read as transient.
+			refusals := make([]TableEntry, 0, 16)
+			for _, c := range []struct{ name, op, after string }{
+				{"reading the target branch head in the freshness check", opBranchHead, ""},
+				{"reading the target file in the freshness check", opReadFile + " " + sourcePath, ""},
+				{"finding the pull request", opFind, ""},
+				{"reading the head of the pull request branch", opBranchHead, opFind},
+				{"creating the branch", opCreateBranch, ""},
+				{"reading the target file on the pull request branch", opReadFile + " " + sourcePath,
+					opBranchHead + " shadewright/"},
+				{"committing", opCommit, ""},
+				{"opening the pull request", opOpen, ""},
+			} {
+				refusals = append(refusals,
+					Entry(c.name+" (403)", c.op, c.after, providers.ErrForbidden, ReasonGitForbidden),
+					Entry(c.name+" (422)", c.op, c.after, providers.ErrRejected, ReasonGitRejected))
+			}
+			DescribeTable("stops in NeedsIntervention at once when GitHub refuses for good (403 or 422)",
+				func(op, after string, class error, reason string) {
+					leak := fmt.Errorf("status 403 from https://github.com/example/fleet with token ghs_leaked: %w", class)
+					res, err := hitAfter(op, after, leak)
+					Expect(err).NotTo(HaveOccurred(), "a final refusal is not handed back for a retry")
+					Expect(res).To(Equal(reconcile.Result{}), "and not requeued")
+					got := fetch()
+					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+					Expect(got.Status.Deadline.Time).To(BeTemporally(">", clock), "the deadline has not passed")
+					cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+					Expect(cond).NotTo(BeNil())
+					Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+					Expect(cond.Reason).To(Equal(reason))
+					Expect(cond.Message).NotTo(ContainSubstring("ghs_leaked"))
+					Expect(cond.Message).NotTo(ContainSubstring("https://"))
+					Expect(cond.Message).NotTo(ContainSubstring("403"))
+
+					before := faulty.creations()
+					faulty.failOn("", nil)
+					for range 3 {
+						res, err := reconcileResult()
+						Expect(err).NotTo(HaveOccurred())
+						Expect(res).To(Equal(reconcile.Result{}))
+					}
+					Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention), "the stop is final")
+					Expect(faulty.creations()).To(Equal(before), "nothing more is written to Git")
+					Expect(openRequests()).To(BeEmpty())
+				}, refusals)
+
+			It("does not record a pull request someone else opened on the branch while it was opening its own", func() {
+				// GitHub answers the create with 422 (one open pull request per head and base) and the adapter
+				// returns the open one: it is recorded only when it carries this request's marker.
+				faulty.beforeOp(opOpen, func() {
+					_, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(fetch()),
+						BaseBranch: mainBranch, Title: "someone else's change", Body: "no marker"})
+					Expect(err).NotTo(HaveOccurred())
+				})
+				_, err := hit(opOpen, nil)
+				Expect(err).NotTo(HaveOccurred())
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+				Expect(got.Status.PullRequest).To(BeNil())
+				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
+					To(Equal(ReasonForeignChangeRequest))
+				crs := openRequests()
+				Expect(crs).To(HaveLen(1))
+				Expect(crs[0].State).To(Equal(providers.ChangeRequestOpen), "someone else's pull request is not touched")
+			})
 
 			It("treats a response that never arrives as a timeout, then adopts the pull request it opened", func() {
 				writeTimeout = 200 * time.Millisecond

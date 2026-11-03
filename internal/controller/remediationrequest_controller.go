@@ -84,8 +84,9 @@ type RemediationRequestReconciler struct {
 	// copy. Nil means the client is used (tests).
 	APIReader client.Reader
 	// OpenRepository opens the Git repository a settings entry names. It is used to re-check a plan before a
-	// write and to close the change request of a superseded one. Nil disables the freshness step of Reconcile
-	// (no Git adapter yet); [RemediationRequestReconciler.EnsureFresh] then fails closed.
+	// write and to close the change request of a superseded one. cmd/main.go sets it from the provider
+	// registry; nil (tests without a Git adapter) disables the freshness step of Reconcile, and
+	// [RemediationRequestReconciler.EnsureFresh] then fails closed.
 	OpenRepository freshness.RepositoryOpener
 	// CheckTimeout bounds the policy check phase: the uncached reads and the source resolver together. Zero
 	// means [DefaultCheckTimeout].
@@ -481,11 +482,10 @@ func (r *RemediationRequestReconciler) EnsureFresh(ctx context.Context, rr *reme
 	}
 	freshCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	err := freshness.Checker{Reader: r.reader(), OpenRepository: r.OpenRepository, Source: r.Source}.Fresh(freshCtx, rr)
-	// A verdict that arrives after the deadline, stale and unusable included, is not acted on: a read may have
-	// been cut short.
-	if err != nil {
-		err = boundErr(ctx, freshCtx, "freshness check", err)
-	}
+	// A verdict that arrives after the deadline, fresh (nil), stale and unusable included, is not acted on: a
+	// read may have been cut short, and a "fresh" from a read that ended with the deadline is not one the
+	// caller may write on.
+	err = boundErr(ctx, freshCtx, "freshness check", err)
 	cancel()
 	phase, reason, message := remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnusable, messageRepositoryUnusable
 	if !errors.Is(err, freshness.ErrRepositoryUnusable) {

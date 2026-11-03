@@ -447,7 +447,8 @@ func TestKedaReadinessUnknownIsWaitedFor(t *testing.T) {
 }
 
 // The wait is bounded: a ScaledObject whose readiness stays unknown for longer than TargetStateTimeout ends
-// the request in NeedsIntervention (ScaledObjectNotReady).
+// the request in NeedsIntervention (ScaledObjectNotReady), whose PolicyAllowed condition says since when it
+// has had that reason: the end of the wait, not its start (#232).
 func TestKedaReadinessUnknownTimesOut(t *testing.T) {
 	w := newKedaWorld(t, []any{kcond("Ready", "Unknown", "")})
 	start := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
@@ -460,18 +461,11 @@ func TestKedaReadinessUnknownTimesOut(t *testing.T) {
 		t.Fatalf("Reconcile = %+v, %v; want a requeue at the end of the wait", res, err)
 	}
 	w.now = start.Add(DefaultTargetStateTimeout)
-	if err := w.reconcile(t); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	got := w.fetch(t)
-	c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPolicyAllowed)
-	if got.Status.Phase != remediationv1alpha1.PhaseNeedsIntervention || c == nil ||
-		c.Reason != string(policy.ReasonScaledObjectNotReady) || c.Message != messageTargetStateTimeout {
-		t.Fatalf("phase %q, PolicyAllowed %+v; want NeedsIntervention/ScaledObjectNotReady after the wait", got.Status.Phase, c)
-	}
+	w.expectTimedOut(t)
 }
 
-// setPolicyAllowed writes a PolicyAllowed condition to the request's status, as an earlier reconcile left it.
+// setPolicyAllowed writes a PolicyAllowed condition to the request's status, as a status written by another
+// path would leave it (none does today).
 func (w *kedaWorld) setPolicyAllowed(t *testing.T, c metav1.Condition) {
 	t.Helper()
 	rr := w.fetch(t)
@@ -498,7 +492,8 @@ func (w *kedaWorld) expectWaiting(t *testing.T, since time.Time) {
 	}
 }
 
-// expectTimedOut checks that the reconcile ends the wait in NeedsIntervention (ScaledObjectNotReady).
+// expectTimedOut checks that the reconcile ends the wait in NeedsIntervention (ScaledObjectNotReady), with
+// PolicyAllowed's lastTransitionTime at the reconcile's time, when the condition took that reason.
 func (w *kedaWorld) expectTimedOut(t *testing.T) {
 	t.Helper()
 	if err := w.reconcile(t); err != nil {
@@ -507,14 +502,17 @@ func (w *kedaWorld) expectTimedOut(t *testing.T) {
 	got := w.fetch(t)
 	c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPolicyAllowed)
 	if got.Status.Phase != remediationv1alpha1.PhaseNeedsIntervention || c == nil ||
-		c.Reason != string(policy.ReasonScaledObjectNotReady) || c.Message != messageTargetStateTimeout {
-		t.Fatalf("phase %q, PolicyAllowed %+v; want NeedsIntervention/ScaledObjectNotReady after the wait", got.Status.Phase, c)
+		c.Reason != string(policy.ReasonScaledObjectNotReady) || c.Message != messageTargetStateTimeout ||
+		!c.LastTransitionTime.Time.Equal(w.now) {
+		t.Fatalf("phase %q, PolicyAllowed %+v; want NeedsIntervention/ScaledObjectNotReady since %v after the wait",
+			got.Status.Phase, c, w.now)
 	}
 }
 
 // An earlier Unknown PolicyAllowed with another reason does not shorten the wait (#232): the wait clock starts
 // when ScaledObjectReadinessUnknown is first written, not at the old condition's lastTransitionTime, so the
-// request still waits the full TargetStateTimeout and is never allowed meanwhile.
+// request still waits the full TargetStateTimeout and is never allowed meanwhile. No path writes such a
+// condition today; this guards a second wait reason or another writer of PolicyAllowed.
 func TestKedaWaitClockStartsWithItsReason(t *testing.T) {
 	w := newKedaWorld(t, []any{kcond("Ready", "Unknown", "")})
 	start := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
@@ -547,6 +545,22 @@ func TestKedaWaitClockKeepsItsStartAcrossReconciles(t *testing.T) {
 		w.now = start.Add(after)
 		w.expectWaiting(t, start)
 	}
+	w.now = start.Add(DefaultTargetStateTimeout)
+	w.expectTimedOut(t)
+}
+
+// A wait whose lastTransitionTime is after now (a clock that went back, a status written by hand) starts again
+// at now (#232): measured from a future time, waited would stay zero and the wait would never time out.
+func TestKedaWaitClockAfterNowStartsAgain(t *testing.T) {
+	w := newKedaWorld(t, []any{kcond("Ready", "Unknown", "")})
+	start := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	w.now = start.Add(time.Hour)
+	w.expectWaiting(t, start.Add(time.Hour))
+
+	w.now = start
+	w.expectWaiting(t, start)
+	w.now = start.Add(DefaultTargetStateTimeout - time.Second)
+	w.expectWaiting(t, start)
 	w.now = start.Add(DefaultTargetStateTimeout)
 	w.expectTimedOut(t)
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -67,6 +68,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		faulty       *faultyGit
 		openErr      error
 		writeTimeout time.Duration
+		// opens counts the repositories opened through the reconciler.
+		opens int
 	)
 
 	manifest := func(limit string) []byte {
@@ -84,6 +87,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				if repo.URL != settings.Spec.Repositories[0].URL {
 					return nil, errors.New("unknown repository")
 				}
+				opens++
 				if openErr != nil {
 					return nil, openErr
 				}
@@ -138,7 +142,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		seq++
 		clock = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 		build = buildPath
-		faulty, openErr, writeTimeout = nil, nil, 0
+		faulty, openErr, writeTimeout, opens = nil, nil, 0, 0
 		err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fx.TargetNamespace}})
 		Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
 
@@ -533,7 +537,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			return head
 		}
 		// stoppedWaiting asserts that the request stopped with reason after its pull request was recorded, and
-		// that the pull request is left open for a person.
+		// that the pull request was closed with nothing pushed to it.
 		stoppedWaiting := func(reason string) {
 			GinkgoHelper()
 			got := fetch()
@@ -545,10 +549,12 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			for _, text := range []string{"b-", "copy", "namePrefix", "320Mi", "memory"} {
 				Expect(cond.Message).NotTo(ContainSubstring(text), "no file content in the status")
 			}
+			Expect(cond.Message).To(HaveSuffix("the pull request was closed"))
+			Expect(cond.Message).NotTo(ContainSubstring("branch was cut"), "the text names the window it was refused in")
 			Expect(meta.IsStatusConditionTrue(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)).To(BeTrue())
 			crs := openRequests()
-			Expect(crs).To(HaveLen(1))
-			Expect(crs[0].State).To(Equal(providers.ChangeRequestOpen), "the pull request is left for a person")
+			Expect(crs).To(HaveLen(1), "no other pull request is opened")
+			Expect(crs[0].State).To(Equal(providers.ChangeRequestClosed), "a refused pull request is closed")
 			Expect(crs[0].HeadSHA).To(Equal(got.Status.PullRequest.HeadSHA), "nothing is pushed or rebuilt")
 		}
 
@@ -641,6 +647,160 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			faulty.failOn("", nil)
 			Expect(reconcileOnce()).To(Succeed())
 			Expect(fetch().Status.PullRequest.RenderedTargetHead).To(Equal(moved))
+		})
+
+		// cutBranch reconciles until the branch exists and returns the commit it was cut at.
+		cutBranch := func() (string, string) {
+			GinkgoHelper()
+			for faulty.count(opCreateBranch) == 0 {
+				Expect(reconcileOnce()).To(Succeed())
+			}
+			branch := freshness.BranchName(fetch())
+			cut, err := git.BranchHead(ctx, branch)
+			Expect(err).NotTo(HaveOccurred())
+			return branch, cut
+		}
+		// stoppedBeforeCommit asserts that the request stopped with reason before any commit or pull request.
+		stoppedBeforeCommit := func(branch, cut, reason string) {
+			GinkgoHelper()
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(reason))
+			Expect(cond.Message).To(HaveSuffix("nothing was committed"))
+			for _, text := range []string{"320Mi", "268435456", "memory"} {
+				Expect(cond.Message).NotTo(ContainSubstring(text), "no file content in the status")
+			}
+			head, err := git.BranchHead(ctx, branch)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(head).To(Equal(cut), "nothing was committed")
+			Expect(faulty.count(opCommit)).To(BeZero())
+			Expect(openRequests()).To(BeEmpty())
+		}
+
+		It("commits and opens the pull request when an unrelated merge moved the target branch after the cut", func() {
+			branch, cut := cutBranch()
+			moved, err := git.Push(mainBranch, "README.yaml", []byte("a: 2\n"))
+			Expect(err).NotTo(HaveOccurred())
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "nothing is refused")
+			Expect(faulty.count(opCommit)).To(Equal(1))
+			crs := openRequests()
+			Expect(crs).To(HaveLen(1))
+			Expect(crs[0].State).To(Equal(providers.ChangeRequestOpen))
+			file, err := git.ReadFile(ctx, crs[0].HeadSHA, sourcePath)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(file.Data).To(Equal(manifest("384Mi")))
+			Expect(cut).NotTo(Equal(moved), "the branch was cut before the merge")
+			Expect(crs[0].HeadBranch).To(Equal(branch))
+		})
+
+		It("stops before the commit when another field of the target file was edited after the cut", func() {
+			branch, cut := cutBranch()
+			// The freshness check still sees the previous limit, and the edit alone renders fine; merging would
+			// combine it with the change, which no render saw.
+			_, err := git.Push(mainBranch, sourcePath, withMemoryRequest(manifest("256Mi"), "320Mi"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reconcileOnce()).To(Succeed())
+			stoppedBeforeCommit(branch, cut, ReasonTargetFileDiverged)
+		})
+
+		It("stops before the commit when the previous value is spelled otherwise after the cut", func() {
+			// The patcher reads 268435456 as 256Mi, so the planned change of the edited file is byte for byte the
+			// commit; only the file the branch was cut from tells the two apart.
+			branch, cut := cutBranch()
+			_, err := git.Push(mainBranch, sourcePath, manifest("268435456"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reconcileOnce()).To(Succeed())
+			stoppedBeforeCommit(branch, cut, ReasonTargetFileDiverged)
+		})
+
+		It("retries, without stopping, when the file on the branch cannot be read after the target file was edited", func() {
+			branch, cut := cutBranch()
+			_, err := git.Push(mainBranch, sourcePath, withMemoryRequest(manifest("256Mi"), "320Mi"))
+			Expect(err).NotTo(HaveOccurred())
+			// The read of the step, which follows its read of the branch head, not the freshness check's read.
+			faulty.failOnAfter(opReadFile+" "+sourcePath, opBranchHead+" "+branch,
+				&providers.RetryableError{Err: errors.New("server error")})
+			err = reconcileOnce()
+			Expect(err).To(HaveOccurred())
+			Expect(retryable(err)).To(BeTrue())
+			Expect(faulty.faults()).To(Equal(1))
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed read decides nothing")
+			Expect(faulty.count(opCommit)).To(BeZero())
+
+			faulty.failOn("", nil)
+			Expect(reconcileOnce()).To(Succeed())
+			stoppedBeforeCommit(branch, cut, ReasonTargetFileDiverged)
+		})
+
+		It("cuts the branch at the head the freshness check found the plan fresh at", func() {
+			checked, err := git.BranchHead(ctx, mainBranch)
+			Expect(err).NotTo(HaveOccurred())
+			// A merge after the freshness check, right before the step looks for the pull request: the step
+			// does not read the head again, so the branch starts where the file was checked.
+			for !controllerutil.ContainsFinalizer(fetch(), FinalizerName) {
+				Expect(reconcileOnce()).To(Succeed())
+			}
+			faulty.beforeOp(opFind, func() {
+				defer GinkgoRecover()
+				_, err := git.Push(mainBranch, sourcePath, withMemoryRequest(manifest("256Mi"), "320Mi"))
+				Expect(err).NotTo(HaveOccurred())
+			})
+			heads := faulty.count(opBranchHead + " " + mainBranch)
+			Expect(reconcileOnce()).To(Succeed())
+			Expect(faulty.count(opCreateBranch)).To(Equal(1))
+			cut, err := git.BranchHead(ctx, freshness.BranchName(fetch()))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cut).To(Equal(checked))
+			Expect(faulty.count(opBranchHead+" "+mainBranch)-heads).To(Equal(2), "only the freshness check reads the head")
+		})
+
+		It("fails closed when the freshness check returns no head for a waiting pull request", func() {
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			got.Status.PullRequest.RenderedTargetHead = ""
+			_, err := reconciler().renderWaiting(ctx, got, freshness.Result{})
+			Expect(err).To(MatchError(errNoHead), "no head is never a pass")
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		})
+
+		It("closes a waiting pull request whose target file the patcher now refuses, as PatchRefused", func() {
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			// An anchor on the path: the freshness check still reads the previous limit, the patcher refuses.
+			_, err := git.Push(mainBranch, sourcePath, bytes.Replace(manifest("256Mi"),
+				[]byte("limits:\n"), []byte("limits: &l\n"), 1))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reconcileOnce()).To(Succeed())
+			stoppedWaiting(ReasonPatchRefused)
+		})
+
+		It("keeps a waiting pull request open and retries when closing it after a refusal fails", func() {
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			addOverlay()
+			faulty.failOn(opClose, &providers.RetryableError{Err: errors.New("server error")})
+			err := reconcileOnce()
+			Expect(err).To(HaveOccurred())
+			Expect(retryable(err)).To(BeTrue())
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "a failed close is retried")
+			Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+
+			faulty.failOn("", nil)
+			Expect(reconcileOnce()).To(Succeed())
+			stoppedWaiting(string(semdiff.ReasonOtherObjectChanged))
+			Expect(fetch().Status.PullRequest.HeadSHA).To(Equal(got.Status.PullRequest.HeadSHA))
+		})
+
+		It("opens the repository once for the freshness check and the render of a waiting pull request", func() {
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			_, err := git.Push(mainBranch, "README.yaml", []byte("a: 2\n"))
+			Expect(err).NotTo(HaveOccurred())
+			opens = 0
+			Expect(reconcileOnce()).To(Succeed())
+			// One for the look at the pull request, one for the freshness check, which the render reuses.
+			Expect(opens).To(Equal(2))
 		})
 	})
 

@@ -18,7 +18,7 @@ limitations under the License.
 // (design sections 5.1 and 6, ADR-0003, ADR-0011).
 //
 // [ComputeDigest] gives the plan digest that is stored in status.planDigest when the plan is fixed.
-// [Checker.Fresh] runs right before every write and answers one question: is the world still the one the
+// [Checker.Check] runs right before every write and answers one question: is the world still the one the
 // digest was made for? It is fail closed. Only a definite change is a [StaleError], which makes the request
 // Superseded; any other error (an API or Git host failure, a paused system, a missing digest) also stops the
 // write but says nothing about the plan, so the caller retries. The exception is [ErrRepositoryUnusable]:
@@ -216,7 +216,8 @@ func ComputeDigest(rr *v1alpha1.RemediationRequest, src *v1alpha1.ResolvedSource
 	return digest.Compute(in), nil
 }
 
-// RepositoryOpener opens the Git repository a settings entry names.
+// RepositoryOpener opens the Git repository a settings entry names. The provider it returns is not bound to
+// the context it was opened with, so [Result.Git] can be used after the check.
 type RepositoryOpener func(ctx context.Context, repo v1alpha1.GitRepository) (providers.GitProvider, error)
 
 // SourceResolver maps the target to its file in Git (ADR-0012). It is the resolver the policy check uses;
@@ -232,54 +233,60 @@ type Checker struct {
 	Reader client.Reader
 	// OpenRepository opens the repository of the request's source.
 	OpenRepository RepositoryOpener
-	// Source is the resolver the policy check used. Fresh maps the target again with it before the file is
+	// Source is the resolver the policy check used. Check maps the target again with it before the file is
 	// read, so a write never goes to a file that no longer declares the target. Nil fails closed.
 	Source SourceResolver
 }
 
-// Fresh returns nil only when every input of the plan is unchanged since the digest was made: the same policy
-// UID and generation, the same settings entry, the same target object, and the target file on the target
-// branch still holds the previous value. A merge to the target branch that does not touch the file leaves the
-// plan fresh.
-//
-// It returns a [*StaleError] when an input definitely changed, [ErrPaused] when settings pause writes, and
-// another error when an input could not be read. In every case except nil the caller must not write.
-func (c Checker) Fresh(ctx context.Context, rr *v1alpha1.RemediationRequest) error {
-	_, err := c.FreshAt(ctx, rr)
-	return err
+// Result is what a check that found the plan fresh read: the head of the target branch, the target file at
+// that head and the repository it was read from, so the caller can render the change at that commit without
+// opening the repository or reading the head and the file again.
+type Result struct {
+	// Head is the head of the target branch the target file was checked at.
+	Head string
+	// File is the content of the target file at Head.
+	File []byte
+	// Git is the repository of the plan's settings entry, as the check opened it.
+	Git providers.GitProvider
 }
 
-// FreshAt is [Checker.Fresh] that also returns the head of the target branch the target file was checked at,
-// so the caller can render the change at that commit without reading the head again. The head is set only
-// when the error is nil.
-func (c Checker) FreshAt(ctx context.Context, rr *v1alpha1.RemediationRequest) (string, error) {
+// Check returns a Result and a nil error only when every input of the plan is unchanged since the digest
+// was made: the same policy UID and generation, the same settings entry, the same target object, and the
+// target file on the target branch still holds the previous value. A merge to the target branch that does
+// not touch the file leaves the plan fresh.
+//
+// It returns a [*StaleError] when an input definitely changed, [ErrPaused] when settings pause writes, and
+// another error when an input could not be read. In every case except nil the caller must not write, and the
+// Result is empty.
+func (c Checker) Check(ctx context.Context, rr *v1alpha1.RemediationRequest) (Result, error) {
 	src := rr.Status.Source
 	if rr.Status.PlanDigest == "" || src == nil {
-		return "", errors.New("the request has no plan digest")
+		return Result{}, errors.New("the request has no plan digest")
 	}
 
 	pol, settings, repo, err := c.loadPlan(ctx, rr)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 
 	live, err := c.checkTarget(ctx, rr, pol)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	commit, observed, err := c.checkSource(ctx, rr, pol, settings)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
-	if err := c.checkFile(ctx, rr, repo, commit); err != nil {
-		return "", err
+	git, file, err := c.checkFile(ctx, rr, repo, commit)
+	if err != nil {
+		return Result{}, err
 	}
 	// The mapping and the Git reads (up to readTimeout each) take long. Revalidate last what they were based
 	// on: the target (UID and resource version, since the mapping compared the live object with Git) and the
 	// Flux objects the mapping saw. If any changed meanwhile, the checks above describe different objects: not
 	// fresh, not stale; the caller retries.
 	if err := c.recheckInputs(ctx, rr, live, observed); err != nil {
-		return "", err
+		return Result{}, err
 	}
 	// Read the policy and the settings once more, last, before saying "fresh": a pause, a tightened or deleted
 	// policy, or a changed repository entry meanwhile must not pass. It is not decided
@@ -289,18 +296,18 @@ func (c Checker) FreshAt(ctx context.Context, rr *v1alpha1.RemediationRequest) (
 		// A read that answered as the context ended may have been cut short, and "fresh" has a deadline of its
 		// own: nil is returned only while the context is live.
 		if err := ctx.Err(); err != nil {
-			return "", fmt.Errorf("the plan was checked, but the check ran out of time: %w", err)
+			return Result{}, fmt.Errorf("the plan was checked, but the check ran out of time: %w", err)
 		}
 		// checkFile compared the mapped commit with the head before and after its read, so it is the head the
-		// file was checked at.
-		return commit, nil
+		// file was read and checked at.
+		return Result{Head: commit, File: file, Git: git}, nil
 	case errors.Is(err, ErrPaused):
-		return "", err
+		return Result{}, err
 	default:
 		if _, isStale := errors.AsType[*StaleError](err); isStale {
-			return "", errors.New("the policy or the settings changed while the plan was checked, checking again")
+			return Result{}, errors.New("the policy or the settings changed while the plan was checked, checking again")
 		}
-		return "", err
+		return Result{}, err
 	}
 }
 
@@ -460,65 +467,66 @@ func (c Checker) checkTarget(ctx context.Context, rr *v1alpha1.RemediationReques
 
 // checkFile reads the target file at the head of the target branch, not of the pull request branch, so a merge
 // that changed the value is seen, and checks that it still holds the previous value. It reads the head again
-// after the file and fails with a retry error if the branch moved.
+// after the file and fails with a retry error if the branch moved. On a pass it returns the repository it
+// opened and the file it read.
 func (c Checker) checkFile(ctx context.Context, rr *v1alpha1.RemediationRequest, repo v1alpha1.GitRepository,
-	mapped string) error {
+	mapped string) (providers.GitProvider, []byte, error) {
 	src := rr.Status.Source
 	field, err := sourcemap.FieldFor(rr.Spec.Action, rr.Spec.TargetRef)
 	if err != nil {
-		return fmt.Errorf("locate the field of the action: %w", err)
+		return nil, nil, fmt.Errorf("locate the field of the action: %w", err)
 	}
 	previous, ok := sourcemap.PreviousValue(rr.Spec.Action)
 	if !ok {
-		return errors.New("the action has no previous value")
+		return nil, nil, errors.New("the action has no previous value")
 	}
 	if c.OpenRepository == nil {
-		return errors.New("no Git provider is available")
+		return nil, nil, errors.New("no Git provider is available")
 	}
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	git, err := c.OpenRepository(ctx, repo)
 	if providers.IsInvalidConfig(err) {
-		return ErrRepositoryUnusable
+		return nil, nil, ErrRepositoryUnusable
 	}
 	if err != nil {
-		return provider("open the repository", err)
+		return nil, nil, provider("open the repository", err)
 	}
 	head, err := git.BranchHead(ctx, string(src.TargetBranch))
 	if err != nil {
-		return provider("read the head of the target branch", err)
+		return nil, nil, provider("read the head of the target branch", err)
 	}
 	// The mapping and this read must see one commit. If the branch moved since the mapping, the mapped source
 	// may describe another tree than the file read here: not fresh, not stale; the caller retries.
 	if head != mapped {
-		return errors.New("the target branch moved while its source was mapped, checking again")
+		return nil, nil, errors.New("the target branch moved while its source was mapped, checking again")
 	}
 	file, err := git.ReadFile(ctx, head, string(src.Path))
 	// A failed read is returned as it is, so a delay the host asked for (Retry-After) is kept and the host is
 	// not called again at once.
 	if err != nil && !errors.Is(err, providers.ErrNotFound) {
-		return provider("read the target file on the target branch", err)
+		return nil, nil, provider("read the target file on the target branch", err)
 	}
 	// The read can take long. If the branch moved meanwhile, the file (or its absence) may not be the one at
 	// head, so neither a pass nor a "no longer exists" is trusted: not fresh, not stale; the caller retries.
 	// This check comes before the outcome of the read is looked at.
 	after, headErr := git.BranchHead(ctx, string(src.TargetBranch))
 	if headErr != nil {
-		return provider("read the head of the target branch", headErr)
+		return nil, nil, provider("read the head of the target branch", headErr)
 	}
 	if after != head {
-		return errors.New("the target branch moved while the target file was read, checking again")
+		return nil, nil, errors.New("the target branch moved while the target file was read, checking again")
 	}
 	if err != nil { // ErrNotFound, the only error left
-		return stale(ReasonTargetFileChanged, "%s no longer exists on the target branch", src.Path)
+		return nil, nil, stale(ReasonTargetFileChanged, "%s no longer exists on the target branch", src.Path)
 	}
 	got, found, err := sourcemap.ReadField(file.Data, rr.Spec.TargetRef, field)
 	if err != nil {
-		return stale(ReasonTargetFileChanged, "%s on the target branch no longer declares the target alone: %v", src.Path, err)
+		return nil, nil, stale(ReasonTargetFileChanged, "%s on the target branch no longer declares the target alone: %v", src.Path, err)
 	}
 	if !found || !field.Equals(got, previous) {
-		return stale(ReasonTargetFileChanged, "%s on the target branch no longer holds the previous value of %s",
+		return nil, nil, stale(ReasonTargetFileChanged, "%s on the target branch no longer holds the previous value of %s",
 			src.Path, field)
 	}
-	return nil
+	return git, file.Data, nil
 }

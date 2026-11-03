@@ -86,7 +86,7 @@ type RemediationRequestReconciler struct {
 	// OpenRepository opens the Git repository a settings entry names. It is used to re-check a plan before a
 	// write and to close the change request of a superseded one. cmd/main.go sets it from the provider
 	// registry; nil (tests without a Git adapter) disables the freshness step of Reconcile, and
-	// [RemediationRequestReconciler.EnsureFresh] then fails closed.
+	// the freshness check (ensureFresh) then fails closed.
 	OpenRepository freshness.RepositoryOpener
 	// CheckTimeout bounds the policy check phase: the uncached reads and the source resolver together. Zero
 	// means [DefaultCheckTimeout].
@@ -141,7 +141,7 @@ func boundErr(parent, phase context.Context, name string, err error) error {
 	return err
 }
 
-// ErrSuperseded is returned by EnsureFresh when the plan went stale: the request is now Superseded and its
+// ErrSuperseded is returned by ensureFresh when the plan went stale: the request is now Superseded and its
 // change request is closed. The caller must not write.
 var ErrSuperseded = errors.New("the plan is superseded")
 
@@ -476,7 +476,7 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		r.now().After(rr.Status.Deadline.Time) {
 		return r.expire(ctx, rr)
 	}
-	targetHead, err := r.ensureFresh(ctx, rr)
+	fresh, err := r.ensureFresh(ctx, rr)
 	switch {
 	case errors.Is(err, ErrSuperseded):
 		return ctrl.Result{}, nil
@@ -489,51 +489,45 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 	case err == nil && outcome == prClosed:
 		return r.rejected(ctx, rr)
 	case err == nil:
-		return r.advance(ctx, rr, targetHead)
+		return r.advance(ctx, rr, fresh)
 	default:
 		return r.waitOrFail(ctx, rr, err)
 	}
 }
 
-// EnsureFresh must run right before every Git write of a request (design section 6). It returns nil only when
-// the plan is fresh. When an input of the plan digest changed, it closes the request's change request through
-// the provider, sets the phase to Superseded and returns ErrSuperseded; the branch is never rebuilt or
-// force-pushed. Any other error (an input could not be read, writes are paused) means "not fresh": the caller
-// must not write and may retry.
+// ensureFresh must run right before every Git write of a request (design section 6). It returns a nil error
+// only when the plan is fresh, with what the freshness check read (the target branch head, the target file
+// there and the repository), so the write and the render check work on that commit. When an input of the plan
+// digest changed, it closes the request's change request through the provider, sets the phase to Superseded
+// and returns ErrSuperseded; the branch is never rebuilt or force-pushed. Any other error (an input could not
+// be read, writes are paused) means "not fresh": the caller must not write and may retry.
 //
 // It is idempotent (invariant 5): closing a closed change request succeeds, and a request that is already
 // Superseded returns ErrSuperseded without calling the provider again. The change request is closed before
 // the status is written, so a crash in between leaves a retry that closes it again as a no-op.
-func (r *RemediationRequestReconciler) EnsureFresh(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	_, err := r.ensureFresh(ctx, rr)
-	return err
-}
-
-// ensureFresh is EnsureFresh that also returns the head of the target branch the plan was found fresh at, for
-// the render check (design section 6). The head is set only when the error is nil.
 func (r *RemediationRequestReconciler) ensureFresh(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
-	string, error) {
+	freshness.Result, error) {
 	if rr.Status.Phase == remediationv1alpha1.PhaseSuperseded {
-		return "", ErrSuperseded
+		return freshness.Result{}, ErrSuperseded
 	}
 	if !beforeMerge(rr.Status.Phase) {
-		return "", fmt.Errorf("a request in phase %q takes no write that needs a fresh plan", rr.Status.Phase)
+		return freshness.Result{}, fmt.Errorf("a request in phase %q takes no write that needs a fresh plan", rr.Status.Phase)
 	}
 	freshCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
-	head, err := freshness.Checker{Reader: r.reader(), OpenRepository: r.OpenRepository, Source: r.Source}.FreshAt(freshCtx, rr)
+	fresh, err := freshness.Checker{Reader: r.reader(), OpenRepository: r.OpenRepository, Source: r.Source}.Check(freshCtx, rr)
 	// A verdict that arrives after the deadline, fresh (nil), stale and unusable included, is not acted on: a
 	// read may have been cut short, and a "fresh" from a read that ended with the deadline is not one the
 	// caller may write on.
 	err = boundErr(ctx, freshCtx, "freshness check", err)
 	cancel()
 	if err == nil {
-		return head, nil
+		return fresh, nil
 	}
 	phase, reason, message := remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnusable, messageRepositoryUnusable
 	if !errors.Is(err, freshness.ErrRepositoryUnusable) {
 		staleErr, ok := errors.AsType[*freshness.StaleError](err)
 		if !ok {
-			return "", err
+			return freshness.Result{}, err
 		}
 		phase, reason, message = remediationv1alpha1.PhaseSuperseded, staleErr.Reason, staleErr.Message
 		// The whole cleanup shares one deadline: reading the settings, opening the repository, finding and
@@ -560,7 +554,7 @@ func (r *RemediationRequestReconciler) ensureFresh(ctx context.Context, rr *reme
 			message = "The plan is stale and the repository it was made for is not configured any more; " +
 				"its change request, if any, was not closed"
 		case err != nil:
-			return "", err
+			return freshness.Result{}, err
 		}
 	}
 	rr.Status.Phase = phase
@@ -572,11 +566,11 @@ func (r *RemediationRequestReconciler) ensureFresh(ctx context.Context, rr *reme
 		ObservedGeneration: rr.Generation,
 	})
 	if err := r.Status().Update(ctx, rr); err != nil {
-		return "", fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+		return freshness.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
 	logf.FromContext(ctx).Info("Superseded RemediationRequest", "remediationRequest", client.ObjectKeyFromObject(rr),
 		"phase", phase, "reason", reason)
-	return "", ErrSuperseded
+	return freshness.Result{}, ErrSuperseded
 }
 
 // closeChangeRequest closes the request's change request, if it has one, in the repository the plan was made

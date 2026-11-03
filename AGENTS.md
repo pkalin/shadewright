@@ -94,7 +94,7 @@ Every issue names the ADRs it is tied to:
 ## Commands
 
 ```bash
-make manifests generate   # after editing api/**/*_types.go or markers
+make manifests generate   # after editing api/**/*_types.go or markers; CI fails if config/ or api/ is stale
 make api-docs             # regenerate docs/reference/api.md from the API types; CI fails if it is stale
 make lint-fix             # golangci-lint, config in .golangci.yml
 make test                 # unit + envtest (real kube-apiserver and etcd, no cluster needed)

@@ -87,9 +87,11 @@ spec:
                       description: github holds GitHub App settings.
                       properties:
                         appClientID:
-                          description: appClientID is the GitHub App's client ID.
+                          description: 'appClientID is the GitHub App''s client ID:
+                            1 to 64 letters, digits, ''.'', ''_'' or ''-''.'
                           maxLength: 64
                           minLength: 1
+                          pattern: ^[A-Za-z0-9._-]+$
                           type: string
                         installationID:
                           description: installationID is the App's installation that
@@ -107,10 +109,17 @@ spec:
                                 keyID:
                                   description: |-
                                     keyID is the key identifier, with or without a version, for example
-                                    https://<vault>.vault.azure.net/keys/github-app.
+                                    https://<vault>.vault.azure.net/keys/github-app. It follows the Key Vault naming rules, as the signer
+                                    does: a vault name of 3 to 24 lower-case letters, digits and hyphens that starts with a letter, ends with
+                                    a letter or digit and has no consecutive hyphens; a key name of 1 to 127 letters, digits and hyphens; an
+                                    optional version of 32 lower-case hexadecimal digits.
                                   maxLength: 2048
-                                  pattern: ^https://[a-z0-9-]+\.vault\.azure\.net/keys/[A-Za-z0-9-]+(/[0-9a-f]{32})?$
+                                  pattern: ^https://[a-z][a-z0-9-]{1,22}[a-z0-9]\.vault\.azure\.net/keys/[A-Za-z0-9-]{1,127}(/[0-9a-f]{32})?$
                                   type: string
+                                  x-kubernetes-validations:
+                                  - message: the vault name must not contain consecutive
+                                      hyphens
+                                    rule: '!self.matches(''^https://[a-z0-9-]*--'')'
                               required:
                               - keyID
                               type: object
@@ -137,8 +146,9 @@ spec:
                       type: string
                     targetBranch:
                       default: main
-                      description: targetBranch is the only branch pull requests may
-                        target. The branch Flux tracks must equal it.
+                      description: |-
+                        targetBranch is the only branch pull requests may target. The branch Flux tracks must equal it. For
+                        GitHub it starts with a letter or digit, has at most 200 characters and does not end with '.'.
                       maxLength: 255
                       minLength: 1
                       pattern: ^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$
@@ -152,7 +162,9 @@ spec:
                     url:
                       description: |-
                         url is the HTTPS clone URL, without credentials, query or fragment. It must match the URL of the Flux
-                        source that delivers a target, or no change is made.
+                        source that delivers a target, or no change is made. For GitHub it is https://github.com/<owner>/<repo>
+                        in lower case, without .git: an owner of 1 to 39 letters, digits and hyphens that starts with a letter or
+                        digit, and a repository name of 1 to 100 letters, digits, '.', '_' or '-' other than '.' and '..'.
                       maxLength: 512
                       pattern: ^https://[a-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9_~-][A-Za-z0-9_.~-]*)+$
                       type: string
@@ -166,9 +178,15 @@ spec:
                     rule: 'self.provider == ''GitHub'' ? has(self.github) : !has(self.github)'
                   - message: a GitHub repository URL must be https://github.com/<owner>/<repo>
                       in lower case, without .git
-                    rule: self.provider != 'GitHub' || (self.url.matches('^https://github[.]com/[a-z0-9-]+/[a-z0-9_.-]+$')
+                    rule: self.provider != 'GitHub' || (self.url.matches('^https://github[.]com/[a-z0-9][a-z0-9-]{0,38}/[a-z0-9_.-]{1,100}$')
                       && !self.url.endsWith('.git') && !self.url.endsWith('/.') &&
                       !self.url.endsWith('/..'))
+                  - fieldPath: .targetBranch
+                    message: a GitHub target branch must start with a letter or digit,
+                      have at most 200 characters and not end with '.'
+                    rule: self.provider != 'GitHub' || !has(self.targetBranch) ||
+                      (self.targetBranch.matches('^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$')
+                      && !self.targetBranch.endsWith('.'))
                 maxItems: 16
                 type: array
                 x-kubernetes-list-map-keys:

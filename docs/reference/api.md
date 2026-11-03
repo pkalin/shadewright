@@ -162,7 +162,7 @@ Used by: [Signer](#signer).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `keyID` | string | Yes | keyID is the key identifier, with or without a version, for example https://&lt;vault>.vault.azure.net/keys/github-app.<br>Maximum length: 2048<br>Pattern: `^https://[a-z0-9-]+\.vault\.azure\.net/keys/[A-Za-z0-9-]+(/[0-9a-f]{32})?$` |
+| `keyID` | string | Yes | keyID is the key identifier, with or without a version, for example https://&lt;vault>.vault.azure.net/keys/github-app. It follows the Key Vault naming rules, as the signer does: a vault name of 3 to 24 lower-case letters, digits and hyphens that starts with a letter, ends with a letter or digit and has no consecutive hyphens; a key name of 1 to 127 letters, digits and hyphens; an optional version of 32 lower-case hexadecimal digits.<br>Maximum length: 2048<br>Pattern: `^https://[a-z][a-z0-9-]{1,22}[a-z0-9]\.vault\.azure\.net/keys/[A-Za-z0-9-]{1,127}(/[0-9a-f]{32})?$`<br>Rule: the vault name must not contain consecutive hyphens (`!self.matches('^https://[a-z0-9-]*--')`) |
 
 ### GitBranch
 
@@ -216,7 +216,7 @@ Used by: [GitRepository](#gitrepository).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `appClientID` | string | Yes | appClientID is the GitHub App's client ID.<br>Maximum length: 64<br>Minimum length: 1 |
+| `appClientID` | string | Yes | appClientID is the GitHub App's client ID: 1 to 64 letters, digits, '.', '_' or '-'.<br>Maximum length: 64<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9._-]+$` |
 | `installationID` | integer | Yes | installationID is the App's installation that covers this repository.<br>Minimum: 1 |
 | `signer` | [Signer](#signer) | Yes | signer says where the App's private key is.<br>Rule: a signer must be configured |
 
@@ -260,15 +260,16 @@ name, so the model never chooses a URL or credentials.
 Validation rules:
 
 - github must be set if and only if provider is GitHub: `self.provider == 'GitHub' ? has(self.github) : !has(self.github)`
-- a GitHub repository URL must be https://github.com/&lt;owner>/&lt;repo> in lower case, without .git: `self.provider != 'GitHub' || (self.url.matches('^https://github[.]com/[a-z0-9-]+/[a-z0-9_.-]+$') && !self.url.endsWith('.git') && !self.url.endsWith('/.') && !self.url.endsWith('/..'))`
+- a GitHub repository URL must be https://github.com/&lt;owner>/&lt;repo> in lower case, without .git: `self.provider != 'GitHub' || (self.url.matches('^https://github[.]com/[a-z0-9][a-z0-9-]{0,38}/[a-z0-9_.-]{1,100}$') && !self.url.endsWith('.git') && !self.url.endsWith('/.') && !self.url.endsWith('/..'))`
+- a GitHub target branch must start with a letter or digit, have at most 200 characters and not end with '.': `self.provider != 'GitHub' || !has(self.targetBranch) || (self.targetBranch.matches('^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$') && !self.targetBranch.endsWith('.'))`
 
 Used by: [RemediationSettingsSpec](#remediationsettingsspec).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | [Name](#name) | Yes | name is how policies and requests refer to the repository.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
-| `url` | string | Yes | url is the HTTPS clone URL, without credentials, query or fragment. It must match the URL of the Flux source that delivers a target, or no change is made.<br>Maximum length: 512<br>Pattern: `^https://[a-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9_~-][A-Za-z0-9_.~-]*)+$` |
-| `targetBranch` | [GitBranch](#gitbranch) | No | targetBranch is the only branch pull requests may target. The branch Flux tracks must equal it.<br>Default: `main`<br>Maximum length: 255<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$`<br>Rule: must be a plain branch name, not HEAD, refs/..., shadewright/... or one containing '..' or '.lock' |
+| `url` | string | Yes | url is the HTTPS clone URL, without credentials, query or fragment. It must match the URL of the Flux source that delivers a target, or no change is made. For GitHub it is https://github.com/&lt;owner>/&lt;repo> in lower case, without .git: an owner of 1 to 39 letters, digits and hyphens that starts with a letter or digit, and a repository name of 1 to 100 letters, digits, '.', '_' or '-' other than '.' and '..'.<br>Maximum length: 512<br>Pattern: `^https://[a-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9_~-][A-Za-z0-9_.~-]*)+$` |
+| `targetBranch` | [GitBranch](#gitbranch) | No | targetBranch is the only branch pull requests may target. The branch Flux tracks must equal it. For GitHub it starts with a letter or digit, has at most 200 characters and does not end with '.'.<br>Default: `main`<br>Maximum length: 255<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$`<br>Rule: must be a plain branch name, not HEAD, refs/..., shadewright/... or one containing '..' or '.lock' |
 | `provider` | [GitProviderType](#gitprovidertype) | Yes | provider selects the Git hosting adapter.<br>One of `GitHub` |
 | `github` | [GitHubRepository](#githubrepository) | No | github holds GitHub App settings. |
 

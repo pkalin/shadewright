@@ -33,9 +33,13 @@ const (
 // AzureKeyVaultKey is a key in Azure Key Vault that may only sign (ADR-0006).
 type AzureKeyVaultKey struct {
 	// keyID is the key identifier, with or without a version, for example
-	// https://<vault>.vault.azure.net/keys/github-app.
+	// https://<vault>.vault.azure.net/keys/github-app. It follows the Key Vault naming rules, as the signer
+	// does: a vault name of 3 to 24 lower-case letters, digits and hyphens that starts with a letter, ends with
+	// a letter or digit and has no consecutive hyphens; a key name of 1 to 127 letters, digits and hyphens; an
+	// optional version of 32 lower-case hexadecimal digits.
 	// +kubebuilder:validation:MaxLength=2048
-	// +kubebuilder:validation:Pattern=`^https://[a-z0-9-]+\.vault\.azure\.net/keys/[A-Za-z0-9-]+(/[0-9a-f]{32})?$`
+	// +kubebuilder:validation:Pattern=`^https://[a-z][a-z0-9-]{1,22}[a-z0-9]\.vault\.azure\.net/keys/[A-Za-z0-9-]{1,127}(/[0-9a-f]{32})?$`
+	// +kubebuilder:validation:XValidation:rule="!self.matches('^https://[a-z0-9-]*--')",message="the vault name must not contain consecutive hyphens"
 	// +required
 	KeyID string `json:"keyID"`
 }
@@ -50,9 +54,10 @@ type Signer struct {
 
 // GitHubRepository holds the GitHub App settings for one repository.
 type GitHubRepository struct {
-	// appClientID is the GitHub App's client ID.
+	// appClientID is the GitHub App's client ID: 1 to 64 letters, digits, '.', '_' or '-'.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+$`
 	// +required
 	AppClientID string `json:"appClientID"`
 
@@ -69,20 +74,24 @@ type GitHubRepository struct {
 // GitRepository is a repository Shadewright may open pull requests in. Requests and policies refer to it by
 // name, so the model never chooses a URL or credentials.
 // +kubebuilder:validation:XValidation:rule="self.provider == 'GitHub' ? has(self.github) : !has(self.github)",message="github must be set if and only if provider is GitHub"
-// +kubebuilder:validation:XValidation:rule="self.provider != 'GitHub' || (self.url.matches('^https://github[.]com/[a-z0-9-]+/[a-z0-9_.-]+$') && !self.url.endsWith('.git') && !self.url.endsWith('/.') && !self.url.endsWith('/..'))",message="a GitHub repository URL must be https://github.com/<owner>/<repo> in lower case, without .git"
+// +kubebuilder:validation:XValidation:rule="self.provider != 'GitHub' || (self.url.matches('^https://github[.]com/[a-z0-9][a-z0-9-]{0,38}/[a-z0-9_.-]{1,100}$') && !self.url.endsWith('.git') && !self.url.endsWith('/.') && !self.url.endsWith('/..'))",message="a GitHub repository URL must be https://github.com/<owner>/<repo> in lower case, without .git"
+// +kubebuilder:validation:XValidation:rule="self.provider != 'GitHub' || !has(self.targetBranch) || (self.targetBranch.matches('^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$') && !self.targetBranch.endsWith('.'))",message="a GitHub target branch must start with a letter or digit, have at most 200 characters and not end with '.'",fieldPath=".targetBranch"
 type GitRepository struct {
 	// name is how policies and requests refer to the repository.
 	// +required
 	Name Name `json:"name"`
 
 	// url is the HTTPS clone URL, without credentials, query or fragment. It must match the URL of the Flux
-	// source that delivers a target, or no change is made.
+	// source that delivers a target, or no change is made. For GitHub it is https://github.com/<owner>/<repo>
+	// in lower case, without .git: an owner of 1 to 39 letters, digits and hyphens that starts with a letter or
+	// digit, and a repository name of 1 to 100 letters, digits, '.', '_' or '-' other than '.' and '..'.
 	// +kubebuilder:validation:MaxLength=512
 	// +kubebuilder:validation:Pattern=`^https://[a-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9_~-][A-Za-z0-9_.~-]*)+$`
 	// +required
 	URL string `json:"url"`
 
-	// targetBranch is the only branch pull requests may target. The branch Flux tracks must equal it.
+	// targetBranch is the only branch pull requests may target. The branch Flux tracks must equal it. For
+	// GitHub it starts with a letter or digit, has at most 200 characters and does not end with '.'.
 	// +kubebuilder:default=main
 	// +optional
 	TargetBranch GitBranch `json:"targetBranch,omitempty"`

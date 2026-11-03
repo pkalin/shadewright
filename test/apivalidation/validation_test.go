@@ -516,6 +516,31 @@ var _ = Describe("RemediationSettings", func() {
 		Entry("Shadewright's own branch", "shadewright/11111111-1111-4111-8111-111111111111"),
 	)
 
+	DescribeTable("refuses target branches the GitHub adapter refuses",
+		func(branch string) {
+			s := fx.RemediationSettings()
+			s.Spec.Repositories[0].TargetBranch = v1alpha1.GitBranch(branch)
+			expectRefused(s, "spec.repositories[0].targetBranch")
+		},
+		Entry("leading underscore", "_main"),
+		Entry("longer than 200 characters", "b"+strings.Repeat("x", 200)),
+		Entry("trailing dot", "main."),
+		Entry("trailing dot after a slash", "release/v1."),
+	)
+
+	DescribeTable("accepts target branches at the GitHub adapter's bounds",
+		func(branch string) {
+			s := fx.RemediationSettings()
+			s.Spec.Repositories[0].TargetBranch = v1alpha1.GitBranch(branch)
+			Expect(k8sClient.Create(ctx, s)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, s)).To(Succeed())
+		},
+		Entry("200 characters", "b"+strings.Repeat("x", 199)),
+		Entry("nested with dots and underscores", "release/v1.2_rc"),
+		Entry("underscore after a slash", "release/_next"),
+		Entry("digit first", "2026-release"),
+	)
+
 	DescribeTable("refuses repository URLs that carry credentials or point elsewhere",
 		func(url, msg string) {
 			s := fx.RemediationSettings()
@@ -532,6 +557,47 @@ var _ = Describe("RemediationSettings", func() {
 		Entry("dot owner", "https://github.com/./fleet", "spec.repositories[0].url"),
 		Entry("parent repository", "https://github.com/example/..", "spec.repositories[0].url"),
 		Entry("dot in owner", "https://github.com/ex.ample/fleet", githubURLMsg),
+		Entry("owner starting with a hyphen", "https://github.com/-example/fleet", githubURLMsg),
+		Entry("owner longer than 39 characters", "https://github.com/"+strings.Repeat("o", 40)+"/fleet", githubURLMsg),
+		Entry("name longer than 100 characters", "https://github.com/example/"+strings.Repeat("n", 101), githubURLMsg),
+	)
+
+	DescribeTable("accepts GitHub repository URLs at the adapter's bounds",
+		func(url string) {
+			s := fx.RemediationSettings()
+			s.Spec.Repositories[0].URL = url
+			Expect(k8sClient.Create(ctx, s)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, s)).To(Succeed())
+		},
+		Entry("owner of 39 characters", "https://github.com/"+strings.Repeat("o", 39)+"/fleet"),
+		Entry("name of 100 characters", "https://github.com/example/"+strings.Repeat("n", 100)),
+		Entry("one-character owner and name", "https://github.com/e/f"),
+		Entry("digit-first owner with hyphens", "https://github.com/1-example/fleet_repo.v2"),
+	)
+
+	DescribeTable("refuses App client IDs the GitHub adapter refuses",
+		func(id string) {
+			s := fx.RemediationSettings()
+			s.Spec.Repositories[0].GitHub.AppClientID = id
+			expectRefused(s, "spec.repositories[0].github.appClientID")
+		},
+		Entry("space", "Iv23 example"),
+		Entry("slash", "Iv23/example"),
+		Entry("colon", "Iv23:example"),
+		Entry("non-ASCII letter", "Iv23\u00e9xample"),
+		Entry("longer than 64 characters", strings.Repeat("a", 65)),
+	)
+
+	DescribeTable("accepts App client IDs the GitHub adapter accepts",
+		func(id string) {
+			s := fx.RemediationSettings()
+			s.Spec.Repositories[0].GitHub.AppClientID = id
+			Expect(k8sClient.Create(ctx, s)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, s)).To(Succeed())
+		},
+		Entry("classic", "Iv1.0123456789abcdef"),
+		Entry("all allowed characters", "Iv23li.A_b-9"),
+		Entry("64 characters", strings.Repeat("a", 64)),
 	)
 
 	It("refuses two repositories with the same URL", func() {
@@ -553,4 +619,36 @@ var _ = Describe("RemediationSettings", func() {
 		s.Spec.Repositories[0].GitHub.Signer.AzureKeyVault.KeyID = "https://evil.example.com/keys/github-app"
 		expectRefused(s, "keyID")
 	})
+
+	DescribeTable("refuses key IDs outside the Key Vault naming rules",
+		func(keyID, msg string) {
+			s := fx.RemediationSettings()
+			s.Spec.Repositories[0].GitHub.Signer.AzureKeyVault.KeyID = keyID
+			expectRefused(s, msg)
+		},
+		Entry("vault name of 2 characters", "https://kv.vault.azure.net/keys/github-app", "keyID"),
+		Entry("vault name of 25 characters",
+			"https://k"+strings.Repeat("v", 24)+".vault.azure.net/keys/github-app", "keyID"),
+		Entry("vault name starting with a digit", "https://1kv-example.vault.azure.net/keys/github-app", "keyID"),
+		Entry("vault name starting with a hyphen", "https://-kv-example.vault.azure.net/keys/github-app", "keyID"),
+		Entry("vault name ending with a hyphen", "https://kv-example-.vault.azure.net/keys/github-app", "keyID"),
+		Entry("consecutive hyphens in the vault name", "https://kv--example.vault.azure.net/keys/github-app",
+			"the vault name must not contain consecutive hyphens"),
+		Entry("key name longer than 127 characters",
+			"https://kv-example.vault.azure.net/keys/"+strings.Repeat("k", 128), "keyID"),
+	)
+
+	DescribeTable("accepts key IDs at the Key Vault naming bounds",
+		func(keyID string) {
+			s := fx.RemediationSettings()
+			s.Spec.Repositories[0].GitHub.Signer.AzureKeyVault.KeyID = keyID
+			Expect(k8sClient.Create(ctx, s)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, s)).To(Succeed())
+		},
+		Entry("vault name of 3 characters", "https://kv1.vault.azure.net/keys/github-app"),
+		Entry("vault name of 24 characters", "https://k"+strings.Repeat("v", 23)+".vault.azure.net/keys/github-app"),
+		Entry("key name of 127 characters with consecutive hyphens",
+			"https://kv-example.vault.azure.net/keys/"+strings.Repeat("k", 125)+"--"),
+		Entry("with a version", "https://kv-example.vault.azure.net/keys/github-app/0123456789abcdef0123456789abcdef"),
+	)
 })

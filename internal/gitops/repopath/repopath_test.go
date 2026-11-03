@@ -22,7 +22,10 @@ import (
 	"github.com/pkalin/shadewright/internal/gitops/repopath"
 )
 
-const orders = "apps/orders"
+const (
+	orders = "apps/orders"
+	apps   = "apps"
+)
 
 func TestJoin(t *testing.T) {
 	for _, tc := range []struct {
@@ -32,13 +35,17 @@ func TestJoin(t *testing.T) {
 		{".", "./apps/orders", orders, true},
 		{orders, "../base", "apps/base", true},
 		{orders, "so.yaml", "apps/orders/so.yaml", true},
-		{"apps", "app.v2", "apps/app.v2", true},
+		{apps, "app.v2", "apps/app.v2", true},
 		{".", "", "", false},
 		{".", "/etc", "", false},
-		{"apps", "../../x", "", false},
+		{apps, "../../x", "", false},
 		{".", "a..b", "", false},
 		{".", "github.com/org/repo", "", false},
 		{".", "GitHub.com/org/repo", "", false},
+		// kustomize treats only a leading github.com/ as remote; the joined path stays local otherwise.
+		{".", "./github.com/org/repo", "", false},
+		{apps, "../github.com/org/repo", "", false},
+		{".", "a/../github.com/org/repo", "github.com/org/repo", true},
 		{".", "https://example.com/x", "", false},
 		{".", "git@github.com:org/repo", "", false},
 		{".", "x.yaml?ref=main", "", false},

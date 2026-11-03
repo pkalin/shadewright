@@ -65,6 +65,10 @@ type Result struct {
 // a reference kustomize could read as remote, or a build kustomize refuses. Check reads nothing outside
 // in.Files and never runs a plugin or fetches a remote base.
 //
+// The render covers the repository path only, not the Flux Kustomization's own spec fields (patches, images,
+// targetNamespace, postBuild, components): the caller must refuse a Kustomization that sets them, as the
+// source mapping does for patches, components and postBuild (#178).
+//
 // Renders are serialised in the process (kustomize keeps global state). ctx bounds the wait for that turn:
 // when it ends first, Check returns ctx.Err() without rendering. A render that has started runs to its end,
 // since kustomize cannot be cancelled; the limits on the build ([MaxVisits], [MaxBuildBytes]) bound how long

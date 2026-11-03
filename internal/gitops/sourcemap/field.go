@@ -129,11 +129,12 @@ func (f Field) Get(obj map[string]any) (any, bool) {
 	return cur, cur != nil
 }
 
-// equal reports whether two field values are the same. Without Quantity they must have the same JSON form,
-// so the number 15 equals 15 decoded either as an integer or a float, but not the string "15".
 // Equals reports whether two decoded values are the same value of this field: as quantities for a Quantity
 // field (256Mi equals 268435456), otherwise by their JSON encoding.
 func (f Field) Equals(a, b any) bool { return f.equal(a, b) }
+
+// equal reports whether two field values are the same. Without Quantity they must have the same JSON form,
+// so the number 15 equals 15 decoded either as an integer or a float, but not the string "15".
 
 func (f Field) equal(a, b any) bool {
 	if f.Quantity {

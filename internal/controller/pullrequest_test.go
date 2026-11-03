@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	kyaml "sigs.k8s.io/kustomize/kyaml/yaml"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/semdiff"
@@ -62,6 +63,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		git        *fakegit.Git
 		clock      time.Time
 		build      remediationv1alpha1.GitDirPath
+		// faulty, when set, is the provider the reconciler gets instead of git; openErr fails opening it.
+		faulty       *faultyGit
+		openErr      error
+		writeTimeout time.Duration
 	)
 
 	manifest := func(limit string) []byte {
@@ -79,15 +84,26 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				if repo.URL != settings.Spec.Repositories[0].URL {
 					return nil, errors.New("unknown repository")
 				}
+				if openErr != nil {
+					return nil, openErr
+				}
+				if faulty != nil {
+					return faulty, nil
+				}
 				return git, nil
 			},
-			Now: func() time.Time { return clock },
+			Now:          func() time.Time { return clock },
+			WriteTimeout: writeTimeout,
 		}
 	}
 	key := func() reconcile.Request {
 		return reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)}
 	}
-	// reconcileOnce runs one reconcile with a new reconciler, as after a restart.
+	// reconcileResult runs one reconcile with a new reconciler, as after a restart.
+	reconcileResult := func() (reconcile.Result, error) {
+		return reconciler().Reconcile(ctx, key())
+	}
+	// reconcileOnce is reconcileResult without the result.
 	reconcileOnce := func() error {
 		_, err := reconciler().Reconcile(ctx, key())
 		return err
@@ -122,6 +138,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		seq++
 		clock = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 		build = buildPath
+		faulty, openErr, writeTimeout = nil, nil, 0
 		err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fx.TargetNamespace}})
 		Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
 
@@ -324,7 +341,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 	It("does not commit on a branch that holds something else", func() {
 		// The branch exists with another value in the file, as if someone created it by hand.
-		Expect(reconcileOnce()).To(Succeed()) // deadline
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
 		base, err := git.BranchHead(ctx, mainBranch)
 		Expect(err).NotTo(HaveOccurred())
@@ -341,7 +357,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 	})
 
 	It("leaves a pull request without its marker alone", func() {
-		Expect(reconcileOnce()).To(Succeed()) // deadline
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
 		base, err := git.BranchHead(ctx, mainBranch)
 		Expect(err).NotTo(HaveOccurred())
@@ -380,7 +395,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 	})
 
 	It("expires a request whose freshness check keeps failing", func() {
-		Expect(reconcileOnce()).To(Succeed()) // deadline
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
 		Expect(reconcileOnce()).To(Succeed()) // branch
 		git.SetFail(func(op string) error {
@@ -396,7 +410,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 	})
 
 	It("expires a request that did not open its pull request before the deadline", func() {
-		Expect(reconcileOnce()).To(Succeed()) // deadline
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
 		Expect(reconcileOnce()).To(Succeed()) // branch
 		clock = clock.Add(DefaultPullRequestTimeout + time.Minute)
@@ -441,7 +454,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 	})
 
 	It("never closes a pull request without its marker, also on deletion", func() {
-		Expect(reconcileOnce()).To(Succeed()) // deadline
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
 		base, err := git.BranchHead(ctx, mainBranch)
 		Expect(err).NotTo(HaveOccurred())
@@ -486,6 +498,373 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(errors.Is(err, providers.ErrNotFound)).To(BeTrue())
 		Expect(openRequests()).To(BeEmpty())
 	})
+
+	// The failure cases of design section 14 for the pull request step: a crash between an external call and
+	// the status write, Git host outages, and a target file that changes while the request waits.
+	Context("when something fails on the way", func() {
+		BeforeEach(func() {
+			faulty = newFaultyGit(git)
+		})
+
+		// waiting reports that the request is still where the step left it before the failure: in
+		// PolicyChecked, with no pull request recorded and no condition saying why none was opened.
+		waiting := func() {
+			got := fetch()
+			ExpectWithOffset(1, got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+			ExpectWithOffset(1, got.Status.PullRequest).To(BeNil())
+			ExpectWithOffset(1, meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)).
+				To(BeNil(), "a failure worth retrying writes no outcome")
+		}
+		// loseStatusWrites reconciles with a client whose status writes fail from the moment a pull request
+		// exists, until one does: the pull request is open and the request does not know it.
+		loseStatusWrites := func() {
+			r := reconciler()
+			r.Client = &statusFailer{Client: k8sClient, fail: func() bool { return len(git.ChangeRequests()) > 0 }}
+			for range 10 {
+				_, _ = r.Reconcile(ctx, key())
+				if len(openRequests()) == 1 {
+					break
+				}
+			}
+			ExpectWithOffset(1, openRequests()).To(HaveLen(1))
+			waiting()
+		}
+		// hitAfter makes op fail with fault where it directly follows a call starting with after ("" for any),
+		// and reconciles until a reconcile got that fault (with a nil fault: called op), returning its result.
+		hitAfter := func(op, after string, fault error) (reconcile.Result, error) {
+			faulty.failOnAfter(op, after, fault)
+			for range 10 {
+				calls, faults := faulty.count(op), faulty.faults()
+				res, err := reconcileResult()
+				if (fault == nil && faulty.count(op) > calls) || (fault != nil && faulty.faults() > faults) {
+					return res, err
+				}
+			}
+			Fail("the step never called " + op)
+			return reconcile.Result{}, nil
+		}
+		hit := func(op string, fault error) (reconcile.Result, error) { return hitAfter(op, "", fault) }
+
+		Context("between opening the pull request and writing status", func() {
+			It("finds the pull request by its branch and marker after a crash, and opens no second one", func() {
+				faulty.crashAfter(opOpen)
+				for range 10 {
+					if err := reconcileOnce(); err != nil {
+						break
+					}
+				}
+				Expect(faulty.count(opOpen)).To(Equal(1))
+				Expect(openRequests()).To(HaveLen(1), "the pull request exists although the executor never saw it")
+				waiting()
+
+				got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+				Expect(faulty.count(opOpen)).To(Equal(1), "the restart adopted the pull request instead of asking for one")
+				crs := openRequests()
+				Expect(crs).To(HaveLen(1))
+				Expect(hasMarker(crs[0].Body, got)).To(BeTrue())
+				Expect(got.Status.PullRequest).To(Equal(&remediationv1alpha1.PullRequestStatus{
+					Number: crs[0].Number, URL: crs[0].URL, HeadSHA: crs[0].HeadSHA}))
+			})
+
+			It("adopts the pull request after the status write that records it failed, and opens no second one", func() {
+				loseStatusWrites()
+				got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+				Expect(faulty.count(opOpen)).To(Equal(1))
+				Expect(got.Status.PullRequest.Number).To(Equal(openRequests()[0].Number))
+			})
+
+			It("closes the pull request it finds by its marker when the deadline passes first", func() {
+				loseStatusWrites()
+				clock = clock.Add(DefaultPullRequestTimeout + time.Minute)
+				Expect(reconcileOnce()).To(Succeed())
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
+				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
+					To(Equal(ReasonPullRequestDeadline))
+				Expect(openRequests()).To(HaveLen(1))
+				Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestClosed), "no open pull request is left behind")
+				Expect(faulty.count(opOpen)).To(Equal(1))
+			})
+
+			It("closes the pull request it finds by its marker when the target file changes first", func() {
+				loseStatusWrites()
+				_, err := git.Push(mainBranch, sourcePath, manifest("512Mi"))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(reconcileOnce()).To(Succeed())
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh).Reason).
+					To(Equal(freshness.ReasonTargetFileChanged))
+				Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+				for range 3 {
+					Expect(reconcileOnce()).To(Succeed())
+				}
+				Expect(openRequests()).To(HaveLen(1))
+				Expect(faulty.count(opOpen)).To(Equal(1))
+			})
+		})
+
+		Context("when GitHub fails", func() {
+			// Each call to the Git host, in the freshness check and in the step. The freshness check reads the
+			// head and the target file of the target branch first; the step's own reads of the pull request
+			// branch are hit by the call they follow.
+			steps := []TableEntry{
+				Entry("reading the target branch head in the freshness check", opBranchHead, ""),
+				Entry("reading the target file in the freshness check", opReadFile+" "+sourcePath, ""),
+				Entry("finding the pull request", opFind, ""),
+				Entry("reading the head of the pull request branch", opBranchHead, opFind),
+				Entry("creating the branch", opCreateBranch, ""),
+				Entry("reading the target file on the pull request branch", opReadFile+" "+sourcePath,
+					opBranchHead+" shadewright/"),
+				Entry("reading the files of the render check", opReadFile+" "+buildKustomize, ""),
+				Entry("committing", opCommit, ""),
+				Entry("opening the pull request", opOpen, ""),
+			}
+
+			DescribeTable("retries a server error with backoff, writes nothing and then opens one pull request",
+				func(op, after string) {
+					// The adapter's error text is never trusted: it could hold a URL with a token.
+					leak := "status 502 from https://github.com/example/fleet with token ghs_leaked"
+					_, err := hitAfter(op, after, &providers.RetryableError{Err: errors.New(leak)})
+					Expect(err).To(HaveOccurred(), "an error goes to the work queue's backoff")
+					Expect(retryable(err)).To(BeTrue(), "a server error is classed as retryable: %v", err)
+					Expect(err.Error()).NotTo(ContainSubstring("ghs_leaked"))
+					Expect(err.Error()).NotTo(ContainSubstring("https://"))
+					waiting()
+
+					faulty.failOn("", nil)
+					got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+					Expect(openRequests()).To(HaveLen(1))
+				}, steps)
+
+			DescribeTable("waits as long as GitHub asks (429 or a secondary rate limit with Retry-After)",
+				func(op, after string) {
+					limited := &providers.RetryableError{RetryAfter: 42 * time.Second, Err: errors.New("secondary rate limit")}
+					res, err := hitAfter(op, after, limited)
+					Expect(err).NotTo(HaveOccurred(), "a delay the host asked for is a wait, not an error")
+					Expect(res.RequeueAfter).To(Equal(42*time.Second), "neither sooner nor later than asked")
+					waiting()
+				}, steps)
+
+			It("treats a response that never arrives as a timeout, then adopts the pull request it opened", func() {
+				writeTimeout = 200 * time.Millisecond
+				faulty.blockAfter(opOpen)
+				var err error
+				for range 10 {
+					if err = reconcileOnce(); err != nil {
+						break
+					}
+				}
+				Expect(errors.Is(err, ErrTimeout)).To(BeTrue(), "the step's own deadline is a retryable timeout: %v", err)
+				Expect(openRequests()).To(HaveLen(1))
+				waiting()
+
+				faulty.blockAfter("")
+				writeTimeout = 0 // the later steps get the default deadline again
+				got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+				Expect(faulty.count(opOpen)).To(Equal(1))
+			})
+
+			It("retries a conflict on the commit and lets the branch decide the outcome", func() {
+				// Someone pushes another value to the branch just before the commit, which then fails on the
+				// expected head: a conflict is not final by itself, the next reconcile reads the branch again.
+				faulty.beforeOp(opCommit, func() {
+					_, err := git.Push(freshness.BranchName(fetch()), sourcePath, manifest("1Gi"))
+					Expect(err).NotTo(HaveOccurred())
+				})
+				_, err := hit(opCommit, nil)
+				Expect(errors.Is(err, providers.ErrConflict)).To(BeTrue(), "%v", err)
+				waiting()
+
+				Expect(reconcileOnce()).To(Succeed())
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
+					To(Equal(ReasonBranchDiverged))
+				Expect(openRequests()).To(BeEmpty())
+			})
+
+			It("ends the request without a retry when the repository settings can never open a provider", func() {
+				openErr = fmt.Errorf("client ID: %w", providers.ErrInvalidConfig)
+				res, err := reconcileResult()
+				Expect(err).NotTo(HaveOccurred(), "a permanent refusal is not retried")
+				Expect(res).To(Equal(reconcile.Result{}))
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh).Reason).
+					To(Equal(reasonRepositoryUnusable))
+			})
+
+			DescribeTable("gives up with Expired at the deadline while GitHub keeps failing",
+				func(op string, fault error, wait time.Duration) {
+					res, err := hit(op, fault)
+					if wait > 0 {
+						Expect(err).NotTo(HaveOccurred())
+						// The clock has not moved since the decision: the whole step's time is left, and a longer
+						// delay is cut to it, so the request expires on time.
+						Expect(res.RequeueAfter).To(Equal(min(wait, DefaultPullRequestTimeout)))
+					} else {
+						Expect(retryable(err)).To(BeTrue())
+					}
+					waiting()
+					Expect(fetch().Status.Deadline).NotTo(BeNil(), "the deadline is stored with the decision")
+					clock = clock.Add(DefaultPullRequestTimeout + time.Second)
+					before := faulty.creations()
+					res, err = reconcileResult()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(res).To(Equal(reconcile.Result{}), "an expired request is not retried")
+					got := fetch()
+					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
+					cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+					Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+					Expect(cond.Reason).To(Equal(ReasonPullRequestDeadline))
+					Expect(faulty.creations()).To(Equal(before), "no branch, commit or pull request after the deadline")
+					Expect(openRequests()).To(BeEmpty())
+				},
+				Entry("server errors on the open", opOpen, &providers.RetryableError{Err: errors.New("status 503")},
+					time.Duration(0)),
+				Entry("a rate limit with a long Retry-After on the open", opOpen, &providers.RetryableError{
+					RetryAfter: time.Hour, Err: errors.New("rate limit")}, time.Hour),
+				// The freshness check fails from the first reconcile after the policy check, before any Git write.
+				Entry("server errors in every freshness check", opBranchHead,
+					&providers.RetryableError{Err: errors.New("status 502")}, time.Duration(0)),
+			)
+
+			It("stores the deadline in the status write that decides the request", func() {
+				got := fetch()
+				Expect(got.Status.Deadline).NotTo(BeNil())
+				Expect(got.Status.Deadline.Time).To(BeTemporally("==", clock.Add(DefaultPullRequestTimeout)))
+			})
+
+			It("supersedes a plan that is stale right after the decision on the next reconcile", func() {
+				_, err := git.Push(mainBranch, sourcePath, manifest("512Mi"))
+				Expect(err).NotTo(HaveOccurred())
+				res, err := reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(Equal(reconcile.Result{}))
+				Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded), "no other write comes first")
+			})
+
+			It("does not start the deadline while writes are paused, so a long pause expires nothing", func() {
+				pause := func(on bool) {
+					live := &remediationv1alpha1.RemediationSettings{}
+					Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SettingsName}, live)).To(Succeed())
+					live.Spec.Paused = new(on)
+					Expect(k8sClient.Update(ctx, live)).To(Succeed())
+				}
+				// Decide the request again, this time while writes are paused.
+				pause(true)
+				got := fetch()
+				got.Status = remediationv1alpha1.RemediationRequestStatus{}
+				Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+				Expect(reconcileOnce()).To(Succeed())
+				got = fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+				Expect(got.Status.Deadline).To(BeNil(), "no deadline is started during a pause")
+				for range 3 {
+					res, err := reconcileResult()
+					Expect(err).NotTo(HaveOccurred(), "a pause is a wait, not an error")
+					Expect(res.RequeueAfter).To(Equal(freshRecheckDelay))
+				}
+				Expect(fetch().Status.Deadline).To(BeNil())
+				clock = clock.Add(2 * DefaultPullRequestTimeout)
+				pause(false)
+				Expect(reconcileOnce()).To(Succeed())
+				Expect(fetch().Status.Deadline.Time).To(BeTemporally("==", clock.Add(DefaultPullRequestTimeout)),
+					"the deadline starts once the pause has ended")
+				got = drive(remediationv1alpha1.PhaseAwaitingApproval)
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+				Expect(openRequests()).To(HaveLen(1))
+			})
+
+			It("writes nothing to Git when the deadline passes while the freshness check runs", func() {
+				Expect(reconcileOnce()).To(Succeed()) // finalizer
+				// The freshness check is slow: the deadline passes before it returns a fresh verdict.
+				faulty.beforeOp(opBranchHead, func() { clock = clock.Add(DefaultPullRequestTimeout + time.Minute) })
+				Expect(reconcileOnce()).To(Succeed())
+				Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
+				Expect(faulty.creations()).To(BeZero())
+			})
+		})
+
+		Context("when the target file changes while the request waits", func() {
+			It("supersedes the request during review, closes its pull request and opens no other", func() {
+				got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+				branch := freshness.BranchName(got)
+				head, err := git.BranchHead(ctx, branch)
+				Expect(err).NotTo(HaveOccurred())
+				_, err = git.Push(mainBranch, sourcePath, manifest("512Mi"))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(reconcileOnce()).To(Succeed())
+				got = fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh).Reason).
+					To(Equal(freshness.ReasonTargetFileChanged))
+				Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+				for range 3 {
+					Expect(reconcileOnce()).To(Succeed())
+				}
+				Expect(openRequests()).To(HaveLen(1))
+				Expect(faulty.count(opOpen)).To(Equal(1))
+				after, err := git.BranchHead(ctx, branch)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(after).To(Equal(head), "the branch is never rebuilt")
+			})
+
+			It("supersedes the request before the commit when the file changes after the branch was cut", func() {
+				for faulty.count(opCreateBranch) == 0 {
+					Expect(reconcileOnce()).To(Succeed())
+				}
+				branch := freshness.BranchName(fetch())
+				cut, err := git.BranchHead(ctx, branch)
+				Expect(err).NotTo(HaveOccurred())
+				_, err = git.Push(mainBranch, sourcePath, manifest("512Mi"))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(reconcileOnce()).To(Succeed())
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh).Reason).
+					To(Equal(freshness.ReasonTargetFileChanged))
+				head, err := git.BranchHead(ctx, branch)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(head).To(Equal(cut), "nothing was committed")
+				Expect(faulty.count(opCommit)).To(BeZero())
+				Expect(openRequests()).To(BeEmpty())
+			})
+
+			It("stops before the commit when the file still holds the previous value but the change no longer renders as planned", func() {
+				// A memory request above the planned limit: the freshness check still sees the previous limit,
+				// the render check refuses the changed Deployment.
+				_, err := git.Push(mainBranch, sourcePath, withMemoryRequest(manifest("256Mi"), "512Mi"))
+				Expect(err).NotTo(HaveOccurred())
+				got := drive(remediationv1alpha1.PhaseNeedsIntervention)
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+				cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+				Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				Expect(cond.Reason).To(Equal(string(semdiff.ReasonSchemaInvalid)))
+				Expect(cond.Message).NotTo(ContainSubstring("512Mi"), "no file content in the status")
+				Expect(faulty.count(opCommit)).To(BeZero())
+				Expect(openRequests()).To(BeEmpty())
+			})
+
+			It("opens the pull request when the same edit keeps the request below the planned limit", func() {
+				// The control of the spec above: the edited file itself is fine, only the request above the
+				// planned limit is refused.
+				_, err := git.Push(mainBranch, sourcePath, withMemoryRequest(manifest("256Mi"), "320Mi"))
+				Expect(err).NotTo(HaveOccurred())
+				got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+				file, err := git.ReadFile(ctx, got.Status.PullRequest.HeadSHA, sourcePath)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(string(file.Data)).To(ContainSubstring("memory: 384Mi"))
+				Expect(string(file.Data)).To(ContainSubstring("memory: 320Mi"))
+			})
+		})
+	})
 })
 
 // statusFailer fails status writes while fail returns true, as a lost write after a successful Git call.
@@ -508,6 +887,214 @@ func (f *failingStatus) Update(ctx context.Context, obj client.Object, opts ...c
 		return errors.New("status write lost")
 	}
 	return f.SubResourceWriter.Update(ctx, obj, opts...)
+}
+
+// Operation names of faultyGit. A ReadFile fault or count may name the path too: "ReadFile <path>".
+const (
+	opFind         = "FindChangeRequest"
+	opCreateBranch = "CreateBranch"
+	opReadFile     = "ReadFile"
+)
+
+// faultyGit wraps the fake provider. It counts every call and injects faults the fake's hook cannot express:
+// a fault for one path or for the call that follows another, a crash or a response that never arrives after a
+// call took effect, and a change made by someone else right before a call.
+type faultyGit struct {
+	*fakegit.Git
+
+	mu     sync.Mutex
+	calls  map[string]int
+	failOp string
+	after  string
+	fault  error
+	hits   int
+	last   string
+	crash  string
+	block  string
+	before map[string]func()
+}
+
+func newFaultyGit(g *fakegit.Git) *faultyGit {
+	return &faultyGit{Git: g, calls: map[string]int{}, before: map[string]func(){}}
+}
+
+// failOn makes op ("ReadFile <path>" for one file) fail with fault before it runs; a nil fault fails nothing.
+func (f *faultyGit) failOn(op string, fault error) { f.failOnAfter(op, "", fault) }
+
+// failOnAfter is failOn for the calls of op that directly follow a call whose "op arg" starts with after, so a
+// fault can hit the pull request step's own read and not the freshness check's read of the same file.
+func (f *faultyGit) failOnAfter(op, after string, fault error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failOp, f.after, f.fault = op, after, fault
+}
+
+// faults returns how many injected faults were returned.
+func (f *faultyGit) faults() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hits
+}
+
+// crashAfter makes the next successful call of op return an error, as a crash after the call took effect.
+func (f *faultyGit) crashAfter(op string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.crash = op
+}
+
+// blockAfter makes every successful call of op wait for the end of its context and then report a timeout,
+// as a response that never arrives although the host did the work; "" stops it.
+func (f *faultyGit) blockAfter(op string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.block = op
+}
+
+// beforeOp runs do once, right before the next call of op.
+func (f *faultyGit) beforeOp(op string, do func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.before[op] = do
+}
+
+// count returns how often op ("ReadFile <path>" for one file) was called, failed calls included.
+func (f *faultyGit) count(op string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls[op]
+}
+
+// creations returns how many branch, commit and pull request writes were attempted. Closing a change request
+// is not counted: expiry may close an unrecorded pull request of its own.
+func (f *faultyGit) creations() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls[opCreateBranch] + f.calls[opCommit] + f.calls[opOpen]
+}
+
+func (f *faultyGit) enter(op, arg string) error {
+	f.mu.Lock()
+	f.calls[op]++
+	f.calls[op+" "+arg]++
+	do := f.before[op]
+	delete(f.before, op)
+	fault := f.fault
+	if (f.failOp != op && f.failOp != op+" "+arg) || !strings.HasPrefix(f.last, f.after) {
+		fault = nil
+	}
+	if fault != nil {
+		f.hits++
+	}
+	f.last = op + " " + arg
+	f.mu.Unlock()
+	if do != nil {
+		do()
+	}
+	return fault
+}
+
+func (f *faultyGit) leave(ctx context.Context, op string, err error) error {
+	if err != nil {
+		return err
+	}
+	f.mu.Lock()
+	crash, block := f.crash == op, f.block == op
+	if crash {
+		f.crash = ""
+	}
+	f.mu.Unlock()
+	switch {
+	case crash:
+		return errors.New("connection lost after the call")
+	case block:
+		<-ctx.Done()
+		// What the adapter returns when the caller's deadline ends the call.
+		return &providers.RetryableError{Err: fmt.Errorf("%s: %w", op, context.DeadlineExceeded)}
+	}
+	return nil
+}
+
+func (f *faultyGit) ReadFile(ctx context.Context, sha, path string) (providers.File, error) {
+	if err := f.enter(opReadFile, path); err != nil {
+		return providers.File{}, err
+	}
+	file, err := f.Git.ReadFile(ctx, sha, path)
+	return file, f.leave(ctx, opReadFile, err)
+}
+
+func (f *faultyGit) BranchHead(ctx context.Context, branch string) (string, error) {
+	if err := f.enter(opBranchHead, branch); err != nil {
+		return "", err
+	}
+	sha, err := f.Git.BranchHead(ctx, branch)
+	return sha, f.leave(ctx, opBranchHead, err)
+}
+
+func (f *faultyGit) CreateBranch(ctx context.Context, branch, from string) error {
+	if err := f.enter(opCreateBranch, branch); err != nil {
+		return err
+	}
+	return f.leave(ctx, opCreateBranch, f.Git.CreateBranch(ctx, branch, from))
+}
+
+func (f *faultyGit) CommitFile(ctx context.Context, branch, expectedHead string, ch providers.FileChange) (string, error) {
+	if err := f.enter(opCommit, branch); err != nil {
+		return "", err
+	}
+	sha, err := f.Git.CommitFile(ctx, branch, expectedHead, ch)
+	return sha, f.leave(ctx, opCommit, err)
+}
+
+func (f *faultyGit) OpenChangeRequest(ctx context.Context, req providers.NewChangeRequest) (providers.ChangeRequest, error) {
+	if err := f.enter(opOpen, req.HeadBranch); err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	cr, err := f.Git.OpenChangeRequest(ctx, req)
+	if err = f.leave(ctx, opOpen, err); err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	return cr, nil
+}
+
+func (f *faultyGit) FindChangeRequest(ctx context.Context, branch string) (providers.ChangeRequest, error) {
+	if err := f.enter(opFind, branch); err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	cr, err := f.Git.FindChangeRequest(ctx, branch)
+	if err = f.leave(ctx, opFind, err); err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	return cr, nil
+}
+
+func (f *faultyGit) CloseChangeRequest(ctx context.Context, n int64) error {
+	if err := f.enter(opClose, ""); err != nil {
+		return err
+	}
+	return f.leave(ctx, opClose, f.Git.CloseChangeRequest(ctx, n))
+}
+
+// retryable reports whether err is one the reconciler hands back for a retry: a Git host failure worth
+// retrying, a transient read of the render check, or the step's own deadline.
+func retryable(err error) bool {
+	return errors.Is(err, providers.ErrRetryable) || errors.Is(err, sourcemap.ErrTransient) || errors.Is(err, ErrTimeout)
+}
+
+// withMemoryRequest sets a memory request on the worker container of a deploymentManifest, through the YAML
+// tree rather than by text.
+func withMemoryRequest(manifest []byte, request string) []byte {
+	GinkgoHelper()
+	doc, err := kyaml.Parse(string(manifest))
+	Expect(err).NotTo(HaveOccurred())
+	_, err = doc.Pipe(
+		kyaml.LookupCreate(kyaml.MappingNode, "spec", "template", "spec", "containers", "[name="+workerContainer+"]",
+			"resources", "requests"),
+		kyaml.SetField("memory", kyaml.NewStringRNode(request)))
+	Expect(err).NotTo(HaveOccurred())
+	out, err := doc.String()
+	Expect(err).NotTo(HaveOccurred())
+	return []byte(out)
 }
 
 var _ = Describe("Pull request body", func() {

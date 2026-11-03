@@ -29,6 +29,12 @@ import (
 
 func rep(s string, n int) string { return strings.Repeat(s, n) }
 
+// Text that must survive after a redacted value.
+const (
+	nextField = "\nnext: field"
+	endText   = " end"
+)
+
 func b64(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
 
 var (
@@ -54,6 +60,8 @@ var (
 	// tail is secret material that must not survive after an escape, punctuation, a space or a line break.
 	tail  = "Remaining" + "SyntheticValue" + "42"
 	tail2 = "Second" + "SyntheticValue" + "43"
+	// wordTail is secret material without digits, so the long-token rule cannot catch it by accident.
+	wordTail = "Remaining" + "SyntheticValue"
 	// opaque is a secret value long enough for the full marker.
 	opaque = "Synthetic" + "OpaqueValue42"
 )
@@ -127,7 +135,7 @@ func corpus() []corpusCase {
 			`", uri="/", response="` + tail + `"`, []string{tail, tail2}, []string{KindCredential}},
 		{"quoted authorization in json", `{"Authorization":"Digest nonce=\"` + tail2 + `\", response=\"` + tail + `\"","x":1}`,
 			[]string{tail, tail2}, nil},
-		{"yaml literal block", "password: |-\n  synthetic-" + tail + "\nnext: field", []string{tail}, []string{KindCredential}},
+		{"yaml literal block", "password: |-\n  synthetic-" + tail + nextField, []string{tail}, []string{KindCredential}},
 		{"yaml folded block nested", "db:\n  password: >2+ # comment\n     one-" + tail + "\n\n     two-" + tail2 + "\n  user: app",
 			[]string{tail, tail2}, nil},
 		{"yaml block in list item", "- token: |\n    " + tail + "\n- token: x", []string{tail}, nil},
@@ -200,7 +208,7 @@ func TestKeepsUsefulText(t *testing.T) {
 // Text around a redacted value must survive: the next YAML field, the next connection string field.
 func TestKeepsTextAroundValues(t *testing.T) {
 	for in, want := range map[string]string{
-		"password: |-\n  synthetic-" + tail + "\nnext: field":        "password: |-\n  [REDACTED:credential]\nnext: field",
+		"password: |-\n  synthetic-" + tail + nextField:              "password: |-\n  [REDACTED:credential]\nnext: field",
 		"db:\n  password: |\n    a-" + tail + "\n    b\n  user: app": "db:\n  password: |\n    [REDACTED:credential]\n  user: app",
 		"Server=example;Password=prefix " + tail + ";Encrypt=True":   "Server=example;Password=[REDACTED:connection-string];Encrypt=True",
 		"password: |\nnext: field":                                   "password: *\nnext: field",
@@ -213,13 +221,22 @@ func TestKeepsTextAroundValues(t *testing.T) {
 		"src 2001:db8::1, ok":                                        "src [ip], ok",
 		"secretName: |\n  orders-tls\n":                              "secretName: |\n  orders-tls\n",
 		// Issue #114.
-		`"{\"clientSecret\":\"prefix,` + tail + `\"}"`:          `"{\"clientSecret\":\"[REDACTED:credential]\"}"`,
-		"password:\n  " + opaque + "\nnext: field":              "password:\n  [REDACTED:credential]\nnext: field",
-		"password:  # set by CI\n  " + opaque + "\nnext: field": "password:  [REDACTED:credential]\nnext: field",
-		"token:\n  \"" + opaque + "\"\nnext: field":             "token:\n  \"[REDACTED:credential]\"\nnext: field",
-		"{\"password\":\n  \"" + opaque + "\"}":                 "{\"password\":\n  \"[REDACTED:credential]\"}",
-		"retry with Basic " + b64("u:p") + " now":               "retry with Basic *** now",
-		"secretName:\n  orders-tls\n":                           "secretName:\n  orders-tls\n",
+		`"{\"clientSecret\":\"prefix,` + tail + `\"}"`:    `"{\"clientSecret\":\"[REDACTED:credential]\"}"`,
+		"password:\n  " + opaque + nextField:              "password:\n  [REDACTED:credential]\nnext: field",
+		"password:  # set by CI\n  " + opaque + nextField: "password:  # set by CI\n  [REDACTED:credential]\nnext: field",
+		"token:\n  \"" + opaque + "\"\nnext: field":       "token:\n  \"[REDACTED:credential]\"\nnext: field",
+		"{\"password\":\n  \"" + opaque + "\"}":           "{\"password\":\n  \"[REDACTED:credential]\"}",
+		"retry with Basic " + b64("u:p") + " now":         "retry with Basic *** now",
+		"secretName:\n  orders-tls\n":                     "secretName:\n  orders-tls\n",
+		// Second review of #189.
+		"password:\n- " + opaque + "\n- " + tail + nextField:                                          "password:\n- [REDACTED:credential]\nnext: field",
+		"password:\n# set by CI\n  " + opaque + nextField:                                             "password:\n# set by CI\n  [REDACTED:credential]\nnext: field",
+		"credentials:\n  user: admin\n  secretRef:\n    name: db\n  value: '" + opaque + "'\nnext: x": "credentials:\n  user: ***\n  secretRef:\n    name: db\n  value: '[REDACTED:credential]'\nnext: x",
+		"- name: DB_PASSWORD\n  value: " + opaque + "\n- name: MODE\n  value: debug":                  "- name: DB_PASSWORD\n  value: [REDACTED:credential]\n- name: MODE\n  value: debug",
+		`{"name":"DB_PASSWORD","value":"` + opaque + `"}`:                                             `{"name":"DB_PASSWORD","value":"[REDACTED:credential]"}`,
+		`"{\\\"token\\\":\\\"a,` + wordTail + `\\\"}"`:                                                `"{\\\"token\\\":\\\"[REDACTED:credential]\\\"}"`,
+		"DB_PASS=" + opaque + " next":                                                                 "DB_PASS=[REDACTED:credential] next",
+		"auth: " + opaque + " and auth: failed":                                                       "auth: [REDACTED:credential] and auth: failed",
 	} {
 		if got := String(in); got != want {
 			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
@@ -254,8 +271,8 @@ func gapCases() []gapCase {
 		{"unterminated escaped json value", `"{\"clientSecret\":\"prefix,` + tail + `" next`,
 			[]string{tail}, []string{`" next`}},
 		// YAML value on the next line, with and without trailing spaces after the colon.
-		{"yaml value on next line", "password:\n  " + opaque + "\nnext: field",
-			[]string{opaque}, []string{"password:\n  ", "\nnext: field"}},
+		{"yaml value on next line", "password:\n  " + opaque + nextField,
+			[]string{opaque}, []string{"password:\n  ", nextField}},
 		{"yaml value on next line after spaces", "db:\n  password:   \n    " + opaque + "\n    " + tail + "\n  user: app",
 			[]string{opaque, tail}, []string{"db:\n  password:   \n    ", "\n  user: app"}},
 		{"yaml quoted value on next line", "- token:\n    '" + opaque + "'\n- token: x",
@@ -267,7 +284,9 @@ func gapCases() []gapCase {
 			[]string{opaque}, []string{"fetch ", " 403"}},
 		// Short Basic and Bearer credentials.
 		{"short basic", "header Basic " + b64("u:p") + " rejected", []string{b64("u:p")}, []string{"header Basic ", " rejected"}},
-		{"short bearer", "with Bearer abc, retry", []string{"abc"}, []string{"with Bearer ", ", retry"}},
+		{"short padded basic", "header Basic " + base64.StdEncoding.EncodeToString([]byte("ab:c")) + " rejected",
+			[]string{base64.StdEncoding.EncodeToString([]byte("ab:c"))}, []string{"header Basic ", " rejected"}},
+		{"bearer opaque token", "with Bearer " + rep("x9", 5) + ", retry", []string{rep("x9", 5)}, []string{"with Bearer ", ", retry"}},
 		// Whitespace, including newlines, on both sides of the colon in JSON and YAML flow mappings.
 		{"json newline after colon", "{\"password\":\n  \"" + opaque + "\"}",
 			[]string{opaque}, []string{"{\"password\":\n  \"", "\"}"}},
@@ -280,13 +299,70 @@ func gapCases() []gapCase {
 		// From #111: short key names.
 		{"pass key", "login pass=" + opaque + " user=app", []string{opaque}, []string{"login pass=", " user=app"}},
 		{"auth key", "auth=" + opaque + " ok", []string{opaque}, []string{" ok"}},
-		{"auth yaml key", "auth: " + opaque + "\nnext: field", []string{opaque}, []string{"\nnext: field"}},
-		{"sig key outside query", "webhook rejected with sig: " + opaque + " end", []string{opaque},
-			[]string{"webhook rejected with sig: ", " end"}},
+		{"auth yaml key", "auth: " + opaque + nextField, []string{opaque}, []string{nextField}},
+		{"sig key outside query", "webhook rejected with sig: " + opaque + endText, []string{opaque},
+			[]string{"webhook rejected with sig: ", endText}},
 		// From #111: a JWT whose payload does not start with "eyJ".
 		{"jwt with other payload", "token " + otherJWT + " expired", []string{otherJWT}, []string{" expired"}},
+		// Second review of #189: YAML layouts the next-line rule missed.
+		{"compact sequence at key indent", "password:\n- " + opaque + nextField,
+			[]string{opaque}, []string{"password:\n- ", nextField}},
+		{"comment before next-line value", "password:\n# set by CI\n  " + opaque + nextField,
+			[]string{opaque}, []string{nextField}},
+		// Short keys as the last segment of an env or snake key.
+		{"db pass env", "DB_PASS=" + opaque + " next", []string{opaque}, []string{"DB_PASS=", " next"}},
+		{"mysql root pass yaml", "MYSQL_ROOT_PASS: " + opaque + nextField, []string{opaque}, []string{nextField}},
+		{"basic auth key", "basic_auth: " + opaque + nextField, []string{opaque}, []string{nextField}},
+		{"bare auth with secret-shaped value", "auth: " + opaque + nextField, []string{opaque}, []string{nextField}},
+		{"quoted bare auth key", `{"auth": "failed for ` + tail + `"}`, []string{tail}, nil},
+		// base64url tokens hold "-".
+		{"base64url token with hyphens", "token rejected: " + base64URLToken + endText,
+			[]string{"Synth3ticAbC", "dEf0123XyZ98", "76QwErTy54321"}, []string{"token rejected: ", endText}},
+		{"hex token after a hyphen", "id key-" + hexToken + endText, []string{hexToken}, []string{endText}},
+		// Escaped embedded JSON, pretty-printed and escaped twice.
+		{"pretty escaped json", `"{\n  \"clientSecret\": \"` + opaque + `\"\n}"`, []string{opaque}, []string{`\"\n}"`}},
+		{"tab escaped json", `"{\t\"token\" : \"` + opaque + `\"}"`, []string{opaque}, nil},
+		{"double escaped json", `"{\\\"clientSecret\\\":\\\"prefix,` + wordTail + `\\\",\\\"x\\\":1}"`,
+			[]string{wordTail}, []string{`\\\",\\\"x\\\":1}"`}},
+		// Generic children of a secret key, and the Kubernetes env forms.
+		{"children of a secret mapping", "credentials:\n  user: admin\n  value: " + opaque + nextField,
+			[]string{opaque, "admin"}, []string{"credentials:\n  user: ", nextField}},
+		{"children of a secret sequence", "tokens:\n  - id: 1\n    value: '" + opaque + "'\n  - " + tail + nextField,
+			[]string{opaque, tail}, []string{nextField}},
+		{"kubernetes env yaml", "env:\n- name: DB_PASSWORD\n  value: " + opaque + "\n- name: LOG_LEVEL\n  value: debug",
+			[]string{opaque}, []string{"- name: DB_PASSWORD\n  value: ", "- name: LOG_LEVEL\n  value: debug"}},
+		{"kubernetes env yaml quoted and indented", "    env:\n      - name: \"API_TOKEN\"\n        value: \"" + opaque + "\"\n",
+			[]string{opaque}, []string{"        value: \""}},
+		{"kubernetes env json", `[{"name":"API_TOKEN","value":"` + opaque + `"},{"name":"MODE","value":"debug"}]`,
+			[]string{opaque}, []string{`{"name":"MODE","value":"debug"}`}},
+		{"kubernetes env yaml flow", "env: [{name: DB_PASSWORD, value: " + opaque + "}]", []string{opaque}, nil},
+		// Review of #192: a secret key nested below a kept reference child or a bare short key, block
+		// values of a bare short key, a quoted passphrase after one, a value starting with "#" after "="
+		// and a token after an image digest.
+		{"secret key below a reference child", "credentials:\n  secretRef:\n    name: db-creds\n    token:\n      - " + opaque + nextField,
+			[]string{opaque}, []string{"secretRef:\n    name: db-creds\n    token:\n      - ", nextField}},
+		{"secret key below a reference child at the end", "credentials:\n  secretRef:\n    token:\n      - abc123secret\n",
+			[]string{"abc123secret"}, []string{"secretRef:\n    token:\n      - "}},
+		{"secret keys below nested reference children", "credentials:\n  secretRef:\n    token:\n      keyRef:\n        password:\n          " +
+			opaque + "\n      user: admin\n  user: root" + nextField,
+			[]string{opaque, "admin", "root"}, []string{"keyRef:\n        password:\n          ", nextField}},
+		{"bare pass block scalar", "pass: |\n  s3cr3t!pw99\n", []string{"s3cr3t!pw99"}, []string{"pass: |\n  "}},
+		{"bare auth sequence", "auth:\n  - tok3n!value99\n", []string{"tok3n!value99"}, []string{"auth:\n  - "}},
+		{"bare auth mapping", "auth:\n  mode: oidc\n  key: k3y!" + opaque + nextField,
+			[]string{opaque}, []string{"mode: oidc", nextField}},
+		{"secret key under a bare auth", "auth:\n  mode: oidc\n  password:\n    - hunter2" + nextField,
+			[]string{"hunter2"}, []string{"mode: oidc", "password:\n    - ", nextField}},
+		{"quoted passphrase after bare pass", `pass: "correct horse battery staple"` + nextField,
+			[]string{"correct horse battery staple"}, []string{`pass: "`, `"` + nextField}},
+		{"comment-like value after an equals sign", "API_TOKEN= #" + opaque + "\n  indented: line",
+			[]string{opaque}, []string{"\n  indented: line"}},
+		{"token after an image digest", "image x@sha256:" + rep("a1", 32) + "-" + randomToken + endText,
+			[]string{randomToken}, []string{"sha256:" + rep("a1", 32) + "-", endText}},
 	}
 }
+
+// base64URLToken is a base64url token whose hyphens cut it into parts shorter than the long-token minimum.
+var base64URLToken = "Synth3ticAbC-" + "dEf0123XyZ98-" + "76QwErTy54321-Zz"
 
 func TestGapCases(t *testing.T) {
 	for _, c := range gapCases() {
@@ -315,9 +391,26 @@ func TestGapRulesKeepUsefulText(t *testing.T) {
 	for _, in := range []string{
 		"password:\nnext: field",
 		"password:   \n",
-		"credentials:\n  - name: app\n    key: token",
 		"credentials:\n  name: app",
+		"credentials:\n  - name: app\n    secretRef:\n      name: db-creds\n      key: password",
 		"auth:\n  {name: app}",
+		"- name: DB_PASSWORD_FILE\n  value: /etc/secret/pw",
+		"- name: LOG_LEVEL\n  value: debug",
+		// Bare short keys followed by a colon keep diagnostic text.
+		"pass: 12 fail: 0",
+		"auth: failed for user bob",
+		"sig: invalid",
+		"auth:\n  mode: oidc",
+		// Ordinary prose after Basic and Bearer.
+		"failed basic health check",
+		"missing Bearer token",
+		"Bearer authentication failed",
+		"Basic realm required",
+		// Hyphenated names, UUIDs and image names are not tokens.
+		"pod orders-worker-7d9f8b6c5-x2x9q-and-a-long-suffix-0123 restarted",
+		"uid 550e8400-e29b-41d4-a716-446655440000 deleted",
+		"image registry.example.com/team/orders-worker-service-v2:1.2.3-rc1",
+		"kube-system-controller-manager-node-0123456789 ready",
 		"author: someone",
 		"bypass=on",
 		"signal: SIGTERM",
@@ -325,6 +418,12 @@ func TestGapRulesKeepUsefulText(t *testing.T) {
 		"/var/lib/kubelet/pods/volumes/kubernetes.io~secret/tls",
 		"ReplicaSetControllerManagerDeploymentName",
 		"image ghcr.io/example/orders@sha512:" + rep("ab12", 32),
+		// Review of #192.
+		"image ghcr.io/example/orders@sha256:" + rep("a1", 32) + "-amd64",
+		"credentials: # set by CI\n  secretRef:\n    name: db-creds\n",
+		"auth:\n  - failed\n",
+		"pass: |\n  12 of 12\n",
+		`auth: "failed"`,
 		"Basic\nnext",
 		`{"x":1}`,
 	} {
@@ -351,8 +450,44 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"flow newlines":            "{password\n:\n",
 		"long token parts":         rep("ab12", 6) + "/",
 		"userinfo":                 "https://a@",
+		"env entries":              "- name: DB_PASSWORD\n",
+		"secret mapping children":  "credentials:\n  a: b\n  ref:\n    c: d\n",
+		"escape runs":              `{\"token\":\"\\\\\\\"`,
+		"hyphen runs":              rep("Ab1-", 8) + "/",
+		"comment headers":          "credentials: # c\n  a: b\n",
+		"bare key children":        "auth:\n  password:\n    x\n",
+		"references over headers":  "credentials:\n  secretRef:\n    token:\n      - x\n",
 	} {
 		in := rep(unit, size/len(unit))
+		start := time.Now()
+		out := String(in)
+		if d := time.Since(start); d > 10*time.Second {
+			t.Errorf("%s: %d bytes took %s", name, len(in), d)
+		}
+		if len(out) > len(in) {
+			t.Errorf("%s: output grew from %d to %d bytes", name, len(in), len(out))
+		}
+	}
+}
+
+// Nested entries whose lines all belong to the first one: each match reads a bounded part of them.
+func TestNestedBlocksStayLinear(t *testing.T) {
+	if testing.Short() {
+		t.Skip("large inputs")
+	}
+	for name, line := range map[string]func(indent string) string{
+		"env entries":   func(in string) string { return in + "- name: DB_PASSWORD\n" },
+		"empty headers": func(in string) string { return in + "password:\n" },
+		"references":    func(in string) string { return in + "secretRef:\n" },
+		// Each secret header sits below a reference child of the one before.
+		"headers below references": func(in string) string { return in + in + "token:\n" + in + in + " secretRef:\n" },
+		"comment headers":          func(in string) string { return in + "token: # c\n" },
+	} {
+		var b strings.Builder
+		for i := 0; b.Len() < 1<<20; i++ {
+			b.WriteString(line(strings.Repeat(" ", i)))
+		}
+		in := b.String()
 		start := time.Now()
 		out := String(in)
 		if d := time.Since(start); d > 10*time.Second {

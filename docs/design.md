@@ -51,8 +51,12 @@ sequenceDiagram
     K->>A: Warning events, pod status and owners
     A->>A: Redact and fingerprint the symptoms
     A->>K: Group them into an Incident
-    A->>M: Redacted context, bounded tool loop (planned)
+    A->>M: Redacted context, one structured call (planned)
     M-->>A: Diagnosis and a proposed typed action (planned)
+    opt Escalation on a deterministic signal (planned)
+        A->>M: Stronger model with redacted read tools, bounded
+        M-->>A: Diagnosis and a proposed typed action
+    end
     A->>R: Create the request: what to change, never where (planned)
     E->>R: Reconcile the request
     E->>K: Read the live target and its Flux objects
@@ -77,7 +81,7 @@ sequenceDiagram
 | --- | --- | --- |
 | Collector | Watches, event normalization, correlation through `ownerReferences` | Read selected namespaces and kinds |
 | Incident store | Fingerprints, counters, timestamps, analysis history, operation IDs | Redacted data only |
-| Analyzer | Builds context, calls the model, runs a bounded tool loop | Read, plus create `RemediationRequest` |
+| Analyzer | Builds context, makes one structured model call, runs a bounded tool loop on escalation (planned) | Read, plus create `RemediationRequest` |
 | Policy engine | Allowed actions, scope, bounds, whether review is required | Rules owned by the cluster admin |
 | Remediation controller | Reconciles `RemediationRequest`, runs the approved plan, handles failures | CR status, Git through the GitHub App |
 | GitOps adapter | Reads the repository, prepares the change, branch, commit, PR, auto-merge | One repository, allowed paths |
@@ -93,7 +97,7 @@ The collector, the incident store and the analyzer run in the analyzer binary; t
 - **Executor:** reads (`get` only) policies and settings, always from the API server, never through a cache (reading incidents for verification is planned); reads (`get` only, no list or watch) the target kinds (Deployments, StatefulSets, KEDA ScaledObjects) and the Flux Kustomizations and GitRepositories that deliver them, for source mapping; reads requests, writes their status and patches them to add or remove its finalizer in the operator namespace only (a Role), and its cache watches requests only there; the spec of a request is immutable (CEL), so the patch cannot change what was decided. It cannot create requests or write incidents.
 - Neither can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
 
-No model runs in the cluster and no GPU is needed: the analyzer calls a managed model endpoint (Microsoft Foundry first). The tool loop is our own code, not a hosted agent service.
+No model runs in the cluster and no GPU is needed: the analyzer calls a managed model endpoint (Microsoft Foundry first). The call, and the bounded tool loop on escalation (planned), are our own code, not a hosted agent service.
 
 ### 2.3. Provider interfaces
 
@@ -204,24 +208,29 @@ The number of Incidents is bounded instead of retained for a time: at most 500 i
 
 ### 3.3. Analysis
 
-Deterministic rules and known runbooks run first. The model gets a bounded context: incident summary, object status and owners, a log excerpt, selected metrics and recent Git changes for the source of the object.
+Proposed in [ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md): context first, one structured call.
 
-The result has a fixed schema: hypotheses, evidence, missing data, uncertainty, proposed action, expected effect and verification conditions. When the evidence is not there, the correct result is no proposal and a hand-off to a human. A model's self-reported confidence never makes an action eligible.
+Deterministic rules and known runbooks run first. A runbook match is deterministic and makes no model call. The model path is for incidents no runbook matched, and its common case is one small-model call: the context builder assembles a bounded, redacted context deterministically (incident summary, object status and owners, a log excerpt, selected metrics and recent Git changes for the source of the object) and the small model returns one structured result. Read tools (section 4) are offered only on escalation, within fixed step, token and spend budgets, so the cost per incident is predictable and a recorded context can be replayed in CI.
+
+The prompt is a Go `embed` template in `internal/analysis/prompts/`, reviewed like code; there is no setting, ConfigMap or CRD for it. Its catalog and the output schema are generated from the Go action and result types. It has a static system part (role, rules, catalog, schema) and then the untrusted context in delimited blocks tagged with their provenance, with a rule that their text is data, never instructions. Each analysis record stores the prompt version (a content hash), the model deployment and ID, and the token counts. What the model sees also depends on operator redaction patterns and on the deployment, which is why the evaluation (11.2) is keyed on model and prompt together.
+
+The result has a fixed schema: hypotheses, evidence, missing data, uncertainty, proposed action, expected effect and verification conditions. When the evidence is not there, the correct result is no proposal and a hand-off to a human. A non-empty "missing data" is a hand-off that says what is missing, not an escalation. A model's self-reported confidence never makes an action eligible and never triggers escalation. The structured result is the only way a proposal is made: one validator checks it against the schema and the catalog and builds the `RemediationRequest`. If policy later denies the request, the analyzer does not propose again, and the denial reason is never shown to the model.
+
+Escalation runs on deterministic signals only: the context builder truncated the context or could not fetch a source, or the small model's output failed schema validation after one retry. The stronger model then gets the read tools, within the same budgets, at most once per incident fingerprint per cooldown window.
 
 ## 4. Tools
 
-The analyzer exposes tools to the model through its own adapters. MCP is optional: it can expose the same tools later, but it is not required by the controller and it does not replace Kubernetes RBAC ([ADR-0003](adr/0003-gitops-only-typed-remediation.md)).
+The analyzer exposes tools to the model through its own adapters. In the MVP loop they are offered only when an analysis escalates (3.3, 11.2); the first call runs on the prepared context alone. Every tool result goes through `internal/redact` before the model sees it. MCP is optional: it can expose the same tools later, but it is not required by the controller and it does not replace Kubernetes RBAC ([ADR-0003](adr/0003-gitops-only-typed-remediation.md)).
 
 | Tool | Purpose | Mode |
 | --- | --- | --- |
-| `get_resource`, `list_events` | Object state and symptom history | Read |
+| `get_resource`, `list_events` | Object state and symptom history | Read, redacted |
 | `get_pod_logs` | Bounded time range and byte count | Read, redacted |
-| `query_metrics` | Approved query templates only | Read |
-| `get_delivery_status` | Flux Kustomization / HelmRelease revision and readiness | Read |
-| `read_git_file`, `get_recent_changes` | Map an object to its source in Git | Read |
-| `submit_remediation_proposal` | Submit a plan for policy check | Write a proposal |
+| `query_metrics` | Approved query templates only | Read, redacted |
+| `get_delivery_status` | Flux Kustomization / HelmRelease revision and readiness | Read, redacted |
+| `read_git_file`, `get_recent_changes` | Map an object to its source in Git | Read, redacted |
 
-PR creation and auto-merge are not model tools at all: only the remediation controller does them, after policy.
+There is no proposal tool: a proposal is the structured output of the call (3.3), checked by one validator. PR creation and auto-merge are not model tools at all: only the remediation controller does them, after policy.
 
 The model never gets a shell, `kubectl exec`, `kubectl apply`, or a way to change policy. Every tool has an argument schema, a timeout, a response size limit, an allow list of object kinds and server-side authorization. Tool results, logs and repository content are untrusted data, including when they contain instructions addressed to the agent. RBAC on the ServiceAccount enforces the limits; hiding write tools is not enough.
 
@@ -401,7 +410,7 @@ stateDiagram-v2
     Superseded --> [*]
 ```
 
-The policy check, the first step, loads the policy the request names, the `default` RemediationSettings and the live target, and then maps the target to its file in Git (ADR-0012). The target is read again after the mapping, and the check starts over if its UID or resourceVersion changed, so the previous value and the file in Git always describe the same object. It stores `status.source`, `policyUID`, `policyRevision` (`name/generation`), `effectiveApprovalRequired` and the `PolicyAllowed` condition together with the phase, through the status subresource with the resourceVersion it read, so a stale read ends in a conflict and a decided request is never decided again.
+The policy check, the first step, loads the policy the request names, the `default` RemediationSettings and the live target, and then maps the target to its file in Git (ADR-0012). The target is read again after the mapping, and the check starts over if its UID or resourceVersion changed, so the previous value and the file in Git always describe the same object. It stores `status.source`, `policyUID`, `policyRevision` (`name/generation`), `effectiveApprovalRequired`, the pull request step's `deadline` (unless writes are paused) and the `PolicyAllowed` condition together with the phase, through the status subresource with the resourceVersion it read, so a stale read ends in a conflict and a decided request is never decided again.
 
 | Finding | Phase | `PolicyAllowed` |
 | --- | --- | --- |
@@ -413,7 +422,7 @@ The policy check, the first step, loads the policy the request names, the `defau
 | The matching repository's settings cannot open a Git provider (a value the schema accepts but the adapter refuses, such as an App client ID outside `[A-Za-z0-9._-]` or a target branch starting with `_` or longer than 200 characters) | `NeedsIntervention`, `RepositoryUnusable` | `Unknown` |
 | All checks pass | `PolicyChecked`, `WithinApprovedBounds` | `True` |
 
-Only a failure worth retrying (API server, Git host, or a signer that is throttled, cannot reach Key Vault or Entra ID, or cannot get a token yet) is retried, with backoff, or after the delay the host asked for (`Retry-After`); every permanent refusal is a final phase, settings that can never open a Git provider included (the same refusal ends a later freshness check in `NeedsIntervention`, `PlanFresh` reason `RepositoryUnusable`, without closing anything). While a retry is pending the request keeps no phase (or `Pending`) and no `PolicyAllowed` condition. The retry limit is planned. The policy and settings are read from the API server on every check, never from the cache, so a deleted policy or a tightened setting takes effect at once. Messages and conditions never carry Git URLs or provider text.
+Only a failure worth retrying (API server, Git host, or a signer that is throttled, cannot reach Key Vault or Entra ID, or cannot get a token yet) is retried, with backoff, or after the delay the host asked for (`Retry-After`, cut to the time left before `status.deadline` for a request that has not opened its pull request yet, so it expires on time); every permanent refusal is a final phase, settings that can never open a Git provider included (the same refusal ends a later freshness check in `NeedsIntervention`, `PlanFresh` reason `RepositoryUnusable`, without closing anything). While a retry is pending the request keeps no phase (or `Pending`) and no `PolicyAllowed` condition. The retry limit is planned. The policy and settings are read from the API server on every check, never from the cache, so a deleted policy or a tightened setting takes effect at once. Messages and conditions never carry Git URLs or provider text.
 
 Every external call of a step runs under the step's own deadline: the policy check (the uncached reads and the source resolver together) and, separately, the freshness check and the cleanup of a stale plan (open the repository, find and close the change request, as one sequence). A step that reaches its deadline returns a retryable error and keeps the request in its phase; it never ends in a final phase. The caller's own cancellation stays a different error, so shutdown is not reported as a timeout.
 
@@ -428,9 +437,9 @@ Each reconcile:
 
 Never assume exactly-once execution. A PR can be created while the status write that records its number fails. The branch name `shadewright/<request-uid>` and a marker in the PR body (request UID and plan digest) let the controller find the existing operation after a restart.
 
-The pull request step (`internal/controller/pullrequest.go`) runs for a fresh request in `PolicyChecked` and does at most one write per reconcile, after the freshness check:
+The pull request step (`internal/controller/pullrequest.go`) runs for a fresh request in `PolicyChecked` and does at most one write per reconcile, right after the freshness check:
 
-1. It stores `status.deadline` (30 minutes by default) and adds the finalizer `remediation.shadewright.io/close-pull-request`, each in its own write.
+1. Its deadline, `status.deadline` (30 minutes by default), is stored by the policy check in the same status write that sets `PolicyChecked`, so it also ends a request whose freshness check never passes (a Git host that stays down). A request decided while writes are paused gets no deadline then; it gets one, in its own write, on the first freshness check that finds writes allowed again. Once started, time spent paused counts against it, and a request whose deadline passed during a pause becomes `Expired` when writes resume. The step then adds the finalizer `remediation.shadewright.io/close-pull-request`, in its own write.
 2. It looks for a change request on `shadewright/<request-uid>` first. One that carries the request's exact marker and holds the desired value at its head is adopted; a merged one becomes `Merged`, a closed one or one without the marker `NeedsIntervention` (`ChangeRequestClosed`, `ForeignChangeRequest`).
 3. Without one, it creates the branch at the head of the target branch, then renders the Kustomization's directory with and without the change (8.2 steps 4 and 5) and only then commits the typed change on top of the head it read (the patch checks the previous value), then opens the pull request with the evidence, scope, expected effect, risk, rollback and the marker. The title and body are built from validated fields and redacted. Every write names the head it expects, so a lost status write or a concurrent reconcile finds the work instead of repeating it.
 4. Recording the pull request sets `PRCreated` with its number, URL and head commit and clears the deadline; the next reconcile moves it to `AwaitingApproval` (`Approved` `False`, `WaitingForReview`). Auto-merge is not built yet, so a request whose policy allows automation also waits for a person (the `AutoMergeQueued` edge of the diagram is planned).
@@ -560,7 +569,7 @@ The GitHub App enables auto-merge (GraphQL `enablePullRequestAutoMerge`, squash)
 
 1. **Least privilege RBAC:** never `cluster-admin`; read only selected namespaces and kinds. The analyzer's namespaces are a boundary of its identity, not only a setting: one RoleBinding per watched namespace, and an empty list is refused rather than read as "all namespaces" (2.2). Separate roles for analysis, proposal, status and execution.
 2. **Untrusted data:** events, logs, annotations, tool descriptions and Git files may carry prompt injection. They never change instructions, permissions or the action catalog.
-3. **Redaction:** secrets, tokens, connection strings and personal data are removed before the model sees them. One function does it (`internal/redact`): built-in rules for common token formats, long random tokens without a known prefix, JWTs, private keys, connection strings, credentials in URLs (any userinfo), Authorization, Basic and Bearer values, values of secret-named keys in env, JSON and YAML forms, emails and IP addresses, plus operator-supplied patterns; a match becomes a marker naming its kind, and the output is never longer than the input. Reading `Secret` objects is off by default; checking that a referenced Secret exists goes through a narrow adapter that returns only yes or no.
+3. **Redaction:** secrets, tokens, connection strings and personal data are removed before the model sees them. One function does it (`internal/redact`): built-in rules for common token formats, long random tokens without a known prefix, JWTs, private keys, connection strings, credentials in URLs (any userinfo), Authorization values, Basic and Bearer values that look like credentials, values of secret-named keys in env, JSON (also escaped inside a string) and YAML forms (all scalar values under a secret-named YAML key), Kubernetes environment variables whose name holds a secret, emails and IP addresses, plus operator-supplied patterns; a match becomes a marker naming its kind, and the output is never longer than the input. Reading `Secret` objects is off by default; checking that a referenced Secret exists goes through a narrow adapter that returns only yes or no.
 4. **Bounded actions:** typed operations, namespace and path scope, change limits, per-environment policy. No commands generated by the model.
 5. **Approval of a specific change:** approval is bound to the current plan and head commit. A field set by an untrusted author never replaces an admin or reviewer decision.
 6. **Network:** controlled egress to the Kubernetes API, the model endpoint, Key Vault, GitHub and Entra ID. NetworkPolicies in the Shadewright namespace.
@@ -634,9 +643,13 @@ For the lab: Sweden Central ([ADR-0016](adr/0016-lab-region-sweden-central.md)).
 
 ### 11.2. Model strategy
 
-- Small model: summarize context, classify the symptom, propose a known runbook.
-- Stronger model: hard incidents, ambiguous dependencies, multi-step analysis. Used as an escalation, not by default.
+- Small model: summarize context, classify the symptom, propose a known runbook. One structured call on a prepared context, without tools.
+- Stronger model: hard incidents, ambiguous dependencies, multi-step analysis, with read tools and fixed step, token and spend budgets. Used as an escalation, not by default. Deterministic signals trigger it, never model output: the context was truncated or a source could not be fetched, or the small model's output failed schema validation after one retry. At most one escalation per incident fingerprint per cooldown window. A runbook match (a rule with no model call) never reaches the model at all.
 - Deterministic code: enforce policy, compute bounds, build the diff, decide whether execution is allowed.
+
+`ModelProvider` is built as `Complete(ctx, CompletionRequest) (Completion, error)`: messages, tool definitions, an optional response schema and `MaxOutputTokens` in; `Content` (a string), tool calls, `Usage` and a `Model` field out; throttling and unavailability as `ErrRetryable`. Planned: a deployment field, typed malformed-output and timeout errors, and usage reported on failure (11.1). Foundry adapters cover the OpenAI and Anthropic families.
+
+Evaluation gate. A change to a prompt, model or schema must pass the scenario evaluation before merge. In CI it runs against a fake model and covers plumbing, schemas and refusal paths only; it does not test the prompt's defences or model quality. Quality is gated by a recorded real-model evaluation keyed by model ID and version plus the prompt hash, stored in this repository (for example `test/eval/results/`). Its recorded contexts from the fleet scenarios live here too (for example `test/eval/contexts/`); the fleet's `scenarios/*/expected.yaml` are the expectations, and each result pins the fleet commit it read them from. The analyzer embeds the list of evaluated (model, prompt hash) pairs and refuses automatic analysis, with the reason reported, when the configured deployment's model (or `Completion.Model`) has no passing record. It fails closed. Details in [ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md).
 
 Concrete models are chosen by benchmark on the scenario set. Measure diagnosis accuracy, plan usefulness, false fixes, latency and cost per resolved incident.
 
@@ -662,11 +675,11 @@ Count every call of an analysis: tool steps, retries and escalations. Check how 
 | A, cheaper | 0.20 USD | 0.80 USD | 18 × 0.20 + 4.5 × 0.80 = 7.20 USD/month |
 | B, stronger | 2.00 USD | 8.00 USD | 18 × 2.00 + 4.5 × 8.00 = 72.00 USD/month |
 
-If A handles everything and 10% also goes to B with the same context size: 7.20 + 0.10 × 72.00 = 14.40 USD/month.
+Runbook matches make no model call and cost nothing, so the figures above are an upper bound for the model path. The common case there is one call to A. If a made-up 5% of analyses also escalate to B with the same context size (escalations also run tools, so real ones cost more): 7.20 + 0.05 × 72.00 = 10.80 USD/month.
 
 ### 12.3. Controls
 
-Real prices come from the model card, the deployment configurator and the [Azure Pricing Calculator](https://azure.microsoft.com/en-us/pricing/calculator/), recorded with the date checked. The app enforces maximum context, steps, output tokens, concurrency, analyses per day and a daily spend limit. An Azure budget only alerts; it does not stop usage ([budgets](https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/tutorial-acm-create-budgets)). Deduplication and cached diagnoses keep repeated calls down.
+Real prices come from the model card, the deployment configurator and the [Azure Pricing Calculator](https://azure.microsoft.com/en-us/pricing/calculator/), recorded with the date checked. The app enforces maximum context, steps, output tokens, concurrency, analyses per day and a daily spend limit. An Azure budget only alerts; it does not stop usage ([budgets](https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/tutorial-acm-create-budgets)). Deduplication and cached diagnoses keep repeated calls down. A failed or timed-out call is charged at its upper bound (the input estimate plus `MaxOutputTokens`). The daily counter lives in the operator namespace, in an object the analyzer owns (the exact object is left to [#43](https://github.com/pkalin/shadewright/issues/43)); a counter that cannot be read or written means refuse, not allow.
 
 The lab itself (AKS node, Key Vault, storage, Foundry) is priced in `shadewright-azure` and runs only when needed ([ADR-0008](adr/0008-disposable-azure-lab.md)).
 
@@ -721,7 +734,8 @@ Still open:
 4. **Teams.** Whether the maintainer's Microsoft account can receive Teams Workflows webhooks. If not, GitHub issues stay the only notifier for now.
 5. **Required checks in policy.** Whether a policy should name verification checks a request cannot drop, beyond the ones each action always runs.
 6. **Scenario switch.** Proposed in [ADR-0022](adr/0022-scenario-switch-and-clusters.md): Flux on each cluster tracks a `cluster/<cluster>` branch that the scenario harness moves forward with one scenario or reset commit at a time, and the agent's pull requests target that branch. Open until the ADR is accepted.
-7. **Incident retention.** Incidents are bounded by a count (3.2), not deleted: the analyzer has no `delete` on them. When old Incidents should go, and who deletes them, is open.
+7. **Calling the model.** Proposed in [ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md): prompts are code, context first with one structured call, escalation on deterministic signals with bounded tools, an evaluation gate keyed on model and prompt that the analyzer enforces at run time. Open until the ADR is accepted.
+8. **Incident retention.** Incidents are bounded by a count (3.2), not deleted: the analyzer has no `delete` on them. When old Incidents should go, and who deletes them, is open.
 
 ## 16. Prior art
 

@@ -41,7 +41,7 @@ const (
 // admission controller writes the policies' Ready condition (pkg/controllers/webhook/controller.go) and emits
 // the admission events; the reports controller writes the policy reports and emits kyverno-scan events for the
 // same failing results (pkg/controllers/report/utils/events.go). Using the event names rather than the
-// Deployment names of the Helm chart makes a report result and the event about it fingerprint alike.
+// Deployment names of the Helm chart gives a report result the reporting controller of the event about it.
 const (
 	eventAdmission = "kyverno-admission"
 	eventScan      = "kyverno-scan"

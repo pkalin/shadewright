@@ -40,6 +40,8 @@ const (
 	waiting             = "waiting"
 	appsV1              = "apps/v1"
 	keyReason           = "reason"
+	keyName             = "name"
+	keyReady            = "ready"
 	// The values Kubernetes and Cloudflare write, spelled out so a changed constant fails the tests.
 	wantKubelet = "kubelet"
 	wantCoreGV  = "v1"
@@ -60,7 +62,7 @@ func fixture(t *testing.T, name string) map[string]any {
 }
 
 // webContainer is a container that is not cloudflared.
-func webContainer() map[string]any { return map[string]any{"name": "web", "image": "nginx:1.29"} }
+func webContainer() map[string]any { return map[string]any{keyName: "web", "image": "nginx:1.29"} }
 
 // symptoms runs the module's one symptom source.
 func symptoms(obj map[string]any) []modules.Symptom {
@@ -198,11 +200,11 @@ func TestPodStates(t *testing.T) {
 		want   bool
 	}{
 		{"as recorded", func(map[string]any) {}, true},
-		{"ready", func(p map[string]any) { containerStatusOf(p)["ready"] = true }, false},
-		{"ready missing", func(p map[string]any) { delete(containerStatusOf(p), "ready") }, false},
-		{"ready not a bool", func(p map[string]any) { containerStatusOf(p)["ready"] = "false" }, false},
+		{keyReady, func(p map[string]any) { containerStatusOf(p)[keyReady] = true }, false},
+		{"ready missing", func(p map[string]any) { delete(containerStatusOf(p), keyReady) }, false},
+		{"ready not a bool", func(p map[string]any) { containerStatusOf(p)[keyReady] = "false" }, false},
 		{"no container status", func(p map[string]any) { delete(p["status"].(map[string]any), "containerStatuses") }, false},
-		{"status of another container", func(p map[string]any) { containerStatusOf(p)["name"] = "sidecar" }, false},
+		{"status of another container", func(p map[string]any) { containerStatusOf(p)[keyName] = "sidecar" }, false},
 		{"being deleted", func(p map[string]any) {
 			p["metadata"].(map[string]any)["deletionTimestamp"] = "2026-11-04T09:00:00Z"
 		}, false},
@@ -230,6 +232,27 @@ func TestPodStates(t *testing.T) {
 		{"mirror with a registry port and no tag", func(p map[string]any) {
 			container(p)["image"] = "registry.example.com:5000/mirror/cloudflared"
 		}, true},
+		{"official image on index.docker.io, no labels", func(p map[string]any) {
+			container(p)["image"] = "index.docker.io/cloudflare/cloudflared:2026.10.7"
+			p["metadata"].(map[string]any)["labels"] = nil
+		}, true},
+		{"official image on registry-1.docker.io, no labels", func(p map[string]any) {
+			container(p)["image"] = "registry-1.docker.io/cloudflare/cloudflared@sha256:" + strings.Repeat("ab", 32)
+			p["metadata"].(map[string]any)["labels"] = nil
+		}, true},
+		{"bare cloudflared repository, labelled", func(p map[string]any) { container(p)["image"] = "cloudflared:dev" }, true},
+		{"bare cloudflared repository, no labels", func(p map[string]any) {
+			container(p)["image"] = "cloudflared:dev"
+			p["metadata"].(map[string]any)["labels"] = nil
+		}, false},
+		{"status for an older generation", func(p map[string]any) { p["metadata"].(map[string]any)["generation"] = 2 }, false},
+		{"status for a newer generation", func(p map[string]any) {
+			p["status"].(map[string]any)["observedGeneration"] = 3
+		}, true},
+		{"no observed generation", func(p map[string]any) {
+			delete(p["status"].(map[string]any), "observedGeneration")
+			p["metadata"].(map[string]any)["generation"] = 2
+		}, true},
 		{"cloudflared second of two containers", func(p map[string]any) {
 			spec := p["spec"].(map[string]any)
 			spec["containers"] = append([]any{webContainer()}, spec["containers"].([]any)...)
@@ -241,6 +264,72 @@ func TestPodStates(t *testing.T) {
 		if got := len(symptoms(p)) == 1; got != c.want {
 			t.Errorf("%s: symptom %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// TestSecondCloudflaredContainer checks that the symptom is about the first cloudflared container that is not
+// ready: a ready one before it does not hide it.
+func TestSecondCloudflaredContainer(t *testing.T) {
+	p := fixture(t, fixtureCrashLoop)
+	spec, status := p["spec"].(map[string]any), p["status"].(map[string]any)
+	spec["containers"] = append([]any{map[string]any{keyName: "first", "image": "cloudflare/cloudflared:2026.10.7"}},
+		spec["containers"].([]any)...)
+	status["containerStatuses"] = append([]any{map[string]any{keyName: "first", keyReady: true, "restartCount": 0,
+		"state": map[string]any{"running": map[string]any{"startedAt": "2026-11-04T08:00:04Z"}}}},
+		status["containerStatuses"].([]any)...)
+	got := symptoms(p)
+	if len(got) != 1 || got[0].Evidence[0] != (modules.Evidence{Field: fieldContainerName, Value: nameCloudflared}) {
+		t.Errorf("ready first container, unready second: got %#v, want the second", got)
+	}
+}
+
+// TestNamelessContainer checks that a container without a name is not matched to a status without a name.
+func TestNamelessContainer(t *testing.T) {
+	p := fixture(t, fixtureCrashLoop)
+	container(p)[keyName] = ""
+	containerStatusOf(p)[keyName] = ""
+	if got := symptoms(p); got != nil {
+		t.Errorf("nameless container and status: got %#v, want none", got)
+	}
+}
+
+// TestBoundedStatuses checks that only the first maxContainers container statuses are read.
+func TestBoundedStatuses(t *testing.T) {
+	p := fixture(t, fixtureCrashLoop)
+	status := p["status"].(map[string]any)
+	cf := status["containerStatuses"].([]any)[0]
+	others := make([]any, 0, maxContainers+1)
+	for range maxContainers {
+		others = append(others, map[string]any{keyName: "web", keyReady: false})
+	}
+	status["containerStatuses"] = append(others, cf)
+	if got := symptoms(p); got != nil {
+		t.Errorf("cloudflared status after %d others: got %#v, want none", maxContainers, got)
+	}
+	status["containerStatuses"] = append(others[:maxContainers-1], cf)
+	if got := symptoms(p); len(got) != 1 {
+		t.Errorf("cloudflared status as entry %d: got %d symptoms, want 1", maxContainers, len(got))
+	}
+}
+
+// podSource is a module that watches Pods too.
+type podSource struct{}
+
+func (podSource) Name() string { return "other" }
+func (podSource) Detection() modules.IntegrationDetection {
+	return modules.IntegrationDetection{GroupVersions: []string{wantCoreGV}}
+}
+func (podSource) Hooks() modules.Hooks {
+	return modules.Hooks{Symptoms: []modules.SymptomSource{{Versions: []string{wantCoreGV}, Kind: KindPod,
+		Resource: "pods", ReportingController: wantKubelet, Symptoms: podSymptoms}}}
+}
+
+// TestPodKindOwned checks that this module owns the Pod source: a second module that watches Pods makes the
+// registry refuse to build.
+func TestPodKindOwned(t *testing.T) {
+	if _, err := modules.New(nil, []modules.Integration{Module(), podSource{}}); err == nil ||
+		!strings.Contains(err.Error(), "watched twice") {
+		t.Errorf("two Pod sources: New error %v, want watched twice", err)
 	}
 }
 
@@ -273,7 +362,7 @@ func TestSecretsAndFreeTextNeverRead(t *testing.T) {
 		p := fixture(t, f)
 		c := container(p)
 		c["args"] = []any{"tunnel", "run", "--token", secret}
-		c["env"] = []any{map[string]any{"name": "TUNNEL_TOKEN", "value": secret}}
+		c["env"] = []any{map[string]any{keyName: "TUNNEL_TOKEN", "value": secret}}
 		c["command"] = []any{hostile}
 		p["metadata"].(map[string]any)["annotations"] = map[string]any{"note": hostile}
 		st := containerStatusOf(p)

@@ -409,7 +409,7 @@ func TestModuleRegistersAndIsDetected(t *testing.T) {
 }
 
 // TestReportingControllers checks that each source names the event source Kyverno writes for the component that
-// writes the object (kyverno v1.19.2 pkg/event/source.go), so a report result and its event fingerprint alike.
+// writes the object (kyverno v1.19.2 pkg/event/source.go), so a report result and its event name the same reporting controller.
 func TestReportingControllers(t *testing.T) {
 	want := map[string]string{
 		KindClusterPolicy: wantAdmission, KindPolicy: wantAdmission,

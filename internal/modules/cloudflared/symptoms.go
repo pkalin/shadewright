@@ -42,12 +42,16 @@ const (
 
 // Images and labels that mark cloudflared (package documentation for the sources).
 const (
-	officialRepository       = "cloudflare/cloudflared"
-	officialDockerRepository = "docker.io/" + officialRepository
-	mirrorSuffix             = "/cloudflared"
-	labelPod                 = "pod"
-	labelAppName             = "app.kubernetes.io/name"
+	officialRepository = "cloudflare/cloudflared"
+	copyRepository     = "cloudflared"
+	copySuffix         = "/" + copyRepository
+	labelPod           = "pod"
+	labelAppName       = "app.kubernetes.io/name"
 )
+
+// dockerHubHosts are the spellings of Docker Hub's registry host in an image reference: the official image
+// under any of them is Cloudflare's own.
+var dockerHubHosts = []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/"}
 
 // labelValues are the label values, per key, that let a copy of the image in another registry count as
 // cloudflared.
@@ -80,10 +84,11 @@ const (
 	fieldPodReadyCondition = "status.conditions.Ready.reason"
 )
 
-// podSymptoms gives one TunnelDown symptom for a Pending or Running pod, not being deleted, whose first
-// cloudflared container is not ready and not still being created. Only the image, the labels, the phase, the
-// deletion timestamp and the status of the container are read; command, args, env, messages and annotations
-// never are.
+// podSymptoms gives one TunnelDown symptom for a Pending or Running pod, not being deleted and with a status
+// for its current generation, about the first of its cloudflared containers that is not ready and not still
+// being created: a second replica of cloudflared in the same pod that is down is a problem too, even when the
+// first is ready. Only the image, the labels, the phase, the generations, the deletion timestamp and the
+// status of the container are read; command, args, env, messages and annotations never are.
 func podSymptoms(obj map[string]any) []modules.Symptom {
 	if av, _ := obj["apiVersion"].(string); av != CoreVersion {
 		return nil
@@ -96,6 +101,9 @@ func podSymptoms(obj map[string]any) []modules.Symptom {
 		return nil
 	}
 	status, _ := obj["status"].(map[string]any)
+	if stale(meta, status) {
+		return nil
+	}
 	if phase, _ := status["phase"].(string); phase != phasePending && phase != phaseRunning {
 		return nil
 	}
@@ -128,6 +136,19 @@ func podSymptoms(obj map[string]any) []modules.Symptom {
 		return []modules.Symptom{tunnelDown(name, image, st, state, status)}
 	}
 	return nil
+}
+
+// stale reports whether the pod's status was written for an older generation of its spec: status.observedGeneration
+// (Kubernetes v1.37.2 staging/src/k8s.io/api/core/v1/types.go PodStatus, set by the kubelet since the
+// PodObservedGenerationTracking feature, GA in 1.35) is set and below metadata.generation. A status without
+// it, from an older kubelet, is read as current.
+func stale(meta, status map[string]any) bool {
+	observed, ok := modules.JSONInteger(status["observedGeneration"])
+	if !ok {
+		return false
+	}
+	generation, ok := modules.JSONInteger(meta["generation"])
+	return ok && observed < generation
 }
 
 // tunnelDown builds the symptom of one container: at most 8 evidence entries.
@@ -175,19 +196,25 @@ func containerStatus(statuses []any, name string) map[string]any {
 }
 
 // IsCloudflared reports whether a container image, in a pod with the given labels (as decoded from JSON),
-// is cloudflared: Cloudflare's own image (cloudflare/cloudflared or docker.io/cloudflare/cloudflared, any tag
-// or digest), or an image whose last path element is cloudflared in a pod that carries one of the labels of
-// Cloudflare's manifests (pod=cloudflared, app.kubernetes.io/name=cloudflare-tunnel) or
-// app.kubernetes.io/name=cloudflared. Labels alone are never enough. Both inputs are untrusted.
+// is cloudflared: Cloudflare's own image (cloudflare/cloudflared, alone or under one of Docker Hub's host
+// names docker.io, index.docker.io and registry-1.docker.io, any tag or digest), or a copy, an image whose
+// repository is cloudflared or ends in /cloudflared, in a pod that carries one of the labels of Cloudflare's
+// manifests (pod=cloudflared, app.kubernetes.io/name=cloudflare-tunnel) or app.kubernetes.io/name=cloudflared.
+// Labels alone are never enough. Both inputs are untrusted.
 func IsCloudflared(image string, labels map[string]any) bool {
 	repo, ok := repository(image)
 	if !ok {
 		return false
 	}
-	if repo == officialRepository || repo == officialDockerRepository {
+	if repo == officialRepository {
 		return true
 	}
-	return strings.HasSuffix(repo, mirrorSuffix) && hasCloudflaredLabel(labels)
+	for _, host := range dockerHubHosts {
+		if repo == host+officialRepository {
+			return true
+		}
+	}
+	return (repo == copyRepository || strings.HasSuffix(repo, copySuffix)) && hasCloudflaredLabel(labels)
 }
 
 // repository returns an image reference without its digest and tag, and false for an empty or too long one.

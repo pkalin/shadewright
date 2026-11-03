@@ -5,6 +5,7 @@
     "name": "cloudflared-6d9f7c8b5d-h7j3t",
     "namespace": "demo",
     "uid": "6b1f0d2e-3c4a-4b5d-8e6f-7a8b9c0d1e2f",
+    "generation": 1,
     "generateName": "cloudflared-6d9f7c8b5d-",
     "labels": {
       "pod": "cloudflared",
@@ -63,37 +64,43 @@
     ]
   },
   "status": {
+    "observedGeneration": 1,
     "phase": "Running",
     "conditions": [
       {
         "type": "PodReadyToStartContainers",
         "status": "True",
         "lastProbeTime": null,
-        "lastTransitionTime": "2026-11-04T08:00:03Z"
+        "lastTransitionTime": "2026-11-04T08:00:03Z",
+        "observedGeneration": 1
       },
       {
         "type": "Initialized",
         "status": "True",
         "lastProbeTime": null,
-        "lastTransitionTime": "2026-11-04T08:00:00Z"
+        "lastTransitionTime": "2026-11-04T08:00:00Z",
+        "observedGeneration": 1
       },
       {
         "type": "Ready",
         "status": "True",
         "lastProbeTime": null,
-        "lastTransitionTime": "2026-11-04T09:12:40Z"
+        "lastTransitionTime": "2026-11-04T09:12:40Z",
+        "observedGeneration": 1
       },
       {
         "type": "ContainersReady",
         "status": "True",
         "lastProbeTime": null,
-        "lastTransitionTime": "2026-11-04T09:12:40Z"
+        "lastTransitionTime": "2026-11-04T09:12:40Z",
+        "observedGeneration": 1
       },
       {
         "type": "PodScheduled",
         "status": "True",
         "lastProbeTime": null,
-        "lastTransitionTime": "2026-11-04T08:00:00Z"
+        "lastTransitionTime": "2026-11-04T08:00:00Z",
+        "observedGeneration": 1
       }
     ],
     "startTime": "2026-11-04T08:00:00Z",

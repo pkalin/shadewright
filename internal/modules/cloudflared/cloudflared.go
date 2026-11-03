@@ -27,9 +27,8 @@ const (
 	KindPod     = "Pod"
 )
 
-// reportingKubelet is the component that writes pod status, the collector's reporting controller for
-// observations read from pod status too, so a symptom here and a kubelet event about the same pod
-// fingerprint alike.
+// reportingKubelet is the component that writes pod status. It is the reporting controller the collector
+// gives its own observations read from pod status too.
 const reportingKubelet = "kubelet"
 
 // module is the cloudflared integration. It has no state.
@@ -42,8 +41,9 @@ func (module) Name() string { return Name }
 
 // Detection declares the core group version v1, the one of the Pods the module reads: cloudflared has no API
 // group, so there is nothing more specific to detect through discovery. The module is therefore detected on
-// every cluster and active only where the cluster admin enables it; the symptom source recognises cloudflared
-// pod by pod (package documentation).
+// every cluster, detection does not narrow it, and it is active wherever the cluster admin enables it
+// (ADR-0018 amendment of 2026-11-04, [modules.CoreOnly]: such a module may only diagnose). The symptom source
+// recognises cloudflared pod by pod (package documentation).
 func (module) Detection() modules.IntegrationDetection {
 	return modules.IntegrationDetection{GroupVersions: []string{CoreVersion}}
 }

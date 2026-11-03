@@ -20,32 +20,35 @@ limitations under the License.
 //
 // Detection: cloudflared has no API of its own, no CRD and no group version. The module declares the core
 // group version v1, the one of the Pods it reads, so it is detected wherever Pods are served, which is every
-// cluster, and it is active only where the cluster admin enables it in RemediationSettings (detection never
-// enables a module). Recognising cloudflared is the job of the symptom source, pod by pod (see below), not of
+// cluster: detection does not narrow it, and it is active wherever the cluster admin enables it in
+// RemediationSettings, which stays the only gate (ADR-0018 amendment of 2026-11-04). Such a module may only
+// diagnose; [modules.New] refuses tools, actions and checks for it ([modules.CoreOnly]). Recognising cloudflared is the job of the symptom source, pod by pod (see below), not of
 // detection: detection by workloads would need the detector to read Pods or Deployments, which it does not
 // today, and listing Deployments would need a grant the analyzer does not have.
 //
-// Symptom source, Pods (core v1), read only from the object itself. Its reporting controller is the kubelet,
-// which writes pod status. A container of spec.containers (init and ephemeral containers are not read) is
-// cloudflared when its image is:
+// Symptom source, Pods (core v1), read only from the object itself. The module owns the registry's one Pod
+// source: a later module that reads Pods must share it. Its reporting controller is the kubelet, which writes
+// pod status, the one the collector gives its pod observations too. A container of spec.containers (init and
+// ephemeral containers are not read) is cloudflared when its image is:
 //
-//   - Cloudflare's own image, cloudflare/cloudflared or docker.io/cloudflare/cloudflared, with any tag or digest
-//     (cloudflared 2026.10.7 .docker-images: the registry docker.io/cloudflare, image cloudflared; Cloudflare's
-//     charts default to cloudflare/cloudflared), or
-//   - a copy in another registry or path whose last path element is cloudflared, in a pod that carries a label
+//   - Cloudflare's own image, cloudflare/cloudflared alone or under one of Docker Hub's host names (docker.io,
+//     index.docker.io, registry-1.docker.io), with any tag or digest (cloudflared 2026.10.7 .docker-images: the
+//     registry docker.io/cloudflare, image cloudflared; Cloudflare's charts default to cloudflare/cloudflared), or
+//   - a copy, an image whose repository is cloudflared or ends in /cloudflared, in a pod that carries a label
 //     Cloudflare's own manifests set: pod=cloudflared (helm-charts tag cloudflare-tunnel-remote-0.1.2,
 //     templates/deployment.yaml) or app.kubernetes.io/name=cloudflare-tunnel (tag cloudflare-tunnel-0.3.2, the
 //     chart's default name in its selector labels), or app.kubernetes.io/name=cloudflared, the recommended
 //     label with the application's name.
 //
-// A label alone never makes a pod cloudflared, whatever the image, and an image whose last path element is
-// cloudflared but that is not Cloudflare's needs the label. Images, labels and status are untrusted: whoever
+// A label alone never makes a pod cloudflared, whatever the image, and a copy that is not Cloudflare's own
+// image needs the label. Images, labels and status are untrusted: whoever
 // can create a pod in a watched namespace can make it look like cloudflared. A false match only adds a symptom
 // about that pod; the module proposes nothing.
 //
-// The first cloudflared container of a pod that is Pending or Running, not being deleted, and whose
-// containerStatuses entry says ready false gives one TunnelDown symptom, unless the container is waiting with
-// the kubelet's ContainerCreating or PodInitializing (Kubernetes v1.37.2 pkg/kubelet/kubelet_pods.go): those
+// A pod that is Pending or Running, not being deleted and whose status is for its current spec (a set
+// status.observedGeneration not below metadata.generation, written by the kubelet since Kubernetes 1.35) gives
+// one TunnelDown symptom about the first of its cloudflared containers whose containerStatuses entry says
+// ready false and that is not waiting with the kubelet's ContainerCreating or PodInitializing (Kubernetes v1.37.2 pkg/kubelet/kubelet_pods.go): those
 // are the states before a container first starts, and the events that explain a pod stuck there are collected
 // like every Warning event. Ready false means the container is not running (CrashLoopBackOff,
 // CreateContainerConfigError for a missing token Secret key, an image pull failure) or that its readiness probe
@@ -67,8 +70,9 @@ limitations under the License.
 // [modules.ValidSymptom].
 //
 // One symptom is about one replica: a tunnel with another ready replica still serves, which the summary says.
-// Known limit: the registry allows one symptom source per kind, so this module's Pod source is the only one; a
-// later core-workloads Pod rule must share it rather than add a second source.
+// Known limits, for the wiring of symptom sources (design 2.5): a running container is not ready until its
+// first readiness probe passes, so every rollout shows the symptom for a moment, and a source has no clock to
+// wait out; a crash-looping container gives this symptom and the collector's termination observation too.
 //
 // This package imports only the standard library and this module (ADR-0013): Pods are read as plain JSON maps.
 package cloudflared

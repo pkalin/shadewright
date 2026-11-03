@@ -82,6 +82,41 @@ func TestSymptomSourceValidate(t *testing.T) {
 	}
 }
 
+// TestNewRefusesCoreOnlyModulesThatAct checks that a module detected by the core group alone, which detection
+// does not narrow, may only diagnose: tools, actions and checks are refused, sources and rules are not.
+func TestNewRefusesCoreOnlyModulesThatAct(t *testing.T) {
+	core := IntegrationDetection{GroupVersions: []string{"v1"}}
+	check := validCheck()
+	for name, h := range map[string]Hooks{
+		"tool":   {Tools: []Tool{{}}},
+		"action": {Actions: []v1alpha1.ActionType{v1alpha1.ActionAdjustKedaMaxReplicas}},
+		"check":  {Checks: []VerificationCheck{check}},
+	} {
+		r, err := New(nil, []Integration{stubIntegration{name: sharedName, detection: core, hooks: h}})
+		if err == nil || r != nil || !strings.Contains(err.Error(), "may only diagnose") {
+			t.Errorf("core-only module with a %s: New = %v, %v; want a refusal", name, r, err)
+		}
+		// The same hooks are allowed with the module's own group.
+		own := IntegrationDetection{GroupVersions: []string{"v1", kedaGV}}
+		if _, err := New(nil, []Integration{stubIntegration{name: sharedName, detection: own, hooks: h}}); err != nil {
+			t.Errorf("module with its own group and a %s: New: %v", name, err)
+		}
+	}
+	diagnose := Hooks{Symptoms: []SymptomSource{validSource()}}
+	if _, err := New(nil, []Integration{stubIntegration{name: sharedName, detection: core, hooks: diagnose}}); err != nil {
+		t.Errorf("core-only module with a symptom source: New: %v", err)
+	}
+	for gvs, want := range map[string]bool{"": false, "v1": true, "v1,apps/v1": false} {
+		var d IntegrationDetection
+		if gvs != "" {
+			d.GroupVersions = strings.Split(gvs, ",")
+		}
+		if got := CoreOnly(d); got != want {
+			t.Errorf("CoreOnly(%q) = %v, want %v", gvs, got, want)
+		}
+	}
+}
+
 func TestNewRefusesBadSymptomSources(t *testing.T) {
 	bad := validSource()
 	bad.Symptoms = nil

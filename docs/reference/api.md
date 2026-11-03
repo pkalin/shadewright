@@ -139,6 +139,18 @@ Used by: [Action](#action).
 | `previousValue` | integer | Yes | previousValue is the value the plan was made against.<br>Maximum: 1000<br>Minimum: 1 |
 | `desiredValue` | integer | Yes | desiredValue is the new maxReplicaCount.<br>Maximum: 1000<br>Minimum: 1 |
 
+### AnalysisBudget
+
+AnalysisBudget counts the model-backed analyses of one UTC day against spec.maxAnalysesPerDay.
+
+
+Used by: [RemediationSettingsStatus](#remediationsettingsstatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `day` | string | Yes | day is the UTC day the count belongs to, as YYYY-MM-DD.<br>Maximum length: 10<br>Minimum length: 10<br>Pattern: `^[0-9]{4}-[0-9]{2}-[0-9]{2}$` |
+| `used` | integer | Yes | used is the number of analyses started on day, at most the largest maxAnalysesPerDay.<br>Maximum: 10000<br>Minimum: 0 |
+
 ### ApprovalMode
 
 ApprovalMode says whether a human must approve.
@@ -338,7 +350,6 @@ Used by: [Incident](#incident).
 | `occurrences` | [OccurrenceRecord](#occurrencerecord) array | No | occurrences are the newest occurrences counted for this incident, newest first, at most 32: for each, the highest total the cluster reported that was counted, and when it began. After a restart the analyzer reads them to count only what is new. Older ones are dropped.<br>Maximum items: 32<br>List type: atomic |
 | `occurrencesDroppedThrough` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | occurrencesDroppedThrough is when the newest occurrence dropped from occurrences began. An occurrence with no record that began no later than this is treated as counted in full, so the bound never counts one twice. |
 | `lastAnalysisTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | lastAnalysisTime is when the analyzer last ran; it drives the cooldown. |
-| `lastAnalysisDayCount` | integer | No | lastAnalysisDayCount is how many analyses of this incident ran on the UTC day of lastAnalysisTime, the one at lastAnalysisTime included. The analyzer sums it over the Incidents analyzed today to enforce RemediationSettings maxAnalysesPerDay, so a restart does not reset the daily budget. When lastAnalysisTime is set and this is 0 or absent, it counts as 1.<br>Maximum: 10000<br>Minimum: 0 |
 | `analysisRecords` | [RecordID](#recordid) array | No | analysisRecords are the newest analysis record IDs, oldest first.<br>Maximum items: 20<br>Maximum length: 256<br>Minimum length: 1<br>List type: atomic |
 | `remediationRequests` | [Name](#name) array | No | remediationRequests are the names of requests made for this incident, oldest first.<br>Maximum items: 20<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`<br>List type: atomic |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase.<br>List type: map<br>List key: `type` |
@@ -642,6 +653,7 @@ Used by: [RemediationSettings](#remediationsettings).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `observedGeneration` | integer | No | observedGeneration is the generation the status describes. |
+| `analysisBudget` | [AnalysisBudget](#analysisbudget) | No | analysisBudget is the count of analyses of the current UTC day, written only by the analyzer: it adds one before each model-backed analysis and starts again at 0 on a new day. It lives here, not in the Incidents, so neither a restart nor deleting Incidents frees budget. A missing value means none used today; a day in the future or a value the analyzer cannot read means the budget is spent (fail closed). Whoever can write this status can reset the count: grant it to the analyzer and admins only. |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions report problems such as an unreachable signer.<br>List type: map<br>List key: `type` |
 
 ### ResolvedSource

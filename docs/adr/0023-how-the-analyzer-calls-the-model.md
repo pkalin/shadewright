@@ -57,7 +57,7 @@ The analyzer is the only component that talks to a model, and everything it send
 
 9. **Spend accounting.**
    - A failed or timed-out call is charged at its upper bound: the input estimate plus `MaxOutputTokens`.
-   - The daily counter is kept in the operator namespace, in an object the analyzer owns. The exact object is left to [#43](https://github.com/pkalin/shadewright/issues/43).
+   - The daily count of analyses is kept in the status of the cluster-scoped `RemediationSettings` (`status.analysisBudget`), which only the analyzer writes ([#43](https://github.com/pkalin/shadewright/issues/43)). Where the daily spend is counted is still open.
    - A counter that cannot be read or written means refuse, not allow.
 
 ## Consequences
@@ -83,4 +83,4 @@ The analyzer is the only component that talks to a model, and everything it send
 
 ## Amendments
 
-None.
+- 2026-11-03: point 9 now names the object of the daily count of analyses: the status of `RemediationSettings` (`status.analysisBudget`: the UTC day and the analyses started on it), not an object in the operator namespace. The settings are cluster-scoped, so this adds one cluster-wide grant to the analyzer: `get`, `update` and `patch` on `remediationsettings/status`, and nothing on the settings themselves. Whoever can write that status can reset the count (threat model, section 6). Where the daily spend is counted is still open ([#43](https://github.com/pkalin/shadewright/issues/43)).

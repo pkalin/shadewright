@@ -54,6 +54,8 @@ var (
 	// tail is secret material that must not survive after an escape, punctuation, a space or a line break.
 	tail  = "Remaining" + "SyntheticValue" + "42"
 	tail2 = "Second" + "SyntheticValue" + "43"
+	// wordTail is secret material without digits, so the long-token rule cannot catch it by accident.
+	wordTail = "Remaining" + "SyntheticValue"
 	// opaque is a secret value long enough for the full marker.
 	opaque = "Synthetic" + "OpaqueValue42"
 )
@@ -220,6 +222,15 @@ func TestKeepsTextAroundValues(t *testing.T) {
 		"{\"password\":\n  \"" + opaque + "\"}":                 "{\"password\":\n  \"[REDACTED:credential]\"}",
 		"retry with Basic " + b64("u:p") + " now":               "retry with Basic *** now",
 		"secretName:\n  orders-tls\n":                           "secretName:\n  orders-tls\n",
+		// Second review of #189.
+		"password:\n- " + opaque + "\n- " + tail + "\nnext: field":                                    "password:\n- [REDACTED:credential]\nnext: field",
+		"password:\n# set by CI\n  " + opaque + "\nnext: field":                                       "password:\n# set by CI\n  [REDACTED:credential]\nnext: field",
+		"credentials:\n  user: admin\n  secretRef:\n    name: db\n  value: '" + opaque + "'\nnext: x": "credentials:\n  user: ***\n  secretRef:\n    name: db\n  value: '[REDACTED:credential]'\nnext: x",
+		"- name: DB_PASSWORD\n  value: " + opaque + "\n- name: MODE\n  value: debug":                  "- name: DB_PASSWORD\n  value: [REDACTED:credential]\n- name: MODE\n  value: debug",
+		`{"name":"DB_PASSWORD","value":"` + opaque + `"}`:                                             `{"name":"DB_PASSWORD","value":"[REDACTED:credential]"}`,
+		`"{\\\"token\\\":\\\"a,` + wordTail + `\\\"}"`:                                                `"{\\\"token\\\":\\\"[REDACTED:credential]\\\"}"`,
+		"DB_PASS=" + opaque + " next":                                                                 "DB_PASS=[REDACTED:credential] next",
+		"auth: " + opaque + " and auth: failed":                                                       "auth: [REDACTED:credential] and auth: failed",
 	} {
 		if got := String(in); got != want {
 			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
@@ -267,7 +278,9 @@ func gapCases() []gapCase {
 			[]string{opaque}, []string{"fetch ", " 403"}},
 		// Short Basic and Bearer credentials.
 		{"short basic", "header Basic " + b64("u:p") + " rejected", []string{b64("u:p")}, []string{"header Basic ", " rejected"}},
-		{"short bearer", "with Bearer abc, retry", []string{"abc"}, []string{"with Bearer ", ", retry"}},
+		{"short padded basic", "header Basic " + base64.StdEncoding.EncodeToString([]byte("ab:c")) + " rejected",
+			[]string{base64.StdEncoding.EncodeToString([]byte("ab:c"))}, []string{"header Basic ", " rejected"}},
+		{"bearer opaque token", "with Bearer " + rep("x9", 5) + ", retry", []string{rep("x9", 5)}, []string{"with Bearer ", ", retry"}},
 		// Whitespace, including newlines, on both sides of the colon in JSON and YAML flow mappings.
 		{"json newline after colon", "{\"password\":\n  \"" + opaque + "\"}",
 			[]string{opaque}, []string{"{\"password\":\n  \"", "\"}"}},
@@ -285,8 +298,43 @@ func gapCases() []gapCase {
 			[]string{"webhook rejected with sig: ", " end"}},
 		// From #111: a JWT whose payload does not start with "eyJ".
 		{"jwt with other payload", "token " + otherJWT + " expired", []string{otherJWT}, []string{" expired"}},
+		// Second review of #189: YAML layouts the next-line rule missed.
+		{"compact sequence at key indent", "password:\n- " + opaque + "\nnext: field",
+			[]string{opaque}, []string{"password:\n- ", "\nnext: field"}},
+		{"comment before next-line value", "password:\n# set by CI\n  " + opaque + "\nnext: field",
+			[]string{opaque}, []string{"\nnext: field"}},
+		// Short keys as the last segment of an env or snake key.
+		{"db pass env", "DB_PASS=" + opaque + " next", []string{opaque}, []string{"DB_PASS=", " next"}},
+		{"mysql root pass yaml", "MYSQL_ROOT_PASS: " + opaque + "\nnext: field", []string{opaque}, []string{"\nnext: field"}},
+		{"basic auth key", "basic_auth: " + opaque + "\nnext: field", []string{opaque}, []string{"\nnext: field"}},
+		{"bare auth with secret-shaped value", "auth: " + opaque + "\nnext: field", []string{opaque}, []string{"\nnext: field"}},
+		{"quoted bare auth key", `{"auth": "failed for ` + tail + `"}`, []string{tail}, nil},
+		// base64url tokens hold "-".
+		{"base64url token with hyphens", "token rejected: " + base64URLToken + " end",
+			[]string{"Synth3ticAbC", "dEf0123XyZ98", "76QwErTy54321"}, []string{"token rejected: ", " end"}},
+		{"hex token after a hyphen", "id key-" + hexToken + " end", []string{hexToken}, []string{" end"}},
+		// Escaped embedded JSON, pretty-printed and escaped twice.
+		{"pretty escaped json", `"{\n  \"clientSecret\": \"` + opaque + `\"\n}"`, []string{opaque}, []string{`\"\n}"`}},
+		{"tab escaped json", `"{\t\"token\" : \"` + opaque + `\"}"`, []string{opaque}, nil},
+		{"double escaped json", `"{\\\"clientSecret\\\":\\\"prefix,` + wordTail + `\\\",\\\"x\\\":1}"`,
+			[]string{wordTail}, []string{`\\\",\\\"x\\\":1}"`}},
+		// Generic children of a secret key, and the Kubernetes env forms.
+		{"children of a secret mapping", "credentials:\n  user: admin\n  value: " + opaque + "\nnext: field",
+			[]string{opaque, "admin"}, []string{"credentials:\n  user: ", "\nnext: field"}},
+		{"children of a secret sequence", "tokens:\n  - id: 1\n    value: '" + opaque + "'\n  - " + tail + "\nnext: field",
+			[]string{opaque, tail}, []string{"\nnext: field"}},
+		{"kubernetes env yaml", "env:\n- name: DB_PASSWORD\n  value: " + opaque + "\n- name: LOG_LEVEL\n  value: debug",
+			[]string{opaque}, []string{"- name: DB_PASSWORD\n  value: ", "- name: LOG_LEVEL\n  value: debug"}},
+		{"kubernetes env yaml quoted and indented", "    env:\n      - name: \"API_TOKEN\"\n        value: \"" + opaque + "\"\n",
+			[]string{opaque}, []string{"        value: \""}},
+		{"kubernetes env json", `[{"name":"API_TOKEN","value":"` + opaque + `"},{"name":"MODE","value":"debug"}]`,
+			[]string{opaque}, []string{`{"name":"MODE","value":"debug"}`}},
+		{"kubernetes env yaml flow", "env: [{name: DB_PASSWORD, value: " + opaque + "}]", []string{opaque}, nil},
 	}
 }
+
+// base64URLToken is a base64url token whose hyphens cut it into parts shorter than the long-token minimum.
+var base64URLToken = "Synth3ticAbC-" + "dEf0123XyZ98-" + "76QwErTy54321-Zz"
 
 func TestGapCases(t *testing.T) {
 	for _, c := range gapCases() {
@@ -315,9 +363,26 @@ func TestGapRulesKeepUsefulText(t *testing.T) {
 	for _, in := range []string{
 		"password:\nnext: field",
 		"password:   \n",
-		"credentials:\n  - name: app\n    key: token",
 		"credentials:\n  name: app",
+		"credentials:\n  - name: app\n    secretRef:\n      name: db-creds\n      key: password",
 		"auth:\n  {name: app}",
+		"- name: DB_PASSWORD_FILE\n  value: /etc/secret/pw",
+		"- name: LOG_LEVEL\n  value: debug",
+		// Bare short keys followed by a colon keep diagnostic text.
+		"pass: 12 fail: 0",
+		"auth: failed for user bob",
+		"sig: invalid",
+		"auth:\n  mode: oidc",
+		// Ordinary prose after Basic and Bearer.
+		"failed basic health check",
+		"missing Bearer token",
+		"Bearer authentication failed",
+		"Basic realm required",
+		// Hyphenated names, UUIDs and image names are not tokens.
+		"pod orders-worker-7d9f8b6c5-x2x9q-and-a-long-suffix-0123 restarted",
+		"uid 550e8400-e29b-41d4-a716-446655440000 deleted",
+		"image registry.example.com/team/orders-worker-service-v2:1.2.3-rc1",
+		"kube-system-controller-manager-node-0123456789 ready",
 		"author: someone",
 		"bypass=on",
 		"signal: SIGTERM",
@@ -351,8 +416,39 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"flow newlines":            "{password\n:\n",
 		"long token parts":         rep("ab12", 6) + "/",
 		"userinfo":                 "https://a@",
+		"env entries":              "- name: DB_PASSWORD\n",
+		"secret mapping children":  "credentials:\n  a: b\n  ref:\n    c: d\n",
+		"escape runs":              `{\"token\":\"\\\\\\\"`,
+		"hyphen runs":              rep("Ab1-", 8) + "/",
 	} {
 		in := rep(unit, size/len(unit))
+		start := time.Now()
+		out := String(in)
+		if d := time.Since(start); d > 10*time.Second {
+			t.Errorf("%s: %d bytes took %s", name, len(in), d)
+		}
+		if len(out) > len(in) {
+			t.Errorf("%s: output grew from %d to %d bytes", name, len(in), len(out))
+		}
+	}
+}
+
+// Nested entries whose lines all belong to the first one: each match reads a bounded part of them.
+func TestNestedBlocksStayLinear(t *testing.T) {
+	if testing.Short() {
+		t.Skip("large inputs")
+	}
+	for name, line := range map[string]string{
+		"env entries":   "- name: DB_PASSWORD\n",
+		"empty headers": "password:\n",
+		"references":    "secretRef:\n",
+	} {
+		var b strings.Builder
+		for i := 0; b.Len() < 1<<20; i++ {
+			b.WriteString(strings.Repeat(" ", i))
+			b.WriteString(line)
+		}
+		in := b.String()
 		start := time.Now()
 		out := String(in)
 		if d := time.Since(start); d > 10*time.Second {

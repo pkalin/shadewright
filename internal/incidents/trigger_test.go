@@ -514,7 +514,7 @@ func listIncidents(t *testing.T, ns string) map[string]remediationv1alpha1.Incid
 var triggerConfig = Config{TriggerInterval: 50 * time.Millisecond, Now: func() time.Time { return triggerNow }}
 
 // Restarting the controller with 50 open Incidents whose cooldowns hold marks none of them due again, and
-// the budget used today, read back from the RemediationSettings status, still limits the new ones.
+// the budget used today, read back from the budget ConfigMap, still limits the new ones.
 func TestRestartKeepsCooldownsAndBudget(t *testing.T) {
 	ns := namespace(t)
 	// 51 analyses today (fp(1) to fp(51)) of 53: two slots, for fp(51) and fp(52), none for fp(53) and fp(54).
@@ -566,7 +566,7 @@ func TestRestartKeepsCooldownsAndBudget(t *testing.T) {
 	}
 }
 
-// The budget lives in the RemediationSettings status, not in the Incidents: deleting the Incidents analyzed
+// The budget lives in its ConfigMap, not in the Incidents: deleting the Incidents analyzed
 // today frees none of it.
 func TestDeletingIncidentsDoesNotFreeBudget(t *testing.T) {
 	ns := namespace(t)
@@ -842,7 +842,8 @@ func TestFlappingIncidentIsDueWithinTheSettleLimit(t *testing.T) {
 	// The condition keeps its first not-due reason (NoNewData) while the incident debounces, so the test
 	// waits for the first recurrence to be written and for a few passes to see it.
 	recur(0)
-	eventually(t, ns, 1, func(inc *remediationv1alpha1.Incident) bool { return inc.Status.LastSeen.Equal(&metav1.Time{Time: triggerNow}) })
+	written := &metav1.Time{Time: triggerNow}
+	eventually(t, ns, 1, func(inc *remediationv1alpha1.Incident) bool { return inc.Status.LastSeen.Equal(written) })
 	time.Sleep(4 * 50 * time.Millisecond)
 	for i := 1; i < 30; i++ { // up to 4 min 50 s
 		recur(i)

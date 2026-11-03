@@ -448,7 +448,7 @@ func TestLeaseNamesMatchTheBinaries(t *testing.T) {
 // list, watch, create, patch or delete, so it can neither read other ConfigMaps nor recreate a deleted
 // budget. The executor has no grant on it.
 func TestAnalysisBudgetIsTheOnlyConfigMap(t *testing.T) {
-	budget := incidents.BudgetName
+	budget, other := incidents.BudgetName, "other"
 	cases := []struct {
 		id, verb, ns, name string
 		want               bool
@@ -464,7 +464,7 @@ func TestAnalysisBudgetIsTheOnlyConfigMap(t *testing.T) {
 		{analyzer, "deletecollection", operatorNS, "", false},
 		{analyzer, "get", operatorNS, "", false},
 		{analyzer, "get", operatorNS, "kube-root-ca.crt", false},
-		{analyzer, "update", operatorNS, "other", false},
+		{analyzer, "update", operatorNS, other, false},
 		{analyzer, "get", otherNS, budget, false},
 		{analyzer, "update", otherNS, budget, false},
 		{analyzer, "update", unwatched, budget, false},
@@ -484,7 +484,8 @@ func TestAnalysisBudgetIsTheOnlyConfigMap(t *testing.T) {
 func TestAnalysisBudgetRealCalls(t *testing.T) {
 	ctx := t.Context()
 	asAnalyzer := impersonate(t, analyzer)
-	for _, name := range []string{incidents.BudgetName, "other"} {
+	const other = "other"
+	for _, name := range []string{incidents.BudgetName, other} {
 		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: operatorNS, Name: name}}
 		if err := admin.Create(ctx, cm); err != nil {
 			t.Fatal(err)
@@ -492,22 +493,23 @@ func TestAnalysisBudgetRealCalls(t *testing.T) {
 		t.Cleanup(func() { _ = admin.Delete(context.Background(), cm) })
 	}
 	budget := &corev1.ConfigMap{}
-	if err := asAnalyzer.Get(ctx, client.ObjectKey{Namespace: operatorNS, Name: incidents.BudgetName}, budget); err != nil {
+	key := client.ObjectKey{Namespace: operatorNS, Name: incidents.BudgetName}
+	if err := asAnalyzer.Get(ctx, key, budget); err != nil {
 		t.Fatalf("analyzer cannot read its budget: %v", err)
 	}
 	budget.Data = map[string]string{incidents.BudgetDayKey: "2026-11-03", incidents.BudgetUsedKey: "1"}
 	if err := asAnalyzer.Update(ctx, budget); err != nil {
 		t.Fatalf("analyzer cannot update its budget: %v", err)
 	}
-	other := &corev1.ConfigMap{}
-	if err := admin.Get(ctx, client.ObjectKey{Namespace: operatorNS, Name: "other"}, other); err != nil {
+	otherCM := &corev1.ConfigMap{}
+	if err := admin.Get(ctx, client.ObjectKey{Namespace: operatorNS, Name: other}, otherCM); err != nil {
 		t.Fatal(err)
 	}
-	other.Data = map[string]string{"used": "0"}
-	if err := asAnalyzer.Update(ctx, other); !apierrors.IsForbidden(err) {
+	otherCM.Data = map[string]string{"used": "0"}
+	if err := asAnalyzer.Update(ctx, otherCM); !apierrors.IsForbidden(err) {
 		t.Errorf("analyzer updating another ConfigMap = %v, want forbidden", err)
 	}
-	if err := asAnalyzer.Get(ctx, client.ObjectKeyFromObject(other), &corev1.ConfigMap{}); !apierrors.IsForbidden(err) {
+	if err := asAnalyzer.Get(ctx, client.ObjectKeyFromObject(otherCM), &corev1.ConfigMap{}); !apierrors.IsForbidden(err) {
 		t.Errorf("analyzer reading another ConfigMap = %v, want forbidden", err)
 	}
 	if err := admin.Delete(ctx, budget); err != nil {

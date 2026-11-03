@@ -624,7 +624,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			DescribeTable("retries a server error with backoff, writes nothing and then opens one pull request",
 				func(op string) {
 					// The adapter's error text is never trusted: it could hold a URL with a token.
-					leak := "status 502 from https://x-access-token:ghs_leaked@github.com/example/fleet"
+					leak := "status 502 from https://github.com/example/fleet with token ghs_leaked"
 					_, err := hit(op, &providers.RetryableError{Err: errors.New(leak)})
 					Expect(err).To(HaveOccurred(), "an error goes to the work queue's backoff")
 					Expect(retryable(err)).To(BeTrue(), "a server error is classed as retryable: %v", err)

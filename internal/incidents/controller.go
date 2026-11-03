@@ -85,6 +85,12 @@ type Config struct {
 	// StopTimeout bounds the last writes when the controller stops (shutdown or lost leadership): batches
 	// still unwritten then are logged and counted as lost.
 	StopTimeout time.Duration
+	// Debounce, Cooldown and TriggerInterval drive the analysis trigger ([Due]): how long an Incident must go
+	// without a new observation, the least time between two analyses without a new occurrence, and how often
+	// the Incidents are decided again.
+	Debounce        time.Duration
+	Cooldown        time.Duration
+	TriggerInterval time.Duration
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
 }
@@ -96,6 +102,8 @@ type Config struct {
 type Controller struct {
 	cfg    Config
 	client client.Client
+	// marker writes the AnalysisDue condition: the manager's client, like client.
+	marker client.Client
 	reader client.Reader
 	cache  client.Reader
 	obs    <-chan collector.Observation
@@ -154,6 +162,15 @@ func New(cfg Config) (*Controller, error) {
 	if cfg.StopTimeout <= 0 {
 		cfg.StopTimeout = DefaultStopTimeout
 	}
+	if cfg.Debounce <= 0 {
+		cfg.Debounce = DefaultDebounce
+	}
+	if cfg.Cooldown <= 0 {
+		cfg.Cooldown = DefaultCooldown
+	}
+	if cfg.TriggerInterval <= 0 {
+		cfg.TriggerInterval = DefaultTriggerInterval
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -174,7 +191,7 @@ func New(cfg Config) (*Controller, error) {
 // Incident before each write with the API reader, so a retry never works from a stale copy, and loads the
 // Incidents from the cache at start. It runs only on the leader, like the collector.
 func (c *Controller) SetupWithManager(mgr ctrl.Manager, obs <-chan collector.Observation) error {
-	c.client, c.reader, c.cache, c.obs = mgr.GetClient(), mgr.GetAPIReader(), mgr.GetClient(), obs
+	c.client, c.marker, c.reader, c.cache, c.obs = mgr.GetClient(), mgr.GetClient(), mgr.GetAPIReader(), mgr.GetClient(), obs
 	if err := mgr.Add(c); err != nil {
 		return fmt.Errorf("adding the Incident controller: %w", err)
 	}
@@ -198,10 +215,14 @@ func (c *Controller) Start(ctx context.Context) error {
 	if err := c.load(ctx); err != nil {
 		return err
 	}
-	written := make(chan struct{})
+	written, marked := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(written)
 		c.writeLoop(ctx)
+	}()
+	go func() {
+		defer close(marked)
+		c.triggerLoop(ctx)
 	}()
 	for {
 		select {
@@ -211,6 +232,7 @@ func (c *Controller) Start(ctx context.Context) error {
 			}
 		case <-ctx.Done():
 			<-written
+			<-marked
 			c.stop(ctx)
 			return nil
 		}

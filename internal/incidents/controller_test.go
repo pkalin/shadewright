@@ -162,6 +162,12 @@ type running struct {
 
 func start(t *testing.T, ns string, cfg Config) *running {
 	t.Helper()
+	return startMarking(t, ns, cfg, env.admin)
+}
+
+// startMarking is start with marker writing the AnalysisDue condition.
+func startMarking(t *testing.T, ns string, cfg Config, marker client.Client) *running {
+	t.Helper()
 	cfg.Namespace = ns
 	if cfg.Window == 0 {
 		cfg.Window = time.Second
@@ -171,7 +177,8 @@ func start(t *testing.T, ns string, cfg Config) *running {
 		t.Fatal(err)
 	}
 	r := &running{Controller: c, writes: &countingClient{Client: env.admin}, obs: make(chan collector.Observation)}
-	c.client, c.reader, c.cache, c.obs = r.writes, env.admin, env.admin, r.obs
+	// The AnalysisDue condition is written apart, so the counts and hooks see only the observation writes.
+	c.client, c.marker, c.reader, c.cache, c.obs = r.writes, marker, env.admin, env.admin, r.obs
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- c.Start(ctx) }()
@@ -491,7 +498,8 @@ func TestIncidentHoldsOnlyTheSymptom(t *testing.T) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatal(err)
 	}
-	allowed := []string{"phase", "firstSeen", "lastSeen", "count", "occurrences"}
+	// conditions hold AnalysisDue, whose reason and message are fixed strings.
+	allowed := []string{"phase", "firstSeen", "lastSeen", "count", "occurrences", "conditions"}
 	for k := range fields {
 		if !slices.Contains(allowed, k) {
 			t.Errorf("unexpected status field %q", k)

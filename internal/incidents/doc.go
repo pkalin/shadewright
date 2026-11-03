@@ -42,4 +42,11 @@ limitations under the License.
 // refuses as invalid, or meant for an Incident whose name holds another fingerprint, is dropped, not
 // retried, and counted in shadewright_incident_batches_dropped_total by reason; so is a batch still
 // unwritten when a stop's deadline passes.
+//
+// The controller also marks which Incidents are due for analysis (design 3.2): every TriggerInterval (10 s)
+// it decides each one with [Due] and sets the condition AnalysisDue, with a reason, where the decision
+// changed. The analyses used today are summed from the Incidents' status ([UsedToday]), so a restart resets
+// neither the daily budget (RemediationSettings maxAnalysesPerDay) nor a cooldown, and no more Incidents
+// are due at once than the budget has left. Without the RemediationSettings object nothing is due. The mark
+// runs nothing: the analysis reads it.
 package incidents

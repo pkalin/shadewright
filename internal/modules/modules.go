@@ -81,9 +81,28 @@ type Hooks struct {
 	Actions []v1alpha1.ActionType
 }
 
-// SymptomSource turns objects of one watched kind into symptoms. It is a placeholder: its fields come with the
-// first integration that watches a kind.
-type SymptomSource struct{}
+// SymptomSource turns objects of one watched kind into symptoms. It is declarative apart from Symptoms, a
+// pure function, so the caller decides how the kind is watched and a test can feed it recorded objects.
+// [New] refuses a source that [SymptomSource.Validate] refuses.
+type SymptomSource struct {
+	// Group is the API group of the watched kind, for example "kustomize.toolkit.fluxcd.io".
+	Group string
+	// Versions are the versions of Group the source can read, most preferred first. The caller reads the
+	// kind in the first one the cluster serves, and leaves the source out when it serves none.
+	Versions []string
+	// Kind is the watched kind, for example "Kustomization".
+	Kind string
+	// Resource is the plural resource name, for RBAC rules, for example "kustomizations".
+	Resource string
+	// ReportingController is the component whose status the source reads, for example
+	// "kustomize-controller". It is what a fingerprint hashes as the reporting controller.
+	ReportingController string
+	// Symptoms returns the symptoms one object of the kind shows: none when it is healthy or when its status
+	// does not describe its current spec. obj is the object as decoded from JSON (the Object map of an
+	// unstructured object). Everything in it is untrusted. Symptoms only reads obj, never changes it, and
+	// does no I/O.
+	Symptoms func(obj map[string]any) []Symptom
+}
 
 // DiagnosisRule is a deterministic diagnosis rule. It is a placeholder: its fields come with the first module
 // that has a rule.

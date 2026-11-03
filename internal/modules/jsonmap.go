@@ -42,12 +42,19 @@ func JSONInteger(v any) (int64, bool) {
 	return 0, false
 }
 
-// FirstCondition returns the first entry of status.conditions whose type is typ, or nil when status, its
-// conditions or such an entry are missing or not of the JSON shape expected. status is the object's status
-// as decoded from JSON and is only read.
+// MaxConditions is how many entries of status.conditions [FirstCondition] reads. The API sets no limit, so a
+// forged object with a huge list cannot make a source do unbounded work; real objects carry a handful.
+const MaxConditions = 64
+
+// FirstCondition returns the first entry of status.conditions whose type is typ, among the first
+// [MaxConditions], or nil when status, its conditions or such an entry are missing or not of the JSON shape
+// expected. status is the object's status as decoded from JSON and is only read.
 func FirstCondition(status map[string]any, typ string) map[string]any {
 	conds, _ := status["conditions"].([]any)
-	for _, c := range conds {
+	for i, c := range conds {
+		if i == MaxConditions {
+			break
+		}
 		cond, _ := c.(map[string]any)
 		if t, _ := cond["type"].(string); t == typ {
 			return cond

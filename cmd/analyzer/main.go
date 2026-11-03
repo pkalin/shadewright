@@ -40,6 +40,7 @@ import (
 	"github.com/pkalin/shadewright/internal/incidents"
 	"github.com/pkalin/shadewright/internal/modules"
 	"github.com/pkalin/shadewright/internal/modules/aks"
+	"github.com/pkalin/shadewright/internal/modules/cloudflared"
 	"github.com/pkalin/shadewright/internal/modules/flux"
 	"github.com/pkalin/shadewright/internal/modules/keda"
 	"github.com/pkalin/shadewright/internal/modules/kyverno"
@@ -147,7 +148,7 @@ func main() {
 	// The compiled-in modules (ADR-0019). The generic platform is always added by modules.New; a refusal stops
 	// the start. A module is active only when RemediationSettings enables it and it is detected.
 	registry, err := modules.New([]modules.Platform{aks.Platform{}},
-		[]modules.Integration{flux.Module(), keda.Module(), kyverno.Module(), secretsstore.Module()})
+		[]modules.Integration{cloudflared.Module(), flux.Module(), keda.Module(), kyverno.Module(), secretsstore.Module()})
 	if err != nil {
 		setupLog.Error(err, "Failed to build the module registry")
 		os.Exit(1)

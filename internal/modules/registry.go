@@ -88,7 +88,8 @@ type integrationEntry struct {
 // [MaxIntegrations] integrations, a nil module (a typed nil included), an invalid name or detection, a name
 // given twice on one axis, a node label listed twice by one platform, a provider ID scheme without node labels,
 // two platforms with the same provider ID scheme and the same node labels, which could never be told apart, or
-// a symptom source that [SymptomSource.Validate] refuses, a kind watched twice, by one module or by two (on
+// an integration whose detection is core group versions only ([CoreOnly]) that offers tools, actions or
+// verification checks, a symptom source that [SymptomSource.Validate] refuses, a kind watched twice, by one module or by two (on
 // either axis), a diagnosis rule with an invalid or repeated name or with neither an event nor a node
 // function, or a verification check that [VerificationCheck] does not allow or that two modules declare.
 // Platform and integration names are separate: one of each may share a name. The registry keeps a copy of
@@ -162,6 +163,11 @@ func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 		}
 		label := fmt.Sprintf("integration module %q", name)
 		hooks := cloneHooks(in.Hooks())
+		if CoreOnly(d) && (len(hooks.Tools) > 0 || len(hooks.Actions) > 0 || len(hooks.Checks) > 0) {
+			return nil, fmt.Errorf("%s: detection by core group versions only does not narrow, so the module may "+
+				"only diagnose: it offers %d tools, %d actions and %d checks", label, len(hooks.Tools),
+				len(hooks.Actions), len(hooks.Checks))
+		}
 		if err := errors.Join(validateSources(label, hooks.Symptoms, watched), validateRules(hooks.Rules),
 			validateChecks(label, hooks.Checks, checks)); err != nil {
 			return nil, fmt.Errorf("%s: %w", label, err)
@@ -174,6 +180,24 @@ func New(platforms []Platform, integrations []Integration) (*Registry, error) {
 	slices.SortFunc(r.platforms, func(a, b platformEntry) int { return strings.Compare(a.name, b.name) })
 	slices.SortFunc(r.integrations, func(a, b integrationEntry) int { return strings.Compare(a.name, b.name) })
 	return r, nil
+}
+
+// CoreOnly reports whether an integration's detection declares only group versions of the core group ("v1"),
+// which every cluster serves. Such a module, for an add-on with no API group of its own (cloudflared), is
+// detected on every cluster, so for it detection does not narrow and it is active wherever it is enabled
+// (ADR-0018 amendment of 2026-11-04). [New] therefore allows it only symptom sources and diagnosis rules: no
+// tools, actions or verification checks. A detection with no group versions at all is never detected and is
+// not core only.
+func CoreOnly(d IntegrationDetection) bool {
+	if len(d.GroupVersions) == 0 {
+		return false
+	}
+	for _, gv := range d.GroupVersions {
+		if strings.Contains(gv, "/") {
+			return false
+		}
+	}
+	return true
 }
 
 // validateRules checks the diagnosis rules of one module: each has a valid name, given once, and an event or

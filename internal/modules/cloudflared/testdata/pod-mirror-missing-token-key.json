@@ -1,0 +1,104 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "cloudflare-tunnel-5f6a7b8c9d-m4n7r",
+    "namespace": "edge",
+    "uid": "3e4f5a6b-7c8d-4e9f-8a0b-1c2d3e4f5a6b",
+    "generation": 1,
+    "labels": {
+      "app.kubernetes.io/name": "cloudflare-tunnel",
+      "app.kubernetes.io/instance": "tunnel",
+      "pod-template-hash": "5f6a7b8c9d"
+    }
+  },
+  "spec": {
+    "containers": [
+      {
+        "name": "cloudflare-tunnel",
+        "image": "registry.example.com:5000/mirror/cloudflare/cloudflared:2026.10.7",
+        "args": [
+          "tunnel",
+          "--config",
+          "/etc/cloudflared/config/config.yaml",
+          "run"
+        ],
+        "env": [
+          {
+            "name": "TUNNEL_TOKEN",
+            "valueFrom": {
+              "secretKeyRef": {
+                "name": "tunnel",
+                "key": "tunnelToken"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "status": {
+    "observedGeneration": 1,
+    "phase": "Pending",
+    "conditions": [
+      {
+        "type": "PodReadyToStartContainers",
+        "status": "True",
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-11-04T08:00:03Z",
+        "observedGeneration": 1
+      },
+      {
+        "type": "Initialized",
+        "status": "True",
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-11-04T08:00:00Z",
+        "observedGeneration": 1
+      },
+      {
+        "type": "Ready",
+        "status": "False",
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-11-04T08:00:00Z",
+        "reason": "ContainersNotReady",
+        "message": "containers with unready status: [cloudflare-tunnel]",
+        "observedGeneration": 1
+      },
+      {
+        "type": "ContainersReady",
+        "status": "False",
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-11-04T08:00:00Z",
+        "reason": "ContainersNotReady",
+        "message": "containers with unready status: [cloudflare-tunnel]",
+        "observedGeneration": 1
+      },
+      {
+        "type": "PodScheduled",
+        "status": "True",
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-11-04T08:00:00Z",
+        "observedGeneration": 1
+      }
+    ],
+    "startTime": "2026-11-04T08:00:00Z",
+    "qosClass": "BestEffort",
+    "containerStatuses": [
+      {
+        "name": "cloudflare-tunnel",
+        "state": {
+          "waiting": {
+            "reason": "CreateContainerConfigError",
+            "message": "couldn't find key tunnelToken in Secret edge/tunnel"
+          }
+        },
+        "lastState": {},
+        "ready": false,
+        "restartCount": 0,
+        "image": "registry.example.com:5000/mirror/cloudflare/cloudflared:2026.10.7",
+        "imageID": "",
+        "started": false
+      }
+    ]
+  }
+}

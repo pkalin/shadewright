@@ -60,4 +60,16 @@ func TestFirstCondition(t *testing.T) {
 			t.Errorf("FirstCondition(%#v) = %#v, want nil", s, got)
 		}
 	}
+	// Only the first MaxConditions entries are read.
+	many := make([]any, MaxConditions, MaxConditions+1)
+	for i := range many {
+		many[i] = map[string]any{typ: "Other"}
+	}
+	if got := FirstCondition(map[string]any{conds: append(many, first)}, ready); got != nil {
+		t.Errorf("FirstCondition after %d other conditions = %#v, want nil", MaxConditions, got)
+	}
+	many[MaxConditions-1] = first
+	if got := FirstCondition(map[string]any{conds: many}, ready); got[st] != isFalse {
+		t.Errorf("FirstCondition as condition %d = %#v, want it", MaxConditions, got)
+	}
 }

@@ -107,7 +107,9 @@ type DetectedIntegration struct {
 	// Integration is the detected module.
 	Integration Integration
 	// GroupVersion is the first of the module's declared group versions that the cluster serves, in discovery
-	// form ("keda.sh/v1alpha1"). It is what RemediationSettings status.integrations[].version reports.
+	// form ("keda.sh/v1alpha1"). It is what RemediationSettings status.integrations[].version reports. For a
+	// module whose detection is core group versions only ([CoreOnly], cloudflared) it is "v1" on every cluster,
+	// so it says nothing about whether the add-on runs.
 	GroupVersion string
 }
 

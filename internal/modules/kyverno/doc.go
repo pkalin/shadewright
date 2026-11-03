@@ -28,7 +28,7 @@ limitations under the License.
 // still reach the policy reports.
 //
 // Symptom sources, read only from the object itself. Their reporting controllers are the event sources Kyverno
-// writes (kyverno-admission, kyverno-scan), so a report result and the event about it fingerprint alike:
+// writes (kyverno-admission, kyverno-scan), the reporting controller of the events about the same results:
 //
 //   - PolicyReport and ClusterPolicyReport: one symptom per result of a Kyverno policy (results[].source, see
 //     [kyvernoSource]; Kubernetes' own ValidatingAdmissionPolicy and MutatingAdmissionPolicy results and other

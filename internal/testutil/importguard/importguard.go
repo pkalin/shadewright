@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -194,6 +195,30 @@ func NoForbiddenDeps(t T, dir string, patterns ...string) {
 			}
 		}
 	}
+}
+
+// Testutil is the import path prefix of the test-only helper packages of this module, this one included.
+const Testutil = Module + "internal/testutil/"
+
+// NoTestutilInProductCode fails the test for any Go file under root that is not a _test.go file and imports a
+// package under [Testutil]. The helpers are for tests only; the Go toolchain cannot enforce that, since they
+// are ordinary importable packages. Files inside a directory named testutil are the helpers themselves and are
+// skipped. It returns the number of files checked.
+func NoTestutilInProductCode(t T, root string) int {
+	t.Helper()
+	checked := 0
+	WalkGoFiles(t, root, func(path string) {
+		if strings.HasSuffix(path, "_test.go") || slices.Contains(strings.Split(filepath.ToSlash(path), "/"), "testutil") {
+			return
+		}
+		checked++
+		for _, p := range FileImports(t, path) {
+			if strings.HasPrefix(p, Testutil) {
+				t.Errorf("%s imports %q: internal/testutil is for _test.go files only", path, p)
+			}
+		}
+	})
+	return checked
 }
 
 // ModuleRoot returns the directory of this module's go.mod, searched upwards from the working directory.

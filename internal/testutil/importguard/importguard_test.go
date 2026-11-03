@@ -100,3 +100,18 @@ func TestDirectImportsOnlyStandardOrModule(t *testing.T) {
 		t.Errorf("DirectImportsOnlyStandardOrModule reported %v, want one error for k8s.io/api/core/v1", rec.errors)
 	}
 }
+
+func TestNoTestutilInProductCodeReportsAnImport(t *testing.T) {
+	rec := &recorder{TB: t}
+	NoTestutilInProductCode(rec, filepath.Join("testdata", "product"))
+	if len(rec.errors) != 1 || !strings.Contains(rec.errors[0], `internal/testutil/importguard`) {
+		t.Errorf("NoTestutilInProductCode reported %v, want one error for the importguard import", rec.errors)
+	}
+}
+
+// TestNoTestutilInProductCode enforces that no non-test file in the module imports internal/testutil.
+func TestNoTestutilInProductCode(t *testing.T) {
+	if n := NoTestutilInProductCode(t, ModuleRoot(t)); n == 0 {
+		t.Fatal("no Go files checked")
+	}
+}

@@ -1,6 +1,6 @@
 # Design
 
-Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the semantic diff check of section 8.2, the GitHub and Key Vault adapters, the pull request step of section 6 (branch, commit and pull request, up to `AwaitingApproval`), the collector of section 3.1 and both levels of deduplication of section 3.2, with the Incident controller that keeps them in `Incident` objects, and the RBAC of sections 2.2 and 10. Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
+Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the semantic diff check of section 8.2, the GitHub and Key Vault adapters, the pull request step of section 6 (branch, commit and pull request, up to `AwaitingApproval`), the collector of section 3.1 and both levels of deduplication of section 3.2, with the Incident controller that keeps them in `Incident` objects, the RBAC of sections 2.2 and 10, and the registries of platform and integration modules of sections 2.4 and 2.5 (built, not yet wired into a binary). Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
 
 ## 1. Goals
 
@@ -131,7 +131,19 @@ A `Platform` module per provider, detected from node `providerID` and labels. Th
 
 Order: generic and AKS first; EKS and GKE as detection-only skeletons; Cluster API when a real case needs it.
 
-The registries are built (`internal/modules`); no module is wired into the operator yet. There is no global registry: each binary builds one immutable registry at start-up from an explicit list of compiled-in modules ([ADR-0019](adr/0019-extension-packaging.md)), and a name given twice, or two platforms with the same provider ID scheme and the same node labels, stops the start.
+The registries are built (`internal/modules`) but not wired: no binary uses them yet. There is no global registry: the analyzer will build one immutable registry at start-up (planned, [#61](https://github.com/pkalin/shadewright/issues/61)) from an explicit list of compiled-in modules ([ADR-0019](adr/0019-extension-packaging.md)); the executor does not need detection. A refusal from `New` stops the start. Neither identity can read Nodes yet; the RBAC for that comes with #61.
+
+A module contributes hooks (symptom sources, diagnosis rules, tools, actions) only when the cluster admin enabled it in `RemediationSettings` and it is detected (invariant 4). Detection alone never adds a tool or an action, and an enabled module that is not detected contributes nothing. Module tools are part of the tool set the evaluation gate covers ([ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md)).
+
+`New` refuses:
+
+- a name that is not a DNS label starting with a letter (at most 63 characters), so it fits a CRD enum later;
+- a name given twice on one axis, `generic` included;
+- a provider ID scheme without node labels;
+- a node label listed twice by one platform, or an invalid label key or group version;
+- two platforms with identical claims (same scheme, same labels in any order).
+
+Platform and integration names are separate namespaces (a platform and an integration may share a name), so `RemediationSettings` will enable them in separate lists.
 
 Detection is a pure function of the nodes' `providerID` values and label keys. A provider ID scheme (`azure`, `aws`, `gce`) names the cloud, not the managed service: a self-managed cluster on cloud machines (Cluster API, kubeadm) has the same scheme as AKS, EKS or GKE. So a platform is recognised by the node labels its managed service sets (AKS `kubernetes.azure.com/cluster`, GKE `cloud.google.com/gke-nodepool`, EKS managed node groups `eks.amazonaws.com/nodegroup`), and the scheme is an extra condition for a node whose provider ID is set; a scheme alone claims nothing. Two platforms may share a scheme (AKS and a Cluster API platform on Azure) as long as their labels differ.
 
@@ -154,7 +166,7 @@ An `Integration` module per add-on: detection (API groups, CRDs, versions), watc
 
 Later candidates: External Secrets Operator, Reloader, cert-manager, Trivy Operator, Karpenter. Modules are enabled per cluster in `RemediationSettings`, and the operator reports what it detected in status.
 
-An integration is detected when the discovery API serves any of the group versions it declares (KEDA: `keda.sh/v1alpha1`), again as a pure function of the list the caller collected. Detection by other signals, such as the image of a Deployment for cloudflared, comes with the module that needs it. A module's contributions (symptom sources, diagnosis rules, read-only tools, catalog actions) are declared in one value whose zero value contributes nothing, so a detection-only module is a name and its detection.
+An integration is detected when the discovery API serves any of the group versions it declares (KEDA: `keda.sh/v1alpha1`), again as a pure function of the list the caller collected. Detection by other signals, such as the image of a Deployment for cloudflared, comes with the module that needs it. As in 2.4, an integration contributes hooks only when it is enabled and detected. A module's contributions (symptom sources, diagnosis rules, read-only tools, catalog actions) are declared in one value whose zero value contributes nothing, so a detection-only module is a name and its detection.
 
 ## 3. Observation and deduplication
 
@@ -765,8 +777,8 @@ Decided on 2026-11-01:
 | Evaluation | Recorded contexts per scenario with the expected diagnosis or refusal; CI runs them against a fake model, the real model on demand |
 | Agent observability | controller-runtime Prometheus metrics, plus OpenTelemetry traces per analysis (tool calls, tokens, latency) |
 | Packaging | Kubebuilder's Helm plugin; images on GHCR, signed keyless, with SBOMs |
-| Pluggability | Three axes: platform services, cluster platforms, cluster integrations ([ADR-0018](adr/0018-three-axes-of-pluggability.md)); security integrations diagnose only |
-| Extension packaging | Compiled in now; signed declarative OCI packs later ([ADR-0019](adr/0019-extension-packaging.md)) |
+| Pluggability | Three axes: platform services, cluster platforms, cluster integrations ([ADR-0018](adr/0018-three-axes-of-pluggability.md)); security integrations diagnose only; a module contributes hooks only when enabled and detected (2026-11-03) |
+| Extension packaging | Compiled in now, registered at start-up from an explicit list; signed declarative OCI packs later ([ADR-0019](adr/0019-extension-packaging.md)) |
 | Controller identities | Separate analyzer and executor ServiceAccounts and roles; incidents and requests reachable only in the operator namespace, the analyzer's reads only in the watched namespaces (2.2) |
 | Calling the model (2026-11-03) | Prompts as code, context first with one structured call, escalation on deterministic signals with bounded tools, an evaluation gate keyed on model and prompt that the analyzer enforces at run time; a durable daily count of analyses that fails closed ([ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md)) |
 

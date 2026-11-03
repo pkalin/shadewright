@@ -34,3 +34,7 @@ Options in the ecosystem:
 - **Go plugins**: rejected, too fragile.
 - **gRPC plugin processes**: kept in reserve if packs ever need logic that CEL cannot express.
 - **Packs with executable content (WebAssembly)**: possible later for diagnosis only; not for actions.
+
+## Amendments
+
+- 2026-11-03: "registered at start-up" means the binary builds one immutable registry from an explicit list of compiled-in modules. There is no global registry and no `init()` registration, so a duplicate name is an error from the constructor instead of a panic at load, and tests can build registries freely ([#214](https://github.com/pkalin/shadewright/pull/214), design 2.4). The decision is unchanged.

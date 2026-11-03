@@ -49,6 +49,9 @@ const (
 	workerContainer = "worker"
 	mainBranch      = "main"
 	opClose         = "CloseChangeRequest"
+	opBranchHead    = "BranchHead"
+	workerImage     = "example.invalid/worker:1"
+	appsGlob        = "apps/**/*.yaml"
 )
 
 var _ = Describe("RemediationRequest plan freshness", func() {
@@ -109,7 +112,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 				Template: corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{appLabel: appName}},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{
-						Name: workerContainer, Image: "example.invalid/worker:1",
+						Name: workerContainer, Image: workerImage,
 						Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
 							corev1.ResourceMemory: resource.MustParse("256Mi"),
 						}},
@@ -122,7 +125,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		policy.Spec.Actions = []remediationv1alpha1.PolicyAction{fx.MemoryLimitPolicyAction()}
 		policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 100
 		policy.Spec.RequestNamespaces = []remediationv1alpha1.Name{requestNamespace}
-		policy.Spec.GitOps.AllowedPaths = []remediationv1alpha1.GitPathPattern{"apps/**/*.yaml"}
+		policy.Spec.GitOps.AllowedPaths = []remediationv1alpha1.GitPathPattern{appsGlob}
 		Expect(k8sClient.Create(ctx, policy)).To(Succeed())
 		settings = fx.RemediationSettings()
 		settings.Spec.Repositories[0].TargetBranch = mainBranch
@@ -157,7 +160,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(err).NotTo(HaveOccurred())
 		cr, err = git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: branch, BaseBranch: mainBranch, Title: "t"})
 		Expect(err).NotTo(HaveOccurred())
-		got.Status.Phase = remediationv1alpha1.PhasePRCreated
+		got.Status.Phase = remediationv1alpha1.PhaseAwaitingApproval
 		got.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{
 			Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA,
 		}
@@ -168,7 +171,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, o))).To(Succeed())
 		}
 		Eventually(func() bool {
-			return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "default"},
+			return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: SettingsName},
 				&remediationv1alpha1.RemediationSettings{}))
 		}).Should(BeTrue())
 	})
@@ -275,7 +278,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 
 		_, err = reconcileOnce()
 		Expect(err).To(HaveOccurred())
-		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePRCreated), "not decided before the close was confirmed")
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not decided before the close was confirmed")
 
 		supersedes(freshness.ReasonTargetFileChanged)
 		Expect(closes.Load()).To(Equal(int32(2)), "the retry closes an already closed change request, a no-op")
@@ -283,14 +286,14 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 
 	It("does not supersede and does not close when an input cannot be read", func() {
 		git.SetFail(func(op string) error {
-			if op == "BranchHead" {
+			if op == opBranchHead {
 				return &providers.RetryableError{Err: errors.New("host down")}
 			}
 			return nil
 		})
 		_, err := reconcileOnce()
 		Expect(err).To(HaveOccurred())
-		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePRCreated))
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
 		Expect(reconciler().EnsureFresh(ctx, fetch())).NotTo(Succeed())
 	})
@@ -309,7 +312,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		r := reconciler()
 		r.OpenRepository = nil
 		Expect(r.EnsureFresh(ctx, fetch())).NotTo(Succeed())
-		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePRCreated))
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 	})
 
 	// other opens a pull request with the same number in another repository, which must never be touched.
@@ -423,7 +426,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		res, err := reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.RequeueAfter).To(Equal(freshRecheckDelay))
-		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePRCreated))
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 		Expect(closes.Load()).To(BeZero())
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
 		Expect(reconciler().EnsureFresh(ctx, fetch())).To(MatchError(freshness.ErrPaused))
@@ -446,7 +449,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		})
 		Expect(r.EnsureFresh(ctx, fetch())).To(MatchError(freshness.ErrPaused))
 		Expect(closes.Load()).To(BeZero())
-		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePRCreated))
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 	})
 
 	It("keeps credentials out of the error when the cleanup call fails", func() {
@@ -474,7 +477,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 
 	It("honours the delay a Git host asks for while checking", func() {
 		git.SetFail(func(op string) error {
-			if op == "BranchHead" {
+			if op == opBranchHead {
 				return &providers.RetryableError{RetryAfter: 7 * time.Second, Err: errors.New("rate limited")}
 			}
 			return nil

@@ -112,7 +112,7 @@ var _ = Describe("RemediationRequest Controller", func() {
 				Template: corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "web"}},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{
-						Name: "worker", Image: "example.invalid/worker:1",
+						Name: "worker", Image: workerImage,
 						Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
 							corev1.ResourceMemory: resource.MustParse("256Mi"),
 						}},
@@ -124,7 +124,7 @@ var _ = Describe("RemediationRequest Controller", func() {
 		policy.Spec.Actions = []remediationv1alpha1.PolicyAction{fx.MemoryLimitPolicyAction()}
 		policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 100
 		policy.Spec.RequestNamespaces = []remediationv1alpha1.Name{requestNamespace}
-		policy.Spec.GitOps.AllowedPaths = []remediationv1alpha1.GitPathPattern{"apps/**/*.yaml"}
+		policy.Spec.GitOps.AllowedPaths = []remediationv1alpha1.GitPathPattern{appsGlob}
 		settings = fx.RemediationSettings()
 		request = fx.MemoryLimitRequest(requestNamespace, fmt.Sprintf("rr-%d", seq))
 		request.Spec.PolicyRef = remediationv1alpha1.Name(policy.Name)
@@ -154,7 +154,7 @@ var _ = Describe("RemediationRequest Controller", func() {
 		}
 		// Wait for the settings to go, so the next spec can create them again.
 		Eventually(func() bool {
-			return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "default"},
+			return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: SettingsName},
 				&remediationv1alpha1.RemediationSettings{}))
 		}).Should(BeTrue())
 		request, policy, settings, deployment = nil, nil, nil, nil

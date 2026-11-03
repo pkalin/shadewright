@@ -96,6 +96,11 @@ func (g guardTransport) do(req *http.Request) (*http.Response, error) {
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
 	closeBody(resp)
+	// An oversized body is final whenever the read ended: a try that runs out while it is read must not
+	// turn it into a retryable timeout.
+	if len(body) > maxResponseBody {
+		return nil, final{errResponseTooLarge}
+	}
 	// A read that ended after the try or the caller gave up returns the context error, whether or not
 	// the read itself failed: the HTTP client's read error does not match it, and a read can also end
 	// cleanly with a cut body (closing a TLS connection sends close_notify before the socket closes, and a
@@ -107,9 +112,6 @@ func (g guardTransport) do(req *http.Request) (*http.Response, error) {
 	}
 	if err != nil {
 		return nil, cleanBodyError(err)
-	}
-	if len(body) > maxResponseBody {
-		return nil, final{errResponseTooLarge}
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	resp.ContentLength = int64(len(body))

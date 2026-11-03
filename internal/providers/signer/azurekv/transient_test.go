@@ -166,33 +166,37 @@ func (b *cutBody) Read(p []byte) (int, error) {
 
 func (*cutBody) Close() error { return nil }
 
+// cutAuthorized replaces the body of each authorized response with a cutBody holding data, sent chunked,
+// and then calls onAuthorized when it is set.
+func cutAuthorized(data string, onAuthorized func()) func(policy.Transporter) policy.Transporter {
+	return func(inner policy.Transporter) policy.Transporter {
+		return transporterFunc(func(req *http.Request) (*http.Response, error) {
+			resp, err := inner.Do(req)
+			if err != nil || req.Header.Get("Authorization") == "" {
+				return resp, err
+			}
+			_ = resp.Body.Close()
+			resp.Body = &cutBody{ctx: req.Context(), data: strings.NewReader(data)}
+			resp.ContentLength = -1
+			resp.Header.Del("Content-Length")
+			if onAuthorized != nil {
+				onAuthorized()
+			}
+			return resp, nil
+		})
+	}
+}
+
 // TestSignTryTimeoutWithCleanlyEndedBody covers a per-try deadline after which the body read still ends
 // without an error but with a cut body: it is the try's retryable deadline error, not a final SDK error
 // from decoding the cut JSON. A caller that cancels in the same place still gets a non-retryable
 // cancellation.
 func TestSignTryTimeoutWithCleanlyEndedBody(t *testing.T) {
 	kid := "https://" + testHost + "/keys/github-app/" + testVersion
-	cut := func(onAuthorized func()) func(policy.Transporter) policy.Transporter {
-		return func(inner policy.Transporter) policy.Transporter {
-			return transporterFunc(func(req *http.Request) (*http.Response, error) {
-				resp, err := inner.Do(req)
-				if err != nil || req.Header.Get("Authorization") == "" {
-					return resp, err
-				}
-				_ = resp.Body.Close()
-				resp.Body = &cutBody{ctx: req.Context(), data: strings.NewReader(`{"kid":"` + kid + `","value":"`)}
-				resp.ContentLength = -1
-				resp.Header.Del("Content-Length")
-				if onAuthorized != nil {
-					onAuthorized()
-				}
-				return resp, nil
-			})
-		}
-	}
+	cutJSON := `{"kid":"` + kid + `","value":"`
 
-	s, v := setupWith(t, kid, Options{Timeout: 30 * time.Second, MaxRetries: -1}, &fakeCredential{}, cut(nil),
-		clientConfig{tryTimeout: 50 * time.Millisecond})
+	s, v := setupWith(t, kid, Options{Timeout: 30 * time.Second, MaxRetries: -1}, &fakeCredential{},
+		cutAuthorized(cutJSON, nil), clientConfig{tryTimeout: 50 * time.Millisecond})
 	v.respond = v.signOK(kid)
 	_, err := s.Sign(context.Background(), digestOf("x"))
 	if !providers.IsRetryable(err) || !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errRequestSDK) {
@@ -202,12 +206,56 @@ func TestSignTryTimeoutWithCleanlyEndedBody(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s, v = setupWith(t, kid, Options{Timeout: 30 * time.Second, MaxRetries: -1}, &fakeCredential{}, cut(cancel),
-		clientConfig{tryTimeout: 30 * time.Second})
+	s, v = setupWith(t, kid, Options{Timeout: 30 * time.Second, MaxRetries: -1}, &fakeCredential{},
+		cutAuthorized(cutJSON, cancel), clientConfig{tryTimeout: 30 * time.Second})
 	v.respond = v.signOK(kid)
 	_, err = s.Sign(ctx, digestOf("x"))
 	if !errors.Is(err, context.Canceled) || providers.IsRetryable(err) {
 		t.Errorf("caller cancel: err = %v, want a non-retryable cancellation", err)
+	}
+}
+
+// TestSignOversizedBodyAtTryDeadlineIsFinal covers an oversized chunked body whose read ends as the per-try
+// deadline passes: it stays the final response too large error, not a retryable timeout.
+func TestSignOversizedBodyAtTryDeadlineIsFinal(t *testing.T) {
+	kid := "https://" + testHost + "/keys/github-app/" + testVersion
+	s, v := setupWith(t, kid, Options{Timeout: 30 * time.Second, MaxRetries: 2}, &fakeCredential{},
+		cutAuthorized(strings.Repeat("a", maxResponseBody+1), nil), clientConfig{tryTimeout: 50 * time.Millisecond})
+	v.respond = v.signOK(kid)
+	_, err := s.Sign(context.Background(), digestOf("x"))
+	if !errors.Is(err, errResponseTooLarge) || providers.IsRetryable(err) {
+		t.Errorf("err = %v, want the final response too large error", err)
+	}
+	assertCleanChain(t, "oversized body at the try deadline", err)
+	if n := len(v.authorized()); n != 1 {
+		t.Errorf("%d authorized requests, want 1 (no retry)", n)
+	}
+}
+
+// TestGuardTransportCancelledWithCleanBody calls guardTransport directly with a request whose context was
+// cancelled and a body that ends cleanly: it returns the cancellation, which is final, and never the body.
+func TestGuardTransportCancelledWithCleanBody(t *testing.T) {
+	for _, entra := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+testHost+"/keys/k/sign", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g := guardTransport{entra: entra, inner: transporterFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Request: req, ContentLength: -1,
+				Body: io.NopCloser(strings.NewReader(`{"kid":"cut`))}, nil
+		})}
+		resp, err := g.do(req)
+		if resp != nil {
+			t.Errorf("entra=%v: got a response, want none", entra)
+		}
+		if !errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("entra=%v: err = %v, want context.Canceled", entra, err)
+		}
+		if _, retry := entraCause(err); retry {
+			t.Errorf("entra=%v: err = %v is classed retryable, want final", entra, err)
+		}
 	}
 }
 

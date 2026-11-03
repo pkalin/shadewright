@@ -20,9 +20,9 @@ package groupversion
 
 import "regexp"
 
-// Pattern is the apiVersion pattern of the Incident's ObjectRef schema (api/v1alpha1/common_types.go): an
-// optional DNS subdomain group and "/", then a Kubernetes version (v1, v1alpha1, v2beta3). A test keeps the
-// two equal.
+// Pattern is the apiVersion pattern of the Incident's ObjectRef schema (api/v1alpha1/common_types.go) and of
+// an integration's detected version in RemediationSettings status: an optional DNS subdomain group and "/",
+// then a Kubernetes version (v1, v1alpha1, v2beta3). A test keeps them equal.
 const Pattern = `^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?v[0-9]+((alpha|beta)[0-9]+)?$`
 
 // MaxLength is the longest group version accepted, the ObjectRef schema's bound.

@@ -17,10 +17,10 @@ limitations under the License.
 package groupversion
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/pkalin/shadewright/internal/testutil/crdschema"
 )
 
 func TestValid(t *testing.T) {
@@ -42,14 +42,23 @@ func TestValid(t *testing.T) {
 	}
 }
 
-// TestPatternMatchesSchema keeps Pattern equal to the ObjectRef schema, so a value this package accepts is
-// accepted by the API server too.
+// TestPatternMatchesSchema keeps Pattern equal to the group version patterns of the generated CRDs (the
+// apiVersion of an Incident's subject and of a request's target, and the version an integration was detected
+// by), so a value this package accepts is accepted by the API server too.
 func TestPatternMatchesSchema(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "..", "api", "v1alpha1", "common_types.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(src), "// +kubebuilder:validation:Pattern=`"+Pattern+"`") {
-		t.Error("Pattern differs from the apiVersion pattern of ObjectRef in api/v1alpha1/common_types.go")
+	for _, c := range []struct {
+		file string
+		path string
+	}{
+		{"remediation.shadewright.io_incidents.yaml", "spec.subject.apiVersion"},
+		{"remediation.shadewright.io_remediationrequests.yaml", "spec.targetRef.apiVersion"},
+		{"remediation.shadewright.io_remediationsettings.yaml", "status.integrations.items.version"},
+	} {
+		if got := crdschema.Pattern(t, c.file, c.path); got != Pattern {
+			t.Errorf("%s: pattern of %s is %q, want Pattern %q", c.file, c.path, got, Pattern)
+		}
+		if got, ok := crdschema.Field(t, c.file, c.path)["maxLength"].(float64); !ok || int(got) != MaxLength {
+			t.Errorf("%s: maxLength of %s is %v, want MaxLength %d", c.file, c.path, got, MaxLength)
+		}
 	}
 }

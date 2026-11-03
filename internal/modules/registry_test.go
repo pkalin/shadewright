@@ -17,11 +17,13 @@ limitations under the License.
 package modules
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/testutil/crdschema"
 )
 
 // ptrPlatform and ptrIntegration have pointer receivers that read their fields, so a nil one panics when
@@ -128,8 +130,9 @@ func TestNewAccepts(t *testing.T) {
 	if got := names(r.Platforms()); !slices.Equal(got, want) {
 		t.Errorf("Platforms = %v, want %v", got, want)
 	}
-	if got := names(r.DetectIntegrations([]string{"v1"})); !slices.Equal(got, []string{"core"}) {
-		t.Errorf("DetectIntegrations = %v, want [core]", got)
+	if got := r.DetectIntegrations([]string{"v1"}); len(got) != 1 || got[0].Integration.Name() != "core" ||
+		got[0].GroupVersion != "v1" {
+		t.Errorf("DetectIntegrations = %+v, want core by v1", got)
 	}
 }
 
@@ -182,5 +185,82 @@ func TestGenericContributesNothing(t *testing.T) {
 	if g.Detection().ProviderIDScheme != "" || len(g.Detection().NodeLabels) != 0 ||
 		len(h.Symptoms)+len(h.Rules)+len(h.Tools)+len(h.Actions) != 0 {
 		t.Errorf("generic = %+v, %+v; want no detection and no hooks", g.Detection(), h)
+	}
+}
+
+const settingsCRD = "remediation.shadewright.io_remediationsettings.yaml"
+
+// TestNamePatternMatchesSchema keeps NamePattern equal to the pattern of every module name in the generated
+// RemediationSettings CRD, so a name the registry accepts can be enabled and reported, and a name the schema
+// accepts is one a module may have.
+func TestNamePatternMatchesSchema(t *testing.T) {
+	for _, path := range []string{
+		"spec.modules.platforms.items",
+		"spec.modules.integrations.items",
+		"status.platform.detected",
+		"status.platform.active",
+		"status.integrations.items.name",
+	} {
+		if got := crdschema.Pattern(t, settingsCRD, path); got != NamePattern {
+			t.Errorf("pattern of %s is %q, want NamePattern %q", path, got, NamePattern)
+		}
+	}
+}
+
+// TestBoundsMatchSchema keeps MaxPlatforms and MaxIntegrations equal to the caps of the settings lists, and
+// status.integrations large enough for every enabled name and every compiled-in integration.
+func TestBoundsMatchSchema(t *testing.T) {
+	if got := crdschema.MaxItems(t, settingsCRD, "spec.modules.platforms"); got != MaxPlatforms {
+		t.Errorf("spec.modules.platforms maxItems = %d, want MaxPlatforms %d", got, MaxPlatforms)
+	}
+	if got := crdschema.MaxItems(t, settingsCRD, "spec.modules.integrations"); got != MaxIntegrations {
+		t.Errorf("spec.modules.integrations maxItems = %d, want MaxIntegrations %d", got, MaxIntegrations)
+	}
+	if got := crdschema.MaxItems(t, settingsCRD, "status.integrations"); got != 2*MaxIntegrations {
+		t.Errorf("status.integrations maxItems = %d, want %d (every enabled and every compiled-in integration)",
+			got, 2*MaxIntegrations)
+	}
+}
+
+// TestNewBoundsModules checks that New refuses one module more than each bound and accepts the bound itself.
+func TestNewBoundsModules(t *testing.T) {
+	platforms := func(n int) []Platform {
+		out := make([]Platform, n)
+		for i := range out {
+			out[i] = stubPlatform{name: fmt.Sprintf("p%d", i)}
+		}
+		return out
+	}
+	integrations := func(n int) []Integration {
+		out := make([]Integration, n)
+		for i := range out {
+			out[i] = stubIntegration{name: fmt.Sprintf("i%d", i)}
+		}
+		return out
+	}
+	r := mustNew(t, platforms(MaxPlatforms), integrations(MaxIntegrations))
+	if got := len(r.Platforms()); got != MaxPlatforms+1 {
+		t.Errorf("Platforms has %d entries, want %d with generic", got, MaxPlatforms+1)
+	}
+	if r, err := New(platforms(MaxPlatforms+1), nil); err == nil || r != nil ||
+		!strings.Contains(err.Error(), fmt.Sprintf("at most %d are allowed besides generic", MaxPlatforms)) {
+		t.Errorf("New with %d platforms: registry %t, error %v; want a refusal", MaxPlatforms+1, r != nil, err)
+	}
+	if r, err := New(nil, integrations(MaxIntegrations+1)); err == nil || r != nil ||
+		!strings.Contains(err.Error(), fmt.Sprintf("at most %d are allowed", MaxIntegrations)) {
+		t.Errorf("New with %d integrations: registry %t, error %v; want a refusal", MaxIntegrations+1, r != nil, err)
+	}
+}
+
+func TestValidName(t *testing.T) {
+	for _, s := range []string{"a", "aks", "secrets-store-csi-driver", "k8s", "a" + strings.Repeat("b", 62)} {
+		if !ValidName(s) {
+			t.Errorf("ValidName(%q) = false, want true", s)
+		}
+	}
+	for _, s := range []string{"", "AKS", "1aks", "-aks", "aks-", "a_b", "a.b", "a b", "a" + strings.Repeat("b", 63)} {
+		if ValidName(s) {
+			t.Errorf("ValidName(%q) = true, want false", s)
+		}
 	}
 }

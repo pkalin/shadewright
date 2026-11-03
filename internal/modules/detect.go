@@ -102,19 +102,29 @@ func hasLabels(n Node, keys []string) bool {
 	return true
 }
 
-// DetectIntegrations returns the integrations whose add-on the cluster serves, sorted by name. groupVersions
-// are the group versions from the discovery API, in the form of its groupVersion field ("keda.sh/v1alpha1",
-// "v1"). The function reads only its input.
-func (r *Registry) DetectIntegrations(groupVersions []string) []Integration {
+// DetectedIntegration is an integration whose add-on the cluster serves, with the group version that showed it.
+type DetectedIntegration struct {
+	// Integration is the detected module.
+	Integration Integration
+	// GroupVersion is the first of the module's declared group versions that the cluster serves, in discovery
+	// form ("keda.sh/v1alpha1"). It is what RemediationSettings status.integrations[].version reports.
+	GroupVersion string
+}
+
+// DetectIntegrations returns the integrations whose add-on the cluster serves, sorted by name, each with the
+// group version that matched: the first one the module declares that is served. groupVersions are the group
+// versions from the discovery API, in the form of its groupVersion field ("keda.sh/v1alpha1", "v1"). The
+// function reads only its input.
+func (r *Registry) DetectIntegrations(groupVersions []string) []DetectedIntegration {
 	served := make(map[string]bool, len(groupVersions))
 	for _, gv := range groupVersions {
 		served[gv] = true
 	}
-	var out []Integration
+	var out []DetectedIntegration
 	for _, e := range r.integrations {
 		for _, gv := range e.detection.GroupVersions {
 			if served[gv] {
-				out = append(out, e.module)
+				out = append(out, DetectedIntegration{Integration: e.module, GroupVersion: gv})
 				break
 			}
 		}

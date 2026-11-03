@@ -26,9 +26,25 @@ import (
 	"github.com/pkalin/shadewright/internal/groupversion"
 )
 
-// namePattern is the form of a module name: a DNS label that starts with a letter, so it fits a CRD enum, a
-// status field and a metric label as it is.
-var namePattern = regexp.MustCompile(`^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`)
+// NamePattern is the form of a module name: a DNS label that starts with a letter, at most 63 characters, so
+// it fits a settings list, a status field and a metric label as it is. It is the pattern of ModuleName in
+// api/v1alpha1/remediationsettings_types.go; a test keeps the two equal.
+const NamePattern = `^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`
+
+var namePattern = regexp.MustCompile(NamePattern)
+
+// ValidName reports whether name is a valid module name, on either axis.
+func ValidName(name string) bool { return namePattern.MatchString(name) }
+
+// MaxPlatforms and MaxIntegrations are the most platform modules (besides generic) and integration modules one
+// registry holds. They are the caps of spec.modules.platforms and spec.modules.integrations in
+// RemediationSettings, so every compiled-in module can be enabled, and they bound status.integrations, which
+// lists at most every enabled name and every detected (so compiled-in) one: 32 + 32 = 64. A test keeps them
+// equal to the CRD.
+const (
+	MaxPlatforms    = 8
+	MaxIntegrations = 32
+)
 
 // schemePattern is the form of a provider ID scheme (RFC 3986, lower case).
 var schemePattern = regexp.MustCompile(`^[a-z][a-z0-9+.-]{0,62}$`)
@@ -64,12 +80,18 @@ type integrationEntry struct {
 }
 
 // New builds a registry from the platform and integration modules compiled into the binary. The generic
-// platform is always added and must not be passed. New fails on a nil module (a typed nil included), an
-// invalid name or detection, a name given twice on one axis, a node label listed twice by one platform, a
-// provider ID scheme without node labels, or two platforms with the same provider ID scheme and the same node
-// labels, which could never be told apart. Platform and integration names are separate: one of each may share
+// platform is always added and must not be passed. New fails on more than [MaxPlatforms] platforms or
+// [MaxIntegrations] integrations, a nil module (a typed nil included), an invalid name or detection, a name
+// given twice on one axis, a node label listed twice by one platform, a provider ID scheme without node labels,
+// or two platforms with the same provider ID scheme and the same node labels, which could never be told apart. Platform and integration names are separate: one of each may share
 // a name.
 func New(platforms []Platform, integrations []Integration) (*Registry, error) {
+	if len(platforms) > MaxPlatforms {
+		return nil, fmt.Errorf("%d platform modules given, at most %d are allowed besides generic", len(platforms), MaxPlatforms)
+	}
+	if len(integrations) > MaxIntegrations {
+		return nil, fmt.Errorf("%d integration modules given, at most %d are allowed", len(integrations), MaxIntegrations)
+	}
 	r := &Registry{
 		platformByName:    map[string]platformEntry{},
 		integrationByName: map[string]integrationEntry{},
@@ -152,7 +174,7 @@ func isNil(module any) bool {
 
 // checkName validates a module name and fails on one already in seen.
 func checkName[V any](axis, name string, seen map[string]V) error {
-	if !namePattern.MatchString(name) {
+	if !ValidName(name) {
 		return fmt.Errorf("%s module name %q is invalid", axis, name)
 	}
 	if _, ok := seen[name]; ok {

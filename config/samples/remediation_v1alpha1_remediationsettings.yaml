@@ -5,7 +5,7 @@ metadata:
   name: default
 spec:
   paused: false
-  # Accepted but not enforced yet: no controller reads it until #88.
+  # Cap on active requests (before the merge): more wait in Pending with the condition Queued.
   maxConcurrentRemediations: 1
   maxAnalysesPerDay: 100
   repositories:

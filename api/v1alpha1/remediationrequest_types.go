@@ -292,6 +292,13 @@ type RemediationRequestStatus struct {
 	// +optional
 	LastPhaseTransitionTime *metav1.MicroTime `json:"lastPhaseTransitionTime,omitempty"`
 
+	// breakerProbe is true on a request the policy check let through while the circuit breaker was tripped
+	// (half-open): it is the breaker's probe. It is written with the allowed decision and never cleared. The
+	// breaker finds a running probe, or one that ended without a success, by this field only; a request
+	// without it is not a probe.
+	// +optional
+	BreakerProbe bool `json:"breakerProbe,omitempty"`
+
 	// effectiveApprovalRequired is what policy decided, which may be stricter than spec.approvalRequired.
 	// +optional
 	EffectiveApprovalRequired *bool `json:"effectiveApprovalRequired,omitempty"`

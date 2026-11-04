@@ -125,7 +125,7 @@ helm uninstall shadewright --namespace shadewright-system
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | crd.enabled | bool | `true` | Install the CRDs as templates (Helm does not upgrade or delete CRDs from a `crds/` directory). Set `false` only if you install them another way. |
-| crd.keep | bool | `true` | Keep the CRDs, and so every Incident and RemediationRequest, when the release is uninstalled (adds the `helm.sh/resource-policy: keep` annotation). Set `false` to delete all of them with the release. |
+| crd.keep | bool | `true` | Keep the CRDs, and so every Incident and RemediationRequest, when the release is uninstalled (adds the `helm.sh/resource-policy: keep` annotation). Set `false` to delete all of them with the release: `helm uninstall` then removes the executor and the CRDs together, so delete the requests first (steps 1 to 3 of upgrade and uninstall). |
 
 ### RBAC
 
@@ -189,6 +189,6 @@ helm uninstall shadewright --namespace shadewright-system
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| settings.create | bool | `false` | Create the RemediationSettings object `default` from `spec`, as a post-install and post-upgrade hook. Every install or upgrade replaces the object with `spec`, overwriting hand edits, so leave it off if you manage the object elsewhere. Helm does not track hook objects: the object is not deleted when the release is uninstalled. Requires a non-empty `spec`. |
+| settings.create | bool | `false` | Create the RemediationSettings object `default` from `spec`, only when it does not exist (a post-install and post-upgrade hook that checks with `lookup`). Helm never changes or deletes it afterwards, so a pause set by hand (`spec.paused: true`) survives every upgrade; change the object with kubectl or GitOps. `lookup` finds nothing under `helm template` and `--dry-run`, so those always render it. Helm does not track hook objects: the object is not deleted when the release is uninstalled. Requires a non-empty `spec`. |
 | settings.spec | object | `{}` | Spec of the RemediationSettings object. Required and non-empty when `create` is true (the schema enforces it). The fields are in the API reference, see the README for an example. |
 

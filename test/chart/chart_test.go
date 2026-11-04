@@ -638,3 +638,35 @@ func TestChartRefusesWeakenedValues(t *testing.T) {
 	ok := helmArgs(t, false, "executor.extraArgs={--zap-log-level=debug}", "analyzer.podLabels.team=a")
 	run(t, repoRoot(t), helm, ok...)
 }
+
+// The settings object holds the kill switch (spec.paused). The chart creates it only when it does not exist
+// (lookup in the template, covered by hack/chart-install-test.sh on a real cluster, since helm template has no
+// cluster and lookup finds nothing there) and never lets Helm delete it: a hook-delete-policy would remove the
+// live object, and a normal release object would be rewritten by every upgrade.
+func TestSettingsObjectIsAHookThatHelmNeverDeletes(t *testing.T) {
+	if r := render(t, false); r.chart["RemediationSettings//default"] != nil {
+		t.Error("the settings object is rendered although settings.create is false")
+	}
+	r := render(t, false, "settings.create=true", "settings.spec.paused=true")
+	obj := r.chart["RemediationSettings//default"]
+	if obj == nil {
+		t.Fatal("settings.create=true rendered no RemediationSettings object")
+	}
+	ann := obj.GetAnnotations()
+	if got := ann["helm.sh/hook"]; got != "post-install,post-upgrade" {
+		t.Errorf("hook annotation = %q, want post-install,post-upgrade (the CRD comes from the same release)", got)
+	}
+	if p, ok := ann["helm.sh/hook-delete-policy"]; ok {
+		t.Errorf("hook-delete-policy %q would let Helm delete the live settings object", p)
+	}
+	if paused, _, _ := unstructured.NestedBool(obj.Object, "spec", "paused"); !paused {
+		t.Error("spec.paused from the values is not rendered")
+	}
+	src, err := os.ReadFile(filepath.Join(repoRoot(t), "dist/chart/templates/settings.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), `lookup "remediation.shadewright.io/v1alpha1" "RemediationSettings"`) {
+		t.Error("templates/settings.yaml does not check for an existing object with lookup")
+	}
+}

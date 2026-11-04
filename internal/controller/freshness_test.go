@@ -211,6 +211,18 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(reconciler().freshErr(ctx, fetch())).To(Succeed())
 	})
 
+	// closedForStalePlan checks that PullRequestOpened of a superseded request says its pull request is closed
+	// and why, with its number.
+	closedForStalePlan := func(got *remediationv1alpha1.RemediationRequest, reason string) {
+		GinkgoHelper()
+		opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(opened).NotTo(BeNil())
+		Expect(opened.Status).To(Equal(metav1.ConditionTrue), "the pull request was opened")
+		Expect(opened.Reason).To(Equal(ReasonPullRequestClosed))
+		Expect(opened.Message).To(Equal(fmt.Sprintf("Pull request #%d is closed: the plan is stale (%s)",
+			got.Status.PullRequest.Number, reason)))
+	}
+
 	supersedes := func(reason string) {
 		_, err := reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())
@@ -221,6 +233,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(c.Status).To(Equal(metav1.ConditionFalse))
 		Expect(c.Reason).To(Equal(reason))
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+		closedForStalePlan(got, reason)
 	}
 
 	It("closes the change request once when the policy is edited, and not again", func() {
@@ -328,6 +341,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded), "our close, not a person's rejection")
 		Expect(planFresh().Reason).To(Equal(freshness.ReasonTargetFileChanged))
+		closedForStalePlan(got, freshness.ReasonTargetFileChanged)
 	})
 
 	It("finishes the cleanup after a restart between the mark and the close, though the plan looks fresh again", func() {

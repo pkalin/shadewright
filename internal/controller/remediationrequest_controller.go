@@ -581,6 +581,7 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 	if mark := staleMark(rr); mark != nil && outcome == prClosed {
 		// The cleanup of a stale plan started (ensureFresh) and its pull request is closed: the close that was
 		// cut short was ours, not a person's rejection, whatever the plan looks like now.
+		closedByUs(rr, staleClosed(mark.Reason))
 		return ctrl.Result{}, r.ignoreSuperseded(r.endFreshness(ctx, rr, remediationv1alpha1.PhaseSuperseded,
 			mark.Reason, mark.Message))
 	}
@@ -711,6 +712,8 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 	closeErr = boundErr(ctx, cleanCtx, "cleanup of the change request", closeErr)
 	cleanCancel()
 	switch err := closeErr; {
+	case err == nil:
+		closedByUs(rr, staleClosed(staleErr.Reason))
 	case errors.Is(err, freshness.ErrRepositoryUnusable):
 		// The settings of the repository cannot be used, so the change request cannot be closed either.
 		phase, reason, message = remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnusable,
@@ -741,6 +744,11 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 			"change request; it was not closed"
 	}
 	return r.endFreshness(ctx, rr, phase, reason, message)
+}
+
+// staleClosed is the fixed text of PullRequestOpened for a pull request closed because its plan is stale.
+func staleClosed(reason string) string {
+	return "the plan is stale (" + reason + ")"
 }
 
 // endFreshness writes the final phase of a plan that is not fresh, with PlanFresh False saying why, and returns

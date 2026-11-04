@@ -444,6 +444,11 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
 			To(Equal(ReasonChangeRequestClosed))
+		opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(opened.Status).To(Equal(metav1.ConditionTrue))
+		Expect(opened.Reason).To(Equal(ReasonChangeRequestClosed))
+		Expect(opened.Message).To(Equal(fmt.Sprintf("Pull request #%d was closed without a merge",
+			got.Status.PullRequest.Number)), "the condition no longer says the pull request is open")
 	})
 
 	It("expires a request whose freshness check keeps failing", func() {
@@ -598,7 +603,12 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			}
 			Expect(cond.Message).To(HaveSuffix("the pull request was closed"))
 			Expect(cond.Message).NotTo(ContainSubstring("branch was cut"), "the text names the window it was refused in")
-			Expect(meta.IsStatusConditionTrue(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)).To(BeTrue())
+			opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+			Expect(opened).NotTo(BeNil())
+			Expect(opened.Status).To(Equal(metav1.ConditionTrue), "the pull request was opened")
+			Expect(opened.Reason).To(Equal(ReasonPullRequestClosed))
+			Expect(opened.Message).To(Equal(fmt.Sprintf("Pull request #%d is closed: the change no longer renders "+
+				"as planned (%s)", got.Status.PullRequest.Number, reason)))
 			crs := openRequests()
 			Expect(crs).To(HaveLen(1), "no other pull request is opened")
 			Expect(crs[0].State).To(Equal(providers.ChangeRequestClosed), "a refused pull request is closed")
@@ -1249,6 +1259,12 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh).Reason).
 					To(Equal(freshness.ReasonTargetFileChanged))
 				Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+				opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+				Expect(opened.Status).To(Equal(metav1.ConditionTrue), "the pull request was opened")
+				Expect(opened.Reason).To(Equal(ReasonPullRequestClosed))
+				Expect(opened.Message).To(Equal(fmt.Sprintf("Pull request #%d is closed: the plan is stale (%s)",
+					got.Status.PullRequest.Number, freshness.ReasonTargetFileChanged)),
+					"the condition no longer says the pull request is open")
 				for range 3 {
 					Expect(reconcileOnce()).To(Succeed())
 				}

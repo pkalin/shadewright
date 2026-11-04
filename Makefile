@@ -90,6 +90,7 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart digest
 	hack/chart-set-digests_test.sh
 	hack/ci-changed_test.sh
 	hack/release-verify-notes_test.sh
+	hack/require-on-main_test.sh
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.

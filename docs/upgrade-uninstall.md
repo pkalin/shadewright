@@ -56,7 +56,7 @@ gh attestation verify "oci://$IMAGE@$DIGEST" \
   --signer-workflow pkalin/shadewright/.github/workflows/images.yml
 ```
 
-Every GitHub release lists the digests of its two images and its chart, with these commands filled in for that tag (the identity pinned to it), once the images and the chart are published. A pre-release tag such as `v0.2.0-rc.1` is built, signed and verified the same way: the identity regexp above accepts it, it is tagged `0.2.0-rc.1` only (no `latest`, no `X.Y`), and its chart has that version and `appVersion`.
+Releases after v0.1.0 list the digests of its two images and its chart, with these commands filled in for that tag (the identity pinned to it), once the images and the chart are published. A pre-release tag such as `v0.2.0-rc.1` is built, signed and verified the same way: the identity regexp above accepts it, it is tagged `0.2.0-rc.1` only (no `latest`, no `X.Y`), and its chart has that version and `appVersion`.
 
 Each command exits non-zero when the signature, the identity or the issuer does not match. To pin a single release instead of any `main` or tag build, replace the end of `IDENTITY` with `refs/tags/vX.Y.Z$`. The SBOM lists the packages of the linux/amd64 image. The same checks run in the [images workflow](https://github.com/pkalin/shadewright/blob/main/.github/workflows/images.yml) right after every push, so a build that cannot be verified fails there.
 
@@ -92,7 +92,7 @@ helm upgrade shadewright oci://ghcr.io/pkalin/charts/shadewright --version <new 
   --namespace shadewright-system -f my-values.yaml --wait --timeout 5m
 ```
 
-- Pin `--version`. Verify the chart and the images first (the chart's cosign identity is in the [configuration reference](reference/configuration.md#helm-chart), the images are in [verify a release](#verify-a-release)).
+- Pin `--version`, or better install the digest you verified (`oci://ghcr.io/pkalin/charts/shadewright@sha256:<chart digest>` in place of the reference and `--version`; Helm accepts it). Verify the chart and the images first (the chart's cosign identity is in the [configuration reference](reference/configuration.md#helm-chart), the images are in [verify a release](#verify-a-release)).
 - Prefer `-f my-values.yaml` to `--reuse-values`, which reuses the values of the last release instead of the new chart's: the digests of the new release may not reach the Deployments. After any upgrade check the images that run (`kubectl -n shadewright-system get deploy -o wide`). `--reset-then-reuse-values` starts from the new chart's values and applies yours.
 - From a source checkout, use the path of the clone instead (`./dist/chart`). A clone has no digests: set `executor.image.digest` and `analyzer.image.digest` to the digests of the release you check out, or `image.allowTag=true` to run the `appVersion` tag, which needs images built from that same checkout. Without either, the chart refuses to render. Mind that the clone must be of the tag whose images you run.
 - The CRDs are templates of the chart, so `helm upgrade` applies them with the Deployments, unlike a CRD in a `crds/` directory. With `--wait` Helm returns when the Deployments are available; the Lease handover from step 5 still applies.

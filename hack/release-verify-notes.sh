@@ -29,7 +29,7 @@ end='<!-- shadewright:verify:end -->'
 
 pre=""
 if [ "${version}" != "${version%%-*}" ]; then
-  pre="This is a pre-release: it is not the latest release and its images and chart are tagged \`${version}\` only (no \`latest\`, no \`X.Y\` tag).
+  pre="This is a pre-release: it is not the latest release and its images and chart are tagged \`${version}\` only (no \`latest\`, no \`X.Y\` tag). Install by digest as below: Helm does not pick pre-releases by itself.
 
 "
 fi
@@ -44,7 +44,7 @@ ${pre}| Artifact | Reference |
 | Analyzer image | \`ghcr.io/${owner}/shadewright-analyzer@${analyzer}\` |
 | Helm chart | \`oci://ghcr.io/${owner}/charts/shadewright\` version \`${version}\`, \`${chart}\` |
 
-The images carry a keyless cosign signature, a signed SPDX SBOM and a GitHub build provenance attestation; the chart carries a keyless cosign signature and runs the two images above by digest. Verify by digest, never by tag. You need [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 2.x or later and the [GitHub CLI](https://cli.github.com/). Details: [verify a release](https://shadewright.io/upgrade-uninstall/#verify-a-release).
+The release workflow checked the keyless cosign signature and the signed SPDX SBOM of both images, and the chart runs exactly those images by digest. The Images workflow also records a GitHub build provenance attestation, and the chart is signed keyless. Verify by digest, never by tag; the commands below check all of it again. You need [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 2.x or later and the [GitHub CLI](https://cli.github.com/). Details: [verify a release](https://shadewright.io/upgrade-uninstall/#verify-a-release).
 
 \`\`\`bash
 ISSUER=https://token.actions.githubusercontent.com
@@ -64,7 +64,8 @@ done
 cosign verify --certificate-identity-regexp "\$CHART_IDENTITY" --certificate-oidc-issuer "\$ISSUER" \\
   ghcr.io/${owner}/charts/shadewright@${chart}
 
-helm install shadewright oci://ghcr.io/${owner}/charts/shadewright --version ${version} \\
+# Install the chart you verified: Helm accepts the digest in the reference, so nothing can move in between.
+helm install shadewright oci://ghcr.io/${owner}/charts/shadewright@${chart} \\
   --namespace shadewright-system --create-namespace
 \`\`\`
 ${end}
@@ -74,8 +75,9 @@ TEXT
 body="$(cat)"
 # Drop an earlier copy of the section (markers included), then append the current one.
 body="$(printf '%s\n' "${body}" | awk -v s="${start}" -v e="${end}" '
-  $0 == s { skip = 1; next }
-  skip && $0 == e { skip = 0; next }
+  { line = $0; sub(/\r$/, "", line) }
+  line == s { skip = 1; next }
+  skip && line == e { skip = 0; next }
   !skip { print }
 ')"
 # Trim trailing blank lines.

@@ -37,9 +37,14 @@ diff -u "${tmp}/one.md" "${tmp}/two.md" && ok "idempotent" || bad "idempotent"
 ./release-verify-notes.sh pkalin/shadewright v0.2.0 "${d3}" "${d3}" "${d3}" < "${tmp}/one.md" > "${tmp}/three.md"
 grep -qF "${d1}" "${tmp}/three.md" && bad "old digest left" || ok "old digest replaced"
 
+# A body edited in the web UI has CRLF line endings: the markers are still found, so a rerun replaces.
+sed 's/$/\r/' "${tmp}/one.md" > "${tmp}/crlf.md"
+notes v0.2.0 < "${tmp}/crlf.md" > "${tmp}/crlf2.md"
+[ "$(grep -c 'shadewright:verify:start' "${tmp}/crlf2.md")" = 1 ] && ok "CRLF rerun replaces" || bad "CRLF rerun duplicated the section"
+
 # An empty body and a pre-release tag.
 notes v0.2.0-rc.1 < /dev/null > "${tmp}/rc.md"
-grep -qF 'pre-release' "${tmp}/rc.md" && grep -qF 'tags/v0\.2\.0-rc\.1$' "${tmp}/rc.md" && grep -qF -- '--version 0.2.0-rc.1' "${tmp}/rc.md" &&
+grep -qF 'pre-release' "${tmp}/rc.md" && grep -qF 'tags/v0\.2\.0-rc\.1$' "${tmp}/rc.md" && grep -qF -- "charts/shadewright@${d3}" "${tmp}/rc.md" && ! grep -qF -- "--version" "${tmp}/rc.md" &&
   ok "pre-release" || bad "pre-release"
 [ "$(head -n 1 "${tmp}/rc.md")" = '<!-- shadewright:verify:start -->' ] && ok "empty body" || bad "empty body"
 

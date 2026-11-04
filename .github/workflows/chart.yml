@@ -9,7 +9,8 @@ name: Chart
 # OIDC, no key to store) and verifies the signature against the identity of this workflow, so a mismatch fails
 # the run.
 #
-# Two kinds of tag publish. vX.Y.Z (cut by release-please) must equal version and appVersion of Chart.yaml. A
+# A tag must point at a commit on main (hack/require-on-main.sh, before anything is pushed). Two kinds of tag
+# publish. vX.Y.Z (cut by release-please) must equal version and appVersion of Chart.yaml. A
 # semver pre-release tag (vX.Y.Z-rc.1, created by hand with `gh release create --prerelease`) has no bump
 # commit: the chart is packaged with --version and --app-version taken from the tag
 # (hack/chart-release-version.sh). Helm pushes only the version tag, so a pre-release moves no floating tag.
@@ -50,10 +51,17 @@ jobs:
       packages: write
       id-token: write # cosign keyless signing, this job only
     steps:
+      # A release tag must point at a commit on main: the signature identity only says "this workflow on a v*
+      # tag", so the history of main is fetched for the check below.
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: ${{ github.ref_type == 'tag' && '0' || '1' }}
+
+      - name: Require the tag to be on main
+        if: github.ref_type == 'tag'
+        run: hack/require-on-main.sh HEAD origin/main
 
       - name: Setup Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
@@ -80,8 +88,8 @@ jobs:
           printf '%s' "${TOKEN}" | docker login ghcr.io --username "${ACTOR}" --password-stdin
           printf '%s' "${TOKEN}" | helm registry login ghcr.io --username "${ACTOR}" --password-stdin
 
-      # The images of this tag, by digest, each verified against the identity of the Images workflow on this
-      # very tag before its digest goes into the chart. The Images workflow of the same tag runs in parallel, so
+      # The images of this tag, by digest, each verified (signature and SPDX SBOM attestation) against the identity of the Images
+      # workflow on this very tag before its digest goes into the chart. The Images workflow of the same tag runs in parallel, so
       # this waits for each image and a signature that verifies: every 30 s, at most 30 minutes, then the run
       # fails with the image it waited for. Re-run the failed jobs of this run once the Images workflow of the
       # tag has finished. The signature check is on the digest, so a tag moved after the check changes nothing.
@@ -104,10 +112,13 @@ jobs:
               if printf '%s' "${got}" | grep -Eq '^sha256:[a-f0-9]{64}$' && cosign verify \
                   --certificate-identity "${identity}" \
                   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+                  "${ref}@${got}" > /dev/null 2>&1 && cosign verify-attestation --type spdxjson \
+                  --certificate-identity "${identity}" \
+                  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
                   "${ref}@${got}" > /dev/null 2>&1; then
                 d="${got}"
               elif [ "$(date +%s)" -ge "${deadline}" ]; then
-                echo "no image ${ref}:${TAG#v} signed by ${identity} after 30 minutes; re-run this job once the Images workflow of ${TAG} has finished" >&2
+                echo "no image ${ref}:${TAG#v} signed and attested by ${identity} after 30 minutes; re-run this job once the Images workflow of ${TAG} has finished" >&2
                 exit 1
               else
                 echo "waiting for ${ref}:${TAG#v} and its signature"

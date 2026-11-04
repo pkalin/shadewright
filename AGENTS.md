@@ -28,8 +28,8 @@ so the **pull request title** is what counts; a required check (`Conventional PR
   `perf` a patch, `!` or a `BREAKING CHANGE:` footer a breaking release (a minor one while the version is
   0.x). `revert` is listed too; `refactor`, `test`, `docs`, `build`, `ci` and `chore` stay out of the changelog.
 - The release workflow keeps one release pull request open (opened by the `shadewright-release` App). Merging it
-  is the release: it tags `vX.Y.Z`, updates `CHANGELOG.md` and creates the GitHub release. Never tag by hand and
-  never edit `CHANGELOG.md` or `.release-please-manifest.json` outside that pull request.
+  is the release: it tags `vX.Y.Z`, updates `CHANGELOG.md` and creates the GitHub release. Never tag a plain `vX.Y.Z` by
+  hand (pre-releases: see below), and never edit `CHANGELOG.md` or `.release-please-manifest.json` outside that pull request.
   The GitHub release notes are then regrouped by scope by `hack/release-notes-by-scope.sh` (see the comment in
   `.github/workflows/release-please.yml`, which also shows how to regroup an existing release).
   Once the images and the chart of the tag are published, the last job of `chart.yml` appends their digests and

@@ -83,7 +83,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 	}
 	reconciler := func() *RemediationRequestReconciler {
 		r := &RemediationRequestReconciler{
-			Client: k8sClient, Scheme: k8sClient.Scheme(), Source: sourceFunc(func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
+			Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), Source: sourceFunc(func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
 				res := resolved()
 				res.Source.BaseCommit, _ = git.BranchHead(ctx, mainBranch)
 				res.Source.BuildPath = build
@@ -634,6 +634,15 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			armed = true
 			Expect(reconcileOnce()).To(Succeed())
 			Expect(writes).NotTo(ContainElement(opClose))
+			// Further requeues while paused close nothing and record no second Event.
+			Expect(recorder.Events).To(Receive(ContainSubstring(ReasonWritesPaused)))
+			for range 3 {
+				res, err := reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res.RequeueAfter).To(Equal(freshRecheckDelay))
+			}
+			Expect(writes).NotTo(ContainElement(opClose))
+			Expect(recorder.Events).NotTo(Receive())
 			Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
 			Expect(fetch().DeletionTimestamp).NotTo(BeNil(), "the finalizer holds the request")
 			Expect(pausedCondition()).NotTo(BeNil())

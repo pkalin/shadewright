@@ -67,10 +67,16 @@ const (
 // writeAllowed is the kill switch's gate. It returns nil only when the RemediationSettings object, read from
 // the API server right now, exists and does not pause writes. A pause is [freshness.ErrPaused]; a settings
 // object that cannot be read, or does not exist, is [freshness.ErrWriteBlocked]. In both cases the caller
-// must not write.
+// must not write. Without an APIReader the gate refuses too: unlike the other reads (reader), it never falls
+// back to the client, whose cache may hold a copy from before the pause.
 func (r *RemediationRequestReconciler) writeAllowed(ctx context.Context) error {
+	if r.APIReader == nil {
+		return fmt.Errorf("%w: no API server reader", freshness.ErrWriteBlocked)
+	}
 	settings := &remediationv1alpha1.RemediationSettings{}
-	if err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); err != nil {
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); err != nil {
+		// The wrapped API error goes only to the log and the error backoff. It must never be put into a
+		// condition message or an Event: those carry fixed text only.
 		return fmt.Errorf("%w: get RemediationSettings %s: %w", freshness.ErrWriteBlocked,
 			remediationv1alpha1.SettingsName, err)
 	}

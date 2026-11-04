@@ -22,6 +22,8 @@ import (
 	"reflect"
 	"testing"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
@@ -107,4 +109,24 @@ func TestProviderErrorKeepsTheKillSwitch(t *testing.T) {
 			t.Fatalf("WrapProvider lost %v: %v", want, err)
 		}
 	}
+}
+
+// TestWriteAllowedNeedsTheAPIReader checks that the gate never falls back to the client (and its cache): with
+// no APIReader it blocks the write, even when the client would read settings that allow it.
+func TestWriteAllowedNeedsTheAPIReader(t *testing.T) {
+	r := &RemediationRequestReconciler{Client: allowingClient{}}
+	if err := r.writeAllowed(context.Background()); !errors.Is(err, freshness.ErrWriteBlocked) {
+		t.Fatalf("writeAllowed without an APIReader returned %v, want ErrWriteBlocked", err)
+	}
+	r.APIReader = allowingClient{}
+	if err := r.writeAllowed(context.Background()); err != nil {
+		t.Fatalf("writeAllowed with an APIReader that allows returned %v", err)
+	}
+}
+
+// allowingClient answers every Get with an object left as it is: settings that do not pause.
+type allowingClient struct{ client.Client }
+
+func (allowingClient) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
+	return nil
 }

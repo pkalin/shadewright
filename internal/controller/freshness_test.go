@@ -74,7 +74,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 	}
 	reconciler := func() *RemediationRequestReconciler {
 		return &RemediationRequestReconciler{
-			Client: k8sClient, Scheme: k8sClient.Scheme(), Source: sourceFunc(func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
+			Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), Source: sourceFunc(func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
 				// Like the real resolver, report the head of the branch as it is now.
 				res := resolved()
 				res.Source.BaseCommit, _ = git.BranchHead(ctx, mainBranch)

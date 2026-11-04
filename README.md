@@ -19,6 +19,12 @@
 
 It never changes your workloads or any other object it watches: it writes only its own control state (Incidents, RemediationRequests and their status, the remediation settings status, an analysis budget ConfigMap, leader election Leases and Events), and a model's answer is never authorization.
 
+## Guides
+
+- [Getting started](https://shadewright.io/getting-started/): tests without a cluster, an observe-only install, and a hand-written request to a reviewed pull request.
+- [Configuration reference](https://shadewright.io/reference/configuration/): flags, namespaces and RoleBindings, images, metrics and workload identity.
+- [Troubleshooting](https://shadewright.io/troubleshooting/): every request condition reason with its cause and fix.
+
 ## Repositories
 
 | Repository | Contents |

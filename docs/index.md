@@ -14,6 +14,7 @@ hide:
 <p class="sw-tagline">A Kubernetes operator that diagnoses incidents with an LLM and proposes fixes only as reviewed GitOps pull requests.</p>
 
 [Read the design](design.md){ .md-button .md-button--primary }
+[Getting started](getting-started.md){ .md-button }
 [Decisions](adr/index.md){ .md-button }
 [GitHub](https://github.com/pkalin/shadewright){ .md-button }
 

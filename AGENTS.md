@@ -102,9 +102,9 @@ Every issue names the ADRs it is tied to:
   change skip its check, so extend the groups and `hack/ci-changed_test.sh` when a job starts reading a new
   directory. Concurrency (cancel a superseded pull request run) lives in `ci.yml` only. Called workflows
   (`lint.yml`, `test.yml`, `test-e2e.yml`, `vulncheck.yml`, `workflow-lint.yml`, `images-build.yml`,
-  `chart-test.yml`) have no triggers of their own, except the weekly `vulncheck.yml` schedule. `images.yml` and
-  `chart.yml` publish from main and `v*` tags and stay separate, because their signatures are verified against
-  those file names.
+  `chart-test.yml`) have no triggers of their own, except the weekly `vulncheck.yml` schedule. `images.yml`
+  (publishes from main and `v*` tags) and `chart.yml` (runs the chart tests, then publishes, on `v*` tags only)
+  stay separate, because their signatures are verified against those file names.
 - **Tests.** Every bug fix gets a test that fails without it; every new API rule gets a refusal test.
 
 ## Design choices

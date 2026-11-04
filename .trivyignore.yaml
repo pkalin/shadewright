@@ -1,0 +1,12 @@
+# Findings that `trivy config` (chart-test.yml, on pull requests that change the chart or config/) may not fail
+# the run for. The scan fails on HIGH and CRITICAL findings; an entry here needs an id, a `statement` that says
+# why the finding does not apply or is accepted, and ideally `expired_at`, so it comes back for review.
+# Nothing is ignored today: the chart and config/ have no HIGH or CRITICAL finding. Example entry:
+#
+# misconfigurations:
+#   - id: KSV-0014
+#     paths:
+#       - "chart.yaml"
+#     statement: why this does not apply here
+#     expired_at: 2027-06-01
+misconfigurations: []

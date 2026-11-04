@@ -1,7 +1,9 @@
 name: Chart test
 
 # Lints and renders the Helm chart and installs it on Kind: with explicit values, and with chart-testing (ct lint,
-# then the default values plus image.allowTag with images built from the checkout, ct install and helm test).
+# then the default values plus image.allowTag with images built from the checkout, ct install and helm test), and
+# scans the rendered chart and config/ for misconfigurations with Trivy (HIGH and CRITICAL fail the run unless
+# .trivyignore.yaml ignores them with a reason).
 # Called by ci.yml on pull requests and by chart.yml before a release tag publishes the chart.
 on:
   workflow_call:
@@ -46,6 +48,53 @@ jobs:
 
       - name: Lint and compare the chart with config/default
         run: make chart-lint test-chart
+
+  # Part of this workflow, so it runs under the same `run` input as the other jobs (the `chart` group of
+  # hack/ci-changed.sh) and is a job of ci.yml's `chart` call, already covered by ci-ok. The chart is rendered with
+  # helm template (which fails loudly) and the output is scanned: trivy config on the chart directory skips a
+  # chart that does not render with only a warning, which would be a silent pass. Trivy comes from the official
+  # release, checked against a pinned sha256 (hack/install-trivy.sh).
+  trivy-config:
+    name: Trivy config scan
+    if: ${{ inputs.run != false }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Install Trivy
+        run: hack/install-trivy.sh "${RUNNER_TEMP}/trivy-bin"
+
+      # The default values of the chart test (image.allowTag only, the rest default), so the rendered objects are
+      # what a default install creates.
+      - name: Render the chart
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/rendered"
+          helm template shadewright dist/chart --namespace shadewright-system \
+            --values dist/chart/ci/default-values.yaml --set clusterId=trivy-scan > "${RUNNER_TEMP}/rendered/chart.yaml"
+          grep -q '^kind: Deployment$' "${RUNNER_TEMP}/rendered/chart.yaml"
+
+      # Findings of any severity are listed; HIGH and CRITICAL fail the run (exit code 1) unless
+      # .trivyignore.yaml names them with a reason. A scanner error also fails the run.
+      - name: Scan the rendered chart
+        run: |
+          "${RUNNER_TEMP}/trivy-bin/trivy" config --exit-code 1 --severity HIGH,CRITICAL \
+            --ignorefile .trivyignore.yaml --skip-version-check "${RUNNER_TEMP}/rendered"
+
+      - name: Scan config/
+        run: |
+          "${RUNNER_TEMP}/trivy-bin/trivy" config --exit-code 1 --severity HIGH,CRITICAL \
+            --ignorefile .trivyignore.yaml --skip-version-check config
 
   install:
     name: Install on Kind

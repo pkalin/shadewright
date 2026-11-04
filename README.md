@@ -8,6 +8,7 @@
 
 <p align="center">
   <a href="https://artifacthub.io/packages/search?repo=shadewright"><img src="https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/shadewright" alt="Artifact Hub"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/pkalin/shadewright"><img src="https://api.scorecard.dev/projects/github.com/pkalin/shadewright/badge" alt="OpenSSF Scorecard"></a>
 </p>
 
 > [!WARNING]

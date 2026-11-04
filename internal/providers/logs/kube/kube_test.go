@@ -308,7 +308,7 @@ func TestEmptyNamespaceSetRefusesEveryQuery(t *testing.T) {
 
 func TestExcerptIsRedacted(t *testing.T) {
 	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PSR5wHnYp3qk"
-	conn := "postgres://admin:S3cr3tPassw0rd@db.internal:5432/app"
+	conn := "Server=db;Database=app;User Id=admin;Password=S3cr3tPassw0rd;"
 	text := "starting\nAuthorization: Bearer " + jwt + "\nconnecting to " + conn + "\nready\n"
 	got, err := newLogServer(text).source(t).Logs(context.Background(), query())
 	if err != nil {

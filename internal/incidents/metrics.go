@@ -17,9 +17,25 @@ limitations under the License.
 package incidents
 
 import (
+	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/phasegauge"
 )
+
+// The analyzer's metrics, served on its metrics endpoint (docs/reference/metrics.md). Every label takes its
+// values from a closed set fixed in this file: never a name, fingerprint, namespace or message from the
+// cluster, so the number of series stays bounded whatever the cluster holds.
 
 // refusedObservations counts the observations of new fingerprints that were not stored because the
 // Incident cap was reached. It is served on the analyzer's metrics endpoint.
@@ -52,8 +68,200 @@ var overflowedOccurrences = prometheus.NewCounter(prometheus.CounterOpts{
 	Help: "Observations of a new occurrence not counted because the caps on occurrences held unwritten were reached.",
 })
 
+// Results of analysisReservations.
+const (
+	reserveReserved       = "reserved"
+	reserveBudgetSpent    = "budget_spent"
+	reserveBudgetNotFound = "budget_not_found"
+	reserveBudgetBad      = "budget_unreadable"
+	reserveError          = "error"
+)
+
+// analysisReservations counts the calls of [ReserveAnalysis], by result: a unit of the daily budget was
+// taken (the model may be called), the budget was spent, its ConfigMap is missing or cannot be trusted, or
+// another error (a failed read or write). Only reserved allows a model call.
+var analysisReservations = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "shadewright_analysis_reservations_total",
+	Help: "Reservations of a unit of the daily analysis budget, by result " +
+		"(reserved, budget_spent, budget_not_found, budget_unreadable, error).",
+}, []string{"result"})
+
+// analysesUsedToday and analysesPerDayLimit are the analysis budget as the last pass of the analysis trigger
+// read it. Each reports nothing while its value is unknown: the limit until the RemediationSettings are read,
+// the count until the budget ConfigMap is read and trusted. A fail-closed pass clears what it could not read,
+// so neither shows a value the trigger no longer goes by.
+var (
+	analysesUsedToday = newOptionalGauge("shadewright_analyses_used_today",
+		"Analyses counted against the current UTC day in the budget ConfigMap, at the last trigger pass; "+
+			"absent while the budget is unknown.")
+	analysesPerDayLimit = newOptionalGauge("shadewright_analyses_per_day_limit",
+		"RemediationSettings maxAnalysesPerDay, at the last trigger pass; absent while the settings are unknown.")
+)
+
+// optionalGauge is a gauge without labels that reports nothing while its value is unknown. A plain Gauge
+// cannot be taken away once set, so a stale value would stay on the endpoint.
+type optionalGauge struct {
+	desc  *prometheus.Desc
+	mu    sync.Mutex
+	value float64
+	known bool
+}
+
+func newOptionalGauge(name, help string) *optionalGauge {
+	return &optionalGauge{desc: prometheus.NewDesc(name, help, nil, nil)}
+}
+
+// set sets the value and makes it known.
+func (g *optionalGauge) set(v float64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.value, g.known = v, true
+}
+
+// clear makes the value unknown, so the gauge reports nothing.
+func (g *optionalGauge) clear() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.value, g.known = 0, false
+}
+
+// get returns the value and whether it is known.
+func (g *optionalGauge) get() (float64, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.value, g.known
+}
+
+// Describe implements prometheus.Collector.
+func (g *optionalGauge) Describe(ch chan<- *prometheus.Desc) {
+	ch <- g.desc
+}
+
+// Collect implements prometheus.Collector.
+func (g *optionalGauge) Collect(ch chan<- prometheus.Metric) {
+	if v, ok := g.get(); ok {
+		ch <- prometheus.MustNewConstMetric(g.desc, prometheus.GaugeValue, v)
+	}
+}
+
+// triggerPassErrors counts the passes of the analysis trigger that failed (each is retried at the next
+// interval).
+var triggerPassErrors = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "shadewright_analysis_trigger_errors_total",
+	Help: "Passes of the analysis trigger that failed and are retried at the next interval.",
+})
+
+// incidentWriteErrors counts the writes of an Incident that failed and are retried. Writes the API server
+// refuses for good are counted in droppedBatches instead.
+var incidentWriteErrors = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "shadewright_incident_write_errors_total",
+	Help: "Writes of an Incident that failed and are retried.",
+})
+
+// incidentPhases reports the Incidents in the operator namespace by phase, and those due for analysis.
+var incidentPhases = &incidentCollector{
+	phases: prometheus.NewDesc("shadewright_incidents",
+		"Incidents in the operator namespace, by phase (None without one, Other for a phase this version "+
+			"does not know).", []string{"phase"}, nil),
+	due: prometheus.NewDesc("shadewright_incidents_analysis_due",
+		"Incidents in the operator namespace whose AnalysisDue condition is True.", nil, nil),
+}
+
 func init() {
-	metrics.Registry.MustRegister(refusedObservations, droppedBatches, overflowedOccurrences)
+	metrics.Registry.MustRegister(refusedObservations, droppedBatches, overflowedOccurrences,
+		analysisReservations, analysesUsedToday, analysesPerDayLimit, triggerPassErrors, incidentWriteErrors,
+		incidentPhases)
+	// The closed sets start at zero, so a rate is defined before the first event.
+	for _, r := range []string{dropInvalid, dropFingerprintConflict, dropStopped} {
+		droppedBatches.WithLabelValues(r)
+	}
+	for _, r := range []string{reserveReserved, reserveBudgetSpent, reserveBudgetNotFound, reserveBudgetBad,
+		reserveError} {
+		analysisReservations.WithLabelValues(r)
+	}
+}
+
+// recordReservation counts a result of [ReserveAnalysis].
+func recordReservation(err error) {
+	result := reserveError
+	switch {
+	case err == nil:
+		result = reserveReserved
+	case errors.Is(err, ErrBudgetSpent):
+		result = reserveBudgetSpent
+	case errors.Is(err, ErrBudgetNotFound):
+		result = reserveBudgetNotFound
+	case errors.Is(err, ErrBudgetUnreadable):
+		result = reserveBudgetBad
+	}
+	analysisReservations.WithLabelValues(result).Inc()
+}
+
+// incidentPhaseList are the phases incidentPhases reports by name, the enum of IncidentPhase.
+var incidentPhaseList = []remediationv1alpha1.IncidentPhase{
+	remediationv1alpha1.IncidentOpen,
+	remediationv1alpha1.IncidentAnalyzing,
+	remediationv1alpha1.IncidentProposed,
+	remediationv1alpha1.IncidentEscalated,
+	remediationv1alpha1.IncidentResolved,
+}
+
+// phaseListTimeout bounds the cache read of one scrape. The source is set only once the informer has synced
+// (package phasegauge), so the read does not wait for the API server; the bound guards the endpoint anyway.
+const phaseListTimeout = 5 * time.Second
+
+// incidentCollector counts the Incidents in the operator namespace by phase, and those due for analysis, when
+// the metrics are scraped. It reads the informer the controller already uses, and only on the leader once that
+// informer has synced (phasegauge.Source), so a scrape makes no API call and starts no watch. Until then, on a
+// standby replica, or when the read fails, it reports nothing: a missing series is visible, a zero would claim
+// there are no Incidents.
+type incidentCollector struct {
+	phases    *prometheus.Desc
+	due       *prometheus.Desc
+	source    phasegauge.Source
+	namespace atomic.Pointer[string]
+}
+
+// setNamespace sets the namespace the collector counts in.
+func (c *incidentCollector) setNamespace(ns string) {
+	c.namespace.Store(&ns)
+}
+
+// Describe implements prometheus.Collector.
+func (c *incidentCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.phases
+	ch <- c.due
+}
+
+// Collect implements prometheus.Collector.
+func (c *incidentCollector) Collect(ch chan<- prometheus.Metric) {
+	r, ns := c.source.Reader(), c.namespace.Load()
+	if r == nil || ns == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), phaseListTimeout)
+	defer cancel()
+	var list remediationv1alpha1.IncidentList
+	// The objects are only read, so the cache's copies are used as they are.
+	if err := r.List(ctx, &list, client.InNamespace(*ns), client.UnsafeDisableDeepCopy); err != nil {
+		logf.Log.WithName("metrics").Error(err, "Failed to list Incidents for the phase metric")
+		return
+	}
+	counts := make(map[string]int, len(incidentPhaseList)+2)
+	for _, l := range phasegauge.Labels(incidentPhaseList) {
+		counts[l] = 0
+	}
+	due := 0
+	for i := range list.Items {
+		counts[phasegauge.Label(list.Items[i].Status.Phase, incidentPhaseList)]++
+		if meta.IsStatusConditionTrue(list.Items[i].Status.Conditions, ConditionAnalysisDue) {
+			due++
+		}
+	}
+	for phase, n := range counts {
+		ch <- prometheus.MustNewConstMetric(c.phases, prometheus.GaugeValue, float64(n), phase)
+	}
+	ch <- prometheus.MustNewConstMetric(c.due, prometheus.GaugeValue, float64(due))
 }
 
 // boundedSet remembers at most n strings, forgetting the oldest first. The order is a ring, so a forgotten

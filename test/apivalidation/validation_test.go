@@ -782,7 +782,7 @@ var _ = Describe("RemediationSettings", func() {
 			Entry("empty", ""),
 			Entry("plain HTTP", "http://example.openai.azure.com/"),
 			Entry("no scheme", "example.openai.azure.com"),
-			Entry("user info", "https://user:pass@example.openai.azure.com/"),
+			Entry("user info", "https://user:pass@example.com/"),
 			Entry("a query", "https://example.openai.azure.com/?api-key=secret"),
 			Entry("a fragment", "https://example.openai.azure.com/#x"),
 			Entry("an IP address", "https://10.0.0.1/"),

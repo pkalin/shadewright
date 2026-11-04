@@ -8,7 +8,7 @@ Pausing stops the executor's own Git writes. It does not revoke a proposal that 
 
 - A pull request that is already open stays open. Anyone with write access, or a repository rule that merges by itself, can still merge it.
 - A merged change stays merged, and the GitOps controller keeps deploying it. To undo it, revert it in Git by hand, through your normal review.
-- Pausing does not stop analysis, so the model is still called. Stop that with step 2.
+- Pausing does not stop analysis. Stop that with step 2.
 
 ## 1. Stop new Git writes: `spec.paused`
 
@@ -18,7 +18,7 @@ kubectl patch remediationsettings default --type merge -p '{"spec":{"paused":tru
 
 The executor reads the settings right before each write and, while `paused` is true, does none of these:
 
-- push a branch, open a pull request or open an issue;
+- push a branch or open a pull request (issues are planned, [ADR-0014](adr/0014-notifications-github-issues-first.md), and are also covered by the pause);
 - close a pull request, including the one a deleted request owns or one whose plan went stale;
 - finish a deletion: the finalizer `remediation.shadewright.io/close-pull-request` stays on a deleted `RemediationRequest` until the pause ends, because closing is a write.
 
@@ -34,13 +34,13 @@ kubectl patch remediationsettings default --type merge -p '{"spec":{"paused":fal
 kubectl patch remediationsettings default --type merge -p '{"spec":{"maxAnalysesPerDay":0}}'
 ```
 
-With `0` the analyzer starts no new analysis (an incident is not due, reason `AnalysisDisabled`), so no model call is made and no new proposal appears. Incidents are still recorded. Analyses already running are not cancelled. To resume, set the value back (the default is 100).
+With `0` the analyzer starts no new analysis (an incident is not due, reason `AnalysisDisabled`), so no new analysis is started and no new proposal appears. Incidents are still recorded. The analysis loop that calls the model is not built yet, so today no model calls happen either way, but this setting already marks incidents not due. To resume, set the value back (the default is 100).
 
 To stop both at once, put both fields in one patch.
 
 ## 3. Close an open pull request by hand
 
-Close it on GitHub, without merging, as you would any pull request. The executor does not fight this: it never reopens a pull request. When it next looks (immediately when not paused, after the pause ends otherwise), it sees the closed pull request and ends the `RemediationRequest` in phase `NeedsIntervention` with reason `ChangeRequestClosed`. Nothing is pushed or opened again for it.
+Close it on GitHub, without merging, as you would any pull request. The executor does not fight this: it never reopens a pull request. When it next looks (within about five minutes, since it polls; after the pause ends if paused), it sees the closed pull request and ends the `RemediationRequest` in phase `NeedsIntervention` with reason `ChangeRequestClosed`. Nothing is pushed or opened again for it.
 
 Deleting the `RemediationRequest` also closes its pull request, but only while not paused, so do not use that to stop things during a pause. A pull request that does not carry the request's marker is never closed by the executor.
 
@@ -48,7 +48,7 @@ Deleting the `RemediationRequest` also closes its pull request, but only while n
 
 Pausing is reversible with one patch. Revoking is what to do when you do not trust the executor's credentials. Both steps are in [shadewright-azure](https://github.com/pkalin/shadewright-azure#readme); use the sections named here and do not copy IDs into Git.
 
-- **GitHub App:** uninstall the App from the fleet repository (GitHub, Settings, Applications, Installed GitHub Apps, Configure, Uninstall). The executor can then no longer push, open or close anything there. See "GitHub App" in the shadewright-azure README, which installs it on that one repository alone.
-- **Key Vault `sign` grant:** remove the role assignment that lets the executor's identity sign with the App key, by setting `github_app_key_imported = false` in the foundation's `terraform.tfvars` and applying (step 5 of "GitHub App" adds it). Without it the executor cannot obtain a token for the App. Show the plan and check that only that one role assignment goes before you apply.
+- **GitHub App (first, effective at once):** uninstall the App from the fleet repository (GitHub, Settings, Applications, Installed GitHub Apps, Configure, Uninstall). Its installation tokens stop working, so the executor can no longer push, open or close anything there. See "GitHub App" in the shadewright-azure README, which installs it on that one repository alone.
+- **Key Vault `sign` grant (second):** remove the role assignment that lets the executor's identity sign with the App key, by setting `github_app_key_imported = false` in the foundation's `terraform.tfvars` and applying (step 5 of "GitHub App" adds it). This only stops new tokens: the executor caches an installation token until shortly before it expires, up to an hour, so a token it already holds keeps working until then. Show the plan and check that only that one role assignment goes before you apply.
 
 Revoking does not close pull requests or revert merges either.

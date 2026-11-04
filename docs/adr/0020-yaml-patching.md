@@ -1,7 +1,7 @@
 # ADR-0020: Patching YAML by replacing one scalar in place
 
-- Status: Proposed
-- Date: 2026-11-02
+- Status: Accepted
+- Date: 2026-11-04
 
 ## Context
 

@@ -123,7 +123,8 @@ Every issue names the ADRs it is tied to:
 Go toolchain: the Dockerfile builder stage (`golang:<x.y.z>`, bumped by Dependabot) and the `toolchain` line of `go.mod` (read by setup-go in CI for lint, tests and govulncheck) must name the same release; `make lint` runs `hack/check-go-toolchain.sh` and fails when they differ, so a Dependabot bump of the image needs the `toolchain` line changed in the same pull request. Never raise the `go` line for this. Locally run `GOTOOLCHAIN=go<x.y.z> make lint test` with that release (a newer local Go can report different lint and vet results).
 
 ```bash
-make manifests generate   # after editing api/**/*_types.go or markers
+make manifests generate   # after editing api/**/*_types.go or markers; manifests also runs chart-crds
+make chart-crds           # copy config/crd/bases into dist/chart/templates/crd (hack/chart-crds.sh); a removed CRD's template is deleted
 make api-docs             # regenerate docs/reference/api.md from the API types
 make verify-generated     # regenerate all of the above from scratch; fails on any diff, new or deleted file (CI runs it)
 make lint-fix             # golangci-lint, config in .golangci.yml
@@ -162,7 +163,7 @@ make docs-requirements      # after editing requirements-docs.in: regenerate the
 
 ## Kubebuilder rules
 
-- Never edit generated files: `config/crd/bases/*`, `config/rbac/role.yaml`, `config/webhook/manifests.yaml`, `**/zz_generated.*.go`, `PROJECT`. Regenerate them.
+- Never edit generated files: `config/crd/bases/*`, `dist/chart/templates/crd/*` (made by `make chart-crds`), `config/rbac/role.yaml`, `config/webhook/manifests.yaml`, `**/zz_generated.*.go`, `PROJECT`. Regenerate them.
 - Never remove `// +kubebuilder:scaffold:*` markers; the CLI injects code there.
 - Scaffold with the CLI (`kubebuilder create api`, `kubebuilder create webhook`), not by hand. External types (Flux, KEDA): `--controller=true --resource=false --external-api-path=... --external-api-module=...`.
 - Status uses `metav1.Condition` with `observedGeneration`; `phase` is only a summary. Use the `/status` subresource.

@@ -118,6 +118,7 @@ All `NeedsIntervention`, on `PolicyAllowed`. The mapping reads plain kustomize m
 | `UnsupportedKustomization` | A kustomization file uses more than plain `resources`: patches, generators, components, transformers, prefixes, a namespace or remote resources | Flatten the layout |
 | `FileNotReadable` | A file the build needs is missing, over 1 MiB or not valid YAML | Fix the file |
 | `TooManyFiles` | The build is deeper than 8 directories, lists more than 256 files or needs more than 512 reads | Simplify the layout |
+| `InputTooLarge` | The build reads more than 16 MiB in all or holds more than 4096 YAML documents | Split the Kustomization or remove what it does not need |
 | `DeclarationNotFound` | No document declares the object (for example a generator or patch produces it) | Declare it in a plain manifest |
 | `AmbiguousDeclaration` | More than one document could declare it | Keep exactly one |
 

@@ -158,7 +158,7 @@ var denialReasons = func() map[string]struct{} {
 		sourcemap.ReasonBranchNotFound, sourcemap.ReasonInvalidPath, sourcemap.ReasonNoKustomizationFile,
 		sourcemap.ReasonUnsupportedKustomization, sourcemap.ReasonFileNotReadable, sourcemap.ReasonTooManyFiles,
 		sourcemap.ReasonDeclarationNotFound, sourcemap.ReasonAmbiguousDeclaration, sourcemap.ReasonFieldNotFound,
-		sourcemap.ReasonValueMismatch, sourcemap.ReasonPathNotAllowed,
+		sourcemap.ReasonValueMismatch, sourcemap.ReasonPathNotAllowed, sourcemap.ReasonInputTooLarge,
 	} {
 		reasons = append(reasons, string(r))
 	}

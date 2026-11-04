@@ -225,9 +225,10 @@ const (
 	// switch) holds back the request's next Git write. The request keeps its phase and the rest of its status,
 	// and the condition is removed once the request may write again or ends.
 	ConditionWritesPaused = "WritesPaused"
-	// ConditionQueued is True, with reason TargetLocked, ConcurrencyLimitReached or CircuitOpen, while a limit
-	// of the executor holds back a request the policy check has not let through yet: another request is active
-	// on the same target, maxConcurrentRemediations requests are active, or the circuit breaker is open. The
+	// ConditionQueued is True, with reason TargetLocked, ConcurrencyLimitReached, CircuitOpen or
+	// CircuitHalfOpen, while a limit of the executor holds back a request the policy check has not let through
+	// yet: another request is active on the same target, maxConcurrentRemediations requests are active, the
+	// circuit breaker is open, or it is half-open and another request runs as its probe. The
 	// request keeps no phase or Pending and is checked again every 30 seconds; the condition is removed once the
 	// limits let the request through, or at the decision of the policy check.
 	ConditionQueued = "Queued"

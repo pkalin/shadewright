@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -113,6 +114,16 @@ type RemediationRequestReconciler struct {
 	// Events in the request's namespace, the operator namespace, where the executor's leader election Role
 	// grants create and patch on Events. Nil records none (tests).
 	Recorder record.EventRecorder
+	// BreakerThreshold is how many consecutive failed requests open the circuit breaker (limits.go). Zero means
+	// [DefaultBreakerThreshold].
+	BreakerThreshold int
+	// BreakerCooldown is how long the circuit breaker stays open after the latest of those failures. Zero means
+	// [DefaultBreakerCooldown].
+	BreakerCooldown time.Duration
+
+	// admitMu makes the check of the limits and the status write that lets a request through the policy check
+	// one step, so two workers can never both take the last slot or the same target.
+	admitMu sync.Mutex
 }
 
 // DefaultTargetStateTimeout is how long the policy check waits by default for KEDA to report on a
@@ -233,6 +244,13 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if rr.Status.Phase != "" && rr.Status.Phase != remediationv1alpha1.PhasePending {
 		return r.recheck(ctx, rr)
 	}
+	// A request a limit holds back (Queued) checks only the limits until they let it through, so it does not
+	// read Git while it waits. Every other request is decided first, so a refusal is never held back.
+	if meta.IsStatusConditionTrue(rr.Status.Conditions, remediationv1alpha1.ConditionQueued) {
+		if res, stop, err := r.holdBack(ctx, rr, true); stop {
+			return res, err
+		}
+	}
 
 	checkCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
 	out, err := r.check(checkCtx, rr)
@@ -261,8 +279,20 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 
+	if out.phase == remediationv1alpha1.PhasePolicyChecked {
+		// The limits are checked again, now, and the decision is written under the same lock, so the next
+		// check of the limits sees this request as active.
+		r.admitMu.Lock()
+		defer r.admitMu.Unlock()
+		if res, stop, err := r.holdBack(ctx, rr, false); stop {
+			return res, err
+		}
+	}
+
 	rr.Status.ObservedGeneration = rr.Generation
-	rr.Status.Phase = out.phase
+	r.setPhase(rr, out.phase)
+	// The request is decided: no limit holds it back any more.
+	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionQueued)
 	rr.Status.Source = out.source
 	rr.Status.PolicyUID = out.policyUID
 	rr.Status.PolicyRevision = out.policyRevision
@@ -336,12 +366,18 @@ func (r *RemediationRequestReconciler) waitForTarget(rr *remediationv1alpha1.Rem
 // reason stays (setPolicyAllowed), so the wait ends TargetStateTimeout after it started.
 func (r *RemediationRequestReconciler) recordWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	out outcome, delay time.Duration) (ctrl.Result, error) {
-	if !setPolicyAllowed(&rr.Status.Conditions, metav1.Condition{
+	changed := setPolicyAllowed(&rr.Status.Conditions, metav1.Condition{
 		Status:             metav1.ConditionUnknown,
 		Reason:             out.reason,
 		Message:            out.message,
 		ObservedGeneration: rr.Generation,
-	}, r.now()) {
+	}, r.now())
+	// The limits let the request through to this wait, so a Queued condition from before is no longer true.
+	if meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionQueued) != nil {
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionQueued)
+		changed = true
+	}
+	if !changed {
 		return ctrl.Result{RequeueAfter: delay}, nil
 	}
 	if err := r.Status().Update(ctx, rr); err != nil {
@@ -590,7 +626,7 @@ func beforeMerge(p remediationv1alpha1.RemediationPhase) bool {
 // makes at most one Git write right after this check.
 func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	ctrl.Result, error) {
-	if r.OpenRepository == nil || !beforeMerge(rr.Status.Phase) || rr.Status.PlanDigest == "" {
+	if r.OpenRepository == nil || !progresses(rr) {
 		return ctrl.Result{}, nil
 	}
 	outcome := prOpen
@@ -785,7 +821,7 @@ func staleClosed(reason string) string {
 // ErrSuperseded (or the error of the status write).
 func (r *RemediationRequestReconciler) endFreshness(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	phase remediationv1alpha1.RemediationPhase, reason, message string) error {
-	rr.Status.Phase = phase
+	r.setPhase(rr, phase)
 	// A final phase waits for nothing, also not for the kill switch; the request does not go on, so no
 	// WritesResumed Event is recorded.
 	resume(rr)

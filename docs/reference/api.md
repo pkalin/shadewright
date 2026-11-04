@@ -688,6 +688,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | --- | --- | --- | --- |
 | `observedGeneration` | integer | No | observedGeneration is the generation the status describes. |
 | `phase` | [RemediationPhase](#remediationphase) | No | phase summarizes progress.<br>One of `Pending`, `PolicyChecked`, `PRCreated`, `AwaitingApproval`, `AutoMergeQueued`, `Merged`, `WaitingForDelivery`, `Verifying`, `Succeeded`, `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded`, `NeedsIntervention` |
+| `lastPhaseTransitionTime` | [MicroTime](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#microtime-v1-meta) | No | lastPhaseTransitionTime is when phase last changed, to the microsecond. The circuit breaker orders the outcomes of requests by it. |
 | `effectiveApprovalRequired` | boolean | No | effectiveApprovalRequired is what policy decided, which may be stricter than spec.approvalRequired. |
 | `source` | [ResolvedSource](#resolvedsource) | No | source is where the change is made, resolved by the controller before the policy check. |
 | `planDigest` | string | No | planDigest covers the semantic change, the target UID, the resolved source with the repository URL and provider installation from RemediationSettings, and the policy UID and generation. It is fixed when the branch is created; if any input changes later, the request becomes Superseded and its PR is closed.<br>Pattern: `^sha256:[0-9a-f]{64}$` |
@@ -696,7 +697,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `policyUID` | [UID](#uid) | No | policyUID is the UID of the policy the decision used. It is part of the plan digest.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists. |
 | `deadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | deadline is when the current step gives up. |
-| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified, PlanFresh and WritesPaused.<br>List type: map<br>List key: `type` |
+| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified, PlanFresh, WritesPaused and Queued.<br>List type: map<br>List key: `type` |
 
 ### RemediationSettingsSpec
 
@@ -708,7 +709,7 @@ Used by: [RemediationSettings](#remediationsettings).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `paused` | boolean | No | paused stops every write: pull requests, auto-merge and issues. Analysis continues. Checked right before each write. It revokes no published pull request and reverts no merge; see https://shadewright.io/emergency/.<br>Default: `false` |
-| `maxConcurrentRemediations` | integer | No | maxConcurrentRemediations will limit requests between PolicyChecked and a terminal phase. It is accepted and stored but not enforced yet: no controller reads it until concurrency limits are built (#88).<br>Default: `1`<br>Maximum: 20<br>Minimum: 1 |
+| `maxConcurrentRemediations` | integer | No | maxConcurrentRemediations limits the requests that are active at once in the operator namespace: from PolicyChecked up to the merge, and while a deleted one still closes its pull request. A further request the policy allows stays Pending, with the condition Queued, until fewer are active; a refusal at the first check is never held back, but a request already Queued is decided again only once the limits let it through. Read from the API server right before each allowed decision.<br>Default: `1`<br>Maximum: 20<br>Minimum: 1 |
 | `maxAnalysesPerDay` | integer | No | maxAnalysesPerDay limits model-backed analyses per UTC day; 0 disables the model.<br>Default: `100`<br>Maximum: 10000<br>Minimum: 0 |
 | `repositories` | [GitRepository](#gitrepository) array | No | repositories Shadewright may open pull requests in. URLs are unique, so a Flux source matches at most one entry.<br>Maximum items: 16<br>List type: map<br>List key: `name`<br>Rule: repository URLs must be unique (`self.all(r, self.exists_one(s, s.url == r.url))`) |
 | `modules` | [Modules](#modules) | No | modules enables platform and integration modules. Left out, only the generic platform is on and no integration is: nothing is enabled because it was detected. |

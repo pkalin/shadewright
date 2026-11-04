@@ -151,7 +151,7 @@ var _ = Describe("RemediationRequest Controller", func() {
 	)
 
 	reconcileOnce := func() (reconcile.Result, error) {
-		r := &RemediationRequestReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Source: stub}
+		r := &RemediationRequestReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), Source: stub}
 		return r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
 	}
 	fetch := func() *remediationv1alpha1.RemediationRequest {
@@ -472,7 +472,7 @@ var _ = Describe("RemediationRequest Controller", func() {
 					return git, nil
 				},
 			}
-			r := &RemediationRequestReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Source: resolver}
+			r := &RemediationRequestReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), Source: resolver}
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
 			Expect(err).NotTo(HaveOccurred(), "a final refusal is not handed back for a retry")
 			got := fetch()

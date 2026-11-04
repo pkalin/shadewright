@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 700" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Shadewright analyzer</title>
-  <desc id="d">Zoom into the analyzer identity. Built: the collector watches events and pod status in the watched namespaces, resolves owners, redacts and fingerprints them; two levels of deduplication feed a durable, bounded Incident CR; the analysis trigger decides when an Incident is due, within a daily budget; the analyzer also reports platform and integration detection in the settings status. Planned, drawn dashed: the context builder, read-only tools (Prometheus approved templates and logs in watched namespaces), the model provider outside the cluster, and the typed RemediationRequest handed to the executor.</desc>
+  <desc id="d">Zoom into the analyzer identity. Built: the collector watches events and pod status in the watched namespaces, resolves owners, redacts and fingerprints them; two levels of deduplication feed a durable, bounded Incident CR; the analysis trigger decides when an Incident is due, within a daily budget; the analyzer also reports platform and integration detection in the settings status. Planned, drawn dashed: the context builder, read-only tools (the Prometheus adapter with approved templates is built but not wired; logs in watched namespaces), the model provider outside the cluster, and the typed RemediationRequest handed to the executor.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -56,7 +56,7 @@
 
   <rect class="pl" x="44" y="380" width="210" height="72" rx="10"/>
   <text class="h" x="60" y="406">Prometheus · logs</text>
-  <text class="pn" x="238" y="443" text-anchor="end">planned</text>
+  <text class="pn" x="44" y="470">adapter built · not wired</text>
   <text class="s" x="60" y="427">approved templates only</text>
   <text class="s" x="60" y="443">watched namespaces</text>
 

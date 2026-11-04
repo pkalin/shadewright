@@ -438,7 +438,7 @@ func createSettings(t *testing.T, maxPerDay int32) *remediationv1alpha1.Remediat
 	t.Helper()
 	s := testfixtures.RemediationSettings()
 	s.Name = remediationv1alpha1.SettingsName
-	s.Spec.MaxAnalysesPerDay = new(maxPerDay)
+	s.Spec.Analysis = &remediationv1alpha1.AnalysisSettings{MaxAnalysesPerDay: new(maxPerDay)}
 	if err := env.admin.Create(t.Context(), s); err != nil {
 		t.Fatal(err)
 	}
@@ -637,6 +637,35 @@ func TestNothingIsDueWithoutSettings(t *testing.T) {
 	eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
 }
 
+// Settings without spec.analysis.maxAnalysesPerDay leave the daily limit unknown, so nothing is due (fail
+// closed, not a default of 100); a deprecated spec.maxAnalysesPerDay of 0 wins over the new field's 100.
+func TestSettingsWithoutALimitOrWithAnOldZeroMarkNothingDue(t *testing.T) {
+	for name, tc := range map[string]struct {
+		edit   func(*remediationv1alpha1.RemediationSettings)
+		reason string
+	}{
+		"no analysis": {withoutAnalysis, ReasonSettingsIncomplete},
+		"old field 0": {withOldZero, ReasonAnalysisDisabled},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ns := namespace(t)
+			createSettings(t, 100)
+			createBudget(t, ns, nil)
+			createIncident(t, ns, 1, incidentStatus(2*time.Minute, time.Hour, 0))
+			var r *editedSettings
+			startWith(t, ns, triggerConfig, func(c *Controller, _ *countingClient) {
+				r = &editedSettings{Reader: c.cache}
+				c.cache = r
+			})
+			eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
+			r.edit.Store(&tc.edit)
+			eventually(t, ns, 1, dueIs(false, tc.reason))
+			r.edit.Store(nil)
+			eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
+		})
+	}
+}
+
 // A budget from a future day cannot be trusted, so nothing is due.
 func TestBudgetFromTheFutureFailsClosed(t *testing.T) {
 	ns := namespace(t)
@@ -716,7 +745,7 @@ func TestNotDueReasonChangesWriteNothing(t *testing.T) {
 	if err := env.admin.Get(t.Context(), client.ObjectKeyFromObject(settings), settings); err != nil {
 		t.Fatal(err)
 	}
-	settings.Spec.MaxAnalysesPerDay = new(int32(0))
+	settings.Spec.Analysis.MaxAnalysesPerDay = new(int32(0))
 	if err := env.admin.Update(t.Context(), settings); err != nil {
 		t.Fatal(err)
 	}

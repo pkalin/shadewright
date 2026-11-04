@@ -167,10 +167,14 @@ type RemediationSettingsSpec struct {
 	// +optional
 	MaxConcurrentRemediations int32 `json:"maxConcurrentRemediations,omitempty"`
 
-	// maxAnalysesPerDay limits model-backed analyses per UTC day; 0 disables the model.
+	// maxAnalysesPerDay is deprecated: it moved to spec.analysis.maxAnalysesPerDay. It has no default, and
+	// a rule on the field refuses any write that sets or changes it. An object stored by v0.1.0 that holds
+	// it can still be updated as long as the value is left as it is (CRD validation ratcheting), and removing
+	// it is always allowed. While it is set, the analysis trigger goes by the lower of it and
+	// spec.analysis.maxAnalysesPerDay, so an old 0 keeps analysis off. Move the value and remove this field.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=10000
-	// +kubebuilder:default=100
+	// +kubebuilder:validation:XValidation:rule="false",message="spec.maxAnalysesPerDay moved to spec.analysis.maxAnalysesPerDay: set it there and remove this field"
 	// +optional
 	MaxAnalysesPerDay *int32 `json:"maxAnalysesPerDay,omitempty"`
 
@@ -189,18 +193,31 @@ type RemediationSettingsSpec struct {
 	Modules *Modules `json:"modules,omitempty"`
 
 	// analysis bounds every model-backed analysis and names the model deployments it may call. Left out, its
-	// limits take their defaults and no model is configured. Planned: no component reads these fields yet;
-	// the analysis loop (#76) will enforce them, and the daily token caps need the spend counter of #208.
-	// The endpoints decide where the analyzer sends its Entra ID token and the redacted context, so write
-	// access to this object is security-relevant (threat model).
+	// limits take their defaults and no model is configured. Read today: maxAnalysesPerDay, by the analysis
+	// trigger. Planned: no component reads the other fields yet; the analysis loop (#76) will enforce them,
+	// and the daily token caps need the spend counter of #208. The endpoints decide where the analyzer sends
+	// its Entra ID token and the redacted context, so write access to this object is security-relevant
+	// (threat model).
 	// +kubebuilder:default={}
 	// +optional
 	Analysis *AnalysisSettings `json:"analysis,omitempty"`
 }
 
 // AnalysisSettings bounds each model-backed analysis (design 12.3). Every limit has a safe default and a hard
-// upper bound in the schema. Planned: none of them is enforced yet (#76).
+// upper bound in the schema. Read today: maxAnalysesPerDay, by the analysis trigger. Planned: the other
+// limits and the models are not enforced yet (#76).
 type AnalysisSettings struct {
+	// maxAnalysesPerDay limits model-backed analyses per UTC day, across all Incidents; 0 disables the
+	// model. 0 to 10000. Defaulted to 100 also when spec.analysis is left out. Read today by the analysis
+	// trigger: 0 marks every Incident not due (AnalysisDisabled). The daily count is enforced once the
+	// analysis reserves units of the budget (#16, #76); until then nothing adds to it. Replaces the
+	// deprecated spec.maxAnalysesPerDay; while that is still set, the lower of the two applies.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=10000
+	// +kubebuilder:default=100
+	// +optional
+	MaxAnalysesPerDay *int32 `json:"maxAnalysesPerDay,omitempty"`
+
 	// maxContextBytes is the most bytes of redacted cluster context (events, pod status, log excerpts,
 	// metrics) the context builder puts into one analysis, before the fixed system part of the prompt.
 	// 4096 to 262144; the default of 32768 is roughly 8,000 tokens. A context cut at this bound is marked
@@ -251,7 +268,7 @@ type AnalysisSettings struct {
 type AnalysisModels struct {
 	// triage is the small model for the one structured call on the prepared context, without tools. Left out,
 	// no model is called: an incident no runbook matches is handed off to a person, and no unit of
-	// maxAnalysesPerDay is used for it.
+	// spec.analysis.maxAnalysesPerDay is used for it.
 	// +optional
 	Triage *ModelDeployment `json:"triage,omitempty"`
 

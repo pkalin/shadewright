@@ -13,7 +13,7 @@ destroyed after), [ADR-0012](adr/0012-object-to-source-mapping.md) (finding the 
 [ADR-0022](adr/0022-scenario-switch-and-clusters.md) (the scenario switch and the `cluster/lab` branch).
 
 The fleet installs both the analyzer and the executor, but the analyzer does no work in this run: the request is
-written by hand and the settings sample has `maxAnalysesPerDay: 0`, so the model is never called.
+written by hand and the settings sample has `analysis.maxAnalysesPerDay: 0`, so the model is never called.
 
 !!! warning "Costs money and changes real systems"
     Steps 1 and 11 create and destroy Azure resources (about 0.10 EUR per hour while the lab is up, see
@@ -152,6 +152,12 @@ Expect a pod in `CrashLoopBackOff` with a growing restart count, the last state 
 `48Mi`. That `48Mi` is the `previous` value of the request.
 
 ## 6. Fill and apply the samples
+
+The settings sample sets `spec.analysis.maxAnalysesPerDay`, which the CRDs of v0.1.0 do not have (they drop it,
+and analysis would default to 100). So the fleet's vendored install (`infrastructure/shadewright/`, see its
+`VENDOR` file for the commit) must be vendored from a `shadewright` commit at or after the move of that field
+before you apply the sample; regenerate it with `scripts/vendor-shadewright.sh` in the fleet repository if it is
+older.
 
 In `shadewright`, copy the lab samples to a directory outside Git (so the real values never reach a commit) and fill
 them. Each value comes from here:

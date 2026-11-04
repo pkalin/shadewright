@@ -149,9 +149,10 @@ func (c *Controller) markDue(ctx context.Context) error {
 	return nil
 }
 
-// readBudget reads maxAnalysesPerDay from the RemediationSettings (into s) and the analyses used today from
-// the budget ConfigMap. closed is the not-due reason of every Incident when the budget is unknown, and empty
-// otherwise; readErr is set when a read failed for another reason than a missing object. Both reads together
+// readBudget reads the daily limit from the RemediationSettings (into s, see [maxAnalysesPerDay]) and the
+// analyses used today from the budget ConfigMap. closed is the not-due reason of every Incident when the
+// budget is unknown, settings without a limit included, and empty otherwise; readErr is set when a read
+// failed for another reason than a missing object. Both reads together
 // run under ReadTimeout, shorter than the pass, so a read that stalls leaves the rest of the pass to take the
 // marks that say due back.
 //
@@ -172,7 +173,13 @@ func (c *Controller) readBudget(ctx context.Context, now time.Time, s *TriggerSe
 		analysesUsedToday.clear()
 		return 0, ReasonSettingsUnreadable, fmt.Errorf("reading RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 	}
-	s.MaxAnalysesPerDay = maxAnalysesPerDay(&settings)
+	limit, ok := maxAnalysesPerDay(&settings)
+	if !ok {
+		analysesPerDayLimit.clear()
+		analysesUsedToday.clear()
+		return 0, ReasonSettingsIncomplete, nil
+	}
+	s.MaxAnalysesPerDay = limit
 	analysesPerDayLimit.set(float64(s.MaxAnalysesPerDay))
 	// The ConfigMap is read from the API server on every pass: the analyzer may get it by name only, so there
 	// is no informer on it.
@@ -185,7 +192,7 @@ func (c *Controller) readBudget(ctx context.Context, now time.Time, s *TriggerSe
 		analysesUsedToday.clear()
 		return 0, ReasonBudgetReadFailed, fmt.Errorf("reading ConfigMap %s/%s: %w", c.cfg.Namespace, BudgetName, err)
 	}
-	used, ok := UsedToday(&cm, now)
+	used, ok = UsedToday(&cm, now)
 	if !ok {
 		analysesUsedToday.clear()
 		return 0, ReasonBudgetUnreadable, nil
@@ -321,12 +328,13 @@ var dueMessages = map[string]string{
 	ReasonNoNewData:            "Nothing was observed since the last analysis",
 	ReasonCoolingDown:          "The cooldown since the last analysis has not passed",
 	ReasonDebouncing:           "Waiting for the incident to settle, at most the settle limit after its first unsettled observation",
-	ReasonAnalysisDisabled:     "RemediationSettings maxAnalysesPerDay is 0",
-	ReasonDailyBudgetReached:   "The analyses of the current UTC day reached maxAnalysesPerDay",
+	ReasonAnalysisDisabled:     "RemediationSettings spec.analysis.maxAnalysesPerDay, or the deprecated spec.maxAnalysesPerDay, is 0",
+	ReasonDailyBudgetReached:   "The analyses of the current UTC day reached the daily limit of the RemediationSettings",
 	ReasonBudgetUnreadable:     "The analysis budget ConfigMap cannot be trusted, so the budget is taken as spent",
 	ReasonBudgetNotFound:       "The analysis budget ConfigMap does not exist, so the daily budget is unknown",
 	ReasonBudgetReadFailed:     "The analysis budget ConfigMap could not be read, so the daily budget is unknown",
 	ReasonSettingsNotFound:     "The RemediationSettings object does not exist, so the daily budget is unknown",
 	ReasonSettingsUnreadable:   "The RemediationSettings object could not be read, so the daily budget is unknown",
+	ReasonSettingsIncomplete:   "The RemediationSettings object sets no spec.analysis.maxAnalysesPerDay, so the daily budget is unknown",
 	ReasonForeignFingerprint:   "The Incident's name belongs to another fingerprint",
 }

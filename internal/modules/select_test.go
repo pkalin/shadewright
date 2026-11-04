@@ -135,3 +135,82 @@ func TestUnknownMessageIsCapped(t *testing.T) {
 		t.Errorf("message of %d bytes: %q", len(msg), msg)
 	}
 }
+
+// hooksSummary is what a test can compare of hooks: the fields of every element that is not a function.
+func hooksSummary(h Hooks) string {
+	var b strings.Builder
+	for _, s := range h.Symptoms {
+		fmt.Fprintf(&b, "symptom %s %v %s %s %s;", s.Group, s.Versions, s.Kind, s.Resource, s.ReportingController)
+	}
+	for _, r := range h.Rules {
+		fmt.Fprintf(&b, "rule %s;", r.Name)
+	}
+	fmt.Fprintf(&b, "tools %d;actions %v;", len(h.Tools), h.Actions)
+	for _, c := range h.Checks {
+		fmt.Fprintf(&b, "check %s %s %s;", c.Name, c.Group, c.Kind)
+	}
+	return b.String()
+}
+
+// TestActiveReturnsCopies checks that a caller that changes every slice of what Active returned changes
+// neither the selection nor the registry.
+func TestActiveReturnsCopies(t *testing.T) {
+	full := stubIntegration{
+		name:      kedaName,
+		detection: IntegrationDetection{GroupVersions: []string{kedaGV}},
+		hooks: Hooks{
+			Symptoms: []SymptomSource{validSource()},
+			Rules: []DiagnosisRule{{Name: "keda-rule",
+				Event: func(Event) (Symptom, bool) { return Symptom{}, false }}},
+			Tools:   []Tool{{}},
+			Actions: []v1alpha1.ActionType{v1alpha1.ActionAdjustKedaMaxReplicas},
+			Checks:  []VerificationCheck{validCheck()},
+		},
+	}
+	r := mustNew(t, []Platform{aksWithRule}, []Integration{full})
+	d := r.Detect([]Node{{ProviderID: azureID, Labels: map[string]string{aksLabel: ""}}}, []string{kedaGV})
+	s := r.Select(Enabled{Platforms: []string{aksName}, Integrations: []string{kedaName}}, d)
+
+	first := s.Active()
+	if got := activeNames(s); !slices.Equal(got, []string{GenericPlatform, aksName, kedaName}) {
+		t.Fatalf("active = %v, want generic, aks and keda", got)
+	}
+	want := make([]string, len(first))
+	for i, m := range first {
+		want[i] = hooksSummary(m.Hooks)
+	}
+	registryWant := hooksSummary(full.hooks)
+
+	for i := range first {
+		h := &first[i].Hooks
+		for j := range h.Symptoms {
+			h.Symptoms[j].Group, h.Symptoms[j].Kind = "mutated", "Mutated"
+			for k := range h.Symptoms[j].Versions {
+				h.Symptoms[j].Versions[k] = "mutated"
+			}
+		}
+		for j := range h.Rules {
+			h.Rules[j].Name = "mutated"
+		}
+		// Tool has no fields yet, so changing an element shows nothing; its slice is copied all the same.
+		for j := range h.Actions {
+			h.Actions[j] = "Mutated"
+		}
+		for j := range h.Checks {
+			h.Checks[j].Name, h.Checks[j].Kind = "Mutated", "Mutated"
+		}
+	}
+
+	second := s.Active()
+	if len(second) != len(want) {
+		t.Fatalf("second Active has %d modules, want %d", len(second), len(want))
+	}
+	for i, m := range second {
+		if got := hooksSummary(m.Hooks); got != want[i] {
+			t.Errorf("module %s: a caller changed the selection's hooks:\n got %s\nwant %s", m.Name, got, want[i])
+		}
+	}
+	if h, _ := r.IntegrationHooks(kedaName); hooksSummary(h) != registryWant {
+		t.Errorf("a caller changed the registry's hooks: %s", hooksSummary(h))
+	}
+}

@@ -164,8 +164,15 @@ func (s Selection) Unknown() (platforms, integrations []string) {
 }
 
 // Active returns the modules that contribute hooks: generic, then the active platform when it is another
-// one, then the active integrations by name.
-func (s Selection) Active() []ActiveModule { return slices.Clone(s.activeList) }
+// one, then the active integrations by name. The modules and their hooks are copies, down to the slices in
+// each symptom source, so a caller that changes them changes neither the selection nor the registry.
+func (s Selection) Active() []ActiveModule {
+	out := slices.Clone(s.activeList)
+	for i := range out {
+		out[i].Hooks = cloneHooks(out[i].Hooks)
+	}
+	return out
+}
 
 // buildActive lists the active modules, for Select.
 func (s Selection) buildActive() []ActiveModule {

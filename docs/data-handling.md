@@ -17,7 +17,7 @@ What Shadewright stores, what it sends where, what it publishes and how long eac
 | Flux `Kustomization` and `GitRepository`, the target workload or `ScaledObject`, policy and settings | Status and spec, for source mapping and the freshness check | Executor |
 | The Git repository | The files of the build for the target's Kustomization (up to 256 files, 1 MiB each), through the GitHub API | Executor |
 
-Neither identity reads Secrets, ConfigMap data (except its own budget ConfigMap) or **pod logs**. Reading logs is **planned** ([#72](https://github.com/pkalin/shadewright/issues/72)), bounded and redacted.
+Neither identity reads Secrets, ConfigMap data (except its own budget ConfigMap) or **pod logs**. The pod logs adapter is built but **not wired**, and the analyzer has no grant on `pods/log`: once wired, it reads one container per call, only in the watched namespaces, at most 1 MiB and 24 hours back, and returns at most 256 KiB, redacted before it leaves the adapter ([design, section 4](design.md#4-tools)).
 
 ## Redaction
 

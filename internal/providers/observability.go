@@ -64,7 +64,8 @@ type LogQuery struct {
 	MaxBytes int64
 }
 
-// LogExcerpt is a bounded piece of logs. The text is untrusted and not yet redacted.
+// LogExcerpt is a bounded piece of logs. The text is untrusted. The Kubernetes adapter
+// (internal/providers/logs/kube) redacts it before returning it; the fake does not.
 type LogExcerpt struct {
 	Text      string
 	Truncated bool

@@ -17,7 +17,7 @@ limitations under the License.
 package github
 
 import (
-	"crypto/sha1" //nolint:gosec // G505: Git object IDs are SHA-1; used to check content against its ID, not for secrecy.
+	"crypto/sha1" // #nosec G505 -- Git object IDs are SHA-1; used to check content against its ID, not for secrecy
 	"encoding/hex"
 	"net/url"
 	"regexp"
@@ -104,7 +104,7 @@ func refPath(branch string) string {
 
 // blobSHA is the Git object ID of a blob with this content.
 func blobSHA(data []byte) string {
-	h := sha1.New() //nolint:gosec // G401: computes a Git blob ID, which is SHA-1 by definition
+	h := sha1.New() // #nosec G401 -- computes a Git blob ID, which is SHA-1 by definition
 	h.Write([]byte("blob " + strconv.Itoa(len(data)) + "\x00"))
 	h.Write(data)
 	return hex.EncodeToString(h.Sum(nil))

@@ -28,10 +28,15 @@ import (
 
 var now = time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 
-func resp(status int, body string, kv ...string) *http.Response {
+// resp builds a response whose headers are the key-value pairs in kv.
+func resp(t *testing.T, status int, body string, kv ...string) *http.Response {
+	t.Helper()
+	if len(kv)%2 != 0 {
+		t.Fatalf("resp: odd number of header arguments %q", kv)
+	}
 	h := http.Header{}
-	for i := 0; i < len(kv); i += 2 {
-		h.Set(kv[i], kv[i+1]) //nolint:gosec // G602: callers pass key-value pairs; an odd count should panic the test
+	for i := 0; i+1 < len(kv); i += 2 {
+		h.Set(kv[i], kv[i+1])
 	}
 	return &http.Response{StatusCode: status, Header: h, Body: io.NopCloser(strings.NewReader(body))}
 }
@@ -44,15 +49,15 @@ func TestLimited(t *testing.T) {
 		limited bool
 		want    time.Duration
 	}{
-		{"retry-after", resp(403, "", "Retry-After", "12"), true, 12 * time.Second},
-		{"retry-after capped", resp(403, "", "Retry-After", "999999"), true, time.Hour},
-		{"retry-after date", resp(429, "", "Retry-After", now.Add(20*time.Second).Format(http.TimeFormat)), true, 20 * time.Second},
-		{"quota reset", resp(403, "", "X-RateLimit-Remaining", "0", "X-RateLimit-Reset", reset(45*time.Second)), true, 45 * time.Second},
-		{"quota reset in the past", resp(403, "", "X-RateLimit-Remaining", "0", "X-RateLimit-Reset", reset(-time.Minute)), true, time.Minute},
-		{"headerless 429", resp(429, ""), true, time.Minute},
-		{"secondary 403", resp(403, "You have exceeded a secondary rate limit", "X-RateLimit-Remaining", "10"), true, time.Minute},
-		{"abuse 403", resp(403, "Abuse Detection mechanism"), true, time.Minute},
-		{"plain 403", resp(403, "Resource not accessible"), false, 0},
+		{"retry-after", resp(t, 403, "", "Retry-After", "12"), true, 12 * time.Second},
+		{"retry-after capped", resp(t, 403, "", "Retry-After", "999999"), true, time.Hour},
+		{"retry-after date", resp(t, 429, "", "Retry-After", now.Add(20*time.Second).Format(http.TimeFormat)), true, 20 * time.Second},
+		{"quota reset", resp(t, 403, "", "X-RateLimit-Remaining", "0", "X-RateLimit-Reset", reset(45*time.Second)), true, 45 * time.Second},
+		{"quota reset in the past", resp(t, 403, "", "X-RateLimit-Remaining", "0", "X-RateLimit-Reset", reset(-time.Minute)), true, time.Minute},
+		{"headerless 429", resp(t, 429, ""), true, time.Minute},
+		{"secondary 403", resp(t, 403, "You have exceeded a secondary rate limit", "X-RateLimit-Remaining", "10"), true, time.Minute},
+		{"abuse 403", resp(t, 403, "Abuse Detection mechanism"), true, time.Minute},
+		{"plain 403", resp(t, 403, "Resource not accessible"), false, 0},
 	}
 	for _, c := range cases {
 		d, ok := Limited(c.r, now)

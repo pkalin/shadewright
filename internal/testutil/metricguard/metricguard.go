@@ -84,7 +84,7 @@ func Check(t testing.TB, g prometheus.Gatherer, want map[string]Labels) {
 // (`name`).
 func Documented(t testing.TB, path string, want map[string]Labels) {
 	t.Helper()
-	doc, err := os.ReadFile(path)
+	doc, err := os.ReadFile(path) // #nosec G304 -- test helper reading a repository doc the test names
 	if err != nil {
 		t.Errorf("reading the metrics reference: %v", err)
 		return

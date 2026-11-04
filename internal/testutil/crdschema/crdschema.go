@@ -39,7 +39,7 @@ func Field(t testing.TB, file, path string) map[string]any {
 		t.Fatal("cannot find the crdschema source file")
 	}
 	full := filepath.Join(filepath.Dir(self), "..", "..", "..", "config", "crd", "bases", file)
-	raw, err := os.ReadFile(full)
+	raw, err := os.ReadFile(full) // #nosec G304 -- test helper reading a CRD from the repository's config/crd/bases
 	if err != nil {
 		t.Fatalf("read CRD: %v", err)
 	}

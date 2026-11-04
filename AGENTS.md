@@ -94,8 +94,10 @@ Every issue names the ADRs it is tied to:
   `make vulncheck` (govulncheck) when dependencies change; the `govulncheck` CI job (Vulncheck workflow, also
   weekly) runs it with the Go release of the Dockerfile's builder stage and fails on any finding the code reaches.
 - **Static security checks.** `gosec` runs inside golangci-lint (`make lint`, the lint job of every Go pull
-  request). Suppress a finding only with a narrow `//nolint:gosec // <reason>` or a path-and-rule exclusion
-  with a comment in `.golangci.yml`, never by disabling a rule for the whole code base.
+  request). Suppress a gosec finding on its line with `// #nosec G<nnn> -- <reason>` (that rule only), any
+  other linter with `//nolint:<linter> // <reason>`; `nolintlint` fails a `nolint` without a linter or a
+  reason, or one that no longer suppresses anything. A path-and-rule exclusion in `.golangci.yml` needs a
+  comment saying why; never disable a rule for the whole code base.
 - **Containers.** Distroless or scratch base images, non-root user, read-only root filesystem, all
   capabilities dropped, resource requests and limits set.
   The Dockerfile builds both binaries once (builder pinned by digest, Go release equal to go.mod's toolchain

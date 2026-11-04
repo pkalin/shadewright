@@ -172,7 +172,7 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 	}
 	if p.jitter == nil {
 		// Half fixed, half random: spreads retries without making the delay arbitrarily short.
-		p.jitter = func(d time.Duration) time.Duration { return d/2 + rand.N(d/2+1) } //nolint:gosec // G404: retry jitter, not a secret
+		p.jitter = func(d time.Duration) time.Duration { return d/2 + rand.N(d/2+1) } // #nosec G404 -- retry jitter, not a secret
 	}
 	if p.now == nil {
 		p.now = time.Now

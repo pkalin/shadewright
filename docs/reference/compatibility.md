@@ -4,7 +4,7 @@ title: Compatibility
 
 # Compatibility
 
-What Shadewright has been run against, taken from CI, the end-to-end setup, the fleet repository and the reference lab, and what its code is written to accept. The two are kept apart: **tested** means a pipeline or the lab ran it; **accepted** means the code and the CRD rules allow it but nothing runs it. Where nothing is tested, this page says so instead of promising a range. State at v0.1.0, with the lab files as of 2026-11-04.
+What Shadewright has been run against, taken from CI, the end-to-end setup, the fleet repository and the reference lab, and what its code is written to accept. The two are kept apart: **tested** means a pipeline or the lab ran it; **accepted** means the code and the CRD rules allow it but nothing runs it. Where nothing is tested, this page says so instead of promising a range. State at v0.2.0-rc.1, with the lab run of 2026-11-04.
 
 ## Tested
 
@@ -13,8 +13,9 @@ What Shadewright has been run against, taken from CI, the end-to-end setup, the 
 | Kubernetes API server (envtest) | 1.37 | Unit and envtest suites in CI (`make test`). The version is the one of `k8s.io/api` in `go.mod`, so it moves with it. CRD validation (CEL), RBAC and the controllers run against it |
 | Kubernetes (Kind) | the node image Kind v0.33.0 uses by default | The `e2e` job in CI (`make test-e2e`): installs the CRDs and both Deployments and checks that they run, serve metrics and hold separate Leases. The node image is not pinned in this repository |
 | Kubernetes (Kind, fleet) | 1.36.4 | The fleet repository's `Kind` workflow brings up a cluster with Flux and the infrastructure and apps, without Shadewright |
-| Kubernetes (AKS) | 1.36 | The reference lab. `kubernetes_version` is unset in `shadewright-azure`, so the cluster takes the region's default, which was 1.36 on 2026-11-03. The fleet pins its schema checks to 1.36.0 |
+| Kubernetes (AKS) | 1.36 (1.36.5 on 2026-11-04) | The reference lab. `kubernetes_version` is unset in `shadewright-azure`, so the cluster takes the region's default. The fleet pins its schema checks to 1.36.0 |
 | Flux | 2.10.0 (source-controller 1.10.1, kustomize-controller 1.10.1, helm-controller 1.7.1, notification-controller 1.10.0) | The lab and the fleet's Kind cluster, installed from the release manifest with images pinned by digest. In the lab only these four controllers run |
+| Helm chart | 0.2.0-rc.1 | `ct install` and `helm test` on Kind in CI (pull requests that change the chart, and every release tag). In the lab on 2026-11-04, Flux helm-controller 1.7.1 installed the chart from `oci://ghcr.io/pkalin/charts/shadewright` by digest, after source-controller verified its keyless signature (`OCIRepository` with `verify.provider: cosign`) |
 | KEDA | 2.21.0 (chart and app) | The lab and the fleet's Kind cluster, from the upstream chart, not the AKS add-on |
 | Go | the `toolchain` line of `go.mod` (1.26.10) | CI and the image build |
 | Kustomize (render check) | `sigs.k8s.io/kustomize/api` 0.21.2, linked into the executor | The executor renders in process; there is no kustomize binary to match. The fleet's own checks use kustomize 5.8.1 |
@@ -33,7 +34,7 @@ No pipeline runs the operator, Flux and KEDA together: that combination is the m
 
 ## Architectures
 
-Both images are built for `linux/amd64` and `linux/arm64` (Images workflow, on pull requests without pushing and on `main` and tags with a push). Everything that **runs** in CI and in the lab is amd64: the GitHub-hosted `ubuntu` runners and the lab's `Standard_B2as_v2` node. The arm64 images are built but no pipeline starts them, so arm64 is untested.
+Both images are built for `linux/amd64` and `linux/arm64` (Images workflow, on pull requests without pushing and on `main` and tags with a push). Everything that **runs** in CI and in the lab is amd64: the GitHub-hosted `ubuntu` runners and the lab's `Standard_D4as_v5` node. The arm64 images are built but no pipeline starts them, so arm64 is untested.
 
 ## Git hosting
 

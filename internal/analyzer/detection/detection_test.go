@@ -42,6 +42,8 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/modules"
 	"github.com/pkalin/shadewright/internal/modules/aks"
+	"github.com/pkalin/shadewright/internal/modules/eks"
+	"github.com/pkalin/shadewright/internal/modules/gke"
 )
 
 var request = ctrl.Request{NamespacedName: client.ObjectKey{Name: remediationv1alpha1.SettingsName}}
@@ -432,6 +434,54 @@ func TestHangingSettingsCallsEndAtTheDeadline(t *testing.T) {
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("Reconcile did not return within 5 s of a 100 ms deadline")
+			}
+		})
+	}
+}
+
+// TestStatusReportsEKSAndGKE checks the settings status on EKS and GKE node fixtures with only eks enabled: an
+// enabled platform is active, a detected one that is not enabled is reported but generic is active, and nodes
+// of two platforms report no detection.
+func TestStatusReportsEKSAndGKE(t *testing.T) {
+	cases := []struct {
+		name  string
+		files []string
+		want  remediationv1alpha1.PlatformStatus
+	}{
+		{"EKS, enabled", []string{fixtureEKS}, remediationv1alpha1.PlatformStatus{Detected: eks.Name, Active: eks.Name}},
+		{"GKE, not enabled", []string{fixtureGKE},
+			remediationv1alpha1.PlatformStatus{Detected: gke.Name, Active: remediationv1alpha1.GenericPlatform}},
+		{"EKS and GKE nodes", []string{fixtureEKS, fixtureGKE},
+			remediationv1alpha1.PlatformStatus{Active: remediationv1alpha1.GenericPlatform}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := t.Context()
+			s := &remediationv1alpha1.RemediationSettings{
+				ObjectMeta: metav1.ObjectMeta{Name: remediationv1alpha1.SettingsName},
+				Spec: remediationv1alpha1.RemediationSettingsSpec{Modules: &remediationv1alpha1.Modules{
+					Platforms: []remediationv1alpha1.ModuleName{eks.Name}}},
+			}
+			b := clientfake.NewClientBuilder().WithScheme(fakeScheme(t)).WithObjects(s).WithStatusSubresource(s)
+			for _, f := range c.files {
+				n := &corev1.Node{}
+				load(t, f, n)
+				b = b.WithObjects(n)
+			}
+			cl := b.Build()
+			d := newDetector(t, cl, noGroups)
+			if _, err := d.Reconcile(ctx, request); err != nil {
+				t.Fatal(err)
+			}
+			var cur remediationv1alpha1.RemediationSettings
+			if err := cl.Get(ctx, request.NamespacedName, &cur); err != nil {
+				t.Fatal(err)
+			}
+			if cur.Status.Platform == nil || *cur.Status.Platform != c.want {
+				t.Errorf("status = %+v, want %+v", cur.Status.Platform, c.want)
+			}
+			if got := d.Selection().ActivePlatform(); got != string(c.want.Active) {
+				t.Errorf("active = %q, want %q", got, c.want.Active)
 			}
 		})
 	}

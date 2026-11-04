@@ -28,7 +28,7 @@ No pipeline runs the operator, Flux and KEDA together: that combination is the m
 | Kubernetes | There is no tested minimum. The CRDs use CEL validation rules, so the API server must support them, and the collector reads `events.k8s.io/v1` Events and Pod `status.observedGeneration` where the kubelet writes it. Treat anything older than the tested versions as unverified |
 | Flux | Detection and source mapping read `kustomize.toolkit.fluxcd.io/v1`, `source.toolkit.fluxcd.io/v1` and `helm.toolkit.fluxcd.io/v2`; the [design](../design.md) calls this Flux 2.3 and later. Beta versions are not read. The reason strings of the Flux module were read from the controller versions in the table above |
 | KEDA | `keda.sh/v1alpha1`, the only version KEDA 2.x serves. The policy check refuses any other version for `AdjustKedaMaxReplicas` |
-| Other platforms | The `generic` and `aks` platform modules exist. Nothing tests a cluster that is neither Kind nor AKS |
+| Other platforms | The `generic` and `aks` platform modules exist, and `eks` and `gke`, which only detect (no diagnosis rules). EKS is detected only when every node is in a managed node group. Nothing tests a cluster that is neither Kind nor AKS |
 | Network policy | The shipped NetworkPolicies need a CNI that enforces them. The lab runs Cilium; the first check that the API server is reachable under them there is [#216](https://github.com/pkalin/shadewright/issues/216), still open. On a CNI that does not enforce them the objects are accepted and do nothing |
 
 ## Architectures

@@ -69,6 +69,10 @@ type Observation struct {
 	// Subject is the object the symptom is correlated to: the owning workload when the owner chain could be
 	// verified, otherwise the object itself.
 	Subject remediationv1alpha1.ObjectRef
+	// Source is the namespace the observation came from: the event's own namespace, or the pod's for a
+	// container termination read from pod status. It is the namespace RBAC grants the creation of the event
+	// in, so it is never empty, unlike Subject's namespace for a cluster-scoped subject (a Node).
+	Source string
 	// Reason, Type and ReportingController are the event's, or OOMKilled (or the termination reason),
 	// Warning and kubelet for a container termination read from pod status.
 	Reason              string

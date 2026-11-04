@@ -37,7 +37,7 @@ The phase gauges are computed when the endpoint is scraped, from the informer th
 | `shadewright_incident_write_errors_total` | counter | none | Writes of an Incident's status that failed and are retried |
 | `shadewright_incident_batches_dropped_total` | counter | `reason`: `invalid`, `fingerprint_conflict`, `stopped` | Batches of observations not stored: refused by the API server as invalid, an Incident of the expected name holds another fingerprint, or still unwritten when the process stopped |
 | `shadewright_incident_observations_refused_total` | counter | none | Observations of a new fingerprint not stored because the cap on Incidents (`--max-incidents`) was reached |
-| `shadewright_incident_occurrences_overflow_total` | counter | none | Observations of a new occurrence not counted because the caps on occurrences held unwritten were reached |
+| `shadewright_incident_occurrences_overflow_total` | counter | none | Observations of a new occurrence not counted because the caps on occurrences held unwritten (per Incident, per namespace share, total) were reached |
 
 ## controller-runtime metrics
 

@@ -33,7 +33,11 @@ const invalidID = "event:not a uid"
 func eventID(i int) string { return fmt.Sprintf("event:0a1b2c3d-4e5f-4a6b-8c7d-%012d", i) }
 
 func batchOf(count int64, occ map[string]counted) *batch {
-	return &batch{count: count, first: t0, last: t0.Add(time.Minute), occurrences: occ}
+	held := make(map[string]heldOccurrence, len(occ))
+	for id, o := range occ {
+		held[id] = heldOccurrence{counted: o}
+	}
+	return &batch{count: count, first: t0, last: t0.Add(time.Minute), occurrences: held}
 }
 
 func TestMergeCountsAndSaturates(t *testing.T) {

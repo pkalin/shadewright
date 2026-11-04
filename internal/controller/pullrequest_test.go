@@ -1816,7 +1816,7 @@ var _ = Describe("Pull request body", func() {
 		// redactor would otherwise take for a token.
 		name := "incident-9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 		rr.Spec.IncidentRef.Name = name
-		hexToken := "3f1c9a7be2d84f06a5b1c3e9d7f2a4b6c8e0d1f3"
+		hexToken := "3f1c9a7be2d84f06a5b1c3e9d7f2a4b6c8e0d1f3" // #nosec G101 -- made-up hex run, not a credential
 		rr.Status.Source.Path = remediationv1alpha1.GitFilePath("apps/" + hexToken + "/deployment.yaml")
 		body := pullRequestBody(rr, name)
 		Expect(body).To(ContainSubstring("for incident `" + name + "`."))

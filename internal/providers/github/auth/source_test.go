@@ -594,7 +594,7 @@ func TestSecretsNeverInLogsOrErrors(t *testing.T) {
 			j := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 			jwts = append(jwts, j)
 			w.WriteHeader(status)
-			_, _ = io.WriteString(w, `{"message":"bad `+j+` `+testToken+`"}`)
+			_, _ = io.WriteString(w, `{"message":"bad `+j+` `+testToken+`"}`) // #nosec G705 -- fake hostile server echoing credentials on purpose
 		})
 		tok, err := fresh.src.Token(context.Background())
 		record(tok, err)

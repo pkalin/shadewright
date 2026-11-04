@@ -156,7 +156,7 @@ func Deps(t T, dir string, patterns ...string) []Package {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, goBin, append([]string{"list", "-deps", "-json"}, patterns...)...)
+	cmd := exec.CommandContext(ctx, goBin, append([]string{"list", "-deps", "-json"}, patterns...)...) // #nosec G204 -- test helper; go from PATH, patterns from the test
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

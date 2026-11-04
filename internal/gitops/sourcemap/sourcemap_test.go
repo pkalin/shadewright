@@ -867,7 +867,6 @@ func TestResolveKeepsSourceURLOutOfMessages(t *testing.T) {
 	}
 }
 
-//nolint:goconst // literal identities keep the cases readable
 func TestFieldFor(t *testing.T) {
 	so := v1alpha1.ObjectRef{APIVersion: "keda.sh/v1alpha1", Kind: "ScaledObject"}
 	dep := v1alpha1.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment"}
@@ -935,8 +934,6 @@ func scaledObjectDoc(apiVersion, kind, namespace, name string, maxReplicas int) 
 // TestResolveNeverPicksAnotherDocument checks that a multi-document file resolves only to the document whose
 // apiVersion, kind, namespace and name all equal the live target's. The policy decision trusts this
 // (ADR-0012): it cannot check itself that the resolved source and the live target are the same declaration.
-//
-//nolint:goconst // literal identities keep each case readable
 func TestResolveNeverPicksAnotherDocument(t *testing.T) {
 	const live = 10
 	decoys := []struct {

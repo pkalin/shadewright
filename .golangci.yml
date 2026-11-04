@@ -11,19 +11,21 @@ linters:
     - ginkgolinter
     - goconst
     - gocyclo
+    - gosec
     - govet
     - ineffassign
     - lll
-    - modernize
+    - logcheck
     - misspell
+    - modernize
     - nakedret
+    - nolintlint
     - prealloc
     - revive
     - staticcheck
     - unconvert
     - unparam
     - unused
-    - logcheck
   settings:
     custom:
       logcheck:
@@ -42,6 +44,10 @@ linters:
     modernize:
       disable:
         - omitzero
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
   exclusions:
     generated: lax
     rules:
@@ -52,6 +58,18 @@ linters:
           - dupl
           - lll
         path: internal/*
+      # Tests of the code that redacts or guards credentials hold synthetic secrets on purpose, to check
+      # they never leak. Only these packages; a real key pasted into any other test is still reported.
+      - linters:
+          - gosec
+        path: ^internal/(redact|providers/(github|github/auth|metrics/prometheus|registry|signer/azurekv))/[^/]+_test\.go$
+        text: "^G101:"
+      # Tests read fixtures from testdata and run helm, kubectl, kind and go: paths and commands are the
+      # test's own, never cluster data.
+      - linters:
+          - gosec
+        path: _test\.go$
+        text: "^G(204|304):"
     paths:
       - third_party$
       - builtin$

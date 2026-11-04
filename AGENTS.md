@@ -96,6 +96,11 @@ Every issue names the ADRs it is tied to:
   Trivy is installed by `hack/install-trivy.sh` from the official release with a pinned sha256, never through
   `aquasecurity/trivy-action` (its tags were force-pushed to malicious code in March 2026, GHSA-69fq-xp46-6x23); bump
   the version and the checksum together.
+- **Static security checks.** `gosec` runs inside golangci-lint (`make lint`, the lint job of every Go pull
+  request). Suppress a gosec finding on its line with `// #nosec G<nnn> -- <reason>` (that rule only), any
+  other linter with `//nolint:<linter> // <reason>`; `nolintlint` fails a `nolint` without a linter or a
+  reason, or one that no longer suppresses anything. A path-and-rule exclusion in `.golangci.yml` needs a
+  comment saying why; never disable a rule for the whole code base.
 - **Containers.** Distroless or scratch base images, non-root user, read-only root filesystem, all
   capabilities dropped, resource requests and limits set.
   The Dockerfile builds both binaries once (builder pinned by digest, Go release equal to go.mod's toolchain

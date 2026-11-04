@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-//nolint:goconst // the tables spell their values out to read as recorded objects
 package eks
 
 import (

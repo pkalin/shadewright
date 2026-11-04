@@ -38,7 +38,7 @@ into the samples on your machine only, and the samples in Git keep their `REPLAC
 - `lab/terraform.tfvars` in `shadewright-azure` (git-ignored) has `flux_enabled = true`, `fleet_repository_url`
   set to your fleet repository and `fleet_branch = "cluster/lab"`. Flux must track `cluster/lab`, and
   the settings sample's `targetBranch` must be the same branch, or the source mapping denies the request (`Denied`, reason `BranchMismatch`).
-- `az`, `kubectl`, `kubelogin`, `gh`, `jq` and `make` are installed, and `gh auth status` shows an account that can
+- `az`, `kubectl`, `kubelogin`, `terraform`, `curl`, `gh`, `jq` and `make` are installed, and `gh auth status` shows an account that can
   read your fleet repository.
 
 ## 1. Bring the lab up
@@ -50,9 +50,9 @@ make lab-cost    # price per hour for the current settings; changes nothing
 make lab-up      # init, plan, plan summary and price, then asks
 ```
 
-Expect a plan with only creates (the cluster and the federated credentials),
+Expect a plan with only creates and no Flux resources (the extension is gone),
 the price per hour, and the prompt. Read the plan, then type `yes` (lower case) to apply exactly that saved plan.
-Anything else applies nothing. `make lab-up` then installs Flux (about two minutes: the pinned manifest, the `GitRepository` `fleet` and the root Kustomization `lab`); if that step fails, the cluster is up and billed, so run `make lab-flux` to repeat it. Then fetch credentials for the session:
+Anything else applies nothing. `make lab-up` then installs Flux in the same run (about two minutes: the pinned manifest, the `GitRepository` `fleet` and the root Kustomization `lab`); if that step fails, the cluster is up and billed, so run `make lab-flux` (it asks for a typed yes) to repeat it. Then fetch credentials for the session:
 
 ```bash
 eval "$(terraform -chdir=lab output -raw get_credentials)"

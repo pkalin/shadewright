@@ -46,7 +46,8 @@ import (
 const (
 	// DefaultInterval is how long after a successful run detection runs again.
 	DefaultInterval = 10 * time.Minute
-	// DefaultTimeout is the deadline of the node list and of the discovery call, each.
+	// DefaultTimeout is the deadline of the node list, of the discovery call and of the settings read and
+	// status write (with their retries on conflict), each.
 	DefaultTimeout = 30 * time.Second
 	// MaxNodes is the most nodes read; a cluster with more is taken as generic. AKS allows 5,000 nodes.
 	MaxNodes = 5000
@@ -83,7 +84,8 @@ type Config struct {
 	GroupVersions GroupVersionsFunc
 	// Interval is how long after a successful run detection runs again.
 	Interval time.Duration
-	// Timeout bounds the node list and the discovery call, each.
+	// Timeout bounds the node list, the discovery call and the settings read and status write (with their
+	// retries on conflict), each.
 	Timeout time.Duration
 }
 
@@ -194,8 +196,12 @@ func (d *Detector) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result
 
 // refresh reads the settings, works out the selection from their spec and det, stores it and writes the
 // status if it changed. A conflict reads the settings again. Settings that do not exist give generic only and
-// found false; settings that cannot be read keep the previous selection and return the error.
+// found false; settings that cannot be read keep the previous selection and return the error. The reads and
+// writes, retries included, run under Timeout, so a stalled API server ends the run with an error that is
+// retried with backoff instead of holding the controller's only worker.
 func (d *Detector) refresh(ctx context.Context, det modules.Detection, o outcome) (sel modules.Selection, found bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, d.cfg.Timeout)
+	defer cancel()
 	sel = d.Selection()
 	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		var s remediationv1alpha1.RemediationSettings

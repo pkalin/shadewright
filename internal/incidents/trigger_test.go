@@ -511,7 +511,11 @@ func listIncidents(t *testing.T, ns string) map[string]remediationv1alpha1.Incid
 }
 
 // triggerConfig is a controller config with the fixed clock and a short trigger interval.
-var triggerConfig = Config{TriggerInterval: 50 * time.Millisecond, Now: func() time.Time { return triggerNow }}
+// testTriggerInterval is the trigger interval of these tests. The pass and the budget read take their
+// deadlines from it (180 ms and 135 ms), long enough for envtest under -race.
+const testTriggerInterval = 200 * time.Millisecond
+
+var triggerConfig = Config{TriggerInterval: testTriggerInterval, Now: func() time.Time { return triggerNow }}
 
 // Restarting the controller with 50 open Incidents whose cooldowns hold marks none of them due again, and
 // the budget used today, read back from the budget ConfigMap, still limits the new ones.
@@ -584,7 +588,7 @@ func TestDeletingIncidentsDoesNotFreeBudget(t *testing.T) {
 		}
 	}
 	marks := r.writes.marks.Load()
-	time.Sleep(20 * triggerConfig.TriggerInterval)
+	time.Sleep(10 * triggerConfig.TriggerInterval)
 	if inc := eventually(t, ns, 3, func(*remediationv1alpha1.Incident) bool { return true }); meta.IsStatusConditionTrue(
 		inc.Status.Conditions, ConditionAnalysisDue) || r.writes.marks.Load() != marks {
 		t.Fatalf("deleting the analyzed Incidents freed budget: %+v", inc.Status.Conditions)
@@ -601,7 +605,7 @@ func TestHeldObservationsDebounce(t *testing.T) {
 	now.Store(triggerNow.UnixNano())
 	clock := func() time.Time { return time.Unix(0, now.Load()).UTC() }
 	// A long window holds every observation after the first.
-	r := start(t, ns, Config{Window: time.Hour, TriggerInterval: 50 * time.Millisecond, Now: clock})
+	r := start(t, ns, Config{Window: time.Hour, TriggerInterval: testTriggerInterval, Now: clock})
 	r.obs <- observation(1, 1, 1, 1, triggerNow)
 	eventually(t, ns, 1, dueIs(false, ReasonDebouncing))
 	// The burst goes on: an observation every 10 s, held unwritten.
@@ -716,7 +720,7 @@ func TestNotDueReasonChangesWriteNothing(t *testing.T) {
 	if err := env.admin.Update(t.Context(), settings); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(20 * triggerConfig.TriggerInterval)
+	time.Sleep(10 * triggerConfig.TriggerInterval)
 	if got := r.writes.marks.Load() - marks; got != 0 {
 		t.Fatalf("%d conditions rewritten when only the not-due reason changed", got)
 	}
@@ -731,7 +735,7 @@ func TestDueFollowsTheClockAndTheAnalysis(t *testing.T) {
 	var now atomic.Int64
 	now.Store(triggerNow.UnixNano())
 	createIncident(t, ns, 1, incidentStatus(10*time.Second, time.Minute, 0))
-	start(t, ns, Config{TriggerInterval: 50 * time.Millisecond,
+	start(t, ns, Config{TriggerInterval: testTriggerInterval,
 		Now: func() time.Time { return time.Unix(0, now.Load()).UTC() }})
 	eventually(t, ns, 1, dueIs(false, ReasonDebouncing))
 	now.Store(triggerNow.Add(35 * time.Second).UnixNano())
@@ -829,7 +833,7 @@ func TestFlappingIncidentIsDueWithinTheSettleLimit(t *testing.T) {
 	var now atomic.Int64
 	now.Store(triggerNow.UnixNano())
 	clock := func() time.Time { return time.Unix(0, now.Load()).UTC() }
-	r := start(t, ns, Config{Window: time.Hour, SettleLimit: 5 * time.Minute, TriggerInterval: 50 * time.Millisecond, Now: clock})
+	r := start(t, ns, Config{Window: time.Hour, SettleLimit: 5 * time.Minute, TriggerInterval: testTriggerInterval, Now: clock})
 	eventually(t, ns, 1, dueIs(false, ReasonNoNewData))
 	// The same occurrence counts up every 10 s, from triggerNow on.
 	recur := func(i int) {
@@ -919,4 +923,125 @@ func TestUnreadableBudgetTakesTheMarkBack(t *testing.T) {
 	eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
 	reader.fail.Store(true)
 	eventually(t, ns, 1, dueIs(false, ReasonBudgetReadFailed))
+}
+
+// hangs blocks until ctx ends, like an API server that accepts a request and never answers.
+func hangs(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// hangingGets is a reader whose Gets of objects of type T hang, while hang is set, until their context ends.
+type hangingGets[T client.Object] struct {
+	client.Reader
+	hang atomic.Bool
+}
+
+func (h *hangingGets[T]) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(T); ok && h.hang.Load() {
+		return hangs(ctx)
+	}
+	return h.Reader.Get(ctx, key, obj, opts...)
+}
+
+// A budget read that never answers ends at ReadTimeout: the pass goes on with the budget unknown, so an
+// Incident marked due is set not due, and later passes still run (#243). Without the deadline the read waits
+// for the trigger's context, which lasts as long as the controller, and the mark stays.
+func TestHangingBudgetReadEndsAtTheDeadline(t *testing.T) {
+	for name, tc := range map[string]struct {
+		reason string
+		setup  func(c *Controller) *atomic.Bool
+	}{
+		"settings": {ReasonSettingsUnreadable, func(c *Controller) *atomic.Bool {
+			h := &hangingGets[*remediationv1alpha1.RemediationSettings]{Reader: c.cache}
+			c.cache = h
+			return &h.hang
+		}},
+		"budget": {ReasonBudgetReadFailed, func(c *Controller) *atomic.Bool {
+			h := &hangingGets[*corev1.ConfigMap]{Reader: c.reader}
+			c.reader = h
+			return &h.hang
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ns := namespace(t)
+			createSettings(t, 10)
+			createBudget(t, ns, nil)
+			createIncident(t, ns, 1, incidentStatus(2*time.Minute, time.Hour, 0))
+			var hang *atomic.Bool
+			startWith(t, ns, triggerConfig, func(c *Controller, _ *countingClient) { hang = tc.setup(c) })
+			eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
+			hang.Store(true)
+			eventually(t, ns, 1, dueIs(false, tc.reason))
+			// Later passes still run: once the reads answer again, the Incident is due again.
+			hang.Store(false)
+			eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
+		})
+	}
+}
+
+// hangingList is a cache whose Lists hang until their context ends, counting the calls.
+type hangingList struct {
+	client.Reader
+	calls atomic.Int32
+}
+
+func (h *hangingList) List(ctx context.Context, _ client.ObjectList, _ ...client.ListOption) error {
+	h.calls.Add(1)
+	return hangs(ctx)
+}
+
+// A pass that stalls ends at PassTimeout and the next pass runs (#243): here the list from the cache never
+// answers, and the loop must still try again. Without the pass deadline the first list holds the loop until
+// the controller stops.
+func TestHangingPassEndsAtTheDeadline(t *testing.T) {
+	c, err := New(Config{Namespace: "ns", TriggerInterval: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &hangingList{}
+	c.cache = cache
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { c.triggerLoop(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(10 * time.Second)
+	for cache.calls.Load() < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d passes in 10 s with a 50 ms interval: a stalled pass held the loop", cache.calls.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// New refuses a pass deadline that is not shorter than the trigger interval, and a budget read deadline that
+// is not shorter than the pass, and derives both from a short interval.
+func TestNewBoundsTheTriggerDeadlines(t *testing.T) {
+	for name, cfg := range map[string]Config{
+		"pass equals interval": {TriggerInterval: time.Second, PassTimeout: time.Second},
+		"pass over interval":   {TriggerInterval: time.Second, PassTimeout: 2 * time.Second},
+		"pass over default":    {PassTimeout: DefaultTriggerInterval},
+		"read equals pass":     {PassTimeout: time.Second, ReadTimeout: time.Second},
+		"read over derived":    {TriggerInterval: time.Second, ReadTimeout: time.Second},
+	} {
+		cfg.Namespace = "ns"
+		if _, err := New(cfg); err == nil {
+			t.Errorf("%s: New accepted pass %s and read %s for interval %s", name, cfg.PassTimeout, cfg.ReadTimeout,
+				cfg.TriggerInterval)
+		}
+	}
+	c, err := New(Config{Namespace: "ns"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.cfg.PassTimeout != DefaultPassTimeout || c.cfg.ReadTimeout != DefaultReadTimeout {
+		t.Errorf("defaults: pass %s, read %s", c.cfg.PassTimeout, c.cfg.ReadTimeout)
+	}
+	c, err = New(Config{Namespace: "ns", TriggerInterval: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.cfg.PassTimeout != 900*time.Millisecond || c.cfg.ReadTimeout != 675*time.Millisecond {
+		t.Errorf("from a 1 s interval: pass %s, read %s", c.cfg.PassTimeout, c.cfg.ReadTimeout)
+	}
 }

@@ -10,13 +10,53 @@ sources:
 
 # Both versions follow the release (release-please bumps them with the tag); the chart is published only on a
 # release tag, so what a tag publishes is the chart of that tag.
-version: 0.1.0 # x-release-please-version
-appVersion: "0.1.0" # x-release-please-version
+version: 0.1.0  # x-release-please-version
+appVersion: "0.1.0"  # x-release-please-version
 
 keywords:
   - kubernetes
   - operator
   - gitops
 
+# A GitHub handle and its URL, no email (chart-testing validates the handle).
+maintainers:
+  - name: pkalin
+    url: https://github.com/pkalin
+
+# Artifact Hub metadata. The image tags follow the release (release-please bumps them); the published chart
+# runs the release's images by digest (values.yaml). prerelease stays "true" while the version is 0.x.
 annotations:
   kubebuilder.io/generated-by: kubebuilder
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/prerelease: "true"
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://shadewright.io
+    - name: Source
+      url: https://github.com/pkalin/shadewright
+  artifacthub.io/images: |
+    - name: executor
+      image: ghcr.io/pkalin/shadewright-executor:0.1.0 # x-release-please-version
+    - name: analyzer
+      image: ghcr.io/pkalin/shadewright-analyzer:0.1.0 # x-release-please-version
+  artifacthub.io/crds: |
+    - kind: Incident
+      version: v1alpha1
+      name: incidents.remediation.shadewright.io
+      displayName: Incident
+      description: Repeated symptoms of one problem on one workload, grouped
+    - kind: RemediationRequest
+      version: v1alpha1
+      name: remediationrequests.remediation.shadewright.io
+      displayName: Remediation request
+      description: One proposed fix, a typed action carried out as a GitOps pull request after policy allows it
+    - kind: RemediationPolicy
+      version: v1alpha1
+      name: remediationpolicies.remediation.shadewright.io
+      displayName: Remediation policy
+      description: Which actions are allowed, on which targets, within which bounds, and whether a human must approve
+    - kind: RemediationSettings
+      version: v1alpha1
+      name: remediationsettings.remediation.shadewright.io
+      displayName: Remediation settings
+      description: The one cluster-wide settings object, with the kill switch

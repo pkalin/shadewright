@@ -40,8 +40,9 @@ func TestParseNamespaces(t *testing.T) {
 		{in: demo, want: []string{demo}},
 		{in: " team-b, demo ,team-b", want: []string{demo, teamB}},
 		{in: "demo,,", want: []string{demo}},
-		{in: "", wantErr: true},
-		{in: " , ", wantErr: true},
+		// No namespace is an empty list, never "all namespaces".
+		{in: ""},
+		{in: " , "},
 		{in: "Demo", wantErr: true},
 		{in: "demo,team_a", wantErr: true},
 		{in: "*", wantErr: true},
@@ -80,6 +81,20 @@ func TestCacheOptions(t *testing.T) {
 	}
 	if found != 2 {
 		t.Errorf("ByObject restricts %d of Incident and RemediationRequest, want 2", found)
+	}
+}
+
+// TestCacheOptionsWithNoNamespace checks that an empty list never becomes an empty DefaultNamespaces, which
+// controller-runtime reads as every namespace: the default is the operator namespace alone.
+func TestCacheOptionsWithNoNamespace(t *testing.T) {
+	for _, watched := range [][]string{nil, {}} {
+		opts := CacheOptions("shadewright-system", watched)
+		if len(opts.DefaultNamespaces) != 1 {
+			t.Fatalf("DefaultNamespaces = %v for %#v, want the operator namespace only", opts.DefaultNamespaces, watched)
+		}
+		if _, ok := opts.DefaultNamespaces["shadewright-system"]; !ok {
+			t.Errorf("DefaultNamespaces = %v, want the operator namespace", opts.DefaultNamespaces)
+		}
 	}
 }
 

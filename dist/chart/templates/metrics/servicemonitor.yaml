@@ -1,0 +1,51 @@
+{{- /*
+One Prometheus Operator ServiceMonitor per component, off by default (metrics.serviceMonitor.enabled). Prometheus
+scrapes with its own ServiceAccount token: the endpoint checks it with a TokenReview and a SubjectAccessReview,
+so that ServiceAccount needs the metrics-reader ClusterRole (nothing in the chart binds it). The serving
+certificate is self-signed by the binary, so its verification is skipped; the token is still checked.
+*/ -}}
+{{- if .Values.metrics.serviceMonitor.enabled }}
+{{- if not .Values.metrics.enabled }}
+{{- fail "metrics.serviceMonitor.enabled needs metrics.enabled: there is no metrics Service to scrape" }}
+{{- end }}
+{{- range $component := list "executor" "analyzer" }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" (printf "%s-metrics" $component) "context" $) }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- with omit ($.Values.metrics.serviceMonitor.labels | default dict) "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/version" "app.kubernetes.io/part-of" "app.kubernetes.io/managed-by" "app.kubernetes.io/component" "helm.sh/chart" "control-plane" }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- include "shadewright.labels" (dict "component" $component "context" $) | nindent 4 }}
+spec:
+  namespaceSelector:
+    matchNames:
+    - {{ $.Release.Namespace }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "shadewright.name" $ }}
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+      control-plane: {{ $component }}
+  endpoints:
+  - path: /metrics
+    {{- if $.Values.metrics.secure }}
+    port: https
+    scheme: https
+    {{- /* Prometheus's own ServiceAccount token: the only way to scrape with it. Prometheus Operator deprecates
+    bearerTokenFile and rejects it when arbitraryFSAccessThroughSMs is denied; then leave this off and write
+    your own ServiceMonitor with authorization (credentials from a Secret holding a token for metrics-reader). */}}
+    bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+    tlsConfig:
+      insecureSkipVerify: true
+    {{- else }}
+    port: http
+    scheme: http
+    {{- end }}
+    {{- with $.Values.metrics.serviceMonitor.interval }}
+    interval: {{ . | quote }}
+    {{- end }}
+{{- end }}
+{{- end }}

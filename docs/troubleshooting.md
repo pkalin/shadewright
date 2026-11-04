@@ -222,4 +222,14 @@ The patcher reasons named inside a `PatchRefused` message are `PreviousValueDiff
 
 ## Not request reasons
 
-An Incident that never gets analyzed shows why in its `AnalysisDue` condition. It is due (status `True`) with `FirstAnalysis`, `NewOccurrence`, `CooldownExpired` or `AnalysisTimedOut`. Not due (status `False`): `AnalysisDisabled` (`maxAnalysesPerDay` is 0), `DailyBudgetReached`, `BudgetNotFound` (the ConfigMap `shadewright-analysis-budget` was deleted; recreate it empty), `BudgetUnreadable`, `BudgetReadFailed`, `SettingsNotFound`, `SettingsUnreadable`, `Debouncing`, `CoolingDown`, `NoNewData`, `Analyzing`, `Proposed`, `Escalated`, `NotObserved`, `AnalysisStartUnknown` and `ForeignFingerprint`. The settings status carries `UnknownModules` (a name in `spec.modules` no module has) and `DetectionFailed`. No analysis runs yet, so `AnalysisDue` is a mark only.
+An Incident that never gets analyzed shows why in its `AnalysisDue` condition. It is due (status `True`) with `FirstAnalysis`, `NewOccurrence`, `CooldownExpired` or `AnalysisTimedOut`. Not due (status `False`): `AnalysisDisabled` (`maxAnalysesPerDay` is 0), `DailyBudgetReached`, `BudgetNotFound` (the ConfigMap `shadewright-analysis-budget` was deleted; recreate it empty), `BudgetUnreadable`, `BudgetReadFailed`, `SettingsNotFound`, `SettingsUnreadable`, `Debouncing`, `CoolingDown`, `NoNewData`, `Analyzing`, `Proposed`, `Escalated`, `NotObserved`, `AnalysisStartUnknown` and `ForeignFingerprint`. The settings status carries `UnknownModules` (a name in `spec.modules` no module has), `DetectionFailed` and `NoWatchedNamespaces` (the analyzer watches no namespace; see [No Incident appears](#no-incident-appears)). No analysis runs yet, so `AnalysisDue` is a mark only.
+
+## No Incident appears
+
+The analyzer records Incidents only for symptoms in the namespaces it watches. The Helm chart's default `analyzer.watchNamespaces` is empty, which watches no namespace (never all of them): the analyzer starts and is Ready, but reads no events or pods. Check, in this order:
+
+- `kubectl -n shadewright-system logs deploy/shadewright-analyzer | grep "Watching"` says `Watching no namespaces`, or lists the namespaces.
+- The gauge `shadewright_analyzer_watched_namespaces` is `0`.
+- `kubectl get remediationsettings default -o jsonpath='{.status.conditions[?(@.type=="NoWatchedNamespaces")]}'` shows `True` with reason `NoNamespacesWatched`. The condition appears only once a `RemediationSettings` object exists, and the chart creates none by default (`settings.create: false`).
+
+To watch namespaces, upgrade with the list (`--set 'analyzer.watchNamespaces={team-a,team-b}'`); each one must exist and gets a read-only RoleBinding. With the kustomize install, set `--watch-namespaces` and add the RoleBindings as `config/watch` does. If the list is set and still nothing appears, the namespace may lack its RoleBinding (the analyzer's reads are refused there) or have no symptom the collector knows.

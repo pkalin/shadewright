@@ -4,8 +4,10 @@ name: Chart
 # hand). Pull requests and pushes to main lint, render, compare and install it through ci.yml, which calls
 # chart-test.yml; a release tag runs the same tests here first. Only a v* tag
 # publishes it to ghcr.io/<owner>/charts/shadewright, and only the publish job has packages: write and
-# id-token: write. After the push it signs the chart by digest with cosign keyless (GitHub OIDC, no key to
-# store) and verifies the signature against the identity of this workflow, so a mismatch fails the run.
+# id-token: write. Before packaging it writes the digests of the tag's signed images into values.yaml, so the
+# published chart runs them by digest. After the push it signs the chart by digest with cosign keyless (GitHub
+# OIDC, no key to store) and verifies the signature against the identity of this workflow, so a mismatch fails
+# the run.
 on:
   push:
     tags: ["v*"]
@@ -56,14 +58,64 @@ jobs:
             exit 1
           fi
 
-      - name: Package the chart
-        run: helm package dist/chart --destination "${RUNNER_TEMP}/chart"
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
+      # Docker (for the image inspection and cosign, which read its credentials) and Helm (for the push) log in
+      # with the job token before anything reads ghcr.io, so private packages work too.
       - name: Log in to GHCR
         env:
           ACTOR: ${{ github.actor }}
           TOKEN: ${{ github.token }}
-        run: printf '%s' "${TOKEN}" | helm registry login ghcr.io --username "${ACTOR}" --password-stdin
+        run: |
+          set -euo pipefail
+          printf '%s' "${TOKEN}" | docker login ghcr.io --username "${ACTOR}" --password-stdin
+          printf '%s' "${TOKEN}" | helm registry login ghcr.io --username "${ACTOR}" --password-stdin
+
+      # The images of this tag, by digest, each verified against the identity of the Images workflow on this
+      # very tag before its digest goes into the chart. The Images workflow of the same tag runs in parallel, so
+      # this waits for each image and a signature that verifies: every 30 s, at most 30 minutes, then the run
+      # fails with the image it waited for. Re-run the failed jobs of this run once the Images workflow of the
+      # tag has finished. The signature check is on the digest, so a tag moved after the check changes nothing.
+      - name: Write the signed image digests into values.yaml
+        env:
+          TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "${OWNER}" | tr '[:upper:]' '[:lower:]')"
+          identity="https://github.com/${REPOSITORY}/.github/workflows/images.yml@refs/tags/${TAG}"
+          deadline=$(( $(date +%s) + 1800 ))
+          for image in executor analyzer; do
+            ref="ghcr.io/${owner}/shadewright-${image}"
+            d=""
+            until [ -n "${d}" ]; do
+              got="$(docker buildx imagetools inspect "${ref}:${TAG#v}" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
+              if printf '%s' "${got}" | grep -Eq '^sha256:[a-f0-9]{64}$' && cosign verify \
+                  --certificate-identity "${identity}" \
+                  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+                  "${ref}@${got}" > /dev/null 2>&1; then
+                d="${got}"
+              elif [ "$(date +%s)" -ge "${deadline}" ]; then
+                echo "no image ${ref}:${TAG#v} signed by ${identity} after 30 minutes; re-run this job once the Images workflow of ${TAG} has finished" >&2
+                exit 1
+              else
+                echo "waiting for ${ref}:${TAG#v} and its signature"
+                sleep 30
+              fi
+            done
+            printf -v "digest_${image}" '%s' "${d}"
+            echo "${ref}@${d}" >> "${GITHUB_STEP_SUMMARY}"
+          done
+          hack/chart-set-digests.sh dist/chart/values.yaml "${digest_executor}" "${digest_analyzer}"
+          rendered="$(helm template publish-check dist/chart --set clusterId=publish-check)"
+          for d in "${digest_executor}" "${digest_analyzer}"; do
+            grep -qF "@${d}\"" <<<"${rendered}" || { echo "the chart does not run ${d}" >&2; exit 1; }
+          done
+
+      - name: Package the chart
+        run: helm package dist/chart --destination "${RUNNER_TEMP}/chart"
 
       - name: Push the chart
         env:
@@ -80,9 +132,6 @@ jobs:
           fi
           echo "CHART_REF=ghcr.io/${owner}/charts/shadewright@${digest}" >> "${GITHUB_ENV}"
           echo "oci://ghcr.io/${owner}/charts/shadewright:${TAG#v} (${digest})" >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       # Always by digest: a tag can move, the digest names the pushed chart.
       - name: Sign the chart (keyless)

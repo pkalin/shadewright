@@ -1,5 +1,7 @@
 # Shadewright chart values. The schema in values.schema.json validates them on install, upgrade, lint and
-# template. Nothing here looks like a real identity, digest or cluster: the values you must set are empty.
+# template. Nothing here looks like a real identity or cluster. With no values at all the published chart installs
+# an idle Shadewright: the analyzer watches no namespace and the executor has no Azure workload identity, so it
+# cannot reach Key Vault to sign for the GitHub App.
 # README.md is generated from the "# --" comments below with helm-docs (make chart-docs): every key needs one.
 
 # -- Partially overrides the chart name, which is kept in the release name. At most 63 characters. Empty uses `shadewright`.
@@ -8,13 +10,17 @@ nameOverride: ""
 # -- Fully overrides the resource name prefix, at most 63 characters. Empty uses the release name (or `<release>-shadewright` if it does not contain the chart name). The ServiceAccount names, and so the subject of the federated credential, derive from it.
 # @section -- General
 fullnameOverride: ""
-# -- Required. Cluster ID, 1 to 63 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit. Passed as `--cluster-id` and hashed into every Incident fingerprint so Incidents of two clusters never merge. Changing it starts every Incident afresh, so choose it once.
-# @default -- none, required
+# -- Cluster ID, 1 to 63 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit. Passed as `--cluster-id` and hashed into every Incident fingerprint so Incidents of two clusters never merge. Empty uses the UID of the `kube-system` namespace, read with `lookup` at install and upgrade (stable and unique for the life of the cluster); `helm template`, `helm lint`, a client-side `--dry-run`, GitOps tools that render client-side (helm diff, Argo CD, Flux with a dry-run) and an installer without `get` on the `kube-system` namespace must set it, or the chart fails. Changing it, also from empty to a value, starts every Incident afresh, so choose it once. It is an ID, never a display name.
+# @default -- empty (the UID of `kube-system`)
 # @section -- General
 clusterId: ""
-# -- Image pull secrets of both Pods, a list of `{name: <secret>}`, for a mirror that needs them. The default images are public.
+# -- Image pull secrets of both Pods, a list of `{name: <secret>}` (at most 16), for a mirror that needs them. The default images are public. Each component's `imagePullSecrets` is added to it.
 # @section -- General
 imagePullSecrets: []
+image:
+  # -- Allow an image without a digest to run by the `appVersion` tag. Off by default, so the chart fails to render when a digest is missing: the published chart carries the release's signed digests and needs nothing here. Set `true` only from a source checkout, with images built from that same checkout (older images, such as v0.1.0, stop at start with an empty `analyzer.watchNamespaces`).
+  # @section -- Images
+  allowTag: false
 metrics:
   # -- Serve the metrics endpoint of both components, with its two Services. When false there are no Services, no metrics RBAC and no metrics NetworkPolicy.
   # @section -- Metrics
@@ -25,6 +31,16 @@ metrics:
   # -- Serve metrics over HTTPS with a TokenReview and a SubjectAccessReview per request. `false` serves plain HTTP with no authentication: for a test only, `helm install` prints a warning.
   # @section -- Metrics
   secure: true
+  serviceMonitor:
+    # -- Install a Prometheus Operator `ServiceMonitor` for each component (needs the `monitoring.coreos.com/v1` CRDs and `metrics.enabled`). Prometheus scrapes with its own ServiceAccount token, so bind that ServiceAccount to the `metrics-reader` ClusterRole, and label its namespace `metrics: enabled` for the NetworkPolicy. The endpoint's certificate is self-signed, so the ServiceMonitor skips its verification. It scrapes with `bearerTokenFile` (Prometheus's own token), which Prometheus Operator deprecates and rejects when `arbitraryFSAccessThroughSMs` is denied: then keep this off and write your own ServiceMonitor with `authorization` from a Secret that holds a token allowed to read metrics.
+    # @section -- Metrics
+    enabled: false
+    # -- Scrape interval, such as `30s` or `1m`. Empty uses the Prometheus default.
+    # @section -- Metrics
+    interval: ""
+    # -- Further labels on the ServiceMonitors, for the `serviceMonitorSelector` of your Prometheus. The chart's own labels cannot be overridden.
+    # @section -- Metrics
+    labels: {}
 networkPolicy:
   # -- Install the NetworkPolicies: default deny for the namespace, DNS and TCP 443 and 6443 egress per component, and ingress to the metrics port from namespaces labeled `metrics: enabled`. Setting `false` installs no NetworkPolicy at all, so the namespace loses its default deny too and every Pod in it can talk to anything unless you restrict it yourself (`helm install` prints a warning).
   # @section -- Network policy
@@ -46,11 +62,11 @@ rbac:
 ## only sign with the GitHub App key in Key Vault.
 executor:
   image:
-    # -- Repository of the executor image (a mirror, for example). The Deployment runs repository@digest.
+    # -- Repository of the executor image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true.
     # @section -- Images
     repository: ghcr.io/pkalin/shadewright-executor
-    # -- Required. Digest of the executor image: `sha256:` and 64 lower case hex digits. Images are pinned by digest, so a tag is refused by the schema and a moved tag cannot change what runs.
-    # @default -- none, required
+    # -- Digest of the executor image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) fails to render unless `image.allowTag` is true, which runs the `appVersion` tag instead. The schema refuses a tag in this field.
+    # @default -- the release's digest in the published chart, empty in the source
     # @section -- Images
     digest: ""
     # -- Image pull policy. One of `Always`, `IfNotPresent` or `Never`.
@@ -90,31 +106,40 @@ executor:
   # -- Further Pod annotations.
   # @section -- Executor
   podAnnotations: {}
-  # -- Node selector of the Pod.
+  # -- Node selector of the Pod, at most 32 labels.
   # @section -- Executor
   nodeSelector: {}
-  # -- Tolerations of the Pod, a list of Kubernetes toleration objects.
+  # -- Tolerations of the Pod, at most 32 Kubernetes toleration objects.
   # @section -- Executor
   tolerations: []
-  # -- Affinity of the Pod, a Kubernetes affinity object.
+  # -- Affinity of the Pod, a Kubernetes affinity object (`nodeAffinity`, `podAffinity`, `podAntiAffinity`).
   # @section -- Executor
   affinity: {}
+  # -- Topology spread constraints of the Pod, at most 8 Kubernetes `topologySpreadConstraints` objects.
+  # @section -- Executor
+  topologySpreadConstraints: []
+  # -- Priority class of the Pod. Empty uses the cluster default.
+  # @section -- Executor
+  priorityClassName: ""
+  # -- Image pull secrets of this component only, added to the global `imagePullSecrets`, a list of `{name: <secret>}` (at most 16).
+  # @section -- Executor
+  imagePullSecrets: []
 
 ## The analyzer reads the cluster and writes Incidents and proposed RemediationRequests. It never acts on them.
 analyzer:
   image:
-    # -- Repository of the analyzer image (a mirror, for example). The Deployment runs repository@digest.
+    # -- Repository of the analyzer image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true.
     # @section -- Images
     repository: ghcr.io/pkalin/shadewright-analyzer
-    # -- Required. Digest of the analyzer image: `sha256:` and 64 lower case hex digits. Images are pinned by digest, so a tag is refused by the schema and a moved tag cannot change what runs.
-    # @default -- none, required
+    # -- Digest of the analyzer image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) fails to render unless `image.allowTag` is true, which runs the `appVersion` tag instead. The schema refuses a tag in this field.
+    # @default -- the release's digest in the published chart, empty in the source
     # @section -- Images
     digest: ""
     # -- Image pull policy. One of `Always`, `IfNotPresent` or `Never`.
     # @section -- Images
     pullPolicy: IfNotPresent
-  # -- Required, at least one unique namespace name, never all namespaces. The analyzer reads events, Pods and workloads only in these namespaces: the chart passes them as `--watch-namespaces` and binds the read-only watch ClusterRole with one RoleBinding in each (`kube-system` included only if you list it).
-  # @default -- none, required
+  # -- Unique namespace names, at most 256. The analyzer reads events, Pods and workloads only in these namespaces: the chart passes them as `--watch-namespaces` and binds the read-only watch ClusterRole with one RoleBinding in each (`kube-system` included only if you list it). Empty (the default) watches no namespace, never all of them: the analyzer starts, is Ready and records no Incident, and no RoleBinding is created. `*` is refused.
+  # @default -- empty (no namespace)
   # @section -- Analyzer
   watchNamespaces: []
   # -- Most Incidents kept in the operator namespace (`--max-incidents`), 1 or more. Null (unset) keeps the binary's default of 500.
@@ -155,15 +180,37 @@ analyzer:
   # -- Further Pod annotations.
   # @section -- Analyzer
   podAnnotations: {}
-  # -- Node selector of the Pod.
+  # -- Node selector of the Pod, at most 32 labels.
   # @section -- Analyzer
   nodeSelector: {}
-  # -- Tolerations of the Pod, a list of Kubernetes toleration objects.
+  # -- Tolerations of the Pod, at most 32 Kubernetes toleration objects.
   # @section -- Analyzer
   tolerations: []
-  # -- Affinity of the Pod, a Kubernetes affinity object.
+  # -- Affinity of the Pod, a Kubernetes affinity object (`nodeAffinity`, `podAffinity`, `podAntiAffinity`).
   # @section -- Analyzer
   affinity: {}
+  # -- Topology spread constraints of the Pod, at most 8 Kubernetes `topologySpreadConstraints` objects.
+  # @section -- Analyzer
+  topologySpreadConstraints: []
+  # -- Priority class of the Pod. Empty uses the cluster default.
+  # @section -- Analyzer
+  priorityClassName: ""
+  # -- Image pull secrets of this component only, added to the global `imagePullSecrets`, a list of `{name: <secret>}` (at most 16).
+  # @section -- Analyzer
+  imagePullSecrets: []
+
+## The helm test hook (templates/tests): a Pod that checks that the metrics Service of each component answers.
+tests:
+  image:
+    # -- Repository of the image of the `helm test` Pod. It needs `curl`. Rendered only with `metrics.enabled`.
+    # @section -- Tests
+    repository: docker.io/curlimages/curl
+    # -- Digest of the test image (curl 8.23.0), required: `sha256:` and 64 lower case hex digits.
+    # @section -- Tests
+    digest: sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93
+  # -- Image pull secrets of the test Pod only, added to the global `imagePullSecrets`, a list of `{name: <secret>}` (at most 16).
+  # @section -- Tests
+  imagePullSecrets: []
 
 settings:
   # -- Create the RemediationSettings object `default` from `spec`, only when it does not exist (a post-install and post-upgrade hook that checks with `lookup`). Helm never changes or deletes it afterwards, so a pause set by hand (`spec.paused: true`) survives every upgrade; change the object with kubectl or GitOps. `lookup` finds nothing under `helm template` and `--dry-run`, so those always render it. Helm does not track hook objects: the object is not deleted when the release is uninstalled. Requires a non-empty `spec`.

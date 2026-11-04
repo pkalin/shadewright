@@ -40,6 +40,9 @@ check "readme only skips everything" "false false false" $pr README.md
 check "generated api docs run go and images" "true true false" $pr docs/reference/api.md
 check "go file runs everything" "true true true" $pr api/x.go
 check "chart only runs chart" "false false true" $pr dist/chart/values.yaml
+check "chart ci values run chart" "false false true" $pr dist/chart/ci/default-values.yaml
+check "ct config runs chart" "false false true" $pr ct.yaml
+check "chart test workflow runs everything" "true true true" $pr .github/workflows/chart-test.yml
 check "licence runs images only" "false true false" $pr LICENSE
 check "ci.yml runs everything" "true true true" $pr .github/workflows/ci.yml
 check "a called workflow runs everything" "true true true" $pr .github/workflows/lint.yml

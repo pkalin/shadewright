@@ -4,7 +4,6 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "clusterId",
     "executor",
     "analyzer"
   ],
@@ -58,7 +57,7 @@
         },
         "digest": {
           "type": "string",
-          "pattern": "^sha256:[a-f0-9]{64}$"
+          "pattern": "^(sha256:[a-f0-9]{64})?$"
         },
         "pullPolicy": {
           "enum": [
@@ -118,25 +117,32 @@
           "items": {
             "type": "string",
             "pattern": "^--[a-zA-Z0-9][a-zA-Z0-9.-]*(=.*)?$"
-          }
+          },
+          "maxItems": 32
         },
         "podLabels": {
-          "$ref": "#/definitions/stringMap"
+          "$ref": "#/definitions/labelMap"
         },
         "podAnnotations": {
-          "$ref": "#/definitions/stringMap"
+          "$ref": "#/definitions/annotationMap"
         },
         "nodeSelector": {
-          "$ref": "#/definitions/stringMap"
+          "$ref": "#/definitions/labelMap"
         },
         "tolerations": {
-          "type": "array",
-          "items": {
-            "type": "object"
-          }
+          "$ref": "#/definitions/tolerations"
         },
         "affinity": {
-          "type": "object"
+          "$ref": "#/definitions/affinity"
+        },
+        "topologySpreadConstraints": {
+          "$ref": "#/definitions/topologySpreadConstraints"
+        },
+        "priorityClassName": {
+          "$ref": "#/definitions/priorityClassName"
+        },
+        "imagePullSecrets": {
+          "$ref": "#/definitions/pullSecrets"
         }
       }
     },
@@ -144,8 +150,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "image",
-        "watchNamespaces"
+        "image"
       ],
       "properties": {
         "image": {
@@ -165,29 +170,27 @@
           "items": {
             "type": "string",
             "pattern": "^--[a-zA-Z0-9][a-zA-Z0-9.-]*(=.*)?$"
-          }
+          },
+          "maxItems": 32
         },
         "podLabels": {
-          "$ref": "#/definitions/stringMap"
+          "$ref": "#/definitions/labelMap"
         },
         "podAnnotations": {
-          "$ref": "#/definitions/stringMap"
+          "$ref": "#/definitions/annotationMap"
         },
         "nodeSelector": {
-          "$ref": "#/definitions/stringMap"
+          "$ref": "#/definitions/labelMap"
         },
         "tolerations": {
-          "type": "array",
-          "items": {
-            "type": "object"
-          }
+          "$ref": "#/definitions/tolerations"
         },
         "affinity": {
-          "type": "object"
+          "$ref": "#/definitions/affinity"
         },
         "watchNamespaces": {
           "type": "array",
-          "minItems": 1,
+          "maxItems": 256,
           "uniqueItems": true,
           "items": {
             "type": "string",
@@ -200,8 +203,169 @@
             "null"
           ],
           "minimum": 1
+        },
+        "topologySpreadConstraints": {
+          "$ref": "#/definitions/topologySpreadConstraints"
+        },
+        "priorityClassName": {
+          "$ref": "#/definitions/priorityClassName"
+        },
+        "imagePullSecrets": {
+          "$ref": "#/definitions/pullSecrets"
         }
       }
+    },
+    "labelMap": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {
+        "maxLength": 317,
+        "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 63
+      }
+    },
+    "annotationMap": {
+      "type": "object",
+      "maxProperties": 64,
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "pullSecrets": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253,
+            "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+          }
+        }
+      }
+    },
+    "tolerations": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string",
+            "maxLength": 317
+          },
+          "operator": {
+            "enum": [
+              "Exists",
+              "Equal"
+            ]
+          },
+          "value": {
+            "type": "string",
+            "maxLength": 63
+          },
+          "effect": {
+            "enum": [
+              "",
+              "NoSchedule",
+              "PreferNoSchedule",
+              "NoExecute"
+            ]
+          },
+          "tolerationSeconds": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "affinity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "nodeAffinity": {
+          "type": "object"
+        },
+        "podAffinity": {
+          "type": "object"
+        },
+        "podAntiAffinity": {
+          "type": "object"
+        }
+      }
+    },
+    "topologySpreadConstraints": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "maxSkew",
+          "topologyKey",
+          "whenUnsatisfiable"
+        ],
+        "properties": {
+          "maxSkew": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "topologyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 317
+          },
+          "whenUnsatisfiable": {
+            "enum": [
+              "DoNotSchedule",
+              "ScheduleAnyway"
+            ]
+          },
+          "labelSelector": {
+            "type": "object"
+          },
+          "matchLabelKeys": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "string"
+            }
+          },
+          "minDomains": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "nodeAffinityPolicy": {
+            "enum": [
+              "Honor",
+              "Ignore"
+            ]
+          },
+          "nodeTaintsPolicy": {
+            "enum": [
+              "Honor",
+              "Ignore"
+            ]
+          }
+        }
+      }
+    },
+    "priorityClassName": {
+      "type": "string",
+      "maxLength": 253,
+      "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"
     }
   },
   "properties": {
@@ -215,22 +379,18 @@
     },
     "clusterId": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$",
-      "description": "1 to 63 letters, digits, '.', '_' or '-', starting and ending with a letter or digit."
+      "pattern": "^([A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?)?$",
+      "description": "Empty (the UID of kube-system) or 1 to 63 letters, digits, '.', '_' or '-', starting and ending with a letter or digit."
     },
     "imagePullSecrets": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "name"
-        ],
-        "properties": {
-          "name": {
-            "type": "string",
-            "minLength": 1
-          }
+      "$ref": "#/definitions/pullSecrets"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowTag": {
+          "type": "boolean"
         }
       }
     },
@@ -248,6 +408,23 @@
         },
         "secure": {
           "type": "boolean"
+        },
+        "serviceMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "interval": {
+              "type": "string",
+              "pattern": "^([0-9]+(ms|s|m|h))*$",
+              "maxLength": 32
+            },
+            "labels": {
+              "$ref": "#/definitions/labelMap"
+            }
+          }
         }
       }
     },
@@ -292,6 +469,34 @@
     },
     "analyzer": {
       "$ref": "#/definitions/analyzer"
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository",
+            "digest"
+          ],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$"
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            }
+          }
+        },
+        "imagePullSecrets": {
+          "$ref": "#/definitions/pullSecrets"
+        }
+      }
     },
     "settings": {
       "type": "object",

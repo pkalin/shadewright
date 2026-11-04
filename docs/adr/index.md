@@ -25,6 +25,6 @@
 | [0021](0021-amending-accepted-adrs.md) | Amending accepted ADRs | Accepted |
 | [0022](0022-scenario-switch-and-clusters.md) | Switching a scenario on with a per-cluster branch, on Kind and the lab | Accepted, amended |
 | [0023](0023-how-the-analyzer-calls-the-model.md) | How the analyzer calls the model: prompts as code, context first, one structured call | Accepted, amended |
-| [0024](0024-analyzer-writes-detection-to-settings-status.md) | The analyzer writes platform and integration detection to the RemediationSettings status | Accepted |
+| [0024](0024-analyzer-writes-detection-to-settings-status.md) | The analyzer writes platform and integration detection to the RemediationSettings status | Accepted, amended |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

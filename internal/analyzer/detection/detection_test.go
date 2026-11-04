@@ -486,3 +486,39 @@ func TestStatusReportsEKSAndGKE(t *testing.T) {
 		})
 	}
 }
+
+// TestStatusReportsNoWatchedNamespaces checks that an analyzer that watches no namespace says so in the
+// settings status, and that one that watches some reports the condition False.
+func TestStatusReportsNoWatchedNamespaces(t *testing.T) {
+	for _, tc := range []struct {
+		watched int
+		want    metav1.ConditionStatus
+		reason  string
+	}{
+		{0, metav1.ConditionTrue, ReasonNoNamespacesWatched},
+		{2, metav1.ConditionFalse, ReasonNamespacesWatched},
+	} {
+		t.Run(fmt.Sprintf("watched=%d", tc.watched), func(t *testing.T) {
+			ctx := t.Context()
+			s := aksSettings()
+			c := clientfake.NewClientBuilder().WithScheme(fakeScheme(t)).WithObjects(s, aksNode("n0")).
+				WithStatusSubresource(s).Build()
+			d, err := New(Config{Registry: registry(t), GroupVersions: noGroups, WatchedNamespaces: tc.watched})
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.reader, d.writer = c, c
+			if _, err := d.Reconcile(ctx, request); err != nil {
+				t.Fatal(err)
+			}
+			var cur remediationv1alpha1.RemediationSettings
+			if err := c.Get(ctx, request.NamespacedName, &cur); err != nil {
+				t.Fatal(err)
+			}
+			cond := meta.FindStatusCondition(cur.Status.Conditions, ConditionNoWatchedNamespaces)
+			if cond == nil || cond.Status != tc.want || cond.Reason != tc.reason {
+				t.Errorf("NoWatchedNamespaces = %+v, want %s with reason %s", cond, tc.want, tc.reason)
+			}
+		})
+	}
+}

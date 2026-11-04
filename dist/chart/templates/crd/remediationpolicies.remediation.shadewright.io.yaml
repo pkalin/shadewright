@@ -7,6 +7,8 @@ metadata:
     "helm.sh/resource-policy": keep
     {{- end }}
     controller-gen.kubebuilder.io/version: v0.22.0
+  labels:
+    {{- include "shadewright.labels" (dict "component" "" "context" $) | nindent 4 }}
   name: remediationpolicies.remediation.shadewright.io
 spec:
   group: remediation.shadewright.io

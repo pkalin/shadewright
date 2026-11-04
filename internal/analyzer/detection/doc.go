@@ -28,7 +28,8 @@ limitations under the License.
 //     spec.modules and that detection with [modules.Registry.Select]. No field of the status is ever read for
 //     this or for anything else: it is a report, so a stale or forged status enables nothing;
 //  3. writes status.platform, status.integrations, observedGeneration and the conditions UnknownModules (True
-//     when spec.modules names a module this binary does not have) and DetectionFailed with an update of the
+//     when spec.modules names a module this binary does not have), DetectionFailed and NoWatchedNamespaces
+//     (True when the analyzer watches no namespace, [Config.WatchedNamespaces]) with an update of the
 //     status subresource, read again and retried on a conflict, and only when something changed. The read and
 //     the write of steps 2 and 3, retries included, have a deadline of their own.
 //

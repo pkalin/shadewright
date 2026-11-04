@@ -68,8 +68,9 @@ func main() {
 		"The operator namespace: where Incidents and RemediationRequests are written. "+
 			"Defaults to the POD_NAMESPACE environment variable.")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
-		"Comma-separated namespaces whose events, pods and workloads the analyzer reads. Required; each one "+
-			"needs a RoleBinding to the analyzer-watch-role (config/watch).")
+		"Comma-separated namespaces whose events, pods and workloads the analyzer reads; each one needs a "+
+			"RoleBinding to the analyzer-watch-role (config/watch). Empty (the default) watches no namespace, "+
+			"never all of them: the analyzer then starts no collector and records no Incident.")
 	flag.StringVar(&clusterIDFlag, "cluster-id", "",
 		"A name for this cluster, hashed into every fingerprint so Incidents from two clusters never merge. "+
 			"Required: 1 to 63 letters, digits, '.', '_' or '-', starting and ending with a letter or digit. "+
@@ -99,8 +100,14 @@ func main() {
 		setupLog.Error(nil, "Invalid --max-incidents: it must be at least 1", "value", maxIncidents)
 		os.Exit(1)
 	}
-	setupLog.Info("Watching namespaces", "namespaces", watched, "operatorNamespace", namespace,
-		"clusterID", clusterID, "maxIncidents", maxIncidents)
+	analyzer.SetWatchedNamespaces(len(watched))
+	if len(watched) == 0 {
+		setupLog.Info("Watching no namespaces: no events or pods are read and no Incident is recorded; "+
+			"set --watch-namespaces to watch some", "operatorNamespace", namespace, "clusterID", clusterID)
+	} else {
+		setupLog.Info("Watching namespaces", "namespaces", watched, "operatorNamespace", namespace,
+			"clusterID", clusterID, "maxIncidents", maxIncidents)
+	}
 
 	mgrOpts := opts.ManagerOptions(setupLog, scheme, cmdutil.AnalyzerLease)
 	mgrOpts.Cache = analyzer.CacheOptions(namespace, watched)
@@ -138,9 +145,14 @@ func main() {
 		setupLog.Error(err, "Failed to create the collector")
 		os.Exit(1)
 	}
-	if err := col.SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to set up the collector")
-		os.Exit(1)
+	// With no watched namespace the collector is not set up, so no informer on events or pods is started: the
+	// cache would hold the operator namespace only (analyzer.CacheOptions), where the analyzer has no grant on
+	// them, and its sync would fail. Its observation channel then stays empty.
+	if len(watched) > 0 {
+		if err := col.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to set up the collector")
+			os.Exit(1)
+		}
 	}
 	if err := inc.SetupWithManager(mgr, col.Observations()); err != nil {
 		setupLog.Error(err, "Failed to set up the Incident controller")
@@ -156,8 +168,9 @@ func main() {
 		os.Exit(1)
 	}
 	det, err := detection.New(detection.Config{
-		Registry:      registry,
-		GroupVersions: detection.DiscoveryGroupVersions(mgr.GetConfig()),
+		Registry:          registry,
+		GroupVersions:     detection.DiscoveryGroupVersions(mgr.GetConfig()),
+		WatchedNamespaces: len(watched),
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to create platform detection")

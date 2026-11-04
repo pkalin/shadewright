@@ -371,3 +371,62 @@ func TestEnvtestOnlyWatchedNamespacesAndNoCoreEvents(t *testing.T) {
 		t.Fatalf("informers = %v, want exactly %v (no core/v1 Events, no owner informers)", got, want)
 	}
 }
+
+// TestEnvtestNoWatchedNamespaceCachesNothing checks the cache of an analyzer started with an empty
+// --watch-namespaces: with admin credentials, so RBAC hides nothing, it still lists no pod and no event of any
+// watched or unwatched namespace. An empty DefaultNamespaces would list them all.
+func TestEnvtestNoWatchedNamespaceCachesNothing(t *testing.T) {
+	startEnv(t)
+	ctx := t.Context()
+	for _, ns := range []string{watchedNS, unwatchedNS} {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "nothing-" + ns, Namespace: ns},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "app"}}},
+		}
+		if err := env.admin.Create(ctx, pod); err != nil {
+			t.Fatal(err)
+		}
+		if err := env.admin.Create(ctx, envEvent(ns, "nothing-"+ns, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The admin client sees them, so a cache that lists nothing proves the scope, not an empty cluster.
+	var all corev1.PodList
+	if err := env.admin.List(ctx, &all); err != nil {
+		t.Fatal(err)
+	}
+	if len(all.Items) < 2 {
+		t.Fatalf("admin lists %d pods, want at least the 2 just created", len(all.Items))
+	}
+
+	c, err := cache.New(env.testEnv.Config, func() cache.Options {
+		o := analyzer.CacheOptions(operatorNS, nil)
+		o.Scheme = env.admin.Scheme()
+		return o
+	}())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() { _ = c.Start(cctx) }()
+	syncCtx, done := context.WithTimeout(ctx, 30*time.Second)
+	defer done()
+	if !c.WaitForCacheSync(syncCtx) {
+		t.Fatal("cache did not start")
+	}
+	var pods corev1.PodList
+	if err := c.List(syncCtx, &pods); err != nil {
+		t.Fatal(err)
+	}
+	var events eventsv1.EventList
+	if err := c.List(syncCtx, &events); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range pods.Items {
+		t.Errorf("cache with no watched namespace lists pod %s/%s", p.Namespace, p.Name)
+	}
+	for _, e := range events.Items {
+		t.Errorf("cache with no watched namespace lists event %s/%s", e.Namespace, e.Name)
+	}
+}

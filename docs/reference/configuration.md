@@ -13,7 +13,7 @@ Everything an operator can set today, checked against `cmd/main.go` (the executo
 | Executor | `/manager` | `ghcr.io/pkalin/shadewright-executor` | Reconciles `RemediationRequest` objects in the operator namespace, decides with the policy, acts through Git |
 | Analyzer | `/analyzer` | `ghcr.io/pkalin/shadewright-analyzer` | Collector, Incident controller, platform and module detection. Creates Incidents and, once the analysis is built, requests. Never acts on them |
 
-Both images are distroless, run as user 65532, and are published for linux/amd64 and linux/arm64. The manifests in `config/manager` use the placeholder `controller:latest` for both, so every install replaces it (the chart refuses to render without a digest). Pin by digest; the [getting started](../getting-started.md#2-install-in-observe-only-mode) page has the v0.1.0 digests and an overlay that does it. Both Deployments run one replica with `--leader-elect`, restricted Pod Security settings (non-root, `RuntimeDefault` seccomp, read-only root filesystem, all capabilities dropped), requests of 10m CPU and 64Mi, and limits of 500m CPU and 128Mi.
+Both images are distroless, run as user 65532, and are published for linux/amd64 and linux/arm64. The manifests in `config/manager` use the placeholder `controller:latest` for both, so every install replaces it (the published chart runs the release's signed images by digest; a chart from a source checkout runs the `appVersion` tag). Pin by digest; the [getting started](../getting-started.md#2-install-in-observe-only-mode) page has the v0.1.0 digests and an overlay that does it. Both Deployments run one replica with `--leader-elect`, restricted Pod Security settings (non-root, `RuntimeDefault` seccomp, read-only root filesystem, all capabilities dropped), requests of 10m CPU and 64Mi, and limits of 500m CPU and 128Mi.
 
 ## Helm chart
 
@@ -24,23 +24,21 @@ helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <vers
   --namespace shadewright-system --create-namespace -f my-values.yaml
 ```
 
-Use the release name `shadewright` and the namespace `shadewright-system`: the names of the ServiceAccounts, and so the subject of the federated credential, come from the chart's full name: the release name when it contains the chart name `shadewright` (so `shadewright-executor` and `shadewright-analyzer` for the release `shadewright`), otherwise `<release>-shadewright`, then `-executor` or `-analyzer` (cut to 63 characters in all; `fullnameOverride` replaces the prefix). Check with `helm template` or `kubectl -n <namespace> get serviceaccounts` before you create the federated credential. The Leases and the analysis budget ConfigMap keep the fixed names the binaries expect whatever the release is called. `values.schema.json` validates the values on install, upgrade, lint and template; `helm lint` fails without the required ones.
+Use the release name `shadewright` and the namespace `shadewright-system`: the names of the ServiceAccounts, and so the subject of the federated credential, come from the chart's full name: the release name when it contains the chart name `shadewright` (so `shadewright-executor` and `shadewright-analyzer` for the release `shadewright`), otherwise `<release>-shadewright`, then `-executor` or `-analyzer` (cut to 63 characters in all; `fullnameOverride` replaces the prefix). Check with `helm template` or `kubectl -n <namespace> get serviceaccounts` before you create the federated credential. The Leases and the analysis budget ConfigMap keep the fixed names the binaries expect whatever the release is called. `values.schema.json` validates the values on install, upgrade, lint and template.
 
-A minimal `my-values.yaml`:
+The published chart installs with no values at all as an idle Shadewright: the analyzer watches no namespace (no RoleBinding outside the operator namespace), so it reads no namespaced object outside the operator namespace, has no Git identity, and writes only in the operator namespace (its Leases, the budget ConfigMap, Events) plus the settings status once a settings object exists; it still lists Nodes and reads discovery and the settings cluster-wide. The executor has no Azure workload identity, so it cannot reach Key Vault to sign for the GitHub App. The cluster ID is the UID of `kube-system`. The published chart runs the release's signed images by digest (the publish job writes them into its `values.yaml`). A chart from a source checkout has no digests and refuses to render until you set `executor.image.digest` and `analyzer.image.digest`, or opt in with `image.allowTag: true` to run the `appVersion` tag, which needs images built from that same checkout: the v0.1.0 images stop at start with an empty watch list. `helm test` checks that the metrics Service of each component answers and refuses a scrape without a token. A `my-values.yaml` that puts it to work:
 
 ```yaml
-clusterId: my-cluster
+clusterId: my-cluster    # optional; required when the chart is rendered with helm template
 executor:
-  image:
-    digest: sha256:<executor image digest>
   identity:
     azure:
       clientId: <client ID of the executor managed identity>
 analyzer:
-  image:
-    digest: sha256:<analyzer image digest>
   watchNamespaces: [<namespace to watch>]
 ```
+
+Each component also takes the standard Pod values, bounded by the schema: `nodeSelector`, `tolerations`, `affinity`, `topologySpreadConstraints`, `priorityClassName`, `imagePullSecrets` (added to the global list) and `podAnnotations`. Every object carries the `app.kubernetes.io/*` labels and `helm.sh/chart`. The chart passes `ct lint` and `ct install` (chart-testing, with the default values on Kind) and `helm lint --strict` in CI.
 
 Every value, with its default, its allowed values and its security effect, is in the [chart README](https://github.com/pkalin/shadewright/blob/main/dist/chart/README.md). It is generated from the comments in `dist/chart/values.yaml` with helm-docs (`make chart-docs`), and CI fails if the two differ or a value has no description, so there is one source. `values.schema.json` is the authority on which values are required.
 
@@ -55,7 +53,7 @@ cosign verify \
 
 The digest is in the run summary of the Chart workflow, or from `helm pull oci://ghcr.io/pkalin/charts/shadewright --version <version>` (it prints `Digest:`). Image signatures are verified the same way, with the image name and the `images\.yml` workflow in the identity.
 
-Not in the chart: the Prometheus `ServiceMonitor` (as in `config/default`), cert-manager and webhooks (none are installed), and the `Namespace` (use `--create-namespace`). The security contexts, probes, ports and the replica count (1, with leader election) are fixed to what `config/` sets.
+`metrics.serviceMonitor.enabled` (off by default, as `config/default` leaves `config/prometheus` out) installs a Prometheus Operator `ServiceMonitor` per component; Prometheus then needs the `metrics-reader` ClusterRole for its ServiceAccount and the label `metrics: enabled` on its namespace. Not in the chart: cert-manager and webhooks (none are installed), and the `Namespace` (use `--create-namespace`). The security contexts, probes, ports and the replica count (1, with leader election) are fixed to what `config/` sets.
 
 ## Flags
 
@@ -89,7 +87,7 @@ Flags are passed as container args. A flag given twice takes its last value. The
 
 | Flag | Default | Meaning | `config/` sets |
 | --- | --- | --- | --- |
-| `--watch-namespaces` | none, **required** | Comma-separated namespaces whose events, pods and workloads are read. Each must be a valid namespace name; spaces and duplicates are dropped; an empty list is an error, never "all namespaces" | `demo` (the lab) |
+| `--watch-namespaces` | empty (no namespace) | Comma-separated namespaces whose events, pods and workloads are read. Each must be a valid namespace name (`*` is refused); spaces and duplicates are dropped. An empty list watches no namespace, never "all namespaces": the analyzer starts and is Ready, starts no collector, records no Incident, logs `Watching no namespaces` and reports the condition `NoWatchedNamespaces` True in the settings status | `demo` (the lab) |
 | `--cluster-id` | none, **required** | See [cluster ID](#cluster-id) | `lab` (the lab) |
 | `--max-incidents` | `500` | Most Incidents kept in the operator namespace; at least 1. At the cap a new fingerprint is not stored, is counted in `shadewright_incident_observations_refused_total` and reported in a Warning event (at most one per 10 minutes) | unset |
 
@@ -116,14 +114,14 @@ These are compiled in. Changing one needs a code change.
 
 ## Cluster ID
 
-`--cluster-id` is hashed into every Incident fingerprint, so Incidents from two clusters never merge. It is 1 to 63 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit. Give each cluster its own. **Changing it starts every Incident afresh**, so choose it once. The manifests ship `lab`; the Helm chart takes it from the required value `clusterId`.
+`--cluster-id` is hashed into every Incident fingerprint, so Incidents from two clusters never merge. It is 1 to 63 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit. Give each cluster its own. **Changing it starts every Incident afresh**, so choose it once. The manifests ship `lab`. The Helm chart takes it from the value `clusterId`; left empty, it uses the UID of the `kube-system` namespace, read with `lookup` at install and upgrade (stable and unique for the life of the cluster). `helm template`, `helm lint` and a client-side `--dry-run` fail with a message until `clusterId` is set. GitOps tools and client-side renders (`helm template`, helm diff, Argo CD, Flux with a dry-run) ask no cluster, and an installer without `get` on the `kube-system` namespace cannot read it, so each of those must set `clusterId` explicitly. Moving from the default to a value of your own also starts every Incident afresh. It is an ID, never a display name.
 
 ## Namespaces and RoleBindings
 
 Three namespaces matter:
 
 - **Operator namespace** (`shadewright-system`: the `namespace` of `config/default`, with the name prefix `shadewright-`). It holds the Deployments, ServiceAccounts, Incidents, RemediationRequests and the analysis budget. The executor reconciles requests only here; a request anywhere else is never seen. A policy must list this namespace in `requestNamespaces`, or the request is `Denied` (`RequestNamespaceNotAllowed`). Renaming it means changing the federated credential subject, every RoleBinding subject, and `--namespace`.
-- **Watched namespaces**, set by `--watch-namespaces`. The analyzer's cache is limited to them, so it asks for no more than its RBAC grants.
+- **Watched namespaces**, set by `--watch-namespaces`. The analyzer's cache is limited to them, so it asks for no more than its RBAC grants. None by default in the chart: an empty list watches nothing.
 - **Target namespaces**, set by the policy (`targets.namespaces`). Independent of the watched ones: a policy only allows what a request names.
 
 Each watched namespace needs a RoleBinding that binds the ClusterRole `shadewright-analyzer-watch-role` to the ServiceAccount `shadewright-analyzer` of the operator namespace. `config/watch` is the example and holds only the lab's `demo` binding; it is built on its own because `config/default` sets every namespace to the operator's. Without the binding the API server refuses the analyzer's reads there and nothing is observed in that namespace. A repository test checks that the lab's `--watch-namespaces` and `config/watch` agree; it cannot check yours.

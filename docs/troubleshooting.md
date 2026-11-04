@@ -41,13 +41,13 @@ A request stuck in `Pending` with no condition is being retried: the signer cann
 
 ## Limits
 
-Set on `Queued` (`True`) when the policy allows a request but a limit holds it back; refusals are never held. The request keeps no phase or `Pending` and checks only the limits every 30 seconds, so it reads no Git meanwhile; once they let it through, the condition goes and the policy check runs again. Limits count the requests in the operator namespace.
+Set on `Queued` (`True`) when the policy allows a request but a limit holds it back; a refusal at the first check is never held, but a request already `Queued` is decided again only once the limits let it through, so a policy change that now refuses it waits for a free slot. The request keeps no phase or `Pending` and checks only the limits every 30 seconds, so it reads no Git meanwhile; once they let it through, the condition goes and the policy check runs again. Limits count the requests in the operator namespace.
 
 | Reason | Cause | Fix |
 | --- | --- | --- |
 | `TargetLocked` | Another active request names the same target UID: from `PolicyChecked` until `Merged` or a final phase, or deleted but still closing its pull request | Wait for it to end, or delete it if it should not go on |
 | `ConcurrencyLimitReached` | `maxConcurrentRemediations` requests are active | Wait, review the open pull requests, or raise the limit in `RemediationSettings` |
-| `CircuitOpen` | Three requests that went through the policy check failed (`Failed`, `NeedsIntervention`) since the latest merge, the latest less than 30 minutes ago. `Expired` does not count | Find out why they failed. The breaker closes 30 minutes after the latest failure, or when a request merges; deleting the failed requests closes it at once. After an upgrade it starts closed: requests that ended before then are not counted |
+| `CircuitOpen` | Three requests that went through the policy check failed (`Failed`, `NeedsIntervention`) since the latest `Merged` (or `Succeeded`) request, the latest less than 30 minutes ago. `Expired` does not count | Find out why they failed. The breaker closes 30 minutes after the latest failure, or when a request is `Merged` (or `Succeeded`); deleting the failed requests closes it at once. After an upgrade it starts closed: requests that ended before then are not counted |
 
 A request that stays in `Pending` with no condition while the executor logs a failed list of `RemediationRequests` is held back too: the limits cannot be read, so nothing goes through. A request that was already `Queued` keeps its earlier reason, if any, while the list is unreadable.
 

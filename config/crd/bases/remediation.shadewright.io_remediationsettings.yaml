@@ -65,8 +65,9 @@ spec:
                 description: |-
                   maxConcurrentRemediations limits the requests that are active at once in the operator namespace: from
                   PolicyChecked up to the merge, and while a deleted one still closes its pull request. A further request
-                  the policy allows stays Pending, with the condition Queued, until fewer are active; a refusal is never held
-                  back. Read from the API server right before each allowed decision.
+                  the policy allows stays Pending, with the condition Queued, until fewer are active; a refusal at the first
+                  check is never held back, but a request already Queued is decided again only once the limits let it
+                  through. Read from the API server right before each allowed decision.
                 format: int32
                 maximum: 20
                 minimum: 1

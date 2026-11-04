@@ -21,7 +21,7 @@ The phase gauges are computed when the endpoint is scraped, from the informer th
 | `shadewright_remediations_in_flight` | gauge | none | RemediationRequests that hold a slot under `maxConcurrentRemediations`, as the last check of the limits counted them. 0 until the first check |
 | `shadewright_remediation_concurrency_limit` | gauge | none | `maxConcurrentRemediations` in force at the last check of the limits. 0 until the first check |
 | `shadewright_remediation_waits_total` | counter | `reason`: `target_locked`, `concurrency_limit`, `circuit_open`, `limits_unknown` | Times a request that passed every check was held back `Queued` before the decision, by reason; a request is counted again at each 30 s recheck while it waits. `limits_unknown` is a check of the limits that failed and is retried with backoff (fail closed) |
-| `shadewright_circuit_breaker_open` | gauge | none | 1 while the circuit breaker of [design 10.7](../design.md) is open, else 0, as the last check of the limits found it |
+| `shadewright_circuit_breaker_open` | gauge | none | 1 while the circuit breaker of [design 10, item 7](../design.md#10-security) is open, else 0, as the last check of the limits found it |
 | `shadewright_circuit_breaker_trips_total` | counter | none | Times this process found the breaker open after it had found it closed (or at its first check). Starts again at zero when the Pod restarts |
 
 ## Analyzer

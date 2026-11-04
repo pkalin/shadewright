@@ -46,8 +46,7 @@
   <text class="h" x="60" y="136">Workloads</text>
   <text class="s" x="60" y="157">events · pod status</text>
   <text class="s" x="60" y="173">watched namespaces only</text>
-  <text class="lbl" x="44" y="198">reports platform and</text>
-  <text class="lbl" x="44" y="214">integration detection</text>
+  <text class="lbl" x="160" y="224">detection report</text>
   <rect class="box" x="44" y="270" width="210" height="72" rx="10"/>
   <text class="h" x="60" y="296">RemediationSettings</text>
   <text class="s" x="60" y="317">maxAnalysesPerDay · status</text>

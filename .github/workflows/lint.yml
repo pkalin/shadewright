@@ -1,14 +1,19 @@
 name: Lint
 
+# Called by ci.yml (the only trigger), which decides from the changed files whether it runs.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_call:
+    inputs:
+      run:
+        description: Whether the job runs; ci.yml passes false when no file of this group changed.
+        type: boolean
+        default: true
 
 permissions: {}
 
 jobs:
   lint:
+    if: ${{ inputs.run != false }}
     permissions:
       contents: read
     name: lint
@@ -23,6 +28,16 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      # golangci-lint's analysis cache. Pull requests restore the newest cache of main or of their own branch.
+      - name: Cache golangci-lint
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/golangci-lint
+          key: golangci-lint-${{ runner.os }}-${{ hashFiles('go.sum', '.golangci.yml', '.custom-gcl.yml') }}-${{ github.sha }}
+          restore-keys: |
+            golangci-lint-${{ runner.os }}-${{ hashFiles('go.sum', '.golangci.yml', '.custom-gcl.yml') }}-
+            golangci-lint-${{ runner.os }}-
 
       - name: Check linter configuration
         run: make lint-config

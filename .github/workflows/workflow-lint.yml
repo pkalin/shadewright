@@ -4,10 +4,9 @@ name: Workflow lint
 # template injection, excessive permissions, unpinned actions, credential persistence). Both tools are pinned;
 # actionlint's download is checked against the sha256 published with its release.
 # Run the same checks locally before changing a workflow: actionlint, then zizmor .github/workflows
+# Called by ci.yml (the only trigger); always runs.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_call:
 
 permissions: {}
 

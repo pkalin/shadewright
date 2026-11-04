@@ -1,8 +1,10 @@
 name: Images
 
-# Builds the executor and analyzer images for linux/amd64 and linux/arm64. Pull requests build both without
-# pushing. Pushes to main and v* tags also push to ghcr.io/pkalin/shadewright-{executor,analyzer}; only the
-# publish job has packages: write. After the push, the same job signs each image by digest with cosign keyless
+# Builds the executor and analyzer images for linux/amd64 and linux/arm64 and pushes them to
+# ghcr.io/pkalin/shadewright-{executor,analyzer} from main and v* tags; only the publish job has packages: write.
+# The pull request build (amd64 only, no push, no write permission) is images-build.yml, called by ci.yml; it is
+# a separate file because a called workflow may not contain a job that asks for more permissions than its caller
+# grants, and this file's identity is what the signature is verified against. After the push, the same job signs each image by digest with cosign keyless
 # (GitHub OIDC, no key to store), attaches an SPDX SBOM as a signed attestation, records a GitHub build
 # provenance attestation, and verifies all three against the identity of this workflow, so a mismatch fails the
 # run (#82). The id-token and attestations permissions exist only on the publish job, which never runs for a
@@ -11,38 +13,10 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-  pull_request:
 
 permissions: {}
 
 jobs:
-  build:
-    name: Build ${{ matrix.image }} (no push)
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        image: [executor, analyzer]
-    steps:
-      - name: Clone the code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - name: Build both architectures
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          target: ${{ matrix.image }}
-          platforms: linux/amd64,linux/arm64
-          push: false
-
   publish:
     name: Publish ${{ matrix.image }}
     if: github.event_name == 'push'

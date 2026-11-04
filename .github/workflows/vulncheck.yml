@@ -1,9 +1,14 @@
 name: Vulncheck
 
+# Called by ci.yml on pull requests and pushes to main, which decides from the changed files whether it runs.
+# A scheduled or manual run has no inputs and always runs.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_call:
+    inputs:
+      run:
+        description: Whether the job runs; ci.yml passes false when no file of this group changed.
+        type: boolean
+        default: true
   # New advisories can affect an unchanged main, so scan weekly too (Monday 06:17 UTC).
   schedule:
     - cron: "17 6 * * 1"
@@ -13,6 +18,7 @@ permissions: {}
 
 jobs:
   vulncheck:
+    if: ${{ inputs.run != false }}
     permissions:
       contents: read
     name: govulncheck

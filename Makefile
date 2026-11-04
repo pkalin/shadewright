@@ -84,9 +84,10 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test-scripts
-test-scripts: ## Test the release notes script (hack/release-notes-by-scope.sh).
+test-scripts: ## Test the release notes, chart docs and CI change detection scripts (hack/*_test.sh).
 	hack/release-notes-by-scope_test.sh
 	hack/check-chart-docs_test.sh
+	hack/ci-changed_test.sh
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.

@@ -1,14 +1,19 @@
 name: Tests
 
+# Called by ci.yml (the only trigger), which decides from the changed files whether it runs.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_call:
+    inputs:
+      run:
+        description: Whether the job runs; ci.yml passes false when no file of this group changed.
+        type: boolean
+        default: true
 
 permissions: {}
 
 jobs:
   test:
+    if: ${{ inputs.run != false }}
     permissions:
       contents: read
     name: test
@@ -23,6 +28,14 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      # The envtest binaries (kube-apiserver, etcd) that setup-envtest downloads; the Kubernetes release comes
+      # from k8s.io/api in go.mod, so go.mod is the key.
+      - name: Cache envtest binaries
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: bin/k8s
+          key: envtest-${{ runner.os }}-${{ hashFiles('go.mod') }}
 
       - name: Running Tests
         run: |

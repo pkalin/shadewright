@@ -46,6 +46,12 @@ rules:
 - apiGroups:
   - remediation.shadewright.io
   resources:
+  - incidents
+  verbs:
+  - get
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
   - remediationrequests
   verbs:
   - get

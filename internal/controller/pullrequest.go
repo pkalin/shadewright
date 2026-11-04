@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -413,7 +414,7 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 		HeadBranch: branch,
 		BaseBranch: string(src.TargetBranch),
 		Title:      commitTitle(rr),
-		Body:       pullRequestBody(rr),
+		Body:       pullRequestBody(rr, r.verifiedIncidentName(ctx, rr)),
 	})
 	if err != nil {
 		return reconcile.Result{}, freshness.WrapProvider("open the pull request", err)
@@ -934,8 +935,10 @@ func commitTitle(rr *remediationv1alpha1.RemediationRequest) string {
 
 // pullRequestBody is the evidence, scope, expected effect, risk and rollback plan, and the marker. Every value
 // comes from validated fields of the request and its status; the whole body is redacted once more, so nothing
-// that looks like a secret reaches the Git host.
-func pullRequestBody(rr *remediationv1alpha1.RemediationRequest) string {
+// that looks like a secret reaches the Git host. The one exception is incident, the Incident name as
+// verifiedIncidentName returned it: when it is not empty, its whole occurrences are kept
+// (redact.StringKeeping), because the collector's names are a long hex run the redactor takes for a token.
+func pullRequestBody(rr *remediationv1alpha1.RemediationRequest, incident string) string {
 	what, previous, desired := change(rr)
 	t, src := rr.Spec.TargetRef, rr.Status.Source
 	approval := "yes"
@@ -956,7 +959,39 @@ func pullRequestBody(rr *remediationv1alpha1.RemediationRequest) string {
 		"Any other push to this branch stops the automation.\n\n")
 	b.WriteString("**Rollback:** revert this pull request; the GitOps controller applies the previous value.\n\n")
 	fmt.Fprintf(&b, "**Approval required:** %s.\n\n", approval)
-	out := redact.String(b.String())
+	out := redact.StringKeeping(b.String(), incident)
 	// The marker is added after redaction: it holds only the UID and the digest, and must stay exact.
 	return out + marker(rr) + "\n"
+}
+
+// collectorIncidentName matches the name the collector gives an Incident: "incident-" and the 64 lower-case hex
+// digits of its fingerprint (incidents.Name, which the executor does not import: it is analyzer code).
+var collectorIncidentName = regexp.MustCompile(`^incident-[0-9a-f]{64}$`)
+
+// verifiedIncidentName returns the name of the request's Incident when the body may show it unredacted, and ""
+// otherwise. spec.incidentRef is written by whoever created the request, so the name alone proves nothing: a
+// hex secret could be written as "incident-<secret>". The name is kept only when the executor reads an
+// Incident of that name in the request's namespace from the API server (never the cache, so get is enough),
+// its UID is the one in incidentRef, and the name is the one the collector derives from the Incident's
+// fingerprint. Any failure to read it, including a missing permission, gives "" and so a redacted name: the
+// body is only less readable, never blocked.
+func (r *RemediationRequestReconciler) verifiedIncidentName(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) string {
+	ref := rr.Spec.IncidentRef
+	if !collectorIncidentName.MatchString(ref.Name) {
+		return ""
+	}
+	var inc remediationv1alpha1.Incident
+	if err := r.reader().Get(ctx, client.ObjectKey{Namespace: rr.Namespace, Name: ref.Name}, &inc); err != nil {
+		if !apierrors.IsNotFound(err) {
+			logf.FromContext(ctx).Info("Failed to read the Incident of RemediationRequest, so its name was redacted",
+				"remediationRequest", client.ObjectKeyFromObject(rr), "reason", apierrors.ReasonForError(err))
+		}
+		return ""
+	}
+	if ref.UID == "" || types.UID(ref.UID) != inc.UID ||
+		"incident-"+strings.TrimPrefix(inc.Spec.Fingerprint, "sha256:") != inc.Name {
+		return ""
+	}
+	return inc.Name
 }

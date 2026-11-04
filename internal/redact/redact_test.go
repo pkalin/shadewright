@@ -704,3 +704,34 @@ func TestFluxRevisions(t *testing.T) {
 		{name: "at sign and prefix before a secret", input: "x@sha1:" + commit + " end", secrets: []string{commit}},
 	})
 }
+
+// StringKeeping keeps only whole occurrences of the verified strings; everything else is redacted as String
+// redacts it (#264).
+func TestStringKeeping(t *testing.T) {
+	name := "incident-" + rep("9f86d081", 8)
+	hexToken := rep("3f1c9a7b", 5)
+	in := "change for incident `" + name + "`.\nincident `" + name + "`, path apps/" + hexToken + "/x.yaml"
+	want := "change for incident `" + name + "`.\nincident `" + name + "`, path [REDACTED:token].yaml"
+	if out := StringKeeping(in, name); out != want {
+		t.Errorf("StringKeeping:\n got: %s\nwant: %s", out, want)
+	}
+	if out := String(in); strings.Contains(out, name) {
+		t.Errorf("String keeps the name, so the test proves nothing:\n%s", out)
+	}
+	for _, s := range []string{
+		"x" + name,
+		name + ".example",
+		"a." + name,
+		name + "-" + rep("ab12", 6),
+		name + "0",
+		"incident-" + hexToken,
+	} {
+		in := "incident `" + s + "` end"
+		if out := StringKeeping(in, name, ""); !strings.Contains(out, "[REDACTED:token]") || strings.Contains(out, name) {
+			t.Errorf("kept a string that is not a whole verified occurrence:\n in: %s\nout: %s", in, out)
+		}
+	}
+	if out, want := StringKeeping("token "+hexToken, ""), String("token "+hexToken); out != want {
+		t.Errorf("an empty keep changed the result: %q, want %q", out, want)
+	}
+}

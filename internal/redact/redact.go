@@ -127,6 +127,58 @@ func String(s string) string {
 	return defaultRedactor.String(s)
 }
 
+// StringKeeping is String, except that each whole occurrence of a string in keep stays as it is. It is for
+// text the caller renders from a fixed template, where keep holds values the caller has verified are not
+// secrets (an object name it read back from the API server, for example), never text from a model, a user or
+// the cluster. An occurrence counts only when the bytes on both sides are not token characters (ASCII letters,
+// digits and "+/_-=."), so a kept string inside a longer run is redacted with that run. The text between kept
+// occurrences is redacted piece by piece; empty strings in keep are ignored.
+func StringKeeping(s string, keep ...string) string {
+	var b strings.Builder
+	rest := s
+	for {
+		at, n := firstWhole(rest, keep)
+		if at < 0 {
+			b.WriteString(String(rest))
+			return b.String()
+		}
+		b.WriteString(String(rest[:at]))
+		b.WriteString(rest[at : at+n])
+		rest = rest[at+n:]
+	}
+}
+
+// firstWhole returns the offset and length of the first whole occurrence in s of a non-empty string of keep
+// (the longest one on a tie), or -1.
+func firstWhole(s string, keep []string) (int, int) {
+	best, bestLen := -1, 0
+	for _, k := range keep {
+		if k == "" {
+			continue
+		}
+		for from := 0; from <= len(s)-len(k); {
+			i := strings.Index(s[from:], k)
+			if i < 0 {
+				break
+			}
+			i += from
+			if (i == 0 || !isTokenByte(s[i-1])) && (i+len(k) == len(s) || !isTokenByte(s[i+len(k)])) {
+				if best < 0 || i < best || (i == best && len(k) > bestLen) {
+					best, bestLen = i, len(k)
+				}
+				break
+			}
+			from = i + 1
+		}
+	}
+	return best, bestLen
+}
+
+// isTokenByte reports whether c can be part of a token run or an object name.
+func isTokenByte(c byte) bool {
+	return isAlnum(c) || strings.IndexByte("+/_-=.", c) >= 0
+}
+
 // span is a byte range of the input to replace, with the kind of the rule that found it.
 type span struct {
 	start, end int

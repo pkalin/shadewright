@@ -59,7 +59,9 @@ var (
 )
 
 // breakerSeen is the state of the breaker the last check of the limits in this process found, plus one: zero
-// before the first check.
+// before the first check. One value for the process is enough: a check lists the requests of the request's
+// namespace, but the executor watches requests in the operator namespace only (CacheOptions), so every check
+// reads the same namespace and there is one breaker. Key it by namespace if requests ever span namespaces.
 var breakerSeen atomic.Int32
 
 func init() {

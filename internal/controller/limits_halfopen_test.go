@@ -24,10 +24,10 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -38,13 +38,6 @@ import (
 // before limitsNow, so at limitsNow the cool-down is over and the breaker is half-open.
 const halfOpenCooldown = 5 * time.Minute
 
-// admittedAt gives rr the PolicyAllowed condition the policy check writes when it lets a request through at t.
-func admittedAt(rr *remediationv1alpha1.RemediationRequest, t time.Time) *remediationv1alpha1.RemediationRequest {
-	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionPolicyAllowed,
-		Status: metav1.ConditionTrue, Reason: "Allowed", Message: "test", LastTransitionTime: metav1.NewTime(t)})
-	return rr
-}
-
 // halfOpenWorld is limitsWorld with the breaker tripped by three failures in a row and its cool-down over at
 // limitsNow, plus others. Besides rr it holds rr2, a second Pending request on another Deployment, so neither
 // the lock nor the cap (20) holds one back behind the other.
@@ -53,7 +46,7 @@ func halfOpenWorld(t *testing.T, others ...*remediationv1alpha1.RemediationReque
 	*remediationv1alpha1.RemediationRequest) {
 	t.Helper()
 	fail := func(name string, phase remediationv1alpha1.RemediationPhase, ago time.Duration) *remediationv1alpha1.RemediationRequest {
-		return admittedAt(otherRequest(name, "uid-target-"+name, phase, ago), limitsNow.Add(-ago-time.Minute))
+		return otherRequest(name, "uid-target-"+name, phase, ago)
 	}
 	others = append([]*remediationv1alpha1.RemediationRequest{
 		fail("f1", remediationv1alpha1.PhaseFailed, 30*time.Minute),
@@ -99,42 +92,62 @@ func endProbe(t *testing.T, c client.Client, probe *remediationv1alpha1.Remediat
 	}
 }
 
-// TestBreakerHalfOpenLetsOneProbeThrough checks that after the cool-down one request goes through as the probe
-// and the next waits (CircuitHalfOpen) while it runs, also for a new reconciler on the same objects (a restart
-// or a new leader). A request let through before the trip that still runs is not a probe.
+// expectProbe checks that got is marked as the breaker's probe, or not.
+func expectProbe(t *testing.T, got *remediationv1alpha1.RemediationRequest, want bool) {
+	t.Helper()
+	if got.Status.BreakerProbe != want {
+		t.Fatalf("%s: breakerProbe = %v, want %v", got.Name, got.Status.BreakerProbe, want)
+	}
+}
+
+// TestBreakerHalfOpenLetsOneProbeThrough checks that after the cool-down one request goes through as the probe,
+// marked so, and the next waits (CircuitHalfOpen) while it runs, also for a new reconciler on the same objects
+// (a restart or a new leader). A request let through before the trip that still runs is not a probe, and a
+// request let through while the breaker is closed is not marked.
 func TestBreakerHalfOpenLetsOneProbeThrough(t *testing.T) {
-	old := admittedAt(otherRequest("old", "uid-target-old", remediationv1alpha1.PhasePRCreated, 40*time.Minute),
-		limitsNow.Add(-40*time.Minute))
+	old := otherRequest("old", "uid-target-old", remediationv1alpha1.PhasePRCreated, 40*time.Minute)
 	r, c, rr, rr2 := halfOpenWorld(t, old)
 	_, got, err := reconcileLimits(t, r, rr)
 	expectAdmitted(t, err, got)
+	expectProbe(t, got, true)
 
 	res, got2, err := reconcileLimits(t, r, rr2)
 	expectHeld(t, res, err, got2, ReasonCircuitHalfOpen)
+	expectProbe(t, got2, false)
 
 	later := limitsNow.Add(time.Hour)
 	restarted := &RemediationRequestReconciler{Client: c, APIReader: c, Scheme: c.Scheme(), Source: r.Source,
 		BreakerCooldown: halfOpenCooldown, Now: func() time.Time { return later }}
 	for _, phase := range []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhasePRCreated,
-		remediationv1alpha1.PhaseAwaitingApproval, remediationv1alpha1.PhaseWaitingForDelivery} {
+		remediationv1alpha1.PhaseAwaitingApproval, remediationv1alpha1.PhaseAutoMergeQueued} {
 		endProbe(t, c, rr, phase, later.Add(-time.Minute))
 		res, got2, err = reconcileLimits(t, restarted, rr2)
 		expectHeld(t, res, err, got2, ReasonCircuitHalfOpen)
 	}
+
+	// Closed: a request let through is not a probe.
+	r2, _, rr3, _ := limitsWorld(t, 20)
+	_, got3, err := reconcileLimits(t, r2, rr3)
+	expectAdmitted(t, err, got3)
+	expectProbe(t, got3, false)
 }
 
-// TestBreakerProbeOutcome checks what ends the half-open state: the probe's success closes the breaker, and
-// anything else (a failure, or a final phase that is neither, such as Expired) opens it again for a full
-// cool-down from the end of the probe, after which the next request goes through as the new probe.
+// TestBreakerProbeOutcome checks what ends the half-open state: the probe's success (Merged or a later phase)
+// closes the breaker, and anything else (a failure, or a final phase that is neither, such as Expired or
+// Denied) opens it again for a full cool-down from the end of the probe, after which the next request goes
+// through as the new probe.
 func TestBreakerProbeOutcome(t *testing.T) {
 	cases := map[remediationv1alpha1.RemediationPhase]bool{ // phase of the probe: whether it closes the breaker
-		remediationv1alpha1.PhaseMerged:            true,
-		remediationv1alpha1.PhaseSucceeded:         true,
-		remediationv1alpha1.PhaseFailed:            false,
-		remediationv1alpha1.PhaseNeedsIntervention: false,
-		remediationv1alpha1.PhaseExpired:           false,
-		remediationv1alpha1.PhaseCancelled:         false,
-		remediationv1alpha1.PhaseSuperseded:        false,
+		remediationv1alpha1.PhaseMerged:             true,
+		remediationv1alpha1.PhaseWaitingForDelivery: true,
+		remediationv1alpha1.PhaseVerifying:          true,
+		remediationv1alpha1.PhaseSucceeded:          true,
+		remediationv1alpha1.PhaseFailed:             false,
+		remediationv1alpha1.PhaseNeedsIntervention:  false,
+		remediationv1alpha1.PhaseExpired:            false,
+		remediationv1alpha1.PhaseCancelled:          false,
+		remediationv1alpha1.PhaseSuperseded:         false,
+		remediationv1alpha1.PhaseDenied:             false,
 	}
 	for phase, closes := range cases {
 		t.Run(string(phase), func(t *testing.T) {
@@ -146,18 +159,110 @@ func TestBreakerProbeOutcome(t *testing.T) {
 
 			ended := limitsNow.Add(2 * time.Minute)
 			endProbe(t, c, rr, phase, ended)
-			if closes {
-				r.Now = func() time.Time { return ended }
-				_, got2, err = reconcileLimits(t, r, rr2)
-				expectAdmitted(t, err, got2)
-				return
-			}
-			r.Now = func() time.Time { return ended.Add(halfOpenCooldown - time.Millisecond) }
-			res, got2, err = reconcileLimits(t, r, rr2)
-			expectHeld(t, res, err, got2, ReasonCircuitOpen)
-			r.Now = func() time.Time { return ended.Add(halfOpenCooldown) }
-			_, got2, err = reconcileLimits(t, r, rr2)
-			expectAdmitted(t, err, got2)
+			expectProbeEnd(t, r, rr2, ended, closes)
+		})
+	}
+}
+
+// expectProbeEnd checks the breaker after a probe ended at ended: closed at once when it closes, else open for
+// a full cool-down from ended and half-open after it, when rr2 goes through as the new probe.
+func expectProbeEnd(t *testing.T, r *RemediationRequestReconciler, rr2 *remediationv1alpha1.RemediationRequest,
+	ended time.Time, closes bool) {
+	t.Helper()
+	if closes {
+		r.Now = func() time.Time { return ended }
+		_, got2, err := reconcileLimits(t, r, rr2)
+		expectAdmitted(t, err, got2)
+		expectProbe(t, got2, false)
+		return
+	}
+	r.Now = func() time.Time { return ended.Add(halfOpenCooldown - time.Millisecond) }
+	res, got2, err := reconcileLimits(t, r, rr2)
+	expectHeld(t, res, err, got2, ReasonCircuitOpen)
+	r.Now = func() time.Time { return ended.Add(halfOpenCooldown) }
+	_, got2, err = reconcileLimits(t, r, rr2)
+	expectAdmitted(t, err, got2)
+	expectProbe(t, got2, true)
+}
+
+// deleteProbe gives the probe the executor's finalizer and deletes it, so it stays listed while it is being
+// deleted.
+func deleteProbe(t *testing.T, c client.Client, probe *remediationv1alpha1.RemediationRequest) {
+	t.Helper()
+	ctx := context.Background()
+	if err := c.Get(ctx, client.ObjectKeyFromObject(probe), probe); err != nil {
+		t.Fatal(err)
+	}
+	controllerutil.AddFinalizer(probe, FinalizerName)
+	if err := c.Update(ctx, probe); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(ctx, probe); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestBreakerDeletedProbe checks a probe being deleted: one that still runs holds the others back, and one that
+// ended without a success opens the breaker again from its end, as if it were not being deleted.
+func TestBreakerDeletedProbe(t *testing.T) {
+	t.Run("running", func(t *testing.T) {
+		r, c, rr, rr2 := halfOpenWorld(t)
+		_, got, err := reconcileLimits(t, r, rr)
+		expectAdmitted(t, err, got)
+		deleteProbe(t, c, rr)
+		r.Now = func() time.Time { return limitsNow.Add(time.Hour) }
+		res, got2, err := reconcileLimits(t, r, rr2)
+		expectHeld(t, res, err, got2, ReasonCircuitHalfOpen)
+	})
+	t.Run("ended", func(t *testing.T) {
+		r, c, rr, rr2 := halfOpenWorld(t)
+		_, got, err := reconcileLimits(t, r, rr)
+		expectAdmitted(t, err, got)
+		ended := limitsNow.Add(2 * time.Minute)
+		endProbe(t, c, rr, remediationv1alpha1.PhaseExpired, ended)
+		deleteProbe(t, c, rr)
+		expectProbeEnd(t, r, rr2, ended, false)
+	})
+}
+
+// TestBreakerProbeEndedWithoutTransitionTime checks that a probe that ended without lastPhaseTransitionTime
+// (written by hand) is taken to have ended one cool-down after the trip: the breaker is open for one more
+// cool-down, and half-open after it, not open for ever.
+func TestBreakerProbeEndedWithoutTransitionTime(t *testing.T) {
+	r, c, rr, rr2 := halfOpenWorld(t)
+	_, got, err := reconcileLimits(t, r, rr)
+	expectAdmitted(t, err, got)
+	got.Status.Phase = remediationv1alpha1.PhaseExpired
+	got.Status.LastPhaseTransitionTime = nil
+	if err := c.Status().Update(context.Background(), got); err != nil {
+		t.Fatal(err)
+	}
+	// The trip is the third failure, 10 minutes before limitsNow: the probe counts as ended 5 minutes before
+	// limitsNow, so the breaker is open until limitsNow.
+	r.Now = func() time.Time { return limitsNow.Add(-time.Millisecond) }
+	res, got2, err := reconcileLimits(t, r, rr2)
+	expectHeld(t, res, err, got2, ReasonCircuitOpen)
+	r.Now = func() time.Time { return limitsNow.Add(time.Hour) }
+	_, got2, err = reconcileLimits(t, r, rr2)
+	expectAdmitted(t, err, got2)
+	expectProbe(t, got2, true)
+}
+
+// TestBreakerSkewedLeadersAdmitOneProbe checks that a leader whose clock differs from the one that let the
+// probe through, behind or ahead, still finds the probe and holds the next request back: the probe is found by
+// status.breakerProbe, not by comparing the times the two clocks wrote.
+func TestBreakerSkewedLeadersAdmitOneProbe(t *testing.T) {
+	for name, skew := range map[string]time.Duration{"behind": -4 * time.Minute, "ahead": 3 * time.Hour} {
+		t.Run(name, func(t *testing.T) {
+			leaderA, c, rr, rr2 := halfOpenWorld(t)
+			leaderA.Now = func() time.Time { return limitsNow.Add(time.Minute) }
+			_, got, err := reconcileLimits(t, leaderA, rr)
+			expectAdmitted(t, err, got)
+			leaderB := &RemediationRequestReconciler{Client: c, APIReader: c, Scheme: c.Scheme(),
+				Source: leaderA.Source, BreakerCooldown: halfOpenCooldown,
+				Now: func() time.Time { return limitsNow.Add(skew) }}
+			res, got2, err := reconcileLimits(t, leaderB, rr2)
+			expectHeld(t, res, err, got2, ReasonCircuitHalfOpen)
 		})
 	}
 }
@@ -194,30 +299,5 @@ func TestBreakerConcurrentReconcilesAdmitOneProbe(t *testing.T) {
 				t.Fatalf("%d requests went through in the half-open state, want 1", admitted)
 			}
 		})
-	}
-}
-
-// TestBreakerProbeIdentification checks which requests count as probes: those let through at or after the trip
-// by their PolicyAllowed time, kept to the second, so one in the same second counts, and one without the
-// condition counts (fail closed).
-func TestBreakerProbeIdentification(t *testing.T) {
-	tripped := limitsNow.Add(500 * time.Millisecond)
-	rr := func() *remediationv1alpha1.RemediationRequest {
-		return otherRequest("p", "uid-p", remediationv1alpha1.PhasePRCreated, 0)
-	}
-	cases := []struct {
-		name string
-		rr   *remediationv1alpha1.RemediationRequest
-		want bool
-	}{
-		{"after", admittedAt(rr(), limitsNow.Add(time.Minute)), true},
-		{"same second", admittedAt(rr(), limitsNow), true},
-		{"before", admittedAt(rr(), limitsNow.Add(-time.Second)), false},
-		{"no condition", rr(), true},
-	}
-	for _, tc := range cases {
-		if got := probe(tc.rr, tripped); got != tc.want {
-			t.Errorf("%s: probe = %v, want %v", tc.name, got, tc.want)
-		}
 	}
 }

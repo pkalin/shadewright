@@ -6,6 +6,13 @@ name: Release
 #
 # The token comes from the shadewright-release GitHub App, not GITHUB_TOKEN, because pull requests opened
 # with GITHUB_TOKEN do not trigger workflows and the required checks would never run on the release PR.
+# After the release is created, the next step regroups its GitHub release notes by Conventional Commit scope
+# (hack/release-notes-by-scope.sh: API, Analyzer, Policy, ..., Other; features first inside each scope).
+# CHANGELOG.md stays as release-please writes it. To regroup a release that already exists, by hand:
+#   gh release view vX.Y.Z --json body -q .body | hack/release-notes-by-scope.sh > notes.md
+#   gh release edit vX.Y.Z --notes-file notes.md
+# The script only reads the release-please format, so run it on the original body, never on a regrouped one.
+#
 # The App's key lives in the `release` environment, which only deployments from main can use.
 on:
   push:
@@ -21,6 +28,8 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     environment: release
+    permissions:
+      contents: read
     steps:
       - name: Mint a short-lived App token
         id: app-token
@@ -33,8 +42,25 @@ jobs:
           permission-pull-requests: write
           permission-issues: write
       - name: Release please
+        id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+      - name: Clone the code
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Group the release notes by scope
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          notes="${RUNNER_TEMP}/release-notes.md"
+          gh release view "${TAG}" --json body --jq .body | hack/release-notes-by-scope.sh > "${notes}"
+          gh release edit "${TAG}" --notes-file "${notes}"

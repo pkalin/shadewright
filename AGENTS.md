@@ -38,6 +38,10 @@ so the **pull request title** is what counts; a required check (`Conventional PR
   publishes images and chart (version and appVersion from the tag, no bump commit, no floating tags) and does
   not disturb release-please. Never create a plain `vX.Y.Z` tag by hand.
 - Merge the release pull request when the milestone of that version is done, not on every change.
+- Artifact Hub reads the chart repository's metadata (`dist/artifacthub-repo.yml`, the Verified Publisher label)
+  from the OCI tag `artifacthub.io` next to the chart, once per repository; `chart.yml` pushes it again on every
+  release tag. Never delete that tag or the chart's versions in GHCR, and keep `artifacthub.io` out of any package
+  clean-up. Change the metadata only by pull request.
 
 ## Working agreement
 

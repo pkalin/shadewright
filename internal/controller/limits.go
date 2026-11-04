@@ -68,7 +68,8 @@ import (
 // comparing times written by different clocks, so leaders with skewed clocks agree on the probe. A request
 // without the field (one let through before the trip, or before the field existed) is not a probe. A probe
 // runs (holds the others back) until it reaches a final phase or Merged, whether or not it is being deleted;
-// once its finalizer is gone it is no longer listed. One that ended without lastPhaseTransitionTime (written
+// once its finalizer is gone it is no longer listed, so a probe that ended without a success and was then
+// deleted adds no further cool-down (the next request is the new single probe, so nothing more goes through). One that ended without lastPhaseTransitionTime (written
 // by hand) is taken to have ended one cool-down after the trip, the earliest it could have been let through,
 // so it opens the breaker again for one more cool-down at most (bounded, fail closed). The field is never
 // cleared, so a probe of an earlier trip that still runs after the breaker closed holds back the probes of

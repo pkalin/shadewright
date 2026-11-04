@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 760" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Shadewright architecture</title>
-  <desc id="d">Events from the cluster become durable incidents. The analyzer, with read-only access and the model, proposes a typed RemediationRequest. A deterministic policy engine decides; the remediation controller opens a pull request on the Git host; after human review and required checks the change merges, the GitOps controller (Flux) applies it, and the verifier confirms the symptom is gone.</desc>
+  <desc id="d">Events from the cluster become durable incidents. The analyzer, with read-only access and the model, proposes a typed RemediationRequest. A deterministic policy engine decides; the remediation controller opens a pull request on the Git host; after human review and required checks the change merges, the GitOps controller (Flux) applies it, and the verifier confirms the symptom is gone. Built so far: the collector, incidents, the policy engine and the remediation controller up to the pull request; the analyzer's model call, the model provider and the verifier are planned and drawn dashed.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -11,6 +11,9 @@
       .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
       .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
       .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .pl{fill:#1d1b2b;stroke:#5a5478;stroke-width:1.2;stroke-dasharray:5 4}
+      .ple{fill:#16222a;stroke:#2f5d63;stroke-width:1.2;stroke-dasharray:5 4}
+      .pn{fill:#8a85a8;font-size:10px;font-weight:600;letter-spacing:.06em}
       .h{fill:#f1edff;font-size:15px;font-weight:650}
       .s{fill:#a9a4c4;font-size:12.5px}
       .id{fill:none;stroke:#7c24fc;stroke-opacity:.55;stroke-dasharray:5 5;stroke-width:1.2}
@@ -60,7 +63,8 @@
   <text class="h" x="594" y="136">Incident</text>
   <text class="s" x="594" y="157">durable CR · fingerprint</text>
 
-  <rect class="box" x="578" y="250" width="210" height="72" rx="10"/>
+  <rect class="pl" x="578" y="250" width="210" height="72" rx="10"/>
+  <text class="pn" x="772" y="266" text-anchor="end">planned</text>
   <text class="h" x="594" y="276">Analyzer</text>
   <text class="s" x="594" y="296">rules first, then the model</text>
   <text class="s" x="594" y="313">with read-only tools</text>
@@ -79,12 +83,14 @@
   <text class="h" x="594" y="488">Remediation controller</text>
   <text class="s" x="594" y="509">idempotent state machine</text>
 
-  <rect class="box" x="578" y="610" width="210" height="64" rx="10"/>
+  <rect class="pl" x="578" y="610" width="210" height="64" rx="10"/>
+  <text class="pn" x="772" y="626" text-anchor="end">planned</text>
   <text class="h" x="594" y="636">Verifier</text>
   <text class="s" x="594" y="657">revision applied · symptom gone</text>
 
   <!-- outside -->
-  <rect class="ext" x="866" y="250" width="210" height="72" rx="10"/>
+  <rect class="ple" x="866" y="250" width="210" height="72" rx="10"/>
+  <text class="pn" x="1060" y="266" text-anchor="end">planned</text>
   <text class="h" x="882" y="276">Model provider</text>
   <text class="s" x="882" y="296">redacted, bounded context</text>
   <text class="s" x="882" y="313">no tools with write access</text>
@@ -119,6 +125,12 @@
 
   <path class="f" d="M683 526V604" marker-end="url(#a)"/>
   <text class="lbl" x="692" y="570">after merge</text>
+
+  <!-- legend -->
+  <rect class="box" x="866" y="112" width="30" height="16" rx="4"/>
+  <text class="lbl" x="906" y="125">built</text>
+  <rect class="pl" x="866" y="136" width="30" height="16" rx="4"/>
+  <text class="lbl" x="906" y="149">designed, not built</text>
 
   <!-- refusal -->
   <text class="no" x="332" y="550">denied or stale → stop, explain, no PR</text>

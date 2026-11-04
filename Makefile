@@ -59,6 +59,11 @@ manifests: controller-gen ## Generate WebhookConfiguration, the executor and ana
 	"$(CONTROLLER_GEN)" rbac:roleName=executor-role paths="./internal/controller/..." output:rbac:artifacts:config=config/rbac/executor
 	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-role paths="./internal/analyzer" output:rbac:artifacts:config=config/rbac/analyzer
 	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-watch-role paths="./internal/analyzer/collector/..." output:rbac:artifacts:config=config/rbac/analyzer/watch
+	$(MAKE) chart-crds
+
+.PHONY: chart-crds
+chart-crds: ## Copy config/crd/bases into dist/chart/templates/crd with the chart's wrapper, keep annotation and labels (a CRD that is gone is removed).
+	hack/chart-crds.sh
 
 .PHONY: api-docs
 api-docs: crd-ref-docs ## Generate the API reference (docs/reference/api.md) from the Go types in api/.
@@ -84,9 +89,10 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test-scripts
-test-scripts: ## Test the release notes, release steps, chart docs, chart digest and CI change detection scripts (hack/*_test.sh).
+test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest and CI change detection scripts (hack/*_test.sh).
 	hack/release-notes-by-scope_test.sh
 	hack/check-chart-docs_test.sh
+	hack/chart-crds_test.sh
 	hack/chart-set-digests_test.sh
 	hack/ci-changed_test.sh
 	hack/release-verify-notes_test.sh
@@ -147,7 +153,7 @@ vulncheck: govulncheck ## Report known vulnerabilities reached from the code (Go
 # controller-gen never deletes a file it no longer generates.
 GENERATED_FILES = 'config/crd/bases/*.yaml' config/rbac/executor/role.yaml config/rbac/analyzer/role.yaml \
 	config/rbac/analyzer/watch/role.yaml config/webhook/manifests.yaml '*zz_generated.deepcopy.go' \
-	docs/reference/api.md
+	docs/reference/api.md 'dist/chart/templates/crd/*.yaml'
 
 .PHONY: verify-generated
 verify-generated: ## Regenerate all generated files from scratch and fail if the working tree then differs from Git.

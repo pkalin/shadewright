@@ -1,0 +1,14 @@
+Shadewright {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namespace }}.
+
+  kubectl -n {{ .Release.Namespace }} get deployments
+
+Next:
+{{- if not .Values.settings.create }}
+  - Create the RemediationSettings object named "default" (settings.create=true, or apply your own).
+{{- end }}
+{{- if not .Values.executor.identity.azure.clientId }}
+  - executor.identity.azure.clientId is not set: the executor cannot sign for the GitHub App, so a request that
+    reaches the Git step stays Pending.
+{{- end }}
+  - Metrics are scraped only from namespaces labeled "metrics: enabled", by an identity allowed to "get" the
+    non-resource URL /metrics (the ClusterRole {{ include "shadewright.resourceName" (dict "suffix" "metrics-reader" "context" $) }}; nothing binds it).

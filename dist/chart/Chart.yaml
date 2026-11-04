@@ -1,0 +1,21 @@
+apiVersion: v2
+name: shadewright
+description: A Kubernetes operations agent that diagnoses incidents with an LLM and proposes fixes only as GitOps pull requests
+type: application
+kubeVersion: ">=1.28.0-0"
+home: https://shadewright.io
+sources:
+  - https://github.com/pkalin/shadewright
+
+# Both versions follow the release (release-please bumps them with the tag); the chart is published only on a
+# release tag, so what a tag publishes is the chart of that tag.
+version: 0.1.0 # x-release-please-version
+appVersion: "0.1.0" # x-release-please-version
+
+keywords:
+  - kubernetes
+  - operator
+  - gitops
+
+annotations:
+  kubebuilder.io/generated-by: kubebuilder

@@ -343,3 +343,36 @@ endef
 define gomodver
 $(shell go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
 endef
+
+##@ Helm chart
+
+# The chart in dist/chart was generated with Kubebuilder's helm/v2-alpha plugin and then adjusted by hand (two
+# Deployments, per-component values, RBAC that matches config/default). Do not regenerate it with
+# "kubebuilder edit --plugins=helm/v2-alpha --force": test-chart shows what such a run would break.
+HELM ?= helm
+CHART_DIR ?= dist/chart
+CHART_KIND_CLUSTER ?= shadewright-chart-test
+
+.PHONY: chart-lint
+chart-lint: ## Lint the chart with the test values, and check that the schema refuses an install without them.
+	$(HELM) lint $(CHART_DIR) -f $(CHART_DIR)/ci/test-values.yaml --strict
+	@if $(HELM) lint $(CHART_DIR) >/dev/null 2>&1; then \
+		echo "helm lint passed without the required values: values.schema.json is not enforced"; exit 1; \
+	fi
+
+.PHONY: test-chart
+test-chart: kustomize ## Render the chart and fail if its RBAC, NetworkPolicies, Services or CRDs differ from kustomize build config/default.
+	KUSTOMIZE="$(KUSTOMIZE)" HELM="$(HELM)" CHART_TEST_REQUIRED=1 go test -count=1 ./test/chart/ -v
+
+.PHONY: test-chart-install
+test-chart-install: kind ## Install the chart on a Kind cluster (created here) and check the Deployments and the permissions.
+	@case "$$($(KIND) get clusters)" in \
+		*"$(CHART_KIND_CLUSTER)"*) echo "Kind cluster '$(CHART_KIND_CLUSTER)' already exists." ;; \
+		*) $(KIND) create cluster --name $(CHART_KIND_CLUSTER) ;; \
+	esac
+	$(KUBECTL) config use-context kind-$(CHART_KIND_CLUSTER)
+	hack/chart-install-test.sh "$(KUBECTL)" "$(HELM)"
+
+.PHONY: chart-kind-delete
+chart-kind-delete: kind ## Delete the Kind cluster of test-chart-install.
+	@$(KIND) delete cluster --name $(CHART_KIND_CLUSTER)

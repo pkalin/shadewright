@@ -1,0 +1,28 @@
+{{- if .Values.rbac.helpers.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "remediationrequest-admin-role" "context" $) }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "" "context" $) | nindent 4 }}
+rules:
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - remediationrequests
+  verbs:
+  - create
+  - delete
+  - deletecollection
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - remediationrequests/status
+  verbs:
+  - get
+{{- end }}

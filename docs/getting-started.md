@@ -7,7 +7,7 @@ title: Getting started
 This page has three paths, from the one that needs nothing to the one that opens a real pull request: run the tests without a cluster, install the agent in observe-only mode, and take a hand-written request to a reviewed pull request. Settings are in the [configuration reference](reference/configuration.md); a request that stops is explained in [troubleshooting](troubleshooting.md).
 
 !!! warning "What exists today"
-    Shadewright is at v0.1.0. Built: the collector, the Incident controller, platform and module detection (all in the analyzer), and the executor's whole path from a `RemediationRequest` to an open pull request waiting for a person (policy check, source mapping, freshness check, branch, commit, pull request). **Not built:** the analysis that calls a model (so nothing proposes a request by itself), auto-merge, delivery tracking, verification, the Helm chart ([#83](https://github.com/pkalin/shadewright/issues/83)) and the `Cancelled` phase. Every request is written by hand today. The [README](https://github.com/pkalin/shadewright#readme) and the [threat model](threat-model.md) list what is built and planned.
+    Shadewright is at v0.1.0. Built: the collector, the Incident controller, platform and module detection (all in the analyzer), and the executor's whole path from a `RemediationRequest` to an open pull request waiting for a person (policy check, source mapping, freshness check, branch, commit, pull request). **Not built:** the analysis that calls a model (so nothing proposes a request by itself), auto-merge, delivery tracking, verification, and the `Cancelled` phase. Every request is written by hand today. The Helm chart ([#83](https://github.com/pkalin/shadewright/issues/83)) is on `main` and is published with the first release after v0.1.0. The [README](https://github.com/pkalin/shadewright#readme) and the [threat model](threat-model.md) list what is built and planned.
 
 ## 1. Run the tests without a cluster
 
@@ -127,6 +127,19 @@ Expect both Deployments ready, a log line with your namespaces and cluster ID, a
 The executor Deployment carries the label `azure.workload.identity/use: "true"` and its ServiceAccount a placeholder client ID. Both are inert off AKS and in observe-only mode, where the executor never opens a repository. They matter in the next path.
 
 To remove observe-only, `kubectl delete -k .` and delete the settings object first. Removing the CRDs deletes every Incident. The order for an install that has requests is in [upgrade and uninstall](upgrade-uninstall.md).
+
+### Install with Helm instead
+
+The chart installs the same objects as `config/default` plus one `RoleBinding` per watched namespace, with the images, cluster ID, watched namespaces and workload identity as values. From a clone of the repository (the registry has the chart from the first release after v0.1.0, see the [configuration reference](reference/configuration.md#helm-chart)):
+
+```bash
+helm install shadewright ./dist/chart --namespace shadewright-system --create-namespace \
+  --set clusterId=my-cluster --set 'analyzer.watchNamespaces={default}' \
+  --set executor.image.digest=sha256:66df21ea967a22e8e50b73284254b796665ef5e9470b320707900983aca37f9c \
+  --set analyzer.image.digest=sha256:697defe7774b29621f64c967ff93e83b309455c2a72d50b190e179f9ff3fc8e4
+```
+
+The same settings object and checks as above apply (`--set settings.create=true` and `settings.spec` create it from values). Uninstalling keeps the CRDs by default (`crd.keep`), so Incidents survive.
 
 ## 3. From a hand-written request to a reviewed pull request
 

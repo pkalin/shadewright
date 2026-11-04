@@ -1,0 +1,125 @@
+name: Chart
+
+# Lints and tests the Helm chart in dist/chart (generated with Kubebuilder's helm/v2-alpha plugin, then adjusted
+# by hand, so the comparison test is the guard). Pull requests and pushes to main lint, render and compare
+# the chart with config/default, and a Kind job installs it. Only a v* tag
+# publishes it to ghcr.io/<owner>/charts/shadewright, and only the publish job has packages: write.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions: {}
+
+env:
+  HELM_VERSION: v4.3.1
+
+jobs:
+  chart:
+    name: Lint and render
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false # this workflow publishes on tags: no cache a pull request could poison
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Lint and compare the chart with config/default
+        run: make chart-lint test-chart
+
+  install:
+    name: Install on Kind
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false # this workflow publishes on tags: no cache a pull request could poison
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Install the chart on Kind and check the permissions
+        run: make test-chart-install
+
+      # The cluster is deleted even when a step failed.
+      - name: Delete the Kind cluster
+        if: ${{ always() }}
+        run: make chart-kind-delete
+
+  publish:
+    name: Publish the chart
+    # Release tags only. The chart version must equal the tag (release-please bumps both in the release pull
+    # request), so a tag never publishes the chart of another version.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [chart, install]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Check that the chart version is the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(helm show chart dist/chart | sed -n 's/^version: //p')"
+          app_version="$(helm show chart dist/chart | sed -n 's/^appVersion: //p' | tr -d '"')"
+          if [ "v${version}" != "${TAG}" ] || [ "v${app_version}" != "${TAG}" ]; then
+            echo "chart version ${version} / appVersion ${app_version} do not match the tag ${TAG}" >&2
+            exit 1
+          fi
+
+      - name: Package the chart
+        run: helm package dist/chart --destination "${RUNNER_TEMP}/chart"
+
+      - name: Log in to GHCR
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "${TOKEN}" | helm registry login ghcr.io --username "${ACTOR}" --password-stdin
+
+      - name: Push the chart
+        env:
+          TAG: ${{ github.ref_name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "${OWNER}" | tr '[:upper:]' '[:lower:]')"
+          helm push "${RUNNER_TEMP}/chart/shadewright-${TAG#v}.tgz" "oci://ghcr.io/${owner}/charts" 2>&1 | tee "${RUNNER_TEMP}/push.log"
+          digest="$(sed -n 's/^Digest: //p' "${RUNNER_TEMP}/push.log")"
+          echo "oci://ghcr.io/${owner}/charts/shadewright:${TAG#v} (${digest})" >> "${GITHUB_STEP_SUMMARY}"

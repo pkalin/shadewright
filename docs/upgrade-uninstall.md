@@ -4,7 +4,7 @@ title: Upgrade and uninstall
 
 # Upgrade and uninstall
 
-What to do, in which order, when you move Shadewright to a new release or remove it. It is written for the manifests of v0.1.0 (`config/default`, applied with `kubectl apply -k`, see [getting started](getting-started.md#2-install-in-observe-only-mode)). There is no Helm chart yet ([#83](https://github.com/pkalin/shadewright/issues/83), **planned**); when it exists this page gets its commands.
+What to do, in which order, when you move Shadewright to a new release or remove it. It is written for the manifests of v0.1.0 (`config/default`, applied with `kubectl apply -k`, see [getting started](getting-started.md#2-install-in-observe-only-mode)). The Helm chart ([#83](https://github.com/pkalin/shadewright/issues/83)) installs the same objects; this page does not give its commands yet, but the order below applies to `helm upgrade` and `helm uninstall` too, and note that `helm uninstall` keeps the CRDs by default (`crd.keep`).
 
 The one thing to know first: **a `RemediationRequest` that has opened a pull request carries a finalizer, and only the executor can remove it.** Delete the executor, the namespace or the CRDs before the requests and they stay `Terminating` with nobody to clean up.
 

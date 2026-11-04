@@ -1,0 +1,128 @@
+# Shadewright chart values. The schema in values.schema.json validates them on install, upgrade, lint and
+# template. Nothing here looks like a real identity, digest or cluster: the values you must set are empty.
+
+## String to partially override the chart name (kept in the release name).
+# nameOverride: ""
+## String to fully override the resource name prefix. Leave unset to use the release name.
+# fullnameOverride: ""
+
+## Hashed into every Incident fingerprint so Incidents of two clusters never merge. Required. 1 to 63 letters,
+## digits, ".", "_" or "-", starting and ending with a letter or digit. Changing it starts every Incident afresh.
+clusterId: ""
+
+## Image pull secrets, for a mirror that needs them. The default images are public.
+imagePullSecrets: []
+
+## Metrics endpoint of both components.
+metrics:
+  enabled: true
+  port: 8443
+  ## HTTPS with a TokenReview and a SubjectAccessReview per request. false serves plain HTTP with no
+  ## authentication: only for a test.
+  secure: true
+
+## NetworkPolicies: default deny for the namespace, DNS and TCP 443 and 6443 egress per component, and ingress
+## to the metrics port from namespaces labeled "metrics: enabled".
+networkPolicy:
+  enabled: true
+
+## The CRDs. Helm does not upgrade or delete CRDs from the crds/ directory, so they are templates here.
+crd:
+  enabled: true
+  ## Keep the CRDs (and so every Incident and RemediationRequest) when the release is uninstalled.
+  keep: true
+
+rbac:
+  ## Admin, editor and viewer ClusterRoles for each custom resource. Shadewright does not use them, they are
+  ## for your people. Off by default (least privilege).
+  helpers:
+    enabled: false
+
+## The executor reconciles RemediationRequests and is the only component that talks to Git. Its identity may
+## only sign with the GitHub App key in Key Vault.
+executor:
+  image:
+    repository: ghcr.io/pkalin/shadewright-executor
+    ## Required: sha256:<64 hex digits>. The images are pinned by digest, never by tag.
+    digest: ""
+    pullPolicy: IfNotPresent
+  identity:
+    azure:
+      ## Client ID of the executor's managed identity (workload identity). Not a secret. Sets the ServiceAccount
+      ## annotation azure.workload.identity/client-id and the Pod label azure.workload.identity/use. Without it
+      ## a request that reaches the Git step is retried quietly and stays Pending.
+      clientId: ""
+  serviceAccount:
+    ## Further ServiceAccount annotations, for another cloud's workload identity.
+    annotations: {}
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 64Mi
+  extraArgs: []
+  podLabels: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+## The analyzer reads the cluster and writes Incidents and proposed RemediationRequests. It never acts on them.
+analyzer:
+  image:
+    repository: ghcr.io/pkalin/shadewright-analyzer
+    ## Required: sha256:<64 hex digits>.
+    digest: ""
+    pullPolicy: IfNotPresent
+  ## Namespaces whose events, pods and workloads are read. Required, at least one. Each gets a RoleBinding to
+  ## the read-only watch ClusterRole. Never "all namespaces".
+  watchNamespaces: []
+  ## Most Incidents kept in the operator namespace (the binary's default is 500). Unset keeps the default.
+  # maxIncidents: 500
+  identity:
+    azure:
+      ## The analyzer has no cloud identity today (the model call is not built, ADR-0023). Same effect as above.
+      clientId: ""
+  serviceAccount:
+    annotations: {}
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 64Mi
+  extraArgs: []
+  podLabels: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+## The RemediationSettings object named "default". Off by default: create it here or manage it yourself.
+## Fields are in the API reference. Example:
+##   settings:
+##     create: true
+##     spec:
+##       paused: false
+##       maxConcurrentRemediations: 1
+##       maxAnalysesPerDay: 100
+##       repositories:
+##         - name: fleet
+##           url: https://github.com/<owner>/<repo>
+##           targetBranch: main
+##           provider: GitHub
+##           github:
+##             appClientID: <GitHub App client ID>
+##             installationID: <installation ID>
+##             signer:
+##               azureKeyVault:
+##                 keyID: https://<vault>.vault.azure.net/keys/<key>
+##       modules:
+##         platforms: [aks]
+##         integrations: [flux]
+settings:
+  create: false
+  spec: {}

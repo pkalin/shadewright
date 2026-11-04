@@ -4,7 +4,7 @@ title: Configuration reference
 
 # Configuration reference
 
-Everything an operator can set today, checked against `cmd/main.go` (the executor), `cmd/analyzer/main.go`, `internal/cmdutil` and `config/` at v0.1.0. There is no Helm chart yet ([#83](https://github.com/pkalin/shadewright/issues/83), **planned**); its values will map onto the settings below. Objects and fields of the custom resources are in the [API reference](api.md). See also [compatibility](compatibility.md), [upgrade and uninstall](../upgrade-uninstall.md), [identity rotation](../identity-rotation.md) and [data handling](../data-handling.md). Metric names are in the [metrics reference](metrics.md).
+Everything an operator can set today, checked against `cmd/main.go` (the executor), `cmd/analyzer/main.go`, `internal/cmdutil` and `config/` at v0.1.0. The Helm chart in `dist/chart` ([#83](https://github.com/pkalin/shadewright/issues/83)) maps its values onto the settings below; see [Helm chart](#helm-chart). Objects and fields of the custom resources are in the [API reference](api.md). See also [compatibility](compatibility.md), [upgrade and uninstall](../upgrade-uninstall.md), [identity rotation](../identity-rotation.md) and [data handling](../data-handling.md). Metric names are in the [metrics reference](metrics.md).
 
 ## Components and images
 
@@ -13,7 +13,57 @@ Everything an operator can set today, checked against `cmd/main.go` (the executo
 | Executor | `/manager` | `ghcr.io/pkalin/shadewright-executor` | Reconciles `RemediationRequest` objects in the operator namespace, decides with the policy, acts through Git |
 | Analyzer | `/analyzer` | `ghcr.io/pkalin/shadewright-analyzer` | Collector, Incident controller, platform and module detection. Creates Incidents and, once the analysis is built, requests. Never acts on them |
 
-Both images are distroless, run as user 65532, and are published for linux/amd64 and linux/arm64. The manifests in `config/manager` use the placeholder `controller:latest` for both, so every install replaces it. Pin by digest; the [getting started](../getting-started.md#2-install-in-observe-only-mode) page has the v0.1.0 digests and an overlay that does it. Both Deployments run one replica with `--leader-elect`, restricted Pod Security settings (non-root, `RuntimeDefault` seccomp, read-only root filesystem, all capabilities dropped), requests of 10m CPU and 64Mi, and limits of 500m CPU and 128Mi.
+Both images are distroless, run as user 65532, and are published for linux/amd64 and linux/arm64. The manifests in `config/manager` use the placeholder `controller:latest` for both, so every install replaces it (the chart refuses to render without a digest). Pin by digest; the [getting started](../getting-started.md#2-install-in-observe-only-mode) page has the v0.1.0 digests and an overlay that does it. Both Deployments run one replica with `--leader-elect`, restricted Pod Security settings (non-root, `RuntimeDefault` seccomp, read-only root filesystem, all capabilities dropped), requests of 10m CPU and 64Mi, and limits of 500m CPU and 128Mi.
+
+## Helm chart
+
+The chart is `dist/chart`. It was generated with Kubebuilder's `helm/v2-alpha` plugin (Kubebuilder v4.16.0) and then adjusted by hand: the plugin renders one manager, so the two Deployments, their ServiceAccounts and the RBAC are written out. **Do not regenerate it with the plugin**; `make test-chart` renders it and fails if its RBAC, NetworkPolicies, Services or CRDs differ from `kustomize build config/default` plus `config/watch` (any extra or missing verb, resource or subject), so a change to `config/rbac` needs the same change in `dist/chart/templates/rbac`. It is published as `oci://ghcr.io/pkalin/charts/shadewright` by the release tag workflow, so the first published version is the one after v0.1.0; until then install from a clone with `./dist/chart`.
+
+```bash
+helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+  --namespace shadewright-system --create-namespace -f my-values.yaml
+```
+
+Use the release name `shadewright` and the namespace `shadewright-system`: the names of the ServiceAccounts, and so the subject of the federated credential, are the release name plus `-executor` and `-analyzer`. The Leases and the analysis budget ConfigMap keep the fixed names the binaries expect whatever the release is called. `values.schema.json` validates the values on install, upgrade, lint and template; `helm lint` fails without the required ones.
+
+A minimal `my-values.yaml`:
+
+```yaml
+clusterId: my-cluster
+executor:
+  image:
+    digest: sha256:<executor image digest>
+  identity:
+    azure:
+      clientId: <client ID of the executor managed identity>
+analyzer:
+  image:
+    digest: sha256:<analyzer image digest>
+  watchNamespaces: [<namespace to watch>]
+```
+
+| Value | Default | Meaning |
+| --- | --- | --- |
+| `clusterId` | none, **required** | `--cluster-id` of the analyzer, see [cluster ID](#cluster-id) |
+| `executor.image.repository`, `analyzer.image.repository` | `ghcr.io/pkalin/shadewright-executor`, `ghcr.io/pkalin/shadewright-analyzer` | Image repositories (a mirror, for example) |
+| `executor.image.digest`, `analyzer.image.digest` | none, **required** | `sha256:<64 hex digits>`; images are pinned by digest, a tag cannot be set |
+| `executor.image.pullPolicy`, `analyzer.image.pullPolicy` | `IfNotPresent` | |
+| `analyzer.watchNamespaces` | none, **required** | `--watch-namespaces`, and one RoleBinding to the watch ClusterRole per namespace (see [namespaces and RoleBindings](#namespaces-and-rolebindings)) |
+| `analyzer.maxIncidents` | unset (binary default 500) | `--max-incidents` |
+| `executor.identity.azure.clientId` | empty | Client ID of the executor's managed identity (not a secret): sets the ServiceAccount annotation `azure.workload.identity/client-id` and the Pod label `azure.workload.identity/use`. Empty sets neither; see [workload identity](#workload-identity-azure) |
+| `analyzer.identity.azure.clientId` | empty | The same for the analyzer, which needs none today |
+| `executor.serviceAccount.annotations`, `analyzer.serviceAccount.annotations` | `{}` | More ServiceAccount annotations, for another cloud's workload identity |
+| `executor.resources`, `analyzer.resources` | 10m / 64Mi requests, 500m / 128Mi limits | Container resources |
+| `executor.extraArgs`, `analyzer.extraArgs` | `[]` | Further flags, each `--name` or `--name=value` |
+| `executor.podLabels`, `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` (and the same under `analyzer`) | empty | Scheduling and metadata |
+| `imagePullSecrets` | `[]` | For a private mirror |
+| `metrics.enabled`, `metrics.port`, `metrics.secure` | `true`, `8443`, `true` | `--metrics-bind-address`, the two Services, the metrics RBAC and NetworkPolicy; `secure: false` serves plain HTTP with no authentication (a test only) |
+| `networkPolicy.enabled` | `true` | The four NetworkPolicies of `config/network-policy` |
+| `crd.enabled`, `crd.keep` | `true`, `true` | Install the CRDs; keep them when the release is uninstalled (so Incidents and requests survive). Helm never upgrades CRDs from a `crds/` directory, so they are templates |
+| `rbac.helpers.enabled` | `false` | The admin, editor and viewer ClusterRoles for each custom resource (for your people; Shadewright does not use them) |
+| `settings.create`, `settings.spec` | `false`, `{}` | Create the `RemediationSettings` object `default` from `spec` (the fields of [RemediationSettings](#remediationsettings)). Helm owns it afterwards: an upgrade overwrites hand edits, so leave it off if you manage the object elsewhere |
+
+Not in the chart: the Prometheus `ServiceMonitor` (as in `config/default`), cert-manager and webhooks (none are installed), and the `Namespace` (use `--create-namespace`). The security contexts, probes, ports and the replica count (1, with leader election) are fixed to what `config/` sets.
 
 ## Flags
 
@@ -74,7 +124,7 @@ These are compiled in. Changing one needs a code change.
 
 ## Cluster ID
 
-`--cluster-id` is hashed into every Incident fingerprint, so Incidents from two clusters never merge. It is 1 to 63 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit. Give each cluster its own. **Changing it starts every Incident afresh**, so choose it once. The manifests ship `lab`; the Helm chart will take it from a value.
+`--cluster-id` is hashed into every Incident fingerprint, so Incidents from two clusters never merge. It is 1 to 63 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit. Give each cluster its own. **Changing it starts every Incident afresh**, so choose it once. The manifests ship `lab`; the Helm chart takes it from the required value `clusterId`.
 
 ## Namespaces and RoleBindings
 

@@ -1,0 +1,13 @@
+{{- if .Values.settings.create }}
+# The one cluster-wide settings object (design section 4). It is created only when asked for, and Helm owns it
+# afterwards: an upgrade writes the values below over any edit made by hand, so leave this off if you manage
+# the object another way (for example in your GitOps repository).
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: RemediationSettings
+metadata:
+  name: default
+  labels:
+    {{- include "shadewright.labels" (dict "component" "" "context" $) | nindent 4 }}
+spec:
+  {{- toYaml (required "settings.spec is required when settings.create is true" .Values.settings.spec) | nindent 2 }}
+{{- end }}

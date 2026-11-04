@@ -166,6 +166,11 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		got.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{
 			Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA,
 		}
+		// As recordPullRequest writes it.
+		meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{
+			Type: remediationv1alpha1.ConditionPROpened, Status: metav1.ConditionTrue,
+			Reason: ReasonPullRequestOpened, Message: fmt.Sprintf("Pull request #%d is open", cr.Number),
+		})
 		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
 	})
 	AfterEach(func() {
@@ -211,6 +216,29 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(reconciler().freshErr(ctx, fetch())).To(Succeed())
 	})
 
+	// closedForStalePlan checks that PullRequestOpened of a superseded request says its pull request is closed
+	// and why, with its number.
+	closedForStalePlan := func(got *remediationv1alpha1.RemediationRequest, reason string) {
+		GinkgoHelper()
+		opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(opened).NotTo(BeNil())
+		Expect(opened.Status).To(Equal(metav1.ConditionTrue), "the pull request was opened")
+		Expect(opened.Reason).To(Equal(ReasonPullRequestClosed))
+		Expect(opened.Message).To(Equal(fmt.Sprintf("Pull request #%d is closed: the plan is stale (%s)",
+			got.Status.PullRequest.Number, reason)))
+	}
+
+	// stillOpen checks that PullRequestOpened of a request that stopped with its pull request left open still
+	// says the pull request is open.
+	stillOpen := func() {
+		GinkgoHelper()
+		opened := meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(opened).NotTo(BeNil())
+		Expect(opened.Status).To(Equal(metav1.ConditionTrue))
+		Expect(opened.Reason).To(Equal(ReasonPullRequestOpened), "the pull request was not closed")
+		Expect(opened.Message).To(Equal(fmt.Sprintf("Pull request #%d is open", cr.Number)))
+	}
+
 	supersedes := func(reason string) {
 		_, err := reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())
@@ -221,6 +249,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(c.Status).To(Equal(metav1.ConditionFalse))
 		Expect(c.Reason).To(Equal(reason))
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+		closedForStalePlan(got, reason)
 	}
 
 	It("closes the change request once when the policy is edited, and not again", func() {
@@ -328,6 +357,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded), "our close, not a person's rejection")
 		Expect(planFresh().Reason).To(Equal(freshness.ReasonTargetFileChanged))
+		closedForStalePlan(got, freshness.ReasonTargetFileChanged)
 	})
 
 	It("finishes the cleanup after a restart between the mark and the close, though the plan looks fresh again", func() {
@@ -419,6 +449,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(other.State).To(Equal(providers.ChangeRequestOpen))
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+		stillOpen()
 	})
 
 	It("drops the mark when the pull request merges before the cleanup closes it", func() {
@@ -480,6 +511,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			Expect(c.Message).To(ContainSubstring("was not closed"))
 			Expect(c.Message).NotTo(ContainSubstring("https://"))
 			Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+			stillOpen()
 
 			_, err = reconcileOnce()
 			Expect(err).NotTo(HaveOccurred())
@@ -590,6 +622,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(closes.Load()).To(BeZero())
 		Expect(other.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen), "the unrelated pull request stays open")
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+		stillOpen()
 	})
 
 	It("ends in NeedsIntervention, without closing or retrying, when the repository settings cannot be used", func() {
@@ -609,6 +642,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(c.Message).NotTo(ContainSubstring("github.com"))
 		Expect(closes.Load()).To(BeZero())
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+		stillOpen()
 	})
 
 	It("closes nothing when the repository entry now names another target branch", func() {
@@ -623,6 +657,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(c.Reason).To(Equal("TargetBranchChanged"))
 		Expect(closes.Load()).To(BeZero())
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+		stillOpen()
 	})
 
 	It("ends in NeedsIntervention, without closing or retrying, when a stale plan's repository settings cannot be used", func() {
@@ -642,6 +677,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(c.Message).NotTo(ContainSubstring("ghp_secret"))
 		Expect(closes.Load()).To(BeZero())
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+		stillOpen()
 	})
 
 	It("closes nothing and does not block when the repository is removed from the settings", func() {
@@ -651,6 +687,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 		Expect(closes.Load()).To(BeZero())
+		stillOpen()
 	})
 
 	It("closes in the recorded repository when the entry is only renamed", func() {

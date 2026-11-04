@@ -78,6 +78,10 @@ const stepDelay = time.Second
 const (
 	// ReasonPullRequestOpened: the pull request is open and its head is the commit Shadewright made.
 	ReasonPullRequestOpened = "PullRequestOpened"
+	// ReasonPullRequestClosed: Shadewright closed the recorded pull request without a merge (or found it closed
+	// while closing it), because the plan is stale or the change no longer renders as planned.
+	// PullRequestOpened stays True (the pull request was opened) and its message names the number and why.
+	ReasonPullRequestClosed = "PullRequestClosed"
 	// ReasonWaitingForReview: the pull request waits for a human review.
 	ReasonWaitingForReview = "WaitingForReview"
 	// ReasonHeadMoved: someone else pushed to the branch. Automation stops; the plan no longer describes the
@@ -87,7 +91,8 @@ const (
 	ReasonBranchDiverged = "BranchDiverged"
 	// ReasonForeignChangeRequest: a pull request for the branch exists without this request's marker.
 	ReasonForeignChangeRequest = "ForeignChangeRequest"
-	// ReasonChangeRequestClosed: the pull request was closed without merging before the request recorded it.
+	// ReasonChangeRequestClosed: the pull request was closed without a merge, not by a close the request recorded,
+	// before or after the request recorded the pull request.
 	ReasonChangeRequestClosed = "ChangeRequestClosed"
 	// ReasonChangeRequestMerged: the pull request was merged.
 	ReasonChangeRequestMerged = "ChangeRequestMerged"
@@ -276,6 +281,7 @@ func (r *RemediationRequestReconciler) refuseWaiting(ctx context.Context, rr *re
 	outcome := "; the pull request was closed"
 	switch {
 	case err == nil:
+		closedByUs(rr, "the change no longer renders as planned ("+ref.reason+")")
 	case errors.Is(err, freshness.ErrRepositoryUnusable), errors.Is(err, errTargetBranchChanged),
 		errors.Is(err, errRepositoryGone):
 		outcome = "; the settings no longer reach its repository, so the pull request was not closed"
@@ -482,6 +488,30 @@ func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr
 	return nil
 }
 
+// markClosed rewrites PullRequestOpened of a request whose recorded pull request is closed without a merge, so
+// the condition no longer says it is open: the reason, the number and a fixed text that says why.
+// The caller writes it in the status write that ends the request. A request without a recorded pull request
+// is left alone: its PullRequestOpened never said one was open.
+func markClosed(rr *remediationv1alpha1.RemediationRequest, reason, text string) {
+	pr := rr.Status.PullRequest
+	if pr == nil {
+		return
+	}
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type:               remediationv1alpha1.ConditionPROpened,
+		Status:             metav1.ConditionTrue,
+		Reason:             reason,
+		Message:            fmt.Sprintf("Pull request #%d %s", pr.Number, text),
+		ObservedGeneration: rr.Generation,
+	})
+}
+
+// closedByUs is markClosed for a pull request Shadewright has just closed, with why it did. A close of a pull
+// request that is already closed succeeds too, so the text does not claim who closed it first.
+func closedByUs(rr *remediationv1alpha1.RemediationRequest, why string) {
+	markClosed(rr, ReasonPullRequestClosed, "is closed: "+why)
+}
+
 // renderRefusal is a render check that did not pass: merging the change would not build exactly the planned change.
 // It carries a stable reason and fixed text, never file content; the caller says what happened to the commit
 // or the pull request.
@@ -555,9 +585,11 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	return prOpen
 }
 
-// rejected ends a fresh request whose pull request a person closed without a merge.
+// rejected ends a fresh request whose pull request a person closed without a merge. It may also be
+// Shadewright's own close after a render refusal whose status write was lost, so the text does not say who.
 func (r *RemediationRequestReconciler) rejected(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
+	markClosed(rr, ReasonChangeRequestClosed, "was closed without a merge")
 	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 		ReasonChangeRequestClosed, "The pull request was closed without a merge; automation stopped"))
 }

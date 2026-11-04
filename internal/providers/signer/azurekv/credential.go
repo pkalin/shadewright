@@ -176,7 +176,8 @@ func (f *tokenFile) assertion(ctx context.Context) (string, error) {
 // a pipe cannot hold the read, and checks the opened file, so nothing can be swapped in between. Errors
 // are fixed and never quote the path or the content.
 func readTokenFile(path string) (string, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	// The path is AZURE_FEDERATED_TOKEN_FILE from the pod's environment, never cluster or model data.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // G304: operator configuration
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return "", errTokenFileMissing

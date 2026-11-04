@@ -31,7 +31,7 @@ var now = time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 func resp(status int, body string, kv ...string) *http.Response {
 	h := http.Header{}
 	for i := 0; i < len(kv); i += 2 {
-		h.Set(kv[i], kv[i+1])
+		h.Set(kv[i], kv[i+1]) //nolint:gosec // G602: callers pass key-value pairs; an odd count should panic the test
 	}
 	return &http.Response{StatusCode: status, Header: h, Body: io.NopCloser(strings.NewReader(body))}
 }

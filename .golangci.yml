@@ -10,6 +10,7 @@ linters:
     - errcheck
     - ginkgolinter
     - goconst
+    - gosec
     - gocyclo
     - govet
     - ineffassign
@@ -52,6 +53,18 @@ linters:
           - dupl
           - lll
         path: internal/*
+      # Tests hold synthetic credentials on purpose (redaction and credential-leak tests), read fixtures
+      # from testdata, and run helm, kubectl, kind and go. None of it reaches a built binary.
+      - linters:
+          - gosec
+        path: _test\.go$
+        text: "^G(101|204|304):"
+      # Test-only helper packages (not built into the binaries): they read repository files and run the
+      # test tools (go, helm, kubectl, kind) by path or name given by the test.
+      - linters:
+          - gosec
+        path: ^(test|internal/testutil)/
+        text: "^G(204|304):"
     paths:
       - third_party$
       - builtin$

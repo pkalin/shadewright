@@ -187,3 +187,11 @@ func TestExecutorMetricsAreBoundedAndDocumented(t *testing.T) {
 	metricguard.Check(t, metrics.Registry, executorMetrics())
 	metricguard.Documented(t, filepath.Join("..", "..", "docs", "reference", "metrics.md"), executorMetrics())
 }
+
+// TestDenialReasonsStartAtZero checks that every denial reason and Other has a series before the first denial,
+// so an alert on one reason sees 0 rather than no series.
+func TestDenialReasonsStartAtZero(t *testing.T) {
+	if got, want := testutil.CollectAndCount(policyDenials), len(denialReasons)+1; got != want {
+		t.Fatalf("shadewright_policy_denials_total has %d series, want %d (every reason and Other)", got, want)
+	}
+}

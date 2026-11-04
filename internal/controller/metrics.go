@@ -100,6 +100,10 @@ func init() {
 	for _, k := range []string{errorTimeout, errorConflict, errorCancelled, errorOther} {
 		reconcileErrors.WithLabelValues(k)
 	}
+	for r := range denialReasons {
+		policyDenials.WithLabelValues(r)
+	}
+	policyDenials.WithLabelValues(labelOther)
 }
 
 // requestPhaseList are the phases requestPhases reports by name, the enum of RemediationPhase.

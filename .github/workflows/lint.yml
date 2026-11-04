@@ -7,8 +7,37 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.changed.outputs.run }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Pull requests: decided from the files the pull request changes (hack/ci-changed.sh). Pushes to main,
+      # tags, scheduled and manual runs always run. The jobs below are skipped with a job-level `if`, which
+      # counts as passing for the required checks (a workflow-level `paths` filter would leave them pending).
+      - name: Decide from the changed files
+        id: changed
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: hack/ci-changed.sh go .github/workflows/lint.yml >> "$GITHUB_OUTPUT"
+
   lint:
+    needs: changes
+    if: ${{ needs.changes.outputs.run == 'true' }}
     permissions:
       contents: read
     name: lint
@@ -23,6 +52,16 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      # golangci-lint's analysis cache. Pull requests restore the newest cache of main or of their own branch.
+      - name: Cache golangci-lint
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/golangci-lint
+          key: golangci-lint-${{ runner.os }}-${{ hashFiles('go.sum', '.golangci.yml', '.custom-gcl.yml') }}-${{ github.sha }}
+          restore-keys: |
+            golangci-lint-${{ runner.os }}-${{ hashFiles('go.sum', '.golangci.yml', '.custom-gcl.yml') }}-
+            golangci-lint-${{ runner.os }}-
 
       - name: Check linter configuration
         run: make lint-config

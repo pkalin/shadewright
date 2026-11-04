@@ -2,7 +2,8 @@ name: Chart
 
 # Lints and tests the Helm chart in dist/chart (generated with Kubebuilder's helm/v2-alpha plugin, then adjusted
 # by hand, so the comparison test is the guard). Pull requests and pushes to main lint, render and compare
-# the chart with config/default, and a Kind job installs it. Only a v* tag
+# the chart with config/default, and a Kind job installs it. On pull requests they run only when a file they
+# depend on changes (the `changes` job, hack/ci-changed.sh); a superseded pull request run is cancelled. Only a v* tag
 # publishes it to ghcr.io/<owner>/charts/shadewright, and only the publish job has packages: write and
 # id-token: write. After the push it signs the chart by digest with cosign keyless (GitHub OIDC, no key to
 # store) and verifies the signature against the identity of this workflow, so a mismatch fails the run.
@@ -14,12 +15,41 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   HELM_VERSION: v4.3.1
 
 jobs:
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.changed.outputs.run }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Pull requests: decided from the files the pull request changes (hack/ci-changed.sh). Pushes to main,
+      # tags, scheduled and manual runs always run. The jobs below are skipped with a job-level `if`, which
+      # counts as passing for the required checks (a workflow-level `paths` filter would leave them pending).
+      - name: Decide from the changed files
+        id: changed
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: hack/ci-changed.sh chart .github/workflows/chart.yml >> "$GITHUB_OUTPUT"
+
   chart:
     name: Lint and render
+    needs: changes
+    if: ${{ needs.changes.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -45,6 +75,8 @@ jobs:
 
   install:
     name: Install on Kind
+    needs: changes
+    if: ${{ needs.changes.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

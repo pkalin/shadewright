@@ -88,9 +88,16 @@ Every issue names the ADRs it is tied to:
   capabilities dropped, resource requests and limits set.
   The Dockerfile builds both binaries once (builder pinned by digest, Go release equal to go.mod's toolchain
   line) and has the targets `executor`, `analyzer` (one binary each) and `local` (both, the default). The
-  Images workflow builds `executor` and `analyzer` for linux/amd64 and linux/arm64 on pull requests without
-  pushing, and pushes `ghcr.io/pkalin/shadewright-{executor,analyzer}` from main and `v*` tags only, in the one job
+  Images workflow builds `executor` and `analyzer` for linux/amd64 on pull requests without pushing, and for
+  linux/amd64 and linux/arm64 and pushes `ghcr.io/pkalin/shadewright-{executor,analyzer}` from main and `v*` tags only, in the one job
   that has `packages: write`. `make docker-build-images` builds both for the host platform.
+- **CI scope.** On pull requests, the heavy workflows (Lint, Tests, E2E, Vulncheck, Images, Chart) start with a
+  `changes` job that runs `hack/ci-changed.sh` on the files the pull request changes and skip their jobs with a
+  job-level `if` when none of their paths changed; a skipped job counts as passing, so the required checks keep
+  their names. Never add `paths` to a workflow with a required check: it would never start and the merge would
+  wait forever. A path a job depends on that is missing from the script's groups lets a change skip its check,
+  so extend the groups (and `hack/ci-changed_test.sh`) when a job starts reading a new directory. Pushes to main,
+  tags and scheduled runs run everything, and a new push to a pull request cancels the older run.
 - **Tests.** Every bug fix gets a test that fails without it; every new API rule gets a refusal test.
 
 ## Design choices

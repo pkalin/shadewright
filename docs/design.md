@@ -688,6 +688,7 @@ The GitHub App enables auto-merge (GraphQL `enablePullRequestAutoMerge`, squash)
 - Stale approvals dismissed on new pushes, and approval of the most recent push required.
 - The GitHub App is never on a ruleset bypass list and has only `contents: write`, `pull_requests: write`, `issues: write` (for notifications, ADR-0014) and `metadata: read` on one repository. It cannot approve its own PRs.
 - No direct pushes or force pushes to `main`; only branches and PRs.
+- On the clusters that run scenarios, the protected branch Flux tracks, and that the agent's PRs target, is `cluster/<cluster>`, not `main`. Its rulesets mirror the PR rules of `main` for the agent's PRs (approval, code owner review and the required checks `Conventional PR title`, `Render manifests` and `Path guard`), the repository admin role can still push to it directly (a known limit for v0.1.0, with a planned follow-up), and nobody can force-push or delete it ([ADR-0022](adr/0022-scenario-switch-and-clusters.md)).
 - Extra commits, a changed target or a digest mismatch stop automation.
 
 ## 9. Identity
@@ -835,7 +836,7 @@ The lab itself (AKS node, Key Vault, storage, Foundry) is priced in `shadewright
 
 ## 13. Milestones
 
-**Stage 0: lab and scenarios.** Disposable lab cluster, fleet repo, branch rules, scenario set: bad image, missing Secret reference, OOM, unschedulable pod, broken KEDA trigger, invalid manifest. Each scenario has an expected outcome, including the cases where the agent must refuse. *Done when:* every scenario can be reproduced with one command. How a scenario is switched on and where it runs is proposed in [ADR-0022](adr/0022-scenario-switch-and-clusters.md): each cluster's Flux tracks its own `cluster/<cluster>` branch, a scenario is one commit on it, and scenarios run on Kind and the lab.
+**Stage 0: lab and scenarios.** Disposable lab cluster, fleet repo, branch rules, scenario set: bad image, missing Secret reference, OOM, unschedulable pod, broken KEDA trigger, invalid manifest. Each scenario has an expected outcome, including the cases where the agent must refuse. *Done when:* every scenario can be reproduced with one command. How a scenario is switched on and where it runs is decided in [ADR-0022](adr/0022-scenario-switch-and-clusters.md): each cluster's Flux tracks its own `cluster/<cluster>` branch, a scenario is one commit on it, scenarios run on Kind and the lab, and a push builds the scenario only from `origin/main`.
 
 **Stage 1: observe and diagnose, read-only.** Collector, fingerprints, aggregation, durable incidents, model integration, analysis output. No writes to the cluster or Git. *Done when:* a burst of repeated symptoms makes one incident, a restart does not cause an analysis storm, and each diagnosis names its evidence.
 
@@ -876,6 +877,7 @@ Decided on 2026-11-01:
 | Extension packaging | Compiled in now, registered at start-up from an explicit list; signed declarative OCI packs later ([ADR-0019](adr/0019-extension-packaging.md)) |
 | Controller identities | Separate analyzer and executor ServiceAccounts and roles; incidents and requests reachable only in the operator namespace, the analyzer's namespaced reads only in the watched namespaces; cluster-wide it reads only the settings and a Node list (2.2, [ADR-0024](adr/0024-analyzer-writes-detection-to-settings-status.md)) |
 | Detection report (2026-11-03) | The analyzer writes detection to the `RemediationSettings` status; no component reads any field of it to decide ([ADR-0024](adr/0024-analyzer-writes-detection-to-settings-status.md)) |
+| Scenario switch (2026-11-03) | Flux on each cluster tracks its own `cluster/<cluster>` branch; the scenario harness moves it forward with one scenario or reset commit at a time and never writes `main`; the agent's pull requests target that branch, under rulesets that mirror `main`'s protections for them; scenarios run on Kind and the lab ([ADR-0022](adr/0022-scenario-switch-and-clusters.md)) |
 | Calling the model (2026-11-03) | Prompts as code, context first with one structured call, escalation on deterministic signals with bounded tools, an evaluation gate keyed on model and prompt that the analyzer enforces at run time; a durable daily count of analyses that fails closed ([ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md)) |
 
 Still open:
@@ -885,7 +887,7 @@ Still open:
 3. **Model choice.** Benchmark on the scenario set at stage 1: a small model for triage and a stronger one for escalation.
 4. **Teams.** Whether the maintainer's Microsoft account can receive Teams Workflows webhooks. If not, GitHub issues stay the only notifier for now.
 5. **Required checks in policy.** Whether a policy should name verification checks a request cannot drop, beyond the ones each action always runs.
-6. **Scenario switch.** Proposed in [ADR-0022](adr/0022-scenario-switch-and-clusters.md): Flux on each cluster tracks a `cluster/<cluster>` branch that the scenario harness moves forward with one scenario or reset commit at a time, and the agent's pull requests target that branch. Open until the ADR is accepted.
+6. **Scenario switch.** Decided on 2026-11-03: [ADR-0022](adr/0022-scenario-switch-and-clusters.md) is accepted (row above). Kept as an item so that the numbers below do not change.
 7. **Calling the model.** Decided on 2026-11-03: [ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md) is accepted (row above). Where the daily spend is counted is [#208](https://github.com/pkalin/shadewright/issues/208).
 8. **Incident retention.** Incidents are bounded by a count (3.2), not deleted: the analyzer has no `delete` on them. When old Incidents should go, and who deletes them, is open.
 

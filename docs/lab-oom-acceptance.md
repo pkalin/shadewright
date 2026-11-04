@@ -31,6 +31,7 @@ into the samples on your machine only, and the samples in Git keep their `REPLAC
   (`github_app_key_imported = true`).
 - The fleet repository has the branch `cluster/lab` and its two rulesets (ADR-0022, decision 5). The scenario
   harness never creates a branch, so create it once from `main` if it is missing.
+- `cluster/lab` is reset to `main`'s tree (`make scenario-reset CLUSTER=lab` in `shadewright-fleet`; it needs the kube context of the lab, so step 4 runs it once the lab is up). `Path guard` reads its workflow, allow list and `CODEOWNERS` from the base branch, and a cluster branch that predates them fails the agent's pull request. It is a no-op when the trees are equal.
 - `lab/terraform.tfvars` in `shadewright-azure` (git-ignored) has `flux_enabled = true`, `fleet_repository_url`
   set to your fleet repository and `fleet_branch = "cluster/lab"`. Flux must track `cluster/lab`, and
   the settings sample's `targetBranch` must be the same branch, or the source mapping ends in `NeedsIntervention`.
@@ -96,6 +97,7 @@ In `shadewright-fleet`, with the kube context of the lab:
 
 ```bash
 make tools
+make scenario-reset CLUSTER=lab   # first step of a run: cluster/lab holds main's tree
 make scenario-oom CLUSTER=lab
 ```
 

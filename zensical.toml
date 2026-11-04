@@ -3,7 +3,7 @@
 
 [project]
 site_name = "Shadewright"
-site_description = "A Kubernetes operator that diagnoses incidents with an LLM and proposes fixes only as reviewed GitOps pull requests"
+site_description = "A safe-remediation controller for Kubernetes clusters run with GitOps: it turns untrusted proposals, from rules or an LLM, into typed, bounded changes tied to policy and to the object's real source in Git, delivers them only as reviewed pull requests, and verifies the effect"
 site_url = "https://shadewright.io/"
 repo_url = "https://github.com/pkalin/shadewright"
 repo_name = "pkalin/shadewright"

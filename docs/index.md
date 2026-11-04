@@ -11,7 +11,7 @@ hide:
 
 ![Shadewright](assets/wordmark.png)
 
-<p class="sw-tagline">A Kubernetes operator that diagnoses incidents with an LLM and proposes fixes only as reviewed GitOps pull requests.</p>
+<p class="sw-tagline">A safe-remediation controller for Kubernetes clusters run with GitOps: it turns untrusted proposals, from rules or an LLM, into typed, bounded changes tied to policy and to the object's real source in Git, delivers them only as reviewed pull requests, and verifies the effect.</p>
 
 [Read the design](design.md){ .md-button .md-button--primary }
 [Getting started](getting-started.md){ .md-button }

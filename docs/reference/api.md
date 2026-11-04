@@ -649,7 +649,7 @@ Used by: [RemediationPolicy](#remediationpolicy).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `observedGeneration` | integer | No | observedGeneration is the generation the status describes. |
-| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions are reserved. Nothing writes them yet: an unknown repositoryRef is not reported here but refuses the requests that use the policy (reason RepositoryNotConfigured).<br>List type: map<br>List key: `type` |
+| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions are reserved. Nothing writes them yet: an unknown repositoryRef is not reported here but refuses the requests that use the policy (reason RepositoryNotInPolicy).<br>List type: map<br>List key: `type` |
 
 ### RemediationRequestSpec
 

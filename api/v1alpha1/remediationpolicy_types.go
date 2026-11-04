@@ -183,7 +183,7 @@ type RemediationPolicyStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// conditions are reserved. Nothing writes them yet: an unknown repositoryRef is not reported here but
-// refuses the requests that use the policy (reason RepositoryNotConfigured).
+	// refuses the requests that use the policy (reason RepositoryNotInPolicy).
 	// +listType=map
 	// +listMapKey=type
 	// +optional

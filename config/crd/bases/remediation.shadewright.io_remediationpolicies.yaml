@@ -314,7 +314,7 @@ spec:
               conditions:
                 description: |-
                   conditions are reserved. Nothing writes them yet: an unknown repositoryRef is not reported here but
-                  refuses the requests that use the policy (reason RepositoryNotConfigured).
+                  refuses the requests that use the policy (reason RepositoryNotInPolicy).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

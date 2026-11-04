@@ -180,17 +180,21 @@ the analyzer's detection (`UnknownModules`, `DetectionFailed`), so an empty stat
 The executor builds the repository and its signer when a request first needs them, and a problem shows in the
 conditions of the request (see the end of this step and step 7). Reasons to look for:
 
-- `RepositoryNotConfigured` (`Denied`): the `repositoryRef` of the policy names no entry in the settings;
-  `RepositoryNotAllowed`: the target is delivered from a repository the policy does not allow;
-  `BranchNotAllowed`: the source tracks a branch other than the repository's `targetBranch`;
+- `RepositoryNotConfigured` (`Denied`): the URL of the Flux `GitRepository` equals no `url` in the settings'
+  `repositories`, or more than one. The match is exact, so a case difference or a `.git` suffix is enough;
+- `RepositoryNotInPolicy` (`Denied`): the matching repository is not the policy's `gitOps.repositoryRef`, which
+  includes a `repositoryRef` that names no settings entry;
+- `BranchMismatch` (`Denied`): the branch Flux tracks is not the repository's `targetBranch`;
 - `RepositoryUnusable` (`NeedsIntervention`): the settings of the repository (URL, client ID, installation ID, the
   Key Vault `keyID` or a missing signer) cannot be used to open it; fix the settings and apply a new request;
 - `GitForbidden` or `GitRejected`: GitHub refused the App (permissions, installation, ruleset); the request ends
   `NeedsIntervention` before a pull request exists;
 - no reason at all: a signer that cannot be built (no workload identity) or a Key Vault or GitHub error that
-  may pass is retried quietly, so the request stays in `PolicyChecked` and the cause is in the executor log
-  (`kubectl -n shadewright-system logs deploy/shadewright-executor`) until the request ends `Expired` with
-  `PullRequestDeadline`.
+  may pass is retried quietly. Source mapping opens the repository and its signer before the policy decision, so
+  the request stays `Pending`, not `PolicyChecked`. The pull request deadline starts only after an `Allowed`
+  decision, so nothing ends such a request. Read the executor log
+  (`kubectl -n shadewright-system logs deploy/shadewright-executor`) and fix the identity or the Key Vault
+  access it names.
 
 The Incident: if the collector already made one for the OOMKilled `web` container
 (`kubectl -n shadewright-system get incidents`), use its name and UID in the request. Otherwise write the sample:

@@ -37,7 +37,7 @@ into the samples on your machine only, and the samples in Git keep their `REPLAC
   branch, so an old cluster branch also fails the agent's pull request. The reset is a no-op when the trees are equal.
 - `lab/terraform.tfvars` in `shadewright-azure` (git-ignored) has `flux_enabled = true`, `fleet_repository_url`
   set to your fleet repository and `fleet_branch = "cluster/lab"`. Flux must track `cluster/lab`, and
-  the settings sample's `targetBranch` must be the same branch, or the source mapping ends in `NeedsIntervention`.
+  the settings sample's `targetBranch` must be the same branch, or the source mapping denies the request (`Denied`, reason `BranchMismatch`).
 - `az`, `kubectl`, `kubelogin`, `gh`, `jq` and `make` are installed, and `gh auth status` shows an account that can
   read your fleet repository.
 

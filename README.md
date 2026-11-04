@@ -17,7 +17,7 @@
 4. **Opens a pull request** in your GitOps repository, with the evidence and a rollback plan. Your branch rules decide what merges.
 5. **Verifies** the result after the GitOps controller (Flux today) applies it, and escalates when the symptom stays.
 
-It never writes to the cluster directly, and a model's answer is never authorization.
+It never changes your workloads or any other object it watches: it writes only its own control state (Incidents, RemediationRequests and their status, the remediation settings status, an analysis budget ConfigMap, leader election Leases and Events), and a model's answer is never authorization.
 
 ## Repositories
 

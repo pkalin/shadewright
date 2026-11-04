@@ -62,8 +62,9 @@ spec:
                 type: integer
               maxConcurrentRemediations:
                 default: 1
-                description: maxConcurrentRemediations limits requests between PolicyChecked
-                  and a terminal phase.
+                description: |-
+                  maxConcurrentRemediations will limit requests between PolicyChecked and a terminal phase. It is accepted
+                  and stored but not enforced yet: no controller reads it until concurrency limits are built (#88).
                 format: int32
                 maximum: 20
                 minimum: 1

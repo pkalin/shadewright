@@ -15,7 +15,7 @@ Checked 2026-11-01 on the lab subscription (`az cognitiveservices model list`) a
 
 ## Decision
 
-Run the whole lab in Sweden Central, so cluster, identities, storage and model are in one region, and the EU node price is the lowest.
+Run the whole lab in Sweden Central, so cluster, identities, storage and model are in one region, and the node price is the lowest of the EU candidates compared (Sweden Central and North Europe, 2026-11-01); East US 2 was cheaper still.
 
 ## Consequences
 
@@ -27,3 +27,7 @@ Run the whole lab in Sweden Central, so cluster, identities, storage and model a
 
 - North Europe: no Anthropic models and a slightly higher node price.
 - East US 2: cheapest node, but data and latency outside the EU for a European maintainer.
+
+## Amendments
+
+- 2026-11-04: the Decision is unchanged. The claim that the node price is the lowest is narrowed to the EU candidates compared (Sweden Central and North Europe); East US 2 was cheaper ([#245](https://github.com/pkalin/shadewright/issues/245)).

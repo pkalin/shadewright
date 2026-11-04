@@ -93,6 +93,9 @@ Every issue names the ADRs it is tied to:
   existing dependencies, and check new ones for maintenance and licence (Apache-2.0 compatible). Run
   `make vulncheck` (govulncheck) when dependencies change; the `govulncheck` CI job (Vulncheck workflow, also
   weekly) runs it with the Go release of the Dockerfile's builder stage and fails on any finding the code reaches.
+  Trivy is installed by `hack/install-trivy.sh` from the official release with a pinned sha256, never through
+  `aquasecurity/trivy-action` (its tags were force-pushed to malicious code in March 2026, GHSA-69fq-xp46-6x23); bump
+  the version and the checksum together.
 - **Static security checks.** `gosec` runs inside golangci-lint (`make lint`, the lint job of every Go pull
   request). Suppress a gosec finding on its line with `// #nosec G<nnn> -- <reason>` (that rule only), any
   other linter with `//nolint:<linter> // <reason>`; `nolintlint` fails a `nolint` without a linter or a
@@ -119,6 +122,17 @@ Every issue names the ADRs it is tied to:
   `chart-test.yml`) have no triggers of their own, except the weekly `vulncheck.yml` schedule. `images.yml`
   (publishes from main and `v*` tags) and `chart.yml` (runs the chart tests, publishes, then adds the digests to the release, on `v*` tags only)
   stay separate, because their signatures are verified against those file names.
+  Scans that are not part of the pull request graph: `codeql.yml` (CodeQL for `go` and `actions`) runs on pushes to
+  main, weekly and by hand, never on pull requests, because gosec in golangci-lint covers Go changes and zizmor
+  (in `workflow-lint`) covers workflow changes, and its database build is the slowest scan; it needs the
+  repository's code scanning default setup switched off (uploads from an advanced setup are refused while it is
+  on). `trivy.yml` scans the published executor and analyzer images (SARIF to code scanning, a category per
+  image, findings do not fail the run, scanner errors do) on `v*` tags, after the Images workflow pushed them,
+  and weekly against the latest release. `scorecard.yml` (OpenSSF Scorecard, results published for the README
+  badge) runs on pushes to main, weekly and on branch protection changes, and contains only the steps the action
+  allows with `publish_results`. The Trivy misconfiguration scan of the rendered chart and `config/` is the
+  `trivy-config` job of `chart-test.yml`, so it runs only when the `chart` group changed; HIGH and CRITICAL
+  findings fail it unless `.trivyignore.yaml` lists them with a statement of why.
 - **Tests.** Every bug fix gets a test that fails without it; every new API rule gets a refusal test.
 
 ## Design choices

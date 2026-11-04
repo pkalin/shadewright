@@ -14,8 +14,9 @@ go_paths='.*\.go|go\.mod|go\.sum|api/.*|cmd/.*|internal/.*|config/.*|test/.*|hac
 go_re="^(${go_paths})$"
 # The image build context also takes the licence files (see .dockerignore).
 images_re="^(${go_paths}|LICENSE|NOTICE)$"
-# The chart is compared with config/default, rendered by Go tests and installed by scripts in hack/.
-chart_re='^(dist/chart/.*|config/.*|test/.*|hack/.*|api/.*|go\.mod|go\.sum|Makefile|ct\.yaml|PROJECT)$'
+# The chart is compared with config/default, rendered by Go tests and installed by scripts in hack/; Trivy scans it
+# and config/ with the ignores of .trivyignore.yaml.
+chart_re='^(dist/chart/.*|config/.*|test/.*|hack/.*|api/.*|go\.mod|go\.sum|Makefile|ct\.yaml|\.trivyignore\.yaml|PROJECT)$'
 # ci.yml and the workflows it calls, and this script.
 self_re='^(\.github/workflows/(ci|lint|test|test-e2e|vulncheck|workflow-lint|images-build|chart-test)\.yml|hack/ci-changed\.sh)$'
 

@@ -93,8 +93,8 @@ type RemediationRequestReconciler struct {
 	WriteTimeout time.Duration
 	// IncidentReadTimeout bounds the read of the Incident a request names, made before the pull request is
 	// opened to decide whether its body may show the name (verifiedIncidentName). It runs inside the Git step's
-	// deadline, so a stalled read cannot use that up; on timeout the name is redacted. Zero means
-	// [DefaultIncidentReadTimeout].
+	// deadline and takes at most half of what is left of it, so a stalled read cannot use that up; on timeout
+	// the name is redacted. Zero means [DefaultIncidentReadTimeout].
 	IncidentReadTimeout time.Duration
 	// PullRequestTimeout is how long a request may take from PolicyChecked to an open pull request; it is
 	// stored in status.deadline. Zero means [DefaultPullRequestTimeout].

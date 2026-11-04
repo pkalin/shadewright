@@ -1020,14 +1020,15 @@ func (r *RemediationRequestReconciler) verifiedIncidentName(ctx context.Context,
 	if !collectorIncidentName.MatchString(ref.Name) {
 		return ""
 	}
-	readCtx, cancel := bound(ctx, r.IncidentReadTimeout, DefaultIncidentReadTimeout)
+	readCtx, cancel := context.WithTimeout(ctx, incidentReadTimeout(ctx, r.IncidentReadTimeout))
 	defer cancel()
 	var inc remediationv1alpha1.Incident
 	if err := r.reader().Get(readCtx, client.ObjectKey{Namespace: rr.Namespace, Name: ref.Name}, &inc); err != nil {
 		if !apierrors.IsNotFound(err) {
 			reason := apierrors.ReasonForError(err)
-			if ctx.Err() == nil && readCtx.Err() != nil {
-				// The read's own deadline, not the step's: the error itself carries no API reason.
+			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+				// The read's own deadline, not the step's: the error itself carries no API reason. Any other
+				// error, even one that came as the deadline passed, keeps its own.
 				reason = metav1.StatusReasonTimeout
 			}
 			logf.FromContext(ctx).Info("Failed to read the Incident of RemediationRequest, so its name was redacted",
@@ -1040,4 +1041,17 @@ func (r *RemediationRequestReconciler) verifiedIncidentName(ctx context.Context,
 		return ""
 	}
 	return inc.Name
+}
+
+// incidentReadTimeout is the deadline of the Incident read: configured (zero means [DefaultIncidentReadTimeout]),
+// and never more than half the time the step has left, so even a short WriteTimeout leaves the open its time.
+func incidentReadTimeout(step context.Context, configured time.Duration) time.Duration {
+	d := configured
+	if d <= 0 {
+		d = DefaultIncidentReadTimeout
+	}
+	if deadline, ok := step.Deadline(); ok {
+		d = min(d, time.Until(deadline)/2)
+	}
+	return d
 }

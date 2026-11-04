@@ -19,9 +19,11 @@ package controller
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 )
@@ -85,13 +88,23 @@ func TestVerifiedIncidentName(t *testing.T) {
 	forbidden := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(incident(ns, name, hex)).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-				return apierrors.NewForbidden(schema.GroupResource{Group: "remediation.shadewright.io", Resource: "incidents"},
+				return apierrors.NewForbidden(schema.GroupResource{Group: remediationv1alpha1.GroupVersion.Group, Resource: "incidents"},
 					name, nil)
 			},
 		}).Build()
 	r := &RemediationRequestReconciler{Client: forbidden, APIReader: forbidden}
 	if got := r.verifiedIncidentName(context.Background(), request(name, uid)); got != "" {
 		t.Errorf("failed read: got %q, want \"\"", got)
+	}
+
+	// logged returns a context whose logger records each line's key-value pairs into lines.
+	logged := func(lines *[]string) context.Context {
+		var mu sync.Mutex
+		return logf.IntoContext(context.Background(), funcr.New(func(_, args string) {
+			mu.Lock()
+			defer mu.Unlock()
+			*lines = append(*lines, args)
+		}, funcr.Options{}))
 	}
 
 	// A read that hangs ends at its own deadline, long before the step's, and keeps the name redacted (#272).
@@ -102,25 +115,64 @@ func TestVerifiedIncidentName(t *testing.T) {
 				return ctx.Err()
 			},
 		}).Build()
+	var lines []string
 	r = &RemediationRequestReconciler{Client: stalled, APIReader: stalled, IncidentReadTimeout: 50 * time.Millisecond}
-	step, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	step, cancel := context.WithTimeout(logged(&lines), 5*time.Second)
 	defer cancel()
 	start := time.Now()
 	if got := r.verifiedIncidentName(step, request(name, uid)); got != "" {
 		t.Errorf("stalled read: got %q, want \"\"", got)
 	}
-	if took := time.Since(start); took > 2*time.Second {
+	if took := time.Since(start); took > time.Second {
 		t.Errorf("stalled read took %v, want about its own deadline", took)
 	}
 	if step.Err() != nil {
 		t.Errorf("the read's deadline ended the step's context: %v", step.Err())
 	}
+	if len(lines) != 1 || !strings.Contains(lines[0], `"reason"="Timeout"`) {
+		t.Errorf("stalled read: logged %q, want one line with reason Timeout", lines)
+	}
 
-	// A cancelled step cancels the read too: the name is redacted and the cancellation stays the caller's.
+	// An API error that comes as the read's deadline passes keeps its own reason: only a timeout is logged as one.
+	late := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(incident(ns, name, hex)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, _ client.WithWatch, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+				<-ctx.Done()
+				return apierrors.NewForbidden(schema.GroupResource{Group: remediationv1alpha1.GroupVersion.Group, Resource: "incidents"},
+					name, nil)
+			},
+		}).Build()
+	lines = nil
+	r = &RemediationRequestReconciler{Client: late, APIReader: late, IncidentReadTimeout: 50 * time.Millisecond}
+	if got := r.verifiedIncidentName(logged(&lines), request(name, uid)); got != "" {
+		t.Errorf("late forbidden read: got %q, want \"\"", got)
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], `"reason"="Forbidden"`) {
+		t.Errorf("late forbidden read: logged %q, want one line with reason Forbidden", lines)
+	}
+
+	// A short step caps the read at half the time the step has left, whatever IncidentReadTimeout says, so a
+	// small WriteTimeout still leaves the open its time.
+	r = &RemediationRequestReconciler{Client: stalled, APIReader: stalled, IncidentReadTimeout: time.Minute}
+	short, cancelShort := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelShort()
+	if got := r.verifiedIncidentName(short, request(name, uid)); got != "" {
+		t.Errorf("short step: got %q, want \"\"", got)
+	}
+	if short.Err() != nil {
+		t.Errorf("short step: the read used up the step's deadline: %v", short.Err())
+	}
+
+	// A cancelled step cancels the read too: the name is redacted at once and the cancellation stays the
+	// caller's.
 	cancelled, cancelNow := context.WithCancel(context.Background())
 	cancelNow()
 	r = &RemediationRequestReconciler{Client: stalled, APIReader: stalled}
+	start = time.Now()
 	if got := r.verifiedIncidentName(cancelled, request(name, uid)); got != "" {
 		t.Errorf("cancelled step: got %q, want \"\"", got)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("cancelled step took %v, want an immediate return", took)
 	}
 }

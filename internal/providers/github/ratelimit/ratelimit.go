@@ -25,6 +25,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/pkalin/shadewright/internal/providers/retryafter"
 )
 
 const (
@@ -42,11 +44,7 @@ const (
 func RetryAfter(h http.Header, now time.Time) time.Duration {
 	var d time.Duration
 	if v := h.Get("Retry-After"); v != "" {
-		if secs, err := strconv.Atoi(v); err == nil {
-			d = time.Duration(min(max(secs, 0), int(MaxDelay/time.Second))) * time.Second
-		} else if t, err := http.ParseTime(v); err == nil {
-			d = t.Sub(now)
-		}
+		d = retryafter.Parse(v, now, MaxDelay)
 	} else if h.Get("X-RateLimit-Remaining") == "0" {
 		if reset, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64); err == nil {
 			d = time.Unix(reset, 0).Sub(now)

@@ -19,6 +19,16 @@
 
 It never changes your workloads or any other object it watches: it writes only its own control state (Incidents, RemediationRequests and their status, the remediation settings status, an analysis budget ConfigMap, leader election Leases and Events), and a model's answer is never authorization.
 
+## Install
+
+```bash
+helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+  --namespace shadewright-system --create-namespace \
+  --set 'analyzer.watchNamespaces={default}'
+```
+
+Pick the version on the [releases page](https://github.com/pkalin/shadewright/releases) (a pre-release needs `--version`) and [verify the release](https://shadewright.io/upgrade-uninstall/#verify-a-release) first. [Getting started](https://shadewright.io/getting-started/) has the details.
+
 ## Guides
 
 - [Getting started](https://shadewright.io/getting-started/): tests without a cluster, an observe-only install, and a hand-written request to a reviewed pull request.

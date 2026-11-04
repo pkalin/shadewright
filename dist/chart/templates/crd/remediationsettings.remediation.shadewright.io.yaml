@@ -7,6 +7,8 @@ metadata:
     "helm.sh/resource-policy": keep
     {{- end }}
     controller-gen.kubebuilder.io/version: v0.22.0
+  labels:
+    {{- include "shadewright.labels" (dict "component" "" "context" $) | nindent 4 }}
   name: remediationsettings.remediation.shadewright.io
 spec:
   group: remediation.shadewright.io
@@ -260,9 +262,11 @@ spec:
               conditions:
                 description: |-
                   conditions report problems. The analyzer writes UnknownModules: True when spec.modules names a module
-                  that it does not have compiled in, which then contributes nothing; and DetectionFailed: True when its
+                  that it does not have compiled in, which then contributes nothing; DetectionFailed: True when its
                   last run could not list the nodes or read the discovery API, so the report is from the last run that
-                  succeeded, or shows only generic active when none has.
+                  succeeded, or shows only generic active when none has; and NoWatchedNamespaces: True when it was
+                  started with no namespace to watch (the chart's default), so it reads no events or pods and records no
+                  Incident.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

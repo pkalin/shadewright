@@ -29,8 +29,10 @@ import (
 )
 
 // ParseNamespaces reads the --watch-namespaces flag: a comma-separated list of namespace names. It trims
-// spaces, drops duplicates and returns the names sorted. An empty list is an error, not "all namespaces":
-// an unrestricted cache would ask for more than the analyzer's RoleBindings grant (design 10.1).
+// spaces, drops duplicates and returns the names sorted. An empty list means no namespace at all, never "all
+// namespaces": the analyzer then reads nothing namespaced outside the operator namespace (see [CacheOptions])
+// and the binary starts no collector (design 2.2 and 10.1). A name that is not a valid namespace name, such
+// as "*", is an error.
 func ParseNamespaces(flag string) ([]string, error) {
 	var out []string
 	for part := range strings.SplitSeq(flag, ",") {
@@ -45,9 +47,6 @@ func ParseNamespaces(flag string) ([]string, error) {
 			out = append(out, ns)
 		}
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no namespace to watch: set --watch-namespaces to at least one namespace")
-	}
 	slices.Sort(out)
 	return out, nil
 }
@@ -57,10 +56,17 @@ func ParseNamespaces(flag string) ([]string, error) {
 // (RemediationSettings) are not affected by namespace restrictions. Managed fields are dropped before an
 // object enters the cache: nothing in the analyzer reads them, and they are often the largest part of an
 // event or a pod.
+//
+// With no watched namespace the default is the operator namespace alone, never an empty map: controller-runtime
+// reads an empty DefaultNamespaces as every namespace. The analyzer holds no grant on pods or events there, so
+// such a cache lists nothing it could not already read, and the binary starts no informer on them anyway.
 func CacheOptions(operatorNamespace string, watched []string) cache.Options {
-	defaults := make(map[string]cache.Config, len(watched))
+	defaults := make(map[string]cache.Config, max(len(watched), 1))
 	for _, ns := range watched {
 		defaults[ns] = cache.Config{}
+	}
+	if len(defaults) == 0 {
+		defaults[operatorNamespace] = cache.Config{}
 	}
 	operator := map[string]cache.Config{operatorNamespace: {}}
 	return cache.Options{

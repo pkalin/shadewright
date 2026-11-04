@@ -248,9 +248,11 @@ type RemediationSettingsStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// conditions report problems. The analyzer writes UnknownModules: True when spec.modules names a module
-	// that it does not have compiled in, which then contributes nothing; and DetectionFailed: True when its
+	// that it does not have compiled in, which then contributes nothing; DetectionFailed: True when its
 	// last run could not list the nodes or read the discovery API, so the report is from the last run that
-	// succeeded, or shows only generic active when none has.
+	// succeeded, or shows only generic active when none has; and NoWatchedNamespaces: True when it was
+	// started with no namespace to watch (the chart's default), so it reads no events or pods and records no
+	// Incident.
 	// +listType=map
 	// +listMapKey=type
 	// +optional

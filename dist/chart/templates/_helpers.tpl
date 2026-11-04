@@ -60,11 +60,14 @@ control-plane: {{ .component }}
 {{- end }}
 
 {{/*
-Common labels. Takes a dict with .component (may be empty) and .context.
+Common labels, on every object of the chart (test/chart checks it). Takes a dict with .component (may be empty)
+and .context.
 */}}
 {{- define "shadewright.labels" -}}
 app.kubernetes.io/name: {{ include "shadewright.name" .context }}
 app.kubernetes.io/instance: {{ .context.Release.Name }}
+app.kubernetes.io/version: {{ .context.Chart.AppVersion | quote }}
+app.kubernetes.io/part-of: shadewright
 app.kubernetes.io/managed-by: {{ .context.Release.Service }}
 helm.sh/chart: {{ .context.Chart.Name }}-{{ .context.Chart.Version | replace "+" "_" }}
 {{- if .component }}
@@ -73,13 +76,55 @@ app.kubernetes.io/component: {{ .component }}
 {{- end }}
 
 {{/*
-Image reference of a component by digest. The digest is required: a tag can move, a digest cannot.
-Takes a dict with .component and .context.
+Image reference of a component. The chart published on a release tag carries the digests of that release's
+signed images in values.yaml (the Chart workflow writes them before packaging), so it runs repository@digest. A
+source checkout has no digest and falls back to the appVersion tag. Takes a dict with .component and .context.
 */}}
 {{- define "shadewright.image" -}}
 {{- $c := index .context.Values .component -}}
-{{- $digest := required (printf "%s.image.digest is required (sha256:<64 hex digits>); images are pinned by digest" .component) $c.image.digest -}}
-{{- printf "%s@%s" $c.image.repository $digest -}}
+{{- if $c.image.digest -}}
+{{- printf "%s@%s" $c.image.repository $c.image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" $c.image.repository .context.Chart.AppVersion -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Cluster ID hashed into every Incident fingerprint (--cluster-id). An explicit clusterId wins. Otherwise the UID
+of the kube-system namespace: stable for the life of the cluster and unique, read with lookup at install and
+upgrade time. helm template, helm lint and a client-side --dry-run ask no cluster, so lookup finds nothing there
+and the chart fails with a clear message instead of rendering an ID that would change at install. It is an ID,
+never a display name.
+*/}}
+{{- define "shadewright.clusterId" -}}
+{{- if .Values.clusterId -}}
+{{- .Values.clusterId -}}
+{{- else -}}
+{{- $ns := lookup "v1" "Namespace" "" "kube-system" | default dict -}}
+{{- $uid := dig "metadata" "uid" "" $ns -}}
+{{- if not $uid -}}
+{{- fail "clusterId is not set and the UID of the kube-system namespace could not be read (helm template, helm lint and --dry-run ask no cluster): set clusterId, for example --set clusterId=<your cluster>" -}}
+{{- end -}}
+{{- $uid -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Image pull secrets of one component: the global list and the component's own, without duplicates. Takes a dict
+with .component and .context. Renders nothing when both are empty.
+*/}}
+{{- define "shadewright.imagePullSecrets" -}}
+{{- $c := index .context.Values .component -}}
+{{- $names := list -}}
+{{- range concat (.context.Values.imagePullSecrets | default list) ($c.imagePullSecrets | default list) -}}
+{{- $names = append $names .name -}}
+{{- end -}}
+{{- with $names | uniq -}}
+imagePullSecrets:
+{{- range . }}
+- name: {{ . | quote }}
+{{- end }}
+{{- end -}}
 {{- end }}
 
 {{/*

@@ -1,4 +1,6 @@
-# Values for lint and render tests only. Placeholders, not a real cluster, identity or image.
+# Values for the render tests of test/chart and make chart-lint only. Placeholders, not a real cluster, identity or
+# image. They live outside dist/chart/ci on purpose: chart-testing installs the chart once per ci/*-values.yaml
+# file, and its install must run with the default values.
 clusterId: chart-test
 executor:
   image:

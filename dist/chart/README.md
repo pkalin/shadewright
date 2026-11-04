@@ -13,32 +13,38 @@ This chart installs the two components (the analyzer and the executor), their RB
 - Kubernetes version `>=1.28.0-0` (the `kubeVersion` of Chart.yaml).
 - Flux, the GitOps controller that deploys the pull requests the executor opens (Argo CD is not supported yet).
 - Workload identity for the executor: a managed identity (Azure) with a federated credential for the executor ServiceAccount, allowed to sign with the GitHub App key in Key Vault. Its client ID is `executor.identity.azure.clientId`. The ServiceAccount names derive from the release name: install as release `shadewright` in the namespace `shadewright-system` to get `shadewright-executor` and `shadewright-analyzer`, and check them with `helm template` before you create the credential.
-- The images, pinned by digest (see the release notes).
+- The images: the published chart runs the release's signed images by digest (written into its `values.yaml` when the chart is published). A chart from a source checkout runs the `appVersion` tag instead, unless you set the digests.
 
 ## Install
 
-Write a `my-values.yaml` with the required values:
+With no values the chart installs an idle Shadewright: the analyzer starts and is Ready but watches no namespace (no RoleBinding outside the operator namespace, no Incident), and the executor has no identity, so it can write nothing to Git. The cluster ID defaults to the UID of the `kube-system` namespace.
+
+```bash
+helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+  --namespace shadewright-system --create-namespace
+helm test shadewright --namespace shadewright-system
+```
+
+`helm test` runs a Pod that checks that the metrics Service of each component answers (so each Deployment has a Ready Pod) and refuses a scrape without a token. To put Shadewright to work, write a `my-values.yaml`:
 
 ```yaml
-clusterId: my-cluster
+clusterId: my-cluster            # optional: the kube-system UID otherwise; required for helm template
 executor:
-  image:
-    digest: sha256:<executor image digest>
   identity:
     azure:
       clientId: <client ID of the executor managed identity>
 analyzer:
-  image:
-    digest: sha256:<analyzer image digest>
-  watchNamespaces: [<namespace to watch>]
+  watchNamespaces: [<namespace to watch>]   # each must exist; empty watches none, never all
 ```
 
 ```bash
-helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+helm upgrade --install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
   --namespace shadewright-system --create-namespace -f my-values.yaml
 ```
 
-`values.schema.json` validates the values on install, upgrade, lint and template, and the chart refuses to render without the required ones. To manage the `RemediationSettings` object from the chart, set `settings.create: true` and give `settings.spec` (the fields are in the [API reference](https://shadewright.io/reference/api/)):
+Choose the cluster ID once: it is hashed into every Incident fingerprint, so changing it, also from the default to a value of your own, starts every Incident afresh. `helm template`, `helm lint` and a client-side `--dry-run` ask no cluster, so they need `clusterId` (a GitOps tool that renders with `helm template` too).
+
+`values.schema.json` validates the values on install, upgrade, lint and template. To manage the `RemediationSettings` object from the chart, set `settings.create: true` and give `settings.spec` (the fields are in the [API reference](https://shadewright.io/reference/api/)):
 
 ```yaml
 settings:
@@ -81,7 +87,7 @@ helm upgrade shadewright oci://ghcr.io/pkalin/charts/shadewright --version <vers
   --namespace shadewright-system -f my-values.yaml
 ```
 
-The CRDs are templates of this chart, so `helm upgrade` upgrades them (Helm itself never upgrades CRDs from a `crds/` directory). Read the release notes first: a change to the CRD schema, the flags or the values is listed as breaking. With `settings.create: true` every upgrade replaces the `RemediationSettings` object with `settings.spec`.
+The CRDs are templates of this chart, so `helm upgrade` upgrades them (Helm itself never upgrades CRDs from a `crds/` directory). Read the release notes first: a change to the CRD schema, the flags or the values is listed as breaking. With `settings.create: true` the `RemediationSettings` object is created only when it does not exist: an upgrade never changes it, so a pause set by hand (`spec.paused: true`) survives. Change the object with kubectl or GitOps.
 
 ## Uninstall
 
@@ -103,8 +109,8 @@ helm uninstall shadewright --namespace shadewright-system
 |-----|------|---------|-------------|
 | nameOverride | string | `""` | Partially overrides the chart name, which is kept in the release name. At most 63 characters. Empty uses `shadewright`. |
 | fullnameOverride | string | `""` | Fully overrides the resource name prefix, at most 63 characters. Empty uses the release name (or `<release>-shadewright` if it does not contain the chart name). The ServiceAccount names, and so the subject of the federated credential, derive from it. |
-| clusterId | string | none, required | Required. Cluster ID, 1 to 63 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit. Passed as `--cluster-id` and hashed into every Incident fingerprint so Incidents of two clusters never merge. Changing it starts every Incident afresh, so choose it once. |
-| imagePullSecrets | list | `[]` | Image pull secrets of both Pods, a list of `{name: <secret>}`, for a mirror that needs them. The default images are public. |
+| clusterId | string | empty (the UID of `kube-system`) | Cluster ID, 1 to 63 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit. Passed as `--cluster-id` and hashed into every Incident fingerprint so Incidents of two clusters never merge. Empty uses the UID of the `kube-system` namespace, read with `lookup` at install and upgrade (stable and unique for the life of the cluster); `helm template`, `helm lint` and a client-side `--dry-run` ask no cluster, so there it must be set or the chart fails. Changing it, also from empty to a value, starts every Incident afresh, so choose it once. It is an ID, never a display name. |
+| imagePullSecrets | list | `[]` | Image pull secrets of both Pods, a list of `{name: <secret>}` (at most 16), for a mirror that needs them. The default images are public. Each component's `imagePullSecrets` is added to it. |
 
 ### Metrics
 
@@ -113,6 +119,9 @@ helm uninstall shadewright --namespace shadewright-system
 | metrics.enabled | bool | `true` | Serve the metrics endpoint of both components, with its two Services. When false there are no Services, no metrics RBAC and no metrics NetworkPolicy. |
 | metrics.port | int | `8443` | Metrics port, 1 to 65535. Passed as `--metrics-bind-address` and opened by the metrics NetworkPolicy. |
 | metrics.secure | bool | `true` | Serve metrics over HTTPS with a TokenReview and a SubjectAccessReview per request. `false` serves plain HTTP with no authentication: for a test only, `helm install` prints a warning. |
+| metrics.serviceMonitor.enabled | bool | `false` | Install a Prometheus Operator `ServiceMonitor` for each component (needs the `monitoring.coreos.com/v1` CRDs and `metrics.enabled`). Prometheus scrapes with its own ServiceAccount token, so bind that ServiceAccount to the `metrics-reader` ClusterRole, and label its namespace `metrics: enabled` for the NetworkPolicy. The endpoint's certificate is self-signed, so the ServiceMonitor skips its verification. |
+| metrics.serviceMonitor.interval | string | `""` | Scrape interval, such as `30s` or `1m`. Empty uses the Prometheus default. |
+| metrics.serviceMonitor.labels | object | `{}` | Further labels on the ServiceMonitors, for the `serviceMonitorSelector` of your Prometheus. The chart's own labels cannot be overridden. |
 
 ### Network policy
 
@@ -137,11 +146,11 @@ helm uninstall shadewright --namespace shadewright-system
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| executor.image.repository | string | `"ghcr.io/pkalin/shadewright-executor"` | Repository of the executor image (a mirror, for example). The Deployment runs repository@digest. |
-| executor.image.digest | string | none, required | Required. Digest of the executor image: `sha256:` and 64 lower case hex digits. Images are pinned by digest, so a tag is refused by the schema and a moved tag cannot change what runs. |
+| executor.image.repository | string | `"ghcr.io/pkalin/shadewright-executor"` | Repository of the executor image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest. |
+| executor.image.digest | string | the release's digest in the published chart, empty in the source | Digest of the executor image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) runs the `appVersion` tag instead. The schema refuses a tag in this field. |
 | executor.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. One of `Always`, `IfNotPresent` or `Never`. |
-| analyzer.image.repository | string | `"ghcr.io/pkalin/shadewright-analyzer"` | Repository of the analyzer image (a mirror, for example). The Deployment runs repository@digest. |
-| analyzer.image.digest | string | none, required | Required. Digest of the analyzer image: `sha256:` and 64 lower case hex digits. Images are pinned by digest, so a tag is refused by the schema and a moved tag cannot change what runs. |
+| analyzer.image.repository | string | `"ghcr.io/pkalin/shadewright-analyzer"` | Repository of the analyzer image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest. |
+| analyzer.image.digest | string | the release's digest in the published chart, empty in the source | Digest of the analyzer image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) runs the `appVersion` tag instead. The schema refuses a tag in this field. |
 | analyzer.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. One of `Always`, `IfNotPresent` or `Never`. |
 
 ### Identity
@@ -163,15 +172,18 @@ helm uninstall shadewright --namespace shadewright-system
 | executor.extraArgs | list | `[]` | Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--namespace`, `--watch-namespaces`, `--cluster-id` and `--max-incidents`. |
 | executor.podLabels | object | `{}` | Further Pod labels. The chart refuses `control-plane`, `app.kubernetes.io/*`, `helm.sh/*` and `azure.workload.identity/*`: it sets them itself (the identity labels come from `identity.azure.clientId`). |
 | executor.podAnnotations | object | `{}` | Further Pod annotations. |
-| executor.nodeSelector | object | `{}` | Node selector of the Pod. |
-| executor.tolerations | list | `[]` | Tolerations of the Pod, a list of Kubernetes toleration objects. |
-| executor.affinity | object | `{}` | Affinity of the Pod, a Kubernetes affinity object. |
+| executor.nodeSelector | object | `{}` | Node selector of the Pod, at most 32 labels. |
+| executor.tolerations | list | `[]` | Tolerations of the Pod, at most 32 Kubernetes toleration objects. |
+| executor.affinity | object | `{}` | Affinity of the Pod, a Kubernetes affinity object (`nodeAffinity`, `podAffinity`, `podAntiAffinity`). |
+| executor.topologySpreadConstraints | list | `[]` | Topology spread constraints of the Pod, at most 8 Kubernetes `topologySpreadConstraints` objects. |
+| executor.priorityClassName | string | `""` | Priority class of the Pod. Empty uses the cluster default. |
+| executor.imagePullSecrets | list | `[]` | Image pull secrets of this component only, added to the global `imagePullSecrets`, a list of `{name: <secret>}` (at most 16). |
 
 ### Analyzer
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| analyzer.watchNamespaces | list | none, required | Required, at least one unique namespace name, never all namespaces. The analyzer reads events, Pods and workloads only in these namespaces: the chart passes them as `--watch-namespaces` and binds the read-only watch ClusterRole with one RoleBinding in each (`kube-system` included only if you list it). |
+| analyzer.watchNamespaces | list | empty (no namespace) | Unique namespace names, at most 256. The analyzer reads events, Pods and workloads only in these namespaces: the chart passes them as `--watch-namespaces` and binds the read-only watch ClusterRole with one RoleBinding in each (`kube-system` included only if you list it). Empty (the default) watches no namespace, never all of them: the analyzer starts, is Ready and records no Incident, and no RoleBinding is created. `*` is refused. |
 | analyzer.maxIncidents | string | null (the binary's default, 500) | Most Incidents kept in the operator namespace (`--max-incidents`), 1 or more. Null (unset) keeps the binary's default of 500. |
 | analyzer.serviceAccount.annotations | object | `{}` | Further ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `analyzer.identity.azure.clientId`. |
 | analyzer.resources.limits.cpu | string | `"500m"` | CPU limit. `limits` is required and cannot be empty, so the container is never unbounded. |
@@ -181,9 +193,19 @@ helm uninstall shadewright --namespace shadewright-system
 | analyzer.extraArgs | list | `[]` | Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--namespace`, `--watch-namespaces`, `--cluster-id` and `--max-incidents`. |
 | analyzer.podLabels | object | `{}` | Further Pod labels. The chart refuses `control-plane`, `app.kubernetes.io/*`, `helm.sh/*` and `azure.workload.identity/*`: it sets them itself (the identity labels come from `identity.azure.clientId`). |
 | analyzer.podAnnotations | object | `{}` | Further Pod annotations. |
-| analyzer.nodeSelector | object | `{}` | Node selector of the Pod. |
-| analyzer.tolerations | list | `[]` | Tolerations of the Pod, a list of Kubernetes toleration objects. |
-| analyzer.affinity | object | `{}` | Affinity of the Pod, a Kubernetes affinity object. |
+| analyzer.nodeSelector | object | `{}` | Node selector of the Pod, at most 32 labels. |
+| analyzer.tolerations | list | `[]` | Tolerations of the Pod, at most 32 Kubernetes toleration objects. |
+| analyzer.affinity | object | `{}` | Affinity of the Pod, a Kubernetes affinity object (`nodeAffinity`, `podAffinity`, `podAntiAffinity`). |
+| analyzer.topologySpreadConstraints | list | `[]` | Topology spread constraints of the Pod, at most 8 Kubernetes `topologySpreadConstraints` objects. |
+| analyzer.priorityClassName | string | `""` | Priority class of the Pod. Empty uses the cluster default. |
+| analyzer.imagePullSecrets | list | `[]` | Image pull secrets of this component only, added to the global `imagePullSecrets`, a list of `{name: <secret>}` (at most 16). |
+
+### Tests
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| tests.image.repository | string | `"docker.io/curlimages/curl"` | Repository of the image of the `helm test` Pod. It needs `curl`. Rendered only with `metrics.enabled`. |
+| tests.image.digest | string | `"sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93"` | Digest of the test image (curl 8.23.0), required: `sha256:` and 64 lower case hex digits. |
 
 ### Settings
 

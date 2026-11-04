@@ -13,32 +13,38 @@ This chart installs the two components (the analyzer and the executor), their RB
 - Kubernetes version `{{ template "chart.kubeVersion" . }}` (the `kubeVersion` of Chart.yaml).
 - Flux, the GitOps controller that deploys the pull requests the executor opens (Argo CD is not supported yet).
 - Workload identity for the executor: a managed identity (Azure) with a federated credential for the executor ServiceAccount, allowed to sign with the GitHub App key in Key Vault. Its client ID is `executor.identity.azure.clientId`. The ServiceAccount names derive from the release name: install as release `shadewright` in the namespace `shadewright-system` to get `shadewright-executor` and `shadewright-analyzer`, and check them with `helm template` before you create the credential.
-- The images, pinned by digest (see the release notes).
+- The images: the published chart runs the release's signed images by digest (written into its `values.yaml` when the chart is published). A chart from a source checkout runs the `appVersion` tag instead, unless you set the digests.
 
 ## Install
 
-Write a `my-values.yaml` with the required values:
+With no values the chart installs an idle Shadewright: the analyzer starts and is Ready but watches no namespace (no RoleBinding outside the operator namespace, no Incident), and the executor has no identity, so it can write nothing to Git. The cluster ID defaults to the UID of the `kube-system` namespace.
+
+```bash
+helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+  --namespace shadewright-system --create-namespace
+helm test shadewright --namespace shadewright-system
+```
+
+`helm test` runs a Pod that checks that the metrics Service of each component answers (so each Deployment has a Ready Pod) and refuses a scrape without a token. To put Shadewright to work, write a `my-values.yaml`:
 
 ```yaml
-clusterId: my-cluster
+clusterId: my-cluster            # optional: the kube-system UID otherwise; required for helm template
 executor:
-  image:
-    digest: sha256:<executor image digest>
   identity:
     azure:
       clientId: <client ID of the executor managed identity>
 analyzer:
-  image:
-    digest: sha256:<analyzer image digest>
-  watchNamespaces: [<namespace to watch>]
+  watchNamespaces: [<namespace to watch>]   # each must exist; empty watches none, never all
 ```
 
 ```bash
-helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+helm upgrade --install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
   --namespace shadewright-system --create-namespace -f my-values.yaml
 ```
 
-`values.schema.json` validates the values on install, upgrade, lint and template, and the chart refuses to render without the required ones. To manage the `RemediationSettings` object from the chart, set `settings.create: true` and give `settings.spec` (the fields are in the [API reference](https://shadewright.io/reference/api/)):
+Choose the cluster ID once: it is hashed into every Incident fingerprint, so changing it, also from the default to a value of your own, starts every Incident afresh. `helm template`, `helm lint` and a client-side `--dry-run` ask no cluster, so they need `clusterId` (a GitOps tool that renders with `helm template` too).
+
+`values.schema.json` validates the values on install, upgrade, lint and template. To manage the `RemediationSettings` object from the chart, set `settings.create: true` and give `settings.spec` (the fields are in the [API reference](https://shadewright.io/reference/api/)):
 
 ```yaml
 settings:
@@ -81,7 +87,7 @@ helm upgrade shadewright oci://ghcr.io/pkalin/charts/shadewright --version <vers
   --namespace shadewright-system -f my-values.yaml
 ```
 
-The CRDs are templates of this chart, so `helm upgrade` upgrades them (Helm itself never upgrades CRDs from a `crds/` directory). Read the release notes first: a change to the CRD schema, the flags or the values is listed as breaking. With `settings.create: true` every upgrade replaces the `RemediationSettings` object with `settings.spec`.
+The CRDs are templates of this chart, so `helm upgrade` upgrades them (Helm itself never upgrades CRDs from a `crds/` directory). Read the release notes first: a change to the CRD schema, the flags or the values is listed as breaking. With `settings.create: true` the `RemediationSettings` object is created only when it does not exist: an upgrade never changes it, so a pause set by hand (`spec.paused: true`) survives. Change the object with kubectl or GitOps.
 
 ## Uninstall
 

@@ -2,7 +2,19 @@ Shadewright {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namesp
 
   kubectl -n {{ .Release.Namespace }} get deployments
 
+Cluster ID (hashed into every Incident fingerprint): {{ include "shadewright.clusterId" . }}
+{{- if not .Values.clusterId }} (the UID of the kube-system namespace; keep it: a change starts every Incident afresh){{ end }}
+
 Next:
+{{- if not .Values.analyzer.watchNamespaces }}
+  - The analyzer watches no namespace (analyzer.watchNamespaces is empty), so it reads no events or pods and
+    records no Incident. To watch some, upgrade with the list, for example:
+
+      helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} --reuse-values \
+        --set 'analyzer.watchNamespaces={team-a,team-b}'
+
+    The chart creates one read-only RoleBinding in each listed namespace, which must exist.
+{{- end }}
 {{- if not .Values.settings.create }}
   - Create the RemediationSettings object named "default" (settings.create=true, or apply your own).
 {{- end }}
@@ -13,6 +25,11 @@ Next:
 {{- if and .Values.metrics.enabled .Values.metrics.secure }}
   - Metrics are scraped only from namespaces labeled "metrics: enabled", by an identity allowed to "get" the
     non-resource URL /metrics (the ClusterRole {{ include "shadewright.resourceName" (dict "suffix" "metrics-reader" "context" $) }}; nothing binds it).
+{{- end }}
+{{- if or (not .Values.executor.image.digest) (not .Values.analyzer.image.digest) }}
+  - An image has no digest, so it runs by the tag {{ .Chart.AppVersion }} (a source checkout). The chart published
+    on a release tag pins the release's signed digests; set executor.image.digest and analyzer.image.digest
+    to pin them here.
 {{- end }}
 {{- if not .Values.networkPolicy.enabled }}
 

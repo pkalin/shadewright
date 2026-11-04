@@ -69,6 +69,12 @@ const (
 	// ReasonDetectionFailed and ReasonDetected are its reasons.
 	ReasonDetectionFailed = "DetectionFailed"
 	ReasonDetected        = "Detected"
+	// ConditionNoWatchedNamespaces is True when the analyzer was started with an empty --watch-namespaces, so it
+	// reads no events or pods and records no Incident (the chart's default).
+	ConditionNoWatchedNamespaces = "NoWatchedNamespaces"
+	// ReasonNoNamespacesWatched and ReasonNamespacesWatched are its reasons.
+	ReasonNoNamespacesWatched = "NoNamespacesWatched"
+	ReasonNamespacesWatched   = "NamespacesWatched"
 	// FieldOwner is the field manager of the status writes.
 	FieldOwner = "shadewright-detection"
 )
@@ -87,6 +93,9 @@ type Config struct {
 	// Timeout bounds the node list, the discovery call and the settings read and status write (with their
 	// retries on conflict), each.
 	Timeout time.Duration
+	// WatchedNamespaces is how many namespaces the analyzer watches (--watch-namespaces). Zero sets the
+	// condition NoWatchedNamespaces True. It is reported only and decides nothing here.
+	WatchedNamespaces int
 }
 
 // Detector detects the platform and the integrations, keeps the active modules and reports them in
@@ -217,7 +226,7 @@ func (d *Detector) refresh(ctx context.Context, det modules.Detection, o outcome
 		found = true
 		sel = d.cfg.Registry.Select(enabledOf(s.Spec.Modules), det)
 		d.store(sel)
-		want := statusFor(s, sel, o)
+		want := statusFor(s, sel, o, d.cfg.WatchedNamespaces)
 		if equality.Semantic.DeepEqual(s.Status, want) {
 			return nil
 		}
@@ -248,10 +257,11 @@ func enabledOf(m *remediationv1alpha1.Modules) modules.Enabled {
 	return e
 }
 
-// statusFor returns s's status with the detector's fields set from sel and o. Conditions of other types are
-// kept. When no detection has succeeded yet, it reports only what is known: generic active, nothing detected,
-// no integrations, and DetectionFailed True, so an earlier report does not stay in place.
-func statusFor(s remediationv1alpha1.RemediationSettings, sel modules.Selection, o outcome) remediationv1alpha1.RemediationSettingsStatus {
+// statusFor returns s's status with the detector's fields set from sel, o and the number of watched
+// namespaces. Conditions of other types are kept. When no detection has succeeded yet, it reports only what is
+// known: generic active, nothing detected, no integrations, and DetectionFailed True, so an earlier report does
+// not stay in place.
+func statusFor(s remediationv1alpha1.RemediationSettings, sel modules.Selection, o outcome, watched int) remediationv1alpha1.RemediationSettingsStatus {
 	st := *s.Status.DeepCopy()
 	st.ObservedGeneration = s.Generation
 	p := sel.PlatformStatus()
@@ -288,6 +298,19 @@ func statusFor(s remediationv1alpha1.RemediationSettings, sel modules.Selection,
 		c.Status, c.Reason, c.Message = metav1.ConditionTrue, ReasonUnknownModulesEnabled, msg
 	}
 	meta.SetStatusCondition(&st.Conditions, c)
+	ns := metav1.Condition{
+		Type:               ConditionNoWatchedNamespaces,
+		Status:             metav1.ConditionFalse,
+		Reason:             ReasonNamespacesWatched,
+		Message:            fmt.Sprintf("Namespaces watched by the analyzer: %d", watched),
+		ObservedGeneration: s.Generation,
+	}
+	if watched <= 0 {
+		ns.Status, ns.Reason = metav1.ConditionTrue, ReasonNoNamespacesWatched
+		ns.Message = "The analyzer watches no namespace: it reads no events or pods and records no Incident. " +
+			"Set --watch-namespaces (the chart's analyzer.watchNamespaces) to watch some"
+	}
+	meta.SetStatusCondition(&st.Conditions, ns)
 	return st
 }
 

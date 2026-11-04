@@ -48,8 +48,16 @@ const (
 	operatorNS = "shadewright-system"
 	release    = "shadewright"
 
-	kindClusterRole = "ClusterRole"
+	kindClusterRole        = "ClusterRole"
+	kindRole               = "Role"
+	kindRoleBinding        = "RoleBinding"
+	kindClusterRoleBinding = "ClusterRoleBinding"
+	chartName              = "shadewright"
+	unknownField           = "additional properties"
 )
+
+// components are the two Deployments of the chart.
+var components = []string{"executor", "analyzer"}
 
 // helperRole matches the admin, editor and viewer ClusterRoles for people; the chart installs them only on request.
 var helperRole = regexp.MustCompile(`-(admin|editor|viewer)-role$`)
@@ -184,14 +192,14 @@ func diffLines(want, got []string) (missing, extra []string) {
 func describe(t *testing.T, u *unstructured.Unstructured) []string {
 	t.Helper()
 	switch u.GetKind() {
-	case "Role":
+	case kindRole:
 		return grants(convert[rbacv1.Role](t, u).Rules)
 	case kindClusterRole:
 		return grants(convert[rbacv1.ClusterRole](t, u).Rules)
-	case "RoleBinding":
+	case kindRoleBinding:
 		b := convert[rbacv1.RoleBinding](t, u)
 		return bindingLines(b.RoleRef, b.Subjects)
-	case "ClusterRoleBinding":
+	case kindClusterRoleBinding:
 		b := convert[rbacv1.ClusterRoleBinding](t, u)
 		return bindingLines(b.RoleRef, b.Subjects)
 	}
@@ -211,7 +219,7 @@ func bindingLines(ref rbacv1.RoleRef, subjects []rbacv1.Subject) []string {
 
 func isRBAC(u *unstructured.Unstructured) bool {
 	switch u.GetKind() {
-	case "Role", "ClusterRole", "RoleBinding", "ClusterRoleBinding":
+	case kindRole, kindClusterRole, kindRoleBinding, kindClusterRoleBinding:
 		return true
 	}
 	return false
@@ -247,23 +255,43 @@ func compareRBAC(t *testing.T, want, got map[string]*unstructured.Unstructured) 
 
 type rendered struct {
 	kustomize map[string]*unstructured.Unstructured // config/default and config/watch
-	chart     map[string]*unstructured.Unstructured
+	// kustomizeDefault is config/default alone: what the chart installs with no watched namespace.
+	kustomizeDefault map[string]*unstructured.Unstructured
+	// chart holds every object helm template renders except the helm test hooks, which are in tests.
+	chart map[string]*unstructured.Unstructured
+	tests map[string]*unstructured.Unstructured
+}
+
+// testValues are the placeholder values of the render tests (a cluster ID, image digests, an executor identity
+// and the namespace demo, as config/ has).
+func testValues(t *testing.T) string {
+	return filepath.Join(repoRoot(t), "test", "chart", "testdata", "values.yaml")
 }
 
 // helmArgs is the helm template command line for the chart with the test values plus extra --set arguments.
 func helmArgs(t *testing.T, helperRoles bool, extraSet ...string) []string {
 	t.Helper()
+	set := append([]string{fmt.Sprintf("rbac.helpers.enabled=%t", helperRoles)}, extraSet...)
+	return helmArgsWith(t, []string{"-f", testValues(t)}, set...)
+}
+
+// helmArgsWith is the helm template command line with the given value files (as -f arguments) and --set
+// arguments.
+func helmArgsWith(t *testing.T, files []string, set ...string) []string {
+	t.Helper()
 	root := repoRoot(t)
-	args := make([]string, 0, 9+2*len(extraSet))
-	args = append(args,
-		"template", release, filepath.Join(root, "dist", "chart"), "--namespace", operatorNS,
-		"-f", filepath.Join(root, "dist", "chart", "ci", "test-values.yaml"),
-		"--set", fmt.Sprintf("rbac.helpers.enabled=%t", helperRoles),
-	)
-	for _, s := range extraSet {
+	args := make([]string, 0, 5+len(files)+2*len(set))
+	args = append(args, "template", release, filepath.Join(root, "dist", "chart"), "--namespace", operatorNS)
+	args = append(args, files...)
+	for _, s := range set {
 		args = append(args, "--set", s)
 	}
 	return args
+}
+
+// isTestHook reports whether u is a helm test hook (templates/tests): it exists only while helm test runs.
+func isTestHook(u *unstructured.Unstructured) bool {
+	return slices.Contains(strings.Split(u.GetAnnotations()["helm.sh/hook"], ","), "test")
 }
 
 // helmFails renders the chart with the given values and returns helm's error output; it fails the test if the
@@ -281,17 +309,35 @@ func helmFails(t *testing.T, extraSet ...string) string {
 
 func render(t *testing.T, helperRoles bool, extraSet ...string) rendered {
 	t.Helper()
+	return renderArgs(t, helmArgs(t, helperRoles, extraSet...))
+}
+
+// renderArgs renders kustomize and the chart with the given helm template command line.
+func renderArgs(t *testing.T, args []string) rendered {
+	t.Helper()
 	root := repoRoot(t)
 	kustomize := tool(t, "KUSTOMIZE", "kustomize")
 	helm := tool(t, "HELM", "helm")
 
-	r := rendered{kustomize: map[string]*unstructured.Unstructured{}, chart: map[string]*unstructured.Unstructured{}}
+	r := rendered{
+		kustomize:        map[string]*unstructured.Unstructured{},
+		kustomizeDefault: map[string]*unstructured.Unstructured{},
+		chart:            map[string]*unstructured.Unstructured{},
+		tests:            map[string]*unstructured.Unstructured{},
+	}
 	for _, dir := range []string{"config/default", "config/watch"} {
 		for _, u := range objects(t, run(t, root, kustomize, "build", dir)) {
 			r.kustomize[key(u)] = u
+			if dir == "config/default" {
+				r.kustomizeDefault[key(u)] = u
+			}
 		}
 	}
-	for _, u := range objects(t, run(t, root, helm, helmArgs(t, helperRoles, extraSet...)...)) {
+	for _, u := range objects(t, run(t, root, helm, args...)) {
+		if isTestHook(u) {
+			r.tests[key(u)] = u
+			continue
+		}
 		r.chart[key(u)] = u
 	}
 	if len(r.chart) == 0 {
@@ -597,7 +643,7 @@ func TestChartRefusesWeakenedValues(t *testing.T) {
 		labels   = "podLabels"
 		annots   = "serviceAccount.annotations"
 		separate = "separate identities"
-		unknown  = "additional properties"
+		unknown  = unknownField
 		saAnn    = `serviceAccount.annotations.azure\.workload\.identity/`
 	)
 	type refusal struct {
@@ -622,7 +668,7 @@ func TestChartRefusesWeakenedValues(t *testing.T) {
 		"leader-elect", "health-probe-bind-address", "metrics-bind-address", "metrics-secure", "namespace",
 		"watch-namespaces", "cluster-id", "max-incidents",
 	} {
-		for _, comp := range []string{"executor", "analyzer"} {
+		for _, comp := range components {
 			cases["extra arg "+flag+" ("+comp+")"] = refusal{fmt.Sprintf("%s.extraArgs={--%s=x}", comp, flag), "--" + flag}
 		}
 	}

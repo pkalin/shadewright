@@ -84,9 +84,10 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test-scripts
-test-scripts: ## Test the release notes script (hack/release-notes-by-scope.sh).
+test-scripts: ## Test the release notes, chart docs and chart digest scripts in hack/.
 	hack/release-notes-by-scope_test.sh
 	hack/check-chart-docs_test.sh
+	hack/chart-set-digests_test.sh
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
@@ -375,12 +376,26 @@ chart-docs-check: helm-docs ## Fail if the chart README is stale or a value has 
 	@"$(HELM_DOCS)" $(HELM_DOCS_FLAGS) --dry-run 2>/dev/null | diff -u $(CHART_DIR)/README.md - >&2 || { \
 		echo "error: $(CHART_DIR)/README.md is stale: run 'make chart-docs' and commit the result." >&2; exit 1; }
 
+CHART_TEST_VALUES ?= test/chart/testdata/values.yaml
+
+# ct (chart-testing) for chart-ct-lint, run from its image (pinned by digest), which holds yamllint and yamale
+# too. CI installs the same ct version with the chart-testing action.
+CT_IMAGE ?= quay.io/helmpack/chart-testing:v3.15.0@sha256:54317f2d93730ea9ca1236e3d79cd95d74110b8d733b6ab124e5829209b5f4e4
+
 .PHONY: chart-lint
-chart-lint: chart-docs-check ## Check the chart README, lint the chart with the test values, and check that the schema (not a template's required) refuses a tag instead of a digest.
-	$(HELM) lint $(CHART_DIR) -f $(CHART_DIR)/ci/test-values.yaml --strict
-	@if $(HELM) lint $(CHART_DIR) -f $(CHART_DIR)/ci/test-values.yaml --set executor.image.digest=latest >/dev/null 2>&1; then \
+chart-lint: chart-docs-check ## Check the chart README, lint the chart with the test values and with the default values (plus a clusterId: lint asks no cluster), and check that the schema (not a template's required) refuses a tag instead of a digest.
+	$(HELM) lint $(CHART_DIR) -f $(CHART_TEST_VALUES) --strict
+	$(HELM) lint $(CHART_DIR) --set clusterId=chart-lint --strict
+	@if $(HELM) lint $(CHART_DIR) --set clusterId=chart-lint --set executor.image.digest=latest >/dev/null 2>&1; then \
 		echo "helm lint passed with a tag instead of a digest: values.schema.json is not enforced"; exit 1; \
 	fi
+
+# The maintainer check reads the origin remote with git, so run it in a clone: a git worktree keeps its git
+# directory outside the mounted folder.
+.PHONY: chart-ct-lint
+chart-ct-lint: ## Run chart-testing's lint on the chart (yamllint, the Chart.yaml schema, the maintainers, helm lint; ct.yaml) in the pinned ct image.
+	$(CONTAINER_TOOL) run --rm -v "$(CURDIR):/src:ro" -w /src $(CT_IMAGE) \
+		sh -c 'git config --global --add safe.directory /src && ct lint --config ct.yaml'
 
 .PHONY: test-chart
 test-chart: kustomize ## Render the chart and fail if its RBAC, NetworkPolicies, Services or CRDs differ from kustomize build config/default.
@@ -398,3 +413,31 @@ test-chart-install: kind ## Install the chart on a Kind cluster (created here) a
 .PHONY: chart-kind-delete
 chart-kind-delete: kind ## Delete the Kind cluster of test-chart-install.
 	@$(KIND) delete cluster --name $(CHART_KIND_CLUSTER)
+
+# The chart-testing job runs the chart with its default values, so the images must be the ones the default
+# values name: repository:appVersion. They are built from this checkout under that tag and loaded into the Kind
+# cluster. The local Docker keeps them under that tag too: after a local run, remove them before you pull the
+# published release images.
+CHART_CT_KIND_CLUSTER ?= shadewright-chart-ct
+CHART_APP_VERSION = $(shell sed -n 's/^appVersion: "\{0,1\}\([0-9A-Za-z.+-]*\)"\{0,1\}.*/\1/p' $(CHART_DIR)/Chart.yaml)
+CHART_CT_IMAGES = ghcr.io/pkalin/shadewright-executor:$(CHART_APP_VERSION) ghcr.io/pkalin/shadewright-analyzer:$(CHART_APP_VERSION)
+
+.PHONY: chart-ct-cluster
+chart-ct-cluster: kind ## Create the Kind cluster of the chart-testing job and load images built from this checkout under the appVersion tag.
+	@test -n "$(CHART_APP_VERSION)" || { echo "no appVersion in $(CHART_DIR)/Chart.yaml" >&2; exit 1; }
+	@case "$$($(KIND) get clusters)" in \
+		*"$(CHART_CT_KIND_CLUSTER)"*) echo "Kind cluster '$(CHART_CT_KIND_CLUSTER)' already exists." ;; \
+		*) $(KIND) create cluster --name $(CHART_CT_KIND_CLUSTER) ;; \
+	esac
+	$(MAKE) docker-build-images IMG_EXECUTOR=ghcr.io/pkalin/shadewright-executor:$(CHART_APP_VERSION) \
+		IMG_ANALYZER=ghcr.io/pkalin/shadewright-analyzer:$(CHART_APP_VERSION)
+	$(KIND) load docker-image --name $(CHART_CT_KIND_CLUSTER) $(CHART_CT_IMAGES)
+	$(KUBECTL) config use-context kind-$(CHART_CT_KIND_CLUSTER)
+
+.PHONY: test-chart-defaults
+test-chart-defaults: chart-ct-cluster ## Install the chart with no values on the chart-testing Kind cluster and check that it reads nothing and writes nothing, then run helm test.
+	hack/chart-default-install-test.sh "$(KUBECTL)" "$(HELM)"
+
+.PHONY: chart-ct-kind-delete
+chart-ct-kind-delete: kind ## Delete the Kind cluster of the chart-testing job.
+	@$(KIND) delete cluster --name $(CHART_CT_KIND_CLUSTER)

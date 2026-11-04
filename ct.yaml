@@ -1,0 +1,17 @@
+# chart-testing (ct) configuration for dist/chart: make chart-ct-lint and the Chart workflow's chart-testing job.
+# ct lint runs yamllint and the Chart.yaml schema, checks that each maintainer is a GitHub account and runs helm
+# lint; ct install installs the chart with its default values (there is no ci/*-values.yaml on purpose), runs
+# helm test and uninstalls it.
+chart-dirs:
+  - dist
+charts:
+  - dist/chart
+target-branch: main
+# The chart version follows the release: release-please bumps it only in the release pull request, so a pull
+# request that changes the chart keeps the version on purpose.
+check-version-increment: false
+validate-maintainers: true
+# helm lint asks no cluster, so the clusterId default (the kube-system UID, read with lookup) is not available.
+helm-lint-extra-args: --set clusterId=ct-lint
+# Generous: the Kind node pulls the test image on the first helm test.
+helm-extra-args: --timeout 5m

@@ -38,9 +38,11 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
-      {{- with .Values.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+      {{- with $c.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with include "shadewright.imagePullSecrets" (dict "component" "executor" "context" $) }}
+      {{- . | nindent 6 }}
       {{- end }}
       containers:
       - name: executor
@@ -104,5 +106,9 @@ spec:
       {{- end }}
       {{- with $c.affinity }}
       affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}

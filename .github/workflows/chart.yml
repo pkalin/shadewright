@@ -2,10 +2,13 @@ name: Chart
 
 # Lints and tests the Helm chart in dist/chart (generated with Kubebuilder's helm/v2-alpha plugin, then adjusted
 # by hand, so the comparison test is the guard). Pull requests and pushes to main lint, render and compare
-# the chart with config/default, and a Kind job installs it. Only a v* tag
+# the chart with config/default, a Kind job installs it with explicit values, and the chart-testing job runs
+# ct lint and installs it with no values at all (images built from the checkout), with helm test. Only a v* tag
 # publishes it to ghcr.io/<owner>/charts/shadewright, and only the publish job has packages: write and
-# id-token: write. After the push it signs the chart by digest with cosign keyless (GitHub OIDC, no key to
-# store) and verifies the signature against the identity of this workflow, so a mismatch fails the run.
+# id-token: write. Before packaging it writes the digests of the tag's signed images into values.yaml, so the
+# published chart runs them by digest. After the push it signs the chart by digest with cosign keyless (GitHub
+# OIDC, no key to store) and verifies the signature against the identity of this workflow, so a mismatch fails
+# the run.
 on:
   push:
     branches: [main]
@@ -16,6 +19,10 @@ permissions: {}
 
 env:
   HELM_VERSION: v4.3.1
+  CT_VERSION: 3.15.0
+  YAMLLINT_VERSION: 1.33.0
+  YAMALE_VERSION: 6.0.0
+  UV_VERSION: 0.13.7
 
 jobs:
   chart:
@@ -77,12 +84,63 @@ jobs:
         if: ${{ always() }}
         run: make chart-kind-delete
 
+  chart-testing:
+    name: chart-testing (default values on Kind)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false # this workflow publishes on tags: no cache a pull request could poison
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      # Installs ct, yamllint and yamale at the versions above (ct's download is verified with cosign).
+      - name: Setup chart-testing
+        uses: helm/chart-testing-action@720270857a28afd41e2426521a7801db09e9b510 # v2.9.0
+        with:
+          version: ${{ env.CT_VERSION }}
+          yamllint_version: ${{ env.YAMLLINT_VERSION }}
+          yamale_version: ${{ env.YAMALE_VERSION }}
+          uv_version: ${{ env.UV_VERSION }}
+
+      # yamllint, the Chart.yaml schema, maintainers (a GitHub handle, no email) and helm lint (ct.yaml).
+      - name: ct lint
+        run: ct lint --config ct.yaml
+
+      # The default values run repository:appVersion, so the images are built from this checkout under that
+      # tag and loaded into Kind (pinned KIND_VERSION): the install tests this code with no values at all.
+      - name: Create the Kind cluster and load the images
+        run: make chart-ct-cluster
+
+      - name: Install with no values and check that it reads and writes nothing
+        run: make test-chart-defaults
+
+      # Installs with the default values (there is no ci/*-values.yaml), runs helm test and uninstalls.
+      - name: ct install
+        run: ct install --config ct.yaml
+
+      - name: Delete the Kind cluster
+        if: ${{ always() }}
+        run: make chart-ct-kind-delete
+
   publish:
     name: Publish the chart
     # Release tags only. The chart version must equal the tag (release-please bumps both in the release pull
     # request), so a tag never publishes the chart of another version.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [chart, install]
+    needs: [chart, install, chart-testing]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -111,6 +169,41 @@ jobs:
             exit 1
           fi
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # The images of this tag, by digest, each verified against the identity of the Images workflow on this
+      # very tag before its digest goes into the chart. The tag is resolved once; the signature check is on the
+      # digest, so a tag moved after the check changes nothing.
+      - name: Write the signed image digests into values.yaml
+        env:
+          TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "${OWNER}" | tr '[:upper:]' '[:lower:]')"
+          identity="^https://github\.com/${REPOSITORY//./\\.}/\.github/workflows/images\.yml@refs/tags/${TAG//./\\.}$"
+          for image in executor analyzer; do
+            ref="ghcr.io/${owner}/shadewright-${image}"
+            d="$(docker buildx imagetools inspect "${ref}:${TAG#v}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+            if ! printf '%s' "${d}" | grep -Eq '^sha256:[a-f0-9]{64}$'; then
+              echo "no digest for ${ref}:${TAG#v}" >&2
+              exit 1
+            fi
+            cosign verify \
+              --certificate-identity-regexp "${identity}" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "${ref}@${d}" > /dev/null
+            printf -v "digest_${image}" '%s' "${d}"
+            echo "${ref}@${d}" >> "${GITHUB_STEP_SUMMARY}"
+          done
+          hack/chart-set-digests.sh dist/chart/values.yaml "${digest_executor}" "${digest_analyzer}"
+          rendered="$(helm template publish-check dist/chart --set clusterId=publish-check)"
+          for d in "${digest_executor}" "${digest_analyzer}"; do
+            grep -qF "@${d}\"" <<<"${rendered}" || { echo "the chart does not run ${d}" >&2; exit 1; }
+          done
+
       - name: Package the chart
         run: helm package dist/chart --destination "${RUNNER_TEMP}/chart"
 
@@ -135,9 +228,6 @@ jobs:
           fi
           echo "CHART_REF=ghcr.io/${owner}/charts/shadewright@${digest}" >> "${GITHUB_ENV}"
           echo "oci://ghcr.io/${owner}/charts/shadewright:${TAG#v} (${digest})" >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       # Always by digest: a tag can move, the digest names the pushed chart.
       - name: Sign the chart (keyless)

@@ -38,9 +38,11 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
-      {{- with .Values.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+      {{- with $c.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with include "shadewright.imagePullSecrets" (dict "component" "analyzer" "context" $) }}
+      {{- . | nindent 6 }}
       {{- end }}
       containers:
       - name: analyzer
@@ -57,8 +59,9 @@ spec:
         - --metrics-secure=false
         {{- end }}
         {{- end }}
-        - --watch-namespaces={{ join "," (required "analyzer.watchNamespaces needs at least one namespace" .Values.analyzer.watchNamespaces) }}
-        - --cluster-id={{ required "clusterId is required" .Values.clusterId }}
+        {{- /* Always rendered: an empty value watches no namespace (never all of them), and says so in the Pod spec. */}}
+        - --watch-namespaces={{ join "," (.Values.analyzer.watchNamespaces | default list) }}
+        - --cluster-id={{ include "shadewright.clusterId" $ }}
         {{- with .Values.analyzer.maxIncidents }}
         - --max-incidents={{ . }}
         {{- end }}
@@ -113,5 +116,9 @@ spec:
       {{- end }}
       {{- with $c.affinity }}
       affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}

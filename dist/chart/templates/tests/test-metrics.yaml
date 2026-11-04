@@ -1,0 +1,163 @@
+{{- /*
+The helm test hook. One Pod asks the metrics Service of each component for /metrics. A Service sends traffic
+only to Ready Pods, so an answer shows that the Deployment has a Ready Pod and that its metrics endpoint
+serves. With metrics.secure (the default) the Pod sends no token and must get 401: the endpoint answers and
+refuses an unauthenticated scrape. With metrics.secure=false it must get 200. The Pod has no ServiceAccount
+token and no RBAC. Rendered only with metrics.enabled: without metrics there is nothing to ask without
+permissions. With networkPolicy.enabled two NetworkPolicies, hooks too, let only this Pod reach the metrics
+port while the test runs; Helm deletes them afterwards, also when the test fails.
+*/ -}}
+{{- if .Values.metrics.enabled }}
+{{- $scheme := ternary "https" "http" .Values.metrics.secure }}
+{{- $want := ternary "401" "200" .Values.metrics.secure }}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "test-egress" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "test" "context" $) | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "shadewright.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: test
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  - ports:
+    - port: {{ .Values.metrics.port }}
+      protocol: TCP
+    to:
+    - podSelector:
+        matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: In
+          values:
+          - {{ include "shadewright.name" . }}
+        - key: control-plane
+          operator: In
+          values:
+          - executor
+          - analyzer
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "test-ingress" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "test" "context" $) | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+spec:
+  podSelector:
+    matchExpressions:
+    - key: app.kubernetes.io/name
+      operator: In
+      values:
+      - {{ include "shadewright.name" . }}
+    - key: control-plane
+      operator: In
+      values:
+      - executor
+      - analyzer
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: {{ include "shadewright.name" . }}
+          app.kubernetes.io/instance: {{ .Release.Name }}
+          app.kubernetes.io/component: test
+    ports:
+    - port: {{ .Values.metrics.port }}
+      protocol: TCP
+---
+{{- end }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "test-metrics" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "test" "context" $) | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+  - name: metrics
+    image: {{ printf "%s@%s" .Values.tests.image.repository .Values.tests.image.digest | quote }}
+    imagePullPolicy: IfNotPresent
+    command:
+    - /bin/sh
+    - -ec
+    - |
+      for url in "$EXECUTOR_URL" "$ANALYZER_URL"; do
+        got=""
+        for i in $(seq 1 30); do
+          got="$(curl --silent --insecure --output /dev/null --max-time 5 --write-out '%{http_code}' "$url" || true)"
+          [ "$got" = "$WANT" ] && break
+          sleep 2
+        done
+        if [ "$got" != "$WANT" ]; then
+          echo "FAIL: $url answered '$got', want $WANT" >&2
+          exit 1
+        fi
+        echo "ok: $url answered $got"
+      done
+    env:
+    - name: WANT
+      value: {{ $want | quote }}
+    - name: EXECUTOR_URL
+      value: {{ printf "%s://%s.%s.svc:%d/metrics" $scheme (include "shadewright.resourceName" (dict "suffix" "executor-metrics-service" "context" $)) .Release.Namespace (int .Values.metrics.port) | quote }}
+    - name: ANALYZER_URL
+      value: {{ printf "%s://%s.%s.svc:%d/metrics" $scheme (include "shadewright.resourceName" (dict "suffix" "analyzer-metrics-service" "context" $)) .Release.Namespace (int .Values.metrics.port) | quote }}
+    securityContext:
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+    resources:
+      limits:
+        cpu: 100m
+        memory: 32Mi
+      requests:
+        cpu: 10m
+        memory: 16Mi
+{{- end }}

@@ -170,7 +170,12 @@ func executorMetrics() map[string]metricguard.Labels {
 		"shadewright_remediation_reconcile_errors_total": {
 			labelKind: {errorTimeout, errorConflict, errorCancelled, errorOther},
 		},
-		"shadewright_remediation_requests": {"phase": phasegauge.Labels(requestPhaseList)},
+		"shadewright_remediation_requests":          {"phase": phasegauge.Labels(requestPhaseList)},
+		"shadewright_remediations_in_flight":        {},
+		"shadewright_remediation_concurrency_limit": {},
+		"shadewright_remediation_waits_total":       {"reason": slices.Collect(maps.Values(waitReasons))},
+		"shadewright_circuit_breaker_open":          {},
+		"shadewright_circuit_breaker_trips_total":   {},
 	}
 }
 

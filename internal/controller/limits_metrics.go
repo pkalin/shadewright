@@ -62,6 +62,10 @@ var breakerSeenOpen atomic.Bool
 
 func init() {
 	metrics.Registry.MustRegister(remediationsInFlight, concurrencyLimit, remediationWaits, breakerOpen, breakerTrips)
+	// The closed set starts at zero, so a rate is defined before the first request is held back.
+	for _, label := range waitReasons {
+		remediationWaits.WithLabelValues(label)
+	}
 }
 
 // recordLimits updates the metrics from one check of the limits. err is the error of the check; a request held

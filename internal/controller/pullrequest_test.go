@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -72,6 +73,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		faulty       *faultyGit
 		openErr      error
 		writeTimeout time.Duration
+		// apiReader, when set, replaces the reconciler's APIReader (k8sClient otherwise); incidentReadTimeout its IncidentReadTimeout.
+		apiReader           client.Reader
+		incidentReadTimeout time.Duration
 		// opens counts the repositories opened through the reconciler.
 		opens int
 		// recorder, when set, records the reconciler's Events.
@@ -102,8 +106,12 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				}
 				return git, nil
 			},
-			Now:          func() time.Time { return clock },
-			WriteTimeout: writeTimeout,
+			Now:                 func() time.Time { return clock },
+			WriteTimeout:        writeTimeout,
+			IncidentReadTimeout: incidentReadTimeout,
+		}
+		if apiReader != nil {
+			r.APIReader = apiReader
 		}
 		if recorder != nil {
 			r.Recorder = recorder
@@ -153,6 +161,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		clock = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 		build = buildPath
 		faulty, openErr, writeTimeout, opens, recorder = nil, nil, 0, 0, nil
+		apiReader, incidentReadTimeout = nil, 0
 		err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fx.TargetNamespace}})
 		Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
 
@@ -295,6 +304,40 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		body := answering(remediationv1alpha1.IncidentRef{Name: inc.Name, UID: "22222222-2222-4222-8222-222222222222"})
 		Expect(body).NotTo(ContainSubstring(hex))
 		Expect(body).To(ContainSubstring("for incident `[REDACTED:token]`."))
+	})
+
+	It("opens the pull request with the name redacted when the Incident read hangs", func() {
+		hex := strings.Repeat("5e884898", 7) + fmt.Sprintf("%08x", seq)
+		inc := collectorIncident(hex)
+		// The read of the Incident never answers, as from a stalled API server; every other read goes through.
+		// Its own deadline is far shorter than the step's, so the step still has the time to open the pull
+		// request. Without that deadline the read would use up the step's and the open would time out.
+		hangs := &atomic.Int32{}
+		apiReader = hangingIncidentReader{Reader: k8sClient, hangs: hangs}
+		writeTimeout, incidentReadTimeout = 2*time.Second, 100*time.Millisecond
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		replaced := fx.MemoryLimitRequest(requestNamespace, request.Name+"-incident")
+		replaced.Spec.PolicyRef, replaced.Spec.TargetRef = request.Spec.PolicyRef, request.Spec.TargetRef
+		replaced.Spec.IncidentRef = remediationv1alpha1.IncidentRef{Name: inc.Name, UID: remediationv1alpha1.UID(inc.UID)}
+		Expect(k8sClient.Create(ctx, replaced)).To(Succeed())
+		request = replaced
+		// Unlike drive, any error fails the test: a step that ran out of time is retryable, and a retry would
+		// hang the same way. The loop has an overall limit too, so a slow regression fails instead of crawling.
+		start := time.Now()
+		for range 20 {
+			Expect(reconcileOnce()).To(Succeed())
+			if fetch().Status.Phase == remediationv1alpha1.PhaseAwaitingApproval {
+				break
+			}
+			Expect(time.Since(start)).To(BeNumerically("<", 20*time.Second), "the steps took too long")
+		}
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		// The read did hang: the body is redacted because of the deadline, not because the read was skipped.
+		Expect(hangs.Load()).To(BeNumerically(">=", 1))
+		crs := openRequests()
+		Expect(crs).To(HaveLen(1))
+		Expect(crs[0].Body).NotTo(ContainSubstring(hex))
+		Expect(crs[0].Body).To(ContainSubstring("for incident `[REDACTED:token]`."))
 	})
 
 	It("finds the existing work after a restart between any two steps", func() {
@@ -451,6 +494,11 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
 			To(Equal(ReasonChangeRequestClosed))
+		opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(opened.Status).To(Equal(metav1.ConditionTrue))
+		Expect(opened.Reason).To(Equal(ReasonChangeRequestClosed))
+		Expect(opened.Message).To(Equal(fmt.Sprintf("Pull request #%d was closed without a merge",
+			got.Status.PullRequest.Number)), "the condition no longer says the pull request is open")
 	})
 
 	It("expires a request whose freshness check keeps failing", func() {
@@ -763,7 +811,12 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			}
 			Expect(cond.Message).To(HaveSuffix("the pull request was closed"))
 			Expect(cond.Message).NotTo(ContainSubstring("branch was cut"), "the text names the window it was refused in")
-			Expect(meta.IsStatusConditionTrue(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)).To(BeTrue())
+			opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+			Expect(opened).NotTo(BeNil())
+			Expect(opened.Status).To(Equal(metav1.ConditionTrue), "the pull request was opened")
+			Expect(opened.Reason).To(Equal(ReasonPullRequestClosed))
+			Expect(opened.Message).To(Equal(fmt.Sprintf("Pull request #%d is closed: the change no longer renders "+
+				"as planned (%s)", got.Status.PullRequest.Number, reason)))
 			crs := openRequests()
 			Expect(crs).To(HaveLen(1), "no other pull request is opened")
 			Expect(crs[0].State).To(Equal(providers.ChangeRequestClosed), "a refused pull request is closed")
@@ -987,6 +1040,33 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(reconcileOnce()).To(Succeed())
 			stoppedWaiting(ReasonPatchRefused)
+		})
+
+		It("leaves a refused waiting pull request open, and says so, when the settings no longer reach its repository", func() {
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			addOverlay()
+			// The freshness check reads the target file first; the repository leaves the settings right before
+			// the step reads the file of the pull request, after the check passed and before the close.
+			faulty.beforeOp(opReadFile, func() {
+				faulty.beforeOp(opReadFile, func() {
+					defer GinkgoRecover()
+					live := &remediationv1alpha1.RemediationSettings{}
+					Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, live)).To(Succeed())
+					live.Spec.Repositories = nil
+					Expect(k8sClient.Update(ctx, live)).To(Succeed())
+				})
+			})
+			Expect(reconcileOnce()).To(Succeed())
+			after := fetch()
+			Expect(after.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			approved := meta.FindStatusCondition(after.Status.Conditions, remediationv1alpha1.ConditionApproved)
+			Expect(approved.Reason).To(Equal(string(semdiff.ReasonOtherObjectChanged)))
+			Expect(approved.Message).To(HaveSuffix("so the pull request was not closed"))
+			Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+			opened := meta.FindStatusCondition(after.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+			Expect(opened.Status).To(Equal(metav1.ConditionTrue))
+			Expect(opened.Reason).To(Equal(ReasonPullRequestOpened), "the pull request was not closed")
+			Expect(opened.Message).To(Equal(fmt.Sprintf("Pull request #%d is open", got.Status.PullRequest.Number)))
 		})
 
 		It("keeps a waiting pull request open and retries when closing it after a refusal fails", func() {
@@ -1414,6 +1494,12 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh).Reason).
 					To(Equal(freshness.ReasonTargetFileChanged))
 				Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+				opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+				Expect(opened.Status).To(Equal(metav1.ConditionTrue), "the pull request was opened")
+				Expect(opened.Reason).To(Equal(ReasonPullRequestClosed))
+				Expect(opened.Message).To(Equal(fmt.Sprintf("Pull request #%d is closed: the plan is stale (%s)",
+					got.Status.PullRequest.Number, freshness.ReasonTargetFileChanged)),
+					"the condition no longer says the pull request is open")
 				for range 3 {
 					Expect(reconcileOnce()).To(Succeed())
 				}
@@ -1765,4 +1851,21 @@ func bodyRequest() *remediationv1alpha1.RemediationRequest {
 	rr.Status.PolicyRevision = "p/1"
 	rr.Status.Source = &remediationv1alpha1.ResolvedSource{Path: sourcePath, TargetBranch: mainBranch}
 	return rr
+}
+
+// hangingIncidentReader is a reader whose get of an Incident blocks until its context ends, as a stalled API
+// server would, and counts those gets in hangs; reads of other kinds go to Reader.
+type hangingIncidentReader struct {
+	client.Reader
+	hangs *atomic.Int32
+}
+
+func (h hangingIncidentReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object,
+	opts ...client.GetOption) error {
+	if _, ok := obj.(*remediationv1alpha1.Incident); ok {
+		h.hangs.Add(1)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return h.Reader.Get(ctx, key, obj, opts...)
 }

@@ -10,7 +10,7 @@ Developing the operator needs a real cluster with a GitOps controller and a mana
 ## Decision
 
 - Unit and controller tests run on envtest, no cluster needed. End-to-end tests run on Kind in GitHub Actions.
-- The lab runs in Azure, in a subscription separate from any production workload, in three Terraform roots: `bootstrap` (state), `foundation` (Key Vault, identities, model deployment, budget; stays up) and `lab` (AKS, federation, Flux; applied for a session and destroyed after).
+- The lab runs in Azure, in a subscription separate from any production workload, in three Terraform roots: `bootstrap` (state), `foundation` (Key Vault, identities, model deployment, budget; stays up) and `lab` (AKS, federation and the values for the Flux install; applied for a session and destroyed after).
 - AKS: Free tier, one small node pool, Entra ID with Azure RBAC, local accounts disabled, public API server limited by `authorized_ip_ranges`.
 
 ## Consequences
@@ -24,3 +24,7 @@ Developing the operator needs a real cluster with a GitOps controller and a mana
 - Private cluster: needs `az aks command invoke` or a jump host for every `kubectl`, which is painful for operator development.
 - A permanent cluster: simpler, but pays for idle hours.
 - Local Kind or Minikube only: no workload identity, no managed model, and heavy on a laptop.
+
+## Amendments
+
+- 2026-11-04: the `lab` root no longer creates Flux. It holds AKS, the federation and the values for the Flux install, which `scripts/lab.sh` runs after the apply ([ADR-0022](0022-scenario-switch-and-clusters.md), amended the same day). The lab is still applied for a session and destroyed after, and `make lab-down` still leaves nothing behind; nothing is widened.

@@ -71,6 +71,11 @@ const DefaultPullRequestTimeout = 30 * time.Minute
 // DefaultWriteTimeout bounds one Git step: opening the repository, rebuilding the state and one write.
 const DefaultWriteTimeout = 2 * time.Minute
 
+// DefaultIncidentReadTimeout bounds the read of the Incident whose name the pull request body shows. One get
+// of a small object takes milliseconds; a read that fails only redacts the name, so a short deadline loses
+// nothing and leaves the rest of the step's deadline to the Git host.
+const DefaultIncidentReadTimeout = 5 * time.Second
+
 // stepDelay is how soon the next step runs after a single write of the step.
 const stepDelay = time.Second
 
@@ -78,6 +83,10 @@ const stepDelay = time.Second
 const (
 	// ReasonPullRequestOpened: the pull request is open and its head is the commit Shadewright made.
 	ReasonPullRequestOpened = "PullRequestOpened"
+	// ReasonPullRequestClosed: Shadewright closed the recorded pull request without a merge (or found it closed
+	// while closing it), because the plan is stale or the change no longer renders as planned.
+	// PullRequestOpened stays True (the pull request was opened) and its message names the number and why.
+	ReasonPullRequestClosed = "PullRequestClosed"
 	// ReasonWaitingForReview: the pull request waits for a human review.
 	ReasonWaitingForReview = "WaitingForReview"
 	// ReasonHeadMoved: someone else pushed to the branch. Automation stops; the plan no longer describes the
@@ -87,7 +96,8 @@ const (
 	ReasonBranchDiverged = "BranchDiverged"
 	// ReasonForeignChangeRequest: a pull request for the branch exists without this request's marker.
 	ReasonForeignChangeRequest = "ForeignChangeRequest"
-	// ReasonChangeRequestClosed: the pull request was closed without merging before the request recorded it.
+	// ReasonChangeRequestClosed: the pull request was closed without a merge, not by a close the request recorded,
+	// before or after the request recorded the pull request.
 	ReasonChangeRequestClosed = "ChangeRequestClosed"
 	// ReasonChangeRequestMerged: the pull request was merged.
 	ReasonChangeRequestMerged = "ChangeRequestMerged"
@@ -276,6 +286,7 @@ func (r *RemediationRequestReconciler) refuseWaiting(ctx context.Context, rr *re
 	outcome := "; the pull request was closed"
 	switch {
 	case err == nil:
+		closedByUs(rr, "the change no longer renders as planned ("+ref.reason+")")
 	case errors.Is(err, freshness.ErrRepositoryUnusable), errors.Is(err, errTargetBranchChanged),
 		errors.Is(err, errRepositoryGone):
 		outcome = "; the settings no longer reach its repository, so the pull request was not closed"
@@ -486,6 +497,30 @@ func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr
 	return nil
 }
 
+// markClosed rewrites PullRequestOpened of a request whose recorded pull request is closed without a merge, so
+// the condition no longer says it is open: the reason, the number and a fixed text that says why.
+// The caller writes it in the status write that ends the request. A request without a recorded pull request
+// is left alone: its PullRequestOpened never said one was open.
+func markClosed(rr *remediationv1alpha1.RemediationRequest, reason, text string) {
+	pr := rr.Status.PullRequest
+	if pr == nil {
+		return
+	}
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type:               remediationv1alpha1.ConditionPROpened,
+		Status:             metav1.ConditionTrue,
+		Reason:             reason,
+		Message:            fmt.Sprintf("Pull request #%d %s", pr.Number, text),
+		ObservedGeneration: rr.Generation,
+	})
+}
+
+// closedByUs is markClosed for a pull request Shadewright has just closed, with why it did. A close of a pull
+// request that is already closed succeeds too, so the text does not claim who closed it first.
+func closedByUs(rr *remediationv1alpha1.RemediationRequest, why string) {
+	markClosed(rr, ReasonPullRequestClosed, "is closed: "+why)
+}
+
 // renderRefusal is a render check that did not pass: merging the change would not build exactly the planned change.
 // It carries a stable reason and fixed text, never file content; the caller says what happened to the commit
 // or the pull request.
@@ -559,9 +594,11 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	return prOpen
 }
 
-// rejected ends a fresh request whose pull request a person closed without a merge.
+// rejected ends a fresh request whose pull request a person closed without a merge. It may also be
+// Shadewright's own close after a render refusal whose status write was lost, so the text does not say who.
 func (r *RemediationRequestReconciler) rejected(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
+	markClosed(rr, ReasonChangeRequestClosed, "was closed without a merge")
 	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 		ReasonChangeRequestClosed, "The pull request was closed without a merge; automation stopped"))
 }
@@ -991,19 +1028,29 @@ var collectorIncidentName = regexp.MustCompile(`^incident-[0-9a-f]{64}$`)
 // hex secret could be written as "incident-<secret>". The name is kept only when the executor reads an
 // Incident of that name in the request's namespace from the API server (never the cache, so get is enough),
 // its UID is the one in incidentRef, and the name is the one the collector derives from the Incident's
-// fingerprint. Any failure to read it, including a missing permission, gives "" and so a redacted name: the
-// body is only less readable, never blocked.
+// fingerprint. Any failure to read it, including a missing permission or a read slower than
+// IncidentReadTimeout, gives "" and so a redacted name: the body is only less readable, never blocked. The
+// read has a deadline of its own, shorter than the step's, so a stalled API server leaves the step the time to
+// open the pull request; a cancelled step still cancels the read, and the open then fails as it would have.
 func (r *RemediationRequestReconciler) verifiedIncidentName(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) string {
 	ref := rr.Spec.IncidentRef
 	if !collectorIncidentName.MatchString(ref.Name) {
 		return ""
 	}
+	readCtx, cancel := context.WithTimeout(ctx, incidentReadTimeout(ctx, r.IncidentReadTimeout))
+	defer cancel()
 	var inc remediationv1alpha1.Incident
-	if err := r.reader().Get(ctx, client.ObjectKey{Namespace: rr.Namespace, Name: ref.Name}, &inc); err != nil {
+	if err := r.reader().Get(readCtx, client.ObjectKey{Namespace: rr.Namespace, Name: ref.Name}, &inc); err != nil {
 		if !apierrors.IsNotFound(err) {
+			reason := apierrors.ReasonForError(err)
+			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+				// The read's own deadline, not the step's: the error itself carries no API reason. Any other
+				// error, even one that came as the deadline passed, keeps its own.
+				reason = metav1.StatusReasonTimeout
+			}
 			logf.FromContext(ctx).Info("Failed to read the Incident of RemediationRequest, so its name was redacted",
-				"remediationRequest", client.ObjectKeyFromObject(rr), "reason", apierrors.ReasonForError(err))
+				"remediationRequest", client.ObjectKeyFromObject(rr), "reason", reason)
 		}
 		return ""
 	}
@@ -1012,4 +1059,17 @@ func (r *RemediationRequestReconciler) verifiedIncidentName(ctx context.Context,
 		return ""
 	}
 	return inc.Name
+}
+
+// incidentReadTimeout is the deadline of the Incident read: configured (zero means [DefaultIncidentReadTimeout]),
+// and never more than half the time the step has left, so even a short WriteTimeout leaves the open its time.
+func incidentReadTimeout(step context.Context, configured time.Duration) time.Duration {
+	d := configured
+	if d <= 0 {
+		d = DefaultIncidentReadTimeout
+	}
+	if deadline, ok := step.Deadline(); ok {
+		d = min(d, time.Until(deadline)/2)
+	}
+	return d
 }

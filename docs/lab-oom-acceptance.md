@@ -38,7 +38,7 @@ into the samples on your machine only, and the samples in Git keep their `REPLAC
 - `lab/terraform.tfvars` in `shadewright-azure` (git-ignored) has `flux_enabled = true`, `fleet_repository_url`
   set to your fleet repository and `fleet_branch = "cluster/lab"`. Flux must track `cluster/lab`, and
   the settings sample's `targetBranch` must be the same branch, or the source mapping denies the request (`Denied`, reason `BranchMismatch`).
-- `az`, `kubectl`, `kubelogin`, `gh`, `jq` and `make` are installed, and `gh auth status` shows an account that can
+- `az`, `kubectl`, `kubelogin`, `terraform`, `curl`, `gh`, `jq` and `make` are installed, and `gh auth status` shows an account that can
   read your fleet repository.
 
 ## 1. Bring the lab up
@@ -50,9 +50,9 @@ make lab-cost    # price per hour for the current settings; changes nothing
 make lab-up      # init, plan, plan summary and price, then asks
 ```
 
-Expect a plan with only creates (the cluster, the federated credentials, the Flux extension and configuration),
+Expect a plan with only creates and no Flux resources (the extension is gone),
 the price per hour, and the prompt. Read the plan, then type `yes` (lower case) to apply exactly that saved plan.
-Anything else applies nothing. Then fetch credentials for the session:
+Anything else applies nothing. `make lab-up` then installs Flux in the same run (about two minutes: the pinned manifest, the `GitRepository` `fleet` and the root Kustomization `lab`); if that step fails, the cluster is up and billed, so run `make lab-flux` (it asks for a typed yes) to repeat it. Then fetch credentials for the session:
 
 ```bash
 eval "$(terraform -chdir=lab output -raw get_credentials)"
@@ -87,8 +87,7 @@ kubectl -n flux-system get kustomizations
 kubectl -n demo get pods
 ```
 
-Expect `cluster/lab`; the Kustomization that applies `./clusters/lab` (the Flux extension names it after the
-configuration and the Kustomization, so expect `fleet-lab`; confirm the name on the first session), `infrastructure`,
+Expect `cluster/lab`; the Kustomization that applies `./clusters/lab` (`lab`, created by `make lab-up`), `infrastructure`,
 `shadewright` and `apps`, all `Ready=True` (the first sync takes a few minutes); and the demo pods `web` and `worker` running. If `infrastructure` is not ready, wait: `shadewright` and
 `apps` depend on it.
 

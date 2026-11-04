@@ -20,7 +20,7 @@ Every commit on `main` follows [Conventional Commits](https://www.conventionalco
 so the **pull request title** is what counts; a required check (`Conventional PR title`) validates it.
 
 - Types: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`, `revert`.
-- Scope is optional; when used it is one of: `api`, `analyzer`, `policy`, `gitops`, `platforms`, `integrations`, `docs`, `ci`, `deps`.
+- Scope is optional; when used it is one of: `api`, `analyzer`, `policy`, `gitops`, `platforms`, `integrations`, `chart`, `docs`, `ci`, `deps`.
 - Summary in English, imperative, starting lower case, no full stop: `feat(policy): refuse decreases by default`.
 - `!` after the type or scope, plus a `BREAKING CHANGE:` footer in the description, for incompatible changes
   (API fields, CRD schema, flags, Helm values).

@@ -246,6 +246,50 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(openRequests()).To(HaveLen(1))
 	})
 
+	// answering replaces the request with one whose incidentRef is ref, and drives it to a pull request.
+	answering := func(ref remediationv1alpha1.IncidentRef) string {
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		replaced := fx.MemoryLimitRequest(requestNamespace, request.Name+"-incident")
+		replaced.Spec.PolicyRef, replaced.Spec.TargetRef = request.Spec.PolicyRef, request.Spec.TargetRef
+		replaced.Spec.IncidentRef = ref
+		Expect(k8sClient.Create(ctx, replaced)).To(Succeed())
+		request = replaced
+		Expect(drive(remediationv1alpha1.PhaseAwaitingApproval).Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		crs := openRequests()
+		Expect(crs).To(HaveLen(1))
+		return crs[0].Body
+	}
+	// collectorIncident creates an Incident named as the collector names it, from fingerprint hex.
+	collectorIncident := func(hex string) *remediationv1alpha1.Incident {
+		inc := &remediationv1alpha1.Incident{
+			ObjectMeta: metav1.ObjectMeta{Namespace: requestNamespace, Name: "incident-" + hex},
+			Spec: remediationv1alpha1.IncidentSpec{
+				Fingerprint: "sha256:" + hex, Reason: "OOMKilled",
+				Subject: remediationv1alpha1.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "orders"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, inc))).To(Succeed()) })
+		return inc
+	}
+
+	It("names the Incident it read back verbatim", func() {
+		hex := strings.Repeat("9f86d081", 7) + fmt.Sprintf("%08x", seq)
+		inc := collectorIncident(hex)
+		body := answering(remediationv1alpha1.IncidentRef{Name: inc.Name, UID: remediationv1alpha1.UID(inc.UID)})
+		Expect(body).To(ContainSubstring("for incident `" + inc.Name + "`."))
+		Expect(body).To(ContainSubstring("incident `" + inc.Name + "`, policy"))
+	})
+
+	It("redacts an Incident name of the collector's form that no Incident with that UID has", func() {
+		hex := strings.Repeat("3f1c9a7b", 7) + fmt.Sprintf("%08x", seq)
+		inc := collectorIncident(hex)
+		// A hex secret written as "incident-<secret>": the right form, but no Incident has this UID.
+		body := answering(remediationv1alpha1.IncidentRef{Name: inc.Name, UID: "22222222-2222-4222-8222-222222222222"})
+		Expect(body).NotTo(ContainSubstring(hex))
+		Expect(body).To(ContainSubstring("for incident `[REDACTED:token]`."))
+	})
+
 	It("finds the existing work after a restart between any two steps", func() {
 		// Every Git write fails once after it took effect, as if the executor crashed before it could go on.
 		crashed := map[string]bool{}
@@ -1503,7 +1547,7 @@ var _ = Describe("Pull request body", func() {
 		// Names are validated by the schema; the body is redacted anyway, so a token that slipped through a
 		// future field never reaches the Git host.
 		rr.Spec.IncidentRef.Name = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
-		body := pullRequestBody(rr)
+		body := pullRequestBody(rr, "")
 		Expect(body).NotTo(ContainSubstring("eyJhbGciOiJIUzI1NiJ9"))
 		Expect(body).To(ContainSubstring("[REDACTED"))
 		Expect(hasMarker(body, rr)).To(BeTrue())
@@ -1522,7 +1566,7 @@ var _ = Describe("Pull request body", func() {
 		rr.Spec.IncidentRef.Name = name
 		hexToken := "3f1c9a7be2d84f06a5b1c3e9d7f2a4b6c8e0d1f3"
 		rr.Status.Source.Path = remediationv1alpha1.GitFilePath("apps/" + hexToken + "/deployment.yaml")
-		body := pullRequestBody(rr)
+		body := pullRequestBody(rr, name)
 		Expect(body).To(ContainSubstring("for incident `" + name + "`."))
 		Expect(body).To(ContainSubstring("incident `" + name + "`, policy `p/1`"))
 		Expect(body).NotTo(ContainSubstring(hexToken), "a hex token in other text is still redacted")
@@ -1530,16 +1574,17 @@ var _ = Describe("Pull request body", func() {
 		Expect(hasMarker(body, rr)).To(BeTrue())
 	})
 
-	It("redacts a hex token used as the Incident name", func() {
+	It("redacts a hex token used as the Incident name when it was not verified", func() {
 		hex40 := strings.Repeat("3f1c9a7b", 5)
 		for _, token := range []string{
 			hex40,                         // a 40-digit hex token, a valid object name
 			strings.Repeat("9f86d081", 8), // 64 hex digits without the prefix
 			"incident-" + hex40,           // the prefix and 40 hex digits
+			"incident-" + strings.Repeat("9f86d081", 8), // the collector's form, not read back
 		} {
 			rr := bodyRequest()
 			rr.Spec.IncidentRef.Name = token
-			body := pullRequestBody(rr)
+			body := pullRequestBody(rr, "")
 			Expect(body).NotTo(ContainSubstring(token), token)
 			Expect(body).To(ContainSubstring("for incident `[REDACTED:token]`."), token)
 			Expect(hasMarker(body, rr)).To(BeTrue())

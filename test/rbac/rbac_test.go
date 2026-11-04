@@ -357,6 +357,12 @@ func TestPermissionBoundary(t *testing.T) {
 		{"executor", "update", group, "incidents", "status", otherNS, false},
 		{"executor", "get", group, "incidents", "", otherNS, false},
 		{"executor", "list", group, "incidents", "", otherNS, false},
+		// get on the request's Incident only, to check the name the pull request body shows (#264).
+		{"executor", "get", group, "incidents", "", operatorNS, true},
+		{"executor", "list", group, "incidents", "", operatorNS, false},
+		{"executor", "watch", group, "incidents", "", operatorNS, false},
+		{"executor", "update", group, "incidents", "", operatorNS, false},
+		{"executor", "update", group, "incidents", "status", operatorNS, false},
 		{"executor", "watch", group, "remediationpolicies", "", "", false},
 		{"executor", "list", group, "remediationsettings", "", "", false},
 		{"executor", "get", group, "remediationpolicies", "", "", true},

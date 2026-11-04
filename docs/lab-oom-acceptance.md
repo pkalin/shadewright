@@ -256,10 +256,12 @@ Expect:
   `-              memory: 48Mi` and `+              memory: 64Mi` under `resources.limits` of container `web`. The memory
   request (`32Mi`) and everything else are untouched.
 - A body that names the incident by its full name, `incident-` and 64 hex digits (not `[REDACTED:token]`), in its
-  opening sentence and in the evidence, with the change, scope, evidence (the request, its UID, the incident, the
-  policy revision `<policy name>/<generation>`, the plan digest), expected effect, risk, rollback and
-  `Approval required: yes`, and a last line `<!-- shadewright request-uid=... plan-digest=sha256:... -->` whose UID
-  and digest match `.metadata.uid` and `.status.planDigest` of the request.
+  opening sentence and in the evidence. The executor shows the name only after reading that Incident back, so a
+  redacted name means the read failed (the executor's log says so) or the request names no such Incident. The
+  body also holds the change, scope, evidence (the request, its UID, the incident, the policy revision
+  `<policy name>/<generation>`, the plan digest), expected effect, risk, rollback and `Approval required: yes`,
+  and a last line `<!-- shadewright request-uid=... plan-digest=sha256:... -->` whose UID and digest match
+  `.metadata.uid` and `.status.planDigest` of the request.
 - The required checks run on the pull request, and it is not merged: a person reviews it. Do not merge it before
   step 9 (merge, delivery and verification are out of scope for v0.1.0).
 

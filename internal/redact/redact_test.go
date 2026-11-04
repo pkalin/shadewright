@@ -705,36 +705,33 @@ func TestFluxRevisions(t *testing.T) {
 	})
 }
 
-// The collector names an Incident "incident-" and the 64 lower-case hex digits of its fingerprint (#264). That
-// exact form is kept; any other hex run stays a token: another length, no prefix, upper case, or part of a
-// longer name.
-func TestIncidentNameIsKept(t *testing.T) {
-	hex64 := rep("9f86d081", 8)
-	name := "incident-" + hex64
-	for _, in := range []string{
-		name,
-		"Shadewright proposes one typed change for incident `" + name + "`.",
-		"incident " + name + ", policy p/1",
+// StringKeeping keeps only whole occurrences of the verified strings; everything else is redacted as String
+// redacts it (#264).
+func TestStringKeeping(t *testing.T) {
+	name := "incident-" + rep("9f86d081", 8)
+	hexToken := rep("3f1c9a7b", 5)
+	in := "change for incident `" + name + "`.\nincident `" + name + "`, path apps/" + hexToken + "/x.yaml"
+	want := "change for incident `" + name + "`.\nincident `" + name + "`, path [REDACTED:token].yaml"
+	if out := StringKeeping(in, name); out != want {
+		t.Errorf("StringKeeping:\n got: %s\nwant: %s", out, want)
+	}
+	if out := String(in); strings.Contains(out, name) {
+		t.Errorf("String keeps the name, so the test proves nothing:\n%s", out)
+	}
+	for _, s := range []string{
+		"x" + name,
+		name + ".example",
+		"a." + name,
+		name + "-" + rep("ab12", 6),
+		name + "0",
+		"incident-" + hexToken,
 	} {
-		if out := String(in); out != in {
-			t.Errorf("changed an Incident name:\n in: %s\nout: %s", in, out)
+		in := "incident `" + s + "` end"
+		if out := StringKeeping(in, name, ""); !strings.Contains(out, "[REDACTED:token]") || strings.Contains(out, name) {
+			t.Errorf("kept a string that is not a whole verified occurrence:\n in: %s\nout: %s", in, out)
 		}
 	}
-	for _, token := range []string{
-		rep("3f1c9a7b", 5),                         // 40 hex digits
-		hex64,                                      // 64 hex digits without the prefix
-		"incident-" + rep("3f1c9a7b", 5),           // the prefix and 40 hex digits
-		"incident-" + strings.ToUpper(hex64),       // upper-case hex
-		"incident-" + hex64 + "0",                  // 65 hex digits
-		"xincident-" + hex64,                       // another prefix
-		"incident-" + hex64 + ".example",           // part of a longer name
-		"x.incident-" + hex64,                      // part of a longer name
-		"incident-" + hex64 + "-" + rep("ab12", 6), // a token after the name
-	} {
-		in := "incident `" + token + "` end"
-		out := String(in)
-		if !strings.Contains(out, "[REDACTED:token]") {
-			t.Errorf("kept a token that is no Incident name:\n in: %s\nout: %s", in, out)
-		}
+	if out, want := StringKeeping("token "+hexToken, ""), String("token "+hexToken); out != want {
+		t.Errorf("an empty keep changed the result: %q, want %q", out, want)
 	}
 }

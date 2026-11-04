@@ -34,6 +34,12 @@ import (
 // +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationpolicies,verbs=get
 // +kubebuilder:rbac:groups=remediation.shadewright.io,resources=remediationsettings,verbs=get
 //
+// The pull request step reads the request's Incident, one object through the API reader, to check that the
+// name it shows unredacted in the body is a real Incident's (pullrequest.go, verifiedIncidentName): get only,
+// in the operator namespace.
+//
+// +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=incidents,verbs=get
+//
 // Source mapping (ADR-0012) reads the target and the Flux objects that deliver it, one object at a time through
 // the manager's API reader (never the cache), so get is enough: no list, no watch. The kinds are the action catalog's targets and the
 // Flux Kustomization and GitRepository; Secrets are never granted.

@@ -360,8 +360,8 @@ spec:
                 type: boolean
               lastPhaseTransitionTime:
                 description: |-
-                  lastPhaseTransitionTime is when phase last changed. The circuit breaker orders the outcomes of requests
-                  by it.
+                  lastPhaseTransitionTime is when phase last changed, to the microsecond. The circuit breaker orders the
+                  outcomes of requests by it.
                 format: date-time
                 type: string
               observedGeneration:

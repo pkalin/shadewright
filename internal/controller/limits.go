@@ -20,8 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
-	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -29,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -40,25 +39,30 @@ import (
 // PolicyChecked), the step after which a request writes to Git. A request that is already past it is never
 // stopped by them; the kill switch (killswitch.go) is what stops writes at once.
 //
-// A request is active from PolicyChecked until it reaches a phase it stops in (Merged today, or any final
-// phase); a request being deleted is not, since all that is left for it is closing its own change request.
-// Before it lets a request through, the policy check counts the active requests and reads the outcomes of the
-// others, straight from the API server (never the cache, which may not show a request let through a moment
-// ago), and lets it through only when
+// A request is active while the executor can still move it on before the merge (progresses: a phase before the
+// merge with a plan digest), and while it is being deleted and still holds the finalizer, since its pull
+// request may still be open until the finalizer is gone. Before the policy check writes an allowed decision it
+// counts the active requests and reads the outcomes of the others, straight from the API server (never the
+// cache, which may not show a request let through a moment ago), and lets the request through only when
 //
 //   - no other active request names the same target UID (the lock),
 //   - fewer than maxConcurrentRemediations of RemediationSettings are active (the cap), and
-//   - the breaker is closed: the last BreakerThreshold outcomes of requests that were let through are not all
-//     failures, or the latest of them is older than BreakerCooldown.
+//   - the breaker is closed: fewer than BreakerThreshold failures came after the latest success among the
+//     requests that went through the policy check, or the latest of them is older than BreakerCooldown.
 //
 // The count and the status write that lets a request through run under one mutex, so two workers can never
 // both take the last slot. All state is read from the requests themselves (phase, lastPhaseTransitionTime), so
 // a restart neither forgets an open breaker nor frees a slot (invariant 5). It fails closed: when the settings
-// or the requests cannot be read, no request is let through.
+// or the requests cannot be read, or there is no API server reader, no request is let through.
 //
-// A request held back keeps no phase (or Pending), gets the condition Queued with the limit as the reason,
-// and is checked again after admissionRecheckDelay. The same check runs once before the policy check, so a
-// request that cannot go through anyway does not read Git every time it is looked at.
+// Only a request the policy check allows is held back: refusals (Denied, NeedsIntervention) are written at
+// once. A request held back keeps no phase (or Pending), gets the condition Queued with the limit as the
+// reason, and is checked again after admissionRecheckDelay. While it is Queued only the limits are checked, so
+// it does not read Git; once they let it through, Queued is removed and the whole policy check runs again.
+//
+// The limits are counted per namespace: requests live in the operator namespace. The lock is per target
+// object, not per file in Git; two targets declared in one file are kept apart by the plan digest and the
+// freshness check, which supersede the second plan when the first one changes the file.
 
 // Reasons of the Queued condition. They are fixed and few, so they may be used as metric labels.
 const (
@@ -121,41 +125,48 @@ type limitsState struct {
 	failures int
 }
 
-// stoppingPhases are the phases a request stops in: the final ones, and Merged, where the request stops today
-// (delivery and verification are not built). Any other phase past Pending, an unknown one included, is active.
-var stoppingPhases = map[remediationv1alpha1.RemediationPhase]bool{
-	remediationv1alpha1.PhaseMerged:            true,
-	remediationv1alpha1.PhaseSucceeded:         true,
-	remediationv1alpha1.PhaseDenied:            true,
-	remediationv1alpha1.PhaseFailed:            true,
-	remediationv1alpha1.PhaseExpired:           true,
-	remediationv1alpha1.PhaseCancelled:         true,
-	remediationv1alpha1.PhaseSuperseded:        true,
-	remediationv1alpha1.PhaseNeedsIntervention: true,
+// progresses reports whether the executor can still move a request on before the merge (recheck): a phase
+// before the merge, with the plan digest the policy check fixes. Phases after the merge are not built, and a
+// request in one stops there today.
+func progresses(rr *remediationv1alpha1.RemediationRequest) bool {
+	return beforeMerge(rr.Status.Phase) && rr.Status.PlanDigest != ""
 }
 
-// active reports whether a request counts against the lock and the cap.
+// active reports whether a request counts against the lock and the cap: it progresses, or it is being deleted
+// and still holds the finalizer that closes its pull request.
 func active(rr *remediationv1alpha1.RemediationRequest) bool {
-	p := rr.Status.Phase
-	return p != "" && p != remediationv1alpha1.PhasePending && !stoppingPhases[p] && rr.DeletionTimestamp.IsZero()
+	if !rr.DeletionTimestamp.IsZero() {
+		return controllerutil.ContainsFinalizer(rr, FinalizerName)
+	}
+	return progresses(rr)
 }
 
-// breakerOutcome reports whether a request that was let through ended in success or failure. Merged and
-// Succeeded are successes; Failed, Expired and NeedsIntervention (a pull request closed without a merge
-// included) are failures. Denied, Cancelled and Superseded say nothing about whether the changes work, and a
-// request without a plan digest never got through the policy check, so neither counts. Nor does a request
-// without lastPhaseTransitionTime (one that ended before the field existed): it cannot be ordered.
-func breakerOutcome(rr *remediationv1alpha1.RemediationRequest) (failed, ok bool) {
-	if rr.Status.PlanDigest == "" || rr.Status.LastPhaseTransitionTime == nil || !rr.DeletionTimestamp.IsZero() {
-		return false, false
+// Outcomes of a request for the circuit breaker.
+type outcomeClass int
+
+const (
+	outcomeNone outcomeClass = iota
+	outcomeSuccess
+	outcomeFailure
+)
+
+// breakerOutcome classifies a request for the breaker. Merged and Succeeded are successes; Failed and
+// NeedsIntervention (a pull request closed without a merge included) are failures. Expired is neither: it
+// comes from Git host outages and deadlines, not from a bad change. Denied, Cancelled and Superseded say
+// nothing about whether the changes work, and a request without a plan digest never got through the policy
+// check, so neither counts. Nor does a request without lastPhaseTransitionTime (one that ended before the
+// field existed): it cannot be ordered.
+func breakerOutcome(rr *remediationv1alpha1.RemediationRequest) outcomeClass {
+	if rr.Status.PlanDigest == "" || rr.Status.LastPhaseTransitionTime == nil {
+		return outcomeNone
 	}
 	switch rr.Status.Phase {
 	case remediationv1alpha1.PhaseMerged, remediationv1alpha1.PhaseSucceeded:
-		return false, true
-	case remediationv1alpha1.PhaseFailed, remediationv1alpha1.PhaseExpired, remediationv1alpha1.PhaseNeedsIntervention:
-		return true, true
+		return outcomeSuccess
+	case remediationv1alpha1.PhaseFailed, remediationv1alpha1.PhaseNeedsIntervention:
+		return outcomeFailure
 	}
-	return false, false
+	return outcomeNone
 }
 
 func (r *RemediationRequestReconciler) breakerThreshold() int {
@@ -174,25 +185,30 @@ func (r *RemediationRequestReconciler) breakerCooldown() time.Duration {
 
 // checkLimits reads the settings and the requests in rr's namespace from the API server and decides whether rr
 // may go through the policy check now. It returns errSettingsMissing when the settings do not exist, and any
-// other read error as it is; the caller must then not let the request through.
+// other read error as it is; the caller must then not let the request through. Without an APIReader it
+// refuses too: like the kill switch, it never falls back to the cache.
 func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	limitsState, error) {
+	if r.APIReader == nil {
+		return limitsState{}, errors.New("cannot check the limits: no API server reader")
+	}
 	settings := &remediationv1alpha1.RemediationSettings{}
-	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
+	switch err := r.APIReader.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err):
 		return limitsState{}, errSettingsMissing
 	case err != nil:
 		return limitsState{}, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 	}
 	list := &remediationv1alpha1.RemediationRequestList{}
-	if err := r.reader().List(ctx, list, client.InNamespace(rr.Namespace)); err != nil {
+	if err := r.APIReader.List(ctx, list, client.InNamespace(rr.Namespace)); err != nil {
 		return limitsState{}, fmt.Errorf("list RemediationRequests in %s: %w", rr.Namespace, err)
 	}
 	// An object written before the field had a default, or by hand, may hold 0: the smallest limit the schema
 	// allows is used then, never no limit.
 	s := limitsState{limit: max(int(settings.Spec.MaxConcurrentRemediations), 1)}
 	locked := false
-	var outcomes []*remediationv1alpha1.RemediationRequest
+	var lastSuccess, lastFailure time.Time
+	var failures []time.Time
 	for i := range list.Items {
 		other := &list.Items[i]
 		if other.UID == rr.UID {
@@ -204,25 +220,26 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 				locked = true
 			}
 		}
-		if _, ok := breakerOutcome(other); ok {
-			outcomes = append(outcomes, other)
+		switch breakerOutcome(other) {
+		case outcomeSuccess:
+			if t := other.Status.LastPhaseTransitionTime.Time; t.After(lastSuccess) {
+				lastSuccess = t
+			}
+		case outcomeFailure:
+			t := other.Status.LastPhaseTransitionTime.Time
+			failures = append(failures, t)
+			if t.After(lastFailure) {
+				lastFailure = t
+			}
 		}
 	}
-	// Latest first; equal times by name, so the order does not depend on the list.
-	slices.SortFunc(outcomes, func(a, b *remediationv1alpha1.RemediationRequest) int {
-		if c := b.Status.LastPhaseTransitionTime.Compare(a.Status.LastPhaseTransitionTime.Time); c != 0 {
-			return c
+	// The failures in a row are those after the latest success; one at the very same time counts as a failure.
+	for _, t := range failures {
+		if !t.Before(lastSuccess) {
+			s.failures++
 		}
-		return strings.Compare(a.Name, b.Name)
-	})
-	for _, o := range outcomes {
-		if failed, _ := breakerOutcome(o); !failed {
-			break
-		}
-		s.failures++
 	}
-	s.open = s.failures >= r.breakerThreshold() &&
-		r.now().Before(outcomes[0].Status.LastPhaseTransitionTime.Add(r.breakerCooldown()))
+	s.open = s.failures >= r.breakerThreshold() && r.now().Before(lastFailure.Add(r.breakerCooldown()))
 	switch {
 	case s.open:
 		s.reason = ReasonCircuitOpen
@@ -278,29 +295,41 @@ func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.Remediat
 		return
 	}
 	rr.Status.Phase = phase
-	rr.Status.LastPhaseTransitionTime = &metav1.Time{Time: r.now()}
+	t := metav1.NewMicroTime(r.now())
+	rr.Status.LastPhaseTransitionTime = &t
 }
 
 // holdBack checks the limits for a request about to go through the policy check, and holds it back (Queued)
 // when one does not let it through. stop means the caller must return res and err without deciding. A failure
-// to read the limits stops too, with the error, so the request is retried with backoff (fail closed). Before
-// the policy check (beforeCheck) missing settings do not stop: the policy check denies the request then.
+// to read the limits stops too, with the error, so the request is retried with backoff (fail closed).
+//
+// queued is the check of a request that is already Queued, made in place of the policy check so that a
+// waiting request does not read Git. Once the limits let it through, Queued is removed (written at once, so it
+// is not left behind when the policy check then fails for a while) and the policy check runs. Missing
+// settings let it go on as well: the policy check denies the request then.
 func (r *RemediationRequestReconciler) holdBack(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	beforeCheck bool) (res reconcile.Result, stop bool, err error) {
+	queued bool) (res reconcile.Result, stop bool, err error) {
 	limCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
 	s, err := r.checkLimits(limCtx, rr)
 	err = boundErr(ctx, limCtx, "check of the limits", err)
 	cancel()
-	if beforeCheck && errors.Is(err, errSettingsMissing) {
-		return reconcile.Result{}, false, nil
+	pass := queued && errors.Is(err, errSettingsMissing)
+	if !pass {
+		r.observeLimits(s, err)
+		if err != nil {
+			return reconcile.Result{}, true, err
+		}
+		if s.reason != "" {
+			res, err = r.waitForLimits(ctx, rr, s.reason)
+			return res, true, err
+		}
 	}
-	r.observeLimits(s, err)
-	if err != nil {
-		return reconcile.Result{}, true, err
+	if queued && meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionQueued) != nil {
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionQueued)
+		if err := r.Status().Update(ctx, rr); err != nil {
+			return reconcile.Result{}, true, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
+				rr.Namespace, rr.Name, err)
+		}
 	}
-	if s.reason == "" {
-		return reconcile.Result{}, false, nil
-	}
-	res, err = r.waitForLimits(ctx, rr, s.reason)
-	return res, true, err
+	return reconcile.Result{}, false, nil
 }

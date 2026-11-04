@@ -286,10 +286,10 @@ type RemediationRequestStatus struct {
 	// +optional
 	Phase RemediationPhase `json:"phase,omitempty"`
 
-	// lastPhaseTransitionTime is when phase last changed. The circuit breaker orders the outcomes of requests
-	// by it.
+	// lastPhaseTransitionTime is when phase last changed, to the microsecond. The circuit breaker orders the
+	// outcomes of requests by it.
 	// +optional
-	LastPhaseTransitionTime *metav1.Time `json:"lastPhaseTransitionTime,omitempty"`
+	LastPhaseTransitionTime *metav1.MicroTime `json:"lastPhaseTransitionTime,omitempty"`
 
 	// effectiveApprovalRequired is what policy decided, which may be stricter than spec.approvalRequired.
 	// +optional

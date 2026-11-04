@@ -31,10 +31,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
 )
 
 var limitsNow = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+
+// limitsTarget is the target UID of the request deadlineWorld makes.
+const limitsTarget = "33333333-3333-4333-8333-333333333333"
 
 const limitsDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
@@ -48,7 +52,8 @@ func otherRequest(name, uid string, phase remediationv1alpha1.RemediationPhase, 
 	if phase != "" && phase != remediationv1alpha1.PhasePending {
 		rr.Status.PlanDigest = limitsDigest
 	}
-	rr.Status.LastPhaseTransitionTime = &metav1.Time{Time: limitsNow.Add(-ago)}
+	at := metav1.NewMicroTime(limitsNow.Add(-ago))
+	rr.Status.LastPhaseTransitionTime = &at
 	return rr
 }
 
@@ -88,7 +93,8 @@ func limitsWorld(t *testing.T, limit int32, others ...*remediationv1alpha1.Remed
 		}
 	}
 	stub := &stubResolver{result: resolved()}
-	r := &RemediationRequestReconciler{Client: c, Scheme: c.Scheme(), Source: stub, Now: func() time.Time { return limitsNow }}
+	r := &RemediationRequestReconciler{Client: c, APIReader: c, Scheme: c.Scheme(), Source: stub,
+		Now: func() time.Time { return limitsNow }}
 	return r, c, rr, stub
 }
 
@@ -104,10 +110,21 @@ func reconcileLimits(t *testing.T, r *RemediationRequestReconciler, rr *remediat
 	return res, got, err
 }
 
-// expectQueued checks that the request was held back with reason, did not go through the policy check and
-// did not read Git.
-func expectQueued(t *testing.T, res reconcile.Result, err error, got *remediationv1alpha1.RemediationRequest,
-	stub *stubResolver, reason string) {
+// expectQueued checks that the request was held back with reason and did not go through the policy check, and
+// that a second look at it while the limit holds checks only the limits: it does not read Git again.
+func expectQueued(t *testing.T, r *RemediationRequestReconciler, rr *remediationv1alpha1.RemediationRequest,
+	res reconcile.Result, err error, got *remediationv1alpha1.RemediationRequest, stub *stubResolver, reason string) {
+	t.Helper()
+	expectHeld(t, res, err, got, reason)
+	calls := stub.calls.Load()
+	res, got, err = reconcileLimits(t, r, rr)
+	expectHeld(t, res, err, got, reason)
+	if n := stub.calls.Load(); n != calls {
+		t.Fatalf("a Queued request read Git: %d resolver calls, want %d", n, calls)
+	}
+}
+
+func expectHeld(t *testing.T, res reconcile.Result, err error, got *remediationv1alpha1.RemediationRequest, reason string) {
 	t.Helper()
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -121,9 +138,6 @@ func expectQueued(t *testing.T, res reconcile.Result, err error, got *remediatio
 	}
 	if res.RequeueAfter != admissionRecheckDelay {
 		t.Fatalf("RequeueAfter = %v, want %v", res.RequeueAfter, admissionRecheckDelay)
-	}
-	if n := stub.calls.Load(); n != 0 {
-		t.Fatalf("the source resolver was called %d times while the request was held back", n)
 	}
 }
 
@@ -149,12 +163,12 @@ func TestLimitsLockPerTargetUID(t *testing.T) {
 
 	for _, phase := range []remediationv1alpha1.RemediationPhase{
 		remediationv1alpha1.PhasePolicyChecked, remediationv1alpha1.PhasePRCreated,
-		remediationv1alpha1.PhaseAwaitingApproval, remediationv1alpha1.PhaseVerifying,
+		remediationv1alpha1.PhaseAwaitingApproval, remediationv1alpha1.PhaseAutoMergeQueued,
 	} {
 		t.Run(string(phase), func(t *testing.T) {
 			r, _, rr, stub := limitsWorld(t, 20, otherRequest("holder", target, phase, time.Minute))
 			res, got, err := reconcileLimits(t, r, rr)
-			expectQueued(t, res, err, got, stub, ReasonTargetLocked)
+			expectQueued(t, r, rr, res, err, got, stub, ReasonTargetLocked)
 		})
 	}
 	t.Run("another target", func(t *testing.T) {
@@ -204,7 +218,7 @@ func TestLimitsMaxConcurrentRemediations(t *testing.T) {
 		r, _, rr, stub := limitsWorld(t, 2, a("a", remediationv1alpha1.PhasePolicyChecked),
 			a("b", remediationv1alpha1.PhaseAwaitingApproval))
 		res, got, err := reconcileLimits(t, r, rr)
-		expectQueued(t, res, err, got, stub, ReasonConcurrencyLimit)
+		expectQueued(t, r, rr, res, err, got, stub, ReasonConcurrencyLimit)
 	})
 	t.Run("a slot free", func(t *testing.T) {
 		r, _, rr, _ := limitsWorld(t, 2, a("a", remediationv1alpha1.PhasePolicyChecked),
@@ -215,21 +229,37 @@ func TestLimitsMaxConcurrentRemediations(t *testing.T) {
 	t.Run("unset limit means one", func(t *testing.T) {
 		r, _, rr, stub := limitsWorld(t, 0, a("a", remediationv1alpha1.PhasePRCreated))
 		res, got, err := reconcileLimits(t, r, rr)
-		expectQueued(t, res, err, got, stub, ReasonConcurrencyLimit)
+		expectQueued(t, r, rr, res, err, got, stub, ReasonConcurrencyLimit)
 	})
 	t.Run("unset limit lets one through", func(t *testing.T) {
 		r, _, rr, _ := limitsWorld(t, 0)
 		_, got, err := reconcileLimits(t, r, rr)
 		expectAdmitted(t, err, got)
 	})
-	t.Run("unknown phase is active", func(t *testing.T) {
-		r, _, rr, stub := limitsWorld(t, 1, a("a", "SomethingNew"))
-		res, got, err := reconcileLimits(t, r, rr)
-		expectQueued(t, res, err, got, stub, ReasonConcurrencyLimit)
+	t.Run("requests the executor does not move on hold no slot", func(t *testing.T) {
+		noPlan := a("noplan", remediationv1alpha1.PhasePolicyChecked)
+		noPlan.Status.PlanDigest = ""
+		r, _, rr, _ := limitsWorld(t, 1, noPlan, a("verifying", remediationv1alpha1.PhaseVerifying),
+			a("delivery", remediationv1alpha1.PhaseWaitingForDelivery), a("unknown", "SomethingNew"))
+		_, got, err := reconcileLimits(t, r, rr)
+		expectAdmitted(t, err, got)
 	})
-	t.Run("deleting holds no slot", func(t *testing.T) {
+	t.Run("deleting with the finalizer holds its slot and lock", func(t *testing.T) {
+		for _, phase := range []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhasePRCreated,
+			remediationv1alpha1.PhaseNeedsIntervention} {
+			o := otherRequest("deleting", limitsTarget, phase, time.Minute)
+			o.Finalizers = []string{FinalizerName}
+			r, c, rr, stub := limitsWorld(t, 20, o)
+			if err := c.Delete(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			res, got, err := reconcileLimits(t, r, rr)
+			expectQueued(t, r, rr, res, err, got, stub, ReasonTargetLocked)
+		}
+	})
+	t.Run("deleting without the finalizer holds no slot", func(t *testing.T) {
 		o := a("a", remediationv1alpha1.PhasePRCreated)
-		o.Finalizers = []string{"remediation.shadewright.io/test"}
+		o.Finalizers = []string{"example.com/other"}
 		r, c, rr, _ := limitsWorld(t, 1, o)
 		if err := c.Delete(context.Background(), o); err != nil {
 			t.Fatal(err)
@@ -249,7 +279,7 @@ func TestLimitsCircuitBreaker(t *testing.T) {
 	}
 	failed := func() []*remediationv1alpha1.RemediationRequest {
 		return []*remediationv1alpha1.RemediationRequest{
-			o("f1", remediationv1alpha1.PhaseExpired, 30*time.Minute),
+			o("f1", remediationv1alpha1.PhaseFailed, 30*time.Minute),
 			o("f2", remediationv1alpha1.PhaseNeedsIntervention, 20*time.Minute),
 			o("f3", remediationv1alpha1.PhaseFailed, 10*time.Minute),
 		}
@@ -257,7 +287,7 @@ func TestLimitsCircuitBreaker(t *testing.T) {
 	t.Run("open", func(t *testing.T) {
 		r, _, rr, stub := limitsWorld(t, 20, failed()...)
 		res, got, err := reconcileLimits(t, r, rr)
-		expectQueued(t, res, err, got, stub, ReasonCircuitOpen)
+		expectQueued(t, r, rr, res, err, got, stub, ReasonCircuitOpen)
 	})
 	t.Run("neutral outcomes do not close it", func(t *testing.T) {
 		others := append(failed(), o("d", remediationv1alpha1.PhaseDenied, time.Minute),
@@ -265,7 +295,7 @@ func TestLimitsCircuitBreaker(t *testing.T) {
 			o("c", remediationv1alpha1.PhaseCancelled, 3*time.Minute))
 		r, _, rr, stub := limitsWorld(t, 20, others...)
 		res, got, err := reconcileLimits(t, r, rr)
-		expectQueued(t, res, err, got, stub, ReasonCircuitOpen)
+		expectQueued(t, r, rr, res, err, got, stub, ReasonCircuitOpen)
 	})
 	t.Run("a success closes it", func(t *testing.T) {
 		r, _, rr, _ := limitsWorld(t, 20, append(failed(), o("ok", remediationv1alpha1.PhaseMerged, time.Minute))...)
@@ -275,7 +305,7 @@ func TestLimitsCircuitBreaker(t *testing.T) {
 	t.Run("a success before the failures does not", func(t *testing.T) {
 		r, _, rr, stub := limitsWorld(t, 20, append(failed(), o("ok", remediationv1alpha1.PhaseMerged, time.Hour))...)
 		res, got, err := reconcileLimits(t, r, rr)
-		expectQueued(t, res, err, got, stub, ReasonCircuitOpen)
+		expectQueued(t, r, rr, res, err, got, stub, ReasonCircuitOpen)
 	})
 	t.Run("too few failures", func(t *testing.T) {
 		r, _, rr, _ := limitsWorld(t, 20, failed()[1:]...)
@@ -289,17 +319,37 @@ func TestLimitsCircuitBreaker(t *testing.T) {
 		expectAdmitted(t, err, got)
 	})
 	t.Run("one failure after the cool-down opens it again", func(t *testing.T) {
-		others := append(failed(), o("f4", remediationv1alpha1.PhaseExpired, time.Minute))
+		others := append(failed(), o("f4", remediationv1alpha1.PhaseNeedsIntervention, time.Minute))
 		r, _, rr, stub := limitsWorld(t, 20, others...)
 		r.BreakerCooldown = 10 * time.Minute
 		res, got, err := reconcileLimits(t, r, rr)
-		expectQueued(t, res, err, got, stub, ReasonCircuitOpen)
+		expectQueued(t, r, rr, res, err, got, stub, ReasonCircuitOpen)
+	})
+	t.Run("expired is not a failure", func(t *testing.T) {
+		r, _, rr, _ := limitsWorld(t, 20, o("e1", remediationv1alpha1.PhaseExpired, 3*time.Minute),
+			o("e2", remediationv1alpha1.PhaseExpired, 2*time.Minute), o("e3", remediationv1alpha1.PhaseExpired, time.Minute))
+		_, got, err := reconcileLimits(t, r, rr)
+		expectAdmitted(t, err, got)
+	})
+	t.Run("ordered below the second", func(t *testing.T) {
+		// Three failures and then a success, all within one second: the success is the latest outcome, so the
+		// breaker is closed. With times kept to the second they would tie, and the failures could come last.
+		at := func(x *remediationv1alpha1.RemediationRequest, ms int) *remediationv1alpha1.RemediationRequest {
+			mt := metav1.NewMicroTime(limitsNow.Add(-time.Second).Truncate(time.Second).Add(time.Duration(ms) * time.Millisecond))
+			x.Status.LastPhaseTransitionTime = &mt
+			return x
+		}
+		r, _, rr, _ := limitsWorld(t, 20, at(o("a1", remediationv1alpha1.PhaseFailed, 0), 100),
+			at(o("a2", remediationv1alpha1.PhaseFailed, 0), 200), at(o("a3", remediationv1alpha1.PhaseFailed, 0), 300),
+			at(o("a0", remediationv1alpha1.PhaseMerged, 0), 900))
+		_, got, err := reconcileLimits(t, r, rr)
+		expectAdmitted(t, err, got)
 	})
 	t.Run("threshold", func(t *testing.T) {
 		r, _, rr, stub := limitsWorld(t, 20, failed()[2:]...)
 		r.BreakerThreshold = 1
 		res, got, err := reconcileLimits(t, r, rr)
-		expectQueued(t, res, err, got, stub, ReasonCircuitOpen)
+		expectQueued(t, r, rr, res, err, got, stub, ReasonCircuitOpen)
 	})
 	t.Run("requests stopped before the policy check do not count", func(t *testing.T) {
 		others := failed()
@@ -340,20 +390,18 @@ func TestLimitsCheckedAgainAfterPolicyCheck(t *testing.T) {
 	}
 }
 
-// TestLimitsFailClosed checks that a request is not let through when the requests cannot be listed, before or
-// after the policy check.
+// TestLimitsFailClosed checks that a request is not let through when the requests cannot be listed, whether
+// it is checked for the first time or is Queued, and that a Queued request then does not read Git.
 func TestLimitsFailClosed(t *testing.T) {
-	for _, failAfter := range []int{0, 1} {
-		t.Run(fmt.Sprintf("list fails after %d", failAfter), func(t *testing.T) {
+	for _, queued := range []bool{false, true} {
+		t.Run(fmt.Sprintf("queued %v", queued), func(t *testing.T) {
 			r, base, rr, stub := limitsWorld(t, 20)
-			lists := 0
-			r.Client = interceptorClient(base, func() error {
-				lists++
-				if lists > failAfter {
-					return errors.New("list refused")
-				}
-				return nil
-			})
+			wantCalls := int32(1)
+			if queued {
+				markQueued(t, base, rr)
+				wantCalls = 0
+			}
+			r.APIReader = interceptorClient(base, func() error { return errors.New("list refused") })
 			obs := &recordingObserver{}
 			r.Limits = obs
 			_, got, err := reconcileLimits(t, r, rr)
@@ -363,8 +411,8 @@ func TestLimitsFailClosed(t *testing.T) {
 			if got.Status.Phase != "" {
 				t.Fatalf("phase = %q, want none", got.Status.Phase)
 			}
-			if want := int32(failAfter); stub.calls.Load() != want {
-				t.Fatalf("resolver calls = %d, want %d", stub.calls.Load(), want)
+			if stub.calls.Load() != wantCalls {
+				t.Fatalf("resolver calls = %d, want %d", stub.calls.Load(), wantCalls)
 			}
 			if len(obs.waited) == 0 || obs.waited[len(obs.waited)-1] != ReasonLimitsUnknown {
 				t.Fatalf("observer saw %v, want %s last", obs.waited, ReasonLimitsUnknown)
@@ -373,17 +421,107 @@ func TestLimitsFailClosed(t *testing.T) {
 	}
 }
 
-// TestLimitsMissingSettingsStillDenied checks that missing settings do not hold a request back before the
-// policy check, which denies it.
+// TestLimitsNeedTheAPIReader checks that the limits never fall back to the client (and its cache): with no
+// APIReader no request is let through, even when the client would show free slots.
+func TestLimitsNeedTheAPIReader(t *testing.T) {
+	r, _, rr, _ := limitsWorld(t, 20)
+	r.APIReader = nil
+	_, got, err := reconcileLimits(t, r, rr)
+	if err == nil || got.Status.Phase == remediationv1alpha1.PhasePolicyChecked {
+		t.Fatalf("phase = %q, err = %v; want no decision and an error", got.Status.Phase, err)
+	}
+}
+
+// TestLimitsDoNotHoldRefusals checks that a limit holds back only a request the policy check lets through: a
+// refusal is written at once even while the target is locked, the cap is reached and the breaker is open.
+func TestLimitsDoNotHoldRefusals(t *testing.T) {
+	blocking := func() []*remediationv1alpha1.RemediationRequest {
+		return []*remediationv1alpha1.RemediationRequest{
+			otherRequest("holder", limitsTarget, remediationv1alpha1.PhasePRCreated, time.Minute),
+			otherRequest("f1", "uid-f1", remediationv1alpha1.PhaseFailed, 3*time.Minute),
+			otherRequest("f2", "uid-f2", remediationv1alpha1.PhaseFailed, 2*time.Minute),
+			otherRequest("f3", "uid-f3", remediationv1alpha1.PhaseFailed, time.Minute),
+		}
+	}
+	cases := map[string]struct {
+		mutate func(t *testing.T, c client.Client, rr *remediationv1alpha1.RemediationRequest, stub *stubResolver)
+		phase  remediationv1alpha1.RemediationPhase
+	}{
+		"policy missing": {func(t *testing.T, c client.Client, rr *remediationv1alpha1.RemediationRequest, _ *stubResolver) {
+			if err := c.Delete(context.Background(), &remediationv1alpha1.RemediationPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: string(rr.Spec.PolicyRef)}}); err != nil {
+				t.Fatal(err)
+			}
+		}, remediationv1alpha1.PhaseDenied},
+		"source mapping refuses": {func(_ *testing.T, _ client.Client, _ *remediationv1alpha1.RemediationRequest, stub *stubResolver) {
+			stub.result = sourcemap.Result{Outcome: sourcemap.NeedsIntervention, Reason: sourcemap.ReasonFieldNotFound}
+		}, remediationv1alpha1.PhaseNeedsIntervention},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			r, c, rr, stub := limitsWorld(t, 1, blocking()...)
+			tc.mutate(t, c, rr, stub)
+			_, got, err := reconcileLimits(t, r, rr)
+			if err != nil || got.Status.Phase != tc.phase {
+				t.Fatalf("phase = %q, err = %v, want %s at once", got.Status.Phase, err, tc.phase)
+			}
+			if c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionQueued); c != nil {
+				t.Fatalf("a refused request is Queued: %+v", c)
+			}
+		})
+	}
+}
+
+// TestLimitsClearQueuedWhenTheyPass checks that Queued goes as soon as the limits let a Queued request
+// through, also when the policy check after it fails for a while.
+func TestLimitsClearQueuedWhenTheyPass(t *testing.T) {
+	r, c, rr, stub := limitsWorld(t, 20)
+	markQueued(t, c, rr)
+	stub.err = errors.New("the Git host is down")
+	_, got, err := reconcileLimits(t, r, rr)
+	if err == nil {
+		t.Fatal("Reconcile returned no error although the policy check failed")
+	}
+	if stub.calls.Load() != 1 {
+		t.Fatalf("resolver calls = %d, want the policy check to run once the limits pass", stub.calls.Load())
+	}
+	if q := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionQueued); q != nil {
+		t.Fatalf("Queued was left behind after the limits passed: %+v", q)
+	}
+}
+
+// TestLimitsMissingSettingsStillDenied checks that missing settings do not hold a request back, new or Queued:
+// the policy check denies it.
 func TestLimitsMissingSettingsStillDenied(t *testing.T) {
-	r, c, rr, _ := limitsWorld(t, 1)
-	if err := c.Delete(context.Background(), &remediationv1alpha1.RemediationSettings{
-		ObjectMeta: metav1.ObjectMeta{Name: remediationv1alpha1.SettingsName}}); err != nil {
+	for _, queued := range []bool{false, true} {
+		t.Run(fmt.Sprintf("queued %v", queued), func(t *testing.T) {
+			r, c, rr, _ := limitsWorld(t, 1)
+			if queued {
+				markQueued(t, c, rr)
+			}
+			if err := c.Delete(context.Background(), &remediationv1alpha1.RemediationSettings{
+				ObjectMeta: metav1.ObjectMeta{Name: remediationv1alpha1.SettingsName}}); err != nil {
+				t.Fatal(err)
+			}
+			_, got, err := reconcileLimits(t, r, rr)
+			if err != nil || got.Status.Phase != remediationv1alpha1.PhaseDenied {
+				t.Fatalf("phase = %q, err = %v, want Denied", got.Status.Phase, err)
+			}
+		})
+	}
+}
+
+// markQueued writes Queued True on rr, as a limit that held it back would have.
+func markQueued(t *testing.T, c client.Client, rr *remediationv1alpha1.RemediationRequest) {
+	t.Helper()
+	ctx := context.Background()
+	if err := c.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 		t.Fatal(err)
 	}
-	_, got, err := reconcileLimits(t, r, rr)
-	if err != nil || got.Status.Phase != remediationv1alpha1.PhaseDenied {
-		t.Fatalf("phase = %q, err = %v, want Denied", got.Status.Phase, err)
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionQueued,
+		Status: metav1.ConditionTrue, Reason: ReasonConcurrencyLimit, Message: "test"})
+	if err := c.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -422,7 +560,7 @@ func TestPhaseTransitionTimeRecorded(t *testing.T) {
 }
 
 // interceptorClient wraps base so that each List first calls fail, and fails with its error.
-func interceptorClient(base client.Client, fail func() error) client.WithWatch {
+func interceptorClient(base client.Client, fail func() error) client.Reader {
 	return interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if err := fail(); err != nil {

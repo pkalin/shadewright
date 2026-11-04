@@ -243,10 +243,12 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if rr.Status.Phase != "" && rr.Status.Phase != remediationv1alpha1.PhasePending {
 		return r.recheck(ctx, rr)
 	}
-	// The limits are checked before the policy check too, so a request that cannot go through yet does not
-	// read Git each time it is looked at.
-	if res, stop, err := r.holdBack(ctx, rr, true); stop {
-		return res, err
+	// A request a limit holds back (Queued) checks only the limits until they let it through, so it does not
+	// read Git while it waits. Every other request is decided first, so a refusal is never held back.
+	if meta.IsStatusConditionTrue(rr.Status.Conditions, remediationv1alpha1.ConditionQueued) {
+		if res, stop, err := r.holdBack(ctx, rr, true); stop {
+			return res, err
+		}
 	}
 
 	checkCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
@@ -615,7 +617,7 @@ func beforeMerge(p remediationv1alpha1.RemediationPhase) bool {
 // makes at most one Git write right after this check.
 func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	ctrl.Result, error) {
-	if r.OpenRepository == nil || !beforeMerge(rr.Status.Phase) || rr.Status.PlanDigest == "" {
+	if r.OpenRepository == nil || !progresses(rr) {
 		return ctrl.Result{}, nil
 	}
 	outcome := prOpen

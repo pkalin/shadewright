@@ -50,11 +50,12 @@ const (
 	// (providers.ErrTooLarge); the mapping checks the size again in case an adapter does not.
 	MaxFileBytes = providers.MaxFileBytes
 	// MaxTotalBytes is how many bytes one mapping reads in all, kustomization and .sourceignore lookups and
-	// cached reads included, so that many files near MaxFileBytes cannot add up without bound. It equals the
-	// render budget of the semantic diff (semdiff.MaxBuildBytes).
+	// cached reads included, so that many files near MaxFileBytes cannot add up without bound. The semantic
+	// diff takes its render budget from it (semdiff.MaxBuildBytes).
 	MaxTotalBytes = 16 << 20
-	// MaxDocuments is how many YAML documents one mapping decodes in all manifest files, empty ones and ones
-	// holding only comments included, so that a file of many small documents cannot keep the decoder busy.
+	// MaxDocuments is how many YAML documents one mapping decodes in all manifest files, and [ReadField] in
+	// its one file, empty ones and ones holding only comments included, so that a file of many small
+	// documents cannot keep the decoder busy.
 	MaxDocuments = 4096
 )
 
@@ -285,22 +286,16 @@ func (w *walker) findDeclaration(ctx context.Context, id identity) (declaration,
 		if err != nil {
 			return declaration{}, nil, err
 		}
-		docs := newDocuments(f.Data)
+		docs := newDocuments(f.Data, &w.docs)
 		for {
-			raw, err := docs.next()
+			doc, err := docs.next()
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			if err != nil {
-				r := needsIntervention(ReasonFileNotReadable, "%s is not valid YAML", p)
-				return declaration{}, &r, nil
-			}
-			// Counted before decoding, so the document over the budget is never decoded.
-			if w.docs++; w.docs > MaxDocuments {
+			if errors.Is(err, errTooManyDocuments) {
 				return declaration{}, new(needsIntervention(ReasonInputTooLarge,
 					"the build holds more than %d YAML documents", MaxDocuments)), nil
 			}
-			doc, err := decodeDocument(raw)
 			if err != nil {
 				r := needsIntervention(ReasonFileNotReadable, "%s is not valid YAML", p)
 				return declaration{}, &r, nil
@@ -360,21 +355,32 @@ func match(doc map[string]any, id identity) matchKind {
 	}
 }
 
-// documents splits a multi-document YAML file into raw documents, one at a time.
-type documents struct{ r *utilyaml.YAMLReader }
+// errTooManyDocuments is returned by documents.next when the document budget is spent.
+var errTooManyDocuments = errors.New("too many YAML documents")
 
-func newDocuments(data []byte) documents {
-	return documents{r: utilyaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(data)))}
+// documents decodes a multi-document YAML file one document at a time, counting each against a budget of
+// MaxDocuments that may be shared by several files.
+type documents struct {
+	r       *utilyaml.YAMLReader
+	decoded *int
 }
 
-// next returns the next raw document, which may be empty or hold only comments, or io.EOF after the last.
-func (d documents) next() ([]byte, error) {
-	return d.r.Read()
+func newDocuments(data []byte, decoded *int) documents {
+	return documents{r: utilyaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(data))), decoded: decoded}
 }
 
-// decodeDocument decodes one raw document; it returns nil for an empty one. Duplicate keys are an error, so a
-// document cannot hide a second value for the same field.
-func decodeDocument(raw []byte) (map[string]any, error) {
+// next returns the next document, nil for one that is empty or holds only comments, io.EOF after the last,
+// errTooManyDocuments when the budget is spent, or another error when the file is not valid YAML. A
+// document is counted before it is decoded, so the one over the budget is never decoded. Duplicate keys are
+// an error, so a document cannot hide a second value for the same field.
+func (d documents) next() (map[string]any, error) {
+	raw, err := d.r.Read()
+	if err != nil {
+		return nil, err
+	}
+	if *d.decoded++; *d.decoded > MaxDocuments {
+		return nil, errTooManyDocuments
+	}
 	var doc map[string]any
 	if err := yaml.UnmarshalStrict(raw, &doc); err != nil {
 		return nil, err
@@ -385,24 +391,24 @@ func decodeDocument(raw []byte) (map[string]any, error) {
 // ReadField returns the value of field in the one document of data that declares target. It is an error when
 // no document declares the target, when more than one may (another version, a missing namespace, a second
 // copy) or when a List holds it, because the value could then belong to another object. found is false when
-// the document does not set the field.
+// the document does not set the field. A file of more than MaxDocuments documents is an error too.
 func ReadField(data []byte, target v1alpha1.ObjectRef, field Field) (value any, found bool, err error) {
 	gv, err := schema.ParseGroupVersion(target.APIVersion)
 	if err != nil {
 		return nil, false, fmt.Errorf("invalid apiVersion")
 	}
 	id := identity{gvk: gv.WithKind(target.Kind), namespace: target.Namespace, name: target.Name}
-	// One document is decoded at a time and only the match is kept.
-	docs := newDocuments(data)
+	// One document is decoded at a time, at most MaxDocuments in this call, and only the match is kept.
+	decoded := 0
+	docs := newDocuments(data, &decoded)
 	var exact map[string]any
 	for {
-		raw, err := docs.next()
+		doc, err := docs.next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
-		var doc map[string]any
-		if err == nil {
-			doc, err = decodeDocument(raw)
+		if errors.Is(err, errTooManyDocuments) {
+			return nil, false, fmt.Errorf("the file holds more than %d YAML documents", MaxDocuments)
 		}
 		if err != nil {
 			return nil, false, fmt.Errorf("the file is not valid YAML")

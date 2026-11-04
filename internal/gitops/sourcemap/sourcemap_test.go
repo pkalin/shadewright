@@ -1297,9 +1297,10 @@ func TestResolveBoundsWhatItParses(t *testing.T) {
 			}
 		}, sourcemap.NeedsIntervention, sourcemap.ReasonInputTooLarge,
 			map[string]int{fmt.Sprintf("apps/orders/big%d.yaml", sourcemap.MaxTotalBytes/bigFileBytes+1): 0}},
+		// The document after the budget is not valid YAML: it is counted before it is decoded, so it never is.
 		{"many documents in one file", func(f *fixture) {
 			f.files[ksFile] += "  - many.yaml\n"
-			f.files["apps/orders/many.yaml"] = configMaps(sourcemap.MaxDocuments)
+			f.files["apps/orders/many.yaml"] = configMaps(sourcemap.MaxDocuments-fixtureDocs) + "---\na: [\n"
 		}, sourcemap.NeedsIntervention, sourcemap.ReasonInputTooLarge, nil},
 		{"many documents across files", func(f *fixture) {
 			for i := range 8 {
@@ -1318,13 +1319,26 @@ func TestResolveBoundsWhatItParses(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newFixture()
-			tc.change(f)
-			var c *readCounter
-			f.gitWrap = func(g providers.GitProvider) providers.GitProvider {
-				c = &readCounter{GitProvider: g, files: map[string]int{}}
-				return c
+			// counters holds one readCounter per run, with or without the cache.
+			var counters []*readCounter
+			change := func(f *fixture) {
+				tc.change(f)
+				f.gitWrap = func(g providers.GitProvider) providers.GitProvider {
+					c := &readCounter{GitProvider: g, files: map[string]int{}}
+					counters = append(counters, c)
+					return c
+				}
 			}
+			// The provider returns a file before the mapping can count it, so the mapping may read one file past
+			// the budget, never more. A run through the cache reads from the provider only what it misses.
+			checkBytes := func(c *readCounter) {
+				t.Helper()
+				if c.bytes > sourcemap.MaxTotalBytes+sourcemap.MaxFileBytes {
+					t.Errorf("read %d bytes, over the budget of %d", c.bytes, sourcemap.MaxTotalBytes)
+				}
+			}
+			f := newFixture()
+			change(f)
 			res, _, err := f.run(t)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -1332,17 +1346,45 @@ func TestResolveBoundsWhatItParses(t *testing.T) {
 			if res.Outcome != tc.want || res.Reason != tc.reason {
 				t.Fatalf("result = %s/%s (%s), want %s/%s", res.Outcome, res.Reason, res.Message, tc.want, tc.reason)
 			}
-			// The provider returns a file before the mapping can count it, so the mapping may read one file past
-			// the budget, never more.
-			if c.bytes > sourcemap.MaxTotalBytes+sourcemap.MaxFileBytes {
-				t.Errorf("read %d bytes, over the budget of %d", c.bytes, sourcemap.MaxTotalBytes)
+			if len(counters) != 1 {
+				t.Fatalf("opened the repository %d times, want 1", len(counters))
 			}
+			c := counters[0]
+			checkBytes(c)
 			for p, n := range tc.maxReads {
 				if c.files[p] > n {
 					t.Errorf("%s read %d times, want at most %d", p, c.files[p], n)
 				}
 			}
-			sameWithCache(t, tc.change, res)
+			counters = nil
+			sameWithCache(t, change, res)
+			if len(counters) == 0 {
+				t.Fatal("the cached runs opened no repository")
+			}
+			for _, c := range counters {
+				checkBytes(c)
+			}
 		})
+	}
+}
+
+// ReadField decodes at most MaxDocuments documents of its file and refuses the rest unread (#240).
+func TestReadFieldBoundsDocuments(t *testing.T) {
+	target := v1alpha1.ObjectRef{APIVersion: "keda.sh/v1alpha1", Kind: "ScaledObject", Namespace: "orders",
+		Name: "orders-worker"}
+	field, err := sourcemap.FieldFor(v1alpha1.Action{Type: v1alpha1.ActionAdjustKedaMaxReplicas}, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// scaledObjectYAML holds 2 documents: the Service and the ScaledObject.
+	atBudget := scaledObjectYAML + configMaps(sourcemap.MaxDocuments-2)
+	got, found, err := sourcemap.ReadField([]byte(atBudget), target, field)
+	if err != nil || !found || fmt.Sprint(got) != "10" {
+		t.Fatalf("at the budget: ReadField = %v, %v, %v; want 10, true, nil", got, found, err)
+	}
+	// The document after the budget is not valid YAML: it is counted before it is decoded, so it never is.
+	_, _, err = sourcemap.ReadField([]byte(atBudget+"---\na: [\n"), target, field)
+	if err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatalf("over the budget: ReadField error = %v, want one about too many documents", err)
 	}
 }

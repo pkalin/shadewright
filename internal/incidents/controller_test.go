@@ -224,6 +224,7 @@ func observation(f, i int, total, count int64, began time.Time) collector.Observ
 			APIVersion: "apps/v1", Kind: "Deployment", Namespace: "demo", Name: "orders",
 			UID: "33333333-3333-4333-8333-333333333333",
 		},
+		Source: "demo",
 		Reason: "BackOff", Type: corev1.EventTypeWarning, ReportingController: "kubelet",
 		Symptom:    "Back-off restarting failed container worker",
 		Occurrence: eventID(i), Total: total, Count: count, Began: began, ObservedAt: began,
@@ -1030,8 +1031,8 @@ func TestInFlightOccurrencesCountAsHeld(t *testing.T) {
 	if held > perIncident {
 		t.Fatalf("%d occurrences held unwritten with one write in flight, over the cap of %d", held, perIncident)
 	}
-	if r.held[fp(1)] > perIncident || r.heldTotal > perIncident {
-		t.Fatalf("held %d (total %d), over the cap of %d", r.held[fp(1)], r.heldTotal, perIncident)
+	if r.heldBy(fp(1)) > perIncident || r.heldTotal > perIncident {
+		t.Fatalf("held %d (total %d), over the cap of %d", r.heldBy(fp(1)), r.heldTotal, perIncident)
 	}
 }
 
@@ -1110,39 +1111,71 @@ func TestHeldOccurrencesStayWithinTheCaps(t *testing.T) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.heldTotal != 0 || len(r.held) != 0 {
-		t.Fatalf("held %v (total %d) after every batch was written, want nothing", r.held, r.heldTotal)
+		t.Fatalf("held %s (total %d) after every batch was written, want nothing", heldString(r.Controller), r.heldTotal)
 	}
 	indexed(t, r.Controller)
 }
 
-// observationIn is observation with one count of a new occurrence, about a subject in namespace subjectNS.
-func observationIn(subjectNS string, f, i int, began time.Time) collector.Observation {
+// observationIn is observation with one count of a new occurrence from namespace source, about a subject
+// in that namespace.
+func observationIn(source string, f, i int, began time.Time) collector.Observation {
 	o := observation(f, i, 1, 1, began)
-	o.Subject.Namespace = subjectNS
+	o.Subject.Namespace, o.Source = source, source
 	return o
 }
 
-// heldConsistent reports, with mu held, whether held, heldNamespace and heldIn add up to heldTotal: the
-// empty string, or what does not. It does not fail the test itself, so the caller can unlock first.
+// nodeObservation is observationIn about a Node, a cluster-scoped subject with no namespace, reported by an
+// event in namespace source.
+func nodeObservation(source string, f, i int, began time.Time) collector.Observation {
+	o := observation(f, i, 1, 1, began)
+	o.Subject = remediationv1alpha1.ObjectRef{APIVersion: "v1", Kind: "Node", Name: fmt.Sprintf("node-%d", f),
+		UID: "44444444-4444-4444-8444-444444444444"}
+	o.Reason, o.Symptom, o.Source = "NodeNotReady", "Node status is now: NodeNotReady", source
+	return o
+}
+
+// heldConsistent reports, with mu held, whether held and heldIn add up to heldTotal, and each holding's in
+// to its n: the empty string, or what does not. It does not fail the test itself, so the caller can unlock
+// first.
 func heldConsistent(c *Controller) string {
 	perFingerprint, perNamespace := 0, 0
-	for f, n := range c.held {
-		perFingerprint += n
-		if _, ok := c.heldNamespace[f]; !ok {
-			return fmt.Sprintf("fingerprint %s holds %d with no namespace", f, n)
+	in := map[string]int{}
+	for f, h := range c.held {
+		if h.n <= 0 {
+			return fmt.Sprintf("fingerprint %s kept with %d held", f, h.n)
+		}
+		perFingerprint += h.n
+		sum := 0
+		for ns, k := range h.in {
+			if k <= 0 {
+				return fmt.Sprintf("fingerprint %s keeps namespace %q with %d held", f, ns, k)
+			}
+			sum += k
+			in[ns] += k
+		}
+		if sum != h.n {
+			return fmt.Sprintf("fingerprint %s holds %d, its namespaces %v", f, h.n, h.in)
 		}
 	}
 	for ns, n := range c.heldIn {
-		if n <= 0 {
-			return fmt.Sprintf("namespace %q kept with %d held", ns, n)
+		if n <= 0 || in[ns] != n {
+			return fmt.Sprintf("namespace %q kept with %d held, its fingerprints hold %d", ns, n, in[ns])
 		}
 		perNamespace += n
 	}
-	if len(c.heldNamespace) != len(c.held) || perFingerprint != c.heldTotal || perNamespace != c.heldTotal {
-		return fmt.Sprintf("held %v, heldNamespace %v and heldIn %v do not add up to heldTotal %d",
-			c.held, c.heldNamespace, c.heldIn, c.heldTotal)
+	if len(in) != len(c.heldIn) || perFingerprint != c.heldTotal || perNamespace != c.heldTotal {
+		return fmt.Sprintf("held %v and heldIn %v do not add up to heldTotal %d", heldString(c), c.heldIn, c.heldTotal)
 	}
 	return ""
+}
+
+// heldString prints held with the counts, not the pointers. The caller holds mu.
+func heldString(c *Controller) string {
+	out := map[string]holding{}
+	for f, h := range c.held {
+		out[f] = *h
+	}
+	return fmt.Sprint(out)
 }
 
 // waitHeld waits until cond holds for the controller's held counts, checked with mu held, and fails at once
@@ -1153,7 +1186,7 @@ func waitHeld(t *testing.T, r *running, what string, cond func() bool) {
 	for {
 		r.mu.Lock()
 		ok, bad := cond(), heldConsistent(r.Controller)
-		held, in, total := fmt.Sprint(r.held), fmt.Sprint(r.heldIn), r.heldTotal
+		held, in, total := heldString(r.Controller), fmt.Sprint(r.heldIn), r.heldTotal
 		r.mu.Unlock()
 		if bad != "" {
 			t.Fatal(bad)
@@ -1195,7 +1228,7 @@ func TestNamespaceShareLeavesRoomForOtherNamespaces(t *testing.T) {
 	for i := 1; i <= quiet; i++ {
 		r.obs <- observationIn("quiet", 9, 9000+i, from.Add(time.Duration(i)*time.Second))
 	}
-	waitHeld(t, r, "the quiet namespace's occurrences are held", func() bool { return r.held[fp(9)] == quiet })
+	waitHeld(t, r, "the quiet namespace's occurrences are held", func() bool { return r.heldBy(fp(9)) == quiet })
 	r.mu.Lock()
 	inNoisy, heldTotal := r.heldIn["noisy"], r.heldTotal
 	r.mu.Unlock()
@@ -1209,29 +1242,103 @@ func TestNamespaceShareLeavesRoomForOtherNamespaces(t *testing.T) {
 	failing.Store(false)
 	eventually(t, ns, 9, countIs(quiet))
 	waitHeld(t, r, "held counts go back to zero once every batch is written", func() bool {
-		return r.heldTotal == 0 && len(r.held) == 0 && len(r.heldIn) == 0 && len(r.heldNamespace) == 0
+		return r.heldTotal == 0 && len(r.held) == 0 && len(r.heldIn) == 0
 	})
 }
 
-// The share of one namespace is within the caps: by default a quarter of the total, never over the total
-// and never zero.
+// Occurrences are charged to the namespace they came from, not to their subject's: a Node has none, so
+// every cluster-scoped Incident would otherwise share one key. A tenant that holds its full share with
+// Node-regarding events neither blocks the same fingerprint's later occurrences from another namespace
+// (default, where node events land) nor other cluster-scoped Incidents, and its share is not charged for
+// them. Every held count goes back to zero after writes that succeed and after writes refused as invalid.
+func TestClusterScopedSubjectsAreChargedToTheirSource(t *testing.T) {
+	ns := namespace(t)
+	const perIncident, perNamespace, total = 20, 10, 100
+	r := start(t, ns, Config{Window: 100 * time.Millisecond, RetryAfter: 50 * time.Millisecond,
+		MaxPendingOccurrences: total, MaxPendingOccurrencesPerIncident: perIncident,
+		MaxPendingOccurrencesPerNamespace: perNamespace})
+	const (
+		failing = iota
+		succeeding
+		refusing
+	)
+	var mode atomic.Int32
+	r.writes.instead = func(context.Context) error {
+		switch mode.Load() {
+		case failing:
+			return apierrors.NewServerTimeout(remediationv1alpha1.GroupVersion.WithResource("incidents").GroupResource(), "update", 1)
+		case refusing:
+			return apierrors.NewInvalid(remediationv1alpha1.GroupVersion.WithKind("Incident").GroupKind(), "x", nil)
+		}
+		return nil
+	}
+	from := time.Now().Truncate(time.Second).Add(-time.Hour)
+	at := func(i int) time.Time { return from.Add(time.Duration(i) * time.Second) }
+	// The tenant fills its share with node 1, and node 2 takes its first occurrence past it.
+	for i := 1; i <= perNamespace+5; i++ {
+		r.obs <- nodeObservation("tenant", 1, i, at(i))
+	}
+	for i := 1; i <= 5; i++ {
+		r.obs <- nodeObservation("tenant", 2, 200+i, at(i))
+	}
+	// The kubelet's reports in default: node 1 again, and node 3.
+	const again, other = 5, 4
+	for i := 1; i <= again; i++ {
+		r.obs <- nodeObservation("default", 1, 100+i, at(i))
+	}
+	for i := 1; i <= other; i++ {
+		r.obs <- nodeObservation("default", 3, 300+i, at(i))
+	}
+	waitHeld(t, r, "default's occurrences are counted", func() bool {
+		return r.heldBy(fp(1)) == perNamespace+again && r.heldBy(fp(2)) == 1 && r.heldBy(fp(3)) == other
+	})
+	r.mu.Lock()
+	tenant, dflt, empty := r.heldIn["tenant"], r.heldIn["default"], r.heldIn[""]
+	r.mu.Unlock()
+	if tenant != perNamespace+1 || dflt != again+other || empty != 0 {
+		t.Fatalf("held in tenant %d, default %d, the empty namespace %d; want %d, %d and 0",
+			tenant, dflt, empty, perNamespace+1, again+other)
+	}
+	mode.Store(succeeding)
+	eventually(t, ns, 1, countIs(perNamespace+again))
+	eventually(t, ns, 3, countIs(other))
+	zero := func() bool { return r.heldTotal == 0 && len(r.held) == 0 && len(r.heldIn) == 0 }
+	waitHeld(t, r, "held counts go back to zero once every batch is written", zero)
+
+	// Writes refused as invalid drop their batches: the counts of both namespaces go back to zero too.
+	mode.Store(refusing)
+	for i := 1; i <= 3; i++ {
+		r.obs <- nodeObservation("tenant", 1, 400+i, at(i))
+		r.obs <- nodeObservation("default", 1, 500+i, at(i))
+	}
+	waitHeld(t, r, "held counts go back to zero once the batches are refused", zero)
+}
+
+// The share of one namespace is within the caps: by default a quarter of the total but never under the
+// per-Incident cap, never over the total and never zero.
 func TestNamespaceShareIsWithinTheCaps(t *testing.T) {
 	for _, tt := range []struct {
-		total, share, want int
+		total, perIncident, share, want int
 	}{
-		{0, 0, DefaultMaxPendingOccurrences / DefaultNamespaceShareDivisor},
-		{30, 0, 7},
-		{30, 10, 10},
-		{30, 100, 30},
-		{2, 0, 1},
+		{0, 0, 0, DefaultMaxPendingOccurrences / DefaultNamespaceShareDivisor},
+		{30, 5, 0, 7},
+		// A quarter of the total would lower the per-Incident cap: the default share takes that cap.
+		{30, 20, 0, 20},
+		{10000, 4000, 0, 4000},
+		// ... but never more than the total.
+		{30, 100, 0, 30},
+		{30, 5, 10, 10},
+		{30, 5, 100, 30},
+		{2, 1, 0, 1},
 	} {
 		c, err := New(Config{Namespace: "operator", MaxPendingOccurrences: tt.total,
-			MaxPendingOccurrencesPerNamespace: tt.share})
+			MaxPendingOccurrencesPerIncident: tt.perIncident, MaxPendingOccurrencesPerNamespace: tt.share})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got := c.cfg.MaxPendingOccurrencesPerNamespace; got != tt.want {
-			t.Errorf("total %d, share %d: got share %d, want %d", tt.total, tt.share, got, tt.want)
+			t.Errorf("total %d, per Incident %d, share %d: got share %d, want %d", tt.total, tt.perIncident,
+				tt.share, got, tt.want)
 		}
 	}
 }
@@ -1257,11 +1364,13 @@ func TestHeldCountsReturnToZeroAfterCancellation(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	r.obs <- observationIn("a", 1, 1, now)
 	waitFor(t, entered)
-	for i := 2; i <= 4; i++ {
+	// One Incident's occurrences from two namespaces, each charged to its own.
+	for i := 2; i <= 3; i++ {
 		r.obs <- observationIn("a", 1, i, now)
 	}
+	r.obs <- observationIn("b", 1, 4, now)
 	r.obs <- observationIn("b", 2, 100, now)
-	waitHeld(t, r, "the occurrences are held", func() bool { return r.heldIn["a"] == 4 && r.heldIn["b"] == 1 })
+	waitHeld(t, r, "the occurrences are held", func() bool { return r.heldIn["a"] == 3 && r.heldIn["b"] == 2 })
 	hang.Store(false)
 	r.stop()
 	if inc := get(t, ns); inc.Status.Count != 4 {
@@ -1272,8 +1381,8 @@ func TestHeldCountsReturnToZeroAfterCancellation(t *testing.T) {
 	if bad := heldConsistent(r.Controller); bad != "" {
 		t.Fatal(bad)
 	}
-	if r.heldTotal != 0 || len(r.held) != 0 || len(r.heldIn) != 0 || len(r.heldNamespace) != 0 {
-		t.Fatalf("held %v, heldIn %v, heldTotal %d after stop wrote every batch, want nothing",
-			r.held, r.heldIn, r.heldTotal)
+	if r.heldTotal != 0 || len(r.held) != 0 || len(r.heldIn) != 0 {
+		t.Fatalf("held %s, heldIn %v, heldTotal %d after stop wrote every batch, want nothing",
+			heldString(r.Controller), r.heldIn, r.heldTotal)
 	}
 }

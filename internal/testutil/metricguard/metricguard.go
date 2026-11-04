@@ -95,3 +95,16 @@ func Documented(t testing.TB, path string, want map[string]Labels) {
 		}
 	}
 }
+
+// Help returns the help text of desc, for the HELP line of an expected exposition in
+// testutil.CollectAndCompare. prometheus.Desc does not export it, so it is read from the Desc's String form.
+func Help(t testing.TB, desc *prometheus.Desc) string {
+	t.Helper()
+	s := desc.String()
+	_, after, ok := strings.Cut(s, `help: "`)
+	if !ok {
+		t.Fatalf("no help in %s", s)
+	}
+	help, _, _ := strings.Cut(after, `", `)
+	return help
+}

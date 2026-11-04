@@ -277,9 +277,12 @@ func New(cfg Config) (*Controller, error) {
 // Incidents from the cache at start. It runs only on the leader, like the collector.
 func (c *Controller) SetupWithManager(mgr ctrl.Manager, obs <-chan collector.Observation) error {
 	c.client, c.reader, c.cache, c.obs = mgr.GetClient(), mgr.GetAPIReader(), mgr.GetClient(), obs
-	incidentPhases.setSource(mgr.GetCache(), c.cfg.Namespace)
 	if err := mgr.Add(c); err != nil {
 		return fmt.Errorf("adding the Incident controller: %w", err)
+	}
+	incidentPhases.setNamespace(c.cfg.Namespace)
+	if err := mgr.Add(incidentPhases.source.Runnable(mgr.GetCache(), &remediationv1alpha1.Incident{})); err != nil {
+		return fmt.Errorf("adding the source of the Incident phase metric: %w", err)
 	}
 	return nil
 }

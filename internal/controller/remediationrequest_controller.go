@@ -71,6 +71,9 @@ type SourceResolver interface {
 type RemediationRequestReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Namespace is the operator namespace, where the requests are. The phase metric counts the requests there.
+	// SetupWithManager requires it; Reconcile does not read it.
+	Namespace string
 	// Source resolves the target's declaration in Git.
 	Source SourceResolver
 	// APIReader reads straight from the API server (mgr.GetAPIReader()). The live target is read through it,
@@ -533,7 +536,13 @@ func (r *RemediationRequestReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	if r.Source == nil {
 		return errors.New("a SourceResolver is required")
 	}
-	requestPhases.setReader(mgr.GetCache())
+	if r.Namespace == "" {
+		return errors.New("the operator namespace is required")
+	}
+	requestPhases.setNamespace(r.Namespace)
+	if err := mgr.Add(requestPhases.source.Runnable(mgr.GetCache(), &remediationv1alpha1.RemediationRequest{})); err != nil {
+		return fmt.Errorf("adding the source of the RemediationRequest phase metric: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&remediationv1alpha1.RemediationRequest{}).
 		Named("remediationrequest").

@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/phasegauge"
 	"github.com/pkalin/shadewright/internal/policy"
 	"github.com/pkalin/shadewright/internal/testutil/metricguard"
 )
@@ -106,40 +107,51 @@ func TestCountErrorsCountsByKind(t *testing.T) {
 	}
 }
 
-// requestsIn returns a fake client holding requests with the given phases.
+// operatorNamespace is the namespace of the requests the phase collector counts in these tests.
+const operatorNamespace = "shadewright-system"
+
+// requestsIn returns a fake client holding requests in operatorNamespace with the given phases, and one more
+// request in another namespace, which the collector must not count.
 func requestsIn(t *testing.T, phases ...remediationv1alpha1.RemediationPhase) client.Reader {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := remediationv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	objs := make([]client.Object, 0, len(phases))
+	objs := make([]client.Object, 0, len(phases)+1)
+	objs = append(objs, &remediationv1alpha1.RemediationRequest{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "another-namespace", Name: "rr-other"},
+		Status:     remediationv1alpha1.RemediationRequestStatus{Phase: remediationv1alpha1.PhaseDenied},
+	})
 	for i, p := range phases {
 		objs = append(objs, &remediationv1alpha1.RemediationRequest{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "shadewright-system", Name: fmt.Sprintf("rr-%d", i)},
+			ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace, Name: fmt.Sprintf("rr-%d", i)},
 			Status:     remediationv1alpha1.RemediationRequestStatus{Phase: p},
 		})
 	}
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 }
 
+// The collector counts the requests of the operator namespace only, by phase, with unknown and missing phases
+// as Other and None, and reports nothing until its source is set.
 func TestRequestPhaseCollector(t *testing.T) {
 	c := &requestPhaseCollector{desc: requestPhases.desc}
+	c.setNamespace(operatorNamespace)
 	if n := testutil.CollectAndCount(c); n != 0 {
-		t.Fatalf("a collector without a reader reported %d series, want none", n)
+		t.Fatalf("a collector without a source reported %d series, want none", n)
 	}
-	c.setReader(requestsIn(t, remediationv1alpha1.PhaseDenied, remediationv1alpha1.PhaseDenied,
+	c.source.Set(requestsIn(t, remediationv1alpha1.PhaseDenied, remediationv1alpha1.PhaseDenied,
 		remediationv1alpha1.PhasePRCreated, "", "Made-Up by someone"))
 	want := map[string]float64{}
-	for _, p := range requestPhaseList {
-		want[string(p)] = 0
+	for _, l := range phasegauge.Labels(requestPhaseList) {
+		want[l] = 0
 	}
-	want[labelNoPhase], want[labelOther] = 1, 1
+	want[phasegauge.None], want[phasegauge.Other] = 1, 1
 	want[string(remediationv1alpha1.PhaseDenied)] = 2
 	want[string(remediationv1alpha1.PhasePRCreated)] = 1
 
 	var exp strings.Builder
-	exp.WriteString("# HELP shadewright_remediation_requests " + helpOf(t, c) + "\n")
+	exp.WriteString("# HELP shadewright_remediation_requests " + metricguard.Help(t, c.desc) + "\n")
 	exp.WriteString("# TYPE shadewright_remediation_requests gauge\n")
 	for _, phase := range slices.Sorted(maps.Keys(want)) {
 		fmt.Fprintf(&exp, "shadewright_remediation_requests{phase=%q} %v\n", phase, want[phase])
@@ -149,25 +161,8 @@ func TestRequestPhaseCollector(t *testing.T) {
 	}
 }
 
-// helpOf returns the help text of the collector's one metric.
-func helpOf(t *testing.T, c *requestPhaseCollector) string {
-	t.Helper()
-	s := c.desc.String()
-	_, after, ok := strings.Cut(s, `help: "`)
-	if !ok {
-		t.Fatalf("no help in %s", s)
-	}
-	help, _, _ := strings.Cut(after, `", `)
-	return help
-}
-
 // executorMetrics are the executor's metrics and the closed set of every label.
 func executorMetrics() map[string]metricguard.Labels {
-	phases := make([]string, 0, len(requestPhaseList)+2)
-	phases = append(phases, labelNoPhase, labelOther)
-	for _, p := range requestPhaseList {
-		phases = append(phases, string(p))
-	}
 	reasons := append(slices.Collect(maps.Keys(denialReasons)), labelOther)
 	return map[string]metricguard.Labels{
 		"shadewright_policy_decisions_total": {"outcome": {decisionAllowed, decisionDenied, decisionNeedsIntervention}},
@@ -175,7 +170,7 @@ func executorMetrics() map[string]metricguard.Labels {
 		"shadewright_remediation_reconcile_errors_total": {
 			labelKind: {errorTimeout, errorConflict, errorCancelled, errorOther},
 		},
-		"shadewright_remediation_requests": {"phase": phases},
+		"shadewright_remediation_requests": {"phase": phasegauge.Labels(requestPhaseList)},
 	}
 }
 
@@ -185,8 +180,9 @@ func TestExecutorMetricsAreBoundedAndDocumented(t *testing.T) {
 	recordDecision(remediationv1alpha1.PhaseDenied, "a message from the cluster")
 	recordDecision(remediationv1alpha1.PhaseDenied, string(policy.ReasonKindExcluded))
 	reconcileErrors.WithLabelValues(errorKind(errors.New("free text")))
-	requestPhases.setReader(requestsIn(t, remediationv1alpha1.PhasePending, "a phase from the cluster", ""))
-	t.Cleanup(func() { requestPhases.reader.Store(nil) })
+	requestPhases.setNamespace(operatorNamespace)
+	requestPhases.source.Set(requestsIn(t, remediationv1alpha1.PhasePending, "a phase from the cluster", ""))
+	t.Cleanup(func() { requestPhases.source.Set(nil) })
 
 	metricguard.Check(t, metrics.Registry, executorMetrics())
 	metricguard.Documented(t, filepath.Join("..", "..", "docs", "reference", "metrics.md"), executorMetrics())

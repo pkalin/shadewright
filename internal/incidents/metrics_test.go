@@ -37,21 +37,40 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/phasegauge"
 	"github.com/pkalin/shadewright/internal/testutil/metricguard"
 )
 
-// reservations returns the count of analysisReservations for result.
-func reservations(result string) float64 {
-	return testutil.ToFloat64(analysisReservations.WithLabelValues(result))
+// reservationResults are the values of the result label of analysisReservations.
+var reservationResults = []string{reserveReserved, reserveBudgetSpent, reserveBudgetNotFound, reserveBudgetBad, reserveError}
+
+// reservations returns the count of analysisReservations for each result.
+func reservations() map[string]float64 {
+	out := map[string]float64{}
+	for _, r := range reservationResults {
+		out[r] = testutil.ToFloat64(analysisReservations.WithLabelValues(r))
+	}
+	return out
 }
 
-// Each result of ReserveAnalysis is counted under its own label value.
+// checkReservations reports every result whose count changed since before by other than want says (absent:
+// unchanged).
+func checkReservations(t *testing.T, before map[string]float64, want map[string]float64) {
+	t.Helper()
+	after := reservations()
+	for _, r := range reservationResults {
+		if d := after[r] - before[r]; d != want[r] {
+			t.Errorf("result %s counted %v more times, want %v", r, d, want[r])
+		}
+	}
+}
+
+// Each result of ReserveAnalysis is counted under its own label value, and under no other.
 func TestReserveAnalysisIsCounted(t *testing.T) {
 	ns := namespace(t)
 	createSettings(t, 1)
 	createBudget(t, ns, nil)
-	reserved, spent, notFound := reservations(reserveReserved), reservations(reserveBudgetSpent),
-		reservations(reserveBudgetNotFound)
+	before := reservations()
 	if err := ReserveAnalysis(t.Context(), env.admin, env.admin, ns, triggerNow); err != nil {
 		t.Fatal(err)
 	}
@@ -61,28 +80,21 @@ func TestReserveAnalysisIsCounted(t *testing.T) {
 	if err := ReserveAnalysis(t.Context(), env.admin, env.admin, namespace(t), triggerNow); !errors.Is(err, ErrBudgetNotFound) {
 		t.Fatalf("a reservation without the ConfigMap = %v, want ErrBudgetNotFound", err)
 	}
-	for result, d := range map[string]float64{
-		reserveReserved:       reservations(reserveReserved) - reserved,
-		reserveBudgetSpent:    reservations(reserveBudgetSpent) - spent,
-		reserveBudgetNotFound: reservations(reserveBudgetNotFound) - notFound,
-	} {
-		if d != 1 {
-			t.Errorf("result %s counted %v times, want 1", result, d)
-		}
-	}
+	checkReservations(t, before, map[string]float64{reserveReserved: 1, reserveBudgetSpent: 1, reserveBudgetNotFound: 1})
 }
 
 func TestRecordReservationSortsErrors(t *testing.T) {
 	cases := map[string]error{
-		reserveBudgetBad: fmt.Errorf("reserving: %w", ErrBudgetUnreadable),
-		reserveError:     apierrors.NewServiceUnavailable("down"),
+		reserveReserved:       nil,
+		reserveBudgetSpent:    fmt.Errorf("reserving: %w", ErrBudgetSpent),
+		reserveBudgetNotFound: fmt.Errorf("reserving: %w", ErrBudgetNotFound),
+		reserveBudgetBad:      fmt.Errorf("reserving: %w", ErrBudgetUnreadable),
+		reserveError:          apierrors.NewServiceUnavailable("down"),
 	}
 	for result, err := range cases {
-		before := reservations(result)
+		before := reservations()
 		recordReservation(err)
-		if got := reservations(result) - before; got != 1 {
-			t.Errorf("%v counted %v times as %s, want 1", err, got, result)
-		}
+		checkReservations(t, before, map[string]float64{result: 1})
 	}
 }
 
@@ -98,16 +110,57 @@ func pollUntil(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// gaugeIs reports whether g is known with value v.
+func gaugeIs(g *optionalGauge, v float64) bool {
+	got, ok := g.get()
+	return ok && got == v
+}
+
+// gaugeUnknown reports whether g reports nothing, on the endpoint too.
+func gaugeUnknown(g *optionalGauge) bool {
+	_, ok := g.get()
+	return !ok && testutil.CollectAndCount(g) == 0
+}
+
 // A pass of the analysis trigger reports the budget it read.
 func TestTriggerReportsTheBudget(t *testing.T) {
 	ns := namespace(t)
 	createSettings(t, 7)
 	createBudget(t, ns, usedToday(3))
-	analysesUsedToday.Set(0)
-	analysesPerDayLimit.Set(0)
+	analysesUsedToday.clear()
+	analysesPerDayLimit.clear()
 	start(t, ns, triggerConfig)
 	pollUntil(t, "the budget gauges", func() bool {
-		return testutil.ToFloat64(analysesUsedToday) == 3 && testutil.ToFloat64(analysesPerDayLimit) == 7
+		return gaugeIs(analysesUsedToday, 3) && gaugeIs(analysesPerDayLimit, 7)
+	})
+	if n := testutil.CollectAndCount(analysesUsedToday); n != 1 {
+		t.Fatalf("the count reports %d series, want 1", n)
+	}
+}
+
+// A pass that cannot trust the budget ConfigMap takes the count it reported before away, and reports the limit
+// it read from the settings.
+func TestTriggerClearsAnUntrustedBudget(t *testing.T) {
+	ns := namespace(t)
+	createSettings(t, 7)
+	createBudget(t, ns, budgetData(tomorrow, "1")) // a day in the future: not trusted
+	analysesUsedToday.set(5)
+	analysesPerDayLimit.clear()
+	start(t, ns, triggerConfig)
+	pollUntil(t, "the count cleared and the limit set", func() bool {
+		return gaugeUnknown(analysesUsedToday) && gaugeIs(analysesPerDayLimit, 7)
+	})
+}
+
+// A pass without the settings takes both the limit and the count away.
+func TestTriggerClearsTheBudgetWithoutSettings(t *testing.T) {
+	ns := namespace(t)
+	createBudget(t, ns, usedToday(3))
+	analysesUsedToday.set(5)
+	analysesPerDayLimit.set(9)
+	start(t, ns, triggerConfig)
+	pollUntil(t, "both gauges cleared", func() bool {
+		return gaugeUnknown(analysesUsedToday) && gaugeUnknown(analysesPerDayLimit)
 	})
 }
 
@@ -186,27 +239,28 @@ func incidentsIn(t *testing.T, ns string, due map[int]bool, phases ...remediatio
 
 func TestIncidentCollector(t *testing.T) {
 	c := &incidentCollector{phases: incidentPhases.phases, due: incidentPhases.due}
+	c.setNamespace("operator")
 	if n := testutil.CollectAndCount(c); n != 0 {
 		t.Fatalf("a collector without a source reported %d series, want none", n)
 	}
-	c.setSource(incidentsIn(t, "operator", map[int]bool{0: true, 1: true},
+	c.source.Set(incidentsIn(t, "operator", map[int]bool{0: true, 1: true},
 		remediationv1alpha1.IncidentOpen, remediationv1alpha1.IncidentOpen, remediationv1alpha1.IncidentAnalyzing,
-		"", "Something-From the cluster"), "operator")
+		"", "Something-From the cluster"))
 	want := map[string]float64{}
-	for _, p := range incidentPhaseList {
-		want[string(p)] = 0
+	for _, l := range phasegauge.Labels(incidentPhaseList) {
+		want[l] = 0
 	}
-	want[labelNoPhase], want[labelOther] = 1, 1
+	want[phasegauge.None], want[phasegauge.Other] = 1, 1
 	want[string(remediationv1alpha1.IncidentOpen)] = 2
 	want[string(remediationv1alpha1.IncidentAnalyzing)] = 1
 
 	var exp strings.Builder
-	exp.WriteString("# HELP shadewright_incidents " + helpOf(t, c.phases.String()) + "\n")
+	exp.WriteString("# HELP shadewright_incidents " + metricguard.Help(t, c.phases) + "\n")
 	exp.WriteString("# TYPE shadewright_incidents gauge\n")
 	for _, phase := range slices.Sorted(maps.Keys(want)) {
 		fmt.Fprintf(&exp, "shadewright_incidents{phase=%q} %v\n", phase, want[phase])
 	}
-	exp.WriteString("# HELP shadewright_incidents_analysis_due " + helpOf(t, c.due.String()) + "\n")
+	exp.WriteString("# HELP shadewright_incidents_analysis_due " + metricguard.Help(t, c.due) + "\n")
 	exp.WriteString("# TYPE shadewright_incidents_analysis_due gauge\n")
 	exp.WriteString("shadewright_incidents_analysis_due 2\n")
 	if err := testutil.CollectAndCompare(c, strings.NewReader(exp.String())); err != nil {
@@ -214,24 +268,8 @@ func TestIncidentCollector(t *testing.T) {
 	}
 }
 
-// helpOf returns the help text in the String form of a Desc.
-func helpOf(t *testing.T, desc string) string {
-	t.Helper()
-	_, after, ok := strings.Cut(desc, `help: "`)
-	if !ok {
-		t.Fatalf("no help in %s", desc)
-	}
-	help, _, _ := strings.Cut(after, `", `)
-	return help
-}
-
 // analyzerMetrics are the metrics of package incidents and the closed set of every label.
 func analyzerMetrics() map[string]metricguard.Labels {
-	phases := make([]string, 0, len(incidentPhaseList)+2)
-	phases = append(phases, labelNoPhase, labelOther)
-	for _, p := range incidentPhaseList {
-		phases = append(phases, string(p))
-	}
 	return map[string]metricguard.Labels{
 		"shadewright_incident_observations_refused_total": {},
 		"shadewright_incident_batches_dropped_total": {
@@ -239,14 +277,12 @@ func analyzerMetrics() map[string]metricguard.Labels {
 		},
 		"shadewright_incident_occurrences_overflow_total": {},
 		"shadewright_incident_write_errors_total":         {},
-		"shadewright_analysis_reservations_total": {
-			"result": {reserveReserved, reserveBudgetSpent, reserveBudgetNotFound, reserveBudgetBad, reserveError},
-		},
-		"shadewright_analyses_used_today":           {},
-		"shadewright_analyses_per_day_limit":        {},
-		"shadewright_analysis_trigger_errors_total": {},
-		"shadewright_incidents":                     {"phase": phases},
-		"shadewright_incidents_analysis_due":        {},
+		"shadewright_analysis_reservations_total":         {"result": reservationResults},
+		"shadewright_analyses_used_today":                 {},
+		"shadewright_analyses_per_day_limit":              {},
+		"shadewright_analysis_trigger_errors_total":       {},
+		"shadewright_incidents":                           {"phase": phasegauge.Labels(incidentPhaseList)},
+		"shadewright_incidents_analysis_due":              {},
 	}
 }
 
@@ -254,9 +290,11 @@ func analyzerMetrics() map[string]metricguard.Labels {
 // from closed sets, and is documented, whatever phase an Incident holds.
 func TestAnalyzerMetricsAreBoundedAndDocumented(t *testing.T) {
 	recordReservation(errors.New("free text"))
-	incidentPhases.setSource(incidentsIn(t, "operator", nil, remediationv1alpha1.IncidentOpen, "a phase from the cluster", ""),
-		"operator")
-	t.Cleanup(func() { incidentPhases.source.Store(nil) })
+	incidentPhases.setNamespace("operator")
+	incidentPhases.source.Set(incidentsIn(t, "operator", nil, remediationv1alpha1.IncidentOpen, "a phase from the cluster", ""))
+	t.Cleanup(func() { incidentPhases.source.Set(nil) })
+	analysesUsedToday.set(1)
+	analysesPerDayLimit.set(2)
 
 	metricguard.Check(t, metrics.Registry, analyzerMetrics())
 	metricguard.Documented(t, filepath.Join("..", "..", "docs", "reference", "metrics.md"), analyzerMetrics())

@@ -19,7 +19,7 @@ package incidents
 import (
 	"context"
 	"errors"
-	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/phasegauge"
 )
 
 // The analyzer's metrics, served on its metrics endpoint (docs/reference/metrics.md). Every label takes its
@@ -86,17 +87,62 @@ var analysisReservations = prometheus.NewCounterVec(prometheus.CounterOpts{
 }, []string{"result"})
 
 // analysesUsedToday and analysesPerDayLimit are the analysis budget as the last pass of the analysis trigger
-// read it. They are set only when both the settings and the budget ConfigMap could be read and trusted.
+// read it. Each reports nothing while its value is unknown: the limit until the RemediationSettings are read,
+// the count until the budget ConfigMap is read and trusted. A fail-closed pass clears what it could not read,
+// so neither shows a value the trigger no longer goes by.
 var (
-	analysesUsedToday = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "shadewright_analyses_used_today",
-		Help: "Analyses counted against the current UTC day in the budget ConfigMap, at the last trigger pass.",
-	})
-	analysesPerDayLimit = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "shadewright_analyses_per_day_limit",
-		Help: "RemediationSettings maxAnalysesPerDay, at the last trigger pass.",
-	})
+	analysesUsedToday = newOptionalGauge("shadewright_analyses_used_today",
+		"Analyses counted against the current UTC day in the budget ConfigMap, at the last trigger pass; "+
+			"absent while the budget is unknown.")
+	analysesPerDayLimit = newOptionalGauge("shadewright_analyses_per_day_limit",
+		"RemediationSettings maxAnalysesPerDay, at the last trigger pass; absent while the settings are unknown.")
 )
+
+// optionalGauge is a gauge without labels that reports nothing while its value is unknown. A plain Gauge
+// cannot be taken away once set, so a stale value would stay on the endpoint.
+type optionalGauge struct {
+	desc  *prometheus.Desc
+	mu    sync.Mutex
+	value float64
+	known bool
+}
+
+func newOptionalGauge(name, help string) *optionalGauge {
+	return &optionalGauge{desc: prometheus.NewDesc(name, help, nil, nil)}
+}
+
+// set sets the value and makes it known.
+func (g *optionalGauge) set(v float64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.value, g.known = v, true
+}
+
+// clear makes the value unknown, so the gauge reports nothing.
+func (g *optionalGauge) clear() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.value, g.known = 0, false
+}
+
+// get returns the value and whether it is known.
+func (g *optionalGauge) get() (float64, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.value, g.known
+}
+
+// Describe implements prometheus.Collector.
+func (g *optionalGauge) Describe(ch chan<- *prometheus.Desc) {
+	ch <- g.desc
+}
+
+// Collect implements prometheus.Collector.
+func (g *optionalGauge) Collect(ch chan<- prometheus.Metric) {
+	if v, ok := g.get(); ok {
+		ch <- prometheus.MustNewConstMetric(g.desc, prometheus.GaugeValue, v)
+	}
+}
 
 // triggerPassErrors counts the passes of the analysis trigger that failed (each is retried at the next
 // interval).
@@ -151,13 +197,7 @@ func recordReservation(err error) {
 	analysisReservations.WithLabelValues(result).Inc()
 }
 
-// Phase labels outside the enum of IncidentPhase.
-const (
-	labelNoPhase = "None"
-	labelOther   = "Other"
-)
-
-// incidentPhaseList are the phases incidentPhases reports, the enum of IncidentPhase.
+// incidentPhaseList are the phases incidentPhases reports by name, the enum of IncidentPhase.
 var incidentPhaseList = []remediationv1alpha1.IncidentPhase{
 	remediationv1alpha1.IncidentOpen,
 	remediationv1alpha1.IncidentAnalyzing,
@@ -166,41 +206,25 @@ var incidentPhaseList = []remediationv1alpha1.IncidentPhase{
 	remediationv1alpha1.IncidentResolved,
 }
 
-// incidentPhaseLabel returns the phase label of an Incident: the phase when it is in incidentPhaseList, None
-// when it has none, and Other otherwise.
-func incidentPhaseLabel(p remediationv1alpha1.IncidentPhase) string {
-	if p == "" {
-		return labelNoPhase
-	}
-	if slices.Contains(incidentPhaseList, p) {
-		return string(p)
-	}
-	return labelOther
-}
-
-// phaseListTimeout bounds the cache read of one scrape, so a cache that is not synced yet cannot hold the
-// metrics endpoint.
+// phaseListTimeout bounds the cache read of one scrape. The source is set only once the informer has synced
+// (package phasegauge), so the read does not wait for the API server; the bound guards the endpoint anyway.
 const phaseListTimeout = 5 * time.Second
 
-// incidentSource is what incidentCollector lists from.
-type incidentSource struct {
-	reader    client.Reader
-	namespace string
-}
-
-// incidentCollector counts the Incidents by phase, and those due for analysis, when the metrics are scraped.
-// It reads the manager's cache, which the controller already fills with the Incidents, so a scrape costs no
-// API call. Until a source is set, or when the read fails, it reports nothing: a missing series is visible, a
-// zero would claim there are no Incidents.
+// incidentCollector counts the Incidents in the operator namespace by phase, and those due for analysis, when
+// the metrics are scraped. It reads the informer the controller already uses, and only on the leader once that
+// informer has synced (phasegauge.Source), so a scrape makes no API call and starts no watch. Until then, on a
+// standby replica, or when the read fails, it reports nothing: a missing series is visible, a zero would claim
+// there are no Incidents.
 type incidentCollector struct {
-	phases *prometheus.Desc
-	due    *prometheus.Desc
-	source atomic.Pointer[incidentSource]
+	phases    *prometheus.Desc
+	due       *prometheus.Desc
+	source    phasegauge.Source
+	namespace atomic.Pointer[string]
 }
 
-// setSource sets the reader and namespace the collector lists from.
-func (c *incidentCollector) setSource(r client.Reader, namespace string) {
-	c.source.Store(&incidentSource{reader: r, namespace: namespace})
+// setNamespace sets the namespace the collector counts in.
+func (c *incidentCollector) setNamespace(ns string) {
+	c.namespace.Store(&ns)
 }
 
 // Describe implements prometheus.Collector.
@@ -211,26 +235,25 @@ func (c *incidentCollector) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect implements prometheus.Collector.
 func (c *incidentCollector) Collect(ch chan<- prometheus.Metric) {
-	src := c.source.Load()
-	if src == nil {
+	r, ns := c.source.Reader(), c.namespace.Load()
+	if r == nil || ns == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), phaseListTimeout)
 	defer cancel()
 	var list remediationv1alpha1.IncidentList
 	// The objects are only read, so the cache's copies are used as they are.
-	if err := src.reader.List(ctx, &list, client.InNamespace(src.namespace), client.UnsafeDisableDeepCopy); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(*ns), client.UnsafeDisableDeepCopy); err != nil {
 		logf.Log.WithName("metrics").Error(err, "Failed to list Incidents for the phase metric")
 		return
 	}
 	counts := make(map[string]int, len(incidentPhaseList)+2)
-	for _, p := range incidentPhaseList {
-		counts[string(p)] = 0
+	for _, l := range phasegauge.Labels(incidentPhaseList) {
+		counts[l] = 0
 	}
-	counts[labelNoPhase], counts[labelOther] = 0, 0
 	due := 0
 	for i := range list.Items {
-		counts[incidentPhaseLabel(list.Items[i].Status.Phase)]++
+		counts[phasegauge.Label(list.Items[i].Status.Phase, incidentPhaseList)]++
 		if meta.IsStatusConditionTrue(list.Items[i].Status.Conditions, ConditionAnalysisDue) {
 			due++
 		}

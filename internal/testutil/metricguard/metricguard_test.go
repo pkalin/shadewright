@@ -123,3 +123,10 @@ func TestDocumented(t *testing.T) {
 		t.Fatalf("errors %q, want one for shadewright_other_total", r.errors)
 	}
 }
+
+func TestHelp(t *testing.T) {
+	desc := prometheus.NewDesc("shadewright_x", "Things, by phase (None, Other).", []string{phaseLabel}, nil)
+	if got := Help(t, desc); got != "Things, by phase (None, Other)." {
+		t.Fatalf("Help = %q", got)
+	}
+}

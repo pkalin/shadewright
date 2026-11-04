@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"slices"
 	"sync/atomic"
 	"time"
 
@@ -33,6 +32,7 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/pkalin/shadewright/internal/phasegauge"
 	"github.com/pkalin/shadewright/internal/policy"
 )
 
@@ -41,10 +41,7 @@ import (
 // number of series stays bounded whatever the requests hold.
 
 // labelOther is the value of a label whose input is not in the label's closed set.
-const labelOther = "Other"
-
-// labelNoPhase is the phase label of an object whose status has no phase yet.
-const labelNoPhase = "None"
+const labelOther = phasegauge.Other
 
 // Outcomes of policyDecisions.
 const (
@@ -105,7 +102,7 @@ func init() {
 	}
 }
 
-// requestPhaseList are the phases requestPhases reports, the enum of RemediationPhase.
+// requestPhaseList are the phases requestPhases reports by name, the enum of RemediationPhase.
 var requestPhaseList = []remediationv1alpha1.RemediationPhase{
 	remediationv1alpha1.PhasePending,
 	remediationv1alpha1.PhasePolicyChecked,
@@ -125,7 +122,8 @@ var requestPhaseList = []remediationv1alpha1.RemediationPhase{
 }
 
 // denialReasons are the reasons policyDenials reports by name: the reasons the controller, package policy and
-// package sourcemap give. Every one is a constant in the code, never text from the cluster.
+// package sourcemap give. Every one is a constant in the code, never text from the cluster. The list is kept by
+// hand; TestDenialReasonsCoverEveryReason fails when a reason constant of those packages is missing.
 var denialReasons = func() map[string]struct{} {
 	reasons := make([]string, 0, 64)
 	reasons = append(reasons,
@@ -154,6 +152,9 @@ var denialReasons = func() map[string]struct{} {
 		sourcemap.ReasonRevisionMismatch, sourcemap.ReasonRepositoryNotConfigured,
 		sourcemap.ReasonRepositoryNotInPolicy, sourcemap.ReasonRepositoryUnusable, sourcemap.ReasonBranchMismatch,
 		sourcemap.ReasonBranchNotFound, sourcemap.ReasonInvalidPath, sourcemap.ReasonNoKustomizationFile,
+		sourcemap.ReasonUnsupportedKustomization, sourcemap.ReasonFileNotReadable, sourcemap.ReasonTooManyFiles,
+		sourcemap.ReasonDeclarationNotFound, sourcemap.ReasonAmbiguousDeclaration, sourcemap.ReasonFieldNotFound,
+		sourcemap.ReasonValueMismatch, sourcemap.ReasonPathNotAllowed,
 	} {
 		reasons = append(reasons, string(r))
 	}
@@ -212,22 +213,24 @@ func (c countErrors) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	return res, err
 }
 
-// phaseListTimeout bounds the cache read of one scrape, so a cache that is not synced yet cannot hold the
-// metrics endpoint.
+// phaseListTimeout bounds the cache read of one scrape. The source is set only once the informer has synced
+// (package phasegauge), so the read does not wait for the API server; the bound guards the endpoint anyway.
 const phaseListTimeout = 5 * time.Second
 
-// requestPhaseCollector counts the RemediationRequests by phase when the metrics are scraped. It reads the
-// manager's cache, which already holds every request in the operator namespace (CacheOptions), so a scrape
-// costs no API call. Until a reader is set, or when the read fails, it reports nothing: a missing series is
-// visible, a zero would claim there are no requests.
+// requestPhaseCollector counts the RemediationRequests in the operator namespace by phase when the metrics are
+// scraped. It reads the informer the controller already uses, and only on the leader once that informer has
+// synced (phasegauge.Source), so a scrape makes no API call and starts no watch. Until then, on a standby
+// replica, or when the read fails, it reports nothing: a missing series is visible, a zero would claim there
+// are no requests.
 type requestPhaseCollector struct {
-	desc   *prometheus.Desc
-	reader atomic.Pointer[client.Reader]
+	desc      *prometheus.Desc
+	source    phasegauge.Source
+	namespace atomic.Pointer[string]
 }
 
-// setReader sets the reader the collector lists from.
-func (c *requestPhaseCollector) setReader(r client.Reader) {
-	c.reader.Store(&r)
+// setNamespace sets the namespace the collector counts in.
+func (c *requestPhaseCollector) setNamespace(ns string) {
+	c.namespace.Store(&ns)
 }
 
 // Describe implements prometheus.Collector.
@@ -237,39 +240,26 @@ func (c *requestPhaseCollector) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect implements prometheus.Collector.
 func (c *requestPhaseCollector) Collect(ch chan<- prometheus.Metric) {
-	r := c.reader.Load()
-	if r == nil {
+	r, ns := c.source.Reader(), c.namespace.Load()
+	if r == nil || ns == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), phaseListTimeout)
 	defer cancel()
 	var list remediationv1alpha1.RemediationRequestList
 	// The objects are only read, so the cache's copies are used as they are.
-	if err := (*r).List(ctx, &list, client.UnsafeDisableDeepCopy); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(*ns), client.UnsafeDisableDeepCopy); err != nil {
 		logf.Log.WithName("metrics").Error(err, "Failed to list RemediationRequests for the phase metric")
 		return
 	}
 	counts := make(map[string]int, len(requestPhaseList)+2)
-	for _, p := range requestPhaseList {
-		counts[string(p)] = 0
+	for _, l := range phasegauge.Labels(requestPhaseList) {
+		counts[l] = 0
 	}
-	counts[labelNoPhase], counts[labelOther] = 0, 0
 	for i := range list.Items {
-		counts[requestPhaseLabel(list.Items[i].Status.Phase)]++
+		counts[phasegauge.Label(list.Items[i].Status.Phase, requestPhaseList)]++
 	}
 	for phase, n := range counts {
 		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(n), phase)
 	}
-}
-
-// requestPhaseLabel returns the phase label of a request: the phase when it is in requestPhaseList, None
-// when it has none, and Other otherwise.
-func requestPhaseLabel(p remediationv1alpha1.RemediationPhase) string {
-	if p == "" {
-		return labelNoPhase
-	}
-	if slices.Contains(requestPhaseList, p) {
-		return string(p)
-	}
-	return labelOther
 }

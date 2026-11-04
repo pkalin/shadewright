@@ -318,7 +318,7 @@ type RemediationRequestStatus struct {
 	Deadline *metav1.Time `json:"deadline,omitempty"`
 
 	// conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
-	// Verified and PlanFresh.
+	// Verified, PlanFresh and WritesPaused.
 	// +listType=map
 	// +listMapKey=type
 	// +optional

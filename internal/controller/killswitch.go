@@ -36,18 +36,19 @@ import (
 
 // The kill switch (design sections 5.4 and 10.7): RemediationSettings spec.paused stops every Git write.
 //
-// Every Git provider the reconciler opens is wrapped in a gatedGit (openRepository), whose write methods call
-// writeAllowed immediately before they call the host. writeAllowed reads the settings from the API server,
-// never from the cache, so a pause set at any moment, also after the freshness check passed and between the
-// reads of one step, stops the next write. It fails closed: settings that cannot be read, or that are gone,
+// Every Git provider the executor opens is wrapped in a gatedGit (openRepository, and GatedRepository for the
+// source mapping), whose write methods call writeAllowed immediately before they call the host. writeAllowed
+// reads the settings from the API server, never from the cache, so a pause set at any moment, also after the
+// freshness check passed and between the reads of one step, stops the next write. It fails closed: settings that cannot be read, or that are gone,
 // block the write as well. The freshness check, the watch of a recorded pull request and the close of a change
 // request also look at the switch first, so a paused executor does not even read Git for a write it may not
 // make; the gate is the check that holds whatever the path.
 //
 // A request held back by the switch keeps its phase and the rest of its status (a stale mark, a recorded pull
 // request, the deadline), says so with the condition WritesPaused and an Event, and checks again after
-// freshRecheckDelay. When writes are allowed again it goes on from where it stopped, and the condition is
-// removed with another Event; a request that ends instead (a final phase) loses the condition without one.
+// freshRecheckDelay. When a recheck finds writes allowed again (resumeIfAllowed), the condition is removed with
+// another Event at once, whatever the rest of that check finds, and the request goes on from where it stopped;
+// a request that ends instead (a final phase) loses the condition without one.
 
 // Reasons and Event reasons of the kill switch.
 const (
@@ -98,6 +99,14 @@ func (r *RemediationRequestReconciler) openRepository(ctx context.Context, repo 
 		return nil, err
 	}
 	return &gatedGit{git: git, allow: r.writeAllowed}, nil
+}
+
+// GatedRepository is openRepository for providers the reconciler does not open itself: cmd/main.go gives it
+// to the source mapping, which only reads, so that every provider the executor opens passes the kill switch
+// before a write, whoever opened it. Reads are not gated.
+func (r *RemediationRequestReconciler) GatedRepository(ctx context.Context, repo remediationv1alpha1.GitRepository) (
+	providers.GitProvider, error) {
+	return r.openRepository(ctx, repo)
 }
 
 // gatedGit is a GitProvider whose writes (CreateBranch, CommitFile, OpenChangeRequest, EnableAutoMerge,
@@ -191,6 +200,29 @@ func resume(rr *remediationv1alpha1.RemediationRequest) bool {
 	}
 	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionWritesPaused)
 	return true
+}
+
+// resumeIfAllowed removes WritesPaused, records the WritesResumed Event and returns nil once writeAllowed, read
+// right now, finds writes allowed. A request without the condition is left alone, without a read. While the
+// gate still refuses (a pause, or settings that cannot be read) the condition stays, and nil is returned: the
+// caller's own path decides what happens next. Only the error of the status write is returned.
+func (r *RemediationRequestReconciler) resumeIfAllowed(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) error {
+	if meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionWritesPaused) == nil {
+		return nil
+	}
+	readCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
+	allowed := r.writeAllowed(readCtx)
+	cancel()
+	if allowed != nil || ctx.Err() != nil {
+		return nil
+	}
+	resume(rr)
+	if err := r.Status().Update(ctx, rr); err != nil {
+		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	r.resumed(ctx, rr)
+	return nil
 }
 
 // resumed records the Event of a request that may write again, once the status without WritesPaused is written.

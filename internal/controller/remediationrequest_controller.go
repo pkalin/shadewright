@@ -595,6 +595,14 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		return r.expire(ctx, rr)
 	}
 	fresh, err := r.ensureFresh(ctx, rr)
+	if !errors.Is(err, freshness.ErrPaused) && !errors.Is(err, ErrSuperseded) {
+		// The check did not stop at a pause: a request held back by the kill switch loses WritesPaused as
+		// soon as the gate finds writes allowed, whatever comes next (a failure of the host, a refusal, a
+		// wait), so the condition never outlives the pause.
+		if err := r.resumeIfAllowed(ctx, rr); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	switch {
 	case errors.Is(err, ErrSuperseded):
 		return ctrl.Result{}, nil

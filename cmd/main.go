@@ -112,23 +112,24 @@ func main() {
 		return settings.Spec.Repositories, nil
 	}}
 
-	// The policy check and the freshness rechecks share one resolver. Its cache keeps file reads at a commit,
-	// which never change, so a plan rechecked every five minutes does not scan the same tree again.
-	source := &sourcemap.Resolver{
-		Client:         mgr.GetAPIReader(),
-		OpenRepository: repos.Open,
-		Cache:          sourcemap.NewReadCache(sourcemap.DefaultCacheEntries, sourcemap.DefaultCacheBytes),
-	}
-	if err := (&controller.RemediationRequestReconciler{
+	reconciler := &controller.RemediationRequestReconciler{
 		Client:         mgr.GetClient(),
 		Scheme:         mgr.GetScheme(),
 		APIReader:      mgr.GetAPIReader(),
-		Source:         source,
 		OpenRepository: repos.Open,
 		// The core/v1 recorder writes with the grant on core Events that the executor's leader election Role
 		// already holds in the operator namespace, where the requests are, as the analyzer's recorder does.
 		Recorder: mgr.GetEventRecorderFor("shadewright-executor"), //nolint:staticcheck // see above
-	}).SetupWithManager(mgr); err != nil {
+	}
+	// The policy check and the freshness rechecks share one resolver. Its cache keeps file reads at a commit,
+	// which never change, so a plan rechecked every five minutes does not scan the same tree again. It only
+	// reads, but it opens its providers through the kill switch's gate too, like every provider of the executor.
+	reconciler.Source = &sourcemap.Resolver{
+		Client:         mgr.GetAPIReader(),
+		OpenRepository: reconciler.GatedRepository,
+		Cache:          sourcemap.NewReadCache(sourcemap.DefaultCacheEntries, sourcemap.DefaultCacheBytes),
+	}
+	if err := reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "remediationrequest")
 		os.Exit(1)
 	}

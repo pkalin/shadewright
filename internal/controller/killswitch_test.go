@@ -24,6 +24,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
@@ -121,6 +122,31 @@ func TestWriteAllowedNeedsTheAPIReader(t *testing.T) {
 	r.APIReader = allowingClient{}
 	if err := r.writeAllowed(context.Background()); err != nil {
 		t.Fatalf("writeAllowed with an APIReader that allows returned %v", err)
+	}
+}
+
+// TestGatedRepositoryIsGated checks that the opener cmd/main.go gives the source mapping is gated: reads pass,
+// and a write is blocked while the kill switch cannot be read (here: no APIReader).
+func TestGatedRepositoryIsGated(t *testing.T) {
+	inner := fakegit.NewGit("main", nil)
+	r := &RemediationRequestReconciler{OpenRepository: func(context.Context, remediationv1alpha1.GitRepository) (
+		providers.GitProvider, error) {
+		return inner, nil
+	}}
+	ctx := context.Background()
+	git, err := r.GatedRepository(ctx, remediationv1alpha1.GitRepository{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := git.BranchHead(ctx, "main")
+	if err != nil {
+		t.Fatalf("a read through the gated opener failed: %v", err)
+	}
+	if err := git.CreateBranch(ctx, "shadewright/x", head); !errors.Is(err, freshness.ErrWriteBlocked) {
+		t.Fatalf("CreateBranch through the gated opener returned %v, want ErrWriteBlocked", err)
+	}
+	if _, err := inner.BranchHead(ctx, "shadewright/x"); !errors.Is(err, providers.ErrNotFound) {
+		t.Fatalf("the blocked write reached the host: %v", err)
 	}
 }
 

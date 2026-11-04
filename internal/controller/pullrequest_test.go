@@ -628,6 +628,31 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(openRequests()).To(HaveLen(1))
 		})
 
+		DescribeTable("clears WritesPaused once writes are allowed, also when the next check then fails",
+			func(hostErr error, phase remediationv1alpha1.RemediationPhase) {
+				Expect(reconcileOnce()).To(Succeed()) // finalizer
+				armed = true
+				Expect(reconcileOnce()).To(Succeed())
+				Expect(pausedCondition()).NotTo(BeNil())
+				Expect(recorder.Events).To(Receive(ContainSubstring(ReasonWritesPaused)))
+
+				setPaused(false)
+				git.SetFail(func(op string) error {
+					if op == opBranchHead { // the freshness check reads it first
+						return hostErr
+					}
+					return nil
+				})
+				_ = reconcileOnce()
+				Expect(writes).To(BeEmpty())
+				Expect(fetch().Status.Phase).To(Equal(phase))
+				Expect(pausedCondition()).To(BeNil(), "spec.paused is false, so the condition is gone")
+				Expect(recorder.Events).To(Receive(Equal("Normal " + EventWritesResumed + " " + messageWritesResumed)))
+			},
+			Entry("a failure of the host (5xx)", providers.ErrRetryable, remediationv1alpha1.PhasePolicyChecked),
+			Entry("a refusal of the host (403)", providers.ErrForbidden, remediationv1alpha1.PhaseNeedsIntervention),
+		)
+
 		It("does not close the pull request of a deleted request when paused between the look-up and the close", func() {
 			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 			Expect(k8sClient.Delete(ctx, request)).To(Succeed())

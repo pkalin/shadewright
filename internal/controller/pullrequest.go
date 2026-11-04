@@ -71,6 +71,11 @@ const DefaultPullRequestTimeout = 30 * time.Minute
 // DefaultWriteTimeout bounds one Git step: opening the repository, rebuilding the state and one write.
 const DefaultWriteTimeout = 2 * time.Minute
 
+// DefaultIncidentReadTimeout bounds the read of the Incident whose name the pull request body shows. One get
+// of a small object takes milliseconds; a read that fails only redacts the name, so a short deadline loses
+// nothing and leaves the rest of the step's deadline to the Git host.
+const DefaultIncidentReadTimeout = 5 * time.Second
+
 // stepDelay is how soon the next step runs after a single write of the step.
 const stepDelay = time.Second
 
@@ -1005,19 +1010,29 @@ var collectorIncidentName = regexp.MustCompile(`^incident-[0-9a-f]{64}$`)
 // hex secret could be written as "incident-<secret>". The name is kept only when the executor reads an
 // Incident of that name in the request's namespace from the API server (never the cache, so get is enough),
 // its UID is the one in incidentRef, and the name is the one the collector derives from the Incident's
-// fingerprint. Any failure to read it, including a missing permission, gives "" and so a redacted name: the
-// body is only less readable, never blocked.
+// fingerprint. Any failure to read it, including a missing permission or a read slower than
+// IncidentReadTimeout, gives "" and so a redacted name: the body is only less readable, never blocked. The
+// read has a deadline of its own, shorter than the step's, so a stalled API server leaves the step the time to
+// open the pull request; a cancelled step still cancels the read, and the open then fails as it would have.
 func (r *RemediationRequestReconciler) verifiedIncidentName(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) string {
 	ref := rr.Spec.IncidentRef
 	if !collectorIncidentName.MatchString(ref.Name) {
 		return ""
 	}
+	readCtx, cancel := context.WithTimeout(ctx, incidentReadTimeout(ctx, r.IncidentReadTimeout))
+	defer cancel()
 	var inc remediationv1alpha1.Incident
-	if err := r.reader().Get(ctx, client.ObjectKey{Namespace: rr.Namespace, Name: ref.Name}, &inc); err != nil {
+	if err := r.reader().Get(readCtx, client.ObjectKey{Namespace: rr.Namespace, Name: ref.Name}, &inc); err != nil {
 		if !apierrors.IsNotFound(err) {
+			reason := apierrors.ReasonForError(err)
+			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+				// The read's own deadline, not the step's: the error itself carries no API reason. Any other
+				// error, even one that came as the deadline passed, keeps its own.
+				reason = metav1.StatusReasonTimeout
+			}
 			logf.FromContext(ctx).Info("Failed to read the Incident of RemediationRequest, so its name was redacted",
-				"remediationRequest", client.ObjectKeyFromObject(rr), "reason", apierrors.ReasonForError(err))
+				"remediationRequest", client.ObjectKeyFromObject(rr), "reason", reason)
 		}
 		return ""
 	}
@@ -1026,4 +1041,17 @@ func (r *RemediationRequestReconciler) verifiedIncidentName(ctx context.Context,
 		return ""
 	}
 	return inc.Name
+}
+
+// incidentReadTimeout is the deadline of the Incident read: configured (zero means [DefaultIncidentReadTimeout]),
+// and never more than half the time the step has left, so even a short WriteTimeout leaves the open its time.
+func incidentReadTimeout(step context.Context, configured time.Duration) time.Duration {
+	d := configured
+	if d <= 0 {
+		d = DefaultIncidentReadTimeout
+	}
+	if deadline, ok := step.Deadline(); ok {
+		d = min(d, time.Until(deadline)/2)
+	}
+	return d
 }

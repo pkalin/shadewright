@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -71,6 +72,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		faulty       *faultyGit
 		openErr      error
 		writeTimeout time.Duration
+		// apiReader, when set, is the reconciler's APIReader; incidentReadTimeout its IncidentReadTimeout.
+		apiReader           client.Reader
+		incidentReadTimeout time.Duration
 		// opens counts the repositories opened through the reconciler.
 		opens int
 	)
@@ -99,8 +103,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				}
 				return git, nil
 			},
-			Now:          func() time.Time { return clock },
-			WriteTimeout: writeTimeout,
+			Now:                 func() time.Time { return clock },
+			WriteTimeout:        writeTimeout,
+			APIReader:           apiReader,
+			IncidentReadTimeout: incidentReadTimeout,
 		}
 	}
 	key := func() reconcile.Request {
@@ -146,6 +152,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		clock = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 		build = buildPath
 		faulty, openErr, writeTimeout, opens = nil, nil, 0, 0
+		apiReader, incidentReadTimeout = nil, 0
 		err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fx.TargetNamespace}})
 		Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
 
@@ -288,6 +295,40 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		body := answering(remediationv1alpha1.IncidentRef{Name: inc.Name, UID: "22222222-2222-4222-8222-222222222222"})
 		Expect(body).NotTo(ContainSubstring(hex))
 		Expect(body).To(ContainSubstring("for incident `[REDACTED:token]`."))
+	})
+
+	It("opens the pull request with the name redacted when the Incident read hangs", func() {
+		hex := strings.Repeat("5e884898", 7) + fmt.Sprintf("%08x", seq)
+		inc := collectorIncident(hex)
+		// The read of the Incident never answers, as from a stalled API server; every other read goes through.
+		// Its own deadline is far shorter than the step's, so the step still has the time to open the pull
+		// request. Without that deadline the read would use up the step's and the open would time out.
+		hangs := &atomic.Int32{}
+		apiReader = hangingIncidentReader{Reader: k8sClient, hangs: hangs}
+		writeTimeout, incidentReadTimeout = 2*time.Second, 100*time.Millisecond
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		replaced := fx.MemoryLimitRequest(requestNamespace, request.Name+"-incident")
+		replaced.Spec.PolicyRef, replaced.Spec.TargetRef = request.Spec.PolicyRef, request.Spec.TargetRef
+		replaced.Spec.IncidentRef = remediationv1alpha1.IncidentRef{Name: inc.Name, UID: remediationv1alpha1.UID(inc.UID)}
+		Expect(k8sClient.Create(ctx, replaced)).To(Succeed())
+		request = replaced
+		// Unlike drive, any error fails the test: a step that ran out of time is retryable, and a retry would
+		// hang the same way. The loop has an overall limit too, so a slow regression fails instead of crawling.
+		start := time.Now()
+		for range 20 {
+			Expect(reconcileOnce()).To(Succeed())
+			if fetch().Status.Phase == remediationv1alpha1.PhaseAwaitingApproval {
+				break
+			}
+			Expect(time.Since(start)).To(BeNumerically("<", 20*time.Second), "the steps took too long")
+		}
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		// The read did hang: the body is redacted because of the deadline, not because the read was skipped.
+		Expect(hangs.Load()).To(BeNumerically(">=", 1))
+		crs := openRequests()
+		Expect(crs).To(HaveLen(1))
+		Expect(crs[0].Body).NotTo(ContainSubstring(hex))
+		Expect(crs[0].Body).To(ContainSubstring("for incident `[REDACTED:token]`."))
 	})
 
 	It("finds the existing work after a restart between any two steps", func() {
@@ -1643,4 +1684,21 @@ func bodyRequest() *remediationv1alpha1.RemediationRequest {
 	rr.Status.PolicyRevision = "p/1"
 	rr.Status.Source = &remediationv1alpha1.ResolvedSource{Path: sourcePath, TargetBranch: mainBranch}
 	return rr
+}
+
+// hangingIncidentReader is a reader whose get of an Incident blocks until its context ends, as a stalled API
+// server would, and counts those gets in hangs; reads of other kinds go to Reader.
+type hangingIncidentReader struct {
+	client.Reader
+	hangs *atomic.Int32
+}
+
+func (h hangingIncidentReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object,
+	opts ...client.GetOption) error {
+	if _, ok := obj.(*remediationv1alpha1.Incident); ok {
+		h.hangs.Add(1)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return h.Reader.Get(ctx, key, obj, opts...)
 }

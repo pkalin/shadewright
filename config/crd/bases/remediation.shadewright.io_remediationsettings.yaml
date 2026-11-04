@@ -246,7 +246,8 @@ spec:
                   rule: self.all(r, self.exists_one(s, s.url == r.url))
             type: object
           status:
-            description: status reports whether the settings are usable.
+            description: status is the analyzer's detection report. It does not report
+              whether repositories or signers are usable.
             properties:
               conditions:
                 description: |-

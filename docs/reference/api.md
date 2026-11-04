@@ -49,7 +49,7 @@ Validation rules:
 | --- | --- | --- | --- |
 | `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
 | `spec` | [RemediationPolicySpec](#remediationpolicyspec) | Yes | spec is the policy. |
-| `status` | [RemediationPolicyStatus](#remediationpolicystatus) | No | status reports whether the policy is usable. |
+| `status` | [RemediationPolicyStatus](#remediationpolicystatus) | No | status is reserved; no controller writes it yet. |
 
 ## RemediationRequest
 
@@ -82,7 +82,7 @@ Validation rules:
 | --- | --- | --- | --- |
 | `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
 | `spec` | [RemediationSettingsSpec](#remediationsettingsspec) | Yes | spec holds the settings. |
-| `status` | [RemediationSettingsStatus](#remediationsettingsstatus) | No | status reports whether the settings are usable. |
+| `status` | [RemediationSettingsStatus](#remediationsettingsstatus) | No | status is the analyzer's detection report. It does not report whether repositories or signers are usable. |
 
 
 ## Types
@@ -639,7 +639,9 @@ Used by: [RemediationPolicy](#remediationpolicy).
 
 ### RemediationPolicyStatus
 
-RemediationPolicyStatus reports whether the policy is usable.
+RemediationPolicyStatus is reserved for the policy's status. No controller writes it yet: a policy is checked
+by the schema and CEL rules when it is applied, and a problem with it shows in the conditions of the
+RemediationRequests that use it.
 
 
 Used by: [RemediationPolicy](#remediationpolicy).
@@ -647,7 +649,7 @@ Used by: [RemediationPolicy](#remediationpolicy).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `observedGeneration` | integer | No | observedGeneration is the generation the status describes. |
-| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions report problems such as an unknown repositoryRef.<br>List type: map<br>List key: `type` |
+| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions are reserved. Nothing writes them yet: an unknown repositoryRef is not reported here but refuses the requests that use the policy (reason RepositoryNotInPolicy).<br>List type: map<br>List key: `type` |
 
 ### RemediationRequestSpec
 
@@ -713,7 +715,9 @@ Used by: [RemediationSettings](#remediationsettings).
 
 ### RemediationSettingsStatus
 
-RemediationSettingsStatus reports whether the settings are usable.
+RemediationSettingsStatus is the analyzer's report of platform and integration detection (ADR-0024). It says
+nothing about whether a repository or signer is usable: those are built when a request needs them, and a
+problem shows in the conditions of that request.
 
 
 Used by: [RemediationSettings](#remediationsettings).

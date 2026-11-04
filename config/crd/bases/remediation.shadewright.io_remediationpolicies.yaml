@@ -309,10 +309,12 @@ spec:
             - targets
             type: object
           status:
-            description: status reports whether the policy is usable.
+            description: status is reserved; no controller writes it yet.
             properties:
               conditions:
-                description: conditions report problems such as an unknown repositoryRef.
+                description: |-
+                  conditions are reserved. Nothing writes them yet: an unknown repositoryRef is not reported here but
+                  refuses the requests that use the policy (reason RepositoryNotInPolicy).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

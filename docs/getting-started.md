@@ -33,7 +33,7 @@ make verify-generated    # regenerates CRDs, RBAC and the API reference; fails o
 
 ## 2. Install in observe-only mode
 
-Observe-only means the analyzer watches the namespaces you name and records `Incident` objects, and nothing else happens: no model is called (nothing calls one yet), no settings entry names a repository, and `spec.paused` is true, so the executor could not write to Git even if a request existed. It writes only its own control state in `shadewright-system`.
+Observe-only means the analyzer watches the namespaces you name and records `Incident` objects, and nothing else happens: no model is called (nothing calls one yet), no settings entry names a repository, and `spec.paused` is true, so the executor could not write to Git even if a request existed. It writes only its own control state: Incidents, the budget ConfigMap, the settings status and Events.
 
 What you need:
 
@@ -99,6 +99,9 @@ Review what you are about to apply, then apply it and the settings:
 ```bash
 kubectl kustomize . | less
 kubectl apply -k .
+kubectl wait --for=condition=Established \
+  crd/incidents.remediation.shadewright.io crd/remediationpolicies.remediation.shadewright.io \
+  crd/remediationrequests.remediation.shadewright.io crd/remediationsettings.remediation.shadewright.io
 kubectl apply -f - <<'EOF'
 apiVersion: remediation.shadewright.io/v1alpha1
 kind: RemediationSettings

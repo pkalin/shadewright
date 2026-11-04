@@ -52,7 +52,7 @@ Set by the policy check, on `PolicyAllowed`.
 | `TargetChanged` | NeedsIntervention | The UID changed while the source was mapped (see also the freshness table) | Apply a new request |
 | `PreviousValueMismatch` | Denied | `previous` (or `previousValue`) is not the live value, so the policy's percent limits would be measured from a wrong baseline | Read the live value and apply a new request |
 | `FieldNotFound` | NeedsIntervention | The field the action changes is not set on the live object, or in the file in Git | The action changes an existing value. Set it in Git first |
-| `ValueMismatch` | NeedsIntervention | The value in the file differs from the live one: a patch, a `postBuild` substitution or an unapplied change sits between them | Wait for Flux to apply, or make the file the single source of the value |
+| `ValueMismatch` | NeedsIntervention | The value in the file differs from the live one: someone or something changed the live object (a manual edit, an autoscaler) or Flux has not applied the file yet | Make the live value and the file agree (let Flux apply, or revert the live change), then apply a new request with `previous` equal to that value |
 | `WithinApprovedBounds` | allowed | Every check passed | Nothing to do |
 
 ## Delivery from Flux
@@ -207,4 +207,4 @@ The patcher reasons named inside a `PatchRefused` message are `PreviousValueDiff
 
 ## Not request reasons
 
-An Incident that never gets analyzed shows why in its `AnalysisDue` condition: `AnalysisDisabled` (`maxAnalysesPerDay` is 0), `DailyBudgetReached`, `BudgetNotFound` (the ConfigMap `shadewright-analysis-budget` was deleted; recreate it empty), `BudgetUnreadable`, `BudgetReadFailed`, `SettingsNotFound`, `SettingsUnreadable`, `Debouncing`, `CoolingDown`, `NoNewData`, `Analyzing`, `Proposed`, `Escalated`, `NotObserved`, `AnalysisStartUnknown` and `ForeignFingerprint`. The settings status carries `UnknownModules` (a name in `spec.modules` no module has) and `DetectionFailed`. No analysis runs yet, so `AnalysisDue` is a mark only.
+An Incident that never gets analyzed shows why in its `AnalysisDue` condition. It is due (status `True`) with `FirstAnalysis`, `NewOccurrence`, `CooldownExpired` or `AnalysisTimedOut`. Not due (status `False`): `AnalysisDisabled` (`maxAnalysesPerDay` is 0), `DailyBudgetReached`, `BudgetNotFound` (the ConfigMap `shadewright-analysis-budget` was deleted; recreate it empty), `BudgetUnreadable`, `BudgetReadFailed`, `SettingsNotFound`, `SettingsUnreadable`, `Debouncing`, `CoolingDown`, `NoNewData`, `Analyzing`, `Proposed`, `Escalated`, `NotObserved`, `AnalysisStartUnknown` and `ForeignFingerprint`. The settings status carries `UnknownModules` (a name in `spec.modules` no module has) and `DetectionFailed`. No analysis runs yet, so `AnalysisDue` is a mark only.

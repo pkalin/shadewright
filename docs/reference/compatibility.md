@@ -4,7 +4,7 @@ title: Compatibility
 
 # Compatibility
 
-What Shadewright has been run against, taken from CI, the end-to-end setup, the fleet repository and the reference lab, and what its code is written to accept. The two are kept apart: **tested** means a pipeline or the lab ran it; **accepted** means the code and the CRD rules allow it but nothing runs it. Where nothing is tested, this page says so instead of promising a range. State at v0.2.0, with the lab run of 2026-11-04.
+What Shadewright has been run against, taken from CI, the end-to-end setup, the fleet repository and the reference lab, and what its code is written to accept. The two are kept apart: **tested** means a pipeline or the lab ran it; **accepted** means the code and the CRD rules allow it but nothing runs it. Where nothing is tested, this page says so instead of promising a range. State at v0.2.0-rc.1, with the lab run of 2026-11-04.
 
 ## Tested
 

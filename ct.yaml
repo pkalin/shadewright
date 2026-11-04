@@ -1,7 +1,8 @@
 # chart-testing (ct) configuration for dist/chart: make chart-ct-lint and the Chart workflow's chart-testing job.
 # ct lint runs yamllint and the Chart.yaml schema, checks that each maintainer is a GitHub account and runs helm
-# lint; ct install installs the chart with its default values (there is no ci/*-values.yaml on purpose), runs
-# helm test and uninstalls it.
+# lint; ct install installs the chart with dist/chart/ci/default-values.yaml, which holds only image.allowTag
+# (a source checkout has no digests), so everything else is the default values; it runs helm test and
+# uninstalls it.
 chart-dirs:
   - dist
 charts:

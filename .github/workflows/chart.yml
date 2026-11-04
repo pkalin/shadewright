@@ -3,7 +3,8 @@ name: Chart
 # Lints and tests the Helm chart in dist/chart (generated with Kubebuilder's helm/v2-alpha plugin, then adjusted
 # by hand, so the comparison test is the guard). Pull requests and pushes to main lint, render and compare
 # the chart with config/default, a Kind job installs it with explicit values, and the chart-testing job runs
-# ct lint and installs it with no values at all (images built from the checkout), with helm test. Only a v* tag
+# ct lint and installs it with the default values plus image.allowTag (images built from the checkout), with
+# helm test. Only a v* tag
 # publishes it to ghcr.io/<owner>/charts/shadewright, and only the publish job has packages: write and
 # id-token: write. Before packaging it writes the digests of the tag's signed images into values.yaml, so the
 # published chart runs them by digest. After the push it signs the chart by digest with cosign keyless (GitHub
@@ -120,14 +121,15 @@ jobs:
         run: ct lint --config ct.yaml
 
       # The default values run repository:appVersion, so the images are built from this checkout under that
-      # tag and loaded into Kind (pinned KIND_VERSION): the install tests this code with no values at all.
+      # tag and loaded into Kind (pinned KIND_VERSION): the install tests this code with the default values and
+      # image.allowTag (dist/chart/ci/default-values.yaml).
       - name: Create the Kind cluster and load the images
         run: make chart-ct-cluster
 
-      - name: Install with no values and check that it reads and writes nothing
+      - name: Install with the default values and check what it may read and write
         run: make test-chart-defaults
 
-      # Installs with the default values (there is no ci/*-values.yaml), runs helm test and uninstalls.
+      # Installs with ci/default-values.yaml (image.allowTag only, the rest default), runs helm test and uninstalls.
       - name: ct install
         run: ct install --config ct.yaml
 
@@ -172,9 +174,22 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
+      # Docker (for the image inspection and cosign, which read its credentials) and Helm (for the push) log in
+      # with the job token before anything reads ghcr.io, so private packages work too.
+      - name: Log in to GHCR
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${TOKEN}" | docker login ghcr.io --username "${ACTOR}" --password-stdin
+          printf '%s' "${TOKEN}" | helm registry login ghcr.io --username "${ACTOR}" --password-stdin
+
       # The images of this tag, by digest, each verified against the identity of the Images workflow on this
-      # very tag before its digest goes into the chart. The tag is resolved once; the signature check is on the
-      # digest, so a tag moved after the check changes nothing.
+      # very tag before its digest goes into the chart. The Images workflow of the same tag runs in parallel, so
+      # this waits for each image and a signature that verifies: every 30 s, at most 30 minutes, then the run
+      # fails with the image it waited for. Re-run the failed jobs of this run once the Images workflow of the
+      # tag has finished. The signature check is on the digest, so a tag moved after the check changes nothing.
       - name: Write the signed image digests into values.yaml
         env:
           TAG: ${{ github.ref_name }}
@@ -183,18 +198,26 @@ jobs:
         run: |
           set -euo pipefail
           owner="$(printf '%s' "${OWNER}" | tr '[:upper:]' '[:lower:]')"
-          identity="^https://github\.com/${REPOSITORY//./\\.}/\.github/workflows/images\.yml@refs/tags/${TAG//./\\.}$"
+          identity="https://github.com/${REPOSITORY}/.github/workflows/images.yml@refs/tags/${TAG}"
+          deadline=$(( $(date +%s) + 1800 ))
           for image in executor analyzer; do
             ref="ghcr.io/${owner}/shadewright-${image}"
-            d="$(docker buildx imagetools inspect "${ref}:${TAG#v}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
-            if ! printf '%s' "${d}" | grep -Eq '^sha256:[a-f0-9]{64}$'; then
-              echo "no digest for ${ref}:${TAG#v}" >&2
-              exit 1
-            fi
-            cosign verify \
-              --certificate-identity-regexp "${identity}" \
-              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-              "${ref}@${d}" > /dev/null
+            d=""
+            until [ -n "${d}" ]; do
+              got="$(docker buildx imagetools inspect "${ref}:${TAG#v}" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
+              if printf '%s' "${got}" | grep -Eq '^sha256:[a-f0-9]{64}$' && cosign verify \
+                  --certificate-identity "${identity}" \
+                  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+                  "${ref}@${got}" > /dev/null 2>&1; then
+                d="${got}"
+              elif [ "$(date +%s)" -ge "${deadline}" ]; then
+                echo "no image ${ref}:${TAG#v} signed by ${identity} after 30 minutes; re-run this job once the Images workflow of ${TAG} has finished" >&2
+                exit 1
+              else
+                echo "waiting for ${ref}:${TAG#v} and its signature"
+                sleep 30
+              fi
+            done
             printf -v "digest_${image}" '%s' "${d}"
             echo "${ref}@${d}" >> "${GITHUB_STEP_SUMMARY}"
           done
@@ -206,12 +229,6 @@ jobs:
 
       - name: Package the chart
         run: helm package dist/chart --destination "${RUNNER_TEMP}/chart"
-
-      - name: Log in to GHCR
-        env:
-          ACTOR: ${{ github.actor }}
-          TOKEN: ${{ github.token }}
-        run: printf '%s' "${TOKEN}" | helm registry login ghcr.io --username "${ACTOR}" --password-stdin
 
       - name: Push the chart
         env:

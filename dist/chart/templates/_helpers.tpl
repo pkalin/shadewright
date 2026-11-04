@@ -78,14 +78,17 @@ app.kubernetes.io/component: {{ .component }}
 {{/*
 Image reference of a component. The chart published on a release tag carries the digests of that release's
 signed images in values.yaml (the Chart workflow writes them before packaging), so it runs repository@digest. A
-source checkout has no digest and falls back to the appVersion tag. Takes a dict with .component and .context.
+source checkout has no digest: it fails closed, unless image.allowTag opts in to the appVersion tag. Takes a
+dict with .component and .context.
 */}}
 {{- define "shadewright.image" -}}
 {{- $c := index .context.Values .component -}}
 {{- if $c.image.digest -}}
 {{- printf "%s@%s" $c.image.repository $c.image.digest -}}
-{{- else -}}
+{{- else if .context.Values.image.allowTag -}}
 {{- printf "%s:%s" $c.image.repository .context.Chart.AppVersion -}}
+{{- else -}}
+{{- fail (printf "%s.image.digest is empty: set it (sha256:<64 hex digits>), or set image.allowTag=true to run the %s tag with images built from this same checkout" .component .context.Chart.AppVersion) -}}
 {{- end -}}
 {{- end }}
 
@@ -110,8 +113,8 @@ never a display name.
 {{- end }}
 
 {{/*
-Image pull secrets of one component: the global list and the component's own, without duplicates. Takes a dict
-with .component and .context. Renders nothing when both are empty.
+Image pull secrets of one Pod: the global list and the component's own (executor, analyzer or tests), without
+duplicates. Takes a dict with .component and .context. Renders nothing when both are empty.
 */}}
 {{- define "shadewright.imagePullSecrets" -}}
 {{- $c := index .context.Values .component -}}

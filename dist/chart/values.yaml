@@ -1,6 +1,7 @@
 # Shadewright chart values. The schema in values.schema.json validates them on install, upgrade, lint and
-# template. Nothing here looks like a real identity or cluster. With no values at all the chart installs an idle
-# Shadewright: the analyzer watches no namespace and the executor has no identity, so it can write nothing to Git.
+# template. Nothing here looks like a real identity or cluster. With no values at all the published chart installs
+# an idle Shadewright: the analyzer watches no namespace and the executor has no Azure workload identity, so it
+# cannot reach Key Vault to sign for the GitHub App.
 # README.md is generated from the "# --" comments below with helm-docs (make chart-docs): every key needs one.
 
 # -- Partially overrides the chart name, which is kept in the release name. At most 63 characters. Empty uses `shadewright`.
@@ -9,13 +10,17 @@ nameOverride: ""
 # -- Fully overrides the resource name prefix, at most 63 characters. Empty uses the release name (or `<release>-shadewright` if it does not contain the chart name). The ServiceAccount names, and so the subject of the federated credential, derive from it.
 # @section -- General
 fullnameOverride: ""
-# -- Cluster ID, 1 to 63 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit. Passed as `--cluster-id` and hashed into every Incident fingerprint so Incidents of two clusters never merge. Empty uses the UID of the `kube-system` namespace, read with `lookup` at install and upgrade (stable and unique for the life of the cluster); `helm template`, `helm lint` and a client-side `--dry-run` ask no cluster, so there it must be set or the chart fails. Changing it, also from empty to a value, starts every Incident afresh, so choose it once. It is an ID, never a display name.
+# -- Cluster ID, 1 to 63 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit. Passed as `--cluster-id` and hashed into every Incident fingerprint so Incidents of two clusters never merge. Empty uses the UID of the `kube-system` namespace, read with `lookup` at install and upgrade (stable and unique for the life of the cluster); `helm template`, `helm lint`, a client-side `--dry-run`, GitOps tools that render client-side (helm diff, Argo CD, Flux with a dry-run) and an installer without `get` on the `kube-system` namespace must set it, or the chart fails. Changing it, also from empty to a value, starts every Incident afresh, so choose it once. It is an ID, never a display name.
 # @default -- empty (the UID of `kube-system`)
 # @section -- General
 clusterId: ""
 # -- Image pull secrets of both Pods, a list of `{name: <secret>}` (at most 16), for a mirror that needs them. The default images are public. Each component's `imagePullSecrets` is added to it.
 # @section -- General
 imagePullSecrets: []
+image:
+  # -- Allow an image without a digest to run by the `appVersion` tag. Off by default, so the chart fails to render when a digest is missing: the published chart carries the release's signed digests and needs nothing here. Set `true` only from a source checkout, with images built from that same checkout (older images, such as v0.1.0, stop at start with an empty `analyzer.watchNamespaces`).
+  # @section -- Images
+  allowTag: false
 metrics:
   # -- Serve the metrics endpoint of both components, with its two Services. When false there are no Services, no metrics RBAC and no metrics NetworkPolicy.
   # @section -- Metrics
@@ -27,7 +32,7 @@ metrics:
   # @section -- Metrics
   secure: true
   serviceMonitor:
-    # -- Install a Prometheus Operator `ServiceMonitor` for each component (needs the `monitoring.coreos.com/v1` CRDs and `metrics.enabled`). Prometheus scrapes with its own ServiceAccount token, so bind that ServiceAccount to the `metrics-reader` ClusterRole, and label its namespace `metrics: enabled` for the NetworkPolicy. The endpoint's certificate is self-signed, so the ServiceMonitor skips its verification.
+    # -- Install a Prometheus Operator `ServiceMonitor` for each component (needs the `monitoring.coreos.com/v1` CRDs and `metrics.enabled`). Prometheus scrapes with its own ServiceAccount token, so bind that ServiceAccount to the `metrics-reader` ClusterRole, and label its namespace `metrics: enabled` for the NetworkPolicy. The endpoint's certificate is self-signed, so the ServiceMonitor skips its verification. It scrapes with `bearerTokenFile` (Prometheus's own token), which Prometheus Operator deprecates and rejects when `arbitraryFSAccessThroughSMs` is denied: then keep this off and write your own ServiceMonitor with `authorization` from a Secret that holds a token allowed to read metrics.
     # @section -- Metrics
     enabled: false
     # -- Scrape interval, such as `30s` or `1m`. Empty uses the Prometheus default.
@@ -57,10 +62,10 @@ rbac:
 ## only sign with the GitHub App key in Key Vault.
 executor:
   image:
-    # -- Repository of the executor image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest.
+    # -- Repository of the executor image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true.
     # @section -- Images
     repository: ghcr.io/pkalin/shadewright-executor
-    # -- Digest of the executor image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) runs the `appVersion` tag instead. The schema refuses a tag in this field.
+    # -- Digest of the executor image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) fails to render unless `image.allowTag` is true, which runs the `appVersion` tag instead. The schema refuses a tag in this field.
     # @default -- the release's digest in the published chart, empty in the source
     # @section -- Images
     digest: ""
@@ -123,10 +128,10 @@ executor:
 ## The analyzer reads the cluster and writes Incidents and proposed RemediationRequests. It never acts on them.
 analyzer:
   image:
-    # -- Repository of the analyzer image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest.
+    # -- Repository of the analyzer image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true.
     # @section -- Images
     repository: ghcr.io/pkalin/shadewright-analyzer
-    # -- Digest of the analyzer image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) runs the `appVersion` tag instead. The schema refuses a tag in this field.
+    # -- Digest of the analyzer image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) fails to render unless `image.allowTag` is true, which runs the `appVersion` tag instead. The schema refuses a tag in this field.
     # @default -- the release's digest in the published chart, empty in the source
     # @section -- Images
     digest: ""
@@ -203,6 +208,9 @@ tests:
     # -- Digest of the test image (curl 8.23.0), required: `sha256:` and 64 lower case hex digits.
     # @section -- Tests
     digest: sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93
+  # -- Image pull secrets of the test Pod only, added to the global `imagePullSecrets`, a list of `{name: <secret>}` (at most 16).
+  # @section -- Tests
+  imagePullSecrets: []
 
 settings:
   # -- Create the RemediationSettings object `default` from `spec`, only when it does not exist (a post-install and post-upgrade hook that checks with `lookup`). Helm never changes or deletes it afterwards, so a pause set by hand (`spec.paused: true`) survives every upgrade; change the object with kubectl or GitOps. `lookup` finds nothing under `helm template` and `--dry-run`, so those always render it. Helm does not track hook objects: the object is not deleted when the release is uninstalled. Requires a non-empty `spec`.

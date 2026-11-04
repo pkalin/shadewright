@@ -37,6 +37,7 @@ const (
 	analyzerDeployment = "Deployment/" + operatorNS + "/shadewright-analyzer"
 	identityLabel      = "azure.workload.identity/use"
 	componentLabel     = "app.kubernetes.io/component"
+	mirrorSecret       = "mirror"
 )
 
 // chartVersions reads version and appVersion from Chart.yaml.
@@ -54,11 +55,17 @@ func chartVersions(t *testing.T) (version, appVersion string) {
 	return string(v[1]), string(a[1])
 }
 
-// defaultRender renders the chart with its default values: only clusterId is set, since helm template asks no
-// cluster for the kube-system UID.
+// ciValues is the values file of chart-testing: the default values plus image.allowTag, since a source
+// checkout has no digests.
+func ciValues(t *testing.T) []string {
+	return []string{"-f", filepath.Join(repoRoot(t), "dist", "chart", "ci", "default-values.yaml")}
+}
+
+// defaultRender renders the chart as chart-testing installs it: the default values with ci/default-values.yaml
+// (image.allowTag) and a clusterId, since helm template asks no cluster for the kube-system UID.
 func defaultRender(t *testing.T, set ...string) rendered {
 	t.Helper()
-	return renderArgs(t, helmArgsWith(t, nil, append([]string{"clusterId=chart-test"}, set...)...))
+	return renderArgs(t, helmArgsWith(t, ciValues(t), append([]string{"clusterId=chart-test"}, set...)...))
 }
 
 func container(t *testing.T, r rendered, k string) corev1.Container {
@@ -74,11 +81,11 @@ func container(t *testing.T, r rendered, k string) corev1.Container {
 	return d.Spec.Template.Spec.Containers[0]
 }
 
-// TestDefaultValuesReadNothingAndWriteNothing checks the install with no values (invariant 6 and the issue's
+// TestDefaultValuesWatchNothingAndHaveNoIdentity checks the install with no values (invariant 6 and the issue's
 // default): the analyzer watches no namespace and has no RoleBinding outside the operator namespace, neither
-// component has a workload identity, so the executor cannot sign for the GitHub App, and the images run by the
-// appVersion tag of a source checkout.
-func TestDefaultValuesReadNothingAndWriteNothing(t *testing.T) {
+// component has an Azure workload identity, so the executor cannot reach Key Vault to sign for the GitHub App,
+// and with image.allowTag (chart-testing's only value) the images run by the appVersion tag.
+func TestDefaultValuesWatchNothingAndHaveNoIdentity(t *testing.T) {
 	_, appVersion := chartVersions(t)
 	r := defaultRender(t)
 
@@ -150,7 +157,7 @@ func TestRBACEqualsKustomizeForEveryToggle(t *testing.T) {
 		{name: "max incidents", set: []string{"analyzer.maxIncidents=10"}},
 		{name: "scheduling", set: []string{
 			"executor.priorityClassName=high", "analyzer.nodeSelector.pool=system",
-			"imagePullSecrets[0].name=mirror", "executor.imagePullSecrets[0].name=other",
+			"imagePullSecrets[0].name=" + mirrorSecret, "executor.imagePullSecrets[0].name=other",
 		}},
 		{name: "overrides", set: []string{"nameOverride=shadewright", "fullnameOverride=shadewright"}},
 	}
@@ -184,8 +191,7 @@ func TestRBACEqualsKustomizeForEveryToggle(t *testing.T) {
 // TestClusterIDNeedsAValueWithoutACluster checks that helm template (no cluster, so lookup finds no kube-system
 // namespace) fails with a message that names clusterId, and that the default comes from the kube-system UID.
 func TestClusterIDNeedsAValueWithoutACluster(t *testing.T) {
-	cmd := helmArgsWith(t, nil)
-	out, err := runErr(t, cmd)
+	out, err := runErr(t, helmArgsWith(t, ciValues(t)))
 	if err == nil {
 		t.Fatalf("helm template without clusterId succeeded:\n%s", out)
 	}
@@ -220,6 +226,36 @@ func execCombined(name, dir string, args ...string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
+// TestImageWithoutDigestFailsClosed checks that a source checkout without digests does not render unless
+// image.allowTag opts in to the appVersion tag, and that ci/default-values.yaml holds that one key only.
+func TestImageWithoutDigestFailsClosed(t *testing.T) {
+	out, err := runErr(t, helmArgsWith(t, nil, "clusterId=chart-test"))
+	if err == nil {
+		t.Fatalf("helm template without digests or image.allowTag succeeded:\n%s", out)
+	}
+	if !strings.Contains(out, "image.digest is empty") || !strings.Contains(out, "image.allowTag=true") {
+		t.Errorf("error does not say how to fix it:\n%s", out)
+	}
+	out, err = runErr(t, helmArgsWith(t, nil, "clusterId=chart-test", "image.allowTag=false",
+		"executor.image.digest=sha256:"+strings.Repeat("1", 64)))
+	if err == nil || !strings.Contains(out, "analyzer.image.digest is empty") {
+		t.Errorf("one digest missing did not fail on that component:\n%s", out)
+	}
+	b, rerr := os.ReadFile(filepath.Join(repoRoot(t), "dist", "chart", "ci", "default-values.yaml"))
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	var keys []string
+	for l := range strings.SplitSeq(string(b), "\n") {
+		if l != "" && !strings.HasPrefix(l, "#") {
+			keys = append(keys, strings.TrimSpace(l))
+		}
+	}
+	if !slices.Equal(keys, []string{"image:", "allowTag: true"}) {
+		t.Errorf("ci/default-values.yaml sets %v, want image.allowTag only (ct install must test the defaults)", keys)
+	}
+}
+
 func TestImagesByDigestOrAppVersionTag(t *testing.T) {
 	r := render(t, false)
 	for _, comp := range components {
@@ -240,8 +276,8 @@ func TestImagesByDigestOrAppVersionTag(t *testing.T) {
 func TestStandardValuesReachOnlyTheirComponent(t *testing.T) {
 	const term = "executor.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0]"
 	r := render(t, false,
-		"imagePullSecrets[0].name=mirror",
-		"executor.imagePullSecrets[0].name=mirror",
+		"imagePullSecrets[0].name="+mirrorSecret,
+		"executor.imagePullSecrets[0].name="+mirrorSecret,
 		"executor.imagePullSecrets[1].name=executor-only",
 		"executor.priorityClassName=system-cluster-critical",
 		"executor.nodeSelector.pool=system",
@@ -262,10 +298,10 @@ func TestStandardValuesReachOnlyTheirComponent(t *testing.T) {
 	for _, s := range es.ImagePullSecrets {
 		secrets = append(secrets, s.Name)
 	}
-	if !slices.Equal(secrets, []string{"mirror", "executor-only"}) {
+	if !slices.Equal(secrets, []string{mirrorSecret, "executor-only"}) {
 		t.Errorf("executor pull secrets %v, want mirror and executor-only once each", secrets)
 	}
-	if len(as.ImagePullSecrets) != 1 || as.ImagePullSecrets[0].Name != "mirror" {
+	if len(as.ImagePullSecrets) != 1 || as.ImagePullSecrets[0].Name != mirrorSecret {
 		t.Errorf("analyzer pull secrets %v, want the global mirror only", as.ImagePullSecrets)
 	}
 	if es.PriorityClassName != "system-cluster-critical" || as.PriorityClassName != "" {
@@ -390,6 +426,16 @@ func TestHelmTestHookNeedsNoPermissions(t *testing.T) {
 // TestHelmTestHookFollowsTheMetricsValues checks which test hooks each metrics and network policy value renders,
 // and the answer the test Pod expects.
 func TestHelmTestHookFollowsTheMetricsValues(t *testing.T) {
+	r := render(t, false, "imagePullSecrets[0].name="+mirrorSecret, "tests.imagePullSecrets[0].name="+mirrorSecret,
+		"tests.imagePullSecrets[1].name=tests-only")
+	pod := testPod(t, r)
+	secrets := make([]string, 0, len(pod.Spec.ImagePullSecrets))
+	for _, s := range pod.Spec.ImagePullSecrets {
+		secrets = append(secrets, s.Name)
+	}
+	if !slices.Equal(secrets, []string{mirrorSecret, "tests-only"}) {
+		t.Errorf("test Pod pull secrets %v, want mirror and tests-only once each", secrets)
+	}
 	if r := render(t, false, "networkPolicy.enabled=false"); len(r.tests) != 1 {
 		t.Errorf("networkPolicy.enabled=false renders test hooks %v, want the Pod only", keys(r.tests))
 	}
@@ -460,6 +506,16 @@ func checkTestNetworkPolicy(t *testing.T, k string, h *unstructured.Unstructured
 		t.Errorf("%s: delete policy %q, want it deleted after the test whatever its result", k, pol)
 	}
 	np := convert[networkingv1.NetworkPolicy](t, h)
+	for _, rule := range np.Spec.Egress {
+		dns := false
+		for _, p := range rule.Ports {
+			dns = dns || (p.Port != nil && p.Port.IntValue() == 53)
+		}
+		if dns && len(rule.To) != 0 {
+			t.Errorf("%s: DNS egress limited to %+v; NodeLocal DNSCache and other CoreDNS labels need any destination",
+				k, rule.To)
+		}
+	}
 	for _, rule := range np.Spec.Ingress {
 		for _, p := range rule.Ports {
 			if p.Port == nil || p.Port.IntValue() != 8443 {

@@ -34,6 +34,9 @@ spec:
     {{- if $.Values.metrics.secure }}
     port: https
     scheme: https
+    {{- /* Prometheus's own ServiceAccount token: the only way to scrape with it. Prometheus Operator deprecates
+    bearerTokenFile and rejects it when arbitraryFSAccessThroughSMs is denied; then leave this off and write
+    your own ServiceMonitor with authorization (credentials from a Secret holding a token for metrics-reader). */}}
     bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
     tlsConfig:
       insecureSkipVerify: true

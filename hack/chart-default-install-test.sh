@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# Installs the Helm chart (dist/chart) with no values at all on the current Kubernetes context (the Kind cluster
+# Installs the Helm chart (dist/chart) with its default values plus dist/chart/ci/default-values.yaml (only
+# image.allowTag, since a source checkout has no digests) on the current Kubernetes context: the Kind cluster
 # of the Chart workflow's chart-testing job, whose images were built from this checkout and loaded under the
-# appVersion tag) and checks that the default install reads nothing and writes nothing: the analyzer is Ready
-# and watches no namespace, holds no RoleBinding outside the operator namespace and cannot read Pods or events
-# anywhere; neither ServiceAccount has a workload identity, so the executor cannot sign for the GitHub App; the
-# cluster ID is the UID of kube-system. Then it runs helm test, uninstalls and deletes the kept CRDs, so a
-# later install on the same cluster (ct install) starts clean. Usage:
-#   hack/chart-default-install-test.sh <kubectl> <helm>
+# appVersion tag. It checks what the default install may do. The analyzer is Ready, watches no namespace,
+# holds no RoleBinding outside the operator namespace and cannot list Pods or events anywhere (it still lists
+# Nodes and reads discovery and the settings cluster-wide, and writes only in the operator namespace plus the
+# settings status). Neither ServiceAccount has an Azure workload identity, so the executor cannot reach Key
+# Vault to sign for the GitHub App. The cluster ID is the UID of kube-system. Then it runs helm test,
+# uninstalls and deletes the kept CRDs, so a later install on the same cluster (ct install) starts clean.
+# Usage:
+#   hack/chart-default-install-test.sh <kubectl> <helm> <values file>
 set -euo pipefail
 
 KUBECTL="${1:-kubectl}"
 HELM="${2:-helm}"
+VALUES="${3:?usage: $0 <kubectl> <helm> <values file>}"
 NS=shadewright-defaults
 REL=shadewright
 CHART="$(cd "$(dirname "$0")/.." && pwd)/dist/chart"
@@ -23,7 +27,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"${HELM}" install "${REL}" "${CHART}" --namespace "${NS}" --create-namespace --wait --timeout 5m
+"${HELM}" install "${REL}" "${CHART}" --namespace "${NS}" --create-namespace -f "${VALUES}" --wait --timeout 5m
 
 fail=0
 check() { # description, command...

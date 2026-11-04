@@ -13,11 +13,11 @@ This chart installs the two components (the analyzer and the executor), their RB
 - Kubernetes version `>=1.28.0-0` (the `kubeVersion` of Chart.yaml).
 - Flux, the GitOps controller that deploys the pull requests the executor opens (Argo CD is not supported yet).
 - Workload identity for the executor: a managed identity (Azure) with a federated credential for the executor ServiceAccount, allowed to sign with the GitHub App key in Key Vault. Its client ID is `executor.identity.azure.clientId`. The ServiceAccount names derive from the release name: install as release `shadewright` in the namespace `shadewright-system` to get `shadewright-executor` and `shadewright-analyzer`, and check them with `helm template` before you create the credential.
-- The images: the published chart runs the release's signed images by digest (written into its `values.yaml` when the chart is published). A chart from a source checkout runs the `appVersion` tag instead, unless you set the digests.
+- The images: the published chart runs the release's signed images by digest (written into its `values.yaml` when the chart is published). A chart from a source checkout has no digests and refuses to render until you set them, or opt in with `image.allowTag: true` to run the `appVersion` tag with images built from that same checkout (the v0.1.0 images stop at start with an empty watch list).
 
 ## Install
 
-With no values the chart installs an idle Shadewright: the analyzer starts and is Ready but watches no namespace (no RoleBinding outside the operator namespace, no Incident), and the executor has no identity, so it can write nothing to Git. The cluster ID defaults to the UID of the `kube-system` namespace.
+With no values the published chart installs an idle Shadewright. The analyzer starts and is Ready but watches no namespace (no RoleBinding outside the operator namespace, no Incident): it reads no namespaced object outside the operator namespace, has no Git identity, and writes only in the operator namespace (its Leases, the budget ConfigMap, Events) plus the settings status once a settings object exists; it still lists Nodes and reads discovery and the settings cluster-wide. The executor has no Azure workload identity, so it cannot reach Key Vault to sign for the GitHub App. The cluster ID defaults to the UID of the `kube-system` namespace. To catch a forgotten watch list, alert on `shadewright_analyzer_watched_namespaces == 0`.
 
 ```bash
 helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
@@ -42,7 +42,7 @@ helm upgrade --install shadewright oci://ghcr.io/pkalin/charts/shadewright --ver
   --namespace shadewright-system --create-namespace -f my-values.yaml
 ```
 
-Choose the cluster ID once: it is hashed into every Incident fingerprint, so changing it, also from the default to a value of your own, starts every Incident afresh. `helm template`, `helm lint` and a client-side `--dry-run` ask no cluster, so they need `clusterId` (a GitOps tool that renders with `helm template` too).
+Choose the cluster ID once: it is hashed into every Incident fingerprint, so changing it, also from the default to a value of your own, starts every Incident afresh. GitOps tools and client-side renders (`helm template`, helm diff, Argo CD, Flux with a dry-run) ask no cluster, and an installer without `get` on the `kube-system` namespace cannot read it, so each of those must set `clusterId` explicitly.
 
 `values.schema.json` validates the values on install, upgrade, lint and template. To manage the `RemediationSettings` object from the chart, set `settings.create: true` and give `settings.spec` (the fields are in the [API reference](https://shadewright.io/reference/api/)):
 
@@ -109,8 +109,20 @@ helm uninstall shadewright --namespace shadewright-system
 |-----|------|---------|-------------|
 | nameOverride | string | `""` | Partially overrides the chart name, which is kept in the release name. At most 63 characters. Empty uses `shadewright`. |
 | fullnameOverride | string | `""` | Fully overrides the resource name prefix, at most 63 characters. Empty uses the release name (or `<release>-shadewright` if it does not contain the chart name). The ServiceAccount names, and so the subject of the federated credential, derive from it. |
-| clusterId | string | empty (the UID of `kube-system`) | Cluster ID, 1 to 63 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit. Passed as `--cluster-id` and hashed into every Incident fingerprint so Incidents of two clusters never merge. Empty uses the UID of the `kube-system` namespace, read with `lookup` at install and upgrade (stable and unique for the life of the cluster); `helm template`, `helm lint` and a client-side `--dry-run` ask no cluster, so there it must be set or the chart fails. Changing it, also from empty to a value, starts every Incident afresh, so choose it once. It is an ID, never a display name. |
+| clusterId | string | empty (the UID of `kube-system`) | Cluster ID, 1 to 63 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit. Passed as `--cluster-id` and hashed into every Incident fingerprint so Incidents of two clusters never merge. Empty uses the UID of the `kube-system` namespace, read with `lookup` at install and upgrade (stable and unique for the life of the cluster); `helm template`, `helm lint`, a client-side `--dry-run`, GitOps tools that render client-side (helm diff, Argo CD, Flux with a dry-run) and an installer without `get` on the `kube-system` namespace must set it, or the chart fails. Changing it, also from empty to a value, starts every Incident afresh, so choose it once. It is an ID, never a display name. |
 | imagePullSecrets | list | `[]` | Image pull secrets of both Pods, a list of `{name: <secret>}` (at most 16), for a mirror that needs them. The default images are public. Each component's `imagePullSecrets` is added to it. |
+
+### Images
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| image.allowTag | bool | `false` | Allow an image without a digest to run by the `appVersion` tag. Off by default, so the chart fails to render when a digest is missing: the published chart carries the release's signed digests and needs nothing here. Set `true` only from a source checkout, with images built from that same checkout (older images, such as v0.1.0, stop at start with an empty `analyzer.watchNamespaces`). |
+| executor.image.repository | string | `"ghcr.io/pkalin/shadewright-executor"` | Repository of the executor image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true. |
+| executor.image.digest | string | the release's digest in the published chart, empty in the source | Digest of the executor image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) fails to render unless `image.allowTag` is true, which runs the `appVersion` tag instead. The schema refuses a tag in this field. |
+| executor.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. One of `Always`, `IfNotPresent` or `Never`. |
+| analyzer.image.repository | string | `"ghcr.io/pkalin/shadewright-analyzer"` | Repository of the analyzer image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true. |
+| analyzer.image.digest | string | the release's digest in the published chart, empty in the source | Digest of the analyzer image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) fails to render unless `image.allowTag` is true, which runs the `appVersion` tag instead. The schema refuses a tag in this field. |
+| analyzer.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. One of `Always`, `IfNotPresent` or `Never`. |
 
 ### Metrics
 
@@ -119,7 +131,7 @@ helm uninstall shadewright --namespace shadewright-system
 | metrics.enabled | bool | `true` | Serve the metrics endpoint of both components, with its two Services. When false there are no Services, no metrics RBAC and no metrics NetworkPolicy. |
 | metrics.port | int | `8443` | Metrics port, 1 to 65535. Passed as `--metrics-bind-address` and opened by the metrics NetworkPolicy. |
 | metrics.secure | bool | `true` | Serve metrics over HTTPS with a TokenReview and a SubjectAccessReview per request. `false` serves plain HTTP with no authentication: for a test only, `helm install` prints a warning. |
-| metrics.serviceMonitor.enabled | bool | `false` | Install a Prometheus Operator `ServiceMonitor` for each component (needs the `monitoring.coreos.com/v1` CRDs and `metrics.enabled`). Prometheus scrapes with its own ServiceAccount token, so bind that ServiceAccount to the `metrics-reader` ClusterRole, and label its namespace `metrics: enabled` for the NetworkPolicy. The endpoint's certificate is self-signed, so the ServiceMonitor skips its verification. |
+| metrics.serviceMonitor.enabled | bool | `false` | Install a Prometheus Operator `ServiceMonitor` for each component (needs the `monitoring.coreos.com/v1` CRDs and `metrics.enabled`). Prometheus scrapes with its own ServiceAccount token, so bind that ServiceAccount to the `metrics-reader` ClusterRole, and label its namespace `metrics: enabled` for the NetworkPolicy. The endpoint's certificate is self-signed, so the ServiceMonitor skips its verification. It scrapes with `bearerTokenFile` (Prometheus's own token), which Prometheus Operator deprecates and rejects when `arbitraryFSAccessThroughSMs` is denied: then keep this off and write your own ServiceMonitor with `authorization` from a Secret that holds a token allowed to read metrics. |
 | metrics.serviceMonitor.interval | string | `""` | Scrape interval, such as `30s` or `1m`. Empty uses the Prometheus default. |
 | metrics.serviceMonitor.labels | object | `{}` | Further labels on the ServiceMonitors, for the `serviceMonitorSelector` of your Prometheus. The chart's own labels cannot be overridden. |
 
@@ -141,17 +153,6 @@ helm uninstall shadewright --namespace shadewright-system
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | rbac.helpers.enabled | bool | `false` | Install admin, editor and viewer ClusterRoles for each custom resource. Shadewright does not use them, they are for your people. Off by default (least privilege). |
-
-### Images
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| executor.image.repository | string | `"ghcr.io/pkalin/shadewright-executor"` | Repository of the executor image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest. |
-| executor.image.digest | string | the release's digest in the published chart, empty in the source | Digest of the executor image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) runs the `appVersion` tag instead. The schema refuses a tag in this field. |
-| executor.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. One of `Always`, `IfNotPresent` or `Never`. |
-| analyzer.image.repository | string | `"ghcr.io/pkalin/shadewright-analyzer"` | Repository of the analyzer image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest. |
-| analyzer.image.digest | string | the release's digest in the published chart, empty in the source | Digest of the analyzer image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) runs the `appVersion` tag instead. The schema refuses a tag in this field. |
-| analyzer.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. One of `Always`, `IfNotPresent` or `Never`. |
 
 ### Identity
 
@@ -206,6 +207,7 @@ helm uninstall shadewright --namespace shadewright-system
 |-----|------|---------|-------------|
 | tests.image.repository | string | `"docker.io/curlimages/curl"` | Repository of the image of the `helm test` Pod. It needs `curl`. Rendered only with `metrics.enabled`. |
 | tests.image.digest | string | `"sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93"` | Digest of the test image (curl 8.23.0), required: `sha256:` and 64 lower case hex digits. |
+| tests.imagePullSecrets | list | `[]` | Image pull secrets of the test Pod only, added to the global `imagePullSecrets`, a list of `{name: <secret>}` (at most 16). |
 
 ### Settings
 

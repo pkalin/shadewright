@@ -31,18 +31,12 @@ spec:
   policyTypes:
   - Egress
   egress:
+  {{- /* DNS to any destination: NodeLocal DNSCache and CoreDNS under other labels are not kube-dns Pods. */}}
   - ports:
     - port: 53
       protocol: UDP
     - port: 53
       protocol: TCP
-    to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: kube-system
-      podSelector:
-        matchLabels:
-          k8s-app: kube-dns
   - ports:
     - port: {{ .Values.metrics.port }}
       protocol: TCP
@@ -115,9 +109,8 @@ spec:
     runAsGroup: 101
     seccompProfile:
       type: RuntimeDefault
-  {{- with .Values.imagePullSecrets }}
-  imagePullSecrets:
-    {{- toYaml . | nindent 4 }}
+  {{- with include "shadewright.imagePullSecrets" (dict "component" "tests" "context" $) }}
+  {{- . | nindent 2 }}
   {{- end }}
   containers:
   - name: metrics

@@ -385,6 +385,15 @@
     "imagePullSecrets": {
       "$ref": "#/definitions/pullSecrets"
     },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowTag": {
+          "type": "boolean"
+        }
+      }
+    },
     "metrics": {
       "type": "object",
       "additionalProperties": false,
@@ -483,6 +492,9 @@
               "pattern": "^sha256:[a-f0-9]{64}$"
             }
           }
+        },
+        "imagePullSecrets": {
+          "$ref": "#/definitions/pullSecrets"
         }
       }
     },

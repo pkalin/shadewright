@@ -383,9 +383,9 @@ CHART_TEST_VALUES ?= test/chart/testdata/values.yaml
 CT_IMAGE ?= quay.io/helmpack/chart-testing:v3.15.0@sha256:54317f2d93730ea9ca1236e3d79cd95d74110b8d733b6ab124e5829209b5f4e4
 
 .PHONY: chart-lint
-chart-lint: chart-docs-check ## Check the chart README, lint the chart with the test values and with the default values (plus a clusterId: lint asks no cluster), and check that the schema (not a template's required) refuses a tag instead of a digest.
+chart-lint: chart-docs-check ## Check the chart README, lint the chart with the test values and with the default values (plus image.allowTag and a clusterId: a source checkout has no digests and lint asks no cluster), and check that the schema (not a template's required) refuses a tag instead of a digest.
 	$(HELM) lint $(CHART_DIR) -f $(CHART_TEST_VALUES) --strict
-	$(HELM) lint $(CHART_DIR) --set clusterId=chart-lint --strict
+	$(HELM) lint $(CHART_DIR) -f $(CHART_DIR)/ci/default-values.yaml --set clusterId=chart-lint --strict
 	@if $(HELM) lint $(CHART_DIR) --set clusterId=chart-lint --set executor.image.digest=latest >/dev/null 2>&1; then \
 		echo "helm lint passed with a tag instead of a digest: values.schema.json is not enforced"; exit 1; \
 	fi
@@ -403,10 +403,9 @@ test-chart: kustomize ## Render the chart and fail if its RBAC, NetworkPolicies,
 
 .PHONY: test-chart-install
 test-chart-install: kind ## Install the chart on a Kind cluster (created here) and check the Deployments and the permissions.
-	@case "$$($(KIND) get clusters)" in \
-		*"$(CHART_KIND_CLUSTER)"*) echo "Kind cluster '$(CHART_KIND_CLUSTER)' already exists." ;; \
-		*) $(KIND) create cluster --name $(CHART_KIND_CLUSTER) ;; \
-	esac
+	@$(KIND) get clusters | grep -qx '$(CHART_KIND_CLUSTER)' \
+		&& echo "Kind cluster '$(CHART_KIND_CLUSTER)' already exists." \
+		|| $(KIND) create cluster --name $(CHART_KIND_CLUSTER)
 	$(KUBECTL) config use-context kind-$(CHART_KIND_CLUSTER)
 	hack/chart-install-test.sh "$(KUBECTL)" "$(HELM)"
 
@@ -414,29 +413,33 @@ test-chart-install: kind ## Install the chart on a Kind cluster (created here) a
 chart-kind-delete: kind ## Delete the Kind cluster of test-chart-install.
 	@$(KIND) delete cluster --name $(CHART_KIND_CLUSTER)
 
-# The chart-testing job runs the chart with its default values, so the images must be the ones the default
-# values name: repository:appVersion. They are built from this checkout under that tag and loaded into the Kind
-# cluster. The local Docker keeps them under that tag too: after a local run, remove them before you pull the
-# published release images.
+# The chart-testing job runs the chart with its default values plus image.allowTag (dist/chart/ci/
+# default-values.yaml), so the images must be the ones those values name: repository:appVersion, both read from
+# the chart. They are built from this checkout under that tag and loaded into the Kind cluster. The local Docker
+# keeps them under that tag too: after a local run, remove them before you pull the published release images.
 CHART_CT_KIND_CLUSTER ?= shadewright-chart-ct
+CHART_CT_VALUES ?= $(CHART_DIR)/ci/default-values.yaml
 CHART_APP_VERSION = $(shell sed -n 's/^appVersion: "\{0,1\}\([0-9A-Za-z.+-]*\)"\{0,1\}.*/\1/p' $(CHART_DIR)/Chart.yaml)
-CHART_CT_IMAGES = ghcr.io/pkalin/shadewright-executor:$(CHART_APP_VERSION) ghcr.io/pkalin/shadewright-analyzer:$(CHART_APP_VERSION)
+# chart-repository <component>: image.repository of that component in values.yaml.
+chart-repository = $(shell awk '/^$(1):/{c=1;next} /^[^ \#]/{c=0} c && /^    repository:/{print $$2; exit}' $(CHART_DIR)/values.yaml)
+CHART_CT_EXECUTOR = $(call chart-repository,executor):$(CHART_APP_VERSION)
+CHART_CT_ANALYZER = $(call chart-repository,analyzer):$(CHART_APP_VERSION)
 
 .PHONY: chart-ct-cluster
-chart-ct-cluster: kind ## Create the Kind cluster of the chart-testing job and load images built from this checkout under the appVersion tag.
-	@test -n "$(CHART_APP_VERSION)" || { echo "no appVersion in $(CHART_DIR)/Chart.yaml" >&2; exit 1; }
-	@case "$$($(KIND) get clusters)" in \
-		*"$(CHART_CT_KIND_CLUSTER)"*) echo "Kind cluster '$(CHART_CT_KIND_CLUSTER)' already exists." ;; \
-		*) $(KIND) create cluster --name $(CHART_CT_KIND_CLUSTER) ;; \
-	esac
-	$(MAKE) docker-build-images IMG_EXECUTOR=ghcr.io/pkalin/shadewright-executor:$(CHART_APP_VERSION) \
-		IMG_ANALYZER=ghcr.io/pkalin/shadewright-analyzer:$(CHART_APP_VERSION)
-	$(KIND) load docker-image --name $(CHART_CT_KIND_CLUSTER) $(CHART_CT_IMAGES)
+chart-ct-cluster: kind ## Create the Kind cluster of the chart-testing job and load images built from this checkout under the chart's repository:appVersion.
+	@if printf '%s\n' "$(CHART_CT_EXECUTOR)" "$(CHART_CT_ANALYZER)" | grep -Evxq '[a-z0-9./_-]+:[0-9A-Za-z.+-]+'; then \
+		echo "no image repository or appVersion in $(CHART_DIR): '$(CHART_CT_EXECUTOR)' '$(CHART_CT_ANALYZER)'" >&2; exit 1; \
+	fi
+	@$(KIND) get clusters | grep -qx '$(CHART_CT_KIND_CLUSTER)' \
+		&& echo "Kind cluster '$(CHART_CT_KIND_CLUSTER)' already exists." \
+		|| $(KIND) create cluster --name $(CHART_CT_KIND_CLUSTER)
+	$(MAKE) docker-build-images IMG_EXECUTOR=$(CHART_CT_EXECUTOR) IMG_ANALYZER=$(CHART_CT_ANALYZER)
+	$(KIND) load docker-image --name $(CHART_CT_KIND_CLUSTER) $(CHART_CT_EXECUTOR) $(CHART_CT_ANALYZER)
 	$(KUBECTL) config use-context kind-$(CHART_CT_KIND_CLUSTER)
 
 .PHONY: test-chart-defaults
-test-chart-defaults: chart-ct-cluster ## Install the chart with no values on the chart-testing Kind cluster and check that it reads nothing and writes nothing, then run helm test.
-	hack/chart-default-install-test.sh "$(KUBECTL)" "$(HELM)"
+test-chart-defaults: chart-ct-cluster ## Install the chart with the default values (plus image.allowTag) on the chart-testing Kind cluster, check what it may read and write, then run helm test.
+	hack/chart-default-install-test.sh "$(KUBECTL)" "$(HELM)" "$(CHART_CT_VALUES)"
 
 .PHONY: chart-ct-kind-delete
 chart-ct-kind-delete: kind ## Delete the Kind cluster of the chart-testing job.

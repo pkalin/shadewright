@@ -1,0 +1,6 @@
+# chart-testing (ct lint, ct install) and make chart-ct-cluster use this file and nothing else, so the install
+# runs with the default values except for one opt-in: a source checkout has no image digests, so the chart
+# runs the appVersion tag, which the job builds from this checkout and loads into Kind. The published chart
+# carries the release's digests and needs no values at all. .helmignore keeps ci/ out of the package.
+image:
+  allowTag: true

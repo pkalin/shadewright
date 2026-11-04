@@ -100,6 +100,7 @@ func main() {
 		setupLog.Error(nil, "Invalid --max-incidents: it must be at least 1", "value", maxIncidents)
 		os.Exit(1)
 	}
+	analyzer.SetWatchedNamespaces(len(watched))
 	if len(watched) == 0 {
 		setupLog.Info("Watching no namespaces: no events or pods are read and no Incident is recorded; "+
 			"set --watch-namespaces to watch some", "operatorNamespace", namespace, "clusterID", clusterID)

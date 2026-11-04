@@ -28,6 +28,7 @@ The phase gauges are computed when the endpoint is scraped, from the informer th
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
+| `shadewright_analyzer_watched_namespaces` | gauge | none | Namespaces the analyzer watches (`--watch-namespaces`), set once at start on every replica. `0` is valid (the chart's default) and means it reads no events or pods and records no Incident: alert on it if you expect Incidents |
 | `shadewright_incidents` | gauge | `phase`: an [Incident phase](api.md), `None` or `Other` | Incidents in the operator namespace, by phase. Reported by the leader only; missing (not zero) before its informer has synced or when the read fails |
 | `shadewright_incidents_analysis_due` | gauge | none | Incidents whose `AnalysisDue` condition is `True`. Reported with the gauge above |
 | `shadewright_analyses_used_today` | gauge | none | Analyses counted against the current UTC day in the budget ConfigMap, as the last pass of the analysis trigger read it. Missing while the budget is unknown: before the first pass, and after a pass that could not read the settings or could not read or trust the ConfigMap (the trigger then marks nothing due). On a replica that lost leadership it keeps the value of its last pass |
@@ -51,6 +52,9 @@ sum(shadewright_remediation_requests{phase=~"NeedsIntervention|AwaitingApproval"
 
 # Denials by reason over the last day
 sum by (reason) (increase(shadewright_policy_denials_total[1d]))
+
+# An analyzer that watches no namespace, so it records no Incident
+max(shadewright_analyzer_watched_namespaces) == 0
 
 # Share of today's analysis budget used
 max(shadewright_analyses_used_today) / max(shadewright_analyses_per_day_limit)

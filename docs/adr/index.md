@@ -9,7 +9,7 @@
 | [0005](0005-go-kubebuilder-single-module.md) | Go, Kubebuilder, one module with two binaries | Accepted |
 | [0006](0006-github-app-key-in-key-vault.md) | GitHub App with its private key in Key Vault | Accepted, amended |
 | [0007](0007-incident-state-in-crds.md) | Incident state in CRDs for the MVP | Accepted, amended |
-| [0008](0008-disposable-azure-lab.md) | A disposable Azure lab in its own subscription | Accepted |
+| [0008](0008-disposable-azure-lab.md) | A disposable Azure lab in its own subscription | Accepted, amended |
 | [0009](0009-api-group-and-docs-domain.md) | API group and docs domain | Accepted |
 | [0010](0010-docs-site-zensical.md) | Docs site built with Zensical on GitHub Pages | Accepted |
 | [0011](0011-policy-as-cluster-scoped-crd.md) | Policy as a cluster-scoped CRD | Accepted, amended |
@@ -23,7 +23,7 @@
 | [0019](0019-extension-packaging.md) | Packaging extensions: compiled in now, signed OCI packs later | Accepted, amended |
 | [0020](0020-yaml-patching.md) | Patching YAML by replacing one scalar in place | Accepted |
 | [0021](0021-amending-accepted-adrs.md) | Amending accepted ADRs | Accepted |
-| [0022](0022-scenario-switch-and-clusters.md) | Switching a scenario on with a per-cluster branch, on Kind and the lab | Accepted |
+| [0022](0022-scenario-switch-and-clusters.md) | Switching a scenario on with a per-cluster branch, on Kind and the lab | Accepted, amended |
 | [0023](0023-how-the-analyzer-calls-the-model.md) | How the analyzer calls the model: prompts as code, context first, one structured call | Accepted, amended |
 | [0024](0024-analyzer-writes-detection-to-settings-status.md) | The analyzer writes platform and integration detection to the RemediationSettings status | Accepted |
 

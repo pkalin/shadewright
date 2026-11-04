@@ -17,6 +17,7 @@ nav = [
   { "Design" = "design.md" },
   { "Threat model" = "threat-model.md" },
   { "The name" = "name.md" },
+  { "Emergency stop" = "emergency.md" },
   { "Lab" = [
     { "OOM acceptance run" = "lab-oom-acceptance.md" },
   ] },

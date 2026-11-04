@@ -150,7 +150,8 @@ type Modules struct {
 // RemediationSettingsSpec holds cluster-wide settings, including the kill switch.
 type RemediationSettingsSpec struct {
 	// paused stops every write: pull requests, auto-merge and issues. Analysis continues. Checked right
-	// before each write.
+	// before each write. It revokes no published pull request and reverts no merge; see
+	// https://shadewright.io/emergency/.
 	// +kubebuilder:default=false
 	// +optional
 	Paused *bool `json:"paused,omitempty"`

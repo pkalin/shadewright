@@ -121,7 +121,8 @@ spec:
                 default: false
                 description: |-
                   paused stops every write: pull requests, auto-merge and issues. Analysis continues. Checked right
-                  before each write.
+                  before each write. It revokes no published pull request and reverts no merge; see
+                  https://shadewright.io/emergency/.
                 type: boolean
               repositories:
                 description: |-

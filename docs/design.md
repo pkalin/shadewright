@@ -887,8 +887,9 @@ Still open:
 3. **Model choice.** Benchmark on the scenario set at stage 1: a small model for triage and a stronger one for escalation.
 4. **Teams.** Whether the maintainer's Microsoft account can receive Teams Workflows webhooks. If not, GitHub issues stay the only notifier for now.
 5. **Required checks in policy.** Whether a policy should name verification checks a request cannot drop, beyond the ones each action always runs.
-6. **Calling the model.** Decided on 2026-11-03: [ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md) is accepted (row above). Where the daily spend is counted is [#208](https://github.com/pkalin/shadewright/issues/208).
-7. **Incident retention.** Incidents are bounded by a count (3.2), not deleted: the analyzer has no `delete` on them. When old Incidents should go, and who deletes them, is open.
+6. **Scenario switch.** Decided on 2026-11-03: [ADR-0022](adr/0022-scenario-switch-and-clusters.md) is accepted (row above). Kept as an item so that the numbers below do not change.
+7. **Calling the model.** Decided on 2026-11-03: [ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md) is accepted (row above). Where the daily spend is counted is [#208](https://github.com/pkalin/shadewright/issues/208).
+8. **Incident retention.** Incidents are bounded by a count (3.2), not deleted: the analyzer has no `delete` on them. When old Incidents should go, and who deletes them, is open.
 
 ## 16. Prior art
 

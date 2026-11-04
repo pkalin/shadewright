@@ -688,7 +688,7 @@ The GitHub App enables auto-merge (GraphQL `enablePullRequestAutoMerge`, squash)
 - Stale approvals dismissed on new pushes, and approval of the most recent push required.
 - The GitHub App is never on a ruleset bypass list and has only `contents: write`, `pull_requests: write`, `issues: write` (for notifications, ADR-0014) and `metadata: read` on one repository. It cannot approve its own PRs.
 - No direct pushes or force pushes to `main`; only branches and PRs.
-- On the clusters that run scenarios, the protected branch Flux tracks, and that the agent's PRs target, is `cluster/<cluster>`, not `main`. Its rulesets mirror the PR rules of `main` for the agent's PRs (approval, code owner review, `Path guard` and the other required checks), the repository admin role can still push to it directly (a known limit for v0.1.0, with a planned follow-up), and nobody can force-push or delete it ([ADR-0022](adr/0022-scenario-switch-and-clusters.md)).
+- On the clusters that run scenarios, the protected branch Flux tracks, and that the agent's PRs target, is `cluster/<cluster>`, not `main`. Its rulesets mirror the PR rules of `main` for the agent's PRs (approval, code owner review and the required checks `Conventional PR title`, `Render manifests` and `Path guard`), the repository admin role can still push to it directly (a known limit for v0.1.0, with a planned follow-up), and nobody can force-push or delete it ([ADR-0022](adr/0022-scenario-switch-and-clusters.md)).
 - Extra commits, a changed target or a digest mismatch stop automation.
 
 ## 9. Identity

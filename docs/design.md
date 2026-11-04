@@ -1,6 +1,6 @@
 # Design
 
-Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the semantic diff check of section 8.2, the GitHub and Key Vault adapters, the pull request step of section 6 (branch, commit and pull request, up to `AwaitingApproval`), the kill switch of section 5.4 (`spec.paused`, one gate right before every Git write), the concurrency limit, the lock per target and the circuit breaker of section 10.7 (retry limits and cooldowns are not built), the collector of section 3.1 and both levels of deduplication of section 3.2, with the Incident controller that keeps them in `Incident` objects, the RBAC of sections 2.2 and 10, the registries of platform and integration modules of sections 2.4 and 2.5 with the symptom source contract, wired into the analyzer with the generic and AKS platforms, the EKS and GKE platforms (detection only) and the cloudflared, Flux, KEDA, Kyverno and Secrets Store CSI driver integrations, platform and integration detection, which the analyzer runs and reports in the settings status (5.4), and the Prometheus metrics of both components ([reference](reference/metrics.md)); the diagnosis rules and the cloudflared, Flux, KEDA and Kyverno symptom sources feed nothing yet. Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
+Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the semantic diff check of section 8.2, the GitHub and Key Vault adapters, the Prometheus `MetricsSource` adapter with its approved query templates (section 4; not wired into the analyzer yet), the pull request step of section 6 (branch, commit and pull request, up to `AwaitingApproval`), the kill switch of section 5.4 (`spec.paused`, one gate right before every Git write), the concurrency limit, the lock per target and the circuit breaker of section 10.7 (retry limits and cooldowns are not built), the collector of section 3.1 and both levels of deduplication of section 3.2, with the Incident controller that keeps them in `Incident` objects, the RBAC of sections 2.2 and 10, the registries of platform and integration modules of sections 2.4 and 2.5 with the symptom source contract, wired into the analyzer with the generic and AKS platforms, the EKS and GKE platforms (detection only) and the cloudflared, Flux, KEDA, Kyverno and Secrets Store CSI driver integrations, platform and integration detection, which the analyzer runs and reports in the settings status (5.4), and the Prometheus metrics of both components ([reference](reference/metrics.md)); the diagnosis rules and the cloudflared, Flux, KEDA and Kyverno symptom sources feed nothing yet. Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
 
 ## 1. Goals
 
@@ -117,6 +117,8 @@ Every external system sits behind a Go interface with one adapter per product, s
 | `Signer` | Azure Key Vault key | AWS KMS, HashiCorp Vault transit |
 
 Provider SDKs are imported only inside their adapter package. Each interface has an in-memory fake used by the tests.
+
+The Prometheus adapter (`internal/providers/metrics/prometheus`) speaks the plain Prometheus HTTP query API with the standard library, so it also works against Thanos, Mimir, Grafana Cloud and Azure Monitor managed Prometheus. It runs only the templates listed in section 4. TLS and authentication come from the HTTP client it is given; it never follows a redirect and never puts the URL, a parameter or response text in an error.
 
 ### 2.4. Cluster platforms
 
@@ -341,6 +343,21 @@ The analyzer exposes tools to the model through its own adapters. In the MVP loo
 | `query_metrics` | Approved query templates only | Read, redacted |
 | `get_delivery_status` | Flux Kustomization / HelmRelease revision and readiness | Read, redacted |
 | `read_git_file`, `get_recent_changes` | Map an object to its source in Git | Read, redacted |
+
+`query_metrics` runs only approved PromQL templates compiled into the Prometheus adapter (`internal/providers/metrics/prometheus`); there is no setting, CRD or tool argument that carries query text. Every template takes the same two parameters, `namespace` (a DNS-1123 label) and `workload` (a DNS-1123 subdomain); any other value or parameter is refused before a request is made. For the pod templates, `workload` is the name of a Deployment, StatefulSet or DaemonSet, and its pods are matched by name (the workload name plus one or two generated segments, so some pods of another workload whose name extends this one, such as the StatefulSet pod `web-v2-0` for `web`, match too; the `pod` label of each series tells them apart).
+
+| Template | Result per series | Source |
+| --- | --- | --- |
+| `container_memory_working_set_bytes` | memory working set of each container, bytes | cAdvisor |
+| `container_memory_limit_bytes` | memory limit of each container, bytes | kube-state-metrics |
+| `container_cpu_usage_cores` | CPU used by each container, cores, 5-minute rate | cAdvisor |
+| `container_cpu_throttled_ratio` | share of CFS periods throttled, 0 to 1, over 5 minutes | cAdvisor |
+| `container_restarts_total` | restart count of each container | kube-state-metrics |
+| `container_last_terminated_oomkilled` | 1 when the container's last termination was OOMKilled | kube-state-metrics |
+| `container_waiting_reason` | 1 per waiting container, with the reason (CrashLoopBackOff, ImagePullBackOff, ...) | kube-state-metrics |
+| `deployment_replicas_unavailable` | unavailable replicas of the Deployment named `workload` | kube-state-metrics |
+
+Limits, fixed in code: a range query covers at most 6 hours with a step of at least 15 seconds and at most 500 points per series, and no time lies more than 7 days back or more than a minute ahead; a result holds at most 50 series, 500 points per series, 5,000 points and 1 MiB, and is refused as soon as it exceeds any of them while it is read. A series may carry only the labels its template aggregates by, with plain-name values; warnings and error text from Prometheus are dropped. Each query has a deadline (30 seconds by default, at most 2 minutes) and is not retried by the adapter. The result still goes through `internal/redact` before the model sees it, like every tool result.
 
 There is no proposal tool: a proposal is the structured output of the call (3.3), checked by one validator. PR creation and auto-merge are not model tools at all: only the remediation controller does them, after policy.
 

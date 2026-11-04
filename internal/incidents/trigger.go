@@ -62,9 +62,9 @@ const (
 	// controller, is more recent than the debounce, and the settle limit since its first unsettled
 	// observation has not passed.
 	ReasonDebouncing = "Debouncing"
-	// ReasonAnalysisDisabled: RemediationSettings maxAnalysesPerDay is 0.
+	// ReasonAnalysisDisabled: RemediationSettings spec.analysis.maxAnalysesPerDay is 0.
 	ReasonAnalysisDisabled = "AnalysisDisabled"
-	// ReasonDailyBudgetReached: the analyses of the current UTC day reached maxAnalysesPerDay.
+	// ReasonDailyBudgetReached: the analyses of the current UTC day reached spec.analysis.maxAnalysesPerDay.
 	ReasonDailyBudgetReached = "DailyBudgetReached"
 	// ReasonBudgetUnreadable: the budget ConfigMap holds a day in the future, a count out of bounds or keys
 	// it should not, so the budget is taken as spent.
@@ -104,8 +104,8 @@ type TriggerSettings struct {
 	// AnalysisTimeout is how long an incident may stay in phase Analyzing after its last analysis began
 	// before that analysis is taken as lost. It is due again at the later of AnalysisTimeout and Cooldown.
 	AnalysisTimeout time.Duration
-	// MaxAnalysesPerDay is RemediationSettings maxAnalysesPerDay: the analyses allowed per UTC day across all
-	// Incidents. 0 disables analysis.
+	// MaxAnalysesPerDay is RemediationSettings spec.analysis.maxAnalysesPerDay: the analyses allowed per UTC
+	// day across all Incidents. 0 disables analysis.
 	MaxAnalysesPerDay int
 }
 

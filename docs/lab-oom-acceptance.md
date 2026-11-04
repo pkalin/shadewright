@@ -13,7 +13,7 @@ destroyed after), [ADR-0012](adr/0012-object-to-source-mapping.md) (finding the 
 [ADR-0022](adr/0022-scenario-switch-and-clusters.md) (the scenario switch and the `cluster/lab` branch).
 
 The fleet installs both the analyzer and the executor, but the analyzer does no work in this run: the request is
-written by hand and the settings sample has `maxAnalysesPerDay: 0`, so the model is never called.
+written by hand and the settings sample has `analysis.maxAnalysesPerDay: 0`, so the model is never called.
 
 !!! warning "Costs money and changes real systems"
     Steps 1 and 11 create and destroy Azure resources (about 0.10 EUR per hour while the lab is up, see

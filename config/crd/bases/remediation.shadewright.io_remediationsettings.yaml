@@ -56,11 +56,22 @@ spec:
                 default: {}
                 description: |-
                   analysis bounds every model-backed analysis and names the model deployments it may call. Left out, its
-                  limits take their defaults and no model is configured. Planned: no component reads these fields yet;
-                  the analysis loop (#76) will enforce them, and the daily token caps need the spend counter of #208.
-                  The endpoints decide where the analyzer sends its Entra ID token and the redacted context, so write
+                  limits take their defaults and no model is configured. Enforced today: maxAnalysesPerDay, read by the
+                  analysis trigger. Planned: no component reads the other fields yet; the analysis loop (#76) will
+                  enforce them, and the daily token caps need the spend counter of #208. The endpoints decide where the analyzer sends its Entra ID token and the redacted context, so write
                   access to this object is security-relevant (threat model).
                 properties:
+                  maxAnalysesPerDay:
+                    default: 100
+                    description: |-
+                      maxAnalysesPerDay limits model-backed analyses per UTC day, across all Incidents; 0 disables the
+                      model. Enforced: the analysis trigger marks an Incident not due once the day's count reaches it
+                      (AnalysisDisabled at 0, DailyBudgetReached otherwise). 0 to 10000. Defaulted to 100 also when
+                      spec.analysis is left out.
+                    format: int32
+                    maximum: 10000
+                    minimum: 0
+                    type: integer
                   maxConcurrentAnalyses:
                     default: 1
                     description: maxConcurrentAnalyses is the most analyses that call
@@ -167,7 +178,7 @@ spec:
                         description: |-
                           triage is the small model for the one structured call on the prepared context, without tools. Left out,
                           no model is called: an incident no runbook matches is handed off to a person, and no unit of
-                          maxAnalysesPerDay is used for it.
+                          spec.analysis.maxAnalysesPerDay is used for it.
                         properties:
                           apiVersion:
                             description: |-
@@ -235,14 +246,6 @@ spec:
                         - 1) : self.escalation.endpoint) || self.triage.deployment.lowerAscii()
                         != self.escalation.deployment.lowerAscii()'
                 type: object
-              maxAnalysesPerDay:
-                default: 100
-                description: maxAnalysesPerDay limits model-backed analyses per UTC
-                  day; 0 disables the model.
-                format: int32
-                maximum: 10000
-                minimum: 0
-                type: integer
               maxConcurrentRemediations:
                 default: 1
                 description: |-

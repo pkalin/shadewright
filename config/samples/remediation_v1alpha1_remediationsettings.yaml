@@ -7,7 +7,6 @@ spec:
   paused: false
   # Cap on active requests (before the merge): more wait in Pending with the condition Queued.
   maxConcurrentRemediations: 1
-  maxAnalysesPerDay: 100
   repositories:
     - name: fleet
       url: https://github.com/example/fleet
@@ -26,11 +25,13 @@ spec:
   modules:
     platforms: [aks]
     integrations: [keda, flux]
-  # Bounds of every model-backed analysis and the model deployments it may call. Planned: not enforced yet
-  # (the analysis loop, #76; the daily token caps need the spend counter, #208). No key goes here: the
-  # analyzer authenticates with its workload identity. The endpoint decides where that token and the
-  # redacted context go, so guard write access to this object. maxTokensPerDay is required on each model.
+  # Bounds of every model-backed analysis and the model deployments it may call. Enforced today:
+  # maxAnalysesPerDay (0 disables the model). Planned: the rest is not enforced yet (the analysis loop, #76;
+  # the daily token caps need the spend counter, #208). No key goes here: the analyzer authenticates with its
+  # workload identity. The endpoint decides where that token and the redacted context go, so guard write
+  # access to this object. maxTokensPerDay is required on each model.
   analysis:
+    maxAnalysesPerDay: 100
     maxContextBytes: 32768
     maxToolSteps: 4
     maxOutputTokens: 2048

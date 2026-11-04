@@ -27,6 +27,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -496,7 +497,7 @@ var _ = Describe("RemediationSettings", func() {
 		expectAccepted(s)
 		Expect(*s.Spec.Paused).To(BeFalse())
 		Expect(s.Spec.MaxConcurrentRemediations).To(BeEquivalentTo(1))
-		Expect(*s.Spec.MaxAnalysesPerDay).To(BeEquivalentTo(100))
+		Expect(*s.Spec.Analysis.MaxAnalysesPerDay).To(BeEquivalentTo(100))
 	})
 
 	It("refuses any name but default", func() {
@@ -704,8 +705,37 @@ var _ = Describe("RemediationSettings", func() {
 			Expect(*a.MaxToolSteps).To(BeEquivalentTo(4))
 			Expect(*a.MaxOutputTokens).To(BeEquivalentTo(2048))
 			Expect(*a.MaxConcurrentAnalyses).To(BeEquivalentTo(1))
+			Expect(*a.MaxAnalysesPerDay).To(BeEquivalentTo(100))
 			Expect(a.Models).To(BeNil())
 		})
+
+		It("defaults maxAnalysesPerDay to 100 when analysis is set without it", func() {
+			s := withAnalysis(func(a *v1alpha1.AnalysisSettings) { a.MaxToolSteps = ptr.To[int32](2) })
+			expectAccepted(s)
+			Expect(*s.Spec.Analysis.MaxAnalysesPerDay).To(BeEquivalentTo(100))
+		})
+
+		It("refuses maxAnalysesPerDay at the old top-level path", func() {
+			u := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": v1alpha1.GroupVersion.String(),
+				"kind":       "RemediationSettings",
+				"metadata":   map[string]any{"name": v1alpha1.SettingsName},
+				"spec":       map[string]any{"maxAnalysesPerDay": int64(0)},
+			}}
+			err := k8sClient.Create(ctx, u, client.FieldValidation("Strict"))
+			if err == nil {
+				deleteAfterSpec(u)
+			}
+			Expect(err).To(MatchError(ContainSubstring(`unknown field "spec.maxAnalysesPerDay"`)))
+		})
+
+		DescribeTable("accepts maxAnalysesPerDay at its bounds",
+			func(n int32) {
+				expectAccepted(withAnalysis(func(a *v1alpha1.AnalysisSettings) { a.MaxAnalysesPerDay = new(n) }))
+			},
+			Entry("0, which disables the model", int32(0)),
+			Entry("10000", int32(10000)),
+		)
 
 		It("accepts a triage and an escalation model with their own caps", func() {
 			expectAccepted(withAnalysis(func(a *v1alpha1.AnalysisSettings) {
@@ -755,6 +785,10 @@ var _ = Describe("RemediationSettings", func() {
 				"spec.analysis.maxConcurrentAnalyses"),
 			Entry("more than 8 concurrent analyses", func(a *v1alpha1.AnalysisSettings) { a.MaxConcurrentAnalyses = ptr.To[int32](9) },
 				"spec.analysis.maxConcurrentAnalyses"),
+			Entry("negative analyses per day", func(a *v1alpha1.AnalysisSettings) { a.MaxAnalysesPerDay = ptr.To[int32](-1) },
+				"spec.analysis.maxAnalysesPerDay"),
+			Entry("more than 10000 analyses per day", func(a *v1alpha1.AnalysisSettings) { a.MaxAnalysesPerDay = ptr.To[int32](10001) },
+				"spec.analysis.maxAnalysesPerDay"),
 			Entry("a triage model without a daily token cap", func(a *v1alpha1.AnalysisSettings) {
 				a.Models = &v1alpha1.AnalysisModels{Triage: model()}
 				a.Models.Triage.MaxTokensPerDay = nil

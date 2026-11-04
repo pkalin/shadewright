@@ -51,7 +51,7 @@ const (
 // budgetDayLayout is the layout of the day in the budget ConfigMap.
 const budgetDayLayout = "2006-01-02"
 
-// maxBudgetUsed is the largest count the budget holds, the largest maxAnalysesPerDay.
+// maxBudgetUsed is the largest count the budget holds, the largest spec.analysis.maxAnalysesPerDay.
 const maxBudgetUsed = 10000
 
 // budgetUsedPattern is the form of the count: plain decimal digits, no sign, space or leading plus.
@@ -142,16 +142,17 @@ func UsedToday(cm *corev1.ConfigMap, now time.Time) (used int, ok bool) {
 	return b.used, true
 }
 
-// maxAnalysesPerDay returns the settings' maxAnalysesPerDay, or its default when unset.
+// maxAnalysesPerDay returns the settings' spec.analysis.maxAnalysesPerDay, or its default when analysis or the
+// field is unset. The API server defaults both, so unset is only seen on an object the schema did not default.
 func maxAnalysesPerDay(settings *remediationv1alpha1.RemediationSettings) int {
-	if settings.Spec.MaxAnalysesPerDay != nil {
-		return int(*settings.Spec.MaxAnalysesPerDay)
+	if a := settings.Spec.Analysis; a != nil && a.MaxAnalysesPerDay != nil {
+		return int(*a.MaxAnalysesPerDay)
 	}
 	return DefaultMaxAnalysesPerDay
 }
 
 // ReserveAnalysis takes one unit of the daily analysis budget, before a model-backed analysis (#16). It reads
-// the RemediationSettings (maxAnalysesPerDay) and the budget ConfigMap in namespace fresh with reader, adds one
+// the RemediationSettings (spec.analysis.maxAnalysesPerDay) and the budget ConfigMap in namespace fresh with reader, adds one
 // to the count (starting at 1 on a new UTC day) and updates the ConfigMap with the resourceVersion it read
 // (an update, not a patch), retrying on conflict, so concurrent callers never take the same unit twice. It
 // refuses with [ErrBudgetSpent] when the day's count reached maxAnalysesPerDay, with [ErrBudgetNotFound]

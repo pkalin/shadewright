@@ -438,7 +438,7 @@ func createSettings(t *testing.T, maxPerDay int32) *remediationv1alpha1.Remediat
 	t.Helper()
 	s := testfixtures.RemediationSettings()
 	s.Name = remediationv1alpha1.SettingsName
-	s.Spec.MaxAnalysesPerDay = new(maxPerDay)
+	s.Spec.Analysis = &remediationv1alpha1.AnalysisSettings{MaxAnalysesPerDay: new(maxPerDay)}
 	if err := env.admin.Create(t.Context(), s); err != nil {
 		t.Fatal(err)
 	}
@@ -716,7 +716,7 @@ func TestNotDueReasonChangesWriteNothing(t *testing.T) {
 	if err := env.admin.Get(t.Context(), client.ObjectKeyFromObject(settings), settings); err != nil {
 		t.Fatal(err)
 	}
-	settings.Spec.MaxAnalysesPerDay = new(int32(0))
+	settings.Spec.Analysis.MaxAnalysesPerDay = new(int32(0))
 	if err := env.admin.Update(t.Context(), settings); err != nil {
 		t.Fatal(err)
 	}

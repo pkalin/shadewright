@@ -109,7 +109,8 @@ metadata:
   name: default
 spec:
   paused: true
-  maxAnalysesPerDay: 0
+  analysis:
+    maxAnalysesPerDay: 0
 EOF
 ```
 
@@ -122,7 +123,7 @@ kubectl get remediationsettings default -o jsonpath='{.status}{"\n"}'
 kubectl -n shadewright-system get incidents
 ```
 
-Expect both Deployments ready, a log line with your namespaces and cluster ID, and in the settings status the platform detection, the `DetectionFailed` condition `False` and `NoWatchedNamespaces` `False`. An analyzer started with no namespace (the Helm chart's default) logs `Watching no namespaces` instead, reports `NoWatchedNamespaces` `True` once a settings object exists, and records no Incident. Incidents appear once a watched namespace has a symptom the collector knows (for example an `OOMKilled` container or a failing pod); each carries the condition `AnalysisDue` with reason `AnalysisDisabled`, which is what `maxAnalysesPerDay: 0` does. The logs are the controller-runtime development format until you pass `--zap-devel=false`.
+Expect both Deployments ready, a log line with your namespaces and cluster ID, and in the settings status the platform detection, the `DetectionFailed` condition `False` and `NoWatchedNamespaces` `False`. An analyzer started with no namespace (the Helm chart's default) logs `Watching no namespaces` instead, reports `NoWatchedNamespaces` `True` once a settings object exists, and records no Incident. Incidents appear once a watched namespace has a symptom the collector knows (for example an `OOMKilled` container or a failing pod); each carries the condition `AnalysisDue` with reason `AnalysisDisabled`, which is what `analysis.maxAnalysesPerDay: 0` does. The logs are the controller-runtime development format until you pass `--zap-devel=false`.
 
 The executor Deployment carries the label `azure.workload.identity/use: "true"` and its ServiceAccount a placeholder client ID. Both are inert off AKS and in observe-only mode, where the executor never opens a repository. They matter in the next path.
 

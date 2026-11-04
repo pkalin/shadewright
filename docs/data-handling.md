@@ -45,7 +45,7 @@ Anything in the cluster is readable by whoever has `get` on it, so treat the Inc
 - Read tools are offered only on escalation, within fixed step, token and spend budgets.
 - The model's output is a proposal only; deterministic policy decides whether it runs (invariant 1).
 - The endpoint is Microsoft Foundry first. In the lab the model deployments are in a subscription of the project's own, behind Entra ID (no API keys).
-- How much it may spend per day is `spec.maxAnalysesPerDay` (default 100). Planned: a cap in tokens per model deployment, `spec.analysis.models.*.maxTokensPerDay` (required on each model, not counted yet, #208).
+- How much it may spend per day is `spec.analysis.maxAnalysesPerDay` (default 100). Planned: a cap in tokens per model deployment, `spec.analysis.models.*.maxTokensPerDay` (required on each model, not counted yet, #208).
 
 When it is built, this page gets the exact fields sent.
 

@@ -156,19 +156,21 @@ Used by: [AnalysisSettings](#analysissettings).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `triage` | [ModelDeployment](#modeldeployment) | No | triage is the small model for the one structured call on the prepared context, without tools. Left out, no model is called: an incident no runbook matches is handed off to a person, and no unit of maxAnalysesPerDay is used for it. |
+| `triage` | [ModelDeployment](#modeldeployment) | No | triage is the small model for the one structured call on the prepared context, without tools. Left out, no model is called: an incident no runbook matches is handed off to a person, and no unit of spec.analysis.maxAnalysesPerDay is used for it. |
 | `escalation` | [ModelDeployment](#modeldeployment) | No | escalation is the stronger model, called with read tools only on the deterministic escalation signals of ADR-0023. Left out, an escalation trigger hands the incident off to a person. |
 
 ### AnalysisSettings
 
 AnalysisSettings bounds each model-backed analysis (design 12.3). Every limit has a safe default and a hard
-upper bound in the schema. Planned: none of them is enforced yet (#76).
+upper bound in the schema. Enforced today: maxAnalysesPerDay. Planned: the other limits and the models are
+not enforced yet (#76).
 
 
 Used by: [RemediationSettingsSpec](#remediationsettingsspec).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
+| `maxAnalysesPerDay` | integer | No | maxAnalysesPerDay limits model-backed analyses per UTC day, across all Incidents; 0 disables the model. Enforced: the analysis trigger marks an Incident not due once the day's count reaches it (AnalysisDisabled at 0, DailyBudgetReached otherwise). 0 to 10000. Defaulted to 100 also when spec.analysis is left out.<br>Default: `100`<br>Maximum: 10000<br>Minimum: 0 |
 | `maxContextBytes` | integer | No | maxContextBytes is the most bytes of redacted cluster context (events, pod status, log excerpts, metrics) the context builder puts into one analysis, before the fixed system part of the prompt. 4096 to 262144; the default of 32768 is roughly 8,000 tokens. A context cut at this bound is marked truncated, which is an escalation trigger (ADR-0023).<br>Default: `32768`<br>Maximum: 262144<br>Minimum: 4096 |
 | `maxToolSteps` | integer | No | maxToolSteps is the most read tool calls one escalated analysis may make. The triage call has no tools (ADR-0023), so this only bounds escalation. 0 to 16; 0 means escalation gets no tools.<br>Default: `4`<br>Maximum: 16<br>Minimum: 0 |
 | `maxOutputTokens` | integer | No | maxOutputTokens is the most output tokens one model call may produce, sent as the request's MaxOutputTokens, so the provider stops there. An analysis makes at most 3 + maxToolSteps model calls: the triage call, one retry after invalid output, and maxToolSteps + 1 escalated turns (an invalid escalated result gets no retry; it is handed off). That bounds its output. 256 to 16384.<br>Default: `2048`<br>Maximum: 16384<br>Minimum: 256 |
@@ -762,10 +764,9 @@ Used by: [RemediationSettings](#remediationsettings).
 | --- | --- | --- | --- |
 | `paused` | boolean | No | paused stops every write: pull requests, auto-merge and issues. Analysis continues. Checked right before each write. It revokes no published pull request and reverts no merge; see https://shadewright.io/emergency/.<br>Default: `false` |
 | `maxConcurrentRemediations` | integer | No | maxConcurrentRemediations limits the requests that are active at once in the operator namespace: from PolicyChecked up to the merge, and while a deleted one still closes its pull request. A further request the policy allows stays Pending, with the condition Queued, until fewer are active; a refusal at the first check is never held back, but a request already Queued is decided again only once the limits let it through. Read from the API server right before each allowed decision.<br>Default: `1`<br>Maximum: 20<br>Minimum: 1 |
-| `maxAnalysesPerDay` | integer | No | maxAnalysesPerDay limits model-backed analyses per UTC day; 0 disables the model.<br>Default: `100`<br>Maximum: 10000<br>Minimum: 0 |
 | `repositories` | [GitRepository](#gitrepository) array | No | repositories Shadewright may open pull requests in. URLs are unique, so a Flux source matches at most one entry.<br>Maximum items: 16<br>List type: map<br>List key: `name`<br>Rule: repository URLs must be unique (`self.all(r, self.exists_one(s, s.url == r.url))`) |
 | `modules` | [Modules](#modules) | No | modules enables platform and integration modules. Left out, only the generic platform is on and no integration is: nothing is enabled because it was detected. |
-| `analysis` | [AnalysisSettings](#analysissettings) | No | analysis bounds every model-backed analysis and names the model deployments it may call. Left out, its limits take their defaults and no model is configured. Planned: no component reads these fields yet; the analysis loop (#76) will enforce them, and the daily token caps need the spend counter of #208. The endpoints decide where the analyzer sends its Entra ID token and the redacted context, so write access to this object is security-relevant (threat model).<br>Default: `{}` |
+| `analysis` | [AnalysisSettings](#analysissettings) | No | analysis bounds every model-backed analysis and names the model deployments it may call. Left out, its limits take their defaults and no model is configured. Enforced today: maxAnalysesPerDay, read by the analysis trigger. Planned: no component reads the other fields yet; the analysis loop (#76) will enforce them, and the daily token caps need the spend counter of #208. The endpoints decide where the analyzer sends its Entra ID token and the redacted context, so write access to this object is security-relevant (threat model).<br>Default: `{}` |
 
 ### RemediationSettingsStatus
 

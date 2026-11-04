@@ -54,7 +54,7 @@ limitations under the License.
 // it decides each one with [Due] and sets the condition AnalysisDue, with a reason, when the decision turns
 // from due to not due or back. The analyses used today are read from the budget ConfigMap [BudgetName] in
 // the operator namespace ([UsedToday]), so neither a restart nor deleting Incidents frees the daily budget
-// (RemediationSettings maxAnalysesPerDay), and no more Incidents are due at once than the budget has left.
+// (RemediationSettings spec.analysis.maxAnalysesPerDay), and no more Incidents are due at once than the budget has left.
 // Without the RemediationSettings object or the ConfigMap, or with a budget it cannot trust, nothing is due;
 // the controller never creates the ConfigMap. Each pass has a deadline shorter than the interval
 // (PassTimeout, 8 s), and the budget read within it one of its own (ReadTimeout, 5 s); a read that runs into

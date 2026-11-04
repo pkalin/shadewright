@@ -148,8 +148,8 @@ One cluster-scoped object named `default` (field details in the [API reference](
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `spec.paused` | `false` | Stops every write: pull requests, closes, finalizer cleanup. Analysis continues. See [emergency stop](../emergency.md) |
-| `spec.maxAnalysesPerDay` | `100` | Model-backed analyses per UTC day, 0 to 10000. `0` marks every Incident not due (`AnalysisDisabled`). The model call itself is not built yet |
 | `spec.maxConcurrentRemediations` | `1` | Requests active at once (1 to 20), in the operator namespace: from `PolicyChecked` until `Merged` or a final phase, and while a deleted one still closes its pull request. A further request the policy allows stays `Pending` with the condition `Queued` (`ConcurrencyLimitReached`); a refusal at the first check is never held back, but a request already `Queued` is decided again only once the limits let it through. See [troubleshooting](../troubleshooting.md#limits) |
+| `spec.analysis.maxAnalysesPerDay` | `100` | Model-backed analyses per UTC day across all Incidents, 0 to 10000. `0` marks every Incident not due (`AnalysisDisabled`). Enforced by the analysis trigger; the default applies also when `spec.analysis` is left out. The model call itself is not built yet |
 | `spec.analysis.maxContextBytes` | `32768` | Bytes of redacted context in one analysis, 4096 to 262144. Planned: not enforced yet (#76) |
 | `spec.analysis.maxToolSteps` | `4` | Read tool calls of one escalated analysis, 0 to 16. Planned: not enforced yet (#76) |
 | `spec.analysis.maxOutputTokens` | `2048` | Output tokens of one model call, 256 to 16384. An analysis makes at most 3 + `maxToolSteps` calls. Planned: not enforced yet (#76) |

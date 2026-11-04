@@ -38,15 +38,21 @@ kubectl patch remediationsettings default --type merge -p '{"spec":{"paused":fal
 
 Each request goes on from where it stopped; the condition is removed and an Event `WritesResumed` is recorded.
 
-## 2. Stop analysis: `spec.maxAnalysesPerDay: 0`
+## 2. Stop analysis: `spec.analysis.maxAnalysesPerDay: 0`
 
 ```bash
-kubectl patch remediationsettings default --type merge -p '{"spec":{"maxAnalysesPerDay":0}}'
+kubectl patch remediationsettings default --type merge -p '{"spec":{"analysis":{"maxAnalysesPerDay":0}}}'
 ```
+
+A merge patch changes only this field: the other fields of `spec.analysis`, such as the models, stay as they are.
 
 With `0` the analyzer starts no new analysis (an incident is not due, reason `AnalysisDisabled`), so no new analysis is started and no new proposal appears. Incidents are still recorded. The analysis loop that calls the model is not built yet, so today no model calls happen either way, but this setting already marks incidents not due. To resume, set the value back (the default is 100).
 
-To stop both at once, put both fields in one patch.
+To stop both at once, put both fields in one patch:
+
+```bash
+kubectl patch remediationsettings default --type merge -p '{"spec":{"paused":true,"analysis":{"maxAnalysesPerDay":0}}}'
+```
 
 ## 3. Close an open pull request by hand
 

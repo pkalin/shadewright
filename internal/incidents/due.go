@@ -149,7 +149,7 @@ func (c *Controller) markDue(ctx context.Context) error {
 	return nil
 }
 
-// readBudget reads maxAnalysesPerDay from the RemediationSettings (into s) and the analyses used today from
+// readBudget reads spec.analysis.maxAnalysesPerDay from the RemediationSettings (into s) and the analyses used today from
 // the budget ConfigMap. closed is the not-due reason of every Incident when the budget is unknown, and empty
 // otherwise; readErr is set when a read failed for another reason than a missing object. Both reads together
 // run under ReadTimeout, shorter than the pass, so a read that stalls leaves the rest of the pass to take the
@@ -321,8 +321,8 @@ var dueMessages = map[string]string{
 	ReasonNoNewData:            "Nothing was observed since the last analysis",
 	ReasonCoolingDown:          "The cooldown since the last analysis has not passed",
 	ReasonDebouncing:           "Waiting for the incident to settle, at most the settle limit after its first unsettled observation",
-	ReasonAnalysisDisabled:     "RemediationSettings maxAnalysesPerDay is 0",
-	ReasonDailyBudgetReached:   "The analyses of the current UTC day reached maxAnalysesPerDay",
+	ReasonAnalysisDisabled:     "RemediationSettings spec.analysis.maxAnalysesPerDay is 0",
+	ReasonDailyBudgetReached:   "The analyses of the current UTC day reached spec.analysis.maxAnalysesPerDay",
 	ReasonBudgetUnreadable:     "The analysis budget ConfigMap cannot be trusted, so the budget is taken as spent",
 	ReasonBudgetNotFound:       "The analysis budget ConfigMap does not exist, so the daily budget is unknown",
 	ReasonBudgetReadFailed:     "The analysis budget ConfigMap could not be read, so the daily budget is unknown",

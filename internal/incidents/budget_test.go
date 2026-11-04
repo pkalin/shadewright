@@ -26,6 +26,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 )
 
 // budgetOf reads the data of the budget ConfigMap in ns.
@@ -38,7 +40,30 @@ func budgetOf(t *testing.T, ns string) map[string]string {
 	return cm.Data
 }
 
-// ReserveAnalysis counts up to maxAnalysesPerDay, refuses beyond it, and starts again on a new UTC day.
+// maxAnalysesPerDay reads spec.analysis.maxAnalysesPerDay and falls back to the default when analysis or the
+// field is unset, so settings the schema did not default never leave the trigger without a limit.
+func TestMaxAnalysesPerDayReadsAnalysisOrDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		analysis *remediationv1alpha1.AnalysisSettings
+		want     int
+	}{
+		{"no analysis block", nil, DefaultMaxAnalysesPerDay},
+		{"empty analysis block", &remediationv1alpha1.AnalysisSettings{}, DefaultMaxAnalysesPerDay},
+		{"set to 0", &remediationv1alpha1.AnalysisSettings{MaxAnalysesPerDay: new(int32(0))}, 0},
+		{"set to 7", &remediationv1alpha1.AnalysisSettings{MaxAnalysesPerDay: new(int32(7))}, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &remediationv1alpha1.RemediationSettings{}
+			s.Spec.Analysis = tc.analysis
+			if got := maxAnalysesPerDay(s); got != tc.want {
+				t.Fatalf("maxAnalysesPerDay = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// ReserveAnalysis counts up to spec.analysis.maxAnalysesPerDay, refuses beyond it, and starts again on a new UTC day.
 func TestReserveAnalysisCountsAndRollsOver(t *testing.T) {
 	ns := namespace(t)
 	createSettings(t, 2)

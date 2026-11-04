@@ -1499,14 +1499,10 @@ func withMemoryRequest(manifest []byte, request string) []byte {
 
 var _ = Describe("Pull request body", func() {
 	It("carries no secret and keeps the marker exact", func() {
-		rr := fx.MemoryLimitRequest(requestNamespace, "body")
-		rr.UID = "11111111-1111-4111-8111-111111111111"
+		rr := bodyRequest()
 		// Names are validated by the schema; the body is redacted anyway, so a token that slipped through a
-		// future field never reaches the Git host. This one is no Kubernetes name, so it is redacted too.
+		// future field never reaches the Git host.
 		rr.Spec.IncidentRef.Name = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
-		rr.Status.PlanDigest = "sha256:" + strings.Repeat("a", 64)
-		rr.Status.PolicyRevision = "p/1"
-		rr.Status.Source = &remediationv1alpha1.ResolvedSource{Path: sourcePath, TargetBranch: mainBranch}
 		body := pullRequestBody(rr)
 		Expect(body).NotTo(ContainSubstring("eyJhbGciOiJIUzI1NiJ9"))
 		Expect(body).To(ContainSubstring("[REDACTED"))
@@ -1519,18 +1515,13 @@ var _ = Describe("Pull request body", func() {
 	})
 
 	It("names an Incident called after its fingerprint verbatim and still redacts free text", func() {
-		rr := fx.MemoryLimitRequest(requestNamespace, "body")
-		rr.UID = "11111111-1111-4111-8111-111111111111"
+		rr := bodyRequest()
 		// The collector names an Incident "incident-" plus the 64 hex digits of its fingerprint, a run the
-		// redactor takes for a token in free text.
+		// redactor would otherwise take for a token.
 		name := "incident-9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 		rr.Spec.IncidentRef.Name = name
 		hexToken := "3f1c9a7be2d84f06a5b1c3e9d7f2a4b6c8e0d1f3"
-		rr.Status.PlanDigest = "sha256:" + strings.Repeat("a", 64)
-		rr.Status.PolicyRevision = "p/1"
-		rr.Status.Source = &remediationv1alpha1.ResolvedSource{
-			Path: remediationv1alpha1.GitFilePath("apps/" + hexToken + "/deployment.yaml"), TargetBranch: mainBranch,
-		}
+		rr.Status.Source.Path = remediationv1alpha1.GitFilePath("apps/" + hexToken + "/deployment.yaml")
 		body := pullRequestBody(rr)
 		Expect(body).To(ContainSubstring("for incident `" + name + "`."))
 		Expect(body).To(ContainSubstring("incident `" + name + "`, policy `p/1`"))
@@ -1538,4 +1529,30 @@ var _ = Describe("Pull request body", func() {
 		Expect(body).To(ContainSubstring("[REDACTED:token]"))
 		Expect(hasMarker(body, rr)).To(BeTrue())
 	})
+
+	It("redacts a hex token used as the Incident name", func() {
+		hex40 := strings.Repeat("3f1c9a7b", 5)
+		for _, token := range []string{
+			hex40,                         // a 40-digit hex token, a valid object name
+			strings.Repeat("9f86d081", 8), // 64 hex digits without the prefix
+			"incident-" + hex40,           // the prefix and 40 hex digits
+		} {
+			rr := bodyRequest()
+			rr.Spec.IncidentRef.Name = token
+			body := pullRequestBody(rr)
+			Expect(body).NotTo(ContainSubstring(token), token)
+			Expect(body).To(ContainSubstring("for incident `[REDACTED:token]`."), token)
+			Expect(hasMarker(body, rr)).To(BeTrue())
+		}
+	})
 })
+
+// bodyRequest is a request with the status fields the pull request body reads.
+func bodyRequest() *remediationv1alpha1.RemediationRequest {
+	rr := fx.MemoryLimitRequest(requestNamespace, "body")
+	rr.UID = "11111111-1111-4111-8111-111111111111"
+	rr.Status.PlanDigest = "sha256:" + strings.Repeat("a", 64)
+	rr.Status.PolicyRevision = "p/1"
+	rr.Status.Source = &remediationv1alpha1.ResolvedSource{Path: sourcePath, TargetBranch: mainBranch}
+	return rr
+}

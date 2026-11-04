@@ -255,10 +255,11 @@ Expect:
 - One file, `apps/demo/web-deployment.yaml`, one commit, and a diff of exactly one line pair:
   `-              memory: 48Mi` and `+              memory: 64Mi` under `resources.limits` of container `web`. The memory
   request (`32Mi`) and everything else are untouched.
-- A body with the change, scope, evidence (the request, its UID, the incident by its full name `incident-<64 hex digits>`, the policy revision
-  `<policy name>/<generation>`, the plan digest), expected effect, risk, rollback and `Approval required: yes`, and a last line
-  `<!-- shadewright request-uid=... plan-digest=sha256:... -->` whose UID and digest match
-  `.metadata.uid` and `.status.planDigest` of the request.
+- A body that names the incident by its full name, `incident-` and 64 hex digits (not `[REDACTED:token]`), in its
+  opening sentence and in the evidence, with the change, scope, evidence (the request, its UID, the incident, the
+  policy revision `<policy name>/<generation>`, the plan digest), expected effect, risk, rollback and
+  `Approval required: yes`, and a last line `<!-- shadewright request-uid=... plan-digest=sha256:... -->` whose UID
+  and digest match `.metadata.uid` and `.status.planDigest` of the request.
 - The required checks run on the pull request, and it is not merged: a person reviews it. Do not merge it before
   step 9 (merge, delivery and verification are out of scope for v0.1.0).
 

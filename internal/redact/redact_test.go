@@ -704,3 +704,37 @@ func TestFluxRevisions(t *testing.T) {
 		{name: "at sign and prefix before a secret", input: "x@sha1:" + commit + " end", secrets: []string{commit}},
 	})
 }
+
+// The collector names an Incident "incident-" and the 64 lower-case hex digits of its fingerprint (#264). That
+// exact form is kept; any other hex run stays a token: another length, no prefix, upper case, or part of a
+// longer name.
+func TestIncidentNameIsKept(t *testing.T) {
+	hex64 := rep("9f86d081", 8)
+	name := "incident-" + hex64
+	for _, in := range []string{
+		name,
+		"Shadewright proposes one typed change for incident `" + name + "`.",
+		"incident " + name + ", policy p/1",
+	} {
+		if out := String(in); out != in {
+			t.Errorf("changed an Incident name:\n in: %s\nout: %s", in, out)
+		}
+	}
+	for _, token := range []string{
+		rep("3f1c9a7b", 5),                         // 40 hex digits
+		hex64,                                      // 64 hex digits without the prefix
+		"incident-" + rep("3f1c9a7b", 5),           // the prefix and 40 hex digits
+		"incident-" + strings.ToUpper(hex64),       // upper-case hex
+		"incident-" + hex64 + "0",                  // 65 hex digits
+		"xincident-" + hex64,                       // another prefix
+		"incident-" + hex64 + ".example",           // part of a longer name
+		"x.incident-" + hex64,                      // part of a longer name
+		"incident-" + hex64 + "-" + rep("ab12", 6), // a token after the name
+	} {
+		in := "incident `" + token + "` end"
+		out := String(in)
+		if !strings.Contains(out, "[REDACTED:token]") {
+			t.Errorf("kept a token that is no Incident name:\n in: %s\nout: %s", in, out)
+		}
+	}
+}

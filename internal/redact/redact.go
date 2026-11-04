@@ -721,9 +721,12 @@ const minTokenLength = 24
 // Paths and image names (short parts between slashes), long names made of letters only, Kubernetes names
 // and UUIDs (lower case, short pieces between hyphens) and the hex of an image digest ("sha256:...", which
 // identifies a build, not a credential, also with a suffix such as "-amd64") are kept; what follows the
-// digest's hex is judged on its own.
+// digest's hex is judged on its own. The name the collector gives an Incident (isIncidentName) is kept too.
 func longTokenSpan(s string, m []int, _ int) (int, int, bool) {
 	start, run := m[0], s[m[0]:m[1]]
+	if isIncidentName(s, m) {
+		return 0, 0, false
+	}
 	if prefix := strings.ToLower(s[max(0, m[0]-7):m[0]]); prefix == "sha256:" || prefix == "sha512:" {
 		if digest, rest, _ := strings.Cut(run, "-"); isHex(digest) {
 			start, run = m[1]-len(rest), rest
@@ -733,6 +736,28 @@ func longTokenSpan(s string, m []int, _ int) (int, int, bool) {
 		return start, m[1], true
 	}
 	return 0, 0, false
+}
+
+// incidentNamePrefix and incidentNameHexLength give the form of the name the collector gives an Incident:
+// the prefix and the 64 lower-case hex digits of its fingerprint, a SHA-256 digest (incidents.Name).
+const (
+	incidentNamePrefix    = "incident-"
+	incidentNameHexLength = 64
+)
+
+// isIncidentName reports whether the run m of s is, as a whole, the name the collector gives an Incident:
+// exactly incidentNamePrefix and incidentNameHexLength lower-case hex digits, not part of a longer name (no
+// '.' on either side; the other name characters are part of the run). The hex is a fingerprint, not a
+// credential, and a reviewer needs the name to find the Incident (#264). Any other hex run, with another
+// prefix, another length or upper case, is judged as a token.
+func isIncidentName(s string, m []int) bool {
+	hex, ok := strings.CutPrefix(s[m[0]:m[1]], incidentNamePrefix)
+	if !ok || len(hex) != incidentNameHexLength || strings.ContainsFunc(hex, func(r rune) bool {
+		return (r < '0' || r > '9') && (r < 'a' || r > 'f')
+	}) {
+		return false
+	}
+	return (m[0] == 0 || s[m[0]-1] != '.') && (m[1] == len(s) || s[m[1]] != '.')
 }
 
 // randomRun reports whether some part of run between slashes looks random, as described for longTokenSpan.

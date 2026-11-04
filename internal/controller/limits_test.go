@@ -543,7 +543,8 @@ func TestLimitsMetrics(t *testing.T) {
 	}
 
 	trips := testutil.ToFloat64(breakerTrips)
-	open := limitsState{open: true, reason: ReasonCircuitOpen, limit: 1}
+	open := limitsState{circuit: circuitOpen, reason: ReasonCircuitOpen, limit: 1}
+	halfOpen := limitsState{circuit: circuitHalfOpen, probing: true, reason: ReasonCircuitHalfOpen, limit: 1}
 	recordLimits(open, nil)
 	recordLimits(open, nil)
 	if got := testutil.ToFloat64(breakerTrips) - trips; got != 1 || testutil.ToFloat64(breakerOpen) != 1 {
@@ -554,14 +555,28 @@ func TestLimitsMetrics(t *testing.T) {
 	if got := testutil.ToFloat64(breakerTrips) - trips; got != 2 {
 		t.Fatalf("trips rose by %v, want 2 after it closed and opened again", got)
 	}
+	// Half-open is reported as open (1) and is no trip; a failed probe that opens it again is one.
+	recordLimits(halfOpen, nil)
+	if got := testutil.ToFloat64(breakerTrips) - trips; got != 2 || testutil.ToFloat64(breakerOpen) != 1 {
+		t.Fatalf("trips rose by %v (open %v) when half-open, want 2 and 1", got, testutil.ToFloat64(breakerOpen))
+	}
+	recordLimits(open, nil)
+	if got := testutil.ToFloat64(breakerTrips) - trips; got != 3 {
+		t.Fatalf("trips rose by %v, want 3 after a failed probe opened it again", got)
+	}
 	recordLimits(limitsState{limit: 1}, nil)
+	if testutil.ToFloat64(breakerOpen) != 0 {
+		t.Fatal("breaker open gauge is not 0 once closed")
+	}
 }
 
 // TestLimitsMetricLabelsAreClosed checks that every reason of the limits has a label value, and that the
 // values are the documented closed set.
 func TestLimitsMetricLabelsAreClosed(t *testing.T) {
-	want := map[string]bool{"target_locked": true, "concurrency_limit": true, "circuit_open": true, "limits_unknown": true}
-	for _, reason := range []string{ReasonTargetLocked, ReasonConcurrencyLimit, ReasonCircuitOpen, ReasonLimitsUnknown} {
+	want := map[string]bool{"target_locked": true, "concurrency_limit": true, "circuit_open": true,
+		"circuit_half_open": true, "limits_unknown": true}
+	for _, reason := range []string{ReasonTargetLocked, ReasonConcurrencyLimit, ReasonCircuitOpen,
+		ReasonCircuitHalfOpen, ReasonLimitsUnknown} {
 		if !want[waitReasons[reason]] {
 			t.Fatalf("reason %s has label value %q, not in the closed set", reason, waitReasons[reason])
 		}

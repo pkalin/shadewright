@@ -1,0 +1,100 @@
+{{ template "chart.header" . }}
+
+{{ template "chart.badgesSection" . }}
+
+<!-- This file is generated from values.yaml and README.md.gotmpl by helm-docs (make chart-docs). Do not edit it by hand. -->
+
+[Shadewright](https://shadewright.io) is a Kubernetes operations agent. It watches a cluster, groups repeated symptoms into incidents, asks an LLM for a diagnosis and proposes a fix only as a pull request to your GitOps repository. The GitOps controller deploys the fix and Shadewright verifies the effect. Model output is never authorization: deterministic policy decides what may run.
+
+This chart installs the two components (the analyzer and the executor), their RBAC, NetworkPolicies, metrics Services and the CRDs.
+
+## Prerequisites
+
+- Kubernetes version `{{ template "chart.kubeVersion" . }}` (the `kubeVersion` of Chart.yaml).
+- Flux, the GitOps controller that deploys the pull requests the executor opens (Argo CD is not supported yet).
+- Workload identity for the executor: a managed identity (Azure) with a federated credential for the executor ServiceAccount, allowed to sign with the GitHub App key in Key Vault. Its client ID is `executor.identity.azure.clientId`. The ServiceAccount names derive from the release name: install as release `shadewright` in the namespace `shadewright-system` to get `shadewright-executor` and `shadewright-analyzer`, and check them with `helm template` before you create the credential.
+- The images, pinned by digest (see the release notes).
+
+## Install
+
+Write a `my-values.yaml` with the required values:
+
+```yaml
+clusterId: my-cluster
+executor:
+  image:
+    digest: sha256:<executor image digest>
+  identity:
+    azure:
+      clientId: <client ID of the executor managed identity>
+analyzer:
+  image:
+    digest: sha256:<analyzer image digest>
+  watchNamespaces: [<namespace to watch>]
+```
+
+```bash
+helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+  --namespace shadewright-system --create-namespace -f my-values.yaml
+```
+
+`values.schema.json` validates the values on install, upgrade, lint and template, and the chart refuses to render without the required ones. To manage the `RemediationSettings` object from the chart, set `settings.create: true` and give `settings.spec` (the fields are in the [API reference](https://shadewright.io/reference/api/)):
+
+```yaml
+settings:
+  create: true
+  spec:
+    maxConcurrentRemediations: 1
+    repositories:
+      - name: fleet
+        url: https://github.com/<owner>/<repo>
+        targetBranch: main
+        provider: GitHub
+        github:
+          appClientID: <GitHub App client ID>
+          installationID: <installation ID>
+          signer:
+            azureKeyVault:
+              keyID: https://<vault>.vault.azure.net/keys/<key>
+    modules:
+      platforms: [aks]
+      integrations: [flux]
+```
+
+## Verify the signatures
+
+The chart and the images are signed with cosign keyless (GitHub OIDC) by digest. Verify before you install. The identity of the chart is the chart workflow on a release tag of this repository:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/pkalin/shadewright/\.github/workflows/chart\.yml@refs/tags/v[0-9].*$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/pkalin/charts/shadewright@sha256:<chart digest>
+```
+
+The digest is in the run summary of the Chart workflow, or `helm pull oci://ghcr.io/pkalin/charts/shadewright --version <version>` prints it (`Digest:`). Image signatures are verified the same way: use the image name (`ghcr.io/pkalin/shadewright-executor@sha256:<digest>` or `shadewright-analyzer`) and the `images\.yml` workflow in the identity.
+
+## Upgrade
+
+```bash
+helm upgrade shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+  --namespace shadewright-system -f my-values.yaml
+```
+
+The CRDs are templates of this chart, so `helm upgrade` upgrades them (Helm itself never upgrades CRDs from a `crds/` directory). Read the release notes first: a change to the CRD schema, the flags or the values is listed as breaking. With `settings.create: true` every upgrade replaces the `RemediationSettings` object with `settings.spec`.
+
+## Uninstall
+
+```bash
+helm uninstall shadewright --namespace shadewright-system
+```
+
+- With `crd.keep: true` (the default) the CRDs stay, and so does every Incident and RemediationRequest. Set it to `false` before you uninstall only if you want them all deleted with the release.
+- The `RemediationSettings` object created by `settings.create` is a Helm hook object: Helm does not track it, so it is **not removed**. Delete it yourself (`kubectl delete remediationsettings default`).
+- Read [upgrade and uninstall](https://shadewright.io/upgrade-uninstall/) for the order that avoids stuck requests, and for the GitHub App, Key Vault key and federated credential that live outside the cluster.
+
+## Values
+
+{{ template "chart.valuesSection" . }}
+
+

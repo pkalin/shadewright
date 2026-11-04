@@ -1,0 +1,27 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer-role" "context" $) }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "" "context" $) | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - list
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - remediationsettings
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - remediationsettings/status
+  verbs:
+  - update

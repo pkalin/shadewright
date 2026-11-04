@@ -1,0 +1,19 @@
+{{- if .Values.metrics.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "executor-metrics-service" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "executor" "context" $) | nindent 4 }}
+    control-plane: executor
+spec:
+  ports:
+  - name: {{ if .Values.metrics.secure }}https{{ else }}http{{ end }}
+    port: {{ .Values.metrics.port }}
+    protocol: TCP
+    targetPort: {{ .Values.metrics.port }}
+  selector:
+    app.kubernetes.io/name: {{ include "shadewright.name" . }}
+    control-plane: executor
+{{- end }}

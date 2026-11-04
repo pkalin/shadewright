@@ -22,8 +22,8 @@ fi
 
 awk '
 BEGIN {
-  nsc = split("api analyzer policy gitops platforms integrations docs ci deps other", scopes, " ")
-  split("API|Analyzer|Policy|GitOps|Platforms|Integrations|Docs|CI|Dependencies|Other", titles, "|")
+  nsc = split("api analyzer policy gitops platforms integrations chart docs ci deps other", scopes, " ")
+  split("API|Analyzer|Policy|GitOps|Platforms|Integrations|Chart|Docs|CI|Dependencies|Other", titles, "|")
   for (i = 1; i <= nsc; i++) known[scopes[i]] = i
   ntypes = 0
   heading = ""; breaking = ""; cur = 0; ntail = 0

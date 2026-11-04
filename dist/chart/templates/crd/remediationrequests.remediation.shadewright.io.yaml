@@ -1,0 +1,528 @@
+{{- if .Values.crd.enabled }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    {{- if .Values.crd.keep }}
+    "helm.sh/resource-policy": keep
+    {{- end }}
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: remediationrequests.remediation.shadewright.io
+spec:
+  group: remediation.shadewright.io
+  names:
+    categories:
+    - shadewright
+    kind: RemediationRequest
+    listKind: RemediationRequestList
+    plural: remediationrequests
+    shortNames:
+    - rr
+    singular: remediationrequest
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.action.type
+      name: Action
+      type: string
+    - jsonPath: .spec.targetRef.name
+      name: Target
+      type: string
+    - jsonPath: .status.pullRequest.number
+      name: PR
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          RemediationRequest is one proposed fix: a typed action on one object, carried out as a GitOps pull request
+          after deterministic policy allows it.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec is the plan.
+            properties:
+              action:
+                description: action is the typed change.
+                properties:
+                  adjustKedaMaxReplicas:
+                    description: adjustKedaMaxReplicas holds the parameters for AdjustKedaMaxReplicas.
+                    properties:
+                      desiredValue:
+                        description: desiredValue is the new maxReplicaCount.
+                        format: int32
+                        maximum: 1000
+                        minimum: 1
+                        type: integer
+                      previousValue:
+                        description: previousValue is the value the plan was made
+                          against.
+                        format: int32
+                        maximum: 1000
+                        minimum: 1
+                        type: integer
+                    required:
+                    - desiredValue
+                    - previousValue
+                    type: object
+                    x-kubernetes-validations:
+                    - message: desiredValue must differ from previousValue
+                      rule: self.desiredValue != self.previousValue
+                  setContainerMemoryLimit:
+                    description: setContainerMemoryLimit holds the parameters for
+                      SetContainerMemoryLimit.
+                    properties:
+                      container:
+                        description: container is the container name in the pod template.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      desired:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: desired is the new limit.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      previous:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: previous is the limit the plan was made against.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    required:
+                    - container
+                    - desired
+                    - previous
+                    type: object
+                    x-kubernetes-validations:
+                    - message: desired must differ from previous
+                      rule: quantity(string(self.desired)).compareTo(quantity(string(self.previous)))
+                        != 0
+                    - message: previous and desired must be whole bytes
+                      rule: quantity(string(self.previous)).isInteger() && quantity(string(self.desired)).isInteger()
+                    - message: previous must be between 1Mi and 1Ti
+                      rule: quantity(string(self.previous)).compareTo(quantity('1Mi'))
+                        >= 0 && quantity(string(self.previous)).compareTo(quantity('1Ti'))
+                        <= 0
+                    - message: desired must be between 1Mi and 1Ti
+                      rule: quantity(string(self.desired)).compareTo(quantity('1Mi'))
+                        >= 0 && quantity(string(self.desired)).compareTo(quantity('1Ti'))
+                        <= 0
+                  type:
+                    description: type selects the action.
+                    enum:
+                    - AdjustKedaMaxReplicas
+                    - SetContainerMemoryLimit
+                    type: string
+                required:
+                - type
+                type: object
+                x-kubernetes-validations:
+                - message: adjustKedaMaxReplicas must be set if and only if type is
+                    AdjustKedaMaxReplicas
+                  rule: 'self.type == ''AdjustKedaMaxReplicas'' ? has(self.adjustKedaMaxReplicas)
+                    : !has(self.adjustKedaMaxReplicas)'
+                - message: setContainerMemoryLimit must be set if and only if type
+                    is SetContainerMemoryLimit
+                  rule: 'self.type == ''SetContainerMemoryLimit'' ? has(self.setContainerMemoryLimit)
+                    : !has(self.setContainerMemoryLimit)'
+              approvalRequired:
+                default: true
+                description: |-
+                  approvalRequired asks for human review. false is a request for automation that policy may refuse;
+                  it never lowers policy or repository rules.
+                type: boolean
+              incidentRef:
+                description: incidentRef is the incident this plan answers.
+                properties:
+                  name:
+                    description: name of the Incident.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                  uid:
+                    description: uid of the Incident.
+                    pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+              mode:
+                default: GitOps
+                description: mode is how the plan is carried out.
+                enum:
+                - GitOps
+                type: string
+              policyRef:
+                description: policyRef names the RemediationPolicy that must allow
+                  this plan.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              targetRef:
+                description: targetRef is the live object the change is about.
+                properties:
+                  apiVersion:
+                    description: apiVersion of the object, for example apps/v1 or
+                      keda.sh/v1alpha1.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?v[0-9]+((alpha|beta)[0-9]+)?$
+                    type: string
+                  kind:
+                    description: kind of the object.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[A-Z][A-Za-z0-9]*$
+                    type: string
+                  name:
+                    description: name of the object.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                  namespace:
+                    description: namespace of the object; empty for cluster-scoped
+                      objects.
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  uid:
+                    description: uid of the object.
+                    pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
+                x-kubernetes-validations:
+                - message: targetRef.uid is required
+                  rule: has(self.uid) && size(self.uid) > 0
+                - message: targetRef.namespace is required
+                  rule: has(self.namespace) && size(self.namespace) > 0
+              verification:
+                default: {}
+                description: verification says when the change counts as a success.
+                properties:
+                  checks:
+                    description: checks to run in addition to the ones the action
+                      type always needs.
+                    items:
+                      description: |-
+                        VerificationCheck is a named, deterministic check run after delivery. DeliveryRevisionApplied: the GitOps
+                        controller has applied the revision that contains the merged change. WorkloadHealthy: the target workload
+                        is available and its rollout is complete. KedaReady: the KEDA ScaledObject reports Ready=True, is not
+                        paused (Paused=True, which a scale-in or scale-out pause also sets), is not on fallback (Fallback=True) and
+                        its HPA can read its metrics (HPAActive is not False). QueueBacklogDecreasing: the backlog that drives the
+                        ScaledObject is going down. NoNewOOMKills: no container of the target is OOMKilled after the change.
+                      enum:
+                      - DeliveryRevisionApplied
+                      - WorkloadHealthy
+                      - KedaReady
+                      - QueueBacklogDecreasing
+                      - NoNewOOMKills
+                      type: string
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-type: set
+                  stableFor:
+                    default: 3m
+                    description: stableFor is how long all checks must hold.
+                    type: string
+                  timeout:
+                    default: 10m
+                    description: timeout is how long to wait for delivery and stability
+                      before giving up.
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: stableFor must be at least 1m
+                  rule: '!has(self.stableFor) || duration(self.stableFor) >= duration(''1m'')'
+                - message: timeout must be at most 24h
+                  rule: '!has(self.timeout) || duration(self.timeout) <= duration(''24h'')'
+                - message: timeout must be longer than stableFor
+                  rule: '!has(self.timeout) || !has(self.stableFor) || duration(self.timeout)
+                    > duration(self.stableFor)'
+            required:
+            - action
+            - incidentRef
+            - policyRef
+            - targetRef
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable; a changed plan is a new RemediationRequest
+              rule: self == oldSelf
+            - message: AdjustKedaMaxReplicas can only target a keda.sh ScaledObject
+              rule: self.action.type != 'AdjustKedaMaxReplicas' || (self.targetRef.apiVersion.startsWith('keda.sh/')
+                && self.targetRef.kind == 'ScaledObject')
+            - message: SetContainerMemoryLimit can only target an apps/v1 Deployment
+                or StatefulSet
+              rule: self.action.type != 'SetContainerMemoryLimit' || (self.targetRef.apiVersion
+                == 'apps/v1' && self.targetRef.kind in ['Deployment', 'StatefulSet'])
+          status:
+            description: status is the progress, written by the controller.
+            properties:
+              breakerProbe:
+                description: |-
+                  breakerProbe is true on a request the policy check let through while the circuit breaker was tripped
+                  (half-open): it is the breaker's probe. It is written with the allowed decision and never cleared. The
+                  breaker finds a running probe, or one that ended without a success, by this field only; a request
+                  without it is not a probe.
+                type: boolean
+              conditions:
+                description: |-
+                  conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
+                  Verified, PlanFresh, WritesPaused and Queued.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              deadline:
+                description: deadline is when the current step gives up.
+                format: date-time
+                type: string
+              effectiveApprovalRequired:
+                description: effectiveApprovalRequired is what policy decided, which
+                  may be stricter than spec.approvalRequired.
+                type: boolean
+              lastPhaseTransitionTime:
+                description: |-
+                  lastPhaseTransitionTime is when phase last changed, to the microsecond. The circuit breaker orders the
+                  outcomes of requests by it.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: observedGeneration is the generation the status describes.
+                format: int64
+                type: integer
+              phase:
+                description: phase summarizes progress.
+                enum:
+                - Pending
+                - PolicyChecked
+                - PRCreated
+                - AwaitingApproval
+                - AutoMergeQueued
+                - Merged
+                - WaitingForDelivery
+                - Verifying
+                - Succeeded
+                - Denied
+                - Failed
+                - Expired
+                - Cancelled
+                - Superseded
+                - NeedsIntervention
+                type: string
+              planDigest:
+                description: |-
+                  planDigest covers the semantic change, the target UID, the resolved source with the repository URL and
+                  provider installation from RemediationSettings, and the policy UID and generation. It is fixed when the
+                  branch is created; if any input changes later, the request becomes Superseded and its PR is closed.
+                pattern: ^sha256:[0-9a-f]{64}$
+                type: string
+              planRepository:
+                description: planRepository is the repository and installation the
+                  plan digest covers, set together with planDigest.
+                properties:
+                  installationID:
+                    description: installationID is the provider installation that
+                      covers the repository; 0 when the provider has none.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  url:
+                    description: url is the repository URL from RemediationSettings.
+                    maxLength: 512
+                    type: string
+                required:
+                - url
+                type: object
+              policyRevision:
+                description: |-
+                  policyRevision is the policy name and generation the decision used, as name/generation. The policy UID
+                  is recorded next to it, because a deleted and recreated policy can reach the same generation again.
+                maxLength: 128
+                type: string
+              policyUID:
+                description: policyUID is the UID of the policy the decision used.
+                  It is part of the plan digest.
+                pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                type: string
+              pullRequest:
+                description: pullRequest is set once the pull request exists.
+                properties:
+                  headSHA:
+                    description: headSHA is the commit Shadewright pushed. Any other
+                      head stops automation.
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  number:
+                    description: number of the pull request.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  renderedTargetHead:
+                    description: |-
+                      renderedTargetHead is the head of the target branch at which the change in the pull request was last
+                      rendered and found to be exactly the planned one. While the pull request waits, the change is rendered
+                      again only when the target branch head is another commit; empty means not rendered since it was recorded.
+                    maxLength: 40
+                    minLength: 40
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  url:
+                    description: url of the pull request.
+                    maxLength: 2048
+                    pattern: ^https://
+                    type: string
+                required:
+                - headSHA
+                - number
+                - url
+                type: object
+              source:
+                description: source is where the change is made, resolved by the controller
+                  before the policy check.
+                properties:
+                  baseCommit:
+                    description: |-
+                      baseCommit is the full SHA of the target branch the change was made against. It is fixed when the branch
+                      is created; later merges to the target branch do not change it.
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  buildPath:
+                    description: |-
+                      buildPath is the directory the Flux Kustomization builds (its spec.path, "." for the repository root).
+                      Before every commit the pull request step renders it with and without the change and refuses anything
+                      but the planned difference (design 8.2, steps 4 and 5). The policy check always sets it, and the plan
+                      digest covers it; a request without it is never committed.
+                    maxLength: 512
+                    minLength: 1
+                    pattern: ^(\.|[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)$
+                    type: string
+                  path:
+                    description: path is the file that declares the target.
+                    maxLength: 512
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.ya?ml$
+                    type: string
+                  repositoryRef:
+                    description: repositoryRef is the RemediationSettings entry whose
+                      URL matches the Flux source.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  targetBranch:
+                    description: |-
+                      targetBranch is the branch the pull request targets: the branch Flux tracks, which must equal the
+                      repository's targetBranch in RemediationSettings.
+                    maxLength: 255
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: must be a plain branch name, not HEAD, refs/..., shadewright/...
+                        or one containing '..' or '.lock'
+                      rule: '!self.contains(''..'') && !self.endsWith(''.lock'') &&
+                        !self.contains(''.lock/'') && self != ''HEAD'' && !self.startsWith(''refs/'')
+                        && !self.startsWith(''shadewright/'')'
+                required:
+                - baseCommit
+                - path
+                - repositoryRef
+                - targetBranch
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+{{- end }}

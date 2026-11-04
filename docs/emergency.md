@@ -1,6 +1,6 @@
 # Emergency stop
 
-This page says how to stop Shadewright quickly, and what each step does not stop. Every setting below lives in the one cluster-wide `RemediationSettings` object, named `default` ([API reference](reference/api.md)). Run the commands with a kubeconfig that may patch it.
+This page says how to stop Shadewright quickly, and what each step does not stop. Every setting below lives in the one cluster-wide `RemediationSettings` object, named `default` ([API reference](reference/api.md)). Run the commands with a kubeconfig that may patch it. A pause is set by kubectl or GitOps: with the Helm chart, `settings.create=true` only creates the object when it does not exist, and Helm never changes it after the install, so a `helm upgrade` does not undo a pause (a GitOps repository that manages the object does, so change it there too).
 
 ## What pausing does not do
 

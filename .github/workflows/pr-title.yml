@@ -39,6 +39,7 @@ jobs:
             gitops
             platforms
             integrations
+            chart
             docs
             ci
             deps

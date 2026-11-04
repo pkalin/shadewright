@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer-leader-election-rolebinding" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "analyzer" "context" $) | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer-leader-election-role" "context" $) }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer" "context" $) }}
+  namespace: {{ .Release.Namespace }}

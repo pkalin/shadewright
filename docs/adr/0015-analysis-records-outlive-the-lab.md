@@ -18,9 +18,14 @@ Model transcripts (context sent, tool calls, outputs, tokens) are needed for aud
 
 - Real incidents from the lab become evaluation fixtures.
 - Storage cost is negligible at lab volume, but retention must be set.
+- The deployed role does not yet enforce create-only: see the amendment of 2026-11-04.
 - A redaction bug would now persist data, so redaction gets its own tests and is applied before both the model call and the write.
 
 ## Alternatives considered
 
 - Drop transcripts after analysis: no audit trail and no evaluation data.
 - Store them in the cluster: lost with the lab, and too large for etcd.
+
+## Amendments
+
+- 2026-11-04: the Decision (create-only) is unchanged, but the analysis writer role deployed in `shadewright-azure` does not enforce it. It grants `blobs/write`, which can overwrite an existing blob. Blob versioning is on, so an overwritten record keeps its earlier content as a version until retention removes it: today the guarantee is versioning as recovery evidence, not create-only. Making the role create-only is tracked in [#154](https://github.com/pkalin/shadewright/issues/154); immutable blob storage is an option there ([#244](https://github.com/pkalin/shadewright/issues/244)).

@@ -1,0 +1,145 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 1044" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Shadewright executor</title>
+  <desc id="d">Zoom into the executor identity. A RemediationRequest passes, in order: the source mapping (Flux objects to the one file in Git, within an input budget), the policy engine (policy, settings, live target state and the resolved source), the limits (concurrency, a lock per target, a circuit breaker with one probe when half-open; only an allowed request is held back as Queued and checked again every 30 seconds, a refusal is never held back), the freshness check, the patcher with the semantic diff, and the kill switch gate, which reads spec.paused right before every Git write. The Key Vault signer signs for the GitHub App, which creates the branch, commit and pull request outside the cluster; the request waits in AwaitingApproval. When a person merges, the controller observes the merge and the request stops in Merged, which is also the breaker's success. Refusals end in Denied, NeedsIntervention or Superseded. Built up to Merged. Planned, drawn dashed: auto-merge, the delivery check against the Flux lastAppliedRevision, and the verifier.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .pl{fill:#1d1b2b;stroke:#5a5478;stroke-width:1.2;stroke-dasharray:5 4}
+      .plk{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6;stroke-dasharray:6 4}
+      .ple{fill:#16222a;stroke:#2f5d63;stroke-width:1.2;stroke-dasharray:5 4}
+      .pn{fill:#8a85a8;font-size:10px;font-weight:600;letter-spacing:.06em}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .id{fill:none;stroke:#7c24fc;stroke-opacity:.55;stroke-dasharray:5 5;stroke-width:1.2}
+      .idt{fill:#a879ff;font-size:11.5px;font-weight:600;letter-spacing:.06em}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .fp{stroke:#a879ff;stroke-width:1.8;fill:none;stroke-dasharray:7 5}
+      .r{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .no{fill:#ff8fa3;font-size:11.5px;font-weight:600}
+    </style>
+  </defs>
+
+  <rect width="1120" height="1044" rx="18" fill="#0e0e16"/>
+
+  <!-- lanes -->
+  <rect class="lane" x="24" y="24" width="250" height="996" rx="14"/>
+  <text class="lanet" x="44" y="54">CLUSTER</text>
+  <rect class="lane" x="292" y="24" width="536" height="996" rx="14"/>
+  <text class="lanet" x="312" y="54">SHADEWRIGHT</text>
+  <rect class="lane" x="846" y="24" width="250" height="996" rx="14"/>
+  <text class="lanet" x="866" y="54">OUTSIDE THE CLUSTER</text>
+
+  <!-- identity -->
+  <rect class="id" x="312" y="74" width="496" height="922" rx="12"/>
+  <text class="idt" x="794" y="94" text-anchor="end">EXECUTOR IDENTITY · CR status + Git App</text>
+
+  <!-- cluster lane -->
+  <rect class="box" x="44" y="200" width="210" height="72" rx="10"/>
+  <text class="h" x="60" y="226">Flux objects</text>
+  <text class="s" x="60" y="247">Kustomization, GitRepository</text>
+  <text class="s" x="60" y="263">inventory · revision</text>
+  <rect class="box" x="44" y="350" width="210" height="72" rx="10"/>
+  <text class="h" x="60" y="376">Policy &amp; settings</text>
+  <text class="s" x="60" y="397">owned by the cluster admin</text>
+  <text class="s" x="60" y="413">spec.paused · limits</text>
+
+  <!-- executor -->
+  <rect class="key" x="420" y="110" width="280" height="56" rx="12"/>
+  <text class="h" x="440" y="135">RemediationRequest</text>
+  <text class="s" x="440" y="154">from the analyzer, never authority</text>
+  <rect class="box" x="332" y="200" width="210" height="72" rx="10"/>
+  <text class="h" x="348" y="226">Source mapping</text>
+  <text class="s" x="348" y="247">Flux objects → the one file</text>
+  <text class="s" x="348" y="263">in Git · input budget</text>
+  <text class="no" x="332" y="292">denied → Denied</text>
+  <text class="no" x="332" y="308">unmappable →</text>
+  <text class="no" x="332" y="324">NeedsIntervention</text>
+  <rect class="box" x="332" y="350" width="210" height="72" rx="10"/>
+  <text class="h" x="348" y="376">Policy engine</text>
+  <text class="s" x="348" y="397">policy · settings · live target</text>
+  <text class="s" x="348" y="413">the resolved source</text>
+  <text class="no" x="332" y="442">not allowed → Denied</text>
+  <rect class="box" x="578" y="350" width="210" height="72" rx="10"/>
+  <text class="h" x="594" y="376">Limits</text>
+  <text class="s" x="594" y="397">concurrency · lock per target</text>
+  <text class="s" x="594" y="413">breaker · half-open probe</text>
+  <text class="lbl" x="578" y="280">only an allowed request is</text>
+  <text class="lbl" x="578" y="296">held back as Queued, rechecked</text>
+  <text class="lbl" x="578" y="312">every 30 s. A refusal is never</text>
+  <text class="lbl" x="578" y="328">held back</text>
+  <rect class="box" x="578" y="490" width="210" height="72" rx="10"/>
+  <text class="h" x="594" y="516">Freshness check</text>
+  <text class="s" x="594" y="537">plan inputs still current</text>
+  <text class="s" x="594" y="553">rechecked every 5 minutes</text>
+  <text class="no" x="578" y="582">stale plan → Superseded</text>
+  <rect class="box" x="332" y="490" width="210" height="72" rx="10"/>
+  <text class="h" x="348" y="516">Patcher + semantic diff</text>
+  <text class="s" x="348" y="537">in-place patch · kustomize</text>
+  <text class="s" x="348" y="553">only the one field changes</text>
+  <text class="no" x="332" y="582">any other change →</text>
+  <text class="no" x="332" y="598">NeedsIntervention</text>
+  <rect class="box" x="332" y="640" width="210" height="72" rx="10"/>
+  <text class="h" x="348" y="666">Kill switch gate</text>
+  <text class="s" x="348" y="687">spec.paused · right before</text>
+  <text class="s" x="348" y="703">every Git write</text>
+  <text class="no" x="332" y="732">paused or unreadable → no write</text>
+  <rect class="box" x="578" y="770" width="210" height="72" rx="10"/>
+  <text class="h" x="594" y="796">AwaitingApproval</text>
+  <text class="s" x="594" y="817">phase · waits for a human</text>
+  <text class="s" x="594" y="833">approval of the head commit</text>
+  <rect class="box" x="332" y="770" width="210" height="72" rx="10"/>
+  <text class="h" x="348" y="796">Merged (observed)</text>
+  <text class="s" x="348" y="817">a person's merge, observed</text>
+  <text class="s" x="348" y="833">stops here · breaker success</text>
+  <rect class="pl" x="332" y="900" width="210" height="72" rx="10"/>
+  <text class="h" x="348" y="926">After the merge</text>
+  <text class="s" x="348" y="947">auto-merge · delivery check</text>
+  <text class="s" x="348" y="963">verifier</text>
+  <text class="pn" x="526" y="916" text-anchor="end">planned</text>
+
+  <!-- outside -->
+  <rect class="ext" x="866" y="640" width="210" height="72" rx="10"/>
+  <text class="h" x="882" y="666">Key Vault signer</text>
+  <text class="s" x="882" y="687">signs the App JWT, RS256</text>
+  <text class="s" x="882" y="703">key stays in the vault</text>
+  <rect class="ext" x="866" y="770" width="210" height="72" rx="10"/>
+  <text class="h" x="882" y="796">GitHub App</text>
+  <text class="s" x="882" y="817">branch · commit · pull request</text>
+  <text class="s" x="882" y="833">one repository, shadewright/*</text>
+
+  <!-- legend -->
+  <rect class="box" x="866" y="880" width="30" height="16" rx="4"/>
+  <text class="lbl" x="906" y="893">built</text>
+  <rect class="pl" x="866" y="906" width="30" height="16" rx="4"/>
+  <text class="lbl" x="906" y="919">designed, not built</text>
+
+  <!-- flow -->
+  <path class="f" d="M437 166V194" marker-end="url(#a)"/>
+  <path class="r" d="M254 236H326" marker-end="url(#m)"/>
+  <text class="lbl" x="262" y="228">reads</text>
+  <path class="f" d="M520 272V344" marker-end="url(#a)"/>
+  <path class="r" d="M254 386H326" marker-end="url(#m)"/>
+  <text class="lbl" x="262" y="378">reads</text>
+  <path class="f" d="M542 386H572" marker-end="url(#a)"/>
+  <path class="f" d="M683 422V484" marker-end="url(#a)"/>
+  <path class="f" d="M572 526H548" marker-end="url(#a)"/>
+  <path class="f" d="M520 562V634" marker-end="url(#a)"/>
+  <path class="f" d="M542 676H860" marker-end="url(#a)"/>
+  <text class="lbl" x="806" y="668">sign</text>
+  <path class="f" d="M971 712V764" marker-end="url(#a)"/>
+  <text class="lbl" x="981" y="742">token</text>
+  <path class="f" d="M860 806H794" marker-end="url(#a)"/>
+  <text class="lbl" x="800" y="798">opens PR</text>
+  <path class="f" d="M572 806H548" marker-end="url(#a)"/>
+  <path class="fp" d="M437 842V894" marker-end="url(#a)"/>
+  <path class="r" d="M44 236H34V936H326" marker-end="url(#m)"/>
+  <text class="lbl" x="60" y="928">observes revision</text>
+</svg>

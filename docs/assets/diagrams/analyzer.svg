@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 824" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Shadewright analyzer</title>
+  <desc id="d">Zoom into the analyzer identity. Built: the collector watches events and pod status in the watched namespaces, resolves owners, redacts and fingerprints them; two levels of deduplication feed a durable, bounded Incident CR; the analysis trigger decides when an Incident is due. The trigger reads maxAnalysesPerDay from the RemediationSettings spec and reads and updates the daily count in the Budget ConfigMap shadewright-analysis-budget in the operator namespace; an unreadable budget means not due. Separately, the analyzer reports platform and integration detection in the settings status; no component reads that status to decide anything. Prometheus (approved templates, watched namespaces) has an adapter that is built but not wired. Planned, drawn dashed: pod logs as a source, the context builder that takes selected, bounded data from the sources, the model call with read tools on escalation (ADR-0023), the model provider outside the cluster, and the typed RemediationRequest handed to the executor.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .pl{fill:#1d1b2b;stroke:#5a5478;stroke-width:1.2;stroke-dasharray:5 4}
+      .plk{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6;stroke-dasharray:6 4}
+      .ple{fill:#16222a;stroke:#2f5d63;stroke-width:1.2;stroke-dasharray:5 4}
+      .pn{fill:#8a85a8;font-size:10px;font-weight:600;letter-spacing:.06em}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .id{fill:none;stroke:#7c24fc;stroke-opacity:.55;stroke-dasharray:5 5;stroke-width:1.2}
+      .idt{fill:#a879ff;font-size:11.5px;font-weight:600;letter-spacing:.06em}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .fp{stroke:#a879ff;stroke-width:1.8;fill:none;stroke-dasharray:7 5}
+      .r{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .no{fill:#ff8fa3;font-size:11.5px;font-weight:600}
+    </style>
+  </defs>
+
+  <rect width="1120" height="824" rx="18" fill="#0e0e16"/>
+
+  <!-- lanes -->
+  <rect class="lane" x="24" y="24" width="250" height="776" rx="14"/>
+  <text class="lanet" x="44" y="54">CLUSTER</text>
+  <rect class="lane" x="292" y="24" width="536" height="776" rx="14"/>
+  <text class="lanet" x="312" y="54">SHADEWRIGHT</text>
+  <rect class="lane" x="846" y="24" width="250" height="776" rx="14"/>
+  <text class="lanet" x="866" y="54">OUTSIDE THE CLUSTER</text>
+
+  <!-- identity -->
+  <rect class="id" x="312" y="74" width="496" height="702" rx="12"/>
+  <text class="idt" x="794" y="94" text-anchor="end">ANALYZER IDENTITY · read-only + model</text>
+
+  <!-- cluster lane -->
+  <rect class="box" x="44" y="110" width="210" height="72" rx="10"/>
+  <text class="h" x="60" y="136">Workloads</text>
+  <text class="s" x="60" y="157">events · pod status</text>
+  <text class="s" x="60" y="173">watched namespaces only</text>
+  <text class="lbl" x="160" y="224">detection report</text>
+  <rect class="box" x="44" y="270" width="210" height="72" rx="10"/>
+  <text class="h" x="60" y="296">RemediationSettings</text>
+  <text class="s" x="60" y="317">maxAnalysesPerDay · status</text>
+  <text class="s" x="60" y="333">owned by the cluster admin</text>
+  <rect class="box" x="44" y="380" width="210" height="88" rx="10"/>
+  <text class="h" x="60" y="406">Budget ConfigMap</text>
+  <text class="s" x="60" y="427">shadewright-analysis-budget</text>
+  <text class="s" x="60" y="443">in the operator namespace</text>
+  <text class="s" x="60" y="459">get and update</text>
+  <rect class="box" x="44" y="510" width="210" height="72" rx="10"/>
+  <text class="h" x="60" y="536">Prometheus</text>
+  <text class="s" x="60" y="557">approved templates only</text>
+  <text class="s" x="60" y="573">watched namespaces</text>
+  <text class="pn" x="44" y="602">adapter built, not wired</text>
+  <rect class="pl" x="44" y="626" width="210" height="72" rx="10"/>
+  <text class="h" x="60" y="652">Pod logs</text>
+  <text class="s" x="60" y="673">read-only, bounded</text>
+  <text class="s" x="60" y="689">watched namespaces</text>
+  <text class="pn" x="238" y="642" text-anchor="end">planned</text>
+
+  <!-- analyzer: built -->
+  <rect class="box" x="332" y="110" width="210" height="72" rx="10"/>
+  <text class="h" x="348" y="136">Collector</text>
+  <text class="s" x="348" y="157">watched namespaces · owners</text>
+  <text class="s" x="348" y="173">redaction · fingerprint</text>
+  <rect class="box" x="578" y="110" width="210" height="72" rx="10"/>
+  <text class="h" x="594" y="136">Deduplication</text>
+  <text class="s" x="594" y="157">two levels: occurrence</text>
+  <text class="s" x="594" y="173">then fingerprint</text>
+  <rect class="box" x="578" y="240" width="210" height="72" rx="10"/>
+  <text class="h" x="594" y="266">Incident CR</text>
+  <text class="s" x="594" y="287">durable · bounded</text>
+  <text class="s" x="594" y="303">one per fingerprint</text>
+  <text class="lbl" x="578" y="334">caps: 256 held per Incident,</text>
+  <text class="lbl" x="578" y="350">2,500 per source namespace,</text>
+  <text class="lbl" x="578" y="366">at most 500 Incidents</text>
+  <rect class="box" x="332" y="270" width="210" height="72" rx="10"/>
+  <text class="h" x="348" y="296">Analysis trigger</text>
+  <text class="s" x="348" y="317">due · daily budget</text>
+  <text class="s" x="348" y="333">debounce · cooldown</text>
+  <text class="no" x="332" y="366">unreadable budget → not due</text>
+
+  <!-- analyzer: planned -->
+  <rect class="pl" x="332" y="540" width="210" height="72" rx="10"/>
+  <text class="h" x="348" y="566">Context builder</text>
+  <text class="s" x="348" y="587">deterministic · bounded</text>
+  <text class="s" x="348" y="603">redacted · replayable</text>
+  <text class="pn" x="526" y="556" text-anchor="end">planned</text>
+  <rect class="plk" x="420" y="660" width="280" height="56" rx="12"/>
+  <text class="h" x="440" y="685">RemediationRequest</text>
+  <text class="pn" x="684" y="678" text-anchor="end">planned</text>
+  <text class="s" x="440" y="704">a typed proposal, never authority</text>
+
+  <!-- outside -->
+  <rect class="ple" x="866" y="540" width="210" height="72" rx="10"/>
+  <text class="h" x="882" y="566">Model provider</text>
+  <text class="s" x="882" y="587">redacted, bounded context</text>
+  <text class="s" x="882" y="603">one structured result</text>
+  <text class="pn" x="1060" y="556" text-anchor="end">planned</text>
+  <text class="lbl" x="866" y="632">no tools with write access</text>
+
+  <!-- legend -->
+  <rect class="box" x="866" y="700" width="30" height="16" rx="4"/>
+  <text class="lbl" x="906" y="713">built</text>
+  <rect class="pl" x="866" y="726" width="30" height="16" rx="4"/>
+  <text class="lbl" x="906" y="739">designed, not built</text>
+
+  <!-- flow -->
+  <path class="f" d="M254 146H326" marker-end="url(#a)"/>
+  <path class="f" d="M542 146H572" marker-end="url(#a)"/>
+  <path class="f" d="M683 182V234" marker-end="url(#a)"/>
+  <path class="f" d="M572 276H548" marker-end="url(#a)"/>
+  <path class="r" d="M254 292H326" marker-end="url(#m)"/>
+  <text class="lbl" x="262" y="264">maxAnalysesPerDay (spec)</text>
+  <path class="r" d="M254 420H290V322H326" marker-end="url(#m)" marker-start="url(#m)"/>
+  <path class="f" d="M312 230H150V264" marker-end="url(#a)"/>
+  <path class="fp" d="M520 342V534" marker-end="url(#a)"/>
+  <text class="lbl" x="530" y="440">when due</text>
+  <path class="fp" d="M254 546H326" marker-end="url(#a)"/>
+  <text class="lbl" x="262" y="534">selected, bounded</text>
+  <path class="fp" d="M254 662H290V586H326" marker-end="url(#a)"/>
+  <path class="fp" d="M149 504V488H971V534" marker-end="url(#m)" marker-start="url(#m)"/>
+  <text class="lbl" x="600" y="480">read tools, on escalation</text>
+  <path class="fp" d="M542 576H860" marker-end="url(#m)" marker-start="url(#m)"/>
+  <text class="lbl" x="590" y="568">context out, structured result in</text>
+  <path class="fp" d="M437 612V654" marker-end="url(#a)"/>
+  <text class="lbl" x="447" y="640">validate, then propose</text>
+
+  <!-- refusal -->
+  <text class="no" x="332" y="752">no evidence → no proposal, hand off to a human</text>
+</svg>

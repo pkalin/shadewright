@@ -244,7 +244,7 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			RegardingKind:       kindPod,
 			RegardingName:       pod.Name,
 		}
-		obs := r.c.observation(fo, subject, t.finished)
+		obs := r.c.observation(fo, subject, pod.Namespace, t.finished)
 		obs.Occurrence, obs.Began, obs.Total, obs.MayRepeat = t.occurrence(pod.UID), t.finished, 1, t.mayRepeat
 		if !t.mayRepeat {
 			obs.Count = 1

@@ -469,3 +469,33 @@ func TestIncreaseIsCapped(t *testing.T) {
 		}
 	}
 }
+
+// TestSourceIsTheNamespaceTheObservationCameFrom checks Source: the event's own namespace, also for a
+// cluster-scoped subject whose namespace is empty, and the pod's namespace for a termination from pod status.
+func TestSourceIsTheNamespaceTheObservationCameFrom(t *testing.T) {
+	d, rs, pod := workload()
+	withTermination(pod, "containerd://aaa", ReasonOOMKilled, 137, t0)
+	h := newHarness(t, Config{}, d, rs, pod)
+
+	node := warning("node", 0)
+	node.Reason, node.Action, node.Note = "NodeNotReady", "Checking", "Node status is now: NodeNotReady"
+	node.Regarding = corev1.ObjectReference{APIVersion: apiCore, Kind: "Node", Name: node.ReportingInstance, UID: "node-uid"}
+	h.create(node)
+	h.reconcileEvent(node.Name)
+	if got := h.one(); got.Subject.Kind != "Node" || got.Subject.Namespace != "" || got.Source != testNS {
+		t.Errorf("Node event: subject %+v, source %q, want an empty subject namespace and source %q",
+			got.Subject, got.Source, testNS)
+	}
+
+	ev := warning("pod", 0)
+	h.create(ev)
+	h.reconcileEvent(ev.Name)
+	if got := h.one(); got.Source != testNS {
+		t.Errorf("pod event: source %q, want %q", got.Source, testNS)
+	}
+
+	h.reconcilePod(pod.Name)
+	if got := h.one(); got.Reason != ReasonOOMKilled || got.Source != pod.Namespace {
+		t.Errorf("termination: reason %q, source %q, want %s from %q", got.Reason, got.Source, ReasonOOMKilled, pod.Namespace)
+	}
+}

@@ -202,14 +202,17 @@ func (c *Collector) fromEvent(ctx context.Context, ev *eventsv1.Event) (Observat
 		RegardingKind:       reg.Kind,
 		RegardingName:       reg.Name,
 	}
-	return c.observation(fo, subject, lastOccurrence(ev)), true, nil
+	return c.observation(fo, subject, ev.Namespace, lastOccurrence(ev)), true, nil
 }
 
-// observation computes the fingerprint and the symptom of fo. The raw note is not kept.
-func (c *Collector) observation(fo fingerprint.Observation, subject remediationv1alpha1.ObjectRef, at time.Time) Observation {
+// observation computes the fingerprint and the symptom of fo, which came from namespace source. The raw note
+// is not kept.
+func (c *Collector) observation(fo fingerprint.Observation, subject remediationv1alpha1.ObjectRef, source string,
+	at time.Time) Observation {
 	return Observation{
 		Fingerprint:         fingerprint.Fingerprint(fo),
 		Subject:             subject,
+		Source:              source,
 		Reason:              fo.Reason,
 		Type:                fo.Type,
 		ReportingController: fo.ReportingController,

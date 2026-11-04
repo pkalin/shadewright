@@ -65,7 +65,11 @@ jobs:
         with:
           version: ${{ env.HELM_VERSION }}
 
+      # Pull requests and main use the v0.1.0 image digests; a release tag uses the digests of the images
+      # of that tag (the script waits for the Images workflow of the tag to push them).
       - name: Install the chart on Kind and check the permissions
+        env:
+          CHART_TEST_IMAGE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
         run: make test-chart-install
 
       # The cluster is deleted even when a step failed.

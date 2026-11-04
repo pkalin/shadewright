@@ -6,10 +6,6 @@ cliVersion: 4.16.0
 domain: shadewright.io
 layout:
 - go.kubebuilder.io/v4
-plugins:
-  helm.kubebuilder.io/v2-alpha:
-    manifests: dist/install.yaml
-    output: dist
 projectName: shadewright
 repo: github.com/pkalin/shadewright
 resources:

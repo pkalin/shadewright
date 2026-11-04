@@ -6,6 +6,10 @@
   A safe-remediation controller for Kubernetes clusters run with GitOps: it turns untrusted proposals, from rules or an LLM, into typed, bounded changes tied to policy and to the object's real source in Git, delivers them only as reviewed pull requests, and verifies the effect.
 </p>
 
+<p align="center">
+  <a href="https://artifacthub.io/packages/search?repo=shadewright"><img src="https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/shadewright" alt="Artifact Hub"></a>
+</p>
+
 > [!WARNING]
 > Early. Built so far: the API and its validation, the policy check with source mapping and the freshness check, the YAML patchers, the semantic diff check, the GitHub and Key Vault adapters, the Prometheus metrics source and pod logs adapters (not wired yet), the pull request step (branch, commit and pull request, up to a person's review), the kill switch (`spec.paused`, one gate right before every Git write), the concurrency limit, the lock per target and the circuit breaker (retry limits and cooldowns between attempts are not built), the collector (events and pod status to deduplicated observations) and the Incident controller (one bounded `Incident` per fingerprint, marked due for analysis within a daily budget), the Prometheus metrics of both components, and the module registries with the generic and AKS platforms, EKS and GKE (detected only) and the cloudflared, Flux, KEDA, Kyverno and Secrets Store CSI driver integration modules (cloudflared replicas that are not ready, failing Flux objects, KEDA trigger errors and replica ceilings, and failing Kyverno policy report results, policies not Ready and refused admissions, as symptoms; secrets volumes that cannot be mounted, diagnosed from the kubelet's mount events). All of them are in the analyzer, which detects them and reports them in the settings status; nothing feeds the diagnosis rules yet, and the symptom sources are not consumed yet. Not built: the analysis, auto-merge, delivery and the verification. The [design](docs/design.md) says what holds at each step; the [decisions](docs/adr/index.md) say why.
 

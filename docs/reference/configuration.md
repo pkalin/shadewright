@@ -4,7 +4,7 @@ title: Configuration reference
 
 # Configuration reference
 
-Everything an operator can set today, checked against `cmd/main.go` (the executor), `cmd/analyzer/main.go`, `internal/cmdutil` and `config/` at v0.1.0. There is no Helm chart yet ([#83](https://github.com/pkalin/shadewright/issues/83), **planned**); its values will map onto the settings below. Objects and fields of the custom resources are in the [API reference](api.md). See also [compatibility](compatibility.md), [upgrade and uninstall](../upgrade-uninstall.md), [identity rotation](../identity-rotation.md) and [data handling](../data-handling.md). The metrics reference is **planned** ([#89](https://github.com/pkalin/shadewright/issues/89)).
+Everything an operator can set today, checked against `cmd/main.go` (the executor), `cmd/analyzer/main.go`, `internal/cmdutil` and `config/` at v0.1.0. There is no Helm chart yet ([#83](https://github.com/pkalin/shadewright/issues/83), **planned**); its values will map onto the settings below. Objects and fields of the custom resources are in the [API reference](api.md). See also [compatibility](compatibility.md), [upgrade and uninstall](../upgrade-uninstall.md), [identity rotation](../identity-rotation.md) and [data handling](../data-handling.md). Metric names are in the [metrics reference](metrics.md).
 
 ## Components and images
 
@@ -124,6 +124,8 @@ An action contributed by an integration module (`AdjustKedaMaxReplicas` needs `k
 `config/default` patches both Deployments to serve metrics on `:8443` over HTTPS and creates the Services `shadewright-executor-metrics-service` and `shadewright-analyzer-metrics-service` (port `https`, 8443). With `--metrics-secure=true` each request is authenticated by a TokenReview and authorized by a SubjectAccessReview. A scraper therefore needs a ServiceAccount token, and that identity needs the `get` verb on the non-resource URL `/metrics`: the ClusterRole `shadewright-metrics-reader` grants it, and **nothing binds it by default**, so bind it to your Prometheus ServiceAccount.
 
 The shipped NetworkPolicies also gate the network: the namespace is default-deny for ingress and egress, and ingress to port 8443 is allowed only from namespaces labeled `metrics: enabled`. Egress for both components is limited to cluster DNS and TCP 443 and 6443 (the Kubernetes API, Git host and Key Vault are on those ports).
+
+The metrics each component serves are listed in the [metrics reference](metrics.md).
 
 The certificate is self-signed unless you set `--metrics-cert-path` (the cert-manager overlay is commented out in `config/default`). `config/prometheus/monitor.yaml` is a `ServiceMonitor` for the Prometheus Operator, not included by default; it scrapes with the Pod's ServiceAccount token and `insecureSkipVerify: true`, so use a real certificate and `serverName` if you care about that. Do not use `--metrics-secure=false` outside a test.
 

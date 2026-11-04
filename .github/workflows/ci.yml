@@ -1,0 +1,120 @@
+name: CI
+
+# One graph per pull request and push to main. The `changes` job decides once, from the files the pull request
+# changes (hack/ci-changed.sh), which groups of checks have to run; the jobs below call the workflows that hold
+# the checks and pass that decision as `run`. A called job that is not needed is skipped, which counts as
+# passing. `ci-ok` is the single required check of this graph: it fails when detection failed or when any called
+# job failed or was cancelled, so a broken `changes` job can never let a pull request merge unchecked.
+#
+# Never add trigger-level `paths` here: a workflow that never starts leaves its required check pending forever.
+# A new job goes into the `needs` of `ci-ok`.
+#
+# Images and chart publishing run from images.yml and chart.yml on main and v* tags; vulncheck.yml also has its
+# weekly schedule. Cancelling superseded runs is safe only here, so the concurrency group is only in this file
+# (in a called workflow github.workflow is the caller's name, and a second group there could deadlock the run).
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      go: ${{ steps.changed.outputs.go }}
+      images: ${{ steps.changed.outputs.images }}
+      chart: ${{ steps.changed.outputs.chart }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Decide from the changed files
+        id: changed
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: hack/ci-changed.sh >> "$GITHUB_OUTPUT"
+
+  lint:
+    needs: changes
+    permissions:
+      contents: read
+    uses: ./.github/workflows/lint.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+    with:
+      run: ${{ needs.changes.outputs.go == 'true' }}
+
+  test:
+    needs: changes
+    permissions:
+      contents: read
+    uses: ./.github/workflows/test.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+    with:
+      run: ${{ needs.changes.outputs.go == 'true' }}
+
+  e2e:
+    needs: changes
+    permissions:
+      contents: read
+    uses: ./.github/workflows/test-e2e.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+    with:
+      run: ${{ needs.changes.outputs.go == 'true' }}
+
+  govulncheck:
+    needs: changes
+    permissions:
+      contents: read
+    uses: ./.github/workflows/vulncheck.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+    with:
+      run: ${{ needs.changes.outputs.go == 'true' }}
+
+  # Pull request build only (amd64, no push); main and tags publish from images.yml.
+  images:
+    needs: changes
+    if: ${{ github.event_name == 'pull_request' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/images-build.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+    with:
+      run: ${{ needs.changes.outputs.images == 'true' }}
+
+  chart:
+    needs: changes
+    permissions:
+      contents: read
+    uses: ./.github/workflows/chart-test.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+    with:
+      run: ${{ needs.changes.outputs.chart == 'true' }}
+
+  workflow-lint:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/workflow-lint.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+
+  ci-ok:
+    name: ci-ok
+    if: ${{ always() }}
+    needs: [changes, lint, test, e2e, govulncheck, images, chart, workflow-lint]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Check the results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${NEEDS}" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          printf '%s\n' "${NEEDS}" | jq -e '
+            .changes.result == "success"
+            and ([.[].result] | all(. == "success" or . == "skipped"))' > /dev/null

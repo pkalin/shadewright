@@ -707,7 +707,7 @@ Used by: [RemediationSettings](#remediationsettings).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `paused` | boolean | No | paused stops every write: pull requests, auto-merge and issues. Analysis continues. Checked right before each write.<br>Default: `false` |
+| `paused` | boolean | No | paused stops every write: pull requests, auto-merge and issues. Analysis continues. Checked right before each write. It revokes no published pull request and reverts no merge; see https://shadewright.io/emergency/.<br>Default: `false` |
 | `maxConcurrentRemediations` | integer | No | maxConcurrentRemediations limits requests between PolicyChecked and a terminal phase.<br>Default: `1`<br>Maximum: 20<br>Minimum: 1 |
 | `maxAnalysesPerDay` | integer | No | maxAnalysesPerDay limits model-backed analyses per UTC day; 0 disables the model.<br>Default: `100`<br>Maximum: 10000<br>Minimum: 0 |
 | `repositories` | [GitRepository](#gitrepository) array | No | repositories Shadewright may open pull requests in. URLs are unique, so a Flux source matches at most one entry.<br>Maximum items: 16<br>List type: map<br>List key: `name`<br>Rule: repository URLs must be unique (`self.all(r, self.exists_one(s, s.url == r.url))`) |

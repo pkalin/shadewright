@@ -74,7 +74,10 @@ make scenario-reset CLUSTER=lab   # cluster/lab holds main's tree
 ```
 
 Expect one commit on `cluster/lab` whose tree equals `main`'s, or the message that the branch "already holds this tree" if it does. Flux picks
-it up within about two minutes (the sync interval is 60 seconds for the repository, 120 for the Kustomization).
+it up within about two minutes (the sync interval is 60 seconds for the repository, 120 for the Kustomization). On
+the first reset of a branch that predates the agent install, the `shadewright` Kustomization is created only then
+and waits for `infrastructure` and for its Deployments, so allow 5 to 10 minutes and rerun step 3 until all four
+Kustomizations are ready.
 
 ## 3. Check Flux and the cluster
 
@@ -84,8 +87,9 @@ kubectl -n flux-system get kustomizations
 kubectl -n demo get pods
 ```
 
-Expect `cluster/lab`; `lab`, `infrastructure`, `shadewright` and `apps` all `Ready=True` (the first sync takes a few
-minutes); and the demo pods `web` and `worker` running. If `infrastructure` is not ready, wait: `shadewright` and
+Expect `cluster/lab`; the Kustomization that applies `./clusters/lab` (the Flux extension names it after the
+configuration and the Kustomization, so expect `fleet-lab`; confirm the name on the first session), `infrastructure`,
+`shadewright` and `apps`, all `Ready=True` (the first sync takes a few minutes); and the demo pods `web` and `worker` running. If `infrastructure` is not ready, wait: `shadewright` and
 `apps` depend on it.
 
 ## 4. Check the agent
@@ -116,7 +120,7 @@ Expect:
 
 There is nothing to set by hand. The two client IDs reach the install as the substitutions `ANALYZER_CLIENT_ID` and
 `EXECUTOR_CLIENT_ID`, which `lab/flux.tf` in `shadewright-azure` fills from the foundation outputs
-`analyzer_identity` and `executor_identity` (the `lab` Kustomization forwards them to `shadewright`). To compare
+`analyzer_identity` and `executor_identity` (the Kustomization of `./clusters/lab` forwards them to `shadewright`). To compare
 the annotation with the source of truth, in `shadewright-azure`:
 
 ```bash

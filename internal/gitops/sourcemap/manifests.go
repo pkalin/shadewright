@@ -54,8 +54,9 @@ const (
 	// diff takes its render budget from it (semdiff.MaxBuildBytes).
 	MaxTotalBytes = 16 << 20
 	// MaxDocuments is how many YAML documents one mapping decodes in all manifest files, and [ReadField] in
-	// its one file, empty ones and ones holding only comments included, so that a file of many small
-	// documents cannot keep the decoder busy.
+	// its one file, ones holding only comments or blank lines included, so that a file of many small
+	// documents cannot keep the decoder busy. A separator with nothing before it is skipped by the reader
+	// and never decoded, so it is not counted.
 	MaxDocuments = 4096
 )
 

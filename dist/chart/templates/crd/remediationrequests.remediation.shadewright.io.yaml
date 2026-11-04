@@ -291,6 +291,13 @@ spec:
           status:
             description: status is the progress, written by the controller.
             properties:
+              breakerProbe:
+                description: |-
+                  breakerProbe is true on a request the policy check let through while the circuit breaker was tripped
+                  (half-open): it is the breaker's probe. It is written with the allowed decision and never cleared. The
+                  breaker finds a running probe, or one that ended without a success, by this field only; a request
+                  without it is not a probe.
+                type: boolean
               conditions:
                 description: |-
                   conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,

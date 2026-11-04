@@ -180,11 +180,13 @@ func TestActiveReturnsCopies(t *testing.T) {
 		want[i] = hooksSummary(m.Hooks)
 	}
 	registryWant := hooksSummary(full.hooks)
+	platformWant := hooksSummary(aksWithRule.Hooks())
 
 	for i := range first {
 		h := &first[i].Hooks
 		for j := range h.Symptoms {
 			h.Symptoms[j].Group, h.Symptoms[j].Kind = "mutated", "Mutated"
+			h.Symptoms[j].Resource, h.Symptoms[j].ReportingController = "mutated", "mutated"
 			for k := range h.Symptoms[j].Versions {
 				h.Symptoms[j].Versions[k] = "mutated"
 			}
@@ -197,7 +199,7 @@ func TestActiveReturnsCopies(t *testing.T) {
 			h.Actions[j] = "Mutated"
 		}
 		for j := range h.Checks {
-			h.Checks[j].Name, h.Checks[j].Kind = "Mutated", "Mutated"
+			h.Checks[j].Name, h.Checks[j].Group, h.Checks[j].Kind = "Mutated", "mutated", "Mutated"
 		}
 	}
 
@@ -211,6 +213,9 @@ func TestActiveReturnsCopies(t *testing.T) {
 		}
 	}
 	if h, _ := r.IntegrationHooks(kedaName); hooksSummary(h) != registryWant {
-		t.Errorf("a caller changed the registry's hooks: %s", hooksSummary(h))
+		t.Errorf("a caller changed the registry's integration hooks: %s", hooksSummary(h))
+	}
+	if h, _ := r.PlatformHooks(aksName); hooksSummary(h) != platformWant {
+		t.Errorf("a caller changed the registry's platform hooks: %s", hooksSummary(h))
 	}
 }

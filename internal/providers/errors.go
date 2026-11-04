@@ -36,7 +36,8 @@ var (
 	ErrConflict = errors.New("conflict")
 	// ErrRetryable means a transient failure: the same request may succeed later.
 	ErrRetryable = errors.New("retryable")
-	// ErrTooLarge means a file is larger than MaxFileBytes; its content was not downloaded.
+	// ErrTooLarge means a file is larger than MaxFileBytes, and its content was not downloaded, or a result is
+	// larger than the adapter's limit, and was refused while it was read.
 	ErrTooLarge = errors.New("too large")
 	// ErrInvalidConfig means the settings an adapter is built from cannot be used (wrong provider, missing
 	// signer, malformed key ID or URL). It is permanent: the same settings fail the same way on every retry.
@@ -83,7 +84,7 @@ func IsPathNotInTree(err error) bool { return errors.Is(err, ErrPathNotInTree) }
 // IsConflict reports whether err means the request was based on stale state.
 func IsConflict(err error) bool { return errors.Is(err, ErrConflict) }
 
-// IsTooLarge reports whether err means a file exceeds MaxFileBytes.
+// IsTooLarge reports whether err means a file exceeds MaxFileBytes or a result exceeds an adapter's limit.
 func IsTooLarge(err error) bool { return errors.Is(err, ErrTooLarge) }
 
 // IsRetryable reports whether err is a transient failure.

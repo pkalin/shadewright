@@ -492,7 +492,9 @@ The status reports what was detected and what is in use. `status.platform` has `
 
 ## 6. Reconciliation
 
-[![RemediationRequest phases: Pending, PolicyChecked, PRCreated, AwaitingApproval or AutoMergeQueued, Merged, WaitingForDelivery, Verifying, Succeeded; any step can end in Denied, Failed, Expired, Cancelled, Superseded or NeedsIntervention.](assets/diagrams/phases.svg)](assets/diagrams/phases.svg "Open full size")
+[![RemediationRequest phases: Pending, PolicyChecked, PRCreated, AwaitingApproval or AutoMergeQueued, Merged, WaitingForDelivery, Verifying, Succeeded; only the steps up to Merged are built; any step can end in Denied, Failed, Expired, Cancelled, Superseded or NeedsIntervention.](assets/diagrams/phases.svg)](assets/diagrams/phases.svg "Open full size")
+
+Only the steps up to `Merged` are built; delivery and verification (the rest of the main path in the picture) are planned.
 
 Other terminal or waiting phases: `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded`, `NeedsIntervention`. Conditions explain why; `phase` is a summary for humans.
 
@@ -508,6 +510,8 @@ stateDiagram-v2
             PRCreated --> AwaitingApproval: review required
             PRCreated --> AutoMergeQueued: policy allows automation (planned)
             AwaitingApproval --> Merged: a person merged it (observed; the request stops here today)
+            PRCreated --> Merged: merged before the first review step (observed)
+            PolicyChecked --> Merged: an existing merged pull request is adopted (observed)
             AutoMergeQueued --> Merged: checks pass (planned)
         }
         Merged --> WaitingForDelivery: (planned)
@@ -830,7 +834,7 @@ Runbook matches make no model call and cost nothing, so the figures above are a 
 
 ### 12.3. Controls
 
-Real prices come from the model card, the deployment configurator and the [Azure Pricing Calculator](https://azure.microsoft.com/en-us/pricing/calculator/), recorded with the date checked. The app enforces maximum context, steps, output tokens, concurrency, analyses per day and a daily spend limit. An Azure budget only alerts; it does not stop usage ([budgets](https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/tutorial-acm-create-budgets)). Deduplication and cached diagnoses keep repeated calls down. A failed or timed-out call is charged at its upper bound (the input estimate plus `MaxOutputTokens`). The daily count of analyses lives in the ConfigMap `shadewright-analysis-budget` in the operator namespace, which only the analyzer and admins may write; a count that cannot be read or written, or that is missing, means refuse, not allow (section 3.2, [#43](https://github.com/pkalin/shadewright/issues/43)). It is enforced once the analysis (#16) reserves a unit before each model call. Where the daily spend is counted, and in what unit, is open ([#208](https://github.com/pkalin/shadewright/issues/208)).
+Real prices come from the model card, the deployment configurator and the [Azure Pricing Calculator](https://azure.microsoft.com/en-us/pricing/calculator/), recorded with the date checked. The app will enforce maximum context, steps, output tokens, concurrency, analyses per day and a daily spend limit. Concurrency is not enforced yet (#88) and the spend limit is planned (#208); the other limits are enforced as the analysis loop (#16) lands. An Azure budget only alerts; it does not stop usage ([budgets](https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/tutorial-acm-create-budgets)). Deduplication and cached diagnoses keep repeated calls down. A failed or timed-out call is charged at its upper bound (the input estimate plus `MaxOutputTokens`). The daily count of analyses lives in the ConfigMap `shadewright-analysis-budget` in the operator namespace, which only the analyzer and admins may write; a count that cannot be read or written, or that is missing, means refuse, not allow (section 3.2, [#43](https://github.com/pkalin/shadewright/issues/43)). It is enforced once the analysis (#16) reserves a unit before each model call. Where the daily spend is counted, and in what unit, is open ([#208](https://github.com/pkalin/shadewright/issues/208)).
 
 The lab itself (AKS node, Key Vault, storage, Foundry) is priced in `shadewright-azure` and runs only when needed ([ADR-0008](adr/0008-disposable-azure-lab.md)).
 

@@ -1,0 +1,52 @@
+name: Scorecard
+
+# OpenSSF Scorecard supply-chain checks of this repository (branch protection, pinned dependencies, token
+# permissions, signed releases, and so on). Runs on pushes to main, weekly and when a branch protection rule
+# changes (the Branch-Protection result depends on it). Results go to the Security tab as SARIF and, with
+# publish_results, to the OpenSSF API, which serves the badge in the README.
+#
+# publish_results has restrictions that the action verifies before it publishes: the workflow has no top-level
+# `env` or `defaults`, the job has no `container` or `services` and runs on a GitHub-hosted runner, and it
+# contains only steps from a short list of trusted actions (checkout, the scorecard action, upload-sarif) and no
+# `run` step. So there is nothing else in this file: no artifact upload, no extra script. id-token: write is
+# what the publishing needs, and only this job has it.
+#
+# The default token cannot read the settings behind the Branch-Protection check (it needs a repository-admin
+# token); without one that check scores low or "inconclusive". No such secret is configured on purpose.
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: "41 5 * * 1" # Mondays 05:41 UTC
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write # upload the SARIF results
+      id-token: write # publish_results, to the OpenSSF API
+      contents: read
+      actions: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload the results to code scanning
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: results.sarif
+          category: scorecard

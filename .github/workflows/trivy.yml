@@ -1,0 +1,123 @@
+name: Trivy
+
+# Scans the published images ghcr.io/<owner>/shadewright-{executor,analyzer} for known vulnerabilities and uploads
+# the results to code scanning (Security tab), one category per image. It runs on a v* tag, where it waits for
+# the Images workflow of that tag to push the image (like chart.yml does) and scans that tag's digest, and
+# weekly, where it scans the digests of the latest release (new advisories appear for images that did not change).
+# Pull requests and pushes to main do not run it: the images they build are not published, and the chart and
+# config/ misconfiguration scan is part of chart-test.yml.
+#
+# Severity and exit code: every severity is reported and findings never fail the run (the alerts are the output);
+# a scanner error (registry, database download, unreadable image) does fail it, because a failed scan must not
+# look like a clean one. Each image is resolved to a digest first and the scan reads that digest, so a tag moved
+# during the run changes nothing. The latest release is found with `gh release view` (the newest non-pre-release),
+# and its image tag is the version without the v, which is how images.yml tags it; the digests in the release
+# body come from the same tags.
+#
+# Trivy is installed from the official release with a pinned sha256 (hack/install-trivy.sh), not through
+# aquasecurity/trivy-action: in March 2026 most of that action's tags and all of setup-trivy's were force-pushed
+# to malicious code (GHSA-69fq-xp46-6x23, CVE-2026-33634), and only v0.35.0 of the action was left unaffected.
+# A checked binary needs neither, and the version is bumped in one place.
+on:
+  push:
+    tags: ["v*"]
+  schedule:
+    - cron: "23 6 * * 1" # Mondays 06:23 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  scan:
+    name: Scan ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read # gh release view
+      packages: read # pull the images from GHCR, also while the packages are private
+      security-events: write # upload the SARIF results
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [executor, analyzer]
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Trivy
+        run: hack/install-trivy.sh "${RUNNER_TEMP}/trivy-bin"
+
+      # The tag whose image is scanned: this tag, or the latest release (schedule and manual runs).
+      - name: Find the release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT_NAME}" = push ]; then
+            tag="${REF_NAME}"
+          else
+            tag="$(gh release view --json tagName --jq .tagName)"
+          fi
+          printf '%s' "${tag}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || { echo "not a release tag: '${tag}'" >&2; exit 1; }
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GHCR
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "${TOKEN}" | docker login ghcr.io --username "${ACTOR}" --password-stdin
+
+      # On a tag the Images workflow runs in parallel, so this waits (every 30 s, at most 30 minutes) for the
+      # image tag to exist; a scheduled run finds an existing release and does not wait.
+      - name: Resolve the image digest
+        id: image
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          OWNER: ${{ github.repository_owner }}
+          IMAGE: ${{ matrix.image }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "${OWNER}" | tr '[:upper:]' '[:lower:]')"
+          ref="ghcr.io/${owner}/shadewright-${IMAGE}"
+          limit=0
+          if [ "${EVENT_NAME}" = push ]; then limit=1800; fi
+          deadline=$(( $(date +%s) + limit ))
+          while true; do
+            got="$(docker buildx imagetools inspect "${ref}:${TAG#v}" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
+            if printf '%s' "${got}" | grep -Eq '^sha256:[a-f0-9]{64}$'; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "no image ${ref}:${TAG#v} after ${limit} seconds" >&2
+              exit 1
+            fi
+            echo "waiting for ${ref}:${TAG#v}"
+            sleep 30
+          done
+          echo "ref=${ref}@${got}" >> "${GITHUB_OUTPUT}"
+          echo "scanning ${ref}@${got} (${TAG})" >> "${GITHUB_STEP_SUMMARY}"
+
+      # Vulnerabilities only, all severities, SARIF. --exit-code 0: findings do not fail the run; a scanner error
+      # still exits non-zero.
+      - name: Scan the image
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+        run: |
+          set -euo pipefail
+          "${RUNNER_TEMP}/trivy-bin/trivy" image --image-src remote --scanners vuln \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL --exit-code 0 --skip-version-check \
+            --format sarif --output "${RUNNER_TEMP}/trivy.sarif" "${IMAGE_REF}"
+
+      - name: Upload the results to code scanning
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ runner.temp }}/trivy.sarif
+          category: trivy-image-${{ matrix.image }}

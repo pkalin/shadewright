@@ -24,10 +24,10 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -715,18 +715,10 @@ var _ = Describe("RemediationSettings", func() {
 			Expect(*s.Spec.Analysis.MaxAnalysesPerDay).To(BeEquivalentTo(100))
 		})
 
-		It("refuses maxAnalysesPerDay at the old top-level path", func() {
-			u := &unstructured.Unstructured{Object: map[string]any{
-				"apiVersion": v1alpha1.GroupVersion.String(),
-				"kind":       "RemediationSettings",
-				"metadata":   map[string]any{"name": v1alpha1.SettingsName},
-				"spec":       map[string]any{"maxAnalysesPerDay": int64(0)},
-			}}
-			err := k8sClient.Create(ctx, u, client.FieldValidation("Strict"))
-			if err == nil {
-				deleteAfterSpec(u)
-			}
-			Expect(err).To(MatchError(ContainSubstring(`unknown field "spec.maxAnalysesPerDay"`)))
+		It("refuses the deprecated spec.maxAnalysesPerDay on create, naming the new path", func() {
+			s := fx.RemediationSettings()
+			s.Spec.MaxAnalysesPerDay = ptr.To[int32](0)
+			expectRefused(s, "spec.maxAnalysesPerDay moved to spec.analysis.maxAnalysesPerDay")
 		})
 
 		DescribeTable("accepts maxAnalysesPerDay at its bounds",
@@ -1094,5 +1086,87 @@ var _ = Describe("RemediationSettings", func() {
 				}
 			}, "status.integrations[0].version"),
 		)
+	})
+})
+
+// movedFieldRule is the message of the rule on the deprecated spec.maxAnalysesPerDay.
+const movedFieldRule = "spec.maxAnalysesPerDay moved to spec.analysis.maxAnalysesPerDay"
+
+// A RemediationSettings stored by v0.1.0 may hold spec.maxAnalysesPerDay. The rule on that field must not
+// lock such an object: CRD validation ratcheting lets an update through that leaves the field's value as it
+// is, while a write that changes it is refused. The stored object is simulated by taking the rule off the
+// CRD, creating the object, and putting the rule back, as an upgrade of the CRD would.
+var _ = Describe("RemediationSettings stored with the deprecated maxAnalysesPerDay", Serial, Ordered, func() {
+	const crdName = "remediationsettings.remediation.shadewright.io"
+
+	// setFieldRules sets the CEL rules of spec.maxAnalysesPerDay in the CRD and returns the ones it replaced.
+	setFieldRules := func(rules apiextensionsv1.ValidationRules) apiextensionsv1.ValidationRules {
+		var old apiextensionsv1.ValidationRules
+		Eventually(func() error {
+			crd := &apiextensionsv1.CustomResourceDefinition{}
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: crdName}, crd); err != nil {
+				return err
+			}
+			spec := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"]
+			field := spec.Properties["maxAnalysesPerDay"]
+			old = field.XValidations
+			field.XValidations = rules
+			spec.Properties["maxAnalysesPerDay"] = field
+			crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"] = spec
+			return k8sClient.Update(ctx, crd)
+		}).Should(Succeed())
+		return old
+	}
+
+	var stored *v1alpha1.RemediationSettings
+
+	BeforeAll(func() {
+		rules := setFieldRules(nil)
+		Expect(rules).To(HaveLen(1), "the CRD has no rule on spec.maxAnalysesPerDay")
+		DeferCleanup(func() { setFieldRules(rules) })
+
+		// Wait until the API server serves the schema without the rule, then store the object.
+		probe := func() *v1alpha1.RemediationSettings {
+			s := fx.RemediationSettings()
+			s.Spec.MaxAnalysesPerDay = ptr.To[int32](0)
+			return s
+		}
+		Eventually(func() error { return k8sClient.Create(ctx, probe(), client.DryRunAll) }).Should(Succeed())
+		stored = probe()
+		Expect(k8sClient.Create(ctx, stored)).To(Succeed())
+		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, stored))).To(Succeed()) })
+
+		// Put the rule back and wait until a change of the field is refused again.
+		setFieldRules(rules)
+		Eventually(func() error {
+			s := stored.DeepCopy()
+			s.Spec.MaxAnalysesPerDay = ptr.To[int32](1)
+			return k8sClient.Update(ctx, s, client.DryRunAll)
+		}).Should(MatchError(ContainSubstring(movedFieldRule)))
+	})
+
+	It("accepts an update elsewhere that keeps the stored value", func() {
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(stored), stored)).To(Succeed())
+		stored.Spec.Paused = new(true)
+		Expect(k8sClient.Update(ctx, stored)).To(Succeed())
+		Expect(*stored.Spec.MaxAnalysesPerDay).To(BeEquivalentTo(0))
+		Expect(*stored.Spec.Analysis.MaxAnalysesPerDay).To(BeEquivalentTo(100))
+	})
+
+	It("refuses an update that changes the stored value", func() {
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(stored), stored)).To(Succeed())
+		s := stored.DeepCopy()
+		s.Spec.MaxAnalysesPerDay = ptr.To[int32](5)
+		err := k8sClient.Update(ctx, s)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+		Expect(err).To(MatchError(ContainSubstring(movedFieldRule)))
+	})
+
+	It("accepts removing the stored value", func() {
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(stored), stored)).To(Succeed())
+		stored.Spec.MaxAnalysesPerDay = nil
+		stored.Spec.Analysis.MaxAnalysesPerDay = ptr.To[int32](0)
+		Expect(k8sClient.Update(ctx, stored)).To(Succeed())
+		Expect(stored.Spec.MaxAnalysesPerDay).To(BeNil())
 	})
 })

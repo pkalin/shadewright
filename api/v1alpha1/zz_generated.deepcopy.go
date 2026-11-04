@@ -892,6 +892,11 @@ func (in *RemediationSettingsSpec) DeepCopyInto(out *RemediationSettingsSpec) {
 		*out = new(bool)
 		**out = **in
 	}
+	if in.MaxAnalysesPerDay != nil {
+		in, out := &in.MaxAnalysesPerDay, &out.MaxAnalysesPerDay
+		*out = new(int32)
+		**out = **in
+	}
 	if in.Repositories != nil {
 		in, out := &in.Repositories, &out.Repositories
 		*out = make([]GitRepository, len(*in))

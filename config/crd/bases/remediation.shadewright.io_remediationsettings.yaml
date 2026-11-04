@@ -56,18 +56,20 @@ spec:
                 default: {}
                 description: |-
                   analysis bounds every model-backed analysis and names the model deployments it may call. Left out, its
-                  limits take their defaults and no model is configured. Enforced today: maxAnalysesPerDay, read by the
-                  analysis trigger. Planned: no component reads the other fields yet; the analysis loop (#76) will
-                  enforce them, and the daily token caps need the spend counter of #208. The endpoints decide where the analyzer sends its Entra ID token and the redacted context, so write
-                  access to this object is security-relevant (threat model).
+                  limits take their defaults and no model is configured. Read today: maxAnalysesPerDay, by the analysis
+                  trigger. Planned: no component reads the other fields yet; the analysis loop (#76) will enforce them,
+                  and the daily token caps need the spend counter of #208. The endpoints decide where the analyzer sends
+                  its Entra ID token and the redacted context, so write access to this object is security-relevant
+                  (threat model).
                 properties:
                   maxAnalysesPerDay:
                     default: 100
                     description: |-
                       maxAnalysesPerDay limits model-backed analyses per UTC day, across all Incidents; 0 disables the
-                      model. Enforced: the analysis trigger marks an Incident not due once the day's count reaches it
-                      (AnalysisDisabled at 0, DailyBudgetReached otherwise). 0 to 10000. Defaulted to 100 also when
-                      spec.analysis is left out.
+                      model. 0 to 10000. Defaulted to 100 also when spec.analysis is left out. Read today by the analysis
+                      trigger: 0 marks every Incident not due (AnalysisDisabled). The daily count is enforced once the
+                      analysis reserves units of the budget (#16, #76); until then nothing adds to it. Replaces the
+                      deprecated spec.maxAnalysesPerDay; while that is still set, the lower of the two applies.
                     format: int32
                     maximum: 10000
                     minimum: 0
@@ -246,6 +248,21 @@ spec:
                         - 1) : self.escalation.endpoint) || self.triage.deployment.lowerAscii()
                         != self.escalation.deployment.lowerAscii()'
                 type: object
+              maxAnalysesPerDay:
+                description: |-
+                  maxAnalysesPerDay is deprecated: it moved to spec.analysis.maxAnalysesPerDay. It has no default, and
+                  a rule on the field refuses any write that sets or changes it. An object stored by v0.1.0 that holds
+                  it can still be updated as long as the value is left as it is (CRD validation ratcheting), and removing
+                  it is always allowed. While it is set, the analysis trigger goes by the lower of it and
+                  spec.analysis.maxAnalysesPerDay, so an old 0 keeps analysis off. Move the value and remove this field.
+                format: int32
+                maximum: 10000
+                minimum: 0
+                type: integer
+                x-kubernetes-validations:
+                - message: 'spec.maxAnalysesPerDay moved to spec.analysis.maxAnalysesPerDay:
+                    set it there and remove this field'
+                  rule: "false"
               maxConcurrentRemediations:
                 default: 1
                 description: |-

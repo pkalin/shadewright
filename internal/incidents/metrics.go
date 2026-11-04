@@ -96,7 +96,8 @@ var (
 		"Analyses counted against the current UTC day in the budget ConfigMap, at the last trigger pass; "+
 			"absent while the budget is unknown.")
 	analysesPerDayLimit = newOptionalGauge("shadewright_analyses_per_day_limit",
-		"RemediationSettings spec.analysis.maxAnalysesPerDay, at the last trigger pass; absent while the settings are unknown.")
+		"The daily analysis limit of the RemediationSettings (spec.analysis.maxAnalysesPerDay, or the deprecated "+
+			"spec.maxAnalysesPerDay when lower), at the last trigger pass; absent while the settings are unknown.")
 )
 
 // optionalGauge is a gauge without labels that reports nothing while its value is unknown. A plain Gauge

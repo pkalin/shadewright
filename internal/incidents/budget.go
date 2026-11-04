@@ -63,7 +63,8 @@ var reserveBackoff = wait.Backoff{Steps: 8, Duration: 10 * time.Millisecond, Fac
 
 // Errors of [ReserveAnalysis]. Each means: do not call the model.
 var (
-	// ErrBudgetSpent: the analyses of the current UTC day reached maxAnalysesPerDay, which may be 0.
+	// ErrBudgetSpent: the analyses of the current UTC day reached the limit of spec.analysis.maxAnalysesPerDay
+	// (or the lower deprecated spec.maxAnalysesPerDay), which may be 0.
 	ErrBudgetSpent = errors.New("the daily analysis budget is spent")
 	// ErrBudgetUnreadable: the budget ConfigMap holds a day in the future, a count out of bounds, or keys it
 	// should not.
@@ -71,6 +72,9 @@ var (
 	// ErrBudgetNotFound: the budget ConfigMap does not exist. It is not created again here, so deleting it
 	// stops analysis instead of resetting the count.
 	ErrBudgetNotFound = errors.New("the analysis budget ConfigMap does not exist")
+	// ErrSettingsIncomplete: the RemediationSettings has no spec.analysis.maxAnalysesPerDay, so the daily
+	// limit is unknown.
+	ErrSettingsIncomplete = errors.New("the RemediationSettings sets no spec.analysis.maxAnalysesPerDay")
 )
 
 // analysisBudget is the parsed content of the budget ConfigMap. The zero value is an empty ConfigMap: none
@@ -142,20 +146,29 @@ func UsedToday(cm *corev1.ConfigMap, now time.Time) (used int, ok bool) {
 	return b.used, true
 }
 
-// maxAnalysesPerDay returns the settings' spec.analysis.maxAnalysesPerDay, or its default when analysis or the
-// field is unset. The API server defaults both, so unset is only seen on an object the schema did not default.
-func maxAnalysesPerDay(settings *remediationv1alpha1.RemediationSettings) int {
-	if a := settings.Spec.Analysis; a != nil && a.MaxAnalysesPerDay != nil {
-		return int(*a.MaxAnalysesPerDay)
+// maxAnalysesPerDay returns the analyses the settings allow per UTC day: spec.analysis.maxAnalysesPerDay, or
+// the deprecated spec.maxAnalysesPerDay when that is set and lower, so a 0 stored before the field moved keeps
+// analysis off. ok is false when spec.analysis or its maxAnalysesPerDay is unset, which the API server's
+// defaults never leave; the caller then takes the budget as unknown and allows no analysis, rather than
+// guessing a limit.
+func maxAnalysesPerDay(settings *remediationv1alpha1.RemediationSettings) (limit int, ok bool) {
+	a := settings.Spec.Analysis
+	if a == nil || a.MaxAnalysesPerDay == nil {
+		return 0, false
 	}
-	return DefaultMaxAnalysesPerDay
+	limit = int(*a.MaxAnalysesPerDay)
+	if old := settings.Spec.MaxAnalysesPerDay; old != nil {
+		limit = min(limit, int(*old))
+	}
+	return limit, true
 }
 
 // ReserveAnalysis takes one unit of the daily analysis budget, before a model-backed analysis (#16). It reads
 // the RemediationSettings (spec.analysis.maxAnalysesPerDay) and the budget ConfigMap in namespace fresh with reader, adds one
 // to the count (starting at 1 on a new UTC day) and updates the ConfigMap with the resourceVersion it read
 // (an update, not a patch), retrying on conflict, so concurrent callers never take the same unit twice. It
-// refuses with [ErrBudgetSpent] when the day's count reached maxAnalysesPerDay, with [ErrBudgetNotFound]
+// refuses with [ErrSettingsIncomplete] when the settings hold no limit ([maxAnalysesPerDay]), with
+// [ErrBudgetSpent] when the day's count reached the limit, with [ErrBudgetNotFound]
 // when the ConfigMap does not exist, and with [ErrBudgetUnreadable] when its content cannot be trusted
 // ([UsedToday]).
 //
@@ -168,6 +181,10 @@ func ReserveAnalysis(ctx context.Context, reader client.Reader, writer client.Wr
 		if err := reader.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); err != nil {
 			return fmt.Errorf("reading RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 		}
+		limit, ok := maxAnalysesPerDay(settings)
+		if !ok {
+			return ErrSettingsIncomplete
+		}
 		cm := &corev1.ConfigMap{}
 		if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: BudgetName}, cm); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -179,7 +196,7 @@ func ReserveAnalysis(ctx context.Context, reader client.Reader, writer client.Wr
 		if !ok {
 			return ErrBudgetUnreadable
 		}
-		if used >= maxAnalysesPerDay(settings) {
+		if used >= limit {
 			return ErrBudgetSpent
 		}
 		cm.Data = map[string]string{

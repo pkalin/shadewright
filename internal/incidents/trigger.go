@@ -62,9 +62,11 @@ const (
 	// controller, is more recent than the debounce, and the settle limit since its first unsettled
 	// observation has not passed.
 	ReasonDebouncing = "Debouncing"
-	// ReasonAnalysisDisabled: RemediationSettings spec.analysis.maxAnalysesPerDay is 0.
+	// ReasonAnalysisDisabled: the daily limit of the RemediationSettings is 0: spec.analysis.maxAnalysesPerDay,
+	// or the deprecated spec.maxAnalysesPerDay when that is set and lower.
 	ReasonAnalysisDisabled = "AnalysisDisabled"
-	// ReasonDailyBudgetReached: the analyses of the current UTC day reached spec.analysis.maxAnalysesPerDay.
+	// ReasonDailyBudgetReached: the analyses of the current UTC day reached the daily limit of the
+	// RemediationSettings.
 	ReasonDailyBudgetReached = "DailyBudgetReached"
 	// ReasonBudgetUnreadable: the budget ConfigMap holds a day in the future, a count out of bounds or keys
 	// it should not, so the budget is taken as spent.
@@ -77,17 +79,20 @@ const (
 	ReasonSettingsNotFound = "SettingsNotFound"
 	// ReasonSettingsUnreadable: the RemediationSettings object could not be read, so the budget is unknown.
 	ReasonSettingsUnreadable = "SettingsUnreadable"
+	// ReasonSettingsIncomplete: the RemediationSettings object sets no spec.analysis.maxAnalysesPerDay (an
+	// object the API server's defaults did not fill in), so the budget is unknown.
+	ReasonSettingsIncomplete = "SettingsIncomplete"
 	// ReasonForeignFingerprint: the Incident's name belongs to another fingerprint, so this controller does
 	// not analyze it.
 	ReasonForeignFingerprint = "ForeignFingerprint"
 )
 
-// Defaults of the analysis trigger (design 3.2 and 5.4).
+// Defaults of the analysis trigger (design 3.2 and 5.4). The daily limit has no default here: the schema
+// defaults spec.analysis.maxAnalysesPerDay, and a settings object without it allows no analysis.
 const (
-	DefaultDebounce          = 45 * time.Second
-	DefaultCooldown          = 15 * time.Minute
-	DefaultAnalysisTimeout   = 10 * time.Minute
-	DefaultMaxAnalysesPerDay = 100
+	DefaultDebounce        = 45 * time.Second
+	DefaultCooldown        = 15 * time.Minute
+	DefaultAnalysisTimeout = 10 * time.Minute
 )
 
 // TriggerSettings are the limits [Due] applies.
@@ -104,8 +109,8 @@ type TriggerSettings struct {
 	// AnalysisTimeout is how long an incident may stay in phase Analyzing after its last analysis began
 	// before that analysis is taken as lost. It is due again at the later of AnalysisTimeout and Cooldown.
 	AnalysisTimeout time.Duration
-	// MaxAnalysesPerDay is RemediationSettings spec.analysis.maxAnalysesPerDay: the analyses allowed per UTC
-	// day across all Incidents. 0 disables analysis.
+	// MaxAnalysesPerDay is the daily limit of the RemediationSettings ([maxAnalysesPerDay]): the analyses
+	// allowed per UTC day across all Incidents. 0 disables analysis.
 	MaxAnalysesPerDay int
 }
 

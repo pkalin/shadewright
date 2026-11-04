@@ -23,7 +23,8 @@ spec:
             # REPLACE: <key_vault.uri without trailing slash>/keys/<key_vault.github_app_key>, from
             # `terraform -chdir=foundation output -json key_vault` in shadewright-azure.
             keyID: https://kv-replace-me.vault.azure.net/keys/github-app
-  # maxAnalysesPerDay: 0 keeps the model off (enforced). The models are planned: not enforced yet (#76, #208).
+  # maxAnalysesPerDay: 0 is read today by the analysis trigger and marks every Incident not due, so the model
+  # is never called. The models are planned: not enforced yet (#76, #208).
   # REPLACE the endpoint and deployment with the outputs model_endpoint
   # and one of model_deployments of `terraform -chdir=foundation output` in shadewright-azure. No key: the
   # analyzer uses its workload identity. maxTokensPerDay is required: the cap of this deployment per UTC day.

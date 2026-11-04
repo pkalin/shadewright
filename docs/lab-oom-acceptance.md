@@ -153,6 +153,12 @@ Expect a pod in `CrashLoopBackOff` with a growing restart count, the last state 
 
 ## 6. Fill and apply the samples
 
+The settings sample sets `spec.analysis.maxAnalysesPerDay`, which the CRDs of v0.1.0 do not have (they drop it,
+and analysis would default to 100). So the fleet's vendored install (`infrastructure/shadewright/`, see its
+`VENDOR` file for the commit) must be vendored from a `shadewright` commit at or after the move of that field
+before you apply the sample; regenerate it with `scripts/vendor-shadewright.sh` in the fleet repository if it is
+older.
+
 In `shadewright`, copy the lab samples to a directory outside Git (so the real values never reach a commit) and fill
 them. Each value comes from here:
 

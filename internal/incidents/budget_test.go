@@ -17,9 +17,11 @@ limitations under the License.
 package incidents
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,26 +42,85 @@ func budgetOf(t *testing.T, ns string) map[string]string {
 	return cm.Data
 }
 
-// maxAnalysesPerDay reads spec.analysis.maxAnalysesPerDay and falls back to the default when analysis or the
-// field is unset, so settings the schema did not default never leave the trigger without a limit.
-func TestMaxAnalysesPerDayReadsAnalysisOrDefault(t *testing.T) {
+// maxAnalysesPerDay goes by spec.analysis.maxAnalysesPerDay, takes the deprecated spec.maxAnalysesPerDay when
+// that is set and lower, and reports no limit (fail closed) when spec.analysis or its field is unset, never a
+// default.
+func TestMaxAnalysesPerDayFailsClosedAndTakesTheLower(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		analysis *remediationv1alpha1.AnalysisSettings
+		old      *int32
 		want     int
+		wantOK   bool
 	}{
-		{"no analysis block", nil, DefaultMaxAnalysesPerDay},
-		{"empty analysis block", &remediationv1alpha1.AnalysisSettings{}, DefaultMaxAnalysesPerDay},
-		{"set to 0", &remediationv1alpha1.AnalysisSettings{MaxAnalysesPerDay: new(int32(0))}, 0},
-		{"set to 7", &remediationv1alpha1.AnalysisSettings{MaxAnalysesPerDay: new(int32(7))}, 7},
+		{"no analysis block", nil, nil, 0, false},
+		{"no analysis block, old field set", nil, new(int32(5)), 0, false},
+		{"empty analysis block", &remediationv1alpha1.AnalysisSettings{}, nil, 0, false},
+		{"set to 0", &remediationv1alpha1.AnalysisSettings{MaxAnalysesPerDay: new(int32(0))}, nil, 0, true},
+		{"set to 7", &remediationv1alpha1.AnalysisSettings{MaxAnalysesPerDay: new(int32(7))}, nil, 7, true},
+		{"old 0 wins over 100", &remediationv1alpha1.AnalysisSettings{MaxAnalysesPerDay: new(int32(100))}, new(int32(0)), 0, true},
+		{"old 50 wins over 100", &remediationv1alpha1.AnalysisSettings{MaxAnalysesPerDay: new(int32(100))}, new(int32(50)), 50, true},
+		{"new 3 wins over old 50", &remediationv1alpha1.AnalysisSettings{MaxAnalysesPerDay: new(int32(3))}, new(int32(50)), 3, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &remediationv1alpha1.RemediationSettings{}
-			s.Spec.Analysis = tc.analysis
-			if got := maxAnalysesPerDay(s); got != tc.want {
-				t.Fatalf("maxAnalysesPerDay = %d, want %d", got, tc.want)
+			s.Spec.Analysis, s.Spec.MaxAnalysesPerDay = tc.analysis, tc.old
+			if got, ok := maxAnalysesPerDay(s); got != tc.want || ok != tc.wantOK {
+				t.Fatalf("maxAnalysesPerDay = %d, %v; want %d, %v", got, ok, tc.want, tc.wantOK)
 			}
 		})
+	}
+}
+
+// editedSettings is a reader that, while edit is set, changes the RemediationSettings it returns, to show the
+// analyzer objects the API server would not store today: one without spec.analysis (not defaulted) or one
+// with the deprecated spec.maxAnalysesPerDay set (stored by v0.1.0).
+type editedSettings struct {
+	client.Reader
+	edit atomic.Pointer[func(*remediationv1alpha1.RemediationSettings)]
+}
+
+func (e *editedSettings) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := e.Reader.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if s, ok := obj.(*remediationv1alpha1.RemediationSettings); ok {
+		if f := e.edit.Load(); f != nil {
+			(*f)(s)
+		}
+	}
+	return nil
+}
+
+// withoutAnalysis drops spec.analysis, like an object the schema's defaults did not fill in.
+func withoutAnalysis(s *remediationv1alpha1.RemediationSettings) { s.Spec.Analysis = nil }
+
+// withOldZero sets the deprecated spec.maxAnalysesPerDay to 0, like an object v0.1.0's runbook paused.
+func withOldZero(s *remediationv1alpha1.RemediationSettings) {
+	s.Spec.MaxAnalysesPerDay = new(int32(0))
+}
+
+// ReserveAnalysis refuses when the settings hold no daily limit, and when the deprecated field is a lower 0,
+// and takes no unit either way.
+func TestReserveAnalysisFailsClosedOnTheSettings(t *testing.T) {
+	ns := namespace(t)
+	createSettings(t, 10)
+	createBudget(t, ns, nil)
+	r := &editedSettings{Reader: env.admin}
+	for _, tc := range []struct {
+		edit func(*remediationv1alpha1.RemediationSettings)
+		want error
+	}{
+		{withoutAnalysis, ErrSettingsIncomplete},
+		{withOldZero, ErrBudgetSpent},
+	} {
+		r.edit.Store(&tc.edit)
+		if err := ReserveAnalysis(t.Context(), r, env.admin, ns, triggerNow); !errors.Is(err, tc.want) {
+			t.Fatalf("reservation = %v, want %v", err, tc.want)
+		}
+	}
+	if b := budgetOf(t, ns); b[BudgetUsedKey] != "" {
+		t.Fatalf("a refused reservation changed the budget to %v", b)
 	}
 }
 

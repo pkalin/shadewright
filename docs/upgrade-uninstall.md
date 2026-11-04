@@ -63,11 +63,12 @@ Each command exits non-zero when the signature, the identity or the issuer does 
 Both Deployments run one replica with leader election and have no state of their own: Incidents, requests, the settings and the budget live in the cluster API. Every step of the executor rebuilds what it knows from Git and the API, and branch names and pull request markers derive from the request UID and the plan digest, so a restart in the middle of a step finds the work already done instead of repeating it.
 
 1. **Read the release notes** ([CHANGELOG](https://github.com/pkalin/shadewright/blob/main/CHANGELOG.md) and the GitHub release). While the version is 0.x a minor release may carry breaking changes (a commit with `!` or a `BREAKING CHANGE:` footer): API fields, CRD schema, flags or what the manifests install. The API is `v1alpha1` and there is no conversion between versions.
-2. **Pause writes (optional)**: set `spec.paused: true` on the `RemediationSettings` object if you want no pull request opened or closed while the pods restart. Analysis goes on. Unpause afterwards.
-3. **Use the same release for both images.** Analyzer and executor share the CRDs and the API types, and only a pair built from one tag has been tested together. Replace both digests in your overlay (the release page lists them; [verify them](#verify-a-release) first) and keep the `?ref=` of the base on the same tag.
-4. **Apply**: `kubectl apply -k .` applies the CRDs and the Deployments together. Wait for the CRDs (`kubectl wait --for=condition=Established crd/...`, as in getting started) and then for `kubectl -n shadewright-system rollout status deploy/shadewright-analyzer deploy/shadewright-executor`. Only the pod holding the Lease (`shadewright-executor-leader-election`, `shadewright-analyzer-leader-election`) works, so a new pod does nothing until it has the Lease, which can take a short while after the old pod is gone.
-5. **Check** the settings status (`DetectionFailed` is `False`), the Deployments' logs for errors, and that the waiting requests still show their phase.
-6. **Unpause** if you paused.
+2. **From v0.1.0: move `maxAnalysesPerDay`.** v0.1.0 had the daily analysis limit at `spec.maxAnalysesPerDay`; it is now `spec.analysis.maxAnalysesPerDay`. Before upgrading, read the old value (`kubectl get remediationsettings default -o jsonpath='{.spec.maxAnalysesPerDay}{"\n"}'`; empty means it was never set and nothing needs to move). After the new CRDs are applied, set the new field to it and remove the old one in one patch, for example for `0`: `kubectl patch remediationsettings default --type merge -p '{"spec":{"maxAnalysesPerDay":null,"analysis":{"maxAnalysesPerDay":0}}}'`. Change the same in the manifests you keep in Git: a manifest that still sets the old field is refused by the API server, by kubectl and by Flux alike. If you skip this step, a value stored in the old field stays and the analysis trigger goes by the lower of the two fields (the new one defaults to 100), so a stored `0` still keeps analysis off; only a write that sets or changes the old field is refused.
+3. **Pause writes (optional)**: set `spec.paused: true` on the `RemediationSettings` object if you want no pull request opened or closed while the pods restart. Analysis goes on. Unpause afterwards.
+4. **Use the same release for both images.** Analyzer and executor share the CRDs and the API types, and only a pair built from one tag has been tested together. Replace both digests in your overlay (the release page lists them; [verify them](#verify-a-release) first) and keep the `?ref=` of the base on the same tag.
+5. **Apply**: `kubectl apply -k .` applies the CRDs and the Deployments together. Wait for the CRDs (`kubectl wait --for=condition=Established crd/...`, as in getting started) and then for `kubectl -n shadewright-system rollout status deploy/shadewright-analyzer deploy/shadewright-executor`. Only the pod holding the Lease (`shadewright-executor-leader-election`, `shadewright-analyzer-leader-election`) works, so a new pod does nothing until it has the Lease, which can take a short while after the old pod is gone.
+6. **Check** the settings status (`DetectionFailed` is `False`), the Deployments' logs for errors, and that the waiting requests still show their phase.
+7. **Unpause** if you paused.
 
 What happens to requests that are waiting for a person when you upgrade:
 
@@ -82,7 +83,7 @@ What is not touched by an upgrade: the budget ConfigMap `shadewright-analysis-bu
 
 ### Upgrade with Helm
 
-Steps 1 and 2 above (release notes, optional pause) come first. The chart carries both image digests of its release, so one chart version is one tested pair of images (step 3), and `helm upgrade` is step 4. Keep your values in a file and pass it on every upgrade:
+Steps 1 to 3 above (release notes, from v0.1.0 the move of `maxAnalysesPerDay`, whose patch follows `helm upgrade`, and the optional pause) come first. The chart carries both image digests of its release, so one chart version is one tested pair of images (step 4), and `helm upgrade` is step 5. Keep your values in a file and pass it on every upgrade:
 
 ```bash
 helm upgrade shadewright oci://ghcr.io/pkalin/charts/shadewright --version <new version> \
@@ -92,11 +93,11 @@ helm upgrade shadewright oci://ghcr.io/pkalin/charts/shadewright --version <new 
 - Pin `--version`. Verify the chart and the images first (the chart's cosign identity is in the [configuration reference](reference/configuration.md#helm-chart), the images are in [verify a release](#verify-a-release)).
 - Prefer `-f my-values.yaml` to `--reuse-values`, which reuses the values of the last release instead of the new chart's: the digests of the new release may not reach the Deployments. After any upgrade check the images that run (`kubectl -n shadewright-system get deploy -o wide`). `--reset-then-reuse-values` starts from the new chart's values and applies yours.
 - From a source checkout, use the path of the clone instead (`./dist/chart`). A clone has no digests: set `executor.image.digest` and `analyzer.image.digest` to the digests of the release you check out, or `image.allowTag=true` to run the `appVersion` tag, which needs images built from that same checkout. Without either, the chart refuses to render. Mind that the clone must be of the tag whose images you run.
-- The CRDs are templates of the chart, so `helm upgrade` applies them with the Deployments, unlike a CRD in a `crds/` directory. With `--wait` Helm returns when the Deployments are available; the Lease handover from step 4 still applies.
+- The CRDs are templates of the chart, so `helm upgrade` applies them with the Deployments, unlike a CRD in a `crds/` directory. With `--wait` Helm returns when the Deployments are available; the Lease handover from step 5 still applies.
 - Keep the same `clusterId` on every upgrade. It is hashed into every Incident fingerprint, so changing it, also from the empty default (the UID of `kube-system`) to a value of your own, starts every Incident afresh. A client-side render (`helm template`, `helm diff`, Argo CD, Flux with a dry-run) asks no cluster and cannot read the `kube-system` UID, so it fails until `clusterId` is set: put it in the values of any such tool, and set it to the value the live release uses (`helm get values shadewright -n shadewright-system`, or `kubectl get ns kube-system -o jsonpath='{.metadata.uid}'` if you left it empty).
 - The settings object is not changed by an upgrade, see [The settings object](#the-settings-object-and-helm).
 
-Then steps 5 and 6 (check, unpause). `helm rollback` is a downgrade and carries the same warning.
+Then steps 6 and 7 (check, unpause). `helm rollback` is a downgrade and carries the same warning.
 
 ## Uninstall
 

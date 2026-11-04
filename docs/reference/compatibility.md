@@ -25,7 +25,7 @@ No pipeline runs the operator, Flux and KEDA together: that combination is the m
 
 | Area | What the code accepts |
 | --- | --- |
-| Kubernetes | There is no tested minimum. The CRDs use CEL validation rules, so the API server must support them, and the collector reads `events.k8s.io/v1` Events and Pod `status.observedGeneration` where the kubelet writes it (since 1.35). Treat anything older than the tested versions as unverified |
+| Kubernetes | There is no tested minimum. The CRDs use CEL validation rules, so the API server must support them, and the collector reads `events.k8s.io/v1` Events and Pod `status.observedGeneration` where the kubelet writes it. Treat anything older than the tested versions as unverified |
 | Flux | Detection and source mapping read `kustomize.toolkit.fluxcd.io/v1`, `source.toolkit.fluxcd.io/v1` and `helm.toolkit.fluxcd.io/v2`; the [design](../design.md) calls this Flux 2.3 and later. Beta versions are not read. The reason strings of the Flux module were read from the controller versions in the table above |
 | KEDA | `keda.sh/v1alpha1`, the only version KEDA 2.x serves. The policy check refuses any other version for `AdjustKedaMaxReplicas` |
 | Other platforms | The `generic` and `aks` platform modules exist. Nothing tests a cluster that is neither Kind nor AKS |

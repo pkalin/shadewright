@@ -70,7 +70,7 @@ The order matters only if requests exist. Do it in this order:
 
    This is a human action. The agent itself never removes finalizers.
 4. **Delete the workloads**: the executor and the analyzer (`kubectl delete -k .`, or delete the Deployments first if you want the CRDs to survive a while).
-5. **Delete what you created by hand**: the `RemediationPolicy` and `RemediationSettings` objects, the RoleBinding of every watched namespace (`shadewright-analyzer-watch-role`), and the metrics reader binding you made for Prometheus.
+5. **Delete what you created by hand**: the `RemediationPolicy` and `RemediationSettings` objects, the RoleBinding `shadewright-analyzer-watch` in every watched namespace (it binds the ClusterRole `shadewright-analyzer-watch-role`, which `kubectl delete -k .` removes), and the metrics reader binding you made for Prometheus.
 6. **Delete the CRDs last.** Removing them deletes every Incident, request, policy and settings object. Incidents hold the deduplication state and are the record of what the collector saw; export them first if you want it (`kubectl -n shadewright-system get incidents -o yaml`, which holds the redacted symptom and no raw logs, see [data handling](data-handling.md)).
 7. **Outside the cluster**: uninstall the GitHub App from the repository (or delete its private key on GitHub) and delete the Key Vault key and the federated credential. Branches `shadewright/*` that were left are yours to delete. Analysis records in blob storage are kept for their retention, see [data handling](data-handling.md#retention).
 

@@ -139,7 +139,7 @@ helm install shadewright ./dist/chart --namespace shadewright-system --create-na
   --set analyzer.image.digest=sha256:697defe7774b29621f64c967ff93e83b309455c2a72d50b190e179f9ff3fc8e4
 ```
 
-The same settings object and checks as above apply (`--set settings.create=true` and `settings.spec` create it from values, only when it does not exist; Helm never changes it afterwards). Uninstalling keeps the CRDs by default (`crd.keep`), so Incidents survive.
+The same settings object and checks as above apply (`--set settings.create=true` and `settings.spec` create it from values, only when it does not exist; Helm never changes it afterwards). Uninstalling keeps the CRDs by default (`crd.keep`), so Incidents survive. The commands to upgrade the release and to uninstall it, what stays behind (the CRDs and the settings object) and how to remove it are in [upgrade with Helm](upgrade-uninstall.md#upgrade-with-helm), [uninstall with Helm](upgrade-uninstall.md#uninstall-with-helm) and [the settings object](upgrade-uninstall.md#the-settings-object-and-helm).
 
 ## 3. From a hand-written request to a reviewed pull request
 

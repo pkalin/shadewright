@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -355,7 +354,8 @@ func TestLimitsFailClosed(t *testing.T) {
 				}
 				return nil
 			})
-			before := testutil.ToFloat64(remediationWaits.WithLabelValues("limits_unknown"))
+			obs := &recordingObserver{}
+			r.Limits = obs
 			_, got, err := reconcileLimits(t, r, rr)
 			if err == nil {
 				t.Fatal("Reconcile returned no error although the requests could not be listed")
@@ -366,8 +366,8 @@ func TestLimitsFailClosed(t *testing.T) {
 			if want := int32(failAfter); stub.calls.Load() != want {
 				t.Fatalf("resolver calls = %d, want %d", stub.calls.Load(), want)
 			}
-			if got := testutil.ToFloat64(remediationWaits.WithLabelValues("limits_unknown")) - before; got != 1 {
-				t.Fatalf("limits_unknown waits rose by %v, want 1", got)
+			if len(obs.waited) == 0 || obs.waited[len(obs.waited)-1] != ReasonLimitsUnknown {
+				t.Fatalf("observer saw %v, want %s last", obs.waited, ReasonLimitsUnknown)
 			}
 		})
 	}
@@ -387,49 +387,16 @@ func TestLimitsMissingSettingsStillDenied(t *testing.T) {
 	}
 }
 
-// TestLimitsMetrics checks the metrics of a request held back by the cap, and of the breaker: a trip is
-// counted when it is found open after being found closed, not on every check while it stays open.
-func TestLimitsMetrics(t *testing.T) {
+// TestLimitsReportToObserver checks what the observer is told about a request held back by the cap.
+func TestLimitsReportToObserver(t *testing.T) {
 	r, _, rr, _ := limitsWorld(t, 1, otherRequest("a", "uid-a", remediationv1alpha1.PhasePRCreated, time.Minute))
-	waits := testutil.ToFloat64(remediationWaits.WithLabelValues("concurrency_limit"))
+	obs := &recordingObserver{}
+	r.Limits = obs
 	if _, _, err := reconcileLimits(t, r, rr); err != nil {
 		t.Fatal(err)
 	}
-	if got := testutil.ToFloat64(remediationWaits.WithLabelValues("concurrency_limit")) - waits; got != 1 {
-		t.Fatalf("concurrency_limit waits rose by %v, want 1", got)
-	}
-	if testutil.ToFloat64(remediationsInFlight) != 1 || testutil.ToFloat64(concurrencyLimit) != 1 ||
-		testutil.ToFloat64(breakerOpen) != 0 {
-		t.Fatalf("in flight %v, limit %v, breaker open %v; want 1, 1, 0", testutil.ToFloat64(remediationsInFlight),
-			testutil.ToFloat64(concurrencyLimit), testutil.ToFloat64(breakerOpen))
-	}
-
-	trips := testutil.ToFloat64(breakerTrips)
-	open := limitsState{open: true, reason: ReasonCircuitOpen, limit: 1}
-	recordLimits(open, nil)
-	recordLimits(open, nil)
-	if got := testutil.ToFloat64(breakerTrips) - trips; got != 1 || testutil.ToFloat64(breakerOpen) != 1 {
-		t.Fatalf("trips rose by %v (open %v), want 1 trip while it stays open", got, testutil.ToFloat64(breakerOpen))
-	}
-	recordLimits(limitsState{limit: 1}, nil)
-	recordLimits(open, nil)
-	if got := testutil.ToFloat64(breakerTrips) - trips; got != 2 {
-		t.Fatalf("trips rose by %v, want 2 after it closed and opened again", got)
-	}
-	recordLimits(limitsState{limit: 1}, nil)
-}
-
-// TestLimitsMetricLabelsAreClosed checks that every reason of the limits has a label value, and that the
-// values are the documented closed set.
-func TestLimitsMetricLabelsAreClosed(t *testing.T) {
-	want := map[string]bool{"target_locked": true, "concurrency_limit": true, "circuit_open": true, "limits_unknown": true}
-	for _, reason := range []string{ReasonTargetLocked, ReasonConcurrencyLimit, ReasonCircuitOpen, ReasonLimitsUnknown} {
-		if !want[waitReasons[reason]] {
-			t.Fatalf("reason %s has label value %q, not in the closed set", reason, waitReasons[reason])
-		}
-	}
-	if len(waitReasons) != len(want) {
-		t.Fatalf("waitReasons has %d values, want %d", len(waitReasons), len(want))
+	if obs.active != 1 || obs.limit != 1 || obs.open || len(obs.waited) != 1 || obs.waited[0] != ReasonConcurrencyLimit {
+		t.Fatalf("observer = %+v", obs)
 	}
 }
 
@@ -465,3 +432,16 @@ func interceptorClient(base client.Client, fail func() error) client.WithWatch {
 		},
 	})
 }
+
+type recordingObserver struct {
+	waited        []string
+	active, limit int
+	open          bool
+	failures      int
+}
+
+func (o *recordingObserver) AdmissionWaited(reason string) { o.waited = append(o.waited, reason) }
+func (o *recordingObserver) ActiveRemediations(active, limit int) {
+	o.active, o.limit = active, limit
+}
+func (o *recordingObserver) Breaker(open bool, failures int) { o.open, o.failures = open, failures }

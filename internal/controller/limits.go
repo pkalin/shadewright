@@ -60,7 +60,7 @@ import (
 // and is checked again after admissionRecheckDelay. The same check runs once before the policy check, so a
 // request that cannot go through anyway does not read Git every time it is looked at.
 
-// Reasons of the Queued condition. The metrics (limits_metrics.go) map them to the values of a label.
+// Reasons of the Queued condition. They are fixed and few, so they may be used as metric labels.
 const (
 	// ReasonTargetLocked: another active request names the same target UID.
 	ReasonTargetLocked = "TargetLocked"
@@ -69,7 +69,7 @@ const (
 	// ReasonCircuitOpen: the circuit breaker is open after consecutive failures.
 	ReasonCircuitOpen = "CircuitOpen"
 	// ReasonLimitsUnknown: the limits could not be read, so the request is held back (fail closed). It is
-	// counted in the metrics only; the request is retried with the error backoff and gets no condition.
+	// reported to the LimitsObserver only; the request is retried with the error backoff and gets no condition.
 	ReasonLimitsUnknown = "LimitsUnknown"
 )
 
@@ -91,6 +91,21 @@ const (
 
 // admissionRecheckDelay is how long a request held back by a limit waits before it is checked again.
 const admissionRecheckDelay = 30 * time.Second
+
+// LimitsObserver receives the state of the executor's limits, for metrics. Its methods must be cheap and must
+// not block. Labels taken from it are bounded: reasons are the fixed constants above, and no request or target
+// is named.
+type LimitsObserver interface {
+	// AdmissionWaited is called each time a request the policy check would let through is held back. reason
+	// is ReasonTargetLocked, ReasonConcurrencyLimit, ReasonCircuitOpen or ReasonLimitsUnknown.
+	AdmissionWaited(reason string)
+	// ActiveRemediations reports, after each check of the limits, the active requests (the one being decided
+	// not included) and maxConcurrentRemediations in force.
+	ActiveRemediations(active, limit int)
+	// Breaker reports, after each check of the limits, whether the circuit breaker is open and how many
+	// failures in a row the latest outcomes are.
+	Breaker(open bool, consecutiveFailures int)
+}
 
 // errSettingsMissing means RemediationSettings default does not exist. The policy check denies such a request,
 // so the check before it lets the request go on to be denied; the check after it holds the request back.
@@ -219,6 +234,23 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 	return s, nil
 }
 
+// observeLimits reports what a check of the limits found to the LimitsObserver, if any. err is the error of the
+// check; a request held back is reported with its reason.
+func (r *RemediationRequestReconciler) observeLimits(s limitsState, err error) {
+	if r.Limits == nil {
+		return
+	}
+	if err != nil {
+		r.Limits.AdmissionWaited(ReasonLimitsUnknown)
+		return
+	}
+	r.Limits.ActiveRemediations(s.active, s.limit)
+	r.Limits.Breaker(s.open, s.failures)
+	if s.reason != "" {
+		r.Limits.AdmissionWaited(s.reason)
+	}
+}
+
 // waitForLimits holds back a request that a limit does not let through: it sets Queued True with the limit as
 // the reason, writes the status when that changed, and checks again after admissionRecheckDelay.
 func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
@@ -262,7 +294,7 @@ func (r *RemediationRequestReconciler) holdBack(ctx context.Context, rr *remedia
 	if beforeCheck && errors.Is(err, errSettingsMissing) {
 		return reconcile.Result{}, false, nil
 	}
-	recordLimits(s, err)
+	r.observeLimits(s, err)
 	if err != nil {
 		return reconcile.Result{}, true, err
 	}

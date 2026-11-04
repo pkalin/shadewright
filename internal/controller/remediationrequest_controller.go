@@ -117,6 +117,8 @@ type RemediationRequestReconciler struct {
 	// BreakerCooldown is how long the circuit breaker stays open after the latest of those failures. Zero means
 	// [DefaultBreakerCooldown].
 	BreakerCooldown time.Duration
+	// Limits receives the state of the limits (limits.go), for metrics. Nil reports nothing.
+	Limits LimitsObserver
 
 	// admitMu makes the check of the limits and the status write that lets a request through the policy check
 	// one step, so two workers can never both take the last slot or the same target.

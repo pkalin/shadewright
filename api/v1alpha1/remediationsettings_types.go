@@ -187,6 +187,128 @@ type RemediationSettingsSpec struct {
 	// integration is: nothing is enabled because it was detected.
 	// +optional
 	Modules *Modules `json:"modules,omitempty"`
+
+	// analysis bounds every model-backed analysis and names the model deployments it may call. Left out, its
+	// limits take their defaults and no model is configured. Planned: no component reads these fields yet;
+	// the analysis loop (#76) will enforce them, and the daily token caps need the spend counter of #208.
+	// The endpoints decide where the analyzer sends its Entra ID token and the redacted context, so write
+	// access to this object is security-relevant (threat model).
+	// +kubebuilder:default={}
+	// +optional
+	Analysis *AnalysisSettings `json:"analysis,omitempty"`
+}
+
+// AnalysisSettings bounds each model-backed analysis (design 12.3). Every limit has a safe default and a hard
+// upper bound in the schema. Planned: none of them is enforced yet (#76).
+type AnalysisSettings struct {
+	// maxContextBytes is the most bytes of redacted cluster context (events, pod status, log excerpts,
+	// metrics) the context builder puts into one analysis, before the fixed system part of the prompt.
+	// 4096 to 262144; the default of 32768 is roughly 8,000 tokens. A context cut at this bound is marked
+	// truncated, which is an escalation trigger (ADR-0023).
+	// +kubebuilder:validation:Minimum=4096
+	// +kubebuilder:validation:Maximum=262144
+	// +kubebuilder:default=32768
+	// +optional
+	MaxContextBytes *int32 `json:"maxContextBytes,omitempty"`
+
+	// maxToolSteps is the most read tool calls one escalated analysis may make. The triage call has no tools
+	// (ADR-0023), so this only bounds escalation. 0 to 16; 0 means escalation gets no tools.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=16
+	// +kubebuilder:default=4
+	// +optional
+	MaxToolSteps *int32 `json:"maxToolSteps,omitempty"`
+
+	// maxOutputTokens is the most output tokens one model call may produce, sent as the request's
+	// MaxOutputTokens, so the provider stops there. An analysis makes at most 3 + maxToolSteps model calls:
+	// the triage call, one retry after invalid output, and maxToolSteps + 1 escalated turns (an invalid
+	// escalated result gets no retry; it is handed off). That bounds its output. 256 to 16384.
+	// +kubebuilder:validation:Minimum=256
+	// +kubebuilder:validation:Maximum=16384
+	// +kubebuilder:default=2048
+	// +optional
+	MaxOutputTokens *int32 `json:"maxOutputTokens,omitempty"`
+
+	// maxConcurrentAnalyses is the most analyses that call a model at once. 1 to 8.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=8
+	// +kubebuilder:default=1
+	// +optional
+	MaxConcurrentAnalyses *int32 `json:"maxConcurrentAnalyses,omitempty"`
+
+	// models names the model deployments the analyzer may call. Left out, no model is configured, so no
+	// model is called and every incident no runbook matches is handed off to a person.
+	// +optional
+	Models *AnalysisModels `json:"models,omitempty"`
+}
+
+// AnalysisModels names the two model deployments of ADR-0023: a small model for the one structured triage
+// call, and a stronger one used only on escalation. There is no field for a key: the analyzer authenticates
+// with its workload identity (Entra ID, design 11.1), so no credential is ever stored in this object. The two
+// must be different deployments, so the escalation cap cannot be a second budget for the triage model.
+// +kubebuilder:validation:XValidation:rule="!has(self.escalation) || has(self.triage)",message="an escalation model needs a triage model"
+// +kubebuilder:validation:XValidation:rule="!has(self.triage) || !has(self.escalation) || (self.triage.endpoint.endsWith('/') ? self.triage.endpoint.substring(0, self.triage.endpoint.size() - 1) : self.triage.endpoint) != (self.escalation.endpoint.endsWith('/') ? self.escalation.endpoint.substring(0, self.escalation.endpoint.size() - 1) : self.escalation.endpoint) || self.triage.deployment.lowerAscii() != self.escalation.deployment.lowerAscii()",message="triage and escalation must not name the same endpoint and deployment"
+type AnalysisModels struct {
+	// triage is the small model for the one structured call on the prepared context, without tools. Left out,
+	// no model is called: an incident no runbook matches is handed off to a person, and no unit of
+	// maxAnalysesPerDay is used for it.
+	// +optional
+	Triage *ModelDeployment `json:"triage,omitempty"`
+
+	// escalation is the stronger model, called with read tools only on the deterministic escalation signals
+	// of ADR-0023. Left out, an escalation trigger hands the incident off to a person.
+	// +optional
+	Escalation *ModelDeployment `json:"escalation,omitempty"`
+}
+
+// ModelDeployment is one model deployment behind an inference endpoint, for example in Microsoft Foundry
+// (ADR-0016). It holds no key, token or other credential.
+type ModelDeployment struct {
+	// endpoint is the HTTPS base URL of the inference endpoint, for example
+	// https://<resource>.services.ai.azure.com/ or https://<resource>.openai.azure.com/openai/v1. At most 256
+	// characters: a host name of lower-case DNS labels whose last label starts with a letter (so no IP
+	// address and no single-label host such as localhost), an optional port from 1 to 65535 and an optional
+	// path whose segments do not start with '.'. No user info, query or fragment. The schema is
+	// vendor-neutral (ADR-0013). The endpoint decides where the analyzer's Entra ID token and the redacted
+	// context go; planned (#76): the analyzer refuses a host outside an allow-list of suffixes set by the
+	// operator's flag (not in this object), refuses private, loopback and link-local addresses when it dials,
+	// and requests a token for the Cognitive Services audience only.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?(:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$`
+	// +required
+	Endpoint string `json:"endpoint"`
+
+	// deployment is the name of the model deployment: 1 to 64 letters, digits, '.', '_' or '-', starting
+	// with a letter or digit.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]*$`
+	// +required
+	Deployment string `json:"deployment"`
+
+	// apiVersion is the inference API version the adapter sends: v1, or a date such as 2024-10-21 (month 01
+	// to 12, day 01 to 31), optionally followed by -preview.
+	// +kubebuilder:validation:MinLength=2
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^(v1|[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])(-preview)?)$`
+	// +required
+	APIVersion string `json:"apiVersion"`
+
+	// maxTokensPerDay is the daily spend cap of this deployment, in tokens per UTC day: input (cached or not)
+	// plus output tokens of every call, a failed or timed-out call counted at its upper bound (the input
+	// estimate plus maxOutputTokens). Required, with no default, so the admin chooses the cap of each
+	// deployment. It is a count of tokens, not an amount of money, because tokens are what the provider
+	// reports and bills, they are whole numbers, and a money cap would need a price list in this object that
+	// goes stale. It is per deployment because the triage and escalation models differ in price. The spend
+	// it allows is at most this count times the deployment's highest price per token (design 12.1) only
+	// because the counter reserves a call's upper bound before calling, under one lock for concurrent
+	// analyses (planned, #208). 0 to 1,000,000,000; 0, or a cap that is spent, stops calls to this deployment
+	// and hands the incident off.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1000000000
+	// +required
+	MaxTokensPerDay *int64 `json:"maxTokensPerDay,omitempty"`
 }
 
 // SettingsName is the name of the one RemediationSettings object.

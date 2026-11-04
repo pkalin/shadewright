@@ -91,6 +91,8 @@ Maximum length: {{ $val }}
 Minimum items: {{ $val }}
 {{- else if eq $key "MaxItems" -}}
 Maximum items: {{ $val }}
+{{- else if and (or (eq $key "Minimum") (eq $key "Maximum")) (contains "e+" $val) -}}
+{{ $key }}: {{ $val | float64 | int64 }}
 {{- else -}}
 {{ $key }}: {{ $val }}
 {{- end -}}

@@ -4,7 +4,7 @@ title: Configuration reference
 
 # Configuration reference
 
-Everything an operator can set today, checked against `cmd/main.go` (the executor), `cmd/analyzer/main.go`, `internal/cmdutil` and `config/` at v0.1.0. There is no Helm chart yet ([#83](https://github.com/pkalin/shadewright/issues/83), **planned**); its values will map onto the settings below. Objects and fields of the custom resources are in the [API reference](api.md). Metrics names, the upgrade and uninstall order, identity rotation and data handling are **planned** pages (issue [#252](https://github.com/pkalin/shadewright/issues/252), part 2).
+Everything an operator can set today, checked against `cmd/main.go` (the executor), `cmd/analyzer/main.go`, `internal/cmdutil` and `config/` at v0.1.0. There is no Helm chart yet ([#83](https://github.com/pkalin/shadewright/issues/83), **planned**); its values will map onto the settings below. Objects and fields of the custom resources are in the [API reference](api.md). See also [compatibility](compatibility.md), [upgrade and uninstall](../upgrade-uninstall.md), [identity rotation](../identity-rotation.md) and [data handling](../data-handling.md). Metric names are in the [metrics reference](metrics.md).
 
 ## Components and images
 
@@ -125,6 +125,8 @@ An action contributed by an integration module (`AdjustKedaMaxReplicas` needs `k
 
 The shipped NetworkPolicies also gate the network: the namespace is default-deny for ingress and egress, and ingress to port 8443 is allowed only from namespaces labeled `metrics: enabled`. Egress for both components is limited to cluster DNS and TCP 443 and 6443 (the Kubernetes API, Git host and Key Vault are on those ports).
 
+The metrics each component serves are listed in the [metrics reference](metrics.md).
+
 The certificate is self-signed unless you set `--metrics-cert-path` (the cert-manager overlay is commented out in `config/default`). `config/prometheus/monitor.yaml` is a `ServiceMonitor` for the Prometheus Operator, not included by default; it scrapes with the Pod's ServiceAccount token and `insecureSkipVerify: true`, so use a real certificate and `serverName` if you care about that. Do not use `--metrics-secure=false` outside a test.
 
 ## Workload identity (Azure)
@@ -148,4 +150,4 @@ patches:
         value: "<client id of the executor identity>"
 ```
 
-Without a working identity, a request that reaches the Git step is retried quietly and stays `Pending`; see [troubleshooting](../troubleshooting.md#no-reason-at-all). Rotation of the key, the installation and the credentials is **planned** for part 2.
+Without a working identity, a request that reaches the Git step is retried quietly and stays `Pending`; see [troubleshooting](../troubleshooting.md#no-reason-at-all). Rotating the key, the installation and the credentials is in [identity rotation](../identity-rotation.md).

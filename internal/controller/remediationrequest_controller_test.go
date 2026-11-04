@@ -25,6 +25,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -223,8 +224,10 @@ var _ = Describe("RemediationRequest Controller", func() {
 
 	It("moves an allowed request to PolicyChecked and records the decision", func() {
 		create(func() {})
+		allowed := testutil.ToFloat64(policyDecisions.WithLabelValues(decisionAllowed))
 		_, err := reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())
+		Expect(testutil.ToFloat64(policyDecisions.WithLabelValues(decisionAllowed)) - allowed).To(Equal(1.0))
 
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
@@ -262,9 +265,12 @@ var _ = Describe("RemediationRequest Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		first := fetch()
 		calls := stub.calls.Load()
+		allowed := testutil.ToFloat64(policyDecisions.WithLabelValues(decisionAllowed))
 
 		_, err = reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())
+		Expect(testutil.ToFloat64(policyDecisions.WithLabelValues(decisionAllowed))).To(Equal(allowed),
+			"a decision is counted once")
 		second := fetch()
 		Expect(second.ResourceVersion).To(Equal(first.ResourceVersion))
 		Expect(second.Status).To(Equal(first.Status))
@@ -286,8 +292,12 @@ var _ = Describe("RemediationRequest Controller", func() {
 	It("denies a request whose policy does not exist, without retrying", func() {
 		create(func() {})
 		Expect(k8sClient.Delete(ctx, policy)).To(Succeed())
+		denials := testutil.ToFloat64(policyDenials.WithLabelValues(ReasonPolicyNotFound))
+		deniedCount := testutil.ToFloat64(policyDecisions.WithLabelValues(decisionDenied))
 		res, err := reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())
+		Expect(testutil.ToFloat64(policyDenials.WithLabelValues(ReasonPolicyNotFound)) - denials).To(Equal(1.0))
+		Expect(testutil.ToFloat64(policyDecisions.WithLabelValues(decisionDenied)) - deniedCount).To(Equal(1.0))
 		Expect(res).To(Equal(reconcile.Result{}))
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseDenied))

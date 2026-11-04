@@ -20,12 +20,17 @@ nav = [
   { "The name" = "name.md" },
   { "Emergency stop" = "emergency.md" },
   { "Troubleshooting" = "troubleshooting.md" },
+  { "Upgrade and uninstall" = "upgrade-uninstall.md" },
+  { "Identity rotation" = "identity-rotation.md" },
+  { "Data handling" = "data-handling.md" },
   { "Lab" = [
     { "OOM acceptance run" = "lab-oom-acceptance.md" },
   ] },
   { "Reference" = [
     { "Configuration" = "reference/configuration.md" },
+    { "Compatibility" = "reference/compatibility.md" },
     { "API" = "reference/api.md" },
+    { "Metrics" = "reference/metrics.md" },
   ] },
   { "Decisions" = [
     { "Overview" = "adr/index.md" },

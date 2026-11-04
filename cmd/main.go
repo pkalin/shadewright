@@ -115,6 +115,7 @@ func main() {
 	reconciler := &controller.RemediationRequestReconciler{
 		Client:         mgr.GetClient(),
 		Scheme:         mgr.GetScheme(),
+		Namespace:      namespace,
 		APIReader:      mgr.GetAPIReader(),
 		OpenRepository: repos.Open,
 		// The core/v1 recorder writes with the grant on core Events that the executor's leader election Role

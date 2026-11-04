@@ -1,0 +1,21 @@
+# A node of a GKE node pool.
+apiVersion: v1
+kind: Node
+metadata:
+  name: gke-lab-default-pool-1a2b3c4d-x7k9
+  labels:
+    cloud.google.com/gke-nodepool: default-pool
+    cloud.google.com/machine-family: e2
+    kubernetes.io/os: linux
+    node.kubernetes.io/instance-type: e2-standard-4
+    topology.kubernetes.io/zone: europe-west1-b
+spec:
+  providerID: gce://lab-project/europe-west1-b/gke-lab-default-pool-1a2b3c4d-x7k9
+status:
+  conditions:
+  - type: MemoryPressure
+    status: "False"
+    reason: KubeletHasSufficientMemory
+  - type: Ready
+    status: "True"
+    reason: KubeletReady

@@ -187,6 +187,7 @@ func ReserveAnalysis(ctx context.Context, reader client.Reader, writer client.Wr
 		}
 		return writer.Update(ctx, cm, client.FieldOwner(triggerFieldOwner))
 	})
+	recordReservation(err)
 	if err != nil {
 		return fmt.Errorf("reserving an analysis in ConfigMap %s/%s: %w", namespace, BudgetName, err)
 	}

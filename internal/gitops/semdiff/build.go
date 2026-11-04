@@ -44,8 +44,9 @@ const (
 	MaxVisits = 256
 	// MaxBuildBytes bounds the input kustomize processes, with repetition: every visit of a directory adds
 	// the size of its kustomization file and of the resource and patch files it lists. A large base reached
-	// through many overlays is rendered once per path, so this bounds the work and memory of a render.
-	MaxBuildBytes = 16 << 20
+	// through many overlays is rendered once per path, so this bounds the work and memory of a render. It is
+	// the mapping's read budget, so one literal sets both.
+	MaxBuildBytes = sourcemap.MaxTotalBytes
 	// MaxObjects is the most objects one render may return.
 	MaxObjects = 4096
 )

@@ -4,7 +4,7 @@ title: Configuration reference
 
 # Configuration reference
 
-Everything an operator can set today, checked against `cmd/main.go` (the executor), `cmd/analyzer/main.go`, `internal/cmdutil` and `config/` at v0.1.0. There is no Helm chart yet ([#83](https://github.com/pkalin/shadewright/issues/83), **planned**); its values will map onto the settings below. Objects and fields of the custom resources are in the [API reference](api.md). See also [compatibility](compatibility.md), [upgrade and uninstall](../upgrade-uninstall.md), [identity rotation](../identity-rotation.md) and [data handling](../data-handling.md). The metrics reference is **planned** ([#89](https://github.com/pkalin/shadewright/issues/89)).
+Everything an operator can set today, checked against `cmd/main.go` (the executor), `cmd/analyzer/main.go`, `internal/cmdutil` and `config/` at v0.1.0. There is no Helm chart yet ([#83](https://github.com/pkalin/shadewright/issues/83), **planned**); its values will map onto the settings below. Objects and fields of the custom resources are in the [API reference](api.md). See also [compatibility](compatibility.md), [upgrade and uninstall](../upgrade-uninstall.md), [identity rotation](../identity-rotation.md) and [data handling](../data-handling.md). Metric names are in the [metrics reference](metrics.md).
 
 ## Components and images
 
@@ -109,13 +109,13 @@ One cluster-scoped object named `default` (field details in the [API reference](
 | --- | --- | --- |
 | `spec.paused` | `false` | Stops every write: pull requests, closes, finalizer cleanup. Analysis continues. See [emergency stop](../emergency.md) |
 | `spec.maxAnalysesPerDay` | `100` | Model-backed analyses per UTC day, 0 to 10000. `0` marks every Incident not due (`AnalysisDisabled`). The model call itself is not built yet |
-| `spec.maxConcurrentRemediations` | `1` | Accepted and stored, **not enforced** (planned, [#88](https://github.com/pkalin/shadewright/issues/88)) |
+| `spec.maxConcurrentRemediations` | `1` | Requests active at once (1 to 20), in the operator namespace: from `PolicyChecked` until `Merged` or a final phase, and while a deleted one still closes its pull request. A further request the policy allows stays `Pending` with the condition `Queued` (`ConcurrencyLimitReached`); a refusal at the first check is never held back, but a request already `Queued` is decided again only once the limits let it through. See [troubleshooting](../troubleshooting.md#limits) |
 | `spec.repositories` | none | Up to 16 repositories Shadewright may open pull requests in. URLs are unique |
 | `spec.repositories[].url` | required | GitHub: `https://github.com/<owner>/<repo>`, lower case, no `.git`. Must equal the Flux `GitRepository` URL byte for byte, or the request is `Denied` (`RepositoryNotConfigured`) |
 | `spec.repositories[].targetBranch` | `main` | The only branch pull requests may target. Must equal the branch Flux tracks |
 | `spec.repositories[].provider` | required | `GitHub` is the only value |
 | `spec.repositories[].github` | required for GitHub | `appClientID`, `installationID` and `signer.azureKeyVault.keyID` (a key URL such as `https://<vault>.vault.azure.net/keys/<name>`, with an optional 32-digit version) |
-| `spec.modules.platforms`, `spec.modules.integrations` | empty | Modules enabled by name. A module contributes only if it is enabled here and detected. `generic` is always on and is not listed. Compiled in at v0.1.0: platform `aks`; integrations `cloudflared`, `flux`, `keda`, `kyverno`, `secrets-store-csi-driver`. A name no module has is accepted and reported in the `UnknownModules` condition |
+| `spec.modules.platforms`, `spec.modules.integrations` | empty | Modules enabled by name. A module contributes only if it is enabled here and detected. `generic` is always on and is not listed. Compiled in at v0.1.0: platform `aks`; integrations `cloudflared`, `flux`, `keda`, `kyverno`, `secrets-store-csi-driver`. Added since: platforms `eks` and `gke`, which only detect (no diagnosis rules). A name no module has is accepted and reported in the `UnknownModules` condition |
 
 An action contributed by an integration module (`AdjustKedaMaxReplicas` needs `keda`) is `Denied` with `ModuleNotEnabled` unless the module is listed. The settings `status` is a report written by the analyzer; no component reads it to decide anything.
 
@@ -124,6 +124,8 @@ An action contributed by an integration module (`AdjustKedaMaxReplicas` needs `k
 `config/default` patches both Deployments to serve metrics on `:8443` over HTTPS and creates the Services `shadewright-executor-metrics-service` and `shadewright-analyzer-metrics-service` (port `https`, 8443). With `--metrics-secure=true` each request is authenticated by a TokenReview and authorized by a SubjectAccessReview. A scraper therefore needs a ServiceAccount token, and that identity needs the `get` verb on the non-resource URL `/metrics`: the ClusterRole `shadewright-metrics-reader` grants it, and **nothing binds it by default**, so bind it to your Prometheus ServiceAccount.
 
 The shipped NetworkPolicies also gate the network: the namespace is default-deny for ingress and egress, and ingress to port 8443 is allowed only from namespaces labeled `metrics: enabled`. Egress for both components is limited to cluster DNS and TCP 443 and 6443 (the Kubernetes API, Git host and Key Vault are on those ports).
+
+The metrics each component serves are listed in the [metrics reference](metrics.md).
 
 The certificate is self-signed unless you set `--metrics-cert-path` (the cert-manager overlay is commented out in `config/default`). `config/prometheus/monitor.yaml` is a `ServiceMonitor` for the Prometheus Operator, not included by default; it scrapes with the Pod's ServiceAccount token and `insecureSkipVerify: true`, so use a real certificate and `serverName` if you care about that. Do not use `--metrics-secure=false` outside a test.
 

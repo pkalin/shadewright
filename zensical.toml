@@ -30,6 +30,7 @@ nav = [
     { "Configuration" = "reference/configuration.md" },
     { "Compatibility" = "reference/compatibility.md" },
     { "API" = "reference/api.md" },
+    { "Metrics" = "reference/metrics.md" },
   ] },
   { "Decisions" = [
     { "Overview" = "adr/index.md" },

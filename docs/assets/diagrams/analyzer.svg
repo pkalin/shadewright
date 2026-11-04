@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 824" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Shadewright analyzer</title>
-  <desc id="d">Zoom into the analyzer identity. Built: the collector watches events and pod status in the watched namespaces, resolves owners, redacts and fingerprints them; two levels of deduplication feed a durable, bounded Incident CR; the analysis trigger decides when an Incident is due. The trigger reads maxAnalysesPerDay from the RemediationSettings spec and reads and updates the daily count in the Budget ConfigMap shadewright-analysis-budget in the operator namespace; an unreadable budget means not due. Separately, the analyzer reports platform and integration detection in the settings status; no component reads that status to decide anything. Prometheus (approved templates, watched namespaces) has an adapter that is built but not wired. Planned, drawn dashed: pod logs as a source, the context builder that takes selected, bounded data from the sources, the model call with read tools on escalation (ADR-0023), the model provider outside the cluster, and the typed RemediationRequest handed to the executor.</desc>
+  <desc id="d">Zoom into the analyzer identity. Built: the collector watches events and pod status in the watched namespaces, resolves owners, redacts and fingerprints them; two levels of deduplication feed a durable, bounded Incident CR; the analysis trigger decides when an Incident is due. The trigger reads maxAnalysesPerDay from the RemediationSettings spec and reads and updates the daily count in the Budget ConfigMap shadewright-analysis-budget in the operator namespace; an unreadable budget means not due. Separately, the analyzer reports platform and integration detection in the settings status; no component reads that status to decide anything. Prometheus (approved templates, watched namespaces) has an adapter that is built but not wired. Pod logs (bounded, redacted, watched namespaces) have an adapter that is built but not wired; the analyzer has no grant on pods/log yet. Planned, drawn dashed: the context builder that takes selected, bounded data from the sources, the model call with read tools on escalation (ADR-0023), the model provider outside the cluster, and the typed RemediationRequest handed to the executor.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -61,11 +61,11 @@
   <text class="s" x="60" y="557">approved templates only</text>
   <text class="s" x="60" y="573">watched namespaces</text>
   <text class="pn" x="44" y="602">adapter built, not wired</text>
-  <rect class="pl" x="44" y="626" width="210" height="72" rx="10"/>
+  <rect class="box" x="44" y="626" width="210" height="72" rx="10"/>
   <text class="h" x="60" y="652">Pod logs</text>
-  <text class="s" x="60" y="673">read-only, bounded</text>
+  <text class="s" x="60" y="673">bounded · redacted</text>
   <text class="s" x="60" y="689">watched namespaces</text>
-  <text class="pn" x="238" y="642" text-anchor="end">planned</text>
+  <text class="pn" x="44" y="718">adapter built, not wired</text>
 
   <!-- analyzer: built -->
   <rect class="box" x="332" y="110" width="210" height="72" rx="10"/>

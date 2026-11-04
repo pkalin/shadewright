@@ -51,6 +51,9 @@ type MetricsSource interface {
 	Query(ctx context.Context, q MetricsQuery) ([]Series, error)
 }
 
+// DefaultLogBytes is the excerpt size an adapter and the fake use when a query sets no MaxBytes.
+const DefaultLogBytes = 64 << 10
+
 // LogQuery selects a bounded excerpt of one container's logs.
 type LogQuery struct {
 	Namespace string
@@ -58,21 +61,29 @@ type LogQuery struct {
 	Container string
 	// Previous selects the logs of the previous, terminated container instance.
 	Previous bool
-	// Since limits how far back to read; zero means the adapter's default.
+	// Since limits how far back to read; zero means the adapter's default, which for the previous instance
+	// may be no time limit.
 	Since time.Duration
-	// MaxBytes bounds the excerpt; zero means the adapter's default.
+	// MaxBytes bounds the excerpt; zero means DefaultLogBytes.
 	MaxBytes int64
 }
 
-// LogExcerpt is a bounded piece of logs. The text is untrusted and not yet redacted.
+// LogExcerpt is a bounded piece of logs. The text is untrusted. The Kubernetes adapter
+// (internal/providers/logs/kube) redacts it before returning it; the fake does not.
 type LogExcerpt struct {
-	Text      string
+	Text string
+	// Truncated means older lines were cut from the front of the excerpt to fit MaxBytes.
 	Truncated bool
+	// EndMissing means the newest lines could not be read within the adapter's read bound, so the excerpt
+	// ends before the end of the log.
+	EndMissing bool
 }
 
 // LogSource reads logs.
 type LogSource interface {
-	// Logs returns the most recent lines within the query's bounds. ErrNotFound when the pod or container
-	// does not exist.
+	// Logs returns the most recent lines within the query's bounds. ErrNotFound when the pod does not
+	// exist; ErrRejected when the source refuses the request itself, for example for a container the pod
+	// does not have, a previous instance that does not exist or a container that has not started (the
+	// Kubernetes API server answers all three with 400).
 	Logs(ctx context.Context, q LogQuery) (LogExcerpt, error)
 }

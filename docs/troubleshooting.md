@@ -49,7 +49,7 @@ Set on `Queued` (`True`) when the policy allows a request but a limit holds it b
 | `ConcurrencyLimitReached` | `maxConcurrentRemediations` requests are active | Wait, review the open pull requests, or raise the limit in `RemediationSettings` |
 | `CircuitOpen` | Three requests that went through the policy check failed (`Failed`, `NeedsIntervention`) since the latest merge, the latest less than 30 minutes ago. `Expired` does not count | Find out why they failed. The breaker closes 30 minutes after the latest failure, or when a request merges; deleting the failed requests closes it at once. After an upgrade it starts closed: requests that ended before then are not counted |
 
-A request that stays in `Pending` with no condition while the executor logs a failed list of `RemediationRequests` is held back too: the limits cannot be read, so nothing goes through.
+A request that stays in `Pending` with no condition while the executor logs a failed list of `RemediationRequests` is held back too: the limits cannot be read, so nothing goes through. A request that was already `Queued` keeps its earlier reason, if any, while the list is unreadable.
 
 ## Request and target
 

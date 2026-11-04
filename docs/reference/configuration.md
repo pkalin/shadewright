@@ -109,7 +109,7 @@ One cluster-scoped object named `default` (field details in the [API reference](
 | --- | --- | --- |
 | `spec.paused` | `false` | Stops every write: pull requests, closes, finalizer cleanup. Analysis continues. See [emergency stop](../emergency.md) |
 | `spec.maxAnalysesPerDay` | `100` | Model-backed analyses per UTC day, 0 to 10000. `0` marks every Incident not due (`AnalysisDisabled`). The model call itself is not built yet |
-| `spec.maxConcurrentRemediations` | `1` | Accepted and stored, **not enforced** (planned, [#88](https://github.com/pkalin/shadewright/issues/88)) |
+| `spec.maxConcurrentRemediations` | `1` | Requests active at once (1 to 20): from `PolicyChecked` until `Merged` or a final phase. Another request the policy allows waits with the condition `Queued` (`ConcurrencyLimitReached`). See [troubleshooting](../troubleshooting.md#limits) |
 | `spec.repositories` | none | Up to 16 repositories Shadewright may open pull requests in. URLs are unique |
 | `spec.repositories[].url` | required | GitHub: `https://github.com/<owner>/<repo>`, lower case, no `.git`. Must equal the Flux `GitRepository` URL byte for byte, or the request is `Denied` (`RepositoryNotConfigured`) |
 | `spec.repositories[].targetBranch` | `main` | The only branch pull requests may target. Must equal the branch Flux tracks |

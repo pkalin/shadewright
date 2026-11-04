@@ -156,8 +156,9 @@ type RemediationSettingsSpec struct {
 	// +optional
 	Paused *bool `json:"paused,omitempty"`
 
-	// maxConcurrentRemediations will limit requests between PolicyChecked and a terminal phase. It is accepted
-	// and stored but not enforced yet: no controller reads it until concurrency limits are built (#88).
+	// maxConcurrentRemediations limits the requests that are active at once: past the policy check and not yet
+	// in a phase the request stops in (PolicyChecked up to the merge). A request the policy allows waits, with
+	// the condition Queued, until fewer are active. Read from the API server before each such decision.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=20
 	// +kubebuilder:default=1

@@ -31,12 +31,25 @@ The reason is on one of these conditions:
 - `PullRequestOpened`: a stop before a pull request is recorded, and the history of one that was closed.
 - `Approved`: a stop after a pull request is recorded; `WaitingForReview` while it waits.
 - `PlanFresh`: `False` when the plan went stale (`Superseded`), `Unknown` while the Git host refuses a freshness check.
+- `Queued`: `True` while a limit holds a request back before its policy check (see [Limits](#limits)).
 
 Many reasons exist in more than one place with the same cause (the source mapping and the policy both check the repository); they are listed once.
 
 ## No reason at all
 
 A request stuck in `Pending` with no condition is being retried: the signer cannot be built (no workload identity), or Key Vault or GitHub returned an error that may pass. Source mapping opens the repository and its signer before the policy decision, so the request stays `Pending`, not `PolicyChecked`, and nothing ends it (the 30 minute deadline starts only after an allowed decision). Read the executor log and fix what it names: the `azure.workload.identity/client-id` annotation, the federated credential, the `sign` grant on the key, the Key Vault `keyID`, or a GitHub outage. A host that asks for a delay (`Retry-After`) is waited for.
+
+## Limits
+
+Set before the policy check, on `Queued` (`True`). The request keeps no phase or `Pending` and is checked again every 30 seconds; the condition goes once the policy check decides.
+
+| Reason | Cause | Fix |
+| --- | --- | --- |
+| `TargetLocked` | Another active request (from `PolicyChecked` until `Merged` or a final phase) names the same target UID | Wait for it to end, or delete it if it should not go on |
+| `ConcurrencyLimitReached` | `maxConcurrentRemediations` requests are active | Wait, review the open pull requests, or raise the limit in `RemediationSettings` |
+| `CircuitOpen` | The latest three requests that went through the policy check failed (`Failed`, `Expired`, `NeedsIntervention`), the latest less than 30 minutes ago | Find out why they failed. The breaker closes 30 minutes after the latest failure, or when a request merges; deleting the failed requests closes it at once |
+
+A request that stays in `Pending` with no condition while the executor logs a failed list of `RemediationRequests` is held back too: the limits cannot be read, so nothing goes through.
 
 ## Request and target
 

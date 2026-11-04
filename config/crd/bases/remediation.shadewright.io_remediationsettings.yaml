@@ -63,8 +63,9 @@ spec:
               maxConcurrentRemediations:
                 default: 1
                 description: |-
-                  maxConcurrentRemediations will limit requests between PolicyChecked and a terminal phase. It is accepted
-                  and stored but not enforced yet: no controller reads it until concurrency limits are built (#88).
+                  maxConcurrentRemediations limits the requests that are active at once: past the policy check and not yet
+                  in a phase the request stops in (PolicyChecked up to the merge). A request the policy allows waits, with
+                  the condition Queued, until fewer are active. Read from the API server before each such decision.
                 format: int32
                 maximum: 20
                 minimum: 1

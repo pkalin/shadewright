@@ -225,6 +225,12 @@ const (
 	// switch) holds back the request's next Git write. The request keeps its phase and the rest of its status,
 	// and the condition is removed once the request may write again or ends.
 	ConditionWritesPaused = "WritesPaused"
+	// ConditionQueued is True, with reason TargetLocked, ConcurrencyLimitReached or CircuitOpen, while a limit
+	// of the executor holds back a request the policy check has not let through yet: another request is active
+	// on the same target, maxConcurrentRemediations requests are active, or the circuit breaker is open. The
+	// request keeps no phase or Pending and is checked again later; the condition is removed once the policy
+	// check writes its decision.
+	ConditionQueued = "Queued"
 )
 
 // PullRequestStatus records the pull request that carries the plan.
@@ -280,6 +286,11 @@ type RemediationRequestStatus struct {
 	// +optional
 	Phase RemediationPhase `json:"phase,omitempty"`
 
+	// lastPhaseTransitionTime is when phase last changed. The circuit breaker orders the outcomes of requests
+	// by it.
+	// +optional
+	LastPhaseTransitionTime *metav1.Time `json:"lastPhaseTransitionTime,omitempty"`
+
 	// effectiveApprovalRequired is what policy decided, which may be stricter than spec.approvalRequired.
 	// +optional
 	EffectiveApprovalRequired *bool `json:"effectiveApprovalRequired,omitempty"`
@@ -318,7 +329,7 @@ type RemediationRequestStatus struct {
 	Deadline *metav1.Time `json:"deadline,omitempty"`
 
 	// conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
-	// Verified, PlanFresh and WritesPaused.
+	// Verified, PlanFresh, WritesPaused and Queued.
 	// +listType=map
 	// +listMapKey=type
 	// +optional

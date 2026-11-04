@@ -479,7 +479,7 @@ func (r *RemediationRequestReconciler) adoptChangeRequest(ctx context.Context, g
 // recordPullRequest writes PRCreated with the pull request in one status write.
 func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest) error {
-	rr.Status.Phase = remediationv1alpha1.PhasePRCreated
+	r.setPhase(rr, remediationv1alpha1.PhasePRCreated)
 	rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}
 	rr.Status.Deadline = nil
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
@@ -630,7 +630,7 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	if rr.Status.Phase != remediationv1alpha1.PhasePRCreated {
 		return nil
 	}
-	rr.Status.Phase = remediationv1alpha1.PhaseAwaitingApproval
+	r.setPhase(rr, remediationv1alpha1.PhaseAwaitingApproval)
 	message := "The pull request waits for a human review"
 	if rr.Status.EffectiveApprovalRequired != nil && !*rr.Status.EffectiveApprovalRequired {
 		// Auto-merge is not built (#20, #98): a request policy would let merge by itself waits for a person too.
@@ -658,7 +658,7 @@ func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediation
 		// landed, so the plan's freshness no longer says anything and the mark is not left behind.
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
 	}
-	rr.Status.Phase = phase
+	r.setPhase(rr, phase)
 	// A final phase waits for nothing, also not for the kill switch; the request does not go on, so no
 	// WritesResumed Event is recorded.
 	resume(rr)

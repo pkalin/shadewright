@@ -1,0 +1,22 @@
+# A node of an EKS managed node group.
+apiVersion: v1
+kind: Node
+metadata:
+  name: ip-10-0-1-23.eu-west-1.compute.internal
+  labels:
+    eks.amazonaws.com/capacityType: ON_DEMAND
+    eks.amazonaws.com/nodegroup: general
+    eks.amazonaws.com/nodegroup-image: ami-0123456789abcdef0
+    kubernetes.io/os: linux
+    node.kubernetes.io/instance-type: m5.large
+    topology.kubernetes.io/zone: eu-west-1a
+spec:
+  providerID: aws:///eu-west-1a/i-0123456789abcdef0
+status:
+  conditions:
+  - type: MemoryPressure
+    status: "False"
+    reason: KubeletHasSufficientMemory
+  - type: Ready
+    status: "True"
+    reason: KubeletReady

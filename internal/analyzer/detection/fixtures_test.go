@@ -30,6 +30,14 @@ import (
 
 	"github.com/pkalin/shadewright/internal/modules"
 	"github.com/pkalin/shadewright/internal/modules/aks"
+	"github.com/pkalin/shadewright/internal/modules/eks"
+	"github.com/pkalin/shadewright/internal/modules/gke"
+)
+
+// The EKS and GKE node fixtures, used by the detection and status tests.
+const (
+	fixtureEKS = "node-eks.yaml"
+	fixtureGKE = "node-gke.yaml"
 )
 
 func load(t *testing.T, name string, into any) {
@@ -45,7 +53,7 @@ func load(t *testing.T, name string, into any) {
 
 func registry(t *testing.T) *modules.Registry {
 	t.Helper()
-	r, err := modules.New([]modules.Platform{aks.Platform{}}, nil)
+	r, err := modules.New([]modules.Platform{aks.Platform{}, eks.Platform{}, gke.Platform{}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +127,8 @@ func TestFixtureNodes(t *testing.T) {
 		{"node-aks-memory-pressure.yaml", []found{{modules.GenericPlatform, modules.RuleNodePressure,
 			modules.ReasonNodeMemoryPressure}}},
 		{"node-kind.yaml", nil},
+		{fixtureEKS, nil},
+		{fixtureGKE, nil},
 	}
 	s := onAKS(t)
 	for _, c := range cases {
@@ -130,7 +140,8 @@ func TestFixtureNodes(t *testing.T) {
 	}
 }
 
-// TestFixtureNodesDetection checks detection on the node fixtures: AKS nodes give aks, a Kind node generic.
+// TestFixtureNodesDetection checks detection on the node fixtures: AKS, EKS and GKE nodes give their platform; a
+// Kind node, no node, and nodes of two platforms give generic.
 func TestFixtureNodesDetection(t *testing.T) {
 	r := registry(t)
 	cases := []struct {
@@ -140,6 +151,12 @@ func TestFixtureNodesDetection(t *testing.T) {
 		{[]string{"node-aks-spot-preempt.yaml", "node-aks-memory-pressure.yaml"}, aks.Name},
 		{[]string{"node-kind.yaml"}, modules.GenericPlatform},
 		{[]string{"node-kind.yaml", "node-aks-memory-pressure.yaml"}, modules.GenericPlatform},
+		{[]string{fixtureEKS}, eks.Name},
+		{[]string{fixtureGKE}, gke.Name},
+		{[]string{fixtureEKS, fixtureGKE}, modules.GenericPlatform},
+		{[]string{fixtureGKE, "node-aks-spot-preempt.yaml"}, modules.GenericPlatform},
+		{[]string{fixtureEKS, "node-kind.yaml"}, modules.GenericPlatform},
+		{nil, modules.GenericPlatform},
 	}
 	for _, c := range cases {
 		var nodes []modules.Node

@@ -115,7 +115,7 @@ One cluster-scoped object named `default` (field details in the [API reference](
 | `spec.repositories[].targetBranch` | `main` | The only branch pull requests may target. Must equal the branch Flux tracks |
 | `spec.repositories[].provider` | required | `GitHub` is the only value |
 | `spec.repositories[].github` | required for GitHub | `appClientID`, `installationID` and `signer.azureKeyVault.keyID` (a key URL such as `https://<vault>.vault.azure.net/keys/<name>`, with an optional 32-digit version) |
-| `spec.modules.platforms`, `spec.modules.integrations` | empty | Modules enabled by name. A module contributes only if it is enabled here and detected. `generic` is always on and is not listed. Compiled in at v0.1.0: platform `aks`; integrations `cloudflared`, `flux`, `keda`, `kyverno`, `secrets-store-csi-driver`. A name no module has is accepted and reported in the `UnknownModules` condition |
+| `spec.modules.platforms`, `spec.modules.integrations` | empty | Modules enabled by name. A module contributes only if it is enabled here and detected. `generic` is always on and is not listed. Compiled in at v0.1.0: platform `aks`; integrations `cloudflared`, `flux`, `keda`, `kyverno`, `secrets-store-csi-driver`. Added since: platforms `eks` and `gke`, which only detect (no diagnosis rules). A name no module has is accepted and reported in the `UnknownModules` condition |
 
 An action contributed by an integration module (`AdjustKedaMaxReplicas` needs `keda`) is `Denied` with `ModuleNotEnabled` unless the module is listed. The settings `status` is a report written by the analyzer; no component reads it to decide anything.
 

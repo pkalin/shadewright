@@ -1502,7 +1502,7 @@ var _ = Describe("Pull request body", func() {
 		rr := fx.MemoryLimitRequest(requestNamespace, "body")
 		rr.UID = "11111111-1111-4111-8111-111111111111"
 		// Names are validated by the schema; the body is redacted anyway, so a token that slipped through a
-		// future field never reaches the Git host.
+		// future field never reaches the Git host. This one is no Kubernetes name, so it is redacted too.
 		rr.Spec.IncidentRef.Name = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
 		rr.Status.PlanDigest = "sha256:" + strings.Repeat("a", 64)
 		rr.Status.PolicyRevision = "p/1"
@@ -1516,5 +1516,26 @@ var _ = Describe("Pull request body", func() {
 		other := rr.DeepCopy()
 		other.Status.PlanDigest = "sha256:" + strings.Repeat("b", 64)
 		Expect(hasMarker(body, other)).To(BeFalse(), "a marker for another plan is not this plan's")
+	})
+
+	It("names an Incident called after its fingerprint verbatim and still redacts free text", func() {
+		rr := fx.MemoryLimitRequest(requestNamespace, "body")
+		rr.UID = "11111111-1111-4111-8111-111111111111"
+		// The collector names an Incident "incident-" plus the 64 hex digits of its fingerprint, a run the
+		// redactor takes for a token in free text.
+		name := "incident-9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+		rr.Spec.IncidentRef.Name = name
+		hexToken := "3f1c9a7be2d84f06a5b1c3e9d7f2a4b6c8e0d1f3"
+		rr.Status.PlanDigest = "sha256:" + strings.Repeat("a", 64)
+		rr.Status.PolicyRevision = "p/1"
+		rr.Status.Source = &remediationv1alpha1.ResolvedSource{
+			Path: remediationv1alpha1.GitFilePath("apps/" + hexToken + "/deployment.yaml"), TargetBranch: mainBranch,
+		}
+		body := pullRequestBody(rr)
+		Expect(body).To(ContainSubstring("for incident `" + name + "`."))
+		Expect(body).To(ContainSubstring("incident `" + name + "`, policy `p/1`"))
+		Expect(body).NotTo(ContainSubstring(hexToken), "a hex token in other text is still redacted")
+		Expect(body).To(ContainSubstring("[REDACTED:token]"))
+		Expect(hasMarker(body, rr)).To(BeTrue())
 	})
 })

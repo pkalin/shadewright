@@ -255,7 +255,7 @@ Expect:
 - One file, `apps/demo/web-deployment.yaml`, one commit, and a diff of exactly one line pair:
   `-              memory: 48Mi` and `+              memory: 64Mi` under `resources.limits` of container `web`. The memory
   request (`32Mi`) and everything else are untouched.
-- A body with the change, scope, evidence (the request, its UID, the incident, the policy revision
+- A body with the change, scope, evidence (the request, its UID, the incident by its full name `incident-<64 hex digits>`, the policy revision
   `<policy name>/<generation>`, the plan digest), expected effect, risk, rollback and `Approval required: yes`, and a last line
   `<!-- shadewright request-uid=... plan-digest=sha256:... -->` whose UID and digest match
   `.metadata.uid` and `.status.planDigest` of the request.

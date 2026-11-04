@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -933,8 +934,11 @@ func commitTitle(rr *remediationv1alpha1.RemediationRequest) string {
 }
 
 // pullRequestBody is the evidence, scope, expected effect, risk and rollback plan, and the marker. Every value
-// comes from validated fields of the request and its status; the whole body is redacted once more, so nothing
-// that looks like a secret reaches the Git host.
+// comes from validated fields of the request and its status; the text is redacted once more, so nothing that
+// looks like a secret reaches the Git host. The one value kept out of the redactor is the Incident name when it
+// is a Kubernetes object name (see redactedBody.objectName): the collector names Incidents after their
+// fingerprint, a long hex run the redactor would take for a token, and a reviewer needs the name to find the
+// Incident.
 func pullRequestBody(rr *remediationv1alpha1.RemediationRequest) string {
 	what, previous, desired := change(rr)
 	t, src := rr.Spec.TargetRef, rr.Status.Source
@@ -942,21 +946,59 @@ func pullRequestBody(rr *remediationv1alpha1.RemediationRequest) string {
 	if rr.Status.EffectiveApprovalRequired != nil && !*rr.Status.EffectiveApprovalRequired {
 		approval = "no (policy allows automation; auto-merge is not available yet, so a person merges)"
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "Shadewright proposes one typed change for incident `%s`.\n\n", rr.Spec.IncidentRef.Name)
-	fmt.Fprintf(&b, "**Change:** %s (`%s`) of %s `%s/%s`, from `%s` to `%s`.\n\n", what, rr.Spec.Action.Type,
-		t.Kind, t.Namespace, t.Name, previous, desired)
-	fmt.Fprintf(&b, "**Scope:** one value in `%s` on `%s`. Nothing else in this pull request is part of the plan.\n\n",
-		src.Path, src.TargetBranch)
-	fmt.Fprintf(&b, "**Evidence:** RemediationRequest `%s/%s` (UID `%s`), incident `%s`, policy `%s` "+
-		"(decision `WithinApprovedBounds`), plan digest `%s`.\n\n",
-		rr.Namespace, rr.Name, rr.UID, rr.Spec.IncidentRef.Name, rr.Status.PolicyRevision, rr.Status.PlanDigest)
-	fmt.Fprintf(&b, "**Expected effect:** once merged and delivered, %s is `%s`.\n\n", what, desired)
-	b.WriteString("**Risk:** the change is bounded by the policy's limits and touches one field. " +
+	var b redactedBody
+	b.text("Shadewright proposes one typed change for incident `")
+	b.objectName(rr.Spec.IncidentRef.Name)
+	b.text("`.\n\n")
+	b.text(fmt.Sprintf("**Change:** %s (`%s`) of %s `%s/%s`, from `%s` to `%s`.\n\n", what, rr.Spec.Action.Type,
+		t.Kind, t.Namespace, t.Name, previous, desired))
+	b.text(fmt.Sprintf("**Scope:** one value in `%s` on `%s`. Nothing else in this pull request is part of the plan.\n\n",
+		src.Path, src.TargetBranch))
+	b.text(fmt.Sprintf("**Evidence:** RemediationRequest `%s/%s` (UID `%s`), incident `", rr.Namespace, rr.Name, rr.UID))
+	b.objectName(rr.Spec.IncidentRef.Name)
+	b.text(fmt.Sprintf("`, policy `%s` (decision `WithinApprovedBounds`), plan digest `%s`.\n\n",
+		rr.Status.PolicyRevision, rr.Status.PlanDigest))
+	b.text(fmt.Sprintf("**Expected effect:** once merged and delivered, %s is `%s`.\n\n", what, desired))
+	b.text("**Risk:** the change is bounded by the policy's limits and touches one field. " +
 		"Any other push to this branch stops the automation.\n\n")
-	b.WriteString("**Rollback:** revert this pull request; the GitOps controller applies the previous value.\n\n")
-	fmt.Fprintf(&b, "**Approval required:** %s.\n\n", approval)
-	out := redact.String(b.String())
+	b.text("**Rollback:** revert this pull request; the GitOps controller applies the previous value.\n\n")
+	b.text(fmt.Sprintf("**Approval required:** %s.\n\n", approval))
 	// The marker is added after redaction: it holds only the UID and the digest, and must stay exact.
-	return out + marker(rr) + "\n"
+	return b.String() + marker(rr) + "\n"
+}
+
+// redactedBody builds text that is redacted with package redact, except for object names that pass
+// objectName's check. Text between two such names is redacted as one piece, so the redactor sees each line of
+// the template whole up to the name.
+type redactedBody struct {
+	out, pending strings.Builder
+}
+
+// text adds s, to be redacted.
+func (b *redactedBody) text(s string) { b.pending.WriteString(s) }
+
+// objectName adds name as it is when it is a Kubernetes object name (a DNS-1123 subdomain: lower-case letters,
+// digits, '-' and '.', at most 253 bytes), which the API server has validated (the CRD schema of the field
+// holding it) and which cannot hold Markdown, spaces or a credential with upper-case letters or symbols. Any
+// other value is added as text and redacted with the rest. Use it only for fields that hold the name of an
+// object, never for messages, evidence or other free text.
+func (b *redactedBody) objectName(name string) {
+	if name == "" || len(validation.IsDNS1123Subdomain(name)) > 0 {
+		b.text(name)
+		return
+	}
+	b.flush()
+	b.out.WriteString(name)
+}
+
+// flush redacts the pending text and appends it.
+func (b *redactedBody) flush() {
+	b.out.WriteString(redact.String(b.pending.String()))
+	b.pending.Reset()
+}
+
+// String returns the body built so far.
+func (b *redactedBody) String() string {
+	b.flush()
+	return b.out.String()
 }

@@ -1219,3 +1219,130 @@ func TestResolveRetriesWhenAMissingSourceAppears(t *testing.T) {
 		t.Fatalf("error = %v (outcome %s, reason %s), want ErrTransient", err, res.Outcome, res.Reason)
 	}
 }
+
+// readCounter is a GitProvider that counts the files it returns and their bytes.
+type readCounter struct {
+	providers.GitProvider
+	files map[string]int
+	bytes int
+}
+
+func (c *readCounter) ReadFile(ctx context.Context, commit, path string) (providers.File, error) {
+	f, err := c.GitProvider.ReadFile(ctx, commit, path)
+	if err == nil {
+		c.files[path]++
+		c.bytes += len(f.Data)
+	}
+	return f, err
+}
+
+// bigFileBytes is just under MaxFileBytes, so no single file is refused.
+const bigFileBytes = sourcemap.MaxFileBytes - 1024
+
+// big appends a comment to doc so that it is bigFileBytes long.
+func big(doc string) string {
+	return doc + "# " + strings.Repeat("x", bigFileBytes-len(doc)-3) + "\n"
+}
+
+// configMaps returns n small YAML documents that do not declare the target.
+func configMaps(n int) string {
+	var b strings.Builder
+	for i := range n {
+		fmt.Fprintf(&b, "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: c%d\n  namespace: orders\n", i)
+	}
+	return b.String()
+}
+
+// TestResolveBoundsWhatItParses checks that the mapping stops at the second declaration and refuses a build that
+// holds more bytes or documents than it parses in all, before it has read past the budget (#240).
+func TestResolveBoundsWhatItParses(t *testing.T) {
+	// Together the big files are far over the budget.
+	copies := 2*sourcemap.MaxTotalBytes/bigFileBytes + 1
+	// The fixture's files hold 3 documents: the Service and the ScaledObject, and the Deployment.
+	const fixtureDocs = 3
+
+	tests := []struct {
+		name   string
+		change func(f *fixture)
+		want   sourcemap.Outcome
+		reason sourcemap.Reason
+		// maxReads bounds how often each listed file may be read; zero means it must not be read.
+		maxReads map[string]int
+	}{
+		{"many large files that declare the object", func(f *fixture) {
+			f.files[soFile] = big(scaledObjectYAML)
+			for i := range copies {
+				f.files[ksFile] += fmt.Sprintf("  - copy%d.yaml\n", i)
+				f.files[fmt.Sprintf("apps/orders/copy%d.yaml", i)] = big(scaledObjectYAML)
+			}
+		}, sourcemap.NeedsIntervention, sourcemap.ReasonAmbiguousDeclaration,
+			map[string]int{"apps/orders/copy0.yaml": 1, "apps/orders/copy1.yaml": 0}},
+		// The document after the second declaration is not valid YAML: it is never decoded.
+		{"a file that declares the object many times", func(f *fixture) {
+			doc := scaledObjectYAML[strings.Index(scaledObjectYAML, "# The worker"):]
+			f.files[soFile] = scaledObjectYAML + strings.Repeat(doc, 1000) + "a: [\n"
+		}, sourcemap.NeedsIntervention, sourcemap.ReasonAmbiguousDeclaration, nil},
+		{"a declaration without a namespace before many large files", func(f *fixture) {
+			f.files[soFile] = strings.ReplaceAll(scaledObjectYAML, "  namespace: orders\n", "")
+			for i := range copies {
+				f.files[ksFile] += fmt.Sprintf("  - copy%d.yaml\n", i)
+				f.files[fmt.Sprintf("apps/orders/copy%d.yaml", i)] = big(scaledObjectYAML)
+			}
+		}, sourcemap.NeedsIntervention, sourcemap.ReasonAmbiguousDeclaration,
+			map[string]int{"apps/orders/copy0.yaml": 0}},
+		{"many large files that do not declare the object", func(f *fixture) {
+			for i := range copies {
+				f.files[ksFile] += fmt.Sprintf("  - big%d.yaml\n", i)
+				f.files[fmt.Sprintf("apps/orders/big%d.yaml", i)] = big(configMaps(1))
+			}
+		}, sourcemap.NeedsIntervention, sourcemap.ReasonInputTooLarge,
+			map[string]int{fmt.Sprintf("apps/orders/big%d.yaml", sourcemap.MaxTotalBytes/bigFileBytes+1): 0}},
+		{"many documents in one file", func(f *fixture) {
+			f.files[ksFile] += "  - many.yaml\n"
+			f.files["apps/orders/many.yaml"] = configMaps(sourcemap.MaxDocuments)
+		}, sourcemap.NeedsIntervention, sourcemap.ReasonInputTooLarge, nil},
+		{"many documents across files", func(f *fixture) {
+			for i := range 8 {
+				f.files[ksFile] += fmt.Sprintf("  - many%d.yaml\n", i)
+				f.files[fmt.Sprintf("apps/orders/many%d.yaml", i)] = configMaps(sourcemap.MaxDocuments/8 + 1)
+			}
+		}, sourcemap.NeedsIntervention, sourcemap.ReasonInputTooLarge, nil},
+		{"documents that hold only comments count", func(f *fixture) {
+			f.files[ksFile] += "  - comments.yaml\n"
+			f.files["apps/orders/comments.yaml"] = strings.Repeat("# nothing\n---\n", sourcemap.MaxDocuments)
+		}, sourcemap.NeedsIntervention, sourcemap.ReasonInputTooLarge, nil},
+		{"exactly the document budget", func(f *fixture) {
+			f.files[ksFile] += "  - many.yaml\n"
+			f.files["apps/orders/many.yaml"] = configMaps(sourcemap.MaxDocuments - fixtureDocs)
+		}, sourcemap.Resolved, sourcemap.ReasonResolved, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture()
+			tc.change(f)
+			var c *readCounter
+			f.gitWrap = func(g providers.GitProvider) providers.GitProvider {
+				c = &readCounter{GitProvider: g, files: map[string]int{}}
+				return c
+			}
+			res, _, err := f.run(t)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if res.Outcome != tc.want || res.Reason != tc.reason {
+				t.Fatalf("result = %s/%s (%s), want %s/%s", res.Outcome, res.Reason, res.Message, tc.want, tc.reason)
+			}
+			// The provider returns a file before the mapping can count it, so the mapping may read one file past
+			// the budget, never more.
+			if c.bytes > sourcemap.MaxTotalBytes+sourcemap.MaxFileBytes {
+				t.Errorf("read %d bytes, over the budget of %d", c.bytes, sourcemap.MaxTotalBytes)
+			}
+			for p, n := range tc.maxReads {
+				if c.files[p] > n {
+					t.Errorf("%s read %d times, want at most %d", p, c.files[p], n)
+				}
+			}
+			sameWithCache(t, tc.change, res)
+		})
+	}
+}

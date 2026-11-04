@@ -49,6 +49,13 @@ const (
 	// MaxFileBytes is the largest file read. The provider refuses larger files before downloading them
 	// (providers.ErrTooLarge); the mapping checks the size again in case an adapter does not.
 	MaxFileBytes = providers.MaxFileBytes
+	// MaxTotalBytes is how many bytes one mapping reads in all, kustomization and .sourceignore lookups and
+	// cached reads included, so that many files near MaxFileBytes cannot add up without bound. It equals the
+	// render budget of the semantic diff (semdiff.MaxBuildBytes).
+	MaxTotalBytes = 16 << 20
+	// MaxDocuments is how many YAML documents one mapping decodes in all manifest files, empty ones and ones
+	// holding only comments included, so that a file of many small documents cannot keep the decoder busy.
+	MaxDocuments = 4096
 )
 
 // kustomizationKeys are the only fields a kustomization file may use: anything else (patches, generators,
@@ -66,6 +73,9 @@ type walker struct {
 	files []string
 	seen  map[string]bool
 	reads int
+	// bytes and docs count what the mapping has read and decoded, against MaxTotalBytes and MaxDocuments.
+	bytes int
+	docs  int
 	// ignoreChecked holds the directories already checked for a .sourceignore file.
 	ignoreChecked map[string]bool
 }
@@ -228,6 +238,12 @@ func (w *walker) read(ctx context.Context, p string) (providers.File, *Result, e
 		r := needsIntervention(ReasonFileNotReadable, "%s is larger than %d bytes", p, MaxFileBytes)
 		return providers.File{}, &r, nil
 	}
+	// The provider has already downloaded the file, at most MaxFileBytes, so the total can exceed the budget
+	// by less than one file before the mapping stops.
+	if w.bytes += len(f.Data); w.bytes > MaxTotalBytes {
+		return providers.File{}, new(needsIntervention(ReasonInputTooLarge,
+			"the build reads more than %d bytes", MaxTotalBytes)), nil
+	}
 	return f, nil, nil
 }
 
@@ -249,12 +265,14 @@ func (id identity) String() string {
 	return fmt.Sprintf("%s %s/%s", id.gvk.Kind, id.namespace, id.name)
 }
 
-// findDeclaration reads every file and returns the only document that declares id. A document with the same
-// group, kind and name but another version, or with no namespace, could also be the target, so it makes the
-// match ambiguous.
+// findDeclaration reads the files in order and returns the only document that declares id. A document with
+// the same group, kind and name but another version, or with no namespace, could also be the target, so it
+// makes the match ambiguous. It stops at the first sign of ambiguity: a second exact match or a near one. Only
+// the exact match is kept; every other document is dropped once it has been matched, and the documents decoded
+// count against MaxDocuments.
 func (w *walker) findDeclaration(ctx context.Context, id identity) (declaration, *Result, error) {
-	var exact []declaration
-	var near []string
+	var found *declaration
+	what := id.String()
 	for _, p := range w.files {
 		f, stop, err := w.read(ctx, p)
 		if stop != nil {
@@ -267,36 +285,47 @@ func (w *walker) findDeclaration(ctx context.Context, id identity) (declaration,
 		if err != nil {
 			return declaration{}, nil, err
 		}
-		docs, err := decodeDocuments(f.Data)
-		if err != nil {
-			r := needsIntervention(ReasonFileNotReadable, "%s is not valid YAML", p)
-			return declaration{}, &r, nil
-		}
-		for _, doc := range docs {
+		docs := newDocuments(f.Data)
+		for {
+			raw, err := docs.next()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				r := needsIntervention(ReasonFileNotReadable, "%s is not valid YAML", p)
+				return declaration{}, &r, nil
+			}
+			// Counted before decoding, so the document over the budget is never decoded.
+			if w.docs++; w.docs > MaxDocuments {
+				return declaration{}, new(needsIntervention(ReasonInputTooLarge,
+					"the build holds more than %d YAML documents", MaxDocuments)), nil
+			}
+			doc, err := decodeDocument(raw)
+			if err != nil {
+				r := needsIntervention(ReasonFileNotReadable, "%s is not valid YAML", p)
+				return declaration{}, &r, nil
+			}
 			switch match(doc, id) {
 			case matchExact:
-				exact = append(exact, declaration{path: p, doc: doc})
+				if found != nil {
+					return declaration{}, new(needsIntervention(ReasonAmbiguousDeclaration,
+						"%s is declared more than once (%s and %s)", what, found.path, p)), nil
+				}
+				found = &declaration{path: p, doc: doc}
 			case matchNear:
-				near = append(near, p)
+				return declaration{}, new(needsIntervention(ReasonAmbiguousDeclaration,
+					"%s may declare %s without its namespace or with another version", p, what)), nil
 			case matchList:
 				r := needsIntervention(ReasonDeclarationNotFound, "%s holds a List object, which is not supported", p)
 				return declaration{}, &r, nil
 			}
 		}
 	}
-	what := id.String()
-	switch {
-	case len(near) > 0:
-		return declaration{}, new(needsIntervention(ReasonAmbiguousDeclaration,
-			"%s may declare %s without its namespace or with another version", near[0], what)), nil
-	case len(exact) == 0:
+	if found == nil {
 		return declaration{}, new(needsIntervention(ReasonDeclarationNotFound,
 			"no plain manifest declares %s; it may come from a patch or generator", what)), nil
-	case len(exact) > 1:
-		return declaration{}, new(needsIntervention(ReasonAmbiguousDeclaration,
-			"%s is declared more than once (%s and %s)", what, exact[0].path, exact[1].path)), nil
 	}
-	return exact[0], nil, nil
+	return *found, nil, nil
 }
 
 type matchKind int
@@ -331,27 +360,26 @@ func match(doc map[string]any, id identity) matchKind {
 	}
 }
 
-// decodeDocuments splits a multi-document YAML file and decodes each document. Empty documents are skipped.
-// Duplicate keys are an error, so a document cannot hide a second value for the same field.
-func decodeDocuments(data []byte) ([]map[string]any, error) {
-	r := utilyaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(data)))
-	var docs []map[string]any
-	for {
-		raw, err := r.Read()
-		if errors.Is(err, io.EOF) {
-			return docs, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		var doc map[string]any
-		if err := yaml.UnmarshalStrict(raw, &doc); err != nil {
-			return nil, err
-		}
-		if doc != nil {
-			docs = append(docs, doc)
-		}
+// documents splits a multi-document YAML file into raw documents, one at a time.
+type documents struct{ r *utilyaml.YAMLReader }
+
+func newDocuments(data []byte) documents {
+	return documents{r: utilyaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(data)))}
+}
+
+// next returns the next raw document, which may be empty or hold only comments, or io.EOF after the last.
+func (d documents) next() ([]byte, error) {
+	return d.r.Read()
+}
+
+// decodeDocument decodes one raw document; it returns nil for an empty one. Duplicate keys are an error, so a
+// document cannot hide a second value for the same field.
+func decodeDocument(raw []byte) (map[string]any, error) {
+	var doc map[string]any
+	if err := yaml.UnmarshalStrict(raw, &doc); err != nil {
+		return nil, err
 	}
+	return doc, nil
 }
 
 // ReadField returns the value of field in the one document of data that declares target. It is an error when
@@ -364,12 +392,21 @@ func ReadField(data []byte, target v1alpha1.ObjectRef, field Field) (value any, 
 		return nil, false, fmt.Errorf("invalid apiVersion")
 	}
 	id := identity{gvk: gv.WithKind(target.Kind), namespace: target.Namespace, name: target.Name}
-	docs, err := decodeDocuments(data)
-	if err != nil {
-		return nil, false, fmt.Errorf("the file is not valid YAML")
-	}
+	// One document is decoded at a time and only the match is kept.
+	docs := newDocuments(data)
 	var exact map[string]any
-	for _, doc := range docs {
+	for {
+		raw, err := docs.next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		var doc map[string]any
+		if err == nil {
+			doc, err = decodeDocument(raw)
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("the file is not valid YAML")
+		}
 		switch match(doc, id) {
 		case matchExact:
 			if exact != nil {

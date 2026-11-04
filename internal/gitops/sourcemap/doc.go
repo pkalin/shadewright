@@ -44,7 +44,8 @@ limitations under the License.
 // Git is read only through ReadFile and BranchHead, relying on the ReadFile contract: only regular files
 // are returned, symbolic links are never followed, and files over providers.MaxFileBytes are refused before
 // they are downloaded. Reads are bounded by [MaxDepth], [MaxFiles], [MaxReads] and [MaxFileBytes], whatever
-// cap the provider enforces itself. A [ReadCache], when the [Resolver] has one, keeps reads at a full commit
+// cap the provider enforces itself, and in all by [MaxTotalBytes] read and [MaxDocuments] decoded. Documents
+// are decoded one at a time, only the declaration is kept, and the scan stops at a second declaration. A [ReadCache], when the [Resolver] has one, keeps reads at a full commit
 // ID across mappings, keyed by the whole settings repository entry: files, files too large and paths not in
 // the commit's tree (providers.ErrPathNotInTree), never a plain not found or a failed read. Branch heads and
 // cluster objects are read every time, and cached reads count against [MaxReads] like any other. Errors carry

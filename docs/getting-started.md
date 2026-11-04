@@ -37,7 +37,7 @@ Observe-only means the analyzer watches the namespaces you name and records `Inc
 
 What you need:
 
-- A cluster with `kubectl` access that may create CRDs, ClusterRoles and a namespace. The CRDs use CEL validation rules, so the API server must support them. Which Kubernetes versions are tested is part of the compatibility matrix, which is **planned** (issue [#252](https://github.com/pkalin/shadewright/issues/252)); the envtest suites run against Kubernetes 1.37.
+- A cluster with `kubectl` access that may create CRDs, ClusterRoles and a namespace. The CRDs use CEL validation rules, so the API server must support them. The tested Kubernetes versions are in the [compatibility](reference/compatibility.md) page; the envtest suites run against Kubernetes 1.37.
 - The namespaces to watch already exist.
 - `kubectl` with built-in kustomize (`kubectl apply -k`).
 
@@ -126,7 +126,7 @@ Expect both Deployments ready, a log line with your namespaces and cluster ID, a
 
 The executor Deployment carries the label `azure.workload.identity/use: "true"` and its ServiceAccount a placeholder client ID. Both are inert off AKS and in observe-only mode, where the executor never opens a repository. They matter in the next path.
 
-To remove observe-only, `kubectl delete -k .` and delete the settings object first. Removing the CRDs deletes every Incident. The order for an install that has requests is part of the upgrade and uninstall guide, which is **planned**.
+To remove observe-only, `kubectl delete -k .` and delete the settings object first. Removing the CRDs deletes every Incident. The order for an install that has requests is in [upgrade and uninstall](upgrade-uninstall.md).
 
 ## 3. From a hand-written request to a reviewed pull request
 

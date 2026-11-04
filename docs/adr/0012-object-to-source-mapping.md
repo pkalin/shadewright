@@ -35,6 +35,7 @@ If any step is ambiguous (no labels, several matches, the object comes from a pa
 
 - The supported case is unambiguous and easy to test.
 - Many real repositories use overlays or charts; they get diagnoses and issues, not PRs, until support is added.
+- Kustomizations that wait on workload health (`wait: true` or `healthChecks`) are refused while the workload is unhealthy, so users who want pull requests for those workloads must not set them (amendment of 2026-11-04).
 - A request author (or a prompt-injected analysis) cannot aim a change at a file, repository or branch other than the one that actually delivers the target.
 
 ## Alternatives considered
@@ -45,3 +46,4 @@ If any step is ambiguous (no labels, several matches, the object comes from a pa
 ## Amendments
 
 - 2026-11-02: added the "Implementation details" section, which fixes details the decision left open as `internal/gitops/sourcemap` was built ([#120](https://github.com/pkalin/shadewright/pull/120)). The decision is unchanged.
+- 2026-11-04: clarified what the Ready check in step 2 means for Kustomizations that wait ([#237](https://github.com/pkalin/shadewright/issues/237), [shadewright-fleet#24](https://github.com/pkalin/shadewright-fleet/pull/24)). The mapper requires `Ready=True` for the current generation and, separately, a `status.lastAppliedRevision` equal to the GitRepository's artifact revision. Flux folds workload health into Ready only when the Kustomization sets `wait: true` or `healthChecks`; without them Ready=True means the revision was applied. With them, a workload that never becomes healthy keeps Ready at Unknown, then False after the timeout, and `lastAppliedRevision` does not advance, so the mapper refuses it with `KustomizationNotReady` (and the revision check would refuse it too). This is the intended behaviour and is unchanged. Consequence for users: a Kustomization that delivers workloads Shadewright should fix must not wait on their health, or every unhealthy-workload incident it delivers ends `NeedsIntervention` instead of a pull request; the fleet's `apps` Kustomizations do not wait for this reason, and workload health is Shadewright's to judge. Accepting applied-but-unhealthy objects would weaken the provenance checks (Ready and `lastAppliedRevision`) and needs its own ADR ([#259](https://github.com/pkalin/shadewright/issues/259)). The decision is unchanged.

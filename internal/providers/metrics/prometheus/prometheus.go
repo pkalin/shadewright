@@ -19,17 +19,19 @@ package prometheus
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/providers/retryafter"
 )
 
 // Limits on queries and results. They are fixed in code so that no configuration can widen them.
@@ -129,7 +131,8 @@ func defaultTransport() http.RoundTripper {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	t.TLSHandshakeTimeout = 10 * time.Second
-	t.ResponseHeaderTimeout = 30 * time.Second
+	// No ResponseHeaderTimeout: Prometheus sends the headers only once the query is evaluated, and the
+	// deadline of the query (Config.Timeout, up to MaxTimeout) already bounds the whole request.
 	t.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 	return t
 }
@@ -156,11 +159,30 @@ func (s *Source) Query(ctx context.Context, q providers.MetricsQuery) ([]provide
 		return nil, err
 	}
 	form.Set("query", expr)
-	form.Set("timeout", strconv.FormatInt(s.timeout.Milliseconds(), 10)+"ms")
 
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+	server, err := serverTimeout(ctx)
+	if err != nil {
+		return nil, err
+	}
+	form.Set("timeout", strconv.FormatInt(server.Milliseconds(), 10)+"ms")
 	return s.do(ctx, path, form, win, t.info.Labels)
+}
+
+// serverTimeout is the evaluation timeout sent to the server: a tenth below the time left before the
+// deadline of ctx (Config.Timeout or the caller's, whichever is sooner), so that a slow query ends with the
+// server's timeout error, which the adapter can tell apart, and not with the client giving up.
+func serverTimeout(ctx context.Context) (time.Duration, error) {
+	left := DefaultTimeout
+	if dl, ok := ctx.Deadline(); ok {
+		left = time.Until(dl)
+	}
+	d := (left - left/10).Truncate(time.Millisecond)
+	if d < time.Millisecond {
+		return 0, fmt.Errorf("no time left for the prometheus query: %w", context.DeadlineExceeded)
+	}
+	return d, nil
 }
 
 // timeParams checks the times of q against the limits and returns the API path and time parameters.
@@ -184,22 +206,24 @@ func (s *Source) timeParams(q providers.MetricsQuery) (string, url.Values, windo
 		v.Set("time", formatMs(end))
 		return "api/v1/query", v, window{fromMs: end, toMs: end, instant: true}, nil
 	}
+	// The range checks use the times in whole milliseconds, as they are sent: the server counts points
+	// from those, not from the times given.
+	start, end, stepMs := q.Start.UnixMilli(), q.End.UnixMilli(), q.Step.Milliseconds()
 	switch {
 	case q.Step < MinStep:
 		return "", nil, window{}, fmt.Errorf("step is below %s: %w", MinStep, ErrInvalidQuery)
 	case q.Step%time.Millisecond != 0:
 		return "", nil, window{}, fmt.Errorf("step must be whole milliseconds: %w", ErrInvalidQuery)
-	case q.Start.IsZero() || !q.Start.Before(q.End):
+	case q.Start.IsZero() || start >= end:
 		return "", nil, window{}, fmt.Errorf("start time must be before end time: %w", ErrInvalidQuery)
-	case q.End.Sub(q.Start) > MaxRange:
+	case end-start > MaxRange.Milliseconds():
 		return "", nil, window{}, fmt.Errorf("time range is longer than %s: %w", MaxRange, ErrInvalidQuery)
 	case q.Start.Before(now.Add(-MaxLookback)):
 		return "", nil, window{}, fmt.Errorf("start time is more than %s ago: %w", MaxLookback, ErrInvalidQuery)
-	case int64(q.End.Sub(q.Start)/q.Step)+1 > MaxPointsPerSeries:
+	case (end-start)/stepMs+1 > MaxPointsPerSeries:
 		return "", nil, window{}, fmt.Errorf("range and step ask for more than %d points per series: %w",
 			MaxPointsPerSeries, ErrInvalidQuery)
 	}
-	start, end := q.Start.UnixMilli(), q.End.UnixMilli()
 	v.Set("start", formatMs(start))
 	v.Set("end", formatMs(end))
 	v.Set("step", strconv.FormatInt(q.Step.Milliseconds(), 10)+"ms")
@@ -230,7 +254,7 @@ func (s *Source) do(ctx context.Context, path string, form url.Values, win windo
 		return nil, transportError(ctx, "prometheus request failed")
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if err := statusError(resp); err != nil {
+	if err := statusError(resp, s.now()); err != nil {
 		return nil, err
 	}
 	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err != nil || mt != "application/json" {
@@ -239,9 +263,11 @@ func (s *Source) do(ctx context.Context, path string, form url.Values, win windo
 	if resp.ContentLength > MaxBodyBytes {
 		return nil, fmt.Errorf("prometheus response is larger than %d bytes: %w", MaxBodyBytes, providers.ErrTooLarge)
 	}
-	series, err := decode(&capReader{r: resp.Body, left: MaxBodyBytes}, win, labels)
+	body := &capReader{r: resp.Body, left: MaxBodyBytes}
+	series, err := decode(body, win, labels)
 	if err != nil {
-		if ctx.Err() != nil {
+		// A body cut short by the connection (a reset, an unexpected EOF) is transient, not a bad answer.
+		if ctx.Err() != nil || body.readErr != nil {
 			return nil, transportError(ctx, "prometheus response was not read")
 		}
 		return nil, err
@@ -253,25 +279,27 @@ func (s *Source) do(ctx context.Context, path string, form url.Values, win windo
 // the URL and, for some failures, addresses.
 func transportError(ctx context.Context, msg string) error {
 	if err := ctx.Err(); err != nil {
-		if errors.Is(context.Cause(ctx), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
-			return fmt.Errorf("%s: %w", msg, context.DeadlineExceeded)
-		}
-		return fmt.Errorf("%s: %w", msg, context.Canceled)
+		// ctx.Err() is context.Canceled or context.DeadlineExceeded itself; a custom cause never reaches it.
+		return fmt.Errorf("%s: %w", msg, err)
 	}
 	return &providers.RetryableError{Err: errors.New(msg)}
 }
 
-// statusError classifies a non-2xx status without reading the body.
-func statusError(resp *http.Response) error {
+// statusError classifies a non-2xx status. Only the error envelope of a 503 is read, bounded, for its
+// errorType; no body text ever reaches the error.
+func statusError(resp *http.Response, now time.Time) error {
 	code := resp.StatusCode
 	switch {
 	case code >= 200 && code <= 299:
 		return nil
 	case code == http.StatusUnauthorized || code == http.StatusForbidden:
 		return fmt.Errorf("prometheus refused the identity (status %d): %w", code, providers.ErrForbidden)
+	case code == http.StatusServiceUnavailable && serverTimedOut(resp):
+		// The server ran out of the evaluation timeout the adapter sent: the same query would again.
+		return fmt.Errorf("prometheus timed out evaluating the query (status %d): %w", code, providers.ErrRejected)
 	case code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500:
 		return &providers.RetryableError{
-			RetryAfter: retryAfter(resp.Header.Get("Retry-After")),
+			RetryAfter: retryafter.Parse(resp.Header.Get("Retry-After"), now, maxRetryAfter),
 			Err:        fmt.Errorf("prometheus is unavailable (status %d)", code),
 		}
 	default:
@@ -282,14 +310,34 @@ func statusError(resp *http.Response) error {
 // maxRetryAfter caps a delay asked for by the server.
 const maxRetryAfter = 10 * time.Minute
 
-// retryAfter reads a Retry-After header in seconds; dates and anything else are ignored.
-func retryAfter(h string) time.Duration {
-	n, err := strconv.Atoi(strings.TrimSpace(h))
-	if err != nil || n <= 0 {
-		return 0
+// maxErrorEnvelope bounds the part of an error body read for its errorType.
+const maxErrorEnvelope = 4 << 10
+
+// serverTimedOut reports whether a JSON error body is Prometheus's answer to a query that ran out of its
+// evaluation timeout: errorType "timeout". Only the top-level keys up to errorType are read, through a
+// bounded reader; every other value is skipped and dropped, and a body that is cut, malformed or too long
+// counts as no timeout (the status stays retryable).
+func serverTimedOut(resp *http.Response) bool {
+	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+		return false
 	}
-	if n >= int(maxRetryAfter/time.Second) {
-		return maxRetryAfter
+	dec := json.NewDecoder(io.LimitReader(resp.Body, maxErrorEnvelope))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return false
 	}
-	return time.Duration(n) * time.Second
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		if key == "errorType" {
+			v, err := dec.Token()
+			return err == nil && v == "timeout"
+		}
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return false
+		}
+	}
+	return false
 }

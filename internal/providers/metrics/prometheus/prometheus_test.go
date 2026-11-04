@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -131,7 +132,8 @@ func TestTemplatesRender(t *testing.T) {
 				got = r
 				emptyVector(w, r)
 			})
-			if _, err := s.Query(testCtx(t), instant(name)); err != nil {
+			// No shorter deadline than Config.Timeout: the server answers at once.
+			if _, err := s.Query(t.Context(), instant(name)); err != nil {
 				t.Fatal(err)
 			}
 			if got.Method != http.MethodGet || got.URL.Path != "/prom/api/v1/query" {
@@ -141,10 +143,42 @@ func TestTemplatesRender(t *testing.T) {
 			if q.Get("query") != query {
 				t.Errorf("query =\n%s\nwant\n%s", q.Get("query"), query)
 			}
-			if q.Get("time") != nowSecs+".000" || q.Get("timeout") != "30000ms" || len(q) != 3 {
+			if q.Get("time") != nowSecs+".000" || len(q) != 3 {
 				t.Errorf("parameters = %v", q)
 			}
+			// A tenth below the 30 seconds left, in whole milliseconds.
+			if ms := serverTimeoutMs(t, q.Get("timeout")); ms > 27000 || ms < 26000 {
+				t.Errorf("timeout = %s, want just below 27000ms", q.Get("timeout"))
+			}
 		})
+	}
+}
+
+// serverTimeoutMs parses the timeout parameter of a request, in milliseconds.
+func serverTimeoutMs(t *testing.T, v string) int64 {
+	t.Helper()
+	ms, err := strconv.ParseInt(strings.TrimSuffix(v, "ms"), 10, 64)
+	if err != nil || !strings.HasSuffix(v, "ms") {
+		t.Fatalf("timeout = %q, want milliseconds", v)
+	}
+	return ms
+}
+
+// The server's evaluation timeout follows the sooner deadline, the caller's included, and stays below it, so
+// that the server gives up first.
+func TestServerTimeoutIsBelowTheDeadline(t *testing.T) {
+	var timeout string
+	s, _, _ := testSource(t, func(w http.ResponseWriter, r *http.Request) {
+		timeout = r.URL.Query().Get("timeout")
+		emptyVector(w, r)
+	})
+	ctx, cancel := context.WithTimeout(testCtx(t), 2*time.Second)
+	defer cancel()
+	if _, err := s.Query(ctx, instant("container_restarts_total")); err != nil {
+		t.Fatal(err)
+	}
+	if ms := serverTimeoutMs(t, timeout); ms > 1800 || ms < 1000 {
+		t.Errorf("timeout = %s, want just below 1800ms", timeout)
 	}
 }
 
@@ -225,6 +259,29 @@ func TestParametersAreValidated(t *testing.T) {
 	}
 }
 
+// Pod names cut a long workload name, so a template that selects pods by name refuses one it could never
+// match; the Deployment template matches the name as a label and takes any valid name.
+func TestPodWorkloadNameLength(t *testing.T) {
+	s, _, n := testSource(t, emptyVector)
+	for _, info := range Templates() {
+		byPod := slices.Contains(info.Labels, "pod")
+		for _, length := range []int{MaxPodWorkloadName, MaxPodWorkloadName + 1, 253} {
+			q := instant(info.Name)
+			q.Params = params(testNS, strings.Repeat("a", length))
+			n.Store(0)
+			_, err := s.Query(testCtx(t), q)
+			if wantRefused := byPod && length > MaxPodWorkloadName; wantRefused {
+				if !errors.Is(err, ErrInvalidQuery) || n.Load() != 0 {
+					t.Errorf("%s, %d characters: error = %v, %d requests; want ErrInvalidQuery", info.Name, length,
+						err, n.Load())
+				}
+			} else if err != nil {
+				t.Errorf("%s, %d characters: error = %v", info.Name, length, err)
+			}
+		}
+	}
+}
+
 func TestUnknownTemplateIsNotFound(t *testing.T) {
 	s, _, n := testSource(t, emptyVector)
 	for _, name := range []string{"", "up", "CONTAINER_RESTARTS_TOTAL", "container_restarts_total "} {
@@ -246,14 +303,22 @@ func TestTimeLimits(t *testing.T) {
 			q.Start = q.Start.Add(MaxClockSkew + time.Second)
 			q.End = now.Add(MaxClockSkew + time.Second)
 		},
-		"step below minimum":    func(q *providers.MetricsQuery) { q.Step = MinStep - time.Millisecond },
-		"negative step":         func(q *providers.MetricsQuery) { q.Step = -MinStep },
-		"step not whole ms":     func(q *providers.MetricsQuery) { q.Step = MinStep + time.Microsecond },
-		"no start":              func(q *providers.MetricsQuery) { q.Start = time.Time{} },
-		"start after end":       func(q *providers.MetricsQuery) { q.Start = q.End.Add(time.Second) },
-		"start equal to end":    func(q *providers.MetricsQuery) { q.Start = q.End },
-		"range too long":        func(q *providers.MetricsQuery) { q.Start = q.End.Add(-MaxRange - time.Second); q.Step = time.Hour },
-		"too many points":       func(q *providers.MetricsQuery) { q.Start = q.Start.Add(-MinStep) },
+		"step below minimum": func(q *providers.MetricsQuery) { q.Step = MinStep - time.Millisecond },
+		"negative step":      func(q *providers.MetricsQuery) { q.Step = -MinStep },
+		"step not whole ms":  func(q *providers.MetricsQuery) { q.Step = MinStep + time.Microsecond },
+		"no start":           func(q *providers.MetricsQuery) { q.Start = time.Time{} },
+		"start after end":    func(q *providers.MetricsQuery) { q.Start = q.End.Add(time.Second) },
+		"start equal to end": func(q *providers.MetricsQuery) { q.Start = q.End },
+		"range too long":     func(q *providers.MetricsQuery) { q.Start = q.End.Add(-MaxRange - time.Second); q.Step = time.Hour },
+		"too many points":    func(q *providers.MetricsQuery) { q.Start = q.Start.Add(-MinStep) },
+		// 500 steps less half a millisecond, which the start sent in whole milliseconds makes 500 steps.
+		"too many points as sent": func(q *providers.MetricsQuery) {
+			q.Start = now.Add(-MaxPointsPerSeries*MinStep + 500*time.Microsecond)
+		},
+		"start equal to end as sent": func(q *providers.MetricsQuery) {
+			q.End = now.Add(-time.Minute + 700*time.Microsecond)
+			q.Start = q.End.Add(-500 * time.Microsecond)
+		},
 		"start beyond lookback": func(q *providers.MetricsQuery) { q.End = now.Add(-MaxLookback); q.Start = q.End.Add(-time.Hour) },
 		"instant with start":    func(q *providers.MetricsQuery) { q.Step = 0 },
 		"instant beyond lookback": func(q *providers.MetricsQuery) {
@@ -266,6 +331,12 @@ func TestTimeLimits(t *testing.T) {
 	if _, err := s.Query(testCtx(t), ok); !errors.Is(err, ErrInvalidResponse) {
 		// The server answers a vector to the range query: only that it got that far matters here.
 		t.Fatalf("limit query refused before the request: %v", err)
+	}
+	// 499 steps and half a millisecond: sent as 499 steps and a millisecond, still 500 points.
+	edge := ok
+	edge.Start = now.Add(-(MaxPointsPerSeries-1)*MinStep - 500*time.Microsecond)
+	if _, err := s.Query(testCtx(t), edge); !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("query at the limit as sent refused before the request: %v", err)
 	}
 	n.Store(0)
 	for name, mutate := range cases {
@@ -504,6 +575,7 @@ func TestStatusErrors(t *testing.T) {
 		{http.StatusTooManyRequests, "7", providers.IsRetryable, 7 * time.Second},
 		{http.StatusServiceUnavailable, "99999999999999", providers.IsRetryable, maxRetryAfter},
 		{http.StatusInternalServerError, "Wed, 21 Oct 2015 07:28:00 GMT", providers.IsRetryable, 0},
+		{http.StatusBadGateway, now.Add(20 * time.Second).Format(http.TimeFormat), providers.IsRetryable, 20 * time.Second},
 		{http.StatusRequestTimeout, "", providers.IsRetryable, 0},
 	}
 	for _, c := range cases {
@@ -540,6 +612,73 @@ func TestStatusErrors(t *testing.T) {
 				t.Error("redirect was followed")
 			}
 		})
+	}
+}
+
+// A 503 whose envelope says the query ran out of its evaluation timeout is refused for good: the same query
+// would time out again. Any other 503, or an envelope that cannot be read within the bound, stays retryable.
+func TestServerTimeoutIsNotRetryable(t *testing.T) {
+	const leak = "SECRET-from-the-server"
+	const jsonType = "application/json"
+	long := strings.Repeat("x", maxErrorEnvelope)
+	cases := map[string]struct {
+		contentType, body string
+		check             func(error) bool
+	}{
+		"timeout":                {jsonType, `{"status":"error","errorType":"timeout","error":"` + leak + `"}`, providers.IsRejected},
+		"timeout after error":    {jsonType, `{"status":"error","error":"` + leak + `","errorType":"timeout"}`, providers.IsRejected},
+		"unavailable":            {jsonType, `{"status":"error","errorType":"unavailable","error":"` + leak + `"}`, providers.IsRetryable},
+		"no error type":          {jsonType, `{"status":"error","error":"` + leak + `"}`, providers.IsRetryable},
+		"error type not string":  {jsonType, `{"errorType":{"timeout":true}}`, providers.IsRetryable},
+		"not JSON":               {"text/plain", `{"errorType":"timeout"}`, providers.IsRetryable},
+		"beyond the bound":       {jsonType, `{"error":"` + long + `","errorType":"timeout"}`, providers.IsRetryable},
+		"malformed":              {jsonType, `{"errorType":`, providers.IsRetryable},
+		"array, not an envelope": {jsonType, `["errorType","timeout"]`, providers.IsRetryable},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			s, _, _ := testSource(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", c.contentType)
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, c.body)
+			})
+			_, err := s.Query(testCtx(t), instant("container_restarts_total"))
+			if !c.check(err) || (providers.IsRejected(err) && providers.IsRetryable(err)) {
+				t.Fatalf("error = %v", err)
+			}
+			if msg := err.Error(); strings.Contains(msg, leak) || strings.Contains(msg, "xxxx") ||
+				!strings.Contains(msg, "503") {
+				t.Errorf("error = %q, want the status and no response text", msg)
+			}
+		})
+	}
+}
+
+// A body the connection cuts short is a transient failure, not a bad answer; a body that ends cleanly but
+// short of valid JSON is.
+func TestTruncatedBodyIsRetryable(t *testing.T) {
+	cut := func(w http.ResponseWriter, _ *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n\r\n" +
+			matrixPrefix + `{"metric":{"pod":"web-0"`)
+		_ = buf.Flush()
+	}
+	s, srv, _ := testSource(t, cut)
+	_, err := s.Query(testCtx(t), rangeQuery(2))
+	if !providers.IsRetryable(err) || errors.Is(err, ErrInvalidResponse) || strings.Contains(err.Error(), srv.URL) {
+		t.Fatalf("cut body: error = %v, want a retryable error without the URL", err)
+	}
+
+	s, _, _ = testSource(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, matrixPrefix+`{"metric":{"pod":"web-0"`)
+	})
+	_, err = s.Query(testCtx(t), rangeQuery(2))
+	if !errors.Is(err, ErrInvalidResponse) || providers.IsRetryable(err) {
+		t.Fatalf("short body: error = %v, want ErrInvalidResponse", err)
 	}
 }
 

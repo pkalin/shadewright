@@ -34,9 +34,12 @@ import (
 var errBodyTooLarge = errors.New("body too large")
 
 // capReader fails as soon as more than left bytes have been read, instead of truncating silently.
+// It records the first read error of the underlying reader other than io.EOF, so that a body cut short by
+// the connection can be told apart from a malformed one.
 type capReader struct {
-	r    io.Reader
-	left int64
+	r       io.Reader
+	left    int64
+	readErr error
 }
 
 func (c *capReader) Read(p []byte) (int, error) {
@@ -50,6 +53,9 @@ func (c *capReader) Read(p []byte) (int, error) {
 	c.left -= int64(n)
 	if c.left < 0 {
 		return 0, errBodyTooLarge
+	}
+	if err != nil && !errors.Is(err, io.EOF) && c.readErr == nil {
+		c.readErr = err
 	}
 	return n, err
 }

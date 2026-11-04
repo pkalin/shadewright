@@ -22,7 +22,6 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -34,6 +33,15 @@ const (
 	// ParamWorkload is the name of the workload, a DNS-1123 subdomain. What it names depends on the template.
 	ParamWorkload = "workload"
 )
+
+// MaxPodWorkloadName bounds the workload name of a template that selects pods by name. The pods of a
+// Deployment (through its ReplicaSet) and of a DaemonSet get their names from generateName, which the API
+// server cuts to 58 characters before it adds 5 random ones: only for a workload name of at most 57 does the
+// pod name keep the whole name and the dash after it, which the pod selector needs. A StatefulSet pod is
+// named "<name>-<ordinal>" without the cut, and a StatefulSet name is in practice at most 52 characters long
+// (its controller-revision-hash label must fit 63), so the bound costs it nothing. A longer name is refused
+// with ErrInvalidQuery rather than answered with no data.
+const MaxPodWorkloadName = 57
 
 // TemplateInfo describes an approved query template, for building a tool schema or documentation.
 type TemplateInfo struct {
@@ -49,8 +57,11 @@ type TemplateInfo struct {
 
 // template is an approved query. render gets parameters that are already validated.
 type template struct {
-	info   TemplateInfo
-	render func(namespace, workload string) string
+	info TemplateInfo
+	// byPodName says the template selects pods by the workload name, so the name is bounded by
+	// MaxPodWorkloadName.
+	byPodName bool
+	render    func(namespace, workload string) string
 }
 
 // Rate windows are fixed: a query never takes a duration from its parameters.
@@ -85,6 +96,7 @@ var registry = buildRegistry([]template{
 			Description: "Memory working set of each container of the workload's pods, in bytes (cAdvisor).",
 			Labels:      podContainer,
 		},
+		byPodName: true,
 		render: func(ns, w string) string {
 			return "sum by (pod, container) (container_memory_working_set_bytes{" + containersOf(ns, w) + "})"
 		},
@@ -95,6 +107,7 @@ var registry = buildRegistry([]template{
 			Description: "Memory limit of each container of the workload's pods, in bytes (kube-state-metrics).",
 			Labels:      podContainer,
 		},
+		byPodName: true,
 		render: func(ns, w string) string {
 			return "max by (pod, container) (kube_pod_container_resource_limits{" + podsOf(ns, w) +
 				`,resource="memory"})`
@@ -106,6 +119,7 @@ var registry = buildRegistry([]template{
 			Description: "CPU used by each container of the workload's pods, in cores, averaged over 5 minutes (cAdvisor).",
 			Labels:      podContainer,
 		},
+		byPodName: true,
 		render: func(ns, w string) string {
 			return "sum by (pod, container) (rate(container_cpu_usage_seconds_total{" + containersOf(ns, w) +
 				"}" + rateWindow + "))"
@@ -118,6 +132,7 @@ var registry = buildRegistry([]template{
 				"0 to 1, over 5 minutes (cAdvisor).",
 			Labels: podContainer,
 		},
+		byPodName: true,
 		render: func(ns, w string) string {
 			sel := containersOf(ns, w)
 			return "sum by (pod, container) (rate(container_cpu_cfs_throttled_periods_total{" + sel + "}" +
@@ -131,6 +146,7 @@ var registry = buildRegistry([]template{
 			Description: "Restart count of each container of the workload's pods (kube-state-metrics).",
 			Labels:      podContainer,
 		},
+		byPodName: true,
 		render: func(ns, w string) string {
 			return "max by (pod, container) (kube_pod_container_status_restarts_total{" + podsOf(ns, w) + "})"
 		},
@@ -142,6 +158,7 @@ var registry = buildRegistry([]template{
 				"(kube-state-metrics).",
 			Labels: podContainer,
 		},
+		byPodName: true,
 		render: func(ns, w string) string {
 			return "max by (pod, container) (kube_pod_container_status_last_terminated_reason{" + podsOf(ns, w) +
 				`,reason="OOMKilled"})`
@@ -154,6 +171,7 @@ var registry = buildRegistry([]template{
 				"CrashLoopBackOff or ImagePullBackOff (kube-state-metrics).",
 			Labels: []string{"pod", "container", "reason"},
 		},
+		byPodName: true,
 		render: func(ns, w string) string {
 			return "max by (pod, container, reason) (kube_pod_container_status_waiting_reason{" +
 				podsOf(ns, w) + "} == 1)"
@@ -218,9 +236,9 @@ func (t template) renderQuery(params map[string]string) (string, error) {
 	if len(validation.IsDNS1123Subdomain(w)) > 0 {
 		return "", fmt.Errorf("parameter %s is not a DNS-1123 subdomain: %w", ParamWorkload, ErrInvalidQuery)
 	}
-	// Defence in depth: a validated name holds only [a-z0-9.-]. Refuse anything that could end a string.
-	if strings.ContainsAny(ns+w, "\"\\\n{}") {
-		return "", fmt.Errorf("parameter holds a forbidden character: %w", ErrInvalidQuery)
+	if t.byPodName && len(w) > MaxPodWorkloadName {
+		return "", fmt.Errorf("parameter %s is longer than %d characters, which pod names cut: %w",
+			ParamWorkload, MaxPodWorkloadName, ErrInvalidQuery)
 	}
 	return t.render(ns, w), nil
 }

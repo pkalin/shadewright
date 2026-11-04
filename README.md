@@ -24,6 +24,10 @@ It never changes your workloads or any other object it watches: it writes only i
 - [Getting started](https://shadewright.io/getting-started/): tests without a cluster, an observe-only install, and a hand-written request to a reviewed pull request.
 - [Configuration reference](https://shadewright.io/reference/configuration/): flags, namespaces and RoleBindings, images, metrics and workload identity.
 - [Troubleshooting](https://shadewright.io/troubleshooting/): every request condition reason with its cause and fix.
+- [Upgrade and uninstall](https://shadewright.io/upgrade-uninstall/): the order, open pull requests and finalizers, and what deleting a request does.
+- [Compatibility](https://shadewright.io/reference/compatibility/): tested Kubernetes, Flux and KEDA versions, architectures, Git URL form and supported source layouts.
+- [Identity rotation](https://shadewright.io/identity-rotation/): the GitHub App key, the installation, federated credentials and Key Vault key versions.
+- [Data handling](https://shadewright.io/data-handling/): what is stored, sent to the model, published and retained.
 
 ## Repositories
 

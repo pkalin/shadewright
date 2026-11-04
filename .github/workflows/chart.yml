@@ -1,10 +1,8 @@
 name: Chart
 
-# Lints and tests the Helm chart in dist/chart (generated with Kubebuilder's helm/v2-alpha plugin, then adjusted
-# by hand, so the comparison test is the guard). Pull requests and pushes to main lint, render and compare
-# the chart with config/default, a Kind job installs it with explicit values, and the chart-testing job runs
-# ct lint and installs it with the default values plus image.allowTag (images built from the checkout), with
-# helm test. Only a v* tag
+# Publishes the Helm chart in dist/chart (generated with Kubebuilder's helm/v2-alpha plugin, then adjusted by
+# hand). Pull requests and pushes to main lint, render, compare and install it through ci.yml, which calls
+# chart-test.yml; a release tag runs the same tests here first. Only a v* tag
 # publishes it to ghcr.io/<owner>/charts/shadewright, and only the publish job has packages: write and
 # id-token: write. Before packaging it writes the digests of the tag's signed images into values.yaml, so the
 # published chart runs them by digest. After the push it signs the chart by digest with cosign keyless (GitHub
@@ -12,137 +10,26 @@ name: Chart
 # the run.
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-  pull_request:
 
 permissions: {}
 
 env:
   HELM_VERSION: v4.3.1
-  CT_VERSION: 3.15.0
-  YAMLLINT_VERSION: 1.33.0
-  YAMALE_VERSION: 6.0.0
-  UV_VERSION: 0.13.7
 
 jobs:
-  chart:
-    name: Lint and render
-    runs-on: ubuntu-latest
+  test:
+    name: Test the chart
     permissions:
       contents: read
-    steps:
-      - name: Clone the code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Setup Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false # this workflow publishes on tags: no cache a pull request could poison
-
-      - name: Setup Helm
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-        with:
-          version: ${{ env.HELM_VERSION }}
-
-      - name: Lint and compare the chart with config/default
-        run: make chart-lint test-chart
-
-  install:
-    name: Install on Kind
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Clone the code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Setup Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false # this workflow publishes on tags: no cache a pull request could poison
-
-      - name: Setup Helm
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-        with:
-          version: ${{ env.HELM_VERSION }}
-
-      # Pull requests and main use the v0.1.0 image digests; a release tag uses the digests of the images
-      # of that tag (the script waits for the Images workflow of the tag to push them).
-      - name: Install the chart on Kind and check the permissions
-        env:
-          CHART_TEST_IMAGE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
-        run: make test-chart-install
-
-      # The cluster is deleted even when a step failed.
-      - name: Delete the Kind cluster
-        if: ${{ always() }}
-        run: make chart-kind-delete
-
-  chart-testing:
-    name: chart-testing (default values on Kind)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Clone the code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Setup Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false # this workflow publishes on tags: no cache a pull request could poison
-
-      - name: Setup Helm
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-        with:
-          version: ${{ env.HELM_VERSION }}
-
-      # Installs ct, yamllint and yamale at the versions above (ct's download is verified with cosign).
-      - name: Setup chart-testing
-        uses: helm/chart-testing-action@720270857a28afd41e2426521a7801db09e9b510 # v2.9.0
-        with:
-          version: ${{ env.CT_VERSION }}
-          yamllint_version: ${{ env.YAMLLINT_VERSION }}
-          yamale_version: ${{ env.YAMALE_VERSION }}
-          uv_version: ${{ env.UV_VERSION }}
-
-      # yamllint, the Chart.yaml schema, maintainers (a GitHub handle, no email) and helm lint (ct.yaml).
-      - name: ct lint
-        run: ct lint --config ct.yaml
-
-      # The default values run repository:appVersion, so the images are built from this checkout under that
-      # tag and loaded into Kind (pinned KIND_VERSION): the install tests this code with the default values and
-      # image.allowTag (dist/chart/ci/default-values.yaml).
-      - name: Create the Kind cluster and load the images
-        run: make chart-ct-cluster
-
-      - name: Install with the default values and check what it may read and write
-        run: make test-chart-defaults
-
-      # Installs with ci/default-values.yaml (image.allowTag only, the rest default), runs helm test and uninstalls.
-      - name: ct install
-        run: ct install --config ct.yaml
-
-      - name: Delete the Kind cluster
-        if: ${{ always() }}
-        run: make chart-ct-kind-delete
+    uses: ./.github/workflows/chart-test.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
 
   publish:
     name: Publish the chart
     # Release tags only. The chart version must equal the tag (release-please bumps both in the release pull
     # request), so a tag never publishes the chart of another version.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [chart, install, chart-testing]
+    needs: [test]
     runs-on: ubuntu-latest
     permissions:
       contents: read

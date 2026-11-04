@@ -936,6 +936,105 @@ func TestIncidentWithAnotherFingerprintIsRefused(t *testing.T) {
 	}
 }
 
+// The Incident of another fingerprint is read fresh when the write is refused, but its status is not ours:
+// the records load remembered that it still holds stay, and nothing it gained since (a record, a later drop
+// mark) is taken into memory.
+func TestForeignStatusIsNotRemembered(t *testing.T) {
+	ns := namespace(t)
+	now := time.Now().Truncate(time.Second)
+	at := func(d time.Duration) *metav1.Time { return &metav1.Time{Time: now.Add(-d)} }
+	squat := &remediationv1alpha1.Incident{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: Name(fp(1))},
+		Spec:       specOf(observation(2, 1, 1, 1, now)),
+	}
+	if err := env.admin.Create(t.Context(), squat); err != nil {
+		t.Fatal(err)
+	}
+	squat.Status = remediationv1alpha1.IncidentStatus{
+		Phase: remediationv1alpha1.IncidentOpen, FirstSeen: at(4 * time.Hour), LastSeen: at(4 * time.Hour), Count: 5,
+		Occurrences:               []remediationv1alpha1.OccurrenceRecord{{ID: eventID(50), Total: 5, Began: at(2 * time.Hour)}},
+		OccurrencesDroppedThrough: at(3 * time.Hour),
+	}
+	if err := env.admin.Status().Update(t.Context(), squat); err != nil {
+		t.Fatal(err)
+	}
+	r := start(t, ns, Config{Window: 100 * time.Millisecond})
+	if _, _, err := r.Handled(t.Context(), eventID(50), now); err != nil {
+		t.Fatal(err)
+	}
+	// After load, the other Incident gains a record and a later drop mark.
+	squat.Status.Count = 6
+	squat.Status.Occurrences = append(squat.Status.Occurrences,
+		remediationv1alpha1.OccurrenceRecord{ID: eventID(51), Total: 1, Began: at(time.Minute)})
+	squat.Status.OccurrencesDroppedThrough = at(time.Hour)
+	if err := env.admin.Status().Update(t.Context(), squat); err != nil {
+		t.Fatal(err)
+	}
+	before := testutil.ToFloat64(droppedBatches.WithLabelValues(dropFingerprintConflict))
+	r.obs <- observation(1, 1, 1, 1, now)
+	deadline := time.Now().Add(5 * time.Second)
+	for testutil.ToFloat64(droppedBatches.WithLabelValues(dropFingerprintConflict))-before < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the batch was not dropped")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if want := now.Add(-3 * time.Hour); !r.droppedThrough.Equal(want) {
+		t.Errorf("droppedThrough %v, want %v as load remembered it", r.droppedThrough, want)
+	}
+	if got, found := r.handled(eventID(50), now.Add(-2*time.Hour)); !found || got != 5 {
+		t.Errorf("handled = %d, %v for the record load remembered, want 5", got, found)
+	}
+	if got, found := r.handled(eventID(51), now.Add(-time.Minute)); found {
+		t.Errorf("handled = %d for a record the other Incident gained after load, want not found", got)
+	}
+	if got, found := r.handled(eventID(52), now.Add(-2*time.Hour)); found {
+		t.Errorf("handled = %d for an occurrence before the later drop mark, want not found", got)
+	}
+	indexed(t, r.Controller)
+}
+
+// A batch being written still counts as held: the new occurrences arriving while it is in flight cannot take
+// the Incident over its cap.
+func TestInFlightOccurrencesCountAsHeld(t *testing.T) {
+	ns := namespace(t)
+	const perIncident = 10
+	r := start(t, ns, Config{Window: time.Hour, MaxPendingOccurrencesPerIncident: perIncident})
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	r.writes.before = func(context.Context, *remediationv1alpha1.Incident) {
+		once.Do(func() {
+			close(entered)
+			<-release
+		})
+	}
+	defer close(release)
+	now := time.Now().Truncate(time.Second)
+	// The first observation is written at once, alone: the write in flight holds one occurrence.
+	r.obs <- observation(1, 1, 1, 1, now)
+	waitFor(t, entered)
+	for i := 2; i <= perIncident+5; i++ {
+		r.obs <- observation(1, i, 1, 1, now)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	held := 1
+	if b := r.pending[fp(1)]; b != nil {
+		held += len(b.occurrences)
+	}
+	if b := r.failed[fp(1)]; b != nil {
+		held += len(b.occurrences)
+	}
+	if held > perIncident {
+		t.Fatalf("%d occurrences held unwritten with one write in flight, over the cap of %d", held, perIncident)
+	}
+	if r.held[fp(1)] > perIncident || r.heldTotal > perIncident {
+		t.Fatalf("held %d (total %d), over the cap of %d", r.held[fp(1)], r.heldTotal, perIncident)
+	}
+}
+
 // Many new occurrences of one fingerprint while every status write fails: the occurrences held unwritten
 // stay within the caps, per Incident and in total, and so does the memory of records. What goes over is not
 // counted (an undercount, in the metric), but each Incident still gets its last seen once writes succeed.

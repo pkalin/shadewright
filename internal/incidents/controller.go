@@ -694,15 +694,17 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 		}
 		c.forget(fp, gone, stored)
 		// A write before this one whose answer was lost may have dropped records that no batch names: they go
-		// too, as after a write that succeeds. What the Incident holds stays: the status as read, or that of
-		// the Incident with another fingerprint, as load remembered it.
-		holds := stored
+		// too, as after a write that succeeds. What the Incident holds stays: the status as read, or of the
+		// Incident with another fingerprint the records load remembered that its status still holds. That
+		// status is not ours: it is only swept against, never remembered, so neither its records nor its drop
+		// mark enter memory at runtime.
 		if refused.conflict {
-			holds = &res.inc.Status
-		} else if holds == nil {
-			holds = &remediationv1alpha1.IncidentStatus{}
+			c.prune(fp, nil, &res.inc.Status, true)
+		} else if stored != nil {
+			c.settle(fp, nil, stored, true)
+		} else {
+			c.prune(fp, nil, &remediationv1alpha1.IncidentStatus{}, true)
 		}
-		c.settle(fp, nil, holds, true)
 		if !refused.exists && c.pending[fp] == nil {
 			// An Incident that was never created frees its place under the cap.
 			delete(c.names, name)
@@ -743,13 +745,20 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 	c.settle(fp, res.dropped, &res.inc.Status, f != nil)
 }
 
-// settle takes into memory the status of fp's Incident after a write that succeeded or was refused: its
-// records are remembered, and this Incident's records of dropped that the status no longer holds are
-// forgotten, unless a batch still unwritten holds them. With sweep (after a failed write, or a refused
-// one), every record of this Incident is checked the same way, through recordsOf: a write whose answer was
-// lost may have dropped records that neither this write's dropped nor its batches name, and they would
-// otherwise stay in memory for good. The caller holds mu.
+// settle takes into memory the status of fp's Incident after a write that succeeded or was refused: prune
+// forgets what the status no longer holds, and its records and drop mark are remembered. The caller holds
+// mu.
 func (c *Controller) settle(fp string, dropped []string, status *remediationv1alpha1.IncidentStatus, sweep bool) {
+	c.prune(fp, dropped, status, sweep)
+	c.remember(Name(fp), status)
+}
+
+// prune forgets this Incident's records of dropped that status no longer holds, unless a batch still
+// unwritten holds them. With sweep (after a failed write, or a refused one), every record of this Incident
+// is checked the same way, through recordsOf: a write whose answer was lost may have dropped records that
+// neither this write's dropped nor its batches name, and they would otherwise stay in memory for good. It
+// only forgets: nothing of status is taken into memory. The caller holds mu.
+func (c *Controller) prune(fp string, dropped []string, status *remediationv1alpha1.IncidentStatus, sweep bool) {
 	name := Name(fp)
 	stored := make(map[string]struct{}, len(status.Occurrences))
 	for _, r := range status.Occurrences {
@@ -778,7 +787,6 @@ func (c *Controller) settle(fp string, dropped []string, status *remediationv1al
 			}
 		}
 	}
-	c.remember(name, status)
 }
 
 // forget takes the memory of the occurrences of dropped batches back to what stored (the Incident's status,

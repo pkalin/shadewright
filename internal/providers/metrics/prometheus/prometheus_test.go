@@ -47,13 +47,19 @@ const (
 // requests that reached the server.
 func testSource(t *testing.T, h http.HandlerFunc) (*Source, *httptest.Server, *atomic.Int32) {
 	t.Helper()
+	return testSourceIn(t, []string{testNS}, h)
+}
+
+// testSourceIn is testSource with the given allowed namespaces.
+func testSourceIn(t *testing.T, namespaces []string, h http.HandlerFunc) (*Source, *httptest.Server, *atomic.Int32) {
+	t.Helper()
 	var n atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n.Add(1)
 		h(w, r)
 	}))
 	t.Cleanup(srv.Close)
-	s, err := New(Config{URL: srv.URL + "/prom"})
+	s, err := New(Config{URL: srv.URL + "/prom", Namespaces: namespaces})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,6 +74,9 @@ func params(ns, w string) map[string]string {
 func instant(template string) providers.MetricsQuery {
 	return providers.MetricsQuery{Template: template, Params: params(testNS, testWorkload), End: now}
 }
+
+// maxRangePoints is the points per series of a range query over MaxRange at MinStep.
+const maxRangePoints = int(MaxRange/MinStep) + 1
 
 // rangeQuery asks for the given number of points per series, ending now.
 func rangeQuery(points int) providers.MetricsQuery {
@@ -188,13 +197,13 @@ func TestRangeQueryParameters(t *testing.T) {
 		got = r
 		writeJSON(w, `{"status":"success","data":{"resultType":"matrix","result":[]}}`)
 	})
-	q := rangeQuery(241) // one hour
+	q := rangeQuery(61) // one hour
 	if _, err := s.Query(testCtx(t), q); err != nil {
 		t.Fatal(err)
 	}
 	v := got.URL.Query()
 	if got.URL.Path != "/prom/api/v1/query_range" || v.Get("start") != "1793790000.000" ||
-		v.Get("end") != nowSecs+".000" || v.Get("step") != "15000ms" || v.Has("time") {
+		v.Get("end") != nowSecs+".000" || v.Get("step") != "60000ms" || v.Has("time") {
 		t.Errorf("request = %s %v", got.URL.Path, v)
 	}
 }
@@ -259,6 +268,50 @@ func TestParametersAreValidated(t *testing.T) {
 	}
 }
 
+// Prometheus applies no authorization: only the allowed namespaces may be named, and the others never reach
+// the server.
+func TestNamespaceMustBeAllowed(t *testing.T) {
+	s, _, n := testSourceIn(t, []string{testNS, "shop"}, emptyVector)
+	for _, info := range Templates() {
+		for _, ns := range []string{"kube-system", "demo2", "dem", "default"} {
+			q := instant(info.Name)
+			q.Params = params(ns, testWorkload)
+			_, err := s.Query(testCtx(t), q)
+			if !errors.Is(err, ErrInvalidQuery) || strings.Contains(err.Error(), ns) {
+				t.Errorf("%s, %s: error = %v, want ErrInvalidQuery without the namespace", info.Name, ns, err)
+			}
+		}
+		if n.Load() != 0 {
+			t.Fatalf("%s: %d requests reached the server", info.Name, n.Load())
+		}
+	}
+	for _, ns := range []string{testNS, "shop"} {
+		q := instant("container_restarts_total")
+		q.Params = params(ns, testWorkload)
+		n.Store(0)
+		if _, err := s.Query(testCtx(t), q); err != nil || n.Load() != 1 {
+			t.Errorf("%s: error = %v, %d requests; want one request", ns, err, n.Load())
+		}
+	}
+}
+
+func TestEmptyNamespaceSetRefusesEveryQuery(t *testing.T) {
+	for name, set := range map[string][]string{"nil": nil, "empty": {}} {
+		s, _, n := testSourceIn(t, set, emptyVector)
+		for _, info := range Templates() {
+			if _, err := s.Query(testCtx(t), instant(info.Name)); !errors.Is(err, ErrInvalidQuery) {
+				t.Errorf("%s, %s: error = %v, want ErrInvalidQuery", name, info.Name, err)
+			}
+		}
+		if _, err := s.Query(testCtx(t), rangeQuery(2)); !errors.Is(err, ErrInvalidQuery) {
+			t.Errorf("%s, range: error = %v, want ErrInvalidQuery", name, err)
+		}
+		if n.Load() != 0 {
+			t.Errorf("%s: %d requests reached the server", name, n.Load())
+		}
+	}
+}
+
 // Pod names cut a long workload name, so a template that selects pods by name refuses one it could never
 // match; the Deployment template matches the name as a label and takes any valid name.
 func TestPodWorkloadNameLength(t *testing.T) {
@@ -295,26 +348,31 @@ func TestUnknownTemplateIsNotFound(t *testing.T) {
 	}
 }
 
+// The range check alone bounds the points a range query asks for: there is no separate check of them.
+func TestRangeLimitsStayWithinThePointCap(t *testing.T) {
+	if maxRangePoints > MaxPointsPerSeries {
+		t.Errorf("MaxRange at MinStep asks for %d points per series, more than MaxPointsPerSeries (%d)",
+			maxRangePoints, MaxPointsPerSeries)
+	}
+}
+
 func TestTimeLimits(t *testing.T) {
-	ok := rangeQuery(MaxPointsPerSeries)
+	ok := rangeQuery(maxRangePoints)
 	cases := map[string]func(q *providers.MetricsQuery){
 		"no end": func(q *providers.MetricsQuery) { q.End = time.Time{} },
 		"end in the future": func(q *providers.MetricsQuery) {
 			q.Start = q.Start.Add(MaxClockSkew + time.Second)
 			q.End = now.Add(MaxClockSkew + time.Second)
 		},
-		"step below minimum": func(q *providers.MetricsQuery) { q.Step = MinStep - time.Millisecond },
-		"negative step":      func(q *providers.MetricsQuery) { q.Step = -MinStep },
-		"step not whole ms":  func(q *providers.MetricsQuery) { q.Step = MinStep + time.Microsecond },
-		"no start":           func(q *providers.MetricsQuery) { q.Start = time.Time{} },
-		"start after end":    func(q *providers.MetricsQuery) { q.Start = q.End.Add(time.Second) },
-		"start equal to end": func(q *providers.MetricsQuery) { q.Start = q.End },
-		"range too long":     func(q *providers.MetricsQuery) { q.Start = q.End.Add(-MaxRange - time.Second); q.Step = time.Hour },
-		"too many points":    func(q *providers.MetricsQuery) { q.Start = q.Start.Add(-MinStep) },
-		// 500 steps less half a millisecond, which the start sent in whole milliseconds makes 500 steps.
-		"too many points as sent": func(q *providers.MetricsQuery) {
-			q.Start = now.Add(-MaxPointsPerSeries*MinStep + 500*time.Microsecond)
-		},
+		"step below minimum":  func(q *providers.MetricsQuery) { q.Step = MinStep - time.Millisecond },
+		"negative step":       func(q *providers.MetricsQuery) { q.Step = -MinStep },
+		"step not whole ms":   func(q *providers.MetricsQuery) { q.Step = MinStep + time.Microsecond },
+		"no start":            func(q *providers.MetricsQuery) { q.Start = time.Time{} },
+		"start after end":     func(q *providers.MetricsQuery) { q.Start = q.End.Add(time.Second) },
+		"start equal to end":  func(q *providers.MetricsQuery) { q.Start = q.End },
+		"range too long":      func(q *providers.MetricsQuery) { q.Start = q.End.Add(-MaxRange - time.Second); q.Step = time.Hour },
+		"one step too many":   func(q *providers.MetricsQuery) { q.Start = q.Start.Add(-MinStep) },
+		"range a ms too long": func(q *providers.MetricsQuery) { q.Start = q.Start.Add(-time.Millisecond) },
 		"start equal to end as sent": func(q *providers.MetricsQuery) {
 			q.End = now.Add(-time.Minute + 700*time.Microsecond)
 			q.Start = q.End.Add(-500 * time.Microsecond)
@@ -332,9 +390,9 @@ func TestTimeLimits(t *testing.T) {
 		// The server answers a vector to the range query: only that it got that far matters here.
 		t.Fatalf("limit query refused before the request: %v", err)
 	}
-	// 499 steps and half a millisecond: sent as 499 steps and a millisecond, still 500 points.
+	// Half a millisecond short of MaxRange: sent in whole milliseconds as MaxRange, still within it.
 	edge := ok
-	edge.Start = now.Add(-(MaxPointsPerSeries-1)*MinStep - 500*time.Microsecond)
+	edge.Start = now.Add(-MaxRange + 500*time.Microsecond)
 	if _, err := s.Query(testCtx(t), edge); !errors.Is(err, ErrInvalidResponse) {
 		t.Fatalf("query at the limit as sent refused before the request: %v", err)
 	}
@@ -441,7 +499,7 @@ func TestOversizeResultsAreRefusedWhileReading(t *testing.T) {
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			s, _, _ := testSource(t, c.h)
-			_, err := s.Query(testCtx(t), rangeQuery(MaxPointsPerSeries))
+			_, err := s.Query(testCtx(t), rangeQuery(maxRangePoints))
 			if !providers.IsTooLarge(err) || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("error = %v, want ErrTooLarge about %s", err, c.want)
 			}
@@ -758,7 +816,7 @@ func TestConfiguredClientCarriesAuthAndNeverFollowsRedirects(t *testing.T) {
 	client.Transport = headerTransport{next: client.Transport}
 	// A client that would follow redirects: New must override it.
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return nil }
-	s, err := New(Config{URL: srv.URL, Client: client})
+	s, err := New(Config{URL: srv.URL, Client: client, Namespaces: []string{testNS}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -778,24 +836,32 @@ func TestConfiguredClientCarriesAuthAndNeverFollowsRedirects(t *testing.T) {
 	}
 }
 
+// plainURL is a valid URL for the tests of New.
+const plainURL = "http://prometheus"
+
 func TestNewValidates(t *testing.T) {
 	bad := map[string]Config{
-		"empty":        {},
-		"no scheme":    {URL: "prometheus:9090"},
-		"ftp":          {URL: "ftp://prometheus"},
-		"no host":      {URL: "http://"},
-		"credentials":  {URL: "http://user:hunter2-secret@prometheus"},
-		"query":        {URL: "http://prometheus/?token=hunter2-secret"},
-		"empty query":  {URL: "http://prometheus/?"},
-		"fragment":     {URL: "http://prometheus/#hunter2-secret"},
-		"unparsable":   {URL: "http://prometheus:hunter2-secret:x/"},
-		"neg timeout":  {URL: "http://prometheus", Timeout: -time.Second},
-		"long timeout": {URL: "http://prometheus", Timeout: MaxTimeout + time.Second},
+		"empty":         {},
+		"no scheme":     {URL: "prometheus:9090"},
+		"ftp":           {URL: "ftp://prometheus"},
+		"no host":       {URL: "http://"},
+		"credentials":   {URL: "http://user:hunter2-secret@prometheus"},
+		"query":         {URL: "http://prometheus/?token=hunter2-secret"},
+		"empty query":   {URL: "http://prometheus/?"},
+		"fragment":      {URL: "http://prometheus/#hunter2-secret"},
+		"unparsable":    {URL: "http://prometheus:hunter2-secret:x/"},
+		"neg timeout":   {URL: plainURL, Timeout: -time.Second},
+		"long timeout":  {URL: plainURL, Timeout: MaxTimeout + time.Second},
+		"bad namespace": {URL: plainURL, Namespaces: []string{testNS, "hunter2.secret"}},
+		"upper case ns": {URL: plainURL, Namespaces: []string{"Hunter2"}},
+		"empty ns":      {URL: plainURL, Namespaces: []string{""}},
+		"too long ns":   {URL: plainURL, Namespaces: []string{"hunter2" + strings.Repeat("a", 57)}},
+		"too many ns":   {URL: plainURL, Namespaces: manyNamespaces(MaxNamespaces + 1)},
 	}
 	for name, cfg := range bad {
 		_, err := New(cfg)
 		if !providers.IsInvalidConfig(err) || strings.Contains(err.Error(), "hunter2") {
-			t.Errorf("%s: error = %v, want ErrInvalidConfig without the URL", name, err)
+			t.Errorf("%s: error = %v, want ErrInvalidConfig without the URL or namespace", name, err)
 		}
 	}
 	for _, u := range []string{"http://prometheus-server.prometheus.svc", "https://example.com/api/prom/"} {
@@ -803,4 +869,15 @@ func TestNewValidates(t *testing.T) {
 			t.Errorf("%s: %v", u, err)
 		}
 	}
+	if _, err := New(Config{URL: plainURL, Namespaces: manyNamespaces(MaxNamespaces)}); err != nil {
+		t.Errorf("%d namespaces: %v", MaxNamespaces, err)
+	}
+}
+
+func manyNamespaces(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("ns-%d", i)
+	}
+	return out
 }

@@ -13,6 +13,7 @@ What Shadewright stores, what it sends where, what it publishes and how long eac
 | Events (`events.k8s.io`) and Pods | Reason, type, reporting controller, note text, object names and owners, container termination state, in the **watched namespaces only** | Analyzer |
 | Deployments, ReplicaSets, StatefulSets | Owner references and metadata (`get`) | Analyzer |
 | Nodes | `list`, for platform detection | Analyzer |
+| Prometheus (**planned**: the adapter is not wired yet) | The results of the approved query templates ([design, section 4](design.md#4-tools)), only for the **watched namespaces**: Prometheus applies no authorization, so the adapter refuses any other namespace before a request | Analyzer |
 | Flux `Kustomization` and `GitRepository`, the target workload or `ScaledObject`, policy and settings | Status and spec, for source mapping and the freshness check | Executor |
 | The Git repository | The files of the build for the target's Kustomization (up to 256 files, 1 MiB each), through the GitHub API | Executor |
 

@@ -30,6 +30,8 @@ import (
 	"strconv"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/validation"
+
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/retryafter"
 )
@@ -38,15 +40,19 @@ import (
 const (
 	// MaxRange bounds End minus Start of a range query.
 	MaxRange = 6 * time.Hour
-	// MinStep is the finest resolution of a range query; the lab scrapes every 15 seconds.
-	MinStep = 15 * time.Second
+	// MinStep is the finest resolution of a range query: the default global scrape interval of the
+	// prometheus-community chart the lab installs (1m), at which cAdvisor and kube-state-metrics are scraped
+	// there; a finer step would only repeat samples. With MaxRange it bounds a range query to 361 points per
+	// series, within MaxPointsPerSeries.
+	MinStep = time.Minute
 	// MaxLookback bounds how far in the past Start (or End of an instant query) may lie.
 	MaxLookback = 7 * 24 * time.Hour
 	// MaxClockSkew bounds how far in the future End may lie.
 	MaxClockSkew = time.Minute
 	// MaxSeries bounds the series of one result.
 	MaxSeries = 50
-	// MaxPointsPerSeries bounds the samples of one series, asked for and received.
+	// MaxPointsPerSeries bounds the samples of one series received. The points a range query asks for are
+	// bounded by MaxRange and MinStep, at most MaxRange/MinStep+1 (361), below it.
 	MaxPointsPerSeries = 500
 	// MaxPoints bounds the samples of one result, all series together.
 	MaxPoints = 5000
@@ -57,10 +63,13 @@ const (
 	DefaultTimeout = 30 * time.Second
 	// MaxTimeout bounds Config.Timeout.
 	MaxTimeout = 2 * time.Minute
+	// MaxNamespaces bounds Config.Namespaces.
+	MaxNamespaces = 256
 )
 
 // ErrInvalidQuery means the query was refused before any request: an unknown or missing parameter, a value
-// that is not a valid name, or a time range, step or resolution outside the limits. It is permanent.
+// that is not a valid name, a namespace outside Config.Namespaces, or a time range, step or resolution
+// outside the limits. It is permanent.
 var ErrInvalidQuery = errors.New("invalid metrics query")
 
 // ErrInvalidResponse means the server's answer was refused: malformed, of another shape than the template
@@ -80,20 +89,27 @@ type Config struct {
 	// Timeout bounds one query, from the request to the end of the decoded body; it is also sent to the
 	// server as its evaluation timeout. Zero means DefaultTimeout; at most MaxTimeout.
 	Timeout time.Duration
+	// Namespaces are the namespaces a query may name, each a DNS-1123 label, at most MaxNamespaces; the
+	// analyzer passes its watched namespaces (--watch-namespaces). Prometheus applies no authorization of its
+	// own, so this set is what keeps queries to the namespaces the analyzer may read. Empty refuses every
+	// query.
+	Namespaces []string
 }
 
 // Source is a [providers.MetricsSource] for one Prometheus-compatible query API. It is safe for concurrent
 // use.
 type Source struct {
-	base    *url.URL
-	client  *http.Client
-	timeout time.Duration
-	now     func() time.Time
+	base       *url.URL
+	client     *http.Client
+	timeout    time.Duration
+	namespaces map[string]struct{}
+	now        func() time.Time
 }
 
 var _ providers.MetricsSource = (*Source)(nil)
 
-// New validates cfg and returns a Source. It makes no network call. Errors never repeat the URL.
+// New validates cfg and returns a Source. It makes no network call. Errors never repeat the URL or a
+// namespace.
 func New(cfg Config) (*Source, error) {
 	u, err := url.Parse(cfg.URL)
 	if err != nil {
@@ -112,6 +128,16 @@ func New(cfg Config) (*Source, error) {
 	if cfg.Timeout < 0 || cfg.Timeout > MaxTimeout {
 		return nil, fmt.Errorf("timeout must be between 0 and %s: %w", MaxTimeout, providers.ErrInvalidConfig)
 	}
+	if len(cfg.Namespaces) > MaxNamespaces {
+		return nil, fmt.Errorf("more than %d namespaces: %w", MaxNamespaces, providers.ErrInvalidConfig)
+	}
+	namespaces := make(map[string]struct{}, len(cfg.Namespaces))
+	for i, ns := range cfg.Namespaces {
+		if len(validation.IsDNS1123Label(ns)) > 0 {
+			return nil, fmt.Errorf("namespace %d is not a DNS-1123 label: %w", i, providers.ErrInvalidConfig)
+		}
+		namespaces[ns] = struct{}{}
+	}
 	timeout := cfg.Timeout
 	if timeout == 0 {
 		timeout = DefaultTimeout
@@ -124,7 +150,7 @@ func New(cfg Config) (*Source, error) {
 	}
 	// Go keeps some headers, Authorization among them, on a redirect to the same host; never follow one.
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Source{base: u, client: &client, timeout: timeout, now: time.Now}, nil
+	return &Source{base: u, client: &client, timeout: timeout, namespaces: namespaces, now: time.Now}, nil
 }
 
 func defaultTransport() http.RoundTripper {
@@ -153,6 +179,10 @@ func (s *Source) Query(ctx context.Context, q providers.MetricsQuery) ([]provide
 	expr, err := t.renderQuery(q.Params)
 	if err != nil {
 		return nil, err
+	}
+	// After renderQuery, which requires the namespace parameter. The error never repeats the value.
+	if _, ok := s.namespaces[q.Params[ParamNamespace]]; !ok {
+		return nil, fmt.Errorf("parameter %s is not an allowed namespace: %w", ParamNamespace, ErrInvalidQuery)
 	}
 	path, form, win, err := s.timeParams(q)
 	if err != nil {
@@ -207,8 +237,9 @@ func (s *Source) timeParams(q providers.MetricsQuery) (string, url.Values, windo
 		return "api/v1/query", v, window{fromMs: end, toMs: end, instant: true}, nil
 	}
 	// The range checks use the times in whole milliseconds, as they are sent: the server counts points
-	// from those, not from the times given.
-	start, end, stepMs := q.Start.UnixMilli(), q.End.UnixMilli(), q.Step.Milliseconds()
+	// from those, not from the times given. MaxRange and MinStep bound the points asked for per series to
+	// MaxRange/MinStep+1, which TestRangeLimitsStayWithinThePointCap keeps within MaxPointsPerSeries.
+	start, end := q.Start.UnixMilli(), q.End.UnixMilli()
 	switch {
 	case q.Step < MinStep:
 		return "", nil, window{}, fmt.Errorf("step is below %s: %w", MinStep, ErrInvalidQuery)
@@ -220,9 +251,6 @@ func (s *Source) timeParams(q providers.MetricsQuery) (string, url.Values, windo
 		return "", nil, window{}, fmt.Errorf("time range is longer than %s: %w", MaxRange, ErrInvalidQuery)
 	case q.Start.Before(now.Add(-MaxLookback)):
 		return "", nil, window{}, fmt.Errorf("start time is more than %s ago: %w", MaxLookback, ErrInvalidQuery)
-	case (end-start)/stepMs+1 > MaxPointsPerSeries:
-		return "", nil, window{}, fmt.Errorf("range and step ask for more than %d points per series: %w",
-			MaxPointsPerSeries, ErrInvalidQuery)
 	}
 	v.Set("start", formatMs(start))
 	v.Set("end", formatMs(end))
@@ -295,7 +323,8 @@ func statusError(resp *http.Response, now time.Time) error {
 	case code == http.StatusUnauthorized || code == http.StatusForbidden:
 		return fmt.Errorf("prometheus refused the identity (status %d): %w", code, providers.ErrForbidden)
 	case code == http.StatusServiceUnavailable && serverTimedOut(resp):
-		// The server ran out of the evaluation timeout the adapter sent: the same query would again.
+		// The server ran out of the evaluation timeout the adapter sent. Final, since an evaluation that hit
+		// the timeout usually would again (the server counts time in its queue too).
 		return fmt.Errorf("prometheus timed out evaluating the query (status %d): %w", code, providers.ErrRejected)
 	case code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500:
 		return &providers.RetryableError{

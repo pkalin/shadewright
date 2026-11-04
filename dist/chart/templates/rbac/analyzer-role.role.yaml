@@ -1,0 +1,33 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer-role" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "" "context" $) | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  resourceNames:
+  - shadewright-analysis-budget
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - update
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - incidents
+  - remediationrequests
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - incidents/status
+  verbs:
+  - update

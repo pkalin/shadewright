@@ -1,0 +1,31 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "executor-role" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "" "context" $) | nindent 4 }}
+rules:
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - incidents
+  verbs:
+  - get
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - remediationrequests
+  verbs:
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - remediationrequests/status
+  verbs:
+  - get
+  - patch
+  - update

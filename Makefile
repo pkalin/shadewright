@@ -86,10 +86,11 @@ vet: ## Run go vet against code.
 .PHONY: test-scripts
 test-scripts: ## Test the release notes script (hack/release-notes-by-scope.sh).
 	hack/release-notes-by-scope_test.sh
+	hack/check-chart-docs_test.sh
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -coverprofile cover.out
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The kind target installs the pinned Kind (KIND_VERSION) into bin/. The setup builds/loads the Manager Docker image locally.
@@ -256,6 +257,7 @@ CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 GOVULNCHECK ?= $(LOCALBIN)/govulncheck
+HELM_DOCS ?= $(LOCALBIN)/helm-docs
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
@@ -274,6 +276,8 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
 
 GOLANGCI_LINT_VERSION ?= v2.15.0
 GOVULNCHECK_VERSION ?= v1.9.0
+# Generates dist/chart/README.md from values.yaml (checked through the Go checksum database).
+HELM_DOCS_VERSION ?= v1.14.2
 # The one kind pin: CI, the devcontainer and make test-e2e all install it through the kind target below.
 KIND_VERSION ?= v0.33.0
 .PHONY: kustomize
@@ -314,6 +318,11 @@ govulncheck: $(GOVULNCHECK) ## Download govulncheck locally if necessary.
 $(GOVULNCHECK): $(LOCALBIN)
 	$(call go-install-tool,$(GOVULNCHECK),golang.org/x/vuln/cmd/govulncheck,$(GOVULNCHECK_VERSION))
 
+.PHONY: helm-docs
+helm-docs: $(HELM_DOCS) ## Download helm-docs locally if necessary.
+$(HELM_DOCS): $(LOCALBIN)
+	$(call go-install-tool,$(HELM_DOCS),github.com/norwoodj/helm-docs/cmd/helm-docs,$(HELM_DOCS_VERSION))
+
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
@@ -343,3 +352,49 @@ endef
 define gomodver
 $(shell go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
 endef
+
+##@ Helm chart
+
+# The chart in dist/chart was generated with Kubebuilder's helm/v2-alpha plugin and then adjusted by hand (two
+# Deployments, per-component values, RBAC that matches config/default). Do not regenerate it with
+# "kubebuilder edit --plugins=helm/v2-alpha --force": test-chart shows what such a run would break.
+HELM ?= helm
+CHART_DIR ?= dist/chart
+HELM_DOCS_FLAGS = --chart-search-root $(CHART_DIR) --sort-values-order file --skip-version-footer
+CHART_KIND_CLUSTER ?= shadewright-chart-test
+
+.PHONY: chart-docs
+chart-docs: helm-docs ## Regenerate $(CHART_DIR)/README.md from values.yaml and README.md.gotmpl.
+	"$(HELM_DOCS)" $(HELM_DOCS_FLAGS)
+
+# Fails when a value has no description (an empty Description cell, or no "# @section": hack/check-chart-docs.sh)
+# or when README.md is not what helm-docs renders from values.yaml (stale). Nothing is written.
+.PHONY: chart-docs-check
+chart-docs-check: helm-docs ## Fail if the chart README is stale or a value has no description.
+	@"$(HELM_DOCS)" $(HELM_DOCS_FLAGS) --dry-run 2>/dev/null | hack/check-chart-docs.sh -
+	@"$(HELM_DOCS)" $(HELM_DOCS_FLAGS) --dry-run 2>/dev/null | diff -u $(CHART_DIR)/README.md - >&2 || { \
+		echo "error: $(CHART_DIR)/README.md is stale: run 'make chart-docs' and commit the result." >&2; exit 1; }
+
+.PHONY: chart-lint
+chart-lint: chart-docs-check ## Check the chart README, lint the chart with the test values, and check that the schema (not a template's required) refuses a tag instead of a digest.
+	$(HELM) lint $(CHART_DIR) -f $(CHART_DIR)/ci/test-values.yaml --strict
+	@if $(HELM) lint $(CHART_DIR) -f $(CHART_DIR)/ci/test-values.yaml --set executor.image.digest=latest >/dev/null 2>&1; then \
+		echo "helm lint passed with a tag instead of a digest: values.schema.json is not enforced"; exit 1; \
+	fi
+
+.PHONY: test-chart
+test-chart: kustomize ## Render the chart and fail if its RBAC, NetworkPolicies, Services or CRDs differ from kustomize build config/default.
+	KUSTOMIZE="$(KUSTOMIZE)" HELM="$(HELM)" CHART_TEST_REQUIRED=1 go test -count=1 ./test/chart/ -v
+
+.PHONY: test-chart-install
+test-chart-install: kind ## Install the chart on a Kind cluster (created here) and check the Deployments and the permissions.
+	@case "$$($(KIND) get clusters)" in \
+		*"$(CHART_KIND_CLUSTER)"*) echo "Kind cluster '$(CHART_KIND_CLUSTER)' already exists." ;; \
+		*) $(KIND) create cluster --name $(CHART_KIND_CLUSTER) ;; \
+	esac
+	$(KUBECTL) config use-context kind-$(CHART_KIND_CLUSTER)
+	hack/chart-install-test.sh "$(KUBECTL)" "$(HELM)"
+
+.PHONY: chart-kind-delete
+chart-kind-delete: kind ## Delete the Kind cluster of test-chart-install.
+	@$(KIND) delete cluster --name $(CHART_KIND_CLUSTER)

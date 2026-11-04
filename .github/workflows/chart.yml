@@ -1,0 +1,157 @@
+name: Chart
+
+# Lints and tests the Helm chart in dist/chart (generated with Kubebuilder's helm/v2-alpha plugin, then adjusted
+# by hand, so the comparison test is the guard). Pull requests and pushes to main lint, render and compare
+# the chart with config/default, and a Kind job installs it. Only a v* tag
+# publishes it to ghcr.io/<owner>/charts/shadewright, and only the publish job has packages: write and
+# id-token: write. After the push it signs the chart by digest with cosign keyless (GitHub OIDC, no key to
+# store) and verifies the signature against the identity of this workflow, so a mismatch fails the run.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions: {}
+
+env:
+  HELM_VERSION: v4.3.1
+
+jobs:
+  chart:
+    name: Lint and render
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false # this workflow publishes on tags: no cache a pull request could poison
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Lint and compare the chart with config/default
+        run: make chart-lint test-chart
+
+  install:
+    name: Install on Kind
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false # this workflow publishes on tags: no cache a pull request could poison
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      # Pull requests and main use the v0.1.0 image digests; a release tag uses the digests of the images
+      # of that tag (the script waits for the Images workflow of the tag to push them).
+      - name: Install the chart on Kind and check the permissions
+        env:
+          CHART_TEST_IMAGE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+        run: make test-chart-install
+
+      # The cluster is deleted even when a step failed.
+      - name: Delete the Kind cluster
+        if: ${{ always() }}
+        run: make chart-kind-delete
+
+  publish:
+    name: Publish the chart
+    # Release tags only. The chart version must equal the tag (release-please bumps both in the release pull
+    # request), so a tag never publishes the chart of another version.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [chart, install]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # cosign keyless signing, this job only
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Check that the chart version is the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(helm show chart dist/chart | sed -n 's/^version: //p')"
+          app_version="$(helm show chart dist/chart | sed -n 's/^appVersion: //p' | tr -d '"')"
+          if [ "v${version}" != "${TAG}" ] || [ "v${app_version}" != "${TAG}" ]; then
+            echo "chart version ${version} / appVersion ${app_version} do not match the tag ${TAG}" >&2
+            exit 1
+          fi
+
+      - name: Package the chart
+        run: helm package dist/chart --destination "${RUNNER_TEMP}/chart"
+
+      - name: Log in to GHCR
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "${TOKEN}" | helm registry login ghcr.io --username "${ACTOR}" --password-stdin
+
+      - name: Push the chart
+        env:
+          TAG: ${{ github.ref_name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "${OWNER}" | tr '[:upper:]' '[:lower:]')"
+          helm push "${RUNNER_TEMP}/chart/shadewright-${TAG#v}.tgz" "oci://ghcr.io/${owner}/charts" 2>&1 | tee "${RUNNER_TEMP}/push.log"
+          digest="$(sed -n 's/^Digest: //p' "${RUNNER_TEMP}/push.log")"
+          if ! printf '%s' "${digest}" | grep -Eq '^sha256:[a-f0-9]{64}$'; then
+            echo "no chart digest in the helm push output" >&2
+            exit 1
+          fi
+          echo "CHART_REF=ghcr.io/${owner}/charts/shadewright@${digest}" >> "${GITHUB_ENV}"
+          echo "oci://ghcr.io/${owner}/charts/shadewright:${TAG#v} (${digest})" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Always by digest: a tag can move, the digest names the pushed chart.
+      - name: Sign the chart (keyless)
+        run: cosign sign --yes "${CHART_REF}"
+
+      # The identity is this workflow file on a release tag of this repository, issued by GitHub's OIDC
+      # provider. Anything else (another workflow, another repository, a branch) fails the run.
+      - name: Verify the signature
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          identity="^https://github\.com/${REPOSITORY//./\\.}/\.github/workflows/chart\.yml@refs/tags/v[0-9].*$"
+          cosign verify \
+            --certificate-identity-regexp "${identity}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${CHART_REF}" > /dev/null

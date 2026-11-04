@@ -667,6 +667,190 @@ var _ = Describe("RemediationSettings", func() {
 		Entry("with a version", "https://kv-example.vault.azure.net/keys/github-app/0123456789abcdef0123456789abcdef"),
 	)
 
+	Describe("analysis", func() {
+		model := func() *v1alpha1.ModelDeployment {
+			return &v1alpha1.ModelDeployment{
+				Endpoint:   "https://example.services.ai.azure.com/",
+				Deployment: "gpt-5.4-mini",
+				APIVersion: "2024-10-21",
+			}
+		}
+		withAnalysis := func(change func(*v1alpha1.AnalysisSettings)) *v1alpha1.RemediationSettings {
+			s := fx.RemediationSettings()
+			s.Spec.Analysis = &v1alpha1.AnalysisSettings{}
+			change(s.Spec.Analysis)
+			return s
+		}
+		withModel := func(change func(*v1alpha1.ModelDeployment)) *v1alpha1.RemediationSettings {
+			return withAnalysis(func(a *v1alpha1.AnalysisSettings) {
+				m := model()
+				change(m)
+				a.Models = &v1alpha1.AnalysisModels{Triage: m}
+			})
+		}
+
+		It("fills in safe defaults when analysis is left out, with no model configured", func() {
+			s := fx.RemediationSettings()
+			expectAccepted(s)
+			a := s.Spec.Analysis
+			Expect(a).NotTo(BeNil())
+			Expect(a.MaxContextBytes).To(BeEquivalentTo(32768))
+			Expect(*a.MaxToolSteps).To(BeEquivalentTo(4))
+			Expect(a.MaxOutputTokens).To(BeEquivalentTo(2048))
+			Expect(a.MaxConcurrentAnalyses).To(BeEquivalentTo(1))
+			Expect(a.Models).To(BeNil())
+		})
+
+		It("defaults the daily token cap of each model", func() {
+			s := withAnalysis(func(a *v1alpha1.AnalysisSettings) {
+				a.Models = &v1alpha1.AnalysisModels{Triage: model(), Escalation: model()}
+			})
+			expectAccepted(s)
+			Expect(*s.Spec.Analysis.Models.Triage.MaxTokensPerDay).To(BeEquivalentTo(1000000))
+			Expect(*s.Spec.Analysis.Models.Escalation.MaxTokensPerDay).To(BeEquivalentTo(1000000))
+		})
+
+		It("accepts every limit at its lower bound", func() {
+			expectAccepted(withAnalysis(func(a *v1alpha1.AnalysisSettings) {
+				a.MaxContextBytes, a.MaxToolSteps, a.MaxOutputTokens, a.MaxConcurrentAnalyses = 4096, ptr.To[int32](0), 256, 1
+				a.Models = &v1alpha1.AnalysisModels{Triage: model()}
+				a.Models.Triage.MaxTokensPerDay = ptr.To[int64](0)
+			}))
+		})
+
+		It("accepts every limit at its upper bound", func() {
+			expectAccepted(withAnalysis(func(a *v1alpha1.AnalysisSettings) {
+				a.MaxContextBytes, a.MaxToolSteps, a.MaxOutputTokens, a.MaxConcurrentAnalyses = 262144, ptr.To[int32](16), 16384, 8
+				a.Models = &v1alpha1.AnalysisModels{Triage: model()}
+				a.Models.Triage.MaxTokensPerDay = ptr.To[int64](1000000000)
+			}))
+		})
+
+		DescribeTable("refuses limits out of their bounds",
+			func(change func(*v1alpha1.AnalysisSettings), msg string) {
+				expectRefused(withAnalysis(change), msg)
+			},
+			Entry("a context below 4096 bytes", func(a *v1alpha1.AnalysisSettings) { a.MaxContextBytes = 4095 },
+				"spec.analysis.maxContextBytes"),
+			Entry("a context above 262144 bytes", func(a *v1alpha1.AnalysisSettings) { a.MaxContextBytes = 262145 },
+				"spec.analysis.maxContextBytes"),
+			Entry("negative tool steps", func(a *v1alpha1.AnalysisSettings) { a.MaxToolSteps = ptr.To[int32](-1) },
+				"spec.analysis.maxToolSteps"),
+			Entry("more than 16 tool steps", func(a *v1alpha1.AnalysisSettings) { a.MaxToolSteps = ptr.To[int32](17) },
+				"spec.analysis.maxToolSteps"),
+			Entry("fewer than 256 output tokens", func(a *v1alpha1.AnalysisSettings) { a.MaxOutputTokens = 255 },
+				"spec.analysis.maxOutputTokens"),
+			Entry("more than 16384 output tokens", func(a *v1alpha1.AnalysisSettings) { a.MaxOutputTokens = 16385 },
+				"spec.analysis.maxOutputTokens"),
+			Entry("negative concurrency", func(a *v1alpha1.AnalysisSettings) { a.MaxConcurrentAnalyses = -1 },
+				"spec.analysis.maxConcurrentAnalyses"),
+			Entry("more than 8 concurrent analyses", func(a *v1alpha1.AnalysisSettings) { a.MaxConcurrentAnalyses = 9 },
+				"spec.analysis.maxConcurrentAnalyses"),
+			Entry("a negative daily token cap", func(a *v1alpha1.AnalysisSettings) {
+				a.Models = &v1alpha1.AnalysisModels{Triage: model()}
+				a.Models.Triage.MaxTokensPerDay = ptr.To[int64](-1)
+			}, "spec.analysis.models.triage.maxTokensPerDay"),
+			Entry("a daily token cap above 1,000,000,000", func(a *v1alpha1.AnalysisSettings) {
+				a.Models = &v1alpha1.AnalysisModels{Triage: model()}
+				a.Models.Triage.MaxTokensPerDay = ptr.To[int64](1000000001)
+			}, "spec.analysis.models.triage.maxTokensPerDay"),
+			Entry("an escalation cap above 1,000,000,000", func(a *v1alpha1.AnalysisSettings) {
+				a.Models = &v1alpha1.AnalysisModels{Triage: model(), Escalation: model()}
+				a.Models.Escalation.MaxTokensPerDay = ptr.To[int64](1000000001)
+			}, "spec.analysis.models.escalation.maxTokensPerDay"),
+			Entry("an escalation model without a triage model", func(a *v1alpha1.AnalysisSettings) {
+				a.Models = &v1alpha1.AnalysisModels{Escalation: model()}
+			}, "an escalation model needs a triage model"),
+		)
+
+		DescribeTable("accepts model endpoints",
+			func(endpoint string) {
+				expectAccepted(withModel(func(m *v1alpha1.ModelDeployment) { m.Endpoint = endpoint }))
+			},
+			Entry("a Foundry resource", "https://example.services.ai.azure.com/"),
+			Entry("an Azure OpenAI v1 path", "https://example.openai.azure.com/openai/v1"),
+			Entry("a port and a path with dots", "https://models.example.org:8443/api/v1.2/"),
+			Entry("the longest URL", "https://"+strings.Repeat("a", 60)+"."+strings.Repeat("b", 60)+".io/"+
+				strings.Repeat("p", 256-len("https://")-121-len(".io/"))),
+		)
+
+		DescribeTable("refuses model endpoints that are not plain HTTPS URLs",
+			func(endpoint string) {
+				expectRefused(withModel(func(m *v1alpha1.ModelDeployment) { m.Endpoint = endpoint }),
+					"spec.analysis.models.triage.endpoint")
+			},
+			Entry("empty", ""),
+			Entry("plain HTTP", "http://example.openai.azure.com/"),
+			Entry("no scheme", "example.openai.azure.com"),
+			Entry("user info", "https://user:pass@example.openai.azure.com/"),
+			Entry("a query", "https://example.openai.azure.com/?api-key=secret"),
+			Entry("a fragment", "https://example.openai.azure.com/#x"),
+			Entry("an IP address", "https://10.0.0.1/"),
+			Entry("a single-label host", "https://localhost/"),
+			Entry("an upper-case host", "https://Example.openai.azure.com/"),
+			Entry("a dot segment", "https://example.openai.azure.com/../x"),
+			Entry("a hidden segment", "https://example.openai.azure.com/.env"),
+			Entry("an empty segment", "https://example.openai.azure.com//x"),
+			Entry("a space", "https://example.openai.azure.com/a b"),
+			Entry("longer than 256 characters", "https://example.openai.azure.com/"+strings.Repeat("p", 224)),
+		)
+
+		DescribeTable("refuses model deployment names",
+			func(name string) {
+				expectRefused(withModel(func(m *v1alpha1.ModelDeployment) { m.Deployment = name }),
+					"spec.analysis.models.triage.deployment")
+			},
+			Entry("empty", ""),
+			Entry("a slash", "gpt/mini"),
+			Entry("a leading dot", ".hidden"),
+			Entry("a leading dash", "-mini"),
+			Entry("a space", "gpt mini"),
+			Entry("longer than 64 characters", "a"+strings.Repeat("b", 64)),
+		)
+
+		It("accepts a deployment name of 64 characters", func() {
+			expectAccepted(withModel(func(m *v1alpha1.ModelDeployment) { m.Deployment = "a" + strings.Repeat("b", 63) }))
+		})
+
+		DescribeTable("accepts API versions",
+			func(v string) {
+				expectAccepted(withModel(func(m *v1alpha1.ModelDeployment) { m.APIVersion = v }))
+			},
+			Entry(nil, "v1"), Entry(nil, "2024-10-21"), Entry(nil, "2025-04-01-preview"),
+		)
+
+		DescribeTable("refuses API versions",
+			func(v string) {
+				expectRefused(withModel(func(m *v1alpha1.ModelDeployment) { m.APIVersion = v }),
+					"spec.analysis.models.triage.apiVersion")
+			},
+			Entry(nil, ""), Entry(nil, "v2"), Entry(nil, "2024-10"), Entry(nil, "2024-10-21-beta"),
+			Entry(nil, "2024-10-21&api-key=x"), Entry(nil, "latest"),
+		)
+
+		// The model configuration authenticates with workload identity; a field for a key would put a
+		// credential in a cluster-scoped object many can read.
+		It("has no field for a key, secret or credential", func() {
+			var check func(t reflect.Type)
+			check = func(t reflect.Type) {
+				for t.Kind() == reflect.Pointer {
+					t = t.Elem()
+				}
+				if t.Kind() != reflect.Struct {
+					return
+				}
+				for f := range t.Fields() {
+					n := strings.ToLower(f.Name)
+					for _, bad := range []string{"key", "secret", "password", "credential", "auth"} {
+						Expect(n).NotTo(ContainSubstring(bad), "%s.%s", t.Name(), f.Name)
+					}
+					check(f.Type)
+				}
+			}
+			check(reflect.TypeFor[v1alpha1.AnalysisSettings]())
+		})
+	})
+
 	Describe("modules", func() {
 		const aks, keda, flux v1alpha1.ModuleName = "aks", "keda", "flux"
 		withModules := func(m v1alpha1.Modules) *v1alpha1.RemediationSettings {

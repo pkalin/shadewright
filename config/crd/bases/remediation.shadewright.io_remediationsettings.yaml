@@ -52,6 +52,163 @@ spec:
           spec:
             description: spec holds the settings.
             properties:
+              analysis:
+                default: {}
+                description: |-
+                  analysis bounds every model-backed analysis and names the model deployments it may call. Left out, its
+                  limits take their defaults and no model is configured. Planned: no component reads these fields yet;
+                  the analysis loop (#76) will enforce them, and the daily token caps need the spend counter of #208.
+                properties:
+                  maxConcurrentAnalyses:
+                    default: 1
+                    description: maxConcurrentAnalyses is the most analyses that call
+                      a model at once. 1 to 8.
+                    format: int32
+                    maximum: 8
+                    minimum: 1
+                    type: integer
+                  maxContextBytes:
+                    default: 32768
+                    description: |-
+                      maxContextBytes is the most bytes of redacted cluster context (events, pod status, log excerpts,
+                      metrics) the context builder puts into one analysis, before the fixed system part of the prompt.
+                      4096 to 262144; the default of 32768 is roughly 8,000 tokens. A context cut at this bound is marked
+                      truncated, which is an escalation trigger (ADR-0023).
+                    format: int32
+                    maximum: 262144
+                    minimum: 4096
+                    type: integer
+                  maxOutputTokens:
+                    default: 2048
+                    description: |-
+                      maxOutputTokens is the most output tokens one model call may produce, sent as the request's
+                      MaxOutputTokens, so the provider stops there. An analysis makes at most 2 + maxToolSteps calls (the
+                      triage call, one retry after invalid output, and the escalation steps), which bounds its output.
+                      256 to 16384.
+                    format: int32
+                    maximum: 16384
+                    minimum: 256
+                    type: integer
+                  maxToolSteps:
+                    default: 4
+                    description: |-
+                      maxToolSteps is the most read tool calls one escalated analysis may make. The triage call has no tools
+                      (ADR-0023), so this only bounds escalation. 0 to 16; 0 means escalation gets no tools.
+                    format: int32
+                    maximum: 16
+                    minimum: 0
+                    type: integer
+                  models:
+                    description: models names the model deployments the analyzer may
+                      call. Left out, no model is configured.
+                    properties:
+                      escalation:
+                        description: |-
+                          escalation is the stronger model, called with read tools only on the deterministic escalation signals
+                          of ADR-0023. Left out, there is no escalation and those incidents are handed off to a person.
+                        properties:
+                          apiVersion:
+                            description: |-
+                              apiVersion is the inference API version the adapter sends: v1, or a date such as 2024-10-21, optionally
+                              followed by -preview.
+                            maxLength: 32
+                            minLength: 2
+                            pattern: ^(v1|[0-9]{4}-[0-9]{2}-[0-9]{2}(-preview)?)$
+                            type: string
+                          deployment:
+                            description: |-
+                              deployment is the name of the model deployment: 1 to 64 letters, digits, '.', '_' or '-', starting
+                              with a letter or digit.
+                            maxLength: 64
+                            minLength: 1
+                            pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                            type: string
+                          endpoint:
+                            description: |-
+                              endpoint is the HTTPS base URL of the inference endpoint, for example
+                              https://<resource>.services.ai.azure.com/ or https://<resource>.openai.azure.com/openai/v1. At most 256
+                              characters: a host name of lower-case DNS labels whose last label starts with a letter (so no IP
+                              address and no single-label host such as localhost), an optional port and an optional path whose
+                              segments do not start with '.'. No user info, query or fragment.
+                            maxLength: 256
+                            minLength: 1
+                            pattern: ^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$
+                            type: string
+                          maxTokensPerDay:
+                            default: 1000000
+                            description: |-
+                              maxTokensPerDay is the daily spend cap of this deployment, in tokens per UTC day: input (cached or not)
+                              plus output tokens of every call, a failed or timed-out call counted at its upper bound (the input
+                              estimate plus maxOutputTokens). It is a count of tokens, not an amount of money, because tokens are
+                              what the provider reports and bills, they are whole numbers, and a money cap would need a price list
+                              in this object that goes stale; the spend it allows is at most this count times the deployment's
+                              highest price per token (design 12.1). It is per deployment because the triage and escalation models
+                              differ in price. 0 to 1,000,000,000; 0 stops calls to this deployment. Planned: counted by #208.
+                            format: int64
+                            maximum: 1000000000
+                            minimum: 0
+                            type: integer
+                        required:
+                        - apiVersion
+                        - deployment
+                        - endpoint
+                        type: object
+                      triage:
+                        description: |-
+                          triage is the small model for the one structured call on the prepared context, without tools. Left out,
+                          no model is called.
+                        properties:
+                          apiVersion:
+                            description: |-
+                              apiVersion is the inference API version the adapter sends: v1, or a date such as 2024-10-21, optionally
+                              followed by -preview.
+                            maxLength: 32
+                            minLength: 2
+                            pattern: ^(v1|[0-9]{4}-[0-9]{2}-[0-9]{2}(-preview)?)$
+                            type: string
+                          deployment:
+                            description: |-
+                              deployment is the name of the model deployment: 1 to 64 letters, digits, '.', '_' or '-', starting
+                              with a letter or digit.
+                            maxLength: 64
+                            minLength: 1
+                            pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                            type: string
+                          endpoint:
+                            description: |-
+                              endpoint is the HTTPS base URL of the inference endpoint, for example
+                              https://<resource>.services.ai.azure.com/ or https://<resource>.openai.azure.com/openai/v1. At most 256
+                              characters: a host name of lower-case DNS labels whose last label starts with a letter (so no IP
+                              address and no single-label host such as localhost), an optional port and an optional path whose
+                              segments do not start with '.'. No user info, query or fragment.
+                            maxLength: 256
+                            minLength: 1
+                            pattern: ^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$
+                            type: string
+                          maxTokensPerDay:
+                            default: 1000000
+                            description: |-
+                              maxTokensPerDay is the daily spend cap of this deployment, in tokens per UTC day: input (cached or not)
+                              plus output tokens of every call, a failed or timed-out call counted at its upper bound (the input
+                              estimate plus maxOutputTokens). It is a count of tokens, not an amount of money, because tokens are
+                              what the provider reports and bills, they are whole numbers, and a money cap would need a price list
+                              in this object that goes stale; the spend it allows is at most this count times the deployment's
+                              highest price per token (design 12.1). It is per deployment because the triage and escalation models
+                              differ in price. 0 to 1,000,000,000; 0 stops calls to this deployment. Planned: counted by #208.
+                            format: int64
+                            maximum: 1000000000
+                            minimum: 0
+                            type: integer
+                        required:
+                        - apiVersion
+                        - deployment
+                        - endpoint
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: an escalation model needs a triage model
+                      rule: '!has(self.escalation) || has(self.triage)'
+                type: object
               maxAnalysesPerDay:
                 default: 100
                 description: maxAnalysesPerDay limits model-backed analyses per UTC

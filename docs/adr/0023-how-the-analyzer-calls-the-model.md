@@ -58,7 +58,7 @@ The analyzer is the only component that talks to a model, and everything it send
 9. **Spend accounting.**
    - A failed or timed-out call is charged at its upper bound: the input estimate plus `MaxOutputTokens`.
    - The daily count of analyses is kept in the operator namespace, in an object the analyzer owns: the ConfigMap `shadewright-analysis-budget` (the UTC day and the analyses started on it), shipped empty with the analyzer and checked by typed parsing in Go ([#43](https://github.com/pkalin/shadewright/issues/43), design 3.2). The analyzer may `get` and `update` that one ConfigMap, named in `resourceNames`, and may not create it, so deleting it stops analysis instead of resetting the count. Every write uses the resourceVersion read.
-   - Where the daily spend is counted, and in what unit, is open ([#208](https://github.com/pkalin/shadewright/issues/208)).
+   - The daily spend limit is a count of tokens (input and output) per model deployment and UTC day, `maxTokensPerDay` in `RemediationSettings`, not an amount of money, so no price list lives in the settings ([#68](https://github.com/pkalin/shadewright/issues/68), design 12.3). Where that spend is counted is open ([#208](https://github.com/pkalin/shadewright/issues/208)).
    - A counter that is missing, cannot be read or written, or holds a value that cannot be trusted (a future day, a count out of bounds) means refuse, not allow.
 
 ## Consequences
@@ -87,3 +87,4 @@ The analyzer is the only component that talks to a model, and everything it send
 
 - 2026-11-04: [ADR-0003](0003-gitops-only-typed-remediation.md) links here and no longer lists `submit_remediation_proposal` among the model's tools. Nothing in this ADR changed ([#244](https://github.com/pkalin/shadewright/issues/244)).
 - 2026-11-04: Decision 8 now says the Foundry adapters are planned; only the interface and a fake exist. Nothing else changed ([#245](https://github.com/pkalin/shadewright/issues/245)).
+- 2026-11-04: Decision 9 now names the unit of the daily spend limit (tokens per model deployment and UTC day), which it left open; where the spend is counted is still open. Nothing is enforced by this, and nothing else changed ([#68](https://github.com/pkalin/shadewright/issues/68)).

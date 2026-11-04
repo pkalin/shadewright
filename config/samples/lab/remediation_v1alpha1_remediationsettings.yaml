@@ -24,3 +24,13 @@ spec:
             # REPLACE: <key_vault.uri without trailing slash>/keys/<key_vault.github_app_key>, from
             # `terraform -chdir=foundation output -json key_vault` in shadewright-azure.
             keyID: https://kv-replace-me.vault.azure.net/keys/github-app
+  # Planned: not enforced yet (#76, #208). REPLACE the endpoint and deployment with the outputs model_endpoint
+  # and one of model_deployments of `terraform -chdir=foundation output` in shadewright-azure. No key: the
+  # analyzer uses its workload identity.
+  analysis:
+    models:
+      triage:
+        endpoint: https://replace-me.cognitiveservices.azure.com/
+        deployment: REPLACE-deployment
+        apiVersion: "2024-10-21"
+        maxTokensPerDay: 200000

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -47,12 +48,38 @@ import (
 //
 //   - no other active request names the same target UID (the lock),
 //   - fewer than maxConcurrentRemediations of RemediationSettings are active (the cap), and
-//   - the breaker is closed: fewer than BreakerThreshold failures came after the latest success among the
-//     requests that went through the policy check, or the latest of them is older than BreakerCooldown.
+//   - the breaker lets it through: it is closed, or it is half-open and no probe is running (the request
+//     becomes the probe then).
+//
+// The breaker trips when BreakerThreshold failures in a row (after the latest success) are among the
+// requests that went through the policy check. Once tripped it stays so until a success, and it is
+//
+//   - open (CircuitOpen) for BreakerCooldown after the latest failure, or after the latest probe that ended
+//     without a success or a failure (Expired, Cancelled, Superseded, Denied): a probe ends the half-open
+//     state only with a success, anything else opens the breaker again for a full cool-down (fail closed);
+//   - half-open after that: one request at a time goes through as the probe, and the others wait
+//     (CircuitHalfOpen) while it runs. Its success (Merged or a later phase: WaitingForDelivery, Verifying,
+//     Succeeded) closes the breaker, since the failures in a row are counted after the latest success; its
+//     failure is the latest failure, so the breaker is open again for a full cool-down.
+//
+// The probe is marked: the policy check sets status.breakerProbe on a request it lets through while the
+// breaker is tripped, in the same status write as the allowed decision, under the mutex below, so a conflict
+// on that write lets nothing through and marks nothing. The breaker finds probes by that field only, never by
+// comparing times written by different clocks, so leaders with skewed clocks agree on the probe. A request
+// without the field (one let through before the trip, or before the field existed) is not a probe. A probe
+// runs (holds the others back) until it reaches a final phase or Merged, whether or not it is being deleted;
+// once its finalizer is gone it is no longer listed, so a probe that ended without a success and was then
+// deleted adds no further cool-down (the next request is the new single probe, so nothing more goes through). One that ended without lastPhaseTransitionTime (written
+// by hand) is taken to have ended one cool-down after the trip, the earliest it could have been let through,
+// so it opens the breaker again for one more cool-down at most (bounded, fail closed). The field is never
+// cleared, so a probe of an earlier trip that still runs after the breaker closed holds back the probes of
+// the next trip too, and one that ended later than the failures of the next trip opens it again from its
+// end: both only hold more requests back.
 //
 // The count and the status write that lets a request through run under one mutex, so two workers can never
-// both take the last slot. All state is read from the requests themselves (phase, lastPhaseTransitionTime), so
-// a restart neither forgets an open breaker nor frees a slot (invariant 5). It fails closed: when the settings
+// both take the last slot or both become the probe. All state is read from the requests themselves (phase,
+// lastPhaseTransitionTime, breakerProbe), so a restart or a new leader neither forgets an open breaker or a
+// running probe nor frees a slot (invariant 5). It fails closed: when the settings
 // or the requests cannot be read, or there is no API server reader, no request is let through.
 //
 // Only a request the policy check allows is held back: refusals (Denied, NeedsIntervention) are written at
@@ -72,6 +99,8 @@ const (
 	ReasonConcurrencyLimit = "ConcurrencyLimitReached"
 	// ReasonCircuitOpen: the circuit breaker is open after consecutive failures.
 	ReasonCircuitOpen = "CircuitOpen"
+	// ReasonCircuitHalfOpen: the circuit breaker is half-open and another request runs as its probe.
+	ReasonCircuitHalfOpen = "CircuitHalfOpen"
 	// ReasonLimitsUnknown: the limits could not be read, so the request is held back (fail closed). It is
 	// counted in the metrics only; the request is retried with the error backoff and gets no condition.
 	ReasonLimitsUnknown = "LimitsUnknown"
@@ -83,6 +112,8 @@ var queuedMessages = map[string]string{
 	ReasonConcurrencyLimit: "RemediationSettings default allows no more active requests (maxConcurrentRemediations); this one waits for a slot",
 	ReasonCircuitOpen: "The circuit breaker is open after consecutive failed requests; this one waits for the " +
 		"cool-down to end",
+	ReasonCircuitHalfOpen: "The circuit breaker is half-open after its cool-down and another request runs as its " +
+		"probe; this one waits until the probe ends",
 }
 
 // Defaults of the circuit breaker.
@@ -100,14 +131,31 @@ const admissionRecheckDelay = 30 * time.Second
 // so the check before it lets the request go on to be denied; the check after it holds the request back.
 var errSettingsMissing = errors.New("RemediationSettings default does not exist")
 
+// circuitState is the state of the circuit breaker.
+type circuitState int32
+
+const (
+	circuitClosed circuitState = iota
+	circuitOpen
+	circuitHalfOpen
+)
+
 // limitsState is what one check of the limits found.
 type limitsState struct {
 	// reason is empty when the request may go through, else the reason of the Queued condition.
 	reason   string
 	active   int
 	limit    int
-	open     bool
+	circuit  circuitState
 	failures int
+	// probing is whether a probe runs while the breaker is half-open.
+	probing bool
+}
+
+// probe reports whether a request the limits let through becomes the breaker's probe: it does when the breaker
+// is half-open (an open breaker lets nothing through, a closed one lets requests through as no probe).
+func (s limitsState) probe() bool {
+	return s.reason == "" && s.circuit == circuitHalfOpen
 }
 
 // progresses reports whether the executor can still move a request on before the merge (recheck): a phase
@@ -135,7 +183,9 @@ const (
 	outcomeFailure
 )
 
-// breakerOutcome classifies a request for the breaker. Merged and Succeeded are successes; Failed and
+// breakerOutcome classifies a request for the breaker. Merged and the phases after it (WaitingForDelivery,
+// Verifying, Succeeded) are successes: the change merged, and a failure found later moves the request to
+// Failed with a later transition time. Failed and
 // NeedsIntervention (a pull request closed without a merge included) are failures. Expired is neither: it
 // comes from Git host outages and deadlines, not from a bad change. Denied, Cancelled and Superseded say
 // nothing about whether the changes work, and a request without a plan digest never got through the policy
@@ -146,7 +196,8 @@ func breakerOutcome(rr *remediationv1alpha1.RemediationRequest) outcomeClass {
 		return outcomeNone
 	}
 	switch rr.Status.Phase {
-	case remediationv1alpha1.PhaseMerged, remediationv1alpha1.PhaseSucceeded:
+	case remediationv1alpha1.PhaseMerged, remediationv1alpha1.PhaseWaitingForDelivery,
+		remediationv1alpha1.PhaseVerifying, remediationv1alpha1.PhaseSucceeded:
 		return outcomeSuccess
 	case remediationv1alpha1.PhaseFailed, remediationv1alpha1.PhaseNeedsIntervention:
 		return outcomeFailure
@@ -219,21 +270,83 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		}
 	}
 	// The failures in a row are those after the latest success; one at the very same time counts as a failure.
+	inRow := make([]time.Time, 0, len(failures))
 	for _, t := range failures {
 		if !t.Before(lastSuccess) {
-			s.failures++
+			inRow = append(inRow, t)
 		}
 	}
-	s.open = s.failures >= r.breakerThreshold() && r.now().Before(lastFailure.Add(r.breakerCooldown()))
+	s.failures = len(inRow)
+	s.circuit, s.probing = r.breaker(inRow, lastFailure, list.Items, rr.UID)
 	switch {
-	case s.open:
+	case s.circuit == circuitOpen:
 		s.reason = ReasonCircuitOpen
+	case s.circuit == circuitHalfOpen && s.probing:
+		s.reason = ReasonCircuitHalfOpen
 	case locked:
 		s.reason = ReasonTargetLocked
 	case s.active >= s.limit:
 		s.reason = ReasonConcurrencyLimit
 	}
 	return s, nil
+}
+
+// breaker works out the state of the circuit breaker (see the top of this file) from inRow, the times of the
+// failures in a row, lastFailure, the latest of them, and items, the requests of the namespace, of which the one
+// with UID self is skipped. The probes among items are looked at only when the breaker is tripped. probing is
+// whether a probe runs; it is set only when the breaker is half-open.
+func (r *RemediationRequestReconciler) breaker(inRow []time.Time, lastFailure time.Time,
+	items []remediationv1alpha1.RemediationRequest, self types.UID) (state circuitState, probing bool) {
+	threshold := r.breakerThreshold()
+	if len(inRow) < threshold {
+		return circuitClosed, false
+	}
+	slices.SortFunc(inRow, time.Time.Compare)
+	tripped := inRow[threshold-1]
+	reopened := lastFailure
+	for i := range items {
+		p := &items[i]
+		if p.UID == self || !p.Status.BreakerProbe {
+			continue
+		}
+		if !ended(p.Status.Phase) {
+			// Still running, also while it is being deleted: until its finalizer is gone its pull request may
+			// still be open and merge.
+			probing = true
+			continue
+		}
+		if breakerOutcome(p) != outcomeNone {
+			// A success closed the breaker unless failures came after it; a failure is counted in lastFailure.
+			continue
+		}
+		// Ended without a success: the breaker opens again from then. Without a transition time (written by
+		// hand) the end is taken as one cool-down after the trip, the earliest a probe could have been let
+		// through, so the breaker is open for one more cool-down at most, not for ever.
+		end := tripped.Add(r.breakerCooldown())
+		if p.Status.LastPhaseTransitionTime != nil {
+			end = p.Status.LastPhaseTransitionTime.Time
+		}
+		if end.After(reopened) {
+			reopened = end
+		}
+	}
+	if r.now().Before(reopened.Add(r.breakerCooldown())) {
+		return circuitOpen, false
+	}
+	return circuitHalfOpen, probing
+}
+
+// ended reports whether phase ends a probe: a final phase, or Merged or a later one, after which the executor
+// no longer writes to Git for the request. Any other phase, an unknown one included, runs (fail closed).
+func ended(phase remediationv1alpha1.RemediationPhase) bool {
+	switch phase {
+	case remediationv1alpha1.PhaseExpired, remediationv1alpha1.PhaseCancelled, remediationv1alpha1.PhaseSuperseded,
+		remediationv1alpha1.PhaseDenied, remediationv1alpha1.PhaseFailed, remediationv1alpha1.PhaseNeedsIntervention,
+		remediationv1alpha1.PhaseMerged, remediationv1alpha1.PhaseWaitingForDelivery,
+		remediationv1alpha1.PhaseVerifying, remediationv1alpha1.PhaseSucceeded:
+		return true
+	}
+	return false
 }
 
 // waitForLimits holds back a request that a limit does not let through: it sets Queued True with the limit as
@@ -268,7 +381,9 @@ func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.Remediat
 }
 
 // holdBack checks the limits for a request about to go through the policy check, and holds it back (Queued)
-// when one does not let it through. stop means the caller must return res and err without deciding. A failure
+// when one does not let it through. stop means the caller must return res and err without deciding; else probe
+// is whether the request goes through as the breaker's probe (the caller marks it so in the status write that
+// lets it through). A failure
 // to read the limits stops too, with the error, so the request is retried with backoff (fail closed).
 //
 // queued is the check of a request that is already Queued, made in place of the policy check so that a
@@ -276,7 +391,7 @@ func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.Remediat
 // is not left behind when the policy check then fails for a while) and the policy check runs. Missing
 // settings let it go on as well: the policy check denies the request then.
 func (r *RemediationRequestReconciler) holdBack(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	queued bool) (res reconcile.Result, stop bool, err error) {
+	queued bool) (res reconcile.Result, probe, stop bool, err error) {
 	limCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
 	s, err := r.checkLimits(limCtx, rr)
 	err = boundErr(ctx, limCtx, "check of the limits", err)
@@ -285,19 +400,19 @@ func (r *RemediationRequestReconciler) holdBack(ctx context.Context, rr *remedia
 	if !pass {
 		recordLimits(s, err)
 		if err != nil {
-			return reconcile.Result{}, true, err
+			return reconcile.Result{}, false, true, err
 		}
 		if s.reason != "" {
 			res, err = r.waitForLimits(ctx, rr, s.reason)
-			return res, true, err
+			return res, false, true, err
 		}
 	}
 	if queued && meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionQueued) != nil {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionQueued)
 		if err := r.Status().Update(ctx, rr); err != nil {
-			return reconcile.Result{}, true, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
+			return reconcile.Result{}, false, true, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
 				rr.Namespace, rr.Name, err)
 		}
 	}
-	return reconcile.Result{}, false, nil
+	return reconcile.Result{}, s.probe(), false, nil
 }

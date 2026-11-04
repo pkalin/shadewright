@@ -247,7 +247,7 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// A request a limit holds back (Queued) checks only the limits until they let it through, so it does not
 	// read Git while it waits. Every other request is decided first, so a refusal is never held back.
 	if meta.IsStatusConditionTrue(rr.Status.Conditions, remediationv1alpha1.ConditionQueued) {
-		if res, stop, err := r.holdBack(ctx, rr, true); stop {
+		if res, _, stop, err := r.holdBack(ctx, rr, true); stop {
 			return res, err
 		}
 	}
@@ -281,11 +281,16 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	if out.phase == remediationv1alpha1.PhasePolicyChecked {
 		// The limits are checked again, now, and the decision is written under the same lock, so the next
-		// check of the limits sees this request as active.
+		// check of the limits sees this request as active, and as the breaker's probe when it is one. A
+		// conflict on that write lets nothing through and marks nothing: the request is decided again.
 		r.admitMu.Lock()
 		defer r.admitMu.Unlock()
-		if res, stop, err := r.holdBack(ctx, rr, false); stop {
+		res, probe, stop, err := r.holdBack(ctx, rr, false)
+		if stop {
 			return res, err
+		}
+		if probe {
+			rr.Status.BreakerProbe = true
 		}
 	}
 

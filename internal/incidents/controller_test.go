@@ -1114,3 +1114,166 @@ func TestHeldOccurrencesStayWithinTheCaps(t *testing.T) {
 	}
 	indexed(t, r.Controller)
 }
+
+// observationIn is observation with one count of a new occurrence, about a subject in namespace subjectNS.
+func observationIn(subjectNS string, f, i int, began time.Time) collector.Observation {
+	o := observation(f, i, 1, 1, began)
+	o.Subject.Namespace = subjectNS
+	return o
+}
+
+// heldConsistent reports, with mu held, whether held, heldNamespace and heldIn add up to heldTotal: the
+// empty string, or what does not. It does not fail the test itself, so the caller can unlock first.
+func heldConsistent(c *Controller) string {
+	perFingerprint, perNamespace := 0, 0
+	for f, n := range c.held {
+		perFingerprint += n
+		if _, ok := c.heldNamespace[f]; !ok {
+			return fmt.Sprintf("fingerprint %s holds %d with no namespace", f, n)
+		}
+	}
+	for ns, n := range c.heldIn {
+		if n <= 0 {
+			return fmt.Sprintf("namespace %q kept with %d held", ns, n)
+		}
+		perNamespace += n
+	}
+	if len(c.heldNamespace) != len(c.held) || perFingerprint != c.heldTotal || perNamespace != c.heldTotal {
+		return fmt.Sprintf("held %v, heldNamespace %v and heldIn %v do not add up to heldTotal %d",
+			c.held, c.heldNamespace, c.heldIn, c.heldTotal)
+	}
+	return ""
+}
+
+// waitHeld waits until cond holds for the controller's held counts, checked with mu held, and fails at once
+// when the counts do not add up.
+func waitHeld(t *testing.T, r *running, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		r.mu.Lock()
+		ok, bad := cond(), heldConsistent(r.Controller)
+		held, in, total := fmt.Sprint(r.held), fmt.Sprint(r.heldIn), r.heldTotal
+		r.mu.Unlock()
+		if bad != "" {
+			t.Fatal(bad)
+		}
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: held %s, heldIn %s, heldTotal %d", what, held, in, total)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// One namespace that holds its full share of the occurrences held unwritten, while status writes fail,
+// leaves room under the total: the new occurrences of an Incident in another namespace are still counted.
+// Once writes succeed, every held count goes back to zero.
+func TestNamespaceShareLeavesRoomForOtherNamespaces(t *testing.T) {
+	ns := namespace(t)
+	const perIncident, perNamespace, total, noisy, quiet = 20, 10, 30, 3, 5
+	r := start(t, ns, Config{Window: 100 * time.Millisecond, RetryAfter: 50 * time.Millisecond,
+		MaxPendingOccurrences: total, MaxPendingOccurrencesPerIncident: perIncident,
+		MaxPendingOccurrencesPerNamespace: perNamespace})
+	var failing atomic.Bool
+	failing.Store(true)
+	r.writes.instead = func(context.Context) error {
+		if failing.Load() {
+			return apierrors.NewServerTimeout(remediationv1alpha1.GroupVersion.WithResource("incidents").GroupResource(), "update", 1)
+		}
+		return nil
+	}
+	from := time.Now().Truncate(time.Second).Add(-time.Hour)
+	// Fingerprints 1 to 3 in "noisy" send more than the total cap between them.
+	for f := 1; f <= noisy; f++ {
+		for i := 1; i <= perIncident; i++ {
+			r.obs <- observationIn("noisy", f, f*1000+i, from.Add(time.Duration(i)*time.Second))
+		}
+	}
+	for i := 1; i <= quiet; i++ {
+		r.obs <- observationIn("quiet", 9, 9000+i, from.Add(time.Duration(i)*time.Second))
+	}
+	waitHeld(t, r, "the quiet namespace's occurrences are held", func() bool { return r.held[fp(9)] == quiet })
+	r.mu.Lock()
+	inNoisy, heldTotal := r.heldIn["noisy"], r.heldTotal
+	r.mu.Unlock()
+	// The noisy namespace stops at its share, plus the first occurrence of each other Incident that held none.
+	if inNoisy > perNamespace+noisy-1 {
+		t.Fatalf("noisy namespace holds %d, over its share of %d", inNoisy, perNamespace)
+	}
+	if heldTotal > total {
+		t.Fatalf("heldTotal %d, over the cap of %d", heldTotal, total)
+	}
+	failing.Store(false)
+	eventually(t, ns, 9, countIs(quiet))
+	waitHeld(t, r, "held counts go back to zero once every batch is written", func() bool {
+		return r.heldTotal == 0 && len(r.held) == 0 && len(r.heldIn) == 0 && len(r.heldNamespace) == 0
+	})
+}
+
+// The share of one namespace is within the caps: by default a quarter of the total, never over the total
+// and never zero.
+func TestNamespaceShareIsWithinTheCaps(t *testing.T) {
+	for _, tt := range []struct {
+		total, share, want int
+	}{
+		{0, 0, DefaultMaxPendingOccurrences / DefaultNamespaceShareDivisor},
+		{30, 0, 7},
+		{30, 10, 10},
+		{30, 100, 30},
+		{2, 0, 1},
+	} {
+		c, err := New(Config{Namespace: "operator", MaxPendingOccurrences: tt.total,
+			MaxPendingOccurrencesPerNamespace: tt.share})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := c.cfg.MaxPendingOccurrencesPerNamespace; got != tt.want {
+			t.Errorf("total %d, share %d: got share %d, want %d", tt.total, tt.share, got, tt.want)
+		}
+	}
+}
+
+// A status write in flight when the controller is stopped returns with the cancellation; the batches it
+// held are written on stop, and every held count, per Incident, per namespace and in total, goes back to
+// zero.
+func TestHeldCountsReturnToZeroAfterCancellation(t *testing.T) {
+	ns := namespace(t)
+	r := start(t, ns, Config{Window: time.Hour, RetryAfter: 50 * time.Millisecond, StopTimeout: 5 * time.Second})
+	var hang atomic.Bool
+	hang.Store(true)
+	entered := make(chan struct{})
+	var once sync.Once
+	r.writes.instead = func(ctx context.Context) error {
+		if !hang.Load() {
+			return nil
+		}
+		once.Do(func() { close(entered) })
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	now := time.Now().Truncate(time.Second)
+	r.obs <- observationIn("a", 1, 1, now)
+	waitFor(t, entered)
+	for i := 2; i <= 4; i++ {
+		r.obs <- observationIn("a", 1, i, now)
+	}
+	r.obs <- observationIn("b", 2, 100, now)
+	waitHeld(t, r, "the occurrences are held", func() bool { return r.heldIn["a"] == 4 && r.heldIn["b"] == 1 })
+	hang.Store(false)
+	r.stop()
+	if inc := get(t, ns); inc.Status.Count != 4 {
+		t.Fatalf("count %d after stop, want 4", inc.Status.Count)
+	}
+	eventually(t, ns, 2, countIs(1))
+	// Start has returned: nothing else touches the held counts any more.
+	if bad := heldConsistent(r.Controller); bad != "" {
+		t.Fatal(bad)
+	}
+	if r.heldTotal != 0 || len(r.held) != 0 || len(r.heldIn) != 0 || len(r.heldNamespace) != 0 {
+		t.Fatalf("held %v, heldIn %v, heldTotal %d after stop wrote every batch, want nothing",
+			r.held, r.heldIn, r.heldTotal)
+	}
+}

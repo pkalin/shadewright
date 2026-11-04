@@ -64,6 +64,9 @@ const (
 	// in full.
 	DefaultMaxPendingOccurrences            = 10000
 	DefaultMaxPendingOccurrencesPerIncident = 8 * remediationv1alpha1.MaxOccurrenceRecords
+	// DefaultNamespaceShareDivisor sets the default share of one namespace in MaxPendingOccurrences: a quarter
+	// (2,500 at the defaults), so at least four namespaces must be noisy at once to fill the total.
+	DefaultNamespaceShareDivisor = 4
 )
 
 // overflowLogInterval is the least time between two log lines about occurrences left uncounted at the caps
@@ -124,6 +127,13 @@ type Config struct {
 	// MaxPendingOccurrences by one per Incident.
 	MaxPendingOccurrences            int
 	MaxPendingOccurrencesPerIncident int
+	// MaxPendingOccurrencesPerNamespace is the share of MaxPendingOccurrences that the Incidents of one
+	// namespace (the namespace of their subject; cluster-scoped subjects share the empty one) may hold
+	// together, so one noisy namespace cannot fill the total and leave the others' new occurrences uncounted.
+	// A new occurrence over it is not counted, as over the other caps, and an Incident that holds nothing
+	// unwritten still takes its first occurrence. Zero takes MaxPendingOccurrences / DefaultNamespaceShareDivisor
+	// (at least one); a value over MaxPendingOccurrences is taken down to it.
+	MaxPendingOccurrencesPerNamespace int
 	// Debounce, SettleLimit, Cooldown, AnalysisTimeout and TriggerInterval drive the analysis trigger
 	// ([Due]): how long an Incident must go without a new observation, the longest it waits to settle after
 	// its first unsettled observation (the aggregation window by default), the least time between the start
@@ -162,6 +172,11 @@ type Controller struct {
 	// occurrence in two batches counts twice), and heldTotal their sum; consume holds them to the caps.
 	held      map[string]int
 	heldTotal int
+	// heldNamespace is the namespace of the subject of each fingerprint in held (same keys), and heldIn the
+	// sum of held per namespace (only namespaces holding something). heldIn has at most as many keys as held,
+	// and held at most one per name in names, so both stay within MaxIncidents entries.
+	heldNamespace map[string]string
+	heldIn        map[string]int
 	// overflowLogged is when occurrences left uncounted at the caps were last logged, and overflowed how
 	// many were left uncounted since then.
 	overflowLogged time.Time
@@ -224,6 +239,10 @@ func New(cfg Config) (*Controller, error) {
 	if cfg.MaxPendingOccurrencesPerIncident <= 0 {
 		cfg.MaxPendingOccurrencesPerIncident = DefaultMaxPendingOccurrencesPerIncident
 	}
+	if cfg.MaxPendingOccurrencesPerNamespace <= 0 {
+		cfg.MaxPendingOccurrencesPerNamespace = max(cfg.MaxPendingOccurrences/DefaultNamespaceShareDivisor, 1)
+	}
+	cfg.MaxPendingOccurrencesPerNamespace = min(cfg.MaxPendingOccurrencesPerNamespace, cfg.MaxPendingOccurrences)
 	if cfg.Debounce <= 0 {
 		cfg.Debounce = DefaultDebounce
 	}
@@ -257,18 +276,20 @@ func New(cfg Config) (*Controller, error) {
 		cfg.Now = time.Now
 	}
 	return &Controller{
-		cfg:       cfg,
-		ready:     make(chan struct{}),
-		records:   map[string]record{},
-		recordsOf: map[string]map[string]struct{}{},
-		held:      map[string]int{},
-		names:     map[string]struct{}{},
-		pending:   map[string]*batch{},
-		failed:    map[string]*batch{},
-		kick:      make(chan struct{}, 1),
-		nextWrite: map[string]time.Time{},
-		refused:   newBoundedSet(refusedRemembered),
-		waiting:   map[string]time.Time{},
+		cfg:           cfg,
+		ready:         make(chan struct{}),
+		records:       map[string]record{},
+		recordsOf:     map[string]map[string]struct{}{},
+		held:          map[string]int{},
+		heldNamespace: map[string]string{},
+		heldIn:        map[string]int{},
+		names:         map[string]struct{}{},
+		pending:       map[string]*batch{},
+		failed:        map[string]*batch{},
+		kick:          make(chan struct{}, 1),
+		nextWrite:     map[string]time.Time{},
+		refused:       newBoundedSet(refusedRemembered),
+		waiting:       map[string]time.Time{},
 	}, nil
 }
 
@@ -513,12 +534,15 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 	at := c.notFuture(o.ObservedAt)
 	_, scheduled := c.nextWrite[o.Fingerprint]
 	if _, ok := b.occurrences[o.Occurrence]; !ok {
-		if c.full(o.Fingerprint) {
+		ns := c.namespaceOf(o.Fingerprint, o.Subject.Namespace)
+		if c.full(o.Fingerprint, ns) {
 			b.add(&batch{first: at, last: at})
-			c.overflow(ctx, o)
+			c.overflow(ctx, o, ns)
 			return !scheduled
 		}
 		c.held[o.Fingerprint]++
+		c.heldNamespace[o.Fingerprint] = ns
+		c.heldIn[ns]++
 		c.heldTotal++
 	}
 	b.add(&batch{count: n, first: at, last: at, occurrences: map[string]counted{
@@ -533,18 +557,33 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 	return !scheduled
 }
 
-// full reports whether a new occurrence of fp would go over the caps on occurrences held unwritten. An
-// Incident that holds none takes one whatever the total, so no Incident is left without its first
-// occurrence. The caller holds mu.
-func (c *Controller) full(fp string) bool {
+// full reports whether a new occurrence of fp, whose subject is in namespace ns, would go over the caps on
+// occurrences held unwritten: its Incident's, the total, or the share of ns. An Incident that holds none
+// takes one whatever the total and the share, so no Incident is left without its first occurrence. The
+// caller holds mu.
+func (c *Controller) full(fp, ns string) bool {
 	h := c.held[fp]
-	return h >= c.cfg.MaxPendingOccurrencesPerIncident || h > 0 && c.heldTotal >= c.cfg.MaxPendingOccurrences
+	if h >= c.cfg.MaxPendingOccurrencesPerIncident {
+		return true
+	}
+	return h > 0 && (c.heldTotal >= c.cfg.MaxPendingOccurrences || c.heldIn[ns] >= c.cfg.MaxPendingOccurrencesPerNamespace)
+}
+
+// namespaceOf returns the namespace fp's held occurrences are counted in: the one taken when it began to
+// hold, or subject while it holds nothing. A fingerprint covers its subject's namespace, so the two agree;
+// keeping the first one makes the counts in heldIn add up whatever the observations say. The caller holds
+// mu.
+func (c *Controller) namespaceOf(fp, subject string) string {
+	if ns, ok := c.heldNamespace[fp]; ok {
+		return ns
+	}
+	return subject
 }
 
 // overflow counts an observation of a new occurrence left uncounted at the caps, and logs at most once per
 // overflowLogInterval how many were since the last line. It names the Incident, nothing from the event.
 // The caller holds mu.
-func (c *Controller) overflow(ctx context.Context, o collector.Observation) {
+func (c *Controller) overflow(ctx context.Context, o collector.Observation, ns string) {
 	overflowedOccurrences.Inc()
 	c.overflowed++
 	now := c.cfg.Now()
@@ -553,25 +592,38 @@ func (c *Controller) overflow(ctx context.Context, o collector.Observation) {
 	}
 	logf.FromContext(ctx).Info("Left new occurrences uncounted at the cap on occurrences held unwritten",
 		"incident", Name(o.Fingerprint), "uncounted", c.overflowed, "held", c.held[o.Fingerprint],
-		"heldTotal", c.heldTotal, "maxPerIncident", c.cfg.MaxPendingOccurrencesPerIncident,
-		"max", c.cfg.MaxPendingOccurrences)
+		"heldTotal", c.heldTotal, "namespace", ns, "heldInNamespace", c.heldIn[ns],
+		"maxPerIncident", c.cfg.MaxPendingOccurrencesPerIncident,
+		"maxPerNamespace", c.cfg.MaxPendingOccurrencesPerNamespace, "max", c.cfg.MaxPendingOccurrences)
 	c.overflowLogged, c.overflowed = now, 0
 }
 
-// recount sets held for fp to what its pending and failed batches hold, once no batch of fp is in flight.
-// The caller holds mu.
+// recount sets held for fp to what its pending and failed batches hold, once no batch of fp is in flight,
+// and moves heldTotal and its namespace's heldIn by the same difference. The caller holds mu.
 func (c *Controller) recount(fp string) {
 	n := 0
+	ns, known := c.heldNamespace[fp]
 	for _, b := range []*batch{c.pending[fp], c.failed[fp]} {
 		if b != nil {
 			n += len(b.occurrences)
+			if !known {
+				ns, known = b.spec.Subject.Namespace, true
+			}
 		}
 	}
-	c.heldTotal += n - c.held[fp]
+	d := n - c.held[fp]
+	c.heldTotal += d
+	if in := c.heldIn[ns] + d; in <= 0 {
+		delete(c.heldIn, ns)
+	} else {
+		c.heldIn[ns] = in
+	}
 	if n == 0 {
 		delete(c.held, fp)
+		delete(c.heldNamespace, fp)
 	} else {
 		c.held[fp] = n
+		c.heldNamespace[fp] = ns
 	}
 }
 

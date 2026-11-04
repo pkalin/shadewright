@@ -43,6 +43,7 @@ The analyzer is the only component that talks to a model, and everything it send
    - The valid triggers are: the context builder truncated the context or could not fetch a source; or the small model's output failed schema validation after one retry.
    - A non-empty "missing data" in the result is not a trigger. It becomes a hand-off to a person that says what is missing, because it is model output and injected text can steer it. The model's self-reported confidence is never a trigger or a signal of eligibility.
    - Escalation uses the stronger model with read tools, bounded by steps, tokens and the daily spend limit. It is capped at one per incident fingerprint per cooldown window.
+   - An escalation makes at most `maxToolSteps` + 1 model turns. An invalid escalated result gets no retry; it is handed off. With the triage call and its one retry, an analysis makes at most 3 + `maxToolSteps` model calls.
    - Every tool result passes through `internal/redact` before the model sees it, like the context does (invariant 4).
    - When a budget runs out the result is a hand-off, not a proposal.
 
@@ -82,9 +83,10 @@ The analyzer is the only component that talks to a model, and everything it send
 - **The model's confidence, or its list of missing data, as an escalation or eligibility signal:** both are model output that injected text can steer, and confidence is not calibrated. Escalation uses deterministic signals, and eligibility uses policy (invariant 1).
 - **Feeding the policy denial back to the model for a second proposal:** it would show the model the policy's shape and let it search for a proposal that passes. Rejected; a denial ends in a hand-off.
 - **A `submit_remediation_proposal` tool beside the structured output:** two paths to a request, each needing validation. Rejected for one path.
+- **A money cap in settings:** rejected, it needs a price list in the settings that goes stale. The cap is in tokens per deployment (decision 9).
 
 ## Amendments
 
 - 2026-11-04: [ADR-0003](0003-gitops-only-typed-remediation.md) links here and no longer lists `submit_remediation_proposal` among the model's tools. Nothing in this ADR changed ([#244](https://github.com/pkalin/shadewright/issues/244)).
 - 2026-11-04: Decision 8 now says the Foundry adapters are planned; only the interface and a fake exist. Nothing else changed ([#245](https://github.com/pkalin/shadewright/issues/245)).
-- 2026-11-04: Decision 9 now names the unit of the daily spend limit (tokens per model deployment and UTC day), which it left open; where the spend is counted is still open. Nothing is enforced by this, and nothing else changed ([#68](https://github.com/pkalin/shadewright/issues/68)).
+- 2026-11-04: Decides the unit that decision 9 left open: the daily spend limit is a count of tokens per model deployment and UTC day, set in `RemediationSettings`; where the spend is counted is still open (#208). Decision 6 now states the call bound it implied (at most `maxToolSteps` + 1 escalated turns, no retry of an invalid escalated result, so at most 3 + `maxToolSteps` calls per analysis). Nothing is enforced by this, and nothing else changed ([#68](https://github.com/pkalin/shadewright/issues/68)).

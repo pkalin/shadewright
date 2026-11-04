@@ -26,7 +26,7 @@ spec:
             keyID: https://kv-replace-me.vault.azure.net/keys/github-app
   # Planned: not enforced yet (#76, #208). REPLACE the endpoint and deployment with the outputs model_endpoint
   # and one of model_deployments of `terraform -chdir=foundation output` in shadewright-azure. No key: the
-  # analyzer uses its workload identity.
+  # analyzer uses its workload identity. maxTokensPerDay is required: the cap of this deployment per UTC day.
   analysis:
     models:
       triage:

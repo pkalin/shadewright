@@ -670,10 +670,16 @@ var _ = Describe("RemediationSettings", func() {
 	Describe("analysis", func() {
 		model := func() *v1alpha1.ModelDeployment {
 			return &v1alpha1.ModelDeployment{
-				Endpoint:   "https://example.services.ai.azure.com/",
-				Deployment: "gpt-5.4-mini",
-				APIVersion: "2024-10-21",
+				Endpoint:        "https://example.services.ai.azure.com/",
+				Deployment:      "small-model",
+				APIVersion:      "2024-10-21",
+				MaxTokensPerDay: ptr.To[int64](500000),
 			}
+		}
+		strong := func() *v1alpha1.ModelDeployment {
+			m := model()
+			m.Deployment = "strong-model"
+			return m
 		}
 		withAnalysis := func(change func(*v1alpha1.AnalysisSettings)) *v1alpha1.RemediationSettings {
 			s := fx.RemediationSettings()
@@ -694,25 +700,23 @@ var _ = Describe("RemediationSettings", func() {
 			expectAccepted(s)
 			a := s.Spec.Analysis
 			Expect(a).NotTo(BeNil())
-			Expect(a.MaxContextBytes).To(BeEquivalentTo(32768))
+			Expect(*a.MaxContextBytes).To(BeEquivalentTo(32768))
 			Expect(*a.MaxToolSteps).To(BeEquivalentTo(4))
-			Expect(a.MaxOutputTokens).To(BeEquivalentTo(2048))
-			Expect(a.MaxConcurrentAnalyses).To(BeEquivalentTo(1))
+			Expect(*a.MaxOutputTokens).To(BeEquivalentTo(2048))
+			Expect(*a.MaxConcurrentAnalyses).To(BeEquivalentTo(1))
 			Expect(a.Models).To(BeNil())
 		})
 
-		It("defaults the daily token cap of each model", func() {
-			s := withAnalysis(func(a *v1alpha1.AnalysisSettings) {
-				a.Models = &v1alpha1.AnalysisModels{Triage: model(), Escalation: model()}
-			})
-			expectAccepted(s)
-			Expect(*s.Spec.Analysis.Models.Triage.MaxTokensPerDay).To(BeEquivalentTo(1000000))
-			Expect(*s.Spec.Analysis.Models.Escalation.MaxTokensPerDay).To(BeEquivalentTo(1000000))
+		It("accepts a triage and an escalation model with their own caps", func() {
+			expectAccepted(withAnalysis(func(a *v1alpha1.AnalysisSettings) {
+				a.Models = &v1alpha1.AnalysisModels{Triage: model(), Escalation: strong()}
+			}))
 		})
 
 		It("accepts every limit at its lower bound", func() {
 			expectAccepted(withAnalysis(func(a *v1alpha1.AnalysisSettings) {
-				a.MaxContextBytes, a.MaxToolSteps, a.MaxOutputTokens, a.MaxConcurrentAnalyses = 4096, ptr.To[int32](0), 256, 1
+				a.MaxContextBytes, a.MaxToolSteps = ptr.To[int32](4096), ptr.To[int32](0)
+				a.MaxOutputTokens, a.MaxConcurrentAnalyses = ptr.To[int32](256), ptr.To[int32](1)
 				a.Models = &v1alpha1.AnalysisModels{Triage: model()}
 				a.Models.Triage.MaxTokensPerDay = ptr.To[int64](0)
 			}))
@@ -720,7 +724,8 @@ var _ = Describe("RemediationSettings", func() {
 
 		It("accepts every limit at its upper bound", func() {
 			expectAccepted(withAnalysis(func(a *v1alpha1.AnalysisSettings) {
-				a.MaxContextBytes, a.MaxToolSteps, a.MaxOutputTokens, a.MaxConcurrentAnalyses = 262144, ptr.To[int32](16), 16384, 8
+				a.MaxContextBytes, a.MaxToolSteps = ptr.To[int32](262144), ptr.To[int32](16)
+				a.MaxOutputTokens, a.MaxConcurrentAnalyses = ptr.To[int32](16384), ptr.To[int32](8)
 				a.Models = &v1alpha1.AnalysisModels{Triage: model()}
 				a.Models.Triage.MaxTokensPerDay = ptr.To[int64](1000000000)
 			}))
@@ -730,22 +735,34 @@ var _ = Describe("RemediationSettings", func() {
 			func(change func(*v1alpha1.AnalysisSettings), msg string) {
 				expectRefused(withAnalysis(change), msg)
 			},
-			Entry("a context below 4096 bytes", func(a *v1alpha1.AnalysisSettings) { a.MaxContextBytes = 4095 },
+			Entry("a context of 0 bytes", func(a *v1alpha1.AnalysisSettings) { a.MaxContextBytes = ptr.To[int32](0) },
 				"spec.analysis.maxContextBytes"),
-			Entry("a context above 262144 bytes", func(a *v1alpha1.AnalysisSettings) { a.MaxContextBytes = 262145 },
+			Entry("a context below 4096 bytes", func(a *v1alpha1.AnalysisSettings) { a.MaxContextBytes = ptr.To[int32](4095) },
+				"spec.analysis.maxContextBytes"),
+			Entry("a context above 262144 bytes", func(a *v1alpha1.AnalysisSettings) { a.MaxContextBytes = ptr.To[int32](262145) },
 				"spec.analysis.maxContextBytes"),
 			Entry("negative tool steps", func(a *v1alpha1.AnalysisSettings) { a.MaxToolSteps = ptr.To[int32](-1) },
 				"spec.analysis.maxToolSteps"),
 			Entry("more than 16 tool steps", func(a *v1alpha1.AnalysisSettings) { a.MaxToolSteps = ptr.To[int32](17) },
 				"spec.analysis.maxToolSteps"),
-			Entry("fewer than 256 output tokens", func(a *v1alpha1.AnalysisSettings) { a.MaxOutputTokens = 255 },
+			Entry("0 output tokens", func(a *v1alpha1.AnalysisSettings) { a.MaxOutputTokens = ptr.To[int32](0) },
 				"spec.analysis.maxOutputTokens"),
-			Entry("more than 16384 output tokens", func(a *v1alpha1.AnalysisSettings) { a.MaxOutputTokens = 16385 },
+			Entry("fewer than 256 output tokens", func(a *v1alpha1.AnalysisSettings) { a.MaxOutputTokens = ptr.To[int32](255) },
 				"spec.analysis.maxOutputTokens"),
-			Entry("negative concurrency", func(a *v1alpha1.AnalysisSettings) { a.MaxConcurrentAnalyses = -1 },
+			Entry("more than 16384 output tokens", func(a *v1alpha1.AnalysisSettings) { a.MaxOutputTokens = ptr.To[int32](16385) },
+				"spec.analysis.maxOutputTokens"),
+			Entry("0 concurrent analyses", func(a *v1alpha1.AnalysisSettings) { a.MaxConcurrentAnalyses = ptr.To[int32](0) },
 				"spec.analysis.maxConcurrentAnalyses"),
-			Entry("more than 8 concurrent analyses", func(a *v1alpha1.AnalysisSettings) { a.MaxConcurrentAnalyses = 9 },
+			Entry("more than 8 concurrent analyses", func(a *v1alpha1.AnalysisSettings) { a.MaxConcurrentAnalyses = ptr.To[int32](9) },
 				"spec.analysis.maxConcurrentAnalyses"),
+			Entry("a triage model without a daily token cap", func(a *v1alpha1.AnalysisSettings) {
+				a.Models = &v1alpha1.AnalysisModels{Triage: model()}
+				a.Models.Triage.MaxTokensPerDay = nil
+			}, "spec.analysis.models.triage.maxTokensPerDay"),
+			Entry("an escalation model without a daily token cap", func(a *v1alpha1.AnalysisSettings) {
+				a.Models = &v1alpha1.AnalysisModels{Triage: model(), Escalation: strong()}
+				a.Models.Escalation.MaxTokensPerDay = nil
+			}, "spec.analysis.models.escalation.maxTokensPerDay"),
 			Entry("a negative daily token cap", func(a *v1alpha1.AnalysisSettings) {
 				a.Models = &v1alpha1.AnalysisModels{Triage: model()}
 				a.Models.Triage.MaxTokensPerDay = ptr.To[int64](-1)
@@ -755,13 +772,36 @@ var _ = Describe("RemediationSettings", func() {
 				a.Models.Triage.MaxTokensPerDay = ptr.To[int64](1000000001)
 			}, "spec.analysis.models.triage.maxTokensPerDay"),
 			Entry("an escalation cap above 1,000,000,000", func(a *v1alpha1.AnalysisSettings) {
-				a.Models = &v1alpha1.AnalysisModels{Triage: model(), Escalation: model()}
+				a.Models = &v1alpha1.AnalysisModels{Triage: model(), Escalation: strong()}
 				a.Models.Escalation.MaxTokensPerDay = ptr.To[int64](1000000001)
 			}, "spec.analysis.models.escalation.maxTokensPerDay"),
 			Entry("an escalation model without a triage model", func(a *v1alpha1.AnalysisSettings) {
-				a.Models = &v1alpha1.AnalysisModels{Escalation: model()}
+				a.Models = &v1alpha1.AnalysisModels{Escalation: strong()}
 			}, "an escalation model needs a triage model"),
 		)
+
+		DescribeTable("refuses triage and escalation on the same deployment",
+			func(change func(*v1alpha1.ModelDeployment)) {
+				expectRefused(withAnalysis(func(a *v1alpha1.AnalysisSettings) {
+					e := model()
+					change(e)
+					a.Models = &v1alpha1.AnalysisModels{Triage: model(), Escalation: e}
+				}), "triage and escalation must not name the same endpoint and deployment")
+			},
+			Entry("written the same", func(*v1alpha1.ModelDeployment) {}),
+			Entry("without the trailing slash", func(m *v1alpha1.ModelDeployment) {
+				m.Endpoint = "https://example.services.ai.azure.com"
+			}),
+			Entry("with the deployment in upper case", func(m *v1alpha1.ModelDeployment) { m.Deployment = "Small-Model" }),
+		)
+
+		It("accepts the same deployment name on another endpoint", func() {
+			expectAccepted(withAnalysis(func(a *v1alpha1.AnalysisSettings) {
+				e := model()
+				e.Endpoint = "https://other.services.ai.azure.com/"
+				a.Models = &v1alpha1.AnalysisModels{Triage: model(), Escalation: e}
+			}))
+		})
 
 		DescribeTable("accepts model endpoints",
 			func(endpoint string) {
@@ -770,6 +810,8 @@ var _ = Describe("RemediationSettings", func() {
 			Entry("a Foundry resource", "https://example.services.ai.azure.com/"),
 			Entry("an Azure OpenAI v1 path", "https://example.openai.azure.com/openai/v1"),
 			Entry("a port and a path with dots", "https://models.example.org:8443/api/v1.2/"),
+			Entry("port 1", "https://models.example.org:1/"),
+			Entry("port 65535", "https://models.example.org:65535/"),
 			Entry("the longest URL", "https://"+strings.Repeat("a", 60)+"."+strings.Repeat("b", 60)+".io/"+
 				strings.Repeat("p", 256-len("https://")-121-len(".io/"))),
 		)
@@ -792,6 +834,10 @@ var _ = Describe("RemediationSettings", func() {
 			Entry("a hidden segment", "https://example.openai.azure.com/.env"),
 			Entry("an empty segment", "https://example.openai.azure.com//x"),
 			Entry("a space", "https://example.openai.azure.com/a b"),
+			Entry("port 0", "https://example.openai.azure.com:0/"),
+			Entry("port 65536", "https://example.openai.azure.com:65536/"),
+			Entry("port 99999", "https://example.openai.azure.com:99999/"),
+			Entry("an empty port", "https://example.openai.azure.com:/"),
 			Entry("longer than 256 characters", "https://example.openai.azure.com/"+strings.Repeat("p", 224)),
 		)
 
@@ -816,7 +862,8 @@ var _ = Describe("RemediationSettings", func() {
 			func(v string) {
 				expectAccepted(withModel(func(m *v1alpha1.ModelDeployment) { m.APIVersion = v }))
 			},
-			Entry(nil, "v1"), Entry(nil, "2024-10-21"), Entry(nil, "2025-04-01-preview"),
+			Entry(nil, "v1"), Entry(nil, "2024-10-21"), Entry(nil, "2025-04-01-preview"), Entry(nil, "2024-12-31"),
+			Entry(nil, "2024-01-01"),
 		)
 
 		DescribeTable("refuses API versions",
@@ -825,7 +872,8 @@ var _ = Describe("RemediationSettings", func() {
 					"spec.analysis.models.triage.apiVersion")
 			},
 			Entry(nil, ""), Entry(nil, "v2"), Entry(nil, "2024-10"), Entry(nil, "2024-10-21-beta"),
-			Entry(nil, "2024-10-21&api-key=x"), Entry(nil, "latest"),
+			Entry(nil, "2024-10-21&api-key=x"), Entry(nil, "latest"), Entry(nil, "2024-13-01"), Entry(nil, "2024-01-32"),
+			Entry(nil, "2024-00-10"), Entry(nil, "2024-10-00"),
 		)
 
 		// The model configuration authenticates with workload identity; a field for a key would put a

@@ -28,7 +28,8 @@ spec:
     integrations: [keda, flux]
   # Bounds of every model-backed analysis and the model deployments it may call. Planned: not enforced yet
   # (the analysis loop, #76; the daily token caps need the spend counter, #208). No key goes here: the
-  # analyzer authenticates with its workload identity.
+  # analyzer authenticates with its workload identity. The endpoint decides where that token and the
+  # redacted context go, so guard write access to this object. maxTokensPerDay is required on each model.
   analysis:
     maxContextBytes: 32768
     maxToolSteps: 4

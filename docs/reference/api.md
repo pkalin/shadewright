@@ -143,19 +143,21 @@ Used by: [Action](#action).
 
 AnalysisModels names the two model deployments of ADR-0023: a small model for the one structured triage
 call, and a stronger one used only on escalation. There is no field for a key: the analyzer authenticates
-with its workload identity (Entra ID, design 11.1), so no credential is ever stored in this object.
+with its workload identity (Entra ID, design 11.1), so no credential is ever stored in this object. The two
+must be different deployments, so the escalation cap cannot be a second budget for the triage model.
 
 
 Validation rules:
 
 - an escalation model needs a triage model: `!has(self.escalation) || has(self.triage)`
+- triage and escalation must not name the same endpoint and deployment: `!has(self.triage) || !has(self.escalation) || (self.triage.endpoint.endsWith('/') ? self.triage.endpoint.substring(0, self.triage.endpoint.size() - 1) : self.triage.endpoint) != (self.escalation.endpoint.endsWith('/') ? self.escalation.endpoint.substring(0, self.escalation.endpoint.size() - 1) : self.escalation.endpoint) || self.triage.deployment.lowerAscii() != self.escalation.deployment.lowerAscii()`
 
 Used by: [AnalysisSettings](#analysissettings).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `triage` | [ModelDeployment](#modeldeployment) | No | triage is the small model for the one structured call on the prepared context, without tools. Left out, no model is called. |
-| `escalation` | [ModelDeployment](#modeldeployment) | No | escalation is the stronger model, called with read tools only on the deterministic escalation signals of ADR-0023. Left out, there is no escalation and those incidents are handed off to a person. |
+| `triage` | [ModelDeployment](#modeldeployment) | No | triage is the small model for the one structured call on the prepared context, without tools. Left out, no model is called: an incident no runbook matches is handed off to a person, and no unit of maxAnalysesPerDay is used for it. |
+| `escalation` | [ModelDeployment](#modeldeployment) | No | escalation is the stronger model, called with read tools only on the deterministic escalation signals of ADR-0023. Left out, an escalation trigger hands the incident off to a person. |
 
 ### AnalysisSettings
 
@@ -169,9 +171,9 @@ Used by: [RemediationSettingsSpec](#remediationsettingsspec).
 | --- | --- | --- | --- |
 | `maxContextBytes` | integer | No | maxContextBytes is the most bytes of redacted cluster context (events, pod status, log excerpts, metrics) the context builder puts into one analysis, before the fixed system part of the prompt. 4096 to 262144; the default of 32768 is roughly 8,000 tokens. A context cut at this bound is marked truncated, which is an escalation trigger (ADR-0023).<br>Default: `32768`<br>Maximum: 262144<br>Minimum: 4096 |
 | `maxToolSteps` | integer | No | maxToolSteps is the most read tool calls one escalated analysis may make. The triage call has no tools (ADR-0023), so this only bounds escalation. 0 to 16; 0 means escalation gets no tools.<br>Default: `4`<br>Maximum: 16<br>Minimum: 0 |
-| `maxOutputTokens` | integer | No | maxOutputTokens is the most output tokens one model call may produce, sent as the request's MaxOutputTokens, so the provider stops there. An analysis makes at most 2 + maxToolSteps calls (the triage call, one retry after invalid output, and the escalation steps), which bounds its output. 256 to 16384.<br>Default: `2048`<br>Maximum: 16384<br>Minimum: 256 |
+| `maxOutputTokens` | integer | No | maxOutputTokens is the most output tokens one model call may produce, sent as the request's MaxOutputTokens, so the provider stops there. An analysis makes at most 3 + maxToolSteps model calls: the triage call, one retry after invalid output, and maxToolSteps + 1 escalated turns (an invalid escalated result gets no retry; it is handed off). That bounds its output. 256 to 16384.<br>Default: `2048`<br>Maximum: 16384<br>Minimum: 256 |
 | `maxConcurrentAnalyses` | integer | No | maxConcurrentAnalyses is the most analyses that call a model at once. 1 to 8.<br>Default: `1`<br>Maximum: 8<br>Minimum: 1 |
-| `models` | [AnalysisModels](#analysismodels) | No | models names the model deployments the analyzer may call. Left out, no model is configured.<br>Rule: an escalation model needs a triage model |
+| `models` | [AnalysisModels](#analysismodels) | No | models names the model deployments the analyzer may call. Left out, no model is configured, so no model is called and every incident no runbook matches is handed off to a person.<br>Rule: an escalation model needs a triage model<br>Rule: triage and escalation must not name the same endpoint and deployment |
 
 ### ApprovalMode
 
@@ -369,7 +371,7 @@ Used by: [Incident](#incident).
 | `phase` | [IncidentPhase](#incidentphase) | No | phase summarizes the incident.<br>One of `Open`, `Analyzing`, `Proposed`, `Escalated`, `Resolved` |
 | `firstSeen` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | firstSeen is when the first observation arrived. |
 | `lastSeen` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | lastSeen is when the latest observation arrived. |
-| `count` | integer | No | count is the number of occurrences counted, counting event series increments, not totals. It saturates at 1,000,000: a series count is written by whoever can create events, so forged updates can raise it without bound otherwise. It is not a count of distinct occurrences.<br>Maximum: 1e+06<br>Minimum: 0 |
+| `count` | integer | No | count is the number of occurrences counted, counting event series increments, not totals. It saturates at 1,000,000: a series count is written by whoever can create events, so forged updates can raise it without bound otherwise. It is not a count of distinct occurrences.<br>Maximum: 1000000<br>Minimum: 0 |
 | `occurrences` | [OccurrenceRecord](#occurrencerecord) array | No | occurrences are the newest occurrences counted for this incident, newest first, at most 32: for each, the highest total the cluster reported that was counted, and when it began. After a restart the analyzer reads them to count only what is new. Older ones are dropped.<br>Maximum items: 32<br>List type: atomic |
 | `occurrencesDroppedThrough` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | occurrencesDroppedThrough is when the newest occurrence dropped from occurrences began. An occurrence with no record that began no later than this is treated as counted in full, so the bound never counts one twice. |
 | `lastAnalysisTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | lastAnalysisTime is when the analyzer last ran; it drives the cooldown. |
@@ -447,10 +449,10 @@ Used by: [AnalysisModels](#analysismodels).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `endpoint` | string | Yes | endpoint is the HTTPS base URL of the inference endpoint, for example https://&lt;resource>.services.ai.azure.com/ or https://&lt;resource>.openai.azure.com/openai/v1. At most 256 characters: a host name of lower-case DNS labels whose last label starts with a letter (so no IP address and no single-label host such as localhost), an optional port and an optional path whose segments do not start with '.'. No user info, query or fragment.<br>Maximum length: 256<br>Minimum length: 1<br>Pattern: `^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$` |
+| `endpoint` | string | Yes | endpoint is the HTTPS base URL of the inference endpoint, for example https://&lt;resource>.services.ai.azure.com/ or https://&lt;resource>.openai.azure.com/openai/v1. At most 256 characters: a host name of lower-case DNS labels whose last label starts with a letter (so no IP address and no single-label host such as localhost), an optional port from 1 to 65535 and an optional path whose segments do not start with '.'. No user info, query or fragment. The schema is vendor-neutral (ADR-0013). The endpoint decides where the analyzer's Entra ID token and the redacted context go; planned (#76): the analyzer refuses a host outside an allow-list of suffixes set by the operator's flag (not in this object), refuses private, loopback and link-local addresses when it dials, and requests a token for the Cognitive Services audience only.<br>Maximum length: 256<br>Minimum length: 1<br>Pattern: <code>^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?(:([1-9][0-9]{0,3}&#124;[1-5][0-9]{4}&#124;6[0-4][0-9]{3}&#124;65[0-4][0-9]{2}&#124;655[0-2][0-9]&#124;6553[0-5]))?(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$</code> |
 | `deployment` | string | Yes | deployment is the name of the model deployment: 1 to 64 letters, digits, '.', '_' or '-', starting with a letter or digit.<br>Maximum length: 64<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9][A-Za-z0-9._-]*$` |
-| `apiVersion` | string | Yes | apiVersion is the inference API version the adapter sends: v1, or a date such as 2024-10-21, optionally followed by -preview.<br>Maximum length: 32<br>Minimum length: 2<br>Pattern: <code>^(v1&#124;[0-9]{4}-[0-9]{2}-[0-9]{2}(-preview)?)$</code> |
-| `maxTokensPerDay` | integer | No | maxTokensPerDay is the daily spend cap of this deployment, in tokens per UTC day: input (cached or not) plus output tokens of every call, a failed or timed-out call counted at its upper bound (the input estimate plus maxOutputTokens). It is a count of tokens, not an amount of money, because tokens are what the provider reports and bills, they are whole numbers, and a money cap would need a price list in this object that goes stale; the spend it allows is at most this count times the deployment's highest price per token (design 12.1). It is per deployment because the triage and escalation models differ in price. 0 to 1,000,000,000; 0 stops calls to this deployment. Planned: counted by #208.<br>Default: `1000000`<br>Maximum: 1e+09<br>Minimum: 0 |
+| `apiVersion` | string | Yes | apiVersion is the inference API version the adapter sends: v1, or a date such as 2024-10-21 (month 01 to 12, day 01 to 31), optionally followed by -preview.<br>Maximum length: 32<br>Minimum length: 2<br>Pattern: <code>^(v1&#124;[0-9]{4}-(0[1-9]&#124;1[0-2])-(0[1-9]&#124;[12][0-9]&#124;3[01])(-preview)?)$</code> |
+| `maxTokensPerDay` | integer | Yes | maxTokensPerDay is the daily spend cap of this deployment, in tokens per UTC day: input (cached or not) plus output tokens of every call, a failed or timed-out call counted at its upper bound (the input estimate plus maxOutputTokens). Required, with no default, so the admin chooses the cap of each deployment. It is a count of tokens, not an amount of money, because tokens are what the provider reports and bills, they are whole numbers, and a money cap would need a price list in this object that goes stale. It is per deployment because the triage and escalation models differ in price. The spend it allows is at most this count times the deployment's highest price per token (design 12.1) only because the counter reserves a call's upper bound before calling, under one lock for concurrent analyses (planned, #208). 0 to 1,000,000,000; 0, or a cap that is spent, stops calls to this deployment and hands the incident off.<br>Maximum: 1000000000<br>Minimum: 0 |
 
 ### ModuleName
 
@@ -525,7 +527,7 @@ Used by: [IncidentStatus](#incidentstatus).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `id` | string | Yes | id names the occurrence: "event:" and the Event UID, or "termination:" and a hash of the pod UID, the container and the termination.<br>Maximum length: 76<br>Pattern: <code>^(event&#124;termination):[A-Za-z0-9-]{1,64}$</code> |
-| `total` | integer | Yes | total is the highest total of the occurrence counted: the event's series count, or 1 for a termination.<br>Maximum: 2.147483647e+09<br>Minimum: 0 |
+| `total` | integer | Yes | total is the highest total of the occurrence counted: the event's series count, or 1 for a termination.<br>Maximum: 2147483647<br>Minimum: 0 |
 | `began` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | began is when the occurrence began: the event's creation time or the termination's finish time. Absent when the cluster did not report one. |
 
 ### PlanRepository
@@ -763,7 +765,7 @@ Used by: [RemediationSettings](#remediationsettings).
 | `maxAnalysesPerDay` | integer | No | maxAnalysesPerDay limits model-backed analyses per UTC day; 0 disables the model.<br>Default: `100`<br>Maximum: 10000<br>Minimum: 0 |
 | `repositories` | [GitRepository](#gitrepository) array | No | repositories Shadewright may open pull requests in. URLs are unique, so a Flux source matches at most one entry.<br>Maximum items: 16<br>List type: map<br>List key: `name`<br>Rule: repository URLs must be unique (`self.all(r, self.exists_one(s, s.url == r.url))`) |
 | `modules` | [Modules](#modules) | No | modules enables platform and integration modules. Left out, only the generic platform is on and no integration is: nothing is enabled because it was detected. |
-| `analysis` | [AnalysisSettings](#analysissettings) | No | analysis bounds every model-backed analysis and names the model deployments it may call. Left out, its limits take their defaults and no model is configured. Planned: no component reads these fields yet; the analysis loop (#76) will enforce them, and the daily token caps need the spend counter of #208.<br>Default: `{}` |
+| `analysis` | [AnalysisSettings](#analysissettings) | No | analysis bounds every model-backed analysis and names the model deployments it may call. Left out, its limits take their defaults and no model is configured. Planned: no component reads these fields yet; the analysis loop (#76) will enforce them, and the daily token caps need the spend counter of #208. The endpoints decide where the analyzer sends its Entra ID token and the redacted context, so write access to this object is security-relevant (threat model).<br>Default: `{}` |
 
 ### RemediationSettingsStatus
 

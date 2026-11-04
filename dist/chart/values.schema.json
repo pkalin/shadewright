@@ -195,7 +195,10 @@
           }
         },
         "maxIncidents": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1
         }
       }

@@ -1,128 +1,174 @@
 # Shadewright chart values. The schema in values.schema.json validates them on install, upgrade, lint and
 # template. Nothing here looks like a real identity, digest or cluster: the values you must set are empty.
+# README.md is generated from the "# --" comments below with helm-docs (make chart-docs): every key needs one.
 
-## String to partially override the chart name (kept in the release name).
-# nameOverride: ""
-## String to fully override the resource name prefix. Leave unset to use the release name.
-# fullnameOverride: ""
-
-## Hashed into every Incident fingerprint so Incidents of two clusters never merge. Required. 1 to 63 letters,
-## digits, ".", "_" or "-", starting and ending with a letter or digit. Changing it starts every Incident afresh.
+# -- Partially overrides the chart name, which is kept in the release name. At most 63 characters. Empty uses `shadewright`.
+# @section -- General
+nameOverride: ""
+# -- Fully overrides the resource name prefix, at most 63 characters. Empty uses the release name (or `<release>-shadewright` if it does not contain the chart name). The ServiceAccount names, and so the subject of the federated credential, derive from it.
+# @section -- General
+fullnameOverride: ""
+# -- Required. Cluster ID, 1 to 63 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit. Passed as `--cluster-id` and hashed into every Incident fingerprint so Incidents of two clusters never merge. Changing it starts every Incident afresh, so choose it once.
+# @default -- none, required
+# @section -- General
 clusterId: ""
-
-## Image pull secrets, for a mirror that needs them. The default images are public.
+# -- Image pull secrets of both Pods, a list of `{name: <secret>}`, for a mirror that needs them. The default images are public.
+# @section -- General
 imagePullSecrets: []
-
-## Metrics endpoint of both components.
 metrics:
+  # -- Serve the metrics endpoint of both components, with its two Services. When false there are no Services, no metrics RBAC and no metrics NetworkPolicy.
+  # @section -- Metrics
   enabled: true
+  # -- Metrics port, 1 to 65535. Passed as `--metrics-bind-address` and opened by the metrics NetworkPolicy.
+  # @section -- Metrics
   port: 8443
-  ## HTTPS with a TokenReview and a SubjectAccessReview per request. false serves plain HTTP with no
-  ## authentication: only for a test.
+  # -- Serve metrics over HTTPS with a TokenReview and a SubjectAccessReview per request. `false` serves plain HTTP with no authentication: for a test only, `helm install` prints a warning.
+  # @section -- Metrics
   secure: true
-
-## NetworkPolicies: default deny for the namespace, DNS and TCP 443 and 6443 egress per component, and ingress
-## to the metrics port from namespaces labeled "metrics: enabled".
 networkPolicy:
+  # -- Install the NetworkPolicies: default deny for the namespace, DNS and TCP 443 and 6443 egress per component, and ingress to the metrics port from namespaces labeled `metrics: enabled`. Setting `false` installs no NetworkPolicy at all, so the namespace loses its default deny too and every Pod in it can talk to anything unless you restrict it yourself (`helm install` prints a warning).
+  # @section -- Network policy
   enabled: true
-
-## The CRDs. Helm does not upgrade or delete CRDs from the crds/ directory, so they are templates here.
 crd:
+  # -- Install the CRDs as templates (Helm does not upgrade or delete CRDs from a `crds/` directory). Set `false` only if you install them another way.
+  # @section -- CRDs
   enabled: true
-  ## Keep the CRDs (and so every Incident and RemediationRequest) when the release is uninstalled.
+  # -- Keep the CRDs, and so every Incident and RemediationRequest, when the release is uninstalled (adds the `helm.sh/resource-policy: keep` annotation). Set `false` to delete all of them with the release.
+  # @section -- CRDs
   keep: true
-
 rbac:
-  ## Admin, editor and viewer ClusterRoles for each custom resource. Shadewright does not use them, they are
-  ## for your people. Off by default (least privilege).
   helpers:
+    # -- Install admin, editor and viewer ClusterRoles for each custom resource. Shadewright does not use them, they are for your people. Off by default (least privilege).
+    # @section -- RBAC
     enabled: false
 
 ## The executor reconciles RemediationRequests and is the only component that talks to Git. Its identity may
 ## only sign with the GitHub App key in Key Vault.
 executor:
   image:
+    # -- Repository of the executor image (a mirror, for example). The Deployment runs repository@digest.
+    # @section -- Images
     repository: ghcr.io/pkalin/shadewright-executor
-    ## Required: sha256:<64 hex digits>. The images are pinned by digest, never by tag.
+    # -- Required. Digest of the executor image: `sha256:` and 64 lower case hex digits. Images are pinned by digest, so a tag is refused by the schema and a moved tag cannot change what runs.
+    # @default -- none, required
+    # @section -- Images
     digest: ""
+    # -- Image pull policy. One of `Always`, `IfNotPresent` or `Never`.
+    # @section -- Images
     pullPolicy: IfNotPresent
   identity:
     azure:
-      ## Client ID of the executor's managed identity (workload identity). Not a secret. Sets the ServiceAccount
-      ## annotation azure.workload.identity/client-id and the Pod label azure.workload.identity/use. Without it
-      ## a request that reaches the Git step is retried quietly and stays Pending.
+      # -- Client ID (a UUID, not a secret) of the executor's Azure managed identity for workload identity. Sets the ServiceAccount annotation `azure.workload.identity/client-id` and the Pod label `azure.workload.identity/use`. Empty sets neither: the executor then cannot sign for the GitHub App, so a request that reaches the Git step is retried quietly and stays Pending. Must differ from the analyzer's, or the chart refuses to render (separate identities, never one for both).
+      # @default -- empty (no identity)
+      # @section -- Identity
       clientId: ""
   serviceAccount:
-    ## Further ServiceAccount annotations, for another cloud's workload identity.
+    # -- Further ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `executor.identity.azure.clientId`.
+    # @section -- Executor
     annotations: {}
   resources:
     limits:
+      # -- CPU limit. `limits` is required and cannot be empty, so the container is never unbounded.
+      # @section -- Executor
       cpu: 500m
+      # -- Memory limit.
+      # @section -- Executor
       memory: 128Mi
     requests:
+      # -- CPU request.
+      # @section -- Executor
       cpu: 10m
+      # -- Memory request.
+      # @section -- Executor
       memory: 64Mi
+  # -- Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--namespace`, `--watch-namespaces`, `--cluster-id` and `--max-incidents`.
+  # @section -- Executor
   extraArgs: []
+  # -- Further Pod labels. The chart refuses `control-plane`, `app.kubernetes.io/*`, `helm.sh/*` and `azure.workload.identity/*`: it sets them itself (the identity labels come from `identity.azure.clientId`).
+  # @section -- Executor
   podLabels: {}
+  # -- Further Pod annotations.
+  # @section -- Executor
   podAnnotations: {}
+  # -- Node selector of the Pod.
+  # @section -- Executor
   nodeSelector: {}
+  # -- Tolerations of the Pod, a list of Kubernetes toleration objects.
+  # @section -- Executor
   tolerations: []
+  # -- Affinity of the Pod, a Kubernetes affinity object.
+  # @section -- Executor
   affinity: {}
 
 ## The analyzer reads the cluster and writes Incidents and proposed RemediationRequests. It never acts on them.
 analyzer:
   image:
+    # -- Repository of the analyzer image (a mirror, for example). The Deployment runs repository@digest.
+    # @section -- Images
     repository: ghcr.io/pkalin/shadewright-analyzer
-    ## Required: sha256:<64 hex digits>.
+    # -- Required. Digest of the analyzer image: `sha256:` and 64 lower case hex digits. Images are pinned by digest, so a tag is refused by the schema and a moved tag cannot change what runs.
+    # @default -- none, required
+    # @section -- Images
     digest: ""
+    # -- Image pull policy. One of `Always`, `IfNotPresent` or `Never`.
+    # @section -- Images
     pullPolicy: IfNotPresent
-  ## Namespaces whose events, pods and workloads are read. Required, at least one. Each gets a RoleBinding to
-  ## the read-only watch ClusterRole. Never "all namespaces".
+  # -- Required, at least one unique namespace name, never all namespaces. The analyzer reads events, Pods and workloads only in these namespaces: the chart passes them as `--watch-namespaces` and binds the read-only watch ClusterRole with one RoleBinding in each (`kube-system` included only if you list it).
+  # @default -- none, required
+  # @section -- Analyzer
   watchNamespaces: []
-  ## Most Incidents kept in the operator namespace (the binary's default is 500). Unset keeps the default.
-  # maxIncidents: 500
+  # -- Most Incidents kept in the operator namespace (`--max-incidents`), 1 or more. Null (unset) keeps the binary's default of 500.
+  # @default -- null (the binary's default, 500)
+  # @section -- Analyzer
+  maxIncidents: null
   identity:
     azure:
-      ## The analyzer has no cloud identity today (the model call is not built, ADR-0023). Same effect as above.
+      # -- Client ID (a UUID, not a secret) of the analyzer's Azure managed identity. The analyzer has no cloud identity today (the model call is not built, ADR-0023), so leave it empty. Same effect as the executor's value, and it must differ from the executor's or the chart refuses to render.
+      # @default -- empty (no identity)
+      # @section -- Identity
       clientId: ""
   serviceAccount:
+    # -- Further ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `analyzer.identity.azure.clientId`.
+    # @section -- Analyzer
     annotations: {}
   resources:
     limits:
+      # -- CPU limit. `limits` is required and cannot be empty, so the container is never unbounded.
+      # @section -- Analyzer
       cpu: 500m
+      # -- Memory limit.
+      # @section -- Analyzer
       memory: 128Mi
     requests:
+      # -- CPU request.
+      # @section -- Analyzer
       cpu: 10m
+      # -- Memory request.
+      # @section -- Analyzer
       memory: 64Mi
+  # -- Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--namespace`, `--watch-namespaces`, `--cluster-id` and `--max-incidents`.
+  # @section -- Analyzer
   extraArgs: []
+  # -- Further Pod labels. The chart refuses `control-plane`, `app.kubernetes.io/*`, `helm.sh/*` and `azure.workload.identity/*`: it sets them itself (the identity labels come from `identity.azure.clientId`).
+  # @section -- Analyzer
   podLabels: {}
+  # -- Further Pod annotations.
+  # @section -- Analyzer
   podAnnotations: {}
+  # -- Node selector of the Pod.
+  # @section -- Analyzer
   nodeSelector: {}
+  # -- Tolerations of the Pod, a list of Kubernetes toleration objects.
+  # @section -- Analyzer
   tolerations: []
+  # -- Affinity of the Pod, a Kubernetes affinity object.
+  # @section -- Analyzer
   affinity: {}
 
-## The RemediationSettings object named "default". Off by default: create it here or manage it yourself.
-## Fields are in the API reference. Example:
-##   settings:
-##     create: true
-##     spec:
-##       paused: false
-##       maxConcurrentRemediations: 1
-##       maxAnalysesPerDay: 100
-##       repositories:
-##         - name: fleet
-##           url: https://github.com/<owner>/<repo>
-##           targetBranch: main
-##           provider: GitHub
-##           github:
-##             appClientID: <GitHub App client ID>
-##             installationID: <installation ID>
-##             signer:
-##               azureKeyVault:
-##                 keyID: https://<vault>.vault.azure.net/keys/<key>
-##       modules:
-##         platforms: [aks]
-##         integrations: [flux]
 settings:
+  # -- Create the RemediationSettings object `default` from `spec`, as a post-install and post-upgrade hook. Every install or upgrade replaces the object with `spec`, overwriting hand edits, so leave it off if you manage the object elsewhere. Helm does not track hook objects: the object is not deleted when the release is uninstalled. Requires a non-empty `spec`.
+  # @section -- Settings
   create: false
+  # -- Spec of the RemediationSettings object. Required and non-empty when `create` is true (the schema enforces it). The fields are in the API reference, see the README for an example.
+  # @section -- Settings
   spec: {}

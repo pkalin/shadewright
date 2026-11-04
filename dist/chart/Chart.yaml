@@ -10,8 +10,8 @@ sources:
 
 # Both versions follow the release (release-please bumps them with the tag); the chart is published only on a
 # release tag, so what a tag publishes is the chart of that tag.
-version: 0.1.0  # x-release-please-version
-appVersion: "0.1.0"  # x-release-please-version
+version: 0.2.0  # x-release-please-version
+appVersion: "0.2.0"  # x-release-please-version
 
 keywords:
   - kubernetes
@@ -36,9 +36,9 @@ annotations:
       url: https://github.com/pkalin/shadewright
   artifacthub.io/images: |
     - name: executor
-      image: ghcr.io/pkalin/shadewright-executor:0.1.0 # x-release-please-version
+      image: ghcr.io/pkalin/shadewright-executor:0.2.0 # x-release-please-version
     - name: analyzer
-      image: ghcr.io/pkalin/shadewright-analyzer:0.1.0 # x-release-please-version
+      image: ghcr.io/pkalin/shadewright-analyzer:0.2.0 # x-release-please-version
   artifacthub.io/crds: |
     - kind: Incident
       version: v1alpha1

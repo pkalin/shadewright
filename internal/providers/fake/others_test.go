@@ -134,14 +134,18 @@ func TestMetricsAndLogs(t *testing.T) {
 	if err != nil || e.Text != "6789" || !e.Truncated {
 		t.Errorf("bounded logs = %+v, %v", e, err)
 	}
-	l.Set(k, strings.Repeat("x", fake.DefaultLogBytes+10))
+	l.Set(k, strings.Repeat("x", providers.DefaultLogBytes+10))
 	q.MaxBytes = 0
-	if e, _ := l.Logs(ctx, q); len(e.Text) != fake.DefaultLogBytes || !e.Truncated {
+	if e, _ := l.Logs(ctx, q); len(e.Text) != providers.DefaultLogBytes || !e.Truncated {
 		t.Errorf("zero MaxBytes returned %d bytes, truncated=%v", len(e.Text), e.Truncated)
 	}
 	q.Previous = true
+	if _, err := l.Logs(ctx, q); !providers.IsRejected(err) {
+		t.Errorf("previous instance the pod does not have: %v", err)
+	}
+	q.Previous, q.Pod = false, "web-2"
 	if _, err := l.Logs(ctx, q); !providers.IsNotFound(err) {
-		t.Errorf("previous container: %v", err)
+		t.Errorf("missing pod: %v", err)
 	}
 }
 

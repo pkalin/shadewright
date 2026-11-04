@@ -201,10 +201,7 @@ type LogKey struct {
 	Previous                  bool
 }
 
-// DefaultLogBytes is the excerpt size the Logs fake uses when a query sets no MaxBytes.
-const DefaultLogBytes = 64 << 10
-
-// Logs returns logs registered per container, honouring MaxBytes (DefaultLogBytes when zero).
+// Logs returns logs registered per container, honouring MaxBytes (providers.DefaultLogBytes when zero).
 type Logs struct {
 	Hook
 	mu   sync.Mutex
@@ -230,11 +227,18 @@ func (l *Logs) Logs(ctx context.Context, q providers.LogQuery) (providers.LogExc
 	defer l.mu.Unlock()
 	t, ok := l.logs[LogKey{q.Namespace, q.Pod, q.Container, q.Previous}]
 	if !ok {
-		return providers.LogExcerpt{}, fmt.Errorf("logs of %s/%s/%s: %w", q.Namespace, q.Pod, q.Container, providers.ErrNotFound)
+		// Like the Kubernetes API server: a missing pod is not found, a container or instance the pod does
+		// not have is a refused request.
+		for k := range l.logs {
+			if k.Namespace == q.Namespace && k.Pod == q.Pod {
+				return providers.LogExcerpt{}, fmt.Errorf("logs of %s/%s/%s: %w", q.Namespace, q.Pod, q.Container, providers.ErrRejected)
+			}
+		}
+		return providers.LogExcerpt{}, fmt.Errorf("logs of pod %s/%s: %w", q.Namespace, q.Pod, providers.ErrNotFound)
 	}
 	limit := q.MaxBytes
 	if limit <= 0 {
-		limit = DefaultLogBytes
+		limit = providers.DefaultLogBytes
 	}
 	if int64(len(t)) > limit {
 		return providers.LogExcerpt{Text: t[int64(len(t))-limit:], Truncated: true}, nil

@@ -234,7 +234,9 @@ type IntegrationStatus struct {
 	Active bool `json:"active"`
 }
 
-// RemediationSettingsStatus reports whether the settings are usable.
+// RemediationSettingsStatus is the analyzer's report of platform and integration detection (ADR-0024). It says
+// nothing about whether a repository or signer is usable: those are built when a request needs them, and a
+// problem shows in the conditions of that request.
 type RemediationSettingsStatus struct {
 	// observedGeneration is the generation the status describes.
 	// +optional
@@ -286,7 +288,7 @@ type RemediationSettings struct {
 	// +required
 	Spec RemediationSettingsSpec `json:"spec"`
 
-	// status reports whether the settings are usable.
+	// status is the analyzer's detection report. It does not report whether repositories or signers are usable.
 	// +optional
 	Status RemediationSettingsStatus `json:"status,omitzero"`
 }

@@ -159,33 +159,49 @@ them. Each value comes from here:
 
 | Placeholder | Where | Value from |
 | --- | --- | --- |
-| `url` in the settings | `remediationsettings.yaml` | `https://github.com/<owner>/shadewright-fleet`, lower case, no `.git` (`fleet_repository_url` of `lab/terraform.tfvars`) |
-| `appClientID` | `remediationsettings.yaml` | The GitHub App's settings page, "Client ID" |
-| `installationID` | `remediationsettings.yaml` | The number at the end of the URL of the App's installation page (`gh api` cannot read it without the App's JWT) |
-| `keyID` | `remediationsettings.yaml` | `<uri>keys/<github_app_key>` from `terraform -chdir=foundation output -json key_vault` (`uri` ends with `/`; `github_app_key` is the key name, `github-app` by default) |
-| `incidentRef.uid`, `targetRef.uid` | `incident.yaml`, `remediationrequest.yaml` | Commands in the file's header comment, after step 5 and the Incident below |
+| `url` in the settings | `remediation_v1alpha1_remediationsettings.yaml` | `https://github.com/<owner>/shadewright-fleet`, lower case, no `.git` (`fleet_repository_url` of `lab/terraform.tfvars`) |
+| `appClientID` | `remediation_v1alpha1_remediationsettings.yaml` | The GitHub App's settings page, "Client ID" |
+| `installationID` | `remediation_v1alpha1_remediationsettings.yaml` | The number at the end of the URL of the App's installation page (`gh api` cannot read it without the App's JWT) |
+| `keyID` | `remediation_v1alpha1_remediationsettings.yaml` | `<uri>keys/<github_app_key>` from `terraform -chdir=foundation output -json key_vault` (`uri` ends with `/`; `github_app_key` is the key name, `github-app` by default) |
+| `incidentRef.uid`, `targetRef.uid` | `remediation_v1alpha1_incident.yaml`, `remediation_v1alpha1_remediationrequest.yaml` | Commands in the file's header comment, after step 5 and the Incident below |
 
 ```bash
 mkdir -p /tmp/shadewright-lab && cp config/samples/lab/*.yaml /tmp/shadewright-lab/
-# edit remediationsettings.yaml (url, appClientID, installationID, keyID)
+# edit remediation_v1alpha1_remediationsettings.yaml (url, appClientID, installationID, keyID)
 kubectl apply -f /tmp/shadewright-lab/remediation_v1alpha1_remediationsettings.yaml
 kubectl apply -f /tmp/shadewright-lab/remediation_v1alpha1_remediationpolicy.yaml
 kubectl get remediationsettings default
 kubectl get remediationpolicy demo-memory
 ```
 
-Expect both created and, in their `status.conditions`, no problem reported (an unknown `repositoryRef` or an
-unusable signer would show there).
+Expect both created. Applying them checks the schema and CEL rules only; it proves nothing about GitHub, the
+signer or the mapping. No controller writes the conditions of a policy, and the conditions of the settings hold only
+the analyzer's detection (`UnknownModules`, `DetectionFailed`), so an empty status here is not a health check.
+The executor builds the repository and its signer when a request first needs them, and a problem shows in the
+conditions of the request (see the end of this step and step 7). Reasons to look for:
+
+- `RepositoryNotConfigured` (`Denied`): the `repositoryRef` of the policy names no entry in the settings;
+  `RepositoryNotAllowed`: the target is delivered from a repository the policy does not allow;
+  `BranchNotAllowed`: the source tracks a branch other than the repository's `targetBranch`;
+- `RepositoryUnusable` (`NeedsIntervention`): the settings of the repository (URL, client ID, installation ID, the
+  Key Vault `keyID` or a missing signer) cannot be used to open it; fix the settings and apply a new request;
+- `GitForbidden` or `GitRejected`: GitHub refused the App (permissions, installation, ruleset); the request ends
+  `NeedsIntervention` before a pull request exists;
+- no reason at all: a signer that cannot be built (no workload identity) or a Key Vault or GitHub error that
+  may pass is retried quietly, so the request stays in `PolicyChecked` and the cause is in the executor log
+  (`kubectl -n shadewright-system logs deploy/shadewright-executor`) until the request ends `Expired` with
+  `PullRequestDeadline`.
 
 The Incident: if the collector already made one for the OOMKilled `web` container
 (`kubectl -n shadewright-system get incidents`), use its name and UID in the request. Otherwise write the sample:
 
 ```bash
 UID_WEB=$(kubectl -n demo get deployment web -o jsonpath='{.metadata.uid}')
-# put $UID_WEB in incident.yaml (subject.uid) and remediationrequest.yaml (targetRef.uid)
+# put $UID_WEB in remediation_v1alpha1_incident.yaml (subject.uid)
+# and remediation_v1alpha1_remediationrequest.yaml (targetRef.uid)
 kubectl apply -f /tmp/shadewright-lab/remediation_v1alpha1_incident.yaml
 INC_UID=$(kubectl -n shadewright-system get incident web-oomkilled -o jsonpath='{.metadata.uid}')
-# put $INC_UID in remediationrequest.yaml (incidentRef.uid)
+# put $INC_UID in remediation_v1alpha1_remediationrequest.yaml (incidentRef.uid)
 ```
 
 Then the request:
@@ -195,7 +211,9 @@ kubectl apply -f /tmp/shadewright-lab/remediation_v1alpha1_remediationrequest.ya
 kubectl -n shadewright-system get remediationrequest web-memory-001 -w
 ```
 
-Expect the phases `Pending`, `PolicyChecked`, `PRCreated`, then `AwaitingApproval`, in well under a minute. Any
+Expect the phases `Pending`, `PolicyChecked`, `PRCreated`, then `AwaitingApproval`, in well under a minute. A
+watch prints a line only when the object changes and the controller can move through a phase between two reads, so
+it may not show every phase (`Pending` in particular); `AwaitingApproval` at the end is what counts. Any
 other end (`Denied`, `NeedsIntervention`) names its reason in the conditions:
 
 ```bash
@@ -203,6 +221,11 @@ kubectl -n shadewright-system get remediationrequest web-memory-001 -o jsonpath=
 ```
 
 `rr` is the short name of `remediationrequest`. Do not delete the request until step 10.
+
+Repeating: applying the settings, the policy, the Incident and the request again is safe (the request's spec is
+immutable, so an edited file is refused, not applied). The reads (`get`, `gh pr list`, `gh pr view`) can be run any
+number of times. A request does not retry after it ends in `Denied` or `NeedsIntervention`: fix the cause and apply
+a request with a new name. Steps 1, 2, 5 and 9 change the cloud, a branch or the policy, so run each once per session; step 9 in particular ends the request.
 
 ## 7. Check that there is exactly one pull request, and that it is correct
 
@@ -229,13 +252,25 @@ Expect:
   `-              memory: 48Mi` and `+              memory: 64Mi` under `resources.limits` of container `web`. The memory
   request (`32Mi`) and everything else are untouched.
 - A body with the change, scope, evidence (the request, its UID, the incident, the policy revision
-  `demo-memory/1`, the plan digest), expected effect, risk, rollback and `Approval required: yes`, and a last line
+  `<policy name>/<generation>`, the plan digest), expected effect, risk, rollback and `Approval required: yes`, and a last line
   `<!-- shadewright request-uid=... plan-digest=sha256:... -->` whose UID and digest match
   `.metadata.uid` and `.status.planDigest` of the request.
 - The required checks run on the pull request, and it is not merged: a person reviews it. Do not merge it before
   step 9 (merge, delivery and verification are out of scope for v0.1.0).
 
-Also check that the head SHA in the request status equals the pull request's head (`gh pr view <number> --json headRefOid`).
+The policy revision in the body is `.status.policyRevision` of the request, which is the policy name and its
+generation: `demo-memory/1` for a policy applied once and never edited, a higher number otherwise (a reapply with
+changes bumps it). Read it from the run instead of assuming it:
+
+```bash
+kubectl -n shadewright-system get rr web-memory-001 -o jsonpath='{.status.policyRevision}{"\n"}'
+kubectl get remediationpolicy demo-memory -o jsonpath='demo-memory/{.metadata.generation}{"\n"}'
+```
+
+Expect the two lines to agree, and the body to carry the same revision.
+
+Also check that the head SHA in the request status equals the pull request's head
+(`gh pr view <number> --repo <owner>/shadewright-fleet --json headRefOid`).
 
 ## 8. Apply the request again and see nothing new
 

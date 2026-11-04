@@ -174,13 +174,16 @@ type RemediationPolicySpec struct {
 	Approval ApprovalMode `json:"approval,omitempty"`
 }
 
-// RemediationPolicyStatus reports whether the policy is usable.
+// RemediationPolicyStatus is reserved for the policy's status. No controller writes it yet: a policy is checked
+// by the schema and CEL rules when it is applied, and a problem with it shows in the conditions of the
+// RemediationRequests that use it.
 type RemediationPolicyStatus struct {
 	// observedGeneration is the generation the status describes.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// conditions report problems such as an unknown repositoryRef.
+	// conditions are reserved. Nothing writes them yet: an unknown repositoryRef is not reported here but
+// refuses the requests that use the policy (reason RepositoryNotConfigured).
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -210,7 +213,7 @@ type RemediationPolicy struct {
 	// +required
 	Spec RemediationPolicySpec `json:"spec"`
 
-	// status reports whether the policy is usable.
+	// status is reserved; no controller writes it yet.
 	// +optional
 	Status RemediationPolicyStatus `json:"status,omitzero"`
 }

@@ -130,7 +130,7 @@ To remove observe-only, `kubectl delete -k .` and delete the settings object fir
 
 ### Install with Helm instead
 
-The chart installs the same objects as `config/default` plus one `RoleBinding` per watched namespace, with the images, cluster ID, watched namespaces and workload identity as values. From a clone of the repository (the registry has the chart from the first release after v0.1.0, see the [configuration reference](reference/configuration.md#helm-chart)):
+The chart installs the same objects as `config/default`, except the helper roles (off by default) and the Namespace, plus one `RoleBinding` per watched namespace, with the images, cluster ID, watched namespaces and workload identity as values. The first published chart comes with the release after v0.1.0 (see the [configuration reference](reference/configuration.md#helm-chart)). Until then, install from a clone of the tag of the release whose images you use, with that release's own digests; `./dist/chart` on `main` is newer than v0.1.0, so do not mix it with the v0.1.0 digests below for anything but a trial. Or use the kustomize path above. A trial from a clone of `main` with the v0.1.0 digests (the version the chart's own Kind test installs):
 
 ```bash
 helm install shadewright ./dist/chart --namespace shadewright-system --create-namespace \
@@ -139,7 +139,7 @@ helm install shadewright ./dist/chart --namespace shadewright-system --create-na
   --set analyzer.image.digest=sha256:697defe7774b29621f64c967ff93e83b309455c2a72d50b190e179f9ff3fc8e4
 ```
 
-The same settings object and checks as above apply (`--set settings.create=true` and `settings.spec` create it from values). Uninstalling keeps the CRDs by default (`crd.keep`), so Incidents survive.
+The same settings object and checks as above apply (`--set settings.create=true` and `settings.spec` create it from values, only when it does not exist; Helm never changes it afterwards). Uninstalling keeps the CRDs by default (`crd.keep`), so Incidents survive.
 
 ## 3. From a hand-written request to a reviewed pull request
 

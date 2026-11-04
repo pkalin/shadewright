@@ -4,7 +4,7 @@ title: Configuration reference
 
 # Configuration reference
 
-Everything an operator can set today, checked against `cmd/main.go` (the executor), `cmd/analyzer/main.go`, `internal/cmdutil` and `config/` at v0.1.0. The Helm chart in `dist/chart` ([#83](https://github.com/pkalin/shadewright/issues/83)) maps its values onto the settings below; see [Helm chart](#helm-chart). Objects and fields of the custom resources are in the [API reference](api.md). See also [compatibility](compatibility.md), [upgrade and uninstall](../upgrade-uninstall.md), [identity rotation](../identity-rotation.md) and [data handling](../data-handling.md). Metric names are in the [metrics reference](metrics.md).
+Everything an operator can set today, checked against `cmd/main.go` (the executor), `cmd/analyzer/main.go`, `internal/cmdutil` and `config/` at v0.1.0. The Helm chart in `dist/chart` maps its values onto the settings below; see [Helm chart](#helm-chart). Objects and fields of the custom resources are in the [API reference](api.md). See also [compatibility](compatibility.md), [upgrade and uninstall](../upgrade-uninstall.md), [identity rotation](../identity-rotation.md) and [data handling](../data-handling.md). Metric names are in the [metrics reference](metrics.md).
 
 ## Components and images
 
@@ -17,7 +17,7 @@ Both images are distroless, run as user 65532, and are published for linux/amd64
 
 ## Helm chart
 
-The chart is `dist/chart`. It was generated with Kubebuilder's `helm/v2-alpha` plugin (Kubebuilder v4.16.0) and then adjusted by hand: the plugin renders one manager, so the two Deployments, their ServiceAccounts and the RBAC are written out. **Do not regenerate it with the plugin**; `make test-chart` renders it and fails if its RBAC, NetworkPolicies, Services or CRDs differ from `kustomize build config/default` plus `config/watch` (any extra or missing verb, resource or subject), so a change to `config/rbac` needs the same change in `dist/chart/templates/rbac`. It is published as `oci://ghcr.io/pkalin/charts/shadewright` by the release tag workflow, so the first published version is the one after v0.1.0; until then install from a clone with `./dist/chart`.
+The chart is `dist/chart`. It was generated with Kubebuilder's `helm/v2-alpha` plugin (Kubebuilder v4.16.0) and then adjusted by hand: the plugin renders one manager, so the two Deployments, their ServiceAccounts and the RBAC are written out. **Do not regenerate it with the plugin**; `make test-chart` renders it and fails if its RBAC, NetworkPolicies, Services or CRDs differ from `kustomize build config/default` plus `config/watch` (any extra or missing verb, resource or subject), so a change to `config/rbac` needs the same change in `dist/chart/templates/rbac`. The Chart workflow runs these checks on every pull request, but they are not required for merge yet (the ruleset requires other checks): a red chart check does not block a merge, so read it. It is published as `oci://ghcr.io/pkalin/charts/shadewright` by the release tag workflow, so the first published version is the one after v0.1.0; until then install from a clone with `./dist/chart`.
 
 ```bash
 helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
@@ -145,7 +145,7 @@ The ConfigMap `shadewright-analysis-budget` holds the analyses started on the cu
 
 ## RemediationSettings
 
-One cluster-scoped object named `default` (field details in the [API reference](api.md)):
+One cluster-scoped object named `default` (field details in the [API reference](api.md)). With the Helm chart, `settings.create=true` creates it from `settings.spec` only when it does not exist (a hook that checks with `lookup`, which finds nothing under `helm template` and `--dry-run`, so those always show it); Helm never changes or deletes it afterwards, so a `spec.paused: true` set by hand survives every `helm upgrade`. Change it with kubectl or GitOps:
 
 | Field | Default | Meaning |
 | --- | --- | --- |

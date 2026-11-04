@@ -4,7 +4,7 @@ title: Upgrade and uninstall
 
 # Upgrade and uninstall
 
-What to do, in which order, when you move Shadewright to a new release or remove it. It is written for the manifests of v0.1.0 (`config/default`, applied with `kubectl apply -k`, see [getting started](getting-started.md#2-install-in-observe-only-mode)). The Helm chart ([#83](https://github.com/pkalin/shadewright/issues/83)) installs the same objects; this page does not give its commands yet, but the order below applies to `helm upgrade` and `helm uninstall` too, and note that `helm uninstall` keeps the CRDs by default (`crd.keep`).
+What to do, in which order, when you move Shadewright to a new release or remove it. It is written for the manifests of v0.1.0 (`config/default`, applied with `kubectl apply -k`, see [getting started](getting-started.md#2-install-in-observe-only-mode)). The Helm chart installs the same objects, except the helper roles (off by default) and the Namespace; this page does not give its commands yet ([#306](https://github.com/pkalin/shadewright/issues/306)), but the order below applies to `helm upgrade` and `helm uninstall` too. Note that `helm uninstall` keeps the CRDs by default (`crd.keep`), and that with `crd.keep=false` it removes the executor and the CRDs together, so do steps 1 to 3 first. Helm creates the `RemediationSettings` object `default` only when it does not exist and never changes or deletes it afterwards.
 
 The one thing to know first: **a `RemediationRequest` that has opened a pull request carries a finalizer, and only the executor can remove it.** Delete the executor, the namespace or the CRDs before the requests and they stay `Terminating` with nobody to clean up.
 
@@ -108,5 +108,5 @@ With Flux, removing the `Kustomization` that installs Shadewright prunes its obj
 
 ## Not covered
 
-- Uninstall and upgrade commands for the Helm chart: **planned** with [#83](https://github.com/pkalin/shadewright/issues/83).
+- Uninstall and upgrade commands for the Helm chart: **planned**, [#306](https://github.com/pkalin/shadewright/issues/306).
 - Rolling back after a merged pull request: merging is outside Shadewright's control, and undoing it is a revert pull request (the proposal of one is **planned**, [#96](https://github.com/pkalin/shadewright/issues/96)).

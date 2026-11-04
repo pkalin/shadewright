@@ -30,7 +30,7 @@ Deleting a request before merge is today the only way to cancel it, and what it 
 
 ## Verify a release
 
-Images built from `main` or a `v*` tag after [#82](https://github.com/pkalin/shadewright/issues/82) are signed keyless with cosign (the certificate comes from GitHub's OIDC token, there is no key to trust), carry an SPDX SBOM as a signed attestation, and have a GitHub build provenance attestation. v0.1.0 images are not signed. Verify by digest, never by tag, and use the digest you will deploy. You need [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 2.x or later and the [GitHub CLI](https://cli.github.com/).
+Images built from `main` or a `v*` tag after [#82](https://github.com/pkalin/shadewright/issues/82) are signed keyless with cosign (the certificate comes from GitHub's OIDC token, there is no key to trust), carry an SPDX SBOM as a signed attestation, and have a GitHub build provenance attestation. v0.1.0 images are not signed. Verify by digest, never by tag, and use the digest you will deploy. You need [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x or later (the signatures are stored as Sigstore bundles, which cosign 2.x does not find) and the [GitHub CLI](https://cli.github.com/).
 
 ```bash
 IMAGE=ghcr.io/pkalin/shadewright-executor   # and shadewright-analyzer

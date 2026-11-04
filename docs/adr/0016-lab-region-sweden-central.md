@@ -15,7 +15,7 @@ Checked 2026-11-01 on the lab subscription (`az cognitiveservices model list`) a
 
 ## Decision
 
-Run the whole lab in Sweden Central, so cluster, identities, storage and model are in one region, and the EU node price is the lowest.
+Run the whole lab in Sweden Central, so cluster, identities, storage and model are in one region, and the node price is the lowest of the EU candidates compared (Sweden Central and North Europe, 2026-11-01); East US 2 was cheaper still.
 
 ## Consequences
 

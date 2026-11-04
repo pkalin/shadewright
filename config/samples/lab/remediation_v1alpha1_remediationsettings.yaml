@@ -8,6 +8,7 @@ metadata:
   name: default
 spec:
   paused: false
+  # Accepted but not enforced yet: no controller reads it until #88.
   maxConcurrentRemediations: 1
   maxAnalysesPerDay: 0
   repositories:

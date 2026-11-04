@@ -276,6 +276,7 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update status of RemediationRequest %s: %w", req.NamespacedName, err)
 	}
+	recordDecision(out.phase, out.reason)
 	log.Info("Checked RemediationRequest against policy", "remediationRequest", req.NamespacedName,
 		"phase", out.phase, "reason", out.reason)
 	return ctrl.Result{}, nil
@@ -532,10 +533,11 @@ func (r *RemediationRequestReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	if r.Source == nil {
 		return errors.New("a SourceResolver is required")
 	}
+	requestPhases.setReader(mgr.GetCache())
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&remediationv1alpha1.RemediationRequest{}).
 		Named("remediationrequest").
-		Complete(r)
+		Complete(countErrors{r})
 }
 
 // checkBaseline compares the previous value the request claims with the live value of the field. The policy

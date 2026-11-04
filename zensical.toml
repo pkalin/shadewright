@@ -26,6 +26,7 @@ nav = [
   { "Reference" = [
     { "Configuration" = "reference/configuration.md" },
     { "API" = "reference/api.md" },
+    { "Metrics" = "reference/metrics.md" },
   ] },
   { "Decisions" = [
     { "Overview" = "adr/index.md" },

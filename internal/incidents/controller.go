@@ -277,6 +277,7 @@ func New(cfg Config) (*Controller, error) {
 // Incidents from the cache at start. It runs only on the leader, like the collector.
 func (c *Controller) SetupWithManager(mgr ctrl.Manager, obs <-chan collector.Observation) error {
 	c.client, c.reader, c.cache, c.obs = mgr.GetClient(), mgr.GetAPIReader(), mgr.GetClient(), obs
+	incidentPhases.setSource(mgr.GetCache(), c.cfg.Namespace)
 	if err := mgr.Add(c); err != nil {
 		return fmt.Errorf("adding the Incident controller: %w", err)
 	}
@@ -738,6 +739,7 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 			}
 		}
 		c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.RetryAfter)
+		incidentWriteErrors.Inc()
 		logf.FromContext(ctx).Error(err, "Failed to write the Incident status, will retry", "incident", name)
 		return
 	}

@@ -50,6 +50,7 @@ func (c *Controller) triggerLoop(ctx context.Context) {
 	defer tick.Stop()
 	for {
 		if err := c.pass(ctx); err != nil && ctx.Err() == nil {
+			triggerPassErrors.Inc()
 			logf.FromContext(ctx).Error(err, "Failed to decide which Incidents are due for analysis, will retry")
 		}
 		select {
@@ -177,6 +178,8 @@ func (c *Controller) readBudget(ctx context.Context, now time.Time, s *TriggerSe
 	if !ok {
 		return 0, ReasonBudgetUnreadable, nil
 	}
+	analysesUsedToday.Set(float64(used))
+	analysesPerDayLimit.Set(float64(s.MaxAnalysesPerDay))
 	return used, "", nil
 }
 

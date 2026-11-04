@@ -77,7 +77,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		apiReader           client.Reader
 		incidentReadTimeout time.Duration
 		// opens counts the repositories opened through the reconciler.
-		opens int
+		opens atomic.Int32
 		// recorder, when set, records the reconciler's Events.
 		recorder *record.FakeRecorder
 	)
@@ -97,7 +97,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				if repo.URL != settings.Spec.Repositories[0].URL {
 					return nil, errors.New("unknown repository")
 				}
-				opens++
+				opens.Add(1)
 				if openErr != nil {
 					return nil, openErr
 				}
@@ -160,7 +160,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		seq++
 		clock = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 		build = buildPath
-		faulty, openErr, writeTimeout, opens, recorder = nil, nil, 0, 0, nil
+		faulty, openErr, writeTimeout, recorder = nil, nil, 0, nil
+		opens.Store(0)
 		apiReader, incidentReadTimeout = nil, 0
 		err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fx.TargetNamespace}})
 		Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
@@ -1089,10 +1090,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			drive(remediationv1alpha1.PhaseAwaitingApproval)
 			_, err := git.Push(mainBranch, "README.yaml", []byte("a: 2\n"))
 			Expect(err).NotTo(HaveOccurred())
-			opens = 0
+			opens.Store(0)
 			Expect(reconcileOnce()).To(Succeed())
 			// One for the look at the pull request, one for the freshness check, which the render reuses.
-			Expect(opens).To(Equal(2))
+			Expect(opens.Load()).To(Equal(int32(2)))
 		})
 	})
 

@@ -31,6 +31,7 @@ var waitReasons = map[string]string{
 	ReasonTargetLocked:     "target_locked",
 	ReasonConcurrencyLimit: "concurrency_limit",
 	ReasonCircuitOpen:      "circuit_open",
+	ReasonCircuitHalfOpen:  "circuit_half_open",
 	ReasonLimitsUnknown:    "limits_unknown",
 }
 
@@ -45,20 +46,23 @@ var (
 	})
 	remediationWaits = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "shadewright_remediation_waits_total",
-		Help: "RemediationRequests held back before the policy check, by reason (target_locked, concurrency_limit, circuit_open, limits_unknown).",
+		Help: "RemediationRequests held back before the policy check, by reason (target_locked, concurrency_limit, circuit_open, circuit_half_open, limits_unknown).",
 	}, []string{"reason"})
 	breakerOpen = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "shadewright_circuit_breaker_open",
-		Help: "1 while the circuit breaker is open after consecutive failed RemediationRequests, else 0.",
+		Help: "1 while the circuit breaker is open or half-open after consecutive failed RemediationRequests, 0 while it is closed.",
 	})
 	breakerTrips = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "shadewright_circuit_breaker_trips_total",
-		Help: "Times this process found the circuit breaker open after it had found it closed (or at its first check).",
+		Help: "Times this process found the circuit breaker open after it had found it closed or half-open (or at its first check).",
 	})
 )
 
-// breakerSeenOpen is whether the last check of the limits in this process found the breaker open.
-var breakerSeenOpen atomic.Bool
+// breakerSeen is the state of the breaker the last check of the limits in this process found, plus one: zero
+// before the first check. One value for the process is enough: a check lists the requests of the request's
+// namespace, but the executor watches requests in the operator namespace only (CacheOptions), so every check
+// reads the same namespace and there is one breaker. Key it by namespace if requests ever span namespaces.
+var breakerSeen atomic.Int32
 
 func init() {
 	metrics.Registry.MustRegister(remediationsInFlight, concurrencyLimit, remediationWaits, breakerOpen, breakerTrips)
@@ -77,14 +81,13 @@ func recordLimits(s limitsState, err error) {
 	}
 	remediationsInFlight.Set(float64(s.active))
 	concurrencyLimit.Set(float64(s.limit))
-	if s.open {
-		breakerOpen.Set(1)
-		if breakerSeenOpen.CompareAndSwap(false, true) {
-			breakerTrips.Inc()
-		}
-	} else {
+	if s.circuit == circuitClosed {
 		breakerOpen.Set(0)
-		breakerSeenOpen.Store(false)
+	} else {
+		breakerOpen.Set(1)
+	}
+	if seen := int32(s.circuit) + 1; breakerSeen.Swap(seen) != seen && s.circuit == circuitOpen {
+		breakerTrips.Inc()
 	}
 	if label, ok := waitReasons[s.reason]; ok {
 		remediationWaits.WithLabelValues(label).Inc()

@@ -42,12 +42,14 @@ const DefaultTriggerInterval = 10 * time.Second
 // budget ConfigMap), so the managed fields tell them from the observation writes.
 const triggerFieldOwner = "shadewright-analysis-trigger"
 
-// triggerLoop marks the Incidents due for analysis every TriggerInterval until ctx ends.
+// triggerLoop marks the Incidents due for analysis every TriggerInterval until ctx ends. Each pass runs under
+// PassTimeout, shorter than the interval: ctx lasts as long as the controller, so a call that stalls without
+// a deadline would stop every later pass.
 func (c *Controller) triggerLoop(ctx context.Context) {
 	tick := time.NewTicker(c.cfg.TriggerInterval)
 	defer tick.Stop()
 	for {
-		if err := c.markDue(ctx); err != nil && ctx.Err() == nil {
+		if err := c.pass(ctx); err != nil && ctx.Err() == nil {
 			logf.FromContext(ctx).Error(err, "Failed to decide which Incidents are due for analysis, will retry")
 		}
 		select {
@@ -56,6 +58,13 @@ func (c *Controller) triggerLoop(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// pass runs one [Controller.markDue] under PassTimeout.
+func (c *Controller) pass(ctx context.Context) error {
+	pctx, cancel := context.WithTimeout(ctx, c.cfg.PassTimeout)
+	defer cancel()
+	return c.markDue(pctx)
 }
 
 // markDue decides, for every Incident in the namespace, whether it is due for analysis ([Due]) and sets its
@@ -142,8 +151,8 @@ func (c *Controller) markDue(ctx context.Context) error {
 // readBudget reads maxAnalysesPerDay from the RemediationSettings (into s) and the analyses used today from
 // the budget ConfigMap. closed is the not-due reason of every Incident when the budget is unknown, and empty
 // otherwise; readErr is set when a read failed for another reason than a missing object. Both reads together
-// run under ReadTimeout: the trigger's context lasts as long as the controller, and a read that stalls without
-// a deadline would stop every later pass.
+// run under ReadTimeout, shorter than the pass, so a read that stalls leaves the rest of the pass to take the
+// marks that say due back.
 func (c *Controller) readBudget(ctx context.Context, now time.Time, s *TriggerSettings) (used int, closed string, readErr error) {
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.ReadTimeout)
 	defer cancel()

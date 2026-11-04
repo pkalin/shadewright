@@ -45,8 +45,11 @@ const (
 	DefaultWindow       = 5 * time.Minute
 	DefaultMaxIncidents = 500
 	DefaultWriteTimeout = 10 * time.Second
-	// DefaultReadTimeout bounds the analysis trigger's budget read; it stays under DefaultTriggerInterval, so a
-	// read that stalls costs one pass, not the passes after it.
+	// DefaultPassTimeout bounds one pass of the analysis trigger, its reads and writes together. It stays
+	// under DefaultTriggerInterval, so a call that stalls costs at most the pass it is in.
+	DefaultPassTimeout = 8 * time.Second
+	// DefaultReadTimeout bounds the trigger's budget read within a pass. It leaves the rest of the pass to
+	// take back the marks that say due when the read fails.
 	DefaultReadTimeout = 5 * time.Second
 	DefaultRetryAfter  = 5 * time.Second
 	// DefaultEventInterval is the least time between two Warning events at the Incident cap.
@@ -73,9 +76,17 @@ type Config struct {
 	MaxIncidents int
 	// WriteTimeout is the deadline of each write of one Incident, with its retries on conflict.
 	WriteTimeout time.Duration
+	// PassTimeout is the deadline of one pass of the analysis trigger: the list from the cache, the budget
+	// read and the writes of the AnalysisDue conditions together (each write keeps its WriteTimeout within
+	// it). It must be shorter than TriggerInterval; zero takes DefaultPassTimeout, or nine tenths of
+	// TriggerInterval when that is shorter. A pass that runs into it stops; the Incidents it did not decide
+	// keep their marks until the next pass.
+	PassTimeout time.Duration
 	// ReadTimeout is the deadline of the analysis trigger's budget read in each pass: the RemediationSettings
 	// and the budget ConfigMap together. A read that runs into it counts as a read that failed
-	// (SettingsUnreadable or BudgetReadFailed): the Incidents marked due are set not due.
+	// (SettingsUnreadable or BudgetReadFailed): the Incidents marked due are set not due in the rest of the
+	// pass. It must be shorter than PassTimeout; zero takes DefaultReadTimeout, or three quarters of
+	// PassTimeout when that is shorter.
 	ReadTimeout time.Duration
 	// RetryAfter is how long a batch whose write failed waits before it is tried again.
 	RetryAfter time.Duration
@@ -165,9 +176,6 @@ func New(cfg Config) (*Controller, error) {
 	if cfg.WriteTimeout <= 0 {
 		cfg.WriteTimeout = DefaultWriteTimeout
 	}
-	if cfg.ReadTimeout <= 0 {
-		cfg.ReadTimeout = DefaultReadTimeout
-	}
 	if cfg.RetryAfter <= 0 {
 		cfg.RetryAfter = DefaultRetryAfter
 	}
@@ -191,6 +199,20 @@ func New(cfg Config) (*Controller, error) {
 	}
 	if cfg.TriggerInterval <= 0 {
 		cfg.TriggerInterval = DefaultTriggerInterval
+	}
+	if cfg.PassTimeout <= 0 {
+		cfg.PassTimeout = min(DefaultPassTimeout, cfg.TriggerInterval*9/10)
+	}
+	if cfg.PassTimeout >= cfg.TriggerInterval {
+		return nil, fmt.Errorf("incidents: the trigger pass timeout %s must be shorter than the trigger interval %s",
+			cfg.PassTimeout, cfg.TriggerInterval)
+	}
+	if cfg.ReadTimeout <= 0 {
+		cfg.ReadTimeout = min(DefaultReadTimeout, cfg.PassTimeout*3/4)
+	}
+	if cfg.ReadTimeout >= cfg.PassTimeout {
+		return nil, fmt.Errorf("incidents: the budget read timeout %s must be shorter than the trigger pass timeout %s",
+			cfg.ReadTimeout, cfg.PassTimeout)
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now

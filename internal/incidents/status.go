@@ -43,12 +43,19 @@ type counted struct {
 	began time.Time
 }
 
+// heldOccurrence is one occurrence a batch holds: what was counted of it, and the namespace it came from
+// (the observation's Source), whose share of the occurrences held unwritten it is charged to.
+type heldOccurrence struct {
+	counted
+	source string
+}
+
 // batch is what one Incident has gained since its last status write.
 type batch struct {
 	spec        remediationv1alpha1.IncidentSpec
 	count       int64
 	first, last time.Time
-	occurrences map[string]counted
+	occurrences map[string]heldOccurrence
 }
 
 // occurrenceOf returns what b holds of one occurrence. b may be nil.
@@ -57,22 +64,29 @@ func (b *batch) occurrenceOf(id string) (counted, bool) {
 		return counted{}, false
 	}
 	o, ok := b.occurrences[id]
-	return o, ok
+	return o.counted, ok
 }
 
-// add folds other into b. Both belong to the same fingerprint.
+// add folds other into b. Both belong to the same fingerprint. An occurrence b already holds keeps its
+// source: the same occurrence always comes from the same namespace, and keeping the first one keeps the
+// namespace it was charged to.
 func (b *batch) add(other *batch) {
 	b.count += other.count
 	b.first = earliest(b.first, other.first)
 	b.last = latest(b.last, other.last)
 	for id, o := range other.occurrences {
-		b.occurrences[id] = higher(b.occurrences[id], o)
+		cur, ok := b.occurrences[id]
+		if !ok {
+			cur.source = o.source
+		}
+		cur.counted = higher(cur.counted, o.counted)
+		b.occurrences[id] = cur
 	}
 }
 
 // combine returns one batch holding all of bs, which belong to the same fingerprint, without changing them.
 func combine(bs []*batch) *batch {
-	out := &batch{spec: bs[0].spec, occurrences: map[string]counted{}}
+	out := &batch{spec: bs[0].spec, occurrences: map[string]heldOccurrence{}}
 	for _, b := range bs {
 		out.add(b)
 	}

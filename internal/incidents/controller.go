@@ -61,9 +61,14 @@ const (
 	// DefaultMaxPendingOccurrences and DefaultMaxPendingOccurrencesPerIncident bound the occurrences held
 	// unwritten, in pending, failed and in-flight batches together. One Incident's cap is eight times the
 	// records its status keeps, so a burst of up to that many new occurrences within one window is counted
-	// in full.
+	// in full, as long as its namespace's share and the total have room.
 	DefaultMaxPendingOccurrences            = 10000
 	DefaultMaxPendingOccurrencesPerIncident = 8 * remediationv1alpha1.MaxOccurrenceRecords
+	// DefaultNamespaceShareDivisor sets the default share of one namespace in MaxPendingOccurrences: a quarter
+	// (2,500 at the defaults), but never less than MaxPendingOccurrencesPerIncident. A namespace can pass its
+	// share by one per Incident, so one noisy namespace leaves about 70% of the total to the others at the
+	// defaults, and four namespaces must be noisy at once to fill it (three hold at most 8,000).
+	DefaultNamespaceShareDivisor = 4
 )
 
 // overflowLogInterval is the least time between two log lines about occurrences left uncounted at the caps
@@ -115,15 +120,26 @@ type Config struct {
 	StopTimeout time.Duration
 	// MaxPendingOccurrences caps the occurrences held unwritten by all Incidents together, and
 	// MaxPendingOccurrencesPerIncident those of one Incident: the distinct occurrences in its pending, failed
-	// and in-flight batches, each batch counted on its own. A new occurrence over either cap is not counted
-	// (an undercount); a new occurrence is one its Incident's pending batch does not hold yet, so one held
-	// only in a failed or in-flight batch counts as new there. Its observation still moves the Incident's
-	// last seen, and it is counted in
+	// and in-flight batches, each batch counted on its own. A new occurrence over any of the caps (these two
+	// and MaxPendingOccurrencesPerNamespace) is not counted (an undercount); a new occurrence is one its
+	// Incident's pending batch does not hold yet, so one held only in a failed or in-flight batch counts as
+	// new there. Its observation still moves the Incident's last seen, and it is counted in
 	// shadewright_incident_occurrences_overflow_total and logged at most once per minute. An Incident that
 	// holds nothing unwritten always takes its first occurrence, so the total can exceed
-	// MaxPendingOccurrences by one per Incident.
+	// MaxPendingOccurrences, and a namespace its share, by one per Incident.
 	MaxPendingOccurrences            int
 	MaxPendingOccurrencesPerIncident int
+	// MaxPendingOccurrencesPerNamespace is the share of MaxPendingOccurrences that the occurrences from one
+	// namespace may take together, so one noisy namespace cannot fill the total and leave the others' new
+	// occurrences uncounted. Each occurrence is charged to the namespace it came from
+	// (collector.Observation.Source: the event's own namespace, or the pod's), the namespace RBAC grants
+	// event creation in; not to its subject's, which a cluster-scoped subject such as a Node does not have.
+	// The share is checked against the new occurrence's namespace; one over it is not counted, as over the
+	// other caps, and an Incident that holds nothing unwritten still takes its first occurrence, so a
+	// namespace may pass its share by one per Incident. Zero takes the larger of MaxPendingOccurrences /
+	// DefaultNamespaceShareDivisor and MaxPendingOccurrencesPerIncident, so the share never lowers the cap of
+	// one Incident; any value is then taken down to MaxPendingOccurrences, and is at least one.
+	MaxPendingOccurrencesPerNamespace int
 	// Debounce, SettleLimit, Cooldown, AnalysisTimeout and TriggerInterval drive the analysis trigger
 	// ([Due]): how long an Incident must go without a new observation, the longest it waits to settle after
 	// its first unsettled observation (the aggregation window by default), the least time between the start
@@ -158,10 +174,15 @@ type Controller struct {
 	// recordsOf indexes records by Incident name, so the records of one Incident are found without visiting
 	// every record. setRecord and deleteRecord keep the two in step.
 	recordsOf map[string]map[string]struct{}
-	// held is, per fingerprint, the number of occurrences in its pending, failed and in-flight batches (an
-	// occurrence in two batches counts twice), and heldTotal their sum; consume holds them to the caps.
-	held      map[string]int
+	// held is, per fingerprint, what its pending, failed and in-flight batches hold (an occurrence in two
+	// batches counts twice), heldTotal the sum of their n and heldIn the sum of their in per source namespace
+	// (only namespaces holding something); consume holds them to the caps. held has at most one entry per
+	// name in names (MaxIncidents); each holding's in has at most n keys, so all of them together, and the
+	// keys of heldIn, are at most heldTotal, which consume keeps within MaxPendingOccurrences plus one per
+	// Incident.
+	held      map[string]*holding
 	heldTotal int
+	heldIn    map[string]int
 	// overflowLogged is when occurrences left uncounted at the caps were last logged, and overflowed how
 	// many were left uncounted since then.
 	overflowLogged time.Time
@@ -187,6 +208,13 @@ type Controller struct {
 	waiting map[string]time.Time
 	// lastEvent is when the last Warning event at the cap was written.
 	lastEvent time.Time
+}
+
+// holding is what one fingerprint's batches hold unwritten: n occurrences, and in how many of them each
+// source namespace was charged (the values add up to n, no zero entry).
+type holding struct {
+	n  int
+	in map[string]int
 }
 
 // record is what was counted of one occurrence and by which Incident.
@@ -224,6 +252,13 @@ func New(cfg Config) (*Controller, error) {
 	if cfg.MaxPendingOccurrencesPerIncident <= 0 {
 		cfg.MaxPendingOccurrencesPerIncident = DefaultMaxPendingOccurrencesPerIncident
 	}
+	if cfg.MaxPendingOccurrencesPerNamespace <= 0 {
+		// The default share never lowers the per-Incident cap: one Incident alone in its namespace can still
+		// hold its whole burst.
+		cfg.MaxPendingOccurrencesPerNamespace = max(cfg.MaxPendingOccurrences/DefaultNamespaceShareDivisor,
+			cfg.MaxPendingOccurrencesPerIncident)
+	}
+	cfg.MaxPendingOccurrencesPerNamespace = max(min(cfg.MaxPendingOccurrencesPerNamespace, cfg.MaxPendingOccurrences), 1)
 	if cfg.Debounce <= 0 {
 		cfg.Debounce = DefaultDebounce
 	}
@@ -261,7 +296,8 @@ func New(cfg Config) (*Controller, error) {
 		ready:     make(chan struct{}),
 		records:   map[string]record{},
 		recordsOf: map[string]map[string]struct{}{},
-		held:      map[string]int{},
+		held:      map[string]*holding{},
+		heldIn:    map[string]int{},
 		names:     map[string]struct{}{},
 		pending:   map[string]*batch{},
 		failed:    map[string]*batch{},
@@ -507,22 +543,29 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 	}
 	b := c.pending[o.Fingerprint]
 	if b == nil {
-		b = &batch{spec: specOf(o), occurrences: map[string]counted{}}
+		b = &batch{spec: specOf(o), occurrences: map[string]heldOccurrence{}}
 		c.pending[o.Fingerprint] = b
 	}
 	at := c.notFuture(o.ObservedAt)
 	_, scheduled := c.nextWrite[o.Fingerprint]
 	if _, ok := b.occurrences[o.Occurrence]; !ok {
-		if c.full(o.Fingerprint) {
+		if c.full(o.Fingerprint, o.Source) {
 			b.add(&batch{first: at, last: at})
 			c.overflow(ctx, o)
 			return !scheduled
 		}
-		c.held[o.Fingerprint]++
+		h := c.held[o.Fingerprint]
+		if h == nil {
+			h = &holding{in: map[string]int{}}
+			c.held[o.Fingerprint] = h
+		}
+		h.n++
+		h.in[o.Source]++
+		c.heldIn[o.Source]++
 		c.heldTotal++
 	}
-	b.add(&batch{count: n, first: at, last: at, occurrences: map[string]counted{
-		o.Occurrence: {total: o.Total, began: o.Began},
+	b.add(&batch{count: n, first: at, last: at, occurrences: map[string]heldOccurrence{
+		o.Occurrence: {counted: counted{total: o.Total, began: o.Began}, source: o.Source},
 	}})
 	// An ID the schema refuses is counted but never stored, so it is not remembered either: nothing would
 	// ever drop its record from memory.
@@ -533,17 +576,29 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 	return !scheduled
 }
 
-// full reports whether a new occurrence of fp would go over the caps on occurrences held unwritten. An
-// Incident that holds none takes one whatever the total, so no Incident is left without its first
-// occurrence. The caller holds mu.
-func (c *Controller) full(fp string) bool {
-	h := c.held[fp]
-	return h >= c.cfg.MaxPendingOccurrencesPerIncident || h > 0 && c.heldTotal >= c.cfg.MaxPendingOccurrences
+// full reports whether a new occurrence of fp from source namespace ns would go over the caps on occurrences
+// held unwritten: its Incident's, the total, or the share of ns. An Incident that holds none takes one
+// whatever the total and the share, so no Incident is left without its first occurrence. The caller holds
+// mu.
+func (c *Controller) full(fp, ns string) bool {
+	h := c.heldBy(fp)
+	if h >= c.cfg.MaxPendingOccurrencesPerIncident {
+		return true
+	}
+	return h > 0 && (c.heldTotal >= c.cfg.MaxPendingOccurrences || c.heldIn[ns] >= c.cfg.MaxPendingOccurrencesPerNamespace)
+}
+
+// heldBy returns how many occurrences fp's batches hold unwritten. The caller holds mu.
+func (c *Controller) heldBy(fp string) int {
+	if h := c.held[fp]; h != nil {
+		return h.n
+	}
+	return 0
 }
 
 // overflow counts an observation of a new occurrence left uncounted at the caps, and logs at most once per
-// overflowLogInterval how many were since the last line. It names the Incident, nothing from the event.
-// The caller holds mu.
+// overflowLogInterval how many were since the last line. It names the Incident and the source namespace,
+// nothing else from the event. The caller holds mu.
 func (c *Controller) overflow(ctx context.Context, o collector.Observation) {
 	overflowedOccurrences.Inc()
 	c.overflowed++
@@ -552,26 +607,51 @@ func (c *Controller) overflow(ctx context.Context, o collector.Observation) {
 		return
 	}
 	logf.FromContext(ctx).Info("Left new occurrences uncounted at the cap on occurrences held unwritten",
-		"incident", Name(o.Fingerprint), "uncounted", c.overflowed, "held", c.held[o.Fingerprint],
-		"heldTotal", c.heldTotal, "maxPerIncident", c.cfg.MaxPendingOccurrencesPerIncident,
-		"max", c.cfg.MaxPendingOccurrences)
+		"incident", Name(o.Fingerprint), "uncounted", c.overflowed, "held", c.heldBy(o.Fingerprint),
+		"heldTotal", c.heldTotal, "namespace", o.Source, "heldInNamespace", c.heldIn[o.Source],
+		"maxPerIncident", c.cfg.MaxPendingOccurrencesPerIncident,
+		"maxPerNamespace", c.cfg.MaxPendingOccurrencesPerNamespace, "max", c.cfg.MaxPendingOccurrences)
 	c.overflowLogged, c.overflowed = now, 0
 }
 
-// recount sets held for fp to what its pending and failed batches hold, once no batch of fp is in flight.
-// The caller holds mu.
+// recount sets held for fp to what its pending and failed batches hold, once no batch of fp is in flight,
+// and moves heldTotal and heldIn by the difference: each source namespace by what of its occurrences was
+// written or dropped. The caller holds mu.
 func (c *Controller) recount(fp string) {
-	n := 0
+	now := &holding{in: map[string]int{}}
 	for _, b := range []*batch{c.pending[fp], c.failed[fp]} {
 		if b != nil {
-			n += len(b.occurrences)
+			for _, o := range b.occurrences {
+				now.n++
+				now.in[o.source]++
+			}
 		}
 	}
-	c.heldTotal += n - c.held[fp]
-	if n == 0 {
+	if was := c.held[fp]; was != nil {
+		c.heldTotal -= was.n
+		for ns, k := range was.in {
+			c.moveIn(ns, -k)
+		}
+	}
+	c.heldTotal += now.n
+	for ns, k := range now.in {
+		c.moveIn(ns, k)
+	}
+	if now.n == 0 {
 		delete(c.held, fp)
 	} else {
-		c.held[fp] = n
+		c.held[fp] = now
+	}
+}
+
+// moveIn moves the count of source namespace ns in heldIn by d, deleting it at zero. Every occurrence
+// recount takes off was added by consume or an earlier recount, so it never goes below zero. The caller
+// holds mu.
+func (c *Controller) moveIn(ns string, d int) {
+	if v := c.heldIn[ns] + d; v == 0 {
+		delete(c.heldIn, ns)
+	} else {
+		c.heldIn[ns] = v
 	}
 }
 

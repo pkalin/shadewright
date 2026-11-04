@@ -60,9 +60,10 @@ var droppedBatches = prometheus.NewCounterVec(prometheus.CounterOpts{
 }, []string{"reason"})
 
 // overflowedOccurrences counts the observations of an occurrence that were not counted because the caps on
-// occurrences held unwritten were reached (Config.MaxPendingOccurrences and
-// Config.MaxPendingOccurrencesPerIncident). Their Incident is still written; only its count and occurrence
-// records fall short.
+// occurrences held unwritten were reached (Config.MaxPendingOccurrences,
+// Config.MaxPendingOccurrencesPerIncident and Config.MaxPendingOccurrencesPerNamespace). It has no labels, so
+// no namespace name reaches it. Their Incident is still written; only its count and occurrence records fall
+// short.
 var overflowedOccurrences = prometheus.NewCounter(prometheus.CounterOpts{
 	Name: "shadewright_incident_occurrences_overflow_total",
 	Help: "Observations of a new occurrence not counted because the caps on occurrences held unwritten were reached.",

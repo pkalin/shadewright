@@ -45,7 +45,10 @@ const (
 	DefaultWindow       = 5 * time.Minute
 	DefaultMaxIncidents = 500
 	DefaultWriteTimeout = 10 * time.Second
-	DefaultRetryAfter   = 5 * time.Second
+	// DefaultReadTimeout bounds the analysis trigger's budget read; it stays under DefaultTriggerInterval, so a
+	// read that stalls costs one pass, not the passes after it.
+	DefaultReadTimeout = 5 * time.Second
+	DefaultRetryAfter  = 5 * time.Second
 	// DefaultEventInterval is the least time between two Warning events at the Incident cap.
 	DefaultEventInterval = 10 * time.Minute
 	// DefaultStopTimeout bounds the last writes when the controller stops. It stays under the analyzer Pod's
@@ -70,6 +73,10 @@ type Config struct {
 	MaxIncidents int
 	// WriteTimeout is the deadline of each write of one Incident, with its retries on conflict.
 	WriteTimeout time.Duration
+	// ReadTimeout is the deadline of the analysis trigger's budget read in each pass: the RemediationSettings
+	// and the budget ConfigMap together. A read that runs into it counts as a read that failed
+	// (SettingsUnreadable or BudgetReadFailed): the Incidents marked due are set not due.
+	ReadTimeout time.Duration
 	// RetryAfter is how long a batch whose write failed waits before it is tried again.
 	RetryAfter time.Duration
 	// Recorder and Regarding report a refused fingerprint as a Warning event about Regarding (the analyzer's
@@ -157,6 +164,9 @@ func New(cfg Config) (*Controller, error) {
 	}
 	if cfg.WriteTimeout <= 0 {
 		cfg.WriteTimeout = DefaultWriteTimeout
+	}
+	if cfg.ReadTimeout <= 0 {
+		cfg.ReadTimeout = DefaultReadTimeout
 	}
 	if cfg.RetryAfter <= 0 {
 		cfg.RetryAfter = DefaultRetryAfter

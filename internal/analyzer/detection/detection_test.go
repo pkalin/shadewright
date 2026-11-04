@@ -391,3 +391,48 @@ func TestDiscoveryHonoursTheContext(t *testing.T) {
 		t.Errorf("discovery past its deadline returned after %v", d)
 	}
 }
+
+// TestHangingSettingsCallsEndAtTheDeadline checks that a settings read or a status write that never answers
+// ends at Timeout with an error, so the run returns and is retried, instead of holding the controller's only
+// worker (#243). Without the deadline the call waits for the reconcile's context, which has none.
+func TestHangingSettingsCallsEndAtTheDeadline(t *testing.T) {
+	hang := func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	for name, funcs := range map[string]interceptor.Funcs{
+		"read": {Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*remediationv1alpha1.RemediationSettings); ok {
+				return hang(ctx)
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		}},
+		"write": {SubResourceUpdate: func(ctx context.Context, _ client.Client, _ string, _ client.Object, _ ...client.SubResourceUpdateOption) error {
+			return hang(ctx)
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := aksSettings()
+			c := clientfake.NewClientBuilder().WithScheme(fakeScheme(t)).WithObjects(s, aksNode("n0")).
+				WithStatusSubresource(s).WithInterceptorFuncs(funcs).Build()
+			d, err := New(Config{Registry: registry(t), GroupVersions: noGroups, Timeout: 100 * time.Millisecond})
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.reader, d.writer = c, c
+			done := make(chan error, 1)
+			go func() {
+				_, err := d.Reconcile(t.Context(), request)
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("Reconcile = %v, want context.DeadlineExceeded", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Reconcile did not return within 5 s of a 100 ms deadline")
+			}
+		})
+	}
+}

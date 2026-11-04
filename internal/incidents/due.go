@@ -141,8 +141,12 @@ func (c *Controller) markDue(ctx context.Context) error {
 
 // readBudget reads maxAnalysesPerDay from the RemediationSettings (into s) and the analyses used today from
 // the budget ConfigMap. closed is the not-due reason of every Incident when the budget is unknown, and empty
-// otherwise; readErr is set when a read failed for another reason than a missing object.
+// otherwise; readErr is set when a read failed for another reason than a missing object. Both reads together
+// run under ReadTimeout: the trigger's context lasts as long as the controller, and a read that stalls without
+// a deadline would stop every later pass.
 func (c *Controller) readBudget(ctx context.Context, now time.Time, s *TriggerSettings) (used int, closed string, readErr error) {
+	ctx, cancel := context.WithTimeout(ctx, c.cfg.ReadTimeout)
+	defer cancel()
 	var settings remediationv1alpha1.RemediationSettings
 	switch err := c.cache.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, &settings); {
 	case apierrors.IsNotFound(err):

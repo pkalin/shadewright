@@ -920,3 +920,38 @@ func TestUnreadableBudgetTakesTheMarkBack(t *testing.T) {
 	reader.fail.Store(true)
 	eventually(t, ns, 1, dueIs(false, ReasonBudgetReadFailed))
 }
+
+// hangingBudget is a reader whose reads of the budget ConfigMap hang, while hang is set, until their context
+// ends, like an API server that accepts the request and never answers.
+type hangingBudget struct {
+	client.Reader
+	hang atomic.Bool
+}
+
+func (h *hangingBudget) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1.ConfigMap); ok && h.hang.Load() {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return h.Reader.Get(ctx, key, obj, opts...)
+}
+
+// A budget read that never answers ends at ReadTimeout: the pass goes on with the budget unknown, so an
+// Incident marked due is set not due, and later passes still run (#243). Without the deadline the read waits
+// for the trigger's context, which lasts as long as the controller, and the mark stays.
+func TestHangingBudgetReadEndsAtTheDeadline(t *testing.T) {
+	ns := namespace(t)
+	createSettings(t, 10)
+	createBudget(t, ns, nil)
+	createIncident(t, ns, 1, incidentStatus(2*time.Minute, time.Hour, 0))
+	reader := &hangingBudget{Reader: env.admin}
+	cfg := triggerConfig
+	cfg.ReadTimeout = 100 * time.Millisecond
+	startWith(t, ns, cfg, func(c *Controller, _ *countingClient) { c.reader = reader })
+	eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
+	reader.hang.Store(true)
+	eventually(t, ns, 1, dueIs(false, ReasonBudgetReadFailed))
+	// Later passes still run: once the reads answer again, the Incident is due again.
+	reader.hang.Store(false)
+	eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
+}

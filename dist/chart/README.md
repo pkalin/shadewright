@@ -1,6 +1,8 @@
 # shadewright
 
-![Version: 0.1.0](https://img.shields.io/badge/Version-0.1.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.1.0](https://img.shields.io/badge/AppVersion-0.1.0-informational?style=flat-square)
+![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
+
+<!-- No version badges: release-please bumps Chart.yaml in the release pull request, and a version printed here would make this file stale on every release. The version is on the releases page and in Chart.yaml. -->
 
 <!-- This file is generated from values.yaml and README.md.gotmpl by helm-docs (make chart-docs). Do not edit it by hand. -->
 

@@ -1,0 +1,23 @@
+{{- if .Values.rbac.helpers.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "incident-viewer-role" "context" $) }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "" "context" $) | nindent 4 }}
+rules:
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - incidents
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - incidents/status
+  verbs:
+  - get
+{{- end }}

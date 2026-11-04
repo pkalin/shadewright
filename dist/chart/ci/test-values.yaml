@@ -1,0 +1,13 @@
+# Values for lint and render tests only. Placeholders, not a real cluster, identity or image.
+clusterId: chart-test
+executor:
+  image:
+    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+  identity:
+    azure:
+      clientId: 00000000-0000-0000-0000-000000000000
+analyzer:
+  image:
+    digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+  watchNamespaces:
+    - demo

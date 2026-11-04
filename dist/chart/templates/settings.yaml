@@ -1,0 +1,28 @@
+{{- if .Values.settings.create }}
+{{- /* lookup returns an empty map under helm template and --dry-run (no cluster is asked), so those render the object; a real install or upgrade asks the API server. Helm 4 fails a lookup of a kind whose CRD does not exist yet (the first install), so ask only when the API server serves the kind: Capabilities lists it from the cluster. */ -}}
+{{- $existing := dict }}
+{{- if .Capabilities.APIVersions.Has "remediation.shadewright.io/v1alpha1/RemediationSettings" }}
+{{- $existing = lookup "remediation.shadewright.io/v1alpha1" "RemediationSettings" "" "default" | default dict }}
+{{- end }}
+{{- if not $existing }}
+# The one cluster-wide settings object (design section 4). It is created only when asked for, and only when it
+# does not exist: Helm never changes it afterwards. A later install or upgrade finds the object (lookup) and
+# renders nothing, so a pause set by hand (spec.paused: true, the kill switch) is never undone by a release.
+# It is a post-install and post-upgrade hook, not a normal template: on a fresh install the CRD is created by
+# the same release, and Helm cannot map the kind until the CRD exists. A hook runs after the release objects are
+# applied. There is no hook-delete-policy: the object is never deleted by Helm. Helm does not track hook
+# objects, so the object also stays when the release is uninstalled. lookup returns nothing under helm template
+# and helm install --dry-run, so those always show the object. Leave settings.create off if you manage the
+# object another way (for example in your GitOps repository).
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: RemediationSettings
+metadata:
+  name: default
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+  labels:
+    {{- include "shadewright.labels" (dict "component" "" "context" $) | nindent 4 }}
+spec:
+  {{- toYaml (required "settings.spec is required when settings.create is true" .Values.settings.spec) | nindent 2 }}
+{{- end }}
+{{- end }}

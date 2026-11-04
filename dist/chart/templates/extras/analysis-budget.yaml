@@ -1,0 +1,10 @@
+# The analyzer's daily analysis budget. It ships without data on purpose, so an upgrade never resets the
+# count, and the analyzer may get and update it but not create it. The name is fixed in the binary
+# (incidents.BudgetName behind the "shadewright-" prefix), so it does not follow the release name.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shadewright-analysis-budget
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "analyzer" "context" $) | nindent 4 }}

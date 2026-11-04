@@ -35,12 +35,14 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpat
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS executor
 WORKDIR /
+COPY --from=builder /workspace/LICENSE /workspace/NOTICE /licenses/
 COPY --from=builder /workspace/manager .
 USER 65532:65532
 ENTRYPOINT ["/manager"]
 
 FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS analyzer
 WORKDIR /
+COPY --from=builder /workspace/LICENSE /workspace/NOTICE /licenses/
 COPY --from=builder /workspace/analyzer .
 USER 65532:65532
 ENTRYPOINT ["/analyzer"]
@@ -50,5 +52,6 @@ FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/analyzer .
+COPY --from=builder /workspace/LICENSE /workspace/NOTICE /licenses/
 USER 65532:65532
 ENTRYPOINT ["/manager"]

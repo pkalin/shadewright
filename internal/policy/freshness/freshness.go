@@ -79,6 +79,10 @@ var ErrRepositoryUnusable = errors.New("the repository settings cannot be used t
 // ErrPaused means RemediationSettings pauses every write. The plan is not stale; the write waits.
 var ErrPaused = errors.New("remediation is paused")
 
+// ErrWriteBlocked means the kill switch could not be read right before a write (the settings are missing or
+// the API server did not answer), so the write was not made: the gate fails closed. The write is retried.
+var ErrWriteBlocked = errors.New("the write was blocked: the kill switch cannot be read")
+
 // StaleError says the plan the request was approved for is no longer the plan the world calls for.
 type StaleError struct {
 	// Reason is one of the Reason constants.
@@ -144,8 +148,13 @@ func (e *ProviderError) Error() string {
 // Is matches the class, so errors.Is(err, providers.ErrRetryable) works on the sanitised error.
 func (e *ProviderError) Is(target error) bool { return e.Class != nil && target == e.Class }
 
-// provider replaces err by a ProviderError for op, dropping its text and chain.
+// provider replaces err by a ProviderError for op, dropping its text and chain. An error of the kill switch
+// (ErrPaused, ErrWriteBlocked), which a gated provider returns instead of calling the host, is returned as it
+// is: it holds no provider text, and the caller must still tell a pause from a failure of the host.
 func provider(op string, err error) error {
+	if errors.Is(err, ErrPaused) || errors.Is(err, ErrWriteBlocked) {
+		return err
+	}
 	pe := &ProviderError{Op: op}
 	for _, class := range []error{providers.ErrNotFound, providers.ErrConflict, providers.ErrForbidden,
 		providers.ErrRejected, providers.ErrRetryable, providers.ErrTooLarge, context.Canceled,

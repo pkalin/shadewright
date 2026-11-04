@@ -131,14 +131,19 @@ To remove observe-only, `kubectl delete -k .` and delete the settings object fir
 
 ### Install with Helm instead
 
-The chart installs the same objects as `config/default`, except the helper roles (off by default) and the Namespace, plus one `RoleBinding` per watched namespace, with the images, cluster ID, watched namespaces and workload identity as values. With no values the published chart installs an idle Shadewright: no watched namespace, no Azure workload identity, the cluster ID from the `kube-system` UID, and the release's images by digest. From a clone the chart needs the digests (as below) or `image.allowTag: true` with images built from that clone. The first published chart comes with the release after v0.1.0 (see the [configuration reference](reference/configuration.md#helm-chart)). Until then, install from a clone of the tag of the release whose images you use, with that release's own digests; `./dist/chart` on `main` is newer than v0.1.0, so do not mix it with the v0.1.0 digests below for anything but a trial. Or use the kustomize path above. A trial from a clone of `main` with the v0.1.0 digests (the version the chart's own Kind test installs):
+The chart installs the same objects as `config/default`, except the helper roles (off by default) and the Namespace, plus one `RoleBinding` per watched namespace, with the images, cluster ID, watched namespaces and workload identity as values. With no values the published chart installs an idle Shadewright: no watched namespace, no Azure workload identity, the cluster ID from the `kube-system` UID, and the release's images by digest.
+
+Pick a version on the [releases page](https://github.com/pkalin/shadewright/releases), verify the chart (the commands are in [verify a release](upgrade-uninstall.md#verify-a-release) and in the release's own notes), then install it from the registry:
 
 ```bash
-helm install shadewright ./dist/chart --namespace shadewright-system --create-namespace \
-  --set clusterId=my-cluster --set 'analyzer.watchNamespaces={default}' \
-  --set executor.image.digest=sha256:66df21ea967a22e8e50b73284254b796665ef5e9470b320707900983aca37f9c \
-  --set analyzer.image.digest=sha256:697defe7774b29621f64c967ff93e83b309455c2a72d50b190e179f9ff3fc8e4
+helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+  --namespace shadewright-system --create-namespace \
+  --set clusterId=my-cluster --set 'analyzer.watchNamespaces={default}'
 ```
+
+`clusterId` is optional (it defaults to the UID of `kube-system`); `analyzer.watchNamespaces` is what makes the analyzer watch anything. There is no `helm repo add` step because the chart is an OCI artifact, and `--version` is required for a pre-release such as `0.2.0-rc.1`, because Helm does not pick pre-releases by itself. For the strict path, install the digest you verified: `oci://ghcr.io/pkalin/charts/shadewright@sha256:<chart digest>` in place of the reference and `--version` (see the [configuration reference](reference/configuration.md#helm-chart)).
+
+For development, install from a clone with `./dist/chart` in place of the OCI reference. A clone has no image digests: pass `--set executor.image.digest=sha256:<digest> --set analyzer.image.digest=sha256:<digest>` for the release whose tag you checked out, or `--set image.allowTag=true` to run the `appVersion` tag with images built from that same clone.
 
 The same settings object and checks as above apply (`--set settings.create=true` and `settings.spec` create it from values, only when it does not exist; Helm never changes it afterwards). Uninstalling keeps the CRDs by default (`crd.keep`), so Incidents survive. The commands to upgrade the release and to uninstall it, what stays behind (the CRDs and the settings object) and how to remove it are in [upgrade with Helm](upgrade-uninstall.md#upgrade-with-helm), [uninstall with Helm](upgrade-uninstall.md#uninstall-with-helm) and [the settings object](upgrade-uninstall.md#the-settings-object-and-helm).
 

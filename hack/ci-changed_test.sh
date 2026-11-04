@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests hack/ci-changed.sh in a scratch repository: which changed files run which job group.
+# Tests hack/ci-changed.sh in a scratch repository: which changed files run which job groups.
 # Run: hack/ci-changed_test.sh (or make test-scripts)
 set -euo pipefail
 
@@ -8,54 +8,49 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 cd "$tmp"
 git init -q .
-git config user.email t@example.invalid
-git config user.name t
+export GIT_AUTHOR_NAME=t GIT_COMMITTER_NAME=t GIT_AUTHOR_EMAIL=t GIT_COMMITTER_EMAIL=t
 mkdir -p docs api dist/chart .github/workflows hack
-for f in docs/a.md api/x.go dist/chart/values.yaml .github/workflows/lint.yml .github/workflows/chart.yml README.md LICENSE; do echo 1 > "$f"; done
+for f in docs/a.md api/x.go dist/chart/values.yaml .github/workflows/lint.yml .github/workflows/docs.yml .github/workflows/ci.yml README.md LICENSE hack/ci-changed.sh; do echo 1 > "$f"; done
 git add -A
 git commit -q -m base
 base="$(git rev-parse HEAD)"
 fail=0
 
-# check <name> <expected> <group> <workflow> <event> <file to change>
+# check <name> <expected "go images chart"> <event> <file to change>
 check() {
   git reset -q --hard "$base"
-  if [ -n "$6" ]; then
-    mkdir -p "$(dirname "$6")"
-    echo 2 >> "$6"
+  if [ -n "$4" ]; then
+    mkdir -p "$(dirname "$4")"
+    echo 2 >> "$4"
     git add -A
     git commit -q -m change
   fi
-  got="$(EVENT_NAME="$5" BASE_SHA="$base" "$script" "$3" "$4" 2>/dev/null)"
-  if [ "$got" = "run=$2" ]; then
+  got="$(EVENT_NAME="$3" BASE_SHA="$base" "$script" 2>/dev/null | sed 's/^[a-z]*=//' | tr '\n' ' ' | sed 's/ $//')"
+  if [ "$got" = "$2" ]; then
     echo "ok: $1"
   else
-    echo "FAIL: $1: want run=$2, got $got" >&2
+    echo "FAIL: $1: want '$2', got '$got'" >&2
     fail=1
   fi
 }
 
 pr=pull_request
-check "docs only skips go" false go .github/workflows/lint.yml $pr docs/a.md
-check "docs only skips chart" false chart .github/workflows/chart.yml $pr docs/a.md
-check "docs only skips images" false images .github/workflows/images.yml $pr docs/a.md
-check "readme only skips go" false go .github/workflows/lint.yml $pr README.md
-check "generated api docs run go" true go .github/workflows/lint.yml $pr docs/reference/api.md
-check "go file runs go" true go .github/workflows/lint.yml $pr api/x.go
-check "go file runs chart" true chart .github/workflows/chart.yml $pr api/x.go
-check "chart only skips go" false go .github/workflows/lint.yml $pr dist/chart/values.yaml
-check "chart only runs chart" true chart .github/workflows/chart.yml $pr dist/chart/values.yaml
-check "own workflow runs its group" true go .github/workflows/lint.yml $pr .github/workflows/lint.yml
-check "other workflow skips the group" false go .github/workflows/lint.yml $pr .github/workflows/chart.yml
-check "licence runs images only" true images .github/workflows/images.yml $pr LICENSE
-check "licence skips go" false go .github/workflows/lint.yml $pr LICENSE
-check "this script runs everything" true chart .github/workflows/chart.yml $pr hack/ci-changed.sh
-check "push runs everything" true go .github/workflows/lint.yml push ""
-check "schedule runs everything" true go .github/workflows/lint.yml schedule ""
+check "docs only skips everything" "false false false" $pr docs/a.md
+check "readme only skips everything" "false false false" $pr README.md
+check "generated api docs run go and images" "true true false" $pr docs/reference/api.md
+check "go file runs everything" "true true true" $pr api/x.go
+check "chart only runs chart" "false false true" $pr dist/chart/values.yaml
+check "licence runs images only" "false true false" $pr LICENSE
+check "ci.yml runs everything" "true true true" $pr .github/workflows/ci.yml
+check "a called workflow runs everything" "true true true" $pr .github/workflows/lint.yml
+check "an unrelated workflow runs nothing" "false false false" $pr .github/workflows/docs.yml
+check "this script runs everything" "true true true" $pr hack/ci-changed.sh
+check "push runs everything" "true true true" push ""
+check "manual run runs everything" "true true true" workflow_dispatch ""
 
 # An unknown base fails open.
 git reset -q --hard "$base"
-got="$(EVENT_NAME=$pr BASE_SHA=0000000000000000000000000000000000000000 "$script" go .github/workflows/lint.yml 2>/dev/null)"
-if [ "$got" = "run=true" ]; then echo "ok: unknown base fails open"; else echo "FAIL: unknown base: $got" >&2; fail=1; fi
+got="$(EVENT_NAME=$pr BASE_SHA=0000000000000000000000000000000000000000 "$script" 2>/dev/null | tr '\n' ' ')"
+if [ "$got" = "go=true images=true chart=true " ]; then echo "ok: unknown base fails open"; else echo "FAIL: unknown base: $got" >&2; fail=1; fi
 
 exit "$fail"

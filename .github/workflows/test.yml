@@ -1,43 +1,19 @@
 name: Tests
 
+# Called by ci.yml (the only trigger), which decides from the changed files whether it runs.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_call:
+    inputs:
+      run:
+        description: Whether the job runs; ci.yml passes false when no file of this group changed.
+        type: boolean
+        default: true
 
 permissions: {}
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
-  changes:
-    name: Changed files
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    outputs:
-      run: ${{ steps.changed.outputs.run }}
-    steps:
-      - name: Clone the code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      # Pull requests: decided from the files the pull request changes (hack/ci-changed.sh). Pushes to main,
-      # tags, scheduled and manual runs always run. The jobs below are skipped with a job-level `if`, which
-      # counts as passing for the required checks (a workflow-level `paths` filter would leave them pending).
-      - name: Decide from the changed files
-        id: changed
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: hack/ci-changed.sh go .github/workflows/test.yml >> "$GITHUB_OUTPUT"
-
   test:
-    needs: changes
-    if: ${{ needs.changes.outputs.run == 'true' }}
+    if: ${{ inputs.run != false }}
     permissions:
       contents: read
     name: test

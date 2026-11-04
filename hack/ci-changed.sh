@@ -1,52 +1,51 @@
 #!/usr/bin/env bash
-# Decides whether a CI job group has to run, from the files a pull request changes.
-# Usage: hack/ci-changed.sh <group> <workflow-file>
-#   group:         go | chart | images
-#   workflow-file: path of the calling workflow, e.g. .github/workflows/lint.yml (a change to it always runs it)
+# Decides which CI job groups have to run, from the files a pull request changes. Called once by the `changes`
+# job of .github/workflows/ci.yml, which passes the result to the jobs it calls.
+# Usage: hack/ci-changed.sh    (prints go=, images= and chart= lines, each true or false; append to $GITHUB_OUTPUT)
 # Environment:
-#   EVENT_NAME  github.event_name; anything but "pull_request" (push to main, tags, schedule, manual run) runs everything
+#   EVENT_NAME  github.event_name; anything but "pull_request" (push to main, manual run) runs everything
 #   BASE_SHA    base commit of the pull request; HEAD is compared with it (the checkout is the merge commit)
-# Prints "run=true" or "run=false" (append it to $GITHUB_OUTPUT). Fails open: when the diff cannot be computed it
-# says run=true, so a problem here never lets a change skip its checks.
+# Groups: go (lint, test, e2e, govulncheck), images (image build), chart (chart lint, render, install).
+# A change to ci.yml, to a workflow it calls or to this script runs every group. Fails open: when the diff
+# cannot be computed everything runs, so a problem here never lets a change skip its checks.
 set -euo pipefail
 
-group="${1:?group}"
-workflow="${2:?workflow file}"
-
-go_paths='^(.*\.go|go\.mod|go\.sum|api/|cmd/|internal/|config/|test/|hack/|Dockerfile|\.dockerignore|Makefile|\.golangci[^/]*|\.custom-gcl\.yml|PROJECT|docs/reference/)'
-case "$group" in
-go) pattern="$go_paths" ;;
+go_paths='.*\.go|go\.mod|go\.sum|api/.*|cmd/.*|internal/.*|config/.*|test/.*|hack/.*|Dockerfile|\.dockerignore|Makefile|\.golangci[^/]*|\.custom-gcl\.yml|PROJECT|docs/reference/.*'
+go_re="^(${go_paths})$"
 # The image build context also takes the licence files (see .dockerignore).
-images) pattern="${go_paths%)}|LICENSE|NOTICE)" ;;
+images_re="^(${go_paths}|LICENSE|NOTICE)$"
 # The chart is compared with config/default, rendered by Go tests and installed by scripts in hack/.
-chart) pattern='^(dist/chart/|config/|test/|hack/|api/|go\.mod|go\.sum|Makefile|ct\.yaml|PROJECT)' ;;
-*)
-  echo "unknown group: $group" >&2
-  exit 2
-  ;;
-esac
+chart_re='^(dist/chart/.*|config/.*|test/.*|hack/.*|api/.*|go\.mod|go\.sum|Makefile|ct\.yaml|PROJECT)$'
+# ci.yml and the workflows it calls, and this script.
+self_re='^(\.github/workflows/(ci|lint|test|test-e2e|vulncheck|workflow-lint|images-build|chart-test)\.yml|hack/ci-changed\.sh)$'
+
+emit() { # go images chart
+  echo "go=$1"
+  echo "images=$2"
+  echo "chart=$3"
+}
 
 if [ "${EVENT_NAME:-}" != "pull_request" ]; then
-  echo "run=true"
+  emit true true true
   exit 0
 fi
-
-# Always needed to tell the workflow file and this script apart from the rest.
-self='^('"${workflow//./\\.}"'|hack/ci-changed\.sh)$'
 
 if [ -z "${BASE_SHA:-}" ] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
   git fetch --no-tags --depth=1 origin "${BASE_SHA:-}" >&2 || true
 fi
 if ! files="$(git diff --name-only --no-renames "${BASE_SHA:-}" HEAD 2>/dev/null)"; then
   echo "cannot diff against ${BASE_SHA:-unset}: running everything" >&2
-  echo "run=true"
+  emit true true true
   exit 0
 fi
 
 echo "changed files:" >&2
 printf '%s\n' "$files" | sed 's/^/  /' >&2
-if printf '%s\n' "$files" | grep -Eq "$pattern|$self"; then
-  echo "run=true"
+
+match() { printf '%s\n' "$files" | grep -Eq "$1" && echo true || echo false; }
+
+if [ "$(match "$self_re")" = true ]; then
+  emit true true true
 else
-  echo "run=false"
+  emit "$(match "$go_re")" "$(match "$images_re")" "$(match "$chart_re")"
 fi

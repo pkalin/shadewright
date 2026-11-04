@@ -33,7 +33,11 @@ limitations under the License.
 //
 // The collector asks how much of an occurrence was counted ([Controller.Handled]); the answer comes from
 // memory, loaded from the Incidents at start and kept in step with every write, and waits until that load
-// is done. The memory is bounded by the cap on Incidents times the records each keeps.
+// is done. The memory is bounded by the cap on Incidents times the records each keeps, plus the occurrences
+// held unwritten, which are capped per Incident and in total (Config.MaxPendingOccurrencesPerIncident, 256,
+// and Config.MaxPendingOccurrences, 10,000). A new occurrence over a cap is not counted, an undercount
+// counted in shadewright_incident_occurrences_overflow_total; its observation still moves the Incident's
+// last seen, so the Incident is written all the same.
 //
 // At the cap on Incidents (500 by default, --max-incidents), an observation of a new fingerprint is not
 // stored: it is counted in shadewright_incident_observations_refused_total, logged once per fingerprint,

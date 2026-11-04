@@ -622,7 +622,27 @@ func TestLostAnswerWithMoreOccurrencesThanRecordsIsNotCountedTwice(t *testing.T)
 		r.obs <- observation(1, i, 1, 1, now.Add(time.Duration(i)*time.Second))
 	}
 	waitFor(t, lost)
+	inc := eventually(t, ns, 1, countIs(int64(n+1)))
 	settled(t, ns, int64(n+1), time.Second)
+	onlyStored(t, r, inc)
+}
+
+// onlyStored fails if the controller remembers a record of inc's Incident that its status does not hold:
+// the records the write whose answer was lost dropped are forgotten once the retry finds it stored.
+func onlyStored(t *testing.T, r *running, inc *remediationv1alpha1.Incident) {
+	t.Helper()
+	remembered(t, r, inc)
+	stored := map[string]bool{}
+	for _, o := range inc.Status.Occurrences {
+		stored[o.ID] = true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, rec := range r.records {
+		if rec.incident == inc.Name && !stored[id] {
+			t.Errorf("the controller remembers %s, which the Incident no longer records", id)
+		}
+	}
 }
 
 // A lost answer for a batch holding an ID the schema refuses: that occurrence is counted but not recorded,
@@ -837,5 +857,84 @@ func TestIncidentWithAnotherFingerprintIsRefused(t *testing.T) {
 	}
 	if r.writes.updates.Load() != 0 {
 		t.Fatal("the Incident of another fingerprint was written")
+	}
+}
+
+// Many new occurrences of one fingerprint while every status write fails: the occurrences held unwritten
+// stay within the caps, per Incident and in total, and so does the memory of records. What goes over is not
+// counted (an undercount, in the metric), but each Incident still gets its last seen once writes succeed.
+func TestHeldOccurrencesStayWithinTheCaps(t *testing.T) {
+	ns := namespace(t)
+	const perIncident, total, each = 20, 30, 100
+	r := start(t, ns, Config{Window: 100 * time.Millisecond, RetryAfter: 50 * time.Millisecond,
+		MaxPendingOccurrences: total, MaxPendingOccurrencesPerIncident: perIncident})
+	var failing atomic.Bool
+	failing.Store(true)
+	r.writes.instead = func(context.Context) error {
+		if failing.Load() {
+			return apierrors.NewServerTimeout(remediationv1alpha1.GroupVersion.WithResource("incidents").GroupResource(), "update", 1)
+		}
+		return nil
+	}
+	before := testutil.ToFloat64(overflowedOccurrences)
+	from := time.Now().Truncate(time.Second).Add(-time.Hour)
+	newest := from.Add(each * time.Second)
+	check := func() {
+		t.Helper()
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		sum := 0
+		for f := 1; f <= 2; f++ {
+			n := 0
+			for _, b := range []*batch{r.pending[fp(f)], r.failed[fp(f)]} {
+				if b != nil {
+					n += len(b.occurrences)
+				}
+			}
+			if n > perIncident {
+				t.Fatalf("fingerprint %d holds %d occurrences unwritten, over the cap of %d", f, n, perIncident)
+			}
+			sum += n
+		}
+		if sum > total+2 {
+			t.Fatalf("%d occurrences held unwritten, over the cap of %d and one per Incident", sum, total)
+		}
+		if len(r.records) > total+2 {
+			t.Fatalf("%d records in memory with nothing stored, over the occurrences held", len(r.records))
+		}
+	}
+	for i := 1; i <= each; i++ {
+		for f := 1; f <= 2; f++ {
+			r.obs <- observation(f, f*1000+i, 1, 1, from.Add(time.Duration(i)*time.Second))
+		}
+		check()
+	}
+	time.Sleep(300 * time.Millisecond) // several failed retries
+	check()
+	r.mu.Lock()
+	if r.heldTotal > total+2 {
+		t.Errorf("heldTotal %d, over the cap", r.heldTotal)
+	}
+	r.mu.Unlock()
+	uncounted := testutil.ToFloat64(overflowedOccurrences) - before
+	if uncounted < 2*each-total-2 {
+		t.Fatalf("overflow metric grew by %v, want at least %d", uncounted, 2*each-total-2)
+	}
+	failing.Store(false)
+	counted := int64(2*each) - int64(uncounted)
+	var got int64
+	for f := 1; f <= 2; f++ {
+		inc := eventually(t, ns, f, func(inc *remediationv1alpha1.Incident) bool {
+			return inc.Status.LastSeen != nil && inc.Status.LastSeen.Time.Equal(newest)
+		})
+		got += inc.Status.Count
+	}
+	if got != counted {
+		t.Fatalf("counted %d, want the %d not left over the caps", got, counted)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.heldTotal != 0 || len(r.held) != 0 {
+		t.Fatalf("held %v (total %d) after every batch was written, want nothing", r.held, r.heldTotal)
 	}
 }

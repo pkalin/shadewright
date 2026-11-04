@@ -58,7 +58,17 @@ const (
 	// termination grace period (10 s, config/manager/analyzer.yaml), which is shorter than the manager's
 	// graceful shutdown timeout (30 s).
 	DefaultStopTimeout = 5 * time.Second
+	// DefaultMaxPendingOccurrences and DefaultMaxPendingOccurrencesPerIncident bound the occurrences held
+	// unwritten, in pending, failed and in-flight batches together. One Incident's cap is eight times the
+	// records its status keeps, so a burst of up to that many new occurrences within one window is counted
+	// in full.
+	DefaultMaxPendingOccurrences            = 10000
+	DefaultMaxPendingOccurrencesPerIncident = 8 * remediationv1alpha1.MaxOccurrenceRecords
 )
+
+// overflowLogInterval is the least time between two log lines about occurrences left uncounted at the caps
+// on occurrences held unwritten; the metric counts every one.
+const overflowLogInterval = time.Minute
 
 // refusedRemembered bounds the fingerprints refused at the cap that are remembered, so each gets one
 // Warning event per process.
@@ -103,6 +113,17 @@ type Config struct {
 	// StopTimeout bounds the last writes when the controller stops (shutdown or lost leadership): batches
 	// still unwritten then are logged and counted as lost.
 	StopTimeout time.Duration
+	// MaxPendingOccurrences caps the occurrences held unwritten by all Incidents together, and
+	// MaxPendingOccurrencesPerIncident those of one Incident: the distinct occurrences in its pending, failed
+	// and in-flight batches, each batch counted on its own. A new occurrence over either cap is not counted
+	// (an undercount); a new occurrence is one its Incident's pending batch does not hold yet, so one held
+	// only in a failed or in-flight batch counts as new there. Its observation still moves the Incident's
+	// last seen, and it is counted in
+	// shadewright_incident_occurrences_overflow_total and logged at most once per minute. An Incident that
+	// holds nothing unwritten always takes its first occurrence, so the total can exceed
+	// MaxPendingOccurrences by one per Incident.
+	MaxPendingOccurrences            int
+	MaxPendingOccurrencesPerIncident int
 	// Debounce, SettleLimit, Cooldown, AnalysisTimeout and TriggerInterval drive the analysis trigger
 	// ([Due]): how long an Incident must go without a new observation, the longest it waits to settle after
 	// its first unsettled observation (the aggregation window by default), the least time between the start
@@ -131,8 +152,17 @@ type Controller struct {
 
 	mu sync.Mutex
 	// records holds, per occurrence, what was counted and by which Incident: the records of every Incident
-	// plus what is pending. It is bounded by MaxIncidents times MaxOccurrenceRecords plus pending batches.
+	// plus what is held unwritten. It is bounded by the records of the Incidents in memory (MaxIncidents
+	// times MaxOccurrenceRecords) plus the occurrences held unwritten.
 	records map[string]record
+	// held is, per fingerprint, the number of occurrences in its pending, failed and in-flight batches (an
+	// occurrence in two batches counts twice), and heldTotal their sum; consume holds them to the caps.
+	held      map[string]int
+	heldTotal int
+	// overflowLogged is when occurrences left uncounted at the caps were last logged, and overflowed how
+	// many were left uncounted since then.
+	overflowLogged time.Time
+	overflowed     int
 	// droppedThrough is the newest begin time of a record any Incident dropped.
 	droppedThrough time.Time
 	// names are the Incidents that exist or are pending; their number is held to MaxIncidents.
@@ -185,6 +215,12 @@ func New(cfg Config) (*Controller, error) {
 	if cfg.StopTimeout <= 0 {
 		cfg.StopTimeout = DefaultStopTimeout
 	}
+	if cfg.MaxPendingOccurrences <= 0 {
+		cfg.MaxPendingOccurrences = DefaultMaxPendingOccurrences
+	}
+	if cfg.MaxPendingOccurrencesPerIncident <= 0 {
+		cfg.MaxPendingOccurrencesPerIncident = DefaultMaxPendingOccurrencesPerIncident
+	}
 	if cfg.Debounce <= 0 {
 		cfg.Debounce = DefaultDebounce
 	}
@@ -221,6 +257,7 @@ func New(cfg Config) (*Controller, error) {
 		cfg:       cfg,
 		ready:     make(chan struct{}),
 		records:   map[string]record{},
+		held:      map[string]int{},
 		names:     map[string]struct{}{},
 		pending:   map[string]*batch{},
 		failed:    map[string]*batch{},
@@ -401,7 +438,8 @@ func (c *Controller) handled(occurrence string, began time.Time) (int64, bool) {
 // counts Increase of what Handled would answer. Any other counts its Count (the collector knows that much
 // is new), but never more than Increase of the occurrence's record, so an occurrence another process
 // already counted is not counted again; the drop bound does not apply to it. A new fingerprint at the cap
-// is refused.
+// is refused. A new occurrence over the caps on occurrences held unwritten is not counted ([Config]); its
+// observation only moves the batch's first and last seen, so the Incident is still written.
 //
 // It reports whether the batch is due at once: the Incident has not been written by this process yet.
 func (c *Controller) consume(ctx context.Context, o collector.Observation) bool {
@@ -432,6 +470,16 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 		c.pending[o.Fingerprint] = b
 	}
 	at := c.notFuture(o.ObservedAt)
+	_, scheduled := c.nextWrite[o.Fingerprint]
+	if _, ok := b.occurrences[o.Occurrence]; !ok {
+		if c.full(o.Fingerprint) {
+			b.add(&batch{first: at, last: at})
+			c.overflow(ctx, o)
+			return !scheduled
+		}
+		c.held[o.Fingerprint]++
+		c.heldTotal++
+	}
 	b.add(&batch{count: n, first: at, last: at, occurrences: map[string]counted{
 		o.Occurrence: {total: o.Total, began: o.Began},
 	}})
@@ -441,8 +489,49 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 		cur := c.records[o.Occurrence]
 		c.records[o.Occurrence] = record{counted: higher(cur.counted, counted{total: o.Total, began: o.Began}), incident: name}
 	}
-	_, scheduled := c.nextWrite[o.Fingerprint]
 	return !scheduled
+}
+
+// full reports whether a new occurrence of fp would go over the caps on occurrences held unwritten. An
+// Incident that holds none takes one whatever the total, so no Incident is left without its first
+// occurrence. The caller holds mu.
+func (c *Controller) full(fp string) bool {
+	h := c.held[fp]
+	return h >= c.cfg.MaxPendingOccurrencesPerIncident || h > 0 && c.heldTotal >= c.cfg.MaxPendingOccurrences
+}
+
+// overflow counts an observation of a new occurrence left uncounted at the caps, and logs at most once per
+// overflowLogInterval how many were since the last line. It names the Incident, nothing from the event.
+// The caller holds mu.
+func (c *Controller) overflow(ctx context.Context, o collector.Observation) {
+	overflowedOccurrences.Inc()
+	c.overflowed++
+	now := c.cfg.Now()
+	if !c.overflowLogged.IsZero() && now.Sub(c.overflowLogged) < overflowLogInterval {
+		return
+	}
+	logf.FromContext(ctx).Info("Left new occurrences uncounted at the cap on occurrences held unwritten",
+		"incident", Name(o.Fingerprint), "uncounted", c.overflowed, "held", c.held[o.Fingerprint],
+		"heldTotal", c.heldTotal, "maxPerIncident", c.cfg.MaxPendingOccurrencesPerIncident,
+		"max", c.cfg.MaxPendingOccurrences)
+	c.overflowLogged, c.overflowed = now, 0
+}
+
+// recount sets held for fp to what its pending and failed batches hold, once no batch of fp is in flight.
+// The caller holds mu.
+func (c *Controller) recount(fp string) {
+	n := 0
+	for _, b := range []*batch{c.pending[fp], c.failed[fp]} {
+		if b != nil {
+			n += len(b.occurrences)
+		}
+	}
+	c.heldTotal += n - c.held[fp]
+	if n == 0 {
+		delete(c.held, fp)
+	} else {
+		c.held[fp] = n
+	}
 }
 
 // refuse counts and reports an observation of a new fingerprint at the cap. It is logged once per
@@ -531,6 +620,9 @@ func (c *Controller) flushDue(ctx context.Context, all bool) {
 // the Incident of that name holds another fingerprint) drops its batches, and the memory of their
 // occurrences goes back to what the Incident stores, so Handled does not answer "counted" for what was
 // never stored.
+//
+// The batches taken out still count as held while they are in flight, so the observations arriving
+// meanwhile cannot take the Incident over its cap; held is set to what is left once the write returns.
 func (c *Controller) flush(ctx context.Context, fp string) {
 	c.mu.Lock()
 	f, p := c.failed[fp], c.pending[fp]
@@ -551,6 +643,7 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 	res, err := c.write(wctx, batches)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	defer c.recount(fp)
 	name := Name(fp)
 	if refused, ok := errors.AsType[*refusedError](err); ok {
 		gone, stored, reason := batches, (*remediationv1alpha1.IncidentStatus)(nil), dropFingerprintConflict
@@ -600,12 +693,44 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 		return
 	}
 	c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.Window)
-	for _, id := range res.dropped {
-		if r, ok := c.records[id]; ok && r.incident == res.inc.Name {
+	c.settle(fp, res.dropped, &res.inc.Status, f != nil)
+}
+
+// settle takes into memory the status of fp's Incident after a write that succeeded: its records are
+// remembered, and this Incident's records of dropped that the status no longer holds are forgotten, unless
+// a batch still unwritten holds them. After a failed write (sweep), every record of this Incident is
+// checked the same way: a write whose answer was lost may have dropped records that neither this write's
+// dropped nor its batches name, and they would otherwise stay in memory for good. The caller holds mu.
+func (c *Controller) settle(fp string, dropped []string, status *remediationv1alpha1.IncidentStatus, sweep bool) {
+	name := Name(fp)
+	stored := make(map[string]struct{}, len(status.Occurrences))
+	for _, r := range status.Occurrences {
+		stored[r.ID] = struct{}{}
+	}
+	stale := func(id string, r record) bool {
+		if r.incident != name {
+			return false
+		}
+		if _, ok := stored[id]; ok {
+			return false
+		}
+		_, pending := c.pending[fp].occurrenceOf(id)
+		_, failed := c.failed[fp].occurrenceOf(id)
+		return !pending && !failed
+	}
+	for _, id := range dropped {
+		if r, ok := c.records[id]; ok && stale(id, r) {
 			delete(c.records, id)
 		}
 	}
-	c.remember(res.inc.Name, &res.inc.Status)
+	if sweep {
+		for id, r := range c.records {
+			if stale(id, r) {
+				delete(c.records, id)
+			}
+		}
+	}
+	c.remember(name, status)
 }
 
 // forget takes the memory of the occurrences of dropped batches back to what stored (the Incident's status,

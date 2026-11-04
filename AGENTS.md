@@ -32,6 +32,11 @@ so the **pull request title** is what counts; a required check (`Conventional PR
   never edit `CHANGELOG.md` or `.release-please-manifest.json` outside that pull request.
   The GitHub release notes are then regrouped by scope by `hack/release-notes-by-scope.sh` (see the comment in
   `.github/workflows/release-please.yml`, which also shows how to regroup an existing release).
+  Once the images and the chart of the tag are published, the last job of `chart.yml` appends their digests and
+  the cosign verify commands to the release body (idempotent, between markers).
+- A pre-release is the one tag made by hand: `gh release create vX.Y.Z-rc.1 --prerelease --target main`. It
+  publishes images and chart (version and appVersion from the tag, no bump commit, no floating tags) and does
+  not disturb release-please. Never create a plain `vX.Y.Z` tag by hand.
 - Merge the release pull request when the milestone of that version is done, not on every change.
 
 ## Working agreement
@@ -103,7 +108,7 @@ Every issue names the ADRs it is tied to:
   directory. Concurrency (cancel a superseded pull request run) lives in `ci.yml` only. Called workflows
   (`lint.yml`, `test.yml`, `test-e2e.yml`, `vulncheck.yml`, `workflow-lint.yml`, `images-build.yml`,
   `chart-test.yml`) have no triggers of their own, except the weekly `vulncheck.yml` schedule. `images.yml`
-  (publishes from main and `v*` tags) and `chart.yml` (runs the chart tests, then publishes, on `v*` tags only)
+  (publishes from main and `v*` tags) and `chart.yml` (runs the chart tests, publishes, then adds the digests to the release, on `v*` tags only)
   stay separate, because their signatures are verified against those file names.
 - **Tests.** Every bug fix gets a test that fails without it; every new API rule gets a refusal test.
 

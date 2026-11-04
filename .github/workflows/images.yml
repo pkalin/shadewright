@@ -8,7 +8,9 @@ name: Images
 # (GitHub OIDC, no key to store), attaches an SPDX SBOM as a signed attestation, records a GitHub build
 # provenance attestation, and verifies all three against the identity of this workflow, so a mismatch fails the
 # run (#82). The id-token and attestations permissions exist only on the publish job, which never runs for a
-# pull request (forks included). The release workflow (#84) decides which tags are cut.
+# pull request (forks included). Tags are cut by the release workflow (release-please) or, for a pre-release, by hand
+# (`gh release create vX.Y.Z-rc.1 --prerelease --target main`). docker/metadata-action gives a pre-release tag
+# only the full version (0.2.0-rc.1): no X.Y, no X, no latest, so a pre-release never moves a floating tag.
 on:
   push:
     branches: [main]

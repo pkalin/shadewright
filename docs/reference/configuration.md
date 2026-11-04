@@ -51,7 +51,7 @@ cosign verify \
   ghcr.io/pkalin/charts/shadewright@sha256:<chart digest>
 ```
 
-The digest is in the run summary of the Chart workflow, or from `helm pull oci://ghcr.io/pkalin/charts/shadewright --version <version>` (it prints `Digest:`). Image signatures are verified the same way, with the image name and the `images\.yml` workflow in the identity.
+The digest is in the run summary of the Chart workflow, or from `helm pull oci://ghcr.io/pkalin/charts/shadewright --version <version>` (it prints `Digest:`). Image signatures are verified the same way, with the image name and the `images\.yml` workflow in the identity. The GitHub release of a version lists the chart and image digests with these commands filled in. A pre-release (`v0.2.0-rc.1`) publishes the chart as version `0.2.0-rc.1` (also its `appVersion`), signed by the same workflow; pass `--version 0.2.0-rc.1` to Helm, which does not pick pre-releases by itself.
 
 `metrics.serviceMonitor.enabled` (off by default, as `config/default` leaves `config/prometheus` out) installs a Prometheus Operator `ServiceMonitor` per component; Prometheus then needs the `metrics-reader` ClusterRole for its ServiceAccount and the label `metrics: enabled` on its namespace. Not in the chart: cert-manager and webhooks (none are installed), and the `Namespace` (use `--create-namespace`). The security contexts, probes, ports and the replica count (1, with leader election) are fixed to what `config/` sets.
 

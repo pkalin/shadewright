@@ -56,6 +56,8 @@ gh attestation verify "oci://$IMAGE@$DIGEST" \
   --signer-workflow pkalin/shadewright/.github/workflows/images.yml
 ```
 
+Every GitHub release lists the digests of its two images and its chart, with these commands filled in for that tag (the identity pinned to it), once the images and the chart are published. A pre-release tag such as `v0.2.0-rc.1` is built, signed and verified the same way: the identity regexp above accepts it, it is tagged `0.2.0-rc.1` only (no `latest`, no `X.Y`), and its chart has that version and `appVersion`.
+
 Each command exits non-zero when the signature, the identity or the issuer does not match. To pin a single release instead of any `main` or tag build, replace the end of `IDENTITY` with `refs/tags/vX.Y.Z$`. The SBOM lists the packages of the linux/amd64 image. The same checks run in the [images workflow](https://github.com/pkalin/shadewright/blob/main/.github/workflows/images.yml) right after every push, so a build that cannot be verified fails there.
 
 ## Upgrade

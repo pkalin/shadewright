@@ -28,13 +28,43 @@ Deleting a request before merge is today the only way to cancel it, and what it 
 
 `Cancelled` is a phase in the API ("cancelled before the change was merged") and in the [design](design.md), but **nothing sets it in v0.1.0**: there is no field or action that cancels a request and keeps it as a record, and no issue for it yet. If you need the record, copy the object before deleting it. `Cancelled` and `Superseded` differ: `Superseded` is set by the executor when the plan went stale (policy, settings or target changed) and the pull request was closed; see [troubleshooting](troubleshooting.md#freshness).
 
+## Verify a release
+
+Images built from `main` or a `v*` tag after [#82](https://github.com/pkalin/shadewright/issues/82) are signed keyless with cosign (the certificate comes from GitHub's OIDC token, there is no key to trust), carry an SPDX SBOM as a signed attestation, and have a GitHub build provenance attestation. v0.1.0 images are not signed. Verify by digest, never by tag, and use the digest you will deploy. You need [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 2.x or later and the [GitHub CLI](https://cli.github.com/).
+
+```bash
+IMAGE=ghcr.io/pkalin/shadewright-executor   # and shadewright-analyzer
+DIGEST=sha256:<digest from the release page>
+IDENTITY='^https://github\.com/pkalin/shadewright/\.github/workflows/images\.yml@refs/(heads/main|tags/v[0-9].*)$'
+ISSUER=https://token.actions.githubusercontent.com
+
+# Signature: made by the images workflow of this repository.
+cosign verify \
+  --certificate-identity-regexp "$IDENTITY" \
+  --certificate-oidc-issuer "$ISSUER" \
+  "$IMAGE@$DIGEST"
+
+# SBOM (SPDX JSON) attestation: the same identity; the predicate is the SBOM.
+cosign verify-attestation --type spdxjson \
+  --certificate-identity-regexp "$IDENTITY" \
+  --certificate-oidc-issuer "$ISSUER" \
+  "$IMAGE@$DIGEST" | jq -r '.payload | @base64d | fromjson | .predicate' > sbom.spdx.json
+
+# Build provenance: built by this repository's images workflow.
+gh attestation verify "oci://$IMAGE@$DIGEST" \
+  --repo pkalin/shadewright \
+  --signer-workflow pkalin/shadewright/.github/workflows/images.yml
+```
+
+Each command exits non-zero when the signature, the identity or the issuer does not match. To pin a single release instead of any `main` or tag build, replace the end of `IDENTITY` with `refs/tags/vX.Y.Z$`. The SBOM lists the packages of the linux/amd64 image. The same checks run in the [images workflow](https://github.com/pkalin/shadewright/blob/main/.github/workflows/images.yml) right after every push, so a build that cannot be verified fails there.
+
 ## Upgrade
 
 Both Deployments run one replica with leader election and have no state of their own: Incidents, requests, the settings and the budget live in the cluster API. Every step of the executor rebuilds what it knows from Git and the API, and branch names and pull request markers derive from the request UID and the plan digest, so a restart in the middle of a step finds the work already done instead of repeating it.
 
 1. **Read the release notes** ([CHANGELOG](https://github.com/pkalin/shadewright/blob/main/CHANGELOG.md) and the GitHub release). While the version is 0.x a minor release may carry breaking changes (a commit with `!` or a `BREAKING CHANGE:` footer): API fields, CRD schema, flags or what the manifests install. The API is `v1alpha1` and there is no conversion between versions.
 2. **Pause writes (optional)**: set `spec.paused: true` on the `RemediationSettings` object if you want no pull request opened or closed while the pods restart. Analysis goes on. Unpause afterwards.
-3. **Use the same release for both images.** Analyzer and executor share the CRDs and the API types, and only a pair built from one tag has been tested together. Replace both digests in your overlay (the release page lists them) and keep the `?ref=` of the base on the same tag.
+3. **Use the same release for both images.** Analyzer and executor share the CRDs and the API types, and only a pair built from one tag has been tested together. Replace both digests in your overlay (the release page lists them; [verify them](#verify-a-release) first) and keep the `?ref=` of the base on the same tag.
 4. **Apply**: `kubectl apply -k .` applies the CRDs and the Deployments together. Wait for the CRDs (`kubectl wait --for=condition=Established crd/...`, as in getting started) and then for `kubectl -n shadewright-system rollout status deploy/shadewright-analyzer deploy/shadewright-executor`. Only the pod holding the Lease (`shadewright-executor-leader-election`, `shadewright-analyzer-leader-election`) works, so a new pod does nothing until it has the Lease, which can take a short while after the old pod is gone.
 5. **Check** the settings status (`DetectionFailed` is `False`), the Deployments' logs for errors, and that the waiting requests still show their phase.
 6. **Unpause** if you paused.

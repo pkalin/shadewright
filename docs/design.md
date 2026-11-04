@@ -904,7 +904,7 @@ Decided on 2026-11-01:
 | Kill switch | A field in a cluster-scoped config object, checked before every write |
 | Evaluation | Recorded contexts per scenario with the expected diagnosis or refusal; CI runs them against a fake model, the real model on demand |
 | Agent observability | controller-runtime Prometheus metrics and Shadewright's own `shadewright_*` metrics on the same endpoint ([reference](reference/metrics.md)), plus OpenTelemetry traces per analysis (tool calls, tokens, latency; planned) |
-| Packaging | Kubebuilder's Helm plugin; images on GHCR, signed keyless, with SBOMs. Decided, not built yet: signing and SBOMs are #82, Helm packaging is #83 |
+| Packaging | Kubebuilder's Helm plugin; images on GHCR, signed keyless, with SBOMs. Signing, SBOMs and provenance are built (#82, [verify a release](upgrade-uninstall.md#verify-a-release)); Helm packaging is not built yet (#83) |
 | Pluggability | Three axes: platform services, cluster platforms, cluster integrations ([ADR-0018](adr/0018-three-axes-of-pluggability.md)); security integrations diagnose only; a module contributes hooks only when enabled and detected (2026-11-03) |
 | Extension packaging | Compiled in now, registered at start-up from an explicit list; signed declarative OCI packs later ([ADR-0019](adr/0019-extension-packaging.md)) |
 | Controller identities | Separate analyzer and executor ServiceAccounts and roles; incidents and requests reachable only in the operator namespace, the analyzer's namespaced reads only in the watched namespaces; cluster-wide it reads only the settings and a Node list (2.2, [ADR-0024](adr/0024-analyzer-writes-detection-to-settings-status.md)) |

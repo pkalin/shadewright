@@ -12,3 +12,7 @@
 # Re-include Go module files
 !go.mod
 !go.sum
+
+# Re-include the license and the notices, which every image carries in /licenses
+!LICENSE
+!NOTICE

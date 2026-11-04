@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Installs the Helm chart (dist/chart) on the current Kubernetes context (a Kind cluster, see make
 # test-chart-install) with the v0.1.0 images and checks what the API server made of it: the Deployments become
-# available, and the two ServiceAccounts hold exactly the permissions the design gives them. Usage:
+# available, the settings object is created from values, and the two ServiceAccounts hold exactly the
+# permissions the design gives them. Usage:
 #   hack/chart-install-test.sh <kubectl> <helm>
 set -euo pipefail
 
@@ -20,7 +21,14 @@ ANALYZER_DIGEST="${ANALYZER_DIGEST:-sha256:697defe7774b29621f64c967ff93e83b30945
   --set "analyzer.watchNamespaces={demo}" \
   --set "executor.image.digest=${EXECUTOR_DIGEST}" \
   --set "analyzer.image.digest=${ANALYZER_DIGEST}" \
+  --set settings.create=true --set settings.spec.paused=true \
   --wait --timeout 5m
+
+# settings.create=true on a fresh install: the settings object is a post-install hook because its CRD comes
+# from the same release. An upgrade replaces it again (before-hook-creation) and must not fail either.
+"${KUBECTL}" get remediationsettings.remediation.shadewright.io default
+"${HELM}" upgrade "${REL}" "${CHART}" --namespace "${NS}" --reuse-values --wait --timeout 5m
+"${KUBECTL}" get remediationsettings.remediation.shadewright.io default
 
 "${KUBECTL}" -n "${NS}" get deployments,serviceaccounts,networkpolicies,services
 

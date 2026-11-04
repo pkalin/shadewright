@@ -250,6 +250,35 @@ type rendered struct {
 	chart     map[string]*unstructured.Unstructured
 }
 
+// helmArgs is the helm template command line for the chart with the test values plus extra --set arguments.
+func helmArgs(t *testing.T, helperRoles bool, extraSet ...string) []string {
+	t.Helper()
+	root := repoRoot(t)
+	args := make([]string, 0, 9+2*len(extraSet))
+	args = append(args,
+		"template", release, filepath.Join(root, "dist", "chart"), "--namespace", operatorNS,
+		"-f", filepath.Join(root, "dist", "chart", "ci", "test-values.yaml"),
+		"--set", fmt.Sprintf("rbac.helpers.enabled=%t", helperRoles),
+	)
+	for _, s := range extraSet {
+		args = append(args, "--set", s)
+	}
+	return args
+}
+
+// helmFails renders the chart with the given values and returns helm's error output; it fails the test if the
+// render succeeds.
+func helmFails(t *testing.T, extraSet ...string) string {
+	t.Helper()
+	cmd := exec.Command(tool(t, "HELM", "helm"), helmArgs(t, false, extraSet...)...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("helm template succeeded with %v, want an error", extraSet)
+	}
+	return stderr.String()
+}
+
 func render(t *testing.T, helperRoles bool, extraSet ...string) rendered {
 	t.Helper()
 	root := repoRoot(t)
@@ -262,17 +291,11 @@ func render(t *testing.T, helperRoles bool, extraSet ...string) rendered {
 			r.kustomize[key(u)] = u
 		}
 	}
-	args := make([]string, 0, 9+2*len(extraSet))
-	args = append(args,
-		"template", release, filepath.Join(root, "dist", "chart"), "--namespace", operatorNS,
-		"-f", filepath.Join(root, "dist", "chart", "ci", "test-values.yaml"),
-		"--set", fmt.Sprintf("rbac.helpers.enabled=%t", helperRoles),
-	)
-	for _, s := range extraSet {
-		args = append(args, "--set", s)
-	}
-	for _, u := range objects(t, run(t, root, helm, args...)) {
+	for _, u := range objects(t, run(t, root, helm, helmArgs(t, helperRoles, extraSet...)...)) {
 		r.chart[key(u)] = u
+	}
+	if len(r.chart) == 0 {
+		t.Fatal("helm template rendered no objects: the comparison would prove nothing")
 	}
 	return r
 }
@@ -387,6 +410,35 @@ func TestNetworkPoliciesServicesAndCRDsEqualKustomize(t *testing.T) {
 	check("ConfigMap", func(u *unstructured.Unstructured) any { return u.Object["data"] })
 }
 
+// normalizedPod reduces a Deployment to its Pod spec minus what differs on purpose: the image and its pull
+// policy (the manifests use a placeholder, the chart a digest), the cluster ID (a value), the metrics port (the
+// chart makes it optional), the order of the args, and the defaulted automountServiceAccountToken.
+func normalizedPod(d *appsv1.Deployment) corev1.PodSpec {
+	spec := *d.Spec.Template.Spec.DeepCopy()
+	if spec.AutomountServiceAccountToken == nil {
+		yes := true
+		spec.AutomountServiceAccountToken = &yes
+	}
+	if len(spec.Volumes) == 0 {
+		spec.Volumes = nil
+	}
+	for i := range spec.Containers {
+		c := &spec.Containers[i]
+		c.Image, c.ImagePullPolicy = "", ""
+		for j, a := range c.Args {
+			if strings.HasPrefix(a, "--cluster-id=") {
+				c.Args[j] = "--cluster-id=x" // a value of the install
+			}
+		}
+		slices.Sort(c.Args)
+		c.Ports = slices.DeleteFunc(c.Ports, func(p corev1.ContainerPort) bool { return p.Name == "metrics" })
+		if len(c.VolumeMounts) == 0 {
+			c.VolumeMounts = nil
+		}
+	}
+	return spec
+}
+
 func TestDeploymentsKeepSeparateIdentitiesAndHardening(t *testing.T) {
 	r := render(t, false)
 	for _, name := range []string{"shadewright-executor", "shadewright-analyzer"} {
@@ -400,26 +452,19 @@ func TestDeploymentsKeepSeparateIdentitiesAndHardening(t *testing.T) {
 		if wantSA != gotSA || gotSA != name {
 			t.Errorf("%s: service account %q, want %q", k, gotSA, wantSA)
 		}
-		if asJSON(t, wd.Spec.Template.Spec.SecurityContext) != asJSON(t, gd.Spec.Template.Spec.SecurityContext) {
-			t.Errorf("%s: pod security context differs", k)
-		}
 		if len(gd.Spec.Template.Spec.Containers) != 1 || len(wd.Spec.Template.Spec.Containers) != 1 {
 			t.Fatalf("%s: want one container", k)
 		}
-		wc, gc := wd.Spec.Template.Spec.Containers[0], gd.Spec.Template.Spec.Containers[0]
-		if asJSON(t, wc.SecurityContext) != asJSON(t, gc.SecurityContext) {
-			t.Errorf("%s: container security context differs", k)
+		// The whole Pod spec, not a subset: args, env, ports, probes, resources, security contexts and the rest.
+		if w, g := asJSON(t, normalizedPod(wd)), asJSON(t, normalizedPod(gd)); w != g {
+			t.Errorf("%s: Pod spec differs\n kustomize: %s\n chart:     %s", k, w, g)
 		}
-		if !slices.Equal(wc.Command, gc.Command) {
-			t.Errorf("%s: command %v, want %v", k, gc.Command, wc.Command)
+		if asJSON(t, wd.Spec.Replicas) != asJSON(t, gd.Spec.Replicas) {
+			t.Errorf("%s: replicas %s, want %s", k, asJSON(t, gd.Spec.Replicas), asJSON(t, wd.Spec.Replicas))
 		}
+		gc := gd.Spec.Template.Spec.Containers[0]
 		if !strings.Contains(gc.Image, "@sha256:") {
 			t.Errorf("%s: image %q is not pinned by digest", k, gc.Image)
-		}
-		for _, a := range []string{"--leader-elect", "--health-probe-bind-address=:8081", "--metrics-bind-address=:8443"} {
-			if !slices.Contains(gc.Args, a) {
-				t.Errorf("%s: missing arg %s in %v", k, a, gc.Args)
-			}
 		}
 	}
 	// Identities stay apart: only the executor carries the workload identity label with the test values.
@@ -454,4 +499,142 @@ func TestWatchNamespacesGetOneBindingEach(t *testing.T) {
 	if !slices.Contains(dep.Spec.Template.Spec.Containers[0].Args, "--watch-namespaces=team-a,team-b") {
 		t.Errorf("args %v do not carry the watched namespaces", dep.Spec.Template.Spec.Containers[0].Args)
 	}
+}
+
+// allToggles turns on every optional part of the chart: the settings object, both identities (different IDs),
+// two watched namespaces and the helper roles.
+var allToggles = []string{
+	"settings.create=true",
+	"settings.spec.paused=false",
+	"analyzer.identity.azure.clientId=11111111-1111-1111-1111-111111111111",
+	"analyzer.watchNamespaces={demo,team-b}",
+}
+
+func TestRBACEqualsKustomizeWithEveryToggleOn(t *testing.T) {
+	r := render(t, true, allToggles...)
+	if _, ok := r.chart["RemediationSettings//default"]; !ok {
+		t.Error("settings.create=true rendered no RemediationSettings object")
+	}
+	// config/watch binds one namespace (demo). The chart binds each listed namespace the same way: check that
+	// team-b has the same binding as demo, then compare the rest.
+	demo := r.chart["RoleBinding/demo/shadewright-analyzer-watch"]
+	teamB := r.chart["RoleBinding/team-b/shadewright-analyzer-watch"]
+	if demo == nil || teamB == nil {
+		t.Fatal("watch RoleBindings for demo and team-b not rendered")
+	}
+	if strings.Join(describe(t, demo), "\n") != strings.Join(describe(t, teamB), "\n") {
+		t.Errorf("team-b binding differs from demo: %v vs %v", describe(t, teamB), describe(t, demo))
+	}
+	delete(r.chart, "RoleBinding/team-b/shadewright-analyzer-watch")
+
+	want := rbacOnly(r.kustomize, false)
+	if len(want) < 15 {
+		t.Fatalf("only %d RBAC objects from kustomize: the comparison would prove nothing", len(want))
+	}
+	for _, p := range compareRBAC(t, want, rbacOnly(r.chart, false)) {
+		t.Error(p)
+	}
+}
+
+// TestComparisonFailsOnWidenedNamesAndChangedSubject checks the comparison on two more mutations: a
+// resourceNames list widened by one name, and a binding whose subject is another ServiceAccount.
+func TestComparisonFailsOnWidenedNamesAndChangedSubject(t *testing.T) {
+	r := render(t, false)
+	want := rbacOnly(r.kustomize, true)
+
+	got := rbacOnly(r.chart, false)
+	rk := "Role/" + operatorNS + "/shadewright-executor-leader-election-role"
+	role := got[rk]
+	if role == nil {
+		t.Fatalf("%s not rendered", rk)
+	}
+	m := role.DeepCopy()
+	rules, _, _ := unstructured.NestedSlice(m.Object, "rules")
+	widened := false
+	for _, rule := range rules {
+		rm := rule.(map[string]any)
+		if names, ok := rm["resourceNames"].([]any); ok {
+			rm["resourceNames"] = append(names, "another-lease")
+			widened = true
+		}
+	}
+	if !widened {
+		t.Fatal("no rule with resourceNames to widen")
+	}
+	if err := unstructured.SetNestedSlice(m.Object, rules, "rules"); err != nil {
+		t.Fatal(err)
+	}
+	got[rk] = m
+	if p := strings.Join(compareRBAC(t, want, got), "\n"); !strings.Contains(p, "another-lease") {
+		t.Errorf("a widened resourceNames was not reported; got:\n%s", p)
+	}
+
+	got = rbacOnly(r.chart, false)
+	bk := "ClusterRoleBinding//shadewright-executor-rolebinding"
+	b := got[bk]
+	if b == nil {
+		t.Fatalf("%s not rendered", bk)
+	}
+	m = b.DeepCopy()
+	subjects, _, _ := unstructured.NestedSlice(m.Object, "subjects")
+	if len(subjects) == 0 {
+		t.Fatal("binding has no subjects")
+	}
+	subjects[0].(map[string]any)["name"] = "shadewright-analyzer"
+	if err := unstructured.SetNestedSlice(m.Object, subjects, "subjects"); err != nil {
+		t.Fatal(err)
+	}
+	got[bk] = m
+	p := strings.Join(compareRBAC(t, want, got), "\n")
+	if !strings.Contains(p, "missing from the chart: subject|") || !strings.Contains(p, "extra in the chart: subject|") {
+		t.Errorf("a changed binding subject was not reported; got:\n%s", p)
+	}
+}
+
+func TestChartRefusesWeakenedValues(t *testing.T) {
+	const (
+		id       = "00000000-0000-0000-0000-000000000000"
+		labels   = "podLabels"
+		annots   = "serviceAccount.annotations"
+		separate = "separate identities"
+		unknown  = "additional properties"
+		saAnn    = `serviceAccount.annotations.azure\.workload\.identity/`
+	)
+	type refusal struct {
+		set  string
+		want string
+	}
+	cases := map[string]refusal{
+		"one client ID for both":         {"analyzer.identity.azure.clientId=" + id, separate},
+		"same ID in another case":        {"analyzer.identity.azure.clientId=" + strings.ToUpper(id), separate},
+		"identity annotation exec":       {"executor." + saAnn + "client-id=x", annots},
+		"identity annotation analyzer":   {"analyzer." + saAnn + "tenant-id=x", annots},
+		"identity pod label":             {`analyzer.podLabels.azure\.workload\.identity/use=true`, labels},
+		"control-plane pod label":        {"executor.podLabels.control-plane=analyzer", labels},
+		"chart pod label":                {`executor.podLabels.app\.kubernetes\.io/component=analyzer`, labels},
+		"unknown key under executor":     {"executor.resource.limits.cpu=1", unknown},
+		"unknown key under analyzer":     {"analyzer.podLabel.a=b", unknown},
+		"watchNamespaces under executor": {"executor.watchNamespaces={a}", unknown},
+		"limits removed":                 {"executor.resources.limits=null", "limits"},
+	}
+	// Every flag the chart renders itself, for both components.
+	for _, flag := range []string{
+		"leader-elect", "health-probe-bind-address", "metrics-bind-address", "metrics-secure", "namespace",
+		"watch-namespaces", "cluster-id", "max-incidents",
+	} {
+		for _, comp := range []string{"executor", "analyzer"} {
+			cases["extra arg "+flag+" ("+comp+")"] = refusal{fmt.Sprintf("%s.extraArgs={--%s=x}", comp, flag), "--" + flag}
+		}
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if out := helmFails(t, c.set); !strings.Contains(out, c.want) {
+				t.Errorf("error does not mention %q:\n%s", c.want, out)
+			}
+		})
+	}
+	// Flags and labels that are not reserved are fine.
+	helm := tool(t, "HELM", "helm")
+	ok := helmArgs(t, false, "executor.extraArgs={--zap-log-level=debug}", "analyzer.podLabels.team=a")
+	run(t, repoRoot(t), helm, ok...)
 }

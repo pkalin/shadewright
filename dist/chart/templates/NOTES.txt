@@ -10,5 +10,16 @@ Next:
   - executor.identity.azure.clientId is not set: the executor cannot sign for the GitHub App, so a request that
     reaches the Git step stays Pending.
 {{- end }}
+{{- if and .Values.metrics.enabled .Values.metrics.secure }}
   - Metrics are scraped only from namespaces labeled "metrics: enabled", by an identity allowed to "get" the
     non-resource URL /metrics (the ClusterRole {{ include "shadewright.resourceName" (dict "suffix" "metrics-reader" "context" $) }}; nothing binds it).
+{{- end }}
+{{- if not .Values.networkPolicy.enabled }}
+
+WARNING: networkPolicy.enabled=false. The chart installed no NetworkPolicy at all, so the default deny for the
+namespace is gone too: every Pod in {{ .Release.Namespace }} can send and receive any traffic unless you restrict it yourself.
+{{- end }}
+{{- if not .Values.metrics.secure }}
+
+WARNING: metrics.secure=false. The metrics endpoint serves plain HTTP with no authentication. Use it only for a test.
+{{- end }}

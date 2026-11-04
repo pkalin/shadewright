@@ -89,7 +89,7 @@ test-scripts: ## Test the release notes script (hack/release-notes-by-scope.sh).
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -coverprofile cover.out
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The kind target installs the pinned Kind (KIND_VERSION) into bin/. The setup builds/loads the Manager Docker image locally.
@@ -354,10 +354,10 @@ CHART_DIR ?= dist/chart
 CHART_KIND_CLUSTER ?= shadewright-chart-test
 
 .PHONY: chart-lint
-chart-lint: ## Lint the chart with the test values, and check that the schema refuses an install without them.
+chart-lint: ## Lint the chart with the test values, and check that the schema (not a template's required) refuses a tag instead of a digest.
 	$(HELM) lint $(CHART_DIR) -f $(CHART_DIR)/ci/test-values.yaml --strict
-	@if $(HELM) lint $(CHART_DIR) >/dev/null 2>&1; then \
-		echo "helm lint passed without the required values: values.schema.json is not enforced"; exit 1; \
+	@if $(HELM) lint $(CHART_DIR) -f $(CHART_DIR)/ci/test-values.yaml --set executor.image.digest=latest >/dev/null 2>&1; then \
+		echo "helm lint passed with a tag instead of a digest: values.schema.json is not enforced"; exit 1; \
 	fi
 
 .PHONY: test-chart

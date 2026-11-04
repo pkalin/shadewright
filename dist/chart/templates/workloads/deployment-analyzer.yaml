@@ -1,3 +1,4 @@
+{{- $_ := include "shadewright.validate" (dict "component" "analyzer" "context" $) }}
 {{- $c := .Values.analyzer }}
 apiVersion: apps/v1
 kind: Deployment

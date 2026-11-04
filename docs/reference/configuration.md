@@ -24,7 +24,7 @@ helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <vers
   --namespace shadewright-system --create-namespace -f my-values.yaml
 ```
 
-Use the release name `shadewright` and the namespace `shadewright-system`: the names of the ServiceAccounts, and so the subject of the federated credential, are the release name plus `-executor` and `-analyzer`. The Leases and the analysis budget ConfigMap keep the fixed names the binaries expect whatever the release is called. `values.schema.json` validates the values on install, upgrade, lint and template; `helm lint` fails without the required ones.
+Use the release name `shadewright` and the namespace `shadewright-system`: the names of the ServiceAccounts, and so the subject of the federated credential, come from the chart's full name: the release name when it contains the chart name `shadewright` (so `shadewright-executor` and `shadewright-analyzer` for the release `shadewright`), otherwise `<release>-shadewright`, then `-executor` or `-analyzer` (cut to 63 characters in all; `fullnameOverride` replaces the prefix). Check with `helm template` or `kubectl -n <namespace> get serviceaccounts` before you create the federated credential. The Leases and the analysis budget ConfigMap keep the fixed names the binaries expect whatever the release is called. `values.schema.json` validates the values on install, upgrade, lint and template; `helm lint` fails without the required ones.
 
 A minimal `my-values.yaml`:
 
@@ -48,20 +48,31 @@ analyzer:
 | `executor.image.repository`, `analyzer.image.repository` | `ghcr.io/pkalin/shadewright-executor`, `ghcr.io/pkalin/shadewright-analyzer` | Image repositories (a mirror, for example) |
 | `executor.image.digest`, `analyzer.image.digest` | none, **required** | `sha256:<64 hex digits>`; images are pinned by digest, a tag cannot be set |
 | `executor.image.pullPolicy`, `analyzer.image.pullPolicy` | `IfNotPresent` | |
-| `analyzer.watchNamespaces` | none, **required** | `--watch-namespaces`, and one RoleBinding to the watch ClusterRole per namespace (see [namespaces and RoleBindings](#namespaces-and-rolebindings)) |
+| `analyzer.watchNamespaces` | none, **required** | `--watch-namespaces`, and one RoleBinding to the read-only watch ClusterRole in each listed namespace, `kube-system` included if you list it (see [namespaces and RoleBindings](#namespaces-and-rolebindings)) |
 | `analyzer.maxIncidents` | unset (binary default 500) | `--max-incidents` |
-| `executor.identity.azure.clientId` | empty | Client ID of the executor's managed identity (not a secret): sets the ServiceAccount annotation `azure.workload.identity/client-id` and the Pod label `azure.workload.identity/use`. Empty sets neither; see [workload identity](#workload-identity-azure) |
+| `executor.identity.azure.clientId` | empty | Client ID of the executor's managed identity (not a secret): sets the ServiceAccount annotation `azure.workload.identity/client-id` and the Pod label `azure.workload.identity/use`. Empty sets neither; see [workload identity](#workload-identity-azure). The chart refuses to render if both components get the same ID (invariant 6: separate identities) |
 | `analyzer.identity.azure.clientId` | empty | The same for the analyzer, which needs none today |
-| `executor.serviceAccount.annotations`, `analyzer.serviceAccount.annotations` | `{}` | More ServiceAccount annotations, for another cloud's workload identity |
-| `executor.resources`, `analyzer.resources` | 10m / 64Mi requests, 500m / 128Mi limits | Container resources |
-| `executor.extraArgs`, `analyzer.extraArgs` | `[]` | Further flags, each `--name` or `--name=value` |
-| `executor.podLabels`, `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` (and the same under `analyzer`) | empty | Scheduling and metadata |
+| `executor.serviceAccount.annotations`, `analyzer.serviceAccount.annotations` | `{}` | More ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `identity.azure.clientId` |
+| `executor.resources`, `analyzer.resources` | 10m / 64Mi requests, 500m / 128Mi limits | Container resources. `limits` is required and cannot be empty, so they cannot be removed |
+| `executor.extraArgs`, `analyzer.extraArgs` | `[]` | Further flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--namespace`, `--watch-namespaces`, `--cluster-id` and `--max-incidents` |
+| `executor.podLabels`, `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` (and the same under `analyzer`) | empty | Scheduling and metadata. `podLabels` may not set `control-plane`, `app.kubernetes.io/*`, `helm.sh/*` or `azure.workload.identity/*`. Unknown keys under `executor` or `analyzer` fail the schema |
 | `imagePullSecrets` | `[]` | For a private mirror |
-| `metrics.enabled`, `metrics.port`, `metrics.secure` | `true`, `8443`, `true` | `--metrics-bind-address`, the two Services, the metrics RBAC and NetworkPolicy; `secure: false` serves plain HTTP with no authentication (a test only) |
-| `networkPolicy.enabled` | `true` | The four NetworkPolicies of `config/network-policy` |
+| `metrics.enabled`, `metrics.port`, `metrics.secure` | `true`, `8443`, `true` | `--metrics-bind-address`, the two Services, the metrics RBAC and NetworkPolicy; `secure: false` serves plain HTTP with no authentication (**test only**; `helm install` prints a warning) |
+| `networkPolicy.enabled` | `true` | The four NetworkPolicies of `config/network-policy`. **`false` installs no NetworkPolicy at all, so the namespace loses its default deny too**: every Pod in it can then talk to anything unless you restrict it yourself (`helm install` prints a warning) |
 | `crd.enabled`, `crd.keep` | `true`, `true` | Install the CRDs; keep them when the release is uninstalled (so Incidents and requests survive). Helm never upgrades CRDs from a `crds/` directory, so they are templates |
 | `rbac.helpers.enabled` | `false` | The admin, editor and viewer ClusterRoles for each custom resource (for your people; Shadewright does not use them) |
-| `settings.create`, `settings.spec` | `false`, `{}` | Create the `RemediationSettings` object `default` from `spec` (the fields of [RemediationSettings](#remediationsettings)). Helm owns it afterwards: an upgrade overwrites hand edits, so leave it off if you manage the object elsewhere |
+| `settings.create`, `settings.spec` | `false`, `{}` | Create the `RemediationSettings` object `default` from `spec` (the fields of [RemediationSettings](#remediationsettings)). An install or upgrade overwrites hand edits, so leave it off if you manage the object elsewhere. With `create: true` the object is created by a post-install and post-upgrade hook (its CRD comes from the same release, so a normal template would fail on a fresh install). Helm does not track hook objects: **it is not deleted when the release is uninstalled**, delete it yourself, and every install or upgrade replaces it with `spec` |
+
+The chart is signed with cosign keyless (GitHub OIDC) by digest in the publish job, like the images. Verify it before installing; the identity is the chart workflow on a release tag of this repository:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/pkalin/shadewright/\.github/workflows/chart\.yml@refs/tags/v[0-9].*$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/pkalin/charts/shadewright@sha256:<chart digest>
+```
+
+The digest is in the run summary of the Chart workflow, or from `helm pull oci://ghcr.io/pkalin/charts/shadewright --version <version>` (it prints `Digest:`). Image signatures are verified the same way, with the image name and the `images\.yml` workflow in the identity.
 
 Not in the chart: the Prometheus `ServiceMonitor` (as in `config/default`), cert-manager and webhooks (none are installed), and the `Namespace` (use `--create-namespace`). The security contexts, probes, ports and the replica count (1, with leader election) are fixed to what `config/` sets.
 

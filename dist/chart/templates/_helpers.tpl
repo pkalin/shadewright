@@ -81,3 +81,43 @@ Takes a dict with .component and .context.
 {{- $digest := required (printf "%s.image.digest is required (sha256:<64 hex digits>); images are pinned by digest" .component) $c.image.digest -}}
 {{- printf "%s@%s" $c.image.repository $digest -}}
 {{- end }}
+
+{{/*
+Flags the chart renders itself in the Deployments. extraArgs may not name them, so a free list cannot turn off
+leader election, the metrics authentication or the watched namespaces. Keep in step with the args in
+templates/workloads. "namespace" is not an arg of the chart but the Pods get it from POD_NAMESPACE.
+*/}}
+{{- define "shadewright.reservedFlags" -}}
+leader-elect health-probe-bind-address metrics-bind-address metrics-secure namespace watch-namespaces cluster-id max-incidents
+{{- end }}
+
+{{/*
+Refuses values that would weaken the separate identities (invariant 6) or the flags and labels the chart sets.
+Takes a dict with .component ("executor" or "analyzer") and .context. Renders nothing.
+*/}}
+{{- define "shadewright.validate" -}}
+{{- $v := .context.Values -}}
+{{- $c := index $v .component -}}
+{{- $ex := $v.executor.identity.azure.clientId | default "" | lower -}}
+{{- $an := $v.analyzer.identity.azure.clientId | default "" | lower -}}
+{{- if and $ex $an (eq $ex $an) -}}
+{{- fail "executor.identity.azure.clientId and analyzer.identity.azure.clientId are equal: the executor and the analyzer must have separate identities, never one for both" -}}
+{{- end -}}
+{{- range $k, $_ := $c.serviceAccount.annotations -}}
+{{- if hasPrefix "azure.workload.identity/" $k -}}
+{{- fail (printf "%s.serviceAccount.annotations may not set %q: use %s.identity.azure.clientId" $.component $k $.component) -}}
+{{- end -}}
+{{- end -}}
+{{- range $k, $_ := $c.podLabels -}}
+{{- if or (hasPrefix "azure.workload.identity/" $k) (hasPrefix "app.kubernetes.io/" $k) (hasPrefix "helm.sh/" $k) (eq $k "control-plane") -}}
+{{- fail (printf "%s.podLabels may not set %q: the chart sets it (identity labels come from %s.identity.azure.clientId)" $.component $k $.component) -}}
+{{- end -}}
+{{- end -}}
+{{- $reserved := splitList " " (include "shadewright.reservedFlags" .context) -}}
+{{- range $c.extraArgs -}}
+{{- $name := . | trimPrefix "--" | splitList "=" | first -}}
+{{- if has $name $reserved -}}
+{{- fail (printf "%s.extraArgs may not set --%s: the chart sets it" $.component $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}

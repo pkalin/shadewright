@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.2.0](https://github.com/pkalin/shadewright/compare/v0.1.0...v0.2.0) (2026-11-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* **api:** RemediationSettings spec.maxAnalysesPerDay moved to spec.analysis.maxAnalysesPerDay. The old field stays as deprecated: any write that sets or changes it is refused, and while a stored value remains the analyzer uses the lower of the two. When upgrading from v0.1.0, move the value in one patch, for example kubectl patch remediationsettings default --type merge -p '{"spec":{"maxAnalysesPerDay":null,"analysis":{"maxAnalysesPerDay":0}}}', and change the manifests you keep in Git (upgrade and uninstall guide).
+
+### Features
+
+* add a Helm chart published to GHCR on release tags ([#303](https://github.com/pkalin/shadewright/issues/303)) ([69009f3](https://github.com/pkalin/shadewright/commit/69009f3e027c91e97418ba39999c16f51fc12a21))
+* add Prometheus metrics for incidents, analyses, requests by phase, denials and errors ([#292](https://github.com/pkalin/shadewright/issues/292)) ([02af160](https://github.com/pkalin/shadewright/commit/02af16045ad79df0220dccf510447ebbefb015a4))
+* **analyzer:** add the pod logs LogSource adapter, bounded, scoped and redacted ([#316](https://github.com/pkalin/shadewright/issues/316)) ([b94dea3](https://github.com/pkalin/shadewright/commit/b94dea331f7db5b54c7017530d345f701b22aa56))
+* **analyzer:** add the Prometheus MetricsSource adapter with approved query templates ([#304](https://github.com/pkalin/shadewright/issues/304)) ([082137e](https://github.com/pkalin/shadewright/commit/082137e9c74c982c278a9ea162cd270c005ea07f))
+* **api:** analysis limits and model configuration in RemediationSettings ([#315](https://github.com/pkalin/shadewright/issues/315)) ([3541011](https://github.com/pkalin/shadewright/commit/3541011598a587920851f2567f8cbfec3ddac8be))
+* **chart:** install with default values and meet chart-testing conventions ([#310](https://github.com/pkalin/shadewright/issues/310)) ([ffbd18f](https://github.com/pkalin/shadewright/commit/ffbd18f51dd08138aac40c62f358301c90e675b2))
+* **platforms:** detect EKS and GKE with detection-only modules ([#299](https://github.com/pkalin/shadewright/issues/299)) ([1121976](https://github.com/pkalin/shadewright/commit/11219768997373915e3178984e3984983b44e19f))
+* **policy:** add a half-open state to the circuit breaker ([#305](https://github.com/pkalin/shadewright/issues/305)) ([109c3c0](https://github.com/pkalin/shadewright/commit/109c3c066549e159c7c80701fe920bf2c416558e))
+* **policy:** check the kill switch right before every Git write ([#273](https://github.com/pkalin/shadewright/issues/273)) ([c5bbbc7](https://github.com/pkalin/shadewright/commit/c5bbbc7d0c2820daa5c399a59302fd894e4aa734))
+* **policy:** enforce concurrency limits, a lock per target and a circuit breaker ([#291](https://github.com/pkalin/shadewright/issues/291)) ([f6afd4d](https://github.com/pkalin/shadewright/commit/f6afd4d5666c632c8c164a0df6c5c4327e8c1a71))
+
+
+### Bug fixes
+
+* **analyzer:** bound the occurrences held unwritten per Incident and in total ([#275](https://github.com/pkalin/shadewright/issues/275)) ([1263276](https://github.com/pkalin/shadewright/commit/126327602e481d00255d3a888ff5cd77c2f3a472))
+* **analyzer:** give each namespace a share of the occurrences held unwritten ([#301](https://github.com/pkalin/shadewright/issues/301)) ([6ad208c](https://github.com/pkalin/shadewright/commit/6ad208c04300aaf674472f4b3677f0bd5e76b00c))
+* **chart:** keep the chart version out of the generated README ([#326](https://github.com/pkalin/shadewright/issues/326)) ([bda424e](https://github.com/pkalin/shadewright/commit/bda424ea5f3d5b52ac3d5c488b96f568be96de4a))
+* **gitops:** give the Incident read in the pull request step its own deadline ([#277](https://github.com/pkalin/shadewright/issues/277)) ([1403ca4](https://github.com/pkalin/shadewright/commit/1403ca475f9427686fdb623c8fa5ec76bb845106))
+* **gitops:** name the Incident in the pull request body once the executor has read it back ([#265](https://github.com/pkalin/shadewright/issues/265)) ([1c10e67](https://github.com/pkalin/shadewright/commit/1c10e6731e8066df3bdfeffd87b08f2afec97ce8))
+* **gitops:** say on PullRequestOpened when the pull request is closed ([#270](https://github.com/pkalin/shadewright/issues/270)) ([d85178f](https://github.com/pkalin/shadewright/commit/d85178fba8ae92c8841830bf499f96efa37003aa))
+* **gitops:** stop source mapping at the second declaration and bound its total input ([#296](https://github.com/pkalin/shadewright/issues/296)) ([d2e3a69](https://github.com/pkalin/shadewright/commit/d2e3a69b0b8a708d2ddbf390fb78f29caf46e9fe))
+
+
+### Refactoring
+
+* **api:** move maxAnalysesPerDay under spec.analysis ([3dff1db](https://github.com/pkalin/shadewright/commit/3dff1dbb5c10c9da1d58a025280b59b705f53a47))
+
 ## 0.1.0 (2026-11-04)
 
 

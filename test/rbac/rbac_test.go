@@ -359,6 +359,12 @@ func TestPermissionBoundary(t *testing.T) {
 		{"executor", "list", group, "incidents", "", otherNS, false},
 		// get on the request's Incident only, to check the name the pull request body shows (#264).
 		{"executor", "get", group, "incidents", "", operatorNS, true},
+		// The kill switch's Events about a request (WritesPaused, WritesResumed) are core Events, written with
+		// the leader election Role's grant in the operator namespace, where the requests are.
+		{"executor", "create", "", "events", "", operatorNS, true},
+		{"executor", "create", "", "events", "", otherNS, false},
+		{"executor", "delete", "", "events", "", operatorNS, false},
+		{"executor", "create", "events.k8s.io", "events", "", operatorNS, false},
 		{"executor", "list", group, "incidents", "", operatorNS, false},
 		{"executor", "watch", group, "incidents", "", operatorNS, false},
 		{"executor", "update", group, "incidents", "", operatorNS, false},

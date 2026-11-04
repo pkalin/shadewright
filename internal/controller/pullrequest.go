@@ -158,7 +158,7 @@ func (r *RemediationRequestReconciler) openPlanRepository(ctx context.Context, r
 	if src := rr.Status.Source; src == nil || repo.TargetBranch != src.TargetBranch {
 		return nil, remediationv1alpha1.GitRepository{}, errTargetBranchChanged
 	}
-	git, err := r.OpenRepository(ctx, repo)
+	git, err := r.openRepository(ctx, repo)
 	if providers.IsInvalidConfig(err) {
 		return nil, remediationv1alpha1.GitRepository{}, freshness.ErrRepositoryUnusable
 	}
@@ -293,8 +293,12 @@ func (r *RemediationRequestReconciler) refuseWaiting(ctx context.Context, rr *re
 func (r *RemediationRequestReconciler) startDeadline(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	rr.Status.Deadline = &metav1.Time{Time: r.now().Add(r.pullRequestTimeout())}
+	wasPaused := resume(rr)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return reconcile.Result{}, fmt.Errorf("set the deadline of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	if wasPaused {
+		r.resumed(ctx, rr)
 	}
 	return reconcile.Result{RequeueAfter: stepDelay}, nil
 }
@@ -618,6 +622,9 @@ func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediation
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
 	}
 	rr.Status.Phase = phase
+	// A final phase waits for nothing, also not for the kill switch; the request does not go on, so no
+	// WritesResumed Event is recorded.
+	resume(rr)
 	status := metav1.ConditionFalse
 	if phase == remediationv1alpha1.PhaseMerged {
 		status = metav1.ConditionTrue
@@ -673,7 +680,8 @@ func (r *RemediationRequestReconciler) retry(ctx context.Context, rr *remediatio
 	reconcile.Result, error) {
 	switch {
 	case errors.Is(err, freshness.ErrPaused):
-		return reconcile.Result{RequeueAfter: freshRecheckDelay}, nil
+		// The kill switch stopped the write, at the gate right before it or earlier in the step.
+		return r.waitWhilePaused(ctx, rr)
 	case errors.Is(err, freshness.ErrRepositoryUnusable):
 		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 			reasonRepositoryUnusable, messageRepositoryUnusable))
@@ -728,15 +736,25 @@ func refusedWhileWatching(reason string) string {
 		"watching the pull request"
 }
 
-// clearRefusal removes the PlanFresh condition refuseOrWait wrote, once the freshness check passes again.
-func (r *RemediationRequestReconciler) clearRefusal(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
-	if c == nil || c.Status != metav1.ConditionUnknown || (c.Reason != ReasonGitForbidden && c.Reason != ReasonGitRejected) {
+// clearWaits removes, once the freshness check passes again, the PlanFresh condition refuseOrWait wrote and
+// the WritesPaused condition of the kill switch (the check has just read the settings without a pause), in one
+// status write.
+func (r *RemediationRequestReconciler) clearWaits(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	changed := false
+	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh); c != nil &&
+		c.Status == metav1.ConditionUnknown && (c.Reason == ReasonGitForbidden || c.Reason == ReasonGitRejected) {
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+		changed = true
+	}
+	wasPaused := resume(rr)
+	if !changed && !wasPaused {
 		return nil
 	}
-	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	if wasPaused {
+		r.resumed(ctx, rr)
 	}
 	return nil
 }
@@ -819,7 +837,7 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 			errors.Is(err, errChangeRequestNotOurs):
 			// Closed, nothing reachable to close, already merged, or not ours to close.
 		case errors.Is(err, freshness.ErrPaused):
-			return reconcile.Result{RequeueAfter: freshRecheckDelay}, nil
+			return r.waitWhilePaused(ctx, rr)
 		default:
 			return r.waitOrFail(ctx, rr, err)
 		}

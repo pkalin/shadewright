@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -73,13 +74,15 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		writeTimeout time.Duration
 		// opens counts the repositories opened through the reconciler.
 		opens int
+		// recorder, when set, records the reconciler's Events.
+		recorder *record.FakeRecorder
 	)
 
 	manifest := func(limit string) []byte {
 		return deploymentManifest(deployment.Name, deployment.Namespace, workerContainer, limit)
 	}
 	reconciler := func() *RemediationRequestReconciler {
-		return &RemediationRequestReconciler{
+		r := &RemediationRequestReconciler{
 			Client: k8sClient, Scheme: k8sClient.Scheme(), Source: sourceFunc(func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
 				res := resolved()
 				res.Source.BaseCommit, _ = git.BranchHead(ctx, mainBranch)
@@ -102,6 +105,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Now:          func() time.Time { return clock },
 			WriteTimeout: writeTimeout,
 		}
+		if recorder != nil {
+			r.Recorder = recorder
+		}
+		return r
 	}
 	key := func() reconcile.Request {
 		return reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)}
@@ -145,7 +152,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		seq++
 		clock = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 		build = buildPath
-		faulty, openErr, writeTimeout, opens = nil, nil, 0, 0
+		faulty, openErr, writeTimeout, opens, recorder = nil, nil, 0, 0, nil
 		err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fx.TargetNamespace}})
 		Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
 
@@ -549,6 +556,130 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		_, err := git.BranchHead(ctx, freshness.BranchName(fetch()))
 		Expect(errors.Is(err, providers.ErrNotFound)).To(BeTrue())
 		Expect(openRequests()).To(BeEmpty())
+	})
+
+	// Issue #87: the kill switch is read right before every write, not only by the freshness check at the start
+	// of the reconcile. pauseOnLookup sets spec.paused in the API server when the pull request step (or the close)
+	// looks up the change request, which it does after the freshness check passed and before any write.
+	Context("when writes are paused right before a write (kill switch)", func() {
+		var (
+			armed  bool
+			writes []string
+		)
+		setPaused := func(on bool) {
+			live := &remediationv1alpha1.RemediationSettings{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, live)).To(Succeed())
+			live.Spec.Paused = new(on)
+			Expect(k8sClient.Update(ctx, live)).To(Succeed())
+		}
+		pausedCondition := func() *metav1.Condition {
+			return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionWritesPaused)
+		}
+		BeforeEach(func() {
+			armed, writes = false, nil
+			recorder = record.NewFakeRecorder(20)
+			git.SetFail(func(op string) error {
+				if op == opFind && armed {
+					armed = false
+					setPaused(true)
+				}
+				return nil
+			})
+			git.SetAfter(func(op string) error {
+				if !gitReads[op] {
+					writes = append(writes, op)
+				}
+				return nil
+			})
+		})
+
+		It("stops before each write of the pull request step, keeps the state and resumes where it stopped", func() {
+			Expect(reconcileOnce()).To(Succeed()) // finalizer
+			for _, write := range []string{opCreateBranch, opCommit, opOpen} {
+				before := len(writes)
+				armed = true
+				res, err := reconcileResult()
+				Expect(err).NotTo(HaveOccurred(), "a pause is a wait, not an error")
+				Expect(res.RequeueAfter).To(Equal(freshRecheckDelay))
+				Expect(writes[before:]).To(BeEmpty(), "paused after the freshness check: no %s", write)
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "the phase is kept")
+				Expect(got.Status.Deadline).NotTo(BeNil(), "the deadline is kept")
+				Expect(controllerutil.ContainsFinalizer(got, FinalizerName)).To(BeTrue())
+				cond := pausedCondition()
+				Expect(cond).NotTo(BeNil())
+				Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				Expect(cond.Reason).To(Equal(ReasonWritesPaused))
+				Expect(recorder.Events).To(Receive(Equal("Normal " + ReasonWritesPaused + " " + messageWritesPaused)))
+
+				// Still paused: nothing is written, and the Event is not repeated.
+				Expect(reconcileOnce()).To(Succeed())
+				Expect(writes[before:]).To(BeEmpty())
+				Expect(recorder.Events).NotTo(Receive())
+
+				setPaused(false)
+				Expect(reconcileOnce()).To(Succeed())
+				Expect(writes[before:]).To(Equal([]string{write}), "the step goes on with the write it stopped before")
+				Expect(pausedCondition()).To(BeNil())
+				Expect(recorder.Events).To(Receive(Equal("Normal " + EventWritesResumed + " " + messageWritesResumed)))
+			}
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			Expect(openRequests()).To(HaveLen(1))
+		})
+
+		It("does not close the pull request of a deleted request when paused between the look-up and the close", func() {
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+			armed = true
+			Expect(reconcileOnce()).To(Succeed())
+			Expect(writes).NotTo(ContainElement(opClose))
+			Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+			Expect(fetch().DeletionTimestamp).NotTo(BeNil(), "the finalizer holds the request")
+			Expect(pausedCondition()).NotTo(BeNil())
+			Expect(fetch().Status.PullRequest).To(Equal(got.Status.PullRequest))
+
+			setPaused(false)
+			Expect(reconcileOnce()).To(Succeed())
+			Eventually(gone).Should(BeTrue())
+			Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+		})
+
+		DescribeTable("blocks the write when the settings cannot be read right before it (fails closed)",
+			func(readErr func() error) {
+				Expect(reconcileOnce()).To(Succeed()) // finalizer
+				broken := false
+				git.SetFail(func(op string) error {
+					if op == opFind {
+						broken = true
+					}
+					return nil
+				})
+				r := reconciler()
+				r.APIReader = readerFunc(func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+					if _, ok := obj.(*remediationv1alpha1.RemediationSettings); ok && broken {
+						return readErr()
+					}
+					return k8sClient.Get(ctx, key, obj)
+				})
+				_, err := r.Reconcile(ctx, key())
+				Expect(err).To(MatchError(freshness.ErrWriteBlocked), "returned for a retry with backoff")
+				Expect(writes).To(BeEmpty())
+				_, err = git.BranchHead(ctx, freshness.BranchName(fetch()))
+				Expect(errors.Is(err, providers.ErrNotFound)).To(BeTrue(), "no branch was created")
+				Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+
+				git.SetFail(nil)
+				broken = false
+				Expect(reconcileOnce()).To(Succeed())
+				Expect(writes).To(Equal([]string{opCreateBranch}))
+			},
+			Entry("the API server does not answer", func() error { return apierrors.NewServiceUnavailable("down") }),
+			Entry("the settings object is gone", func() error {
+				return apierrors.NewNotFound(remediationv1alpha1.GroupVersion.WithResource("remediationsettings").GroupResource(),
+					remediationv1alpha1.SettingsName)
+			}),
+		)
 	})
 
 	// Issue #181: the target branch can move under the change twice, between cutting the branch and the commit,

@@ -221,6 +221,10 @@ const (
 	// GitForbidden or GitRejected, while the Git host refuses the freshness check of a request whose pull
 	// request waits for review; the pull request is still watched and nothing is written to Git.
 	ConditionPlanFresh = "PlanFresh"
+	// ConditionWritesPaused is True, with reason WritesPaused, while RemediationSettings spec.paused (the kill
+	// switch) holds back the request's next Git write. The request keeps its phase and the rest of its status,
+	// and the condition is removed once the request may write again or ends.
+	ConditionWritesPaused = "WritesPaused"
 )
 
 // PullRequestStatus records the pull request that carries the plan.

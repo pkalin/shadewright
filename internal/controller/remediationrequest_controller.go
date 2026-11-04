@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -100,6 +101,10 @@ type RemediationRequestReconciler struct {
 	TargetStateTimeout time.Duration
 	// Now is the clock; nil means time.Now (tests set it).
 	Now func() time.Time
+	// Recorder records the kill switch's Events about a request (WritesPaused, WritesResumed). They are core/v1
+	// Events in the request's namespace, the operator namespace, where the executor's leader election Role
+	// grants create and patch on Events. Nil records none (tests).
+	Recorder record.EventRecorder
 }
 
 // DefaultTargetStateTimeout is how long the policy check waits by default for KEDA to report on a
@@ -594,7 +599,7 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 	case errors.Is(err, ErrSuperseded):
 		return ctrl.Result{}, nil
 	case errors.Is(err, freshness.ErrPaused):
-		return ctrl.Result{RequeueAfter: freshRecheckDelay}, nil
+		return r.waitWhilePaused(ctx, rr)
 	case rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked && rr.Status.Deadline == nil:
 		// Decided while writes were paused (the policy check starts no deadline then): the freshness check
 		// has just found writes allowed again, so the deadline starts now, whether or not the plan was fresh.
@@ -604,7 +609,7 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 	case outcome == prClosed:
 		return r.rejected(ctx, rr)
 	default:
-		if err := r.clearRefusal(ctx, rr); err != nil {
+		if err := r.clearWaits(ctx, rr); err != nil {
 			return ctrl.Result{}, err
 		}
 		return r.advance(ctx, rr, fresh)
@@ -645,7 +650,8 @@ func (r *RemediationRequestReconciler) ensureFresh(ctx context.Context, rr *reme
 		return freshness.Result{}, r.cleanUpStale(ctx, rr, &freshness.StaleError{Reason: mark.Reason, Message: mark.Message})
 	}
 	freshCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
-	fresh, err := freshness.Checker{Reader: r.reader(), OpenRepository: r.OpenRepository, Source: r.Source}.Check(freshCtx, rr)
+	// The provider the check opens is gated (openRepository): the pull request step writes through it.
+	fresh, err := freshness.Checker{Reader: r.reader(), OpenRepository: r.openRepository, Source: r.Source}.Check(freshCtx, rr)
 	// A verdict that arrives after the deadline, fresh (nil), stale and unusable included, is not acted on: a
 	// read may have been cut short, and a "fresh" from a read that ended with the deadline is not one the
 	// caller may write on.
@@ -748,6 +754,9 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 func (r *RemediationRequestReconciler) endFreshness(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	phase remediationv1alpha1.RemediationPhase, reason, message string) error {
 	rr.Status.Phase = phase
+	// A final phase waits for nothing, also not for the kill switch; the request does not go on, so no
+	// WritesResumed Event is recorded.
+	resume(rr)
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPlanFresh,
 		Status:             metav1.ConditionFalse,
@@ -790,7 +799,7 @@ func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, r
 	if src := rr.Status.Source; src != nil && repo.TargetBranch != src.TargetBranch {
 		return errTargetBranchChanged
 	}
-	git, err := r.OpenRepository(ctx, repo)
+	git, err := r.openRepository(ctx, repo)
 	if providers.IsInvalidConfig(err) {
 		return freshness.ErrRepositoryUnusable
 	}

@@ -125,6 +125,9 @@ func main() {
 		APIReader:      mgr.GetAPIReader(),
 		Source:         source,
 		OpenRepository: repos.Open,
+		// The core/v1 recorder writes with the grant on core Events that the executor's leader election Role
+		// already holds in the operator namespace, where the requests are, as the analyzer's recorder does.
+		Recorder: mgr.GetEventRecorderFor("shadewright-executor"), //nolint:staticcheck // see above
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "remediationrequest")
 		os.Exit(1)

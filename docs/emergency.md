@@ -22,11 +22,21 @@ The executor reads the settings right before each write and, while `paused` is t
 - close a pull request, including the one a deleted request owns or one whose plan went stale;
 - finish a deletion: the finalizer `remediation.shadewright.io/close-pull-request` stays on a deleted `RemediationRequest` until the pause ends, because closing is a write.
 
-It also does not look at its open pull requests while paused. Requests wait and check again. To resume:
+The check is made right before each write, from the API server, so a pause also stops a request whose step has already started: the next write is not made. If the executor cannot read the settings at that moment, or the object is gone, it does not write either.
+
+It also does not look at its open pull requests while paused. Requests keep their state and check again every minute; each one held back shows the condition `WritesPaused` and an Event of the same reason:
+
+```bash
+kubectl get events -n <operator-namespace> --field-selector reason=WritesPaused
+```
+
+To resume:
 
 ```bash
 kubectl patch remediationsettings default --type merge -p '{"spec":{"paused":false}}'
 ```
+
+Each request goes on from where it stopped; the condition is removed and an Event `WritesResumed` is recorded.
 
 ## 2. Stop analysis: `spec.maxAnalysesPerDay: 0`
 

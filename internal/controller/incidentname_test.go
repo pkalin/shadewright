@@ -20,6 +20,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -91,5 +92,35 @@ func TestVerifiedIncidentName(t *testing.T) {
 	r := &RemediationRequestReconciler{Client: forbidden, APIReader: forbidden}
 	if got := r.verifiedIncidentName(context.Background(), request(name, uid)); got != "" {
 		t.Errorf("failed read: got %q, want \"\"", got)
+	}
+
+	// A read that hangs ends at its own deadline, long before the step's, and keeps the name redacted (#272).
+	stalled := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(incident(ns, name, hex)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, _ client.WithWatch, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		}).Build()
+	r = &RemediationRequestReconciler{Client: stalled, APIReader: stalled, IncidentReadTimeout: 50 * time.Millisecond}
+	step, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	if got := r.verifiedIncidentName(step, request(name, uid)); got != "" {
+		t.Errorf("stalled read: got %q, want \"\"", got)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Errorf("stalled read took %v, want about its own deadline", took)
+	}
+	if step.Err() != nil {
+		t.Errorf("the read's deadline ended the step's context: %v", step.Err())
+	}
+
+	// A cancelled step cancels the read too: the name is redacted and the cancellation stays the caller's.
+	cancelled, cancelNow := context.WithCancel(context.Background())
+	cancelNow()
+	r = &RemediationRequestReconciler{Client: stalled, APIReader: stalled}
+	if got := r.verifiedIncidentName(cancelled, request(name, uid)); got != "" {
+		t.Errorf("cancelled step: got %q, want \"\"", got)
 	}
 }

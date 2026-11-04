@@ -1,0 +1,14 @@
+Shadewright
+Copyright 2026 The Shadewright Authors
+
+This repository holds the Shadewright operator (the executor and the analyzer).
+Project site: https://shadewright.io
+Source: https://github.com/pkalin/shadewright
+
+Licensed under the Apache License, Version 2.0 (see LICENSE). Under section 4(d)
+of that license, a redistribution of this work or of a derivative work must
+include a readable copy of the attribution notices in this file.
+
+"Shadewright" and the Shadewright logo are not licensed under the Apache
+License: section 6 grants no permission to use them, except as needed to
+describe the origin of the work and to reproduce this file.

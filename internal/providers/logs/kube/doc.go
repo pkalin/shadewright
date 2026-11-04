@@ -19,35 +19,45 @@ limitations under the License.
 // client-go's pods client ([PodsGetter], which CoreV1() of a clientset, real or fake, satisfies). It is built
 // but not wired: the analyzer does not create it yet, and has no grant on pods/log.
 //
-// Scope: a query may name only a namespace in [Config.Namespaces] (the analyzer's watched namespaces); any
-// other is refused with [ErrInvalidQuery] before a request, an empty set refuses every query, and the error
-// never repeats the namespace. RBAC would refuse such a read too once the analyzer has a grant, but the
-// adapter does not rely on the identity it is given. The pod must be a DNS-1123 subdomain and the container,
-// required (one container per call), a DNS-1123 label.
+// Scope and checks, before any request: a query may name only a namespace in [Config.Namespaces] (the
+// analyzer's watched namespaces); any other is refused with [ErrInvalidQuery], an empty set refuses every
+// query, and the error never repeats the namespace. RBAC would refuse such a read too once the analyzer has a
+// grant, but the adapter does not rely on the identity it is given. The pod must be a DNS-1123 subdomain and
+// the container, required (one container per call), a DNS-1123 label. [New] refuses a nil client, a namespace
+// that is not a DNS-1123 label, more than [MaxNamespaces] namespaces and a timeout above [MaxTimeout].
 //
-// Bounds, fixed in code so that no configuration can widen them: a query reads back its Since ([DefaultSince]
-// when it sets none, at most [MaxSince], rounded up to whole seconds) and at most the last [TailLines] lines,
-// and asks the server for at most [MaxReadBytes] (LimitBytes). The adapter reads at most [MaxReadBytes] of
-// the stream whatever the server sends, keeping only the last [providers.LogQuery.MaxBytes] in memory
-// ([DefaultBytes] when zero, at most [MaxBytes]). The excerpt is the newest part of what was read: when bytes
-// were dropped from its front, its first line, which may be partial, is dropped too, and when the read
-// stopped at [MaxReadBytes], the partial last line, so a cut never leaves half of a secret for the redactor
-// to miss; Truncated is then set. Previous selects the previous, terminated instance of the container. The
-// stream is never followed, and timestamps are not asked for. Each query has a deadline ([Config.Timeout] or
-// the caller's, whichever is sooner).
+// Bounds, fixed in code so that no configuration can widen them. A query of the current container reads back
+// its Since ([DefaultSince] when it sets none); a query of the previous, terminated instance reads back its
+// Since only when it sets one, and otherwise has no time limit, since that instance stopped at some time in
+// the past. Since is at most [MaxSince] and rounded up to whole seconds. The first request asks for the last
+// [TailLines] lines and for at most [MaxReadBytes] plus one byte (LimitBytes), and the adapter reads no more
+// than that whatever the server sends; the extra byte tells a log of exactly [MaxReadBytes] from a longer
+// one. The API server applies LimitBytes from the start of the lines it selected, so when they hold more than
+// [MaxReadBytes], the newest lines are missing: the adapter then sends one more request, for fewer lines (the
+// lines that would fit at the mean length of the first read, times 0.75). If that read is cut too, the
+// excerpt is what it holds and EndMissing is set. Each read holds at most [MaxReadBytes] plus one byte in
+// memory. Lines the server leaves out because of TailLines or Since are not reported.
+//
+// The excerpt is the newest [providers.LogQuery.MaxBytes] of the read ([DefaultBytes] when zero, at most
+// [MaxBytes]), in whole lines: when older bytes are dropped, the first line is dropped too unless it starts
+// right after a newline, and Truncated is set; when the read was cut, its last, partial line is dropped. So a
+// cut never leaves half of a secret for the redactor to miss. The stream is never followed, and timestamps
+// are not asked for. Each query has a deadline ([Config.Timeout] or the caller's, whichever is sooner); a
+// stream that makes no progress for 100 reads in a row fails as cut short.
 //
 // The log is untrusted input (invariant 4). Invalid UTF-8 is replaced, and the text is redacted with
 // internal/redact ([Config.Redactor], or the built-in rules) before it leaves the adapter; redaction never
 // makes the text longer, so the excerpt stays within its byte bound. Redaction is best effort (see package
 // redact); a multi-line secret, such as a PEM key, that a cut splits at a line boundary loses its header, and
-// its remaining lines are redacted only if they look random enough. The adapter logs nothing.
+// its remaining lines are redacted only if they look random enough. The volume of logs is controlled by
+// whoever can write logs in a watched namespace, so Truncated and EndMissing say nothing about the incident.
+// The adapter logs nothing.
 //
 // Errors carry fixed text and the status code only, never the namespace, pod or container name, log text or
 // the API server's message. The adapter does not retry (client-go's own retries are turned off): 404 is
-// [providers.ErrNotFound]; 400, which the API server answers for a container the pod does not have, a
-// previous instance that does not exist or a container that has not started, and any other 4xx are
-// [providers.ErrRejected]; 401 and 403 are [providers.ErrForbidden]; 408, 429, 5xx, a network error and a
-// stream cut short are a [providers.RetryableError] (with the delay the server asked for, capped at 10
-// minutes). A canceled or expired context is returned so that errors.Is matches [context.Canceled] or
+// [providers.ErrNotFound]; 401 and 403 are [providers.ErrForbidden]; 408, 429, 5xx, a network error, a stream
+// cut short and the expiry of [Config.Timeout] are a [providers.RetryableError] (with the delay the server
+// asked for, capped at 10 minutes); any other 4xx, such as 400, is [providers.ErrRejected]. When the caller's
+// context is done, its error is returned, so that errors.Is matches [context.Canceled] or
 // [context.DeadlineExceeded].
 package kube

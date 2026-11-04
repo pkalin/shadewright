@@ -37,17 +37,20 @@ import (
 
 // Limits on queries and excerpts. They are fixed in code so that no configuration can widen them.
 const (
-	// DefaultBytes bounds the excerpt when a query sets no MaxBytes; it equals the fake's default.
-	DefaultBytes = 64 << 10
+	// DefaultBytes bounds the excerpt when a query sets no MaxBytes.
+	DefaultBytes = providers.DefaultLogBytes
 	// MaxBytes bounds the MaxBytes of a query.
 	MaxBytes = 256 << 10
-	// MaxReadBytes bounds what is read of one stream, and is sent as LimitBytes. The excerpt is the newest
-	// MaxBytes (or less) of it.
+	// MaxReadBytes bounds what is read of one stream. LimitBytes is sent as MaxReadBytes plus one, so that
+	// a log of exactly MaxReadBytes is told apart from a longer one, and no more than that is read whatever
+	// the server sends. The excerpt is the newest MaxBytes (or less) of what was read.
 	MaxReadBytes = 1 << 20
-	// TailLines is sent with every request: the server returns at most the last TailLines lines of the time
-	// window.
+	// TailLines is sent with the first request: the server returns at most the last TailLines lines of the
+	// time window. When they hold more than MaxReadBytes, a second request asks for fewer lines.
 	TailLines = 2000
-	// DefaultSince is how far back a query reads when it sets no Since.
+	// DefaultSince is how far back a query of the current container reads when it sets no Since. A query of
+	// the previous instance that sets no Since has no time limit: that instance stopped at some time in the
+	// past, and its last lines are what a diagnosis needs.
 	DefaultSince = time.Hour
 	// MaxSince bounds the Since of a query.
 	MaxSince = 24 * time.Hour
@@ -59,8 +62,15 @@ const (
 	MaxNamespaces = 256
 )
 
-// readChunk is the size of one read from the stream.
+// readChunk is the first buffer size of a read from the stream; the buffer grows up to MaxReadBytes+1.
 const readChunk = 32 << 10
+
+// maxEmptyReads bounds the reads in a row that return no byte and no error, as in package bufio.
+const maxEmptyReads = 100
+
+// tailMargin is the share of the lines that would fit in MaxReadBytes, at the mean line length of the first
+// read, that the second request asks for, so that longer newest lines still fit.
+const tailMargin = 0.75
 
 // maxRetryAfter caps a delay asked for by the server.
 const maxRetryAfter = 10 * time.Minute
@@ -83,8 +93,8 @@ type Config struct {
 	Namespaces []string
 	// Redactor redacts the excerpt; nil means the built-in rules of package redact.
 	Redactor *redact.Redactor
-	// Timeout bounds one query, from the request to the end of the stream. Zero means DefaultTimeout; at
-	// most MaxTimeout.
+	// Timeout bounds one query, both requests included, to the end of the last stream. Zero means
+	// DefaultTimeout; at most MaxTimeout.
 	Timeout time.Duration
 }
 
@@ -137,24 +147,130 @@ func (s *Source) Logs(ctx context.Context, q providers.LogQuery) (providers.LogE
 	if err := ctx.Err(); err != nil {
 		return providers.LogExcerpt{}, fmt.Errorf("logs query not sent: %w", err)
 	}
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
+	data, over, err := s.read(ctx, parent, q, opts)
+	if err != nil {
+		return providers.LogExcerpt{}, err
+	}
+	if over {
+		// The server cut the window at LimitBytes, from its start: the newest lines are missing. Ask again for
+		// fewer lines, so that they fit.
+		tail := fewerLines(data)
+		opts.TailLines = &tail
+		if data, over, err = s.read(ctx, parent, q, opts); err != nil {
+			return providers.LogExcerpt{}, err
+		}
+	}
+	text, truncated := cut(data, over, keep)
+	return providers.LogExcerpt{
+		Text:       s.redact(strings.ToValidUTF8(text, "?")),
+		Truncated:  truncated,
+		EndMissing: over,
+	}, nil
+}
+
+// read sends one request and reads at most MaxReadBytes+1 of the stream. over reports that the stream held
+// more than MaxReadBytes; data is then cut to MaxReadBytes.
+func (s *Source) read(ctx, parent context.Context, q providers.LogQuery, opts *corev1.PodLogOptions,
+) (data []byte, over bool, err error) {
 	stream, err := s.pods.Pods(q.Namespace).GetLogs(q.Pod, opts).MaxRetries(0).Stream(ctx)
 	if err != nil {
-		return providers.LogExcerpt{}, requestError(ctx, err)
+		return nil, false, requestError(ctx, parent, err)
 	}
 	defer func() { _ = stream.Close() }()
-	tail, total, err := readTail(io.LimitReader(stream, MaxReadBytes), keep)
-	if ctx.Err() != nil {
-		// A stream that ended because the context did is never returned as complete.
-		return providers.LogExcerpt{}, fmt.Errorf("logs were not read: %w", ctx.Err())
+	data, err = readAll(io.LimitReader(stream, MaxReadBytes+1))
+	// A stream that ended because a context did is never returned as complete.
+	if err := contextError(ctx, parent); err != nil {
+		return nil, false, err
 	}
 	if err != nil {
-		return providers.LogExcerpt{}, &providers.RetryableError{Err: errors.New("logs stream was cut short")}
+		return nil, false, &providers.RetryableError{Err: errors.New("logs stream was cut short")}
 	}
-	text, truncated := trim(tail, total)
-	return providers.LogExcerpt{Text: s.redact(strings.ToValidUTF8(text, "?")), Truncated: truncated}, nil
+	if len(data) > MaxReadBytes {
+		return data[:MaxReadBytes], true, nil
+	}
+	return data, false, nil
+}
+
+// contextError returns the caller's context error when the caller's context is done, so that errors.Is
+// matches it, and a retryable error when only the adapter's own timeout expired.
+func contextError(ctx, parent context.Context) error {
+	if err := parent.Err(); err != nil {
+		return fmt.Errorf("logs were not read: %w", err)
+	}
+	if ctx.Err() != nil {
+		return &providers.RetryableError{Err: errors.New("logs request timed out")}
+	}
+	return nil
+}
+
+// errNoProgress means the stream returned no byte and no error too many times in a row.
+var errNoProgress = errors.New("logs stream made no progress")
+
+// readAll reads r to its end. The buffer grows by doubling up to MaxReadBytes+1, the most a LimitReader of
+// that size gives; reads that return nothing maxEmptyReads times in a row fail.
+func readAll(r io.Reader) ([]byte, error) {
+	buf := make([]byte, 0, readChunk)
+	empty := 0
+	for {
+		if len(buf) == cap(buf) {
+			if cap(buf) >= MaxReadBytes+1 {
+				return buf, nil
+			}
+			grown := make([]byte, len(buf), min(2*cap(buf), MaxReadBytes+1))
+			copy(grown, buf)
+			buf = grown
+		}
+		n, err := r.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if errors.Is(err, io.EOF) {
+			return buf, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			empty = 0
+		} else if empty++; empty >= maxEmptyReads {
+			return nil, errNoProgress
+		}
+	}
+}
+
+// fewerLines returns the tail lines that should fit in MaxReadBytes, from the mean length of the lines in
+// data (the first MaxReadBytes of the window), with a margin: at least 1, below TailLines.
+func fewerLines(data []byte) int64 {
+	lines := bytes.Count(data, []byte{'\n'})
+	if lines == 0 {
+		return 1
+	}
+	mean := float64(len(data)) / float64(lines)
+	n := int64(float64(MaxReadBytes) / mean * tailMargin)
+	return min(max(n, 1), TailLines-1)
+}
+
+// cut returns the newest whole lines of data that fit in keep bytes. When endMissing, the last line, which
+// the read cut, is dropped. When older bytes are dropped, the first line is dropped too unless it starts
+// right after a newline, so that no cut line reaches the redactor; truncated reports that.
+func cut(data []byte, endMissing bool, keep int) (string, bool) {
+	if endMissing {
+		data = data[:bytes.LastIndexByte(data, '\n')+1]
+	}
+	if len(data) <= keep {
+		return string(data), false
+	}
+	from := len(data) - keep
+	if data[from-1] != '\n' {
+		i := bytes.IndexByte(data[from:], '\n')
+		if i < 0 {
+			return "", true
+		}
+		from += i + 1
+	}
+	return string(data[from:]), true
 }
 
 // options checks q and returns the request options and the bytes to keep. Errors never repeat a value.
@@ -170,7 +286,7 @@ func (s *Source) options(q providers.LogQuery) (*corev1.PodLogOptions, int, erro
 	}
 	since := q.Since
 	switch {
-	case since == 0:
+	case since == 0 && !q.Previous:
 		since = DefaultSince
 	case since < 0 || since > MaxSince:
 		return nil, 0, fmt.Errorf("since must be between 0 and %s: %w", MaxSince, ErrInvalidQuery)
@@ -182,67 +298,26 @@ func (s *Source) options(q providers.LogQuery) (*corev1.PodLogOptions, int, erro
 	case keep < 0 || keep > MaxBytes:
 		return nil, 0, fmt.Errorf("max bytes must be between 0 and %d: %w", MaxBytes, ErrInvalidQuery)
 	}
-	// Whole seconds, rounded up, so the window asked for is never shorter than Since.
-	sinceSeconds := int64((since + time.Second - 1) / time.Second)
-	limit, tail := int64(MaxReadBytes), int64(TailLines)
-	return &corev1.PodLogOptions{
-		Container:    q.Container,
-		Previous:     q.Previous,
-		SinceSeconds: &sinceSeconds,
-		TailLines:    &tail,
-		LimitBytes:   &limit,
-	}, int(keep), nil
-}
-
-// readTail reads r to its end and returns the last keep bytes of it and the number of bytes read. At most
-// keep plus one chunk is held in memory.
-func readTail(r io.Reader, keep int) ([]byte, int64, error) {
-	buf := make([]byte, 0, keep+readChunk)
-	var total int64
-	for {
-		if len(buf) > keep {
-			buf = buf[:copy(buf, buf[len(buf)-keep:])]
-		}
-		n, err := r.Read(buf[len(buf):cap(buf)])
-		buf = buf[:len(buf)+n]
-		total += int64(n)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, total, err
-		}
+	limit, tail := int64(MaxReadBytes+1), int64(TailLines)
+	opts := &corev1.PodLogOptions{
+		Container:  q.Container,
+		Previous:   q.Previous,
+		TailLines:  &tail,
+		LimitBytes: &limit,
 	}
-	if len(buf) > keep {
-		buf = buf[len(buf)-keep:]
+	if since > 0 {
+		// Whole seconds, rounded up, so the window asked for is never shorter than Since.
+		sinceSeconds := int64((since + time.Second - 1) / time.Second)
+		opts.SinceSeconds = &sinceSeconds
 	}
-	return buf, total, nil
-}
-
-// trim drops the first line, which may be partial, when bytes were dropped before tail, and the last line
-// after its final newline when the read stopped at MaxReadBytes, so that no cut line reaches the redactor. It reports whether anything was cut.
-func trim(tail []byte, total int64) (string, bool) {
-	cutFront := total > int64(len(tail))
-	cutEnd := total >= MaxReadBytes
-	if cutFront {
-		i := bytes.IndexByte(tail, '\n')
-		if i < 0 {
-			return "", true
-		}
-		tail = tail[i+1:]
-	}
-	if cutEnd {
-		i := bytes.LastIndexByte(tail, '\n')
-		tail = tail[:i+1]
-	}
-	return string(tail), cutFront || cutEnd
+	return opts, int(keep), nil
 }
 
 // requestError classifies a failed request by its status code. The error of client-go is dropped: its
 // message holds the server's text, which can repeat names and log text.
-func requestError(ctx context.Context, err error) error {
-	if cerr := ctx.Err(); cerr != nil {
-		return fmt.Errorf("logs request failed: %w", cerr)
+func requestError(ctx, parent context.Context, err error) error {
+	if cerr := contextError(ctx, parent); cerr != nil {
+		return cerr
 	}
 	var st apierrors.APIStatus
 	if !errors.As(err, &st) {

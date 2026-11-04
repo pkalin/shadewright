@@ -574,13 +574,14 @@ func TestRefusedIncidentIsDroppedAndFreesItsPlace(t *testing.T) {
 	eventually(t, ns, 2, countIs(1))
 }
 
-// loseAnswer makes the n-th successful status update (counted from 1) look failed, as a timeout after the API
-// server stored it does, and closes lost then.
-func loseAnswer(r *running, n int32) (lost chan struct{}) {
+// loseAnswer makes the second successful status update look failed, as a timeout after the API server
+// stored it does, and closes lost then. The first one creates the Incident's status, so the lost write is
+// one that adds to it.
+func loseAnswer(r *running) (lost chan struct{}) {
 	lost = make(chan struct{})
 	var seen atomic.Int32
 	r.writes.after = func(err error) error {
-		if err == nil && seen.Add(1) == n {
+		if err == nil && seen.Add(1) == 2 {
 			close(lost)
 			return context.DeadlineExceeded
 		}
@@ -613,7 +614,7 @@ func waitFor(t *testing.T, ch <-chan struct{}) {
 func TestLostAnswerWithMoreOccurrencesThanRecordsIsNotCountedTwice(t *testing.T) {
 	ns := namespace(t)
 	r := start(t, ns, Config{Window: 300 * time.Millisecond, RetryAfter: 100 * time.Millisecond})
-	lost := loseAnswer(r, 2)
+	lost := loseAnswer(r)
 	now := time.Now().Truncate(time.Second)
 	r.obs <- observation(1, 0, 1, 1, now.Add(-time.Hour))
 	eventually(t, ns, 1, countIs(1))
@@ -643,6 +644,81 @@ func onlyStored(t *testing.T, r *running, inc *remediationv1alpha1.Incident) {
 			t.Errorf("the controller remembers %s, which the Incident no longer records", id)
 		}
 	}
+	indexed(t, r.Controller)
+}
+
+// indexed fails unless recordsOf indexes exactly the records, each under its Incident. The caller holds mu.
+func indexed(t *testing.T, c *Controller) {
+	t.Helper()
+	n := 0
+	for name, ids := range c.recordsOf {
+		for id := range ids {
+			n++
+			if r, ok := c.records[id]; !ok || r.incident != name {
+				t.Errorf("recordsOf holds %s under %s, records %+v", id, name, r)
+			}
+		}
+	}
+	if n != len(c.records) {
+		t.Errorf("recordsOf indexes %d records, records holds %d", n, len(c.records))
+	}
+}
+
+// A write whose answer was lost drops records with the 32-record cut, and the retry, which finds that write
+// stored, is refused as invalid: the dropped records are forgotten all the same.
+func TestRefusedRetryAfterALostAnswerForgetsDroppedRecords(t *testing.T) {
+	ns := namespace(t)
+	r := start(t, ns, Config{Window: 300 * time.Millisecond, RetryAfter: 500 * time.Millisecond})
+	lost := loseAnswer(r)
+	refused := make(chan struct{})
+	var updates atomic.Int32
+	r.writes.instead = func(context.Context) error {
+		if updates.Add(1) == 3 {
+			close(refused)
+			return apierrors.NewInvalid(remediationv1alpha1.GroupVersion.WithKind("Incident").GroupKind(), "x", nil)
+		}
+		return nil
+	}
+	now := time.Now().Truncate(time.Second)
+	r.obs <- observation(1, 0, 1, 1, now.Add(-time.Hour))
+	eventually(t, ns, 1, countIs(1))
+	n := remediationv1alpha1.MaxOccurrenceRecords + 1
+	for i := 1; i <= n; i++ {
+		r.obs <- observation(1, i, 1, 1, now.Add(time.Duration(i)*time.Second))
+	}
+	waitFor(t, lost)
+	// A new occurrence, so the retry has something to send besides the batch it finds stored.
+	r.obs <- observation(1, n+1, 1, 1, now.Add(time.Duration(n+1)*time.Second))
+	waitFor(t, refused)
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		r.mu.Lock()
+		done := len(r.held) == 0
+		r.mu.Unlock()
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the refused write never returned")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	inc := get(t, ns)
+	if inc.Status.Count != int64(n+1) {
+		t.Fatalf("count %d, want %d", inc.Status.Count, n+1)
+	}
+	stored := map[string]bool{}
+	for _, o := range inc.Status.Occurrences {
+		stored[o.ID] = true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, rec := range r.records {
+		if rec.incident == inc.Name && !stored[id] {
+			t.Errorf("the controller remembers %s, which the Incident no longer records", id)
+		}
+	}
+	indexed(t, r.Controller)
 }
 
 // A lost answer for a batch holding an ID the schema refuses: that occurrence is counted but not recorded,
@@ -650,7 +726,7 @@ func onlyStored(t *testing.T, r *running, inc *remediationv1alpha1.Incident) {
 func TestLostAnswerWithAnInvalidIDIsNotCountedTwice(t *testing.T) {
 	ns := namespace(t)
 	r := start(t, ns, Config{Window: 300 * time.Millisecond, RetryAfter: 100 * time.Millisecond})
-	lost := loseAnswer(r, 2)
+	lost := loseAnswer(r)
 	now := time.Now().Truncate(time.Second)
 	r.obs <- observation(1, 1, 1, 1, now)
 	eventually(t, ns, 1, countIs(1))
@@ -672,7 +748,7 @@ func TestLostAnswerWithAnInvalidIDIsNotCountedTwice(t *testing.T) {
 func TestLostAnswerWithNewObservationsDuringTheRetryWait(t *testing.T) {
 	ns := namespace(t)
 	r := start(t, ns, Config{Window: 200 * time.Millisecond, RetryAfter: 500 * time.Millisecond})
-	lost := loseAnswer(r, 2)
+	lost := loseAnswer(r)
 	now := time.Now().Truncate(time.Second)
 	r.obs <- observation(1, 1, 1, 1, now)
 	eventually(t, ns, 1, countIs(1))
@@ -937,4 +1013,5 @@ func TestHeldOccurrencesStayWithinTheCaps(t *testing.T) {
 	if r.heldTotal != 0 || len(r.held) != 0 {
 		t.Fatalf("held %v (total %d) after every batch was written, want nothing", r.held, r.heldTotal)
 	}
+	indexed(t, r.Controller)
 }

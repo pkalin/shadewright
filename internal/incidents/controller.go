@@ -155,6 +155,9 @@ type Controller struct {
 	// plus what is held unwritten. It is bounded by the records of the Incidents in memory (MaxIncidents
 	// times MaxOccurrenceRecords) plus the occurrences held unwritten.
 	records map[string]record
+	// recordsOf indexes records by Incident name, so the records of one Incident are found without visiting
+	// every record. setRecord and deleteRecord keep the two in step.
+	recordsOf map[string]map[string]struct{}
 	// held is, per fingerprint, the number of occurrences in its pending, failed and in-flight batches (an
 	// occurrence in two batches counts twice), and heldTotal their sum; consume holds them to the caps.
 	held      map[string]int
@@ -257,6 +260,7 @@ func New(cfg Config) (*Controller, error) {
 		cfg:       cfg,
 		ready:     make(chan struct{}),
 		records:   map[string]record{},
+		recordsOf: map[string]map[string]struct{}{},
 		held:      map[string]int{},
 		names:     map[string]struct{}{},
 		pending:   map[string]*batch{},
@@ -398,9 +402,42 @@ func (c *Controller) load(ctx context.Context) error {
 func (c *Controller) remember(name string, status *remediationv1alpha1.IncidentStatus) {
 	for _, r := range status.Occurrences {
 		cur := c.records[r.ID]
-		c.records[r.ID] = record{counted: higher(cur.counted, counted{total: r.Total, began: timeFrom(r.Began)}), incident: name}
+		c.setRecord(r.ID, record{counted: higher(cur.counted, counted{total: r.Total, began: timeFrom(r.Began)}), incident: name})
 	}
 	c.droppedThrough = latest(c.droppedThrough, timeFrom(status.OccurrencesDroppedThrough))
+}
+
+// setRecord sets the record of one occurrence and moves it in recordsOf to its Incident. The caller holds
+// mu.
+func (c *Controller) setRecord(id string, r record) {
+	if old, ok := c.records[id]; ok && old.incident != r.incident {
+		c.unindex(id, old.incident)
+	}
+	c.records[id] = r
+	ids := c.recordsOf[r.incident]
+	if ids == nil {
+		ids = map[string]struct{}{}
+		c.recordsOf[r.incident] = ids
+	}
+	ids[id] = struct{}{}
+}
+
+// deleteRecord forgets the record of one occurrence. The caller holds mu.
+func (c *Controller) deleteRecord(id string) {
+	if old, ok := c.records[id]; ok {
+		c.unindex(id, old.incident)
+		delete(c.records, id)
+	}
+}
+
+// unindex takes id out of the records of name in recordsOf. The caller holds mu.
+func (c *Controller) unindex(id, name string) {
+	if ids := c.recordsOf[name]; ids != nil {
+		delete(ids, id)
+		if len(ids) == 0 {
+			delete(c.recordsOf, name)
+		}
+	}
 }
 
 // Handled answers the collector (collector.HandledFunc): the highest total counted for the occurrence by
@@ -487,7 +524,7 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 	// ever drop its record from memory.
 	if occurrenceID.MatchString(o.Occurrence) {
 		cur := c.records[o.Occurrence]
-		c.records[o.Occurrence] = record{counted: higher(cur.counted, counted{total: o.Total, began: o.Began}), incident: name}
+		c.setRecord(o.Occurrence, record{counted: higher(cur.counted, counted{total: o.Total, began: o.Began}), incident: name})
 	}
 	return !scheduled
 }
@@ -656,6 +693,16 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 			gone, stored = []*batch{res.sent}, res.stored
 		}
 		c.forget(fp, gone, stored)
+		// A write before this one whose answer was lost may have dropped records that no batch names: they go
+		// too, as after a write that succeeds. What the Incident holds stays: the status as read, or that of
+		// the Incident with another fingerprint, as load remembered it.
+		holds := stored
+		if refused.conflict {
+			holds = &res.inc.Status
+		} else if holds == nil {
+			holds = &remediationv1alpha1.IncidentStatus{}
+		}
+		c.settle(fp, nil, holds, true)
 		if !refused.exists && c.pending[fp] == nil {
 			// An Incident that was never created frees its place under the cap.
 			delete(c.names, name)
@@ -696,11 +743,12 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 	c.settle(fp, res.dropped, &res.inc.Status, f != nil)
 }
 
-// settle takes into memory the status of fp's Incident after a write that succeeded: its records are
-// remembered, and this Incident's records of dropped that the status no longer holds are forgotten, unless
-// a batch still unwritten holds them. After a failed write (sweep), every record of this Incident is
-// checked the same way: a write whose answer was lost may have dropped records that neither this write's
-// dropped nor its batches name, and they would otherwise stay in memory for good. The caller holds mu.
+// settle takes into memory the status of fp's Incident after a write that succeeded or was refused: its
+// records are remembered, and this Incident's records of dropped that the status no longer holds are
+// forgotten, unless a batch still unwritten holds them. With sweep (after a failed write, or a refused
+// one), every record of this Incident is checked the same way, through recordsOf: a write whose answer was
+// lost may have dropped records that neither this write's dropped nor its batches name, and they would
+// otherwise stay in memory for good. The caller holds mu.
 func (c *Controller) settle(fp string, dropped []string, status *remediationv1alpha1.IncidentStatus, sweep bool) {
 	name := Name(fp)
 	stored := make(map[string]struct{}, len(status.Occurrences))
@@ -720,13 +768,13 @@ func (c *Controller) settle(fp string, dropped []string, status *remediationv1al
 	}
 	for _, id := range dropped {
 		if r, ok := c.records[id]; ok && stale(id, r) {
-			delete(c.records, id)
+			c.deleteRecord(id)
 		}
 	}
 	if sweep {
-		for id, r := range c.records {
-			if stale(id, r) {
-				delete(c.records, id)
+		for id := range c.recordsOf[name] {
+			if stale(id, c.records[id]) {
+				c.deleteRecord(id)
 			}
 		}
 	}
@@ -755,9 +803,9 @@ func (c *Controller) forget(fp string, gone []*batch, stored *remediationv1alpha
 				k, has = higher(k, o), true
 			}
 			if has {
-				c.records[id] = record{counted: k, incident: name}
+				c.setRecord(id, record{counted: k, incident: name})
 			} else {
-				delete(c.records, id)
+				c.deleteRecord(id)
 			}
 		}
 	}

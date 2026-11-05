@@ -25,7 +25,7 @@ Those PRs then merge on required checks alone; everything else needs a human.
 
 ## 8.2. Making a change
 
-The executor works through eight steps. Each step is written so that a restart or a race finds the existing work instead of repeating it.
+The executor runs steps 1 to 7; step 8 is planned (section 6). Every Git write names the state it expects, so a restart or a race finds the existing work instead of repeating it.
 
 1. Map the object to its source in Git (8.2.1).
 2. Read the current SHA of the target branch and create branch `shadewright/<request-uid>`.
@@ -196,6 +196,6 @@ sequenceDiagram
 | Reason when a budget runs out | `InputTooLarge`, a `NeedsIntervention` |
 | Adapter retries | Four attempts, exponential backoff with jitter |
 | Longest wait kept in the call | 15 seconds; longer goes back to the reconciler |
-| Secondary rate limit without headers | Wait one minute |
+| Secondary rate limit without headers | Delay of one minute (over 15 s, so the call returns it to the reconciler) |
 | Installation token | One hour, scoped to the one repository |
 | Auto-merge method | Squash |

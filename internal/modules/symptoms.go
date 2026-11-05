@@ -37,7 +37,8 @@ var (
 
 // Validate reports why a symptom source cannot be used: no version, a version listed twice, a group version
 // that is not valid (an empty Group is the core group), a kind or resource outside the schema, a reporting
-// controller that is not a component name, or no Symptoms function.
+// controller that is not a component name, no Symptoms function, or a subject owner that is set (any field)
+// with an invalid group version, kind or resource, or that names the watched kind itself.
 func (s SymptomSource) Validate() error {
 	if len(s.Versions) == 0 {
 		return fmt.Errorf("symptom source %s %q lists no version", s.Group, s.Kind)
@@ -65,6 +66,29 @@ func (s SymptomSource) Validate() error {
 	}
 	if s.Symptoms == nil {
 		return fmt.Errorf("symptom source %s %q has no Symptoms function", s.Group, s.Kind)
+	}
+	return s.Subject.validate(s.Group, s.Kind)
+}
+
+// validate reports why a subject owner cannot be used. One that is not set is valid. Otherwise its version,
+// group version, kind and resource follow the rules of a symptom source, and it is another kind than the
+// watched one.
+func (o SubjectOwner) validate(group, kind string) error {
+	if !o.IsSet() {
+		return nil
+	}
+	gv := o.APIVersion()
+	if o.Version == "" || !groupversion.Valid(gv) || strings.Contains(o.Version, "/") {
+		return fmt.Errorf("symptom source %s %q: subject group version %q is invalid", group, kind, gv)
+	}
+	if !kindPattern.MatchString(o.Kind) {
+		return fmt.Errorf("symptom source %s %q: subject kind %q is invalid", group, kind, o.Kind)
+	}
+	if !resourcePattern.MatchString(o.Resource) {
+		return fmt.Errorf("symptom source %s %q: subject resource %q is invalid", group, kind, o.Resource)
+	}
+	if o.Group == group && o.Kind == kind {
+		return fmt.Errorf("symptom source %s %q: the subject is the watched kind itself", group, kind)
 	}
 	return nil
 }
@@ -103,4 +127,53 @@ func cloneHooks(h Hooks) Hooks {
 		out.Symptoms[i].Versions = slices.Clone(out.Symptoms[i].Versions)
 	}
 	return out
+}
+
+// SourceFor returns the symptom source of an active module that watches the group and kind, with the module's
+// name, and false when no active module watches it. The registry allows one source per kind, so there is at
+// most one. The source is a copy, down to its versions.
+func (s Selection) SourceFor(group, kind string) (module string, src SymptomSource, ok bool) {
+	for _, m := range s.activeList {
+		for _, src := range m.Hooks.Symptoms {
+			if src.Group == group && src.Kind == kind {
+				src.Versions = slices.Clone(src.Versions)
+				return m.Name, src, true
+			}
+		}
+	}
+	return "", SymptomSource{}, false
+}
+
+// EvaluateSource runs a symptom source on one object, as decoded from JSON, and returns its symptoms with
+// evidence redacted and bounded ([BoundValue]). A source that panics shows nothing, and a symptom that
+// [ValidSymptom] refuses or that has no summary is dropped: both are bugs in the module, which its tests catch.
+// Since is kept as the source set it; the caller bounds it by its clock.
+func EvaluateSource(src SymptomSource, obj map[string]any) []Symptom {
+	if src.Symptoms == nil {
+		return nil
+	}
+	var out []Symptom
+	for _, sym := range safeSource(src.Symptoms, obj) {
+		if ValidSymptom(sym) != nil || sym.Summary == "" {
+			continue
+		}
+		ev := make([]Evidence, 0, len(sym.Evidence))
+		for _, e := range sym.Evidence {
+			ev = append(ev, Evidence{Field: e.Field, Value: BoundValue(e.Value)})
+		}
+		sym.Evidence = ev
+		out = append(out, sym)
+	}
+	return out
+}
+
+// safeSource calls a source's Symptoms and treats a panic as no symptom, so a module bug cannot stop the
+// analyzer.
+func safeSource(f func(map[string]any) []Symptom, obj map[string]any) (out []Symptom) {
+	defer func() {
+		if recover() != nil {
+			out = nil
+		}
+	}()
+	return f(obj)
 }

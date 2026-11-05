@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/modules"
@@ -38,15 +39,17 @@ const (
 	soFallback     = "scaledobject-fallback.json"
 	soHPAInactive  = "scaledobject-hpa-metrics-unavailable.json"
 	hpaCeiling     = "hpa-at-ceiling.json"
-	rabbitAuth     = "rabbitmq-auth"
-	keyStatus      = "status"
-	keyReason      = "reason"
-	keyMetadata    = "metadata"
-	keyType        = "type"
-	keyName        = "name"
-	otherVersion   = "another version"
-	jobCreate      = "KEDAJobCreateFailed"
-	scalingTarget  = "ErrorScalingTarget"
+	// ordersHPA is the HPA soFallback names in status.hpaName.
+	ordersHPA     = "keda-hpa-orders"
+	rabbitAuth    = "rabbitmq-auth"
+	keyStatus     = "status"
+	keyReason     = "reason"
+	keyMetadata   = "metadata"
+	keyType       = "type"
+	keyName       = "name"
+	otherVersion  = "another version"
+	jobCreate     = "KEDAJobCreateFailed"
+	scalingTarget = "ErrorScalingTarget"
 )
 
 // fixture reads a recorded object from testdata as encoding/json decodes it.
@@ -162,6 +165,8 @@ func TestRecordedObjects(t *testing.T) {
 				{Field: "status.currentMetrics.0.external.current.averageValue", Value: "212500m"},
 				{Field: "spec.metrics.0.external.target.averageValue", Value: "50"},
 			},
+			// ScalingLimited's lastTransitionTime in the fixture.
+			Since: time.Date(2026, time.November, 3, 8, 10, 0, 0, time.UTC),
 		}}},
 	}
 	for _, c := range cases {
@@ -310,6 +315,59 @@ func TestHPARules(t *testing.T) {
 			got := src.Symptoms(obj)
 			if c.want != (len(got) == 1 && got[0].Reason == ReasonReplicaCeiling) || len(got) > 1 {
 				t.Errorf("got %#v, want a ceiling %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestHPACeilingSince checks that a ceiling begins when ScalingLimited last changed, and that a missing or
+// malformed time leaves it unknown.
+func TestHPACeilingSince(t *testing.T) {
+	src := source(t, KindHPA)
+	for _, v := range []any{nil, "", "yesterday", float64(1)} {
+		obj := fixture(t, hpaCeiling)
+		cond(obj, conditionScalingLimited)["lastTransitionTime"] = v
+		got := src.Symptoms(obj)
+		if len(got) != 1 || !got[0].Since.IsZero() {
+			t.Errorf("lastTransitionTime %#v: got %#v, want a ceiling with no start", v, got)
+		}
+	}
+}
+
+// TestHPASymptomsAreAboutTheScaledObject checks the decision of #380: the HPA source's symptoms are about the
+// ScaledObject that controls it, the object AdjustKedaMaxReplicas patches, and the ScaledObject must name the
+// HPA in status.hpaName, which KEDA writes.
+func TestHPASymptomsAreAboutTheScaledObject(t *testing.T) {
+	src := source(t, KindHPA)
+	s := src.Subject
+	if s.Group != Group || s.Version != Version || s.Kind != KindScaledObject || s.Resource != "scaledobjects" ||
+		s.Claims == nil {
+		t.Fatalf("subject %s/%s %s %s (claims set %v), want the ScaledObject with claims", s.Group, s.Version,
+			s.Kind, s.Resource, s.Claims != nil)
+	}
+	// The fixture's status.hpaName is keda-hpa-orders.
+	cases := []struct {
+		name   string
+		change func(o map[string]any)
+		hpa    string
+		want   modules.Claim
+	}{
+		{"names the HPA", func(map[string]any) {}, ordersHPA, modules.ClaimOwned},
+		{"names another HPA", func(map[string]any) {}, "keda-hpa-billing", modules.ClaimNotOwned},
+		{"no name asked", func(map[string]any) {}, "", modules.ClaimNotOwned},
+		// KEDA has not reconciled the ScaledObject yet: wait for its claim (#408).
+		{"no hpaName", func(o map[string]any) { delete(o[keyStatus].(map[string]any), "hpaName") }, ordersHPA, modules.ClaimPending},
+		{"empty hpaName", func(o map[string]any) { o[keyStatus].(map[string]any)["hpaName"] = "" }, ordersHPA, modules.ClaimPending},
+		{"ScaledObject without a status", func(o map[string]any) { delete(o, keyStatus) }, ordersHPA, modules.ClaimPending},
+		{"hpaName not a string", func(o map[string]any) { o[keyStatus].(map[string]any)["hpaName"] = float64(1) }, "1", modules.ClaimNotOwned},
+		{"not a ScaledObject", func(o map[string]any) { o["kind"] = KindScaledJob }, ordersHPA, modules.ClaimNotOwned},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			obj := fixture(t, soFallback)
+			c.change(obj)
+			if got := src.Subject.Claims(obj, c.hpa); got != c.want {
+				t.Errorf("Claims = %d, want %d", got, c.want)
 			}
 		})
 	}

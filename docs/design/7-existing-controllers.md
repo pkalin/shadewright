@@ -8,7 +8,7 @@ This section lists what we analyse in each controller and the fix path (7.1), th
 
 | Controller | What we analyse | Fix path |
 | --- | --- | --- |
-| KEDA | `ScaledObject` and `ScaledJob` conditions, trigger errors and fallback, the HPA's metrics, backlog and replica limits (`internal/modules/keda`, built; symptom sources not consumed yet); cluster and downstream capacity (planned) | PR changing a justified `ScaledObject` field or the Helm values behind it |
+| KEDA | `ScaledObject` and `ScaledJob` conditions, trigger errors and fallback, the HPA's metrics, backlog and replica limits (`internal/modules/keda`, built; the HPA replica ceiling is consumed as an Incident about the `ScaledObject`, the `ScaledObject` and `ScaledJob` sources not yet); cluster and downstream capacity (planned) | PR changing a justified `ScaledObject` field or the Helm values behind it |
 | Flux | Kustomization and HelmRelease readiness, revision, build and apply errors, GitRepository fetch and authentication errors, drift from the source | PR fixing the manifest, values or Kustomization |
 | Crossplane (later) | `Ready` and `Synced`, provider messages, XR dependencies | PR changing the XR or its parameters |
 
@@ -43,7 +43,7 @@ Shadewright never suspends a Kustomization, disables pruning or changes Flux con
 
 | Topic | Detail |
 | --- | --- |
-| KEDA module | `internal/modules/keda` is built; its symptom sources are not consumed yet |
+| KEDA module | `internal/modules/keda` is built; its HPA source is consumed (2.5.3), its `ScaledObject` and `ScaledJob` sources not yet |
 | Cluster and downstream capacity checks | Planned |
 | Crossplane | Later |
 | Delivery and health check after merge | Planned |

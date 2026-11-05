@@ -29,6 +29,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -304,6 +305,25 @@ func TestPermissionBoundary(t *testing.T) {
 		{"analyzer", "list", "apps", "statefulsets", "", otherNS, false},
 		{"analyzer", "get", "apps", "daemonsets", "", otherNS, false},
 		{"analyzer", "get", "batch", "jobs", "", otherNS, false},
+		// Module symptom sources (#380): HPAs are watched, read only, in the watched namespaces; the ScaledObject
+		// that controls one is read one at a time by name to verify it, and only while the KEDA module is
+		// active (the collector's tests check that).
+		{"analyzer", "get", "autoscaling", "horizontalpodautoscalers", "", otherNS, true},
+		{"analyzer", "list", "autoscaling", "horizontalpodautoscalers", "", otherNS, true},
+		{"analyzer", "watch", "autoscaling", "horizontalpodautoscalers", "", otherNS, true},
+		{"analyzer", "update", "autoscaling", "horizontalpodautoscalers", "", otherNS, false},
+		{"analyzer", "patch", "autoscaling", "horizontalpodautoscalers", "status", otherNS, false},
+		{"analyzer", "delete", "autoscaling", "horizontalpodautoscalers", "", otherNS, false},
+		{"analyzer", "list", "autoscaling", "horizontalpodautoscalers", "", unwatched, false},
+		{"analyzer", "list", "autoscaling", "horizontalpodautoscalers", "", "", false},
+		{"analyzer", "get", "keda.sh", "scaledobjects", "", otherNS, true},
+		{"analyzer", "list", "keda.sh", "scaledobjects", "", otherNS, false},
+		{"analyzer", "watch", "keda.sh", "scaledobjects", "", otherNS, false},
+		{"analyzer", "update", "keda.sh", "scaledobjects", "", otherNS, false},
+		{"analyzer", "patch", "keda.sh", "scaledobjects", "", otherNS, false},
+		{"analyzer", "get", "keda.sh", "scaledobjects", "", unwatched, false},
+		{"analyzer", "get", "keda.sh", "scaledjobs", "", otherNS, false},
+		{"analyzer", "get", "keda.sh", "triggerauthentications", "", otherNS, false},
 		{"analyzer", "list", "events.k8s.io", "events", "", unwatched, false},
 		{"analyzer", "get", "", "pods", "", unwatched, false},
 		{"analyzer", "get", "apps", "replicasets", "", unwatched, false},
@@ -444,6 +464,35 @@ func TestPodLogsOnlyInWatchedNamespaces(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestWatchRoleIsReadOnly checks that every rule of the analyzer's watch role, which the module symptom sources
+// widened (#380), only reads: get, list or watch, on named groups and resources, never secrets.
+func TestWatchRoleIsReadOnly(t *testing.T) {
+	path := filepath.Join("..", "..", "config", "rbac", analyzer, "watch", "role.yaml")
+	read := []string{"get", "list", "watch"}
+	roles := 0
+	for _, u := range decodeAll(t, path) {
+		rules, _, ok := policyRules(t, path, u)
+		if !ok {
+			continue
+		}
+		roles++
+		for _, rule := range rules {
+			for _, v := range rule.Verbs {
+				if !slices.Contains(read, v) {
+					t.Errorf("watch role rule %v grants %q", rule, v)
+				}
+			}
+			if slices.Contains(rule.APIGroups, "*") || slices.Contains(rule.Resources, "*") ||
+				slices.Contains(rule.Resources, "secrets") || len(rule.ResourceNames) > 0 || len(rule.NonResourceURLs) > 0 {
+				t.Errorf("watch role rule %v is not a plain read of named resources", rule)
+			}
+		}
+	}
+	if roles != 1 {
+		t.Fatalf("read %d roles from %s, want 1", roles, path)
 	}
 }
 
@@ -817,7 +866,8 @@ func TestAnalyzerCacheWorksWithItsOwnRBAC(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Informers for each kind the analyzer reads, so a missing grant shows up as a sync that never completes.
-	kinds := []client.Object{&corev1.Pod{}, &remediationv1alpha1.Incident{}, &remediationv1alpha1.RemediationRequest{}}
+	kinds := []client.Object{&corev1.Pod{}, &autoscalingv2.HorizontalPodAutoscaler{}, &remediationv1alpha1.Incident{},
+		&remediationv1alpha1.RemediationRequest{}}
 	for _, obj := range kinds {
 		syncCtx, done := context.WithTimeout(ctx, 30*time.Second)
 		_, err := ca.GetInformer(syncCtx, obj, cache.BlockUntilSynced(false))

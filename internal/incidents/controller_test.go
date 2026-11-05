@@ -556,6 +556,36 @@ func TestIncidentHoldsOnlyTheSymptom(t *testing.T) {
 	}
 }
 
+// TestModuleSymptomMakesOneIncident checks the end of #380's first criterion: an observation of a module
+// symptom source (a KEDA HPA at its ceiling, about its ScaledObject) creates one Incident about the
+// ScaledObject, and the schema keeps its "condition:" occurrence.
+func TestModuleSymptomMakesOneIncident(t *testing.T) {
+	ns := namespace(t)
+	r := start(t, ns, Config{})
+	began := time.Now().Add(-time.Minute).Truncate(time.Second)
+	o := observation(1, 0, 1, 1, began)
+	o.Subject = remediationv1alpha1.ObjectRef{
+		APIVersion: "keda.sh/v1alpha1", Kind: "ScaledObject", Namespace: o.Subject.Namespace, Name: "orders",
+		UID: "8d2e4f60-1a3b-4c5d-9e7f-a0b1c2d3e4f5",
+	}
+	o.Reason, o.ReportingController = "ReplicaCeiling", "horizontal-pod-autoscaler"
+	o.Symptom = "The HPA that KEDA manages for this ScaledObject runs at its maximum replica count while its metrics " +
+		"ask for more replicas. Evidence: spec.maxReplicas=20; status.conditions.ScalingLimited.reason=TooManyReplicas"
+	o.Occurrence = "condition:" + strings.Repeat("ab", 16)
+	r.obs <- o
+	inc := eventually(t, ns, 1, countIs(1))
+	if inc.Spec != specOf(o) {
+		t.Fatalf("spec %+v, want %+v", inc.Spec, specOf(o))
+	}
+	if len(inc.Status.Occurrences) != 1 || inc.Status.Occurrences[0].ID != o.Occurrence {
+		t.Fatalf("occurrences %+v, want the condition occurrence recorded", inc.Status.Occurrences)
+	}
+	var list remediationv1alpha1.IncidentList
+	if err := env.admin.List(t.Context(), &list, client.InNamespace(ns)); err != nil || len(list.Items) != 1 {
+		t.Fatalf("%d Incidents (%v), want one", len(list.Items), err)
+	}
+}
+
 // An Incident the API server refuses as invalid is not tried again and does not hold a place under the cap.
 func TestRefusedIncidentIsDroppedAndFreesItsPlace(t *testing.T) {
 	ns := namespace(t)

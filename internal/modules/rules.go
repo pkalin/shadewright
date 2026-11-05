@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
@@ -123,6 +124,13 @@ type Symptom struct {
 	Summary string
 	// Evidence is what the rule read from the cluster, at most 8 entries.
 	Evidence []Evidence
+	// Since is when the state a symptom source reports began: the lastTransitionTime of the condition it
+	// reads. Zero when unknown, and for the symptoms of diagnosis rules. It is untrusted: the evaluator never
+	// takes it as later than its own clock when it reports when the state began, though it identifies the
+	// state by the value as reported. The evaluator counts one occurrence per object, reason and Since, so a
+	// state that ends and comes back is a new occurrence and a state that lasts is counted once; a state it saw
+	// end and come back with the same Since is a new occurrence too.
+	Since time.Time
 }
 
 // Evidence is one value a rule read from the cluster.

@@ -81,3 +81,6 @@ func keepTail(s string, n int) (string, bool) {
 	}
 	return s[start:], true
 }
+
+// KeepHead is keepHead for other packages that bound redacted text the same way (internal/tools).
+func KeepHead(s string, n int) (string, bool) { return keepHead(s, n) }

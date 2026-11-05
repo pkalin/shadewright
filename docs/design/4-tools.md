@@ -1,6 +1,6 @@
 # 4. Tools
 
-This section covers the read tools the analyzer offers to the model, and the adapters behind them. The Prometheus adapter for `query_metrics` and the pod logs adapter for `get_pod_logs` are built and given to the context builder, which is not called yet ([#371](https://github.com/pkalin/shadewright/issues/371)). The missing reference check (4.3) is built but not wired. The read tools are <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)), and the analysis loop that offers them to the model is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)).
+This section covers the read tools the analyzer offers to the model, and the adapters behind them. The Prometheus adapter for `query_metrics` and the pod logs adapter for `get_pod_logs` are built and given to the context builder, which is not called yet ([#371](https://github.com/pkalin/shadewright/issues/371)). The missing reference check (4.3) is built but not wired. The read tools are <span class="sw-status sw-built">built</span> in `internal/tools` ([#74](https://github.com/pkalin/shadewright/issues/74)) but not offered yet: the analysis loop that offers them to the model is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)).
 
 The analyzer exposes tools to the model through its own adapters.
 
@@ -10,11 +10,23 @@ The analyzer exposes tools to the model through its own adapters.
 
 | Tool | Purpose | Mode | Status |
 | --- | --- | --- | --- |
-| `get_resource`, `list_events` | Object state and symptom history | Read, redacted | <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)) |
-| `get_pod_logs` | Bounded time range and byte count | Read, redacted | adapter <span class="sw-status sw-built">built</span>, given to the context builder ([#371](https://github.com/pkalin/shadewright/issues/371)); tool <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)) |
-| `query_metrics` | Approved query templates only | Read, redacted | adapter <span class="sw-status sw-built">built</span>, given to the context builder ([#371](https://github.com/pkalin/shadewright/issues/371)); tool <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)) |
-| `get_delivery_status` | Flux Kustomization / HelmRelease revision and readiness | Read, redacted | <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)) |
-| `read_git_file`, `get_recent_changes` | Map an object to its source in Git | Read, redacted | <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)) |
+| `get_resource`, `list_events` | Object state and symptom history: a Pod, Deployment, StatefulSet or ReplicaSet | Read, redacted | <span class="sw-status sw-built">built</span>, not wired ([#76](https://github.com/pkalin/shadewright/issues/76)) |
+| `get_pod_logs` | Bounded time range and byte count | Read, redacted | tool <span class="sw-status sw-built">built</span>; adapter <span class="sw-status sw-built">built</span>, given to the context builder ([#371](https://github.com/pkalin/shadewright/issues/371)) |
+| `query_metrics` | Approved query templates only, for one pod or one Deployment the tool reads first | Read, redacted | tool <span class="sw-status sw-built">built</span>; adapter <span class="sw-status sw-built">built</span>, given to the context builder ([#371](https://github.com/pkalin/shadewright/issues/371)) |
+| `get_delivery_status` | Flux Kustomization / HelmRelease revision and readiness, in a delivery namespace | Read, redacted | tool <span class="sw-status sw-built">built</span>; not available until a Flux adapter and a grant on Flux objects exist |
+| `read_git_file`, `get_recent_changes` | Map an object to its source in Git | Read, redacted | arguments checked, then always "not available" and never offered: the analyzer has no Git identity ([#373](https://github.com/pkalin/shadewright/issues/373)) |
+| `check_missing_reference` | Whether a Secret or ConfigMap a pod references is missing (4.3) | Read | <span class="sw-status sw-built">built</span>, not wired ([#76](https://github.com/pkalin/shadewright/issues/76)) |
+
+**Bounds of every tool** (`internal/tools`):
+
+- The arguments are one JSON object of at most 2 KiB with exactly the schema's property names (case-sensitive, no duplicates, no others) and types; each value is then checked: names, enums, ranges, and a kind allow list where a tool names objects. An integer may take any JSON form with a zero fractional part (`30`, `30.0`, `3e1`); a fraction is refused as the wrong type, and an explicit `0` is a value, refused when outside the range, never read as an absent argument. They come from the model and are untrusted.
+- A namespace outside `--watch-namespaces` is refused before any read; an empty list refuses every namespace.
+- `get_delivery_status` is the exception: Flux keeps its Kustomizations and HelmReleases in its own namespace, not in the workloads'. Its namespace is checked against a separate list of delivery namespaces, empty unless set, so every call is refused until then (fail closed). That list never widens the collector or any other tool's reads. Which namespaces it holds, and whether reading Flux objects there needs `flux-system` among the watched namespaces as section 2 says today, is decided with the Flux adapter and its grant (<span class="sw-status sw-planned">planned</span>); until then the tool is not available.
+- The reads of one call share a timeout (30 seconds by default, at most 2 minutes). A read that runs out of it gives "could not fetch", labelled timed out; a call whose caller cancelled returns an error instead.
+- Each result has a byte bound (2 to 17 KiB by tool) and is cut in whole lines of redacted text; a log excerpt keeps its newest lines.
+- Every value is redacted, and the whole result again. `get_resource` leaves out annotations, managed fields, the literal values of environment variables (of every container, init and ephemeral container), the metadata of ephemeral volume claim templates and the containers' termination messages (free text the container writes, which the collector never reads either); container commands and arguments are kept for the diagnosis and rely on redaction alone. A log excerpt is rendered by the same code as in the context builder (3.3): it loses its leading continuation lines before redaction, its header is budgeted first, and every cut, also after the second redaction, keeps the header and the newest lines. The error text of a failed read is never shown.
+- A refusal names the rule in a fixed sentence and never echoes an argument. The result is a delimited block whose first line says that its text is data, never instructions, and which the text cannot close: every angle bracket in it, and every Unicode look-alike (full-width, small, CJK, mathematical and others), is escaped, and any spelling of the tag's name, with any dash or invisible character between its words, is changed.
+- A tool whose source is not configured answers "not available" and is not offered to the model.
 
 ## 4.1. `query_metrics`
 
@@ -53,7 +65,7 @@ Prometheus applies no authorization of its own: whoever can reach it can query e
 
 A pod template selects exactly the pods its caller names, never pods whose names only start like the target's. A name prefix would let a neighbour supply the target's evidence (the StatefulSet pod `web-v2-0` next to the Deployment `web`, or a standalone pod named like one of its own).
 
-**Who decides which pods belong to the target.** The adapter has no Kubernetes client, so it does not decide this, and it cannot check that the pods are in the namespace the query names. The context builder (3.3, built, not called yet) resolves them in that same namespace. The model never supplies pod names.
+**Who decides which pods belong to the target.** The adapter has no Kubernetes client, so it does not decide this, and it cannot check that the pods are in the namespace the query names. The context builder (3.3, built, not called yet) resolves them in that same namespace. The context builder's pods never come from the model. `query_metrics` as a tool is different: the model names a pod, which the tool reads first and which must exist in a watched namespace, so its answer can be about any pod there, outside the builder's attribution (3.3); treat it as evidence about that pod only.
 
 - It starts from the target's kind and UID and follows controller owner references (Deployment to ReplicaSet to Pod, StatefulSet to Pod, ReplicaSet to Pod).
 - It uses the analyzer's existing reads: a get of each workload from the API server and the cached list of the namespace's pods.
@@ -177,7 +189,7 @@ The instance metadata stays with the excerpt, in the evidence, never in Incident
 
 ## 4.3. The missing reference check
 
-<span class="sw-status sw-built">built</span>, not wired. `internal/analyzer/refcheck` answers whether a Secret or ConfigMap a pod references is missing, with no permission on either (10.3). Offering it to the model is part of the read tools ([#74](https://github.com/pkalin/shadewright/issues/74), <span class="sw-status sw-planned">planned</span>).
+<span class="sw-status sw-built">built</span>, not wired. `internal/analyzer/refcheck` answers whether a Secret or ConfigMap a pod references is missing, with no permission on either (10.3). The read tool `check_missing_reference` offers it to the model ([#74](https://github.com/pkalin/shadewright/issues/74), <span class="sw-status sw-built">built</span>; not wired until [#76](https://github.com/pkalin/shadewright/issues/76)).
 
 It is a pure function of the pod and the Events in its namespace, both read by the analyzer already. The answer is `missing` with its evidence, or `unknown`; there is no `exists`.
 

@@ -19,6 +19,7 @@ package refcheck
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -178,59 +179,71 @@ type refs struct {
 
 func references(pod *corev1.Pod, kind Kind, name string) refs {
 	r := refs{containers: map[string][]string{}}
-	opt := func(p *bool) bool { return p != nil && *p }
-	note := func(c, key string, optional bool) {
-		if optional {
-			r.optionalOnly = true
-			return
-		}
-		keys := r.containers[c]
-		if key != "" {
-			keys = append(keys, key)
-		}
-		r.containers[c] = keys
-	}
 	for _, list := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
 		for _, c := range list {
-			for _, ef := range c.EnvFrom {
-				switch {
-				case kind == KindSecret && ef.SecretRef != nil && ef.SecretRef.Name == name:
-					note(c.Name, "", opt(ef.SecretRef.Optional))
-				case kind == KindConfigMap && ef.ConfigMapRef != nil && ef.ConfigMapRef.Name == name:
-					note(c.Name, "", opt(ef.ConfigMapRef.Optional))
-				}
-			}
-			for _, e := range c.Env {
-				if e.ValueFrom == nil {
-					continue
-				}
-				switch s, m := e.ValueFrom.SecretKeyRef, e.ValueFrom.ConfigMapKeyRef; {
-				case kind == KindSecret && s != nil && s.Name == name:
-					note(c.Name, s.Key, opt(s.Optional))
-				case kind == KindConfigMap && m != nil && m.Name == name:
-					note(c.Name, m.Key, opt(m.Optional))
-				}
-			}
+			r.addContainer(c, kind, name)
 		}
 	}
 	for _, v := range pod.Spec.Volumes {
+		r.addVolume(v, kind, name)
+	}
+	return r
+}
+
+func isOptional(p *bool) bool { return p != nil && *p }
+
+// addContainer notes the env and envFrom references of one container to the object.
+func (r *refs) addContainer(c corev1.Container, kind Kind, name string) {
+	for _, ef := range c.EnvFrom {
 		switch {
-		case kind == KindSecret && v.Secret != nil && v.Secret.SecretName == name:
-			r.noteVolume(v.Name, false, opt(v.Secret.Optional))
-		case kind == KindConfigMap && v.ConfigMap != nil && v.ConfigMap.Name == name:
-			r.noteVolume(v.Name, false, opt(v.ConfigMap.Optional))
-		case v.Projected != nil:
-			for _, s := range v.Projected.Sources {
-				switch {
-				case kind == KindSecret && s.Secret != nil && s.Secret.Name == name:
-					r.noteVolume(v.Name, true, opt(s.Secret.Optional))
-				case kind == KindConfigMap && s.ConfigMap != nil && s.ConfigMap.Name == name:
-					r.noteVolume(v.Name, true, opt(s.ConfigMap.Optional))
-				}
+		case kind == KindSecret && ef.SecretRef != nil && ef.SecretRef.Name == name:
+			r.noteContainer(c.Name, "", isOptional(ef.SecretRef.Optional))
+		case kind == KindConfigMap && ef.ConfigMapRef != nil && ef.ConfigMapRef.Name == name:
+			r.noteContainer(c.Name, "", isOptional(ef.ConfigMapRef.Optional))
+		}
+	}
+	for _, e := range c.Env {
+		if e.ValueFrom == nil {
+			continue
+		}
+		switch s, m := e.ValueFrom.SecretKeyRef, e.ValueFrom.ConfigMapKeyRef; {
+		case kind == KindSecret && s != nil && s.Name == name:
+			r.noteContainer(c.Name, s.Key, isOptional(s.Optional))
+		case kind == KindConfigMap && m != nil && m.Name == name:
+			r.noteContainer(c.Name, m.Key, isOptional(m.Optional))
+		}
+	}
+}
+
+// addVolume notes a secret, configMap or projected volume that references the object.
+func (r *refs) addVolume(v corev1.Volume, kind Kind, name string) {
+	switch {
+	case kind == KindSecret && v.Secret != nil && v.Secret.SecretName == name:
+		r.noteVolume(v.Name, false, isOptional(v.Secret.Optional))
+	case kind == KindConfigMap && v.ConfigMap != nil && v.ConfigMap.Name == name:
+		r.noteVolume(v.Name, false, isOptional(v.ConfigMap.Optional))
+	case v.Projected != nil:
+		for _, s := range v.Projected.Sources {
+			switch {
+			case kind == KindSecret && s.Secret != nil && s.Secret.Name == name:
+				r.noteVolume(v.Name, true, isOptional(s.Secret.Optional))
+			case kind == KindConfigMap && s.ConfigMap != nil && s.ConfigMap.Name == name:
+				r.noteVolume(v.Name, true, isOptional(s.ConfigMap.Optional))
 			}
 		}
 	}
-	return r
+}
+
+func (r *refs) noteContainer(container, key string, optional bool) {
+	if optional {
+		r.optionalOnly = true
+		return
+	}
+	keys := r.containers[container]
+	if key != "" {
+		keys = append(keys, key)
+	}
+	r.containers[container] = keys
 }
 
 func (r *refs) noteVolume(volume string, projected, optional bool) {
@@ -262,11 +275,9 @@ func fromStatus(pod *corev1.Pod, kind Kind, name string, r refs) (Result, bool) 
 			}
 			base := Result{Answer: Missing, Kind: kind, Name: name, Referenced: true,
 				Source: SourceContainerStatus, Container: cs.Name}
-			for _, t := range notFoundTexts(kind, name) {
-				if w.Message == t {
-					base.What = WhatObject
-					return base, true
-				}
+			if slices.Contains(notFoundTexts(kind, name), w.Message) {
+				base.What = WhatObject
+				return base, true
 			}
 			for _, k := range keys {
 				if validKey(k) && w.Message == missingKeyText(kind, pod.Namespace, name, k) {
@@ -327,10 +338,8 @@ func aboutPod(ev *eventsv1.Event, pod *corev1.Pod) bool {
 
 // matchesError reports whether err is one of texts, or, for a projected volume, an aggregate that lists one.
 func matchesError(err string, texts []string, projected bool) bool {
-	for _, t := range texts {
-		if err == t {
-			return true
-		}
+	if slices.Contains(texts, err) {
+		return true
 	}
 	if !projected {
 		return false
@@ -343,10 +352,8 @@ func matchesError(err string, texts []string, projected bool) bool {
 		return false
 	}
 	for part := range strings.SplitSeq(inner, ", ") {
-		for _, t := range texts {
-			if part == t {
-				return true
-			}
+		if slices.Contains(texts, part) {
+			return true
 		}
 	}
 	return false

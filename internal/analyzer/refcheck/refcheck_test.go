@@ -54,9 +54,9 @@ const (
 	key      = "password"
 	app      = "app"
 	initName = "migrate"
+	creds    = "creds"
+	bundle   = "bundle"
 )
-
-func ptr[T any](v T) *T { return &v }
 
 // testPod references secret by env key (container app), configMap by envFrom (init container migrate),
 // secret by a secret volume "creds", configMap and secret through a projected volume "bundle", and other only
@@ -77,12 +77,12 @@ func testPod() *corev1.Pod {
 					{Name: "DB_PASSWORD", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: secret}, Key: key}}},
 					{Name: "TOKEN", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: other}, Key: "token", Optional: ptr(true)}}},
+						LocalObjectReference: corev1.LocalObjectReference{Name: other}, Key: "token", Optional: new(true)}}},
 				},
 			}},
 			Volumes: []corev1.Volume{
-				{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: secret}}},
-				{Name: "bundle", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+				{Name: creds, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: secret}}},
+				{Name: bundle, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
 					Sources: []corev1.VolumeProjection{
 						{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: config}}},
 						{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: secret}}},
@@ -131,7 +131,7 @@ func TestRecordedFailedMountEvent(t *testing.T) {
 	}
 	got := Check(testPod(), []eventsv1.Event{ev}, KindSecret, secret)
 	want := Result{Answer: Missing, Kind: KindSecret, Name: secret, Referenced: true, What: WhatObject,
-		Source: SourceEvent, Volume: "creds"}
+		Source: SourceEvent, Volume: creds}
 	if got != want {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
@@ -177,10 +177,10 @@ func TestMissingFromFailedMountEvent(t *testing.T) {
 		name, note, ref, volume string
 		kind                    Kind
 	}{
-		{"secret volume", `MountVolume.SetUp failed for volume "creds" : secret "db-creds" not found`, secret, "creds", KindSecret},
-		{"aggregated by the recorder", `(combined from similar events): MountVolume.SetUp failed for volume "creds" : secrets "db-creds" not found`, secret, "creds", KindSecret},
-		{"projected volume, one source", `MountVolume.SetUp failed for volume "bundle" : configmap "app-config" not found`, config, "bundle", KindConfigMap},
-		{"projected volume, several sources", `MountVolume.SetUp failed for volume "bundle" : [configmap "app-config" not found, secret "db-creds" not found]`, secret, "bundle", KindSecret},
+		{"secret volume", `MountVolume.SetUp failed for volume "creds" : secret "db-creds" not found`, secret, creds, KindSecret},
+		{"aggregated by the recorder", `(combined from similar events): MountVolume.SetUp failed for volume "creds" : secrets "db-creds" not found`, secret, creds, KindSecret},
+		{"projected volume, one source", `MountVolume.SetUp failed for volume "bundle" : configmap "app-config" not found`, config, bundle, KindConfigMap},
+		{"projected volume, several sources", `MountVolume.SetUp failed for volume "bundle" : [configmap "app-config" not found, secret "db-creds" not found]`, secret, bundle, KindSecret},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

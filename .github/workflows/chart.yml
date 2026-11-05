@@ -2,7 +2,10 @@ name: Chart
 
 # Publishes the Helm chart in dist/chart (generated with Kubebuilder's helm/v2-alpha plugin, then adjusted by
 # hand). Pull requests and pushes to main lint, render, compare and install it through ci.yml, which calls
-# chart-test.yml; a release tag runs the same tests here first. Only a v* tag
+# chart-test.yml; a release tag runs the same tests here first. The images job resolves the digests of the
+# tag's executor and analyzer images once and verifies their signatures and SBOMs; the install test runs those
+# digests and the publish job writes the same two into the chart, so the published chart points at the tested
+# pair even if a tag moves meanwhile. Only a v* tag
 # publishes it to ghcr.io/<owner>/charts/shadewright, and only the publish job has packages: write and
 # id-token: write. Before packaging it writes the digests of the tag's signed images into values.yaml, so the
 # published chart runs them by digest. After the push it signs the chart by digest with cosign keyless (GitHub
@@ -27,10 +30,55 @@ env:
   HELM_VERSION: v4.3.1
 
 jobs:
-  test:
-    name: Test the chart
+  # Resolves the image pair of the tag once, verified (signature and SBOM attestation against the Images workflow
+  # on this tag), and hands the digests to the test and publish jobs. Waits up to 30 minutes for the Images
+  # workflow of the same tag. packages: read only for private packages; no write, no OIDC token.
+  images:
+    name: Resolve and verify the image digests
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # Digests only, not secrets.
+    outputs:
+      executor: ${{ steps.resolve.outputs.executor }}
+      analyzer: ${{ steps.resolve.outputs.analyzer }}
     permissions:
       contents: read
+      packages: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Log in to GHCR
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "${TOKEN}" | docker login ghcr.io --username "${ACTOR}" --password-stdin
+
+      - name: Resolve and verify the signed image digests
+        id: resolve
+        env:
+          TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          hack/resolve-image-digests.sh "${TAG}" "${REPOSITORY}" "${OWNER}" | tee -a "${GITHUB_OUTPUT}"
+          sed 's/^/- /' "${GITHUB_OUTPUT}" >> "${GITHUB_STEP_SUMMARY}"
+
+  test:
+    name: Test the chart
+    needs: [images]
+    permissions:
+      contents: read
+    with:
+      executor_digest: ${{ needs.images.outputs.executor }}
+      analyzer_digest: ${{ needs.images.outputs.analyzer }}
     uses: ./.github/workflows/chart-test.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
 
   publish:
@@ -39,12 +87,12 @@ jobs:
     # release pull request), so a tag never publishes the chart of another version; a pre-release tag takes
     # its version from the tag.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [test]
+    needs: [images, test]
     runs-on: ubuntu-latest
     # Digests only, not secrets: the release-notes job writes them into the release.
     outputs:
-      executor_digest: ${{ steps.digests.outputs.executor }}
-      analyzer_digest: ${{ steps.digests.outputs.analyzer }}
+      executor_digest: ${{ needs.images.outputs.executor }}
+      analyzer_digest: ${{ needs.images.outputs.analyzer }}
       chart_digest: ${{ steps.push.outputs.digest }}
     permissions:
       contents: read
@@ -88,53 +136,13 @@ jobs:
           printf '%s' "${TOKEN}" | docker login ghcr.io --username "${ACTOR}" --password-stdin
           printf '%s' "${TOKEN}" | helm registry login ghcr.io --username "${ACTOR}" --password-stdin
 
-      # The images of this tag, by digest, each verified (signature and SPDX SBOM attestation) against the identity of the Images
-      # workflow on this very tag before its digest goes into the chart. The Images workflow of the same tag runs in parallel, so
-      # this waits for each image and a signature that verifies: every 30 s, at most 30 minutes, then the run
-      # fails with the image it waited for. Re-run the failed jobs of this run once the Images workflow of the
-      # tag has finished. The signature check is on the digest, so a tag moved after the check changes nothing.
-      - name: Write the signed image digests into values.yaml
-        id: digests
+      # The pair the images job resolved and verified, and the install test ran. chart-pin-digests.sh writes
+      # exactly these into values.yaml and checks that the rendered chart runs them; no tag is resolved here.
+      - name: Write the tested image digests into values.yaml
         env:
-          TAG: ${{ github.ref_name }}
-          REPOSITORY: ${{ github.repository }}
-          OWNER: ${{ github.repository_owner }}
-        run: |
-          set -euo pipefail
-          owner="$(printf '%s' "${OWNER}" | tr '[:upper:]' '[:lower:]')"
-          identity="https://github.com/${REPOSITORY}/.github/workflows/images.yml@refs/tags/${TAG}"
-          deadline=$(( $(date +%s) + 1800 ))
-          for image in executor analyzer; do
-            ref="ghcr.io/${owner}/shadewright-${image}"
-            d=""
-            until [ -n "${d}" ]; do
-              got="$(docker buildx imagetools inspect "${ref}:${TAG#v}" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
-              if printf '%s' "${got}" | grep -Eq '^sha256:[a-f0-9]{64}$' && cosign verify \
-                  --certificate-identity "${identity}" \
-                  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-                  "${ref}@${got}" > /dev/null 2>&1 && cosign verify-attestation --type spdxjson \
-                  --certificate-identity "${identity}" \
-                  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-                  "${ref}@${got}" > /dev/null 2>&1; then
-                d="${got}"
-              elif [ "$(date +%s)" -ge "${deadline}" ]; then
-                echo "no image ${ref}:${TAG#v} signed and attested by ${identity} after 30 minutes; re-run this job once the Images workflow of ${TAG} has finished" >&2
-                exit 1
-              else
-                echo "waiting for ${ref}:${TAG#v} and its signature"
-                sleep 30
-              fi
-            done
-            printf -v "digest_${image}" '%s' "${d}"
-            echo "${ref}@${d}" >> "${GITHUB_STEP_SUMMARY}"
-          done
-          echo "executor=${digest_executor}" >> "${GITHUB_OUTPUT}"
-          echo "analyzer=${digest_analyzer}" >> "${GITHUB_OUTPUT}"
-          hack/chart-set-digests.sh dist/chart/values.yaml "${digest_executor}" "${digest_analyzer}"
-          rendered="$(helm template publish-check dist/chart --set clusterId=publish-check)"
-          for d in "${digest_executor}" "${digest_analyzer}"; do
-            grep -qF "@${d}\"" <<<"${rendered}" || { echo "the chart does not run ${d}" >&2; exit 1; }
-          done
+          EXECUTOR: ${{ needs.images.outputs.executor }}
+          ANALYZER: ${{ needs.images.outputs.analyzer }}
+        run: hack/chart-pin-digests.sh dist/chart "${EXECUTOR}" "${ANALYZER}"
 
       # A pre-release has no commit that bumps Chart.yaml, so its version and appVersion come from the tag.
       - name: Package the chart

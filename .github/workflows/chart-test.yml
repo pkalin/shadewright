@@ -12,6 +12,14 @@ on:
         description: Whether the jobs run; ci.yml passes false when no file of this group changed.
         type: boolean
         default: true
+      executor_digest:
+        description: Digest of the executor image to install by (a release tag run, verified by chart.yml); empty uses the v0.1.0 image.
+        type: string
+        default: ""
+      analyzer_digest:
+        description: Digest of the analyzer image to install by (as executor_digest); both or neither.
+        type: string
+        default: ""
 
 permissions: {}
 
@@ -119,11 +127,12 @@ jobs:
         with:
           version: ${{ env.HELM_VERSION }}
 
-      # Pull requests and main use the v0.1.0 image digests; a release tag uses the digests of the images
-      # of that tag (the script waits for the Images workflow of the tag to push them).
+      # Pull requests and main use the v0.1.0 image digests; a release tag installs by the digests chart.yml
+      # resolved and verified, the same pair its publish job writes into the chart.
       - name: Install the chart on Kind and check the permissions
         env:
-          CHART_TEST_IMAGE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          EXECUTOR_DIGEST: ${{ inputs.executor_digest }}
+          ANALYZER_DIGEST: ${{ inputs.analyzer_digest }}
         run: make test-chart-install
 
       # The cluster is deleted even when a step failed.

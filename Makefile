@@ -94,6 +94,8 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 	hack/check-chart-docs_test.sh
 	hack/chart-crds_test.sh
 	hack/chart-set-digests_test.sh
+	hack/chart-pin-digests_test.sh
+	hack/resolve-image-digests_test.sh
 	hack/ci-changed_test.sh
 	hack/release-verify-notes_test.sh
 	hack/require-on-main_test.sh

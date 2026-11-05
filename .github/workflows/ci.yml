@@ -35,6 +35,7 @@ jobs:
       images: ${{ steps.changed.outputs.images }}
       chart: ${{ steps.changed.outputs.chart }}
       docs: ${{ steps.changed.outputs.docs }}
+      codeql: ${{ steps.changed.outputs.codeql }}
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -106,6 +107,17 @@ jobs:
     with:
       run: ${{ needs.changes.outputs.docs == 'true' }}
 
+  # Pull requests only, and only when Go code or workflows changed; main and the weekly run use codeql.yml's own
+  # triggers. The caller grants what the called job asks for: security-events: write only here.
+  codeql:
+    needs: changes
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.codeql == 'true' }}
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    uses: ./.github/workflows/codeql.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+
   workflow-lint:
     permissions:
       contents: read
@@ -114,7 +126,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: ${{ always() }}
-    needs: [changes, lint, test, e2e, govulncheck, images, chart, docs-check, workflow-lint]
+    needs: [changes, lint, test, e2e, govulncheck, images, chart, docs-check, codeql, workflow-lint]
     runs-on: ubuntu-latest
     permissions: {}
     steps:

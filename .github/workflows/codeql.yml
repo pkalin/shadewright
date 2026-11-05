@@ -1,9 +1,9 @@
 name: CodeQL
 
 # CodeQL code scanning (advanced setup) for Go and for the workflows themselves (language `actions`). It runs on
-# pushes to main and weekly, and deliberately NOT on pull requests: a pull request already gets golangci-lint with
-# gosec for Go code and zizmor for workflow changes (workflow-lint.yml), and CodeQL's database build and analysis
-# are the slowest scan of the graph. Results of main and of the weekly run appear in the Security tab.
+# pushes to main, weekly and by hand, and is called by ci.yml on pull requests that change Go code or workflows
+# (group `codeql` of hack/ci-changed.sh; the `codeql` job is needed by `ci-ok`, so the `code_scanning` ruleset
+# rule stays off). Results appear in the Security tab.
 #
 # BEFORE THIS WORKFLOW'S FIRST RUN ON MAIN the repository's code scanning default setup must be switched off
 # (Settings, Code security, Code scanning, CodeQL analysis, switch to advanced): GitHub refuses uploads from an
@@ -19,6 +19,7 @@ on:
   schedule:
     - cron: "17 4 * * 1" # Mondays 04:17 UTC
   workflow_dispatch:
+  workflow_call:
 
 permissions: {}
 

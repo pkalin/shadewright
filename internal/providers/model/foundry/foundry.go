@@ -27,10 +27,12 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/pkalin/shadewright/internal/providers"
@@ -65,6 +67,10 @@ const (
 	// maxRequestBytes bounds the encoded request. The context the analyzer sends is at most 256 KiB
 	// (spec.analysis.maxContextBytes), so anything near this is a caller's bug.
 	maxRequestBytes = 4 << 20
+	// maxConfigDelay, maxConfigTimeout and maxConfigResponseBytes bound what Config may ask for.
+	maxConfigDelay         = 5 * time.Minute
+	maxConfigTimeout       = 15 * time.Minute
+	maxConfigResponseBytes = 16 << 20
 	// maxDrain is how much of an error body is read and discarded, so the connection can be reused.
 	maxDrain = 64 << 10
 )
@@ -202,6 +208,10 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 	if cfg.BaseDelay < 0 || cfg.MaxDelay < 0 || cfg.Timeout < 0 || cfg.AttemptTimeout < 0 || cfg.MaxResponseBytes < 0 {
 		return nil, invalid("a duration or size is negative")
 	}
+	if cfg.BaseDelay > maxConfigDelay || cfg.MaxDelay > maxConfigDelay || cfg.Timeout > maxConfigTimeout ||
+		cfg.AttemptTimeout > maxConfigTimeout || cfg.MaxResponseBytes > maxConfigResponseBytes {
+		return nil, invalid("a duration or size is above its bound")
+	}
 	p := &Provider{
 		url:            u,
 		deployment:     cfg.Deployment,
@@ -275,8 +285,34 @@ func sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// errDialRefused marks a connection refused by refusePrivate.
+var errDialRefused = errors.New("the address is not a public unicast address")
+
+// refusePrivate is the dialer's control: it runs on the resolved address of every connection, so a host name
+// that resolves (or is rebound) to a loopback, private, link-local, shared (100.64.0.0/10), multicast or
+// unspecified address gets no connection and no token (design 11.1).
+func refusePrivate(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return errDialRefused
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return errDialRefused
+	}
+	ip = ip.Unmap()
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() || sharedAddressSpace.Contains(ip) {
+		return errDialRefused
+	}
+	return nil
+}
+
+// sharedAddressSpace is 100.64.0.0/10 (RFC 6598), used for carrier-grade NAT and by some cluster networks.
+var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
+
 // newHTTPClient never follows redirects (the bearer token must reach the configured host only), requires
-// TLS 1.2 or later, and bounds connection setup and the wait for headers. Each attempt has its own deadline
+// TLS 1.2 or later, connects to public unicast addresses only (refusePrivate), and bounds connection setup
+// and the wait for headers. Each attempt has its own deadline
 // on its context.
 func newHTTPClient(rt http.RoundTripper) *http.Client {
 	if rt == nil {
@@ -285,7 +321,7 @@ func newHTTPClient(rt http.RoundTripper) *http.Client {
 		t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 		t.TLSHandshakeTimeout = 10 * time.Second
 		t.ResponseHeaderTimeout = DefaultAttemptTimeout
-		t.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+		t.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: refusePrivate}).DialContext
 		rt = t
 	}
 	return &http.Client{
@@ -429,6 +465,9 @@ func (p *Provider) retryAfter(h http.Header) time.Duration {
 func transportError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return ctxError(ctx)
+	}
+	if errors.Is(err, errDialRefused) {
+		return fmt.Errorf("foundry: the endpoint resolves to an address that is not public: %w", providers.ErrInvalidConfig)
 	}
 	var ne net.Error
 	if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &ne) && ne.Timeout() {

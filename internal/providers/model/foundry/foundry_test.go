@@ -249,6 +249,9 @@ func TestNewRefusesInvalidConfig(t *testing.T) {
 		"output too large":  func(c *Config) { c.MaxOutputTokens = MaxOutputTokens + 1 },
 		"too many attempts": func(c *Config) { c.MaxAttempts = MaxAttempts + 1 },
 		"negative timeout":  func(c *Config) { c.Timeout = -time.Second },
+		"timeout too long":  func(c *Config) { c.Timeout = maxConfigTimeout + time.Second },
+		"delay too long":    func(c *Config) { c.MaxDelay = maxConfigDelay + time.Second },
+		"body bound":        func(c *Config) { c.MaxResponseBytes = maxConfigResponseBytes + 1 },
 	} {
 		c := ok
 		mod(&c)
@@ -753,4 +756,43 @@ func FuzzParseResponse(f *testing.F) {
 			t.Fatalf("usage out of range %+v", c.Usage)
 		}
 	})
+}
+
+func TestRefusePrivate(t *testing.T) {
+	for addr, ok := range map[string]bool{
+		"20.1.2.3:443":            true,
+		"[2603:1020:1001::1]:443": true,
+		"127.0.0.1:443":           false,
+		"10.0.0.1:443":            false,
+		"172.16.0.1:443":          false,
+		"192.168.1.1:443":         false,
+		"169.254.169.254:80":      false,
+		"100.64.1.1:443":          false,
+		"0.0.0.0:443":             false,
+		"224.0.0.1:443":           false,
+		"[::1]:443":               false,
+		"[fe80::1]:443":           false,
+		"[fd00::1]:443":           false,
+		"[::ffff:10.0.0.1]:443":   false,
+		"not-an-address":          false,
+	} {
+		if err := refusePrivate("tcp", addr, nil); (err == nil) != ok {
+			t.Errorf("refusePrivate(%s) = %v, want allowed %v", addr, err, ok)
+		}
+	}
+}
+
+// The default client never connects to a loopback endpoint, so no token reaches it.
+func TestDefaultClientRefusesALoopbackEndpoint(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
+	t.Cleanup(srv.Close)
+	p, err := New(Config{Endpoint: srv.URL, Deployment: testDeployment, APIVersion: "v1", Tokens: &fakeTokens{tok: goodToken}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Complete(context.Background(), structuredRequest())
+	if !providers.IsInvalidConfig(err) || providers.IsRetryable(err) || hits.Load() != 0 {
+		t.Fatalf("err = %v, hits %d", err, hits.Load())
+	}
 }

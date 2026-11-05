@@ -19,6 +19,7 @@ Status: draft for the MVP.
 **Built, but not used by the analyzer yet**
 
 - The Prometheus `MetricsSource` adapter, with its approved query templates, and the pod logs `LogSource` adapter, bounded and redacted. The analyzer creates both from its flags and gives them to the context builder.
+- The Microsoft Foundry `ModelProvider` adapter for OpenAI-format models (section 11.2), with bounded retries, workload identity and malformed output refused. Not wired yet.
 - The missing reference check (section 4). It infers a missing Secret or ConfigMap without reading either.
 - The context builder (section 3.3). It makes a bounded, redacted context from them and the analyzer's reads. The analyzer creates it, but nothing calls it until the analysis loop (#76).
 

@@ -251,7 +251,7 @@ Only the executor needs a cloud identity today: it signs the GitHub App's JWT wi
 
 - The ServiceAccount `shadewright-executor` carries the annotation `azure.workload.identity/client-id`. In `config/rbac/executor/service_account.yaml` it is the placeholder `<executor-managed-identity-client-id>` and **must be replaced**; the ID is not a secret, but it belongs in your overlay, not in a public repository. The Deployment's Pods already carry the label `azure.workload.identity/use: "true"`.
 - The managed identity needs a federated credential for the subject `system:serviceaccount:shadewright-system:shadewright-executor` and audience `api://AzureADTokenExchange`, and only the `sign` operation on the key. If you rename the namespace or either ServiceAccount, the credential must change with it.
-- The analyzer has no identity annotation or label. The model call that will need one is not built (**planned**, [ADR-0023](../adr/0023-how-the-analyzer-calls-the-model.md)).
+- The analyzer has no identity annotation or label. The Microsoft Foundry adapter that will need one is built but not wired, so no model call needs it yet (**planned**, [ADR-0023](../adr/0023-how-the-analyzer-calls-the-model.md)).
 
 A kustomize patch for the annotation, in your overlay:
 

@@ -207,3 +207,36 @@ func TestWorkloadIdentityCancellation(t *testing.T) {
 		t.Fatalf("err = %v, want canceled", err)
 	}
 }
+
+// A token for another audience is refused and not cached, so the next call asks again.
+func TestWorkloadIdentityRefusesAnotherAudience(t *testing.T) {
+	w, n, _ := entraHarness(t, func(rw http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(rw, `{"token_type":"Bearer","expires_in":3600,"access_token":%q}`, fakeJWT("https://management.azure.com"))
+	})
+	for range 2 {
+		if _, err := w.Token(context.Background()); !providers.IsForbidden(err) {
+			t.Fatalf("err = %v, want forbidden", err)
+		}
+	}
+	if n.Load() != 2 {
+		t.Errorf("sent %d token requests, want 2 (nothing cached)", n.Load())
+	}
+}
+
+// A caller waiting for another caller's exchange gives up when its own context ends.
+func TestWorkloadIdentityWaitRespectsContext(t *testing.T) {
+	w, _, _ := entraHarness(t, func(http.ResponseWriter, *http.Request) {})
+	w.lock <- struct{}{} // another exchange in progress
+	defer func() { <-w.lock }()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := w.Token(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) || !providers.IsRetryable(err) {
+		t.Fatalf("err = %v, want a retryable deadline", err)
+	}
+	cctx, ccancel := context.WithCancel(context.Background())
+	ccancel()
+	if _, err := w.Token(cctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want canceled", err)
+	}
+}

@@ -28,7 +28,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -79,7 +78,9 @@ type WorkloadIdentity struct {
 	client              *http.Client
 	now                 func() time.Time
 
-	mu      sync.Mutex
+	// lock is held by the one Token call that may exchange; a channel, so a waiting caller can give up when
+	// its context ends.
+	lock    chan struct{}
 	token   string
 	expires time.Time
 }
@@ -116,14 +117,21 @@ func newWorkloadIdentity(getenv func(string) string, rt http.RoundTripper) (*Wor
 	u.Path = "/" + tenantID + "/oauth2/v2.0/token"
 	return &WorkloadIdentity{
 		clientID: clientID, tokenFile: tokenFile, tokenURL: u.String(),
-		client: newHTTPClient(rt), now: time.Now,
+		client: newHTTPClient(rt), now: time.Now, lock: make(chan struct{}, 1),
 	}, nil
 }
 
 // Token returns a cached access token, or exchanges the federated token for a new one.
 func (w *WorkloadIdentity) Token(ctx context.Context) (string, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	select {
+	case w.lock <- struct{}{}:
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return "", fmt.Errorf("foundry: the token request was canceled: %w", context.Canceled)
+		}
+		return "", &providers.RetryableError{Err: fmt.Errorf("foundry: no access token: %w", context.DeadlineExceeded)}
+	}
+	defer func() { <-w.lock }()
 	if w.token != "" && w.now().Before(w.expires.Add(-tokenRefreshMargin)) {
 		return w.token, nil
 	}
@@ -192,6 +200,11 @@ func (w *WorkloadIdentity) exchange(ctx context.Context) (string, time.Time, err
 	if err := json.Unmarshal(data, &body); err != nil || body.AccessToken == "" ||
 		!strings.EqualFold(body.TokenType, "Bearer") || body.ExpiresIn <= 0 {
 		return "", time.Time{}, &providers.RetryableError{Err: errors.New("foundry: the answer of Entra ID could not be used")}
+	}
+	if err := checkToken(body.AccessToken); err != nil {
+		// Not cached: a token for another audience would fail every call until it expired.
+		return "", time.Time{}, fmt.Errorf("foundry: Entra ID returned a token that is not for Cognitive Services: %w",
+			providers.ErrForbidden)
 	}
 	return body.AccessToken, start.Add(time.Duration(min(body.ExpiresIn, 24*3600)) * time.Second), nil
 }

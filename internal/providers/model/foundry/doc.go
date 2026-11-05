@@ -22,13 +22,16 @@ limitations under the License.
 // ModelDeployment in RemediationSettings. With API version v1 it posts to <endpoint>/openai/v1/chat/completions
 // (or <endpoint>/chat/completions when the endpoint already ends in /openai/v1) and names the deployment in the
 // body; with a dated version it posts to <endpoint>/openai/deployments/<deployment>/chat/completions. It
-// follows no redirect. Which hosts an endpoint may name is not checked here: that guard (an allow-list of
-// suffixes, no private addresses) belongs to the analyzer (#76).
+// follows no redirect, uses no proxy, and connects only to public unicast addresses: an endpoint that resolves
+// to a loopback, private, link-local or shared address gets no connection and no token
+// ([providers.ErrInvalidConfig]). Which host names an endpoint may use (an allow-list of suffixes held by the
+// operator) is not checked here: that belongs to the analyzer (#76).
 //
 // Authentication is an Entra ID access token only, never a key: [WorkloadIdentity] exchanges the pod's
 // projected service account token for one (the AZURE_* variables of the workload identity webhook), with the
 // standard library. Every token, from any [TokenSource], is checked before it is sent: it must be a JWT whose
-// audience is Cognitive Services, so a token minted for another resource never reaches the endpoint.
+// audience is Cognitive Services, so a token minted for another resource never reaches the endpoint (such a
+// token is [providers.ErrInvalidConfig] and is not retried).
 //
 // Every call has a deadline (Config.Timeout unless the caller's context has a shorter one) and each attempt
 // its own (Config.AttemptTimeout). Network failures, timeouts of one attempt, 408, 429 and 5xx are retried with

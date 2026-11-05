@@ -10,15 +10,17 @@
 # cannot be computed everything runs, so a problem here never lets a change skip its checks.
 set -euo pipefail
 
-go_paths='.*\.go|go\.mod|go\.sum|api/.*|cmd/.*|internal/.*|config/.*|test/.*|hack/.*|Dockerfile|\.dockerignore|Makefile|\.golangci[^/]*|\.custom-gcl\.yml|PROJECT|docs/reference/.*'
+# What the binaries and the images are built from; each group below that builds or runs them includes it.
+build_paths='.*\.go|go\.mod|go\.sum|api/.*|cmd/.*|internal/.*|Dockerfile|\.dockerignore|Makefile|PROJECT'
+go_paths="${build_paths}|config/.*|test/.*|hack/.*|\.golangci[^/]*|\.custom-gcl\.yml|docs/reference/.*"
 go_re="^(${go_paths})$"
 # The image build context also takes the licence files (see .dockerignore).
 images_re="^(${go_paths}|LICENSE|NOTICE)$"
 # The chart is compared with config/default, rendered by Go tests and installed by scripts in hack/; Trivy scans it
 # and config/ with the ignores of .trivyignore.yaml. The install tests build both images from the checkout and run
-# them with the chart's flags, so the binaries' sources and the image build are chart inputs too (the licence
-# files only change the image content, not what the chart runs).
-chart_re='^(dist/chart/.*|config/.*|test/.*|hack/.*|api/.*|cmd/.*|internal/.*|.*\.go|go\.mod|go\.sum|Dockerfile|\.dockerignore|Makefile|ct\.yaml|\.trivyignore\.yaml|PROJECT)$'
+# them with the chart's flags, so everything the build reads is a chart input too (the licence files only change
+# the image content, not what the chart runs).
+chart_re="^(${build_paths}|dist/chart/.*|config/.*|test/.*|hack/.*|ct\\.yaml|\\.trivyignore\\.yaml)$"
 # ci.yml and the workflows it calls, and this script.
 self_re='^(\.github/workflows/(ci|lint|test|test-e2e|vulncheck|workflow-lint|images-build|chart-test)\.yml|hack/ci-changed\.sh)$'
 

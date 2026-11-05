@@ -1108,11 +1108,14 @@ func TestHeldOccurrencesStayWithinTheCaps(t *testing.T) {
 	if got != counted {
 		t.Fatalf("counted %d, want the %d not left over the caps", got, counted)
 	}
+	// The status write is visible before the writer recounts what it held, so wait for the recount.
+	pollUntil(t, "the held occurrences to drain", func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.heldTotal == 0 && len(r.held) == 0
+	})
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.heldTotal != 0 || len(r.held) != 0 {
-		t.Fatalf("held %s (total %d) after every batch was written, want nothing", heldString(r.Controller), r.heldTotal)
-	}
 	indexed(t, r.Controller)
 }
 

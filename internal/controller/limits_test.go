@@ -273,6 +273,12 @@ func TestLimitsLockHeldWhilePullRequestMayBeOpen(t *testing.T) {
 			expectQueuedAfter(t, r, rr, res, err, got, stub, ReasonTargetLocked, heldRecheckInterval)
 		})
 	}
+	t.Run("held by a request the executor moves on although its field says false", func(t *testing.T) {
+		r, _, rr, stub := limitsWorld(t, 20, holding(otherRequest("moving", limitsTarget,
+			remediationv1alpha1.PhaseAwaitingApproval, time.Minute), false))
+		res, got, err := reconcileLimits(t, r, rr)
+		expectQueued(t, r, rr, res, err, got, stub, ReasonTargetLocked)
+	})
 	t.Run("held by a request the executor moves on: checked again soon", func(t *testing.T) {
 		r, _, rr, stub := limitsWorld(t, 20, holding(otherRequest("moving", limitsTarget,
 			remediationv1alpha1.PhaseAwaitingApproval, time.Minute), true))
@@ -426,6 +432,25 @@ func TestBackfillLock(t *testing.T) {
 				t.Fatalf("holdsTarget = %v (set %v), want %v", ptr.Deref(h, false), h != nil, ptr.Deref(c.want, false))
 			}
 		})
+	}
+}
+
+// TestCheckHeldReleasesOnStatus checks that a stopped holder whose status already shows its pull request closed
+// is released without a look-up (the reconciler here has no Git provider, so a look-up would keep the lock).
+func TestCheckHeldReleasesOnStatus(t *testing.T) {
+	o := holding(withPullRequest(otherRequest("o", limitsTarget, remediationv1alpha1.PhaseNeedsIntervention,
+		time.Minute), ReasonChangeRequestClosed), true)
+	r, c, _, _ := limitsWorld(t, 20, o)
+	res, err := r.checkHeld(context.Background(), o)
+	if err != nil || res.RequeueAfter != 0 {
+		t.Fatalf("checkHeld = %+v, %v; want released and no requeue", res, err)
+	}
+	got := &remediationv1alpha1.RemediationRequest{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(o), got); err != nil {
+		t.Fatal(err)
+	}
+	if ptr.Deref(got.Status.HoldsTarget, true) {
+		t.Fatal("the lock was kept although the status shows the pull request closed")
 	}
 }
 

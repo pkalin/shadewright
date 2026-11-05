@@ -61,13 +61,15 @@ var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // holdsLock reports whether a request holds the lock on its target: status.holdsTarget, while the request is not
 // deleted or still has the finalizer that closes its pull request. A request written before the field existed
-// has none; its lock is then derived from its status as the release before this field did (derivedHold).
+// has none; its lock is then derived from its status as the release before this field did (derivedHold). A
+// request the executor still moves on holds the lock whatever the field says, so a false written by hand can
+// only release a request that has stopped (fail closed).
 func holdsLock(rr *remediationv1alpha1.RemediationRequest) bool {
 	if !rr.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(rr, FinalizerName) {
 		return false
 	}
 	if rr.Status.HoldsTarget != nil {
-		return *rr.Status.HoldsTarget
+		return *rr.Status.HoldsTarget || progresses(rr)
 	}
 	return derivedHold(rr)
 }
@@ -142,6 +144,15 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		return reconcile.Result{}, nil
 	}
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
+	if settleLock(rr); !*rr.Status.HoldsTarget {
+		// The status already proves the release (a request backfilled or written before settleLock ran): no
+		// look-up is needed.
+		if err := r.Status().Update(ctx, rr); err != nil {
+			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+		}
+		log.Info("Released the target lock of RemediationRequest: its status shows the pull request closed or merged")
+		return reconcile.Result{}, nil
+	}
 	lookCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	cr, err := r.findOwnChangeRequest(lookCtx, rr)
 	err = boundErr(ctx, lookCtx, "look-up of the change request", err)

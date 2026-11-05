@@ -290,6 +290,8 @@ Whoever keeps a symptom flapping can delay an analysis by up to the window, not 
 
 Until #16 calls it, nothing adds to the count, so the budget is read but not yet enforced. A unit is never given back; a lost answer can only overcount.
 
+<span class="sw-status sw-planned">planned</span> One unit is one claimed attempt: all calls, retries and tool rounds of one run, counted on the UTC day it was reserved, a lost response included; token and money limits are separate bounds ([ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md), proposed).
+
 **Shared by the whole cluster.** Anyone who can create events or pods in a watched namespace can spend the budget with distinct fingerprints that become due over the day. A share per namespace or per fingerprint is <span class="sw-status sw-planned">planned</span> ([#207](https://github.com/pkalin/shadewright/issues/207)).
 
 **Metrics.** Each pass of the trigger reports the count and the limit it read in the gauges `shadewright_analyses_used_today` and `shadewright_analyses_per_day_limit` ([metrics reference](../reference/metrics.md)). The Incident controller also reports, through the leader, the Incidents by phase and the number due for analysis, served at scrape time from its informer with no API call. It counts the analysis trigger passes that fail and the Incident status writes that fail. The metrics reference lists them with their labels.
@@ -346,6 +348,8 @@ Only the arrow into `Open` from the start is built; the dashed states and every 
 **Cap.** <span class="sw-status sw-built">built</span> (the count); the rest <span class="sw-status sw-planned">planned</span>. The cap of 500 keeps counting every Incident, `Resolved` ones included, so the number of Incident objects stays bounded ([ADR-0007](../adr/0007-incident-state-in-crds.md)). `Resolved` only marks the Incidents that are safe to delete. They are not deleted automatically: that needs a delete grant for the analyzer, a change of invariant 6, and is a separate ADR task. Clean-up is manual, see [the cap is reached](../troubleshooting.md#the-incident-cap-is-reached). Built today: the cap counts every Incident, once, when the analyzer starts, so a restart follows the deletions.
 
 ## 3.3. Analysis
+
+<span class="sw-status sw-planned">planned</span> Claims with a run ID and expiry, the recheck before a request is created, the durability steps and whether a stored record gates the proposal are proposed in [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md); until it is accepted and built, a claim is the phase and `lastAnalysisTime` only (3.2).
 
 Decided in [ADR-0023](../adr/0023-how-the-analyzer-calls-the-model.md) (accepted 2026-11-03): context first, one structured call.
 

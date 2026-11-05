@@ -412,7 +412,8 @@ func TestHandledAnswersForHeldOccurrences(t *testing.T) {
 	}
 	clock.set(t0.Add(RecurAfter))
 	r.obs <- sightingOf(1, 99, t0.Add(RecurAfter))
-	eventually(t, ns, 1, func(inc *remediationv1alpha1.Incident) bool { return inc.Status.Count > 0 })
+	// Wait for every batch to be written, however slow the writes, then check that no copy adds to it.
+	eventually(t, ns, 1, countIs(maxHeldPerFingerprint+1))
 	time.Sleep(300 * time.Millisecond)
 	if inc := get(t, ns); inc.Status.Count != maxHeldPerFingerprint+1 {
 		t.Fatalf("count %d, want %d: every occurrence once", inc.Status.Count, maxHeldPerFingerprint+1)

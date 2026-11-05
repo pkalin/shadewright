@@ -340,10 +340,10 @@ func TestSchemaBoundsTheStandardValues(t *testing.T) {
 		"service monitor without port":  {"metrics.serviceMonitor.enabled=true,metrics.enabled=false", "metrics.enabled"},
 		"test image by tag":             {"tests.image.digest=8.23.0", "digest"},
 		"cluster ID with a bad charset": {"clusterId=my cluster", "clusterId"},
-		"executor memory limit removed": {"executor.resources.limits.memory=null", "memory"},
-		"analyzer memory limit removed": {"analyzer.resources.limits.memory=null", "memory"},
-		"empty memory limit":            {"executor.resources.limits.memory=", "memory"},
-		"zero memory limit":             {"analyzer.resources.limits.memory=0", "memory"},
+		"executor memory limit removed": {"executor.resources.limits.memory=null", memoryLimit},
+		"analyzer memory limit removed": {"analyzer.resources.limits.memory=null", memoryLimit},
+		"empty memory limit":            {"executor.resources.limits.memory=", memoryLimit},
+		"zero memory limit":             {"analyzer.resources.limits.memory=0", memoryLimit},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -222,7 +222,7 @@ metrics:
 
 ## Metrics source profile (Prometheus)
 
-The analyzer's `query_metrics` tool reads cAdvisor and kube-state-metrics series through the Prometheus adapter (`internal/providers/metrics/prometheus`, [design section 4](../design/4-tools.md#4-tools)). The adapter is built but **not wired** into the analyzer yet ([#70](https://github.com/pkalin/shadewright/issues/70)), so there is no flag or Helm value for it; this section states what source it supports, so that the wiring and your Prometheus agree.
+The analyzer's `query_metrics` tool reads cAdvisor and kube-state-metrics series through the Prometheus adapter (`internal/providers/metrics/prometheus`, [design section 4](../design/4-tools.md#4-tools)). The adapter is built but **not wired** into the analyzer yet ([#371](https://github.com/pkalin/shadewright/issues/371)), so there is no flag or Helm value for it; this section states what source it supports, so that the wiring and your Prometheus agree.
 
 | Source | Supported | What to set |
 | --- | --- | --- |

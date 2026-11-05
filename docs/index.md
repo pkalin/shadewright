@@ -13,9 +13,8 @@ hide:
 
 <p class="sw-tagline">A safe-remediation controller for Kubernetes clusters run with GitOps: it turns untrusted proposals, from rules or an LLM, into typed, bounded changes tied to policy and to the object's real source in Git, delivers them only as reviewed pull requests, and verifies the effect.</p>
 
-[Read the design](design.md){ .md-button .md-button--primary }
-[Getting started](getting-started.md){ .md-button }
-[Decisions](adr/index.md){ .md-button }
+[Get started](getting-started.md){ .md-button .md-button--primary }
+[Design and decisions](design-and-decisions.md){ .md-button }
 [GitHub](https://github.com/pkalin/shadewright){ .md-button }
 
 </div>

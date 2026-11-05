@@ -20,6 +20,12 @@ if [ -n "${EXECUTOR_DIGEST:-}" ] || [ -n "${ANALYZER_DIGEST:-}" ]; then
     echo "set both EXECUTOR_DIGEST and ANALYZER_DIGEST, or neither" >&2
     exit 1
   fi
+  for d in "${EXECUTOR_DIGEST}" "${ANALYZER_DIGEST}"; do
+    if ! printf '%s' "${d}" | grep -Eq '^sha256:[a-f0-9]{64}$'; then
+      echo "EXECUTOR_DIGEST and ANALYZER_DIGEST must be sha256: and 64 lower case hex digits" >&2
+      exit 1
+    fi
+  done
   echo "using the given image digests"
 else
   echo "pull request or main run: using the v0.1.0 image digests"

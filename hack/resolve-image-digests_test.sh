@@ -31,8 +31,10 @@ echo "$*" >> "${COSIGN_LOG}"
 [ "$1" != "${COSIGN_FAIL:-}" ]
 EOT
 chmod +x "${tmp}/bin/docker" "${tmp}/bin/cosign"
-export PATH="${tmp}/bin:${PATH}" COSIGN_LOG="${tmp}/cosign.log" POLL_SECONDS=0 WAIT_SECONDS=1
+# Failure cases wait WAIT_SECONDS in all, polling every POLL_SECONDS: bounded, no busy loop.
+export PATH="${tmp}/bin:${PATH}" POLL_SECONDS=1 WAIT_SECONDS=1
 
+export COSIGN_LOG="${tmp}/cosign-ok.log"
 out="$("${script}" v1.2.3 Owner/shadewright Owner 2>/dev/null)"
 check "executor digest printed" "$([ "$(sed -n 's/^executor=//p' <<<"${out}")" = "${ex}" ] && echo 0 || echo 1)"
 check "analyzer digest printed" "$([ "$(sed -n 's/^analyzer=//p' <<<"${out}")" = "${an}" ] && echo 0 || echo 1)"
@@ -40,12 +42,15 @@ check "both checks ran on each image by digest" "$([ "$(grep -c "@sha256:" "${CO
 check "identity is the Images workflow on the tag" "$(grep -qF 'Owner/shadewright/.github/workflows/images.yml@refs/tags/v1.2.3' "${COSIGN_LOG}" && echo 0 || echo 1)"
 
 for sub in verify verify-attestation; do
+  export COSIGN_LOG="${tmp}/cosign-${sub}.log"
   r=0; out="$(COSIGN_FAIL="${sub}" "${script}" v1.2.3 Owner/shadewright Owner 2>/dev/null)" || r=1
   check "failing cosign ${sub} refused, nothing printed" "$([ "${r}" = 1 ] && [ -z "${out}" ] && echo 0 || echo 1)"
 done
 
+export COSIGN_LOG="${tmp}/cosign-nondigest.log"
 r=0; EXECUTOR_RESOLVED="v1.2.3" "${script}" v1.2.3 Owner/shadewright Owner > /dev/null 2>&1 || r=1
 check "a non digest is refused" "$([ "${r}" = 1 ] && echo 0 || echo 1)"
+export COSIGN_LOG="${tmp}/cosign-args.log"
 r=0; "${script}" v1.2.3 > /dev/null 2>&1 || r=1
 check "missing arguments refused" "$([ "${r}" = 1 ] && echo 0 || echo 1)"
 exit "${fail}"

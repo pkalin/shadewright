@@ -3,12 +3,11 @@ name: Chart
 # Publishes the Helm chart in dist/chart (generated with Kubebuilder's helm/v2-alpha plugin, then adjusted by
 # hand). Pull requests and pushes to main lint, render, compare and install it through ci.yml, which calls
 # chart-test.yml; a release tag runs the same tests here first. The images job resolves the digests of the
-# tag's executor and analyzer images once and verifies their signatures and SBOMs; the install test runs those
-# digests and the publish job writes the same two into the chart, so the published chart points at the tested
-# pair even if a tag moves meanwhile. Only a v* tag
+# tag's executor and analyzer images once and verifies their signatures and SBOMs; the Kind install test runs
+# those digests (the other chart tests start at once) and the publish job only pins that same pair into
+# values.yaml, so the published chart runs the tested images by digest even if a tag moves meanwhile. Only a v* tag
 # publishes it to ghcr.io/<owner>/charts/shadewright, and only the publish job has packages: write and
-# id-token: write. Before packaging it writes the digests of the tag's signed images into values.yaml, so the
-# published chart runs them by digest. After the push it signs the chart by digest with cosign keyless (GitHub
+# id-token: write. After the push it signs the chart by digest with cosign keyless (GitHub
 # OIDC, no key to store) and verifies the signature against the identity of this workflow, so a mismatch fails
 # the run.
 #
@@ -68,15 +67,29 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          hack/resolve-image-digests.sh "${TAG}" "${REPOSITORY}" "${OWNER}" | tee -a "${GITHUB_OUTPUT}"
-          sed 's/^/- /' "${GITHUB_OUTPUT}" >> "${GITHUB_STEP_SUMMARY}"
+          owner="$(printf '%s' "${OWNER}" | tr '[:upper:]' '[:lower:]')"
+          hack/resolve-image-digests.sh "${TAG}" "${REPOSITORY}" "${OWNER}" | tee "${RUNNER_TEMP}/digests.txt" >> "${GITHUB_OUTPUT}"
+          while IFS='=' read -r image digest; do
+            echo "ghcr.io/${owner}/shadewright-${image}@${digest}" >> "${GITHUB_STEP_SUMMARY}"
+          done < "${RUNNER_TEMP}/digests.txt"
 
+  # Everything but the Kind install starts at once, without waiting for the images.
   test:
     name: Test the chart
+    permissions:
+      contents: read
+    with:
+      part: rest
+    uses: ./.github/workflows/chart-test.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+
+  # The Kind install runs by the digests the images job verified, the pair the publish job writes into the chart.
+  test-install:
+    name: Test the chart install
     needs: [images]
     permissions:
       contents: read
     with:
+      part: install
       executor_digest: ${{ needs.images.outputs.executor }}
       analyzer_digest: ${{ needs.images.outputs.analyzer }}
     uses: ./.github/workflows/chart-test.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
@@ -87,7 +100,7 @@ jobs:
     # release pull request), so a tag never publishes the chart of another version; a pre-release tag takes
     # its version from the tag.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [images, test]
+    needs: [images, test, test-install]
     runs-on: ubuntu-latest
     # Digests only, not secrets: the release-notes job writes them into the release.
     outputs:

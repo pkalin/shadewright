@@ -227,20 +227,36 @@ func Decide(in DecisionInput) Decision {
 
 // Preflight runs the checks of [Decide] that need no resolved source, in the same order and with the same
 // reasons, outcomes and messages, so that the controller can refuse a request before it reads Git or requests a
-// token. in.Source is ignored. It returns the refusal and true when one of those checks fails, and false when the
-// request must go on to source mapping and [Decide]. It never allows anything: a request it lets through is not
-// decided yet, and a refusal it returns is the decision Decide returns for the same input with any resolved
-// source, because the checks it runs come first in Decide's order.
+// token. in.Source is ignored. It returns the refusal and a verdict other than [PreflightContinue] when one of
+// those checks fails, and [PreflightContinue] when the request must go on to source mapping and [Decide]. It
+// never allows anything: a request it lets through is not decided yet, and a refusal it returns is the decision
+// Decide returns for the same input with any source, nil included, because the checks it runs come first in
+// Decide's order.
 //
 // The target state check is not among them, although it reads only the live target: Decide runs it last, so a
 // plan the source checks refuse is Denied whatever state its target is in, and running it here would change
 // that.
-func Preflight(in DecisionInput) (Decision, bool) {
-	if r, msg := preflight(in); r != "" {
-		return refusal(r, msg), true
+func Preflight(in DecisionInput) (Decision, PreflightVerdict) {
+	if r, msg, v := preflight(in); r != "" {
+		return refusal(r, msg), v
 	}
-	return Decision{}, false
+	return Decision{}, PreflightContinue
 }
+
+// PreflightVerdict says whether [Preflight] refused a request, and on what.
+type PreflightVerdict int
+
+const (
+	// PreflightContinue: no check refused; the request goes on to source mapping and [Decide].
+	PreflightContinue PreflightVerdict = iota
+	// PreflightRefused: a check on the request, the policy or the settings alone refused it, so the refusal
+	// holds whatever the live target is.
+	PreflightRefused
+	// PreflightRefusedOnTarget: the check of the live target (identity, kind, namespace, labels) refused it. The
+	// refusal holds only for the target as it was read, so a caller that ends the request on it first makes sure
+	// the target has not changed since.
+	PreflightRefusedOnTarget
+)
 
 // refusal is the decision of a failed check with reason r. It is never Allowed.
 func refusal(r Reason, msg string) Decision {
@@ -260,13 +276,16 @@ func approvalRequired(mode v1alpha1.ApprovalMode, requested *bool) bool {
 	return mode != v1alpha1.ApprovalOptional || requested == nil || *requested
 }
 
-// check runs every check in order and returns the first failure, or an empty reason if all pass.
+// check runs every check in order and returns the first failure, or an empty reason if all pass. The field
+// checks run first, after their own check of the inputs they read, and the source is checked for nil only after
+// them: a refusal of Preflight is then Decide's answer for any source, nil included, and missing inputs give
+// IncompleteInput in any combination.
 func check(in DecisionInput) (Reason, string) {
+	if r, msg, _ := preflight(in); r != "" {
+		return r, msg
+	}
 	if in.Source == nil {
 		return ReasonIncompleteInput, incompleteInputMessage
-	}
-	if r, msg := preflight(in); r != "" {
-		return r, msg
 	}
 	return runChecks(in, sourceChecks)
 }
@@ -274,9 +293,22 @@ func check(in DecisionInput) (Reason, string) {
 // checkFunc is one check: it returns the reason and message of a failure, or an empty reason.
 type checkFunc func(DecisionInput) (Reason, string)
 
+// fieldCheck is one of the field checks, with the verdict of Preflight when it fails.
+type fieldCheck struct {
+	check   checkFunc
+	verdict PreflightVerdict
+}
+
 // fieldChecks read only the request, the policy, the settings and the live target, never the resolved source.
 // They run first in Decide and are all that Preflight runs, so both share one implementation and one order.
-var fieldChecks = []checkFunc{checkRequest, checkAction, checkModule, checkTarget, checkPolicyAction}
+// checkTarget is the one that reads the live target, whose labels can change after it was read.
+var fieldChecks = []fieldCheck{
+	{checkRequest, PreflightRefused},
+	{checkAction, PreflightRefused},
+	{checkModule, PreflightRefused},
+	{checkTarget, PreflightRefusedOnTarget},
+	{checkPolicyAction, PreflightRefused},
+}
 
 // sourceChecks need the resolved source, or must run after the checks that do (the target state check, see
 // checkTargetState). Only Decide runs them.
@@ -285,13 +317,18 @@ var sourceChecks = []checkFunc{checkSource, checkTargetState}
 // incompleteInputMessage is the message of ReasonIncompleteInput.
 const incompleteInputMessage = "The request, policy, settings, resolved source and live target are all needed"
 
-// preflight runs the field checks in order and returns the first failure, or an empty reason if all pass. It
-// never reads in.Source.
-func preflight(in DecisionInput) (Reason, string) {
+// preflight runs the field checks in order and returns the first failure with Preflight's verdict, or an empty
+// reason and PreflightContinue if all pass. It never reads in.Source.
+func preflight(in DecisionInput) (Reason, string, PreflightVerdict) {
 	if in.Request == nil || in.Policy == nil || in.Settings == nil || in.Target == nil {
-		return ReasonIncompleteInput, incompleteInputMessage
+		return ReasonIncompleteInput, incompleteInputMessage, PreflightRefused
 	}
-	return runChecks(in, fieldChecks)
+	for _, c := range fieldChecks {
+		if r, msg := c.check(in); r != "" {
+			return r, msg, c.verdict
+		}
+	}
+	return "", "", PreflightContinue
 }
 
 // runChecks runs checks in order and returns the first failure, or an empty reason if all pass.

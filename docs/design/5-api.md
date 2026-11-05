@@ -201,9 +201,11 @@ A cluster-scoped CR, writable only by the cluster admin ([ADR-0011](../adr/0011-
 
 ### The checks, in order
 
-The first check that fails gives the reason. All of this is built (`internal/policy.Decide`). Before them, a request with an input missing stops with `NeedsIntervention`, reason `IncompleteInput`.
+The first check that fails gives the reason. All of this is built (`internal/policy.Decide`). Before them, a request with the request, the policy, the settings or the live target missing stops with `NeedsIntervention`, reason `IncompleteInput`. A missing resolved source gives the same answer, checked after the first five checks, so whichever inputs are missing the answer is the same.
 
 The first five checks read only the request, the policy, the settings and the live target, never the resolved source. The executor runs exactly those first (`internal/policy.Preflight`), before the source mapping, so a request the policy refuses on its own fields costs no Flux or Git read, no signing and no GitHub token. The preflight uses the same code, order, reasons and conditions as `Decide`, and it only refuses: a request it lets through is mapped to its source, and then `Decide` runs every check again, in full. The target state check stays last, after the source checks, so a plan the source checks refuse is `Denied` whatever state its target is in.
+
+This order is intended (#242): a refusal on the request's own fields wins over anything the source mapping would have said, a stop for a person (`NeedsIntervention`) or a Git error worth a retry included, since the mapping is never asked. Of the five, only the target check reads what can change on the live object (its labels). A refusal by it rests on one read, so the executor reads the target again first and starts the check over if its UID or resourceVersion changed, as it does after the mapping (section 6.2). The other refusals hold whatever the target is and need no second read.
 
 - The request's `policyRef` and namespace (`requestNamespaces`), and the `GitOps` mode.
 - The action type is in the catalog and its parameters are well formed.
@@ -216,16 +218,18 @@ The first five checks read only the request, the policy, the settings and the li
 ```mermaid
 flowchart TD
     start([Request, policy, settings, live target])
-    c0{All present?}
-    subgraph pre ["Field checks: Preflight runs these before the source mapping, Decide runs them again"]
+    c0{"Request, policy, settings and live target present?"}
+    subgraph pre ["Preflight, before the source mapping: Decide runs these checks again"]
         c1["Request: policyRef, requestNamespaces, GitOps mode"]
         c2["Action: in the catalog, parameters well formed"]
         c2m["Module: the action's integration enabled in spec.modules"]
         c3["Target: the object targetRef names, kind allowed and not excluded, namespace and labels in targets"]
         c4["Policy action: listed, change within min, max, maxIncreasePercent, maxDecreasePercent"]
     end
+    reread{"Executor: target read again, same UID and resourceVersion?"}
     map["Source mapping (ADR-0012): Flux objects and Git read for the first time"]
-    again["Decide: the field checks again, on the same input and the resolved source"]
+    again["Decide: the presence check and the field checks again, on the same input and the resolved source"]
+    cs{Resolved source present?}
     c5["Source: the policy's repositoryRef, configured with this targetBranch, file in allowedPaths"]
     c6["Target state: for AdjustKedaMaxReplicas, the ScaledObject ready (KedaReady)"]
     ok[Allowed: WithinApprovedBounds]
@@ -239,7 +243,9 @@ flowchart TD
     c4 -- passes --> map
     map -- resolved --> again
     map -- stops --> ms[Denied or NeedsIntervention: the mapping's reason]
-    again -- passes --> c5
+    again -- passes --> cs
+    cs -- yes --> c5
+    cs -- no --> nis[NeedsIntervention: IncompleteInput]
     c5 -- passes --> c6
     c6 -- passes --> ok
     ok --> ap
@@ -248,7 +254,9 @@ flowchart TD
     c0 -- no --> ni[NeedsIntervention: IncompleteInput]
     c1 -- fails --> d1[Denied: PolicyMismatch, RequestNamespaceNotAllowed, ModeNotSupported]
     c2 -- fails --> d2[Denied: ActionUnknown, InvalidParameters]
-    c3 -- fails --> d3[Denied: TargetMismatch, KindExcluded, KindNotAllowed, TargetNamespaceNotAllowed, TargetLabelsNotMatched, PolicyInvalid]
+    c3 -- fails --> reread
+    reread -- yes --> d3[Denied: TargetMismatch, KindExcluded, KindNotAllowed, TargetNamespaceNotAllowed, TargetLabelsNotMatched, PolicyInvalid]
+    reread -- "no: the target changed" --> start
     c4 -- fails --> d4[Denied: ActionNotAllowed, BelowMinimum, AboveMaximum, IncreaseTooLarge, DecreaseNotAllowed, DecreaseTooLarge, PolicyInvalid]
     c5 -- fails --> d5[Denied: RepositoryNotAllowed, RepositoryNotConfigured, BranchNotAllowed, PathNotAllowed]
     c2m -- fails --> d2m[Denied: ModuleNotEnabled]

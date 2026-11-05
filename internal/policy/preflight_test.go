@@ -25,7 +25,10 @@ import (
 )
 
 // laterReasons are the reasons only the checks after the preflight give: the source checks, the target state
-// check and an allowed plan. Preflight must let every input Decide answers with one of them through.
+// check and an allowed plan. Preflight must let every input Decide answers with one of them through. It is a
+// hand list because the package keeps no reason set per check (a check's reasons are the ones its code
+// returns), and one kept only for this test would be a hand list too. A new later reason missing here makes
+// this test fail, not pass.
 var laterReasons = map[policy.Reason]bool{
 	policy.ReasonWithinApprovedBounds:         true,
 	policy.ReasonRepositoryNotAllowed:         true,
@@ -42,15 +45,19 @@ var laterReasons = map[policy.Reason]bool{
 func checkPreflight(t *testing.T, in policy.DecisionInput) {
 	t.Helper()
 	want := policy.Decide(in)
-	got, refused := policy.Preflight(in)
+	got, v := policy.Preflight(in)
+	refused := v != policy.PreflightContinue
 	if refused && got.Outcome == policy.OutcomeAllowed {
 		t.Fatalf("Preflight() allowed: %+v", got)
 	}
 	if !refused && got != (policy.Decision{}) {
 		t.Fatalf("Preflight() let the request through with a decision: %+v", got)
 	}
-	sourceMissing := in.Source == nil && in.Request != nil && in.Policy != nil && in.Settings != nil && in.Target != nil
-	wantRefused := !laterReasons[want.Reason] && !sourceMissing
+	// Decide checks for a missing source after the field checks: IncompleteInput with only the source missing
+	// means they all passed.
+	onlySourceMissing := in.Source == nil && in.Request != nil && in.Policy != nil && in.Settings != nil &&
+		in.Target != nil && want.Reason == policy.ReasonIncompleteInput
+	wantRefused := !laterReasons[want.Reason] && !onlySourceMissing
 	if refused != wantRefused {
 		t.Fatalf("Preflight() refused = %v (%+v), want %v for Decide() = %s/%s", refused, got, wantRefused,
 			want.Outcome, want.Reason)
@@ -64,8 +71,12 @@ func checkPreflight(t *testing.T, in policy.DecisionInput) {
 	} {
 		other := in
 		other.Source = src
-		if g, r := policy.Preflight(other); r != refused || !reflect.DeepEqual(g, got) {
-			t.Fatalf("Preflight() with %s = %+v/%v, want %+v/%v: it must not read the source", name, g, r, got, refused)
+		if g, r := policy.Preflight(other); r != v || !reflect.DeepEqual(g, got) {
+			t.Fatalf("Preflight() with %s = %+v/%v, want %+v/%v: it must not read the source", name, g, r, got, v)
+		}
+		// A refusal of Preflight is Decide's answer whatever the source, a missing one included.
+		if d := policy.Decide(other); refused && !reflect.DeepEqual(d, got) {
+			t.Fatalf("Decide() with %s = %+v, want Preflight's refusal %+v", name, d, got)
 		}
 	}
 }
@@ -85,7 +96,7 @@ func TestPreflightAgreesWithDecide(t *testing.T) {
 	for _, status := range []string{condFalse, "Unknown"} {
 		in := kedaInput()
 		setCondition(&in, "Ready", status, "")
-		if d, refused := policy.Preflight(in); refused {
+		if d, v := policy.Preflight(in); v != policy.PreflightContinue {
 			t.Fatalf("Ready %s: Preflight() = %+v, want no refusal", status, d)
 		}
 		checkPreflight(t, in)
@@ -93,34 +104,75 @@ func TestPreflightAgreesWithDecide(t *testing.T) {
 }
 
 // TestPreflightRefusesFieldOnlyDenials names the refusals of the acceptance criteria of #242: each is decided by
-// Preflight, before any source is resolved.
+// Preflight, before any source is resolved. Only a refusal by the target check is marked as resting on the live
+// target, which the controller reads again before it ends the request.
 func TestPreflightRefusesFieldOnlyDenials(t *testing.T) {
 	cases := []struct {
-		name   string
-		mutate func(in *policy.DecisionInput)
-		reason policy.Reason
+		name    string
+		mutate  func(in *policy.DecisionInput)
+		reason  policy.Reason
+		verdict policy.PreflightVerdict
 	}{
 		{"request namespace not allowed", func(in *policy.DecisionInput) {
 			in.Policy.Spec.RequestNamespaces = []v1alpha1.Name{otherNamespace}
-		}, policy.ReasonRequestNamespaceNotAllowed},
+		}, policy.ReasonRequestNamespaceNotAllowed, policy.PreflightRefused},
 		{"module not enabled", func(in *policy.DecisionInput) { in.Settings.Spec.Modules = nil },
-			policy.ReasonModuleNotEnabled},
-		{"above the maximum", func(in *policy.DecisionInput) { kedaParams(in, 10, 30) }, policy.ReasonAboveMaximum},
+			policy.ReasonModuleNotEnabled, policy.PreflightRefused},
+		{"above the maximum", func(in *policy.DecisionInput) { kedaParams(in, 10, 30) }, policy.ReasonAboveMaximum,
+			policy.PreflightRefused},
 		{"action not allowed", func(in *policy.DecisionInput) { in.Policy.Spec.Actions = nil },
-			policy.ReasonActionNotAllowed},
+			policy.ReasonActionNotAllowed, policy.PreflightRefused},
 		{"target namespace not allowed", func(in *policy.DecisionInput) {
 			in.Policy.Spec.Targets.Namespaces = []v1alpha1.Name{otherNamespace}
-		}, policy.ReasonTargetNamespaceNotAllowed},
+		}, policy.ReasonTargetNamespaceNotAllowed, policy.PreflightRefusedOnTarget},
+		{"target labels not matched", func(in *policy.DecisionInput) { in.Target.Labels = nil },
+			policy.ReasonTargetLabelsNotMatched, policy.PreflightRefusedOnTarget},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			in := kedaInput()
 			c.mutate(&in)
 			in.Source = nil
-			d, refused := policy.Preflight(in)
-			if !refused || d.Outcome != policy.OutcomeDenied || d.Reason != c.reason || !d.EffectiveApprovalRequired {
-				t.Fatalf("Preflight() = %+v/%v, want Denied/%s", d, refused, c.reason)
+			d, v := policy.Preflight(in)
+			if v != c.verdict || d.Outcome != policy.OutcomeDenied || d.Reason != c.reason || !d.EffectiveApprovalRequired {
+				t.Fatalf("Preflight() = %+v/%v, want Denied/%s/%v", d, v, c.reason, c.verdict)
 			}
 		})
 	}
+}
+
+// Several missing inputs give IncompleteInput from both Decide and Preflight, whichever are missing: the source
+// is checked for nil after the inputs the field checks read, so the order of the nil checks never shows.
+func TestPreflightAgreesWithDecideOnMissingInputs(t *testing.T) {
+	cases := map[string]func(in *policy.DecisionInput){
+		"request and source": func(in *policy.DecisionInput) { in.Request, in.Source = nil, nil },
+		"policy and target":  func(in *policy.DecisionInput) { in.Policy, in.Target = nil, nil },
+		"settings, target and source": func(in *policy.DecisionInput) {
+			in.Settings, in.Target, in.Source = nil, nil, nil
+		},
+		"all": func(in *policy.DecisionInput) { *in = policy.DecisionInput{} },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := kedaInput()
+			mutate(&in)
+			d, v := policy.Preflight(in)
+			if v != policy.PreflightRefused || d.Outcome != policy.OutcomeNeedsIntervention ||
+				d.Reason != policy.ReasonIncompleteInput {
+				t.Fatalf("Preflight() = %+v/%v, want NeedsIntervention/IncompleteInput", d, v)
+			}
+			if got := policy.Decide(in); !reflect.DeepEqual(got, d) {
+				t.Fatalf("Decide() = %+v, want Preflight's %+v", got, d)
+			}
+			checkPreflight(t, in)
+		})
+	}
+	// A field refusal with no source is that refusal in both, not IncompleteInput.
+	in := kedaInput()
+	in.Source = nil
+	in.Policy.Spec.Actions = nil
+	if d := policy.Decide(in); d.Reason != policy.ReasonActionNotAllowed {
+		t.Fatalf("Decide() with no source = %+v, want ActionNotAllowed", d)
+	}
+	checkPreflight(t, in)
 }

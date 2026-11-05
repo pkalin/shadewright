@@ -1,10 +1,14 @@
 # The analyzer's daily analysis budget. It ships without data on purpose, so an upgrade never resets the
 # count, and the analyzer may get and update it but not create it. The name is fixed in the binary
 # (incidents.BudgetName behind the "shadewright-" prefix), so it does not follow the release name.
+# helm.sh/resource-policy: keep leaves it through helm uninstall, so a reinstall (same release name and
+# namespace) adopts it and the day's count goes on. The Leases next to it are recreated and need no such policy.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: shadewright-analysis-budget
   namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     {{- include "shadewright.labels" (dict "component" "analyzer" "context" $) | nindent 4 }}

@@ -225,6 +225,20 @@ The patcher reasons named inside a `PatchRefused` message are `PreviousValueDiff
 
 An Incident that never gets analyzed shows why in its `AnalysisDue` condition. It is due (status `True`) with `FirstAnalysis`, `NewOccurrence`, `CooldownExpired` or `AnalysisTimedOut`. Not due (status `False`): `AnalysisDisabled` (`spec.analysis.maxAnalysesPerDay` is 0, or the deprecated `spec.maxAnalysesPerDay` of v0.1.0 is still set to 0: remove it, see [upgrade](upgrade-uninstall.md#upgrade)), `DailyBudgetReached`, `BudgetNotFound` (the ConfigMap `shadewright-analysis-budget` was deleted; recreate it empty), `BudgetUnreadable`, `BudgetReadFailed`, `SettingsNotFound`, `SettingsUnreadable`, `SettingsIncomplete` (the settings hold no `spec.analysis.maxAnalysesPerDay`, which the schema's defaults normally fill in), `Debouncing`, `CoolingDown`, `NoNewData`, `Analyzing`, `Proposed`, `Escalated`, `NotObserved`, `AnalysisStartUnknown` and `ForeignFingerprint`. The settings status carries `UnknownModules` (a name in `spec.modules` no module has), `DetectionFailed` and `NoWatchedNamespaces` (the analyzer watches no namespace; see [No Incident appears](#no-incident-appears)). No analysis runs yet, so `AnalysisDue` is a mark only.
 
+## The Incident cap is reached
+
+Symptoms: `shadewright_incident_observations_refused_total` rises, a Warning event with reason `IncidentCapReached` on the analyzer's Pod, and a new problem produces no Incident. The cap is `--max-incidents` (500) and counts every Incident, `Resolved` ones included. Watch the gauge `shadewright_incidents` by `phase` (built); an alert at 80% of the cap (400 Incidents in total) is planned, not shipped.
+
+Clean-up is manual: the analyzer has no `delete` on Incidents and does not delete resolved ones (automatic deletion would need a grant and its own ADR). Do it as an admin of the operator namespace.
+
+1. **Pick.** Today (built) nothing sets `Resolved`, so pick by age and by `status.lastSeen`: Incidents not seen for a long time. Once the lifecycle is built (planned, [#251](https://github.com/pkalin/shadewright/issues/251)), `Resolved` marks the safe ones: `kubectl -n shadewright-system get incidents -o json | jq -r '.items[] | select(.status.phase=="Resolved") | .metadata.name'`.
+2. **Skip the ones an active request names.** List the Incidents that RemediationRequests point at, and keep every one named by a request that has not reached a final phase: `kubectl -n shadewright-system get remediationrequests -o json | jq -r '.items[] | [.spec.incidentRef.name, .status.phase] | @tsv'`.
+3. **Keep the evidence.** Export what you will delete first, and keep it with your incident records: `kubectl -n shadewright-system get incident <name> -o yaml > <name>.yaml`. An Incident holds the redacted symptom, counters and times, not logs; the analysis records are kept apart.
+4. **Delete.** `kubectl -n shadewright-system delete incident <name>`. A fingerprint that comes back creates a new Incident.
+5. **Restart and check.** The analyzer counts Incidents only when it starts: `kubectl -n shadewright-system rollout restart deploy/shadewright-analyzer`. Check that `shadewright_incidents` fell and that `shadewright_incident_observations_refused_total` stopped rising.
+
+If the cap fills again at once, the namespaces are producing many fingerprints: see [Limit the namespaces it watches](how-to/limit-watched-namespaces.md).
+
 ## No Incident appears
 
 The analyzer records Incidents only for symptoms in the namespaces it watches. The Helm chart's default `analyzer.watchNamespaces` is empty, which watches no namespace (never all of them): the analyzer starts and is Ready, but reads no events or pods. Check, in this order:

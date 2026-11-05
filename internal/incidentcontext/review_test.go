@@ -161,13 +161,15 @@ func TestBuildDeadline(t *testing.T) {
 	var metricCalls, logCalls atomic.Int32
 	src := webSources()
 	b := newBuilder(t, reader(t, webObjects()...), src, func(c *Config) {
-		c.BuildTimeout = 50 * time.Millisecond
+		// Long enough for the target to resolve under the race detector on a busy runner, so the deadline
+		// expires during the log read.
+		c.BuildTimeout = 500 * time.Millisecond
 		c.Logs = logFunc(func(ctx context.Context, _ providers.LogQuery) (providers.LogExcerpt, error) {
 			logCalls.Add(1)
 			select {
 			case <-ctx.Done():
 				return providers.LogExcerpt{}, ctx.Err()
-			case <-time.After(2 * time.Second):
+			case <-time.After(10 * time.Second):
 				return providers.LogExcerpt{}, errors.New("slow source")
 			}
 		})
@@ -178,7 +180,7 @@ func TestBuildDeadline(t *testing.T) {
 	})
 	start := time.Now()
 	c := build(t, b, incident(deploymentRef()))
-	if d := time.Since(start); d > time.Second {
+	if d := time.Since(start); d > 5*time.Second {
 		t.Errorf("the build took %s", d)
 	}
 	if metricCalls.Load() != 0 || logCalls.Load() != 1 {

@@ -1,6 +1,6 @@
 # 6. Reconciliation
 
-[![Shadewright executor: a RemediationRequest passes the source mapping, the policy engine, the limits, the freshness check, the patcher with the semantic diff and the kill switch gate; the Key Vault signer lets the GitHub App open the pull request, the request waits in AwaitingApproval and stops in Merged when a person merges; refusals end in Denied, NeedsIntervention or Superseded; built up to Merged, with auto-merge, the delivery check and the verifier planned, drawn dashed.](../assets/diagrams/executor.svg)](../assets/diagrams/executor.svg "Open full size")
+[![Shadewright executor: a RemediationRequest passes the policy's field checks, the source mapping, the full policy decision, the limits, the freshness check, the patcher with the semantic diff and the kill switch gate; the Key Vault signer lets the GitHub App open the pull request, the request waits in AwaitingApproval and stops in Merged when a person merges; refusals end in Denied, NeedsIntervention or Superseded; built up to Merged, with auto-merge, the delivery check and the verifier planned, drawn dashed.](../assets/diagrams/executor.svg)](../assets/diagrams/executor.svg "Open full size")
 
 [![RemediationRequest phases: Pending, PolicyChecked, PRCreated, AwaitingApproval or AutoMergeQueued, Merged, WaitingForDelivery, Verifying, Succeeded; only the steps up to Merged are built; any step can end in Denied, Failed, Expired, Cancelled, Superseded or NeedsIntervention.](../assets/diagrams/phases.svg)](../assets/diagrams/phases.svg "Open full size")
 
@@ -108,7 +108,7 @@ All of them are listed in the [metrics reference](../reference/metrics.md).
 | Policy or settings object missing, target UID differs from the live object | `Denied` (`PolicyNotFound`, `SettingsNotFound`, `TargetMismatch`) | `False` |
 | The previous value in the request is not the live value (the policy measures increases and decreases from it) | `Denied` (`PreviousValueMismatch`) | `False` |
 | The live object does not set the field the action changes | `NeedsIntervention` (`FieldNotFound`) | `Unknown` |
-| Source mapping denies (repository, branch, path or inventory) or `policy.Decide` denies | `Denied`, reason of the check | `False` |
+| Source mapping denies (repository, branch, path or inventory) or `policy.Preflight` or `policy.Decide` denies | `Denied`, reason of the check | `False` |
 | `AdjustKedaMaxReplicas` without the `keda` integration enabled in `spec.modules` | `Denied` (`ModuleNotEnabled`) | `False` |
 | `AdjustKedaMaxReplicas` on a `ScaledObject` that is definitely not ready (see "A `ScaledObject` that is not ready" below), checked after every check that denies | `NeedsIntervention` (`ScaledObjectNotReady`) | `Unknown` |
 | `AdjustKedaMaxReplicas` on a `ScaledObject` KEDA has not reported on yet (no status, no `Ready` condition, `Ready=Unknown` other than `PartialTriggerError`) | no phase: see "A `ScaledObject` KEDA has not reported on" below | `Unknown` (`ScaledObjectReadinessUnknown`) while it waits |

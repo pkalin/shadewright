@@ -62,7 +62,7 @@ func TestDeploymentPodsByOwnerReferences(t *testing.T) {
 	otherD.Name, otherD.UID = "web-v2", "uid-web-v2"
 	otherRS := replicaSet("web-v2-abc", "uid-rs-v2", otherD, longAgo)
 	other := pod("other", map[string]string{appName: "other"}, longAgo)
-	other.Namespace = "elsewhere"
+	other.Namespace = otherNS
 	objs := []client.Object{
 		d, rs, otherD, otherRS,
 		pod(crashPod, rs.Labels, longAgo, rsRef),
@@ -79,7 +79,7 @@ func TestDeploymentPodsByOwnerReferences(t *testing.T) {
 		pod("not-controller", rs.Labels, longAgo, metav1.OwnerReference{APIVersion: apiApps, Kind: kindReplicaSet, Name: rs.Name, UID: rs.UID}),
 		func() *corev1.Pod {
 			p := pod("web-abc-9", rs.Labels, longAgo, rsRef)
-			p.Namespace = "elsewhere"
+			p.Namespace = otherNS
 			return p
 		}(),
 		other,

@@ -77,7 +77,7 @@ networkPolicy:
     - 169.254.20.10/32
   analyzer:
     prometheus:
-      # -- Let the analyzer, and only the analyzer, send TCP to the in-cluster Prometheus it queries (the metrics source, ADR-0017). Off by default: the analyzer does not query Prometheus yet, so nothing needs the rule. Set it together with the analyzer's metrics source, and allow the analyzer in the ingress policy of that Prometheus too (a NetworkPolicy of the Prometheus namespace; the chart does not touch other namespaces).
+      # -- Let the analyzer, and only the analyzer, send TCP to the in-cluster Prometheus it queries (the metrics source, ADR-0017). Off by default: the analyzer sends Prometheus nothing unless `--prometheus-url` is set; with `--prometheus-cluster` too it probes it at startup and every 10 minutes, and it queries it once the analysis loop (#76) calls the context builder. Set it together with the analyzer's metrics source, and allow the analyzer in the ingress policy of that Prometheus too (a NetworkPolicy of the Prometheus namespace; the chart does not touch other namespaces).
       # @section -- Network policy
       enabled: false
       # -- Namespace of the Prometheus (matched by `kubernetes.io/metadata.name`). Required when `enabled`.

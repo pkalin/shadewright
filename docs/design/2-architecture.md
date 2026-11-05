@@ -78,7 +78,7 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 
 **What it may read.**
 
-- Events (`events.k8s.io/v1`) and pods (`get`, `list`, `watch`), and workloads (ReplicaSets, Deployments and StatefulSets, `get` only), only in the namespaces it is started with (`--watch-namespaces`).
+- Events (`events.k8s.io/v1`) and pods (`get`, `list`, `watch`), pod logs (`get` on `pods/log`, for the pod logs source of the context builder, 2.3.2), and workloads (ReplicaSets, Deployments and StatefulSets, `get` only), only in the namespaces it is started with (`--watch-namespaces`).
 - That is a ClusterRole that is only a catalogue of verbs, bound by one RoleBinding per watched namespace and never cluster-wide.
 - Its cache is restricted to the same list for those kinds, and to the operator namespace for Incidents and requests.
 - The cache drops managed fields before it stores an object.
@@ -121,7 +121,6 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 - Kyverno kinds: reading them (`get`, `list`, `watch` on `kyverno.io` `clusterpolicies` and `policies`, and on `wgpolicyk8s.io` `policyreports` and `clusterpolicyreports`) is granted only with the wiring of symptom sources (planned, 2.5).
 - Secrets Store CSI driver kinds (`secrets-store.csi.x-k8s.io` `secretproviderclasses` and `secretproviderclasspodstatuses`): that module needs none. It watches no kind and reads only the kubelet's events (2.5).
 - The cloudflared module's symptom source reads Pods, which the analyzer already reads in the watched namespaces, so it needs no new grant.
-- `pods/log`: the pod logs adapter (2.3) is built but not wired. The grant comes with its wiring, in the watched namespaces only.
 
 ### 2.2.3. Executor permissions
 
@@ -163,6 +162,12 @@ Provider SDKs are imported only inside their adapter package. Each interface has
 
 **What it does.** The adapter (`internal/providers/metrics/prometheus`) speaks the plain Prometheus HTTP query API with the standard library. It runs only the templates listed in section 4, and only for the namespaces it is configured with (section 4).
 
+**How the analyzer wires it.** With `--prometheus-url` set, the analyzer creates it with the watched namespaces (`--watch-namespaces`, the set of the cache and the RoleBindings) and gives it to the context builder (3.3), which the analysis loop does not call yet ([#76](https://github.com/pkalin/shadewright/issues/76)). Without the flag the metrics section is "not available". More than 256 watched namespaces with the flag set refuse the start.
+
+- With `--prometheus-cluster`, the analyzer checks at startup and every 10 minutes, on every replica, with one fixed query that is not a template and returns no label, that kube-state-metrics and cAdvisor both hold series with that `cluster` value. With no watched namespace it builds no source and runs no check.
+- When they do not, the analyzer still starts and logs an error, and metrics are **unavailable**: every query fails, so the metrics section is "could not fetch", which escalates (3.3), rather than empty answers read as evidence of absence. A label that disappears later switches metrics off at the next check, and one that appears switches them on.
+- A check that cannot reach Prometheus is not "not found": it changes nothing the last answer said, and before any answer, or once the last one is older than 10 minutes, a query checks first. One check runs at a time; a query waits for it no longer than its own deadline. Decided on [#371](https://github.com/pkalin/shadewright/issues/371) (2026-11-05), instead of refusing to start, which would crash-loop the analyzer on a typo.
+
 **Limits.**
 
 - Thanos, Mimir, Grafana Cloud and Azure Monitor managed Prometheus serve the same query API, but the adapter is untested against them.
@@ -183,7 +188,8 @@ HTTP status handling is in 2.6.
 
 **Limits.**
 
-- It is built but not wired: the analyzer does not create it and has no grant on `pods/log` (section 2.2). Wiring it adds that grant, in the watched namespaces only.
+- The analyzer creates it unless `--pod-logs=false`, with the watched namespaces, and gives it to the context builder (3.3), which the analysis loop does not call yet ([#76](https://github.com/pkalin/shadewright/issues/76)). It reads with the analyzer's own identity: `get` on `pods/log` in the watch role, so only in the watched namespaces (2.2.2).
+- It takes at most 256 namespaces. With more in `--watch-namespaces` and logs on, the analyzer refuses to start with a configuration error that names the limit (decided on [#371](https://github.com/pkalin/shadewright/issues/371)): running without logs would make every analysis escalate on a source it could not fetch.
 - It reads one container of one pod per call, only in the namespaces it is configured with, within the bounds of section 4. It redacts the excerpt before returning it.
 
 **Tying an excerpt to a pod.** It reads the pod (`get` on pods, granted by the analyzer watch role, which is bound only in the watched namespaces) before the first and after the last log request.

@@ -1,8 +1,8 @@
 # 3. Observation and deduplication
 
-This section covers how the analyzer turns cluster symptoms into `Incident` objects and decides when one is due for analysis. The collector (3.1) reads Warning events and pod status. Two levels of deduplication (3.2) keep the counts bounded and stable across restarts. The analysis (3.3) is only partly built: the context builder exists but is not wired, and the analysis loop is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)).
+This section covers how the analyzer turns cluster symptoms into `Incident` objects and decides when one is due for analysis. The collector (3.1) reads Warning events and pod status. Two levels of deduplication (3.2) keep the counts bounded and stable across restarts. The analysis (3.3) is only partly built: the context builder is built and given the real Prometheus and pod logs adapters but not called yet, and the analysis loop is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)).
 
-[![Shadewright analyzer: the collector turns events and pod status of the watched namespaces into deduplicated, bounded Incidents; the analysis trigger decides when one is due, using analysis.maxAnalysesPerDay from the settings and a Budget ConfigMap; Prometheus and pod logs have adapters that are built but not wired, and so is the context builder, which makes a bounded, redacted context in provenance-tagged blocks; planned, drawn dashed: the model call with read tools on escalation, the model provider and the typed RemediationRequest.](../assets/diagrams/analyzer.svg)](../assets/diagrams/analyzer.svg "Open full size")
+[![Shadewright analyzer: the collector turns events and pod status of the watched namespaces into deduplicated, bounded Incidents; the analysis trigger decides when one is due, using analysis.maxAnalysesPerDay from the settings and a Budget ConfigMap; Prometheus and pod logs have adapters that the analyzer gives to the context builder, which is built but not called yet and makes a bounded, redacted context in provenance-tagged blocks; planned, drawn dashed: the model call with read tools on escalation, the model provider and the typed RemediationRequest.](../assets/diagrams/analyzer.svg)](../assets/diagrams/analyzer.svg "Open full size")
 
 ## 3.1. Collecting
 
@@ -326,7 +326,7 @@ Decided in [ADR-0023](../adr/0023-how-the-analyzer-calls-the-model.md) (accepted
 
 ### Design: the order of work
 
-This is the target flow. The analysis loop that runs it is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)); the context builder is built but not wired.
+This is the target flow. The analysis loop that runs it is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)); the context builder is built but not called yet.
 
 - Deterministic rules and known runbooks run first. A runbook match is deterministic and makes no model call.
 - The model path is for incidents no runbook matched. Its common case is one small-model call: the context builder assembles a bounded, redacted context deterministically (incident summary, object status and owners, a log excerpt, selected metrics and recent Git changes for the source of the object) and the small model returns one structured result.
@@ -334,7 +334,7 @@ This is the target flow. The analysis loop that runs it is <span class="sw-statu
 
 ### The context builder
 
-<span class="sw-status sw-built">built</span>, not wired: the analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76)) will call it, and wiring the real metrics and log adapters is [#371](https://github.com/pkalin/shadewright/issues/371).
+<span class="sw-status sw-built">built</span>, not called yet: the analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76)) will call it. The analyzer creates it with the Prometheus adapter (`--prometheus-url`) and the pod logs adapter (`--pod-logs`) and the watched namespaces ([#371](https://github.com/pkalin/shadewright/issues/371)): an Incident whose subject is in any other namespace gets status, logs and metrics "not available", refused before any read or source call.
 
 The context builder (`internal/incidentcontext`) works on the `MetricsSource` and `LogSource` interfaces and the analyzer's existing reads. It is not called `internal/context`, so that it never shadows the standard library's `context` package. For one Incident it makes five sections, in this order, each a block tagged with its provenance:
 

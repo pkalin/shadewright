@@ -68,6 +68,10 @@ limitations under the License.
 // abandoned build is not a failed source. A source call that runs out of its own timeout while the build's
 // context is still alive is a failed source.
 //
-// The builder is built but not wired: the analysis loop (#76) will call it, and wiring the real metrics and
-// log adapters is #371.
+// Namespaces: the builder is given the watched namespaces ([Config.Namespaces]), the same set as the cache and
+// both sources. An Incident whose subject is in any other namespace gets status, logs and metrics "not
+// available", refused before any read or source call; an empty set refuses every subject.
+//
+// The analyzer creates the builder with the Prometheus and pod logs adapters (internal/analyzer NewSources);
+// the analysis loop (#76) will call it.
 package incidentcontext

@@ -69,6 +69,8 @@ const (
 	targetUnsupported
 	// targetFailed: a read failed; the status source could not be fetched.
 	targetFailed
+	// targetUnwatched: the target is in a namespace outside Config.Namespaces; nothing was read.
+	targetUnwatched
 )
 
 // target is what the builder learned about the Incident's subject.
@@ -98,6 +100,12 @@ func (b *Builder) resolve(ctx context.Context, ref remediationv1alpha1.ObjectRef
 	t := target{ref: ref}
 	if ref.UID == "" || ref.Namespace == "" || ref.Name == "" {
 		t.state = targetUnsupported
+		return t
+	}
+	// Before any read: the cache and RBAC would refuse too, but the builder does not rely on them, and the
+	// sources are never asked about such a namespace.
+	if _, ok := b.namespaces[ref.Namespace]; !ok {
+		t.state = targetUnwatched
 		return t
 	}
 	var err error

@@ -59,7 +59,9 @@ limitations under the License.
 // backend that holds several clusters therefore needs [Config.Cluster], which adds cluster="<value>", quoted,
 // to every selector of every template. The label must be stored on the series (by the scrape or by remote
 // write), not an external label the queried server adds only on its way out; a mistyped value or a label the
-// series do not carry leaves every result empty. Only the administrator sets it; neither a query, the model
+// series do not carry leaves every result empty, so [Source.CheckCluster] checks, with one fixed query that is not a
+// template and returns no label, that kube-state-metrics and cAdvisor both hold series of it
+// ([ErrClusterNotFound] when not). Only the administrator sets it; neither a query, the model
 // nor a custom resource can, and [New] refuses a value that is not 1 to [MaxClusterValue] letters, digits,
 // '.', '_', ':', '/' or '-' (starting and ending with a letter or digit), with [providers.ErrInvalidConfig]
 // and an error that does not repeat it.

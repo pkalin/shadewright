@@ -41,6 +41,7 @@ import (
 
 const (
 	testNS     = "shop"
+	otherNS    = "elsewhere"
 	appName    = "app"
 	webName    = "web"
 	crashPod   = "web-abc-1"
@@ -203,7 +204,7 @@ func newBuilder(t testing.TB, r client.Reader, s sources, mutate func(*Config)) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Pods: r, Objects: r, Redactor: red, Now: func() time.Time { return testNow }}
+	cfg := Config{Pods: r, Objects: r, Namespaces: []string{testNS}, Redactor: red, Now: func() time.Time { return testNow }}
 	if s.logs != nil {
 		cfg.Logs = s.logs
 	}

@@ -84,6 +84,9 @@ func (b *Builder) statusBlock(t *target) Block {
 	case targetUnsupported:
 		blk.Availability = NotAvailable
 		l.add("not available: the analyzer does not read objects of kind %s", b.value(t.ref.Kind))
+	case targetUnwatched:
+		blk.Availability = NotAvailable
+		l.add("not available: the target is in a namespace the analyzer does not watch")
 	case targetGone:
 		l.add("%s %s/%s no longer exists, or was replaced by another object of the same name",
 			b.value(t.ref.Kind), b.value(t.ref.Namespace), b.value(t.ref.Name))

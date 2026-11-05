@@ -51,9 +51,12 @@ limitations under the License.
 // catalogue of verbs: it is bound by one RoleBinding per watched namespace (config/watch), never by a
 // ClusterRoleBinding, so the analyzer can read nothing outside the namespaces it was given. Only namespaced
 // reads belong here; anything cluster-scoped or written goes in package analyzer. Workloads are only read
-// one at a time by name, so they get get and nothing else.
+// one at a time by name, so they get get and nothing else. get on pods/log is for the pod logs source of the
+// context builder (internal/providers/logs/kube, wired in cmd/analyzer), not for the collector, which reads no
+// logs; it is here because this package's markers make the one watch role.
 //
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups=apps,resources=replicasets;deployments;statefulsets,verbs=get
 package collector

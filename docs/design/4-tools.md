@@ -1,6 +1,6 @@
 # 4. Tools
 
-This section covers the read tools the analyzer offers to the model, and the adapters behind them. Three parts are built but not wired into the analyzer: the Prometheus adapter for `query_metrics`, the pod logs adapter for `get_pod_logs` (wiring both is [#371](https://github.com/pkalin/shadewright/issues/371)), and the missing reference check (4.3). The read tools are <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)), and the analysis loop that offers them to the model is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)).
+This section covers the read tools the analyzer offers to the model, and the adapters behind them. The Prometheus adapter for `query_metrics` and the pod logs adapter for `get_pod_logs` are built and given to the context builder, which is not called yet ([#371](https://github.com/pkalin/shadewright/issues/371)). The missing reference check (4.3) is built but not wired. The read tools are <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)), and the analysis loop that offers them to the model is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)).
 
 The analyzer exposes tools to the model through its own adapters.
 
@@ -11,14 +11,14 @@ The analyzer exposes tools to the model through its own adapters.
 | Tool | Purpose | Mode | Status |
 | --- | --- | --- | --- |
 | `get_resource`, `list_events` | Object state and symptom history | Read, redacted | <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)) |
-| `get_pod_logs` | Bounded time range and byte count | Read, redacted | adapter <span class="sw-status sw-built">built</span>, not wired ([#371](https://github.com/pkalin/shadewright/issues/371)) |
-| `query_metrics` | Approved query templates only | Read, redacted | adapter <span class="sw-status sw-built">built</span>, not wired ([#371](https://github.com/pkalin/shadewright/issues/371)) |
+| `get_pod_logs` | Bounded time range and byte count | Read, redacted | adapter <span class="sw-status sw-built">built</span>, given to the context builder ([#371](https://github.com/pkalin/shadewright/issues/371)); tool <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)) |
+| `query_metrics` | Approved query templates only | Read, redacted | adapter <span class="sw-status sw-built">built</span>, given to the context builder ([#371](https://github.com/pkalin/shadewright/issues/371)); tool <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)) |
 | `get_delivery_status` | Flux Kustomization / HelmRelease revision and readiness | Read, redacted | <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)) |
 | `read_git_file`, `get_recent_changes` | Map an object to its source in Git | Read, redacted | <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)) |
 
 ## 4.1. `query_metrics`
 
-<span class="sw-status sw-built">built</span> The Prometheus adapter is `internal/providers/metrics/prometheus`. It is not wired into the analyzer yet ([#371](https://github.com/pkalin/shadewright/issues/371)).
+<span class="sw-status sw-built">built</span> The Prometheus adapter is `internal/providers/metrics/prometheus`. The analyzer creates it from `--prometheus-url` and gives it to the context builder, which is not called yet ([#371](https://github.com/pkalin/shadewright/issues/371)).
 
 ### Query templates and parameters
 
@@ -46,14 +46,14 @@ Prometheus applies no authorization of its own: whoever can reach it can query e
 
 - It is given the analyzer's watched namespaces (`--watch-namespaces`, the same list its RBAC grants, section 10.1).
 - A query naming any other namespace is refused before a request, with an error that does not repeat the name. An empty list refuses every query.
-- Passing that list is part of wiring the adapter into the analyzer (<span class="sw-status sw-planned">planned</span>).
+- The analyzer passes it when it creates the adapter from `--prometheus-url` ([#371](https://github.com/pkalin/shadewright/issues/371)), and refuses to start with more than 256 watched namespaces.
 - When it is created, the adapter also refuses a namespace in that list that is not a DNS-1123 label, more than 256 namespaces and a timeout over 2 minutes.
 
 ### Which pods a query names
 
 A pod template selects exactly the pods its caller names, never pods whose names only start like the target's. A name prefix would let a neighbour supply the target's evidence (the StatefulSet pod `web-v2-0` next to the Deployment `web`, or a standalone pod named like one of its own).
 
-**Who decides which pods belong to the target.** The adapter has no Kubernetes client, so it does not decide this, and it cannot check that the pods are in the namespace the query names. The context builder (3.3, built, not wired) resolves them in that same namespace. The model never supplies pod names.
+**Who decides which pods belong to the target.** The adapter has no Kubernetes client, so it does not decide this, and it cannot check that the pods are in the namespace the query names. The context builder (3.3, built, not called yet) resolves them in that same namespace. The model never supplies pod names.
 
 - It starts from the target's kind and UID and follows controller owner references (Deployment to ReplicaSet to Pod, StatefulSet to Pod, ReplicaSet to Pod).
 - It uses the analyzer's existing reads: a get of each workload from the API server and the cached list of the namespace's pods.
@@ -87,8 +87,8 @@ Source profile ([#333](https://github.com/pkalin/shadewright/issues/333), [confi
 - Every template keeps the `cluster` label apart and the adapter drops it from the result.
 - Without the adapter's cluster setting, an answer with two series of one container that differ only in `cluster` is refused as an invalid response, never mixed. That covers two clusters with the same namespace, pod and container, and a source that labels only some of its series.
 - A shared backend (Thanos, Mimir, Grafana Cloud, Azure Monitor managed Prometheus; all untested) needs the cluster setting, which adds `cluster="<value>"` to every selector of every template.
-- The label must be stored on the series (by the scrape or by remote write), not an external label the queried server adds only on its way out. A mistyped value or a label the series do not carry leaves every result empty. A startup check that it selects series is <span class="sw-status sw-planned">planned</span> with the wiring ([#371](https://github.com/pkalin/shadewright/issues/371)).
-- The value is 1 to 100 letters, digits, `.`, `_`, `:`, `/` or `-`, quoted like a parameter. The administrator sets it in the adapter's configuration, never a query, the model or a CR, and the adapter refuses anything else when it is created.
+- The label must be stored on the series (by the scrape or by remote write), not an external label the queried server adds only on its way out. A mistyped value or a label the series do not carry leaves every result empty. So the analyzer checks at startup and every 10 minutes, with one fixed query that returns no label, that kube-state-metrics and cAdvisor both hold series with the value; when they do not, it keeps running and metrics are unavailable (every query fails, which escalates, 3.3) until a check finds them ([#371](https://github.com/pkalin/shadewright/issues/371), [configuration reference](../reference/configuration.md#metrics-source-profile-prometheus)).
+- The value is 1 to 100 letters, digits, `.`, `_`, `:`, `/` or `-`, quoted like a parameter. The administrator sets it (`--prometheus-cluster`), never a query, the model or a CR, and the adapter refuses anything else when it is created.
 
 **Where the namespace scope holds.** It holds only if the `namespace`, `pod`, `container` and `cluster` labels of cAdvisor and kube-state-metrics series are the scrape's. A job that scrapes tenant pods must not honour their labels (`honor_labels: false`), or must drop the `container_*` and `kube_*` metric names from what it keeps. Otherwise a pod can expose a series named like a template's metric with another namespace's labels. Metric values stay evidence a tenant can influence.
 
@@ -126,15 +126,15 @@ Source profile ([#333](https://github.com/pkalin/shadewright/issues/333), [confi
 
 ## 4.2. `get_pod_logs`
 
-<span class="sw-status sw-built">built</span> The pod logs adapter is `internal/providers/logs/kube`. It is not wired. The analyzer has no `pods/log` grant yet.
+<span class="sw-status sw-built">built</span> The pod logs adapter is `internal/providers/logs/kube`. The analyzer creates it unless `--pod-logs=false` and gives it to the context builder, which is not called yet ([#371](https://github.com/pkalin/shadewright/issues/371)).
 
 ### What a call is
 
 A call names one namespace, pod and container, and optionally the previous, terminated instance of the container.
 
-- Like the Prometheus adapter, it is given the analyzer's watched namespaces and refuses any other, and every call when the list is empty, before a request, with an error that does not repeat the name. RBAC would refuse such a read too once the analyzer has a `pods/log` grant, but the adapter does not rely on it.
+- Like the Prometheus adapter, it is given the analyzer's watched namespaces and refuses any other, and every call when the list is empty, before a request, with an error that does not repeat the name. RBAC refuses such a read too (the analyzer's `get` on `pods/log` is bound only in the watched namespaces), but the adapter does not rely on it.
 - The pod must be a DNS-1123 subdomain and the container a DNS-1123 label, checked before a request.
-- When it is created, the adapter refuses a missing client, a namespace that is not a DNS-1123 label, more than 256 namespaces and a timeout over 2 minutes. `--watch-namespaces` has no such cap yet, so wiring either adapter must handle a longer list.
+- When it is created, the adapter refuses a missing client, a namespace that is not a DNS-1123 label, more than 256 namespaces and a timeout over 2 minutes. The analyzer refuses to start when `--watch-namespaces` lists more than 256 and logs are on (or `--prometheus-url` is set), with an error that names the limit ([#371](https://github.com/pkalin/shadewright/issues/371)).
 
 ### Limits, fixed in code
 

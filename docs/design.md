@@ -16,12 +16,11 @@ Status: draft for the MVP.
 - The RBAC of sections 2.2 and 10.
 - The Prometheus metrics of both components ([reference](reference/metrics.md)).
 
-**Built, but not wired into the analyzer yet**
+**Built, but not used by the analyzer yet**
 
-- The Prometheus `MetricsSource` adapter, with its approved query templates.
-- The pod logs `LogSource` adapter, bounded and redacted.
+- The Prometheus `MetricsSource` adapter, with its approved query templates, and the pod logs `LogSource` adapter, bounded and redacted. The analyzer creates both from its flags and gives them to the context builder.
 - The missing reference check (section 4). It infers a missing Secret or ConfigMap without reading either.
-- The context builder (section 3.3). It makes a bounded, redacted context from them and the analyzer's reads.
+- The context builder (section 3.3). It makes a bounded, redacted context from them and the analyzer's reads. The analyzer creates it, but nothing calls it until the analysis loop (#76).
 
 **Built and wired into the analyzer**
 

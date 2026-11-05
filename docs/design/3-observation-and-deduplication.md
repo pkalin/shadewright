@@ -349,7 +349,7 @@ Only the arrow into `Open` from the start is built; the dashed states and every 
 
 ## 3.3. Analysis
 
-<span class="sw-status sw-planned">planned</span> Claims with a run ID and expiry, the recheck before a request is created, the durability steps and whether a stored record gates the proposal are proposed in [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md); until it is accepted and built, a claim is the phase and `lastAnalysisTime` only (3.2).
+<span class="sw-status sw-planned">planned</span> Claims identified by `lastAnalysisTime` with an expiry, the recheck before a request is created, the durability steps and whether a stored record gates the proposal are proposed in [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md); until it is accepted and built, a claim is the phase and `lastAnalysisTime` only (3.2).
 
 Decided in [ADR-0023](../adr/0023-how-the-analyzer-calls-the-model.md) (accepted 2026-11-03): context first, one structured call.
 
@@ -415,7 +415,7 @@ A log source that answers that the pod is gone or refuses the request (no previo
 
 - The prompt is a Go `embed` template in `internal/analysis/prompts/`, reviewed like code; there is no setting, ConfigMap or CRD for it. Its catalog and the output schema are generated from the Go action and result types.
 - It has a static system part (role, rules, catalog, schema) and then the untrusted context in delimited blocks tagged with their provenance, with a rule that their text is data, never instructions.
-- Each analysis record stores the prompt version (a content hash), the model deployment and ID, and the token counts. What the model sees also depends on operator redaction patterns and on the deployment, which is why the evaluation (11.2) is keyed on model and prompt together.
+- Each analysis record stores the prompt version (a content hash), the model deployment and ID, and the token counts. What the model sees also depends on operator redaction patterns and on the deployment, which is why the evaluation (11.2) is keyed on model and prompt together <span class="sw-status sw-planned">planned</span> and, once [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md) is accepted, on a manifest of every such input.
 
 The result has a fixed schema: hypotheses, evidence, missing data, uncertainty, proposed action, expected effect and verification conditions.
 

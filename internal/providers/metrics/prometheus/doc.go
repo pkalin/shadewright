@@ -21,13 +21,33 @@ limitations under the License.
 // The adapter runs only the approved query templates of this package, listed by [Templates]. There is no way
 // to send PromQL text: neither the model, the cluster nor the configuration can add or change a query. A
 // template takes named parameters only, each a Kubernetes name: the namespace must be a DNS-1123 label and
-// the workload a DNS-1123 subdomain, and anything else, an unknown or a missing parameter included, is
-// refused with [ErrInvalidQuery] before a request is made. Prometheus applies no authorization of its own, so
-// the adapter does: a query may name only a namespace in [Config.Namespaces] (the analyzer's watched
-// namespaces), any other is refused with [ErrInvalidQuery] before a request, and an empty set refuses every
-// query; the error never repeats the namespace. A template that selects pods by name also refuses
-// a workload name longer than [MaxPodWorkloadName], which pod names cut. Values are inserted as quoted PromQL
-// strings, and into regular expressions only after their metacharacters are escaped.
+// the workload, which only deployment_replicas_unavailable takes, a DNS-1123 subdomain, and anything else, an
+// unknown or a missing parameter included, is refused with [ErrInvalidQuery] before a request is made.
+// Prometheus applies no authorization of its own, so the adapter does: a query may name only a namespace in
+// [Config.Namespaces] (the analyzer's watched namespaces), any other is refused with [ErrInvalidQuery] before
+// a request, and an empty set refuses every query; the error never repeats the namespace.
+//
+// The pod templates ([TemplateInfo.Pods]) select exactly the pods named by [providers.MetricsQuery.Pods],
+// never pods whose names merely start like the target's: 1 to [MaxPods] distinct names (duplicates are
+// dropped first), each a DNS-1123 subdomain of at most [MaxPodName] characters, or the query is refused with
+// [ErrInvalidQuery] before a request, with an error that gives the position of a refused name, never the
+// name; any other template refuses a pod set. A pod template returns a series per container, so a set within
+// [MaxPods] can still give more than [MaxSeries] series: that answer is refused with [providers.ErrTooLarge],
+// and the caller splits the set.
+//
+// The adapter has no Kubernetes client and does not decide which pods belong to the target, nor can it check
+// that they are in the namespace the query names. Its caller resolves them in that same namespace from the
+// target's kind and UID through controller owner references (Deployment to ReplicaSet to Pod, StatefulSet to
+// Pod), never from a name prefix or model output. The selector matches the namespace and the pods together,
+// so a pod of the same name in another namespace is never selected. The caller can read only the current
+// pods of the target (deleted pods are gone), so it marks the attribution uncertain when any of them started
+// inside the time asked for or the workload rolled within it. The analyzer cannot read DaemonSets, so their
+// pods are not attributed unless a later change adds that grant.
+//
+// The names are sorted and joined as escaped alternatives of one anchored regular expression; a series of
+// any other pod in the response, or one without a pod label, is refused with [ErrInvalidResponse]. The
+// longest query, every name at its longest, keeps the request URL within 32 KiB. Values are inserted as quoted PromQL strings, and into
+// regular expressions only after their metacharacters are escaped.
 //
 // Limits, checked before the request on the times as sent (whole milliseconds): the time range of a range
 // query is at most [MaxRange] and its step at least [MinStep], so it asks for at most 361 points per series;

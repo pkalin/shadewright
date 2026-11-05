@@ -110,6 +110,34 @@ func TestModelLostResponse(t *testing.T) {
 	}
 }
 
+// A fake told which templates select pods refuses a query that forgets the pod set or sends one where it does
+// not belong; one that is not told checks nothing.
+func TestMetricsPodTemplates(t *testing.T) {
+	ctx := context.Background()
+	const deployment = "deployment"
+	pods := []string{"web-0"}
+	m := fake.Metrics{PodTemplates: []string{memory}}
+	m.Set(memory, nil)
+	m.Set(deployment, nil)
+	if _, err := m.Query(ctx, providers.MetricsQuery{Template: memory}); !providers.IsRejected(err) {
+		t.Errorf("pod template without pods: %v", err)
+	}
+	if _, err := m.Query(ctx, providers.MetricsQuery{Template: deployment, Pods: pods}); !providers.IsRejected(err) {
+		t.Errorf("other template with pods: %v", err)
+	}
+	if _, err := m.Query(ctx, providers.MetricsQuery{Template: memory, Pods: pods}); err != nil {
+		t.Errorf("pod template with pods: %v", err)
+	}
+	if _, err := m.Query(ctx, providers.MetricsQuery{Template: deployment}); err != nil {
+		t.Errorf("other template without pods: %v", err)
+	}
+	var unchecked fake.Metrics
+	unchecked.Set(memory, nil)
+	if _, err := unchecked.Query(ctx, providers.MetricsQuery{Template: memory}); err != nil {
+		t.Errorf("fake without PodTemplates: %v", err)
+	}
+}
+
 func TestMetricsAndLogs(t *testing.T) {
 	ctx := context.Background()
 	var m fake.Metrics

@@ -25,6 +25,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -67,12 +68,43 @@ func testSourceIn(t *testing.T, namespaces []string, h http.HandlerFunc) (*Sourc
 	return s, srv, &n
 }
 
+// testStatefulPod is a pod of a StatefulSet "web".
+const testStatefulPod = "web-0"
+
+// testPods are the target's pods of the valid queries: one of a Deployment and one of a StatefulSet.
+var testPods = []string{"web-7d9c8b6f4-x2x9q", testStatefulPod}
+
 func params(ns, w string) map[string]string {
 	return map[string]string{ParamNamespace: ns, ParamWorkload: w}
 }
 
+// isPodTemplate reports whether the named template selects pods.
+func isPodTemplate(t *testing.T, name string) bool {
+	t.Helper()
+	tmpl, ok := registry[name]
+	if !ok {
+		t.Fatalf("no template %s", name)
+	}
+	return tmpl.info.Pods
+}
+
+// validQuery is a valid instant query of the template in testNS: with testPods for a pod template, with
+// testWorkload for the others.
+func validQuery(t *testing.T, template string) providers.MetricsQuery {
+	t.Helper()
+	q := providers.MetricsQuery{Template: template, Params: params(testNS, testWorkload), End: now}
+	if isPodTemplate(t, template) {
+		q.Params = map[string]string{ParamNamespace: testNS}
+		q.Pods = slices.Clone(testPods)
+	}
+	return q
+}
+
+// instant is a valid instant query of a pod template.
 func instant(template string) providers.MetricsQuery {
-	return providers.MetricsQuery{Template: template, Params: params(testNS, testWorkload), End: now}
+	return providers.MetricsQuery{
+		Template: template, Params: map[string]string{ParamNamespace: testNS}, Pods: slices.Clone(testPods), End: now,
+	}
 }
 
 // maxRangePoints is the points per series of a range query over MaxRange at MinStep.
@@ -81,8 +113,8 @@ const maxRangePoints = int(MaxRange/MinStep) + 1
 // rangeQuery asks for the given number of points per series, ending now.
 func rangeQuery(points int) providers.MetricsQuery {
 	return providers.MetricsQuery{
-		Template: "container_restarts_total", Params: params(testNS, testWorkload),
-		Start: now.Add(-time.Duration(points-1) * MinStep), End: now, Step: MinStep,
+		Template: "container_restarts_total", Params: map[string]string{ParamNamespace: testNS},
+		Pods: slices.Clone(testPods), Start: now.Add(-time.Duration(points-1) * MinStep), End: now, Step: MinStep,
 	}
 }
 
@@ -106,7 +138,8 @@ func testCtx(t *testing.T) context.Context {
 }
 
 func TestTemplatesRender(t *testing.T) {
-	const pods = `namespace="demo",pod=~"web-[a-z0-9]+(-[a-z0-9]+)?"`
+	// Sorted: the same set always gives the same text.
+	const pods = `namespace="demo",pod=~"^(web-0|web-7d9c8b6f4-x2x9q)$"`
 	const containers = pods + `,container!="",container!="POD"`
 	want := map[string]string{
 		"container_memory_working_set_bytes": `sum by (pod, container) (container_memory_working_set_bytes{` +
@@ -142,7 +175,7 @@ func TestTemplatesRender(t *testing.T) {
 				emptyVector(w, r)
 			})
 			// No shorter deadline than Config.Timeout: the server answers at once.
-			if _, err := s.Query(t.Context(), instant(name)); err != nil {
+			if _, err := s.Query(t.Context(), validQuery(t, name)); err != nil {
 				t.Fatal(err)
 			}
 			if got.Method != http.MethodGet || got.URL.Path != "/prom/api/v1/query" {
@@ -208,63 +241,313 @@ func TestRangeQueryParameters(t *testing.T) {
 	}
 }
 
-func TestWorkloadIsEscapedInRegexp(t *testing.T) {
+func TestPodNamesAreEscapedInRegexp(t *testing.T) {
 	var query string
 	s, _, _ := testSource(t, func(w http.ResponseWriter, r *http.Request) {
 		query = r.URL.Query().Get("query")
 		emptyVector(w, r)
 	})
 	q := instant("container_restarts_total")
-	q.Params = params(testNS, "web.v2")
+	const dotted = "web.v2-0"
+	q.Pods = []string{dotted, "web.v2-1", dotted}
 	if _, err := s.Query(testCtx(t), q); err != nil {
 		t.Fatal(err)
 	}
-	if want := `pod=~"web\\.v2-[a-z0-9]+(-[a-z0-9]+)?"`; !strings.Contains(query, want) {
+	if want := `pod=~"^(web\\.v2-0|web\\.v2-1)$"`; !strings.Contains(query, want) {
 		t.Errorf("query = %s, want %s in it", query, want)
+	}
+	// The matcher is exact on its own, also on a backend that would not anchor it as Prometheus does.
+	m := regexp.MustCompile(`pod=~("(?:[^"\\]|\\.)*")`).FindStringSubmatch(query)
+	if m == nil {
+		t.Fatalf("query has no pod matcher: %s", query)
+	}
+	re, err := strconv.Unquote(m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	unanchored := regexp.MustCompile(re)
+	for pod, want := range map[string]bool{
+		dotted: true, "web.v2-1": true, "webxv2-0": false, "web.v2-0-0": false, "web.v2-10": false,
+		"xweb.v2-1": false,
+	} {
+		if got := unanchored.MatchString(pod); got != want {
+			t.Errorf("%s: matched = %v, want %v", pod, got, want)
+		}
+	}
+}
+
+// refusedBeforeRequest checks that err is ErrInvalidQuery and repeats none of the values.
+func refusedBeforeRequest(t *testing.T, what string, err error, values ...string) {
+	t.Helper()
+	if !errors.Is(err, ErrInvalidQuery) {
+		t.Fatalf("%s: error = %v, want ErrInvalidQuery", what, err)
+	}
+	for _, v := range values {
+		if v != "" && strings.Contains(err.Error(), v) {
+			t.Errorf("%s: error repeats the value %q: %v", what, v, err)
+		}
 	}
 }
 
 func TestParametersAreValidated(t *testing.T) {
-	cases := map[string]map[string]string{
-		"quote and PromQL":       params(testNS, `web"} or vector(1) #`),
-		"closing brace":          params(testNS, "web}"),
-		"regexp wildcard":        params(testNS, "web.*"),
-		"regexp alternation":     params(testNS, "web|db"),
-		"regexp class":           params(testNS, "[a-z]+"),
-		"backslash":              params(testNS, `web\`),
-		"newline":                params(testNS, "web\nx"),
-		"upper case":             params(testNS, "Web"),
-		"unicode":                params(testNS, "wеb"), // Cyrillic e
-		"empty workload":         params(testNS, ""),
-		"too long workload":      params(testNS, strings.Repeat("a", 254)),
-		"dot in namespace":       params("demo.x", testWorkload),
-		"quote in namespace":     params(`demo",namespace=~".+`, testWorkload),
-		"empty namespace":        params("", testWorkload),
-		"too long namespace":     params(strings.Repeat("a", 64), testWorkload),
-		"missing workload":       {ParamNamespace: testNS},
-		"missing namespace":      {ParamWorkload: testWorkload},
-		"extra parameter":        {ParamNamespace: testNS, ParamWorkload: testWorkload, "query": "up"},
-		"no parameters":          nil,
-		"double dot in workload": params(testNS, "web..v2"),
+	// Values of the workload parameter, refused by the templates that take it.
+	workloads := map[string]string{
+		"quote and PromQL":       `web"} or vector(1) #`,
+		"closing brace":          "web}",
+		"regexp wildcard":        "web.*",
+		"regexp alternation":     "web|db",
+		"regexp class":           "[a-z]+",
+		"backslash":              `web\`,
+		"newline":                "web\nx",
+		"upper case":             "Web",
+		"unicode":                "wеb", // Cyrillic e
+		"empty workload":         "",
+		"too long workload":      strings.Repeat("a", 254),
+		"double dot in workload": "web..v2",
 	}
-	for name, p := range cases {
-		t.Run(name, func(t *testing.T) {
-			s, _, n := testSource(t, emptyVector)
-			for _, info := range Templates() {
-				_, err := s.Query(testCtx(t), providers.MetricsQuery{Template: info.Name, Params: p, End: now})
-				if !errors.Is(err, ErrInvalidQuery) {
-					t.Fatalf("%s: error = %v, want ErrInvalidQuery", info.Name, err)
-				}
-				for _, v := range p {
-					if v != "" && v != testNS && v != testWorkload && strings.Contains(err.Error(), v) {
-						t.Errorf("error repeats the value: %v", err)
-					}
-				}
+	// Values of the namespace parameter, refused by every template.
+	namespaces := map[string]string{
+		"dot in namespace":   "demo.x",
+		"quote in namespace": `demo",namespace=~".+`,
+		"empty namespace":    "",
+		"too long namespace": strings.Repeat("a", 64),
+	}
+	// Changes to a valid query; each returns false when it does not apply to the template.
+	shapes := map[string]func(q *providers.MetricsQuery, pods bool) bool{
+		"missing namespace": func(q *providers.MetricsQuery, _ bool) bool { delete(q.Params, ParamNamespace); return true },
+		"extra parameter":   func(q *providers.MetricsQuery, _ bool) bool { q.Params["query"] = "up"; return true },
+		"no parameters":     func(q *providers.MetricsQuery, _ bool) bool { q.Params = nil; return true },
+		"missing workload": func(q *providers.MetricsQuery, pods bool) bool {
+			delete(q.Params, ParamWorkload)
+			return !pods
+		},
+		// The pod templates select pods by the given names only, never by a workload name.
+		"workload for a pod template": func(q *providers.MetricsQuery, pods bool) bool {
+			q.Params[ParamWorkload] = testWorkload
+			return pods
+		},
+	}
+	s, _, n := testSource(t, emptyVector)
+	for _, info := range Templates() {
+		for name, w := range workloads {
+			if !slices.Contains(info.Params, ParamWorkload) {
+				continue
 			}
-			if n.Load() != 0 {
-				t.Errorf("%d requests reached the server", n.Load())
+			q := validQuery(t, info.Name)
+			q.Params[ParamWorkload] = w
+			_, err := s.Query(testCtx(t), q)
+			refusedBeforeRequest(t, info.Name+", "+name, err, w)
+		}
+		for name, ns := range namespaces {
+			q := validQuery(t, info.Name)
+			q.Params[ParamNamespace] = ns
+			_, err := s.Query(testCtx(t), q)
+			refusedBeforeRequest(t, info.Name+", "+name, err, ns)
+		}
+		for name, change := range shapes {
+			q := validQuery(t, info.Name)
+			if !change(&q, info.Pods) {
+				continue
+			}
+			_, err := s.Query(testCtx(t), q)
+			refusedBeforeRequest(t, info.Name+", "+name, err)
+		}
+	}
+	if n.Load() != 0 {
+		t.Errorf("%d requests reached the server", n.Load())
+	}
+}
+
+// The pod set comes from the caller, which resolves it from the target's owner references; the adapter
+// bounds and validates it before any request, and never repeats a name.
+func TestPodSetIsValidated(t *testing.T) {
+	oversized := make([]string, MaxPods+1)
+	for i := range oversized {
+		oversized[i] = fmt.Sprintf("web-%d", i)
+	}
+	cases := map[string][]string{
+		"nil":                nil,
+		"empty set":          {},
+		"more than MaxPods":  oversized,
+		"empty name":         {testStatefulPod, ""},
+		"quote and PromQL":   {`web-0"} or vector(1) #`},
+		"regexp wildcard":    {"web-.*"},
+		"regexp alternation": {"web-0|db-0"},
+		"regexp group":       {"web-(0)"},
+		"backslash":          {`web-0\`},
+		"newline":            {"web-0\nx"},
+		"upper case":         {"Web-0"},
+		"unicode":            {"wеb-0"}, // Cyrillic e
+		"double dot":         {"web..0"},
+		"longer than a pod":  {strings.Repeat("a", MaxPodName+1)},
+		"subdomain length":   {strings.Repeat("a", 253)},
+	}
+	s, _, n := testSource(t, emptyVector)
+	for _, info := range Templates() {
+		if !info.Pods {
+			continue
+		}
+		for name, pods := range cases {
+			q := instant(info.Name)
+			q.Pods = pods
+			_, err := s.Query(testCtx(t), q)
+			refusedBeforeRequest(t, info.Name+", "+name, err, pods...)
+		}
+	}
+	// A template that does not select pods refuses them rather than ignore them.
+	q := validQuery(t, "deployment_replicas_unavailable")
+	q.Pods = []string{testStatefulPod}
+	_, err := s.Query(testCtx(t), q)
+	refusedBeforeRequest(t, "pods for the Deployment template", err)
+	if n.Load() != 0 {
+		t.Fatalf("%d requests reached the server", n.Load())
+	}
+
+	// The bounds themselves are accepted, duplicates included.
+	full := make([]string, MaxPods)
+	for i := range full {
+		full[i] = fmt.Sprintf("%s-%d", strings.Repeat("a", MaxPodName-3), i%100)
+	}
+	for name, pods := range map[string][]string{
+		"MaxPods names": full,
+		// Duplicates do not count towards the cap: MaxPods+1 names, one of them twice.
+		"MaxPods names and a duplicate": append(slices.Clone(full), full[0]),
+		"MaxPodName long":               {strings.Repeat("a", MaxPodName)},
+		"duplicates":                    {testStatefulPod, testStatefulPod},
+		"dots":                          {"web.v3-1"},
+	} {
+		q := instant("container_restarts_total")
+		q.Pods = pods
+		if _, err := s.Query(testCtx(t), q); err != nil {
+			t.Errorf("%s: error = %v", name, err)
+		}
+	}
+}
+
+// fakePrometheus answers an instant query of container_restarts_total like Prometheus would: with a series
+// for each pod it knows whose name the pod matcher of the query matches, anchored at both ends. So the test
+// checks the query text against real names, not against its expected shape.
+func fakePrometheus(t *testing.T, known []string) http.HandlerFunc {
+	matcher := regexp.MustCompile(`pod=~("(?:[^"\\]|\\.)*")`)
+	return func(w http.ResponseWriter, r *http.Request) {
+		m := matcher.FindStringSubmatch(r.URL.Query().Get("query"))
+		if m == nil {
+			t.Errorf("query has no pod matcher: %s", r.URL.Query().Get("query"))
+			emptyVector(w, r)
+			return
+		}
+		re, err := strconv.Unquote(m[1])
+		if err != nil {
+			t.Errorf("pod matcher is not a quoted string: %s", m[1])
+		}
+		anchored := regexp.MustCompile("^(?:" + re + ")$")
+		var result []string
+		for _, pod := range known {
+			if anchored.MatchString(pod) {
+				result = append(result, fmt.Sprintf(`{"metric":{"pod":%q,"container":"app"},"value":[%s,"1"]}`,
+					pod, nowSecs))
+			}
+		}
+		writeJSON(w, `{"status":"success","data":{"resultType":"vector","result":[`+strings.Join(result, ",")+`]}}`)
+	}
+}
+
+// Only the target's own pods supply its evidence: not the pods of a workload whose name extends the target's
+// (the StatefulSet "web-v2" next to the Deployment "web"), nor a standalone pod named like one of its own.
+func TestOnlyTheTargetPodsAreSelected(t *testing.T) {
+	const (
+		deploymentPod = "web-7d9c8b6f4-x2x9q" // of the Deployment "web", the target
+		oldRSPod      = "web-6c5b4a392-p9q8r" // of its previous ReplicaSet, during a rollout
+		statefulPod   = "web-v2-0"            // of the StatefulSet "web-v2"
+		otherRSPod    = "web-v2-5f6d7c8b9-k8m2p"
+		lookalike     = "web-x7k2p" // standalone, named like a DaemonSet pod of "web"
+	)
+	cases := map[string]struct {
+		target, want []string
+	}{
+		"Deployment next to a StatefulSet that extends its name": {
+			target: []string{deploymentPod}, want: []string{deploymentPod},
+		},
+		"StatefulSet whose name extends another workload's": {
+			target: []string{statefulPod}, want: []string{statefulPod},
+		},
+		"rolling Deployment with pods of two ReplicaSets": {
+			target: []string{oldRSPod, deploymentPod}, want: []string{deploymentPod, oldRSPod},
+		},
+		"pod of the target that is gone": {
+			target: []string{"web-7d9c8b6f4-gone1"}, want: nil,
+		},
+	}
+	known := []string{deploymentPod, oldRSPod, statefulPod, otherRSPod, lookalike}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			s, _, _ := testSource(t, fakePrometheus(t, known))
+			q := instant("container_restarts_total")
+			q.Pods = c.target
+			res, err := s.Query(testCtx(t), q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pods := make([]string, 0, len(res.Series))
+			for _, series := range res.Series {
+				pods = append(pods, series.Labels["pod"])
+			}
+			if !slices.Equal(pods, c.want) {
+				t.Errorf("series of pods %v, want %v", pods, c.want)
 			}
 		})
+	}
+}
+
+// A series of a pod that was not asked for means the server did not answer the query it was sent: the whole
+// result is refused rather than attributed to the target.
+func TestSeriesOfOtherPodsAreRefused(t *testing.T) {
+	for name, metric := range map[string]string{
+		"other pod":    `{"pod":"web-v2-0","container":"app"}`,
+		"prefix":       `{"pod":"web","container":"app"}`,
+		"no pod label": `{"container":"app"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, _, _ := testSource(t, func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, `{"status":"success","data":{"resultType":"vector","result":[`+
+					`{"metric":{"pod":"web-0","container":"app"},"value":[`+nowSecs+`,"1"]},`+
+					`{"metric":`+metric+`,"value":[`+nowSecs+`,"1"]}]}}`)
+			})
+			got, err := s.Query(testCtx(t), instant("container_restarts_total"))
+			if !errors.Is(err, ErrInvalidResponse) || got.Series != nil {
+				t.Fatalf("result = %v, error = %v; want ErrInvalidResponse", got, err)
+			}
+			if strings.Contains(err.Error(), "web-v2-0") {
+				t.Errorf("error repeats the pod: %v", err)
+			}
+		})
+	}
+}
+
+// The query text lists every pod, and is sent in the URL: even the largest pod set, with every name as long as
+// allowed and as many escaped dots as a name can hold, keeps the request URL within maxQueryURL (32 KiB).
+func TestLargestPodSetKeepsTheURLBounded(t *testing.T) {
+	var length int
+	s, _, _ := testSource(t, func(w http.ResponseWriter, r *http.Request) {
+		length = len(r.URL.RequestURI())
+		emptyVector(w, r)
+	})
+	const alnum = "abcdefghijklmnopqrstuvwxyz0123456789"
+	pods := make([]string, MaxPods)
+	for i := range pods {
+		// 32 one-character labels: 31 dots in 63 characters, the last two labels distinct per pod.
+		pods[i] = strings.Repeat("a.", 30) + string(alnum[i/len(alnum)]) + "." + string(alnum[i%len(alnum)])
+		if len(pods[i]) != MaxPodName || strings.Count(pods[i], ".") != 31 {
+			t.Fatalf("pod %d is %d characters with %d dots", i, len(pods[i]), strings.Count(pods[i], "."))
+		}
+	}
+	q := instant("container_cpu_throttled_ratio") // the template that repeats the selector
+	q.Pods = pods
+	if _, err := s.Query(testCtx(t), q); err != nil {
+		t.Fatal(err)
+	}
+	if length == 0 || length > maxQueryURL {
+		t.Errorf("request URL is %d bytes, want at most %d", length, maxQueryURL)
 	}
 }
 
@@ -274,8 +557,8 @@ func TestNamespaceMustBeAllowed(t *testing.T) {
 	s, _, n := testSourceIn(t, []string{testNS, "shop"}, emptyVector)
 	for _, info := range Templates() {
 		for _, ns := range []string{"kube-system", "demo2", "dem", "default"} {
-			q := instant(info.Name)
-			q.Params = params(ns, testWorkload)
+			q := validQuery(t, info.Name)
+			q.Params[ParamNamespace] = ns
 			_, err := s.Query(testCtx(t), q)
 			if !errors.Is(err, ErrInvalidQuery) || strings.Contains(err.Error(), ns) {
 				t.Errorf("%s, %s: error = %v, want ErrInvalidQuery without the namespace", info.Name, ns, err)
@@ -287,7 +570,7 @@ func TestNamespaceMustBeAllowed(t *testing.T) {
 	}
 	for _, ns := range []string{testNS, "shop"} {
 		q := instant("container_restarts_total")
-		q.Params = params(ns, testWorkload)
+		q.Params[ParamNamespace] = ns
 		n.Store(0)
 		if _, err := s.Query(testCtx(t), q); err != nil || n.Load() != 1 {
 			t.Errorf("%s: error = %v, %d requests; want one request", ns, err, n.Load())
@@ -299,7 +582,7 @@ func TestEmptyNamespaceSetRefusesEveryQuery(t *testing.T) {
 	for name, set := range map[string][]string{"nil": nil, "empty": {}} {
 		s, _, n := testSourceIn(t, set, emptyVector)
 		for _, info := range Templates() {
-			if _, err := s.Query(testCtx(t), instant(info.Name)); !errors.Is(err, ErrInvalidQuery) {
+			if _, err := s.Query(testCtx(t), validQuery(t, info.Name)); !errors.Is(err, ErrInvalidQuery) {
 				t.Errorf("%s, %s: error = %v, want ErrInvalidQuery", name, info.Name, err)
 			}
 		}
@@ -308,29 +591,6 @@ func TestEmptyNamespaceSetRefusesEveryQuery(t *testing.T) {
 		}
 		if n.Load() != 0 {
 			t.Errorf("%s: %d requests reached the server", name, n.Load())
-		}
-	}
-}
-
-// Pod names cut a long workload name, so a template that selects pods by name refuses one it could never
-// match; the Deployment template matches the name as a label and takes any valid name.
-func TestPodWorkloadNameLength(t *testing.T) {
-	s, _, n := testSource(t, emptyVector)
-	for _, info := range Templates() {
-		byPod := slices.Contains(info.Labels, "pod")
-		for _, length := range []int{MaxPodWorkloadName, MaxPodWorkloadName + 1, 253} {
-			q := instant(info.Name)
-			q.Params = params(testNS, strings.Repeat("a", length))
-			n.Store(0)
-			_, err := s.Query(testCtx(t), q)
-			if wantRefused := byPod && length > MaxPodWorkloadName; wantRefused {
-				if !errors.Is(err, ErrInvalidQuery) || n.Load() != 0 {
-					t.Errorf("%s, %d characters: error = %v, %d requests; want ErrInvalidQuery", info.Name, length,
-						err, n.Load())
-				}
-			} else if err != nil {
-				t.Errorf("%s, %d characters: error = %v", info.Name, length, err)
-			}
 		}
 	}
 }
@@ -418,7 +678,7 @@ func TestDecodesVectorAndMatrix(t *testing.T) {
 			return
 		}
 		writeJSON(w, `{"data":{"result":[{"values":[[1793793570,"1.5"],[1793793585.0,"+Inf"],[`+nowSecs+
-			`,"2e3"]],"metric":{}}],"resultType":"matrix"},"status":"success"}`)
+			`,"2e3"]],"metric":{"pod":"web-0"}}],"resultType":"matrix"},"status":"success"}`)
 	})
 	res, err := s.Query(testCtx(t), instant("container_restarts_total"))
 	if err != nil {
@@ -444,7 +704,7 @@ func TestDecodesVectorAndMatrix(t *testing.T) {
 		t.Error("a result without warnings is partial")
 	}
 	got = res.Series
-	if len(got) != 1 || len(got[0].Labels) != 0 || len(got[0].Samples) != 3 || got[0].Samples[0].Value != 1.5 ||
+	if len(got) != 1 || len(got[0].Labels) != 1 || len(got[0].Samples) != 3 || got[0].Samples[0].Value != 1.5 ||
 		!math.IsInf(got[0].Samples[1].Value, 1) || got[0].Samples[2].Value != 2000 ||
 		!got[0].Samples[0].Time.Equal(now.Add(-30*time.Second)) {
 		t.Errorf("matrix = %+v", got)
@@ -941,3 +1201,6 @@ func manyNamespaces(n int) []string {
 	}
 	return out
 }
+
+// maxQueryURL is the request URL the largest pod set may need, as the package documentation states it.
+const maxQueryURL = 32 << 10

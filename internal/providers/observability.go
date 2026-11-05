@@ -27,8 +27,16 @@ type MetricsQuery struct {
 	Template string
 	// Params fill the template; adapters validate them.
 	Params map[string]string
-	Start  time.Time
-	End    time.Time
+	// Pods are the exact names of the target's pods, for a template that selects pods; adapters validate and
+	// bound them, and a template that does not select pods refuses them. They are pods in the namespace the
+	// query names: the caller resolves them in that same namespace from the target's kind and UID through
+	// owner references (Deployment to ReplicaSet to Pod, StatefulSet to Pod), never from a name prefix or model
+	// output, so that only the target's own pods supply its evidence. An adapter cannot check that the pods
+	// belong to the namespace; it matches namespace and pod together, so a pod of the same name in another
+	// namespace is never selected.
+	Pods  []string
+	Start time.Time
+	End   time.Time
 	// Step is the resolution of a range query; zero asks for an instant query at End.
 	Step time.Duration
 }

@@ -45,7 +45,7 @@ Prefer the narrowest value in each place:
 | How far a value may go | `min` and `max` of the action, and `maxIncreasePercent` per request |
 | Lowering values | Keep `maxDecreasePercent: 0`. Decreases are refused unless you allow them |
 | Which files | `allowedPaths`, a list of globs with a literal first segment. `*` and `**` never match a segment that starts with a dot, so `.github/` cannot be covered |
-| Who may use it | `requestNamespaces`, default the operator namespace only. A request from any other namespace is `Denied` |
+| Who may use it | `requestNamespaces`, whose default is the literal `[shadewright-system]`: set it to your operator namespace if you installed elsewhere, or every request is `Denied`. A request from any other namespace is `Denied` |
 | Review | `approval: Required` (the default). `Optional` only lets a request ask for no approval, and auto-merge is not built, so a person merges either way |
 
 An edit counts as a change of the policy: every request that waits for review on the old revision becomes `Superseded` and its pull request is closed, so apply a new request after changing one (see [the life of a request](../request-lifecycle.md)).

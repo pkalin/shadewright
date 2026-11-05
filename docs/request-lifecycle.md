@@ -11,20 +11,28 @@ Only the steps up to `Merged` are built. Delivery tracking and verification are 
 ```mermaid
 stateDiagram-v2
     [*] --> Pending
+    Pending --> Pending: queued by a limit, or KEDA has not reported yet
     Pending --> PolicyChecked: policy allows, source found
     Pending --> Denied: policy refuses
     Pending --> NeedsIntervention: source unclear or ScaledObject not ready
     PolicyChecked --> PRCreated: branch, commit, pull request
     PRCreated --> AwaitingApproval: review required
     AwaitingApproval --> Merged: a person merges it
-    AwaitingApproval --> Superseded: the plan went stale
-    AwaitingApproval --> NeedsIntervention: pull request closed or changed
+    PolicyChecked --> Merged: an existing merged pull request is adopted
+    PRCreated --> Merged: merged before the first review step
     PolicyChecked --> Expired: no pull request in 30 minutes
+    PolicyChecked --> Superseded: a plan input changed
+    PRCreated --> Superseded: a plan input changed
+    AwaitingApproval --> Superseded: a plan input changed
+    PolicyChecked --> NeedsIntervention: cannot continue alone
+    PRCreated --> NeedsIntervention: cannot continue alone
+    AwaitingApproval --> NeedsIntervention: pull request closed, head moved or not found
     Merged --> WaitingForDelivery: planned
     WaitingForDelivery --> Succeeded: planned
     Denied --> [*]
     Superseded --> [*]
     Expired --> [*]
+    NeedsIntervention --> [*]
     Merged --> [*]
 ```
 
@@ -32,14 +40,14 @@ stateDiagram-v2
 
 | Phase | What happened | What moves it on | You can |
 | --- | --- | --- | --- |
-| `Pending` | New, or held back (condition `Queued`: another request on the same target, the concurrency limit or the circuit breaker) | The policy check, rechecked every 30 seconds while queued | Wait, or read the reason in [troubleshooting](troubleshooting.md#limits) |
+| `Pending` | New, or held back (condition `Queued`: the concurrency limit, the circuit breaker, or another request that holds the lock on the same target until its pull request is known merged or closed, also after it stopped) | The policy check, rechecked every 30 seconds while queued | Wait, or read the reason in [troubleshooting](troubleshooting.md#limits) |
 | `PolicyChecked` | Policy allowed it (`PolicyAllowed=True`, reason `WithinApprovedBounds`); the plan digest is fixed | The pull request step | Nothing. It expires after 30 minutes without a pull request |
 | `PRCreated` | The branch, commit and pull request exist | The executor records the review state | Open the pull request |
 | `AwaitingApproval` | `Approved=False`, reason `WaitingForReview` | A person merges the pull request, seen within about five minutes | [Approve](how-to/review-and-approve.md) or [reject](how-to/reject-a-proposal.md) |
 | `Merged` | The pull request was merged. The request stops here today | Nothing (delivery is the GitOps controller's job; verification is planned) | Check your GitOps controller |
 | `Denied` | Policy or settings refuse the plan | Nothing, final | [Find the reason](how-to/find-why-refused.md), fix, apply a new request |
-| `NeedsIntervention` | The executor cannot continue safely alone, including a pull request closed without a merge (`ChangeRequestClosed`) | Nothing, final | Read the reason, then apply a new request if the change is still wanted |
-| `Superseded` | A plan input changed before merge (policy, settings, target, file in Git); the pull request was closed | Nothing, final | Apply a new request |
+| `NeedsIntervention` | The executor cannot continue safely alone: a pull request closed without a merge (`ChangeRequestClosed`), a moved head (`HeadMoved`), a render refusal, a ScaledObject that is not ready | Nothing, final | Read the reason, then apply a new request if the change is still wanted |
+| `Superseded` | A plan input changed before merge (policy, settings, target, file in Git). If a pull request was open, Shadewright closed it | Nothing, final | Apply a new request |
 | `Expired` | No pull request opened within 30 minutes of the decision | Nothing, final | Find why the Git calls failed, apply a new request |
 
 The API also defines `AutoMergeQueued`, `WaitingForDelivery`, `Verifying`, `Succeeded`, `Failed` and `Cancelled`. Nothing sets them yet (planned). Auto-merge is not built: even with a policy that has `approval: Optional` and a request with `approvalRequired: false`, a person decides.
@@ -52,7 +60,12 @@ Shadewright never approves its own pull request and does not check reviews itsel
 
 ## When the plan changes after the pull request
 
-A new push to the Shadewright branch, a different target file in Git, or an edited policy invalidates the plan. The executor then closes its pull request (`Superseded`, or `NeedsIntervention` for `HeadMoved` and similar) and never reopens it. The way back is a new request.
+What happens depends on the cause. Only these cases close the pull request, and Shadewright never reopens one:
+
+- A stale plan (a changed policy, settings, target or source file) ends `Superseded` and the executor closes its pull request.
+- A render refusal while the pull request waits (`TargetFileDiverged`, `PatchRefused`, an unplanned difference in the rendered output) closes it and ends `NeedsIntervention`.
+
+These stop the automation but leave the pull request open, so a person closes it (or merges it knowingly): `HeadMoved` (someone pushed to the branch), `ChangeRequestGone`, `ForeignChangeRequest`, `BranchDiverged`. The way back to the change is a new request. See [troubleshooting](troubleshooting.md#pull-request-step).
 
 ## Read it yourself
 

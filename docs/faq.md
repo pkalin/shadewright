@@ -8,14 +8,16 @@ Short answers, each pointing to the page that has the detail. Terms are in the [
 
 ## What will it never do?
 
-These are the project's invariants ([design 10](design.md#10-security), [threat model](threat-model.md)); a change that weakened one would need a new ADR first.
+These are the project's six invariants ([AGENTS.md](https://github.com/pkalin/shadewright/blob/main/AGENTS.md), [design 10](design.md#10-security), [threat model](threat-model.md)); a change that weakened one would need a new ADR first.
 
-- **Apply anything directly.** It has no direct `apply`, `patch`, `delete` or `exec` against your workloads, not even as a fallback when a pull request fails. The only path to a change is a branch and a pull request ([ADR-0003](adr/0003-gitops-only-typed-remediation.md)).
-- **Run a free-form command.** Actions are a closed catalog (today `SetContainerMemoryLimit` and `AdjustKedaMaxReplicas`), each with typed, bounded parameters.
-- **Read or write Secrets.** Neither identity can read Secrets. Secrets and tokens are redacted before anything is stored. The remediation path cannot change policies, pipelines, RBAC or secrets.
-- **Treat a model's answer as permission.** A model can only submit a proposal. Deterministic policy decides whether it may run, and the executor acts only on the plan whose digest matches the one it decided on. Everything read from the cluster is untrusted input and never changes its instructions or tools.
-- **Merge on its own authority.** Pull requests are merged by a person (auto-merge is <span class="sw-status sw-planned">planned</span>, not built), and your branch rules still apply.
-- **Push to a protected branch or bypass checks.** It writes only to branches named `shadewright/<request UID>`.
+1. **Model output is never authorization.** The analyzer can only submit a proposal. Deterministic policy decides whether it may run, and the executor acts only on a plan whose digest matches the approved one.
+2. **Actions are a closed catalog.** Each action is an enum value with typed, bounded parameters (today `SetContainerMemoryLimit` and `AdjustKedaMaxReplicas`). There is no free-form command, no `exec` and no direct `apply` against the cluster, not even as a fallback when a pull request fails ([ADR-0003](adr/0003-gitops-only-typed-remediation.md)).
+3. **Changes go through Git only.** A branch and a pull request, never a push to a protected branch, never bypassing branch protection or required checks. The remediation path cannot change policies, pipelines, RBAC or secrets. It writes only to branches named `shadewright/<request UID>`.
+4. **Everything from the cluster is untrusted input.** Events, logs, annotations, Git contents and tool results may contain prompt injection and never change instructions, tools, permissions or the action catalog. Secrets and tokens are redacted before storage and before a model sees anything, and neither identity can read Secrets.
+5. **Reconciliation is idempotent.** Branch names and pull request markers derive from the request UID and plan digest, so after a restart it finds the existing pull request instead of opening another.
+6. **Separate identities.** The analyzer has read-only cluster access and no Git credential; the executor has the Git App and no model access. Neither is `cluster-admin` and one token is never shared.
+
+Separately, today a person always merges: auto-merge is <span class="sw-status sw-planned">planned</span> and not built. Where the repository owner allows it later, it will be by policy and your branch rules ([design 8.3](design.md#83-auto-merge)). That is current behaviour, not an invariant.
 
 ## What does it cost to run?
 
@@ -23,7 +25,7 @@ The operator is two small Deployments. In the current release nothing calls a mo
 
 ## What data leaves the cluster?
 
-Today, only calls to GitHub (reads of files and branch heads in the one configured repository, and the branch, commit and pull request it writes), to Azure Key Vault (a digest to sign) and to Microsoft Entra ID (the workload identity token). Nothing is sent to a model yet, and there is no telemetry. Details, redaction and retention: [data handling](data-handling.md).
+Today, only calls to GitHub (reads of files and branch heads in the repositories configured in `RemediationSettings`, up to 16, and the branch, commit and pull request it writes there), to Azure Key Vault (a digest to sign) and to Microsoft Entra ID (the workload identity token). Nothing is sent to a model yet, and there is no telemetry. Details, redaction and retention: [data handling](data-handling.md).
 
 ## Which platforms work?
 

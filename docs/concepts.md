@@ -79,7 +79,7 @@ A model's output is therefore only ever a proposal that the analyzer writes as a
 
 ## Observe-only mode <span class="sw-status sw-built">built</span>
 
-What you get when you install and configure no Git repository: the analyzer watches the namespaces you name and records Incidents. Without a `RemediationSettings` repository entry and a GitHub App, nothing can open a pull request. It is the recommended first state, see [install in observe-only mode](install.md).
+What you get from the install in [observe-only mode](install.md): the analyzer watches the namespaces you name and records Incidents, no `RemediationSettings` entry names a repository, and `spec.paused` is true, so the executor could not write to Git even if a request existed. It is the recommended first state, see [install in observe-only mode](install.md).
 
 ## Where to go next
 

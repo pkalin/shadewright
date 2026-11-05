@@ -49,7 +49,7 @@ Module
 :   A platform (AKS, EKS, GKE) or an integration (KEDA, Flux, ...) that adds detection, symptoms or actions, enabled by name in `spec.modules`.
 
 Observe-only mode
-:   An install with no Git repository configured, so the analyzer records Incidents and nothing can be proposed to Git.
+:   An install with no repository in the settings and `spec.paused` true, so the analyzer records Incidents and the executor could not write to Git.
 
 Operator namespace
 :   The namespace (`shadewright-system` by default) that holds the Deployments, Incidents and RemediationRequests.
@@ -82,7 +82,7 @@ Target
 :   The live object a request changes, pinned by UID.
 
 Target lock
-:   A limit by which a request waits while another active request names the same target (`TargetLocked`).
+:   A limit by which a request waits while another request holds the lock on the same target (`status.holdsTarget`), from its allowed decision until its pull request is known merged or closed, also after it stopped (`TargetLocked`).
 
 Watched namespaces
 :   The namespaces the analyzer reads, set by `--watch-namespaces`. See [limit the namespaces it watches](how-to/limit-watched-namespaces.md).

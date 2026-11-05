@@ -15,10 +15,10 @@ A request that is refused or stops says why in its conditions. Background: [desi
       -o jsonpath='{.status.phase}{"\n"}{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'
     ```
 
-2. Read the phase:
+2. Read the phase, and check every condition: `PolicyAllowed`, `PullRequestOpened`, `Approved`, `PlanFresh` and `Queued`:
     - `Denied`: policy or settings do not allow the plan. The reason is on `PolicyAllowed=False`.
     - `NeedsIntervention`: the executor cannot decide or continue alone. The reason is on `PolicyAllowed`, `PullRequestOpened` or `Approved`.
-    - `Superseded`: the plan went stale; see `PlanFresh=False`.
+    - `Superseded`: the plan went stale; the reason is on `PlanFresh=False`.
     - `Pending` with a condition `Queued`: a limit holds it back.
     - `Pending` with no condition at all: it is being retried, usually a Git or signer problem. Read the executor log.
 3. Look the reason up in [troubleshooting](../troubleshooting.md). It lists every reason with its cause and the fix. The reasons of a policy refusal are grouped under [policy decision](../troubleshooting.md#policy-decision).

@@ -201,15 +201,15 @@ A cluster-scoped CR, writable only by the cluster admin ([ADR-0011](../adr/0011-
 
 ### The checks, in order
 
-The first check that fails gives the reason. All of this is built (`internal/policy.Decide`).
+The first check that fails gives the reason. All of this is built (`internal/policy.Decide`). Before them, a request with an input missing stops with `NeedsIntervention`, reason `IncompleteInput`.
 
-1. The request's `policyRef` and namespace (`requestNamespaces`), and the `GitOps` mode.
-2. The action type is in the catalog and its parameters are well formed.
-3. The integration module that contributes the action, if any, is enabled in `RemediationSettings` `spec.modules.integrations` (`AdjustKedaMaxReplicas` needs `keda`).
-4. The live target is the object `targetRef` names (UID, apiVersion, kind, namespace, name). Its kind is one the action may target and not one excluded by section 10 item 10. Its namespace and labels are covered by `targets`.
-5. The policy lists the action, and the change is within `min`, `max`, `maxIncreasePercent` and `maxDecreasePercent` (compared by value, in arbitrary precision).
-6. The resolved repository is the policy's `gitOps.repositoryRef`. It is configured in RemediationSettings with the resolved branch as its `targetBranch`. The file matches `allowedPaths`.
-7. The live target is in a state the action may be applied to. For `AdjustKedaMaxReplicas` that is a `ScaledObject` ready by `KedaReady`, whose identity in the live object is the target's.
+- The request's `policyRef` and namespace (`requestNamespaces`), and the `GitOps` mode.
+- The action type is in the catalog and its parameters are well formed.
+- The integration module that contributes the action, if any, is enabled in `RemediationSettings` `spec.modules.integrations` (`AdjustKedaMaxReplicas` needs `keda`).
+- The live target is the object `targetRef` names (UID, apiVersion, kind, namespace, name). Its kind is one the action may target and not one excluded by section 10 item 10. Its namespace and labels are covered by `targets`.
+- The policy lists the action, and the change is within `min`, `max`, `maxIncreasePercent` and `maxDecreasePercent` (compared by value, in arbitrary precision).
+- The resolved repository is the policy's `gitOps.repositoryRef`. It is configured in RemediationSettings with the resolved branch as its `targetBranch`. The file matches `allowedPaths`.
+- The live target is in a state the action may be applied to. For `AdjustKedaMaxReplicas` that is a `ScaledObject` ready by `KedaReady`, whose identity in the live object is the target's.
 
 ```mermaid
 flowchart TD

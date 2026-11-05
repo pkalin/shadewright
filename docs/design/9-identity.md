@@ -10,15 +10,15 @@ The rule for everything below: no PATs, no client secrets, no long-lived API key
 
 **What it does.** The analyzer has its own managed identity. It holds only the inference role on the model deployment, and permission to create blobs in the analysis records container (ADR-0015).
 
-**Why.** The analyzer talks to a model and writes records. It needs nothing else, so it gets nothing else. The token audience must match the endpoint.
+**Why.** The analyzer talks to a model and writes records.
 
-**Limits.** The deployed role can still overwrite the records. Versioning is the recovery evidence until [#154](https://github.com/pkalin/shadewright/issues/154) makes the role create-only (planned).
+**Limits.** The token audience must match the endpoint. The deployed role can still overwrite the records. Versioning is the recovery evidence until [#154](https://github.com/pkalin/shadewright/issues/154) makes the role create-only (planned).
 
 ## 9.2. Executor and the GitHub App key
 
 **What it does.** The executor has its own managed identity. It may only *sign* with one Key Vault key. The GitHub App private key is imported into Key Vault as a non-exportable key. The executor signs the App JWT through Key Vault and exchanges it for a one-hour installation token.
 
-**Why.** The private key never exists in the pod or in a Kubernetes Secret ([ADR-0006](../adr/0006-github-app-key-in-key-vault.md)). A stolen pod cannot take the key away.
+**Why.** The private key never exists in the pod or in a Kubernetes Secret ([ADR-0006](../adr/0006-github-app-key-in-key-vault.md)). A compromised pod cannot copy the key out, but while it runs it can still sign with it ([threat model](../threat-model.md)).
 
 **The JWT and the token.**
 
@@ -51,14 +51,14 @@ The rule for everything below: no PATs, no client secrets, no long-lived API key
 - network failures: TLS alerts from the server, a closed idle connection, HTTP/2 GOAWAY or stream resets, and any HTTP client error not known to be local;
 - a response body that breaks off.
 
-**Reported as transient after the retries**, so the caller retries later:
+**Reported as transient**, so the caller retries later:
 
 - what is still failing after the 3 retries;
 - a token request that gets no answer from Entra ID;
 - a token request that gets a successful answer that cannot be used;
 - a token request that runs into the per-try deadline.
 
-**Final (never retried):**
+**Final (reported as permanent; the caller does not retry):**
 
 - a certificate the client refuses, from Key Vault or Entra ID;
 - an https request answered in plain HTTP;
@@ -79,7 +79,7 @@ The rule for everything below: no PATs, no client secrets, no long-lived API key
 
 | Topic | Detail |
 | --- | --- |
-| Installation token | One hour, scoped to the one repository, with the four permissions of section 8.4 |
+| Installation token | One hour; checked to list only the one repository; requests the four permissions of section 8.4 |
 | JWT | Issued 60 seconds in the past, 10 minutes in total |
 | Token cache | Until 5 minutes before expiry; one shared refresh |
 | Sign call deadline | 30 seconds, or the caller's if shorter; 10 seconds per try |

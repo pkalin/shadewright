@@ -1,6 +1,6 @@
 # 3. Observation and deduplication
 
-This section covers how the analyzer turns cluster symptoms into `Incident` objects and decides when one is due for analysis. The collector (3.1) reads Warning events and pod status. Two levels of deduplication (3.2) keep the counts bounded and stable across restarts. The analysis (3.3) is only partly built: the context builder exists but is not wired, and the analysis loop is <span class="sw-status sw-planned">planned</span> ([#16](https://github.com/pkalin/shadewright/issues/16)).
+This section covers how the analyzer turns cluster symptoms into `Incident` objects and decides when one is due for analysis. The collector (3.1) reads Warning events and pod status. Two levels of deduplication (3.2) keep the counts bounded and stable across restarts. The analysis (3.3) is only partly built: the context builder exists but is not wired, and the analysis loop is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)).
 
 [![Shadewright analyzer: the collector turns events and pod status of the watched namespaces into deduplicated, bounded Incidents; the analysis trigger decides when one is due, using analysis.maxAnalysesPerDay from the settings and a Budget ConfigMap; Prometheus and pod logs have adapters that are built but not wired, and so is the context builder, which makes a bounded, redacted context in provenance-tagged blocks; planned, drawn dashed: the model call with read tools on escalation, the model provider and the typed RemediationRequest.](../assets/diagrams/analyzer.svg)](../assets/diagrams/analyzer.svg "Open full size")
 
@@ -167,7 +167,7 @@ A new leader that loaded the Incidents before the old leader's last writes lande
 - At the cap a new fingerprint is not stored. Its observations are counted in the Prometheus counter `shadewright_incident_observations_refused_total`, and each new fingerprint is logged once.
 - A Warning event (reason `IncidentCapReached`) about the analyzer's Pod, whose name comes from `POD_NAME`, is written for at most one refusal every 10 minutes, because whoever can create events in a watched namespace can make new fingerprints at will.
 - Fingerprints that already have an Incident are still counted.
-- Nothing deletes Incidents yet (retention by age is <span class="sw-status sw-planned">planned</span>, not built), so once reached the cap stays reached until someone deletes some and the analyzer restarts (it counts the Incidents when it starts). When Incidents should go is open (question 8 in section 15, and the 2026-11-03 amendment of [ADR-0007](../adr/0007-incident-state-in-crds.md#amendments)).
+- Nothing deletes Incidents yet (retention by age is not built), so once reached the cap stays reached until someone deletes some and the analyzer restarts (it counts the Incidents when it starts). When Incidents should go is open (question 8 in section 15, and the 2026-11-03 amendment of [ADR-0007](../adr/0007-incident-state-in-crds.md#amendments)).
 
 **Occurrences held unwritten.** <span class="sw-status sw-built">built</span> They are bounded too, so the controller's memory stays bounded while status writes fail:
 
@@ -275,7 +275,7 @@ Decided in [ADR-0023](../adr/0023-how-the-analyzer-calls-the-model.md) (accepted
 
 ### Design: the order of work
 
-This is the target flow. The analysis loop that runs it is <span class="sw-status sw-planned">planned</span> ([#16](https://github.com/pkalin/shadewright/issues/16)); the context builder is built but not wired.
+This is the target flow. The analysis loop that runs it is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)); the context builder is built but not wired.
 
 - Deterministic rules and known runbooks run first. A runbook match is deterministic and makes no model call.
 - The model path is for incidents no runbook matched. Its common case is one small-model call: the context builder assembles a bounded, redacted context deterministically (incident summary, object status and owners, a log excerpt, selected metrics and recent Git changes for the source of the object) and the small model returns one structured result.

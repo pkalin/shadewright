@@ -1,6 +1,6 @@
 # 4. Tools
 
-This section covers the read tools the analyzer offers to the model, and the adapters behind them. Two adapters are built but not wired into the analyzer: Prometheus for `query_metrics` and pod logs for `get_pod_logs`. The tool loop that offers them is <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)).
+This section covers the read tools the analyzer offers to the model, and the adapters behind them. Three parts are built but not wired into the analyzer: the Prometheus adapter for `query_metrics`, the pod logs adapter for `get_pod_logs` (wiring both is [#371](https://github.com/pkalin/shadewright/issues/371)), and the missing reference check (4.3). The read tools are <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)), and the analysis loop that offers them to the model is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)).
 
 The analyzer exposes tools to the model through its own adapters.
 
@@ -10,11 +10,11 @@ The analyzer exposes tools to the model through its own adapters.
 
 | Tool | Purpose | Mode | Status |
 | --- | --- | --- | --- |
-| `get_resource`, `list_events` | Object state and symptom history | Read, redacted | <span class="sw-status sw-planned">planned</span> |
-| `get_pod_logs` | Bounded time range and byte count | Read, redacted | adapter <span class="sw-status sw-built">built</span>, not wired |
+| `get_resource`, `list_events` | Object state and symptom history | Read, redacted | <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)) |
+| `get_pod_logs` | Bounded time range and byte count | Read, redacted | adapter <span class="sw-status sw-built">built</span>, not wired ([#371](https://github.com/pkalin/shadewright/issues/371)) |
 | `query_metrics` | Approved query templates only | Read, redacted | adapter <span class="sw-status sw-built">built</span>, not wired ([#371](https://github.com/pkalin/shadewright/issues/371)) |
-| `get_delivery_status` | Flux Kustomization / HelmRelease revision and readiness | Read, redacted | <span class="sw-status sw-planned">planned</span> |
-| `read_git_file`, `get_recent_changes` | Map an object to its source in Git | Read, redacted | <span class="sw-status sw-planned">planned</span> |
+| `get_delivery_status` | Flux Kustomization / HelmRelease revision and readiness | Read, redacted | <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)) |
+| `read_git_file`, `get_recent_changes` | Map an object to its source in Git | Read, redacted | <span class="sw-status sw-planned">planned</span> ([#74](https://github.com/pkalin/shadewright/issues/74)) |
 
 ## 4.1. `query_metrics`
 

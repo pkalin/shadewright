@@ -101,7 +101,8 @@ type LogInstance struct {
 	// a Previous query the terminated one before it. Empty when the status named none.
 	ContainerID string
 	// RestartCount is the container's restart count at the check. A Previous query read the instance before
-	// the one this count belongs to.
+	// the one this count belongs to. It can go back to 0 after a node restart, so it is an extra signal, not
+	// an identity.
 	RestartCount int32
 }
 
@@ -125,9 +126,9 @@ type LogExcerpt struct {
 	// CollectedAt is when the source finished reading the logs.
 	CollectedAt time.Time
 	// InstanceUncertain means the source cannot tie the text to Instance: the pod's UID, the container's ID
-	// or its restart count differed between the checks before and after reading, the pod was gone after
-	// reading, or the status named no instance or an ID out of bounds. The text may then hold lines of
-	// another instance, or of two.
+	// or its restart count differed between the checks before and after reading, the check after reading
+	// failed (the pod was gone, for example), or the status did not say which instance answers or named an ID
+	// out of bounds. The text may then hold lines of another instance, or of two.
 	InstanceUncertain bool
 }
 

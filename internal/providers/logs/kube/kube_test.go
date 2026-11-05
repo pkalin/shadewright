@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -138,11 +140,68 @@ func (l *logServer) source(t *testing.T, namespaces ...string) *Source {
 	if namespaces == nil {
 		namespaces = []string{testNS}
 	}
-	s, err := New(Config{Pods: l.cs.CoreV1(), Namespaces: namespaces})
+	s, err := New(Config{Pods: fakePods(t, l.cs), Namespaces: namespaces})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return s
+}
+
+// fakeREST pairs the pods client of a fake clientset with a REST client of a real clientset whose transport
+// answers pod reads from the fake clientset (its reactors and tracker), since the fake has no REST client.
+type fakeREST struct {
+	corev1client.PodsGetter
+	rest rest.Interface
+}
+
+func (f fakeREST) RESTClient() rest.Interface { return f.rest }
+
+// roundTripFunc is an http.RoundTripper made of a function.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func fakePods(t *testing.T, cs *fake.Clientset) PodsGetter {
+	t.Helper()
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/namespaces/"), "/")
+		if r.Method != http.MethodGet || len(parts) != 3 || parts[1] != podsResource.Resource {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			return nil, errors.New("unexpected request")
+		}
+		var (
+			code = http.StatusOK
+			body any
+		)
+		pod, err := cs.CoreV1().Pods(parts[0]).Get(r.Context(), parts[2], metav1.GetOptions{})
+		var st apierrors.APIStatus
+		switch {
+		case errors.As(err, &st):
+			s := st.Status()
+			s.TypeMeta = metav1.TypeMeta{Kind: "Status", APIVersion: "v1"}
+			code, body = int(s.Code), s
+		case err != nil:
+			return nil, err
+		default:
+			pod.TypeMeta = metav1.TypeMeta{Kind: "Pod", APIVersion: "v1"}
+			body = pod
+		}
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: code,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(raw)),
+			Request:    r,
+		}, nil
+	})
+	real, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: "http://fake.invalid"}, &http.Client{Transport: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fakeREST{PodsGetter: cs.CoreV1(), rest: real.CoreV1().RESTClient()}
 }
 
 func query() providers.LogQuery {
@@ -529,7 +588,7 @@ func TestExcerptIsRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	l := newLogServer("opened TICKET-4711\n")
-	s, err := New(Config{Pods: l.cs.CoreV1(), Namespaces: []string{testNS}, Redactor: r})
+	s, err := New(Config{Pods: fakePods(t, l.cs), Namespaces: []string{testNS}, Redactor: r})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,13 +679,14 @@ func TestCanceledContextSendsNothing(t *testing.T) {
 }
 
 func TestNewValidatesTheConfig(t *testing.T) {
-	pods := fake.NewClientset().CoreV1()
+	pods := fakePods(t, fake.NewClientset())
 	many := make([]string, MaxNamespaces+1)
 	for i := range many {
 		many[i] = fmt.Sprintf("ns-%d", i)
 	}
 	for name, cfg := range map[string]Config{
 		"no client":          {Namespaces: []string{testNS}},
+		"no REST client":     {Pods: fake.NewClientset().CoreV1(), Namespaces: []string{testNS}},
 		"bad namespace":      {Pods: pods, Namespaces: []string{"Demo_" + planted}},
 		"too many":           {Pods: pods, Namespaces: many},
 		"negative timeout":   {Pods: pods, Timeout: -time.Second},
@@ -658,15 +718,25 @@ func apiSource(t *testing.T, timeout time.Duration, h http.HandlerFunc) (*Source
 		t.Fatal(err)
 	}
 	var n atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/namespaces/"+testNS+"/pods/"+testPod {
+	s := apiServer(t, timeout, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == podPath {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write(pod)
 			return
 		}
 		n.Add(1)
 		h(w, r)
-	}))
+	})
+	return s, &n
+}
+
+// podPath is the API path of the pod the queries name.
+const podPath = "/api/v1/namespaces/" + testNS + "/pods/" + testPod
+
+// apiServer returns a Source on a real clientset talking to an HTTP server that h answers in full.
+func apiServer(t *testing.T, timeout time.Duration, h http.HandlerFunc) *Source {
+	t.Helper()
+	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	cs, err := kubernetes.NewForConfig(&rest.Config{Host: srv.URL})
 	if err != nil {
@@ -676,7 +746,52 @@ func apiSource(t *testing.T, timeout time.Duration, h http.HandlerFunc) (*Source
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s, &n
+	return s
+}
+
+// A pod read that fails with a status carrying Retry-After, or with a reset connection, is not retried by
+// client-go: one request, a retryable error, no logs request.
+func TestPodReadIsNotRetriedByClientGo(t *testing.T) {
+	for name, fail := range map[string]func(w http.ResponseWriter){
+		"429": func(w http.ResponseWriter) {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+		},
+		"503": func(w http.ResponseWriter) {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusServiceUnavailable)
+		},
+		"reset": func(w http.ResponseWriter) {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				_ = tcp.SetLinger(0) // close with RST
+			}
+			_ = conn.Close()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var pods, logs atomic.Int32
+			s := apiServer(t, 0, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != podPath {
+					logs.Add(1)
+					return
+				}
+				pods.Add(1)
+				fail(w)
+			})
+			_, err := s.Logs(context.Background(), query())
+			if !providers.IsRetryable(err) || strings.Contains(err.Error(), testPod) {
+				t.Errorf("err = %v, want a retryable error without the pod name", err)
+			}
+			if p, l := pods.Load(), logs.Load(); p != 1 || l != 0 {
+				t.Errorf("%d pod reads and %d logs requests, want 1 and 0", p, l)
+			}
+		})
+	}
 }
 
 // A 429 from the API server is returned at once with its delay: client-go does not retry it on its own.
@@ -835,8 +950,9 @@ func TestStatefulSetPodRecreatedUnderTheSameName(t *testing.T) {
 	}
 }
 
-// The container restarts between the adapter's two requests. The first read the old instance, the second
-// the new one (or, for Previous, which is relative, the instance the first read as current): uncertain.
+// The container restarts between the adapter's two requests (after the first was answered, before the second
+// is). The first read the old instance, the second the new one (or, for Previous, which is relative, the
+// instance the first read as current): uncertain.
 func TestRestartBetweenTheTwoRequests(t *testing.T) {
 	for name, previous := range map[string]bool{"current": false, "previous": true} {
 		t.Run(name, func(t *testing.T) {
@@ -844,7 +960,7 @@ func TestRestartBetweenTheTwoRequests(t *testing.T) {
 			l := newLogServer(text)
 			l.previous = []byte(text)
 			l.onLog = func(n int) {
-				if n != 1 {
+				if n != 2 {
 					return
 				}
 				restarted := testPodObject()
@@ -895,10 +1011,38 @@ func TestPodGoneBeforeOrAfterTheRead(t *testing.T) {
 	}
 }
 
-// A failed check of the pod, before or after reading, returns no excerpt, and its error carries no name or
-// server text.
-func TestPodReadErrors(t *testing.T) {
-	for name, after := range map[string]bool{"before": false, "after": true} {
+// A failed check of the pod before reading returns no excerpt, and its error carries no name or server text.
+func TestPodReadErrorBeforeTheRead(t *testing.T) {
+	l := newLogServer("hello\n")
+	l.cs.PrependReactor("get", podsResource.Resource, func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.GetSubresource() != "" {
+			return false, nil, nil
+		}
+		return true, nil, apierrors.NewInternalError(errors.New("pod " + planted))
+	})
+	got, err := l.source(t).Logs(context.Background(), query())
+	if !providers.IsRetryable(err) || got.Text != "" {
+		t.Fatalf("Logs = %+v, %v; want a retryable error", got, err)
+	}
+	if strings.Contains(err.Error(), planted) || strings.Contains(err.Error(), testPod) {
+		t.Errorf("error carries a name or the server's text: %v", err)
+	}
+	if len(l.opts) != 0 {
+		t.Errorf("%d logs requests, want none", len(l.opts))
+	}
+}
+
+// A failed check of the pod after reading (refused, failed, or past the deadline) returns the logs read,
+// marked uncertain.
+func TestPodReadErrorAfterTheRead(t *testing.T) {
+	for name, fail := range map[string]func() error{
+		"forbidden": func() error { return apierrors.NewForbidden(podsResource.GroupResource(), planted, nil) },
+		"internal":  func() error { return apierrors.NewInternalError(errors.New(planted)) },
+		"deadline": func() error {
+			time.Sleep(300 * time.Millisecond) // past the Source's timeout below
+			return nil
+		},
+	} {
 		t.Run(name, func(t *testing.T) {
 			l := newLogServer("hello\n")
 			reads := 0
@@ -906,22 +1050,48 @@ func TestPodReadErrors(t *testing.T) {
 				if a.GetSubresource() != "" {
 					return false, nil, nil
 				}
-				if reads++; after && reads == 1 {
+				if reads++; reads == 1 {
 					return false, nil, nil
 				}
-				return true, nil, apierrors.NewInternalError(errors.New("pod " + planted))
+				if err := fail(); err != nil {
+					return true, nil, err
+				}
+				return false, nil, nil
 			})
-			got, err := l.source(t).Logs(context.Background(), query())
-			if !providers.IsRetryable(err) || got.Text != "" {
-				t.Fatalf("Logs = %+v, %v; want a retryable error", got, err)
+			s, err := New(Config{Pods: fakePods(t, l.cs), Namespaces: []string{testNS}, Timeout: 100 * time.Millisecond})
+			if err != nil {
+				t.Fatal(err)
 			}
-			if strings.Contains(err.Error(), planted) || strings.Contains(err.Error(), testPod) {
-				t.Errorf("error carries a name or the server's text: %v", err)
-			}
-			if want := map[bool]int{false: 0, true: 1}[after]; len(l.opts) != want {
-				t.Errorf("%d logs requests, want %d", len(l.opts), want)
+			got, err := s.Logs(context.Background(), query())
+			if err != nil || got.Text != "hello\n" || !got.InstanceUncertain || got.Instance.PodUID != testUID {
+				t.Errorf("Logs = %+v, %v; want the text, uncertain", got, err)
 			}
 		})
+	}
+}
+
+// A deadline or the adapter's timeout during a pod read is reported as the pod read's, in fixed text.
+func TestContextEndsAPodRead(t *testing.T) {
+	stalled := func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == podPath {
+			select {
+			case <-r.Context().Done():
+			case <-time.After(3 * time.Second):
+			}
+		}
+	}
+	s := apiServer(t, MaxTimeout, stalled)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := s.Logs(ctx, query())
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "pod read") ||
+		strings.Contains(err.Error(), "logs") {
+		t.Errorf("caller deadline: err = %v", err)
+	}
+	s = apiServer(t, 100*time.Millisecond, stalled)
+	_, err = s.Logs(context.Background(), query())
+	if !providers.IsRetryable(err) || !strings.Contains(err.Error(), "pod read") || strings.Contains(err.Error(), "logs") {
+		t.Errorf("adapter timeout: err = %v", err)
 	}
 }
 
@@ -934,6 +1104,13 @@ func TestUnknownInstanceIsUncertain(t *testing.T) {
 		"ID bad bytes":    func(p *corev1.Pod) { p.Status.ContainerStatuses[0].ContainerID = "x://a\nb" },
 		"UID bad bytes":   func(p *corev1.Pod) { p.UID = "a b" },
 		"other container": func(p *corev1.Pod) { p.Status.ContainerStatuses[0].Name = "sidecar" },
+		// The kubelet serves the last terminated instance while the container waits.
+		"waiting": func(p *corev1.Pod) {
+			p.Status.ContainerStatuses[0].State.Waiting = &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}
+		},
+		"terminated without ID": func(p *corev1.Pod) {
+			p.Status.ContainerStatuses[0].State.Terminated = &corev1.ContainerStateTerminated{ExitCode: 1}
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := testPodObject()

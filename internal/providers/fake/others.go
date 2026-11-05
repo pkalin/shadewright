@@ -285,7 +285,7 @@ func (l *Logs) Logs(ctx context.Context, q providers.LogQuery) (providers.LogExc
 	e := providers.LogExcerpt{
 		Text:              t,
 		Instance:          inst.instance,
-		CollectedAt:       time.Now(),
+		CollectedAt:       time.Now().UTC(),
 		InstanceUncertain: !ok || inst.uncertain,
 	}
 	if int64(len(t)) > limit {

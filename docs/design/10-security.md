@@ -106,7 +106,7 @@ Helm deletes both after the test, also when it fails. A `helm test` that is canc
 
 ## 10.7. Loop protection (invariant 7)
 
-**What it does.** Retry limits, a global limit on concurrent fixes, cooldowns, a circuit breaker and an automation kill switch keep the agent from looping on a target.
+**What it does.** The design has retry limits, a global limit on concurrent fixes, cooldowns, a circuit breaker and an automation kill switch, to keep the agent from looping on a target. Only some are built (below).
 
 **Built.**
 

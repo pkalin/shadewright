@@ -44,8 +44,8 @@ check "executor main runs everything" "true true true false true" $pr cmd/main.g
 check "analyzer main runs everything" "true true true false true" $pr cmd/analyzer/main.go
 check "internal package runs everything" "true true true false true" $pr internal/cmdutil/manager.go
 check "root go file runs everything" "true true true false true" $pr tools.go
-check "dockerfile runs everything" "true true true false false" $pr Dockerfile
-check "dockerignore runs everything" "true true true false false" $pr .dockerignore
+check "dockerfile runs go, images and chart" "true true true false false" $pr Dockerfile
+check "dockerignore runs go, images and chart" "true true true false false" $pr .dockerignore
 check "chart only runs chart" "false false true false false" $pr dist/chart/values.yaml
 check "chart ci values run chart" "false false true false false" $pr dist/chart/ci/default-values.yaml
 check "ct config runs chart" "false false true false false" $pr ct.yaml
@@ -60,7 +60,7 @@ check "zensical config runs docs only" "false false false true false" $pr zensic
 check "theme overrides run docs only" "false false false true false" $pr overrides/main.html
 check "glossary snippet runs docs only" "false false false true false" $pr includes/glossary.md
 check "docs requirements run docs only" "false false false true false" $pr requirements-docs.txt
-check "published paths list runs everything" "true true true true false" $pr hack/docs-published-paths.txt
+check "published paths list runs all but codeql" "true true true true false" $pr hack/docs-published-paths.txt
 check "readme only skips docs" "false false false false false" $pr README.md
 check "go.mod runs codeql" "true true true false true" $pr go.mod
 check "this script runs everything" "true true true true true" $pr hack/ci-changed.sh

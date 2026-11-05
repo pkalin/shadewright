@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 1044" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Shadewright executor</title>
-  <desc id="d">Zoom into the executor identity. A RemediationRequest passes, in order: the source mapping (Flux objects to the one file in Git, within an input budget), the policy engine (policy, settings, live target state and the resolved source), the limits (concurrency, a lock per target, a circuit breaker with one probe when half-open; only an allowed request is held back as Queued and checked again every 30 seconds, a refusal is never held back), the freshness check, the patcher with the semantic diff, and the kill switch gate, which reads spec.paused right before every Git write. The Key Vault signer signs for the GitHub App, which creates the branch, commit and pull request outside the cluster; the request waits in AwaitingApproval. When a person merges, the controller observes the merge and the request stops in Merged, which is also the breaker's success. Refusals end in Denied, NeedsIntervention or Superseded. Built up to Merged. Planned, drawn dashed: auto-merge, the delivery check against the Flux lastAppliedRevision, and the verifier.</desc>
+  <desc id="d">Zoom into the executor identity. A RemediationRequest passes, in order: the source mapping (Flux objects to the one file in Git, within an input budget), the policy engine (policy, settings, live target state and the resolved source), the limits (concurrency, a lock per target, a circuit breaker with one probe when half-open; only an allowed request is held back as Queued and checked again every 30 seconds, or every 10 minutes behind a lock held by a request that stopped, a refusal is never held back), the freshness check, the patcher with the semantic diff, and the kill switch gate, which reads spec.paused right before every Git write. The Key Vault signer signs for the GitHub App, which creates the branch, commit and pull request outside the cluster; the request waits in AwaitingApproval. When a person merges, the controller observes the merge and the request stops in Merged, which is also the breaker's success. Refusals end in Denied, NeedsIntervention or Superseded. Built up to Merged. Planned, drawn dashed: auto-merge, the delivery check against the Flux lastAppliedRevision, and the verifier.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -73,8 +73,8 @@
   <text class="s" x="594" y="413">breaker · half-open probe</text>
   <text class="lbl" x="578" y="280">only an allowed request is</text>
   <text class="lbl" x="578" y="296">held back as Queued, rechecked</text>
-  <text class="lbl" x="578" y="312">every 30 s. A refusal is never</text>
-  <text class="lbl" x="578" y="328">held back</text>
+  <text class="lbl" x="578" y="312">every 30 s (or 10 min). A refusal</text>
+  <text class="lbl" x="578" y="328">is never held back</text>
   <rect class="box" x="578" y="490" width="210" height="72" rx="10"/>
   <text class="h" x="594" y="516">Freshness check</text>
   <text class="s" x="594" y="537">plan inputs still current</text>

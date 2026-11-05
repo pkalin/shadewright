@@ -42,11 +42,14 @@ import (
 //
 // A request is active while the executor can still move it on before the merge (progresses: a phase before the
 // merge with a plan digest), and while it is being deleted and still holds the finalizer, since its pull
-// request may still be open until the finalizer is gone. Before the policy check writes an allowed decision it
-// counts the active requests and reads the outcomes of the others, straight from the API server (never the
-// cache, which may not show a request let through a moment ago), and lets the request through only when
+// request may still be open until the finalizer is gone. The lock is held longer than that (targetlock.go):
+// from the allowed decision until the request's pull request is known closed or merged, so a request that
+// stopped with its pull request still open keeps a second pull request off the target. Before the policy check
+// writes an allowed decision it counts the active requests and reads the outcomes of the others, straight from
+// the API server (never the cache, which may not show a request let through a moment ago), and lets the
+// request through only when
 //
-//   - no other active request names the same target UID (the lock),
+//   - no other request that holds the lock names the same target UID (the lock),
 //   - fewer than maxConcurrentRemediations of RemediationSettings are active (the cap), and
 //   - the breaker lets it through: it is closed, or it is half-open and no probe is running (the request
 //     becomes the probe then).
@@ -84,7 +87,8 @@ import (
 //
 // Only a request the policy check allows is held back: refusals (Denied, NeedsIntervention) are written at
 // once. A request held back keeps no phase (or Pending), gets the condition Queued with the limit as the
-// reason, and is checked again after admissionRecheckDelay. While it is Queued only the limits are checked, so
+// reason, and is checked again after admissionRecheckDelay (heldRecheckInterval behind a lock held by a request
+// that stopped, which wakes it when it changes). While it is Queued only the limits are checked, so
 // it does not read Git; once they let it through, Queued is removed and the whole policy check runs again.
 //
 // The limits are counted per namespace: requests live in the operator namespace. The lock is per target
@@ -93,7 +97,7 @@ import (
 
 // Reasons of the Queued condition. The metrics (limits_metrics.go) map them to the values of a label.
 const (
-	// ReasonTargetLocked: another active request names the same target UID.
+	// ReasonTargetLocked: another request that holds the lock (holdsLock) names the same target UID.
 	ReasonTargetLocked = "TargetLocked"
 	// ReasonConcurrencyLimit: maxConcurrentRemediations requests are active.
 	ReasonConcurrencyLimit = "ConcurrencyLimitReached"
@@ -108,7 +112,8 @@ const (
 
 // Fixed messages of the Queued condition.
 var queuedMessages = map[string]string{
-	ReasonTargetLocked:     "Another active request changes the same target; this one waits until that one ends",
+	ReasonTargetLocked: "Another request changes the same target, or its pull request may still be open; this one " +
+		"waits until that one ends and its pull request is closed or merged",
 	ReasonConcurrencyLimit: "RemediationSettings default allows no more active requests (maxConcurrentRemediations); this one waits for a slot",
 	ReasonCircuitOpen: "The circuit breaker is open after consecutive failed requests; this one waits for the " +
 		"cool-down to end",
@@ -150,6 +155,18 @@ type limitsState struct {
 	failures int
 	// probing is whether a probe runs while the breaker is half-open.
 	probing bool
+	// stoppedLock is whether every request that holds the lock on the target has stopped (it is not moved on
+	// or deleted): the lock then lasts until a person or a look-up of checkHeld frees it, so the request
+	// waits longer between checks and is woken by lockWaiters when the holder changes.
+	stoppedLock bool
+}
+
+// recheckDelay is how long a request held back by s waits before it checks the limits again.
+func (s limitsState) recheckDelay() time.Duration {
+	if s.reason == ReasonTargetLocked && s.stoppedLock {
+		return heldRecheckInterval
+	}
+	return admissionRecheckDelay
 }
 
 // probe reports whether a request the limits let through becomes the breaker's probe: it does when the breaker
@@ -242,7 +259,7 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 	// An object written before the field had a default, or by hand, may hold 0: the smallest limit the schema
 	// allows is used then, never no limit.
 	s := limitsState{limit: max(int(settings.Spec.MaxConcurrentRemediations), 1)}
-	locked := false
+	locked, lockMoving := false, false
 	var lastSuccess, lastFailure time.Time
 	var failures []time.Time
 	for i := range list.Items {
@@ -252,9 +269,10 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		}
 		if active(other) {
 			s.active++
-			if other.Spec.TargetRef.UID == rr.Spec.TargetRef.UID {
-				locked = true
-			}
+		}
+		if other.Spec.TargetRef.UID == rr.Spec.TargetRef.UID && holdsLock(other) {
+			locked = true
+			lockMoving = lockMoving || active(other)
 		}
 		switch breakerOutcome(other) {
 		case outcomeSuccess:
@@ -285,6 +303,7 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		s.reason = ReasonCircuitHalfOpen
 	case locked:
 		s.reason = ReasonTargetLocked
+		s.stoppedLock = !lockMoving
 	case s.active >= s.limit:
 		s.reason = ReasonConcurrencyLimit
 	}
@@ -350,9 +369,10 @@ func ended(phase remediationv1alpha1.RemediationPhase) bool {
 }
 
 // waitForLimits holds back a request that a limit does not let through: it sets Queued True with the limit as
-// the reason, writes the status when that changed, and checks again after admissionRecheckDelay.
+// the reason, writes the status when that changed, and checks again after s.recheckDelay.
 func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	reason string) (reconcile.Result, error) {
+	s limitsState) (reconcile.Result, error) {
+	reason := s.reason
 	if meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionQueued,
 		Status:             metav1.ConditionTrue,
@@ -366,7 +386,7 @@ func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *re
 		logf.FromContext(ctx).Info("Queued RemediationRequest behind a limit", "remediationRequest",
 			client.ObjectKeyFromObject(rr), "reason", reason)
 	}
-	return reconcile.Result{RequeueAfter: admissionRecheckDelay}, nil
+	return reconcile.Result{RequeueAfter: s.recheckDelay()}, nil
 }
 
 // setPhase sets the request's phase and, when it changes, lastPhaseTransitionTime to now.
@@ -403,7 +423,7 @@ func (r *RemediationRequestReconciler) holdBack(ctx context.Context, rr *remedia
 			return reconcile.Result{}, false, true, err
 		}
 		if s.reason != "" {
-			res, err = r.waitForLimits(ctx, rr, s.reason)
+			res, err = r.waitForLimits(ctx, rr, s)
 			return res, false, true, err
 		}
 	}

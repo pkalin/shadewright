@@ -401,6 +401,41 @@ func TestUnsupportedKindIsNotAvailable(t *testing.T) {
 	}
 }
 
+// A subject outside the watched namespaces is refused before any read of the cluster or call of a source
+// (#371), and an empty set refuses every subject.
+func TestUnwatchedNamespaceIsRefusedBeforeAnyCall(t *testing.T) {
+	for name, namespaces := range map[string][]string{"other namespace": {otherNS}, "empty set": nil} {
+		reads := 0
+		count := interceptor.Funcs{
+			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+				reads++
+				return errors.New("read")
+			},
+			List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				reads++
+				return errors.New("read")
+			},
+		}
+		r := clientfake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(webObjects()...).WithInterceptorFuncs(count).Build()
+		src := webSources()
+		calls := 0
+		onCall := func(string) error { calls++; return nil }
+		src.logs.SetFail(onCall)
+		src.metrics.SetFail(onCall)
+		b := newBuilder(t, r, src, func(c *Config) { c.Namespaces = namespaces })
+		c := build(t, b, incident(deploymentRef()))
+		if reads != 0 || calls != 0 {
+			t.Errorf("%s: %d cluster reads and %d source calls, want none", name, reads, calls)
+		}
+		if s := one(t, c, SectionStatus); s.Availability != NotAvailable || !strings.Contains(s.Text, "does not watch") {
+			t.Errorf("%s: status %q %q", name, s.Availability, s.Text)
+		}
+		if one(t, c, SectionLogs).Availability != NotAvailable || one(t, c, SectionMetrics).Availability != NotAvailable {
+			t.Errorf("%s: logs and metrics: %+v", name, c.Blocks)
+		}
+	}
+}
+
 // canary is a redactor that removes one marker only.
 type canary struct{}
 

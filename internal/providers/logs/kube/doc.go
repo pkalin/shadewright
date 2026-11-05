@@ -19,7 +19,8 @@ limitations under the License.
 // client-go's pods client, and reads the pod itself through the REST client to tie the excerpt to an instance
 // ([PodsGetter]: CoreV1() of a real clientset; [New] refuses the fake clientset's, which has no REST client).
 // The pod read needs get on pods, which the analyzer's watch role already grants, bound only in the watched
-// namespaces. It is built but not wired: the analyzer does not create it yet, and has no grant on pods/log.
+// namespaces. The analyzer creates it unless --pod-logs=false (internal/analyzer NewSources) and gives it to
+// the context builder; get on pods/log is in the analyzer's watch role, bound only in the watched namespaces.
 //
 // Instance: a log request names a pod and a container by name only. It cannot ask for a pod UID or a
 // container ID, and Previous is relative to the instance running when the kubelet answers. So the adapter
@@ -44,8 +45,8 @@ limitations under the License.
 //
 // Scope and checks, before any request: a query may name only a namespace in [Config.Namespaces] (the
 // analyzer's watched namespaces); any other is refused with [ErrInvalidQuery], an empty set refuses every
-// query, and the error never repeats the namespace. RBAC would refuse such a read too once the analyzer has a
-// grant, but the adapter does not rely on the identity it is given. The pod must be a DNS-1123 subdomain and
+// query, and the error never repeats the namespace. RBAC refuses such a read too, but the adapter does not
+// rely on the identity it is given. The pod must be a DNS-1123 subdomain and
 // the container, required (one container per call), a DNS-1123 label. [New] refuses a nil client or REST client, a namespace
 // that is not a DNS-1123 label, more than [MaxNamespaces] namespaces and a timeout above [MaxTimeout].
 //

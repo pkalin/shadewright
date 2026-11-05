@@ -405,6 +405,48 @@ func TestPermissionBoundary(t *testing.T) {
 	}
 }
 
+// TestPodLogsOnlyInWatchedNamespaces checks the analyzer's one grant on logs (#371): get on pods/log through the
+// watch role, so only in the namespaces a RoleBinding names, never in the operator namespace, an unwatched
+// namespace or cluster-wide, and no other verb. The executor has none.
+func TestPodLogsOnlyInWatchedNamespaces(t *testing.T) {
+	cases := []struct {
+		id, verb, ns string
+		want         bool
+	}{
+		{analyzer, "get", otherNS, true},
+		{analyzer, "get", unwatched, false},
+		{analyzer, "get", operatorNS, false},
+		{analyzer, "get", "", false},
+		{analyzer, "list", otherNS, false},
+		{analyzer, "watch", otherNS, false},
+		{analyzer, "create", otherNS, false},
+		{executor, "get", otherNS, false},
+		{executor, "get", "", false},
+	}
+	for _, c := range cases {
+		if got := can(t, c.id, c.verb, "", "pods", "log", c.ns); got != c.want {
+			t.Errorf("%s %s pods/log in %q: allowed=%v, want %v", c.id, c.verb, c.ns, got, c.want)
+		}
+	}
+	// The grant is in the watch role only: no role of the analyzer bound in the operator namespace or
+	// cluster-wide names pods or any of their subresources.
+	for _, file := range []string{"role.yaml", "leader_election.yaml"} {
+		for _, doc := range decodeAll(t, filepath.Join("..", "..", "config", "rbac", analyzer, file)) {
+			var r rbacv1.ClusterRole // a Role has the same rules
+			if err := decodeInto(doc, &r); err != nil {
+				t.Fatal(err)
+			}
+			for _, rule := range r.Rules {
+				for _, res := range rule.Resources {
+					if strings.HasPrefix(res, "pods") || res == "*" {
+						t.Errorf("%s: %s names %s", file, r.Name, res)
+					}
+				}
+			}
+		}
+	}
+}
+
 // TestAnalyzerGrantsNothingOnSecrets checks that the analyzer holds no permission at all on Secrets (design
 // 10.3, invariant 6). Kubernetes RBAC has no metadata-only verb: get, list or watch on secrets, also through
 // the metadata API, returns the data, so the missing Secret check (internal/analyzer/refcheck) infers its

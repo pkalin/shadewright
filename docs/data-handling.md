@@ -13,11 +13,11 @@ What Shadewright stores, what it sends where, what it publishes and how long eac
 | Events (`events.k8s.io`) and Pods | Reason, type, reporting controller, note text, object names and owners, container termination state, in the **watched namespaces only** | Analyzer |
 | Deployments, ReplicaSets, StatefulSets | Owner references and metadata (`get`) | Analyzer |
 | Nodes | `list`, for platform detection | Analyzer |
-| Prometheus (**planned**: the adapter is not wired yet) | The results of the approved query templates ([design, section 4](design/4-tools.md#4-tools)), only for the **watched namespaces**: Prometheus applies no authorization, so the adapter refuses any other namespace before a request | Analyzer |
+| Prometheus (only with `--prometheus-url`; the context builder that reads it is not called yet, #76) | The results of the approved query templates ([design, section 4](design/4-tools.md#4-tools)), only for the **watched namespaces**: Prometheus applies no authorization, so the adapter refuses any other namespace before a request | Analyzer |
 | Flux `Kustomization` and `GitRepository`, the target workload or `ScaledObject`, policy and settings | Status and spec, for source mapping and the freshness check | Executor |
 | The Git repository | The files of the build for the target's Kustomization (up to 256 files, 1 MiB each), through the GitHub API | Executor |
 
-Neither identity reads Secrets, ConfigMap data (except its own budget ConfigMap) or **pod logs**. The pod logs adapter is built but **not wired**, and the analyzer has no grant on `pods/log`: once wired, it reads one container per call, only in the watched namespaces, at most 24 hours back and at most 1 MiB per request (at most two requests per call), and returns at most 256 KiB of whole lines, redacted before it leaves the adapter ([design, section 4](design/4-tools.md#4-tools)).
+Neither identity reads Secrets or ConfigMap data (except its own budget ConfigMap). The executor reads no **pod logs**. The analyzer may (`get` on `pods/log` in the watched namespaces only; `--pod-logs=false` turns the source off), but reads none yet: the context builder that holds the pod logs source is not called until the analysis loop is built ([#76](https://github.com/pkalin/shadewright/issues/76)). Once it is, the source reads one container per call, only in the watched namespaces, at most 24 hours back and at most 1 MiB per request (at most two requests per call), and returns at most 256 KiB of whole lines, redacted before it leaves the adapter and again by the context builder ([design, section 4](design/4-tools.md#4-tools)). Excerpts are never stored in a custom resource.
 
 ## Redaction
 

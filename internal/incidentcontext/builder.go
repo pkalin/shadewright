@@ -72,6 +72,11 @@ type Config struct {
 	// Objects gets Deployments, StatefulSets and ReplicaSets from the API server: the analyzer may get them,
 	// not list or watch them. Required.
 	Objects client.Reader
+	// Namespaces are the namespaces a subject may be in: the analyzer's watched namespaces
+	// (--watch-namespaces), the same set its cache and both sources are given. A subject in any other
+	// namespace is refused before any read or source call, and its status, logs and metrics are "not
+	// available". Empty refuses every subject.
+	Namespaces []string
 	// Metrics is the metrics source; nil means not configured, so the metrics section is "not available".
 	Metrics providers.MetricsSource
 	// Logs is the log source; nil means not configured, so the log section is "not available". Its excerpts
@@ -92,6 +97,7 @@ type Config struct {
 // Builder builds the context of an Incident. It is safe for concurrent use when its sources are.
 type Builder struct {
 	pods, objects client.Reader
+	namespaces    map[string]struct{}
 	metrics       providers.MetricsSource
 	logs          providers.LogSource
 	redactor      Redactor
@@ -130,8 +136,12 @@ func New(cfg Config) (*Builder, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	namespaces := make(map[string]struct{}, len(cfg.Namespaces))
+	for _, ns := range cfg.Namespaces {
+		namespaces[ns] = struct{}{}
+	}
 	return &Builder{
-		pods: cfg.Pods, objects: cfg.Objects, metrics: cfg.Metrics, logs: cfg.Logs, redactor: cfg.Redactor,
+		pods: cfg.Pods, objects: cfg.Objects, namespaces: namespaces, metrics: cfg.Metrics, logs: cfg.Logs, redactor: cfg.Redactor,
 		limits: cfg.Limits, timeout: cfg.SourceTimeout, buildTimeout: cfg.BuildTimeout, now: cfg.Now,
 	}, nil
 }

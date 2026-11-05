@@ -128,9 +128,10 @@ type Source struct {
 	client     *http.Client
 	timeout    time.Duration
 	namespaces map[string]struct{}
-	// scope is Config.Cluster rendered for every selector (scopeOf).
-	scope string
-	now   func() time.Time
+	// cluster is Config.Cluster, for CheckCluster; scope is it rendered for every selector (scopeOf).
+	cluster string
+	scope   string
+	now     func() time.Time
 }
 
 var _ providers.MetricsSource = (*Source)(nil)
@@ -182,8 +183,9 @@ func New(cfg Config) (*Source, error) {
 	// Go keeps some headers, Authorization among them, on a redirect to the same host; never follow one.
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &Source{
-		base: u, client: &client, timeout: timeout, namespaces: namespaces, scope: scopeOf(cfg.Cluster),
-		now: time.Now,
+		base: u, client: &client, timeout: timeout, namespaces: namespaces, cluster: cfg.Cluster,
+		scope: scopeOf(cfg.Cluster),
+		now:   time.Now,
 	}, nil
 }
 

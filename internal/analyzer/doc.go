@@ -33,8 +33,9 @@ limitations under the License.
 //     update its status subresource (no resourceNames: the object is cluster-scoped and the schema pins its
 //     name to default; the status is a report that nothing reads back to decide), list Nodes for platform
 //     detection (no get or watch, so no informer on them), and nothing namespaced.
-//   - In each watched namespace: the reads in package collector, a ClusterRole bound by one RoleBinding per
-//     namespace in --watch-namespaces, never cluster-wide.
+//   - In each watched namespace: the reads in package collector and get on pods/log for the pod logs source
+//     ([NewSources]), a ClusterRole bound by one RoleBinding per namespace in --watch-namespaces, never
+//     cluster-wide.
 //
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=incidents,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=incidents/status,verbs=update

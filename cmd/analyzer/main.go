@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -37,6 +38,7 @@ import (
 	"github.com/pkalin/shadewright/internal/analyzer/collector"
 	"github.com/pkalin/shadewright/internal/analyzer/detection"
 	"github.com/pkalin/shadewright/internal/cmdutil"
+	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/incidents"
 	"github.com/pkalin/shadewright/internal/modules"
 	"github.com/pkalin/shadewright/internal/modules/aks"
@@ -47,6 +49,7 @@ import (
 	"github.com/pkalin/shadewright/internal/modules/keda"
 	"github.com/pkalin/shadewright/internal/modules/kyverno"
 	"github.com/pkalin/shadewright/internal/modules/secretsstore"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 var (
@@ -61,8 +64,9 @@ func init() {
 
 func main() {
 	var opts cmdutil.Options
-	var namespace, watchNamespaces, clusterIDFlag string
+	var namespace, watchNamespaces, clusterIDFlag, prometheusURL, prometheusCluster string
 	var maxIncidents int
+	var podLogs bool
 	opts.BindFlags(flag.CommandLine)
 	flag.StringVar(&namespace, "namespace", os.Getenv("POD_NAMESPACE"),
 		"The operator namespace: where Incidents and RemediationRequests are written. "+
@@ -78,6 +82,19 @@ func main() {
 	flag.IntVar(&maxIncidents, "max-incidents", incidents.DefaultMaxIncidents,
 		"The most Incidents kept in the operator namespace. At the cap a new fingerprint is not stored: it is "+
 			"counted in shadewright_incident_observations_refused_total and reported in a Warning event.")
+	flag.BoolVar(&podLogs, "pod-logs", true,
+		"Read bounded, redacted excerpts of pod logs in the watched namespaces for the analysis context "+
+			"(get on pods/log, granted by the analyzer-watch-role). At most 256 watched namespaces: with more, "+
+			"the analyzer refuses to start unless this is false.")
+	flag.StringVar(&prometheusURL, "prometheus-url", "",
+		"Base URL of the Prometheus query API the analysis context reads metrics from, with approved query "+
+			"templates only, such as http://prometheus-server.prometheus.svc. Empty (the default): no metrics. "+
+			"At most 256 watched namespaces when set.")
+	flag.StringVar(&prometheusCluster, "prometheus-cluster", "",
+		"The cluster label value of this cluster's series, for a Prometheus shared by several clusters; empty "+
+			"for a Prometheus of this cluster alone. Checked at startup: when no series carries it, metrics are "+
+			"unavailable (analyses that query them escalate) and the analyzer logs an error, checking "+
+			"again every 10 minutes.")
 	flag.Parse()
 
 	ctrl.SetLogger(cmdutil.NewLogger(&opts))
@@ -180,6 +197,46 @@ func main() {
 		setupLog.Error(err, "Failed to set up platform detection")
 		os.Exit(1)
 	}
+
+	// The context builder (design 3.3) and its sources. The analysis loop (#76) calls the builder; until then it
+	// is built here so that the sources' configuration is checked at start. The sources and the builder are given
+	// the watched namespaces, the same set as the cache and the RoleBindings, and refuse any other before a
+	// request. Pod logs are read with the analyzer's own identity, through the pods/log grant of the watch role.
+	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "Failed to create the Kubernetes client")
+		os.Exit(1)
+	}
+	sources, err := analyzer.NewSources(analyzer.SourcesConfig{
+		Watched: watched, PodLogs: podLogs, Pods: clientset.CoreV1(),
+		PrometheusURL: prometheusURL, PrometheusCluster: prometheusCluster, Log: ctrl.Log.WithName("metrics-source"),
+	})
+	if err != nil {
+		setupLog.Error(err, "Invalid context source configuration")
+		os.Exit(1)
+	}
+	if sources.ClusterCheck != nil {
+		if err := mgr.Add(sources.ClusterCheck); err != nil {
+			setupLog.Error(err, "Failed to set up the Prometheus cluster check")
+			os.Exit(1)
+		}
+	}
+	redactor, err := redact.New()
+	if err != nil {
+		setupLog.Error(err, "Failed to create the redactor")
+		os.Exit(1)
+	}
+	contextBuilder, err := incidentcontext.New(incidentcontext.Config{
+		Pods: mgr.GetCache(), Objects: mgr.GetAPIReader(), Namespaces: watched,
+		Metrics: sources.Metrics, Logs: sources.Logs, Redactor: redactor,
+	})
+	if err != nil {
+		setupLog.Error(err, "Failed to create the context builder")
+		os.Exit(1)
+	}
+	_ = contextBuilder // Called by the analysis loop (#76).
+	setupLog.Info("Context sources", "podLogs", sources.Logs != nil, "metrics", sources.Metrics != nil,
+		"prometheusCluster", prometheusCluster != "")
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")

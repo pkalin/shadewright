@@ -8,7 +8,7 @@
  *     opens the full-size file (the no-JS fallback), so the link is kept and only its click is taken over.
  *
  * Controls: click or Enter on the diagram; in the overlay the buttons, the wheel (zoom at the pointer), pinch,
- * drag to pan, + - 0 and the arrow keys; Esc, the close button or a click on the backdrop closes it and
+ * drag to pan, + - 0 and the arrow keys; Esc, the close button or a click outside the window closes it and
  * focus returns to the diagram.
  */
 (function () {
@@ -210,10 +210,11 @@
       pinch = 0;
     }
     stage.addEventListener("pointerup", function (e) {
-      var lastOne = pointers.size === 1;
       release(e);
-      // A click on the empty backdrop (not on the diagram, not after a drag) closes the overlay.
-      if (lastOne && !moved && !content.contains(e.target)) close();
+    });
+    // The diagram opens in a window over the page; a click outside the window (on the dimmed page) closes it.
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) close();
     });
     stage.addEventListener("pointercancel", release);
 

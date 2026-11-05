@@ -167,7 +167,7 @@ A new leader that loaded the Incidents before the old leader's last writes lande
 - At the cap a new fingerprint is not stored. Its observations are counted in the Prometheus counter `shadewright_incident_observations_refused_total`, and each new fingerprint is logged once.
 - A Warning event (reason `IncidentCapReached`) about the analyzer's Pod, whose name comes from `POD_NAME`, is written for at most one refusal every 10 minutes, because whoever can create events in a watched namespace can make new fingerprints at will.
 - Fingerprints that already have an Incident are still counted.
-- Nothing deletes Incidents yet (retention by age is not built), so once reached the cap stays reached until someone deletes some and the analyzer restarts (it counts the Incidents when it starts). When Incidents should go is open (question 8 in section 15, and the 2026-11-03 amendment of [ADR-0007](../adr/0007-incident-state-in-crds.md#amendments)).
+- Nothing deletes Incidents yet (retention by age is not built), so once reached the cap stays reached until someone deletes some and the analyzer restarts (it counts the Incidents when it starts). When Incidents should go is decided but not built: see [Incident lifecycle](#incident-lifecycle), question 8 in section 15, and the 2026-11-03 and 2026-11-05 amendments of [ADR-0007](../adr/0007-incident-state-in-crds.md#amendments).
 
 **Occurrences held unwritten.** <span class="sw-status sw-built">built</span> They are bounded too, so the controller's memory stays bounded while status writes fail:
 
@@ -239,7 +239,7 @@ Whoever keeps a symptom flapping can delay an analysis by up to the window, not 
 
 **Phases come first.** `Open` and `Resolved` (and no phase yet) are decided as above. In the other phases:
 
-- `Proposed` or `Escalated`: not due (reasons of the same name). How an incident leaves those phases is later work.
+- `Proposed` or `Escalated`: not due (reasons of the same name). How an incident leaves those phases is <span class="sw-status sw-planned">planned</span>, see [Incident lifecycle](#incident-lifecycle).
 - `Analyzing`: not due until 10 min after `lastAnalysisTime` (`Analyzing`), after which the analysis is taken as lost. It is due again (`AnalysisTimedOut`, with the debounce and the budget) once the cooldown has passed too, so at 15 min with the defaults, and `CoolingDown` in between.
 - `Analyzing` without a `lastAnalysisTime` cannot be placed against either, so it is not due (`AnalysisStartUnknown`) until its status is repaired: the analysis ([#16](https://github.com/pkalin/shadewright/issues/16)) must write the phase and the time in one status update.
 - An Incident whose name holds another fingerprint is not decided; if it says due, it is set not due (`ForeignFingerprint`).
@@ -268,6 +268,57 @@ Until #16 calls it, nothing adds to the count, so the budget is read but not yet
 **Shared by the whole cluster.** Anyone who can create events or pods in a watched namespace can spend the budget with distinct fingerprints that become due over the day. A share per namespace or per fingerprint is <span class="sw-status sw-planned">planned</span> ([#207](https://github.com/pkalin/shadewright/issues/207)).
 
 **Metrics.** Each pass of the trigger reports the count and the limit it read in the gauges `shadewright_analyses_used_today` and `shadewright_analyses_per_day_limit` ([metrics reference](../reference/metrics.md)). The Incident controller also reports, through the leader, the Incidents by phase and the number due for analysis, served at scrape time from its informer with no API call. It counts the analysis trigger passes that fail and the Incident status writes that fail. The metrics reference lists them with their labels.
+
+### Incident lifecycle
+
+Decided on 2026-11-05 ([#251](https://github.com/pkalin/shadewright/issues/251)); what is built and what is planned is marked in each row. <span class="sw-status sw-built">built</span> Today the controller creates an Incident with the phase `Open` (a status with no phase gets `Open` on its first write), and the trigger reads the phase as described above. <span class="sw-status sw-planned">planned</span> Every other transition. Nothing writes `Analyzing`, `Proposed`, `Escalated` or `Resolved` yet, because the analysis (#16) is not built, and nothing moves an Incident between phases after that.
+
+**Rules.** <span class="sw-status sw-planned">planned</span>
+
+- The analyzer is the only component that moves an Incident between phases. It already owns the Incident's status; the operator's request controller never writes it (it reads a request's phase), no delete grant is added and invariant 6 is unchanged.
+- `Open`, `Proposed` and `Escalated` move to `Resolved` when the symptom has not been seen for 1 hour and no request that names the Incident (`incidentRef`) is still active. A request that reached `Succeeded` (merged and verified) resolves the Incident at once. Active means a request phase before a final one; the final phases are `Succeeded`, `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded` and `NeedsIntervention`.
+- A request that ends in any other final phase moves the Incident to `Escalated`, never `Resolved`: a person decides. That is `Denied`, `Expired`, `Failed`, `Cancelled` and `NeedsIntervention`, which includes a pull request rejected or closed without a merge (`NeedsIntervention`, reason `ChangeRequestClosed`, [section 6](6-reconciliation.md)). `Superseded` leaves the Incident to the newer request that names it, or `Escalated` when there is none.
+- A symptom seen again on a `Resolved` Incident reopens it: `Open`, a new analysis round, counters kept, the round counted. The new analysis gets only the symptoms and context, never the denial reason or any earlier policy outcome, so the model cannot search for what the policy allows (invariant 1: model output is never authorization).
+
+| From phase | Event | To phase | Written by | State |
+| --- | --- | --- | --- | --- |
+| none | first observation of a fingerprint is written | `Open` | Incident controller (analyzer) | Built |
+| `Open` | the trigger marks it due and the analysis starts | `Analyzing` | analyzer (analysis, #16) | Planned |
+| `Analyzing` | the analysis produced a RemediationRequest | `Proposed` | analyzer | Planned |
+| `Analyzing` | the analysis made no proposal | `Escalated` | analyzer | Planned |
+| `Analyzing` | no result after 10 min (taken as lost) | stays `Analyzing`, due again after the cooldown | trigger (`AnalysisTimedOut`) | Built (the mark; no analysis runs yet) |
+| `Proposed` | request `Succeeded` (merged and verified) | `Resolved` at once | analyzer | Planned |
+| `Open` | symptom not seen for 1 h and no active request | `Resolved` | analyzer | Planned |
+| `Proposed` | request `Denied` by policy | `Escalated` | analyzer | Planned |
+| `Proposed` | request `Expired`, `Failed` or `Cancelled` | `Escalated` | analyzer | Planned |
+| `Proposed` | pull request rejected or closed without a merge (request `NeedsIntervention`, `ChangeRequestClosed`), or any other `NeedsIntervention` | `Escalated` | analyzer | Planned |
+| `Proposed` | request `Superseded` | follows the newer request that names the Incident, `Escalated` when there is none | analyzer | Planned |
+| `Proposed` | symptom not seen for 1 h and no active request (symptoms gone before merge, or fixed by a person without the pull request) | `Resolved` | analyzer | Planned |
+| `Escalated` | symptom not seen for 1 h and no active request (a person fixed it, or it went away) | `Resolved` | analyzer | Planned |
+| `Escalated` | a person's fix does not hold: the symptom stays or returns | stays `Escalated` | none | Planned |
+| `Resolved` | symptom seen again (recurrence after success, or after a person's fix) | `Open`, new round | analyzer | Planned |
+
+A person fixing the cause by hand needs no step of its own: the symptom stops, and after an hour with no active request the analyzer resolves the Incident. A request still active when the symptom stops (a pull request waiting for review) keeps the Incident out of `Resolved` until the request ends; if it then merges and verifies, the request `Succeeded` resolves the Incident at once.
+
+```mermaid
+stateDiagram-v2
+    classDef planned stroke-dasharray: 5 5
+    [*] --> Open: first observation written
+    Open --> Analyzing: due, analysis starts
+    Analyzing --> Proposed: request created
+    Analyzing --> Escalated: no proposal
+    Open --> Resolved: symptom gone 1 h, no active request
+    Proposed --> Resolved: request Succeeded
+    Proposed --> Escalated: request ended without success
+    Proposed --> Resolved: symptom gone 1 h, no active request
+    Escalated --> Resolved: symptom gone 1 h, no active request
+    Resolved --> Open: symptom seen again, new round
+    class Analyzing,Proposed,Escalated,Resolved planned
+```
+
+Only the arrow into `Open` from the start is built; the dashed states and every other arrow are planned (#251, and the analysis, #16).
+
+**Cap.** <span class="sw-status sw-built">built</span> (the count); the rest <span class="sw-status sw-planned">planned</span>. The cap of 500 keeps counting every Incident, `Resolved` ones included, so the number of Incident objects stays bounded ([ADR-0007](../adr/0007-incident-state-in-crds.md)). `Resolved` only marks the Incidents that are safe to delete. They are not deleted automatically: that needs a delete grant for the analyzer, a change of invariant 6, and is a separate ADR task. Clean-up is manual, see [the cap is reached](../troubleshooting.md#the-incident-cap-is-reached). Built today: the cap counts every Incident, once, when the analyzer starts, so a restart follows the deletions.
 
 ## 3.3. Analysis
 

@@ -357,9 +357,29 @@ func checkRequest(in DecisionInput) (Reason, string) {
 	return "", ""
 }
 
+// CheckAction runs the policy's catalog and parameter check on one action alone: the type is in the catalog,
+// exactly its parameters are set and they are within the bounds of the schema. It returns an empty reason
+// when the action passes. The analysis runs it on a model's proposal before it creates a request, so a
+// proposal outside the catalog is refused in Go as well as by the schema; the policy still decides the
+// request (invariant 1).
+func CheckAction(a v1alpha1.Action) (Reason, string) {
+	return checkActionOf(a)
+}
+
+// ActionMayTarget reports whether the catalog lets an action of type t target an object of apiVersion and
+// kind, and whether the object's group and kind are outside the excluded ones. It is the catalog half of the
+// target check; the policy's own targets are checked when the request is decided.
+func ActionMayTarget(t v1alpha1.ActionType, apiVersion, kind string) bool {
+	k, ok := catalog[t]
+	return ok && k.allows(apiVersion, kind) && !excluded(apiGroup(apiVersion), kind)
+}
+
 // checkAction checks that the action is in the catalog and its parameters are well formed.
 func checkAction(in DecisionInput) (Reason, string) {
-	a := in.Request.Spec.Action
+	return checkActionOf(in.Request.Spec.Action)
+}
+
+func checkActionOf(a v1alpha1.Action) (Reason, string) {
 	if _, ok := catalog[a.Type]; !ok {
 		return ReasonActionUnknown, fmt.Sprintf("Action type %q is not in the action catalog", a.Type)
 	}

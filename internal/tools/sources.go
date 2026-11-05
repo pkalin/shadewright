@@ -153,7 +153,7 @@ func (s *Set) podLogs(ctx context.Context, a podLogsArgs, r *Result) error {
 			r.addLabel(m.l)
 		}
 	}
-	r.Text, r.headLen = v.Text, v.HeadLen
+	r.Text, r.headLen, r.raw = v.Text, v.HeadLen, true
 	return nil
 }
 
@@ -299,9 +299,10 @@ func (s *Set) queryMetrics(ctx context.Context, t metricTemplate, a queryMetrics
 		for _, k := range slices.Sorted(maps.Keys(se.Labels)) {
 			lb = append(lb, s.value(k)+"="+s.value(se.Labels[k]))
 		}
-		l.add("{%s} %s", strings.Join(lb, ", "), summary(se.Samples, t.overWindow))
+		// A series line is the source's answer.
+		l.add("%s", l.data("{"+strings.Join(lb, ", ")+"} "+summary(se.Samples, t.overWindow)))
 	}
-	r.Text = l.String()
+	r.Text, r.Values = l.String(), l.values
 	return nil
 }
 
@@ -375,10 +376,10 @@ func (s *Set) deliveryStatus(ctx context.Context, a deliveryArgs, r *Result) err
 		return nil
 	}
 	var l lines
-	l.add("applied revision: %s", s.value(st.AppliedRevision))
+	l.add("applied revision: %s", l.data(s.value(st.AppliedRevision)))
 	l.add("ready: %s", strconv.FormatBool(st.Ready))
-	l.add("message: %s", s.value(st.Message))
-	r.Text = l.String()
+	l.add("message: %s", l.data(s.value(st.Message)))
+	r.Text, r.Values = l.String(), l.values
 	return nil
 }
 

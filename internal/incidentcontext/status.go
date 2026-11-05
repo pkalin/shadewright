@@ -28,9 +28,17 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 )
 
-// lines collects the lines of a section; every value from the cluster goes through Builder.value first.
+// lines collects the lines of a section; every value from the cluster goes through Builder.value first, and
+// every value from a source that may be quoted as evidence through lines.data.
 type lines struct {
 	strings.Builder
+	values []string
+}
+
+// data records v, a value from a source as rendered, as quotable ([Block.Data]) and returns it.
+func (l *lines) data(v string) string {
+	l.values = append(l.values, v)
+	return v
 }
 
 func (l *lines) add(format string, args ...any) {
@@ -49,13 +57,13 @@ func stamp(t metav1.Time) string {
 func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 	s := inc.Spec
 	var l lines
-	l.add("subject: %s %s/%s", b.value(s.Subject.Kind), b.value(s.Subject.Namespace), b.value(s.Subject.Name))
-	l.add("reason: %s (%s)", b.value(s.Reason), b.value(s.Type))
+	l.add("subject: %s %s/%s", l.data(b.value(s.Subject.Kind)), l.data(b.value(s.Subject.Namespace)), l.data(b.value(s.Subject.Name)))
+	l.add("reason: %s (%s)", l.data(b.value(s.Reason)), l.data(b.value(s.Type)))
 	if s.ReportingController != "" {
-		l.add("reported by: %s", b.value(s.ReportingController))
+		l.add("reported by: %s", l.data(b.value(s.ReportingController)))
 	}
 	if s.Symptom != "" {
-		l.add("symptom: %s", b.value(s.Symptom))
+		l.add("symptom: %s", l.data(b.value(s.Symptom)))
 	}
 	st := inc.Status
 	l.add("occurrences: %d", st.Count)
@@ -66,10 +74,11 @@ func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 		l.add("last seen: %s", stamp(*st.LastSeen))
 	}
 	if st.Phase != "" {
+		// The phase is written by the analyzer itself, never evidence.
 		l.add("phase: %s", b.value(string(st.Phase)))
 	}
 	blk := Block{Section: SectionSummary, Provenance: ProvenanceIncident, Availability: Available}
-	b.finish(&blk, l.String(), b.limits.Summary)
+	b.finish(&blk, &l, b.limits.Summary)
 	return blk
 }
 
@@ -83,19 +92,19 @@ func (b *Builder) statusBlock(t *target) Block {
 		l.add("could not fetch: reading the target or its pods failed")
 	case targetUnsupported:
 		blk.Availability = NotAvailable
-		l.add("not available: the analyzer does not read objects of kind %s", b.value(t.ref.Kind))
+		l.add("not available: the analyzer does not read objects of kind %s", l.data(b.value(t.ref.Kind)))
 	case targetUnwatched:
 		blk.Availability = NotAvailable
 		l.add("not available: the target is in a namespace the analyzer does not watch")
 	case targetGone:
 		l.add("%s %s/%s no longer exists, or was replaced by another object of the same name",
-			b.value(t.ref.Kind), b.value(t.ref.Namespace), b.value(t.ref.Name))
+			l.data(b.value(t.ref.Kind)), l.data(b.value(t.ref.Namespace)), l.data(b.value(t.ref.Name)))
 	default:
 		b.workloadLines(&l, t)
 		b.podLines(&l, t)
 	}
 	b.podLabels(&blk, t)
-	b.finish(&blk, l.String(), b.limits.Status)
+	b.finish(&blk, &l, b.limits.Status)
 	return blk
 }
 
@@ -113,14 +122,14 @@ func (b *Builder) podLabels(blk *Block, t *target) {
 }
 
 func (b *Builder) conditionLine(l *lines, typ, status, reason, message string, since metav1.Time) {
-	l.add("  condition %s=%s since %s, reason %s: %s", b.value(typ), b.value(status), stamp(since),
-		b.value(reason), b.value(message))
+	l.add("  condition %s=%s since %s, reason %s: %s", l.data(b.value(typ)), l.data(b.value(status)), stamp(since),
+		l.data(b.value(reason)), l.data(b.value(message)))
 }
 
 func (b *Builder) workloadLines(l *lines, t *target) {
 	switch o := t.workload.(type) {
 	case *appsv1.Deployment:
-		l.add("Deployment %s/%s, generation %d, observed generation %d", b.value(o.Namespace), b.value(o.Name),
+		l.add("Deployment %s/%s, generation %d, observed generation %d", l.data(b.value(o.Namespace)), l.data(b.value(o.Name)),
 			o.Generation, o.Status.ObservedGeneration)
 		l.add("  replicas: desired %d, updated %d, ready %d, available %d, unavailable %d", desired(o.Spec.Replicas),
 			o.Status.UpdatedReplicas, o.Status.ReadyReplicas, o.Status.AvailableReplicas, o.Status.UnavailableReplicas)
@@ -128,21 +137,21 @@ func (b *Builder) workloadLines(l *lines, t *target) {
 			b.conditionLine(l, string(c.Type), string(c.Status), c.Reason, c.Message, c.LastTransitionTime)
 		}
 		for _, rs := range t.replicaSets {
-			l.add("  owns ReplicaSet %s, created %s, revision %s, replicas desired %d, ready %d", b.value(rs.Name),
-				stamp(rs.CreationTimestamp), b.value(rs.Annotations["deployment.kubernetes.io/revision"]),
+			l.add("  owns ReplicaSet %s, created %s, revision %s, replicas desired %d, ready %d", l.data(b.value(rs.Name)),
+				stamp(rs.CreationTimestamp), l.data(b.value(rs.Annotations["deployment.kubernetes.io/revision"])),
 				desired(rs.Spec.Replicas), rs.Status.ReadyReplicas)
 		}
 	case *appsv1.StatefulSet:
-		l.add("StatefulSet %s/%s, generation %d, observed generation %d", b.value(o.Namespace), b.value(o.Name),
+		l.add("StatefulSet %s/%s, generation %d, observed generation %d", l.data(b.value(o.Namespace)), l.data(b.value(o.Name)),
 			o.Generation, o.Status.ObservedGeneration)
 		l.add("  replicas: desired %d, current %d, updated %d, ready %d, available %d", desired(o.Spec.Replicas),
 			o.Status.CurrentReplicas, o.Status.UpdatedReplicas, o.Status.ReadyReplicas, o.Status.AvailableReplicas)
-		l.add("  current revision %s, update revision %s", b.value(o.Status.CurrentRevision), b.value(o.Status.UpdateRevision))
+		l.add("  current revision %s, update revision %s", l.data(b.value(o.Status.CurrentRevision)), l.data(b.value(o.Status.UpdateRevision)))
 		for _, c := range o.Status.Conditions {
 			b.conditionLine(l, string(c.Type), string(c.Status), c.Reason, c.Message, c.LastTransitionTime)
 		}
 	case *appsv1.ReplicaSet:
-		l.add("ReplicaSet %s/%s, generation %d, observed generation %d", b.value(o.Namespace), b.value(o.Name),
+		l.add("ReplicaSet %s/%s, generation %d, observed generation %d", l.data(b.value(o.Namespace)), l.data(b.value(o.Name)),
 			o.Generation, o.Status.ObservedGeneration)
 		l.add("  replicas: desired %d, ready %d, available %d", desired(o.Spec.Replicas), o.Status.ReadyReplicas,
 			o.Status.AvailableReplicas)
@@ -174,12 +183,12 @@ func (b *Builder) podLines(l *lines, t *target) {
 		p := &t.pods[i]
 		owner := ""
 		if ref := metav1.GetControllerOfNoCopy(p); ref != nil {
-			owner = ", controlled by " + b.value(ref.Kind) + " " + b.value(ref.Name)
+			owner = ", controlled by " + l.data(b.value(ref.Kind)) + " " + l.data(b.value(ref.Name))
 		}
-		l.add("pod %s%s, phase %s, created %s", b.value(p.Name), owner, b.value(string(p.Status.Phase)),
+		l.add("pod %s%s, phase %s, created %s", l.data(b.value(p.Name)), owner, l.data(b.value(string(p.Status.Phase))),
 			stamp(p.CreationTimestamp))
 		if p.Status.Reason != "" || p.Status.Message != "" {
-			l.add("  status reason %s: %s", b.value(p.Status.Reason), b.value(p.Status.Message))
+			l.add("  status reason %s: %s", l.data(b.value(p.Status.Reason)), l.data(b.value(p.Status.Message)))
 		}
 		for _, c := range p.Status.Conditions {
 			if c.Status != corev1.ConditionTrue {
@@ -198,21 +207,21 @@ func (b *Builder) containerLine(l *lines, cs containerStatus) {
 		kind = "init container"
 	}
 	parts := []string{fmt.Sprintf("ready %t, restarts %d", cs.Ready, cs.RestartCount)}
-	parts = append(parts, "now "+b.state(cs.State))
+	parts = append(parts, "now "+b.state(l, cs.State))
 	if cs.LastTerminationState.Terminated != nil {
-		parts = append(parts, "last "+b.state(cs.LastTerminationState))
+		parts = append(parts, "last "+b.state(l, cs.LastTerminationState))
 	}
-	l.add("  %s %s: %s", kind, b.value(cs.Name), strings.Join(parts, "; "))
+	l.add("  %s %s: %s", kind, l.data(b.value(cs.Name)), strings.Join(parts, "; "))
 }
 
-func (b *Builder) state(s corev1.ContainerState) string {
+func (b *Builder) state(l *lines, s corev1.ContainerState) string {
 	switch {
 	case s.Waiting != nil:
-		return fmt.Sprintf("waiting, reason %s: %s", b.value(s.Waiting.Reason), b.value(s.Waiting.Message))
+		return fmt.Sprintf("waiting, reason %s: %s", l.data(b.value(s.Waiting.Reason)), l.data(b.value(s.Waiting.Message)))
 	case s.Terminated != nil:
 		x := s.Terminated
 		return fmt.Sprintf("terminated, reason %s, exit code %d, signal %d, started %s, finished %s: %s",
-			b.value(x.Reason), x.ExitCode, x.Signal, stamp(x.StartedAt), stamp(x.FinishedAt), b.value(x.Message))
+			l.data(b.value(x.Reason)), x.ExitCode, x.Signal, stamp(x.StartedAt), stamp(x.FinishedAt), l.data(b.value(x.Message)))
 	case s.Running != nil:
 		return "running since " + stamp(s.Running.StartedAt)
 	}

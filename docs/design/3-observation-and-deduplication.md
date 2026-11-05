@@ -1,8 +1,8 @@
 # 3. Observation and deduplication
 
-This section covers how the analyzer turns cluster symptoms into `Incident` objects and decides when one is due for analysis. The collector (3.1) reads Warning events, pod status and the objects of active modules' symptom sources. Two levels of deduplication (3.2) keep the counts bounded and stable across restarts. The analysis (3.3) is only partly built: the context builder is built and given the real Prometheus and pod logs adapters but not called yet, and the analysis loop is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)).
+This section covers how the analyzer turns cluster symptoms into `Incident` objects and decides when one is due for analysis. The collector (3.1) reads Warning events, pod status and the objects of active modules' symptom sources. Two levels of deduplication (3.2) keep the counts bounded and stable across restarts. The analysis (3.3) is only partly built: the context builder is built and given the real Prometheus and pod logs adapters, and the analysis loop that calls it is built, but nothing starts the loop yet (the second part of [#76](https://github.com/pkalin/shadewright/issues/76)).
 
-[![Shadewright analyzer: the collector turns events, pod status and the HPAs of active modules' symptom sources in the watched namespaces into deduplicated, bounded Incidents; the analysis trigger decides when one is due, using analysis.maxAnalysesPerDay from the settings and a Budget ConfigMap; Prometheus and pod logs have adapters that the analyzer gives to the context builder, which is built but not called yet and makes a bounded, redacted context in provenance-tagged blocks; planned, drawn dashed: the model call with read tools on escalation, the model provider and the typed RemediationRequest.](../assets/diagrams/analyzer.svg)](../assets/diagrams/analyzer.svg "Open full size")
+[![Shadewright analyzer: the collector turns events, pod status and the HPAs of active modules' symptom sources in the watched namespaces into deduplicated, bounded Incidents; the analysis trigger decides when one is due, using analysis.maxAnalysesPerDay from the settings and a Budget ConfigMap; Prometheus and pod logs have adapters that the analyzer gives to the context builder, which makes a bounded, redacted context in provenance-tagged blocks; drawn dashed because the analyzer does not start it yet: the analysis loop, built, which claims a due Incident, calls the triage model once and the escalation model with read tools only on a deterministic signal, validates the result and creates the typed RemediationRequest or hands off to a person.](../assets/diagrams/analyzer.svg)](../assets/diagrams/analyzer.svg "Open full size")
 
 ## 3.1. Collecting
 
@@ -266,7 +266,7 @@ Whoever keeps a symptom flapping can delay an analysis by up to the window, not 
 
 - `Proposed` or `Escalated`: not due (reasons of the same name). How an incident leaves those phases is <span class="sw-status sw-planned">planned</span>, see [Incident lifecycle](#incident-lifecycle).
 - `Analyzing`: not due until 10 min after `lastAnalysisTime` (`Analyzing`), after which the analysis is taken as lost. It is due again (`AnalysisTimedOut`, with the debounce and the budget) once the cooldown has passed too, so at 15 min with the defaults, and `CoolingDown` in between.
-- `Analyzing` without a `lastAnalysisTime` cannot be placed against either, so it is not due (`AnalysisStartUnknown`) until its status is repaired: the analysis ([#16](https://github.com/pkalin/shadewright/issues/16)) must write the phase and the time in one status update.
+- `Analyzing` without a `lastAnalysisTime` cannot be placed against either, so it is not due (`AnalysisStartUnknown`) until its status is repaired. The analysis writes the phase and the time in one status update (`internal/analysis`, [#76](https://github.com/pkalin/shadewright/issues/76)), so it never leaves that state itself.
 - An Incident whose name holds another fingerprint is not decided; if it says due, it is set not due (`ForeignFingerprint`).
 
 **Writes.** The condition is written only when the decision changes from due to not due or back, or between two reasons for due. A change between two reasons for not due is not written, and the first reason stays, so a change that turns every Incident's reason at once (the budget used up, or set to 0) costs no writes. The writes carry the field manager `shadewright-analysis-trigger`.
@@ -281,14 +281,14 @@ Whoever keeps a symptom flapping can delay an analysis by up to the window, not 
 
 **Marking Incidents due.** Each Incident marked due takes one more unit of what is left. Those already due go first, then the oldest by `firstSeen`. So no more Incidents are due at once than the budget has left, and a flood of new fingerprints does not push older incidents out of it. A mark whose write failed or whose answer was lost still takes its unit.
 
-**Taking a unit.** The mark is not the check. `ReserveAnalysis` is built, and the analysis ([#16](https://github.com/pkalin/shadewright/issues/16), <span class="sw-status sw-planned">planned</span>) will call it before it calls the model. It reads the ConfigMap, adds one to the day's count (starting at 1 on a new UTC day) and updates it with the resourceVersion it read (an update, not a patch), retrying on conflict. It refuses when:
+**Taking a unit.** The mark is not the check. `ReserveAnalysis` is built, and the analysis loop (`internal/analysis`, [#76](https://github.com/pkalin/shadewright/issues/76)) calls it once per analysis, after the context is built and the first call's provider, and before the first model call; the analyzer binary does not start the loop yet. It reads the ConfigMap, adds one to the day's count (starting at 1 on a new UTC day) and updates it with the resourceVersion it read (an update, not a patch), retrying on conflict. It refuses when:
 
 - the settings hold no `analysis.maxAnalysesPerDay`;
 - the count reached the daily limit (the lower of it and the deprecated `spec.maxAnalysesPerDay`);
 - the ConfigMap is missing;
 - the ConfigMap cannot be trusted.
 
-Until #16 calls it, nothing adds to the count, so the budget is read but not yet enforced. A unit is never given back; a lost answer can only overcount.
+Until the analyzer starts the loop (the second part of #76), nothing adds to the count, so the budget is read but not yet enforced. A unit is never given back; a lost answer can only overcount.
 
 <span class="sw-status sw-planned">planned</span> One unit is one claimed attempt: all calls, retries and tool rounds of one run, counted on the UTC day it was reserved, a lost response included; token and money limits are separate bounds ([ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md))
 
@@ -298,7 +298,7 @@ Until #16 calls it, nothing adds to the count, so the budget is read but not yet
 
 ### Incident lifecycle
 
-Decided on 2026-11-05 ([#251](https://github.com/pkalin/shadewright/issues/251)); what is built and what is planned is marked in each row. <span class="sw-status sw-built">built</span> Today the controller creates an Incident with the phase `Open` (a status with no phase gets `Open` on its first write), and the trigger reads the phase as described above. <span class="sw-status sw-planned">planned</span> Every other transition. Nothing writes `Analyzing`, `Proposed`, `Escalated` or `Resolved` yet, because the analysis (#16) is not built, and nothing moves an Incident between phases after that.
+Decided on 2026-11-05 ([#251](https://github.com/pkalin/shadewright/issues/251)); what is built and what is planned is marked in each row. <span class="sw-status sw-built">built</span> Today the controller creates an Incident with the phase `Open` (a status with no phase gets `Open` on its first write), and the trigger reads the phase as described above. <span class="sw-status sw-built">built</span>, not wired. The analysis controller (`internal/analysis`, [#76](https://github.com/pkalin/shadewright/issues/76)) writes `Analyzing`, `Proposed` and `Escalated`; the analyzer binary starts it in the second part of #76, so on `main` nothing writes them yet. <span class="sw-status sw-planned">planned</span> Every other transition: nothing writes `Resolved` and nothing moves an Incident on from `Proposed` or `Escalated` (#251).
 
 **Rules.** <span class="sw-status sw-planned">planned</span>
 
@@ -309,11 +309,11 @@ Decided on 2026-11-05 ([#251](https://github.com/pkalin/shadewright/issues/251))
 
 | From phase | Event | To phase | Written by | State |
 | --- | --- | --- | --- | --- |
-| none | a symptom seen again 2 to 15 min after its first sighting, one whose observation proves recurrence (a series total of 2 or more), or an immediate one (`OOMKilled`, a module source's symptom state), is written | `Open` | Incident controller (analyzer) | Built |
-| `Open` | the trigger marks it due and the analysis starts | `Analyzing` | analyzer (analysis, #16) | Planned |
-| `Analyzing` | the analysis produced a RemediationRequest | `Proposed` | analyzer | Planned |
-| `Analyzing` | the analysis made no proposal | `Escalated` | analyzer | Planned |
-| `Analyzing` | no result after 10 min (taken as lost) | stays `Analyzing`, due again after the cooldown | trigger (`AnalysisTimedOut`) | Built (the mark; no analysis runs yet) |
+| none | a symptom seen again 2 to 15 min after its first sighting, one whose observation proves recurrence (its occurrence repeated at least 2 min after it began), or an immediate one (`OOMKilled`, a module source's symptom state), is written | `Open` | Incident controller (analyzer) | Built |
+| `Open` | the trigger marks it due and the analysis starts | `Analyzing` | analyzer (analysis, #76) | Built, not wired |
+| `Analyzing` | the analysis produced a RemediationRequest | `Proposed` | analyzer | Built, not wired |
+| `Analyzing` | the analysis made no proposal | `Escalated` | analyzer | Built, not wired |
+| `Analyzing` | no result after 10 min (taken as lost) | stays `Analyzing`, due again after the cooldown | trigger (`AnalysisTimedOut`) | Built (the mark); the analysis controller claims such an Incident again, built, not wired: nothing starts the loop until the second part of #76 |
 | `Proposed` | request `Succeeded` (merged and verified) | `Resolved` at once | analyzer | Planned |
 | `Open` | symptom not seen for 1 h and no active request | `Resolved` | analyzer | Planned |
 | `Proposed` | request `Denied` by policy | `Escalated` | analyzer | Planned |
@@ -343,7 +343,7 @@ stateDiagram-v2
     class Analyzing,Proposed,Escalated,Resolved planned
 ```
 
-Only the arrow into `Open` from the start is built; the dashed states and every other arrow are planned (#251, and the analysis, #16).
+Only the arrow into `Open` from the start runs on `main`. The arrows into and out of `Analyzing` are built in `internal/analysis` and not yet started by the analyzer (#76); every other arrow is planned (#251).
 
 **Cap.** <span class="sw-status sw-built">built</span> (the count); the rest <span class="sw-status sw-planned">planned</span>. The cap of 500 keeps counting every Incident, `Resolved` ones included, so the number of Incident objects stays bounded ([ADR-0007](../adr/0007-incident-state-in-crds.md)). `Resolved` only marks the Incidents that are safe to delete. They are not deleted automatically: that needs a delete grant for the analyzer, a change of invariant 6, and is a separate ADR task. Clean-up is manual, see [the cap is reached](../troubleshooting.md#the-incident-cap-is-reached). Built today: the cap counts every Incident, once, when the analyzer starts, so a restart follows the deletions.
 
@@ -355,7 +355,7 @@ Decided in [ADR-0023](../adr/0023-how-the-analyzer-calls-the-model.md) (accepted
 
 ### Design: the order of work
 
-This is the target flow. The analysis loop that runs it is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)); the context builder is built but not called yet.
+This is the flow. The analysis loop that runs it is <span class="sw-status sw-built">built</span> in `internal/analysis` and tested with a fake model and fake tools; the analyzer binary starts it, with the Foundry adapter, in the second part of [#76](https://github.com/pkalin/shadewright/issues/76). No runbook ships yet, so every analysis takes the model path.
 
 - Deterministic rules and known runbooks run first. A runbook match is deterministic and makes no model call.
 - The model path is for incidents no runbook matched. Its common case is one small-model call: the context builder assembles a bounded, redacted context deterministically (incident summary, object status and owners, a log excerpt, selected metrics and recent Git changes for the source of the object) and the small model returns one structured result.
@@ -363,7 +363,7 @@ This is the target flow. The analysis loop that runs it is <span class="sw-statu
 
 ### The context builder
 
-<span class="sw-status sw-built">built</span>, not called yet: the analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76)) will call it. The analyzer creates it with the Prometheus adapter (`--prometheus-url`) and the pod logs adapter (`--pod-logs`) and the watched namespaces ([#371](https://github.com/pkalin/shadewright/issues/371)): an Incident whose subject is in any other namespace gets status, logs and metrics "not available", refused before any read or source call.
+<span class="sw-status sw-built">built</span>, called by the analysis loop, which the analyzer does not start yet ([#76](https://github.com/pkalin/shadewright/issues/76)). The analyzer creates it with the Prometheus adapter (`--prometheus-url`) and the pod logs adapter (`--pod-logs`) and the watched namespaces ([#371](https://github.com/pkalin/shadewright/issues/371)): an Incident whose subject is in any other namespace gets status, logs and metrics "not available", refused before any read or source call.
 
 The context builder (`internal/incidentcontext`) works on the `MetricsSource` and `LogSource` interfaces and the analyzer's existing reads. It is not called `internal/context`, so that it never shadows the standard library's `context` package. For one Incident it makes five sections, in this order, each a block tagged with its provenance:
 
@@ -411,27 +411,64 @@ A log source that answers that the pod is gone or refuses the request (no previo
 
 ### The prompt and the result
 
-<span class="sw-status sw-planned">planned</span> Not built: `internal/analysis` does not exist yet ([#16](https://github.com/pkalin/shadewright/issues/16)). The design is:
+<span class="sw-status sw-built">built</span> in `internal/analysis`, tested with a fake model; the analyzer starts it in the second part of [#76](https://github.com/pkalin/shadewright/issues/76).
 
-- The prompt is a Go `embed` template in `internal/analysis/prompts/`, reviewed like code; there is no setting, ConfigMap or CRD for it. Its catalog and the output schema are generated from the Go action and result types.
-- It has a static system part (role, rules, catalog, schema) and then the untrusted context in delimited blocks tagged with their provenance, with a rule that their text is data, never instructions.
-- Each analysis record stores the prompt version (a content hash), the model deployment and ID, and the token counts. What the model sees also depends on operator redaction patterns and on the deployment, which is why the evaluation (11.2) is keyed on model and prompt together <span class="sw-status sw-planned">planned</span> and, once [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md) is accepted, on a manifest of every such input.
+- The prompt is a Go `embed` template in `internal/analysis/prompts/`, reviewed like code; there is no setting, ConfigMap or CRD for it. Its catalog and the output schema are generated from the Go types: the result types and the API's `ActionType` and `VerificationCheck` enums. `PromptVersion` is a content hash of the template, the schema and the catalog.
+- It has a static system part (role, rules, catalog, schema) and then the untrusted context in a user message, one delimited block per section, tagged with an ID (`c1`, `c2`...), its section, provenance, availability and labels, with a rule that their text is data, never instructions. Every angle bracket look-alike in the text is escaped and any spelling of the delimiter renamed, so the text can neither close its block nor open another. Tool results come back the same way, as `t1`, `t2`...
+- <span class="sw-status sw-planned">planned</span> Each analysis record stores the prompt version, the model deployment and ID, and the token counts (ADR-0015); today the loop returns them and the controller logs them. What the model sees also depends on operator redaction patterns and on the deployment, which is why the evaluation (11.2) is keyed on a manifest of every such input ([ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md)).
 
-The result has a fixed schema: hypotheses, evidence, missing data, uncertainty, proposed action, expected effect and verification conditions.
+The result has a fixed schema: a summary, hypotheses, evidence (quotes with the block ID), missing data, uncertainty in words, and a proposal (an action, its expected effect and extra verification checks) or `null`. It has no confidence field.
 
+- The schema is strict: every field is listed, nothing else is allowed, and the action type is the API's enum. The loop checks the reply again in Go: one top-level JSON object whose objects have every field of the schema, in its exact case, and no other (a confidence field included), null only where the schema allows it, every length, list and range bound, and the policy's catalog check on the action's parameters (`policy.CheckAction`). A reply that fails is invalid as a whole.
 - When the evidence is not there, the correct result is no proposal and a hand-off to a human. A non-empty "missing data" is a hand-off that says what is missing, not an escalation.
+- A proposal needs at least one quote of 8 bytes or more found verbatim within one data value of the block or tool result it cites. The data values are what came from a source, redacted as shown: each value the summary and status lines are built from (a reason, a symptom, a condition message, a pod name), each metric series line, a log excerpt without its header, an object's JSON from `get_resource`. Text that code writes around them is never quotable, and a quote cannot span two values: not the labels of a line (`occurrences: 3`, `restarts 4`), the Incident's phase (the analyzer writes it), a fixed sentence (a target that "no longer exists, or was replaced by another object of the same name"), the answer lines of `check_missing_reference` ("referenced by the pod spec: true"), a block that is not available or could not be fetched (such as "not available: no Git source is configured"), nor a block's header, labels, log header or fixed lines. A tool result is quotable only when the call is about the Incident's subject or one of its attributed pods (decided 2026-11-05): an answer that names no pod or object (`list_events` without the subject, `query_metrics` without a pod) or another object (`get_resource` on another object, `query_metrics` for another pod) is shown to the model but is never evidence, nor is a tool result that was refused, not found, not available or could not be fetched, nor one labelled `pod outside the incident's attributed pods`. Its target is always the Incident's subject, which the action must be allowed to target (`policy.ActionMayTarget`), and its `policyRef` the policy configured for the action type: the model names neither. Today that means `SetContainerMemoryLimit` on a Deployment or StatefulSet subject; `AdjustKedaMaxReplicas` targets a ScaledObject, which no Incident has as its subject yet, so it is handed off.
 - A model's self-reported confidence never makes an action eligible and never triggers escalation.
-- The structured result is the only way a proposal is made: one validator checks it against the schema and the catalog and builds the `RemediationRequest`.
+- The structured result is the only way a proposal is made. The analysis controller, not the model, creates the `RemediationRequest` in the operator namespace with `approvalRequired: true`; the executor's policy check decides it (invariant 1).
 - If policy later denies the request, the analyzer does not propose again, and the denial reason is never shown to the model.
+
+### The loop and its limits
+
+<span class="sw-status sw-built">built</span> in `internal/analysis`, not yet started by the analyzer ([#76](https://github.com/pkalin/shadewright/issues/76)).
+
+```mermaid
+flowchart TD
+    due["Incident due (AnalysisDue)"] --> claim["claim: Analyzing + lastAnalysisTime, one status update"]
+    claim --> rb{"runbook matches?"}
+    rb -- yes --> plan
+    rb -- no --> triage_cfg{"triage model configured?"}
+    triage_cfg -- no --> handoff
+    triage_cfg -- yes --> ctx["build the context"]
+    ctx --> first{"first call's model configured and its provider built?"}
+    first -- no --> handoff
+    first -- yes --> budget{"ReserveAnalysis"}
+    budget -- refused --> handoff
+    budget -- ok --> signal{"context truncated or a source failed?"}
+    signal -- no --> triage["triage call, no tools; one corrected retry after invalid output"]
+    triage -- valid --> check
+    triage -- invalid twice --> esc
+    signal -- yes --> esc["escalation: read tools, at most maxToolSteps calls"]
+    esc -- valid --> check["evidence, target, policy"]
+    esc -- invalid or a limit --> handoff
+    check -- ok --> plan["create RemediationRequest; Proposed"]
+    check -- refused --> handoff["Escalated: hand-off with a reason"]
+```
+
+- **Claim.** The controller analyzes an Incident the trigger marked due in phase `Open` or none, or `Analyzing` with the reason `AnalysisTimedOut`. It never claims a `Resolved` Incident: reopening one (`Resolved` to `Open`) is planned (#251). It first writes the phase `Analyzing`, `lastAnalysisTime` and `AnalysisDue` (not due, `Analyzing`) in one status update with the resourceVersion it read; a conflict means another write came first and nothing is analyzed. The outcome is a second update: `Proposed` with the request's name in `remediationRequests`, or `Escalated`, and the condition `Analyzed` with the reason. A stop or a lost leadership leaves `Analyzing`, which the trigger takes as lost after 10 minutes. A durable claim with a run ID is #249.
+- **Budget.** One unit of `analysis.maxAnalysesPerDay` per analysis, taken after the context is built and before the first model call, and only once that call can be made: its model (triage, or escalation when the context already signals it) is configured and its provider was built. A refusal (spent, or a budget that cannot be read or trusted) is a hand-off with no model call. With no triage model configured, with an escalation signal and no escalation model, or with a provider that cannot be built (an endpoint outside the allow-list), no unit is used.
+- **Steps.** The triage call has no tools; its one retry adds a fixed corrective message that names the broken rule by a code (`malformed-reply`, `tool-call`, `schema`, `action` for an action whose members do not match its type) and never repeats the reply. An action that fails the policy's catalog check (`policy.CheckAction`, outside the catalog's bounds) gets no retry and no feedback, so the model cannot search for what the policy allows: in triage or escalation it is a hand-off (`ActionOutOfBounds`), not an escalation (decided 2026-11-05). An escalation offers the same read tools on every turn, at most `maxToolSteps` tool calls in at most `maxToolSteps` + 1 turns: the Foundry adapter refuses a reply that calls a tool the request did not offer as malformed output (a hand-off), so the tools are never dropped mid-escalation. A call past the limit within a reply is refused; the last turn says in a fixed message that no calls are left, and a tool call on it is a hand-off (`StepLimit`). A tool that is never offered is never described to the model, not even by name in a refusal.
+- **Tokens.** Each call is charged its reported input and output tokens, or its upper bound (an estimate of one token per two bytes sent, plus `maxOutputTokens`) when the usage is unknown or the call failed. Charging a failed call its upper bound is deliberate and fails closed: whether the service billed it cannot be told (a timeout may come after the reply was generated). A call is not made when it could take the analysis past its bound (500,000 tokens by default) or its deployment past `maxTokensPerDay` within this analysis; counting a deployment's spend across analyses and days is #208.
+- **Deadline.** 8 minutes per analysis, under the trigger's 10-minute analysis timeout. Running out is a hand-off.
+- **Concurrency.** At most `analysis.maxConcurrentAnalyses` analyses at once; a due Incident beyond that is looked at again 10 s later.
+- **Errors.** `ErrRetryable` with a delay of at most 30 s is waited out once within the deadline, then handed off (the Foundry adapter has already retried). The retry counts toward the same bound, so an analysis makes at most 3 + `maxToolSteps` model calls in total ([ADR-0023](../adr/0023-how-the-analyzer-calls-the-model.md) decision 6); a call past it is a hand-off (`ModelUnavailable`); `ErrNotFound`, `ErrForbidden`, any other error and malformed escalated output hand off. Malformed triage output is retried once, then escalates.
 
 ### Escalation
 
-<span class="sw-status sw-planned">planned</span> Not built; the read tools are <span class="sw-status sw-built">built</span> ([#74](https://github.com/pkalin/shadewright/issues/74)) and wait for the analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76)). Escalation runs on deterministic signals only:
+<span class="sw-status sw-built">built</span> in the analysis loop, not yet started by the analyzer ([#76](https://github.com/pkalin/shadewright/issues/76)). Escalation runs on deterministic signals only:
 
 - the context builder truncated the context or could not fetch a source; or
 - the small model's output failed schema validation after one retry.
 
-The stronger model then gets the read tools, within the same budgets, at most once per incident fingerprint per cooldown window.
+The stronger model then gets the read tools, within the same budgets. Since an Incident is analyzed at most once per cooldown and an analysis escalates at most once, that is at most once per incident fingerprint per cooldown window. Each tool call is bound to the namespace of the Incident's subject: a call that names another namespace is refused before the tool reads. `get_delivery_status` is not offered until its delivery namespaces are decided. An answer about a pod that the context builder did not attribute to the subject is labelled `pod outside the incident's attributed pods`, so a neighbour's data is not read as the target's evidence. An invalid escalated result is handed off, never retried.
 
 What does not count, because the signal is controlled by someone who can write to a watched namespace:
 

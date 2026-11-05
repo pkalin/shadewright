@@ -71,6 +71,12 @@ const (
 	ActionSetContainerMemoryLimit ActionType = "SetContainerMemoryLimit"
 )
 
+// ActionTypes returns every value of the ActionType enum, in the enum's order. The analysis builds the model's
+// output schema and the catalog section of its prompt from it, so an action added here appears in both.
+func ActionTypes() []ActionType {
+	return []ActionType{ActionAdjustKedaMaxReplicas, ActionSetContainerMemoryLimit}
+}
+
 // Action is one entry from the action catalog. Exactly the member named by type is set.
 // +kubebuilder:validation:XValidation:rule="self.type == 'AdjustKedaMaxReplicas' ? has(self.adjustKedaMaxReplicas) : !has(self.adjustKedaMaxReplicas)",message="adjustKedaMaxReplicas must be set if and only if type is AdjustKedaMaxReplicas"
 // +kubebuilder:validation:XValidation:rule="self.type == 'SetContainerMemoryLimit' ? has(self.setContainerMemoryLimit) : !has(self.setContainerMemoryLimit)",message="setContainerMemoryLimit must be set if and only if type is SetContainerMemoryLimit"

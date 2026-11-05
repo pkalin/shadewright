@@ -49,8 +49,8 @@ func TestBuildSectionsInOrder(t *testing.T) {
 		t.Fatalf("context escalates: truncated %t, failed %v", c.Truncated, c.FailedSources)
 	}
 	status := one(t, c, SectionStatus)
-	for _, s := range []string{"Deployment shop/web", "MinimumReplicasUnavailable", "owns ReplicaSet web-abc",
-		"pod web-abc-1", "CrashLoopBackOff"} {
+	for _, s := range []string{"Deployment shop/web", unavailable, "owns ReplicaSet web-abc",
+		"pod web-abc-1", crashLoop} {
 		if !strings.Contains(status.Text, s) {
 			t.Errorf("status lacks %q:\n%s", s, status.Text)
 		}
@@ -66,6 +66,10 @@ func TestBuildSectionsInOrder(t *testing.T) {
 	if one(t, c, SectionSummary).Provenance != ProvenanceIncident || logs.Provenance != ProvenanceLogExcerpt ||
 		one(t, c, SectionMetrics).Provenance != ProvenanceMetric || status.Provenance != ProvenanceObjectStatus {
 		t.Errorf("provenance tags: %+v", c.Blocks)
+	}
+	// The attributed pods, most troubled first, for the analysis loop's attribution label.
+	if strings.Join(c.Pods, ",") != "web-abc-1,web-abc-2" {
+		t.Errorf("pods %v, want web-abc-1,web-abc-2", c.Pods)
 	}
 }
 
@@ -533,5 +537,95 @@ func TestWindow(t *testing.T) {
 		if got := w.end.Sub(w.start); got != tc.want || !w.end.Equal(testNow) {
 			t.Errorf("%s: window %s, want %s", name, got, tc.want)
 		}
+	}
+}
+
+// Data is what a quote may cite: nothing of a block that is not available, a log block without its header,
+// and otherwise only the recorded values still in the text.
+func TestBlockData(t *testing.T) {
+	head := "pod web-1 container app, current instance\n"
+	restarts := "container_restarts_total{pod=web-1} 7"
+	limit := "container_memory_limit_bytes{pod=web-1} 268435456"
+	for name, tc := range map[string]struct {
+		blk  Block
+		want []string
+	}{
+		"not available": {Block{Section: SectionGit, Availability: NotAvailable,
+			Text: "not available: no Git source is configured\n"}, nil},
+		"could not fetch": {Block{Section: SectionStatus, Availability: CouldNotFetch,
+			Text: "could not fetch: reading the target or its pods failed\n", Values: []string{"target"}}, nil},
+		"log header": {Block{Section: SectionLogs, Availability: Available, Text: head + "out of memory\n",
+			headLen: len(head)}, []string{"out of memory\n"}},
+		"metrics fixed lines": {Block{Section: SectionMetrics, Availability: Available,
+			Text: restarts + "\ncontainer_waiting_reason" + fixedCouldNotFetch + "\n" +
+				"container_cpu_usage_cores" + fixedNoSeries + partialSuffix + "\n" + limit + "\n",
+			Values: []string{restarts, limit}},
+			[]string{restarts, limit}},
+		"summary values only": {Block{Section: SectionSummary, Availability: Available,
+			Text: "symptom: Back-off restarting\noccurrences: 3\n", Values: []string{"Back-off restarting", ""}},
+			[]string{"Back-off restarting"}},
+		"value cut away": {Block{Section: SectionStatus, Availability: Available, Text: "pod web-abc-1\n",
+			Values: []string{crashPod, "web-abc-2", crashPod}}, []string{crashPod}},
+	} {
+		if got := tc.blk.Data(); strings.Join(got, "|") != strings.Join(tc.want, "|") || len(got) != len(tc.want) {
+			t.Errorf("%s: data %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+// quotable reports whether q lies within one part of the block's data, as the evidence check asks.
+func quotable(blk Block, q string) bool {
+	for _, part := range blk.Data() {
+		if strings.Contains(part, q) {
+			return true
+		}
+	}
+	return false
+}
+
+// Labels, sentences and numbers the builder writes are never quotable, though they are in the block: only
+// values from a source are (review pattern 23). A claimed Incident's phase is the analyzer's own word.
+func TestOnlySourceValuesAreQuotable(t *testing.T) {
+	inc := incident(deploymentRef())
+	inc.Status.Phase = remediationv1alpha1.IncidentAnalyzing
+	c := build(t, newBuilder(t, reader(t, webObjects()...), webSources(), nil), inc)
+	for _, tc := range []struct {
+		section Section
+		quote   string
+		want    bool
+	}{
+		{SectionSummary, "phase: Analyzing", false},
+		{SectionSummary, "Analyzing", false},
+		{SectionSummary, "occurrences: 3", false},
+		{SectionSummary, "reason: BackOff", false},
+		{SectionSummary, "Back-off restarting failed container app", true},
+		{SectionStatus, "owns ReplicaSet web-abc", false},
+		{SectionStatus, "current pods: 2", false},
+		{SectionStatus, "restarts 4", false},
+		{SectionStatus, "waiting, reason CrashLoopBackOff", false},
+		{SectionStatus, crashLoop, true},
+		{SectionStatus, unavailable, true},
+		{SectionLogs, "previous instance", false},
+		{SectionLogs, "panic: boom", true},
+		{SectionMetrics, "container_restarts_total{container=app,pod=web-abc-1} 1", true},
+	} {
+		blk := one(t, c, tc.section)
+		if !strings.Contains(blk.Text, tc.quote) {
+			t.Fatalf("%s lacks %q:\n%s", tc.section, tc.quote, blk.Text)
+		}
+		if got := quotable(blk, tc.quote); got != tc.want {
+			t.Errorf("%s: quoting %q is evidence: %t, want %t", tc.section, tc.quote, got, tc.want)
+		}
+	}
+
+	ref := deploymentRef()
+	ref.UID = "uid-of-an-older-web"
+	gone := one(t, build(t, newBuilder(t, reader(t, webObjects()...), webSources(), nil), incident(ref)), SectionStatus)
+	const sentence = "no longer exists, or was replaced by another object of the same name"
+	if !strings.Contains(gone.Text, sentence) || quotable(gone, sentence) || quotable(gone, "Deployment shop/web") {
+		t.Errorf("the gone-target sentence is quotable: %q of\n%s", gone.Data(), gone.Text)
+	}
+	if !quotable(gone, "Deployment") {
+		t.Errorf("the subject's kind is not quotable: %q", gone.Data())
 	}
 }

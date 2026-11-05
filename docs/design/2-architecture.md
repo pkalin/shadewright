@@ -163,7 +163,7 @@ Provider SDKs are imported only inside their adapter package. Each interface has
 
 **What it does.** The adapter (`internal/providers/metrics/prometheus`) speaks the plain Prometheus HTTP query API with the standard library. It runs only the templates listed in section 4, and only for the namespaces it is configured with (section 4).
 
-**How the analyzer wires it.** With `--prometheus-url` set, the analyzer creates it with the watched namespaces (`--watch-namespaces`, the set of the cache and the RoleBindings) and gives it to the context builder (3.3), which the analysis loop does not call yet ([#76](https://github.com/pkalin/shadewright/issues/76)). Without the flag the metrics section is "not available". More than 256 watched namespaces with the flag set refuse the start.
+**How the analyzer wires it.** With `--prometheus-url` set, the analyzer creates it with the watched namespaces (`--watch-namespaces`, the set of the cache and the RoleBindings) and gives it to the context builder (3.3), which the analysis loop calls; nothing starts the loop yet (the second part of [#76](https://github.com/pkalin/shadewright/issues/76) wires it). Without the flag the metrics section is "not available". More than 256 watched namespaces with the flag set refuse the start.
 
 - With `--prometheus-cluster`, the analyzer checks at startup and every 10 minutes, on every replica, with one fixed query that is not a template and returns no label, that kube-state-metrics and cAdvisor both hold series with that `cluster` value. With no watched namespace it builds no source and runs no check.
 - When they do not, the analyzer still starts and logs an error, and metrics are **unavailable**: every query fails, so the metrics section is "could not fetch", which escalates (3.3), rather than empty answers read as evidence of absence. A label that disappears later switches metrics off at the next check, and one that appears switches them on.
@@ -189,7 +189,7 @@ HTTP status handling is in 2.6.
 
 **Limits.**
 
-- The analyzer creates it unless `--pod-logs=false`, with the watched namespaces, and gives it to the context builder (3.3), which the analysis loop does not call yet ([#76](https://github.com/pkalin/shadewright/issues/76)). It reads with the analyzer's own identity: `get` on `pods/log` in the watch role, so only in the watched namespaces (2.2.2).
+- The analyzer creates it unless `--pod-logs=false`, with the watched namespaces, and gives it to the context builder (3.3), which the analysis loop calls; nothing starts the loop yet (the second part of [#76](https://github.com/pkalin/shadewright/issues/76) wires it). It reads with the analyzer's own identity: `get` on `pods/log` in the watch role, so only in the watched namespaces (2.2.2).
 - It takes at most 256 namespaces. With more in `--watch-namespaces` and logs on, the analyzer refuses to start with a configuration error that names the limit (decided on [#371](https://github.com/pkalin/shadewright/issues/371)): running without logs would make every analysis escalate on a source it could not fetch.
 - It reads one container of one pod per call, only in the namespaces it is configured with, within the bounds of section 4. It redacts the excerpt before returning it.
 

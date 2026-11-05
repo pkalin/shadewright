@@ -128,7 +128,7 @@ func (s *Set) getResource(ctx context.Context, a getResourceArgs, r *Result) err
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	r.Text = string(b) + "\n"
+	r.Text, r.raw = string(b)+"\n", true
 	return nil
 }
 
@@ -306,10 +306,11 @@ func (s *Set) listEvents(ctx context.Context, a listEventsArgs, r *Result) error
 	var l lines
 	l.add("%d events match; the newest %d are shown", len(evs), min(len(evs), a.Limit.v))
 	for _, e := range evs[:min(len(evs), a.Limit.v)] {
-		l.add("%s %s %s %s/%s count %d: %s", eventTime(e).UTC().Format(time.RFC3339), s.value(e.Type),
-			s.value(e.Reason), s.value(e.Regarding.Kind), s.value(e.Regarding.Name), eventCount(e), s.value(e.Note))
+		l.add("%s %s %s %s/%s count %d: %s", eventTime(e).UTC().Format(time.RFC3339), l.data(s.value(e.Type)),
+			l.data(s.value(e.Reason)), l.data(s.value(e.Regarding.Kind)), l.data(s.value(e.Regarding.Name)),
+			eventCount(e), l.data(s.value(e.Note)))
 	}
-	r.Text = l.String()
+	r.Text, r.Values = l.String(), l.values
 	return nil
 }
 
@@ -383,15 +384,15 @@ func (s *Set) checkReference(ctx context.Context, a checkReferenceArgs, r *Resul
 		l.add("what is missing: %s", res.What)
 		l.add("evidence: %s", res.Source)
 		if res.Key != "" {
-			l.add("key: %s", s.value(res.Key))
+			l.add("key: %s", l.data(s.value(res.Key)))
 		}
 		if res.Container != "" {
-			l.add("container: %s", s.value(res.Container))
+			l.add("container: %s", l.data(s.value(res.Container)))
 		}
 		if res.Volume != "" {
-			l.add("volume: %s", s.value(res.Volume))
+			l.add("volume: %s", l.data(s.value(res.Volume)))
 		}
 	}
-	r.Text = l.String()
+	r.Text, r.Values = l.String(), l.values
 	return nil
 }

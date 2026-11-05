@@ -199,16 +199,16 @@ func (s *Source) Query(ctx context.Context, q providers.MetricsQuery) (providers
 		return providers.MetricsResult{}, err
 	}
 	form.Set("timeout", strconv.FormatInt(server.Milliseconds(), 10)+"ms")
-	series, err := s.do(ctx, path, form, win, t.info.Labels)
+	res, err := s.do(ctx, path, form, win, t.info.Labels)
 	if err != nil {
-		return nil, err
+		return providers.MetricsResult{}, err
 	}
 	if t.info.Pods {
-		if err := onlyPods(series, pods); err != nil {
-			return nil, err
+		if err := onlyPods(res.Series, pods); err != nil {
+			return providers.MetricsResult{}, err
 		}
 	}
-	return series, nil
+	return res, nil
 }
 
 // onlyPods refuses a result with a series of any pod outside the set the query selected, or without a pod

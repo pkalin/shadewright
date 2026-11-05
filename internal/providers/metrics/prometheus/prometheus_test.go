@@ -484,12 +484,12 @@ func TestOnlyTheTargetPodsAreSelected(t *testing.T) {
 			s, _, _ := testSource(t, fakePrometheus(t, known))
 			q := instant("container_restarts_total")
 			q.Pods = c.target
-			got, err := s.Query(testCtx(t), q)
+			res, err := s.Query(testCtx(t), q)
 			if err != nil {
 				t.Fatal(err)
 			}
-			pods := make([]string, 0, len(got))
-			for _, series := range got {
+			pods := make([]string, 0, len(res.Series))
+			for _, series := range res.Series {
 				pods = append(pods, series.Labels["pod"])
 			}
 			if !slices.Equal(pods, c.want) {
@@ -514,7 +514,7 @@ func TestSeriesOfOtherPodsAreRefused(t *testing.T) {
 					`{"metric":`+metric+`,"value":[`+nowSecs+`,"1"]}]}}`)
 			})
 			got, err := s.Query(testCtx(t), instant("container_restarts_total"))
-			if !errors.Is(err, ErrInvalidResponse) || got != nil {
+			if !errors.Is(err, ErrInvalidResponse) || got.Series != nil {
 				t.Fatalf("result = %v, error = %v; want ErrInvalidResponse", got, err)
 			}
 			if strings.Contains(err.Error(), "web-v2-0") {

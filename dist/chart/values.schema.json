@@ -180,6 +180,21 @@
             }
           }
         },
+        "modules": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "keda": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        },
         "prometheus": {
           "type": "object",
           "additionalProperties": false,
@@ -187,7 +202,7 @@
             "url": {
               "type": "string",
               "maxLength": 2048,
-              "pattern": "^(https?://[^\\s\"]+)?$"
+              "pattern": "^(https?://[^\\s\"@?#/]+(/[^\\s\"?#]*)?)?$"
             },
             "cluster": {
               "type": "string",

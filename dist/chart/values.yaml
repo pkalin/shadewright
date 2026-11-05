@@ -201,8 +201,13 @@ analyzer:
     # -- Give the analyzer the pod logs source (`--pod-logs`) and its grant: `get` on `pods/log` in the watch ClusterRole, bound only in the watched namespaces. `false` passes `--pod-logs=false` and renders no `pods/log` rule. With more than 256 watched namespaces the analyzer refuses to start unless this is `false`.
     # @section -- Analyzer
     enabled: true
+  modules:
+    keda:
+      # -- Grant the analyzer `get` on KEDA `scaledobjects` in the watched namespaces (the watch ClusterRole), for the KEDA module's symptom source. `false` renders no `scaledobjects` rule: use it when KEDA is not installed. The module itself stays compiled in and finds nothing to read without the grant.
+      # @section -- Analyzer
+      enabled: true
   prometheus:
-    # -- Base URL of the Prometheus query API the analyzer reads metrics from (`--prometheus-url`), `http` or `https`, such as `http://prometheus-server.prometheus.svc`. Empty (the default) passes no flag: no metrics. Open the NetworkPolicy egress to Prometheus too (`networkPolicy.analyzer.prometheus`).
+    # -- Base URL of the Prometheus query API the analyzer reads metrics from (`--prometheus-url`), `http` or `https`, with no user info, query or fragment, such as `http://prometheus-server.prometheus.svc`. Empty (the default) passes no flag: no metrics. Open the NetworkPolicy egress to Prometheus too (`networkPolicy.analyzer.prometheus`).
     # @section -- Analyzer
     url: ""
     # -- The `cluster` label value of this cluster's series (`--prometheus-cluster`), for a Prometheus shared by several clusters. Empty passes no flag. Used only with `analyzer.prometheus.url`.

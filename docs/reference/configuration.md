@@ -38,6 +38,9 @@ analyzer:
   watchNamespaces: [<namespace to watch>]
   podLogs:
     enabled: true   # false: --pod-logs=false and no pods/log rule
+  modules:
+    keda:
+      enabled: true   # false: no scaledobjects rule (KEDA not installed)
   prometheus:
     url: ""         # --prometheus-url, when set
     cluster: ""     # --prometheus-cluster, when set

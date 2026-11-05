@@ -45,9 +45,11 @@ rules:
   - get
   - list
   - watch
+{{- if .Values.analyzer.modules.keda.enabled }}
 - apiGroups:
   - keda.sh
   resources:
   - scaledobjects
   verbs:
   - get
+{{- end }}

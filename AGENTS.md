@@ -181,11 +181,13 @@ Docs site (Zensical, published to shadewright.io by `.github/workflows/docs.yml`
 python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements-docs.txt
 .venv/bin/zensical serve    # preview on localhost:8000
 .venv/bin/zensical build --clean   # must say "No issues found"
+make docs-check             # build, then check internal links, heading anchors and published URLs (hack/docs-check.py; the Docs workflow runs it on pull requests)
 make docs-requirements      # after editing requirements-docs.in: regenerate the hash-locked requirements-docs.txt
 ```
 
 ## Docs and decisions
 
+- Published URLs are kept: `hack/docs-published-paths.txt` lists every page path of shadewright.io, and the Docs workflow fails when a listed path no longer resolves to a page or a redirect page. Adding a page needs no change; moving or deleting one means a redirect, or removing its line from the list in the same pull request, which makes it a visible decision. Regenerate the list from a build with `python3 -I hack/docs-check.py list site`. External links are not checked on pull requests; `docs-links.yml` reports the ones that do not answer weekly, without failing.
 - `docs/design.md` is the system design; its section 15 lists decisions made and open questions. `docs/adr/` holds decisions (template and index there). A new page or ADR must also be added to `nav` in `zensical.toml`.
 - When a change implements or alters a design decision, update the design or add an ADR in the same PR.
 - Docs are written with the code, in the same PR, not later:

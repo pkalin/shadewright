@@ -9,6 +9,9 @@
 !**/*.go
 **/*_test.go
 
+# Re-include files that Go code embeds (go:embed): the analysis prompt template
+!internal/analysis/prompts/*.tmpl
+
 # Re-include Go module files
 !go.mod
 !go.sum

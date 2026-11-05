@@ -4,7 +4,7 @@ title: Upgrade and uninstall
 
 # Upgrade and uninstall
 
-What to do, in which order, when you move Shadewright to a new release or remove it. The steps are written for the manifests of v0.1.0 (`config/default`, applied with `kubectl apply -k`, see [getting started](install.md#install-with-kubectl-and-kustomize)); the commands for the Helm chart are in [Upgrade with Helm](#upgrade-with-helm) and [Uninstall with Helm](#uninstall-with-helm). The Helm chart installs the same objects, except the helper roles (off by default) and the Namespace, and the order below applies to `helm upgrade` and `helm uninstall` too. Note that `helm uninstall` keeps the CRDs by default (`crd.keep`), and that with `crd.keep=false` it removes the executor and the CRDs together, so do steps 1 to 3 of the [uninstall](#uninstall) first. Helm creates the `RemediationSettings` object `default` only when it does not exist and never changes or deletes it afterwards.
+What to do, in which order, when you move Shadewright to a new release or remove it. The steps are written for the manifests of a release (`config/default`, applied with `kubectl apply -k`, see [getting started](install.md#install-with-kubectl-and-kustomize)); the commands for the Helm chart are in [Upgrade with Helm](#upgrade-with-helm) and [Uninstall with Helm](#uninstall-with-helm). The Helm chart installs the same objects, except the helper roles (off by default) and the Namespace, and the order below applies to `helm upgrade` and `helm uninstall` too. Note that `helm uninstall` keeps the CRDs by default (`crd.keep`), and that with `crd.keep=false` it removes the executor and the CRDs together, so do steps 1 to 3 of the [uninstall](#uninstall) first. Helm creates the `RemediationSettings` object `default` only when it does not exist and never changes or deletes it afterwards.
 
 The one thing to know first: **a `RemediationRequest` that has opened a pull request carries a finalizer, and only the executor can remove it.** Delete the executor, the namespace or the CRDs before the requests and they stay `Terminating` with nobody to clean up.
 
@@ -26,7 +26,7 @@ A request that never reached the Git step has no finalizer and is simply deleted
 
 Deleting a request before merge is today the only way to cancel it, and what it does is the list above: close the pull request, remove the object.
 
-`Cancelled` is a phase in the API ("cancelled before the change was merged") and in the [design](design.md), but **nothing sets it in v0.1.0**: there is no field or action that cancels a request and keeps it as a record, and no issue for it yet. If you need the record, copy the object before deleting it. `Cancelled` and `Superseded` differ: `Superseded` is set by the executor when the plan went stale (policy, settings or target changed) and the pull request was closed; see [troubleshooting](troubleshooting.md#freshness).
+`Cancelled` is a phase in the API ("cancelled before the change was merged") and in the [design](design.md), but **nothing sets it yet**: there is no field or action that cancels a request and keeps it as a record, and no issue for it yet. If you need the record, copy the object before deleting it. `Cancelled` and `Superseded` differ: `Superseded` is set by the executor when the plan went stale (policy, settings or target changed) and the pull request was closed; see [troubleshooting](troubleshooting.md#freshness).
 
 ## Verify a release
 
@@ -112,7 +112,7 @@ Then, from v0.1.0, the patch of step 3, and steps 7 and 8 (check, unpause). `hel
 
 The order matters only if requests exist. Do it in this order:
 
-1. **Get ready to clean up**: make sure `spec.paused` is **false** and that the GitHub App and the Key Vault key still work, because closing pull requests needs both. Nothing else needs stopping first: in v0.1.0 nothing creates requests by itself.
+1. **Get ready to clean up**: make sure `spec.paused` is **false** and that the GitHub App and the Key Vault key still work, because closing pull requests needs both. Nothing else needs stopping first: nothing creates requests by itself yet.
 2. **Delete the requests** and wait until they are gone:
 
    ```bash

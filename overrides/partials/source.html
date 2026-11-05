@@ -2,6 +2,9 @@
   The theme's source link, without data-md-component="source": that attribute makes the theme script fetch the
   latest release, stars and forks from api.github.com in every reader's browser. The docs site makes no
   request to a third-party host (#365).
+  The version and the star count come from partials/source-facts.html instead: the docs workflow writes it at
+  build time (gh api with the job's token, step "Fetch release facts"), in the theme's own markup. The file is
+  git-ignored; a build without it (local, docs-check) shows the link alone.
 -#}
 <a href="{{ config.repo_url }}" title="{{ lang.t('source') }}" class="md-source">
   <div class="md-source__icon md-icon">
@@ -10,5 +13,6 @@
   </div>
   <div class="md-source__repository">
     {{ config.repo_name }}
+    {% include "partials/source-facts.html" ignore missing %}
   </div>
 </a>

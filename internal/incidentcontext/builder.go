@@ -31,10 +31,15 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
-// Timeouts of one source call: a cluster read, a metrics query or a log read.
+// Timeouts of one source call (a cluster read, a metrics query or a log read) and of a whole build. A build
+// makes up to about 30 calls one after the other, so the build deadline, not the sum of the call timeouts,
+// bounds how long it takes: the calls left when it passes are not made, and their sources are marked "could
+// not fetch".
 const (
 	DefaultSourceTimeout = 30 * time.Second
 	MaxSourceTimeout     = 2 * time.Minute
+	DefaultBuildTimeout  = 2 * time.Minute
+	MaxBuildTimeout      = 5 * time.Minute
 )
 
 // The window of an analysis: from a little before the Incident was first seen until now.
@@ -78,6 +83,8 @@ type Config struct {
 	Limits Limits
 	// SourceTimeout bounds each source call; zero means [DefaultSourceTimeout], at most [MaxSourceTimeout].
 	SourceTimeout time.Duration
+	// BuildTimeout bounds a whole build; zero means [DefaultBuildTimeout], at most [MaxBuildTimeout].
+	BuildTimeout time.Duration
 	// Now returns the current time; nil means time.Now.
 	Now func() time.Time
 }
@@ -90,6 +97,7 @@ type Builder struct {
 	redactor      Redactor
 	limits        Limits
 	timeout       time.Duration
+	buildTimeout  time.Duration
 	now           func() time.Time
 }
 
@@ -113,12 +121,18 @@ func New(cfg Config) (*Builder, error) {
 	if cfg.SourceTimeout < 0 || cfg.SourceTimeout > MaxSourceTimeout {
 		return nil, fmt.Errorf("context builder: source timeout %s is outside 0 to %s", cfg.SourceTimeout, MaxSourceTimeout)
 	}
+	if cfg.BuildTimeout == 0 {
+		cfg.BuildTimeout = DefaultBuildTimeout
+	}
+	if cfg.BuildTimeout < 0 || cfg.BuildTimeout > MaxBuildTimeout {
+		return nil, fmt.Errorf("context builder: build timeout %s is outside 0 to %s", cfg.BuildTimeout, MaxBuildTimeout)
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
 	return &Builder{
 		pods: cfg.Pods, objects: cfg.Objects, metrics: cfg.Metrics, logs: cfg.Logs, redactor: cfg.Redactor,
-		limits: cfg.Limits, timeout: cfg.SourceTimeout, now: cfg.Now,
+		limits: cfg.Limits, timeout: cfg.SourceTimeout, buildTimeout: cfg.BuildTimeout, now: cfg.Now,
 	}, nil
 }
 
@@ -151,6 +165,7 @@ func (b *Builder) Build(ctx context.Context, inc *remediationv1alpha1.Incident) 
 		return nil, fmt.Errorf("building the context: %w", err)
 	}
 	w := windowOf(inc, b.now().UTC())
+	ctx = context.WithValue(ctx, buildDeadlineKey{}, time.Now().Add(b.buildTimeout))
 	c := &Context{}
 	c.Blocks = append(c.Blocks, b.summaryBlock(inc))
 
@@ -193,9 +208,27 @@ func (b *Builder) Build(ctx context.Context, inc *remediationv1alpha1.Incident) 
 	return c, nil
 }
 
-// call runs one source call with the builder's timeout.
+// buildDeadlineKey carries the deadline of one build in its context. It is a value, not the context's own
+// deadline, so that a source call cut short by it is a failed source, while a cancelled or expired context of
+// the caller still abandons the build.
+type buildDeadlineKey struct{}
+
+// errBuildDeadline is the error of a source call that the build deadline cut short or kept from starting.
+var errBuildDeadline = errors.New("the context build ran out of time")
+
+// call runs one source call with the builder's timeout, cut to what is left of the build deadline. Once the
+// deadline has passed it does not call the source at all.
 func (b *Builder) call(ctx context.Context, f func(ctx context.Context) error) error {
-	cctx, cancel := context.WithTimeout(ctx, b.timeout)
+	deadline := time.Now().Add(b.timeout)
+	if bd, ok := ctx.Value(buildDeadlineKey{}).(time.Time); ok {
+		if !time.Now().Before(bd) {
+			return errBuildDeadline
+		}
+		if bd.Before(deadline) {
+			deadline = bd
+		}
+	}
+	cctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	return f(cctx)
 }

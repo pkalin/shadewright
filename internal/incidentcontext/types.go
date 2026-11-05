@@ -139,6 +139,9 @@ const (
 	// LabelContextCut means the builder cut the block to fit the whole context in [Limits.Total]; the context
 	// is then [Context.Truncated].
 	LabelContextCut Label = "cut to the context bound"
+	// LabelLeadingLinesDropped means the builder dropped lines at the start of a log excerpt that may continue
+	// an entry whose first line the source left out (indented lines, YAML sequence entries, blank lines).
+	LabelLeadingLinesDropped Label = "leading continuation lines dropped"
 	// LabelLogTruncated means the log source cut older lines from the excerpt.
 	LabelLogTruncated Label = "log excerpt truncated by the source"
 	// LabelLogEndMissing means the log source could not read the newest lines.

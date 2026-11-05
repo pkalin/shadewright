@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/analyzer/ownership"
 	"github.com/pkalin/shadewright/internal/groupversion"
 )
 
@@ -97,11 +98,10 @@ func validRef(r remediationv1alpha1.ObjectRef) bool {
 	return r.UID != "" && len(r.UID) <= 128
 }
 
-// Bounds on what is kept from an owner or a pod: real workloads have a few labels and a short selector, and
-// anything larger is not followed, so the caches cannot be filled with large objects.
+// Bounds on what is kept from an owner or a pod are those of package ownership, shared with the context
+// builder: anything larger is not followed, so the caches cannot be filled with large objects.
 const (
-	maxLabels        = 64
-	maxSelectorTerms = 64
+	maxLabels = ownership.MaxLabels
 	// ownerMissTTL is how long a reference that could not be verified (no such object, another UID, a
 	// selector out of bounds) is remembered: briefly, so an owner created a moment after its pod is found
 	// soon.
@@ -369,7 +369,7 @@ func (r *ownerResolver) read(ctx context.Context, ns string, ref metav1.OwnerRef
 	if obj.GetUID() != ref.UID || len(obj.GetLabels()) > maxLabels {
 		return ownerFacts{}, nil
 	}
-	selector, ok := boundedSelector(sel())
+	selector, ok := ownership.Selector(sel())
 	if !ok {
 		return ownerFacts{}, nil
 	}
@@ -381,24 +381,4 @@ func (r *ownerResolver) read(ctx context.Context, ns string, ref metav1.OwnerRef
 		}
 	}
 	return facts, nil
-}
-
-// boundedSelector converts a workload's selector. It refuses an empty one, which would select everything
-// (the apps/v1 API refuses it too), and one with more than maxSelectorTerms terms.
-func boundedSelector(ls *metav1.LabelSelector) (labels.Selector, bool) {
-	if ls == nil || len(ls.MatchLabels)+len(ls.MatchExpressions) == 0 {
-		return nil, false
-	}
-	terms := len(ls.MatchLabels)
-	for _, e := range ls.MatchExpressions {
-		terms += 1 + len(e.Values)
-	}
-	if terms > maxSelectorTerms {
-		return nil, false
-	}
-	s, err := metav1.LabelSelectorAsSelector(ls)
-	if err != nil {
-		return nil, false
-	}
-	return s, true
 }

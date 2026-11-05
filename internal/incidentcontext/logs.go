@@ -37,21 +37,25 @@ type logPick struct {
 	restarts                  int32
 }
 
-// logPicks chooses the containers to read, most relevant first: one whose last instance terminated (its
-// previous instance's tail holds the lines before the termination), then one that waits with a reason, then
-// one that is not ready. When no container shows trouble, the first container of the first pod is read.
-func logPicks(t *target) []logPick {
+// logPicks chooses the containers to read, most relevant first: one whose last instance terminated inside
+// the window (its previous instance's tail holds the lines before the termination), then one that waits
+// with a reason or terminated with an error, then one that is not ready. A termination that finished before
+// the window, and a container that ran to completion (a finished init container), are not trouble. When no
+// container shows trouble, the first regular container of the most troubled pod is read.
+func logPicks(t *target, w window) []logPick {
 	var all []logPick
 	for i := range t.pods {
 		p := &t.pods[i]
 		for _, cs := range allStatuses(p) {
 			pick := logPick{namespace: p.Namespace, pod: p.Name, container: cs.Name, init: cs.init, restarts: cs.RestartCount}
+			last := cs.LastTerminationState.Terminated
 			switch {
-			case cs.LastTerminationState.Terminated != nil:
+			case last != nil && last.FinishedAt.After(w.start):
 				pick.score, pick.previous = 3, true
-			case cs.State.Waiting != nil && cs.State.Waiting.Reason != "":
+			case cs.State.Waiting != nil && cs.State.Waiting.Reason != "",
+				cs.State.Terminated != nil && !completed(cs):
 				pick.score = 2
-			case !cs.Ready:
+			case !cs.Ready && !completed(cs):
 				pick.score = 1
 			}
 			all = append(all, pick)
@@ -65,7 +69,15 @@ func logPicks(t *target) []logPick {
 	for n < len(all) && n < MaxLogExcerpts && all[n].score > 0 {
 		n++
 	}
-	return all[:max(n, min(1, len(all)))]
+	if n > 0 {
+		return all[:n]
+	}
+	for _, pick := range all {
+		if !pick.init {
+			return []logPick{pick}
+		}
+	}
+	return all[:min(1, len(all))]
 }
 
 func notAvailable(sec Section, prov Provenance, text string) Block {
@@ -78,7 +90,7 @@ func (b *Builder) logBlocks(ctx context.Context, t *target, w window) ([]Block, 
 	if b.logs == nil {
 		return []Block{notAvailable(SectionLogs, ProvenanceLogExcerpt, "not available: no log source is configured\n")}, false, nil
 	}
-	picks := logPicks(t)
+	picks := logPicks(t, w)
 	if t.state != targetResolved || len(picks) == 0 {
 		return []Block{notAvailable(SectionLogs, ProvenanceLogExcerpt, "not available: no pod of the target to read logs from\n")}, false, nil
 	}
@@ -146,7 +158,12 @@ func (b *Builder) logBlock(pick logPick, ex providers.LogExcerpt, err error, bud
 		in := ex.Instance
 		h.add("instance: pod uid %s, container id %s, restarts %d, read at %s", b.value(in.PodUID),
 			b.value(in.ContainerID), in.RestartCount, ex.CollectedAt.UTC().Format(time.RFC3339))
-		body = ex.Text
+		// Before redaction: the lines that may continue an entry whose first line the source left out go, so a
+		// secret value whose key line was cut never reaches the redactor alone.
+		var dropped bool
+		if body, dropped = dropLeadingContinuation(ex.Text); dropped {
+			blk.addLabel(LabelLeadingLinesDropped)
+		}
 		if ex.Truncated {
 			blk.addLabel(LabelLogTruncated)
 		}

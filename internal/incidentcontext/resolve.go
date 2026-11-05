@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/analyzer/ownership"
 )
 
 const (
@@ -54,10 +55,6 @@ const (
 	// MaxReplicaSets bounds the ReplicaSets of a Deployment the builder reads (one get each). A rollout has a
 	// few with pods; the bound leaves room for ReplicaSets that pods name falsely.
 	MaxReplicaSets = 16
-	// maxLabels and maxSelectorTerms bound what is followed, as in the collector: real workloads have a few
-	// labels and a short selector.
-	maxLabels        = 64
-	maxSelectorTerms = 64
 )
 
 // targetState says how far the target was resolved.
@@ -84,12 +81,15 @@ type target struct {
 	replicaSets []*appsv1.ReplicaSet
 	// pods are the target's current pods, most relevant first, at most MaxPods.
 	pods []corev1.Pod
+	// total is the number of the target's current pods found, before the bound.
+	total int
 	// uncertain means a pod was created inside the window or the workload rolled within it.
 	uncertain bool
 	// capped means pods or ReplicaSets were left out.
 	capped bool
-	// selectorOutOfBounds means the workload's selector was empty or too large to follow.
-	selectorOutOfBounds bool
+	// outOfBounds means the workload exists but has more labels, or a larger (or empty) selector, than the
+	// builder follows (package ownership), so its pods are not resolved. The workload is not gone.
+	outOfBounds bool
 }
 
 // resolve reads the target and its current pods. Owner references are untrusted: each hop is read, must
@@ -121,16 +121,31 @@ func (b *Builder) resolve(ctx context.Context, ref remediationv1alpha1.ObjectRef
 	if t.state != targetResolved {
 		return t
 	}
-	for i := range t.pods {
-		if t.pods[i].CreationTimestamp.After(w.start) {
-			t.uncertain = true
+	// A Pod subject is matched by its UID, so its pod set is exact; a workload's current pods may differ from
+	// those it had during the window.
+	if ref.Kind != kindPod {
+		for i := range t.pods {
+			if t.pods[i].CreationTimestamp.After(w.start) {
+				t.uncertain = true
+			}
 		}
 	}
-	slices.SortFunc(t.pods, comparePods)
+	t.pods = sortPods(t.pods)
+	t.total = len(t.pods)
 	if len(t.pods) > MaxPods {
 		t.pods, t.capped = t.pods[:MaxPods], true
 	}
 	return t
+}
+
+// workloadInBounds reports whether the workload's labels are within the bound; otherwise it marks the target
+// out of bounds.
+func workloadInBounds(t *target, obj client.Object) bool {
+	if len(obj.GetLabels()) > ownership.MaxLabels {
+		t.outOfBounds = true
+		return false
+	}
+	return true
 }
 
 // get reads one object with the builder's timeout and reports whether it exists with the given UID.
@@ -145,14 +160,15 @@ func (b *Builder) get(ctx context.Context, r client.Reader, ns, name string, uid
 	if err != nil {
 		return false, fmt.Errorf("reading a %s: %w", kind, err)
 	}
-	return obj.GetUID() == uid && len(obj.GetLabels()) <= maxLabels, nil
+	return obj.GetUID() == uid, nil
 }
 
-// listPods lists the pods of a namespace from the cache.
-func (b *Builder) listPods(ctx context.Context, ns string) ([]corev1.Pod, error) {
+// listPods lists the pods of a namespace that the workload's selector matches, from the cache. Each is
+// checked again with ownership.Selects, which also bounds its labels.
+func (b *Builder) listPods(ctx context.Context, ns string, sel labels.Selector) ([]corev1.Pod, error) {
 	var list corev1.PodList
 	if err := b.call(ctx, func(ctx context.Context) error {
-		return b.pods.List(ctx, &list, client.InNamespace(ns))
+		return b.pods.List(ctx, &list, client.InNamespace(ns), client.MatchingLabelsSelector{Selector: sel})
 	}); err != nil {
 		return nil, fmt.Errorf("listing the pods of an Incident's namespace: %w", err)
 	}
@@ -170,8 +186,16 @@ func controlledBy(obj metav1.Object, kind string) *metav1.OwnerReference {
 
 // selects reports whether sel matches the object's labels, within the bound on labels.
 func selects(sel labels.Selector, obj metav1.Object) bool {
-	l := obj.GetLabels()
-	return len(l) <= maxLabels && sel.Matches(labels.Set(l))
+	return ownership.Selects(sel, obj)
+}
+
+// selectorOf converts a workload's selector within the bounds, or marks the target out of bounds.
+func selectorOf(t *target, ls *metav1.LabelSelector) (labels.Selector, bool) {
+	sel, ok := ownership.Selector(ls)
+	if !ok {
+		t.outOfBounds = true
+	}
+	return sel, ok
 }
 
 func (b *Builder) resolveDeployment(ctx context.Context, t *target, w window) error {
@@ -185,12 +209,14 @@ func (b *Builder) resolveDeployment(ctx context.Context, t *target, w window) er
 		return nil
 	}
 	t.workload = &d
-	dsel, ok := boundedSelector(d.Spec.Selector)
-	if !ok {
-		t.selectorOutOfBounds = true
+	if !workloadInBounds(t, &d) {
 		return nil
 	}
-	pods, err := b.listPods(ctx, d.Namespace)
+	dsel, ok := selectorOf(t, d.Spec.Selector)
+	if !ok {
+		return nil
+	}
+	pods, err := b.listPods(ctx, d.Namespace, dsel)
 	if err != nil {
 		return err
 	}
@@ -238,7 +264,7 @@ func (b *Builder) resolveDeployment(ctx context.Context, t *target, w window) er
 		if !found || owner == nil || owner.UID != d.UID || !selects(dsel, rs) {
 			continue
 		}
-		if sel, ok := boundedSelector(rs.Spec.Selector); ok {
+		if sel, ok := ownership.Selector(rs.Spec.Selector); ok {
 			sets[k] = verified{rs, sel}
 		}
 	}
@@ -280,12 +306,14 @@ func (b *Builder) resolveStatefulSet(ctx context.Context, t *target) error {
 		return nil
 	}
 	t.workload = &s
-	sel, ok := boundedSelector(s.Spec.Selector)
-	if !ok {
-		t.selectorOutOfBounds = true
+	if !workloadInBounds(t, &s) {
 		return nil
 	}
-	pods, err := b.listPods(ctx, s.Namespace)
+	sel, ok := selectorOf(t, s.Spec.Selector)
+	if !ok {
+		return nil
+	}
+	pods, err := b.listPods(ctx, s.Namespace, sel)
 	if err != nil {
 		return err
 	}
@@ -313,12 +341,14 @@ func (b *Builder) resolveReplicaSet(ctx context.Context, t *target) error {
 		return nil
 	}
 	t.workload = &rs
-	sel, ok := boundedSelector(rs.Spec.Selector)
-	if !ok {
-		t.selectorOutOfBounds = true
+	if !workloadInBounds(t, &rs) {
 		return nil
 	}
-	pods, err := b.listPods(ctx, rs.Namespace)
+	sel, ok := selectorOf(t, rs.Spec.Selector)
+	if !ok {
+		return nil
+	}
+	pods, err := b.listPods(ctx, rs.Namespace, sel)
 	if err != nil {
 		return err
 	}
@@ -344,26 +374,6 @@ func (b *Builder) resolvePod(ctx context.Context, t *target) error {
 	return nil
 }
 
-// boundedSelector converts a workload's selector. It refuses an empty one, which would select everything,
-// and one with more than maxSelectorTerms terms.
-func boundedSelector(ls *metav1.LabelSelector) (labels.Selector, bool) {
-	if ls == nil || len(ls.MatchLabels)+len(ls.MatchExpressions) == 0 {
-		return nil, false
-	}
-	terms := len(ls.MatchLabels)
-	for _, e := range ls.MatchExpressions {
-		terms += 1 + len(e.Values)
-	}
-	if terms > maxSelectorTerms {
-		return nil, false
-	}
-	s, err := metav1.LabelSelectorAsSelector(ls)
-	if err != nil {
-		return nil, false
-	}
-	return s, true
-}
-
 func boolInt(v bool) int {
 	if v {
 		return 1
@@ -371,35 +381,55 @@ func boolInt(v bool) int {
 	return 0
 }
 
-// trouble scores a pod: the more restarts, waiting or terminated containers and unready containers, the more
+// trouble scores a pod: the more restarts, waiting or failed containers and unready containers, the more
 // relevant it is to the incident.
 type trouble struct {
-	broken   int   // containers waiting with a reason, or terminated, now or last time
+	broken   int   // containers waiting with a reason, terminated with an error, or restarted
 	restarts int32 // restarts of all containers
-	unready  int   // containers not ready
+	unready  int   // containers not ready, other than those that ran to completion
+}
+
+// completed reports a container that ran to completion (exit code 0), such as a finished init container:
+// that is not trouble, although it is not ready.
+func completed(cs containerStatus) bool {
+	return cs.State.Terminated != nil && cs.State.Terminated.ExitCode == 0
 }
 
 func troubleOf(p *corev1.Pod) trouble {
 	var t trouble
 	for _, cs := range allStatuses(p) {
-		if (cs.State.Waiting != nil && cs.State.Waiting.Reason != "") || cs.State.Terminated != nil ||
-			cs.LastTerminationState.Terminated != nil {
+		if (cs.State.Waiting != nil && cs.State.Waiting.Reason != "") ||
+			(cs.State.Terminated != nil && !completed(cs)) || cs.LastTerminationState.Terminated != nil {
 			t.broken++
 		}
 		t.restarts += max(cs.RestartCount, 0)
-		if !cs.Ready {
+		if !cs.Ready && !completed(cs) {
 			t.unready++
 		}
 	}
 	return t
 }
 
-// comparePods orders pods most troubled first, then by name.
-func comparePods(a, b corev1.Pod) int {
-	ta, tb := troubleOf(&a), troubleOf(&b)
-	return cmp.Or(
-		-cmp.Compare(ta.broken, tb.broken), -cmp.Compare(ta.restarts, tb.restarts),
-		-cmp.Compare(ta.unready, tb.unready), cmp.Compare(a.Name, b.Name))
+// sortPods orders pods most troubled first, then by name, scoring each pod once.
+func sortPods(pods []corev1.Pod) []corev1.Pod {
+	type scored struct {
+		pod *corev1.Pod
+		tr  trouble
+	}
+	order := make([]scored, len(pods))
+	for i := range pods {
+		order[i] = scored{&pods[i], troubleOf(&pods[i])}
+	}
+	slices.SortFunc(order, func(a, b scored) int {
+		return cmp.Or(
+			-cmp.Compare(a.tr.broken, b.tr.broken), -cmp.Compare(a.tr.restarts, b.tr.restarts),
+			-cmp.Compare(a.tr.unready, b.tr.unready), cmp.Compare(a.pod.Name, b.pod.Name))
+	})
+	out := make([]corev1.Pod, len(pods))
+	for i, s := range order {
+		out[i] = *s.pod
+	}
+	return out
 }
 
 // containerStatus is a container status with whether it belongs to an init container.

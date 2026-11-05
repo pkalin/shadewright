@@ -147,8 +147,8 @@ func (b *Builder) workloadLines(l *lines, t *target) {
 			b.conditionLine(l, string(c.Type), string(c.Status), c.Reason, c.Message, c.LastTransitionTime)
 		}
 	}
-	if t.selectorOutOfBounds {
-		l.add("  its selector is empty or too large to follow: pods not resolved")
+	if t.outOfBounds {
+		l.add("  its labels or its selector are larger than the builder follows, or the selector is empty: pods not resolved")
 	}
 }
 
@@ -160,8 +160,12 @@ func desired(r *int32) int32 {
 }
 
 func (b *Builder) podLines(l *lines, t *target) {
-	if t.workload != nil && !t.selectorOutOfBounds {
-		l.add("current pods: %d", len(t.pods))
+	if t.workload != nil && !t.outOfBounds {
+		if t.total > len(t.pods) {
+			l.add("current pods: %d, the %d most troubled shown", t.total, len(t.pods))
+		} else {
+			l.add("current pods: %d", t.total)
+		}
 	}
 	for i := range t.pods {
 		p := &t.pods[i]

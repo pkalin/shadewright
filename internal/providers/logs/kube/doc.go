@@ -16,14 +16,37 @@ limitations under the License.
 
 // Package kube is the Kubernetes pod logs adapter of [providers.LogSource] (ADR-0013, design sections 2.3 and
 // 4). It reads the log of one container of one pod through the pods/log subresource of the API server, with
-// client-go's pods client ([PodsGetter], which CoreV1() of a clientset, real or fake, satisfies). It is built
-// but not wired: the analyzer does not create it yet, and has no grant on pods/log.
+// client-go's pods client, and reads the pod itself through the REST client to tie the excerpt to an instance
+// ([PodsGetter]: CoreV1() of a real clientset; [New] refuses the fake clientset's, which has no REST client).
+// The pod read needs get on pods, which the analyzer's watch role already grants, bound only in the watched
+// namespaces. It is built but not wired: the analyzer does not create it yet, and has no grant on pods/log.
+//
+// Instance: a log request names a pod and a container by name only. It cannot ask for a pod UID or a
+// container ID, and Previous is relative to the instance running when the kubelet answers. So the adapter
+// reads the pod before the first and after the last logs request, and records in the excerpt the pod UID, the
+// container ID of the instance asked for (the current container, or for Previous the last terminated one)
+// and the restart count from the check before, and the time the reading ended ([providers.LogExcerpt]). Pod
+// UIDs and container IDs are never reused, so equal checks mean that no other instance answered either logs
+// request, the second one included; the restart count is compared as an extra signal only, since it can go
+// back to 0 after a node restart. The excerpt is marked InstanceUncertain when the checks differ in any of
+// the three, when the second check fails (the pod is gone, the read is refused or fails, or the deadline
+// passes: the logs already read are returned), or when the status names no instance for the container or an
+// ID longer than [providers.MaxLogInstanceIDLength] bytes or with other characters than letters, digits and
+// ._:/+- (such an ID is recorded empty). For the current container it is also marked when the status does not
+// say which instance the kubelet serves: while the container waits, the kubelet serves the last terminated
+// instance, and a terminated state without a container ID names none. What a log request still cannot guarantee: the
+// instance is inferred from the pod's status, not proved by the answer, and the status is the kubelet's
+// report, which can lag the runtime, so a restart the status does not show yet at the second check is not
+// seen; the kubelet keeps the log of one previous instance only, and only while it keeps that container. An
+// uncertain excerpt is a label on the evidence, not a reason to escalate (design section 3.3): restarts and
+// recreation are controlled by whoever runs workloads in a watched namespace. The metadata stays with the
+// excerpt, never in Incident status.
 //
 // Scope and checks, before any request: a query may name only a namespace in [Config.Namespaces] (the
 // analyzer's watched namespaces); any other is refused with [ErrInvalidQuery], an empty set refuses every
 // query, and the error never repeats the namespace. RBAC would refuse such a read too once the analyzer has a
 // grant, but the adapter does not rely on the identity it is given. The pod must be a DNS-1123 subdomain and
-// the container, required (one container per call), a DNS-1123 label. [New] refuses a nil client, a namespace
+// the container, required (one container per call), a DNS-1123 label. [New] refuses a nil client or REST client, a namespace
 // that is not a DNS-1123 label, more than [MaxNamespaces] namespaces and a timeout above [MaxTimeout].
 //
 // Bounds, fixed in code so that no configuration can widen them. A query of the current container reads back
@@ -54,10 +77,13 @@ limitations under the License.
 // The adapter logs nothing.
 //
 // Errors carry fixed text and the status code only, never the namespace, pod or container name, log text or
-// the API server's message. The adapter does not retry (client-go's own retries are turned off): 404 is
+// the API server's message. The adapter retries no request, and client-go's own retries are turned off for
+// the logs requests and the pod reads alike, so neither a status with Retry-After nor a reset connection is
+// sent again. A failed first pod read, and a failed logs request, are classified alike: 404 is
 // [providers.ErrNotFound]; 401 and 403 are [providers.ErrForbidden]; 408, 429, 5xx, a network error, a stream
 // cut short and the expiry of [Config.Timeout] are a [providers.RetryableError] (with the delay the server
-// asked for, capped at 10 minutes); any other 4xx, such as 400, is [providers.ErrRejected]. When the caller's
-// context is done, its error is returned, so that errors.Is matches [context.Canceled] or
-// [context.DeadlineExceeded].
+// asked for, capped at 10 minutes); any other 4xx, such as 400, is [providers.ErrRejected]. The error names
+// which request failed ("pod read" or "logs request"). A failed second pod read is not an error: it marks the
+// excerpt uncertain. When the caller's context is done, its error is returned, so that errors.Is matches
+// [context.Canceled] or [context.DeadlineExceeded].
 package kube

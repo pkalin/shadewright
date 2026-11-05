@@ -30,6 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/validation"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/rest"
 
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/redact"
@@ -80,20 +81,25 @@ const maxRetryAfter = 10 * time.Minute
 // permanent.
 var ErrInvalidQuery = errors.New("invalid logs query")
 
-// PodsGetter is the part of a Kubernetes clientset the adapter uses: CoreV1() of a clientset, real or fake
-// (k8s.io/client-go/kubernetes/fake), satisfies it.
-type PodsGetter = corev1client.PodsGetter
+// PodsGetter is the part of a Kubernetes clientset the adapter uses: the pods client for the logs requests
+// and the REST client for the pod reads; the adapter turns client-go's retries off on each request. CoreV1()
+// of a real clientset satisfies it; the fake clientset (k8s.io/client-go/kubernetes/fake) has no working REST
+// client, so tests pair its pods client with a REST client of their own.
+type PodsGetter interface {
+	corev1client.PodsGetter
+	RESTClient() rest.Interface
+}
 
 // Config configures a [Source].
 type Config struct {
-	// Pods reads the logs, usually CoreV1() of the analyzer's clientset. Required.
+	// Pods reads the logs and the pods, usually CoreV1() of the analyzer's clientset. Required.
 	Pods PodsGetter
 	// Namespaces are the namespaces a query may name, each a DNS-1123 label, at most MaxNamespaces; the
 	// analyzer passes its watched namespaces (--watch-namespaces). Empty refuses every query.
 	Namespaces []string
 	// Redactor redacts the excerpt; nil means the built-in rules of package redact.
 	Redactor *redact.Redactor
-	// Timeout bounds one query, both requests included, to the end of the last stream. Zero means
+	// Timeout bounds one query, both logs requests and both pod reads included. Zero means
 	// DefaultTimeout; at most MaxTimeout.
 	Timeout time.Duration
 }
@@ -112,6 +118,11 @@ var _ providers.LogSource = (*Source)(nil)
 func New(cfg Config) (*Source, error) {
 	if cfg.Pods == nil {
 		return nil, fmt.Errorf("pods client is required: %w", providers.ErrInvalidConfig)
+	}
+	// The fake clientset's REST client is a nil pointer: refuse it here rather than panic on the first query.
+	rc := cfg.Pods.RESTClient()
+	if c, ok := rc.(*rest.RESTClient); rc == nil || ok && c == nil {
+		return nil, fmt.Errorf("pods client has no REST client: %w", providers.ErrInvalidConfig)
 	}
 	if cfg.Timeout < 0 || cfg.Timeout > MaxTimeout {
 		return nil, fmt.Errorf("timeout must be between 0 and %s: %w", MaxTimeout, providers.ErrInvalidConfig)
@@ -151,6 +162,14 @@ func (s *Source) Logs(ctx context.Context, q providers.LogQuery) (providers.LogE
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
+	// The log request names the pod and container by name only, so the instance is checked before the first
+	// and after the last request. Pod UIDs and container IDs are never reused, so equal checks mean no other
+	// instance answered either request in between. The restart count is compared too, as an extra signal
+	// only: it can go back to 0 after a node restart.
+	before, err := s.instance(ctx, parent, q)
+	if err != nil {
+		return providers.LogExcerpt{}, err
+	}
 	data, over, err := s.read(ctx, parent, q, opts)
 	if err != nil {
 		return providers.LogExcerpt{}, err
@@ -164,12 +183,86 @@ func (s *Source) Logs(ctx context.Context, q providers.LogQuery) (providers.LogE
 			return providers.LogExcerpt{}, err
 		}
 	}
+	collected := time.Now().UTC()
+	after, err := s.instance(ctx, parent, q)
+	if err != nil {
+		// The pod is gone, or could not be read: the logs were read in full, but nothing ties them to the
+		// instance checked before.
+		after = instance{}
+	}
 	text, truncated := cut(data, over, keep)
 	return providers.LogExcerpt{
-		Text:       s.redact(strings.ToValidUTF8(text, "?")),
-		Truncated:  truncated,
-		EndMissing: over,
+		Text:              s.redact(strings.ToValidUTF8(text, "?")),
+		Truncated:         truncated,
+		EndMissing:        over,
+		Instance:          before.LogInstance,
+		CollectedAt:       collected,
+		InstanceUncertain: !before.known || after != before,
 	}, nil
+}
+
+// instance is the pod and container instance a query names, as the pod's status gives it. known is false
+// when the status names no instance or an ID is out of bounds; such an instance never ties an excerpt.
+type instance struct {
+	providers.LogInstance
+	known bool
+}
+
+// instance reads the pod a query names and returns the instance of its container. A missing pod is
+// providers.ErrNotFound; other errors are classified like those of a logs request. The read is not retried.
+func (s *Source) instance(ctx, parent context.Context, q providers.LogQuery) (instance, error) {
+	const what = "pod read"
+	var pod corev1.Pod
+	err := s.pods.RESTClient().Get().Namespace(q.Namespace).Resource("pods").Name(q.Pod).
+		MaxRetries(0).Do(ctx).Into(&pod)
+	if err != nil {
+		return instance{}, requestError(ctx, parent, what, err)
+	}
+	if err := contextError(ctx, parent, what); err != nil {
+		return instance{}, err
+	}
+	uid, uidOK := boundedID(string(pod.UID))
+	inst := instance{LogInstance: providers.LogInstance{PodUID: uid}}
+	for _, statuses := range [][]corev1.ContainerStatus{
+		pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses, pod.Status.EphemeralContainerStatuses,
+	} {
+		for _, cs := range statuses {
+			if cs.Name != q.Container {
+				continue
+			}
+			raw := cs.ContainerID
+			// For the current container, the kubelet serves the last terminated instance while the container
+			// waits (to restart, for example), and a terminated state without an ID names no instance: the
+			// status then does not say which instance answers.
+			served := cs.State.Waiting == nil && (cs.State.Terminated == nil || cs.State.Terminated.ContainerID != "")
+			if q.Previous {
+				raw, served = "", true
+				if t := cs.LastTerminationState.Terminated; t != nil {
+					raw = t.ContainerID
+				}
+			}
+			id, idOK := boundedID(raw)
+			inst.ContainerID, inst.RestartCount = id, cs.RestartCount
+			inst.known = served && uidOK && idOK && uid != "" && id != ""
+			return inst, nil
+		}
+	}
+	return inst, nil
+}
+
+// boundedID returns s when it is at most providers.MaxLogInstanceIDLength bytes of letters, digits and
+// ._:/+-, and "" and false otherwise. An empty s is returned with true.
+func boundedID(s string) (string, bool) {
+	if len(s) > providers.MaxLogInstanceIDLength {
+		return "", false
+	}
+	for _, c := range []byte(s) {
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("._:/+-", c) >= 0
+		if !ok {
+			return "", false
+		}
+	}
+	return s, true
 }
 
 // read sends one request and reads at most MaxReadBytes+1 of the stream. over reports that the stream held
@@ -178,12 +271,12 @@ func (s *Source) read(ctx, parent context.Context, q providers.LogQuery, opts *c
 ) (data []byte, over bool, err error) {
 	stream, err := s.pods.Pods(q.Namespace).GetLogs(q.Pod, opts).MaxRetries(0).Stream(ctx)
 	if err != nil {
-		return nil, false, requestError(ctx, parent, err)
+		return nil, false, requestError(ctx, parent, "logs request", err)
 	}
 	defer func() { _ = stream.Close() }()
 	data, err = readAll(io.LimitReader(stream, MaxReadBytes+1))
 	// A stream that ended because a context did is never returned as complete.
-	if err := contextError(ctx, parent); err != nil {
+	if err := contextError(ctx, parent, "logs request"); err != nil {
 		return nil, false, err
 	}
 	if err != nil {
@@ -196,13 +289,14 @@ func (s *Source) read(ctx, parent context.Context, q providers.LogQuery, opts *c
 }
 
 // contextError returns the caller's context error when the caller's context is done, so that errors.Is
-// matches it, and a retryable error when only the adapter's own timeout expired.
-func contextError(ctx, parent context.Context) error {
+// matches it, and a retryable error when only the adapter's own timeout expired; what is a fixed name of the
+// request.
+func contextError(ctx, parent context.Context, what string) error {
 	if err := parent.Err(); err != nil {
-		return fmt.Errorf("logs were not read: %w", err)
+		return fmt.Errorf("%s not completed: %w", what, err)
 	}
 	if ctx.Err() != nil {
-		return &providers.RetryableError{Err: errors.New("logs request timed out")}
+		return &providers.RetryableError{Err: fmt.Errorf("%s timed out", what)}
 	}
 	return nil
 }
@@ -313,22 +407,22 @@ func (s *Source) options(q providers.LogQuery) (*corev1.PodLogOptions, int, erro
 	return opts, int(keep), nil
 }
 
-// requestError classifies a failed request by its status code. The error of client-go is dropped: its
-// message holds the server's text, which can repeat names and log text.
-func requestError(ctx, parent context.Context, err error) error {
-	if cerr := contextError(ctx, parent); cerr != nil {
+// requestError classifies a failed request by its status code; what is a fixed name of the request. The
+// error of client-go is dropped: its message holds the server's text, which can repeat names and log text.
+func requestError(ctx, parent context.Context, what string, err error) error {
+	if cerr := contextError(ctx, parent, what); cerr != nil {
 		return cerr
 	}
 	var st apierrors.APIStatus
 	if !errors.As(err, &st) {
-		return &providers.RetryableError{Err: errors.New("logs request failed")}
+		return &providers.RetryableError{Err: fmt.Errorf("%s failed", what)}
 	}
 	code := int(st.Status().Code)
 	switch {
 	case code == http.StatusNotFound:
-		return fmt.Errorf("pod or container not found (status %d): %w", code, providers.ErrNotFound)
+		return fmt.Errorf("%s: pod or container not found (status %d): %w", what, code, providers.ErrNotFound)
 	case code == http.StatusUnauthorized || code == http.StatusForbidden:
-		return fmt.Errorf("the API server refused the identity (status %d): %w", code, providers.ErrForbidden)
+		return fmt.Errorf("%s: the API server refused the identity (status %d): %w", what, code, providers.ErrForbidden)
 	case code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500:
 		var delay time.Duration
 		if secs, ok := apierrors.SuggestsClientDelay(err); ok {
@@ -337,9 +431,9 @@ func requestError(ctx, parent context.Context, err error) error {
 		}
 		return &providers.RetryableError{
 			RetryAfter: delay,
-			Err:        fmt.Errorf("the API server could not serve the logs (status %d)", code),
+			Err:        fmt.Errorf("%s: the API server could not serve it (status %d)", what, code),
 		}
 	default:
-		return fmt.Errorf("the API server refused the logs request (status %d): %w", code, providers.ErrRejected)
+		return fmt.Errorf("%s: the API server refused it (status %d): %w", what, code, providers.ErrRejected)
 	}
 }

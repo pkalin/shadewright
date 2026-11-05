@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -222,11 +223,29 @@ type LogKey struct {
 	Previous                  bool
 }
 
-// Logs returns logs registered per container, honouring MaxBytes (providers.DefaultLogBytes when zero).
+// Logs returns logs registered per container, honouring MaxBytes (providers.DefaultLogBytes when zero). An
+// excerpt carries the instance registered with SetInstance (zero and uncertain when none is) and the time
+// of the call as CollectedAt.
 type Logs struct {
 	Hook
-	mu   sync.Mutex
-	logs map[LogKey]string
+	mu        sync.Mutex
+	logs      map[LogKey]string
+	instances map[LogKey]logInstance
+}
+
+type logInstance struct {
+	instance  providers.LogInstance
+	uncertain bool
+}
+
+// SetInstance registers the instance an excerpt of a container is tied to, and whether it is uncertain.
+func (l *Logs) SetInstance(k LogKey, instance providers.LogInstance, uncertain bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.instances == nil {
+		l.instances = map[LogKey]logInstance{}
+	}
+	l.instances[k] = logInstance{instance, uncertain}
 }
 
 // Set registers the logs of a container.
@@ -246,7 +265,8 @@ func (l *Logs) Logs(ctx context.Context, q providers.LogQuery) (providers.LogExc
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	t, ok := l.logs[LogKey{q.Namespace, q.Pod, q.Container, q.Previous}]
+	key := LogKey{q.Namespace, q.Pod, q.Container, q.Previous}
+	t, ok := l.logs[key]
 	if !ok {
 		// Like the Kubernetes API server: a missing pod is not found, a container or instance the pod does
 		// not have is a refused request.
@@ -261,10 +281,17 @@ func (l *Logs) Logs(ctx context.Context, q providers.LogQuery) (providers.LogExc
 	if limit <= 0 {
 		limit = providers.DefaultLogBytes
 	}
-	if int64(len(t)) > limit {
-		return providers.LogExcerpt{Text: t[int64(len(t))-limit:], Truncated: true}, nil
+	inst, ok := l.instances[key]
+	e := providers.LogExcerpt{
+		Text:              t,
+		Instance:          inst.instance,
+		CollectedAt:       time.Now().UTC(),
+		InstanceUncertain: !ok || inst.uncertain,
 	}
-	return providers.LogExcerpt{Text: t}, nil
+	if int64(len(t)) > limit {
+		e.Text, e.Truncated = t[int64(len(t))-limit:], true
+	}
+	return e, nil
 }
 
 // Notifier keeps one thread per key; notifying again replaces its title and body.

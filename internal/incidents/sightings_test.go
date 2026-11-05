@@ -17,11 +17,13 @@ limitations under the License.
 package incidents
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -237,5 +239,31 @@ func TestOOMKilledOpensAtOnce(t *testing.T) {
 	r.mu.Unlock()
 	if n != 0 {
 		t.Errorf("%d first sightings held, want none", n)
+	}
+}
+
+// A KEDA ceiling (the HPA's ScalingLimited state, from the KEDA module's symptom source) is a settled,
+// lasting state the collector emits once while it lasts, so it is Immediate and opens its Incident at once,
+// while a one-off Warning event still waits for a second sighting.
+func TestKedaCeilingOpensAtOnceWhileAWarningWaits(t *testing.T) {
+	ns := namespace(t)
+	t0 := time.Now().Truncate(time.Second)
+	clock := &fakeClock{now: t0}
+	r := start(t, ns, Config{Now: clock.Now})
+	ceiling := sightingOf(1, 1, t0)
+	ceiling.Subject = remediationv1alpha1.ObjectRef{APIVersion: "keda.sh/v1alpha1", Kind: "ScaledObject",
+		Namespace: ceiling.Subject.Namespace, Name: ceiling.Subject.Name, UID: "55555555-5555-4555-8555-555555555555"}
+	ceiling.Reason, ceiling.ReportingController = "ScalingLimited", "horizontal-pod-autoscaler"
+	ceiling.Symptom = "The HPA is at its maximum replica count"
+	ceiling.Occurrence = "condition:" + strings.Repeat("a", 64)
+	ceiling.Immediate = true
+	r.obs <- ceiling
+	r.obs <- sightingOf(2, 2, t0)
+	eventually(t, ns, 1, countIs(1))
+	waitHeld(t, r, "the Warning held as a first sighting", func() bool { return r.sightings.len() == 1 })
+	inc := &remediationv1alpha1.Incident{}
+	err := env.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: Name(fp(2))}, inc)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("the one-off Warning opened an Incident (%v), want none yet", err)
 	}
 }

@@ -40,7 +40,7 @@ Events detect symptoms; they are not a durable audit log. The collector keeps wh
 - the occurrence (an event UID, a hash naming one container termination, or a hash naming one symptom state of a module symptom source);
 - the occurrence's total as the cluster reports it;
 - the new occurrence count, and when it happened (never later than the collector's clock);
-- whether it is *immediate*: it opens its Incident at its first sighting instead of waiting to be seen again (3.2). Only a container termination read from pod status with the reason `OOMKilled` is. An event never is, whatever its reason, because whoever can create events in a watched namespace writes the reason. Module symptom sources would declare their own immediate reasons, but the collector does not read them yet, so they declare none.
+- whether it is *immediate*: it opens its Incident at its first sighting instead of waiting to be seen again (3.2). Two kinds are: a container termination read from pod status with the reason `OOMKilled`, and every symptom state of a module's symptom source (a condition state such as a KEDA ceiling, already settled and lasting, with its own start; it is emitted once while it lasts, so it would never be seen again). An event never is, whatever its reason, because whoever can create events in a watched namespace writes the reason.
 
 The new count is at most 1,000 per observation: a series count is written by whoever can create events, so one forged jump adds at most that much (each further update as much again). No raw note leaves the collector. Observations go to a bounded channel read by the Incident controller; when it stays full, the reconcile tries again later without recording anything as handled.
 
@@ -125,7 +125,7 @@ Both are pure functions in `internal/incidents/fingerprint`:
 
 - An observation of a fingerprint that has no Incident is held in memory as a **first sighting**. It opens the Incident when the symptom is seen again **at least 2 minutes and at most 15 minutes** after the first sighting (`RecurAfter`, `RecurWithin` in `internal/incidents`), by the Incident controller's clock. Every sighting held is then counted, in order, so the Incident's count and `firstSeen` include the first one.
 - A sighting before 2 minutes is held too and keeps waiting: a burst within seconds is not a recurrence. One after 15 minutes starts over as a new first sighting, and the old one is forgotten. A symptom seen once opens nothing.
-- **Immediate** observations open their Incident at once, as before: a container `OOMKilled` read from pod status (3.1). The set is explicit and kept small.
+- **Immediate** observations open their Incident at once: a container `OOMKilled` read from pod status, and the symptom states of module symptom sources, such as a KEDA ceiling (3.1). The set is explicit and kept small.
 - Once the Incident exists, every observation is counted at once. Closing an Incident whose symptom has stopped is the lifecycle's rule (see [Incident lifecycle](#incident-lifecycle), #251), not this one.
 
 **Memory only, bounded.** First sightings live in the analyzer's memory, never in a CR, and a restart forgets them. That is safe: a real symptom recurs, and its Incident opens up to 15 minutes later than it would have.
@@ -304,7 +304,7 @@ Decided on 2026-11-05 ([#251](https://github.com/pkalin/shadewright/issues/251))
 
 | From phase | Event | To phase | Written by | State |
 | --- | --- | --- | --- | --- |
-| none | a symptom seen again 2 to 15 min after its first sighting, or an immediate one (`OOMKilled`), is written | `Open` | Incident controller (analyzer) | Built |
+| none | a symptom seen again 2 to 15 min after its first sighting, or an immediate one (`OOMKilled`, a module source's symptom state), is written | `Open` | Incident controller (analyzer) | Built |
 | `Open` | the trigger marks it due and the analysis starts | `Analyzing` | analyzer (analysis, #16) | Planned |
 | `Analyzing` | the analysis produced a RemediationRequest | `Proposed` | analyzer | Planned |
 | `Analyzing` | the analysis made no proposal | `Escalated` | analyzer | Planned |

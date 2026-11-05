@@ -278,6 +278,9 @@ func (r *sourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		obs.Symptom = symptomText(s)
 		obs.Occurrence = conditionOccurrence(obj.GetUID(), r.gvk, p.reason, p.since, p.episode)
 		obs.Began, obs.Total, obs.MayRepeat = p.began, 1, p.mayRepeat
+		// A symptom state is already settled and lasting, with its own start: it opens its Incident at once
+		// (#267), where a one-off event waits to be seen again.
+		obs.Immediate = true
 		if !p.mayRepeat {
 			obs.Count = 1
 		}

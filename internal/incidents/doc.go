@@ -28,7 +28,7 @@ limitations under the License.
 // [RecurAfter] (2 minutes) and at most [RecurWithin] (15 minutes) after the first sighting, with every
 // sighting held counted; a sighting before 2 minutes keeps waiting, one after 15 minutes starts over, and a
 // symptom seen once opens nothing. An observation the collector marks Immediate (a container OOMKilled in
-// pod status) opens its Incident at once. First sightings are bounded (Config.MaxFirstSightings, 4,096,
+// pod status, or a symptom state of a module's source) opens its Incident at once. First sightings are bounded (Config.MaxFirstSightings, 4,096,
 // oldest forgotten first, at most 4 observations each), forgotten after 15 minutes and on a restart, and
 // counted in the gauge shadewright_incident_first_sightings_held.
 //

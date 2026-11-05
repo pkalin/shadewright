@@ -116,16 +116,18 @@ type Observation struct {
 	MayRepeat bool
 	// Immediate is set when the symptom opens an Incident at its first sighting instead of waiting to be
 	// seen again (design 3.2, #267). Only the collector sets it, from what it read itself: a container
-	// termination in pod status whose reason is OOMKilled. An event never sets it, whatever its reason,
-	// because whoever can create events in a watched namespace writes the reason.
+	// termination in pod status whose reason is OOMKilled, or a symptom state of a module's symptom source
+	// (a condition state, already settled and lasting, emitted once while it lasts, so it would never be
+	// seen again). An event never sets it, whatever its reason, because whoever can create events in a
+	// watched namespace writes the reason.
 	Immediate bool
 }
 
 // immediateTerminationReasons are the container termination reasons, read from pod status, that open an
 // Incident at their first sighting: OOMKilled, because a container killed for its memory is a fault on its
 // own, not noise of a cluster that is starting. The set is kept small on purpose; every other symptom opens
-// an Incident only when it is seen again (package incidents). Module symptom sources declare no immediate
-// reason, because the collector does not watch them yet.
+// an Incident only when it is seen again (package incidents), except the states of module symptom sources,
+// which are all immediate (sources.go).
 var immediateTerminationReasons = []string{ReasonOOMKilled}
 
 // immediateTermination reports whether a termination reason read from pod status is in

@@ -28,25 +28,29 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/logs/kube"
 	"github.com/pkalin/shadewright/internal/providers/metrics/prometheus"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // SourcesConfig configures the metrics and log sources of the context builder (design 2.3 and 3.3).
 type SourcesConfig struct {
 	// Watched are the watched namespaces (ParseNamespaces of --watch-namespaces): the one set the cache, the
 	// RoleBindings, both sources and the context builder use. A query about any other namespace is refused by
-	// the source before any request.
+	// the source before any request. With none, no source is built.
 	Watched []string
 	// PodLogs enables the pod logs source (--pod-logs). It needs Pods.
 	PodLogs bool
 	// Pods reads pod logs and pods: CoreV1() of a clientset with the analyzer's identity.
 	Pods kube.PodsGetter
+	// Redactor redacts the log excerpts: pass the one the context builder uses, so that both passes apply one
+	// rule set. Nil means the built-in rules of package redact.
+	Redactor *redact.Redactor
 	// PrometheusURL is the base URL of the Prometheus query API (--prometheus-url); empty means no metrics
 	// source.
 	PrometheusURL string
 	// PrometheusCluster is the cluster label value of a shared Prometheus (--prometheus-cluster); empty means
 	// a Prometheus dedicated to this cluster. It needs PrometheusURL.
 	PrometheusCluster string
-	// Log receives the result of the cluster check.
+	// Log receives the results of the cluster check.
 	Log logr.Logger
 }
 
@@ -55,45 +59,39 @@ type SourcesConfig struct {
 type Sources struct {
 	Metrics providers.MetricsSource
 	Logs    providers.LogSource
-	// ClusterCheck runs the startup check of PrometheusCluster; nil when no cluster is configured. Add it to
-	// the manager.
+	// ClusterCheck checks PrometheusCluster at startup and every [ClusterRecheck]; nil when no cluster is
+	// configured. Add it to the manager.
 	ClusterCheck *ClusterCheck
 }
 
 // NewSources builds the sources from cfg. It makes no request. It refuses a configuration the sources cannot
-// serve: with PodLogs, more watched namespaces than the logs source takes (kube.MaxNamespaces); with a
-// Prometheus URL, more than the metrics source takes (prometheus.MaxNamespaces); a cluster without a URL.
-// The errors name the flags and the limit, never a namespace or the URL.
+// serve, such as more watched namespaces than a source takes (kube.MaxNamespaces, prometheus.MaxNamespaces)
+// or a cluster without a URL; the errors name the flags and the limit, never a namespace or the URL. With no
+// watched namespace it builds no source and no cluster check: no source could be asked anything.
 func NewSources(cfg SourcesConfig) (Sources, error) {
+	if cfg.PrometheusURL == "" && cfg.PrometheusCluster != "" {
+		return Sources{}, fmt.Errorf("--prometheus-cluster needs --prometheus-url: %w", providers.ErrInvalidConfig)
+	}
+	if len(cfg.Watched) == 0 {
+		return Sources{}, nil
+	}
 	var s Sources
 	if cfg.PodLogs {
-		if len(cfg.Watched) > kube.MaxNamespaces {
-			return Sources{}, fmt.Errorf("--pod-logs reads at most %d watched namespaces, and --watch-namespaces "+
-				"lists %d: watch fewer namespaces or set --pod-logs=false: %w", kube.MaxNamespaces, len(cfg.Watched),
-				providers.ErrInvalidConfig)
-		}
-		logs, err := kube.New(kube.Config{Pods: cfg.Pods, Namespaces: cfg.Watched})
+		logs, err := kube.New(kube.Config{Pods: cfg.Pods, Namespaces: cfg.Watched, Redactor: cfg.Redactor})
 		if err != nil {
-			return Sources{}, fmt.Errorf("pod logs source: %w", err)
+			return Sources{}, fmt.Errorf("pod logs source (--pod-logs, --watch-namespaces): %w", err)
 		}
 		s.Logs = logs
 	}
 	if cfg.PrometheusURL == "" {
-		if cfg.PrometheusCluster != "" {
-			return Sources{}, fmt.Errorf("--prometheus-cluster needs --prometheus-url: %w", providers.ErrInvalidConfig)
-		}
 		return s, nil
-	}
-	if len(cfg.Watched) > prometheus.MaxNamespaces {
-		return Sources{}, fmt.Errorf("--prometheus-url queries at most %d watched namespaces, and "+
-			"--watch-namespaces lists %d: watch fewer namespaces or leave --prometheus-url empty: %w",
-			prometheus.MaxNamespaces, len(cfg.Watched), providers.ErrInvalidConfig)
 	}
 	metrics, err := prometheus.New(prometheus.Config{
 		URL: cfg.PrometheusURL, Namespaces: cfg.Watched, Cluster: cfg.PrometheusCluster,
 	})
 	if err != nil {
-		return Sources{}, fmt.Errorf("prometheus source (--prometheus-url, --prometheus-cluster): %w", err)
+		return Sources{}, fmt.Errorf("prometheus source (--prometheus-url, --prometheus-cluster, "+
+			"--watch-namespaces): %w", err)
 	}
 	if cfg.PrometheusCluster == "" {
 		s.Metrics = metrics
@@ -104,11 +102,11 @@ func NewSources(cfg SourcesConfig) (Sources, error) {
 	return s, nil
 }
 
-// ClusterRecheck is how long metrics stay unavailable after the cluster check found no series of the
-// configured cluster, before the next query checks again.
+// ClusterRecheck is the interval of the cluster check after startup, and the age of its last answer after
+// which a query checks again itself.
 const ClusterRecheck = 10 * time.Minute
 
-// clusterCheckTimeout bounds the check at startup.
+// clusterCheckTimeout bounds one check.
 const clusterCheckTimeout = 30 * time.Second
 
 // ErrMetricsUnavailable is the error of every metrics query while the cluster check finds no series of the
@@ -122,76 +120,153 @@ type clusterSource interface {
 	CheckCluster(ctx context.Context) error
 }
 
-// ClusterCheck is the metrics source of a Prometheus with a cluster setting. It checks that the source holds
-// series of the cluster (prometheus.Source.CheckCluster) once at startup ([ClusterCheck.Start]) and, until a
-// check succeeds, before each query. When a check finds none, it logs an error and refuses every query with
-// [ErrMetricsUnavailable] for [ClusterRecheck], then checks again; the analyzer keeps running, so a mistyped
-// label never crash-loops it. A check that fails (Prometheus unreachable) refuses that query with its error and
-// is tried again on the next one. Once a check succeeds, queries go straight to the source.
-type ClusterCheck struct {
-	src clusterSource
-	log logr.Logger
-	now func() time.Time
+// clusterState is what the last check that reached an answer found.
+type clusterState int
 
-	// mu serializes the checks, so that concurrent queries do not each send one.
-	mu sync.Mutex
-	// found: a check succeeded. missingAt: when a check last found no series (zero when none did).
-	found     bool
-	missingAt time.Time
+const (
+	// clusterUnknown: no check has answered yet (none ran, or each one failed).
+	clusterUnknown clusterState = iota
+	clusterFound
+	clusterMissing
+)
+
+// clusterProbe is one check in flight; err is set before done is closed.
+type clusterProbe struct {
+	done chan struct{}
+	err  error
+}
+
+// ClusterCheck is the metrics source of a Prometheus with a cluster setting. It checks that the source holds
+// series of the cluster (prometheus.Source.CheckCluster) at startup and every [ClusterRecheck] while the
+// manager runs ([ClusterCheck.Start]). While the last answer is "found", queries go to the source. While it is
+// "not found", it logs an error and refuses every query with [ErrMetricsUnavailable]; the analyzer keeps
+// running, so a mistyped label never crash-loops it, and a label that disappears later switches metrics off at
+// the next check. A check that fails (Prometheus unreachable) changes nothing it knew. Before any answer, or
+// once the last one is older than ClusterRecheck, a query checks first. One check runs at a time, on its own
+// goroutine and bounded by its own timeout; a caller waits for it only as long as its own context allows.
+type ClusterCheck struct {
+	src      clusterSource
+	log      logr.Logger
+	now      func() time.Time
+	interval time.Duration
+	timeout  time.Duration
+
+	// mu guards the fields below. It is never held across a request.
+	mu        sync.Mutex
+	state     clusterState
+	checkedAt time.Time     // when the last check answered (found or not found); zero when none did
+	inflight  *clusterProbe // the check in flight; nil when none
 }
 
 var _ providers.MetricsSource = (*ClusterCheck)(nil)
 
 func newClusterCheck(src clusterSource, log logr.Logger) *ClusterCheck {
-	return &ClusterCheck{src: src, log: log, now: time.Now}
+	return &ClusterCheck{src: src, log: log, now: time.Now, interval: ClusterRecheck, timeout: clusterCheckTimeout}
 }
 
-// Query runs q once the cluster check has succeeded; see [ClusterCheck].
+// Query runs q while the cluster check finds the series; see [ClusterCheck].
 func (c *ClusterCheck) Query(ctx context.Context, q providers.MetricsQuery) (providers.MetricsResult, error) {
-	if err := c.check(ctx); err != nil {
+	if err := c.ready(ctx); err != nil {
 		return providers.MetricsResult{}, err
 	}
 	return c.src.Query(ctx, q)
 }
 
-// Start runs the check once, bounded by its own timeout, and logs the result. It never fails: a failed check
-// is repeated before the next query. It implements manager.Runnable.
+// Start checks once, then every [ClusterRecheck] until ctx ends, and logs the results. A failed check is
+// logged and does not stop it. It implements manager.Runnable.
 func (c *ClusterCheck) Start(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, clusterCheckTimeout)
-	defer cancel()
-	err := c.check(ctx)
-	if err != nil && !errors.Is(err, ErrMetricsUnavailable) && ctx.Err() == nil {
-		c.log.Error(err, "Failed to check the Prometheus cluster label at startup; checking again before the next query")
+	c.checkLogged(ctx, "Failed to check the Prometheus cluster label at startup")
+	ticker := time.NewTicker(c.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			c.checkLogged(ctx, "Failed to check the Prometheus cluster label")
+		}
 	}
-	return nil
 }
 
 // NeedLeaderElection is false: every replica checks the source it will query.
 func (c *ClusterCheck) NeedLeaderElection() bool { return false }
 
-func (c *ClusterCheck) check(ctx context.Context) error {
+// checkLogged runs one check, waiting at most the check timeout, and logs a failure, a timeout included, unless
+// ctx ended (a shutdown). "Not found" is logged when the check records it.
+func (c *ClusterCheck) checkLogged(ctx context.Context, msg string) {
+	waitCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	if err := c.check(waitCtx); err != nil && !errors.Is(err, ErrMetricsUnavailable) && ctx.Err() == nil {
+		c.log.Error(err, msg+"; metrics stay as the last check found them", "timeout", c.timeout)
+	}
+}
+
+// ready answers from the last check while it is fresh, and checks otherwise.
+func (c *ClusterCheck) ready(ctx context.Context) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.found {
-		return nil
-	}
-	if !c.missingAt.IsZero() && c.now().Sub(c.missingAt) < ClusterRecheck {
-		return ErrMetricsUnavailable
-	}
-	err := c.src.CheckCluster(ctx)
+	state := c.state
+	fresh := !c.checkedAt.IsZero() && c.now().Sub(c.checkedAt) < c.interval
+	c.mu.Unlock()
 	switch {
-	case err == nil:
-		c.found, c.missingAt = true, time.Time{}
-		c.log.Info("Found series of the configured cluster in Prometheus")
+	case fresh && state == clusterFound:
 		return nil
-	case errors.Is(err, prometheus.ErrClusterNotFound):
-		c.missingAt = c.now()
-		c.log.Error(err, "Prometheus holds no series with the --prometheus-cluster value from kube-state-metrics "+
-			"and cAdvisor: metrics are unavailable, and analyses that query them escalate, until it does; check the value "+
-			"and that the label is stored on the series, not added as an external label",
-			"recheckAfter", ClusterRecheck)
+	case fresh && state == clusterMissing:
 		return ErrMetricsUnavailable
 	default:
-		return fmt.Errorf("checking the prometheus cluster label: %w", err)
+		return c.check(ctx)
+	}
+}
+
+// check joins the check in flight or starts one, and waits for it until ctx ends. The check runs on its own
+// goroutine with its own timeout, detached from ctx, so a caller whose context ends returns at once and the
+// result is still recorded for the next caller.
+func (c *ClusterCheck) check(ctx context.Context) error {
+	c.mu.Lock()
+	p := c.inflight
+	if p == nil {
+		p = &clusterProbe{done: make(chan struct{})}
+		c.inflight = p
+		probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.timeout)
+		go func() {
+			defer cancel()
+			c.finish(p, c.src.CheckCluster(probeCtx))
+		}()
+	}
+	c.mu.Unlock()
+	select {
+	case <-p.done:
+		return p.err
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for the prometheus cluster check: %w", context.Cause(ctx))
+	}
+}
+
+// finish records the result of p, releases its waiters and logs the result: "not found" each time, "found"
+// when it was not found before.
+func (c *ClusterCheck) finish(p *clusterProbe, err error) {
+	c.mu.Lock()
+	prev := c.state
+	switch {
+	case err == nil:
+		c.state, c.checkedAt = clusterFound, c.now()
+	case errors.Is(err, prometheus.ErrClusterNotFound):
+		c.state, c.checkedAt = clusterMissing, c.now()
+		err = ErrMetricsUnavailable
+	default:
+		err = fmt.Errorf("checking the prometheus cluster label: %w", err)
+	}
+	c.inflight = nil
+	p.err = err
+	c.mu.Unlock()
+	close(p.done)
+
+	switch {
+	case err == nil && prev != clusterFound:
+		c.log.Info("Found series of the configured cluster in Prometheus")
+	case errors.Is(err, ErrMetricsUnavailable):
+		c.log.Error(prometheus.ErrClusterNotFound, "Prometheus holds no series with the --prometheus-cluster value "+
+			"from kube-state-metrics and cAdvisor: metrics are unavailable, and analyses that query them escalate, "+
+			"until it does; check the value and that the label is stored on the series, not added as an external "+
+			"label", "recheckAfter", c.interval)
 	}
 }

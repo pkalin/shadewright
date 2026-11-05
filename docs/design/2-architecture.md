@@ -164,9 +164,9 @@ Provider SDKs are imported only inside their adapter package. Each interface has
 
 **How the analyzer wires it.** With `--prometheus-url` set, the analyzer creates it with the watched namespaces (`--watch-namespaces`, the set of the cache and the RoleBindings) and gives it to the context builder (3.3), which the analysis loop does not call yet ([#76](https://github.com/pkalin/shadewright/issues/76)). Without the flag the metrics section is "not available". More than 256 watched namespaces with the flag set refuse the start.
 
-- With `--prometheus-cluster`, the analyzer checks at startup, with one fixed query that is not a template and returns no label, that kube-state-metrics and cAdvisor both hold series with that `cluster` value.
-- When they do not, the analyzer still starts and logs an error, and metrics are **unavailable**: every query fails, so the metrics section is "could not fetch", which escalates (3.3), rather than empty answers read as evidence of absence. It checks again before a query once 10 minutes have passed.
-- A check that cannot reach Prometheus is not "not found": that query fails and the next one checks again. Decided on [#371](https://github.com/pkalin/shadewright/issues/371) (2026-11-05), instead of refusing to start, which would crash-loop the analyzer on a typo.
+- With `--prometheus-cluster`, the analyzer checks at startup and every 10 minutes, on every replica, with one fixed query that is not a template and returns no label, that kube-state-metrics and cAdvisor both hold series with that `cluster` value. With no watched namespace it builds no source and runs no check.
+- When they do not, the analyzer still starts and logs an error, and metrics are **unavailable**: every query fails, so the metrics section is "could not fetch", which escalates (3.3), rather than empty answers read as evidence of absence. A label that disappears later switches metrics off at the next check, and one that appears switches them on.
+- A check that cannot reach Prometheus is not "not found": it changes nothing the last answer said, and before any answer, or once the last one is older than 10 minutes, a query checks first. One check runs at a time; a query waits for it no longer than its own deadline. Decided on [#371](https://github.com/pkalin/shadewright/issues/371) (2026-11-05), instead of refusing to start, which would crash-loop the analyzer on a typo.
 
 **Limits.**
 

@@ -92,9 +92,8 @@ func main() {
 			"At most 256 watched namespaces when set.")
 	flag.StringVar(&prometheusCluster, "prometheus-cluster", "",
 		"The cluster label value of this cluster's series, for a Prometheus shared by several clusters; empty "+
-			"for a Prometheus of this cluster alone. Checked at startup: when no series carries it, metrics are "+
-			"unavailable (analyses that query them escalate) and the analyzer logs an error, checking "+
-			"again every 10 minutes.")
+			"for a Prometheus of this cluster alone. Checked at startup and every 10 minutes: while no series "+
+			"carries it, metrics are unavailable (analyses that query them escalate) and the analyzer logs an error.")
 	flag.Parse()
 
 	ctrl.SetLogger(cmdutil.NewLogger(&opts))
@@ -201,14 +200,21 @@ func main() {
 	// The context builder (design 3.3) and its sources. The analysis loop (#76) calls the builder; until then it
 	// is built here so that the sources' configuration is checked at start. The sources and the builder are given
 	// the watched namespaces, the same set as the cache and the RoleBindings, and refuse any other before a
-	// request. Pod logs are read with the analyzer's own identity, through the pods/log grant of the watch role.
+	// request; with none, NewSources builds no source and no cluster check. Pod logs are read with the
+	// analyzer's own identity, through the pods/log grant of the watch role, and redacted with the builder's
+	// redactor, so that both passes apply one rule set.
+	redactor, err := redact.New()
+	if err != nil {
+		setupLog.Error(err, "Failed to create the redactor")
+		os.Exit(1)
+	}
 	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
 	if err != nil {
 		setupLog.Error(err, "Failed to create the Kubernetes client")
 		os.Exit(1)
 	}
 	sources, err := analyzer.NewSources(analyzer.SourcesConfig{
-		Watched: watched, PodLogs: podLogs, Pods: clientset.CoreV1(),
+		Watched: watched, PodLogs: podLogs, Pods: clientset.CoreV1(), Redactor: redactor,
 		PrometheusURL: prometheusURL, PrometheusCluster: prometheusCluster, Log: ctrl.Log.WithName("metrics-source"),
 	})
 	if err != nil {
@@ -220,11 +226,6 @@ func main() {
 			setupLog.Error(err, "Failed to set up the Prometheus cluster check")
 			os.Exit(1)
 		}
-	}
-	redactor, err := redact.New()
-	if err != nil {
-		setupLog.Error(err, "Failed to create the redactor")
-		os.Exit(1)
 	}
 	contextBuilder, err := incidentcontext.New(incidentcontext.Config{
 		Pods: mgr.GetCache(), Objects: mgr.GetAPIReader(), Namespaces: watched,

@@ -122,7 +122,9 @@ def check(site, listed_file):
         if p.design_redirects is not None:
             # The old #n-title anchors of the one-page design: each must exist on the page it maps to.
             for anchor, target in json.loads(p.design_redirects).items():
-                t = parsed.get("/design/" + target)
+                # Resolved from this page's URL, as the browser resolves the script's relative target.
+                r = resolve(target, url)
+                t = parsed.get(r[0]) if r else None
                 if t is None or anchor not in t.ids:
                     problems.append(f"{url}: old design anchor #{anchor} maps to {target}, which has no such anchor")
         if p.refresh:

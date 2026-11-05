@@ -26,7 +26,7 @@ A cluster whose API server supports CEL validation rules, Flux delivering the ta
 
 ## Status
 
-The project is early. The box on the [home page](index.md) lists what is built and what is not, the [threat model](threat-model.md) marks each guarantee as built or planned, and the [milestones](design.md#13-milestones) say what comes next.
+The project is early. The [status section](index.md#status) of the home page lists what is built and what is not, the [threat model](threat-model.md) marks each guarantee as built or planned, and the [milestones](design.md#13-milestones) say what comes next.
 
 ## Where to go next
 

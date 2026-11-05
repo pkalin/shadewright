@@ -206,7 +206,7 @@ func (o *optInt) UnmarshalJSON(b []byte) error {
 		o.over = true
 		return nil
 	}
-	v, err := strconv.ParseInt(d+strings.Repeat("0", e), 10, 64)
+	v, err := strconv.ParseInt(d+strings.Repeat("0", e), 10, 32)
 	if err != nil {
 		o.over = true
 		return nil

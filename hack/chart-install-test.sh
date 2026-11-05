@@ -5,10 +5,8 @@
 # permissions the design gives them (a spot-check). Usage:
 #   hack/chart-install-test.sh <kubectl> <helm>
 # Images: pull request and main runs use the v0.1.0 digests below (the chart is tested, not the images). A tag
-# run (CHART_TEST_IMAGE_TAG=v<version>, set by the Chart workflow) resolves the digests of that tag's images on
-# ghcr.io instead (docker buildx imagetools, retried while the Images workflow of the same tag finishes), so a
-# release chart is never tested with the images of another version. Override with EXECUTOR_DIGEST and
-# ANALYZER_DIGEST.
+# run gets EXECUTOR_DIGEST and ANALYZER_DIGEST from the Chart workflow, which resolved and verified them once
+# (hack/resolve-image-digests.sh) and publishes the chart with the same pair; giving only one of the two fails.
 set -euo pipefail
 
 KUBECTL="${1:-kubectl}"
@@ -17,29 +15,22 @@ NS=shadewright-system
 REL=shadewright
 CHART="$(cd "$(dirname "$0")/.." && pwd)/dist/chart"
 
-# resolve_digest <image name>: the digest of the image tagged with the release version (no leading v).
-resolve_digest() {
-  local ref="ghcr.io/pkalin/shadewright-$1:${CHART_TEST_IMAGE_TAG#v}" out="" i
-  for i in $(seq 1 30); do
-    out="$(docker buildx imagetools inspect "${ref}" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
-    if printf '%s' "${out}" | grep -Eq '^sha256:[a-f0-9]{64}$'; then
-      printf '%s' "${out}"
-      return 0
+if [ -n "${EXECUTOR_DIGEST:-}" ] || [ -n "${ANALYZER_DIGEST:-}" ]; then
+  if [ -z "${EXECUTOR_DIGEST:-}" ] || [ -z "${ANALYZER_DIGEST:-}" ]; then
+    echo "set both EXECUTOR_DIGEST and ANALYZER_DIGEST, or neither" >&2
+    exit 1
+  fi
+  for d in "${EXECUTOR_DIGEST}" "${ANALYZER_DIGEST}"; do
+    if ! printf '%s' "${d}" | grep -Eq '^sha256:[a-f0-9]{64}$'; then
+      echo "EXECUTOR_DIGEST and ANALYZER_DIGEST must be sha256: and 64 lower case hex digits" >&2
+      exit 1
     fi
-    sleep 20
   done
-  echo "could not resolve the digest of ${ref}" >&2
-  return 1
-}
-
-if [ -n "${CHART_TEST_IMAGE_TAG:-}" ]; then
-  echo "tag run: using the digests of the images tagged ${CHART_TEST_IMAGE_TAG}"
-  EXECUTOR_DIGEST="${EXECUTOR_DIGEST:-$(resolve_digest executor)}"
-  ANALYZER_DIGEST="${ANALYZER_DIGEST:-$(resolve_digest analyzer)}"
+  echo "using the given image digests"
 else
   echo "pull request or main run: using the v0.1.0 image digests"
-  EXECUTOR_DIGEST="${EXECUTOR_DIGEST:-sha256:66df21ea967a22e8e50b73284254b796665ef5e9470b320707900983aca37f9c}"
-  ANALYZER_DIGEST="${ANALYZER_DIGEST:-sha256:697defe7774b29621f64c967ff93e83b309455c2a72d50b190e179f9ff3fc8e4}"
+  EXECUTOR_DIGEST="sha256:66df21ea967a22e8e50b73284254b796665ef5e9470b320707900983aca37f9c"
+  ANALYZER_DIGEST="sha256:697defe7774b29621f64c967ff93e83b309455c2a72d50b190e179f9ff3fc8e4"
 fi
 
 "${KUBECTL}" create namespace demo --dry-run=client -o yaml | "${KUBECTL}" apply -f -

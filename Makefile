@@ -94,6 +94,7 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 	hack/check-chart-docs_test.sh
 	hack/chart-crds_test.sh
 	hack/chart-set-digests_test.sh
+	hack/resolve-image-digests_test.sh
 	hack/ci-changed_test.sh
 	hack/release-verify-notes_test.sh
 	hack/require-on-main_test.sh
@@ -427,6 +428,10 @@ chart-ct-lint: ## Run chart-testing's lint on the chart (yamllint, the Chart.yam
 .PHONY: test-chart
 test-chart: kustomize ## Render the chart and fail if its RBAC, NetworkPolicies, Services or CRDs differ from kustomize build config/default.
 	KUSTOMIZE="$(KUSTOMIZE)" HELM="$(HELM)" CHART_TEST_REQUIRED=1 go test -count=1 ./test/chart/ -v
+
+.PHONY: test-chart-pin
+test-chart-pin: ## Test hack/chart-pin-digests.sh with the pinned helm (chart-test.yml runs it; not part of test-scripts, which has no pinned helm).
+	HELM="$(HELM)" hack/chart-pin-digests_test.sh
 
 .PHONY: test-chart-install
 test-chart-install: kind ## Install the chart on a Kind cluster (created here) and check the Deployments and the permissions.

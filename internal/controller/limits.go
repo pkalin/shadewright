@@ -26,6 +26,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -42,7 +43,8 @@ import (
 //
 // A request is active while the executor can still move it on before the merge (progresses: a phase before the
 // merge with a plan digest), and while it is being deleted and still holds the finalizer, since its pull
-// request may still be open until the finalizer is gone. The lock is held longer than that (targetlock.go):
+// request may still be open until the finalizer is gone (one that ended Denied, Cancelled or Superseded, holds
+// no lock and is not a probe is not read, so it is not counted). The lock is held longer than that (targetlock.go):
 // from the allowed decision until the request's pull request is known closed or merged, so a request that
 // stopped with its pull request still open keeps a second pull request off the target. Before the policy check
 // writes an allowed decision it counts the active requests and reads the outcomes of the others, straight from
@@ -84,6 +86,12 @@ import (
 // lastPhaseTransitionTime, breakerProbe), so a restart or a new leader neither forgets an open breaker or a
 // running probe nor frees a slot (invariant 5). It fails closed: when the settings
 // or the requests cannot be read, or there is no API server reader, no request is let through.
+//
+// The requests are listed with field selectors on status.phase, status.holdsTarget and status.breakerProbe
+// (#293, see limitsSelectors), so a request that ended Denied, Cancelled or Superseded, released or never took
+// the lock and is not a probe is never read, and each list is read in pages of limitsPageSize. The breaker
+// still reads every success and failure. All lists are read within the check's
+// deadline (CheckTimeout); one that runs out lets nothing through.
 //
 // Only a request the policy check allows is held back: refusals (Denied, NeedsIntervention) are written at
 // once. A request held back keeps no phase (or Pending), gets the condition Queued with the limit as the
@@ -183,7 +191,9 @@ func progresses(rr *remediationv1alpha1.RemediationRequest) bool {
 }
 
 // active reports whether a request counts against the lock and the cap: it progresses, or it is being deleted
-// and still holds the finalizer that closes its pull request.
+// and still holds the finalizer that closes its pull request. The limits never read a request that ended
+// Denied, Cancelled or Superseded, holds no lock and is not a probe (limitsSelectors), so such a request is not
+// counted while it is being deleted.
 func active(rr *remediationv1alpha1.RemediationRequest) bool {
 	if !rr.DeletionTimestamp.IsZero() {
 		return controllerutil.ContainsFinalizer(rr, FinalizerName)
@@ -212,11 +222,10 @@ func breakerOutcome(rr *remediationv1alpha1.RemediationRequest) outcomeClass {
 	if rr.Status.PlanDigest == "" || rr.Status.LastPhaseTransitionTime == nil {
 		return outcomeNone
 	}
-	switch rr.Status.Phase {
-	case remediationv1alpha1.PhaseMerged, remediationv1alpha1.PhaseWaitingForDelivery,
-		remediationv1alpha1.PhaseVerifying, remediationv1alpha1.PhaseSucceeded:
+	switch {
+	case slices.Contains(successPhases, rr.Status.Phase):
 		return outcomeSuccess
-	case remediationv1alpha1.PhaseFailed, remediationv1alpha1.PhaseNeedsIntervention:
+	case slices.Contains(failurePhases, rr.Status.Phase):
 		return outcomeFailure
 	}
 	return outcomeNone
@@ -252,38 +261,40 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 	case err != nil:
 		return limitsState{}, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 	}
-	list := &remediationv1alpha1.RemediationRequestList{}
-	if err := r.APIReader.List(ctx, list, client.InNamespace(rr.Namespace)); err != nil {
-		return limitsState{}, fmt.Errorf("list RemediationRequests in %s: %w", rr.Namespace, err)
-	}
 	// An object written before the field had a default, or by hand, may hold 0: the smallest limit the schema
 	// allows is used then, never no limit.
 	s := limitsState{limit: max(int(settings.Spec.MaxConcurrentRemediations), 1)}
+	seen, err := r.readLimits(ctx, rr.Namespace)
+	if err != nil {
+		return limitsState{}, err
+	}
 	locked, lockMoving := false, false
 	var lastSuccess, lastFailure time.Time
 	var failures []time.Time
-	for i := range list.Items {
-		other := &list.Items[i]
-		if other.UID == rr.UID {
+	var probes []remediationv1alpha1.RemediationRequest
+	for uid, e := range seen {
+		if uid == rr.UID {
 			continue
 		}
-		if active(other) {
+		if e.probe != nil {
+			probes = append(probes, *e.probe)
+		}
+		if e.active {
 			s.active++
 		}
-		if other.Spec.TargetRef.UID == rr.Spec.TargetRef.UID && holdsLock(other) {
+		if e.target == rr.Spec.TargetRef.UID && e.lock {
 			locked = true
-			lockMoving = lockMoving || active(other)
+			lockMoving = lockMoving || e.active
 		}
-		switch breakerOutcome(other) {
+		switch e.outcome {
 		case outcomeSuccess:
-			if t := other.Status.LastPhaseTransitionTime.Time; t.After(lastSuccess) {
-				lastSuccess = t
+			if e.at.After(lastSuccess) {
+				lastSuccess = e.at
 			}
 		case outcomeFailure:
-			t := other.Status.LastPhaseTransitionTime.Time
-			failures = append(failures, t)
-			if t.After(lastFailure) {
-				lastFailure = t
+			failures = append(failures, e.at)
+			if e.at.After(lastFailure) {
+				lastFailure = e.at
 			}
 		}
 	}
@@ -295,7 +306,7 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		}
 	}
 	s.failures = len(inRow)
-	s.circuit, s.probing = r.breaker(inRow, lastFailure, list.Items, rr.UID)
+	s.circuit, s.probing = r.breaker(inRow, lastFailure, probes)
 	switch {
 	case s.circuit == circuitOpen:
 		s.reason = ReasonCircuitOpen
@@ -310,12 +321,119 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 	return s, nil
 }
 
+// limitsPageSize is the most RemediationRequests one list call of the limits check asks the API server for.
+const limitsPageSize = 100
+
+// Field selectors of RemediationRequest: the selectable fields of the CRD (see the markers on the type).
+const (
+	phaseField = "status.phase"
+	probeField = "status.breakerProbe"
+	lockField  = "status.holdsTarget"
+)
+
+// limitsEntry is what the limits need of one request, so a check keeps no whole requests in memory except the
+// breaker's probes.
+type limitsEntry struct {
+	active bool
+	// lock is holdsLock.
+	lock    bool
+	target  remediationv1alpha1.UID
+	outcome outcomeClass
+	// at is lastPhaseTransitionTime, set when outcome is not outcomeNone.
+	at time.Time
+	// probe is the request when status.breakerProbe is set.
+	probe *remediationv1alpha1.RemediationRequest
+}
+
+// limitsSelectors are the three lists the limits read (#293), in this order:
+//
+//   - every request whose phase is not one of unreadPhases (Denied, Cancelled, Superseded): no phase and
+//     Pending, every phase the executor still moves on, every success and failure, Expired, and any phase
+//     added later or written by hand (an exclusion list, so a new phase is read until it is classified). This
+//     is one paged list, one consistent snapshot: the cap, the requests the executor moves on (which hold the
+//     lock whatever status.holdsTarget says) and the breaker's outcomes come from the same moment, so a request
+//     that changes phase while the limits are read is never seen twice or in two states;
+//   - every request whose status.holdsTarget is not false, in any phase: the holders of the lock (holdsLock),
+//     a stopped one included, also one whose phase was set to Denied by hand, and those that do not have the
+//     field yet (a missing field is the empty value, which is not false). The executor writes the field on
+//     every request it decides (true with the allowed decision, false with a refusal) and once on those
+//     written before it existed (backfillLock), so after that pass only undecided requests lack it;
+//   - every probe (status.breakerProbe=true), also those that ended Denied, Cancelled or Superseded.
+//
+// A request that ended Denied, Cancelled or Superseded, holds no lock (status.holdsTarget false) and is not a
+// probe is never read: it is not active (its deletion makes no Git write, so even while it holds the
+// finalizer it is not counted against the cap), not an outcome and not a holder. The breaker still reads every
+// success and failure, so its reads grow with those (not with refusals and other neutral ends).
+//
+// The lock and probe lists are read after the first; a later read of a request replaces an earlier one, so a
+// request seen twice counts in its newer state, and one that left the first list in between is still read
+// when it holds the lock or is a probe.
+func limitsSelectors() []fields.Selector {
+	read := make([]fields.Selector, 0, len(unreadPhases))
+	for _, p := range unreadPhases {
+		read = append(read, fields.OneTermNotEqualSelector(phaseField, string(p)))
+	}
+	return []fields.Selector{fields.AndSelectors(read...), fields.OneTermNotEqualSelector(lockField, "false"),
+		fields.OneTermEqualSelector(probeField, "true")}
+}
+
+// readLimits reads the requests of namespace that the limits need (limitsSelectors), each list from the API
+// server in pages, and returns what the limits need of each by UID. Any error is returned (fail closed).
+func (r *RemediationRequestReconciler) readLimits(ctx context.Context, namespace string) (
+	map[types.UID]limitsEntry, error) {
+	seen := map[types.UID]limitsEntry{}
+	sels := limitsSelectors()
+	for i, sel := range sels {
+		// The probes are kept from the last list, which holds every probe in its newest state, so each is copied
+		// once.
+		probes := i == len(sels)-1
+		err := r.listPages(ctx, namespace, sel, func(o *remediationv1alpha1.RemediationRequest) {
+			e := limitsEntry{active: active(o), lock: holdsLock(o), target: o.Spec.TargetRef.UID,
+				outcome: breakerOutcome(o)}
+			if e.outcome != outcomeNone {
+				e.at = o.Status.LastPhaseTransitionTime.Time
+			}
+			if probes {
+				e.probe = o.DeepCopy()
+			}
+			seen[o.UID] = e
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return seen, nil
+}
+
+// listPages lists the RemediationRequests in namespace that sel selects from the API server, one page of
+// limitsPageSize at a time, and calls visit with each, so no response grows with the number of requests. The
+// pages after the first continue from the first one's resourceVersion, so together they are one consistent
+// snapshot. Any error, an expired continue token (the snapshot was compacted away) included, is returned and
+// nothing more is visited; the caller then lets nothing through (fail closed).
+func (r *RemediationRequestReconciler) listPages(ctx context.Context, namespace string, sel fields.Selector,
+	visit func(*remediationv1alpha1.RemediationRequest)) error {
+	cont := ""
+	for {
+		list := &remediationv1alpha1.RemediationRequestList{}
+		if err := r.APIReader.List(ctx, list, client.InNamespace(namespace), client.MatchingFieldsSelector{Selector: sel},
+			client.Limit(limitsPageSize), client.Continue(cont)); err != nil {
+			return fmt.Errorf("list RemediationRequests in %s (%s): %w", namespace, sel, err)
+		}
+		for i := range list.Items {
+			visit(&list.Items[i])
+		}
+		if cont = list.Continue; cont == "" {
+			return nil
+		}
+	}
+}
+
 // breaker works out the state of the circuit breaker (see the top of this file) from inRow, the times of the
-// failures in a row, lastFailure, the latest of them, and items, the requests of the namespace, of which the one
-// with UID self is skipped. The probes among items are looked at only when the breaker is tripped. probing is
-// whether a probe runs; it is set only when the breaker is half-open.
+// failures in a row, lastFailure, the latest of them, and probes, the other requests of the namespace marked as
+// probes. The probes are looked at only when the breaker is tripped. probing is whether a probe runs; it is set
+// only when the breaker is half-open.
 func (r *RemediationRequestReconciler) breaker(inRow []time.Time, lastFailure time.Time,
-	items []remediationv1alpha1.RemediationRequest, self types.UID) (state circuitState, probing bool) {
+	probes []remediationv1alpha1.RemediationRequest) (state circuitState, probing bool) {
 	threshold := r.breakerThreshold()
 	if len(inRow) < threshold {
 		return circuitClosed, false
@@ -323,11 +441,8 @@ func (r *RemediationRequestReconciler) breaker(inRow []time.Time, lastFailure ti
 	slices.SortFunc(inRow, time.Time.Compare)
 	tripped := inRow[threshold-1]
 	reopened := lastFailure
-	for i := range items {
-		p := &items[i]
-		if p.UID == self || !p.Status.BreakerProbe {
-			continue
-		}
+	for i := range probes {
+		p := &probes[i]
 		if !ended(p.Status.Phase) {
 			// Still running, also while it is being deleted: until its finalizer is gone its pull request may
 			// still be open and merge.
@@ -358,15 +473,29 @@ func (r *RemediationRequestReconciler) breaker(inRow []time.Time, lastFailure ti
 // ended reports whether phase ends a probe: a final phase, or Merged or a later one, after which the executor
 // no longer writes to Git for the request. Any other phase, an unknown one included, runs (fail closed).
 func ended(phase remediationv1alpha1.RemediationPhase) bool {
-	switch phase {
-	case remediationv1alpha1.PhaseExpired, remediationv1alpha1.PhaseCancelled, remediationv1alpha1.PhaseSuperseded,
-		remediationv1alpha1.PhaseDenied, remediationv1alpha1.PhaseFailed, remediationv1alpha1.PhaseNeedsIntervention,
-		remediationv1alpha1.PhaseMerged, remediationv1alpha1.PhaseWaitingForDelivery,
-		remediationv1alpha1.PhaseVerifying, remediationv1alpha1.PhaseSucceeded:
-		return true
-	}
-	return false
+	return slices.Contains(endedPhases, phase)
 }
+
+// The classes of the phases after the policy check. Every phase of the API is Pending, a phase before the
+// merge (beforeMerge) or in exactly one of these (TestEveryPhaseIsClassified).
+var (
+	// successPhases are the breaker's successes: the change merged.
+	successPhases = []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseMerged,
+		remediationv1alpha1.PhaseWaitingForDelivery, remediationv1alpha1.PhaseVerifying,
+		remediationv1alpha1.PhaseSucceeded}
+	// failurePhases are the breaker's failures.
+	failurePhases = []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseFailed,
+		remediationv1alpha1.PhaseNeedsIntervention}
+	// neutralPhases end a request without saying whether its change works.
+	neutralPhases = []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseExpired,
+		remediationv1alpha1.PhaseDenied, remediationv1alpha1.PhaseCancelled, remediationv1alpha1.PhaseSuperseded}
+	// unreadPhases are the neutral ends the limits do not list unless the request holds the lock or is a probe
+	// (limitsSelectors). Expired is read: its deletion may still close a pull request (closeOnDelete).
+	unreadPhases = []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseDenied,
+		remediationv1alpha1.PhaseCancelled, remediationv1alpha1.PhaseSuperseded}
+	// endedPhases are the phases that end a probe (ended).
+	endedPhases = slices.Concat(successPhases, failurePhases, neutralPhases)
+)
 
 // waitForLimits holds back a request that a limit does not let through: it sets Queued True with the limit as
 // the reason, writes the status when that changed, and checks again after s.recheckDelay.

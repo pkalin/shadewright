@@ -298,7 +298,7 @@ spec:
                   breakerProbe is true on a request the policy check let through while the circuit breaker was tripped
                   (half-open): it is the breaker's probe. It is written with the allowed decision and never cleared. The
                   breaker finds a running probe, or one that ended without a success, by this field only; a request
-                  without it is not a probe.
+                  without it is not a probe. It is a selectable field (field selector status.breakerProbe).
                 type: boolean
               conditions:
                 description: |-
@@ -375,8 +375,11 @@ spec:
                   holdsTarget is true while the request holds the executor's lock on its target: it is set in the status
                   write of the allowed decision and cleared only once the request's pull request is known merged or closed,
                   or a look-up by its branch and marker found none of its own open. While it is true no other request on the
-                  same target goes through the policy check. Unset on a request written before the field existed; the
-                  executor then derives it once from the request's phase and pull request, keeping the lock when in doubt.
+                  same target goes through the policy check. Unset on a request not yet decided, and on one written before the
+                  field existed; the executor then derives it once from the request's phase and pull request, keeping the
+                  lock when in doubt.
+                  A refused request gets false with its refusal.
+                  It is a selectable field (field selector status.holdsTarget), so the executor's lock reads only holders.
                 type: boolean
               lastPhaseTransitionTime:
                 description: |-
@@ -389,7 +392,9 @@ spec:
                 format: int64
                 type: integer
               phase:
-                description: phase summarizes progress.
+                description: |-
+                  phase summarizes progress. It is a selectable field (field selector status.phase), so the executor's
+                  limits list only the phases they need from the API server.
                 enum:
                 - Pending
                 - PolicyChecked
@@ -531,6 +536,10 @@ spec:
         required:
         - spec
         type: object
+    selectableFields:
+    - jsonPath: .status.phase
+    - jsonPath: .status.breakerProbe
+    - jsonPath: .status.holdsTarget
     served: true
     storage: true
     subresources:

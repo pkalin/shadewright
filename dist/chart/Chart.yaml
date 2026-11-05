@@ -2,7 +2,7 @@ apiVersion: v2
 name: shadewright
 description: A Kubernetes operations agent that diagnoses incidents with an LLM and proposes fixes only as GitOps pull requests
 type: application
-kubeVersion: ">=1.28.0-0"
+kubeVersion: ">=1.32.0-0"
 home: https://shadewright.io
 icon: https://shadewright.io/assets/logo.png
 sources:

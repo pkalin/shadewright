@@ -95,7 +95,8 @@ func limitsWorld(t *testing.T, limit int32, others ...*remediationv1alpha1.Remed
 		}
 	}
 	stub := &stubResolver{result: resolved()}
-	r := &RemediationRequestReconciler{Client: c, APIReader: c, Scheme: c.Scheme(), Source: stub,
+	// The fake client does not serve the field selectors the limits list with; apiServerReader does.
+	r := &RemediationRequestReconciler{Client: c, APIReader: &apiServerReader{Reader: c}, Scheme: c.Scheme(), Source: stub,
 		Now: func() time.Time { return limitsNow }}
 	return r, c, rr, stub
 }
@@ -734,6 +735,11 @@ func TestLimitsDoNotHoldRefusals(t *testing.T) {
 			}
 			if c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionQueued); c != nil {
 				t.Fatalf("a refused request is Queued: %+v", c)
+			}
+			// A refusal never takes the lock, and says so, so the lock's list (status.holdsTarget!=false) does
+			// not read it.
+			if got.Status.HoldsTarget == nil || *got.Status.HoldsTarget {
+				t.Fatalf("holdsTarget = %v on a refused request, want false", got.Status.HoldsTarget)
 			}
 		})
 	}

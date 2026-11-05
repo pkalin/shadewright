@@ -284,7 +284,8 @@ type RemediationRequestStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// phase summarizes progress.
+	// phase summarizes progress. It is a selectable field (field selector status.phase), so the executor's
+	// limits list only the phases they need from the API server.
 	// +optional
 	Phase RemediationPhase `json:"phase,omitempty"`
 
@@ -296,15 +297,18 @@ type RemediationRequestStatus struct {
 	// breakerProbe is true on a request the policy check let through while the circuit breaker was tripped
 	// (half-open): it is the breaker's probe. It is written with the allowed decision and never cleared. The
 	// breaker finds a running probe, or one that ended without a success, by this field only; a request
-	// without it is not a probe.
+	// without it is not a probe. It is a selectable field (field selector status.breakerProbe).
 	// +optional
 	BreakerProbe bool `json:"breakerProbe,omitempty"`
 
 	// holdsTarget is true while the request holds the executor's lock on its target: it is set in the status
 	// write of the allowed decision and cleared only once the request's pull request is known merged or closed,
 	// or a look-up by its branch and marker found none of its own open. While it is true no other request on the
-	// same target goes through the policy check. Unset on a request written before the field existed; the
-	// executor then derives it once from the request's phase and pull request, keeping the lock when in doubt.
+	// same target goes through the policy check. Unset on a request not yet decided, and on one written before the
+	// field existed; the executor then derives it once from the request's phase and pull request, keeping the
+	// lock when in doubt.
+	// A refused request gets false with its refusal.
+	// It is a selectable field (field selector status.holdsTarget), so the executor's lock reads only holders.
 	// +optional
 	HoldsTarget *bool `json:"holdsTarget,omitempty"`
 
@@ -361,6 +365,9 @@ type RemediationRequestStatus struct {
 // +kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.spec.targetRef.name`
 // +kubebuilder:printcolumn:name="PR",type=integer,JSONPath=`.status.pullRequest.number`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:selectablefield:JSONPath=`.status.phase`
+// +kubebuilder:selectablefield:JSONPath=`.status.breakerProbe`
+// +kubebuilder:selectablefield:JSONPath=`.status.holdsTarget`
 
 // RemediationRequest is one proposed fix: a typed action on one object, carried out as a GitOps pull request
 // after deterministic policy allows it.

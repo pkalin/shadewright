@@ -150,14 +150,20 @@ The retry limit is planned.
 
 ### No stale reads
 
-The policy and settings are read from the API server on every check, never from the cache, so a deleted policy or a tightened setting takes effect at once. Messages and conditions never carry Git URLs or provider text.
+The policy and settings are read from the API server on every check, never from the cache, so a deleted policy or a tightened setting takes effect at once.
+
+### No Git URLs or provider text
+
+Messages and conditions never carry Git URLs or provider text.
 
 ### Step deadlines
 
-Every external call of a step runs under the step's own deadline. There are two such deadlines:
+Every external call of a step runs under the step's own deadline. Each of these has its own:
 
-- the policy check: the uncached reads (all pages of every list of the limits included) and the source resolver together;
-- the freshness check and the cleanup of a stale plan: open the repository, find and close the change request, as one sequence.
+- the policy check (`CheckTimeout`): the uncached reads (all pages of every list of the limits included) and the source resolver together;
+- the freshness check, with its own context;
+- the cleanup of a stale plan: open the repository, find and close the change request, as one sequence under one shared deadline;
+- each Git step of the pull request step (`WriteTimeout`).
 
 A step that reaches its deadline returns a retryable error and keeps the request in its phase. It never ends in a final phase. The caller's own cancellation stays a different error, so shutdown is not reported as a timeout.
 
@@ -296,6 +302,8 @@ The stop is written with fixed text, never with the response. It applies whereve
 
 ### 6.5.2. The render rule
 
+A validation refusal is written with fixed text, never with the content it checked.
+
 #### What it does
 
 The render rule covers both windows in which the target branch can move under the change: between cutting the branch and the commit, and while the pull request waits (#181). The change is rendered at the head of the target branch at which the freshness check has just found the plan fresh, which is what merging it would build.
@@ -350,8 +358,6 @@ Shadewright never reopens it and does not watch it any more. The way back to the
 A change request is closed only when it is the pull request of the request's branch and carries the request's exact marker. Once a number is recorded, it is closed only when it is that number.
 
 So someone else's pull request on the same branch name, or a recorded number that is not the branch's own, is never closed. The cleanup of a stale plan then ends `NeedsIntervention`, `ForeignChangeRequest`.
-
-A validation refusal is written with fixed text, never with the content it checked.
 
 ## 6.6. Required mechanisms
 
@@ -457,7 +463,7 @@ While writes are paused the deletion waits, because closing is a write. Deleting
 | Retry limit | Planned |
 | Wait kept in the call | Up to 15 seconds; longer requeues after the delay, cut to `status.deadline` |
 | Secondary rate limit message | Searched in at most 16 KiB of the body, never kept |
-| Delay without headers | `Retry-After`, else until `x-ratelimit-reset`, else one minute |
+| Delay for a rate-limited answer | `Retry-After`, else until `x-ratelimit-reset`, else one minute |
 | Create of branch or pull request after an unexplained 422 | Up to four attempts with backoff |
 | Read cache | `sourcemap.ReadCache`: at most 4,096 reads and 16 MiB; executor memory 128 Mi |
 | Finalizer | `remediation.shadewright.io/close-pull-request` |

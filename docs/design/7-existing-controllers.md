@@ -31,7 +31,7 @@ Match the adapter to the installed version.
 
 ## 7.3. Flux
 
-### After the merge
+### After the merge (planned, [#19](https://github.com/pkalin/shadewright/issues/19))
 
 Check that the `Kustomization` (or `HelmRelease`) reports the merge commit as its last applied revision and is `Ready`. Then check workload health. `Ready` alone does not prove the incident is gone.
 
@@ -46,4 +46,5 @@ Shadewright never suspends a Kustomization, disables pruning or changes Flux con
 | KEDA module | `internal/modules/keda` is built; its symptom sources are not consumed yet |
 | Cluster and downstream capacity checks | Planned |
 | Crossplane | Later |
+| Delivery and health check after merge | Planned |
 | Readiness rule for `AdjustKedaMaxReplicas` | `KedaReady`, checked at the decision and before every write |

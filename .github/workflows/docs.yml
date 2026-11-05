@@ -8,9 +8,10 @@ on:
     paths: ["docs/**", "overrides/**", "includes/**", "zensical.toml", "requirements-docs.in", "requirements-docs.txt", ".github/workflows/docs.yml"]
   pull_request:
     paths: ["docs/**", "overrides/**", "includes/**", "zensical.toml", "requirements-docs.in", "requirements-docs.txt", ".github/workflows/docs.yml"]
-  # A published release refreshes the version shown in the top bar (the step "Fetch release facts" below).
-  release:
-    types: [published]
+  # A daily build refreshes the latest release and the star count in the top bar (step "Fetch release facts").
+  # Not a release trigger: that runs on the tag, and the github-pages environment deploys from main only.
+  schedule:
+    - cron: "17 5 * * *"
   workflow_dispatch:
 
 permissions:
@@ -27,8 +28,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # A release event runs on the tag: build the docs of main, which is what the site shows.
-          ref: ${{ github.event_name == 'release' && github.event.repository.default_branch || github.sha }}
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.x"

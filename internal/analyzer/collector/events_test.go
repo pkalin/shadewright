@@ -339,6 +339,22 @@ func TestObservedAtIsClamped(t *testing.T) {
 	}
 }
 
+// A send with room in the channel never times out, even when the send timer has already fired by the time the
+// select runs (a loaded node, -race): a 1 ns timeout makes that the normal case here.
+func TestSendWithRoomNeverTimesOut(t *testing.T) {
+	const events = 200
+	h := newHarness(t, Config{Buffer: events, SendTimeout: time.Nanosecond})
+	h.events.reader = generatedEvents{}
+	for i := range events {
+		if res := h.reconcileEvent(fmt.Sprintf("room-%d", i)); res.RequeueAfter != 0 {
+			t.Fatalf("room-%d: send timed out with room in the channel", i)
+		}
+	}
+	if got := len(h.drain()); got != events {
+		t.Fatalf("got %d observations, want %d", got, events)
+	}
+}
+
 func TestFullChannelKeepsTheCount(t *testing.T) {
 	h := newHarness(t, Config{Buffer: 1})
 	first := warning("first", 0)
@@ -398,13 +414,7 @@ func TestCollectorBoundsEventsUnderLoad(t *testing.T) {
 	h := newHarness(t, Config{MaxEvents: capacity, Buffer: events + 1})
 	h.events.reader = generatedEvents{}
 	for i := range events {
-		// A send can time out although the channel has room: when the 50 ms timer has fired before the select
-		// runs (a slow machine, -race), select picks either ready case. The controller then retries; so does this.
-		for try := 0; h.reconcileEvent(fmt.Sprintf("load-%d", i)).RequeueAfter != 0; try++ {
-			if try == 10 {
-				t.Fatalf("load-%d: still not sent after %d tries", i, try)
-			}
-		}
+		h.reconcileEvent(fmt.Sprintf("load-%d", i))
 	}
 	if n := h.c.series.len(); n > capacity {
 		t.Fatalf("collector remembers %d events, cap %d", n, capacity)

@@ -30,12 +30,27 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # go test keeps the inputs that found new coverage in $GOCACHE/fuzz. Saving them under a new key on every run
+      # (restored from the newest) lets the corpus grow from week to week instead of starting from the seeds.
+      # Caches are per branch, and this workflow runs only on schedule and by hand.
+      - name: Find the fuzz cache
+        id: fuzzcache
+        run: echo "dir=$(go env GOCACHE)/fuzz" >> "$GITHUB_OUTPUT"
+
+      - name: Restore and save the fuzz corpus
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.fuzzcache.outputs.dir }}
+          key: fuzz-corpus-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ runner.os }}-
+
       - name: Fuzz
         run: make fuzz FUZZTIME=4m
 
       # go test writes a failing input to testdata/fuzz/<FuzzName>/ in the package; collect only the new files.
+      # Also when the job timed out (cancelled), so an input written before that is not lost.
       - name: Collect failing inputs
-        if: failure()
+        if: failure() || cancelled()
         run: |
           mkdir -p fuzz-failures
           git ls-files --others --exclude-standard -- '*/testdata/fuzz/*' | while read -r f; do
@@ -44,7 +59,7 @@ jobs:
           done
 
       - name: Upload failing inputs
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-failures

@@ -41,11 +41,12 @@ limitations under the License.
 // template returns, when a series carries a label the template does not produce or a label value that is not
 // a plain name (letters, digits, '.', '_', ':' and '-', at most 253 bytes), when a sample lies more than a
 // second outside the time asked for or its times are not strictly increasing, or when it is malformed in any
-// other way. A successful response with a non-empty warnings list (a store behind the server that did not
-// answer, for example) is returned with [providers.MetricsResult] Partial set; a warnings field that is not a
-// list of strings is refused. The text of warnings and infos, error text and unknown fields of the response are
-// never returned or logged; infos alone do not make a result partial. Label values still need redaction (internal/redact) before a model sees them;
-// the adapter does not redact.
+// other way. A successful response with a warning (a store behind the server that did not answer, for example)
+// is returned with [providers.MetricsResult] Partial set; so is one whose warnings field has another shape than
+// a list of strings. Infos, and warnings that start with "PromQL info: " (where releases before 2.50 put them),
+// describe the query, not missing data, and do not make a result partial. The text of warnings, infos and
+// errors and unknown fields of the response are never returned or logged. Label values still need redaction
+// (internal/redact) before a model sees them; the adapter does not redact.
 //
 // Transport: TLS and authentication come from the *http.Client given in [Config]; redirects are never
 // followed. Each query has a deadline ([Config.Timeout] or the caller's, whichever is sooner); the server is

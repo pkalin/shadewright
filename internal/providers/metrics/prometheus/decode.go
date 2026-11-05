@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/pkalin/shadewright/internal/providers"
@@ -78,8 +79,8 @@ type decoder struct {
 	series []providers.Series
 	// vector and matrix record which element shapes were seen ("value" and "values").
 	vector, matrix bool
-	// warnings counts the entries of the response's warnings list; their text is never kept.
-	warnings int
+	// partial records a warning that the data may be incomplete; the warning text is never kept.
+	partial bool
 }
 
 // decode reads a response of the Prometheus query API. A successful response that carries warnings is
@@ -98,7 +99,7 @@ func decode(r io.Reader, win window, labels []string) (providers.MetricsResult, 
 		// A syntax error or a failed read: the text of either may quote the response.
 		return providers.MetricsResult{}, fmt.Errorf("prometheus response cannot be decoded: %w", ErrInvalidResponse)
 	}
-	return providers.MetricsResult{Series: d.series, Partial: d.warnings > 0}, nil
+	return providers.MetricsResult{Series: d.series, Partial: d.partial}, nil
 }
 
 func invalid(msg string) error {
@@ -128,7 +129,7 @@ func (d *decoder) top() error {
 				return err
 			}
 		case "warnings":
-			if d.warnings, err = d.countStrings(); err != nil {
+			if d.partial, err = d.warns(); err != nil {
 				return err
 			}
 		default: // infos, errorType, error: never returned. Infos annotate the query, they do not cut the data.
@@ -386,34 +387,52 @@ func (d *decoder) delim(want json.Delim) error {
 	return nil
 }
 
-// skip reads and drops one value, refusing nesting deeper than maxSkipDepth.
-// countStrings reads a list of strings, or null, and returns its length without keeping the text.
-func (d *decoder) countStrings() (int, error) {
+// infoPrefix starts the PromQL annotations that Prometheus releases before 2.50 put into warnings, which later
+// releases send as infos (for example "PromQL info: metric might not be a counter"). They describe the query,
+// not missing data.
+const infoPrefix = "PromQL info: "
+
+// warns reads the warnings field and reports whether it says the data may be incomplete: any entry that is not
+// an info annotation. null and an empty list say nothing. A value of another shape (from a proxy that does not
+// follow the API) is taken as a warning, never refused, so a usable answer is kept but marked. The text is
+// compared with a fixed prefix only and never kept.
+func (d *decoder) warns() (bool, error) {
 	tok, err := d.dec.Token()
 	if err != nil {
-		return 0, err
+		return false, err
 	}
-	if tok == nil {
-		return 0, nil
+	switch tok {
+	case nil:
+		return false, nil
+	case json.Delim('['):
+	case json.Delim('{'):
+		return true, d.skipRest('{', 1)
+	default:
+		return true, nil
 	}
-	if tok != json.Delim('[') {
-		return 0, invalid("has malformed warnings")
-	}
-	n := 0
+	partial := false
 	for d.dec.More() {
 		tok, err := d.dec.Token()
 		if err != nil {
-			return 0, err
+			return false, err
 		}
-		if _, ok := tok.(string); !ok {
-			return 0, invalid("has malformed warnings")
+		switch v := tok.(type) {
+		case string:
+			partial = partial || !strings.HasPrefix(v, infoPrefix)
+		case json.Delim:
+			partial = true
+			if err := d.skipRest(v, 1); err != nil {
+				return false, err
+			}
+		default:
+			partial = true
 		}
-		n++
 	}
 	_, err = d.dec.Token()
-	return n, err
+	return partial, err
 }
 
+// skip reads and drops one value, refusing nesting deeper than maxSkipDepth.
 func (d *decoder) skip(depth int) error {
 	tok, err := d.dec.Token()
 	if err != nil {
@@ -423,6 +442,11 @@ func (d *decoder) skip(depth int) error {
 	if !ok {
 		return nil
 	}
+	return d.skipRest(delim, depth)
+}
+
+// skipRest drops the rest of an object or array whose opening delimiter was read at the given depth.
+func (d *decoder) skipRest(delim json.Delim, depth int) error {
 	if delim != '{' && delim != '[' {
 		return invalid("is malformed")
 	}
@@ -439,6 +463,6 @@ func (d *decoder) skip(depth int) error {
 			return err
 		}
 	}
-	_, err = d.dec.Token()
+	_, err := d.dec.Token()
 	return err
 }

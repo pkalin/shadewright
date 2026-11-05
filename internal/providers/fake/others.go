@@ -175,7 +175,8 @@ func (m *Metrics) SetResult(template string, r providers.MetricsResult) {
 	if m.results == nil {
 		m.results = map[string]providers.MetricsResult{}
 	}
-	m.results[template] = providers.MetricsResult{Series: cloneSeries(r.Series), Partial: r.Partial}
+	r.Series = cloneSeries(r.Series)
+	m.results[template] = r
 }
 
 // Query returns the registered result for the template.
@@ -189,7 +190,8 @@ func (m *Metrics) Query(ctx context.Context, q providers.MetricsQuery) (provider
 	if !ok {
 		return providers.MetricsResult{}, fmt.Errorf("template %q: %w", q.Template, providers.ErrNotFound)
 	}
-	return providers.MetricsResult{Series: cloneSeries(r.Series), Partial: r.Partial}, nil
+	r.Series = cloneSeries(r.Series)
+	return r, nil
 }
 
 func cloneSeries(in []providers.Series) []providers.Series {

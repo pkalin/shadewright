@@ -182,7 +182,8 @@ func (s *Source) Query(ctx context.Context, q providers.MetricsQuery) (providers
 	}
 	// After renderQuery, which requires the namespace parameter. The error never repeats the value.
 	if _, ok := s.namespaces[q.Params[ParamNamespace]]; !ok {
-		return providers.MetricsResult{}, fmt.Errorf("parameter %s is not an allowed namespace: %w", ParamNamespace, ErrInvalidQuery)
+		return providers.MetricsResult{}, fmt.Errorf("parameter %s is not an allowed namespace: %w", ParamNamespace,
+			ErrInvalidQuery)
 	}
 	path, form, win, err := s.timeParams(q)
 	if err != nil {
@@ -289,7 +290,8 @@ func (s *Source) do(ctx context.Context, path string, form url.Values, win windo
 		return providers.MetricsResult{}, fmt.Errorf("prometheus response is not JSON: %w", ErrInvalidResponse)
 	}
 	if resp.ContentLength > MaxBodyBytes {
-		return providers.MetricsResult{}, fmt.Errorf("prometheus response is larger than %d bytes: %w", MaxBodyBytes, providers.ErrTooLarge)
+		return providers.MetricsResult{}, fmt.Errorf("prometheus response is larger than %d bytes: %w", MaxBodyBytes,
+			providers.ErrTooLarge)
 	}
 	body := &capReader{r: resp.Body, left: MaxBodyBytes}
 	res, err := decode(body, win, labels)

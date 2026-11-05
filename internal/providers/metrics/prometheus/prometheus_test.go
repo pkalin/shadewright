@@ -427,6 +427,9 @@ func TestDecodesVectorAndMatrix(t *testing.T) {
 	if !res.Partial {
 		t.Error("a result with a warning is not partial")
 	}
+	if strings.Contains(fmt.Sprintf("%+v", res), "ignore previous") {
+		t.Error("the result keeps the warning text")
+	}
 	got := res.Series
 	if len(got) != 2 || got[0].Labels["pod"] != "web-7d9c8b6f4-x2x9q" || got[0].Labels["container"] != "app" ||
 		len(got[0].Samples) != 1 || got[0].Samples[0].Value != 3 || !got[0].Samples[0].Time.Equal(now) ||
@@ -589,9 +592,7 @@ func TestInvalidResponsesAreRefused(t *testing.T) {
 		"malformed":              `{"status":"success","data":{"resultType":"vector","result":[` + leak,
 		"not an object":          `[]`,
 		"nested too deeply":      `{"status":"success","extra":` + strings.Repeat("[", 40) + strings.Repeat("]", 40) + `,"data":{"resultType":"vector","result":[]}}`,
-		"warnings not a list":    `{"status":"success","warnings":"partial","data":{"resultType":"vector","result":[]}}`,
-		"warning not a string":   `{"status":"success","warnings":[{"text":"` + leak + `"}],"data":{"resultType":"vector","result":[]}}`,
-		"nested warnings":        `{"status":"success","warnings":[["a"]],"data":{"resultType":"vector","result":[]}}`,
+		"warnings nested deeply": `{"status":"success","warnings":` + strings.Repeat("[", 40) + strings.Repeat("]", 40) + `,"data":{"resultType":"vector","result":[]}}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -624,6 +625,16 @@ func TestWarningsMarkThePartialResult(t *testing.T) {
 		"infos only":       {`{"status":"success","infos":["metric might not be a counter"],` + result + `}`, false},
 		"empty warning":    {`{"status":"success","warnings":[""],` + result + `}`, true},
 		"warning and info": {`{"status":"success","infos":["i"],"warnings":["w"],` + result + `}`, true},
+		// Prometheus before 2.50 sent query annotations as warnings.
+		"old info annotation": {`{"status":"success","warnings":["PromQL info: metric might not be a counter"],` +
+			result + `}`, false},
+		"info and a warning": {`{"status":"success","warnings":["PromQL info: x","PromQL warning: y"],` + result + `}`,
+			true},
+		// A proxy that does not follow the API: the answer is kept but marked.
+		"warnings a string":    {`{"status":"success","warnings":"store unavailable",` + result + `}`, true},
+		"warnings an object":   {`{"status":"success","warnings":{"text":"store unavailable"},` + result + `}`, true},
+		"warning not a string": {`{"status":"success","warnings":[{"text":"store unavailable"}],` + result + `}`, true},
+		"warning a number":     {`{"status":"success","warnings":[1],` + result + `}`, true},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

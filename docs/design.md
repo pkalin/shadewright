@@ -1,6 +1,6 @@
 # Design
 
-Status: draft for the MVP. Most of the operator is built. The model analysis and everything after the pull request are not.
+Status: draft for the MVP. Built so far:
 
 **Built**
 

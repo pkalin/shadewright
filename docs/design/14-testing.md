@@ -1,5 +1,24 @@
 # 14. Testing
 
-Tests target process behaviour: deduplication across restarts, idempotency after a crash between an API call and the status write, prompt injection in events and logs, refusal of disallowed actions, approval invalidated by a plan change, branch rules, model and GitHub outages, and an incident that changes while the PR waits for review.
+Tests target process behaviour.
 
-Pilot metrics: time to diagnosis and to fix, events per incident, operator-rated plan accuracy, share of accepted PRs, failed or reverted changes, cost and tokens per incident, and actions blocked by policy.
+Tests are meant to cover:
+
+- deduplication across restarts;
+- idempotency after a crash between an API call and the status write;
+- prompt injection in events and logs;
+- refusal of disallowed actions;
+- approval invalidated by a plan change;
+- branch rules;
+- model and GitHub outages;
+- an incident that changes while the PR waits for review.
+
+Pilot metrics:
+
+- Time to diagnosis and to fix.
+- Events per incident.
+- Operator-rated plan accuracy.
+- Share of accepted PRs.
+- Failed or reverted changes.
+- Cost and tokens per incident.
+- Actions blocked by policy.

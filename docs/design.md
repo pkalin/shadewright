@@ -1,6 +1,43 @@
 # Design
 
-Status: draft for the MVP. Built so far: the API and its validation, the policy check step of section 6 with the source mapping and the freshness check, the YAML patchers, the semantic diff check of section 8.2, the GitHub and Key Vault adapters, the Prometheus `MetricsSource` adapter with its approved query templates and the pod logs `LogSource` adapter, bounded and redacted, and the missing reference check that infers a missing Secret or ConfigMap without reading either (section 4; none of the three wired into the analyzer yet), the pull request step of section 6 (branch, commit and pull request, up to `Merged`), the kill switch of section 5.4 (`spec.paused`, one gate right before every Git write), the concurrency limit, the lock per target and the circuit breaker of section 10.7 (retry limits and cooldowns between attempts are not built), the collector of section 3.1 and both levels of deduplication of section 3.2, with the Incident controller that keeps them in `Incident` objects, the RBAC of sections 2.2 and 10, the registries of platform and integration modules of sections 2.4 and 2.5 with the symptom source contract, wired into the analyzer with the generic and AKS platforms, the EKS and GKE platforms (detection only) and the cloudflared, Flux, KEDA, Kyverno and Secrets Store CSI driver integrations, platform and integration detection, which the analyzer runs and reports in the settings status (5.4), and the Prometheus metrics of both components ([reference](reference/metrics.md)); the diagnosis rules and the cloudflared, Flux, KEDA and Kyverno symptom sources feed nothing yet. Everything else is design; diagrams mark unbuilt steps *(planned)*. Decisions that are already made are recorded in the [ADRs](adr/index.md); this page describes the whole system and lists what is still open.
+Status: draft for the MVP.
+
+**Built**
+
+- The API and its validation.
+- The policy check step of section 6, with the source mapping and the freshness check.
+- The YAML patchers.
+- The semantic diff check of section 8.2.
+- The GitHub and Key Vault adapters.
+- The pull request step of section 6: branch, commit and pull request, up to `Merged`.
+- The kill switch of section 5.4: `spec.paused`, one gate right before every Git write.
+- The concurrency limit, the lock per target and the circuit breaker of section 10.7. Retry limits and cooldowns between attempts are not built.
+- The collector of section 3.1 and both levels of deduplication of section 3.2, with the Incident controller that keeps them in `Incident` objects.
+- The RBAC of sections 2.2 and 10.
+- The Prometheus metrics of both components ([reference](reference/metrics.md)).
+
+**Built, but not wired into the analyzer yet**
+
+- The Prometheus `MetricsSource` adapter, with its approved query templates.
+- The pod logs `LogSource` adapter, bounded and redacted.
+- The missing reference check (section 4). It infers a missing Secret or ConfigMap without reading either.
+
+**Built and wired into the analyzer**
+
+- The registries of platform and integration modules of sections 2.4 and 2.5, with the symptom source contract.
+- The generic and AKS platforms, and the EKS and GKE platforms (detection only).
+- The cloudflared, Flux, KEDA, Kyverno and Secrets Store CSI driver integrations.
+- Platform and integration detection. The analyzer runs it and reports it in the settings status (5.4).
+**Built, but feeding nothing yet**
+
+- The diagnosis rules.
+- The cloudflared, Flux, KEDA and Kyverno symptom sources.
+
+**Not built yet**
+
+- Everything else is design. Diagrams mark unbuilt steps *(planned)*.
+
+Decisions that are already made are recorded in the [ADRs](adr/index.md). This page describes the whole system and lists what is still open.
 
 ## Sections
 

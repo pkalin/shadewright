@@ -77,6 +77,22 @@ spec:
         - --prometheus-cluster={{ . }}
         {{- end }}
         {{- end }}
+        {{- with $c.analysis.triageModel }}
+        - --triage-model={{ . }}
+        {{- with $c.analysis.escalationModel }}
+        - --escalation-model={{ . }}
+        {{- end }}
+        {{- with $c.analysis.endpointSuffixes }}
+        - --model-endpoint-suffixes={{ join "," . }}
+        {{- end }}
+        {{- with $c.analysis.actionPolicies }}
+        {{- $pairs := list }}
+        {{- range $type, $policy := . }}
+        {{- $pairs = append $pairs (printf "%s=%s" $type $policy) }}
+        {{- end }}
+        - --action-policies={{ join "," $pairs }}
+        {{- end }}
+        {{- end }}
         {{- with $c.extraArgs }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

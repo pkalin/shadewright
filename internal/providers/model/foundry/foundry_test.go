@@ -148,8 +148,11 @@ func reply(w http.ResponseWriter, body string) {
 	_, _ = io.WriteString(w, body)
 }
 
+// replyModel is the model ID the test replies name.
+const replyModel = "gpt-5.4-mini-2026-03-17"
+
 func completionJSON(finish, message string) string {
-	return `{"id":"chatcmpl-1","object":"chat.completion","model":"gpt-5.4-mini-2026-03-17",` +
+	return `{"id":"chatcmpl-1","object":"chat.completion","model":"` + replyModel + `",` +
 		`"choices":[{"index":0,"finish_reason":"` + finish + `","message":` + message + `}],` +
 		`"usage":{"prompt_tokens":120,"completion_tokens":30,"total_tokens":150,"prompt_tokens_details":{"cached_tokens":64}}}`
 }
@@ -179,7 +182,7 @@ func TestCompleteStructuredSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if c.Content != `{"cause":"oom"}` || c.Usage != wantUsage || c.Model != "gpt-5.4-mini-2026-03-17" || c.ToolCalls != nil {
+	if c.Content != `{"cause":"oom"}` || c.Usage != wantUsage || c.Model != replyModel || c.ToolCalls != nil {
 		t.Errorf("completion = %+v", c)
 	}
 	if path != "/openai/v1/chat/completions" || auth != "Bearer "+goodToken {

@@ -136,7 +136,7 @@ leader election, the metrics authentication or the watched namespaces. Keep in s
 templates/workloads. "namespace" is not an arg of the chart but the Pods get it from POD_NAMESPACE.
 */}}
 {{- define "shadewright.reservedFlags" -}}
-leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster
+leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies
 {{- end }}
 
 {{/*
@@ -164,6 +164,18 @@ Takes a dict with .component ("executor" or "analyzer") and .context. Renders no
 {{- if $c.metricsTLS.secretName -}}
 {{- if not (and $v.metrics.enabled $v.metrics.secure) -}}
 {{- fail (printf "%s.metricsTLS.secretName needs metrics.enabled and metrics.secure: a serving certificate is only used by the HTTPS metrics endpoint" $.component) -}}
+{{- end -}}
+{{- end -}}
+{{- if eq .component "analyzer" -}}
+{{- $a := $c.analysis | default dict -}}
+{{- if and $a.triageModel (not $c.identity.azure.clientId) -}}
+{{- fail "analyzer.analysis.triageModel needs analyzer.identity.azure.clientId: the model call authenticates with the analyzer's Azure workload identity" -}}
+{{- end -}}
+{{- if and $a.triageModel (not $a.endpointSuffixes) -}}
+{{- fail "analyzer.analysis.triageModel needs analyzer.analysis.endpointSuffixes: no model endpoint host is allowed by default, so list your own resource, such as .<resource>.services.ai.azure.com" -}}
+{{- end -}}
+{{- if and $a.escalationModel (not $a.triageModel) -}}
+{{- fail "analyzer.analysis.escalationModel needs analyzer.analysis.triageModel" -}}
 {{- end -}}
 {{- end -}}
 {{- $reserved := splitList " " (include "shadewright.reservedFlags" .context) -}}

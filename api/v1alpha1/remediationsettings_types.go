@@ -193,24 +193,24 @@ type RemediationSettingsSpec struct {
 	Modules *Modules `json:"modules,omitempty"`
 
 	// analysis bounds every model-backed analysis and names the model deployments it may call. Left out, its
-	// limits take their defaults and no model is configured. Read today: maxAnalysesPerDay, by the analysis
-	// trigger. Planned: no component reads the other fields yet; the analysis loop (#76) will enforce them,
-	// and the daily token caps need the spend counter of #208. The endpoints decide where the analyzer sends
-	// its Entra ID token and the redacted context, so write access to this object is security-relevant
-	// (threat model).
+	// limits take their defaults and no model is configured. maxAnalysesPerDay is read by the analysis
+	// trigger; the analysis loop, which the analyzer starts only with its --triage-model flag, reads and
+	// enforces the rest, maxTokensPerDay within one analysis only until the spend counter of #208. The
+	// endpoints decide where the analyzer sends its Entra ID token and the redacted context, so write access
+	// to this object is security-relevant (threat model).
 	// +kubebuilder:default={}
 	// +optional
 	Analysis *AnalysisSettings `json:"analysis,omitempty"`
 }
 
 // AnalysisSettings bounds each model-backed analysis (design 12.3). Every limit has a safe default and a hard
-// upper bound in the schema. Read today: maxAnalysesPerDay, by the analysis trigger. Planned: the other
-// limits and the models are not enforced yet (#76).
+// upper bound in the schema. maxAnalysesPerDay is read by the analysis trigger; the other limits and the
+// models by the analysis loop, which the analyzer starts only with its --triage-model flag.
 type AnalysisSettings struct {
 	// maxAnalysesPerDay limits model-backed analyses per UTC day, across all Incidents; 0 disables the
 	// model. 0 to 10000. Defaulted to 100 also when spec.analysis is left out. Read today by the analysis
-	// trigger: 0 marks every Incident not due (AnalysisDisabled). The daily count is enforced once the
-	// analysis reserves units of the budget (#16, #76); until then nothing adds to it. Replaces the
+	// trigger: 0 marks every Incident not due (AnalysisDisabled). The analysis loop reserves one unit per
+	// attempt before its first model call (ADR-0025), so the count is enforced while it runs. Replaces the
 	// deprecated spec.maxAnalysesPerDay; while that is still set, the lower of the two applies.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=10000
@@ -287,9 +287,9 @@ type ModelDeployment struct {
 	// address and no single-label host such as localhost), an optional port from 1 to 65535 and an optional
 	// path whose segments do not start with '.'. No user info, query or fragment. The schema is
 	// vendor-neutral (ADR-0013). The endpoint decides where the analyzer's Entra ID token and the redacted
-	// context go; planned (#76): the analyzer refuses a host outside an allow-list of suffixes set by the
-	// operator's flag (not in this object), refuses private, loopback and link-local addresses when it dials,
-	// and requests a token for the Cognitive Services audience only.
+	// context go: the analyzer refuses a host outside the allow-list of suffixes of its
+	// --model-endpoint-suffixes flag (not in this object) or a port other than 443, refuses private, loopback
+	// and link-local addresses when it dials, and requests a token for the Cognitive Services audience only.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
 	// +kubebuilder:validation:Pattern=`^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?(:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$`

@@ -387,15 +387,16 @@ Policies and requests refer to repositories by name only.
 
 **Why write access is security-relevant.** The schema is vendor-neutral ([ADR-0013](../adr/0013-adapters-for-every-external-system.md)), but the endpoint decides where the analyzer's Entra ID token and the redacted context go. This includes the `patch` right that the [emergency runbook](../emergency.md) hands out for the kill switch.
 
-**Planned.** No component reads the rest of `analysis` yet. The analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76)) will enforce the limits, and the token caps need the spend counter of [#208](https://github.com/pkalin/shadewright/issues/208). Until then the only analysis limit in force is `analysis.maxAnalysesPerDay` (3.2). The daily count is enforced once the analysis reserves units of the budget ([#16](https://github.com/pkalin/shadewright/issues/16), [#76](https://github.com/pkalin/shadewright/issues/76)); until then nothing adds to it.
+<span class="sw-status sw-built">built</span> The analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76)), which the analyzer starts only with `--triage-model`, reads the rest of `analysis` and enforces it; it reserves one unit of `analysis.maxAnalysesPerDay` per attempt before its first model call (3.2). <span class="sw-status sw-planned">planned</span> `maxTokensPerDay` is enforced within one analysis only; counting it across analyses needs the spend counter of [#208](https://github.com/pkalin/shadewright/issues/208). Without `--triage-model` the only analysis limit in force is `analysis.maxAnalysesPerDay` in the trigger.
 
 - `maxContextBytes`: the redacted context of one analysis, default 32768, 4096 to 262144.
 - `maxToolSteps`: read tool calls of one escalation, default 4, 0 to 16.
 - `maxOutputTokens`: per model call, sent as `MaxOutputTokens`, default 2048, 256 to 16384.
 - `maxConcurrentAnalyses`: default 1, 1 to 8.
 - An analysis makes at most 3 + `maxToolSteps` model calls: the triage call, one retry after invalid output, and `maxToolSteps` + 1 escalated turns. An invalid escalated result gets no retry and is handed off.
-- The analyzer refuses a host outside an allow-list of suffixes held by the operator (a flag, not these settings). It refuses private, loopback and link-local addresses when it dials, and requests a token for the Cognitive Services audience only ([#76](https://github.com/pkalin/shadewright/issues/76)).
-- When a model is missing (#76): with no `triage` model it makes no model call, uses no unit of `analysis.maxAnalysesPerDay`, and hands an incident no runbook matched off to a person. With no `escalation` model an escalation trigger (ADR-0023) hands off. A deployment whose `maxTokensPerDay` is 0, or whose cap for the day is spent, is not called and the incident is handed off.
+- The analyzer refuses a host outside an allow-list of suffixes held by the operator (`--model-endpoint-suffixes`, not these settings), and a port other than 443, before it requests a token (`EndpointNotAllowed`). It refuses private, loopback and link-local addresses when it dials, and requests a token for the Cognitive Services audience only ([#76](https://github.com/pkalin/shadewright/issues/76)).
+- The operator also names the model each role must answer with (`--triage-model`, `--escalation-model`); a reply from another model is refused (ADR-0023 decision 8). A role without its flag is not configured, whatever these settings name.
+- When a model is missing: with no `triage` model it makes no model call, uses no unit of `analysis.maxAnalysesPerDay`, and hands an incident no runbook matched off to a person. With no `escalation` model an escalation trigger (ADR-0023) hands off. A deployment whose `maxTokensPerDay` is 0, or whose cap for the day is spent, is not called and the incident is handed off.
 
 ### Status
 

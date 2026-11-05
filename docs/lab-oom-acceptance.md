@@ -13,7 +13,9 @@ destroyed after), [ADR-0012](adr/0012-object-to-source-mapping.md) (finding the 
 [ADR-0022](adr/0022-scenario-switch-and-clusters.md) (the scenario switch and the `cluster/lab` branch).
 
 The fleet installs both the analyzer and the executor, but the analyzer does no work in this run: the request is
-written by hand and the settings sample has `analysis.maxAnalysesPerDay: 0`, so the model is never called.
+written by hand, the analyzer runs without `--triage-model` and the settings sample has `analysis.maxAnalysesPerDay: 0`,
+so the model is never called. The optional [evaluation run](#evaluation-run-the-first-analysis-with-a-real-model) at
+the end turns the analysis on for one analysis.
 
 !!! warning "Costs money and changes real systems"
     Steps 1 and 11 create and destroy Azure resources (about 0.10 EUR per hour while the lab is up, see
@@ -386,3 +388,66 @@ Expect a destroy plan for the `lab` root only and, after `yes`, a passing `lab-c
 no hourly-billed resource outside it. Remove `/tmp/shadewright-lab`, which holds your filled samples.
 
 Issue [#58](https://github.com/pkalin/shadewright/issues/58) closes once the field log holds the recorded run.
+
+## Evaluation run: the first analysis with a real model
+
+Optional, after step 5 and before step 11, in a lab that is up. It turns the analysis on for one analysis of the OOM
+scenario's Incident, so that a real model reads a real context ([#76](https://github.com/pkalin/shadewright/issues/76)).
+It is an **evaluation run, not production use**: the evaluation harness and its fail-closed check
+([#78](https://github.com/pkalin/shadewright/issues/78)) are not built, and they are the gate before any release that
+starts the loop ([ADR-0025](adr/0025-analysis-claims-units-and-evaluation-manifest.md), decision 7). A proposal it
+makes is a `RemediationRequest` with `approvalRequired: true`, which the executor checks against policy like a
+hand-written one; do not approve it as a fix.
+
+What shadewright-azure already provides, nothing to add: the analyzer's managed identity (`analyzer_identity`), its
+federated credential for `system:serviceaccount:shadewright-system:shadewright-analyzer` (`lab/federation.tf`), the
+inference role on the AI Services account (`model_inference_role`, Cognitive Services OpenAI User), the account's
+network rule for the AKS subnet, and the outputs `model_endpoint` and `model_deployments`. The fleet already gives the
+chart `analyzer.identity.azure.clientId`. The analyzer image must be one built from a commit that has this section.
+
+1. Choose the deployment and read its model. In `shadewright-azure`, `terraform -chdir=foundation output
+   model_deployments` lists the deployment names; `var.model_deployments` in your `foundation/terraform.tfvars` has its
+   model `name` and `version`. A reply names the model as `<name>-<version>`, such as `gpt-4.1-mini-2025-04-14`.
+2. Fill the `analysis` part of the settings sample on your machine: `maxAnalysesPerDay: 1`, the endpoint
+   (`model_endpoint`), the deployment, `apiVersion: "2024-10-21"` and a small `maxTokensPerDay` (the sample's
+   200000 bounds one analysis well). Apply it.
+3. On `cluster/lab` of the fleet (never `main`), add to the HelmRelease values of `infrastructure/shadewright-lab`:
+
+   ```yaml
+   analyzer:
+     analysis:
+       triageModel: <name>-<version>
+       endpointSuffixes:
+         - .<account>.cognitiveservices.azure.com
+       actionPolicies:
+         SetContainerMemoryLimit: demo-memory
+   ```
+
+   Leave `escalationModel` empty: an escalation signal then hands off, which is a valid outcome of this run. `endpointSuffixes`
+   lists the lab's own AI Services account (the host of `model_endpoint`), so no other resource can receive the
+   context or a token; the chart refuses `triageModel` without it. Wait for Flux
+   to roll the analyzer, then check that it started the loop:
+
+   ```bash
+   kubectl -n shadewright-system logs deploy/shadewright-analyzer | grep -E 'The analysis is (on|off)'
+   ```
+
+4. With the OOM scenario on (step 5), wait for its Incident to be due and analyzed:
+
+   ```bash
+   kubectl -n shadewright-system get incidents -w
+   kubectl -n shadewright-system logs deploy/shadewright-analyzer | grep -E 'Analyzed Incident|Refused|Dropped'
+   ```
+
+   Expect the Incident to go `Analyzing` and then `Proposed` (its `status.remediationRequests` names the request,
+   which carries the label `remediation.shadewright.io/incident-uid`) or `Escalated`, with the condition `Analyzed`
+   and its reason. `UnexpectedModel` means the reply named another model than `triageModel`: the `Refused` log line
+   names both; correct the value and wait for the next round (the cooldown is 15 minutes, and the day's budget of 1
+   is spent, so raise `maxAnalysesPerDay` to 2). `EndpointNotAllowed`, `ModelForbidden` or `ModelNotFound` point at
+   the endpoint, the role assignment or the deployment name.
+5. Record the outcome for the field log: the reason, the call and token counts, the models and the prompt version
+   from the `Analyzed Incident` line, and the request's spec if one was made. A wrong or unsupported proposal is a
+   finding for #78, not something to fix in the run.
+6. Turn the analysis off again: remove `analyzer.analysis` from the HelmRelease values on `cluster/lab` and set
+   `maxAnalysesPerDay: 0` in the settings. Delete a request the run made if step 7 should start from a clean
+   namespace (`kubectl -n shadewright-system delete rr -l remediation.shadewright.io/incident-uid`).

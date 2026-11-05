@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 824" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Shadewright analyzer</title>
-  <desc id="d">Zoom into the analyzer identity. Built: the collector watches events, pod status and, for the symptom sources of active modules, HPAs (a KEDA replica ceiling becomes an Incident about the ScaledObject) in the watched namespaces, resolves owners, redacts and fingerprints them; two levels of deduplication feed a durable, bounded Incident CR; the analysis trigger decides when an Incident is due. The trigger reads spec.analysis.maxAnalysesPerDay from the RemediationSettings and reads and updates the daily count in the Budget ConfigMap shadewright-analysis-budget in the operator namespace; an unreadable budget means not due. Separately, the analyzer reports platform and integration detection in the settings status; no component reads that status to decide anything. Prometheus (approved templates, watched namespaces, optional with --prometheus-url) and pod logs (bounded, redacted, watched namespaces, get on pods/log through the watch role) have adapters that the analyzer creates and gives to the context builder. The context builder takes selected data from the sources and makes a bounded (48 KiB), redacted context in provenance-tagged blocks. The analysis loop is built but the analyzer does not start it yet, so its arrows are dashed: when an Incident is due it claims it (phase Analyzing), builds the context, takes one unit of the daily budget, makes one structured call to the triage model and, on a deterministic escalation signal only, calls the escalation model with the read tools bound to the incident's namespace; it validates the result against the schema and the catalog and creates the typed RemediationRequest for the executor, or hands off to a person. The model provider outside the cluster has a Foundry adapter that is built and not wired yet.</desc>
+  <desc id="d">Zoom into the analyzer identity. Built: the collector watches events, pod status and, for the symptom sources of active modules, HPAs (a KEDA replica ceiling becomes an Incident about the ScaledObject) in the watched namespaces, resolves owners, redacts and fingerprints them; two levels of deduplication feed a durable, bounded Incident CR; the analysis trigger decides when an Incident is due. The trigger reads spec.analysis.maxAnalysesPerDay from the RemediationSettings and reads and updates the daily count in the Budget ConfigMap shadewright-analysis-budget in the operator namespace; an unreadable budget means not due. Separately, the analyzer reports platform and integration detection in the settings status; no component reads that status to decide anything. Prometheus (approved templates, watched namespaces, optional with --prometheus-url) and pod logs (bounded, redacted, watched namespaces, get on pods/log through the watch role) have adapters that the analyzer creates and gives to the context builder. The context builder takes selected data from the sources and makes a bounded (48 KiB), redacted context in provenance-tagged blocks. The analysis loop runs only when the analyzer is started with --triage-model (off by default): when an Incident is due it claims it (phase Analyzing, identified by lastAnalysisTime), builds the context, takes one unit of the daily budget, makes one structured call to the triage model and, on a deterministic escalation signal only, calls the escalation model with the read tools bound to the incident's namespace; it refuses a reply from another model than the configured one, validates the result against the schema and the catalog, rechecks its claim live and creates the typed RemediationRequest for the executor, or hands off to a person. The model provider outside the cluster is reached through the Foundry adapter, only at an endpoint inside the operator's host allow-list, with the analyzer's workload identity.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -89,32 +89,31 @@
   <text class="s" x="348" y="333">debounce · cooldown</text>
   <text class="no" x="332" y="366">unreadable budget → not due</text>
 
-  <!-- analyzer: built, not wired -->
+  <!-- analyzer: analysis, built, on with the triage-model flag -->
   <rect class="box" x="332" y="540" width="210" height="72" rx="10"/>
   <text class="h" x="348" y="566">Context builder</text>
   <text class="s" x="348" y="587">48 KiB · redacted</text>
   <text class="s" x="348" y="603">provenance-tagged blocks</text>
-  <text class="pn" x="332" y="630">called by the analysis loop, not wired</text>
+  <text class="pn" x="332" y="630">called by the analysis loop</text>
 
-  <!-- analyzer: planned -->
-  <rect class="plk" x="420" y="660" width="280" height="56" rx="12"/>
+  <rect class="key" x="420" y="660" width="280" height="56" rx="12"/>
   <text class="h" x="440" y="685">RemediationRequest</text>
-  <text class="pn" x="684" y="678" text-anchor="end">not wired</text>
   <text class="s" x="440" y="704">a typed proposal, never authority</text>
 
   <!-- outside -->
-  <rect class="ple" x="866" y="540" width="210" height="72" rx="10"/>
+  <rect class="ext" x="866" y="540" width="210" height="72" rx="10"/>
   <text class="h" x="882" y="566">Model provider</text>
   <text class="s" x="882" y="587">redacted, bounded context</text>
   <text class="s" x="882" y="603">one structured result</text>
-  <text class="pn" x="1060" y="556" text-anchor="end">not wired</text>
+  <text class="pn" x="1060" y="556" text-anchor="end">Foundry</text>
   <text class="lbl" x="866" y="632">no tools with write access</text>
+  <text class="lbl" x="866" y="648">host allow-list · workload identity</text>
 
   <!-- legend -->
   <rect class="box" x="866" y="700" width="30" height="16" rx="4"/>
   <text class="lbl" x="906" y="713">built</text>
   <rect class="pl" x="866" y="726" width="30" height="16" rx="4"/>
-  <text class="lbl" x="906" y="739">planned, or built and not wired</text>
+  <text class="lbl" x="906" y="739">planned</text>
 
   <!-- flow -->
   <path class="f" d="M254 146H326" marker-end="url(#a)"/>
@@ -125,18 +124,18 @@
   <text class="lbl" x="262" y="264">spec.analysis.maxAnalysesPerDay</text>
   <path class="r" d="M254 420H290V322H326" marker-end="url(#m)" marker-start="url(#m)"/>
   <path class="f" d="M312 230H150V264" marker-end="url(#a)"/>
-  <path class="fp" d="M520 342V534" marker-end="url(#a)"/>
+  <path class="f" d="M520 342V534" marker-end="url(#a)"/>
   <text class="lbl" x="530" y="432">when due: the analysis loop</text>
-  <text class="lbl" x="530" y="448">claims it (built, not wired)</text>
-  <path class="fp" d="M254 546H326" marker-end="url(#a)"/>
+  <text class="lbl" x="530" y="448">claims it (with --triage-model)</text>
+  <path class="f" d="M254 546H326" marker-end="url(#a)"/>
   <text class="lbl" x="262" y="534">selected, bounded</text>
-  <path class="fp" d="M254 662H290V586H326" marker-end="url(#a)"/>
-  <path class="fp" d="M149 504V488H971V534" marker-end="url(#m)" marker-start="url(#m)"/>
+  <path class="f" d="M254 662H290V586H326" marker-end="url(#a)"/>
+  <path class="f" d="M149 504V488H971V534" marker-end="url(#m)" marker-start="url(#m)"/>
   <text class="lbl" x="600" y="480">read tools, on escalation</text>
-  <path class="fp" d="M542 576H860" marker-end="url(#m)" marker-start="url(#m)"/>
+  <path class="f" d="M542 576H860" marker-end="url(#m)" marker-start="url(#m)"/>
   <text class="lbl" x="590" y="568">context out, structured result in</text>
-  <path class="fp" d="M437 612V654" marker-end="url(#a)"/>
-  <text class="lbl" x="447" y="640">schema, catalog, evidence, then propose</text>
+  <path class="f" d="M437 612V654" marker-end="url(#a)"/>
+  <text class="lbl" x="447" y="640">model, schema, catalog, evidence, claim, then propose</text>
 
   <!-- refusal -->
   <text class="no" x="332" y="752">no evidence → no proposal, hand off to a human</text>

@@ -29,7 +29,7 @@ kubectl -n shadewright-system get incident <name> -o yaml
 | `status.conditions`, type `AnalysisDue` | Whether the Incident is due for analysis, and why or why not (`FirstAnalysis`, `Debouncing`, `CoolingDown`, `AnalysisDisabled`, `DailyBudgetReached`, ...). The reasons are listed in [troubleshooting](../troubleshooting.md#not-request-reasons) |
 | `status.remediationRequests` | Names of requests made for this Incident. Always empty today: nothing writes it yet (<span class="sw-status sw-planned">planned</span>), not even for a request written by hand |
 
-The analysis that calls a model is not built, so an Incident being "due" starts no model call yet. An Incident holds no logs and no raw event text.
+An Incident being "due" starts a model call only when the analyzer runs with `--triage-model` (off by default); the analysis then writes the phase `Analyzing`, then `Proposed` or `Escalated` with the condition `Analyzed` and its reason. An Incident holds no logs and no raw event text.
 
 ## When there are none
 

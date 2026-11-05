@@ -19,17 +19,17 @@ The analyzer runs locally during development and in the cluster later, always ag
 - Deployment name, model ID and version, API version and TPM/RPM limits are config.
 - The endpoint, deployment name, API version and daily token cap of the triage and escalation models are fields of `RemediationSettings` `spec.analysis.models` (5.4), with no key.
 - TPM/RPM limits are set on the deployment itself.
-- The model ID and version come from the reply and are checked against the evaluation list (11.2).
+- The model ID and version come from the reply. The operator names the one each role must answer with (`--triage-model`, `--escalation-model`), and a reply naming another is refused (`UnexpectedModel`); the check against the evaluation list is planned (11.2).
 
 ### Why the endpoint is guarded
 
-The endpoint decides where the analyzer's Entra ID token and the redacted context go. So the analyzer will:
+The endpoint decides where the analyzer's Entra ID token and the redacted context go. So the analyzer:
 
-- refuse a host outside an operator-held allow-list of suffixes (a flag);
-- refuse private, loopback and link-local addresses when dialing;
-- request the Cognitive Services audience only.
+- refuses a host outside an operator-held allow-list of suffixes (`--model-endpoint-suffixes`, required with `--triage-model`, no default; an entry such as `.<resource>.services.ai.azure.com` allows that one host), and a port other than 443, before it builds a provider or requests a token (`EndpointNotAllowed`);
+- refuses private, loopback and link-local addresses when dialing;
+- requests the Cognitive Services audience only.
 
-The last two are built in the Foundry adapter ([#75](https://github.com/pkalin/shadewright/issues/75)). **Planned.** The allow-list is not built, and nothing reads the `spec.analysis.models` fields yet ([#76](https://github.com/pkalin/shadewright/issues/76)).
+<span class="sw-status sw-built">built</span> The allow-list in the analyzer (`internal/analyzer/models`, [#76](https://github.com/pkalin/shadewright/issues/76)), the last two in the Foundry adapter ([#75](https://github.com/pkalin/shadewright/issues/75)). The analysis loop reads `spec.analysis.models` when the analyzer runs with `--triage-model`.
 
 ### Where inference runs
 
@@ -61,7 +61,7 @@ Deterministic signals trigger it, never model output:
 
 A proposed action outside the catalog's bounds (it fails `policy.CheckAction`) is neither: it gets no retry and no feedback to the model, so the model cannot search for what the policy allows, and the analysis ends as a hand-off with its own reason, `ActionOutOfBounds` (decided 2026-11-05). Schema failures keep their one corrective retry.
 
-At most one escalation per incident fingerprint per cooldown window. A runbook match (a rule with no model call) never reaches the model at all. <span class="sw-status sw-built">built</span> in the analysis loop (3.3), not yet started by the analyzer ([#76](https://github.com/pkalin/shadewright/issues/76)).
+At most one escalation per incident fingerprint per cooldown window. A runbook match (a rule with no model call) never reaches the model at all. <span class="sw-status sw-built">built</span> in the analysis loop (3.3), which the analyzer starts with `--triage-model` and runs with `--escalation-model` ([#76](https://github.com/pkalin/shadewright/issues/76)).
 
 ### The `ModelProvider` interface
 
@@ -85,7 +85,9 @@ At most one escalation per incident fingerprint per cooldown window. A runbook m
 
 `go test -tags foundrysmoke` runs it against a real deployment by hand (see the package documentation).
 
-**Planned.** Wiring the adapter into the analysis loop with the host allow-list above (#76). A deployment field on the request and a typed timeout error. A Foundry adapter for the Anthropic family.
+<span class="sw-status sw-built">built</span> The analyzer gives the analysis loop a Foundry provider per deployment of `spec.analysis.models`, after the host allow-list above, with its workload identity as the token source ([#76](https://github.com/pkalin/shadewright/issues/76)).
+
+**Planned.** A deployment field on the request and a typed timeout error. A Foundry adapter for the Anthropic family.
 
 ### Evaluation gate
 
@@ -95,7 +97,7 @@ A change to a prompt, model or schema must pass the scenario evaluation before m
 - **Quality** is gated by a recorded real-model evaluation, keyed by model ID and version plus the prompt hash (to become the manifest digest of [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md)), stored in this repository (for example `test/eval/results/`).
 - **Recorded contexts** from the fleet scenarios live here too (for example `test/eval/contexts/`). The fleet's `scenarios/*/expected.yaml` are the expectations, and each result pins the fleet commit it read them from.
 
-**It fails closed.** <span class="sw-status sw-planned">planned</span> The analysis loop computes the prompt hash (`PromptVersion`) but does not check an evaluation list yet ([#78](https://github.com/pkalin/shadewright/issues/78)). The analyzer embeds the list of evaluated (model, prompt hash) pairs. It refuses automatic analysis, with the reason reported, when the configured deployment's model (or `Completion.Model`) has no passing record. Details in [ADR-0023](../adr/0023-how-the-analyzer-calls-the-model.md). <span class="sw-status sw-planned">planned</span> [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md) keys the pass on a manifest of every behaviour-affecting input (model and version, prompt and tools hashes, context builder, redaction configuration, rubric, thresholds, repeats), so a change to any of them invalidates it.
+**It fails closed.** <span class="sw-status sw-planned">planned</span> The analysis loop computes the prompt hash (`PromptVersion`) but does not check an evaluation list yet ([#78](https://github.com/pkalin/shadewright/issues/78)); until it does, a run with a real model is an evaluation run in the lab, not production use, and #78 is the gate before a release that starts the loop ([ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md) decision 7). <span class="sw-status sw-built">built</span> The `Completion.Model` check: a reply must name the model the operator configured for its role. <span class="sw-status sw-planned">planned</span> The analyzer embeds the list of evaluated (model, prompt hash) pairs and refuses automatic analysis, with the reason reported, when the configured deployment's model (or `Completion.Model`) has no passing record ([#78](https://github.com/pkalin/shadewright/issues/78)). Details in [ADR-0023](../adr/0023-how-the-analyzer-calls-the-model.md). <span class="sw-status sw-planned">planned</span> [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md) keys the pass on a manifest of every behaviour-affecting input (model and version, prompt and tools hashes, context builder, redaction configuration, rubric, thresholds, repeats), so a change to any of them invalidates it.
 
 ### Choosing concrete models
 

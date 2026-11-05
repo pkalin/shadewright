@@ -34,9 +34,9 @@ Real prices come from the model card, the deployment configurator and the [Azure
 
 ### What the app enforces
 
-The app will enforce maximum context, steps, output tokens, concurrency, analyses per day and a daily spend limit. All are set in `RemediationSettings` (5.4): the count of analyses in `spec.analysis.maxAnalysesPerDay`, the others beside it in `spec.analysis`.
+The app enforces maximum context, steps, output tokens, concurrency, analyses per day and a daily spend limit, with the gaps listed below. All are set in `RemediationSettings` (5.4): the count of analyses in `spec.analysis.maxAnalysesPerDay`, the others beside it in `spec.analysis`.
 
-**Built, not wired.** The analysis loop (`internal/analysis`, 3.3) enforces steps, output tokens, concurrency and the count of analyses, a token bound per analysis, and `maxTokensPerDay` of each deployment within one analysis. The analyzer starts it in the second part of [#76](https://github.com/pkalin/shadewright/issues/76); until then only the trigger reads the count (3.2). **Planned.** The context bound comes from constants of the context builder, not from `maxContextBytes` yet ([#372](https://github.com/pkalin/shadewright/issues/372)), and the daily spend per deployment across analyses needs its counter ([#208](https://github.com/pkalin/shadewright/issues/208)).
+<span class="sw-status sw-built">built</span> The analysis loop (`internal/analysis`, 3.3) enforces steps, output tokens, concurrency and the count of analyses, a token bound per analysis, and `maxTokensPerDay` of each deployment within one analysis. The analyzer starts it only with `--triage-model` ([#76](https://github.com/pkalin/shadewright/issues/76)); without it only the trigger reads the count (3.2). **Planned.** The context bound comes from constants of the context builder, not from `maxContextBytes` yet ([#372](https://github.com/pkalin/shadewright/issues/372)), and the daily spend per deployment across analyses needs its counter ([#208](https://github.com/pkalin/shadewright/issues/208)).
 
 ### Why an Azure budget is not enough
 
@@ -52,8 +52,7 @@ An Azure budget only alerts. It does not stop usage ([budgets](https://learn.mic
 The count lives in the ConfigMap `shadewright-analysis-budget` in the operator namespace. Only the analyzer and admins may write it.
 
 - A count that cannot be read or written, or that is missing, means refuse, not allow (section 3.2, [#43](https://github.com/pkalin/shadewright/issues/43)).
-- <span class="sw-status sw-planned">planned</span> One unit is one claimed attempt, not a call and not money; see [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md).
-- The analysis loop reserves one unit per analysis before its first model call (built; the analyzer starts the loop in the second part of [#76](https://github.com/pkalin/shadewright/issues/76)).
+- <span class="sw-status sw-built">built</span> One unit is one claimed attempt, not a call and not money; see [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md). The analysis loop reserves it before its first model call, when the analyzer runs with `--triage-model` ([#76](https://github.com/pkalin/shadewright/issues/76)).
 
 ### The spend limit
 

@@ -7,7 +7,7 @@ title: Concepts
 The objects and parts you meet when you run Shadewright, and how they relate. This page summarises; the reasoning is in the [design](design.md), linked in each section. Fields are in the [API reference](reference/api.md).
 
 !!! note "Built and planned"
-    Only the executor's path from a `RemediationRequest` to a pull request that waits for a person is built end to end. The analyzer records Incidents but does not yet diagnose or propose: it has no model call, so today a person (or a test) writes the `RemediationRequest`. Built parts are marked <span class="sw-status sw-built">built</span>, designed ones <span class="sw-status sw-planned">planned</span>. The [home page status](index.md#status) has the full list.
+    Only the executor's path from a `RemediationRequest` to a pull request that waits for a person is built end to end. The analyzer records Incidents; it diagnoses and proposes only when started with `--triage-model`, which is off by default and, until the evaluation gate ([#78](https://github.com/pkalin/shadewright/issues/78)) exists, meant for an evaluation run in the lab. So today a person (or a test) writes the `RemediationRequest`. Built parts are marked <span class="sw-status sw-built">built</span>, designed ones <span class="sw-status sw-planned">planned</span>. The [home page status](index.md#status) has the full list.
 
 ## How the parts relate
 

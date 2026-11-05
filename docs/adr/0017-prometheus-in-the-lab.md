@@ -20,3 +20,7 @@ Run a minimal Prometheus in the lab cluster from the fleet repo: the Prometheus 
 
 - `metrics.k8s.io` only: current CPU and memory, no history or custom metrics.
 - Hosted Prometheus from the start: cost or account setup before it is needed.
+
+## Amendments
+
+- 2026-11-05: the Decision is unchanged. The consequence that the same adapter works with any Prometheus-compatible API is narrowed ([#333](https://github.com/pkalin/shadewright/issues/333), [design section 4](../design.md#4-tools)): a backend shared by several clusters needs the adapter's cluster setting, without which the adapter refuses an answer that mixes clusters; a source that honours labels set by the scraped pods breaks the namespace scope; and Thanos, Mimir, Grafana Cloud and Azure Monitor managed Prometheus remain untested.

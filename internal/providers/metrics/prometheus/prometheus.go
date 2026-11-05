@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"time"
@@ -95,7 +96,30 @@ type Config struct {
 	// own, so this set is what keeps queries to the namespaces the analyzer may read. Empty refuses every
 	// query.
 	Namespaces []string
+	// Cluster scopes a source shared by several clusters to this cluster's series: when set, every selector of
+	// every template also matches cluster="<Cluster>". The label must be stored on the series (put there by the
+	// scrape or by remote write), not an external label that the queried server adds only on its way out: a
+	// mistyped value or a label the series do not carry leaves every result empty. When empty, the templates
+	// keep the cluster label apart and a response that holds two clusters' series of one container is refused
+	// with [ErrInvalidResponse] instead of mixing them. 1 to [MaxClusterValue] letters, digits, '.', '_', ':',
+	// '/' or '-', starting and ending with a letter or digit (an EKS cluster ARN fits). Only the administrator
+	// sets it: neither a query, the model nor a custom resource can.
+	Cluster string
 }
+
+// clusterLabel is the label that tells the clusters of a shared source apart (the name commonly used for it).
+// It is the only scope a source takes: a job
+// matcher would not do, since cAdvisor and kube-state-metrics are scraped by different jobs, and duplicate
+// jobs are already removed by the templates (see templates.go).
+const clusterLabel = "cluster"
+
+// MaxClusterValue bounds [Config.Cluster], and a cluster label value in a response: the longest cluster name
+// of AKS (63 characters), EKS (100) and GKE (40).
+const MaxClusterValue = 100
+
+// clusterValue is the syntax of Config.Cluster and of a cluster label value in a response.
+var clusterValue = regexp.MustCompile(fmt.Sprintf(`^[A-Za-z0-9]([A-Za-z0-9._:/-]{0,%d}[A-Za-z0-9])?$`,
+	MaxClusterValue-2))
 
 // Source is a [providers.MetricsSource] for one Prometheus-compatible query API. It is safe for concurrent
 // use.
@@ -104,13 +128,15 @@ type Source struct {
 	client     *http.Client
 	timeout    time.Duration
 	namespaces map[string]struct{}
-	now        func() time.Time
+	// scope is Config.Cluster rendered for every selector (scopeOf).
+	scope string
+	now   func() time.Time
 }
 
 var _ providers.MetricsSource = (*Source)(nil)
 
-// New validates cfg and returns a Source. It makes no network call. Errors never repeat the URL or a
-// namespace.
+// New validates cfg and returns a Source. It makes no network call. Errors never repeat the URL, a
+// namespace or the cluster.
 func New(cfg Config) (*Source, error) {
 	u, err := url.Parse(cfg.URL)
 	if err != nil {
@@ -139,6 +165,10 @@ func New(cfg Config) (*Source, error) {
 		}
 		namespaces[ns] = struct{}{}
 	}
+	if cfg.Cluster != "" && !clusterValue.MatchString(cfg.Cluster) {
+		return nil, fmt.Errorf("cluster must be 1 to %d letters, digits, '.', '_', ':', '/' or '-': %w", MaxClusterValue,
+			providers.ErrInvalidConfig)
+	}
 	timeout := cfg.Timeout
 	if timeout == 0 {
 		timeout = DefaultTimeout
@@ -151,7 +181,10 @@ func New(cfg Config) (*Source, error) {
 	}
 	// Go keeps some headers, Authorization among them, on a redirect to the same host; never follow one.
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Source{base: u, client: &client, timeout: timeout, namespaces: namespaces, now: time.Now}, nil
+	return &Source{
+		base: u, client: &client, timeout: timeout, namespaces: namespaces, scope: scopeOf(cfg.Cluster),
+		now: time.Now,
+	}, nil
 }
 
 func defaultTransport() http.RoundTripper {
@@ -177,7 +210,7 @@ func (s *Source) Query(ctx context.Context, q providers.MetricsQuery) (providers
 	if !ok {
 		return providers.MetricsResult{}, fmt.Errorf("unknown metrics template: %w", providers.ErrNotFound)
 	}
-	expr, pods, err := t.renderQuery(q.Params, q.Pods)
+	expr, pods, err := t.renderQuery(q.Params, q.Pods, s.scope)
 	if err != nil {
 		return providers.MetricsResult{}, err
 	}

@@ -18,7 +18,7 @@
 | [0014](0014-notifications-github-issues-first.md) | Notifications through GitHub issues first | Accepted |
 | [0015](0015-analysis-records-outlive-the-lab.md) | Analysis records are kept and outlive the lab | Accepted, amended |
 | [0016](0016-lab-region-sweden-central.md) | Lab region Sweden Central | Accepted, amended |
-| [0017](0017-prometheus-in-the-lab.md) | Prometheus in the lab | Accepted |
+| [0017](0017-prometheus-in-the-lab.md) | Prometheus in the lab | Accepted, amended |
 | [0018](0018-three-axes-of-pluggability.md) | Three axes of pluggability | Accepted, amended |
 | [0019](0019-extension-packaging.md) | Packaging extensions: compiled in now, signed OCI packs later | Accepted, amended |
 | [0020](0020-yaml-patching.md) | Patching YAML by replacing one scalar in place | Accepted |

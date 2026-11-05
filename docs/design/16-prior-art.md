@@ -1,6 +1,17 @@
 # 16. Prior art
 
-These projects are references and integration candidates, not a survey of the field: other tools diagnose incidents, open pull requests or gate remediation behind a human, and the list makes no claim about them. What Shadewright adds is the combination of sections 6 to 8 (a closed catalog, a plan bound to the policy and to the object's real source in Git, a freshness check before every write, and verification of the effect), and the claim stands only as far as those sections are built.
+These projects are references and integration candidates. This is not a survey of the field.
+
+Other tools diagnose incidents, open pull requests or gate remediation behind a human. The list makes no claim about them.
+
+What Shadewright adds is the combination of sections 6 to 8:
+
+- a closed catalog;
+- a plan bound to the policy and to the object's real source in Git;
+- a freshness check before every write;
+- verification of the effect.
+
+The claim stands only as far as those sections are built.
 
 | Project | Use |
 | --- | --- |

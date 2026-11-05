@@ -319,7 +319,24 @@
   border-color: var(--sw-violet);
   box-shadow: 0 0 0 1px #7c24fc55, 0 0.4rem 1.2rem #7c24fc22;
 }
-.md-typeset .grid.cards > ul > li > p:first-child > strong {
+.md-typeset .grid.cards > ul > li {
+  position: relative;
+}
+/* The title link stretches over the whole card, so the card is one click target. */
+.md-typeset .grid.cards > ul > li > p:first-child > a::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+.md-typeset .grid.cards > ul > li > p:first-child > a:focus-visible {
+  outline: none;
+}
+.md-typeset .grid.cards > ul > li > p:first-child > a:focus-visible::after {
+  outline: 2px solid var(--sw-violet);
+  outline-offset: 2px;
+}
+.md-typeset .grid.cards > ul > li > p:first-child > a > strong {
   color: var(--sw-brand-text);
   font-family: var(--sw-heading-font);
   font-weight: 600;

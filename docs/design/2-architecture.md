@@ -103,13 +103,12 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 - The RoleBindings are built from `config/watch` (separately from `config/default`, in namespaces that must already exist) and must match `--watch-namespaces`. `test/rbac` checks that they do.
 - The Helm chart's RBAC is written by hand in `dist/chart/templates/rbac`, with the RoleBindings rendered from `analyzer.watchNamespaces`. `test/chart` keeps it equal to `config/`: any extra or missing verb, resource or subject fails.
 - An empty `--watch-namespaces` watches no namespace, never all of them. The cache's default is then the operator namespace alone (an empty default would mean every namespace to controller-runtime), no collector is started, and the settings status carries the condition `NoWatchedNamespaces` True. This is the chart's default.
+- With no chart values (the default): the analyzer reads no namespaced object outside the operator namespace, has no Git identity, and writes only in the operator namespace (its Leases, the budget ConfigMap, Events) plus the settings status once a settings object exists. It still lists Nodes and reads discovery and the settings cluster-wide. The executor has no Azure workload identity, so it cannot reach Key Vault to sign for the GitHub App. (`config/manager/manager.yaml` gives the executor workload identity otherwise.)
 - The gauge `shadewright_analyzer_watched_namespaces` reports the count, so an alert on 0 catches a forgotten list.
 
 **Operator namespace and identity.**
 
 - The operator namespace comes from `--namespace`, defaulting to `POD_NAMESPACE`, and the analyzer refuses to start without it.
-- With no values it reads no namespaced object outside the operator namespace, has no Git identity, and writes only in the operator namespace (its Leases, the budget ConfigMap, Events) plus the settings status once a settings object exists. It still lists Nodes and reads discovery and the settings cluster-wide.
-- The executor has no Azure workload identity, so it cannot reach Key Vault to sign for the GitHub App.
 
 **The cluster ID.** It is hashed into every fingerprint and comes from the required `--cluster-id` flag (1 to 63 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit). It is an ID, never a display name.
 
@@ -117,7 +116,7 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 - The chart defaults it to the UID of the `kube-system` namespace, read by Helm with `lookup` at install time (the installer's permission, not the analyzer's). An explicit `clusterId` wins.
 - GitOps tools and client-side renders (`helm template`, helm diff, Argo CD, Flux with a dry-run) ask no cluster, and an installer without `get` on the `kube-system` namespace cannot read it. Each of those must set `clusterId` explicitly.
 
-**Add-on kinds it cannot read today.**
+**What it cannot read today.**
 
 - Kyverno kinds: reading them (`get`, `list`, `watch` on `kyverno.io` `clusterpolicies` and `policies`, and on `wgpolicyk8s.io` `policyreports` and `clusterpolicyreports`) is granted only with the wiring of symptom sources (planned, 2.5).
 - Secrets Store CSI driver kinds (`secrets-store.csi.x-k8s.io` `secretproviderclasses` and `secretproviderclasspodstatuses`): that module needs none. It watches no kind and reads only the kubelet's events (2.5).
@@ -130,7 +129,7 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 - It reads (`get` only) the Incident a request names, in the operator namespace and from the API server, to check the name the pull request body shows. The verifier's read of Incidents is planned.
 - It reads (`get` only, no list or watch) the target kinds (Deployments, StatefulSets, KEDA ScaledObjects) and the Flux Kustomizations and GitRepositories that deliver them, for source mapping.
 - It reads requests, writes their status and patches them to add or remove its finalizer, in the operator namespace only (a Role). Its cache watches requests only there.
-- It records the kill switch's Events about a request (5.4) as core Events, with the `create` and `patch` on core Events that its leader election Role already holds. The spec of a request is immutable (CEL), so the patch cannot change what was decided.
+- It records the kill switch's Events about a request (5.4) as core Events in the operator namespace, with the `create` and `patch` on core Events that its leader election Role already holds. The spec of a request is immutable (CEL), so the patch cannot change what was decided.
 - It cannot create requests or write incidents.
 
 Neither binary can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
@@ -464,7 +463,7 @@ Its evidence is the `ScaledObject`'s name, `spec.maxReplicas`, `status.currentRe
 - `reports.kyverno.io/v1` holds only the short-lived ephemeral reports that Kyverno merges into policy reports. `openreports.io/v1alpha1` is written instead only when Kyverno's `openreportsEnabled` flag is set (off by default). Neither is read.
 - Each source names as its reporting controller the event source Kyverno writes for that component (`kyverno-admission` for policies, `kyverno-scan` for reports). This is the reporting controller the collector gives the events about the same results, so both name the same component.
 
-**Policy reports.** `PolicyReport` and `ClusterPolicyReport` give one symptom per result of a Kyverno policy (its `source` is `kyverno` or one of the `policies.kyverno.io` kinds).
+**Policy reports.** `PolicyReport` and `ClusterPolicyReport` give one symptom per `fail` or `error` result of a Kyverno policy (its `source` is `kyverno` or one of the `policies.kyverno.io` kinds).
 
 - Result `fail` gives reason `PolicyViolation`, and `error` gives `PolicyError`. These are the reasons Kyverno itself uses for these results.
 - Results of Kubernetes' own `ValidatingAdmissionPolicy` and `MutatingAdmissionPolicy`, which Kyverno only reports on, and of other engines are not read.
@@ -605,7 +604,7 @@ Verification fails closed: a check the request needs that no enabled module impl
 | Detection interval | When the analyzer becomes leader, on a new spec generation, and every 10 minutes |
 | Rule evidence bounds | At most 8 evidence values per symptom, each cut to 256 bytes; text over 16 KiB is not shown to a rule; a rule that panics is skipped |
 | Symptom bounds | Reason: CamelCase, at most 128 characters; summary: at most 256 bytes; at most 8 evidence entries |
-| Registry caps | At most 8 platform modules besides generic and 32 integration modules; names are DNS labels of at most 63 characters |
+| Registry caps | At most 8 platform modules besides generic and 32 integration modules; names are DNS labels starting with a letter, at most 63 characters |
 | Cluster ID | `--cluster-id`, 1 to 63 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit |
 | Kyverno report limit | At most the first 32 failing results of a report give symptoms |
 | cloudflared reads | First 64 containers, container statuses and conditions; an image over 512 bytes is not cloudflared |

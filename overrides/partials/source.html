@@ -1,0 +1,14 @@
+{#-
+  The theme's source link, without data-md-component="source": that attribute makes the theme script fetch the
+  latest release, stars and forks from api.github.com in every reader's browser. The docs site makes no
+  request to a third-party host (#365).
+-#}
+<a href="{{ config.repo_url }}" title="{{ lang.t('source') }}" class="md-source">
+  <div class="md-source__icon md-icon">
+    {% set icon = config.theme.icon.repo or "fontawesome/brands/git-alt" %}
+    {% include ".icons/" ~ icon ~ ".svg" %}
+  </div>
+  <div class="md-source__repository">
+    {{ config.repo_name }}
+  </div>
+</a>

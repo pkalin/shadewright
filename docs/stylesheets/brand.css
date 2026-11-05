@@ -2,7 +2,15 @@
  * Shadewright brand for the docs site.
  * Colours are sampled from the mark (docs/assets/logo.png): violet #7c24fc on near-black.
  * Headings use Chakra Petch (SIL OFL 1.1, see docs/assets/fonts/OFL.txt), self-hosted so
- * the site makes no third-party font requests.
+ * the site makes no third-party font requests. Body and code text use the system font stacks (the theme's
+ * Google Fonts request is switched off with `font = false` in zensical.toml).
+ *
+ * Two schemes: slate (dark, the original) and default (light). Contrast is WCAG 2.2 AA (4.5:1), computed on
+ * the sRGB relative luminance of each pair (the ratios are in the pull request of #365):
+ *   light: body #1b1830 on #fff 17.2, link #6a14e8 on #fff 7.3 (on code bg 6.5), code #2a2545 on #f3effd 12.8,
+ *          muted #4f4a6b on #fff 8.3, white on #7c24fc button 6.0
+ *   dark:  body #e2dff2 on #0e0e16 14.7, link #a879ff on #0e0e16 6.3 (on code bg 5.5), code #ddd8f0 on #1d1b2b 12.2,
+ *          muted #a9a5c2 on #0e0e16 8.1, comment #8a86a3 on #16151f 5.2
  */
 
 @font-face {
@@ -45,11 +53,81 @@
   --sw-ink: #0e0e16;
   --sw-ink-raised: #181723;
   --sw-ink-line: #2a2740;
-  --sw-heading-font: "Chakra Petch", var(--md-text-font-family, sans-serif);
+  --sw-heading-font: "Chakra Petch", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --md-text-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --md-code-font: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+/* Light scheme (Material "default"): brand violet on white, the header stays the dark brand bar. */
+[data-md-color-scheme="default"] {
+  --sw-line: #d9d2ee;
+  --sw-surface: #f3effd;
+  --sw-h1: #2a1363;
+  --sw-link-hover: #4c0fb0;
+  --sw-brand-text: #6a14e8;
+  --md-primary-fg-color: var(--sw-ink-raised);
+  --md-primary-fg-color--light: #24223a;
+  --md-primary-fg-color--dark: var(--sw-ink);
+  --md-primary-bg-color: #ece6ff;
+  --md-primary-bg-color--light: #ece6ffb3;
+  --md-accent-fg-color: #6a14e8;
+  --md-accent-fg-color--transparent: #6a14e81f;
+  --md-default-bg-color: #ffffff;
+  --md-default-fg-color: #1b1830;
+  --md-default-fg-color--light: #4f4a6b;
+  --md-default-fg-color--lighter: #6f6a88;
+  --md-default-fg-color--lightest: #e6e1f4;
+  --md-typeset-color: #1b1830;
+  --md-typeset-a-color: #6a14e8;
+  --md-code-bg-color: var(--sw-surface);
+  --md-code-fg-color: #2a2545;
+  --md-code-hl-keyword-color: #6b1fd1;
+  --md-code-hl-string-color: #0b6b57;
+  --md-code-hl-number-color: #9a4a00;
+  --md-code-hl-comment-color: #5f5a78;
+  --md-code-hl-name-color: #2a2545;
+  --md-code-hl-function-color: #6b1fd1;
+  --md-code-hl-operator-color: #4f4a6b;
+  --md-code-hl-punctuation-color: #4f4a6b;
+  --md-code-hl-constant-color: #9a4a00;
+  --md-code-hl-special-color: #9a4a00;
+  --md-code-hl-generic-color: #4f4a6b;
+  --md-code-hl-variable-color: #4f4a6b;
+  --md-footer-bg-color: var(--sw-ink-raised);
+  --md-footer-bg-color--dark: var(--sw-ink);
+
+  --md-mermaid-font-family: var(--sw-heading-font);
+  --md-mermaid-node-bg-color: #f3effd;
+  --md-mermaid-node-fg-color: #1b1830;
+  --md-mermaid-edge-color: #6a14e8;
+  --md-mermaid-label-bg-color: #ffffff;
+  --md-mermaid-label-fg-color: #4c0fb0;
+  --md-mermaid-sequence-actor-bg-color: #f3effd;
+  --md-mermaid-sequence-actor-fg-color: #1b1830;
+  --md-mermaid-sequence-actor-border-color: #7c24fc;
+  --md-mermaid-sequence-actor-line-color: #b9aedd;
+  --md-mermaid-sequence-message-fg-color: #1b1830;
+  --md-mermaid-sequence-message-line-color: #6a14e8;
+  --md-mermaid-sequence-note-bg-color: #fff7d6;
+  --md-mermaid-sequence-note-fg-color: #1b1830;
+  --md-mermaid-sequence-note-border-color: #c9b458;
+  --md-mermaid-sequence-loop-bg-color: transparent;
+  --md-mermaid-sequence-loop-fg-color: #4c0fb0;
+  --md-mermaid-sequence-loop-border-color: #b9aedd;
+  --md-mermaid-sequence-label-bg-color: #f3effd;
+  --md-mermaid-sequence-label-fg-color: #1b1830;
+  --md-mermaid-sequence-number-bg-color: #6a14e8;
+  --md-mermaid-sequence-number-fg-color: #ffffff;
 }
 
 [data-md-color-scheme="slate"] {
   --md-hue: 252;
+  --sw-line: var(--sw-ink-line);
+  --sw-surface: #1d1b2b;
+  --sw-h1: #f1edff;
+  --sw-link-hover: #c6a8ff;
+  --sw-brand-text: var(--sw-violet-light);
+  --md-default-fg-color--light: #a9a5c2;
   --md-primary-fg-color: var(--sw-ink-raised);
   --md-primary-fg-color--light: #24223a;
   --md-primary-fg-color--dark: var(--sw-ink);
@@ -59,6 +137,8 @@
   --md-accent-fg-color--transparent: #9b5cff1f;
   --md-default-bg-color: var(--sw-ink);
   --md-typeset-a-color: var(--sw-violet-light);
+  --md-default-fg-color: #e2dff2;
+  --md-typeset-color: #e2dff2;
   --md-code-bg-color: #16151f;
   --md-code-fg-color: #ddd8f0;
   --md-code-hl-keyword-color: #b48cff;
@@ -121,17 +201,17 @@
   letter-spacing: 0.01em;
 }
 .md-typeset h1 {
-  color: #f1edff;
+  color: var(--sw-h1);
   font-weight: 700;
 }
 .md-typeset h2 {
   padding-bottom: 0.3em;
-  border-bottom: 1px solid var(--sw-ink-line);
+  border-bottom: 1px solid var(--sw-line);
 }
 
 /* Navigation: violet marker on the active page. */
 .md-nav__link--active {
-  color: var(--sw-violet-light);
+  color: var(--sw-brand-text);
 }
 .md-sidebar--primary .md-nav__link--active {
   box-shadow: inset 2px 0 0 var(--sw-violet);
@@ -140,20 +220,20 @@
 
 /* Links and inline code. */
 .md-typeset a:hover {
-  color: #c6a8ff;
+  color: var(--sw-link-hover);
 }
 .md-typeset :not(pre) > code {
-  background-color: #1d1b2b;
-  box-shadow: inset 0 0 0 1px var(--sw-ink-line);
+  background-color: var(--sw-surface);
+  box-shadow: inset 0 0 0 1px var(--sw-line);
 }
 
 /* Tables. */
 .md-typeset table:not([class]) {
-  border: 1px solid var(--sw-ink-line);
+  border: 1px solid var(--sw-line);
 }
 .md-typeset table:not([class]) th {
-  background-color: #1d1b2b;
-  color: #f1edff;
+  background-color: var(--sw-surface);
+  color: var(--sw-h1);
   font-family: var(--sw-heading-font);
   font-weight: 600;
 }
@@ -164,7 +244,7 @@
 /* Buttons. */
 .md-typeset .md-button {
   border-color: var(--sw-violet);
-  color: var(--sw-violet-light);
+  color: var(--sw-brand-text);
   font-family: var(--sw-heading-font);
   font-weight: 600;
   letter-spacing: 0.03em;
@@ -188,11 +268,16 @@
   margin: 0.5rem 0 2.5rem;
   padding: 2.5rem 1rem 2rem;
   text-align: center;
+  /* The wordmark is made for a dark ground, so the hero is a dark panel in both schemes. */
+  background-color: var(--sw-ink);
+  border-radius: 0.5rem;
+  color: #e2dff2;
 }
 .sw-hero::before {
   content: "";
   position: absolute;
   inset: 0;
+  border-radius: inherit;
   z-index: -1;
   background: radial-gradient(ellipse 45% 55% at 50% 38%, #7c24fc40, transparent 70%);
 }
@@ -204,7 +289,13 @@
   max-width: 38rem;
   margin: 1.2rem auto 1.6rem;
   font-size: 1.05rem;
-  color: var(--md-default-fg-color--light);
+  color: #c9c4e0;
+}
+.md-typeset .sw-hero .md-button {
+  color: var(--sw-violet-light);
+}
+.md-typeset .sw-hero .md-button--primary {
+  color: #fff;
 }
 .sw-hero .md-button {
   margin: 0.25rem 0.3rem;
@@ -221,16 +312,127 @@
 
 /* Cards on the home page. */
 .md-typeset .grid.cards > ul > li {
-  border-color: var(--sw-ink-line);
-  background-color: var(--sw-ink-raised);
+  border-color: var(--sw-line);
+  background-color: var(--sw-surface);
 }
 .md-typeset .grid.cards > ul > li:hover {
   border-color: var(--sw-violet);
   box-shadow: 0 0 0 1px #7c24fc55, 0 0.4rem 1.2rem #7c24fc22;
 }
 .md-typeset .grid.cards > ul > li > p:first-child > strong {
-  color: var(--sw-violet-light);
+  color: var(--sw-brand-text);
   font-family: var(--sw-heading-font);
   font-weight: 600;
   letter-spacing: 0.02em;
+}
+
+/* Hand-written SVG diagrams have a dark ground: frame them so they read as figures on a light page too. */
+.md-typeset a[href$=".svg"] > img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--sw-line);
+  border-radius: 0.5rem;
+  background-color: var(--sw-ink);
+  box-shadow: 0 0.2rem 0.8rem #0e0e1626;
+}
+
+/* Planned and built markers: one pattern instead of free text. <span class="sw-status sw-built">built</span> */
+.sw-status {
+  display: inline-block;
+  padding: 0 0.5em;
+  border: 1px solid currentcolor;
+  border-radius: 0.8em;
+  font-size: 0.8em;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+[data-md-color-scheme="default"] .sw-built { color: #0b6b57; background-color: #e3f6f0; }
+[data-md-color-scheme="default"] .sw-planned { color: #7a3d00; background-color: #fff1de; border-style: dashed; }
+[data-md-color-scheme="slate"] .sw-built { color: #7fd6c2; background-color: #12302a; }
+[data-md-color-scheme="slate"] .sw-planned { color: #ffb86b; background-color: #35250f; border-style: dashed; }
+
+/* Announcement bar (overrides/main.html). */
+.md-banner {
+  background-color: #35250f;
+  color: #ffe2bd;
+}
+.md-banner a {
+  color: #fff;
+  text-decoration: underline;
+}
+
+/* Accessibility: a visible keyboard focus on every control, and no motion for those who ask for none. */
+:focus-visible {
+  outline: 2px solid var(--sw-brand-text);
+  outline-offset: 2px;
+}
+.md-header :focus-visible,
+.md-footer :focus-visible,
+.md-banner :focus-visible {
+  outline-color: #fff;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Narrow screens. */
+@media (max-width: 44.9375em) {
+  .sw-hero {
+    padding: 1.5rem 0.75rem 1.25rem;
+  }
+  .sw-hero img {
+    width: 100%;
+  }
+  .md-header__button.md-logo img {
+    height: 1.6rem;
+  }
+}
+
+/* 404 page. */
+.sw-404 {
+  max-width: 34rem;
+  margin: 2rem auto;
+  text-align: center;
+}
+
+/* The header, tabs and footer are the dark brand bar in both schemes, so their text is always light. */
+.md-header,
+.md-tabs,
+.md-footer,
+.md-footer-meta {
+  color: var(--md-primary-bg-color);
+}
+.md-footer-meta {
+  background-color: var(--sw-ink);
+}
+.md-footer__link,
+.md-footer-meta__inner,
+.md-copyright,
+.md-copyright a,
+.md-footer-meta a {
+  color: var(--md-primary-bg-color);
+}
+.md-search__form {
+  background-color: #2a2740;
+}
+.md-search__input,
+.md-search__input::placeholder,
+.md-search__form .md-icon {
+  color: #ece6ff;
+}
+.md-typeset .sw-hero .md-button:not(.md-button--primary) {
+  background-color: #24223a;
+}
+[data-md-color-scheme="slate"] .md-sidebar .md-nav__link.md-nav__link--active,
+[data-md-color-scheme="slate"] .md-nav__link--active {
+  color: var(--sw-link-hover);
 }

@@ -5,9 +5,9 @@ name: docs
 on:
   push:
     branches: [main]
-    paths: ["docs/**", "zensical.toml", "requirements-docs.in", "requirements-docs.txt", ".github/workflows/docs.yml"]
+    paths: ["docs/**", "overrides/**", "includes/**", "zensical.toml", "requirements-docs.in", "requirements-docs.txt", ".github/workflows/docs.yml"]
   pull_request:
-    paths: ["docs/**", "zensical.toml", "requirements-docs.in", "requirements-docs.txt", ".github/workflows/docs.yml"]
+    paths: ["docs/**", "overrides/**", "includes/**", "zensical.toml", "requirements-docs.in", "requirements-docs.txt", ".github/workflows/docs.yml"]
   workflow_dispatch:
 
 permissions:

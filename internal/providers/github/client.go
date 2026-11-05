@@ -238,9 +238,14 @@ func (r response) ok() bool { return r.status >= 200 && r.status <= 299 }
 var errBodyTooLarge = errors.New("GitHub response is too large")
 
 // do sends a call, retrying transient failures with backoff and jitter. Statuses other than 2xx and
-// transient failures are returned as a response, for the method to classify.
+// transient failures are returned as a response, for the method to classify. Every attempt of a write passes
+// checkWrite first, so a checkpoint that refuses stops the call before the request, the first or a retry,
+// goes out.
 func (p *Provider) do(ctx context.Context, c call) (response, error) {
 	for attempt := 0; ; attempt++ {
+		if err := checkWrite(ctx, c); err != nil {
+			return response{}, err
+		}
 		resp, err := p.once(ctx, c)
 		if err == nil || !providers.IsRetryable(err) || attempt+1 >= p.attempts {
 			return resp, err
@@ -259,6 +264,23 @@ func (p *Provider) do(ctx context.Context, c call) (response, error) {
 			return response{}, ctxError(c.op, ctx)
 		}
 	}
+}
+
+// checkWrite runs the caller's write checkpoint ([providers.CheckWrite]) before an attempt of a call that
+// writes. Every method other than GET is a write, so the GraphQL mutation (a POST) is one, and a write method
+// added later is checked without a change here. An ended context is reported as such, before the checkpoint
+// is asked. The checkpoint's error is the caller's own and is returned wrapped, never retried here.
+func checkWrite(ctx context.Context, c call) error {
+	if c.method == http.MethodGet {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctxError(c.op, ctx)
+	}
+	if err := providers.CheckWrite(ctx); err != nil {
+		return fmt.Errorf("%s: stopped before the write: %w", c.op, err)
+	}
+	return nil
 }
 
 func (p *Provider) once(ctx context.Context, c call) (response, error) {

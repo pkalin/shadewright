@@ -16,13 +16,13 @@ Pausing stops the executor's own Git writes. It does not revoke a proposal that 
 kubectl patch remediationsettings default --type merge -p '{"spec":{"paused":true}}'
 ```
 
-The executor reads the settings right before each write and, while `paused` is true, does none of these:
+The executor reads the settings right before each write request it sends to the Git host and, while `paused` is true, does none of these:
 
 - push a branch or open a pull request (issues are planned, [ADR-0014](adr/0014-notifications-github-issues-first.md), and are also covered by the pause);
 - close a pull request, including the one a deleted request owns or one whose plan went stale;
 - finish a deletion: the finalizer `remediation.shadewright.io/close-pull-request` stays on a deleted `RemediationRequest` until the pause ends, because closing is a write.
 
-The check is made right before each write, from the API server, so a pause also stops a request whose step has already started: the next write is not made. A write that has already passed the check when you set the pause may still complete; every later write is stopped. If the executor cannot read the settings at that moment, or the object is gone, it does not write either.
+The check is made from the API server right before each write request sent to the Git host, not once per step: one step may send several (a commit on GitHub is four today: blob, tree, commit and the branch update), and a failed request may be sent again after a backoff. So a pause also stops a request whose step has already started. The boundary is exact: a write request already sent when the executor sees the pause may still complete, and no further write request, and no retry of one, is sent after it. A step stopped half way leaves at most unreferenced Git objects or a branch without its pull request; when writes resume, the request finds what was done (the branch, the commit on it, the open pull request) and does only the rest, without a duplicate. If the executor cannot read the settings at that moment, or the object is gone, it does not write either.
 
 It also does not look at its open pull requests while paused. Requests keep their state and check again every minute; each one held back shows the condition `WritesPaused` and an Event of the same reason:
 

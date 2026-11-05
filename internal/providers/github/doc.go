@@ -53,6 +53,14 @@ limitations under the License.
 // 422 the state does not explain is sent again with backoff, up to MaxAttempts, because a read may come from a
 // replica that lags the write. A 403 whose body cannot be read is a rate limit, so it is retried.
 //
+// A [providers.WriteCheckpoint] carried by the context (the executor's kill switch) is called right before
+// every write request: each request that is not a GET (today POST and PATCH: blob, tree, commit, the GraphQL branch update, branch, pull
+// request, close) and each attempt of it, a retry after a backoff and the repeat of a create after an
+// unexplained 422 included. Reads are not checked. When it refuses, nothing more is sent in that call and its
+// error is returned wrapped, unchanged; a write already sent may still have taken effect, which the idempotent
+// writes above resolve on the next call. Requests for installation tokens (package auth) write nothing to the
+// repository and are not checked.
+//
 // Errors carry fixed text, the status code and their class (not found, conflict, forbidden, rejected, too
 // large, retryable, canceled or deadline exceeded); never a URL, a header, response text, a repository or
 // branch name, or a token.

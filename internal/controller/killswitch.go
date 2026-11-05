@@ -37,7 +37,11 @@ import (
 // The kill switch (design sections 5.4 and 10.7): RemediationSettings spec.paused stops every Git write.
 //
 // Every Git provider the executor opens is wrapped in a gatedGit (openRepository, and GatedRepository for the
-// source mapping), whose write methods call writeAllowed immediately before they call the host. writeAllowed
+// source mapping), whose write methods call writeAllowed immediately before they call the host, and pass it on
+// as the write checkpoint of the context ([providers.WithWriteCheckpoint]): an adapter calls it again right
+// before each write request it sends, so a method that makes several (the GitHub commit: blob, tree, commit,
+// branch update) or retries one after a backoff sends no further write once the pause is seen. A request
+// already sent may still complete; the idempotent writes of the next reconcile pick up from there. writeAllowed
 // reads the settings from the API server, never from the cache, so a pause set at any moment, also after the
 // freshness check passed and between the reads of one step, stops the next write. It fails closed: settings that cannot be read, or that are gone,
 // block the write as well. The freshness check, the watch of a recorded pull request and the close of a change
@@ -111,7 +115,8 @@ func (r *RemediationRequestReconciler) GatedRepository(ctx context.Context, repo
 
 // gatedGit is a GitProvider whose writes (CreateBranch, CommitFile, OpenChangeRequest, EnableAutoMerge,
 // CloseChangeRequest) call allow immediately before the wrapped provider, and return its error instead of
-// writing when it refuses. Reads pass straight through. It implements every method itself rather than
+// writing when it refuses; the wrapped provider gets allow as its write checkpoint too (gate). Reads pass
+// straight through, without a checkpoint. It implements every method itself rather than
 // embedding the interface, so a write method added to GitProvider cannot pass ungated: the build fails until it
 // is added here.
 type gatedGit struct {
@@ -135,36 +140,51 @@ func (g *gatedGit) FindChangeRequest(ctx context.Context, headBranch string) (pr
 	return g.git.FindChangeRequest(ctx, headBranch)
 }
 
-func (g *gatedGit) CreateBranch(ctx context.Context, branch, fromCommit string) error {
+// gate calls allow before a write method and returns the context to call the wrapped provider with: it
+// carries allow as the write checkpoint ([providers.WithWriteCheckpoint]), so an adapter that makes several
+// requests in one method, or retries one, asks the gate again right before each of them.
+func (g *gatedGit) gate(ctx context.Context) (context.Context, error) {
 	if err := g.allow(ctx); err != nil {
+		return ctx, err
+	}
+	return providers.WithWriteCheckpoint(ctx, g.allow), nil
+}
+
+func (g *gatedGit) CreateBranch(ctx context.Context, branch, fromCommit string) error {
+	ctx, err := g.gate(ctx)
+	if err != nil {
 		return err
 	}
 	return g.git.CreateBranch(ctx, branch, fromCommit)
 }
 
 func (g *gatedGit) CommitFile(ctx context.Context, branch, expectedHead string, change providers.FileChange) (string, error) {
-	if err := g.allow(ctx); err != nil {
+	ctx, err := g.gate(ctx)
+	if err != nil {
 		return "", err
 	}
 	return g.git.CommitFile(ctx, branch, expectedHead, change)
 }
 
 func (g *gatedGit) OpenChangeRequest(ctx context.Context, req providers.NewChangeRequest) (providers.ChangeRequest, error) {
-	if err := g.allow(ctx); err != nil {
+	ctx, err := g.gate(ctx)
+	if err != nil {
 		return providers.ChangeRequest{}, err
 	}
 	return g.git.OpenChangeRequest(ctx, req)
 }
 
 func (g *gatedGit) EnableAutoMerge(ctx context.Context, number int64, expectedHeadSHA string) error {
-	if err := g.allow(ctx); err != nil {
+	ctx, err := g.gate(ctx)
+	if err != nil {
 		return err
 	}
 	return g.git.EnableAutoMerge(ctx, number, expectedHeadSHA)
 }
 
 func (g *gatedGit) CloseChangeRequest(ctx context.Context, number int64) error {
-	if err := g.allow(ctx); err != nil {
+	ctx, err := g.gate(ctx)
+	if err != nil {
 		return err
 	}
 	return g.git.CloseChangeRequest(ctx, number)

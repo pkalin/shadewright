@@ -105,7 +105,9 @@ func IsObjectID(s string) bool {
 // construction, so no method can reach another repository.
 //
 // Writes are idempotent where the operation allows it, so a reconcile that restarts after a crash finds the
-// work it already did instead of repeating it.
+// work it already did instead of repeating it. A write method may also stop part way, when the write
+// checkpoint of its context ([WithWriteCheckpoint]) refuses: it returns that error wrapped, and the caller
+// finishes the work later through the idempotent writes.
 //
 // Any method may also return ErrForbidden (the host refused the identity: a missing permission or a rule of
 // the repository) or ErrRejected (the host refused the request as invalid and the state does not explain the

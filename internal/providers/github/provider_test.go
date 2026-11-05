@@ -91,6 +91,8 @@ type script struct {
 	mu    sync.Mutex
 	steps []step
 	n     int
+	// sent records each request that went out to the scripted host, as "METHOD path".
+	sent []string
 }
 
 func (s *script) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -113,6 +115,7 @@ func (s *script) RoundTrip(req *http.Request) (*http.Response, error) {
 		t.Errorf("request outside the repository: %s %s", req.Method, req.URL.EscapedPath())
 		return nil, errors.New("unexpected repository")
 	}
+	s.sent = append(s.sent, req.Method+" "+path)
 	if s.n >= len(s.steps) {
 		t.Errorf("unexpected request %s %s", req.Method, path)
 		return nil, errors.New("unexpected request")

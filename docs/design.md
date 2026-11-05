@@ -21,6 +21,7 @@ Status: draft for the MVP.
 - The Prometheus `MetricsSource` adapter, with its approved query templates.
 - The pod logs `LogSource` adapter, bounded and redacted.
 - The missing reference check (section 4). It infers a missing Secret or ConfigMap without reading either.
+- The context builder (section 3.3). It makes a bounded, redacted context from them and the analyzer's reads.
 
 **Built and wired into the analyzer**
 

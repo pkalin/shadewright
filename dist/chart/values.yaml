@@ -64,7 +64,7 @@ metrics:
           # @section -- Metrics
           key: ca.crt
 networkPolicy:
-  # -- Install the NetworkPolicies: default deny for the namespace, DNS and TCP 443 and 6443 egress per component, and ingress to the metrics port from namespaces labeled `metrics: enabled`. Setting `false` installs no NetworkPolicy at all, so the namespace loses its default deny too and every Pod in it can talk to anything unless you restrict it yourself (`helm install` prints a warning).
+  # -- Install the NetworkPolicies: default deny for the namespace, DNS and TCP 443 and 6443 egress per component (the same two ports for both: a NetworkPolicy cannot tell GitHub from the model endpoint, see the README), an optional Prometheus rule for the analyzer only, and ingress to the metrics port from namespaces labeled `metrics: enabled`. Setting `false` installs no NetworkPolicy at all, so the namespace loses its default deny too and every Pod in it can talk to anything unless you restrict it yourself (`helm install` prints a warning).
   # @section -- Network policy
   enabled: true
   dns:
@@ -75,6 +75,22 @@ networkPolicy:
     # @section -- Network policy
     resolverCIDRs:
     - 169.254.20.10/32
+  analyzer:
+    prometheus:
+      # -- Let the analyzer, and only the analyzer, send TCP to the in-cluster Prometheus it queries (the metrics source, ADR-0017). Off by default: the analyzer does not query Prometheus yet, so nothing needs the rule. Set it together with the analyzer's metrics source, and allow the analyzer in the ingress policy of that Prometheus too (a NetworkPolicy of the Prometheus namespace; the chart does not touch other namespaces).
+      # @section -- Network policy
+      enabled: false
+      # -- Namespace of the Prometheus (matched by `kubernetes.io/metadata.name`). Required when `enabled`.
+      # @section -- Network policy
+      namespace: ""
+      # -- Labels of the Prometheus server Pods in that namespace. The default matches the prometheus-community chart.
+      # @section -- Network policy
+      podLabels:
+        app.kubernetes.io/name: prometheus
+        app.kubernetes.io/component: server
+      # -- TCP port of the Prometheus HTTP API on the Pod (the container port, not the Service port), 1 to 65535.
+      # @section -- Network policy
+      port: 9090
 crd:
   # -- Install the CRDs as templates (Helm does not upgrade or delete CRDs from a `crds/` directory). Set `false` only if you install them another way.
   # @section -- CRDs

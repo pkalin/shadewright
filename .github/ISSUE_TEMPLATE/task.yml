@@ -31,10 +31,23 @@ body:
     validations:
       required: true
   - type: textarea
+    id: decisions
+    attributes:
+      label: Decisions
+      description: >-
+        Choices this task must make that no ADR or design section settles, each as a question with its options,
+        a recommended answer and one sentence on why it matters. At most five; only those that change the API,
+        a test, a permission or what a user sees. They are answered before work starts, in the issue. Leave
+        empty if none.
+      placeholder: |
+        1. Does a pause stop the whole method or every write request? Recommended: every request. Why it matters: ...
+  - type: textarea
     id: acceptance
     attributes:
       label: Acceptance criteria
-      description: Checkable statements, including the tests that must exist.
+      description: >-
+        Checkable statements, including the tests that must exist. Write behaviour as Given, When, Then where it
+        becomes a test. The pull request shows evidence for each one.
       placeholder: |
         - [ ] ...
         - [ ] A test shows that ... is refused

@@ -41,6 +41,28 @@ metrics:
     # -- Further labels on the ServiceMonitors, for the `serviceMonitorSelector` of your Prometheus. The chart's own labels cannot be overridden.
     # @section -- Metrics
     labels: {}
+    tls:
+      # -- Verify the serving certificate of the metrics endpoints instead of skipping the check. On, the ServiceMonitors send a `tlsConfig` with `ca` and `serverName` and no `insecureSkipVerify`, and the chart refuses to render without a CA. Needs `executor.metricsTLS.secretName` and `analyzer.metricsTLS.secretName` (certificates signed by that CA). Issuance stays with you: the chart creates no cert-manager object.
+      # @section -- Metrics
+      enabled: false
+      # -- Name the certificates are checked against (the TLS server name), a DNS name that every serving certificate lists as a subject alternative name. Required when `tls.enabled`.
+      # @section -- Metrics
+      serverName: ""
+      ca:
+        secret:
+          # -- Name of a Secret in the release namespace that holds the CA certificate (PEM) Prometheus trusts. Set this or `ca.configMap.name`, not both.
+          # @section -- Metrics
+          name: ""
+          # -- Key of the CA certificate in that Secret.
+          # @section -- Metrics
+          key: ca.crt
+        configMap:
+          # -- Name of a ConfigMap in the release namespace that holds the CA certificate (PEM) Prometheus trusts. Set this or `ca.secret.name`, not both.
+          # @section -- Metrics
+          name: ""
+          # -- Key of the CA certificate in that ConfigMap.
+          # @section -- Metrics
+          key: ca.crt
 networkPolicy:
   # -- Install the NetworkPolicies: default deny for the namespace, DNS and TCP 443 and 6443 egress per component, and ingress to the metrics port from namespaces labeled `metrics: enabled`. Setting `false` installs no NetworkPolicy at all, so the namespace loses its default deny too and every Pod in it can talk to anything unless you restrict it yourself (`helm install` prints a warning).
   # @section -- Network policy
@@ -106,9 +128,13 @@ executor:
       # -- Memory request.
       # @section -- Executor
       memory: 64Mi
-  # -- Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--namespace`, `--watch-namespaces`, `--cluster-id` and `--max-incidents`.
+  # -- Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--metrics-cert-path`, `--metrics-cert-name`, `--metrics-cert-key`, `--namespace`, `--watch-namespaces`, `--cluster-id` and `--max-incidents`.
   # @section -- Executor
   extraArgs: []
+  metricsTLS:
+    # -- Name of an existing Secret of type `kubernetes.io/tls` (keys `tls.crt` and `tls.key`) in the release namespace that holds the serving certificate of the metrics endpoint. Empty (the default) keeps the certificate the binary generates for itself. Set, the chart mounts the Secret read-only and passes `--metrics-cert-path`; the key must be in the Secret, never in `values`. Needs `metrics.enabled` and `metrics.secure`. Issuance and renewal stay with you.
+    # @section -- Executor
+    secretName: ""
   # -- Further Pod labels. The chart refuses `control-plane`, `app.kubernetes.io/*`, `helm.sh/*` and `azure.workload.identity/*`: it sets them itself (the identity labels come from `identity.azure.clientId`).
   # @section -- Executor
   podLabels: {}
@@ -181,9 +207,13 @@ analyzer:
       # -- Memory request.
       # @section -- Analyzer
       memory: 64Mi
-  # -- Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--namespace`, `--watch-namespaces`, `--cluster-id` and `--max-incidents`.
+  # -- Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--metrics-cert-path`, `--metrics-cert-name`, `--metrics-cert-key`, `--namespace`, `--watch-namespaces`, `--cluster-id` and `--max-incidents`.
   # @section -- Analyzer
   extraArgs: []
+  metricsTLS:
+    # -- Name of an existing Secret of type `kubernetes.io/tls` (keys `tls.crt` and `tls.key`) in the release namespace that holds the serving certificate of the metrics endpoint. Empty (the default) keeps the certificate the binary generates for itself. Set, the chart mounts the Secret read-only and passes `--metrics-cert-path`; the key must be in the Secret, never in `values`. Needs `metrics.enabled` and `metrics.secure`. Issuance and renewal stay with you.
+    # @section -- Analyzer
+    secretName: ""
   # -- Further Pod labels. The chart refuses `control-plane`, `app.kubernetes.io/*`, `helm.sh/*` and `azure.workload.identity/*`: it sets them itself (the identity labels come from `identity.azure.clientId`).
   # @section -- Analyzer
   podLabels: {}

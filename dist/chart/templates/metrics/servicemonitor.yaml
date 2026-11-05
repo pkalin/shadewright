@@ -1,12 +1,28 @@
 {{- /*
 One Prometheus Operator ServiceMonitor per component, off by default (metrics.serviceMonitor.enabled). Prometheus
 scrapes with its own ServiceAccount token: the endpoint checks it with a TokenReview and a SubjectAccessReview,
-so that ServiceAccount needs the metrics-reader ClusterRole (nothing in the chart binds it). The serving
-certificate is self-signed by the binary, so its verification is skipped; the token is still checked.
+so that ServiceAccount needs the metrics-reader ClusterRole (nothing in the chart binds it). By default the serving
+certificate is self-signed by the binary, so its verification is skipped; the token is still checked. With
+metrics.serviceMonitor.tls.enabled the endpoints serve a certificate the administrator issued (see
+executor.metricsTLS and analyzer.metricsTLS) and the ServiceMonitor verifies it against a CA and a serverName.
 */ -}}
 {{- if .Values.metrics.serviceMonitor.enabled }}
 {{- if not .Values.metrics.enabled }}
 {{- fail "metrics.serviceMonitor.enabled needs metrics.enabled: there is no metrics Service to scrape" }}
+{{- end }}
+{{- $tls := $.Values.metrics.serviceMonitor.tls }}
+{{- $caSecret := $tls.ca.secret | default dict }}
+{{- $caConfigMap := $tls.ca.configMap | default dict }}
+{{- if $tls.enabled }}
+{{- if not (or $caSecret.name $caConfigMap.name) }}
+{{- fail "metrics.serviceMonitor.tls.enabled needs a CA: set metrics.serviceMonitor.tls.ca.secret.name or ca.configMap.name" }}
+{{- end }}
+{{- if and $caSecret.name $caConfigMap.name }}
+{{- fail "metrics.serviceMonitor.tls.ca: set the Secret or the ConfigMap, not both" }}
+{{- end }}
+{{- if not $tls.serverName }}
+{{- fail "metrics.serviceMonitor.tls.enabled needs metrics.serviceMonitor.tls.serverName" }}
+{{- end }}
 {{- end }}
 {{- range $component := list "executor" "analyzer" }}
 ---
@@ -39,7 +55,21 @@ spec:
     your own ServiceMonitor with authorization (credentials from a Secret holding a token for metrics-reader). */}}
     bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
     tlsConfig:
+      {{- if $tls.enabled }}
+      serverName: {{ $tls.serverName | quote }}
+      ca:
+        {{- if $caSecret.name }}
+        secret:
+          name: {{ $caSecret.name | quote }}
+          key: {{ $caSecret.key | quote }}
+        {{- else }}
+        configMap:
+          name: {{ $caConfigMap.name | quote }}
+          key: {{ $caConfigMap.key | quote }}
+        {{- end }}
+      {{- else }}
       insecureSkipVerify: true
+      {{- end }}
     {{- else }}
     port: http
     scheme: http

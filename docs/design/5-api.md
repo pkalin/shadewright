@@ -241,8 +241,10 @@ flowchart TD
     c2m -- passes --> c3
     c3 -- passes --> c4
     c4 -- passes --> map
-    map -- resolved --> again
-    map -- stops --> ms[Denied or NeedsIntervention: the mapping's reason]
+    map --> mr{"Executor: target read again, same UID and resourceVersion?"}
+    mr -- "no: the target changed" --> start
+    mr -- "yes, resolved" --> again
+    mr -- "yes, mapping stopped" --> ms[Denied or NeedsIntervention: the mapping's reason]
     again -- passes --> cs
     cs -- yes --> c5
     cs -- no --> nis[NeedsIntervention: IncompleteInput]

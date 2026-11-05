@@ -63,7 +63,7 @@
   <text class="no" x="332" y="308">unmappable →</text>
   <text class="no" x="332" y="324">NeedsIntervention</text>
   <rect class="box" x="332" y="350" width="210" height="72" rx="10"/>
-  <text class="h" x="348" y="376">Policy engine</text>
+  <text class="h" x="348" y="376">Full policy check</text>
   <text class="s" x="348" y="397">policy · settings · live target</text>
   <text class="s" x="348" y="413">the resolved source</text>
   <text class="no" x="332" y="442">not allowed → Denied</text>

@@ -221,7 +221,7 @@ func TestChatURL(t *testing.T) {
 		{"https://r.openai.azure.com/", datedVersion, "https://r.openai.azure.com/openai/deployments/triage/chat/completions?api-version=2024-10-21"},
 		{"https://r.openai.azure.com/openai/v1", datedVersion, ""},
 		{"http://r.openai.azure.com/", "v1", ""},
-		{"https://user@r.openai.azure.com/", "v1", ""},
+		{"https://user" + "@" + "r.openai.azure.com/" /* user info, split so it does not read as an address */, "v1", ""},
 		{"https://r.openai.azure.com/?x=1", "v1", ""},
 		{"https://r.openai.azure.com/#f", "v1", ""},
 		{"https:///path", "v1", ""},

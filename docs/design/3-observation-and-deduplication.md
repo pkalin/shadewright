@@ -290,7 +290,7 @@ Whoever keeps a symptom flapping can delay an analysis by up to the window, not 
 
 Until #16 calls it, nothing adds to the count, so the budget is read but not yet enforced. A unit is never given back; a lost answer can only overcount.
 
-<span class="sw-status sw-planned">planned</span> One unit is one claimed attempt: all calls, retries and tool rounds of one run, counted on the UTC day it was reserved, a lost response included; token and money limits are separate bounds ([ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md), proposed).
+<span class="sw-status sw-planned">planned</span> One unit is one claimed attempt: all calls, retries and tool rounds of one run, counted on the UTC day it was reserved, a lost response included; token and money limits are separate bounds ([ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md))
 
 **Shared by the whole cluster.** Anyone who can create events or pods in a watched namespace can spend the budget with distinct fingerprints that become due over the day. A share per namespace or per fingerprint is <span class="sw-status sw-planned">planned</span> ([#207](https://github.com/pkalin/shadewright/issues/207)).
 
@@ -349,7 +349,7 @@ Only the arrow into `Open` from the start is built; the dashed states and every 
 
 ## 3.3. Analysis
 
-<span class="sw-status sw-planned">planned</span> Claims identified by `lastAnalysisTime` with an expiry, the recheck before a request is created, the durability steps and whether a stored record gates the proposal are proposed in [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md); until it is accepted and built, a claim is the phase and `lastAnalysisTime` only (3.2).
+<span class="sw-status sw-planned">planned</span> Claims identified by `lastAnalysisTime` with an expiry, the recheck before a request is created, the durability steps and whether a stored record gates the proposal are decided in [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md); until they are built, a claim is the phase and `lastAnalysisTime` only (3.2).
 
 Decided in [ADR-0023](../adr/0023-how-the-analyzer-calls-the-model.md) (accepted 2026-11-03): context first, one structured call.
 

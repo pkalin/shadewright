@@ -1,6 +1,6 @@
 # ADR-0025: Analysis claims, units and the evaluation manifest
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-05
 
 ## Context

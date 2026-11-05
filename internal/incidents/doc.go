@@ -32,9 +32,10 @@ limitations under the License.
 // oldest forgotten first, at most 4 observations each), forgotten after 15 minutes and on a restart, and
 // counted in the gauge shadewright_incident_first_sightings_held.
 //
-// Writes are batched: the first observation of an Incident is written at once, and the ones that follow
-// within the aggregation window (5 minutes) go into one status write after it. Writes run in their own
-// goroutine, so a slow API server does not hold up the observations. Each write reads the Incident fresh
+// Writes are batched: the observations that open an Incident, or the first one of an existing Incident in
+// a process, are written at once, and the ones that follow within the aggregation window (5 minutes) go
+// into one status write after it. Writes run in their own goroutine, so a slow API server does not hold
+// up the observations. Each write reads the Incident fresh
 // and retries on conflict. A write whose answer was lost is kept apart from later observations and
 // recognised, occurrence by occurrence, from the totals the status records, so it is not added twice; a
 // batch none of whose occurrences can show that is written again (an overcount rather than a loss). A stop,

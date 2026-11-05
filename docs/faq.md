@@ -8,7 +8,7 @@ Short answers, each pointing to the page that has the detail. Terms are in the [
 
 ## What will it never do?
 
-These are the project's six invariants ([AGENTS.md](https://github.com/pkalin/shadewright/blob/main/AGENTS.md), [design 10](design.md#10-security), [threat model](threat-model.md)); a change that weakened one would need a new ADR first.
+These are the project's six invariants ([AGENTS.md](https://github.com/pkalin/shadewright/blob/main/AGENTS.md), [design 10](design/10-security.md#10-security), [threat model](threat-model.md)); a change that weakened one would need a new ADR first.
 
 1. **Model output is never authorization.** The analyzer can only submit a proposal. Deterministic policy decides whether it may run, and the executor acts only on a plan whose digest matches the approved one.
 2. **Actions are a closed catalog.** Each action is an enum value with typed, bounded parameters (today `SetContainerMemoryLimit` and `AdjustKedaMaxReplicas`). There is no free-form command, no `exec` and no direct `apply` against the cluster, not even as a fallback when a pull request fails ([ADR-0003](adr/0003-gitops-only-typed-remediation.md)).
@@ -17,11 +17,11 @@ These are the project's six invariants ([AGENTS.md](https://github.com/pkalin/sh
 5. **Reconciliation is idempotent.** Branch names and pull request markers derive from the request UID and plan digest, so after a restart it finds the existing pull request instead of opening another.
 6. **Separate identities.** The analyzer has read-only cluster access and no Git credential; the executor has the Git App and no model access. Neither is `cluster-admin` and one token is never shared.
 
-Separately, today a person always merges: auto-merge is <span class="sw-status sw-planned">planned</span> and not built. Where the repository owner allows it later, it will be by policy and your branch rules ([design 8.3](design.md#83-auto-merge)). That is current behaviour, not an invariant.
+Separately, today a person always merges: auto-merge is <span class="sw-status sw-planned">planned</span> and not built. Where the repository owner allows it later, it will be by policy and your branch rules ([design 8.3](design/8-gitops-on-github.md#83-auto-merge)). That is current behaviour, not an invariant.
 
 ## What does it cost to run?
 
-The operator is two small Deployments. In the current release nothing calls a model, so there is no inference cost today. When the analysis is built, the cost is tokens times price per analysis, bounded by `spec.analysis.maxAnalysesPerDay` (default 100) and by planned token caps. [Design 12](design.md#12-cost) has the formula and an illustration with made-up prices. The reference lab in Azure is disposable and priced in the `shadewright-azure` repository ([ADR-0008](adr/0008-disposable-azure-lab.md)).
+The operator is two small Deployments. In the current release nothing calls a model, so there is no inference cost today. When the analysis is built, the cost is tokens times price per analysis, bounded by `spec.analysis.maxAnalysesPerDay` (default 100) and by planned token caps. [Design 12](design/12-cost.md#12-cost) has the formula and an illustration with made-up prices. The reference lab in Azure is disposable and priced in the `shadewright-azure` repository ([ADR-0008](adr/0008-disposable-azure-lab.md)).
 
 ## What data leaves the cluster?
 

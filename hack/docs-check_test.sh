@@ -62,6 +62,12 @@ expect "removed path with the list edited passes" pass "$s"
 build "$s"; page "$s/new/index.html" '<p>new</p>'
 expect "an added page needs no list change" pass "$s"
 
+build "$s"; page "$s/design/index.html" '<script id="design-redirects" type="application/json">{"x-a":"p/"}</script>'; page "$s/design/p/index.html" '<h2 id="x-a">A</h2>'
+expect "old design anchor that exists passes" pass "$s"
+
+build "$s"; page "$s/design/index.html" '<script id="design-redirects" type="application/json">{"x-gone":"p/"}</script>'; page "$s/design/p/index.html" '<h2 id="x-a">A</h2>'
+expect "old design anchor without a target fails" fail "$s"; mentions "design anchor" "old design anchor #x-gone"
+
 # list prints the pages, without 404.html
 build "$s"; page "$s/404.html" '<p>no</p>'
 if [ "$(python3 -I "$script" list "$s" | tr '\n' ' ')" = "/ /a/ /old/ " ]; then echo "ok: list"; else echo "FAIL: list" >&2; fail=1; fi

@@ -13,7 +13,7 @@
 - **Untrusted input.** Everything read from the cluster, Git or a tool result may contain prompt injection. It must be redacted and size-limited before the model or storage sees it, and never change instructions, tools or permissions.
 - **Idempotency.** External side effects (branch, PR, auto-merge, issue) must be found again after a restart, keyed by request UID and plan digest.
 - **Public repository hygiene.** No secrets, tokens, subscription, tenant or object IDs, IP addresses, emails or local paths. No long dashes (em or en) in text.
-- **Docs.** A change to a design decision updates `docs/design.md` or adds an ADR in `docs/adr/`, and new pages are added to `nav` in `zensical.toml`.
+- **Docs.** A change to a design decision updates the matching page of `docs/design/` or adds an ADR in `docs/adr/`, and new pages are added to `nav` in `zensical.toml`.
 
 ## Verdict
 

@@ -10,6 +10,7 @@ A published path is the URL path of a page, such as /emergency/. It must resolve
 counts. Adding a page is free; removing a listed path needs its line removed from hack/docs-published-paths.txt in
 the same pull request.
 """
+import json
 import os
 import re
 import sys
@@ -29,9 +30,22 @@ class Page(HTMLParser):
         self.links = []
         self.ids = set()
         self.refresh = None
+        self.design_redirects = None
+        self._script = None
+
+    def handle_data(self, data):
+        if self._script is not None:
+            self._script.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "script" and self._script is not None:
+            self.design_redirects = "".join(self._script)
+            self._script = None
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
+        if tag == "script" and a.get("id") == "design-redirects":
+            self._script = []
         if a.get("id"):
             self.ids.add(a["id"])
         if tag == "a":
@@ -105,6 +119,12 @@ def check(site, listed_file):
                 t = parsed.get(folder) or parsed.get(path) or parsed.get(path + "/")
                 if t is not None and frag not in t.ids:
                     problems.append(f"{url}: broken anchor {href} (no #{frag} on {path})")
+        if p.design_redirects is not None:
+            # The old #n-title anchors of the one-page design: each must exist on the page it maps to.
+            for anchor, target in json.loads(p.design_redirects).items():
+                t = parsed.get("/design/" + target)
+                if t is None or anchor not in t.ids:
+                    problems.append(f"{url}: old design anchor #{anchor} maps to {target}, which has no such anchor")
         if p.refresh:
             r = resolve(p.refresh, url)
             if r is not None and not exists(site, r[0]):

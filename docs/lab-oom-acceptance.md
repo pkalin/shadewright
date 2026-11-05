@@ -4,7 +4,7 @@ title: "Lab runbook: the OOM scenario produces one reviewed pull request"
 
 # Lab runbook: the OOM scenario produces one reviewed pull request
 
-This is the acceptance run for v0.1.0 ([design 13](design.md#13-milestones), stage 2): on the lab cluster, a
+This is the acceptance run for v0.1.0 ([design 13](design/13-milestones.md#13-milestones), stage 2): on the lab cluster, a
 hand-written `RemediationRequest` for the OOM scenario produces exactly one correct pull request in the fleet
 repository, applying it again opens nothing new, and a change of the policy's bounds closes the pull request and
 ends the request `Superseded`. Decisions behind it: [ADR-0006](adr/0006-github-app-key-in-key-vault.md) (the GitHub

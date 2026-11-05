@@ -10,7 +10,7 @@ the operator diagnoses or refuses wrongly, a scenario for the lab, and tasks fro
   [shadewright-fleet](https://github.com/pkalin/shadewright-fleet)) live in this repository. Tasks labelled
   `agent-ready` are written so that anyone, a person or a coding agent, can take one without further context.
 - The roadmap is a public [GitHub project](https://github.com/users/pkalin/projects/2).
-- The design is [docs/design.md](docs/design.md); decisions are [ADRs](docs/adr/index.md). Both are published
+- The design is [docs/design.md](docs/design.md), one page per section in `docs/design/`; decisions are [ADRs](docs/adr/index.md). Both are published
   at [shadewright.io](https://shadewright.io).
 - [AGENTS.md](AGENTS.md) is the working guide: the invariants, the commit format, the checks to run, what docs
   a change must update. Read it before your first pull request; it applies to people and coding agents alike.

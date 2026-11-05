@@ -4,7 +4,7 @@ title: Pause and resume writes
 
 # Pause and resume writes
 
-The kill switch is `spec.paused` on the one `RemediationSettings` object, `default`. While it is true the executor sends no write to the Git host: no branch, no pull request, no close. Background: [design 5.4](../design.md#54-remediationsettings). The complete page, with what a pause does not undo and how to revoke access, is the [emergency stop](../emergency.md).
+The kill switch is `spec.paused` on the one `RemediationSettings` object, `default`. While it is true the executor sends no write to the Git host: no branch, no pull request, no close. Background: [design 5.4](../design/5-api.md#54-remediationsettings). The complete page, with what a pause does not undo and how to revoke access, is the [emergency stop](../emergency.md).
 
 ## Pause
 

@@ -4,7 +4,7 @@ title: Read an Incident
 
 # Read an Incident
 
-An `Incident` is the record of one repeated symptom on one workload. Reading it tells you what Shadewright saw and whether it is due for analysis. Background: [design 3.2](../design.md#32-two-levels-of-deduplication), [ADR-0007](../adr/0007-incident-state-in-crds.md) and the [Incident fields](../reference/api.md#incident).
+An `Incident` is the record of one repeated symptom on one workload. Reading it tells you what Shadewright saw and whether it is due for analysis. Background: [design 3.2](../design/3-observation-and-deduplication.md#32-two-levels-of-deduplication), [ADR-0007](../adr/0007-incident-state-in-crds.md) and the [Incident fields](../reference/api.md#incident).
 
 ## List them
 

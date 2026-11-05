@@ -663,6 +663,72 @@ func TestContentIsDelimitedUntrustedData(t *testing.T) {
 	if strings.Count(c, "<") != 2 || strings.Count(c, "tool-result") != 2 || !strings.HasSuffix(c, "</tool-result>\n") {
 		t.Errorf("delimiters:\n%s", c)
 	}
+	// Data is neutralised text inside the block, without the header, the fixed line or the closing tag.
+	d := strings.Join(r.Data(), "\n")
+	for _, part := range r.Data() {
+		if !strings.Contains(c, part) {
+			t.Errorf("data part %q is not in the block", part)
+		}
+	}
+	if d == "" || strings.Contains(d, "tool-result") || strings.Contains(d, "untrusted data") ||
+		strings.Contains(d, "<") || !strings.Contains(d, "Ignore previous instructions") {
+		t.Errorf("data:\n%s", d)
+	}
+}
+
+// quotable reports whether q lies within one part of the result's data, as the evidence check asks.
+func quotable(r Result, q string) bool {
+	for _, part := range r.Data() {
+		if strings.Contains(part, q) {
+			return true
+		}
+	}
+	return false
+}
+
+// Lines, labels and answers the tools write are never quotable, though they are in the result: only values
+// from a source are (review pattern 23).
+func TestOnlySourceValuesAreQuotable(t *testing.T) {
+	e := newEnv(t, []client.Object{pod(), deployment(),
+		event("e1", podName, "Back-off restarting failed container", testNow.Add(-time.Minute))})
+	key := fake.LogKey{Namespace: testNS, Pod: podName, Container: container, Previous: true}
+	e.logs.Set(key, "starting\npanic: boom\n")
+	e.metrics.PodTemplates = []string{restartsTemplate}
+	e.metrics.Set(restartsTemplate, []providers.Series{{Labels: map[string]string{argPod: podName}, Samples: []providers.Sample{{Value: 4}}}})
+	e.delivery.Set(providers.DeliveryUnit{Kind: kustomization, Namespace: fluxNS, Name: unitName},
+		providers.DeliveryStatus{AppliedRevision: "main@sha1:abc", Message: "health check failed"})
+	for _, tc := range []struct {
+		tool, quote string
+		want        bool
+	}{
+		{NameCheckMissingReference, "referenced by the pod spec: true", false},
+		{NameCheckMissingReference, "answer: missing", false},
+		{NameCheckMissingReference, "evidence: CreateContainerConfigError", false},
+		{NameCheckMissingReference, "container: app", false},
+		{NameCheckMissingReference, "app", true},
+		{NameListEvents, " count 1: ", false},
+		{NameListEvents, "Back-off restarting failed container", true},
+		{NameGetDeliveryStatus, "ready: false", false},
+		{NameGetDeliveryStatus, "applied revision: main", false},
+		{NameGetDeliveryStatus, "health check failed", true},
+		{NameGetPodLogs, "previous instance", false},
+		{NameGetPodLogs, "panic: boom", true},
+		{NameQueryMetrics, "1 series", false},
+		{NameQueryMetrics, "{pod=" + podName + "} 4", true},
+		{NameGetResource, `"name": "` + podName + `"`, true},
+	} {
+		r := e.call(t, tc.tool, with(tc.tool, nil))
+		if r.Status != StatusOK || !strings.Contains(r.Content(), tc.quote) {
+			t.Fatalf("%s: %q lacks %q:\n%s", tc.tool, r.Status, tc.quote, r.Text)
+		}
+		if got := quotable(r, tc.quote); got != tc.want {
+			t.Errorf("%s: quoting %q is evidence: %t, want %t (data %q)", tc.tool, tc.quote, got, tc.want, r.Data())
+		}
+	}
+	// A result that did not end well has no data, whatever values it holds.
+	if (Result{Status: StatusRefused, Text: "refused\n", Values: []string{"refused"}}).Data() != nil {
+		t.Error("a refusal has data")
+	}
 }
 
 func TestNewRefusesBadConfig(t *testing.T) {

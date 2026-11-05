@@ -180,6 +180,9 @@ func (b *Builder) Build(ctx context.Context, inc *remediationv1alpha1.Incident) 
 	if err := abandoned(ctx); err != nil {
 		return nil, err
 	}
+	for i := range t.pods {
+		c.Pods = append(c.Pods, t.pods[i].Name)
+	}
 	status := b.statusBlock(&t)
 	if t.state == targetFailed {
 		c.failed(SectionStatus)
@@ -256,13 +259,14 @@ func (b *Builder) redact(s string) string { return Redact(b.redactor.String, s) 
 func (b *Builder) value(s string) string { return Value(b.redactor.String, s) }
 
 // finish redacts the assembled text of a section block as a whole, then cuts it to n bytes in whole lines,
-// keeping the head: the sections it finishes are written most relevant first.
-func (b *Builder) finish(blk *Block, text string, n int) {
-	text, cut := keepHead(b.redact(text), n)
+// keeping the head: the sections it finishes are written most relevant first. The values the lines recorded
+// become the block's quotable values; [Block.Data] keeps those the redaction and the cuts left in the text.
+func (b *Builder) finish(blk *Block, l *lines, n int) {
+	text, cut := keepHead(b.redact(l.String()), n)
 	if cut {
 		blk.addLabel(LabelSectionCut)
 	}
-	blk.Text = text
+	blk.Text, blk.Values = text, l.values
 }
 
 // cutOrder is the order in which the total bound cuts sections: the attacker-controlled bulk first, the

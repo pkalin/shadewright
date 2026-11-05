@@ -19,6 +19,7 @@ package incidentcontext
 import (
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // Default bounds, decided on 2026-11-05 (#70). They are the values of [DefaultLimits]; making them settings
@@ -170,8 +171,36 @@ type Block struct {
 	Labels []Label
 	// Text is redacted cluster data: untrusted, never instructions.
 	Text string
+	// Values are the values from a source in Text, redacted as rendered: the values of a summary or status
+	// line and the series lines of a metrics block, never the labels, sentences or numbers code writes around
+	// them. Only these, and a log block's excerpt, may be quoted as evidence ([Block.Data]).
+	Values []string
 	// headLen is the length of the header lines at the start of Text that a cut keeps (log blocks).
 	headLen int
+}
+
+// Data returns the parts of the block's text that are data from a source, the only parts a quote may cite as
+// evidence: none unless the block is [Available]; for a log block, its excerpt without the header lines;
+// otherwise each of its [Block.Values] still found in Text after the section and total cuts. A quote must lie
+// within one part, so it can never cite a label, a fixed sentence or a line written by code, such as
+// "phase: ..." or "... no longer exists".
+func (b Block) Data() []string {
+	if b.Availability != Available {
+		return nil
+	}
+	if b.Section == SectionLogs {
+		if text := b.Text[min(b.headLen, len(b.Text)):]; text != "" {
+			return []string{text}
+		}
+		return nil
+	}
+	var parts []string
+	for _, v := range b.Values {
+		if v != "" && strings.Contains(b.Text, v) && !slices.Contains(parts, v) {
+			parts = append(parts, v)
+		}
+	}
+	return parts
 }
 
 func (b *Block) addLabel(l Label) {
@@ -190,6 +219,10 @@ type Context struct {
 	// FailedSources are the sections whose configured source failed, each once: an escalation signal. A
 	// source that is not configured is not listed.
 	FailedSources []Section
+	// Pods are the names of the pods the builder attributed to the subject and described, at most MaxPods,
+	// in the subject's namespace. The analysis loop labels a tool answer about any other pod as outside the
+	// attribution.
+	Pods []string
 }
 
 // Size is the number of bytes [Limits.Total] bounds: the text of every block.

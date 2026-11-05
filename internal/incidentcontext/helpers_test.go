@@ -40,13 +40,15 @@ import (
 )
 
 const (
-	testNS     = "shop"
-	otherNS    = "elsewhere"
-	appName    = "app"
-	webName    = "web"
-	crashPod   = "web-abc-1"
-	dbUID      = "uid-db"
-	dbRevision = "db-1"
+	testNS      = "shop"
+	otherNS     = "elsewhere"
+	appName     = "app"
+	webName     = "web"
+	crashPod    = "web-abc-1"
+	unavailable = "MinimumReplicasUnavailable"
+	crashLoop   = "CrashLoopBackOff"
+	dbUID       = "uid-db"
+	dbRevision  = "db-1"
 )
 
 var (
@@ -84,7 +86,7 @@ func deployment() *appsv1.Deployment {
 		Status: appsv1.DeploymentStatus{
 			ObservedGeneration: 3, UpdatedReplicas: 2, ReadyReplicas: 1, AvailableReplicas: 1, UnavailableReplicas: 1,
 			Conditions: []appsv1.DeploymentCondition{{
-				Type: appsv1.DeploymentAvailable, Status: corev1.ConditionFalse, Reason: "MinimumReplicasUnavailable",
+				Type: appsv1.DeploymentAvailable, Status: corev1.ConditionFalse, Reason: unavailable,
 				Message: "Deployment does not have minimum availability.",
 			}},
 		},
@@ -124,7 +126,7 @@ func pod(name string, l map[string]string, created metav1.Time, owners ...metav1
 func crashing(p *corev1.Pod, message string) *corev1.Pod {
 	p.Status.ContainerStatuses[0] = corev1.ContainerStatus{
 		Name: appName, RestartCount: 4,
-		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff", Message: message}},
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: crashLoop, Message: message}},
 		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
 			Reason: "Error", ExitCode: 1, Message: message, StartedAt: recent, FinishedAt: recent,
 		}},

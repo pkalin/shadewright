@@ -39,7 +39,7 @@ Anything in the cluster is readable by whoever has `get` on it, so treat the Inc
 
 ## What is sent to the model
 
-**Nothing in v0.1.0.** The analysis that calls a model is not built, the analyzer has no model credential and no workload identity annotation, and nothing calls a model: the Microsoft Foundry adapter is built ([#75](https://github.com/pkalin/shadewright/issues/75)) but not wired into either binary. What is decided ([ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md), **planned**, epic [#16](https://github.com/pkalin/shadewright/issues/16)):
+**Nothing in v0.1.0.** The analysis loop that calls a model is built (`internal/analysis`) but the analyzer does not start it ([#76](https://github.com/pkalin/shadewright/issues/76)), the analyzer has no model credential and no workload identity annotation, and nothing calls a model: the Microsoft Foundry adapter is built ([#75](https://github.com/pkalin/shadewright/issues/75)) but not wired into either binary. What is decided ([ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md), **planned**, epic [#16](https://github.com/pkalin/shadewright/issues/16)):
 
 - The model gets a bounded, redacted context built deterministically: the incident summary, object status and owners, a log excerpt, selected metrics and recent Git changes for the object's source. Untrusted text is delimited and tagged with its provenance and the prompt says it is data, not instructions.
 - Read tools are offered only on escalation, within fixed step, token and spend budgets.

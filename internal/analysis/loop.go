@@ -1,0 +1,793 @@
+/*
+Copyright 2026 The Shadewright Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package analysis
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+
+	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidentcontext"
+	"github.com/pkalin/shadewright/internal/incidents"
+	"github.com/pkalin/shadewright/internal/policy"
+	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/tools"
+)
+
+// Bounds of an analysis.
+const (
+	// DefaultTimeout is the deadline of one analysis when Config.Timeout is zero. It is under the trigger's
+	// analysis timeout (10 minutes), after which an Incident left in Analyzing is taken as lost.
+	DefaultTimeout = 8 * time.Minute
+	// MaxTimeout is the longest Config.Timeout [New] accepts.
+	MaxTimeout = 9 * time.Minute
+	// DefaultMaxTokensPerAnalysis bounds the tokens one analysis may spend, all calls together, when
+	// Config.MaxTokensPerAnalysis is zero.
+	DefaultMaxTokensPerAnalysis = 500_000
+	// MaxToolCallsPerReply bounds the tool calls one reply may ask for; a reply with more is invalid.
+	MaxToolCallsPerReply = 16
+	// minQuoteBytes is the shortest quote, spaces trimmed, that counts as evidence.
+	minQuoteBytes = 8
+	// maxRetryWait is the longest delay a retryable error may ask for that the loop waits out, once per call.
+	maxRetryWait = 30 * time.Second
+)
+
+// Reason says how an analysis ended. Reasons are fixed strings from code, used as the reason of the
+// Incident's Analyzed condition; nothing from the model or the cluster goes into them.
+type Reason string
+
+// Reasons.
+const (
+	// ReasonProposed: the result carried a valid proposal with evidence; a request is created.
+	ReasonProposed Reason = "Proposed"
+	// ReasonRunbookMatched: a deterministic runbook matched and proposed without a model call.
+	ReasonRunbookMatched Reason = "RunbookMatched"
+	// ReasonNoModelConfigured: RemediationSettings names no triage model, so no model was called and no unit
+	// of the daily budget used.
+	ReasonNoModelConfigured Reason = "NoModelConfigured"
+	// ReasonBudgetSpent: the daily analysis budget is spent; no model was called.
+	ReasonBudgetSpent Reason = "BudgetSpent"
+	// ReasonBudgetUnavailable: the budget could not be read or trusted; no model was called.
+	ReasonBudgetUnavailable Reason = "BudgetUnavailable"
+	// ReasonNoProposal: the result made no proposal.
+	ReasonNoProposal Reason = "NoProposal"
+	// ReasonMissingData: the result made no proposal and listed missing data.
+	ReasonMissingData Reason = "MissingData"
+	// ReasonNoEvidence: the result proposed without a quote found in the blocks it cites.
+	ReasonNoEvidence Reason = "NoEvidence"
+	// ReasonTargetNotSupported: the proposed action may not target the Incident's subject, or the subject has
+	// no namespace or UID.
+	ReasonTargetNotSupported Reason = "TargetNotSupported"
+	// ReasonNoPolicyForAction: no RemediationPolicy is configured for the proposed action type.
+	ReasonNoPolicyForAction Reason = "NoPolicyForAction"
+	// ReasonActionOutOfBounds: the proposed action failed the policy's catalog check (outside the catalog's
+	// bounds). It gets no retry and no feedback, so the model cannot search for what the policy allows, and it
+	// is not an escalation (decided 2026-11-05).
+	ReasonActionOutOfBounds Reason = "ActionOutOfBounds"
+	// ReasonInvalidOutput: the result did not match the schema, and no escalation could follow.
+	ReasonInvalidOutput Reason = "InvalidOutput"
+	// ReasonEscalationNotConfigured: an escalation signal was found and no escalation model is configured.
+	ReasonEscalationNotConfigured Reason = "EscalationNotConfigured"
+	// ReasonStepLimit: the escalated model asked for tool calls past maxToolSteps.
+	ReasonStepLimit Reason = "StepLimit"
+	// ReasonTokenLimit: the next call could exceed the analysis's or the deployment's token bound.
+	ReasonTokenLimit Reason = "TokenLimit"
+	// ReasonDeadlineExceeded: the analysis ran out of its deadline.
+	ReasonDeadlineExceeded Reason = "DeadlineExceeded"
+	// ReasonModelUnavailable: the model stayed throttled or failing after its bounded retries, or its retries
+	// used up the analysis's bound of 3 + maxToolSteps model calls.
+	ReasonModelUnavailable Reason = "ModelUnavailable"
+	// ReasonModelNotFound: the deployment does not exist.
+	ReasonModelNotFound Reason = "ModelNotFound"
+	// ReasonModelForbidden: the endpoint refused the analyzer's identity.
+	ReasonModelForbidden Reason = "ModelForbidden"
+	// ReasonModelError: any other failure of the model call, or of building its provider.
+	ReasonModelError Reason = "ModelError"
+)
+
+// ContextBuilder builds the context of an Incident; *incidentcontext.Builder implements it.
+type ContextBuilder interface {
+	Build(ctx context.Context, inc *remediationv1alpha1.Incident) (*incidentcontext.Context, error)
+}
+
+// ToolSet is the read tools offered on escalation; *tools.Set implements it.
+type ToolSet interface {
+	Definitions() []providers.ToolDefinition
+	Call(ctx context.Context, call providers.ToolCall) (tools.Result, error)
+}
+
+// Role names the use of a model deployment.
+type Role string
+
+// Roles.
+const (
+	RoleTriage     Role = "triage"
+	RoleEscalation Role = "escalation"
+)
+
+// ModelFactory returns the provider of one deployment named in RemediationSettings. It is where the endpoint
+// is checked against the operator's allow-list before any call (#76, second part); an error hands the
+// incident off.
+type ModelFactory func(role Role, d remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error)
+
+// ReserveFunc takes one unit of the daily analysis budget, as [incidents.ReserveAnalysis]. Only a nil error
+// allows the model call.
+type ReserveFunc func(ctx context.Context, now time.Time) error
+
+// Plan is a validated proposal: what the request the controller creates will carry.
+type Plan struct {
+	// Action is from the closed catalog and passed the policy's catalog check.
+	Action remediationv1alpha1.Action
+	// Checks are extra verification checks, each once.
+	Checks []remediationv1alpha1.VerificationCheck
+	// PolicyRef is the RemediationPolicy configured for the action type, never chosen by the model.
+	PolicyRef remediationv1alpha1.Name
+}
+
+// Runbook is a deterministic rule that maps an Incident's symptoms to a known plan without a model call
+// (ADR-0023 decision 4). None ships yet; the loop runs any it is given first.
+type Runbook interface {
+	Match(inc *remediationv1alpha1.Incident) (Plan, bool)
+}
+
+// Config configures an [Analyzer].
+type Config struct {
+	// Builder builds the context. Required.
+	Builder ContextBuilder
+	// Tools are the read tools offered on escalation; nil offers none.
+	Tools ToolSet
+	// Models returns the provider of a deployment. Required.
+	Models ModelFactory
+	// Reserve takes a unit of the daily budget before the first model call. Required.
+	Reserve ReserveFunc
+	// Policies names the RemediationPolicy a request of each action type refers to. An action type without
+	// one is never proposed.
+	Policies map[remediationv1alpha1.ActionType]remediationv1alpha1.Name
+	// Runbooks run before the model, in order.
+	Runbooks []Runbook
+	// Timeout is the deadline of one analysis; zero means [DefaultTimeout], at most [MaxTimeout].
+	Timeout time.Duration
+	// MaxTokensPerAnalysis bounds the tokens of one analysis; zero means [DefaultMaxTokensPerAnalysis].
+	MaxTokensPerAnalysis int64
+	// Now returns the current time; nil means time.Now.
+	Now func() time.Time
+}
+
+// Analyzer runs the bounded analysis of one Incident at a time per call. It is safe for concurrent use when
+// its dependencies are.
+type Analyzer struct {
+	cfg Config
+}
+
+// New checks the configuration.
+func New(cfg Config) (*Analyzer, error) {
+	if cfg.Builder == nil || cfg.Models == nil || cfg.Reserve == nil {
+		return nil, errors.New("analysis: a context builder, a model factory and a budget reservation are required")
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = DefaultTimeout
+	}
+	if cfg.Timeout < 0 || cfg.Timeout > MaxTimeout {
+		return nil, fmt.Errorf("analysis: timeout %s is outside 0 to %s", cfg.Timeout, MaxTimeout)
+	}
+	if cfg.MaxTokensPerAnalysis == 0 {
+		cfg.MaxTokensPerAnalysis = DefaultMaxTokensPerAnalysis
+	}
+	if cfg.MaxTokensPerAnalysis < 0 {
+		return nil, errors.New("analysis: the token bound must not be negative")
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	return &Analyzer{cfg: cfg}, nil
+}
+
+// Limits are the settings an analysis reads from RemediationSettings spec.analysis.
+type Limits struct {
+	// MaxToolSteps is the most tool calls of an escalation.
+	MaxToolSteps int
+	// MaxOutputTokens is sent with every call.
+	MaxOutputTokens int
+	// Triage and Escalation are the deployments; nil means not configured.
+	Triage, Escalation *remediationv1alpha1.ModelDeployment
+}
+
+// LimitsOf reads the limits from the settings. A field the API server's defaults never leave unset is taken
+// at its lowest safe value when it is missing: no tool steps and the smallest output bound.
+func LimitsOf(s *remediationv1alpha1.RemediationSettings) Limits {
+	l := Limits{MaxOutputTokens: 256}
+	a := s.Spec.Analysis
+	if a == nil {
+		return l
+	}
+	if a.MaxToolSteps != nil {
+		l.MaxToolSteps = int(min(max(*a.MaxToolSteps, 0), 16))
+	}
+	if a.MaxOutputTokens != nil {
+		l.MaxOutputTokens = int(min(max(*a.MaxOutputTokens, 256), 16384))
+	}
+	if a.Models != nil {
+		l.Triage, l.Escalation = a.Models.Triage, a.Models.Escalation
+	}
+	return l
+}
+
+// Outcome is how an analysis ended.
+type Outcome struct {
+	// Reason is fixed text from code.
+	Reason Reason
+	// Plan is set only with ReasonProposed or ReasonRunbookMatched.
+	Plan *Plan
+	// Escalated says the escalation model was called.
+	Escalated bool
+	// Calls is the number of model calls made, retries included.
+	Calls int
+	// ToolCalls is the number of tool calls run.
+	ToolCalls int
+	// Tokens is what the analysis was charged: reported usage, or the upper bound of a call whose usage is
+	// unknown or that failed.
+	Tokens int64
+	// Models are the model IDs that answered, as the replies named them.
+	Models []string
+	// PromptVersion is [PromptVersion].
+	PromptVersion string
+}
+
+// Analyze runs the analysis of inc with the limits of the settings: runbooks first, then (with a triage
+// model configured) the context, one unit of the daily budget, the triage call with one retry after invalid
+// output, and escalation on the deterministic signals only. It returns an error only when ctx is done (a
+// shutdown or a lost leadership): every other end is an Outcome, a hand-off unless it carries a Plan.
+func (a *Analyzer) Analyze(ctx context.Context, inc *remediationv1alpha1.Incident, limits Limits) (Outcome, error) {
+	out := Outcome{PromptVersion: PromptVersion()}
+	for _, rb := range a.cfg.Runbooks {
+		if p, ok := rb.Match(inc); ok {
+			return a.accept(inc, out, ReasonRunbookMatched, p)
+		}
+	}
+	if limits.Triage == nil {
+		out.Reason = ReasonNoModelConfigured
+		return out, nil
+	}
+	actx, cancel := context.WithTimeout(ctx, a.cfg.Timeout)
+	defer cancel()
+	r := &run{a: a, parent: ctx, ctx: actx, inc: inc, limits: limits, out: &out, spent: map[string]int64{},
+		maxCalls: 3 + max(limits.MaxToolSteps, 0)}
+
+	c, err := a.cfg.Builder.Build(actx, inc)
+	if err != nil {
+		if ctx.Err() != nil {
+			return out, fmt.Errorf("analysis: %w", ctx.Err())
+		}
+		return r.handOff(ReasonDeadlineExceeded)
+	}
+	r.pods = c.Pods
+	var shownContext string
+	shownContext, r.shown = contextMessage(c)
+	r.contextText = shownContext
+
+	// The first model call is known before the budget is touched: a unit is reserved only when a provider for
+	// it is configured and could be built, so a hand-off that makes no call spends nothing.
+	role, deployment := RoleTriage, limits.Triage
+	if c.Escalate() {
+		if limits.Escalation == nil {
+			return r.handOff(ReasonEscalationNotConfigured)
+		}
+		role, deployment = RoleEscalation, limits.Escalation
+	}
+	model, err := a.cfg.Models(role, *deployment)
+	if err != nil {
+		return r.handOff(ReasonModelError)
+	}
+
+	if err := a.cfg.Reserve(actx, a.cfg.Now()); err != nil {
+		if ctx.Err() != nil {
+			return out, fmt.Errorf("analysis: %w", ctx.Err())
+		}
+		if errors.Is(err, incidents.ErrBudgetSpent) {
+			return r.handOff(ReasonBudgetSpent)
+		}
+		return r.handOff(ReasonBudgetUnavailable)
+	}
+
+	var res *Result
+	var action *remediationv1alpha1.Action
+	var reason Reason
+	if role == RoleTriage {
+		res, action, reason, err = r.triage(model)
+		if err != nil {
+			return out, err
+		}
+		if reason != "" {
+			return r.handOff(reason)
+		}
+		if res != nil {
+			return r.finish(res, action)
+		}
+		// The triage output was invalid twice: an escalation signal. The budget unit is already spent.
+		if limits.Escalation == nil {
+			return r.handOff(ReasonEscalationNotConfigured)
+		}
+		if model, err = a.cfg.Models(RoleEscalation, *limits.Escalation); err != nil {
+			return r.handOff(ReasonModelError)
+		}
+	}
+	res, action, reason, err = r.escalate(model)
+	if err != nil {
+		return out, err
+	}
+	if reason != "" {
+		return r.handOff(reason)
+	}
+	return r.finish(res, action)
+}
+
+// run is the state of one analysis.
+type run struct {
+	a           *Analyzer
+	parent, ctx context.Context
+	inc         *remediationv1alpha1.Incident
+	limits      Limits
+	out         *Outcome
+	pods        []string
+	contextText string
+	// shown is the quotable parts of each block and tool result as the model saw them, by ID.
+	shown map[string][]string
+	// maxCalls is the most model calls of the analysis, retries included: 3 + MaxToolSteps (ADR-0023
+	// decision 6).
+	maxCalls int
+	// spent is the tokens charged per deployment.
+	spent map[string]int64
+	tools int
+}
+
+func (r *run) handOff(reason Reason) (Outcome, error) {
+	r.out.Reason = reason
+	r.out.Plan = nil
+	return *r.out, nil
+}
+
+// Codes the corrective message of the triage retry names. They are fixed: the message never echoes the
+// model's reply.
+const (
+	retryMalformed = "malformed-reply"
+	retryToolCall  = "tool-call"
+)
+
+// retryMessage is the corrective user message of the triage retry, from code: it names the rule the first
+// reply broke by its fixed code and nothing else.
+func retryMessage(code string) string {
+	return "Your previous answer was refused (rule: " + code + "). Answer again with one JSON object that " +
+		"matches the output schema, with no tool call and nothing before or after it.\n"
+}
+
+// lastTurnMessage tells the escalated model that its tool calls are spent. The tools stay offered, as on
+// every turn of the escalation (the adapter refuses a call naming a tool the request did not offer), and a
+// tool call on this turn ends the analysis with ReasonStepLimit.
+const lastTurnMessage = "No tool calls are left. Answer now with the JSON object that matches the output " +
+	"schema; a tool call on this turn ends the analysis without a result.\n"
+
+// triage makes the one structured call without tools, and asks once more after invalid output, with a fixed
+// corrective message. It returns a result and its converted action, or a hand-off reason, or neither when the
+// output was invalid twice (an escalation signal).
+func (r *run) triage(model providers.ModelProvider) (*Result, *remediationv1alpha1.Action, Reason, error) {
+	msgs := []providers.Message{
+		{Role: providers.RoleSystem, Content: systemPrompt(false, 0)},
+		{Role: providers.RoleUser, Content: r.contextText},
+	}
+	var code string
+	for attempt := range 2 {
+		if attempt > 0 {
+			msgs = append(msgs[:2:2], providers.Message{Role: providers.RoleUser, Content: retryMessage(code)})
+		}
+		c, reason, err := r.call(model, r.limits.Triage, msgs, nil)
+		if err != nil || (reason != "" && reason != ReasonInvalidOutput) {
+			return nil, nil, reason, err
+		}
+		switch {
+		case reason == ReasonInvalidOutput:
+			code = retryMalformed
+			continue
+		case len(c.ToolCalls) > 0:
+			code = retryToolCall
+			continue
+		}
+		res, action, err := DecodeResult(c.Content)
+		if err == nil {
+			return res, action, "", nil
+		}
+		if errors.Is(err, errOutOfBounds) {
+			return nil, nil, ReasonActionOutOfBounds, nil
+		}
+		code = errInvalid.code
+		if de, ok := errors.AsType[*decodeError](err); ok {
+			code = de.code
+		}
+	}
+	return nil, nil, "", nil
+}
+
+// escalate calls the escalation model with the read tools, bound to the Incident's namespace, for at most
+// MaxToolSteps tool calls and MaxToolSteps + 1 turns. Every turn offers the same tools; the last turn says
+// in a fixed message that no calls are left, and a tool call on it is ReasonStepLimit. An invalid result is
+// handed off, never retried.
+func (r *run) escalate(model providers.ModelProvider) (*Result, *remediationv1alpha1.Action, Reason, error) {
+	r.out.Escalated = true
+	steps := r.limits.MaxToolSteps
+	defs := r.offered()
+	if steps == 0 {
+		defs = nil
+	}
+	if len(defs) == 0 {
+		steps = 0
+	}
+	offered := make(map[string]bool, len(defs))
+	for _, d := range defs {
+		offered[d.Name] = true
+	}
+	msgs := []providers.Message{
+		{Role: providers.RoleSystem, Content: systemPrompt(steps > 0, steps)},
+		{Role: providers.RoleUser, Content: r.contextText},
+	}
+	used := 0
+	for range steps + 1 {
+		last := used >= steps
+		if last && steps > 0 {
+			msgs = append(msgs, providers.Message{Role: providers.RoleUser, Content: lastTurnMessage})
+		}
+		c, reason, err := r.call(model, r.limits.Escalation, msgs, defs)
+		if err != nil || reason != "" {
+			return nil, nil, reason, err
+		}
+		if len(c.ToolCalls) == 0 {
+			res, action, err := DecodeResult(c.Content)
+			if errors.Is(err, errOutOfBounds) {
+				return nil, nil, ReasonActionOutOfBounds, nil
+			}
+			if err != nil {
+				return nil, nil, ReasonInvalidOutput, nil
+			}
+			return res, action, "", nil
+		}
+		if last {
+			return nil, nil, ReasonStepLimit, nil
+		}
+		if len(c.ToolCalls) > MaxToolCallsPerReply {
+			return nil, nil, ReasonInvalidOutput, nil
+		}
+		msgs = append(msgs, providers.Message{Role: providers.RoleAssistant, ToolCalls: c.ToolCalls})
+		for _, call := range c.ToolCalls {
+			var content string
+			if used >= steps {
+				content = refusedResult(call.Name, offered, "refused: no tool calls are left; answer with the JSON result\n")
+			} else {
+				used++
+				content, err = r.callTool(call, offered)
+				if err != nil {
+					return nil, nil, "", err
+				}
+			}
+			msgs = append(msgs, providers.Message{Role: providers.RoleTool, ToolCallID: call.ID, Content: content})
+		}
+	}
+	// Unreachable: every turn before the last uses at least one step, so the turn with no step left returns.
+	return nil, nil, ReasonStepLimit, nil
+}
+
+// offered returns the tool definitions offered on escalation: every configured tool except
+// get_delivery_status, whose delivery namespaces are not decided yet (#76 comment of 2026-11-05).
+func (r *run) offered() []providers.ToolDefinition {
+	if r.a.cfg.Tools == nil {
+		return nil
+	}
+	var defs []providers.ToolDefinition
+	for _, d := range r.a.cfg.Tools.Definitions() {
+		if d.Name != tools.NameGetDeliveryStatus {
+			defs = append(defs, d)
+		}
+	}
+	return defs
+}
+
+// namespaceFree are the tools whose arguments name no namespace: the Git tools, which read the GitOps
+// repository, not the cluster.
+var namespaceFree = []string{tools.NameReadGitFile, tools.NameGetRecentChanges}
+
+// refusedResult renders a refusal. It names the tool only when the escalation offered it: a tool never
+// offered is never described to the model, not even by its name.
+func refusedResult(name string, offered map[string]bool, text string) string {
+	tool := "unknown"
+	if offered[name] {
+		tool = name
+	}
+	return tools.Result{Tool: tool, Status: tools.StatusRefused, Text: text}.Content()
+}
+
+// callTool runs one tool call bound to the Incident's namespace. A call that names another namespace, or a
+// tool not offered, is refused before the tool sees it. An answer about a pod the context builder did not
+// attribute to the subject is labelled so. The result gets the next tool ID (t1, t2...) for the evidence
+// check, which may quote only within one data value ([tools.Result.Data]) of a successful answer about the
+// subject or one of its attributed pods ([run.aboutSubject]): never the block's header, labels or boilerplate, a refusal, an answer that was not
+// found, not available or failed, an answer about another object or none, or one labelled outside the attribution.
+func (r *run) callTool(call providers.ToolCall, offered map[string]bool) (string, error) {
+	r.tools++
+	r.out.ToolCalls++
+	id := fmt.Sprintf("t%d", r.tools)
+	content, quotable, err := r.boundCall(call, offered)
+	if err != nil {
+		return "", err
+	}
+	if len(quotable) > 0 {
+		r.shown[id] = quotable
+	}
+	return "Tool result " + id + ".\n" + content, nil
+}
+
+// boundCall runs one call within the bounds of the escalation. It returns the result as the model sees it,
+// and the parts of it a quote may cite as evidence ([tools.Result.Data]; none when none may).
+func (r *run) boundCall(call providers.ToolCall, offered map[string]bool) (string, []string, error) {
+	// Defence in depth: the adapter already refuses a reply that names a tool the request did not offer.
+	if !offered[call.Name] {
+		return refusedResult(call.Name, offered, "refused: this tool is not offered\n"), nil, nil
+	}
+	// Fail closed: arguments that are too large or not one JSON object are refused here, and every tool but the
+	// Git tools, which name no namespace, must name the subject's.
+	var args map[string]json.RawMessage
+	if len(call.Arguments) > tools.MaxArgumentBytes || json.Unmarshal(call.Arguments, &args) != nil || args == nil {
+		return refusedResult(call.Name, offered, "refused: the arguments do not match the schema\n"), nil, nil
+	}
+	if !slices.Contains(namespaceFree, call.Name) {
+		var ns string
+		raw, ok := args["namespace"]
+		if !ok || json.Unmarshal(raw, &ns) != nil || ns == "" || ns != r.inc.Spec.Subject.Namespace {
+			return refusedResult(call.Name, offered,
+				"refused: the analysis reads only the namespace of the incident's subject\n"), nil, nil
+		}
+	}
+	res, err := r.a.cfg.Tools.Call(r.ctx, call)
+	if err != nil {
+		if r.parent.Err() != nil {
+			return "", nil, fmt.Errorf("analysis: %w", r.parent.Err())
+		}
+		// The analysis deadline passed during the call: the next model call stops the loop.
+		return refusedResult(call.Name, offered, "could not fetch\n"), nil, nil
+	}
+	var quotable []string
+	if r.outsideAttribution(call.Name, args) {
+		res.Labels = append(res.Labels, tools.LabelOutsideAttribution)
+	} else if res.Status == tools.StatusOK && r.aboutSubject(call.Name, args) {
+		quotable = res.Data()
+	}
+	return res.Content(), quotable, nil
+}
+
+// kindPod is the kind of a pod in the read tools' arguments, and appsV1 the API version of the other kinds.
+const (
+	kindPod = "Pod"
+	appsV1  = "apps/v1"
+)
+
+// subjectKinds are the API versions of the kinds the read tools name, for comparing a call's object with
+// the Incident's subject.
+var subjectKinds = map[string]string{kindPod: "v1", "Deployment": appsV1, "StatefulSet": appsV1, "ReplicaSet": appsV1}
+
+// aboutSubject reports whether a call asks about the Incident's subject or one of its attributed pods (decided
+// 2026-11-05): only such an answer is evidence. A call that names a pod is about that pod, whatever else it
+// names. Otherwise only get_resource and list_events can name the subject, by kind and name; list_events
+// without them, query_metrics without a pod (a Deployment's metric included), the Git tools and every other
+// tool are shown to the model but are never evidence.
+func (r *run) aboutSubject(name string, args map[string]json.RawMessage) bool {
+	str := func(k string) string {
+		var s string
+		if raw, ok := args[k]; ok && json.Unmarshal(raw, &s) == nil {
+			return s
+		}
+		return ""
+	}
+	if _, ok := args["pod"]; ok {
+		pod := str("pod")
+		return pod != "" && slices.Contains(r.pods, pod)
+	}
+	if name != tools.NameGetResource && name != tools.NameListEvents {
+		return false
+	}
+	kind, obj := str("kind"), str("name")
+	if kind == "" || obj == "" {
+		return false
+	}
+	if kind == kindPod {
+		return slices.Contains(r.pods, obj)
+	}
+	s := r.inc.Spec.Subject
+	return kind == s.Kind && obj == s.Name && subjectKinds[kind] == s.APIVersion
+}
+
+// outsideAttribution reports whether the call names a pod that is not one of the context's attributed pods.
+func (r *run) outsideAttribution(name string, args map[string]json.RawMessage) bool {
+	str := func(k string) (string, bool) {
+		raw, ok := args[k]
+		if !ok {
+			return "", false
+		}
+		var s string
+		return s, json.Unmarshal(raw, &s) == nil
+	}
+	if pod, ok := str("pod"); ok {
+		return !slices.Contains(r.pods, pod)
+	}
+	if kind, _ := str("kind"); kind == kindPod && (name == tools.NameGetResource || name == tools.NameListEvents) {
+		if pod, ok := str("name"); ok {
+			return !slices.Contains(r.pods, pod)
+		}
+	}
+	return false
+}
+
+// call makes one model call within the token bounds and the deadline. It returns a hand-off reason for a
+// failure (ReasonInvalidOutput for malformed output, which the caller may retry) and an error only when the
+// parent context is done. A retryable error that names a delay of at most maxRetryWait is waited out and the
+// call made once more, within the deadline and within the analysis's bound of 3 + MaxToolSteps calls, which
+// the retry counts toward.
+func (r *run) call(model providers.ModelProvider, d *remediationv1alpha1.ModelDeployment, msgs []providers.Message,
+	offer []providers.ToolDefinition) (providers.Completion, Reason, error) {
+	req := providers.CompletionRequest{
+		Messages: slices.Clone(msgs), Tools: offer, MaxOutputTokens: r.limits.MaxOutputTokens,
+		ResponseSchema: ResponseSchema(),
+	}
+	upper := estimateInput(req) + int64(r.limits.MaxOutputTokens)
+	key := d.Endpoint + "\x00" + d.Deployment
+	for attempt := 0; ; attempt++ {
+		if err := r.parent.Err(); err != nil {
+			return providers.Completion{}, "", fmt.Errorf("analysis: %w", err)
+		}
+		if r.ctx.Err() != nil {
+			return providers.Completion{}, ReasonDeadlineExceeded, nil
+		}
+		dayCap := int64(0)
+		if d.MaxTokensPerDay != nil {
+			dayCap = *d.MaxTokensPerDay
+		}
+		if r.out.Tokens+upper > r.a.cfg.MaxTokensPerAnalysis || r.spent[key]+upper > dayCap {
+			return providers.Completion{}, ReasonTokenLimit, nil
+		}
+		// A retry counts toward the analysis's bound of model calls. Without retries the loop never reaches
+		// it, so a call it stops is one the model's throttling took the room of.
+		if r.out.Calls >= r.maxCalls {
+			return providers.Completion{}, ReasonModelUnavailable, nil
+		}
+		r.out.Calls++
+		c, err := model.Complete(r.ctx, req)
+		// Fail closed: a call that failed, or whose usage is unknown, is charged its upper bound. Whether and
+		// how much the service billed it cannot be told (a timeout may come after the reply was generated), so
+		// the analysis and deployment bounds count the most it could have cost. A malformed reply was billed
+		// and reports its usage, which is charged as reported.
+		charge := upper
+		if (err == nil || providers.IsMalformedOutput(err)) && !c.UsageUnknown {
+			charge = c.Usage.InputTokens + c.Usage.OutputTokens
+		}
+		r.out.Tokens += charge
+		r.spent[key] += charge
+		if c.Model != "" && !slices.Contains(r.out.Models, c.Model) {
+			r.out.Models = append(r.out.Models, c.Model)
+		}
+		switch {
+		case err == nil:
+			return c, "", nil
+		case r.parent.Err() != nil:
+			return providers.Completion{}, "", fmt.Errorf("analysis: %w", r.parent.Err())
+		case r.ctx.Err() != nil:
+			return providers.Completion{}, ReasonDeadlineExceeded, nil
+		case providers.IsMalformedOutput(err):
+			return providers.Completion{}, ReasonInvalidOutput, nil
+		case providers.IsNotFound(err):
+			return providers.Completion{}, ReasonModelNotFound, nil
+		case providers.IsForbidden(err):
+			return providers.Completion{}, ReasonModelForbidden, nil
+		case providers.IsRetryable(err):
+			wait, ok := providers.RetryAfter(err)
+			if attempt > 0 || !ok || wait > maxRetryWait {
+				return providers.Completion{}, ReasonModelUnavailable, nil
+			}
+			select {
+			case <-time.After(wait):
+			case <-r.ctx.Done():
+			}
+		default:
+			return providers.Completion{}, ReasonModelError, nil
+		}
+	}
+}
+
+// estimateInput is a conservative estimate of a request's input tokens: one token per two bytes of
+// everything sent, which overestimates the tokenisers in use for English text and JSON.
+func estimateInput(req providers.CompletionRequest) int64 {
+	n := len(req.ResponseSchema)
+	for _, m := range req.Messages {
+		n += len(m.Content) + len(m.ToolCallID)
+		for _, c := range m.ToolCalls {
+			n += len(c.ID) + len(c.Name) + len(c.Arguments)
+		}
+	}
+	for _, t := range req.Tools {
+		n += len(t.Name) + len(t.Description) + len(t.Parameters)
+	}
+	return int64(n+1) / 2
+}
+
+// finish turns a valid result into the outcome: a hand-off without a proposal, or a plan once the proposal
+// has evidence found in the blocks the model saw, may target the subject and has a policy configured. action
+// is the proposal's action as [DecodeResult] converted and checked it, nil without a proposal.
+func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, error) {
+	if res.Proposal == nil || action == nil {
+		if len(res.MissingData) > 0 {
+			return r.handOff(ReasonMissingData)
+		}
+		return r.handOff(ReasonNoProposal)
+	}
+	if !r.evidenced(res.Evidence) {
+		return r.handOff(ReasonNoEvidence)
+	}
+	var checks []remediationv1alpha1.VerificationCheck
+	for _, c := range res.Proposal.VerificationChecks {
+		if !slices.Contains(checks, c) {
+			checks = append(checks, c)
+		}
+	}
+	return r.a.accept(r.inc, *r.out, ReasonProposed, Plan{Action: *action, Checks: checks})
+}
+
+// evidenced reports whether at least one quote is found verbatim in a quotable part of the block or tool
+// result it cites.
+func (r *run) evidenced(ev []Evidence) bool {
+	for _, e := range ev {
+		q := strings.TrimSpace(e.Quote)
+		if len(q) < minQuoteBytes {
+			continue
+		}
+		for _, part := range r.shown[e.Source] {
+			if strings.Contains(part, q) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// accept checks a plan against the subject and the configured policies, from a runbook or a result.
+func (a *Analyzer) accept(inc *remediationv1alpha1.Incident, out Outcome, reason Reason, p Plan) (Outcome, error) {
+	s := inc.Spec.Subject
+	if s.Namespace == "" || s.UID == "" || !policy.ActionMayTarget(p.Action.Type, s.APIVersion, s.Kind) {
+		out.Reason = ReasonTargetNotSupported
+		return out, nil
+	}
+	if reason, _ := policy.CheckAction(p.Action); reason != "" {
+		out.Reason = ReasonActionOutOfBounds
+		return out, nil
+	}
+	ref, ok := a.cfg.Policies[p.Action.Type]
+	if !ok || ref == "" {
+		out.Reason = ReasonNoPolicyForAction
+		return out, nil
+	}
+	p.PolicyRef = ref
+	out.Reason, out.Plan = reason, &p
+	return out, nil
+}

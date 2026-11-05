@@ -187,6 +187,10 @@ const (
 	LabelLogInstanceUncertain Label = "log excerpt uncertain about its instance"
 	// LabelMetricsPartial: the metrics source warned that the answer may be incomplete.
 	LabelMetricsPartial Label = "partial metrics answer"
+	// LabelOutsideAttribution: the call names a pod that is not one of the pods the context builder attributed
+	// to the Incident's subject, so its answer is not evidence about the target. The analysis loop adds it;
+	// no tool sets it itself.
+	LabelOutsideAttribution Label = "pod outside the incident's attributed pods"
 )
 
 // couldNotFetch is the text of a result whose read failed; the error text is never shown.
@@ -202,6 +206,13 @@ type Result struct {
 	Labels []Label
 	// Text is the redacted answer, within the tool's byte bound.
 	Text string
+	// Values are the values from a source in Text, redacted as rendered: the values of a line, a metric's
+	// series line, an object's JSON or a log excerpt without its header, never the labels, sentences or
+	// answers code writes around them. Only these may be quoted as evidence ([Result.Data]).
+	Values []string
+	// raw means everything after the header (all of Text when headLen is zero) is the source's answer: an
+	// object's JSON or a log excerpt. Call sets Values from it after the final cut.
+	raw bool
 	// headLen, when not zero, is the length of the header lines at the start of Text: the rest is a log
 	// excerpt, which a cut shortens from its oldest lines while the header stays.
 	headLen int
@@ -241,10 +252,33 @@ var angleEscaper = strings.NewReplacer(
 	"\uFE3F", "&lt;", "\uFE40", "&gt;", // presentation forms for vertical angle brackets
 )
 
+// EscapeAngles escapes every character a reader could take for an angle bracket, as [Result.Content] does
+// for a tool result, so that untrusted text in any delimited block of a prompt can neither close the block nor
+// open another.
+func EscapeAngles(text string) string { return angleEscaper.Replace(text) }
+
 // neutralise makes text safe inside the block: every angle bracket look-alike is escaped and any spelling of
 // the delimiter's name is changed.
 func neutralise(text string) string {
 	return delimiterPattern.ReplaceAllString(angleEscaper.Replace(text), "tool_result")
+}
+
+// Data returns the parts of the result a quote may cite as evidence: each of its [Result.Values] as
+// [Result.Content] shows it, when it is still found in the shown text after the cut. A quote must lie within
+// one part, so it can never cite the block's header, a label, a fixed sentence or an answer code wrote, such
+// as "referenced by the pod spec: true". A result that is not [StatusOK] has none.
+func (r Result) Data() []string {
+	if r.Status != StatusOK {
+		return nil
+	}
+	text := neutralise(r.Text)
+	var parts []string
+	for _, v := range r.Values {
+		if p := neutralise(v); p != "" && strings.Contains(text, p) && !slices.Contains(parts, p) {
+			parts = append(parts, p)
+		}
+	}
+	return parts
 }
 
 // Content renders the result for a tool message: a delimited block whose first line says that its text is
@@ -367,15 +401,19 @@ func (s *Set) Call(ctx context.Context, call providers.ToolCall) (Result, error)
 	// its oldest lines after the header.
 	var text string
 	var cut bool
+	head := 0
 	if r.headLen > 0 {
-		text, _, cut = incidentcontext.FitLog(s.redactor.String, r.Text, r.headLen, t.maxBytes)
+		text, head, cut = incidentcontext.FitLog(s.redactor.String, r.Text, r.headLen, t.maxBytes)
 	} else {
 		text, cut = incidentcontext.KeepHead(s.redact(r.Text), t.maxBytes)
 	}
 	if cut {
 		r.addLabel(LabelCut)
 	}
-	r.Text, r.headLen = text, 0
+	if r.raw {
+		r.Values = []string{text[head:]}
+	}
+	r.Text, r.headLen, r.raw = text, 0, false
 	return r, nil
 }
 
@@ -411,8 +449,17 @@ func (s *Set) watched(ns string) bool {
 	return ok
 }
 
-// lines builds the text of a result, one line at a time.
-type lines struct{ b strings.Builder }
+// lines builds the text of a result, one line at a time, and records the values from a source in it.
+type lines struct {
+	b      strings.Builder
+	values []string
+}
+
+// data records v, a value from a source as rendered, as quotable ([Result.Data]) and returns it.
+func (l *lines) data(v string) string {
+	l.values = append(l.values, v)
+	return v
+}
 
 func (l *lines) add(format string, a ...any) {
 	fmt.Fprintf(&l.b, format, a...)

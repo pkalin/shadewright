@@ -51,6 +51,15 @@ type metricPlan struct {
 	overWindow bool
 }
 
+// The fixed lines of a metrics block follow a template name: code text with no data from the source, which
+// [Block.Data] leaves out (only series lines are recorded as values).
+const (
+	fixedTooLarge      = ": answer too large for the pods asked"
+	fixedCouldNotFetch = ": could not fetch"
+	fixedNoSeries      = ": no series"
+	partialSuffix      = " (partial answer)"
+)
+
 // metricPlans are in order of relevance, so that a cut keeps what explains a crash first.
 var metricPlans = []metricPlan{
 	{template: "container_last_terminated_oomkilled", pods: true},
@@ -120,10 +129,10 @@ func (b *Builder) metricsBlock(ctx context.Context, t *target, w window) (Block,
 		case errors.Is(err, providers.ErrTooLarge):
 			// More series than the source answers: the evidence is capped, which is not a failure.
 			blk.addLabel(LabelPodsCapped)
-			l.add("%s: answer too large for the pods asked", plan.template)
+			l.add("%s%s", plan.template, fixedTooLarge)
 		default:
 			failed++
-			l.add("%s: could not fetch", plan.template)
+			l.add("%s%s", plan.template, fixedCouldNotFetch)
 		}
 	}
 	if asked == 0 {
@@ -135,7 +144,7 @@ func (b *Builder) metricsBlock(ctx context.Context, t *target, w window) (Block,
 	case failed > 0:
 		blk.addLabel(LabelIncomplete)
 	}
-	b.finish(&blk, l.String(), b.limits.Metrics)
+	b.finish(&blk, &l, b.limits.Metrics)
 	return blk, failed > 0, nil
 }
 
@@ -143,10 +152,10 @@ func (b *Builder) metricsBlock(ctx context.Context, t *target, w window) (Block,
 func (b *Builder) seriesLines(l *lines, plan metricPlan, res providers.MetricsResult) {
 	partial := ""
 	if res.Partial {
-		partial = " (partial answer)"
+		partial = partialSuffix
 	}
 	if len(res.Series) == 0 {
-		l.add("%s: no series%s", plan.template, partial)
+		l.add("%s%s%s", plan.template, fixedNoSeries, partial)
 		return
 	}
 	out := make([]string, 0, len(res.Series))
@@ -156,7 +165,8 @@ func (b *Builder) seriesLines(l *lines, plan metricPlan, res providers.MetricsRe
 		for _, k := range keys {
 			pairs = append(pairs, b.value(k)+"="+b.value(s.Labels[k]))
 		}
-		out = append(out, plan.template+"{"+strings.Join(pairs, ",")+"} "+valuesOf(plan, s.Samples)+partial)
+		// A series line is the source's answer; the partial mark after it is code.
+		out = append(out, l.data(plan.template+"{"+strings.Join(pairs, ",")+"} "+valuesOf(plan, s.Samples))+partial)
 	}
 	slices.Sort(out)
 	for _, line := range out {

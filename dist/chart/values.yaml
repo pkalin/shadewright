@@ -197,6 +197,17 @@ analyzer:
   # @default -- null (the binary's default, 500)
   # @section -- Analyzer
   maxIncidents: null
+  podLogs:
+    # -- Give the analyzer the pod logs source (`--pod-logs`) and its grant: `get` on `pods/log` in the watch ClusterRole, bound only in the watched namespaces. `false` passes `--pod-logs=false` and renders no `pods/log` rule. With more than 256 watched namespaces the analyzer refuses to start unless this is `false`.
+    # @section -- Analyzer
+    enabled: true
+  prometheus:
+    # -- Base URL of the Prometheus query API the analyzer reads metrics from (`--prometheus-url`), `http` or `https`, such as `http://prometheus-server.prometheus.svc`. Empty (the default) passes no flag: no metrics. Open the NetworkPolicy egress to Prometheus too (`networkPolicy.analyzer.prometheus`).
+    # @section -- Analyzer
+    url: ""
+    # -- The `cluster` label value of this cluster's series (`--prometheus-cluster`), for a Prometheus shared by several clusters. Empty passes no flag. Used only with `analyzer.prometheus.url`.
+    # @section -- Analyzer
+    cluster: ""
   identity:
     azure:
       # -- Client ID (a UUID, not a secret) of the analyzer's Azure managed identity. The analyzer has no cloud identity today (the model call is not built, ADR-0023), so leave it empty. Same effect as the executor's value, and it must differ from the executor's or the chart refuses to render.

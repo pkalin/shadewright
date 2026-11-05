@@ -68,6 +68,15 @@ spec:
         {{- with .Values.analyzer.maxIncidents }}
         - --max-incidents={{ . }}
         {{- end }}
+        {{- if not $c.podLogs.enabled }}
+        - --pod-logs=false
+        {{- end }}
+        {{- with $c.prometheus.url }}
+        - --prometheus-url={{ . }}
+        {{- with $c.prometheus.cluster }}
+        - --prometheus-cluster={{ . }}
+        {{- end }}
+        {{- end }}
         {{- with $c.extraArgs }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

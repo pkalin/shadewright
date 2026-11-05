@@ -171,6 +171,31 @@
         "image": {
           "$ref": "#/definitions/image"
         },
+        "podLogs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          }
+        },
+        "prometheus": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "url": {
+              "type": "string",
+              "maxLength": 2048,
+              "pattern": "^(https?://[^\\s\"]+)?$"
+            },
+            "cluster": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^[^\\s\"]*$"
+            }
+          }
+        },
         "identity": {
           "$ref": "#/definitions/identity"
         },

@@ -13,12 +13,14 @@ rules:
   - get
   - list
   - watch
+{{- if .Values.analyzer.podLogs.enabled }}
 - apiGroups:
   - ""
   resources:
   - pods/log
   verbs:
   - get
+{{- end }}
 - apiGroups:
   - apps
   resources:

@@ -10,7 +10,7 @@ This section is the security design. It states ten security rules (10.1 to 10.10
 
 **Limit.** An empty namespace list watches nothing. It is never read as "all namespaces" (2.2).
 
-**Pod logs.** The analyzer's one read of free text from workloads is `get` on `pods/log`, in the watch role, so only in the watched namespaces and never cluster-wide (`test/rbac` `TestPodLogsOnlyInWatchedNamespaces`). The pod logs source and the Prometheus source are given the same namespace list and refuse any other before a request, and so does the context builder for an Incident's subject: the boundary does not rest on RBAC alone, which Prometheus does not have (2.3). `--pod-logs=false` stops the reads but leaves the grant in the role.
+**Pod logs.** The analyzer's one read of free text from workloads is `get` on `pods/log`, in the watch role, so only in the watched namespaces and never cluster-wide (`test/rbac` `TestPodLogsOnlyInWatchedNamespaces`). The pod logs source and the Prometheus source are given the same namespace list and refuse any other before a request, and so does the context builder for an Incident's subject: the boundary does not rest on RBAC alone, which Prometheus does not have (2.3). `--pod-logs=false` stops the reads; the Helm chart then also renders the role without the grant (`analyzer.podLogs.enabled=false`), while `config/` always keeps it.
 
 ## 10.2. Untrusted data
 

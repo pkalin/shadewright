@@ -782,6 +782,11 @@ func (in *RemediationRequestStatus) DeepCopyInto(out *RemediationRequestStatus) 
 		in, out := &in.LastPhaseTransitionTime, &out.LastPhaseTransitionTime
 		*out = (*in).DeepCopy()
 	}
+	if in.HoldsTarget != nil {
+		in, out := &in.HoldsTarget, &out.HoldsTarget
+		*out = new(bool)
+		**out = **in
+	}
 	if in.EffectiveApprovalRequired != nil {
 		in, out := &in.EffectiveApprovalRequired, &out.EffectiveApprovalRequired
 		*out = new(bool)

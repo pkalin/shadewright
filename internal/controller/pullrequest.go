@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -106,6 +107,10 @@ const (
 	ReasonPatchRefused = "PatchRefused"
 	// ReasonPullRequestDeadline: the pull request was not opened before status.deadline.
 	ReasonPullRequestDeadline = "PullRequestDeadline"
+	// ReasonPullRequestDeadlineCleanupRefused: the pull request was not opened before status.deadline, and the
+	// Git host refused to find or close one Shadewright may have opened on the branch (its status write lost).
+	// The request keeps the lock on its target until a look-up finds none of its own open (targetlock.go).
+	ReasonPullRequestDeadlineCleanupRefused = "PullRequestDeadlineCleanupRefused"
 	// ReasonChangeRequestGone: the recorded pull request cannot be found any more.
 	ReasonChangeRequestGone = "ChangeRequestGone"
 	// ReasonPlanIncomplete: the request's status.source has no buildPath, so the change cannot be rendered.
@@ -147,35 +152,35 @@ func (r *RemediationRequestReconciler) now() time.Time {
 	return time.Now()
 }
 
-// openPlanRepository opens the repository the plan was made for, and nothing else. It returns the provider
-// and the settings entry, or the same errors as closeChangeRequest.
+// openPlanRepository opens the repository the plan was made for, and nothing else. It returns the provider,
+// or the same errors as closeChangeRequest.
 func (r *RemediationRequestReconciler) openPlanRepository(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
-	providers.GitProvider, remediationv1alpha1.GitRepository, error) {
+	providers.GitProvider, error) {
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err):
-		return nil, remediationv1alpha1.GitRepository{}, errRepositoryGone
+		return nil, errRepositoryGone
 	case err != nil:
-		return nil, remediationv1alpha1.GitRepository{}, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
+		return nil, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 	}
 	if freshness.Paused(settings) {
-		return nil, remediationv1alpha1.GitRepository{}, freshness.ErrPaused
+		return nil, freshness.ErrPaused
 	}
 	repo, ok := freshness.FindRepository(settings, rr.Status.PlanRepository)
 	if !ok {
-		return nil, remediationv1alpha1.GitRepository{}, errRepositoryGone
+		return nil, errRepositoryGone
 	}
 	if src := rr.Status.Source; src == nil || repo.TargetBranch != src.TargetBranch {
-		return nil, remediationv1alpha1.GitRepository{}, errTargetBranchChanged
+		return nil, errTargetBranchChanged
 	}
 	git, err := r.openRepository(ctx, repo)
 	if providers.IsInvalidConfig(err) {
-		return nil, remediationv1alpha1.GitRepository{}, freshness.ErrRepositoryUnusable
+		return nil, freshness.ErrRepositoryUnusable
 	}
 	if err != nil {
-		return nil, remediationv1alpha1.GitRepository{}, freshness.WrapProvider("open the repository", err)
+		return nil, freshness.WrapProvider("open the repository", err)
 	}
-	return git, repo, nil
+	return git, nil
 }
 
 // advance runs the pull request step for a fresh request in PolicyChecked, PRCreated or AwaitingApproval. It
@@ -497,8 +502,9 @@ func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr
 	return nil
 }
 
-// markClosed rewrites PullRequestOpened of a request whose recorded pull request is closed without a merge, so
-// the condition no longer says it is open: the reason, the number and a fixed text that says why.
+// markClosed rewrites PullRequestOpened of a request whose recorded pull request is closed without a merge (or,
+// found by checkHeld after the request stopped, merged), so the condition no longer says it is open: the
+// reason, the number and a fixed text that says why. The lock on the target reads these reasons (prMayBeOpen).
 // The caller writes it in the status write that ends the request. A request without a recorded pull request
 // is left alone: its PullRequestOpened never said one was open.
 func markClosed(rr *remediationv1alpha1.RemediationRequest, reason, text string) {
@@ -604,7 +610,7 @@ func (r *RemediationRequestReconciler) rejected(ctx context.Context, rr *remedia
 }
 
 func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	git, _, err := r.openPlanRepository(ctx, rr)
+	git, err := r.openPlanRepository(ctx, rr)
 	if err != nil {
 		return err
 	}
@@ -679,6 +685,7 @@ func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediation
 		Message:            message,
 		ObservedGeneration: rr.Generation,
 	})
+	settleLock(rr)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
@@ -698,14 +705,20 @@ func (r *RemediationRequestReconciler) expire(ctx context.Context, rr *remediati
 	if reason, _, ok := refusal(err); ok {
 		// The deadline has passed either way; waiting for a permission or a rule to change would only keep
 		// the request open longer. The message says that a pull request of its own may be left open.
+		// The lock on the target stays: a pull request of its own may be open (settleLock keeps it, since none
+		// is recorded), until checkHeld finds none open.
 		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
-			ReasonPullRequestDeadline, "The pull request was not opened before the deadline, and the Git host "+
-				"refused ("+reason+") to find or close a pull request Shadewright may have opened on the branch; "+
-				"if one is open, close it by hand"))
+			ReasonPullRequestDeadlineCleanupRefused, "The pull request was not opened before the deadline, and the "+
+				"Git host refused ("+reason+") to find or close a pull request Shadewright may have opened on the "+
+				"branch; if one is open, close it by hand. The target stays locked until none is found open"))
 	}
 	if err != nil && !errors.Is(err, errRepositoryGone) && !errors.Is(err, errTargetBranchChanged) &&
 		!errors.Is(err, freshness.ErrRepositoryUnusable) && !errors.Is(err, errChangeRequestNotOurs) {
 		return r.retry(ctx, rr, err)
+	}
+	if err == nil && rr.Status.HoldsTarget != nil {
+		// The cleanup closed the branch's pull request of this request, or found none of its own: none is open.
+		rr.Status.HoldsTarget = new(false)
 	}
 	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
 		ReasonPullRequestDeadline, "The pull request was not opened before the deadline"))
@@ -855,7 +868,8 @@ func (r *RemediationRequestReconciler) ignoreStopped(err error) error {
 // finalize closes the request's pull request when the request is deleted, then removes the finalizer. It
 // never touches the cluster. Settings that cannot reach the plan's repository any more do not block the
 // deletion: there is nothing this executor can close there. A request that stopped (NeedsIntervention,
-// Expired) may still have an open pull request of its own, so it is closed too; a merged one refuses the
+// Expired) may still have an open pull request of its own, so it is closed too, and so is the one of any
+// request that holds the lock on its target (status.holdsTarget), whatever its phase; a merged one refuses the
 // close with a conflict, and one without this request's marker is left alone. While writes are paused the
 // deletion waits, because closing is a write.
 func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
@@ -863,7 +877,8 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
 		return reconcile.Result{}, nil
 	}
-	if r.OpenRepository != nil && rr.Status.PlanRepository != nil && closeOnDelete(rr.Status.Phase) {
+	if r.OpenRepository != nil && rr.Status.PlanRepository != nil &&
+		(closeOnDelete(rr.Status.Phase) || ptr.Deref(rr.Status.HoldsTarget, false)) {
 		cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 		err := r.closeChangeRequest(cleanCtx, rr)
 		err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)

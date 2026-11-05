@@ -33,6 +33,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -241,7 +242,14 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if !rr.DeletionTimestamp.IsZero() {
 		return r.finalize(ctx, rr)
 	}
+	if err := r.backfillLock(ctx, rr); err != nil {
+		return ctrl.Result{}, err
+	}
 	if rr.Status.Phase != "" && rr.Status.Phase != remediationv1alpha1.PhasePending {
+		if !progresses(rr) {
+			// Stopped: nothing is written to Git any more, but a lock still held waits for its pull request.
+			return r.checkHeld(ctx, rr)
+		}
 		return r.recheck(ctx, rr)
 	}
 	// A request a limit holds back (Queued) checks only the limits until they let it through, so it does not
@@ -292,6 +300,8 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if probe {
 			rr.Status.BreakerProbe = true
 		}
+		// The lock on the target is taken in the same status write (targetlock.go).
+		rr.Status.HoldsTarget = new(true)
 	}
 
 	rr.Status.ObservedGeneration = rr.Generation
@@ -586,6 +596,8 @@ func (r *RemediationRequestReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&remediationv1alpha1.RemediationRequest{}).
+		// A change of a request wakes the requests queued behind its lock on the same target.
+		Watches(&remediationv1alpha1.RemediationRequest{}, handler.EnqueueRequestsFromMapFunc(r.lockWaiters)).
 		Named("remediationrequest").
 		Complete(countErrors{r})
 }
@@ -837,6 +849,7 @@ func (r *RemediationRequestReconciler) endFreshness(ctx context.Context, rr *rem
 		Message:            message,
 		ObservedGeneration: rr.Generation,
 	})
+	settleLock(rr)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}

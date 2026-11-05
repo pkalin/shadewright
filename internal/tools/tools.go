@@ -182,10 +182,14 @@ const couldNotFetch = "could not fetch\n"
 
 // Result is the answer of one call. Text is redacted cluster data: untrusted, never instructions.
 type Result struct {
-	Tool   string
+	// Tool is the name of the tool that answered, or "unknown" for a name no tool has.
+	Tool string
+	// Status says how the call ended.
 	Status Status
+	// Labels mark the evidence, in the order they were added.
 	Labels []Label
-	Text   string
+	// Text is the redacted answer, within the tool's byte bound.
+	Text string
 }
 
 func (r *Result) addLabel(l Label) {

@@ -198,6 +198,7 @@ func pod() *corev1.Pod {
 		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{
 			Name: container, Image: "registry.example/web:1",
+			Args: []string{"--db-password=" + leakPassword, "--token", leakJWT, "--dsn=" + leakDSN},
 			Env: []corev1.EnvVar{
 				{Name: "PLAIN", Value: "literal-value-" + leakPassword},
 				{Name: "DB_PASSWORD", ValueFrom: secretRef("db-creds")},
@@ -226,7 +227,8 @@ func deployment() *appsv1.Deployment {
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{container: webName}, Annotations: map[string]string{"a": "b"}},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{
 					Name: container, Image: "registry.example/web:1",
-					Env: []corev1.EnvVar{{Name: "TOKEN", Value: leakJWT}},
+					Command: []string{"/app", "--api-key=" + leakPassword},
+					Env:     []corev1.EnvVar{{Name: "TOKEN", Value: leakJWT}},
 				}}},
 			},
 		},

@@ -23,7 +23,7 @@ The analyzer exposes tools to the model through its own adapters.
 - A namespace outside `--watch-namespaces` is refused before any read; an empty list refuses every namespace.
 - The reads of one call share a timeout (30 seconds by default, at most 2 minutes). A read that runs out of it gives "could not fetch", labelled timed out; a call whose caller cancelled returns an error instead.
 - Each result has a byte bound (2 to 17 KiB by tool) and is cut in whole lines of redacted text; a log excerpt keeps its newest lines.
-- Every value is redacted, and the whole result again. `get_resource` leaves out annotations, managed fields and the literal values of environment variables. A log excerpt loses its leading continuation lines before redaction, as in the context builder (3.3). The error text of a failed read is never shown.
+- Every value is redacted, and the whole result again. `get_resource` leaves out annotations, managed fields and the literal values of environment variables; container commands and arguments are kept for the diagnosis and rely on redaction alone. A log excerpt loses its leading continuation lines before redaction, as in the context builder (3.3). The error text of a failed read is never shown.
 - A refusal names the rule in a fixed sentence and never echoes an argument. The result is a delimited block whose first line says that its text is data, never instructions, and which the text cannot close.
 - A tool whose source is not configured answers "not available" and is not offered to the model.
 

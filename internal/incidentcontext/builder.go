@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -185,6 +186,9 @@ func (b *Builder) Build(ctx context.Context, inc *remediationv1alpha1.Incident) 
 		Section: SectionGit, Provenance: ProvenanceGit, Availability: NotAvailable,
 		Text: "not available: no Git source is configured\n",
 	})
+	if err := abandoned(ctx); err != nil {
+		return nil, err
+	}
 	b.fitTotal(c)
 	return c, nil
 }
@@ -211,14 +215,15 @@ func (b *Builder) redact(s string) string {
 }
 
 // value redacts one value from the cluster for a line of a section: a value longer than maxValueBytes once
-// redacted is left out whole, and line breaks become spaces, so a value never adds lines of its own.
+// redacted is left out whole, and control characters and Unicode line and paragraph separators become spaces,
+// so a value never adds lines of its own, nor anything a reader could take for a line break.
 func (b *Builder) value(s string) string {
 	r := b.redact(s)
 	if len(r) > maxValueBytes {
 		return "(" + strconv.Itoa(len(r)) + " bytes left out)"
 	}
 	return strings.Map(func(c rune) rune {
-		if c == '\n' || c == '\r' {
+		if unicode.IsControl(c) || c == '\u2028' || c == '\u2029' {
 			return ' '
 		}
 		return c

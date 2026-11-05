@@ -51,8 +51,9 @@ const (
 	// MaxPods bounds the pods of the target the context describes, most relevant first. It equals the most
 	// pods the metrics source takes in one query.
 	MaxPods = 50
-	// MaxReplicaSets bounds the ReplicaSets of a Deployment the builder reads (one get each).
-	MaxReplicaSets = 8
+	// MaxReplicaSets bounds the ReplicaSets of a Deployment the builder reads (one get each). A rollout has a
+	// few with pods; the bound leaves room for ReplicaSets that pods name falsely.
+	MaxReplicaSets = 16
 	// maxLabels and maxSelectorTerms bound what is followed, as in the collector: real workloads have a few
 	// labels and a short selector.
 	maxLabels        = 64
@@ -194,25 +195,30 @@ func (b *Builder) resolveDeployment(ctx context.Context, t *target, w window) er
 		return err
 	}
 	// The ReplicaSets the selected pods name as their controller, each to be read once. Those named like the
-	// Deployment's own come first, so that pods naming other ReplicaSets cannot crowd them out of the bound;
-	// the name only orders the reads, the UID and the owner reference decide.
+	// Deployment's own come first, then those named by the most pods, so that a few pods naming made-up
+	// ReplicaSets cannot crowd the real ones out of the bound; the name and the count only order the reads,
+	// the UID and the owner reference decide. Whoever can create pods in the namespace can still fill the
+	// bound with enough of them; the pod set is then labelled capped.
 	type rsKey struct {
 		name string
 		uid  types.UID
 	}
+	counts := map[rsKey]int{}
 	var keys []rsKey
 	for i := range pods {
 		if ref := controlledBy(&pods[i], kindReplicaSet); ref != nil && selects(dsel, &pods[i]) {
-			if k := (rsKey{ref.Name, ref.UID}); !slices.Contains(keys, k) {
+			k := rsKey{ref.Name, ref.UID}
+			if counts[k] == 0 {
 				keys = append(keys, k)
 			}
+			counts[k]++
 		}
 	}
 	prefix := d.Name + "-"
 	slices.SortFunc(keys, func(a, b rsKey) int {
 		return cmp.Or(
 			-cmp.Compare(boolInt(strings.HasPrefix(a.name, prefix)), boolInt(strings.HasPrefix(b.name, prefix))),
-			cmp.Compare(a.name, b.name), cmp.Compare(a.uid, b.uid))
+			-cmp.Compare(counts[a], counts[b]), cmp.Compare(a.name, b.name), cmp.Compare(a.uid, b.uid))
 	})
 	if len(keys) > MaxReplicaSets {
 		keys, t.capped = keys[:MaxReplicaSets], true

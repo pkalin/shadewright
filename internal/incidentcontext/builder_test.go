@@ -322,6 +322,30 @@ func TestCancelledBuildReturnsAnError(t *testing.T) {
 	}
 }
 
+// A build whose context is cancelled after the last source answered still returns an error.
+func TestCancelledAfterLastSourceReturnsAnError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := newBuilder(t, reader(t, webObjects()...), webSources(), func(c *Config) {
+		c.Metrics = metricsFunc(func(context.Context, providers.MetricsQuery) (providers.MetricsResult, error) {
+			cancel()
+			return providers.MetricsResult{}, nil
+		})
+	})
+	if c, err := b.Build(ctx, incident(deploymentRef())); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled after the last source: %v, %+v", err, c)
+	}
+}
+
+// A value from the cluster never adds a line, or anything that reads as a line break, to its section.
+func TestValueStaysOnOneLine(t *testing.T) {
+	b := newBuilder(t, reader(t), sources{}, func(c *Config) { c.Redactor = canary{} })
+	in := "a\nb\rc\vd\fe\u0085f\u2028g\u2029h\ti"
+	if got := b.value(in); got != "a b c d e f g h i" {
+		t.Fatalf("value(%q) = %q", in, got)
+	}
+}
+
 // A source call that runs out of its own timeout while the build goes on is a failed source.
 func TestSourceTimeoutIsAFailure(t *testing.T) {
 	b := newBuilder(t, reader(t, webObjects()...), webSources(), func(c *Config) {

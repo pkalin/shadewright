@@ -200,6 +200,24 @@ func TestPodSetBounds(t *testing.T) {
 	}
 }
 
+// Pods naming more made-up ReplicaSets, named like the Deployment's, than the bound do not crowd out the real
+// ReplicaSet when each is named by fewer pods.
+func TestDecoyReplicaSetsDoNotCrowdOut(t *testing.T) {
+	d := deployment()
+	rs := replicaSet("web-zzz", "uid-rs-zzz", d, longAgo)
+	rsRef := controllerRef(kindReplicaSet, rs.Name, rs.UID)
+	objs := make([]client.Object, 0, 4+MaxReplicaSets+2)
+	objs = append(objs, d, rs, pod("web-zzz-1", rs.Labels, longAgo, rsRef), pod("web-zzz-2", rs.Labels, longAgo, rsRef))
+	for i := range MaxReplicaSets + 2 {
+		name := fmt.Sprintf("web-aaa%d", i)
+		objs = append(objs, pod(name+"-1", rs.Labels, longAgo, controllerRef(kindReplicaSet, name, "uid-decoy")))
+	}
+	got := resolveWith(t, deploymentRef(), objs...)
+	if strings.Join(podNames(&got), ",") != "web-zzz-1,web-zzz-2" || !got.capped {
+		t.Fatalf("pods %v, capped %t", podNames(&got), got.capped)
+	}
+}
+
 // The metrics source gets exactly the resolved pods, never more than MaxMetricPods, and each template is
 // one the Prometheus adapter approves, with or without pods as it requires.
 func TestMetricQueriesUseResolvedPods(t *testing.T) {

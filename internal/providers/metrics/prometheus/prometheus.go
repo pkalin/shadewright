@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"time"
 
@@ -68,8 +69,8 @@ const (
 )
 
 // ErrInvalidQuery means the query was refused before any request: an unknown or missing parameter, a value
-// that is not a valid name, a namespace outside Config.Namespaces, or a time range, step or resolution
-// outside the limits. It is permanent.
+// that is not a valid name, a namespace outside Config.Namespaces, a pod set that is missing, too large or
+// not allowed for the template, or a time range, step or resolution outside the limits. It is permanent.
 var ErrInvalidQuery = errors.New("invalid metrics query")
 
 // ErrInvalidResponse means the server's answer was refused: malformed, of another shape than the template
@@ -176,7 +177,7 @@ func (s *Source) Query(ctx context.Context, q providers.MetricsQuery) (providers
 	if !ok {
 		return providers.MetricsResult{}, fmt.Errorf("unknown metrics template: %w", providers.ErrNotFound)
 	}
-	expr, err := t.renderQuery(q.Params)
+	expr, pods, err := t.renderQuery(q.Params, q.Pods)
 	if err != nil {
 		return providers.MetricsResult{}, err
 	}
@@ -198,7 +199,29 @@ func (s *Source) Query(ctx context.Context, q providers.MetricsQuery) (providers
 		return providers.MetricsResult{}, err
 	}
 	form.Set("timeout", strconv.FormatInt(server.Milliseconds(), 10)+"ms")
-	return s.do(ctx, path, form, win, t.info.Labels)
+	series, err := s.do(ctx, path, form, win, t.info.Labels)
+	if err != nil {
+		return nil, err
+	}
+	if t.info.Pods {
+		if err := onlyPods(series, pods); err != nil {
+			return nil, err
+		}
+	}
+	return series, nil
+}
+
+// onlyPods refuses a result with a series of any pod outside the set the query selected, or without a pod
+// label: the query already selects only those pods, so such a series means the server did not answer the
+// query it was sent. pods is sorted.
+func onlyPods(series []providers.Series, pods []string) error {
+	for _, s := range series {
+		if _, ok := slices.BinarySearch(pods, s.Labels["pod"]); !ok {
+			return fmt.Errorf("prometheus response has a series of a pod that was not asked for: %w",
+				ErrInvalidResponse)
+		}
+	}
+	return nil
 }
 
 // serverTimeout is the evaluation timeout sent to the server: a tenth below the time left before the

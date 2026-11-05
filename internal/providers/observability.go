@@ -27,8 +27,13 @@ type MetricsQuery struct {
 	Template string
 	// Params fill the template; adapters validate them.
 	Params map[string]string
-	Start  time.Time
-	End    time.Time
+	// Pods are the exact names of the target's pods, for a template that selects pods; adapters validate and
+	// bound them, and a template that does not select pods refuses them. The caller resolves them from the
+	// target's kind and UID through owner references (Deployment to ReplicaSet to Pod), never from a name
+	// prefix or model output, so that only the target's own pods supply its evidence.
+	Pods  []string
+	Start time.Time
+	End   time.Time
 	// Step is the resolution of a range query; zero asks for an instant query at End.
 	Step time.Duration
 }

@@ -333,8 +333,7 @@ func TestPermissionBoundary(t *testing.T) {
 		{"analyzer", "delete", group, "remediationsettings", "", "", false},
 		{"analyzer", "update", group, "remediationpolicies", "status", "", false},
 		{"analyzer", "list", "", "events", "", otherNS, false},
-		{"analyzer", "get", "", "secrets", "", otherNS, false},
-		{"analyzer", "list", "", "secrets", "", operatorNS, false},
+		// Secrets: every verb in every namespace is refused in TestAnalyzerGrantsNothingOnSecrets.
 		{"analyzer", "create", group, "remediationpolicies", "", "", false},
 		{"analyzer", "update", group, "remediationrequests", "finalizers", operatorNS, false},
 		{"analyzer", "delete", group, "incidents", "", operatorNS, false},
@@ -406,6 +405,58 @@ func TestPermissionBoundary(t *testing.T) {
 	}
 }
 
+// TestAnalyzerGrantsNothingOnSecrets checks that the analyzer holds no permission at all on Secrets (design
+// 10.3, invariant 6). Kubernetes RBAC has no metadata-only verb: get, list or watch on secrets, also through
+// the metadata API, returns the data, so the missing Secret check (internal/analyzer/refcheck) infers its
+// answer from pod status and Events instead. The API server is asked for every verb in every namespace,
+// cluster-wide included, and every Role and ClusterRole in config/rbac/analyzer is read, so a rule that names
+// secrets, or any resource or group by wildcard, fails the test even before it is bound.
+func TestAnalyzerGrantsNothingOnSecrets(t *testing.T) {
+	verbs := []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"}
+	for _, ns := range []string{operatorNS, otherNS, unwatched, ""} {
+		for _, verb := range verbs {
+			if can(t, analyzer, verb, "", "secrets", "", ns) {
+				t.Errorf("analyzer may %s secrets in %q", verb, ns)
+			}
+		}
+	}
+
+	var files []string
+	root := filepath.Join("..", "..", "config", "rbac", analyzer)
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(path, ".yaml") {
+			files = append(files, path)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	roles := 0
+	for _, path := range files {
+		for _, u := range decodeAll(t, path) {
+			rules, aggregated, ok := policyRules(t, path, u)
+			if !ok {
+				continue
+			}
+			if aggregated {
+				t.Errorf("%s: a ClusterRole aggregates other roles, whose rules this test cannot see", path)
+			}
+			roles++
+			for _, rule := range rules {
+				core := slices.Contains(rule.APIGroups, "") || slices.Contains(rule.APIGroups, "*")
+				if core && (slices.Contains(rule.Resources, "secrets") || slices.Contains(rule.Resources, "*")) {
+					t.Errorf("%s: a rule grants %v on %v in groups %q", path, rule.Verbs, rule.Resources, rule.APIGroups)
+				}
+			}
+		}
+	}
+	// role.yaml (a Role and a ClusterRole), leader_election.yaml and watch/role.yaml: a test that read no role
+	// would pass for nothing.
+	if roles < 4 {
+		t.Fatalf("read %d roles in %s, want at least 4", roles, root)
+	}
+}
+
 // TestLeasesAreSeparate checks that each identity can renew only its own leader election Lease.
 func TestLeasesAreSeparate(t *testing.T) {
 	leases := map[string]string{executor: cmdutil.ExecutorLease, analyzer: cmdutil.AnalyzerLease}
@@ -444,17 +495,13 @@ func TestLeaseNamesMatchTheBinaries(t *testing.T) {
 			if err := dec.Decode(&u); err != nil {
 				break
 			}
-			switch u["kind"] {
-			case "Lease":
+			if u["kind"] == "Lease" {
 				leaseName = "shadewright-" + u["metadata"].(map[string]any)["name"].(string)
-			case kindRole:
-				var r rbacv1.Role
-				if err := decodeInto(u, &r); err != nil {
-					t.Fatal(err)
-				}
-				for _, rule := range r.Rules {
-					resourceNames = append(resourceNames, rule.ResourceNames...)
-				}
+				continue
+			}
+			rules, _, _ := policyRules(t, id+"/leader_election.yaml", u)
+			for _, rule := range rules {
+				resourceNames = append(resourceNames, rule.ResourceNames...)
 			}
 		}
 		_ = f.Close()
@@ -815,6 +862,27 @@ func TestWatchBindingsMatchTheFlag(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("config/watch binds %v, --watch-namespaces is %v", got, want)
 	}
+}
+
+// policyRules returns the rules of a decoded Role or ClusterRole, whether it is a ClusterRole with an
+// aggregation rule, and false for any other kind. path is only for the failure message.
+func policyRules(t *testing.T, path string, u map[string]any) (rules []rbacv1.PolicyRule, aggregated, ok bool) {
+	t.Helper()
+	switch u["kind"] {
+	case kindRole:
+		var r rbacv1.Role
+		if err := decodeInto(u, &r); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		return r.Rules, false, true
+	case kindCR:
+		var r rbacv1.ClusterRole
+		if err := decodeInto(u, &r); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		return r.Rules, r.AggregationRule != nil, true
+	}
+	return nil, false, false
 }
 
 func decodeAll(t *testing.T, path string) []map[string]any {

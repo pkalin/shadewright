@@ -40,7 +40,7 @@ Events detect symptoms; they are not a durable audit log. The collector keeps wh
 - the occurrence (an event UID, a hash naming one container termination, or a hash naming one symptom state of a module symptom source);
 - the occurrence's total as the cluster reports it;
 - the new occurrence count, and when it happened (never later than the collector's clock);
-- whether it is *immediate*: it opens its Incident at its first sighting instead of waiting to be seen again (3.2). Two kinds are: a container termination read from pod status with the reason `OOMKilled`, and every symptom state of a module's symptom source (a condition state such as a KEDA ceiling, already settled and lasting, with its own start; it is emitted once while it lasts, so it would never be seen again). An event never is, whatever its reason, because whoever can create events in a watched namespace writes the reason.
+- whether it is *immediate*: it opens its Incident at its first sighting instead of waiting to be seen again (3.2; an observation whose total is 2 or more opens it at once too, immediate or not). Two kinds are: a container termination read from pod status with the reason `OOMKilled`, and every symptom state of a module's symptom source (a condition state such as a KEDA ceiling, already settled and lasting, with its own start; it is emitted once while it lasts, so it would never be seen again). An event never is, whatever its reason, because whoever can create events in a watched namespace writes the reason.
 
 The new count is at most 1,000 per observation: a series count is written by whoever can create events, so one forged jump adds at most that much (each further update as much again). No raw note leaves the collector. Observations go to a bounded channel read by the Incident controller; when it stays full, the reconcile tries again later without recording anything as handled.
 
@@ -123,15 +123,18 @@ Both are pure functions in `internal/incidents/fingerprint`:
 
 <span class="sw-status sw-built">built</span> Decided on 2026-11-05 ([#267](https://github.com/pkalin/shadewright/issues/267)). In the v0.1.0 lab run, the first minute after Flux applied a healthy baseline opened four Incidents, each with a count of 1: Warnings from a KEDA scaler and an HPA reading metrics while Prometheus was still starting. Ten minutes later everything was healthy and the Incidents were still open. So a symptom must recur before it opens an Incident:
 
-- An observation of a fingerprint that has no Incident is held in memory as a **first sighting**. It opens the Incident when the symptom is seen again **at least 2 minutes and at most 15 minutes** after the first sighting (`RecurAfter`, `RecurWithin` in `internal/incidents`), by the Incident controller's clock. Every sighting held is then counted, in order, so the Incident's count and `firstSeen` include the first one.
+- An observation that **proves recurrence on its own** opens the Incident at once, whenever it arrives: the cluster's total for its occurrence is 2 or more (an event series), or the occurrence's latest repeat came at least 2 minutes after it began. So an events.k8s.io series that the reporter refreshes only about every 30 minutes (kube-scheduler's `FailedScheduling`), or a replay of a series after a restart, opens its Incident; arrival timing alone would never see it twice in the window.
+- Any other observation of a fingerprint that has no Incident (a single, fresh sighting) is held in memory as a **first sighting**. It opens the Incident when the symptom is seen again **at least 2 minutes and at most 15 minutes** after the first sighting (`RecurAfter`, `RecurWithin` in `internal/incidents`), by the Incident controller's clock.
 - A sighting before 2 minutes is held too and keeps waiting: a burst within seconds is not a recurrence. One after 15 minutes starts over as a new first sighting, and the old one is forgotten. A symptom seen once opens nothing.
 - **Immediate** observations open their Incident at once: a container `OOMKilled` read from pod status, and the symptom states of module symptom sources, such as a KEDA ceiling (3.1). The set is explicit and kept small.
+- Whatever opens the Incident, every sighting held for the fingerprint is counted first, in order, and forgotten, so the Incident's count and `firstSeen` include the first one.
+- A fingerprint refused at the cap on Incidents is remembered (the last 1,024), and each later observation of it is refused as it arrives instead of waiting again as a first sighting.
 - Once the Incident exists, every observation is counted at once. Closing an Incident whose symptom has stopped is the lifecycle's rule (see [Incident lifecycle](#incident-lifecycle), #251), not this one.
 
 **Memory only, bounded.** First sightings live in the analyzer's memory, never in a CR, and a restart forgets them. That is safe: a real symptom recurs, and its Incident opens up to 15 minutes later than it would have.
 
 - At most 4,096 fingerprints are held (`Config.MaxFirstSightings`, the size of the collector's owner cache); when that is full, the oldest first sighting is forgotten and its symptom starts over. So a flood of distinct one-off fingerprints cannot grow the memory, only delay other symptoms' Incidents.
-- At most 4 observations are held per fingerprint, sharing one copy of the symptom, about 12 MiB for all of them at most. A further sighting before 2 minutes is not held, so it is not counted when the Incident opens (an undercount).
+- At most 4 occurrences are held per fingerprint, sharing one copy of the symptom, about 12 MiB for all of them at most. A further sighting of an occurrence already held is merged into it (the highest total), and the collector's question whether an occurrence was counted (`Handled`) is answered from what is held, so a copy sent again neither takes a place nor counts twice. A sighting of a fifth occurrence before 2 minutes is not held, so it is not counted when the Incident opens (an undercount).
 - First sightings older than 15 minutes are dropped on the writer's tick. The gauge `shadewright_incident_first_sightings_held` reports how many are held.
 - The cap on Incidents applies when a sighting opens one, not when it is held.
 
@@ -142,7 +145,7 @@ Starting values, to be tuned on real traffic:
 | Mechanism | MVP value |
 | --- | --- |
 | Debounce before analysis | 45 s (30-60 s) |
-| A symptom opens an Incident when seen again (not immediate) | 2 to 15 min after its first sighting |
+| A single, fresh sighting opens an Incident when seen again (not immediate, total under 2) | 2 to 15 min after its first sighting |
 | Aggregation window for similar observations | 5 min |
 | Longest wait to settle, from the first unsettled observation | 5 min (the aggregation window) |
 | Cooldown before any re-analysis, new symptom and lost analysis included | 15 min |
@@ -304,7 +307,7 @@ Decided on 2026-11-05 ([#251](https://github.com/pkalin/shadewright/issues/251))
 
 | From phase | Event | To phase | Written by | State |
 | --- | --- | --- | --- | --- |
-| none | a symptom seen again 2 to 15 min after its first sighting, or an immediate one (`OOMKilled`, a module source's symptom state), is written | `Open` | Incident controller (analyzer) | Built |
+| none | a symptom seen again 2 to 15 min after its first sighting, one whose observation proves recurrence (a series total of 2 or more), or an immediate one (`OOMKilled`, a module source's symptom state), is written | `Open` | Incident controller (analyzer) | Built |
 | `Open` | the trigger marks it due and the analysis starts | `Analyzing` | analyzer (analysis, #16) | Planned |
 | `Analyzing` | the analysis produced a RemediationRequest | `Proposed` | analyzer | Planned |
 | `Analyzing` | the analysis made no proposal | `Escalated` | analyzer | Planned |

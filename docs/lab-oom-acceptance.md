@@ -204,7 +204,7 @@ conditions of the request (see the end of this step and step 7). Reasons to look
 The Incident: if the collector already made one for the OOMKilled `web` container
 (`kubectl -n shadewright-system get incidents`), use its name and UID in the request. An OOMKilled container opens
 its Incident at the first kill (as does a KEDA ceiling); other Warning events (a scaler or an HPA while Prometheus starts) open one only when they
-are seen again 2 to 15 minutes later, so a settled baseline shows no other Incident
+are seen again 2 to 15 minutes later, or arrive with a series count of 2 or more, so a settled baseline shows no other Incident
 ([design 3.2](design/3-observation-and-deduplication.md#when-a-symptom-opens-an-incident)). Otherwise write the sample:
 
 ```bash

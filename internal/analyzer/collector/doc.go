@@ -24,7 +24,8 @@ limitations under the License.
 // objects in an older version, and watching both would count each event twice. Both watches use the
 // manager's cache, which the analyzer restricts to the watched namespaces. A termination OOMKilled and a
 // symptom state of a module's source are marked Immediate, so their Incident opens at the first sighting;
-// every other symptom, events included whatever their reason, waits to be seen again (package incidents).
+// every other symptom, events included whatever their reason, waits to be seen again, unless its total
+// already shows a repeat (package incidents).
 //
 // Observation-level deduplication: per event the collector remembers the UID and the last handled
 // occurrence count (the series count, or the count of an older recorder, or one), and emits only the

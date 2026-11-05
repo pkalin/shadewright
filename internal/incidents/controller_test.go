@@ -349,7 +349,7 @@ func TestConflictRetriesWithoutLosingCounts(t *testing.T) {
 	// A failed write would wait an hour: the count can only arrive in time through the retry on conflict.
 	r := start(t, ns, Config{RetryAfter: time.Hour})
 	now := time.Now().Truncate(time.Second)
-	r.obs <- observation(1, 1, 2, 2, now)
+	r.obs <- immediate(observation(1, 1, 2, 2, now))
 	eventually(t, ns, 1, countIs(2))
 
 	// Another writer changes the status just before the next write, so it conflicts once.
@@ -385,7 +385,7 @@ func TestLostAnswerIsNotCountedTwice(t *testing.T) {
 		}
 		return err
 	}
-	r.obs <- observation(1, 1, 4, 4, time.Now().Truncate(time.Second))
+	r.obs <- immediate(observation(1, 1, 4, 4, time.Now().Truncate(time.Second)))
 	eventually(t, ns, 1, countIs(4))
 	// Let the batch that went back be tried again: it is recognised as written.
 	time.Sleep(time.Second)
@@ -405,7 +405,7 @@ func TestRestartNeitherResetsNorDoubles(t *testing.T) {
 	ns := namespace(t)
 	began := time.Now().Truncate(time.Second)
 	a := start(t, ns, Config{Window: time.Hour})
-	a.obs <- observation(1, 1, 5, 5, began)
+	a.obs <- immediate(observation(1, 1, 5, 5, began))
 	eventually(t, ns, 1, countIs(5))
 	a.obs <- observation(1, 2, 3, 3, began)
 	// The second batch is pending (the window is an hour); a clean stop writes it.
@@ -531,7 +531,7 @@ func TestCountSaturates(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	// Forged series updates: each adds at most collector.MaxCount.
 	for i := range 1002 {
-		r.obs <- observation(1, 1, int64(i+1)*collector.MaxCount, collector.MaxCount, now)
+		r.obs <- immediate(observation(1, 1, int64(i+1)*collector.MaxCount, collector.MaxCount, now))
 	}
 	eventually(t, ns, 1, countIs(remediationv1alpha1.MaxIncidentCount))
 }

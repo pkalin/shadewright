@@ -51,12 +51,13 @@ const (
 	maxHeldPerFingerprint = 4
 )
 
-// recurs reports whether an observation proves on its own that its symptom recurs: the cluster counts its
-// occurrence at least twice (an event series), or the occurrence's latest repeat came at least RecurAfter
-// after it began. Such a symptom has been seen again already, whenever its observation arrives: an
-// events.k8s.io series refreshed about every 30 minutes, or a replay after a restart.
+// recurs reports whether an observation proves on its own that its symptom recurs: the occurrence's latest
+// repeat came at least RecurAfter after it began. Such a symptom has been seen again already, whenever its
+// observation arrives: an events.k8s.io series refreshed about every 30 minutes, or a replay after a restart.
+// A total of 2 or more alone is not enough: a recorder that repeats an event within seconds (a burst, or a
+// controller's poll interval) makes a series too, and a burst within seconds is not a recurrence.
 func recurs(o collector.Observation) bool {
-	return o.Total >= 2 || (!o.Began.IsZero() && o.ObservedAt.Sub(o.Began) >= RecurAfter)
+	return !o.Began.IsZero() && o.ObservedAt.Sub(o.Began) >= RecurAfter
 }
 
 // sighting is a fingerprint without an Incident, seen at first and not yet seen again in the window that

@@ -24,8 +24,8 @@ limitations under the License.
 // and the normalized, redacted symptom the collector computed.
 //
 // A symptom opens its Incident only when it recurs or is immediate (#267). An observation that proves
-// recurrence on its own (its occurrence's total is 2 or more, or its latest repeat came at least
-// [RecurAfter] after it began) opens its Incident at once, as does one the collector marks Immediate (a
+// recurrence on its own (its occurrence's latest repeat came at least [RecurAfter] after it
+// began; a total of 2 or more alone is not, as a burst within seconds makes a series too) opens its Incident at once, as does one the collector marks Immediate (a
 // container OOMKilled in pod status, or a symptom state of a module's source). Any other observation of a
 // fingerprint without an Incident is held in memory as a first sighting and opens its Incident when it is
 // seen again at least [RecurAfter] (2 minutes) and at most [RecurWithin] (15 minutes) after the first

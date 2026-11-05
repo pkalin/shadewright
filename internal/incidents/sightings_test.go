@@ -177,7 +177,8 @@ func TestRecurs(t *testing.T) {
 		want        bool
 	}{
 		{"a single fresh sighting", 1, t0, t0, false},
-		{"a series counted twice", 2, t0, t0, true},
+		{"a series counted twice within seconds", 2, t0, t0.Add(10 * time.Second), false},
+		{"a series spanning the least time", 2, t0, t0.Add(RecurAfter), true},
 		{"repeated just before the least time", 1, t0, t0.Add(RecurAfter - time.Second), false},
 		{"repeated at the least time", 1, t0, t0.Add(RecurAfter), true},
 		{"no begin time", 1, time.Time{}, t0, false},
@@ -331,16 +332,20 @@ func TestObservationThatProvesRecurrenceOpensAtOnce(t *testing.T) {
 	t0 := time.Now().Truncate(time.Second)
 	r := start(t, ns, Config{Now: (&fakeClock{now: t0}).Now})
 	series := sightingOf(1, 1, t0)
-	series.Total, series.Count = 2, 1
+	series.Total, series.Count, series.Began = 2, 1, t0.Add(-RecurAfter)
 	r.obs <- series
 	eventually(t, ns, 1, countIs(1))
 	lasting := sightingOf(2, 2, t0)
 	lasting.Began = t0.Add(-RecurAfter)
 	r.obs <- lasting
 	eventually(t, ns, 2, countIs(1))
-	// A single, fresh sighting still waits.
+	// A single, fresh sighting still waits, and so does a series repeated within seconds.
+	burst := sightingOf(4, 4, t0)
+	burst.Total, burst.Began = 2, t0.Add(-10*time.Second)
+	r.obs <- burst
+	waitHeld(t, r, "the burst held", func() bool { return r.sightings.len() == 1 })
 	r.obs <- sightingOf(3, 3, t0)
-	waitHeld(t, r, "the fresh sighting held", func() bool { return r.sightings.len() == 1 })
+	waitHeld(t, r, "the fresh sighting held", func() bool { return r.sightings.len() == 2 })
 }
 
 // An observation that opens its Incident at once counts the sightings held for its fingerprint too, and
@@ -350,7 +355,10 @@ func TestOpeningAtOnceCountsTheHeldSightings(t *testing.T) {
 		name string
 		open func(collector.Observation) collector.Observation
 	}{
-		{"a series", func(o collector.Observation) collector.Observation { o.Total, o.Count = 2, 2; return o }},
+		{"a series", func(o collector.Observation) collector.Observation {
+			o.Total, o.Count, o.Began = 2, 2, o.ObservedAt.Add(-RecurAfter)
+			return o
+		}},
 		{"an immediate one", immediate},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -446,7 +454,7 @@ func TestOpeningSightingsAreCountedUnderTheCaps(t *testing.T) {
 			r.obs <- sightingOf(1, i, t0)
 		}
 		series := sightingOf(1, 5, t0)
-		series.Total, series.Count = 2, 2
+		series.Total, series.Count, series.Began = 2, 2, t0.Add(-RecurAfter)
 		r.obs <- series
 		eventually(t, ns, 1, countIs(1))
 		// The first occurrence is counted whatever the share; the rest are over the namespace's share.

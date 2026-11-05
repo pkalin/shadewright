@@ -227,10 +227,10 @@ const (
 	ConditionWritesPaused = "WritesPaused"
 	// ConditionQueued is True, with reason TargetLocked, ConcurrencyLimitReached, CircuitOpen or
 	// CircuitHalfOpen, while a limit of the executor holds back a request the policy check has not let through
-	// yet: another request holds the lock on the same target (it is active, or a pull request it recorded is not
-	// known closed or merged), maxConcurrentRemediations requests are active, the
-	// circuit breaker is open, or it is half-open and another request runs as its probe. The
-	// request keeps no phase or Pending and is checked again every 30 seconds; the condition is removed once the
+	// yet: another request holds the lock on the same target (status.holdsTarget), maxConcurrentRemediations
+	// requests are active, the circuit breaker is open, or it is half-open and another request runs as its
+	// probe. The request keeps no phase or Pending and is checked again every 30 seconds (every 10 minutes, and
+	// when the holder changes, behind a lock held by a request that stopped); the condition is removed once the
 	// limits let the request through, or at the decision of the policy check.
 	ConditionQueued = "Queued"
 )
@@ -299,6 +299,14 @@ type RemediationRequestStatus struct {
 	// without it is not a probe.
 	// +optional
 	BreakerProbe bool `json:"breakerProbe,omitempty"`
+
+	// holdsTarget is true while the request holds the executor's lock on its target: it is set in the status
+	// write of the allowed decision and cleared only once the request's pull request is known merged or closed,
+	// or a look-up by its branch and marker found none of its own open. While it is true no other request on the
+	// same target goes through the policy check. Unset on a request written before the field existed; the
+	// executor then derives it once from the request's phase and pull request, keeping the lock when in doubt.
+	// +optional
+	HoldsTarget *bool `json:"holdsTarget,omitempty"`
 
 	// effectiveApprovalRequired is what policy decided, which may be stricter than spec.approvalRequired.
 	// +optional

@@ -617,6 +617,71 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(meta.FindStatusCondition(next.Status.Conditions, remediationv1alpha1.ConditionQueued)).To(BeNil())
 	})
 
+	// stopHeadMoved drives the request to AwaitingApproval and stops it with HeadMoved, its pull request open.
+	stopHeadMoved := func() *remediationv1alpha1.RemediationRequest {
+		GinkgoHelper()
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		_, err := git.Push(freshness.BranchName(got), "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()))
+		return got
+	}
+
+	It("looks the pull request of a stopped holder up slowly and frees the target once a person closes it", func() {
+		got := stopHeadMoved()
+		_, reconcileSecond := second()
+		expectLocked(reconcileSecond())
+		res, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(heldRecheckInterval), "an open pull request is looked at again slowly")
+		Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()))
+		Expect(git.CloseChangeRequest(ctx, got.Status.PullRequest.Number)).To(Succeed())
+		res, err = reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).To(Equal(reconcile.Result{}), "a released lock is not looked at again")
+		got = fetch()
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
+			To(Equal(ReasonChangeRequestClosed))
+		Expect(reconcileSecond().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+	})
+
+	It("frees the target once a person merges the pull request of a stopped holder", func() {
+		got := stopHeadMoved()
+		_, err := git.Merge(got.Status.PullRequest.Number)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
+			To(Equal(ReasonChangeRequestMerged))
+	})
+
+	It("keeps the lock while the pull request of a stopped holder cannot be looked up", func() {
+		stopHeadMoved()
+		openErr = errors.New("the Git host is down")
+		res, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(heldRecheckInterval))
+		Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()))
+		_, reconcileSecond := second()
+		expectLocked(reconcileSecond())
+	})
+
+	It("closes the pull request of a deleted request that holds the lock, whatever its phase", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		// A phase deletion did not close for before (Failed is set after a merge only once that is built).
+		got.Status.Phase = remediationv1alpha1.PhaseFailed
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+	})
+
 	It("frees the target once the executor sees the pull request closed", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		Expect(git.CloseChangeRequest(ctx, got.Status.PullRequest.Number)).To(Succeed())
@@ -1292,6 +1357,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					To(Equal(ReasonPullRequestDeadline))
 				Expect(openRequests()).To(HaveLen(1))
 				Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestClosed), "no open pull request is left behind")
+				Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()), "the cleanup proved none open: the lock is released")
 				Expect(faulty.count(opOpen)).To(Equal(1))
 			})
 
@@ -1306,11 +1372,43 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					got := fetch()
 					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
 					c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
-					Expect(c.Reason).To(Equal(ReasonPullRequestDeadline))
+					Expect(c.Reason).To(Equal(ReasonPullRequestDeadlineCleanupRefused))
 					Expect(c.Message).To(ContainSubstring(reason))
 					Expect(c.Message).To(ContainSubstring("close it by hand"))
 					Expect(c.Message).NotTo(ContainSubstring("https://"))
 					Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen), "the refused close left it open")
+
+					// The pull request it may have opened is not recorded, but the target stays locked (#376).
+					Expect(got.Status.PullRequest).To(BeNil())
+					Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()))
+					_, reconcileSecond := second()
+					expectLocked(reconcileSecond())
+					// A look-up that fails keeps the lock and is tried again after the slow interval.
+					faulty.failOn(opFind, providers.ErrForbidden)
+					res, err = reconcileResult()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(res.RequeueAfter).To(Equal(heldRecheckInterval))
+					Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()))
+					expectLocked(reconcileSecond())
+					// Once it can look, it finds the pull request by its branch and marker and records it.
+					faulty.failOn("", nil)
+					res, err = reconcileResult()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(res.RequeueAfter).To(Equal(heldRecheckInterval))
+					got = fetch()
+					Expect(got.Status.PullRequest).NotTo(BeNil())
+					Expect(got.Status.PullRequest.Number).To(Equal(openRequests()[0].Number))
+					Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()))
+					expectLocked(reconcileSecond())
+					Expect(git.ChangeRequests()).To(HaveLen(1), "no second pull request while the first is open")
+					// A person closes it: the next look-up releases the lock and the waiting request goes on.
+					Expect(git.CloseChangeRequest(ctx, got.Status.PullRequest.Number)).To(Succeed())
+					Expect(reconcileOnce()).To(Succeed())
+					got = fetch()
+					Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+					Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
+						To(Equal(ReasonChangeRequestClosed))
+					Expect(reconcileSecond().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
 				},
 				Entry("finding it (403)", opFind, providers.ErrForbidden, ReasonGitForbidden),
 				Entry("closing it (403)", opClose, providers.ErrForbidden, ReasonGitForbidden),

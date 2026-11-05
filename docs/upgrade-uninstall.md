@@ -14,7 +14,7 @@ The executor adds the finalizer `remediation.shadewright.io/close-pull-request` 
 
 When a request is deleted, the executor:
 
-- closes its pull request if the request is before merge (`PolicyChecked`, `PRCreated`, `AwaitingApproval`, `AutoMergeQueued`) or stopped in `NeedsIntervention` or `Expired`, then removes the finalizer. The pull request is closed only if it carries the request's marker; a pull request without it is left alone. The branch `shadewright/<request UID>` is left in place;
+- closes its pull request if the request is before merge (`PolicyChecked`, `PRCreated`, `AwaitingApproval`, `AutoMergeQueued`), stopped in `NeedsIntervention` or `Expired`, or holds the lock on its target (`status.holdsTarget`) in any phase, then removes the finalizer, which also releases that lock. The pull request is closed only if it carries the request's marker; a pull request without it is left alone. The branch `shadewright/<request UID>` is left in place;
 - leaves a merged pull request alone (the close is refused with a conflict and the deletion goes on);
 - does not wait when the repository left the settings, the target branch changed, or the pull request is already gone;
 - **waits** while `spec.paused` is true, because closing is a write (see the [emergency stop](emergency.md));
@@ -82,7 +82,7 @@ What happens to requests that are waiting for a person when you upgrade:
 - A request in `PRCreated` or `AwaitingApproval` keeps its pull request. The executor rechecks it every five minutes and on any change, as before.
 - A release that changes how the plan digest is computed or what the freshness check compares would end such a request as `Superseded` (`PlanChanged`) and close its pull request. This follows from the freshness check, not from a promise of a release, so read the notes of every upgrade.
 - A change to the settings or the policy in the same step has the same effect, whatever the release, and one that removes or re-identifies the repository (URL or installation) closes nothing: see [freshness](troubleshooting.md#freshness) and [identity rotation](identity-rotation.md#2-the-github-app-installation).
-- A request that stopped (`NeedsIntervention`, `Expired`) with a recorded pull request holds the lock on its target, from the release that closes #294 on, until its status says the pull request is closed or merged (see [limits](troubleshooting.md#limits)). Requests that stopped under v0.1.0 never say a pull request is closed, so one whose pull request a person closed keeps a later request on its target `Queued` (`TargetLocked`) after the upgrade: delete it.
+- The release that closes #294 records the lock on a target in `status.holdsTarget`. A request written before has no such field: the executor sets it once from the request's status, keeping the lock for a request that the executor still moves on or that stopped with a recorded pull request its status does not show closed or merged (see [limits](troubleshooting.md#limits)). Such a stopped request then looks its pull request up every 10 minutes and frees the target once it is closed or merged.
 
 What is not touched by an upgrade: the budget ConfigMap `shadewright-analysis-budget` (it ships without `data`, so applying the manifests does not reset the day's count) and existing Incidents. A downgrade is not tested; the CRDs of the older release may not accept objects the newer one wrote.
 

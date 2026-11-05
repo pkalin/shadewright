@@ -85,6 +85,99 @@ func TestGatedGitGatesEveryWrite(t *testing.T) {
 	}
 }
 
+// checkpointProbe is a GitProvider whose every method records what the write checkpoint of its context
+// answers right now, as an adapter does before each write request it sends.
+type checkpointProbe struct {
+	asked map[string]error
+}
+
+func (p *checkpointProbe) probe(ctx context.Context, name string) error {
+	p.asked[name] = providers.CheckWrite(ctx)
+	return nil
+}
+
+func (p *checkpointProbe) Capabilities() providers.GitCapabilities {
+	p.asked["Capabilities"] = nil
+	return providers.GitCapabilities{}
+}
+
+func (p *checkpointProbe) ReadFile(ctx context.Context, _, _ string) (providers.File, error) {
+	return providers.File{}, p.probe(ctx, "ReadFile")
+}
+
+func (p *checkpointProbe) BranchHead(ctx context.Context, _ string) (string, error) {
+	return "", p.probe(ctx, "BranchHead")
+}
+
+func (p *checkpointProbe) FindChangeRequest(ctx context.Context, _ string) (providers.ChangeRequest, error) {
+	return providers.ChangeRequest{}, p.probe(ctx, opFind)
+}
+
+func (p *checkpointProbe) CreateBranch(ctx context.Context, _, _ string) error {
+	return p.probe(ctx, "CreateBranch")
+}
+
+func (p *checkpointProbe) CommitFile(ctx context.Context, _, _ string, _ providers.FileChange) (string, error) {
+	return "", p.probe(ctx, "CommitFile")
+}
+
+func (p *checkpointProbe) OpenChangeRequest(ctx context.Context, _ providers.NewChangeRequest) (
+	providers.ChangeRequest, error) {
+	return providers.ChangeRequest{}, p.probe(ctx, "OpenChangeRequest")
+}
+
+func (p *checkpointProbe) EnableAutoMerge(ctx context.Context, _ int64, _ string) error {
+	return p.probe(ctx, "EnableAutoMerge")
+}
+
+func (p *checkpointProbe) CloseChangeRequest(ctx context.Context, _ int64) error {
+	return p.probe(ctx, "CloseChangeRequest")
+}
+
+// TestGatedGitPassesTheGateAsCheckpoint checks that every write of a gated provider gives the wrapped provider
+// the gate as its write checkpoint, so a pause set after the method's own check stops the adapter's next write
+// request (#338), and that reads carry none.
+func TestGatedGitPassesTheGateAsCheckpoint(t *testing.T) {
+	typ := reflect.TypeFor[providers.GitProvider]()
+	for m := range typ.Methods() {
+		t.Run(m.Name, func(t *testing.T) {
+			inner := &checkpointProbe{asked: map[string]error{}}
+			asked := 0
+			// The first ask (the method's own gate) allows; the pause is set right after it.
+			gated := &gatedGit{git: inner, allow: func(context.Context) error {
+				asked++
+				if asked > 1 {
+					return freshness.ErrPaused
+				}
+				return nil
+			}}
+			args := []reflect.Value{}
+			for in := range m.Type.Ins() {
+				if in == reflect.TypeFor[context.Context]() {
+					args = append(args, reflect.ValueOf(context.Background()))
+					continue
+				}
+				args = append(args, reflect.Zero(in))
+			}
+			reflect.ValueOf(gated).MethodByName(m.Name).Call(args)
+			got, called := inner.asked[m.Name]
+			if !called {
+				t.Fatalf("%s did not reach the wrapped provider", m.Name)
+			}
+			if gitReads[m.Name] {
+				if asked != 0 || got != nil {
+					t.Fatalf("the read %s carried a checkpoint (asked %d, answered %v)", m.Name, asked, got)
+				}
+				return
+			}
+			if !errors.Is(got, freshness.ErrPaused) || asked != 2 {
+				t.Fatalf("the write %s: checkpoint answered %v after %d asks, want the pause on the second",
+					m.Name, got, asked)
+			}
+		})
+	}
+}
+
 // TestGatedGitWritesWhenAllowed checks that an allowed write reaches the host.
 func TestGatedGitWritesWhenAllowed(t *testing.T) {
 	inner := fakegit.NewGit("main", map[string][]byte{"a.yaml": []byte("a: 1\n")})

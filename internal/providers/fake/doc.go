@@ -15,6 +15,6 @@ limitations under the License.
 */
 
 // Package fake holds in-memory implementations of the provider interfaces for tests. They follow the
-// contracts documented in package providers, including idempotency and the error kinds, and each has a
-// Fail hook to inject errors per operation.
+// contracts documented in package providers, including idempotency, the error kinds and the write checkpoint
+// (providers.CheckWrite before each write), and each has a Fail hook to inject errors per operation.
 package fake

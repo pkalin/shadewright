@@ -677,6 +677,47 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(openRequests()).To(HaveLen(1))
 		})
 
+		// Issue #338: the gate is also the provider's write checkpoint, asked before each write request of one
+		// method. The fake commits in two writes (the commit object, then the branch); the pause is set between.
+		It("stops between two writes of one commit, keeps the state and resumes without a duplicate", func() {
+			defer git.SetBetween(nil)
+			Expect(reconcileOnce()).To(Succeed()) // finalizer
+			git.SetBetween(func(op string) {
+				if op == opCommit {
+					git.SetBetween(nil)
+					setPaused(true)
+				}
+			})
+			for range 5 {
+				if pausedCondition() != nil {
+					break
+				}
+				res, err := reconcileResult()
+				Expect(err).NotTo(HaveOccurred(), "a pause is a wait, not an error")
+				if pausedCondition() != nil {
+					Expect(res.RequeueAfter).To(Equal(freshRecheckDelay))
+				}
+			}
+			Expect(pausedCondition()).NotTo(BeNil(), "the pause between the commit's writes was seen")
+			Expect(writes).To(Equal([]string{opCreateBranch}), "the commit did not complete")
+			base, err := git.BranchHead(ctx, mainBranch)
+			Expect(err).NotTo(HaveOccurred())
+			head, err := git.BranchHead(ctx, freshness.BranchName(fetch()))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(head).To(Equal(base), "the branch was not moved after the pause")
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "the phase is kept")
+			Expect(got.Status.Deadline).NotTo(BeNil(), "the deadline is kept")
+			Expect(recorder.Events).To(Receive(Equal("Normal " + ReasonWritesPaused + " " + messageWritesPaused)))
+
+			setPaused(false)
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			Expect(pausedCondition()).To(BeNil())
+			Expect(writes).To(Equal([]string{opCreateBranch, opCommit, opOpen}), "each write once, none repeated")
+			Expect(openRequests()).To(HaveLen(1))
+			Expect(git.ChangeRequests()).To(HaveLen(1))
+		})
+
 		DescribeTable("clears WritesPaused once writes are allowed, also when the next check then fails",
 			func(hostErr error, phase remediationv1alpha1.RemediationPhase) {
 				Expect(reconcileOnce()).To(Succeed()) // finalizer

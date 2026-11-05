@@ -107,6 +107,12 @@ func IsObjectID(s string) bool {
 // Writes are idempotent where the operation allows it, so a reconcile that restarts after a crash finds the
 // work it already did instead of repeating it.
 //
+// Every implementation must call [CheckWrite] with the method's context right before each write request it
+// sends to the host and before each retry of one, as the last step before the send, and must not send that
+// request, or any later one in the call, when it refuses. Reads are not checked. A write method may so stop
+// part way: it returns the refusal wrapped, and the caller finishes the work later through the idempotent
+// writes. This is how the kill switch reaches every request a method makes.
+//
 // Any method may also return ErrForbidden (the host refused the identity: a missing permission or a rule of
 // the repository) or ErrRejected (the host refused the request as invalid and the state does not explain the
 // refusal). Both are permanent; a rate limit or another transient failure is a RetryableError instead.

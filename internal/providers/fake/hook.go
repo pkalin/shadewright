@@ -21,11 +21,30 @@ import "sync"
 // Hook injects errors. Fail is called with the operation name (for example "OpenChangeRequest") before the
 // operation runs; a non-nil result is returned instead of running it. After, when set, is called with the
 // operation name once the operation has succeeded, and its error is returned although the change was made,
-// which simulates a crash or timeout between the remote call and the caller seeing the result.
+// which simulates a crash or timeout between the remote call and the caller seeing the result. Between, when
+// set, is called with the operation name between two writes of one operation that makes several (the commit
+// of a Git fake: its objects, then the branch), so a test can act there, for example set a pause.
 type Hook struct {
-	mu    sync.Mutex
-	Fail  func(op string) error
-	After func(op string) error
+	mu      sync.Mutex
+	Fail    func(op string) error
+	After   func(op string) error
+	Between func(op string)
+}
+
+func (h *Hook) between(op string) {
+	h.mu.Lock()
+	f := h.Between
+	h.mu.Unlock()
+	if f != nil {
+		f(op)
+	}
+}
+
+// SetBetween replaces the Between function safely while the fake is in use.
+func (h *Hook) SetBetween(f func(op string)) {
+	h.mu.Lock()
+	h.Between = f
+	h.mu.Unlock()
 }
 
 func (h *Hook) before(op string) error {

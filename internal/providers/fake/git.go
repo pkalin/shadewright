@@ -136,6 +136,9 @@ func (g *Git) CreateBranch(ctx context.Context, branch, from string) error {
 	if err := g.before("CreateBranch"); err != nil {
 		return err
 	}
+	if err := providers.CheckWrite(ctx); err != nil {
+		return err
+	}
 	g.mu.Lock()
 	if _, ok := g.commits[from]; !ok {
 		g.mu.Unlock()
@@ -153,9 +156,14 @@ func (g *Git) CreateBranch(ctx context.Context, branch, from string) error {
 	return g.after("CreateBranch")
 }
 
-// CommitFile commits one file change on a branch whose head must be expectedHead.
+// CommitFile commits one file change on a branch whose head must be expectedHead. Like a host's API it makes
+// two writes, each after the write checkpoint of ctx: the commit object, then the branch update. A refusal
+// between them leaves the commit unreferenced and the branch where it was; Between is called there.
 func (g *Git) CommitFile(ctx context.Context, branch, expectedHead string, ch providers.FileChange) (string, error) {
 	if err := g.before("CommitFile"); err != nil {
+		return "", err
+	}
+	if err := providers.CheckWrite(ctx); err != nil {
 		return "", err
 	}
 	g.mu.Lock()
@@ -176,6 +184,17 @@ func (g *Git) CommitFile(ctx context.Context, branch, expectedHead string, ch pr
 	next := maps.Clone(files)
 	next[ch.Path] = slices.Clone(ch.Content)
 	sha := g.store(cur, next)
+	g.mu.Unlock()
+
+	g.between("CommitFile")
+	if err := providers.CheckWrite(ctx); err != nil {
+		return "", err
+	}
+	g.mu.Lock()
+	if now := g.branches[branch]; now != expectedHead {
+		g.mu.Unlock()
+		return "", fmt.Errorf("branch %q is at %s, expected %s: %w", branch, now, expectedHead, providers.ErrConflict)
+	}
 	g.branches[branch] = sha
 	g.syncHeads(branch, sha)
 	g.mu.Unlock()
@@ -210,6 +229,9 @@ func (g *Git) syncHeads(branch, sha string) {
 // OpenChangeRequest opens a change request, or returns the open one for the same head branch.
 func (g *Git) OpenChangeRequest(ctx context.Context, req providers.NewChangeRequest) (providers.ChangeRequest, error) {
 	if err := g.before("OpenChangeRequest"); err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	if err := providers.CheckWrite(ctx); err != nil {
 		return providers.ChangeRequest{}, err
 	}
 	g.mu.Lock()
@@ -268,6 +290,9 @@ func (g *Git) EnableAutoMerge(ctx context.Context, n int64, expectedHeadSHA stri
 	if err := g.before("EnableAutoMerge"); err != nil {
 		return err
 	}
+	if err := providers.CheckWrite(ctx); err != nil {
+		return err
+	}
 	if err := g.enableAutoMerge(n, expectedHeadSHA); err != nil {
 		return err
 	}
@@ -304,6 +329,9 @@ func (g *Git) AutoMergeEnabled(n int64) bool {
 // CloseChangeRequest closes a change request, idempotently.
 func (g *Git) CloseChangeRequest(ctx context.Context, n int64) error {
 	if err := g.before("CloseChangeRequest"); err != nil {
+		return err
+	}
+	if err := providers.CheckWrite(ctx); err != nil {
 		return err
 	}
 	g.mu.Lock()

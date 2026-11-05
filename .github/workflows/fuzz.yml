@@ -1,0 +1,53 @@
+name: Fuzz
+
+# Runs every Go fuzz target (FUZZ_TARGETS in the Makefile) for a few minutes each, weekly and by hand. Pull
+# requests run only the seed corpora, inside `make test`. Not part of the pull request graph of ci.yml, so a
+# finding here never blocks a pull request: it fails this run and leaves the failing input as an artifact.
+# Reproduce one with `go test -run '<FuzzName>/<file>' ./<package>` after copying the file to the package's
+# testdata/fuzz/<FuzzName>/, and commit it there with the fix as a regression seed.
+on:
+  schedule:
+    - cron: "29 4 * * 2" # Tuesdays 04:29 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  fuzz:
+    permissions:
+      contents: read
+    name: fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Fuzz
+        run: make fuzz FUZZTIME=4m
+
+      # go test writes a failing input to testdata/fuzz/<FuzzName>/ in the package; collect only the new files.
+      - name: Collect failing inputs
+        if: failure()
+        run: |
+          mkdir -p fuzz-failures
+          git ls-files --others --exclude-standard -- '*/testdata/fuzz/*' | while read -r f; do
+            mkdir -p "fuzz-failures/$(dirname "$f")"
+            cp "$f" "fuzz-failures/$f"
+          done
+
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-failures
+          path: fuzz-failures/
+          if-no-files-found: ignore
+          retention-days: 30

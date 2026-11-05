@@ -398,7 +398,13 @@ func TestCollectorBoundsEventsUnderLoad(t *testing.T) {
 	h := newHarness(t, Config{MaxEvents: capacity, Buffer: events + 1})
 	h.events.reader = generatedEvents{}
 	for i := range events {
-		h.reconcileEvent(fmt.Sprintf("load-%d", i))
+		// A send can time out although the channel has room: when the 50 ms timer has fired before the select
+		// runs (a slow machine, -race), select picks either ready case. The controller then retries; so does this.
+		for try := 0; h.reconcileEvent(fmt.Sprintf("load-%d", i)).RequeueAfter != 0; try++ {
+			if try == 10 {
+				t.Fatalf("load-%d: still not sent after %d tries", i, try)
+			}
+		}
 	}
 	if n := h.c.series.len(); n > capacity {
 		t.Fatalf("collector remembers %d events, cap %d", n, capacity)

@@ -100,7 +100,24 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -coverprofile cover.out
+	@# The redact timing tests skip under -race (internal/redact/race_test.go): run that package again without it.
+	go test ./internal/redact
+
+# Fuzz targets as package:function. make fuzz refuses to run when a Fuzz function in the tree is missing here,
+# so a new target cannot be left out of the weekly Fuzz workflow.
+FUZZ_TARGETS ?= internal/redact:FuzzString internal/gitops/patch:FuzzPatch internal/incidents/fingerprint:FuzzNormalize internal/policy/pathmatch:FuzzMatch
+FUZZTIME ?= 30s
+
+.PHONY: fuzz
+fuzz: ## Run each fuzz target for FUZZTIME (default 30s); a failing input is saved under the package's testdata/fuzz.
+	@missing=$$(grep -rhoE --include='*_test.go' '^func Fuzz[A-Za-z0-9_]*' api cmd internal | sed 's/^func //' | sort -u | \
+		while read -r fn; do echo " $(FUZZ_TARGETS) " | grep -qF ":$$fn " || echo "$$fn"; done); \
+	if [ -n "$$missing" ]; then echo "Fuzz functions not listed in FUZZ_TARGETS: $$missing" >&2; exit 1; fi
+	@for t in $(FUZZ_TARGETS); do \
+		echo "fuzz ./$${t%%:*} $${t##*:} for $(FUZZTIME)"; \
+		go test -run '^$$' -fuzz "^$${t##*:}\$$" -fuzztime "$(FUZZTIME)" "./$${t%%:*}" || exit 1; \
+	done
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The kind target installs the pinned Kind (KIND_VERSION) into bin/. The setup builds/loads the Manager Docker image locally.

@@ -287,6 +287,10 @@ func TestHPACeilingIsAnIncidentAboutTheScaledObject(t *testing.T) {
 	h.api.put(scaledObject())
 	h.mustReconcile()
 	o := h.one()
+	if !o.Immediate {
+		t.Error("a symptom state of a module's source is not Immediate: it would wait for a second sighting " +
+			"that never comes (#267)")
+	}
 	want := remediationv1alpha1.ObjectRef{APIVersion: kedaGV, Kind: kindSO, Namespace: testNS, Name: soName,
 		UID: remediationv1alpha1.UID(soUID)}
 	if o.Subject != want {

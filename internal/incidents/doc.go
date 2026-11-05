@@ -23,9 +23,23 @@ limitations under the License.
 // occurrencesDroppedThrough. Nothing from the cluster goes into the Incident beyond the subject, the reason
 // and the normalized, redacted symptom the collector computed.
 //
-// Writes are batched: the first observation of an Incident is written at once, and the ones that follow
-// within the aggregation window (5 minutes) go into one status write after it. Writes run in their own
-// goroutine, so a slow API server does not hold up the observations. Each write reads the Incident fresh
+// A symptom opens its Incident only when it recurs or is immediate (#267). An observation that proves
+// recurrence on its own (its occurrence's latest repeat came at least [RecurAfter] after it
+// began; a total of 2 or more alone is not, as a burst within seconds makes a series too) opens its Incident at once, as does one the collector marks Immediate (a
+// container OOMKilled in pod status, or a symptom state of a module's source). Any other observation of a
+// fingerprint without an Incident is held in memory as a first sighting and opens its Incident when it is
+// seen again at least [RecurAfter] (2 minutes) and at most [RecurWithin] (15 minutes) after the first
+// sighting; a sighting before 2 minutes keeps waiting, one after 15 minutes starts over, and a symptom seen
+// once opens nothing. Whatever opens the Incident counts every sighting held for it first. A fingerprint
+// refused at the cap on Incidents is refused again as each observation arrives. First sightings are bounded
+// (Config.MaxFirstSightings, 4,096, oldest forgotten first, at most 4 occurrences each, copies of one
+// merged), answered by Handled, forgotten after 15 minutes and on a restart, and counted in the gauge
+// shadewright_incident_first_sightings_held.
+//
+// Writes are batched: the observations that open an Incident, or the first one of an existing Incident in
+// a process, are written at once, and the ones that follow within the aggregation window (5 minutes) go
+// into one status write after it. Writes run in their own goroutine, so a slow API server does not hold
+// up the observations. Each write reads the Incident fresh
 // and retries on conflict. A write whose answer was lost is kept apart from later observations and
 // recognised, occurrence by occurrence, from the totals the status records, so it is not added twice; a
 // batch none of whose occurrences can show that is written again (an overcount rather than a loss). A stop,

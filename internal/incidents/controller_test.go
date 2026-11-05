@@ -216,7 +216,10 @@ func startWith(t *testing.T, ns string, cfg Config, setup func(*Controller, *cou
 
 func fp(n int) string { return fmt.Sprintf("sha256:%064x", n) }
 
-// observation returns an observation of fingerprint fp(f), occurrence eventID(i).
+// observation returns an observation of fingerprint fp(f), occurrence eventID(i). Like an event in
+// production it is not Immediate: a fingerprint without an Incident opens one when total is 2 or more, or
+// when it is seen again 2 to 15 min after its first sighting (sightings_test.go); immediate returns one that
+// opens at once.
 func observation(f, i int, total, count int64, began time.Time) collector.Observation {
 	return collector.Observation{
 		Fingerprint: fp(f),
@@ -229,6 +232,13 @@ func observation(f, i int, total, count int64, began time.Time) collector.Observ
 		Symptom:    "Back-off restarting failed container worker",
 		Occurrence: eventID(i), Total: total, Count: count, Began: began, ObservedAt: began,
 	}
+}
+
+// immediate returns o marked Immediate, as the collector marks an OOMKilled termination, so that it opens
+// its Incident at its first sighting.
+func immediate(o collector.Observation) collector.Observation {
+	o.Immediate = true
+	return o
 }
 
 // get reads the Incident of fp(1).
@@ -292,7 +302,7 @@ func TestBurstMakesOneIncidentWithFewWrites(t *testing.T) {
 	r := start(t, ns, Config{Window: 2 * time.Second})
 	now := time.Now().Truncate(time.Second)
 	for i := range 100 {
-		r.obs <- observation(1, i, 1, 1, now.Add(time.Duration(i)*time.Second))
+		r.obs <- immediate(observation(1, i, 1, 1, now.Add(time.Duration(i)*time.Second)))
 	}
 	inc := eventually(t, ns, 1, countIs(100))
 	var list remediationv1alpha1.IncidentList
@@ -339,7 +349,7 @@ func TestConflictRetriesWithoutLosingCounts(t *testing.T) {
 	// A failed write would wait an hour: the count can only arrive in time through the retry on conflict.
 	r := start(t, ns, Config{RetryAfter: time.Hour})
 	now := time.Now().Truncate(time.Second)
-	r.obs <- observation(1, 1, 2, 2, now)
+	r.obs <- immediate(observation(1, 1, 2, 2, now))
 	eventually(t, ns, 1, countIs(2))
 
 	// Another writer changes the status just before the next write, so it conflicts once.
@@ -375,7 +385,7 @@ func TestLostAnswerIsNotCountedTwice(t *testing.T) {
 		}
 		return err
 	}
-	r.obs <- observation(1, 1, 4, 4, time.Now().Truncate(time.Second))
+	r.obs <- immediate(observation(1, 1, 4, 4, time.Now().Truncate(time.Second)))
 	eventually(t, ns, 1, countIs(4))
 	// Let the batch that went back be tried again: it is recognised as written.
 	time.Sleep(time.Second)
@@ -395,7 +405,7 @@ func TestRestartNeitherResetsNorDoubles(t *testing.T) {
 	ns := namespace(t)
 	began := time.Now().Truncate(time.Second)
 	a := start(t, ns, Config{Window: time.Hour})
-	a.obs <- observation(1, 1, 5, 5, began)
+	a.obs <- immediate(observation(1, 1, 5, 5, began))
 	eventually(t, ns, 1, countIs(5))
 	a.obs <- observation(1, 2, 3, 3, began)
 	// The second batch is pending (the window is an hour); a clean stop writes it.
@@ -446,12 +456,12 @@ func TestCapRefusesNewFingerprints(t *testing.T) {
 	r := start(t, ns, Config{MaxIncidents: 2, Recorder: rec, Regarding: pod})
 	before := testutil.ToFloat64(refusedObservations)
 	now := time.Now().Truncate(time.Second)
-	r.obs <- observation(1, 1, 1, 1, now)
-	r.obs <- observation(2, 2, 1, 1, now)
-	r.obs <- observation(3, 3, 1, 1, now)
-	r.obs <- observation(3, 4, 1, 1, now)
-	r.obs <- observation(1, 5, 1, 1, now)
-	r.obs <- observation(4, 6, 1, 1, now) // another new fingerprint, within the event interval
+	r.obs <- immediate(observation(1, 1, 1, 1, now))
+	r.obs <- immediate(observation(2, 2, 1, 1, now))
+	r.obs <- immediate(observation(3, 3, 1, 1, now))
+	r.obs <- immediate(observation(3, 4, 1, 1, now))
+	r.obs <- immediate(observation(1, 5, 1, 1, now))
+	r.obs <- immediate(observation(4, 6, 1, 1, now)) // another new fingerprint, within the event interval
 	eventually(t, ns, 1, countIs(2))
 	eventually(t, ns, 2, countIs(1))
 	err := env.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: Name(fp(3))}, &remediationv1alpha1.Incident{})
@@ -482,10 +492,10 @@ func TestCapEventRepeatsAfterTheInterval(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "analyzer-0"}}
 	r := start(t, ns, Config{MaxIncidents: 1, Recorder: rec, Regarding: pod, EventInterval: 200 * time.Millisecond})
 	now := time.Now().Truncate(time.Second)
-	r.obs <- observation(1, 1, 1, 1, now)
-	r.obs <- observation(2, 2, 1, 1, now)
+	r.obs <- immediate(observation(1, 1, 1, 1, now))
+	r.obs <- immediate(observation(2, 2, 1, 1, now))
 	time.Sleep(300 * time.Millisecond)
-	r.obs <- observation(3, 3, 1, 1, now)
+	r.obs <- immediate(observation(3, 3, 1, 1, now))
 	eventually(t, ns, 1, countIs(1))
 	for _, f := range []int{2, 3} {
 		select {
@@ -502,12 +512,12 @@ func TestCapEventRepeatsAfterTheInterval(t *testing.T) {
 func TestCapCountsExistingIncidentsAfterRestart(t *testing.T) {
 	ns := namespace(t)
 	a := start(t, ns, Config{MaxIncidents: 1})
-	a.obs <- observation(1, 1, 1, 1, time.Now().Truncate(time.Second))
+	a.obs <- immediate(observation(1, 1, 1, 1, time.Now().Truncate(time.Second)))
 	eventually(t, ns, 1, countIs(1))
 	a.stop()
 	b := start(t, ns, Config{MaxIncidents: 1})
-	b.obs <- observation(2, 2, 1, 1, time.Now().Truncate(time.Second))
-	b.obs <- observation(1, 3, 1, 1, time.Now().Truncate(time.Second))
+	b.obs <- immediate(observation(2, 2, 1, 1, time.Now().Truncate(time.Second)))
+	b.obs <- immediate(observation(1, 3, 1, 1, time.Now().Truncate(time.Second)))
 	eventually(t, ns, 1, countIs(2))
 	err := env.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: Name(fp(2))}, &remediationv1alpha1.Incident{})
 	if !apierrors.IsNotFound(err) {
@@ -521,7 +531,7 @@ func TestCountSaturates(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	// Forged series updates: each adds at most collector.MaxCount.
 	for i := range 1002 {
-		r.obs <- observation(1, 1, int64(i+1)*collector.MaxCount, collector.MaxCount, now)
+		r.obs <- immediate(observation(1, 1, int64(i+1)*collector.MaxCount, collector.MaxCount, now))
 	}
 	eventually(t, ns, 1, countIs(remediationv1alpha1.MaxIncidentCount))
 }
@@ -530,7 +540,7 @@ func TestCountSaturates(t *testing.T) {
 func TestIncidentHoldsOnlyTheSymptom(t *testing.T) {
 	ns := namespace(t)
 	r := start(t, ns, Config{})
-	o := observation(1, 1, 1, 1, time.Now().Truncate(time.Second))
+	o := immediate(observation(1, 1, 1, 1, time.Now().Truncate(time.Second)))
 	r.obs <- o
 	inc := eventually(t, ns, 1, countIs(1))
 	if inc.Spec != specOf(o) {
@@ -563,7 +573,7 @@ func TestModuleSymptomMakesOneIncident(t *testing.T) {
 	ns := namespace(t)
 	r := start(t, ns, Config{})
 	began := time.Now().Add(-time.Minute).Truncate(time.Second)
-	o := observation(1, 0, 1, 1, began)
+	o := immediate(observation(1, 0, 1, 1, began))
 	o.Subject = remediationv1alpha1.ObjectRef{
 		APIVersion: "keda.sh/v1alpha1", Kind: "ScaledObject", Namespace: o.Subject.Namespace, Name: "orders",
 		UID: "8d2e4f60-1a3b-4c5d-9e7f-a0b1c2d3e4f5",
@@ -591,7 +601,7 @@ func TestRefusedIncidentIsDroppedAndFreesItsPlace(t *testing.T) {
 	ns := namespace(t)
 	r := start(t, ns, Config{MaxIncidents: 1, Window: 100 * time.Millisecond, RetryAfter: 50 * time.Millisecond})
 	now := time.Now().Truncate(time.Second)
-	bad := observation(1, 1, 1, 1, now)
+	bad := immediate(observation(1, 1, 1, 1, now))
 	bad.Symptom = strings.Repeat("x", 1025) // the schema allows 1024 characters
 	r.obs <- bad
 	time.Sleep(time.Second)
@@ -601,7 +611,7 @@ func TestRefusedIncidentIsDroppedAndFreesItsPlace(t *testing.T) {
 	if total, found, err := r.Handled(t.Context(), bad.Occurrence, now); err != nil || found {
 		t.Fatalf("Handled = %d, %v, %v for an occurrence never stored: want not found", total, found, err)
 	}
-	r.obs <- observation(2, 2, 1, 1, now)
+	r.obs <- immediate(observation(2, 2, 1, 1, now))
 	eventually(t, ns, 2, countIs(1))
 }
 
@@ -647,11 +657,11 @@ func TestLostAnswerWithMoreOccurrencesThanRecordsIsNotCountedTwice(t *testing.T)
 	r := start(t, ns, Config{Window: 300 * time.Millisecond, RetryAfter: 100 * time.Millisecond})
 	lost := loseAnswer(r)
 	now := time.Now().Truncate(time.Second)
-	r.obs <- observation(1, 0, 1, 1, now.Add(-time.Hour))
+	r.obs <- immediate(observation(1, 0, 1, 1, now.Add(-time.Hour)))
 	eventually(t, ns, 1, countIs(1))
 	n := remediationv1alpha1.MaxOccurrenceRecords + 1
 	for i := 1; i <= n; i++ {
-		r.obs <- observation(1, i, 1, 1, now.Add(time.Duration(i)*time.Second))
+		r.obs <- immediate(observation(1, i, 1, 1, now.Add(time.Duration(i)*time.Second)))
 	}
 	waitFor(t, lost)
 	inc := eventually(t, ns, 1, countIs(int64(n+1)))
@@ -711,15 +721,15 @@ func TestRefusedRetryAfterALostAnswerForgetsDroppedRecords(t *testing.T) {
 		return nil
 	}
 	now := time.Now().Truncate(time.Second)
-	r.obs <- observation(1, 0, 1, 1, now.Add(-time.Hour))
+	r.obs <- immediate(observation(1, 0, 1, 1, now.Add(-time.Hour)))
 	eventually(t, ns, 1, countIs(1))
 	n := remediationv1alpha1.MaxOccurrenceRecords + 1
 	for i := 1; i <= n; i++ {
-		r.obs <- observation(1, i, 1, 1, now.Add(time.Duration(i)*time.Second))
+		r.obs <- immediate(observation(1, i, 1, 1, now.Add(time.Duration(i)*time.Second)))
 	}
 	waitFor(t, lost)
 	// A new occurrence, so the retry has something to send besides the batch it finds stored.
-	r.obs <- observation(1, n+1, 1, 1, now.Add(time.Duration(n+1)*time.Second))
+	r.obs <- immediate(observation(1, n+1, 1, 1, now.Add(time.Duration(n+1)*time.Second)))
 	waitFor(t, refused)
 	deadline := time.Now().Add(20 * time.Second)
 	for {
@@ -759,12 +769,12 @@ func TestLostAnswerWithAnInvalidIDIsNotCountedTwice(t *testing.T) {
 	r := start(t, ns, Config{Window: 300 * time.Millisecond, RetryAfter: 100 * time.Millisecond})
 	lost := loseAnswer(r)
 	now := time.Now().Truncate(time.Second)
-	r.obs <- observation(1, 1, 1, 1, now)
+	r.obs <- immediate(observation(1, 1, 1, 1, now))
 	eventually(t, ns, 1, countIs(1))
-	bad := observation(1, 2, 2, 2, now)
+	bad := immediate(observation(1, 2, 2, 2, now))
 	bad.Occurrence = invalidID
 	r.obs <- bad
-	r.obs <- observation(1, 3, 3, 3, now)
+	r.obs <- immediate(observation(1, 3, 3, 3, now))
 	waitFor(t, lost)
 	settled(t, ns, 6, time.Second)
 	r.mu.Lock()
@@ -781,12 +791,12 @@ func TestLostAnswerWithNewObservationsDuringTheRetryWait(t *testing.T) {
 	r := start(t, ns, Config{Window: 200 * time.Millisecond, RetryAfter: 500 * time.Millisecond})
 	lost := loseAnswer(r)
 	now := time.Now().Truncate(time.Second)
-	r.obs <- observation(1, 1, 1, 1, now)
+	r.obs <- immediate(observation(1, 1, 1, 1, now))
 	eventually(t, ns, 1, countIs(1))
-	r.obs <- observation(1, 2, 4, 4, now)
+	r.obs <- immediate(observation(1, 2, 4, 4, now))
 	waitFor(t, lost)
-	r.obs <- observation(1, 2, 6, 2, now) // two more of the occurrence whose write was lost
-	r.obs <- observation(1, 3, 1, 1, now)
+	r.obs <- immediate(observation(1, 2, 6, 2, now)) // two more of the occurrence whose write was lost
+	r.obs <- immediate(observation(1, 3, 1, 1, now))
 	settled(t, ns, 8, time.Second)
 }
 
@@ -796,7 +806,7 @@ func TestRefusedStatusUpdateRollsTheMemoryBack(t *testing.T) {
 	ns := namespace(t)
 	r := start(t, ns, Config{Window: 100 * time.Millisecond, RetryAfter: 50 * time.Millisecond})
 	now := time.Now().Truncate(time.Second)
-	r.obs <- observation(1, 1, 1, 1, now)
+	r.obs <- immediate(observation(1, 1, 1, 1, now))
 	eventually(t, ns, 1, countIs(1))
 	refused := make(chan struct{})
 	var once sync.Once
@@ -808,13 +818,13 @@ func TestRefusedStatusUpdateRollsTheMemoryBack(t *testing.T) {
 		})
 		return err
 	}
-	r.obs <- observation(1, 1, 3, 2, now)
+	r.obs <- immediate(observation(1, 1, 3, 2, now))
 	waitFor(t, refused)
 	time.Sleep(200 * time.Millisecond)
 	if got, found, err := r.Handled(t.Context(), eventID(1), now); err != nil || !found || got != 1 {
 		t.Fatalf("Handled = %d, %v, %v after the refused update; want the stored 1", got, found, err)
 	}
-	again := observation(1, 1, 3, 0, now)
+	again := immediate(observation(1, 1, 3, 0, now))
 	again.MayRepeat = true
 	r.obs <- again
 	settled(t, ns, 3, 300*time.Millisecond)
@@ -846,10 +856,10 @@ func TestSlowWriteDoesNotBlockObservations(t *testing.T) {
 		once.Do(func() { <-release })
 	}
 	now := time.Now().Truncate(time.Second)
-	r.obs <- observation(1, 1, 1, 1, now)
+	r.obs <- immediate(observation(1, 1, 1, 1, now))
 	for i := 2; i < 6; i++ {
 		select {
-		case r.obs <- observation(2, i, 1, 1, now):
+		case r.obs <- immediate(observation(2, i, 1, 1, now)):
 		case <-time.After(2 * time.Second):
 			close(release)
 			t.Fatal("an observation waited for a status write")
@@ -865,7 +875,7 @@ func TestStopRetriesAFailedWrite(t *testing.T) {
 	ns := namespace(t)
 	r := start(t, ns, Config{Window: time.Hour, RetryAfter: 50 * time.Millisecond, StopTimeout: 3 * time.Second})
 	now := time.Now().Truncate(time.Second)
-	r.obs <- observation(1, 1, 1, 1, now)
+	r.obs <- immediate(observation(1, 1, 1, 1, now))
 	eventually(t, ns, 1, countIs(1))
 	var once sync.Once
 	r.writes.instead = func(context.Context) error {
@@ -875,7 +885,7 @@ func TestStopRetriesAFailedWrite(t *testing.T) {
 		})
 		return err
 	}
-	r.obs <- observation(1, 2, 2, 2, now)
+	r.obs <- immediate(observation(1, 2, 2, 2, now))
 	r.stop()
 	if inc := get(t, ns); inc.Status.Count != 3 {
 		t.Fatalf("count %d after stop, want 3", inc.Status.Count)
@@ -887,7 +897,7 @@ func TestStopIsBounded(t *testing.T) {
 	ns := namespace(t)
 	r := start(t, ns, Config{Window: time.Hour, RetryAfter: 50 * time.Millisecond, StopTimeout: 300 * time.Millisecond})
 	now := time.Now().Truncate(time.Second)
-	r.obs <- observation(1, 1, 1, 1, now)
+	r.obs <- immediate(observation(1, 1, 1, 1, now))
 	eventually(t, ns, 1, countIs(1))
 	// The write hangs until its deadline, or until the test gives up on a stop that has none.
 	giveUp := make(chan struct{})
@@ -899,7 +909,7 @@ func TestStopIsBounded(t *testing.T) {
 			return errors.New("given up")
 		}
 	}
-	r.obs <- observation(1, 2, 2, 2, now)
+	r.obs <- immediate(observation(1, 2, 2, 2, now))
 	before := testutil.ToFloat64(droppedBatches.WithLabelValues(dropStopped))
 	started := time.Now()
 	watchdog := time.AfterFunc(3*time.Second, func() { close(giveUp) })
@@ -919,7 +929,7 @@ func TestNextWriteIsPruned(t *testing.T) {
 	r := start(t, ns, Config{Window: 100 * time.Millisecond})
 	now := time.Now().Truncate(time.Second)
 	for f := 1; f <= 3; f++ {
-		r.obs <- observation(f, f, 1, 1, now)
+		r.obs <- immediate(observation(f, f, 1, 1, now))
 		eventually(t, ns, f, countIs(1))
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -1044,10 +1054,10 @@ func TestInFlightOccurrencesCountAsHeld(t *testing.T) {
 	defer close(release)
 	now := time.Now().Truncate(time.Second)
 	// The first observation is written at once, alone: the write in flight holds one occurrence.
-	r.obs <- observation(1, 1, 1, 1, now)
+	r.obs <- immediate(observation(1, 1, 1, 1, now))
 	waitFor(t, entered)
 	for i := 2; i <= perIncident+5; i++ {
-		r.obs <- observation(1, i, 1, 1, now)
+		r.obs <- immediate(observation(1, i, 1, 1, now))
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1111,7 +1121,7 @@ func TestHeldOccurrencesStayWithinTheCaps(t *testing.T) {
 	}
 	for i := 1; i <= each; i++ {
 		for f := 1; f <= 2; f++ {
-			r.obs <- observation(f, f*1000+i, 1, 1, from.Add(time.Duration(i)*time.Second))
+			r.obs <- immediate(observation(f, f*1000+i, 1, 1, from.Add(time.Duration(i)*time.Second)))
 		}
 		check()
 	}
@@ -1150,9 +1160,10 @@ func TestHeldOccurrencesStayWithinTheCaps(t *testing.T) {
 }
 
 // observationIn is observation with one count of a new occurrence from namespace source, about a subject
-// in that namespace.
+// in that namespace. It is immediate, so the tests of the caps on held occurrences count every one at once;
+// TestOpeningSightingsAreCountedUnderTheCaps counts first sightings under the caps.
 func observationIn(source string, f, i int, began time.Time) collector.Observation {
-	o := observation(f, i, 1, 1, began)
+	o := immediate(observation(f, i, 1, 1, began))
 	o.Subject.Namespace, o.Source = source, source
 	return o
 }
@@ -1160,7 +1171,7 @@ func observationIn(source string, f, i int, began time.Time) collector.Observati
 // nodeObservation is observationIn about a Node, a cluster-scoped subject with no namespace, reported by an
 // event in namespace source.
 func nodeObservation(source string, f, i int, began time.Time) collector.Observation {
-	o := observation(f, i, 1, 1, began)
+	o := immediate(observation(f, i, 1, 1, began))
 	o.Subject = remediationv1alpha1.ObjectRef{APIVersion: "v1", Kind: "Node", Name: fmt.Sprintf("node-%d", f),
 		UID: "44444444-4444-4444-8444-444444444444"}
 	o.Reason, o.Symptom, o.Source = "NodeNotReady", "Node status is now: NodeNotReady", source

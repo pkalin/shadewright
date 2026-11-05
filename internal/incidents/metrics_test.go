@@ -192,7 +192,7 @@ func TestFailedWriteIsCounted(t *testing.T) {
 	ns := namespace(t)
 	r := start(t, ns, Config{Window: 100 * time.Millisecond, RetryAfter: 50 * time.Millisecond})
 	now := time.Now().Truncate(time.Second)
-	r.obs <- observation(1, 1, 1, 1, now)
+	r.obs <- immediate(observation(1, 1, 1, 1, now))
 	eventually(t, ns, 1, countIs(1))
 	before := testutil.ToFloat64(incidentWriteErrors)
 	var once sync.Once
@@ -203,7 +203,7 @@ func TestFailedWriteIsCounted(t *testing.T) {
 		})
 		return err
 	}
-	r.obs <- observation(1, 2, 2, 2, now)
+	r.obs <- immediate(observation(1, 2, 2, 2, now))
 	eventually(t, ns, 1, countIs(3))
 	if got := testutil.ToFloat64(incidentWriteErrors) - before; got != 1 {
 		t.Fatalf("%v failed writes counted, want 1", got)
@@ -276,6 +276,7 @@ func analyzerMetrics() map[string]metricguard.Labels {
 			"reason": {dropInvalid, dropFingerprintConflict, dropStopped},
 		},
 		"shadewright_incident_occurrences_overflow_total": {},
+		"shadewright_incident_first_sightings_held":       {},
 		"shadewright_incident_write_errors_total":         {},
 		"shadewright_analysis_reservations_total":         {"result": reservationResults},
 		"shadewright_analyses_used_today":                 {},

@@ -606,13 +606,13 @@ func TestHeldObservationsDebounce(t *testing.T) {
 	clock := func() time.Time { return time.Unix(0, now.Load()).UTC() }
 	// A long window holds every observation after the first.
 	r := start(t, ns, Config{Window: time.Hour, TriggerInterval: testTriggerInterval, Now: clock})
-	r.obs <- observation(1, 1, 1, 1, triggerNow)
+	r.obs <- immediate(observation(1, 1, 1, 1, triggerNow))
 	eventually(t, ns, 1, dueIs(false, ReasonDebouncing))
 	// The burst goes on: an observation every 10 s, held unwritten.
 	for i := 2; i <= 5; i++ {
 		at := triggerNow.Add(time.Duration(i-1) * 10 * time.Second)
 		now.Store(at.UnixNano())
-		r.obs <- observation(1, i, 1, 1, at)
+		r.obs <- immediate(observation(1, i, 1, 1, at))
 	}
 	// 45 s after the first observation, 5 s after the newest: not settled.
 	now.Store(triggerNow.Add(45 * time.Second).UnixNano())

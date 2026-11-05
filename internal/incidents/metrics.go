@@ -69,6 +69,13 @@ var overflowedOccurrences = prometheus.NewCounter(prometheus.CounterOpts{
 	Help: "Observations of a new occurrence not counted because the caps on occurrences held unwritten were reached.",
 })
 
+// firstSightingsHeld is the number of fingerprints held in memory as first sightings: seen once, with no
+// Incident yet, waiting to be seen again (design 3.2, #267). It is at most Config.MaxFirstSightings.
+var firstSightingsHeld = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "shadewright_incident_first_sightings_held",
+	Help: "Symptoms seen once and held in memory, waiting to be seen again before they open an Incident.",
+})
+
 // Results of analysisReservations.
 const (
 	reserveReserved       = "reserved"
@@ -170,7 +177,7 @@ var incidentPhases = &incidentCollector{
 }
 
 func init() {
-	metrics.Registry.MustRegister(refusedObservations, droppedBatches, overflowedOccurrences,
+	metrics.Registry.MustRegister(refusedObservations, droppedBatches, overflowedOccurrences, firstSightingsHeld,
 		analysisReservations, analysesUsedToday, analysesPerDayLimit, triggerPassErrors, incidentWriteErrors,
 		incidentPhases)
 	// The closed sets start at zero, so a rate is defined before the first event.
@@ -277,6 +284,12 @@ type boundedSet struct {
 func newBoundedSet(n int) *boundedSet {
 	n = max(n, 1)
 	return &boundedSet{items: make(map[string]struct{}, n), ring: make([]string, 0, n)}
+}
+
+// has reports whether s is remembered.
+func (b *boundedSet) has(s string) bool {
+	_, ok := b.items[s]
+	return ok
 }
 
 // add remembers s and reports whether it was new.

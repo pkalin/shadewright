@@ -43,7 +43,7 @@ limitations under the License.
 // second outside the time asked for or its times are not strictly increasing, or when it is malformed in any
 // other way. A successful response with a warning (a store behind the server that did not answer, for example)
 // is returned with [providers.MetricsResult] Partial set; so is one whose warnings field has another shape than
-// a list of strings. Infos, and warnings that start with "PromQL info: " (where releases before 2.50 put them),
+// a list of strings. Infos, and warnings that start with "PromQL info: " (where older Prometheus releases put them),
 // describe the query, not missing data, and do not make a result partial. The text of warnings, infos and
 // errors and unknown fields of the response are never returned or logged. Label values still need redaction
 // (internal/redact) before a model sees them; the adapter does not redact.

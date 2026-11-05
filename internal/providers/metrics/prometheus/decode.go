@@ -387,7 +387,7 @@ func (d *decoder) delim(want json.Delim) error {
 	return nil
 }
 
-// infoPrefix starts the PromQL annotations that Prometheus releases before 2.50 put into warnings, which later
+// infoPrefix starts the PromQL annotations that older Prometheus releases put into warnings, which later
 // releases send as infos (for example "PromQL info: metric might not be a counter"). They describe the query,
 // not missing data.
 const infoPrefix = "PromQL info: "

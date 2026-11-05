@@ -625,9 +625,12 @@ func TestWarningsMarkThePartialResult(t *testing.T) {
 		"infos only":       {`{"status":"success","infos":["metric might not be a counter"],` + result + `}`, false},
 		"empty warning":    {`{"status":"success","warnings":[""],` + result + `}`, true},
 		"warning and info": {`{"status":"success","infos":["i"],"warnings":["w"],` + result + `}`, true},
-		// Prometheus before 2.50 sent query annotations as warnings.
+		// Older Prometheus releases sent query annotations as warnings.
 		"old info annotation": {`{"status":"success","warnings":["PromQL info: metric might not be a counter"],` +
 			result + `}`, false},
+		// A later info annotation must not clear an earlier warning.
+		"warning then info": {`{"status":"success","warnings":["PromQL warning: y","PromQL info: x"],` + result + `}`,
+			true},
 		"info and a warning": {`{"status":"success","warnings":["PromQL info: x","PromQL warning: y"],` + result + `}`,
 			true},
 		// A proxy that does not follow the API: the answer is kept but marked.

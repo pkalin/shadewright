@@ -29,8 +29,8 @@ import (
 
 // This file is a fake Prometheus that evaluates the instant queries of the templates against stored series,
 // so that a test checks what a query computes, not only its text. It knows the subset of PromQL the templates
-// use: selectors with =, !=, =~ and !~ matchers, rate over a fixed window, sum and max by labels, "/" between
-// vectors with the same label sets, and "== <number>" as a filter. A stored series of a counter holds its
+// use: selectors with =, !=, =~ and !~ matchers, rate over a fixed window, label_replace, sum and max by
+// labels, "/" between vectors with the same label sets, and "== <number>" as a filter. A stored series of a counter holds its
 // rate over the window directly: the tests are about which series are combined, not about rate itself.
 
 // storedSeries is one series of the fake: its labels, the metric name under __name__, and its value.
@@ -185,6 +185,32 @@ func (p *promqlParser) unary() []sample {
 		v := p.expr()
 		p.expect(")")
 		return aggregate(tok, by, v)
+	case "label_replace":
+		// label_replace(v, dst, replacement, src, regex): where the anchored regex matches src, dst is set to
+		// the expanded replacement; other elements are unchanged.
+		p.expect("(")
+		v := p.expr()
+		var args [4]string
+		for i := range args {
+			p.expect(",")
+			var err error
+			if args[i], err = strconv.Unquote(p.next()); err != nil {
+				p.fail("unquoted label_replace argument")
+			}
+		}
+		p.expect(")")
+		re, err := regexp.Compile("^(?:" + args[3] + ")$")
+		if err != nil {
+			p.fail("bad label_replace regular expression")
+			return nil
+		}
+		for i := range v {
+			src := v[i].labels[args[2]]
+			if m := re.FindStringSubmatchIndex(src); m != nil {
+				v[i].labels[args[0]] = string(re.ExpandString(nil, args[1], src, m))
+			}
+		}
+		return v
 	case "rate":
 		p.expect("(")
 		v := p.selector(p.next())

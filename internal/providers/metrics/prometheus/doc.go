@@ -47,28 +47,37 @@ limitations under the License.
 //
 // The names are sorted and joined as escaped alternatives of one anchored regular expression; a series of
 // any other pod in the response, or one without a pod label, is refused with [ErrInvalidResponse]. The
-// longest query, every name and matcher at its longest, keeps the request URL within 32 KiB. Values, the
-// matchers' included, are inserted as quoted PromQL strings, and into regular expressions only after their
-// metacharacters are escaped.
+// longest query, every name and the cluster setting at their longest, keeps the request URL within 32 KiB.
+// Values, the cluster setting included, are inserted as quoted PromQL strings, and into regular expressions
+// only after their metacharacters are escaped.
 //
 // Source profile. The supported source holds the series of one cluster: a Prometheus dedicated to the cluster,
-// such as the one of the lab (ADR-0017). A shared backend that holds several clusters is supported only with
-// [Config.Matchers] set to the label that tells them apart (cluster, the only label name accepted): each
-// matcher is added, as a quoted equality matcher, to every selector of every template. Without it, the series
-// of the same namespace, pod and container in two clusters are one container to the templates, and the adapter
-// cannot tell: the result mixes both. Only the administrator sets the matchers; neither a query, the model nor
-// a custom resource can, and [New] refuses another label name, more than one matcher, or a
-// value that is not 1 to [MaxMatcherValue] letters, digits, '.', '_' or '-' (starting and ending with a letter
-// or digit), with [providers.ErrInvalidConfig] and an error that does not repeat the value.
+// such as the one of the lab (ADR-0017). Every template keeps the cluster label apart, and the adapter drops it
+// from the result; a response with two series of one container that differ only in cluster (two clusters with
+// the same namespace, pod and container, or a source that labels only some of its series) is refused with
+// [ErrInvalidResponse] rather than mixed, and so is a cluster label value that is not a plain name. A shared
+// backend that holds several clusters therefore needs [Config.Cluster], which adds cluster="<value>", quoted,
+// to every selector of every template. The label must be stored on the series (by the scrape or by remote
+// write), not an external label the queried server adds only on its way out; a mistyped value or a label the
+// series do not carry leaves every result empty. Only the administrator sets it; neither a query, the model
+// nor a custom resource can, and [New] refuses a value that is not 1 to [MaxClusterValue] letters, digits,
+// '.', '_', ':', '/' or '-' (starting and ending with a letter or digit), with [providers.ErrInvalidConfig]
+// and an error that does not repeat it.
+//
+// The namespace check holds only if the namespace, pod, container and cluster labels of the cAdvisor and
+// kube-state-metrics series are the scrape's: a job that scrapes tenant pods must not honour their labels
+// (honor_labels: false), or must drop the container_* and kube_* metric names from what it keeps. Metric values
+// stay evidence a tenant can influence.
 //
 // Within that profile, a measurement counts once even when several series hold it. Two scrape jobs that collect
 // the same cAdvisor or kube-state-metrics series (or two kube-state-metrics replicas) differ only in job or
-// instance, and every template reduces the series of one container (namespace, pod, container) before it
-// aggregates: gauges and states take the max over the container, and the CPU templates take the max over each
-// container instance (the cAdvisor id label) and then sum the instances. A restarted container therefore gives
-// the larger working set of its old and new instance while both have series, never their sum, and a CPU rate
-// over the 5-minute window that counts each instance's part of it once. The comment above the templates in
-// templates.go gives the reason per metric.
+// instance, and every template reduces the series of one container (namespace, pod, container, cluster) before
+// it aggregates: gauges and states take the max over the container, and the CPU templates take the max over
+// each container instance (the cAdvisor id label) and then sum the instances, with the series without an id
+// (the kubelet's /metrics/resource) reduced apart and the larger of the two estimates kept. A restarted
+// container therefore gives the larger working set of its old and new instance while both have series, never
+// their sum, and a CPU rate over the 5-minute window that counts each instance's part of it once. The comments
+// above the templates and on cpuRate in templates.go give the reason per metric.
 //
 // Limits, checked before the request on the times as sent (whole milliseconds): the time range of a range
 // query is at most [MaxRange] and its step at least [MinStep], so it asks for at most 361 points per series;

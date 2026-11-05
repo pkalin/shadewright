@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"regexp"
 	"slices"
@@ -77,6 +78,9 @@ type decoder struct {
 	labels []string
 	points int
 	series []providers.Series
+	// keys holds the labels of each series read, the cluster label left out, to refuse a second series of the
+	// same container from another cluster.
+	keys map[string]struct{}
 	// vector and matrix record which element shapes were seen ("value" and "values").
 	vector, matrix bool
 	// partial records a warning that the data may be incomplete; the warning text is never kept.
@@ -86,7 +90,7 @@ type decoder struct {
 // decode reads a response of the Prometheus query API. A successful response that carries warnings is
 // returned as Partial.
 func decode(r io.Reader, win window, labels []string) (providers.MetricsResult, error) {
-	d := &decoder{dec: json.NewDecoder(r), win: win, labels: labels}
+	d := &decoder{dec: json.NewDecoder(r), win: win, labels: labels, keys: map[string]struct{}{}}
 	d.dec.UseNumber()
 	err := d.top()
 	switch {
@@ -206,6 +210,14 @@ func (d *decoder) result() error {
 		if err != nil {
 			return err
 		}
+		// Every template keeps the cluster label apart and metric drops it, so two series with the same labels
+		// are one container in two clusters (or a source that labels only some of its series): refused rather
+		// than returned as two answers for one container.
+		key := seriesKey(s.Labels)
+		if _, dup := d.keys[key]; dup {
+			return invalid("has two series of one container from different clusters")
+		}
+		d.keys[key] = struct{}{}
 		d.series = append(d.series, s)
 	}
 	return d.delim(']')
@@ -259,10 +271,23 @@ func (d *decoder) metric() (map[string]string, error) {
 		return nil, err
 	}
 	labels := map[string]string{}
+	var sawCluster bool
 	for d.dec.More() {
 		key, err := d.key(nil)
 		if err != nil {
 			return nil, err
+		}
+		if key == clusterLabel {
+			// Kept apart by every template, checked, and dropped: the caller asked about one cluster.
+			v, err := d.str()
+			if err != nil {
+				return nil, err
+			}
+			if sawCluster || !clusterValue.MatchString(v) {
+				return nil, invalid("has a cluster label that is repeated or not a plain name")
+			}
+			sawCluster = true
+			continue
 		}
 		if !slices.Contains(d.labels, key) {
 			return nil, invalid("has a label the template does not produce")
@@ -280,6 +305,16 @@ func (d *decoder) metric() (map[string]string, error) {
 		labels[key] = v
 	}
 	return labels, d.delim('}')
+}
+
+// seriesKey is a canonical form of a label set. Names and values are plain names, so neither holds the
+// separators.
+func seriesKey(labels map[string]string) string {
+	var b strings.Builder
+	for _, k := range slices.Sorted(maps.Keys(labels)) {
+		b.WriteString(k + "\x00" + labels[k] + "\x01")
+	}
+	return b.String()
 }
 
 func (d *decoder) values() ([]providers.Sample, error) {

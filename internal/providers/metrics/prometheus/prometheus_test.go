@@ -148,25 +148,27 @@ func TestTemplatesRender(t *testing.T) {
 	// Sorted: the same set always gives the same text.
 	const pods = `namespace="demo",pod=~"^(web-0|web-7d9c8b6f4-x2x9q)$"`
 	const containers = pods + `,container!="",container!="POD"`
+	cpu := func(metric string) string {
+		return `max by (pod, container, cluster) (sum by (pod, container, cluster, has_id) (label_replace(` +
+			`max by (pod, container, cluster, id) (rate(` + metric + `{` + containers + `}[5m])), ` +
+			`"has_id", "1", "id", ".+")))`
+	}
 	want := map[string]string{
-		"container_memory_working_set_bytes": `max by (pod, container) (container_memory_working_set_bytes{` +
-			containers + `})`,
-		"container_memory_limit_bytes": `max by (pod, container) (kube_pod_container_resource_limits{` + pods +
-			`,resource="memory"})`,
-		"container_cpu_usage_cores": `sum by (pod, container) (max by (pod, container, id) ` +
-			`(rate(container_cpu_usage_seconds_total{` + containers + `}[5m])))`,
-		"container_cpu_throttled_ratio": `sum by (pod, container) (max by (pod, container, id) ` +
-			`(rate(container_cpu_cfs_throttled_periods_total{` + containers + `}[5m]))) / ` +
-			`sum by (pod, container) (max by (pod, container, id) (rate(container_cpu_cfs_periods_total{` +
-			containers + `}[5m])))`,
-		"container_restarts_total": `max by (pod, container) (kube_pod_container_status_restarts_total{` +
-			pods + `})`,
-		"container_last_terminated_oomkilled": `max by (pod, container) ` +
+		"container_memory_working_set_bytes": `max by (pod, container, cluster) ` +
+			`(container_memory_working_set_bytes{` + containers + `})`,
+		"container_memory_limit_bytes": `max by (pod, container, cluster) (kube_pod_container_resource_limits{` +
+			pods + `,resource="memory"})`,
+		"container_cpu_usage_cores": cpu("container_cpu_usage_seconds_total"),
+		"container_cpu_throttled_ratio": cpu("container_cpu_cfs_throttled_periods_total") + " / " +
+			cpu("container_cpu_cfs_periods_total"),
+		"container_restarts_total": `max by (pod, container, cluster) ` +
+			`(kube_pod_container_status_restarts_total{` + pods + `})`,
+		"container_last_terminated_oomkilled": `max by (pod, container, cluster) ` +
 			`(kube_pod_container_status_last_terminated_reason{` + pods + `,reason="OOMKilled"})`,
-		"container_waiting_reason": `max by (pod, container, reason) (kube_pod_container_status_waiting_reason{` +
-			pods + `} == 1)`,
-		"deployment_replicas_unavailable": `max by (deployment) (kube_deployment_status_replicas_unavailable{` +
-			`namespace="demo",deployment="web"})`,
+		"container_waiting_reason": `max by (pod, container, reason, cluster) ` +
+			`(kube_pod_container_status_waiting_reason{` + pods + `} == 1)`,
+		"deployment_replicas_unavailable": `max by (deployment, cluster) ` +
+			`(kube_deployment_status_replicas_unavailable{namespace="demo",deployment="web"})`,
 	}
 	names := make([]string, 0, len(want))
 	for _, info := range Templates() {
@@ -533,18 +535,13 @@ func TestSeriesOfOtherPodsAreRefused(t *testing.T) {
 }
 
 // The query text lists every pod, and is sent in the URL: even the largest pod set, with every name as long as
-// allowed and as many escaped dots as a name can hold, and every matcher as long as allowed, keeps the request
-// URL within maxQueryURL (32 KiB).
+// allowed and as many escaped dots as a name can hold, and the longest cluster setting, keeps the request URL
+// within maxQueryURL (32 KiB).
 func TestLargestPodSetKeepsTheURLBounded(t *testing.T) {
 	var length int
-	matchers := map[string]string{}
-	for _, name := range matcherLabels {
-		matchers[name] = strings.Repeat("a.", MaxMatcherValue/2-1) + "aa"
-		if len(matchers[name]) != MaxMatcherValue {
-			t.Fatalf("matcher value is %d characters", len(matchers[name]))
-		}
-	}
-	s, _, _ := testSourceWith(t, Config{Namespaces: []string{testNS}, Matchers: matchers},
+	// '/' and ':' are sent percent-encoded, three bytes each.
+	cluster := "a" + strings.Repeat("/", MaxClusterValue-2) + "a"
+	s, _, _ := testSourceWith(t, Config{Namespaces: []string{testNS}, Cluster: cluster},
 		func(w http.ResponseWriter, r *http.Request) {
 			length = len(r.URL.RequestURI())
 			emptyVector(w, r)

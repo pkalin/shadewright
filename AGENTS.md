@@ -135,11 +135,11 @@ Every issue names the ADRs it is tied to:
   `trivy-config` job of `chart-test.yml`, so it runs only when the `chart` group changed; HIGH and CRITICAL
   findings fail it unless `.trivyignore.yaml` lists them with a statement of why.
 - **Tests.** Every bug fix gets a test that fails without it; every new API rule gets a refusal test.
-  `make test` runs with the race detector (`-race`), then runs `internal/redact` once more without it for its
-  timing tests, which skip under `-race`. Dynamic analysis is the race detector and the Go fuzz targets: a
-  `Fuzz` function in a parser or matcher of untrusted input goes into `FUZZ_TARGETS` in the Makefile (`make fuzz`
-  fails when one is missing or an entry names no such function, `hack/fuzz-targets.sh`), and `fuzz.yml` runs each for a few minutes weekly. A failing input it finds is
-  committed to the package's `testdata/fuzz/` with the fix.
+  `make test` runs with the race detector (`-race`), then runs the `internal/redact` timing tests, which skip
+  under `-race`, once more without it. Dynamic analysis is the race detector and the Go fuzz targets: a `Fuzz`
+  function in a parser or matcher of untrusted input goes into `FUZZ_TARGETS` in the Makefile (`make fuzz` fails
+  when one is missing or an entry names no such function, `hack/fuzz-targets.sh`), and `fuzz.yml` runs each for a
+  few minutes weekly. A failing input it finds is committed to the package's `testdata/fuzz/` with the fix.
 
 ## Design choices
 

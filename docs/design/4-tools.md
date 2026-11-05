@@ -1,6 +1,6 @@
 # 4. Tools
 
-This section covers the read tools the analyzer offers to the model, and the adapters behind them. The Prometheus adapter for `query_metrics` and the pod logs adapter for `get_pod_logs` are built and given to the context builder, which is not called yet ([#371](https://github.com/pkalin/shadewright/issues/371)). The missing reference check (4.3) is built but not wired. The read tools are <span class="sw-status sw-built">built</span> in `internal/tools` ([#74](https://github.com/pkalin/shadewright/issues/74)) but not offered yet: the analysis loop that offers them to the model is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)).
+This section covers the read tools the analyzer offers to the model, and the adapters behind them. The Prometheus adapter for `query_metrics` and the pod logs adapter for `get_pod_logs` are built and given to the context builder ([#371](https://github.com/pkalin/shadewright/issues/371)) and the read tools. The read tools are <span class="sw-status sw-built">built</span> in `internal/tools` ([#74](https://github.com/pkalin/shadewright/issues/74)), on the same sources, and offered to the escalation model by the analysis loop, which the analyzer starts only with `--triage-model` ([#76](https://github.com/pkalin/shadewright/issues/76)); every call is bound to the namespace of the Incident's subject, and `get_delivery_status` is not offered.
 
 The analyzer exposes tools to the model through its own adapters.
 
@@ -10,12 +10,12 @@ The analyzer exposes tools to the model through its own adapters.
 
 | Tool | Purpose | Mode | Status |
 | --- | --- | --- | --- |
-| `get_resource`, `list_events` | Object state and symptom history: a Pod, Deployment, StatefulSet or ReplicaSet | Read, redacted | <span class="sw-status sw-built">built</span>, not wired ([#76](https://github.com/pkalin/shadewright/issues/76)) |
+| `get_resource`, `list_events` | Object state and symptom history: a Pod, Deployment, StatefulSet or ReplicaSet | Read, redacted | <span class="sw-status sw-built">built</span>, offered on escalation ([#76](https://github.com/pkalin/shadewright/issues/76)) |
 | `get_pod_logs` | Bounded time range and byte count | Read, redacted | tool <span class="sw-status sw-built">built</span>; adapter <span class="sw-status sw-built">built</span>, given to the context builder ([#371](https://github.com/pkalin/shadewright/issues/371)) |
 | `query_metrics` | Approved query templates only, for one pod or one Deployment the tool reads first | Read, redacted | tool <span class="sw-status sw-built">built</span>; adapter <span class="sw-status sw-built">built</span>, given to the context builder ([#371](https://github.com/pkalin/shadewright/issues/371)) |
 | `get_delivery_status` | Flux Kustomization / HelmRelease revision and readiness, in a delivery namespace | Read, redacted | tool <span class="sw-status sw-built">built</span>; not available until a Flux adapter and a grant on Flux objects exist |
 | `read_git_file`, `get_recent_changes` | Map an object to its source in Git | Read, redacted | arguments checked, then always "not available" and never offered: the analyzer has no Git identity ([#373](https://github.com/pkalin/shadewright/issues/373)) |
-| `check_missing_reference` | Whether a Secret or ConfigMap a pod references is missing (4.3) | Read | <span class="sw-status sw-built">built</span>, not wired ([#76](https://github.com/pkalin/shadewright/issues/76)) |
+| `check_missing_reference` | Whether a Secret or ConfigMap a pod references is missing (4.3) | Read | <span class="sw-status sw-built">built</span>, offered on escalation ([#76](https://github.com/pkalin/shadewright/issues/76)) |
 
 **Bounds of every tool** (`internal/tools`):
 
@@ -133,7 +133,7 @@ Source profile ([#333](https://github.com/pkalin/shadewright/issues/333), [confi
 
 - Each query has a deadline: 30 seconds by default, at most 2 minutes.
 - The server is sent an evaluation timeout a tenth below the time left. A query that runs out of it (a 503 with `errorType` `timeout`) is treated as final instead of retryable, since an evaluation that hit the timeout usually would again (time waiting in the server's queue counts towards it too).
-- The adapter does not retry a query. Its caller, the analysis tool loop (<span class="sw-status sw-planned">planned</span>, not built yet), owns the retry and its bound, in line with the rule that every external call has bounded retries.
+- The adapter does not retry a query. Its caller, the analysis tool loop (<span class="sw-status sw-built">built</span>, started with `--triage-model`), owns the retry and its bound, in line with the rule that every external call has bounded retries.
 - The result still goes through `internal/redact` before the model sees it, like every tool result.
 
 ## 4.2. `get_pod_logs`
@@ -189,7 +189,7 @@ The instance metadata stays with the excerpt, in the evidence, never in Incident
 
 ## 4.3. The missing reference check
 
-<span class="sw-status sw-built">built</span>, not wired. `internal/analyzer/refcheck` answers whether a Secret or ConfigMap a pod references is missing, with no permission on either (10.3). The read tool `check_missing_reference` offers it to the model ([#74](https://github.com/pkalin/shadewright/issues/74), <span class="sw-status sw-built">built</span>; not wired until [#76](https://github.com/pkalin/shadewright/issues/76)).
+<span class="sw-status sw-built">built</span> `internal/analyzer/refcheck` answers whether a Secret or ConfigMap a pod references is missing, with no permission on either (10.3). The read tool `check_missing_reference` offers it to the escalation model ([#74](https://github.com/pkalin/shadewright/issues/74), [#76](https://github.com/pkalin/shadewright/issues/76)).
 
 It is a pure function of the pod and the Events in its namespace, both read by the analyzer already. The answer is `missing` with its evidence, or `unknown`; there is no `exists`.
 

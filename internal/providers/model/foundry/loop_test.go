@@ -113,6 +113,9 @@ func runLoop(t *testing.T, maxToolSteps int, replies ...string) (analysis.Outcom
 			return h.p, nil
 		},
 		Reserve: func(context.Context, time.Time) error { return nil },
+		// The model the scripted replies name.
+		ExpectedModels: map[analysis.Role]string{analysis.RoleTriage: replyModel,
+			analysis.RoleEscalation: replyModel},
 	})
 	if err != nil {
 		t.Fatal(err)

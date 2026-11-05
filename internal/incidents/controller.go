@@ -333,6 +333,10 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager, obs <-chan collector.Obs
 	return nil
 }
 
+// AnalysisTimeout returns how long an Incident may stay in phase Analyzing before the trigger takes its
+// analysis as lost: Config.AnalysisTimeout, or its default. The analysis bounds its claim with it.
+func (c *Controller) AnalysisTimeout() time.Duration { return c.cfg.AnalysisTimeout }
+
 // NeedLeaderElection reports that only the leader writes Incidents.
 func (c *Controller) NeedLeaderElection() bool { return true }
 

@@ -437,6 +437,22 @@ func TestRestartNeitherResetsNorDoubles(t *testing.T) {
 	}
 }
 
+// The analysis bounds its claim with the trigger's analysis timeout, configured or the default.
+func TestAnalysisTimeoutIsTheTriggers(t *testing.T) {
+	for want, cfg := range map[time.Duration]Config{
+		DefaultAnalysisTimeout: {Namespace: "x"},
+		12 * time.Minute:       {Namespace: "x", AnalysisTimeout: 12 * time.Minute},
+	} {
+		c, err := New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := c.AnalysisTimeout(); got != want {
+			t.Errorf("AnalysisTimeout() = %s, want %s", got, want)
+		}
+	}
+}
+
 func TestHandledWaitsForTheIncidents(t *testing.T) {
 	c, err := New(Config{Namespace: "x"})
 	if err != nil {

@@ -814,6 +814,67 @@ func TestChartRefusesBadContextSourceValues(t *testing.T) {
 	}
 }
 
+const analyzerClientID = "analyzer.identity.azure.clientId=22222222-2222-2222-2222-222222222222"
+
+// labSuffix is the allow-list a triage model needs.
+const labSuffix = "analyzer.analysis.endpointSuffixes={.lab.services.ai.azure.com}"
+
+// TestAnalyzerAnalysisFollowsValues checks that the analysis flags appear only with a triage model (the
+// analysis is off by default), and together with it.
+func TestAnalyzerAnalysisFollowsValues(t *testing.T) {
+	isAnalysisFlag := func(a string) bool {
+		for _, f := range []string{"--triage-model", "--escalation-model", "--model-endpoint-suffixes", "--action-policies"} {
+			if strings.HasPrefix(a, f) {
+				return true
+			}
+		}
+		return false
+	}
+	if args := analyzerArgs(t, render(t, false)); slices.ContainsFunc(args, isAnalysisFlag) {
+		t.Errorf("default values render analysis flags: %v", args)
+	}
+	// Without a triage model the other values render nothing.
+	if args := analyzerArgs(t, render(t, false, "analyzer.analysis.actionPolicies.SetContainerMemoryLimit=memory",
+		"analyzer.analysis.endpointSuffixes={.a.example}")); slices.ContainsFunc(args, isAnalysisFlag) {
+		t.Errorf("values without a triage model render analysis flags: %v", args)
+	}
+	args := analyzerArgs(t, render(t, false, analyzerClientID,
+		"analyzer.analysis.triageModel=gpt-4.1-mini-2025-04-14", "analyzer.analysis.escalationModel=gpt-4.1-2025-04-14",
+		"analyzer.analysis.endpointSuffixes={.services.ai.azure.com,.openai.azure.com}",
+		"analyzer.analysis.actionPolicies.SetContainerMemoryLimit=memory-limits",
+		"analyzer.analysis.actionPolicies.AdjustKedaMaxReplicas=keda"))
+	for _, want := range []string{"--triage-model=gpt-4.1-mini-2025-04-14", "--escalation-model=gpt-4.1-2025-04-14",
+		"--model-endpoint-suffixes=.services.ai.azure.com,.openai.azure.com",
+		"--action-policies=AdjustKedaMaxReplicas=keda,SetContainerMemoryLimit=memory-limits"} {
+		if !slices.Contains(args, want) {
+			t.Errorf("args %v lack %s", args, want)
+		}
+	}
+}
+
+func TestChartRefusesBadAnalysisValues(t *testing.T) {
+	for name, set := range map[string][]string{
+		"triage model without identity":  {"analyzer.analysis.triageModel=gpt-4.1-mini", labSuffix},
+		"triage model without suffixes":  {analyzerClientID, "analyzer.analysis.triageModel=gpt-4.1-mini"},
+		"escalation without triage":      {analyzerClientID, "analyzer.analysis.escalationModel=gpt-4.1"},
+		"model with a space":             {analyzerClientID, labSuffix, "analyzer.analysis.triageModel=gpt 4"},
+		"model with a comma":             {analyzerClientID, labSuffix, "analyzer.analysis.triageModel=a\\,b"},
+		"suffix without a dot":           {"analyzer.analysis.endpointSuffixes={azure.com}"},
+		"suffix of one label":            {"analyzer.analysis.endpointSuffixes={.com}"},
+		"suffix in upper case":           {"analyzer.analysis.endpointSuffixes={.Azure.com}"},
+		"policy for an unknown action":   {"analyzer.analysis.actionPolicies.Exec=all"},
+		"policy name with an underscore": {"analyzer.analysis.actionPolicies.SetContainerMemoryLimit=a_b"},
+		"unknown analysis value":         {"analyzer.analysis.apiKey=x"},
+	} {
+		t.Run(name, func(t *testing.T) { helmFails(t, set...) })
+	}
+	for _, flag := range []string{"triage-model", "escalation-model", "model-endpoint-suffixes", "action-policies"} {
+		if out := helmFails(t, "analyzer.extraArgs={--"+flag+"=x}"); !strings.Contains(out, "--"+flag) {
+			t.Errorf("extra arg %s not refused:\n%s", flag, out)
+		}
+	}
+}
+
 func watchRoleHasScaledObjects(t *testing.T, r rendered) bool {
 	t.Helper()
 	u := r.chart["ClusterRole//shadewright-analyzer-watch-role"]

@@ -191,7 +191,7 @@ func newController(t *testing.T, ns string, f *fixture) (*Controller, *recording
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Controller{Client: rc, Namespace: ns, Analyzer: a}, rc
+	return &Controller{Client: rc, Reader: env.admin, Namespace: ns, Analyzer: a}, rc
 }
 
 func reconcile(t *testing.T, c *Controller, inc *remediationv1alpha1.Incident) {

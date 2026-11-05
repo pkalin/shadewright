@@ -264,7 +264,7 @@ func chatURL(endpoint, deployment, apiVersion string) (string, error) {
 		return "", errors.New("the endpoint is not an HTTPS URL without user info, query or fragment")
 	}
 	// A DNS host name only (threat model G3.9): an IP literal, or a numeric form some resolvers read as one,
-	// would skip the host allow-list (#76). The last label must start with a letter, as in the CRD pattern.
+	// would skip the analyzer's host allow-list. The last label must start with a letter, as in the CRD pattern.
 	host := u.Hostname()
 	if _, err := netip.ParseAddr(host); err == nil {
 		return "", errors.New("the endpoint host is an IP address, not a DNS name")

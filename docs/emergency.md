@@ -48,7 +48,7 @@ A merge patch changes only this field: the other fields of `spec.analysis`, such
 
 The v0.1.0 patch `{"spec":{"maxAnalysesPerDay":0}}` is refused since that field moved: the API server answers that `spec.maxAnalysesPerDay` moved to `spec.analysis.maxAnalysesPerDay`. Use the patch above. A `0` an earlier patch left in the old field still keeps analysis off, since the lower of the two fields applies.
 
-With `0` the analyzer starts no new analysis (an incident is not due, reason `AnalysisDisabled`), so no new analysis is started and no new proposal appears. Incidents are still recorded. The analysis loop that calls the model is not built yet, so today no model calls happen either way, but this setting already marks incidents not due. To resume, set the value back (the default is 100), and remove the old field in the same patch if it is still set:
+With `0` the analyzer starts no new analysis (an incident is not due, reason `AnalysisDisabled`), so no new analysis is started and no new proposal appears. Incidents are still recorded. When the analyzer runs with `--triage-model`, this also stops its model calls; without that flag no model call happens either way. To resume, set the value back (the default is 100), and remove the old field in the same patch if it is still set:
 
 ```bash
 kubectl patch remediationsettings default --type merge -p '{"spec":{"maxAnalysesPerDay":null,"analysis":{"maxAnalysesPerDay":100}}}'

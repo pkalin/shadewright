@@ -94,6 +94,8 @@ func main() {
 		"The cluster label value of this cluster's series, for a Prometheus shared by several clusters; empty "+
 			"for a Prometheus of this cluster alone. Checked at startup and every 10 minutes: while no series "+
 			"carries it, metrics are unavailable (analyses that query them escalate) and the analyzer logs an error.")
+	var af analysisFlags
+	af.bind(flag.CommandLine)
 	flag.Parse()
 
 	ctrl.SetLogger(cmdutil.NewLogger(&opts))
@@ -199,10 +201,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The context builder (design 3.3) and its sources. The analysis loop (#76) calls the builder; until then it
-	// is built here so that the sources' configuration is checked at start. The sources and the builder are given
-	// the watched namespaces, the same set as the cache and the RoleBindings, and refuse any other before a
-	// request; with none, NewSources builds no source and no cluster check. Pod logs are read with the
+	// The context builder (design 3.3) and its sources. The analysis loop calls the builder; it is built even
+	// when the loop does not start, so that the sources' configuration is checked at start. The sources and the
+	// builder are given the watched namespaces, the same set as the cache and the RoleBindings, and refuse any
+	// other before a request; with none, NewSources builds no source and no cluster check. Pod logs are read with the
 	// analyzer's own identity, through the pods/log grant of the watch role, and redacted with the builder's
 	// redactor, so that both passes apply one rule set.
 	redactor, err := redact.New()
@@ -237,9 +239,14 @@ func main() {
 		setupLog.Error(err, "Failed to create the context builder")
 		os.Exit(1)
 	}
-	_ = contextBuilder // Called by the analysis loop (#76).
 	setupLog.Info("Context sources", "podLogs", sources.Logs != nil, "metrics", sources.Metrics != nil,
 		"prometheusCluster", prometheusCluster != "")
+
+	af.namespace, af.watched, af.claimTimeout = namespace, watched, inc.AnalysisTimeout()
+	if err := setupAnalysis(mgr, af, contextBuilder, sources, redactor); err != nil {
+		setupLog.Error(err, "Failed to set up the analysis")
+		os.Exit(1)
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")

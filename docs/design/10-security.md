@@ -70,7 +70,7 @@ The two egress policies do not open these by default.
 - **Metrics source.** The Prometheus HTTP API on port 9090 (the lab's in-cluster Prometheus, [ADR-0017](../adr/0017-prometheus-in-the-lab.md), behind the `MetricsSource` interface).
 - **Trace exporter.** OpenTelemetry (see the observability row of the stack table). When tracing is enabled it needs a rule to the collector's port, for example OTLP on 4317 or 4318. Until then it is not allowed and a call to it is dropped.
 
-The chart has a rule for Prometheus, off by default because the analyzer sends Prometheus nothing unless `--prometheus-url` is set: with `--prometheus-cluster` too it probes it at startup and every 10 minutes, and it queries it once the analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76)) calls the context builder. `networkPolicy.analyzer.prometheus.enabled` adds to `allow-analyzer-egress` (never to the executor's policy) a rule to the Pods you name in one namespace on one port.
+The chart has a rule for Prometheus, off by default because the analyzer sends Prometheus nothing unless `--prometheus-url` is set: with `--prometheus-cluster` too it probes it at startup and every 10 minutes, and it queries it when the analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76), started with `--triage-model`) calls the context builder or a read tool. `networkPolicy.analyzer.prometheus.enabled` adds to `allow-analyzer-egress` (never to the executor's policy) a rule to the Pods you name in one namespace on one port.
 
 - The Prometheus namespace must allow the analyzer in its own ingress policy. The fleet's `prometheus-server` ingress policy already expects it.
 - The chart changes nothing outside its namespace.

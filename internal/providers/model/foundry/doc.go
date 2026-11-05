@@ -27,7 +27,8 @@ limitations under the License.
 // shared, reserved, documentation or benchmarking address, or to an IPv6 address that embeds one (NAT64,
 // 6to4, IPv4-compatible) or whose embedded IPv4 cannot be read reliably (Teredo, local-use NAT64), gets no
 // connection and no token ([providers.ErrInvalidConfig]). Which host names an endpoint may use (an allow-list
-// of suffixes held by the operator) is not checked here: that belongs to the analyzer (#76).
+// of suffixes held by the operator) is not checked here: the analyzer checks it before it builds a Provider
+// (internal/analyzer/models.CheckEndpoint).
 //
 // Authentication is an Entra ID access token only, never a key: [WorkloadIdentity] exchanges the pod's
 // projected service account token for one (the AZURE_* variables of the workload identity webhook), with the

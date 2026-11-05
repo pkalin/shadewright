@@ -73,5 +73,5 @@ limitations under the License.
 // available", refused before any read or source call; an empty set refuses every subject.
 //
 // The analyzer creates the builder with the Prometheus and pod logs adapters (internal/analyzer NewSources);
-// the analysis loop (#76) will call it.
+// the analysis loop (internal/analysis) calls it.
 package incidentcontext

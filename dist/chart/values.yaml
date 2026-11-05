@@ -77,7 +77,7 @@ networkPolicy:
     - 169.254.20.10/32
   analyzer:
     prometheus:
-      # -- Let the analyzer, and only the analyzer, send TCP to the in-cluster Prometheus it queries (the metrics source, ADR-0017). Off by default: the analyzer sends Prometheus nothing unless `--prometheus-url` is set; with `--prometheus-cluster` too it probes it at startup and every 10 minutes, and it queries it once the analysis loop (#76) calls the context builder. Set it together with the analyzer's metrics source, and allow the analyzer in the ingress policy of that Prometheus too (a NetworkPolicy of the Prometheus namespace; the chart does not touch other namespaces).
+      # -- Let the analyzer, and only the analyzer, send TCP to the in-cluster Prometheus it queries (the metrics source, ADR-0017). Off by default: the analyzer sends Prometheus nothing unless `--prometheus-url` is set; with `--prometheus-cluster` too it probes it at startup and every 10 minutes, and it queries it when the analysis loop (#76, on with `analyzer.analysis.triageModel`) calls the context builder or a read tool. Set it together with the analyzer's metrics source, and allow the analyzer in the ingress policy of that Prometheus too (a NetworkPolicy of the Prometheus namespace; the chart does not touch other namespaces).
       # @section -- Network policy
       enabled: false
       # -- Namespace of the Prometheus (matched by `kubernetes.io/metadata.name`). Required when `enabled`.
@@ -213,9 +213,22 @@ analyzer:
     # -- The `cluster` label value of this cluster's series (`--prometheus-cluster`), for a Prometheus shared by several clusters. Empty passes no flag. Used only with `analyzer.prometheus.url`.
     # @section -- Analyzer
     cluster: ""
+  analysis:
+    # -- Model ID and version the triage deployment of `RemediationSettings` serves, as its replies name it, such as `gpt-4.1-mini-2025-04-14` (`--triage-model`). A reply naming another model is refused (ADR-0023). Empty (the default) passes no analysis flag: the analysis is off, no model is called and no Azure token is requested. Set, it needs `analyzer.identity.azure.clientId` and `analyzer.analysis.endpointSuffixes` (the chart refuses to render without them). Until the evaluation gate (#78) exists, turn it on only for an evaluation run in the lab.
+    # @section -- Analyzer
+    triageModel: ""
+    # -- Model ID and version the escalation deployment serves (`--escalation-model`). Empty: escalation is off whatever `RemediationSettings` names, and an escalation signal hands the incident off. Used only with `triageModel`.
+    # @section -- Analyzer
+    escalationModel: ""
+    # -- Host suffixes a model endpoint in `RemediationSettings` must end with or, without the leading dot, equal (`--model-endpoint-suffixes`), each a dot and two or more lower-case DNS labels, at most 16. Required with `triageModel`: there is no default, so no Azure AI host is allowed unless listed. Any resource under an allowed suffix receives the context and a token, so list your own resource, such as `.<resource>.services.ai.azure.com`, which allows that host only.
+    # @section -- Analyzer
+    endpointSuffixes: []
+    # -- The RemediationPolicy a proposed RemediationRequest of each action type refers to (`--action-policies`), a map from `AdjustKedaMaxReplicas` or `SetContainerMemoryLimit` to a policy name, such as `{SetContainerMemoryLimit: memory-limits}`. An action type without one is never proposed. Used only with `triageModel`.
+    # @section -- Analyzer
+    actionPolicies: {}
   identity:
     azure:
-      # -- Client ID (a UUID, not a secret) of the analyzer's Azure managed identity. The analyzer has no cloud identity today (the model call is not built, ADR-0023), so leave it empty. Same effect as the executor's value, and it must differ from the executor's or the chart refuses to render.
+      # -- Client ID (a UUID, not a secret) of the analyzer's Azure managed identity, for the model call's Entra ID token (Cognitive Services audience only). Sets the ServiceAccount annotation `azure.workload.identity/client-id` and the Pod label `azure.workload.identity/use`. Needed when `analyzer.analysis.triageModel` is set; leave it empty otherwise. It must differ from the executor's or the chart refuses to render (separate identities, never one for both).
       # @default -- empty (no identity)
       # @section -- Identity
       clientId: ""
@@ -239,7 +252,7 @@ analyzer:
       # -- Memory request.
       # @section -- Analyzer
       memory: 64Mi
-  # -- Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--metrics-cert-path`, `--metrics-cert-name`, `--metrics-cert-key`, `--namespace`, `--watch-namespaces`, `--cluster-id` and `--max-incidents`.
+  # -- Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--metrics-cert-path`, `--metrics-cert-name`, `--metrics-cert-key`, `--namespace`, `--watch-namespaces`, `--cluster-id`, `--max-incidents`, the context source flags and the analysis flags.
   # @section -- Analyzer
   extraArgs: []
   metricsTLS:

@@ -60,4 +60,17 @@ limitations under the License.
 // update, and writes the outcome (Proposed or Escalated, the Analyzed condition, the request's name) in
 // another. A stop leaves the Incident Analyzing, which the
 // trigger takes as lost after its analysis timeout.
+//
+// The run is identified by the lastAnalysisTime its claim wrote, and the claim expires the trigger's analysis
+// timeout after it (ADR-0025). Just before the create and in the outcome update the controller reads the
+// Incident live and drops the result (no request, no outcome write, a log line) unless the claim is still the
+// run's and not expired; the analysis deadline, the create and the outcome write fit inside the claim, each
+// write cut to the time left on it. Requests carry the Incident's UID as the label [LabelIncidentUID], and a
+// claim records the request of the previous run that a lost outcome write left out of
+// status.remediationRequests: one created within that run's claim window, with the form an analysis gives it.
+//
+// Only the models the operator configured answer: a reply must name the model of its role
+// (Config.ExpectedModels, ADR-0023 decision 8), and a role without one is not configured. The analyzer binary
+// starts the controller only with its --triage-model flag, with the Foundry adapter behind a host allow-list
+// ([ErrEndpointNotAllowed]).
 package analysis

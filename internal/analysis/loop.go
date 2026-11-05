@@ -25,6 +25,8 @@ import (
 	"strings"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/incidents"
@@ -102,7 +104,25 @@ const (
 	ReasonModelForbidden Reason = "ModelForbidden"
 	// ReasonModelError: any other failure of the model call, or of building its provider.
 	ReasonModelError Reason = "ModelError"
+	// ReasonUnexpectedModel: a reply named another model than the one configured for its deployment's role
+	// (ADR-0023 decision 8), or none; it is not used.
+	ReasonUnexpectedModel Reason = "UnexpectedModel"
+	// ReasonEndpointNotAllowed: the deployment's endpoint is outside the operator's allow-list of host
+	// suffixes (ErrEndpointNotAllowed), so nothing was sent to it and no token requested for it.
+	ReasonEndpointNotAllowed Reason = "EndpointNotAllowed"
 )
+
+// ErrEndpointNotAllowed is what a [ModelFactory] returns, wrapped, for an endpoint outside the operator's
+// allow-list; the analysis hands off with ReasonEndpointNotAllowed.
+var ErrEndpointNotAllowed = errors.New("the model endpoint is not allowed")
+
+// factoryFailure is the hand-off reason of a ModelFactory error.
+func factoryFailure(err error) Reason {
+	if errors.Is(err, ErrEndpointNotAllowed) {
+		return ReasonEndpointNotAllowed
+	}
+	return ReasonModelError
+}
 
 // ContextBuilder builds the context of an Incident; *incidentcontext.Builder implements it.
 type ContextBuilder interface {
@@ -125,8 +145,8 @@ const (
 )
 
 // ModelFactory returns the provider of one deployment named in RemediationSettings. It is where the endpoint
-// is checked against the operator's allow-list before any call (#76, second part); an error hands the
-// incident off.
+// is checked against the operator's allow-list before any call (internal/analyzer/models.NewModelFactory); an error
+// hands the incident off.
 type ModelFactory func(role Role, d remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error)
 
 // ReserveFunc takes one unit of the daily analysis budget, as [incidents.ReserveAnalysis]. Only a nil error
@@ -162,6 +182,12 @@ type Config struct {
 	// Policies names the RemediationPolicy a request of each action type refers to. An action type without
 	// one is never proposed.
 	Policies map[remediationv1alpha1.ActionType]remediationv1alpha1.Name
+	// ExpectedModels names, per role, the model a reply must name in Completion.Model: the model and version
+	// the operator configured for that role's deployment (ADR-0023 decision 8). A reply naming another model,
+	// or none, is refused and the incident handed off (ReasonUnexpectedModel). A role with no entry is not
+	// configured, whatever RemediationSettings names: no triage entry means no model call, and no escalation
+	// entry hands an escalation off.
+	ExpectedModels map[Role]string
 	// Runbooks run before the model, in order.
 	Runbooks []Runbook
 	// Timeout is the deadline of one analysis; zero means [DefaultTimeout], at most [MaxTimeout].
@@ -199,6 +225,11 @@ func New(cfg Config) (*Analyzer, error) {
 		cfg.Now = time.Now
 	}
 	return &Analyzer{cfg: cfg}, nil
+}
+
+// Timeout returns the deadline of one analysis.
+func (a *Analyzer) Timeout() time.Duration {
+	return a.cfg.Timeout
 }
 
 // Limits are the settings an analysis reads from RemediationSettings spec.analysis.
@@ -263,9 +294,12 @@ func (a *Analyzer) Analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 			return a.accept(inc, out, ReasonRunbookMatched, p)
 		}
 	}
-	if limits.Triage == nil {
+	if limits.Triage == nil || a.cfg.ExpectedModels[RoleTriage] == "" {
 		out.Reason = ReasonNoModelConfigured
 		return out, nil
+	}
+	if a.cfg.ExpectedModels[RoleEscalation] == "" {
+		limits.Escalation = nil
 	}
 	actx, cancel := context.WithTimeout(ctx, a.cfg.Timeout)
 	defer cancel()
@@ -295,7 +329,7 @@ func (a *Analyzer) Analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 	}
 	model, err := a.cfg.Models(role, *deployment)
 	if err != nil {
-		return r.handOff(ReasonModelError)
+		return r.handOff(factoryFailure(err))
 	}
 
 	if err := a.cfg.Reserve(actx, a.cfg.Now()); err != nil {
@@ -327,7 +361,7 @@ func (a *Analyzer) Analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 			return r.handOff(ReasonEscalationNotConfigured)
 		}
 		if model, err = a.cfg.Models(RoleEscalation, *limits.Escalation); err != nil {
-			return r.handOff(ReasonModelError)
+			return r.handOff(factoryFailure(err))
 		}
 	}
 	res, action, reason, err = r.escalate(model)
@@ -398,7 +432,7 @@ func (r *run) triage(model providers.ModelProvider) (*Result, *remediationv1alph
 		if attempt > 0 {
 			msgs = append(msgs[:2:2], providers.Message{Role: providers.RoleUser, Content: retryMessage(code)})
 		}
-		c, reason, err := r.call(model, r.limits.Triage, msgs, nil)
+		c, reason, err := r.call(model, RoleTriage, r.limits.Triage, msgs, nil)
 		if err != nil || (reason != "" && reason != ReasonInvalidOutput) {
 			return nil, nil, reason, err
 		}
@@ -453,7 +487,7 @@ func (r *run) escalate(model providers.ModelProvider) (*Result, *remediationv1al
 		if last && steps > 0 {
 			msgs = append(msgs, providers.Message{Role: providers.RoleUser, Content: lastTurnMessage})
 		}
-		c, reason, err := r.call(model, r.limits.Escalation, msgs, defs)
+		c, reason, err := r.call(model, RoleEscalation, r.limits.Escalation, msgs, defs)
 		if err != nil || reason != "" {
 			return nil, nil, reason, err
 		}
@@ -643,11 +677,12 @@ func (r *run) outsideAttribution(name string, args map[string]json.RawMessage) b
 
 // call makes one model call within the token bounds and the deadline. It returns a hand-off reason for a
 // failure (ReasonInvalidOutput for malformed output, which the caller may retry) and an error only when the
-// parent context is done. A retryable error that names a delay of at most maxRetryWait is waited out and the
+// parent context is done. A reply, or a billed failure, that names another model than the one expected for
+// role is refused (ReasonUnexpectedModel), and so is a reply that names none. A retryable error that names a delay of at most maxRetryWait is waited out and the
 // call made once more, within the deadline and within the analysis's bound of 3 + MaxToolSteps calls, which
 // the retry counts toward.
-func (r *run) call(model providers.ModelProvider, d *remediationv1alpha1.ModelDeployment, msgs []providers.Message,
-	offer []providers.ToolDefinition) (providers.Completion, Reason, error) {
+func (r *run) call(model providers.ModelProvider, role Role, d *remediationv1alpha1.ModelDeployment,
+	msgs []providers.Message, offer []providers.ToolDefinition) (providers.Completion, Reason, error) {
 	req := providers.CompletionRequest{
 		Messages: slices.Clone(msgs), Tools: offer, MaxOutputTokens: r.limits.MaxOutputTokens,
 		ResponseSchema: ResponseSchema(),
@@ -687,6 +722,13 @@ func (r *run) call(model providers.ModelProvider, d *remediationv1alpha1.ModelDe
 		r.spent[key] += charge
 		if c.Model != "" && !slices.Contains(r.out.Models, c.Model) {
 			r.out.Models = append(r.out.Models, c.Model)
+		}
+		// ADR-0023 decision 8: only the model configured for the role may answer. The adapter checks the name's
+		// form, so it is safe to log; a reply that names no model cannot be placed and is refused too.
+		if want := r.a.cfg.ExpectedModels[role]; r.parent.Err() == nil && (err == nil || c.Model != "") && c.Model != want {
+			log.FromContext(r.parent).Info("Refused a model reply from another model than the configured one",
+				"role", role, "deployment", d.Deployment, "expected", want, "got", c.Model)
+			return providers.Completion{}, ReasonUnexpectedModel, nil
 		}
 		switch {
 		case err == nil:

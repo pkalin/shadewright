@@ -21,13 +21,13 @@ sequenceDiagram
     K->>A: Warning events, pod status and owners
     A->>A: Redact and fingerprint the symptoms
     A->>K: Group them into an Incident
-    A->>M: Redacted context, one structured call (planned)
-    M-->>A: Diagnosis and a proposed typed action (planned)
-    opt Escalation on a deterministic signal (planned)
+    A->>M: Redacted context, one structured call (only with --triage-model)
+    M-->>A: Diagnosis and a proposed typed action
+    opt Escalation on a deterministic signal
         A->>M: Stronger model with redacted read tools, bounded
         M-->>A: Diagnosis and a proposed typed action
     end
-    A->>R: Create the request: what to change, never where (planned)
+    A->>R: Create the request: what to change, never where
     E->>R: Reconcile the request
     E->>K: Read the live target and its Flux objects
     E->>E: Map the object to its file in Git (ADR-0012)
@@ -53,7 +53,7 @@ This section lists the components (2.2), the two binaries and what each may read
 | --- | --- | --- |
 | Collector | Watches, event normalization, correlation through `ownerReferences` | Read selected namespaces and kinds |
 | Incident store | Fingerprints, counters, timestamps, analysis history, operation IDs | Redacted data only |
-| Analyzer | Builds context (built, not wired); makes one structured model call, runs a bounded tool loop on escalation (planned); detects the platform and integrations | Read; in the operator namespace write Incidents, create requests, write its own Warning events; update the `RemediationSettings` status with the detection report |
+| Analyzer | Builds context; makes one structured model call, runs a bounded tool loop on escalation (built, started with `--triage-model`, off by default); detects the platform and integrations | Read; in the operator namespace write Incidents, create requests, write its own Warning events; update the `RemediationSettings` status with the detection report |
 | Policy engine | Allowed actions, scope, bounds, whether review is required | Rules owned by the cluster admin |
 | Remediation controller | Reconciles `RemediationRequest`, runs the approved plan, handles failures | CR status, Events about a request in the operator namespace, Git through the GitHub App |
 | GitOps adapter | Reads the repository, prepares the change, branch, commit, PR, auto-merge | One repository, allowed paths |
@@ -72,7 +72,7 @@ The analyzer and the remediation controller are separate binaries in one Go modu
 
 Their roles are generated from kubebuilder RBAC markers (`internal/analyzer`, `internal/analyzer/collector`, `internal/controller`).
 
-No model runs in the cluster and no GPU is needed: the analyzer calls a managed model endpoint (Microsoft Foundry first). The call, and the bounded tool loop on escalation (planned), are our own code, not a hosted agent service.
+No model runs in the cluster and no GPU is needed: the analyzer calls a managed model endpoint (Microsoft Foundry first). The call, and the bounded tool loop on escalation, are our own code, not a hosted agent service.
 
 ### 2.2.2. Analyzer permissions
 
@@ -163,7 +163,7 @@ Provider SDKs are imported only inside their adapter package. Each interface has
 
 **What it does.** The adapter (`internal/providers/metrics/prometheus`) speaks the plain Prometheus HTTP query API with the standard library. It runs only the templates listed in section 4, and only for the namespaces it is configured with (section 4).
 
-**How the analyzer wires it.** With `--prometheus-url` set, the analyzer creates it with the watched namespaces (`--watch-namespaces`, the set of the cache and the RoleBindings) and gives it to the context builder (3.3), which the analysis loop calls; nothing starts the loop yet (the second part of [#76](https://github.com/pkalin/shadewright/issues/76) wires it). Without the flag the metrics section is "not available". More than 256 watched namespaces with the flag set refuse the start.
+**How the analyzer wires it.** With `--prometheus-url` set, the analyzer creates it with the watched namespaces (`--watch-namespaces`, the set of the cache and the RoleBindings) and gives it to the context builder (3.3), which the analysis loop calls when the analyzer runs with `--triage-model` ([#76](https://github.com/pkalin/shadewright/issues/76)). Without the flag the metrics section is "not available". More than 256 watched namespaces with the flag set refuse the start.
 
 - With `--prometheus-cluster`, the analyzer checks at startup and every 10 minutes, on every replica, with one fixed query that is not a template and returns no label, that kube-state-metrics and cAdvisor both hold series with that `cluster` value. With no watched namespace it builds no source and runs no check.
 - When they do not, the analyzer still starts and logs an error, and metrics are **unavailable**: every query fails, so the metrics section is "could not fetch", which escalates (3.3), rather than empty answers read as evidence of absence. A label that disappears later switches metrics off at the next check, and one that appears switches them on.
@@ -189,7 +189,7 @@ HTTP status handling is in 2.6.
 
 **Limits.**
 
-- The analyzer creates it unless `--pod-logs=false`, with the watched namespaces, and gives it to the context builder (3.3), which the analysis loop calls; nothing starts the loop yet (the second part of [#76](https://github.com/pkalin/shadewright/issues/76) wires it). It reads with the analyzer's own identity: `get` on `pods/log` in the watch role, so only in the watched namespaces (2.2.2).
+- The analyzer creates it unless `--pod-logs=false`, with the watched namespaces, and gives it to the context builder (3.3), which the analysis loop calls when the analyzer runs with `--triage-model` ([#76](https://github.com/pkalin/shadewright/issues/76)). It reads with the analyzer's own identity: `get` on `pods/log` in the watch role, so only in the watched namespaces (2.2.2).
 - It takes at most 256 namespaces. With more in `--watch-namespaces` and logs on, the analyzer refuses to start with a configuration error that names the limit (decided on [#371](https://github.com/pkalin/shadewright/issues/371)): running without logs would make every analysis escalate on a source it could not fetch.
 - It reads one container of one pod per call, only in the namespaces it is configured with, within the bounds of section 4. It redacts the excerpt before returning it.
 

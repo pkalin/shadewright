@@ -82,12 +82,15 @@ func (m *scriptModel) reqs() []providers.CompletionRequest {
 	return append([]providers.CompletionRequest(nil), m.requests...)
 }
 
+// fakeModel is the model the fake replies name, and the one the fixture expects.
+const fakeModel = "fake-1"
+
 func reply(content string) step {
-	return step{c: providers.Completion{Content: content, Model: "fake-1", Usage: providers.Usage{InputTokens: 100, OutputTokens: 50}}}
+	return step{c: providers.Completion{Content: content, Model: fakeModel, Usage: providers.Usage{InputTokens: 100, OutputTokens: 50}}}
 }
 
 func toolReply(calls ...providers.ToolCall) step {
-	return step{c: providers.Completion{ToolCalls: calls, Model: "fake-1", Usage: providers.Usage{InputTokens: 100, OutputTokens: 10}}}
+	return step{c: providers.Completion{ToolCalls: calls, Model: fakeModel, Usage: providers.Usage{InputTokens: 100, OutputTokens: 10}}}
 }
 
 func toolCall(id, name, args string) providers.ToolCall {
@@ -234,6 +237,7 @@ func newFixture() *fixture {
 			remediationv1alpha1.ActionSetContainerMemoryLimit: memoryPolicy,
 			remediationv1alpha1.ActionAdjustKedaMaxReplicas:   "keda",
 		},
+		ExpectedModels: map[Role]string{RoleTriage: fakeModel, RoleEscalation: fakeModel},
 	}
 	return f
 }

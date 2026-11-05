@@ -21,7 +21,7 @@ Separately, today a person always merges: auto-merge is <span class="sw-status s
 
 ## What does it cost to run?
 
-The operator is two small Deployments. In the current release nothing calls a model, so there is no inference cost today. When the analysis is built, the cost is tokens times price per analysis, bounded by `spec.analysis.maxAnalysesPerDay` (default 100) and by planned token caps. [Design 12](design/12-cost.md#12-cost) has the formula and an illustration with made-up prices. The reference lab in Azure is disposable and priced in the `shadewright-azure` repository ([ADR-0008](adr/0008-disposable-azure-lab.md)).
+The operator is two small Deployments. Nothing calls a model unless the analyzer runs with `--triage-model` (off by default), so there is no inference cost by default. With it, the cost is tokens times price per analysis, bounded by `spec.analysis.maxAnalysesPerDay` (default 100) and by `maxTokensPerDay` per deployment (enforced within one analysis until #208). [Design 12](design/12-cost.md#12-cost) has the formula and an illustration with made-up prices. The reference lab in Azure is disposable and priced in the `shadewright-azure` repository ([ADR-0008](adr/0008-disposable-azure-lab.md)).
 
 ## What data leaves the cluster?
 
@@ -40,7 +40,7 @@ Yes: install in [observe-only mode](install.md). It records Incidents and has no
 
 ## It proposed nothing. Why?
 
-The analysis that diagnoses and proposes is not built yet, so today requests are written by hand ([your first proposal](first-proposal.md)). To see what the analyzer saw, [read an Incident](how-to/read-an-incident.md).
+The analysis that diagnoses and proposes is built but off by default (`--triage-model`), and until its evaluation gate ([#78](https://github.com/pkalin/shadewright/issues/78)) exists it is for evaluation runs in the lab only, so today requests are written by hand ([your first proposal](first-proposal.md)). To see what the analyzer saw, [read an Incident](how-to/read-an-incident.md).
 
 ## A request stopped. Where do I look?
 

@@ -28,6 +28,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -48,7 +49,8 @@ const (
 	maxTokenFile = 64 << 10
 	// maxTokenResponse bounds the body of a token response.
 	maxTokenResponse = 64 << 10
-	// tokenRefreshMargin is how long before its expiry a cached access token is replaced.
+	// tokenRefreshMargin is the most time before its expiry that a cached access token is replaced (see
+	// refreshMargin).
 	tokenRefreshMargin = 5 * time.Minute
 	// tokenRequestTimeout bounds one token request.
 	tokenRequestTimeout = 30 * time.Second
@@ -70,19 +72,32 @@ var (
 // WorkloadIdentity is a [TokenSource] that exchanges the pod's projected service account token for an Entra
 // ID access token for Cognitive Services (the client credentials grant with a client assertion), with the
 // standard library. It reads the token file on every exchange, because Kubernetes rotates it, and caches the
-// access token until five minutes before it expires. Its errors are fixed text with a class and never
-// quote the file, the response or the variables' values. It is safe for concurrent use.
+// access token until shortly before it expires: five minutes, or half its lifetime when that is shorter. Its
+// errors are fixed text with a class and never quote the file, the response or the variables' values. It is
+// safe for concurrent use: concurrent callers share one exchange, and each waits for it only as long as its
+// own context allows.
 type WorkloadIdentity struct {
 	clientID, tokenFile string
 	tokenURL            string
 	client              *http.Client
 	now                 func() time.Time
 
-	// lock is held by the one Token call that may exchange; a channel, so a waiting caller can give up when
-	// its context ends.
-	lock    chan struct{}
+	// mu guards the fields below; it is never held across the network.
+	mu        sync.Mutex
+	token     string
+	refreshAt time.Time
+	// inflight is the exchange in progress, shared by every caller that needs a token meanwhile.
+	inflight *exchangeCall
+}
+
+// exchangeCall is one exchange in progress. Its result is set before done is closed; waiters is guarded by
+// WorkloadIdentity.mu.
+type exchangeCall struct {
+	cancel  context.CancelFunc
+	waiters int
+	done    chan struct{}
 	token   string
-	expires time.Time
+	err     error
 }
 
 // NewWorkloadIdentity reads AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_FEDERATED_TOKEN_FILE and the optional
@@ -117,36 +132,116 @@ func newWorkloadIdentity(getenv func(string) string, rt http.RoundTripper) (*Wor
 	u.Path = "/" + tenantID + "/oauth2/v2.0/token"
 	return &WorkloadIdentity{
 		clientID: clientID, tokenFile: tokenFile, tokenURL: u.String(),
-		client: newHTTPClient(rt), now: time.Now, lock: make(chan struct{}, 1),
+		client: newHTTPClient(rt, tokenRequestTimeout), now: time.Now,
 	}, nil
 }
 
-// Token returns a cached access token, or exchanges the federated token for a new one.
+// Token returns a cached access token, or exchanges the federated token for a new one. Callers that need a
+// token while an exchange is in progress share it; each returns when its own context ends, and the exchange
+// goes on (bounded by tokenRequestTimeout) while anyone still waits, so one canceled caller fails no one else.
 func (w *WorkloadIdentity) Token(ctx context.Context) (string, error) {
+	if ctx.Err() != nil {
+		return "", tokenCtxError(ctx)
+	}
+	w.mu.Lock()
+	if w.token != "" && w.now().Before(w.refreshAt) {
+		tok := w.token
+		w.mu.Unlock()
+		return tok, nil
+	}
+	call := w.inflight
+	if call == nil {
+		// Detached from this caller's cancellation: the exchange serves every waiter, and is canceled only
+		// when all of them have left.
+		xctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		call = &exchangeCall{done: make(chan struct{}), cancel: cancel}
+		w.inflight = call
+		go w.run(xctx, call)
+	}
+	call.waiters++
+	w.mu.Unlock()
 	select {
-	case w.lock <- struct{}{}:
+	case <-call.done:
+		return call.token, call.err
 	case <-ctx.Done():
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return "", fmt.Errorf("foundry: the token request was canceled: %w", context.Canceled)
+		w.mu.Lock()
+		call.waiters--
+		if call.waiters == 0 {
+			// Nobody waits any more: stop the exchange, and let the next caller start a fresh one rather than
+			// join this canceled one.
+			call.cancel()
+			if w.inflight == call {
+				w.inflight = nil
+			}
 		}
-		return "", &providers.RetryableError{Err: fmt.Errorf("foundry: no access token: %w", context.DeadlineExceeded)}
+		w.mu.Unlock()
+		return "", tokenCtxError(ctx)
 	}
-	defer func() { <-w.lock }()
-	if w.token != "" && w.now().Before(w.expires.Add(-tokenRefreshMargin)) {
-		return w.token, nil
-	}
-	tok, expires, err := w.exchange(ctx)
-	if err != nil {
-		return "", err
-	}
-	w.token, w.expires = tok, expires
-	return tok, nil
 }
 
-func (w *WorkloadIdentity) exchange(ctx context.Context) (string, time.Time, error) {
-	fail := func(msg string, class error) (string, time.Time, error) {
-		return "", time.Time{}, fmt.Errorf("foundry: %s: %w", msg, class)
+// run performs one exchange for every caller waiting on call, and caches its token.
+func (w *WorkloadIdentity) run(ctx context.Context, call *exchangeCall) {
+	defer call.cancel()
+	tok, refreshAt, err := w.exchange(ctx)
+	w.mu.Lock()
+	if err == nil {
+		w.token, w.refreshAt = tok, refreshAt
 	}
+	if w.inflight == call {
+		w.inflight = nil
+	}
+	w.mu.Unlock()
+	call.token, call.err = tok, err
+	close(call.done)
+}
+
+func tokenCtxError(ctx context.Context) error {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return fmt.Errorf("foundry: the token request was canceled: %w", context.Canceled)
+	}
+	return &providers.RetryableError{Err: fmt.Errorf("foundry: no access token: %w", context.DeadlineExceeded)}
+}
+
+// refreshMargin is how long before its expiry a token of the given lifetime is replaced: tokenRefreshMargin,
+// or half the lifetime when that is shorter, so a short-lived token is still reused for a while instead of
+// being exchanged on every call.
+func refreshMargin(lifetime time.Duration) time.Duration {
+	return min(tokenRefreshMargin, lifetime/2)
+}
+
+// retryableEntraCodes are the AADSTS codes of a 400 that a later exchange may not repeat: the assertion (the
+// projected service account token) is not within its valid time range, which the kubelet's rotation or clock
+// skew can cause briefly, and Entra ID's own transient error. Any other code is permanent.
+var retryableEntraCodes = map[int64]bool{
+	700024: true, // client assertion is not within its valid time range
+	500133: true, // assertion is not within its valid time range
+	50033:  true, // RetryableError: a transient error
+}
+
+// retryableEntraRefusal reads the error_codes of an Entra ID error body, within maxTokenResponse, and reports
+// whether one of them is retryable. The body is never logged or returned: it may quote the request.
+func retryableEntraRefusal(body io.Reader) bool {
+	data, err := io.ReadAll(io.LimitReader(body, maxTokenResponse+1))
+	if err != nil || len(data) > maxTokenResponse {
+		return false
+	}
+	var e struct {
+		ErrorCodes []int64 `json:"error_codes"`
+	}
+	if json.Unmarshal(data, &e) != nil {
+		return false
+	}
+	for _, c := range e.ErrorCodes {
+		if retryableEntraCodes[c] {
+			return true
+		}
+	}
+	return false
+}
+
+// exchange returns a new access token and the time to replace it. ctx ends only when every caller waiting
+// for it has left (see Token); the exchange is bounded by tokenRequestTimeout.
+func (w *WorkloadIdentity) exchange(ctx context.Context) (string, time.Time, error) {
 	assertion, err := readTokenFile(w.tokenFile)
 	if err != nil {
 		// Retryable: the kubelet swaps the projected volume while it rotates the token. Retries are bounded by
@@ -171,22 +266,22 @@ func (w *WorkloadIdentity) exchange(ctx context.Context) (string, time.Time, err
 	start := w.now()
 	resp, err := w.client.Do(req)
 	if err != nil {
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return fail("the token request was canceled", context.Canceled)
-		}
 		return "", time.Time{}, &providers.RetryableError{Err: errors.New("foundry: no answer from Entra ID")}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	switch code := resp.StatusCode; {
-	case code == http.StatusTooManyRequests || code >= 500:
+	case code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500,
+		code == http.StatusBadRequest && retryableEntraRefusal(resp.Body):
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrain))
 		return "", time.Time{}, &providers.RetryableError{
 			Err: fmt.Errorf("foundry: Entra ID returned status %d", code),
 		}
 	case code != http.StatusOK:
-		// 400 and 401: the federation, the client ID or the tenant is wrong. The body may quote the request.
+		// Other 400s and 401: the federation, the client ID or the tenant is wrong. The body may quote the
+		// request: it is drained, never read into an error.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrain))
-		return fail(fmt.Sprintf("Entra ID refused the token request with status %d", code), providers.ErrForbidden)
+		return "", time.Time{}, fmt.Errorf("foundry: Entra ID refused the token request with status %d: %w",
+			code, providers.ErrForbidden)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponse+1))
 	if err != nil || len(data) > maxTokenResponse {
@@ -206,7 +301,8 @@ func (w *WorkloadIdentity) exchange(ctx context.Context) (string, time.Time, err
 		return "", time.Time{}, fmt.Errorf("foundry: Entra ID returned a token that is not for Cognitive Services: %w",
 			providers.ErrForbidden)
 	}
-	return body.AccessToken, start.Add(time.Duration(min(body.ExpiresIn, 24*3600)) * time.Second), nil
+	lifetime := time.Duration(min(body.ExpiresIn, 24*3600)) * time.Second
+	return body.AccessToken, start.Add(lifetime - refreshMargin(lifetime)), nil
 }
 
 // readTokenFile reads a regular file of at most maxTokenFile bytes. It opens the path without blocking, so a

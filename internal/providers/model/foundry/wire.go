@@ -214,30 +214,26 @@ func encodeMessage(m providers.Message) (chatMessage, error) {
 }
 
 // parseResponse decodes and checks the body of a 200 reply. offered names the tools the request offered;
-// structured says a response schema was sent. On ErrMalformedOutput after the usage block was read, the
-// Completion carries Usage and Model only. Error text is fixed and never quotes the reply.
+// structured says a response schema was sent. The reply was billed, so on ErrMalformedOutput the Completion
+// carries Usage and Model only, or UsageUnknown when no usable usage block could be read. Error text is fixed
+// and never quotes the reply.
 func parseResponse(data []byte, offered map[string]bool, structured bool) (providers.Completion, error) {
 	malformed := func(msg string) error { return fmt.Errorf("foundry: %s: %w", msg, providers.ErrMalformedOutput) }
+	unknown := providers.Completion{UsageUnknown: true}
 	var r chatResponse
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if err := dec.Decode(&r); err != nil {
-		return providers.Completion{}, malformed("the reply is not a chat completion")
+		return unknown, malformed("the reply is not a chat completion")
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return providers.Completion{}, malformed("the reply has data after the chat completion")
+		return unknown, malformed("the reply has data after the chat completion")
 	}
-	if r.Usage == nil {
-		return providers.Completion{}, malformed("the reply has no usage")
+	u, ok := usageOf(r.Usage)
+	if !ok {
+		return unknown, malformed("the reply has no usage, or its usage is out of range")
 	}
-	u := providers.Usage{InputTokens: r.Usage.PromptTokens, OutputTokens: r.Usage.CompletionTokens}
-	if r.Usage.PromptTokensDetails != nil {
-		u.CachedInputTokens = r.Usage.PromptTokensDetails.CachedTokens
-	}
-	if u.InputTokens < 0 || u.OutputTokens < 0 || u.CachedInputTokens < 0 || u.CachedInputTokens > u.InputTokens {
-		return providers.Completion{}, malformed("the usage of the reply is out of range")
-	}
-	if len(r.Model) > maxModelName || !modelNamePattern.MatchString(r.Model) {
-		return providers.Completion{}, malformed("the reply names no valid model")
+	if !validModel(r.Model) {
+		return providers.Completion{Usage: u}, malformed("the reply names no valid model")
 	}
 	billed := providers.Completion{Usage: u, Model: r.Model}
 	fail := func(msg string) (providers.Completion, error) { return billed, malformed(msg) }
@@ -297,6 +293,46 @@ func parseResponse(data []byte, offered map[string]bool, structured bool) (provi
 }
 
 // isJSONObject reports whether b is one valid JSON object, surrounded by white space at most.
+// usageOf converts a usage block, and reports false when there is none or it is out of range.
+func usageOf(cu *chatUsage) (providers.Usage, bool) {
+	if cu == nil {
+		return providers.Usage{}, false
+	}
+	u := providers.Usage{InputTokens: cu.PromptTokens, OutputTokens: cu.CompletionTokens}
+	if cu.PromptTokensDetails != nil {
+		u.CachedInputTokens = cu.PromptTokensDetails.CachedTokens
+	}
+	if u.InputTokens < 0 || u.OutputTokens < 0 || u.CachedInputTokens < 0 || u.CachedInputTokens > u.InputTokens {
+		return providers.Usage{}, false
+	}
+	return u, true
+}
+
+func validModel(m string) bool { return len(m) <= maxModelName && modelNamePattern.MatchString(m) }
+
+// billedUsage reads only the usage and model of a 200 reply that was refused before it was parsed (a
+// Content-Type other than JSON, a body too large to read, a read that failed). data is the body, read within
+// the response bound, or nil when it was not read whole. Without a usable usage block the Completion says
+// UsageUnknown, so that a budget counts the call conservatively.
+func billedUsage(data []byte) providers.Completion {
+	var r struct {
+		Model string     `json:"model"`
+		Usage *chatUsage `json:"usage"`
+	}
+	if data == nil || json.Unmarshal(data, &r) != nil {
+		return providers.Completion{UsageUnknown: true}
+	}
+	u, ok := usageOf(r.Usage)
+	if !ok {
+		return providers.Completion{UsageUnknown: true}
+	}
+	c := providers.Completion{Usage: u}
+	if validModel(r.Model) {
+		c.Model = r.Model
+	}
+	return c
+}
+
 func isJSONObject(b []byte) bool {
 	t := bytes.TrimSpace(b)
 	return len(t) > 0 && t[0] == '{' && json.Valid(t)
@@ -305,42 +341,44 @@ func isJSONObject(b []byte) bool {
 // checkToken checks an access token before it is sent: a header-safe JWT whose audience is Cognitive
 // Services. The payload is decoded, not verified: the endpoint verifies the signature; this check only keeps
 // a token for another resource (or anything that is not a token) from being sent. Errors are fixed text
-// matching providers.ErrInvalidConfig.
+// matching providers.ErrForbidden, whichever TokenSource the token came from: the token is the identity's
+// credential, so a wrong one is fixed by a person on the identity (its federation, scope or source), like a
+// 401 or 403. ErrInvalidConfig stays for the settings the Provider is built from.
 func checkToken(tok string) error {
-	invalid := func(msg string) error { return fmt.Errorf("foundry: %s: %w", msg, providers.ErrInvalidConfig) }
+	refuse := func(msg string) error { return fmt.Errorf("foundry: %s: %w", msg, providers.ErrForbidden) }
 	if tok == "" || len(tok) > maxTokenBytes {
-		return invalid("the access token is empty or too large")
+		return refuse("the access token is empty or too large")
 	}
 	parts := strings.Split(tok, ".")
 	if len(parts) != 3 {
-		return invalid("the access token is not a JWT")
+		return refuse("the access token is not a JWT")
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return invalid("the access token is not a JWT")
+		return refuse("the access token is not a JWT")
 	}
 	for _, p := range []string{parts[0], parts[2]} {
 		if _, err := base64.RawURLEncoding.DecodeString(p); err != nil || p == "" {
-			return invalid("the access token is not a JWT")
+			return refuse("the access token is not a JWT")
 		}
 	}
 	var claims struct {
 		Aud json.RawMessage `json:"aud"`
 	}
 	if err := json.Unmarshal(payload, &claims); err != nil {
-		return invalid("the access token is not a JWT")
+		return refuse("the access token is not a JWT")
 	}
 	var auds []string
 	var one string
 	if err := json.Unmarshal(claims.Aud, &one); err == nil {
 		auds = []string{one}
 	} else if err := json.Unmarshal(claims.Aud, &auds); err != nil {
-		return invalid("the access token has no audience")
+		return refuse("the access token has no audience")
 	}
 	for _, a := range auds {
 		if strings.TrimSuffix(a, "/") == cognitiveServicesAudience {
 			return nil
 		}
 	}
-	return invalid("the access token is not for the Cognitive Services audience")
+	return refuse("the access token is not for the Cognitive Services audience")
 }

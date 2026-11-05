@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -50,6 +51,8 @@ const (
 	datedVersion   = "2024-10-21"
 	callZero       = "call_0"
 	logsTool       = "get_logs"
+	testEndpoint   = "https://example.com/"
+	azureEndpoint  = "https://r.openai.azure.com/"
 )
 
 // fakeJWT returns an unsigned JWT with the given audience claim (a string or a list).
@@ -91,8 +94,15 @@ func newHarness(t *testing.T, handler http.HandlerFunc, mod func(*Config)) *harn
 		handler(w, r)
 	}))
 	t.Cleanup(h.srv.Close)
+	// The endpoint must be a DNS name; every connection goes to the test server, whose certificate names
+	// example.com.
+	tr := h.srv.Client().Transport.(*http.Transport).Clone()
+	addr := h.srv.Listener.Addr().String()
+	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}
 	cfg := Config{
-		Endpoint:   h.srv.URL + "/",
+		Endpoint:   testEndpoint,
 		Deployment: testDeployment,
 		APIVersion: "v1",
 		Tokens:     &fakeTokens{tok: goodToken},
@@ -106,7 +116,7 @@ func newHarness(t *testing.T, handler http.HandlerFunc, mod func(*Config)) *harn
 		mod(&cfg)
 	}
 	p, err := newProvider(cfg, testHooks{
-		transport: h.srv.Client().Transport,
+		transport: tr,
 		sleep: func(ctx context.Context, d time.Duration) error {
 			h.mu.Lock()
 			h.sleeps = append(h.sleeps, d)
@@ -218,7 +228,7 @@ func TestChatURL(t *testing.T) {
 		{"https://r.services.ai.azure.com", "v1", "https://r.services.ai.azure.com/openai/v1/chat/completions"},
 		{"https://r.openai.azure.com/openai/v1", "v1", "https://r.openai.azure.com/openai/v1/chat/completions"},
 		{"https://r.openai.azure.com/openai/v1/", "v1", "https://r.openai.azure.com/openai/v1/chat/completions"},
-		{"https://r.openai.azure.com/", datedVersion, "https://r.openai.azure.com/openai/deployments/triage/chat/completions?api-version=2024-10-21"},
+		{azureEndpoint, datedVersion, "https://r.openai.azure.com/openai/deployments/triage/chat/completions?api-version=2024-10-21"},
 		{"https://r.openai.azure.com/openai/v1", datedVersion, ""},
 		{"http://r.openai.azure.com/", "v1", ""},
 		{"https://user" + "@" + "r.openai.azure.com/" /* user info, split so it does not read as an address */, "v1", ""},
@@ -226,6 +236,15 @@ func TestChatURL(t *testing.T) {
 		{"https://r.openai.azure.com/#f", "v1", ""},
 		{"https:///path", "v1", ""},
 		{"", "v1", ""},
+		// A DNS host name only (threat model G3.9).
+		{"https://20.1.2.3/", "v1", ""},
+		{"https://20.1.2.3:8443/", "v1", ""},
+		{"https://[2603:1020:1001::1]/", "v1", ""},
+		{"https://[::ffff:20.1.2.3]/", "v1", ""},
+		{"https://0x14.1.2.3/", "v1", ""},
+		{"https://335610371/", "v1", ""},
+		{"https://r.openai.azure.com./", "v1", ""},
+		{"https://:443/", "v1", ""},
 	} {
 		got, err := chatURL(tc.endpoint, testDeployment, tc.version)
 		if (err != nil) != (tc.want == "") || got != tc.want {
@@ -234,8 +253,23 @@ func TestChatURL(t *testing.T) {
 	}
 }
 
+// The wait for response headers follows Config.AttemptTimeout, not the default.
+func TestClientHeaderTimeoutFollowsAttemptTimeout(t *testing.T) {
+	for _, d := range []time.Duration{0, 5 * time.Second, 10 * time.Minute} {
+		p, err := New(Config{Endpoint: azureEndpoint, Deployment: testDeployment, APIVersion: "v1",
+			Tokens: &fakeTokens{}, AttemptTimeout: d})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := cmpOr(d, DefaultAttemptTimeout)
+		if got := p.client.Transport.(*http.Transport).ResponseHeaderTimeout; got != want {
+			t.Errorf("AttemptTimeout %v: ResponseHeaderTimeout = %v, want %v", d, got, want)
+		}
+	}
+}
+
 func TestNewRefusesInvalidConfig(t *testing.T) {
-	ok := Config{Endpoint: "https://r.openai.azure.com/", Deployment: testDeployment, APIVersion: "v1", Tokens: &fakeTokens{}}
+	ok := Config{Endpoint: azureEndpoint, Deployment: testDeployment, APIVersion: "v1", Tokens: &fakeTokens{}}
 	if _, err := New(ok); err != nil {
 		t.Fatalf("valid config refused: %v", err)
 	}
@@ -316,15 +350,18 @@ func TestCompleteMalformedOutput(t *testing.T) {
 		name, body  string
 		contentType string
 		withUsage   bool
+		// unknown: billed, but no usage could be read.
+		unknown bool
 	}{
-		{name: "not JSON", body: "<html>" + replyMark},
-		{name: "wrong content type", body: completionJSON("stop", `{"content":"{}"}`), contentType: "text/plain"},
-		{name: "trailing data", body: completionJSON("stop", `{"content":"{}"}`) + `{}`},
-		{name: "no usage", body: `{"model":"m","choices":[{"finish_reason":"stop","message":{"content":"{}"}}]}`},
-		{name: "negative usage", body: `{"model":"m","choices":[],"usage":{"prompt_tokens":-1,"completion_tokens":1}}`},
-		{name: "cached above input", body: `{"model":"m","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":2}}}`},
-		{name: "no model", body: `{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`},
-		{name: "model with spaces", body: `{"model":"a b","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`},
+		{name: "not JSON", body: "<html>" + replyMark, unknown: true},
+		{name: "wrong content type", body: completionJSON("stop", `{"content":"{}"}`), contentType: "text/plain", withUsage: true},
+		{name: "wrong content type, no usage", body: "<html>" + replyMark, contentType: "text/html", unknown: true},
+		{name: "trailing data", body: completionJSON("stop", `{"content":"{}"}`) + `{}`, unknown: true},
+		{name: "no usage", body: `{"model":"m","choices":[{"finish_reason":"stop","message":{"content":"{}"}}]}`, unknown: true},
+		{name: "negative usage", body: `{"model":"m","choices":[],"usage":{"prompt_tokens":-1,"completion_tokens":1}}`, unknown: true},
+		{name: "cached above input", body: `{"model":"m","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":2}}}`, unknown: true},
+		{name: "no model", body: `{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`, withUsage: true},
+		{name: "model with spaces", body: `{"model":"a b","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`, withUsage: true},
 		{name: "no choice", body: `{"model":"m","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`, withUsage: true},
 		{name: "two choices", body: `{"model":"m","choices":[{"finish_reason":"stop","message":{"content":"{}"}},{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`, withUsage: true},
 		{name: "cut off", body: completionJSON("length", `{"content":"{\"cause\":\"`+replyMark+`"}`), withUsage: true},
@@ -364,13 +401,44 @@ func TestCompleteMalformedOutput(t *testing.T) {
 			if tc.withUsage != (c.Usage != providers.Usage{}) {
 				t.Errorf("usage = %+v, want usage %v", c.Usage, tc.withUsage)
 			}
-			if r := h.lastReport(t); r.Usage != c.Usage || r.Err == nil {
+			if c.UsageUnknown != tc.unknown {
+				t.Errorf("UsageUnknown = %v, want %v", c.UsageUnknown, tc.unknown)
+			}
+			if tc.name == "wrong content type" && (c.Usage != wantUsage || c.Model == "") {
+				t.Errorf("billed reply lost its usage or model: %+v", c)
+			}
+			if r := h.lastReport(t); r.Usage != c.Usage || r.Model != c.Model || r.UsageUnknown != c.UsageUnknown || r.Err == nil {
 				t.Errorf("report = %+v", r)
 			}
 			if strings.Contains(err.Error(), replyMark) {
 				t.Error("error quotes the reply")
 			}
 		})
+	}
+}
+
+// A 200 whose body could not be read was billed: retrying it leaves the call's usage unknown.
+func TestCompleteBilledReadFailureIsUsageUnknown(t *testing.T) {
+	var n atomic.Int32
+	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if n.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", "4096")
+			_, _ = io.WriteString(w, `{"id":`) // the connection closes short of Content-Length
+			return
+		}
+		reply(w, completionJSON("stop", `{"content":"{}"}`))
+	}, nil)
+	c, err := h.p.Complete(context.Background(), structuredRequest())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if h.requests.Load() != 2 || c.Usage != wantUsage || !c.UsageUnknown {
+		t.Errorf("requests %d, completion %+v; want 2 requests, the usage of the second and UsageUnknown",
+			h.requests.Load(), c)
+	}
+	if r := h.lastReport(t); !r.UsageUnknown || r.Usage != wantUsage {
+		t.Errorf("report = %+v", r)
 	}
 }
 
@@ -385,12 +453,19 @@ func TestCompleteOversizedReply(t *testing.T) {
 				}
 				_, _ = io.WriteString(w, big)
 			}, func(c *Config) { c.MaxResponseBytes = 1024 })
-			_, err := h.p.Complete(context.Background(), structuredRequest())
+			c, err := h.p.Complete(context.Background(), structuredRequest())
 			if !providers.IsTooLarge(err) || providers.IsRetryable(err) {
 				t.Fatalf("err = %v, want too large", err)
 			}
 			if h.requests.Load() != 1 {
 				t.Errorf("sent %d requests, want 1", h.requests.Load())
+			}
+			// Billed, but a cut body is not parsed: its usage is unknown, and said so.
+			if !c.UsageUnknown || c.Usage != (providers.Usage{}) || c.Content != "" {
+				t.Errorf("completion = %+v, want only UsageUnknown", c)
+			}
+			if r := h.lastReport(t); !r.UsageUnknown {
+				t.Errorf("report = %+v, want UsageUnknown", r)
 			}
 		})
 	}
@@ -489,7 +564,7 @@ func TestCompleteFinalStatuses(t *testing.T) {
 				t.Errorf("sent %d requests, want 1", h.requests.Load())
 			}
 			if s := err.Error(); strings.Contains(s, bodyMark) || strings.Contains(s, promptMark) ||
-				strings.Contains(s, h.srv.URL) {
+				strings.Contains(s, testEndpoint) {
 				t.Errorf("error leaks the body or the URL: %v", err)
 			}
 		})
@@ -613,6 +688,10 @@ func TestCompleteTokenAudience(t *testing.T) {
 				if providers.IsRetryable(err) || strings.Contains(err.Error(), promptMark) {
 					t.Errorf("err = %v", err)
 				}
+				// The same class as WorkloadIdentity's refusal of such a token.
+				if !providers.IsForbidden(err) || providers.IsInvalidConfig(err) {
+					t.Errorf("err = %v, want forbidden only", err)
+				}
 			}
 		})
 	}
@@ -702,7 +781,7 @@ func TestNoSecretInErrorsReportsOrLogs(t *testing.T) {
 	}
 	r := h.lastReport(t)
 	dump := fmt.Sprintf("%v %+v %#v %+v", err, err, err, r) + logged.String()
-	for _, s := range []string{promptMark, replyMark, bodyMark, goodToken, "TOKEN-SECRET", h.srv.URL} {
+	for _, s := range []string{promptMark, replyMark, bodyMark, goodToken, "TOKEN-SECRET", testEndpoint} {
 		if strings.Contains(dump, s) {
 			t.Errorf("%q leaked: %s", s, dump)
 		}
@@ -775,6 +854,43 @@ func TestRefusePrivate(t *testing.T) {
 		"[fd00::1]:443":           false,
 		"[::ffff:10.0.0.1]:443":   false,
 		"not-an-address":          false,
+		"[fe80::1%en0]:443":       false,
+		// Reserved IPv4.
+		"192.0.0.8:443":     false,
+		"192.0.2.1:443":     false,
+		"198.18.0.1:443":    false,
+		"198.19.255.1:443":  false,
+		"198.51.100.1:443":  false,
+		"203.0.113.1:443":   false,
+		"240.0.0.1:443":     false,
+		"255.255.255.255:1": false,
+		"0.1.2.3:443":       false,
+		"100.127.0.1:443":   false,
+		// NAT64 well-known prefix: judged by the embedded IPv4.
+		"[64:ff9b::1401:203]:443": true,  // 20.1.2.3
+		"[64:ff9b::a00:1]:443":    false, // 10.0.0.1
+		"[64:ff9b::7f00:1]:443":   false, // 127.0.0.1
+		"[64:ff9b::a9fe:a9fe]:80": false, // 169.254.169.254
+		"[64:ff9b::6440:101]:443": false, // 100.64.1.1
+		// Local-use NAT64: the IPv4 position is not fixed, refused outright.
+		"[64:ff9b:1::1401:203]:443": false,
+		// 6to4: judged by the embedded IPv4.
+		"[2002:1401:203::1]:443": true,  // 20.1.2.3
+		"[2002:a00:1::1]:443":    false, // 10.0.0.1
+		"[2002:7f00:1::1]:443":   false, // 127.0.0.1
+		// IPv4-compatible (deprecated): judged by the embedded IPv4.
+		"[::1401:203]:443": true,
+		"[::a00:1]:443":    false,
+		"[::]:443":         false,
+		// Teredo, SIIT, other reserved IPv6: refused outright.
+		"[2001:0:4136:e378:8000:63bf:3fff:fdd2]:443": false,
+		"[2001::1401:203]:443":                       false,
+		"[::ffff:0:a00:1]:443":                       false,
+		"[100::1]:443":                               false,
+		"[2001:db8::1]:443":                          false,
+		"[3fff::1]:443":                              false,
+		"[fec0::1]:443":                              false,
+		"[ff02::1]:443":                              false,
 	} {
 		if err := refusePrivate("tcp", addr, nil); (err == nil) != ok {
 			t.Errorf("refusePrivate(%s) = %v, want allowed %v", addr, err, ok)
@@ -782,12 +898,17 @@ func TestRefusePrivate(t *testing.T) {
 	}
 }
 
-// The default client never connects to a loopback endpoint, so no token reaches it.
+// The default client never connects to a loopback endpoint, so no token reaches it. The endpoint is a host
+// name that resolves to loopback: an IP literal is refused by New already.
 func TestDefaultClientRefusesALoopbackEndpoint(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
 	t.Cleanup(srv.Close)
-	p, err := New(Config{Endpoint: srv.URL, Deployment: testDeployment, APIVersion: "v1", Tokens: &fakeTokens{tok: goodToken}})
+	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	if _, err := New(Config{Endpoint: srv.URL, Deployment: testDeployment, APIVersion: "v1", Tokens: &fakeTokens{tok: goodToken}}); !providers.IsInvalidConfig(err) {
+		t.Fatalf("IP literal endpoint: err = %v, want invalid config", err)
+	}
+	p, err := New(Config{Endpoint: "https://localhost:" + port, Deployment: testDeployment, APIVersion: "v1", Tokens: &fakeTokens{tok: goodToken}})
 	if err != nil {
 		t.Fatal(err)
 	}

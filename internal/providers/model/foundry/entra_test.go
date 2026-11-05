@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -145,6 +146,19 @@ func TestWorkloadIdentityErrors(t *testing.T) {
 	}{
 		"refused":         {status: http.StatusBadRequest, body: `{"error_description":"` + bodyMark + `"}`, forbidden: true},
 		"unauthorized":    {status: http.StatusUnauthorized, body: bodyMark, forbidden: true},
+		"request timeout": {status: http.StatusRequestTimeout, body: bodyMark, retryable: true},
+		// The assertion is not within its valid time range: a rotated token file can fix it.
+		"assertion expired": {status: http.StatusBadRequest, retryable: true,
+			body: `{"error":"invalid_client","error_description":"AADSTS700024: ` + bodyMark + `","error_codes":[700024]}`},
+		"assertion time range": {status: http.StatusBadRequest, retryable: true,
+			body: `{"error":"invalid_grant","error_description":"` + bodyMark + `","error_codes":[500133]}`},
+		"entra transient": {status: http.StatusBadRequest, retryable: true,
+			body: `{"error":"temporarily_unavailable","error_codes":[50033]}`},
+		"no federation": {status: http.StatusBadRequest, forbidden: true,
+			body: `{"error":"invalid_client","error_description":"` + bodyMark + `","error_codes":[700213]}`},
+		"code on a 401": {status: http.StatusUnauthorized, forbidden: true, body: `{"error_codes":[700024]}`},
+		"oversized refusal": {status: http.StatusBadRequest, forbidden: true,
+			body: `{"error_codes":[700024],"pad":"` + strings.Repeat("a", maxTokenResponse) + `"}`},
 		"throttled":       {status: http.StatusTooManyRequests, body: bodyMark, retryable: true},
 		"unavailable":     {status: http.StatusServiceUnavailable, body: bodyMark, retryable: true},
 		"not JSON":        {status: http.StatusOK, body: bodyMark, retryable: true},
@@ -194,17 +208,24 @@ func TestWorkloadIdentityTokenFile(t *testing.T) {
 }
 
 func TestWorkloadIdentityCancellation(t *testing.T) {
-	started := make(chan struct{})
+	started, gone := make(chan struct{}), make(chan struct{})
 	w, _, _ := entraHarness(t, func(rw http.ResponseWriter, r *http.Request) {
 		close(started)
 		_, _ = io.Copy(io.Discard, r.Body) // the server sees the client go away only after the body is read
 		<-r.Context().Done()
+		close(gone)
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { <-started; cancel() }()
 	_, err := w.Token(ctx)
 	if !errors.Is(err, context.Canceled) || providers.IsRetryable(err) {
 		t.Fatalf("err = %v, want canceled", err)
+	}
+	// With no caller left, the exchange itself is canceled rather than left to its timeout.
+	select {
+	case <-gone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the token request went on after its only caller left")
 	}
 }
 
@@ -225,9 +246,10 @@ func TestWorkloadIdentityRefusesAnotherAudience(t *testing.T) {
 
 // A caller waiting for another caller's exchange gives up when its own context ends.
 func TestWorkloadIdentityWaitRespectsContext(t *testing.T) {
-	w, _, _ := entraHarness(t, func(http.ResponseWriter, *http.Request) {})
-	w.lock <- struct{}{} // another exchange in progress
-	defer func() { <-w.lock }()
+	release := make(chan struct{})
+	w, _, _ := entraHarness(t, func(http.ResponseWriter, *http.Request) { <-release })
+	defer close(release)
+	go func() { _, _ = w.Token(context.Background()) }() // another exchange in progress
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	_, err := w.Token(ctx)
@@ -238,5 +260,78 @@ func TestWorkloadIdentityWaitRespectsContext(t *testing.T) {
 	ccancel()
 	if _, err := w.Token(cctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want canceled", err)
+	}
+}
+
+// Callers share one exchange, and a canceled caller does not fail the exchange the others wait for.
+func TestWorkloadIdentitySharesOneExchange(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	w, n, _ := entraHarness(t, func(rw http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(started) })
+		<-release
+		_, _ = fmt.Fprintf(rw, `{"token_type":"Bearer","expires_in":3600,"access_token":%q}`, goodToken)
+	})
+	first, cancelFirst := context.WithCancel(context.Background())
+	firstErr := make(chan error, 1)
+	go func() { _, err := w.Token(first); firstErr <- err }()
+	<-started
+	type result struct {
+		tok string
+		err error
+	}
+	waiters := make(chan result, 3)
+	for range 3 {
+		go func() { tok, err := w.Token(context.Background()); waiters <- result{tok, err} }()
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		w.mu.Lock()
+		joined := w.inflight != nil && w.inflight.waiters == 4
+		w.mu.Unlock()
+		if joined {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the waiters did not join the exchange")
+		}
+	}
+	cancelFirst()
+	if err := <-firstErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first caller: err = %v, want canceled", err)
+	}
+	close(release)
+	for range 3 {
+		if r := <-waiters; r.err != nil || r.tok != goodToken {
+			t.Fatalf("waiter: err = %v", r.err)
+		}
+	}
+	if n.Load() != 1 {
+		t.Errorf("sent %d token requests, want 1 shared exchange", n.Load())
+	}
+}
+
+// A token whose lifetime is at or below the refresh margin is still reused for half its lifetime, not
+// exchanged on every call.
+func TestWorkloadIdentityCachesShortLivedTokens(t *testing.T) {
+	for _, expiresIn := range []int{60, 300, 2} {
+		t.Run(fmt.Sprint(expiresIn), func(t *testing.T) {
+			w, n, _ := entraHarness(t, func(rw http.ResponseWriter, r *http.Request) {
+				_, _ = fmt.Fprintf(rw, `{"token_type":"Bearer","expires_in":%d,"access_token":%q}`, expiresIn, goodToken)
+			})
+			now := time.Now()
+			w.now = func() time.Time { return now }
+			for range 3 {
+				if _, err := w.Token(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if n.Load() != 1 {
+				t.Fatalf("sent %d token requests for 3 calls, want 1", n.Load())
+			}
+			now = now.Add(time.Duration(expiresIn) * time.Second / 2)
+			if _, err := w.Token(context.Background()); err != nil || n.Load() != 2 {
+				t.Errorf("not refreshed at half its lifetime: requests %d, err %v", n.Load(), err)
+			}
+		})
 	}
 }

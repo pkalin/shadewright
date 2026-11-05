@@ -96,9 +96,15 @@ type CallReport struct {
 	Deployment string
 	// Model is the model and version that answered, as the reply named it; empty without a usable reply.
 	Model string
-	// Usage is the token usage of the reply; zero without a usable reply. A failed attempt before it may have
-	// been billed too, which the service does not report.
+	// Usage is the token usage of the reply; zero without a usable reply. An attempt that failed before an
+	// answer arrived (a network error, a timeout, a status other than 200) may have been billed too, which
+	// the service does not report.
 	Usage providers.Usage
+	// UsageUnknown is set when an attempt got a 200 answer, so was billed, whose usage could not be read: a
+	// body larger than Config.MaxResponseBytes (not parsed, since a cut JSON body is not safe to read), a
+	// read that failed, or a body without a usable usage block. The budget counts such a call
+	// conservatively (#208).
+	UsageUnknown bool
 	// Attempts is the number of requests sent (or tried) in this call.
 	Attempts int
 	// Duration is the time the call took, backoff included.
@@ -217,7 +223,7 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 		deployment:     cfg.Deployment,
 		sendModel:      cfg.APIVersion == "v1",
 		tokens:         cfg.Tokens,
-		client:         newHTTPClient(h.transport),
+		client:         newHTTPClient(h.transport, cmpOr(cfg.AttemptTimeout, DefaultAttemptTimeout)),
 		maxOutput:      cmpOr(cfg.MaxOutputTokens, DefaultMaxOutputTokens),
 		attempts:       cmpOr(cfg.MaxAttempts, DefaultMaxAttempts),
 		base:           cmpOr(cfg.BaseDelay, DefaultBaseDelay),
@@ -257,6 +263,15 @@ func chatURL(endpoint, deployment, apiVersion string) (string, error) {
 		u.Fragment != "" || u.Opaque != "" || len(endpoint) > 256 {
 		return "", errors.New("the endpoint is not an HTTPS URL without user info, query or fragment")
 	}
+	// A DNS host name only (threat model G3.9): an IP literal, or a numeric form some resolvers read as one,
+	// would skip the host allow-list (#76). The last label must start with a letter, as in the CRD pattern.
+	host := u.Hostname()
+	if _, err := netip.ParseAddr(host); err == nil {
+		return "", errors.New("the endpoint host is an IP address, not a DNS name")
+	}
+	if last := host[strings.LastIndexByte(host, '.')+1:]; last == "" || !isASCIILetter(last[0]) {
+		return "", errors.New("the endpoint host is not a DNS name")
+	}
 	base := strings.TrimSuffix(u.Path, "/")
 	v1Base := strings.HasSuffix(base, "/openai/v1")
 	switch {
@@ -289,38 +304,98 @@ func sleep(ctx context.Context, d time.Duration) error {
 var errDialRefused = errors.New("the address is not a public unicast address")
 
 // refusePrivate is the dialer's control: it runs on the resolved address of every connection, so a host name
-// that resolves (or is rebound) to a loopback, private, link-local, shared (100.64.0.0/10), multicast or
-// unspecified address gets no connection and no token (design 11.1).
+// that resolves (or is rebound) to an address that is not public unicast gets no connection and no token
+// (design 11.1). See publicAddress.
 func refusePrivate(_, address string, _ syscall.RawConn) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return errDialRefused
 	}
 	ip, err := netip.ParseAddr(host)
-	if err != nil {
-		return errDialRefused
-	}
-	ip = ip.Unmap()
-	if !ip.IsGlobalUnicast() || ip.IsPrivate() || sharedAddressSpace.Contains(ip) {
+	if err != nil || ip.Zone() != "" || !publicAddress(ip) {
 		return errDialRefused
 	}
 	return nil
 }
 
-// sharedAddressSpace is 100.64.0.0/10 (RFC 6598), used for carrier-grade NAT and by some cluster networks.
-var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
+// publicAddress reports whether ip is a public unicast address. IPv4 (also mapped into IPv6) must be global
+// unicast, not private and outside reservedIPv4. An IPv6 address that embeds an IPv4 address the standard way
+// (NAT64 64:ff9b::/96, 6to4 2002::/16, IPv4-compatible ::/96) is judged by that IPv4 address, so a DNS64
+// answer for a public endpoint still connects while one for 10.0.0.1 does not. Any other IPv6 address must be
+// global unicast, not unique-local and outside reservedIPv6, which refuses outright the forms whose IPv4
+// cannot be read reliably (local-use NAT64 64:ff9b:1::/48, Teredo 2001::/32, SIIT ::ffff:0:0:0/96).
+func publicAddress(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	if ip.Is4() {
+		return ip.IsGlobalUnicast() && !ip.IsPrivate() && !inAny(reservedIPv4, ip)
+	}
+	b := ip.As16()
+	switch {
+	case nat64WellKnown.Contains(ip), ipv4Compatible.Contains(ip):
+		return publicAddress(netip.AddrFrom4([4]byte(b[12:16])))
+	case sixToFour.Contains(ip):
+		return publicAddress(netip.AddrFrom4([4]byte(b[2:6])))
+	}
+	return ip.IsGlobalUnicast() && !ip.IsPrivate() && !inAny(reservedIPv6, ip)
+}
+
+func inAny(prefixes []netip.Prefix, ip netip.Addr) bool {
+	for _, p := range prefixes {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// Address ranges refused besides those the netip predicates cover (loopback, private, link-local, multicast,
+// unspecified, unique-local).
+var (
+	nat64WellKnown = netip.MustParsePrefix("64:ff9b::/96")
+	ipv4Compatible = netip.MustParsePrefix("::/96")
+	sixToFour      = netip.MustParsePrefix("2002::/16")
+	reservedIPv4   = mustPrefixes(
+		"0.0.0.0/8",       // this network
+		"100.64.0.0/10",   // shared address space (carrier-grade NAT, some cluster networks)
+		"192.0.0.0/24",    // IETF protocol assignments
+		"192.0.2.0/24",    // documentation
+		"192.88.99.0/24",  // 6to4 relay anycast
+		"198.18.0.0/15",   // benchmarking
+		"198.51.100.0/24", // documentation
+		"203.0.113.0/24",  // documentation
+		"240.0.0.0/4",     // reserved, and broadcast
+	)
+	reservedIPv6 = mustPrefixes(
+		"::/8",          // reserved, after the embedded forms above: SIIT, local-use NAT64 64:ff9b:1::/48
+		"100::/64",      // discard
+		"2001::/23",     // IETF protocol assignments, Teredo 2001::/32 included
+		"2001:db8::/32", // documentation
+		"3fff::/20",     // documentation
+		"fec0::/10",     // deprecated site-local
+	)
+)
+
+func mustPrefixes(s ...string) []netip.Prefix {
+	ps := make([]netip.Prefix, len(s))
+	for i, p := range s {
+		ps[i] = netip.MustParsePrefix(p)
+	}
+	return ps
+}
+
+func isASCIILetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
 
 // newHTTPClient never follows redirects (the bearer token must reach the configured host only), requires
 // TLS 1.2 or later, connects to public unicast addresses only (refusePrivate), and bounds connection setup
-// and the wait for headers. Each attempt has its own deadline
-// on its context.
-func newHTTPClient(rt http.RoundTripper) *http.Client {
+// and the wait for headers (headerTimeout, the attempt timeout of the caller). Each attempt has its own
+// deadline on its context.
+func newHTTPClient(rt http.RoundTripper, headerTimeout time.Duration) *http.Client {
 	if rt == nil {
 		t := http.DefaultTransport.(*http.Transport).Clone()
 		t.Proxy = nil
 		t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 		t.TLSHandshakeTimeout = 10 * time.Second
-		t.ResponseHeaderTimeout = DefaultAttemptTimeout
+		t.ResponseHeaderTimeout = headerTimeout
 		t.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: refusePrivate}).DialContext
 		rt = t
 	}
@@ -339,8 +414,8 @@ func (p *Provider) Complete(ctx context.Context, req providers.CompletionRequest
 	c, attempts, err := p.complete(ctx, req)
 	if p.onCall != nil {
 		p.onCall(CallReport{
-			Deployment: p.deployment, Model: c.Model, Usage: c.Usage, Attempts: attempts,
-			Duration: p.now().Sub(start), Err: err,
+			Deployment: p.deployment, Model: c.Model, Usage: c.Usage, UsageUnknown: c.UsageUnknown,
+			Attempts: attempts, Duration: p.now().Sub(start), Err: err,
 		})
 	}
 	return c, err
@@ -353,49 +428,63 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
+	// unknown stays set once an attempt was billed without a usage that reaches the caller.
+	unknown := false
+	done := func(c providers.Completion, attempts int, err error) (providers.Completion, int, error) {
+		c.UsageUnknown = c.UsageUnknown || unknown
+		return c, attempts, err
+	}
 	for attempt := 0; ; attempt++ {
-		data, err := p.once(ctx, body)
+		data, billed, err := p.once(ctx, body)
 		if err == nil {
 			c, perr := parseResponse(data, offered, len(req.ResponseSchema) > 0)
-			return c, attempt + 1, perr
+			return done(c, attempt+1, perr)
+		}
+		var c providers.Completion
+		if billed {
+			c = billedUsage(data)
 		}
 		if !providers.IsRetryable(err) || attempt+1 >= p.attempts {
-			return providers.Completion{}, attempt + 1, err
+			return done(c, attempt+1, err)
 		}
+		// Retrying drops this attempt's answer: if it was billed, its usage is not returned.
+		unknown = unknown || billed
 		d, asked := providers.RetryAfter(err)
 		if asked && d > p.maxDelay {
-			return providers.Completion{}, attempt + 1, err // too long to block: the caller requeues
+			return done(c, attempt+1, err) // too long to block: the caller requeues
 		}
 		if !asked {
 			d = p.jitter(min(p.base<<attempt, p.maxDelay))
 		}
 		if dl, ok := ctx.Deadline(); ok && p.now().Add(d).After(dl) {
-			return providers.Completion{}, attempt + 1, err
+			return done(c, attempt+1, err)
 		}
 		if serr := p.sleep(ctx, d); serr != nil {
-			return providers.Completion{}, attempt + 1, ctxError(ctx)
+			return done(providers.Completion{}, attempt+1, ctxError(ctx))
 		}
 	}
 }
 
 // once sends one attempt and returns the body of a 200 reply. Every other outcome is a classified error with
-// fixed text.
-func (p *Provider) once(ctx context.Context, body []byte) ([]byte, error) {
+// fixed text. billed is true once a 200 arrived, error or not: the model answered and the service bills it.
+// With an error, data is the body when it was read whole within the bound (a Content-Type other than JSON),
+// so that its usage can still be read, and nil otherwise.
+func (p *Provider) once(ctx context.Context, body []byte) (data []byte, billed bool, err error) {
 	if ctx.Err() != nil {
-		return nil, ctxError(ctx)
+		return nil, false, ctxError(ctx)
 	}
 	tok, err := p.tokens.Token(ctx)
 	if err != nil {
-		return nil, tokenError(ctx, err)
+		return nil, false, tokenError(ctx, err)
 	}
 	if err := checkToken(tok); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	actx, cancel := context.WithTimeout(ctx, p.attemptTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(actx, http.MethodPost, p.url, bytes.NewReader(body))
 	if err != nil {
-		return nil, errors.New("foundry: could not build the request")
+		return nil, false, errors.New("foundry: could not build the request")
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Content-Type", "application/json")
@@ -404,7 +493,7 @@ func (p *Provider) once(ctx context.Context, body []byte) ([]byte, error) {
 	resp, err := p.client.Do(req)
 	if err != nil {
 		// The error of http.Client.Do holds the URL and possibly response-controlled text: replace it.
-		return nil, transportError(ctx, err)
+		return nil, false, transportError(ctx, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -412,22 +501,25 @@ func (p *Provider) once(ctx context.Context, body []byte) ([]byte, error) {
 	if code != http.StatusOK {
 		// The body of an error may quote the request: it is drained, never read into an error.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrain))
-		return nil, p.statusError(resp)
+		return nil, false, p.statusError(resp)
 	}
-	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err != nil || mt != "application/json" {
-		return nil, fmt.Errorf("foundry: the reply is not JSON: %w", providers.ErrMalformedOutput)
-	}
+	// A 200 was billed. An oversized body is not parsed (a cut JSON body has no reliable usage): its usage
+	// is unknown.
+	tooLarge := fmt.Errorf("foundry: the reply is larger than %d bytes: %w", p.maxBody, providers.ErrTooLarge)
 	if resp.ContentLength > p.maxBody {
-		return nil, fmt.Errorf("foundry: the reply is larger than %d bytes: %w", p.maxBody, providers.ErrTooLarge)
+		return nil, true, tooLarge
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, p.maxBody+1))
+	data, err = io.ReadAll(io.LimitReader(resp.Body, p.maxBody+1))
 	if err != nil {
-		return nil, transportError(ctx, err)
+		return nil, true, transportError(ctx, err)
 	}
 	if int64(len(data)) > p.maxBody {
-		return nil, fmt.Errorf("foundry: the reply is larger than %d bytes: %w", p.maxBody, providers.ErrTooLarge)
+		return nil, true, tooLarge
 	}
-	return data, nil
+	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+		return data, true, fmt.Errorf("foundry: the reply is not JSON: %w", providers.ErrMalformedOutput)
+	}
+	return data, true, nil
 }
 
 // statusError classifies a status other than 200.

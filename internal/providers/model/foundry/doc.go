@@ -21,17 +21,22 @@ limitations under the License.
 // A [Provider] is bound at construction to one endpoint, deployment and API version, the fields of a
 // ModelDeployment in RemediationSettings. With API version v1 it posts to <endpoint>/openai/v1/chat/completions
 // (or <endpoint>/chat/completions when the endpoint already ends in /openai/v1) and names the deployment in the
-// body; with a dated version it posts to <endpoint>/openai/deployments/<deployment>/chat/completions. It
-// follows no redirect, uses no proxy, and connects only to public unicast addresses: an endpoint that resolves
-// to a loopback, private, link-local or shared address gets no connection and no token
-// ([providers.ErrInvalidConfig]). Which host names an endpoint may use (an allow-list of suffixes held by the
-// operator) is not checked here: that belongs to the analyzer (#76).
+// body; with a dated version it posts to <endpoint>/openai/deployments/<deployment>/chat/completions. The
+// endpoint's host must be a DNS name, never an IP address. The Provider follows no redirect, uses no proxy, and
+// connects only to public unicast addresses: an endpoint that resolves to a loopback, private, link-local,
+// shared, reserved, documentation or benchmarking address, or to an IPv6 address that embeds one (NAT64,
+// 6to4, IPv4-compatible) or whose embedded IPv4 cannot be read reliably (Teredo, local-use NAT64), gets no
+// connection and no token ([providers.ErrInvalidConfig]). Which host names an endpoint may use (an allow-list
+// of suffixes held by the operator) is not checked here: that belongs to the analyzer (#76).
 //
 // Authentication is an Entra ID access token only, never a key: [WorkloadIdentity] exchanges the pod's
 // projected service account token for one (the AZURE_* variables of the workload identity webhook), with the
-// standard library. Every token, from any [TokenSource], is checked before it is sent: it must be a JWT whose
-// audience is Cognitive Services, so a token minted for another resource never reaches the endpoint (such a
-// token is [providers.ErrInvalidConfig] and is not retried).
+// standard library. Concurrent callers share one exchange. Entra ID's 408, 429 and 5xx, and a 400 whose error
+// code says the assertion is not within its valid time range (AADSTS700024, AADSTS500133) or a transient
+// error (AADSTS50033), are retryable; any other refusal is [providers.ErrForbidden]. Every token, from any
+// [TokenSource], is checked before it is sent: it must be a JWT whose audience is Cognitive Services, so a
+// token minted for another resource never reaches the endpoint (such a token is [providers.ErrForbidden],
+// whichever source returned it, and is not retried).
 //
 // Every call has a deadline (Config.Timeout unless the caller's context has a shorter one) and each attempt
 // its own (Config.AttemptTimeout). Network failures, timeouts of one attempt, 408, 429 and 5xx are retried with
@@ -52,7 +57,11 @@ limitations under the License.
 // types and validates it there.
 //
 // Token usage (input, cached input and output tokens) is returned with each reply and reported per call to
-// Config.OnCall, with the attempts and the outcome, for cost accounting (design 12.1).
+// Config.OnCall, with the attempts and the outcome, for cost accounting (design 12.1). A 200 is billed even
+// when it is refused: with a Content-Type other than JSON its usage is still read from the body, within the
+// bound; a body over the bound is not parsed, and a body that cannot be read or holds no usable usage block
+// leaves the usage unknown. Then Completion.UsageUnknown and CallReport.UsageUnknown are set, so the budget
+// can count the call conservatively (#208).
 //
 // Errors carry fixed text, the status code and their class; never a URL, a header, the endpoint, a token, the
 // prompt or any text of the reply. Nothing is logged.

@@ -75,10 +75,10 @@ At most one escalation per incident fingerprint per cooldown window. A runbook m
 - is bound to one endpoint, deployment and API version, the fields of `spec.analysis.models` (rule 5); there is no fallback to another deployment;
 - authenticates with workload identity through Entra ID, with the standard library, and sends a token only when its audience is Cognitive Services;
 - gives every call a deadline and each attempt its own, and retries network failures, timeouts, 408, 429 and 5xx a bounded number of times with backoff, honouring `retry-after-ms` and `Retry-After`;
-- returns an unknown deployment (404) as `ErrNotFound`, and a refused identity (401, 403) as `ErrForbidden`;
-- connects only to public unicast addresses, so an endpoint that resolves to a private, loopback or link-local address gets no token;
+- returns an unknown deployment (404) as `ErrNotFound`, and a refused identity (401, 403, or a token for another audience) as `ErrForbidden`;
+- accepts only a DNS host name in the endpoint, and connects only to public unicast addresses, so an endpoint that resolves to a private, loopback, link-local, shared or reserved address, or to an IPv6 address embedding one (NAT64, 6to4) or one whose embedded IPv4 cannot be read (Teredo), gets no token;
 - reads at most 1 MiB of a reply and checks it as untrusted input. A reply cut off, filtered or refused, content that is not a JSON object when a schema was sent, or a call of a tool the request did not offer is `ErrMalformedOutput`, returned with the reply's usage because it was billed;
-- reports the token usage of every call (input, cached input and output) with the reply and to an `OnCall` hook;
+- reports the token usage of every call (input, cached input and output) with the reply and to an `OnCall` hook, and marks a call whose billed reply had no readable usage (too large, cut short, not a chat completion) as `UsageUnknown`, so the budget counts it conservatively;
 - puts no URL, token, prompt or reply text in its errors and logs nothing.
 
 `go test -tags foundrysmoke` runs it against a real deployment by hand (see the package documentation).

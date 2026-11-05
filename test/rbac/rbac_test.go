@@ -333,8 +333,7 @@ func TestPermissionBoundary(t *testing.T) {
 		{"analyzer", "delete", group, "remediationsettings", "", "", false},
 		{"analyzer", "update", group, "remediationpolicies", "status", "", false},
 		{"analyzer", "list", "", "events", "", otherNS, false},
-		{"analyzer", "get", "", "secrets", "", otherNS, false},
-		{"analyzer", "list", "", "secrets", "", operatorNS, false},
+		// Secrets: every verb in every namespace is refused in TestAnalyzerGrantsNothingOnSecrets.
 		{"analyzer", "create", group, "remediationpolicies", "", "", false},
 		{"analyzer", "update", group, "remediationrequests", "finalizers", operatorNS, false},
 		{"analyzer", "delete", group, "incidents", "", operatorNS, false},
@@ -403,6 +402,71 @@ func TestPermissionBoundary(t *testing.T) {
 		if got := can(t, c.id, c.verb, c.group, c.resource, c.sub, c.ns); got != c.want {
 			t.Errorf("%s %s %s/%s %q in %q: allowed=%v, want %v", c.id, c.verb, c.group, c.resource, c.sub, c.ns, got, c.want)
 		}
+	}
+}
+
+// TestAnalyzerGrantsNothingOnSecrets checks that the analyzer holds no permission at all on Secrets (design
+// 10.3, invariant 6). Kubernetes RBAC has no metadata-only verb: get, list or watch on secrets, also through
+// the metadata API, returns the data, so the missing Secret check (internal/analyzer/refcheck) infers its
+// answer from pod status and Events instead. The API server is asked for every verb in every namespace,
+// cluster-wide included, and every Role and ClusterRole in config/rbac/analyzer is read, so a rule that names
+// secrets, or any resource or group by wildcard, fails the test even before it is bound.
+func TestAnalyzerGrantsNothingOnSecrets(t *testing.T) {
+	verbs := []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"}
+	for _, ns := range []string{operatorNS, otherNS, unwatched, ""} {
+		for _, verb := range verbs {
+			if can(t, analyzer, verb, "", "secrets", "", ns) {
+				t.Errorf("analyzer may %s secrets in %q", verb, ns)
+			}
+		}
+	}
+
+	var files []string
+	root := filepath.Join("..", "..", "config", "rbac", analyzer)
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(path, ".yaml") {
+			files = append(files, path)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	roles := 0
+	for _, path := range files {
+		for _, u := range decodeAll(t, path) {
+			var rules []rbacv1.PolicyRule
+			switch u["kind"] {
+			case kindRole:
+				var r rbacv1.Role
+				if err := decodeInto(u, &r); err != nil {
+					t.Fatalf("%s: %v", path, err)
+				}
+				rules = r.Rules
+			case kindCR:
+				var r rbacv1.ClusterRole
+				if err := decodeInto(u, &r); err != nil {
+					t.Fatalf("%s: %v", path, err)
+				}
+				if r.AggregationRule != nil {
+					t.Errorf("%s: ClusterRole %s aggregates other roles, whose rules this test cannot see", path, r.Name)
+				}
+				rules = r.Rules
+			default:
+				continue
+			}
+			roles++
+			for _, rule := range rules {
+				core := slices.Contains(rule.APIGroups, "") || slices.Contains(rule.APIGroups, "*")
+				if core && (slices.Contains(rule.Resources, "secrets") || slices.Contains(rule.Resources, "*")) {
+					t.Errorf("%s: a rule grants %v on %v in groups %q", path, rule.Verbs, rule.Resources, rule.APIGroups)
+				}
+			}
+		}
+	}
+	// role.yaml (a Role and a ClusterRole), leader_election.yaml and watch/role.yaml: a test that read no role
+	// would pass for nothing.
+	if roles < 4 {
+		t.Fatalf("read %d roles in %s, want at least 4", roles, root)
 	}
 }
 

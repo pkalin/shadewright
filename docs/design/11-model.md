@@ -69,9 +69,19 @@ At most one escalation per incident fingerprint per cooldown window. A runbook m
 - Out: `Content` (a string), tool calls, `Usage` and a `Model` field.
 - Throttling and unavailability come back as `ErrRetryable`.
 
-Today only the interface and a fake exist.
+<span class="sw-status sw-built">built</span> The interface, a fake and the Foundry adapter for OpenAI-format models (`internal/providers/model/foundry`, [#75](https://github.com/pkalin/shadewright/issues/75)). The adapter:
 
-**Planned.** A deployment field, typed malformed-output and timeout errors, and usage reported on failure (11.1). Also Foundry adapters for the OpenAI and Anthropic families.
+- is bound to one endpoint, deployment and API version, the fields of `spec.analysis.models` (rule 5); there is no fallback to another deployment;
+- authenticates with workload identity through Entra ID, with the standard library, and sends a token only when its audience is Cognitive Services;
+- gives every call a deadline and each attempt its own, and retries network failures, timeouts, 408, 429 and 5xx a bounded number of times with backoff, honouring `retry-after-ms` and `Retry-After`;
+- returns an unknown deployment (404) as `ErrNotFound`, and a refused identity (401, 403) as `ErrForbidden`;
+- reads at most 1 MiB of a reply and checks it as untrusted input. A reply cut off, filtered or refused, content that is not a JSON object when a schema was sent, or a call of a tool the request did not offer is `ErrMalformedOutput`, returned with the reply's usage because it was billed;
+- reports the token usage of every call (input, cached input and output) with the reply and to an `OnCall` hook;
+- puts no URL, token, prompt or reply text in its errors and logs nothing.
+
+`go test -tags foundrysmoke` runs it against a real deployment by hand (see the package documentation).
+
+**Planned.** Wiring the adapter into the analysis loop with the endpoint guard above (#76). A deployment field on the request and a typed timeout error. A Foundry adapter for the Anthropic family.
 
 ### Evaluation gate
 

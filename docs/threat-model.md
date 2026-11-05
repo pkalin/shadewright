@@ -68,7 +68,7 @@ flowchart TB
 | Party | Trusted for | Not trusted for | State |
 | --- | --- | --- | --- |
 | Analyzer | Nothing that changes anything: it reads, proposes and writes the detection report to the settings status, which nothing reads to decide | Any of its output as authorization; it can only create a request | Binary, RBAC, collector, Incident controller, analysis trigger and platform detection built; analysis planned (#76) |
-| Model | Nothing | Anything: its output is untrusted input to the analyzer | Planned (#75, #76) |
+| Model | Nothing | Anything: its output is untrusted input to the analyzer | Foundry adapter built: replies bounded and checked, malformed output refused (#75); analysis planned (#76) |
 | Executor | Writing the decision (request status) and holding the Git identity | Choosing what to change: it applies what policy decided | Policy check, source mapping, freshness check and the pull request step built: branch, commit and pull request up to a person's review, closing the pull request of a stale plan (G3.3) |
 | API server and RBAC | Enforcing the CRD schema, CEL rules, RBAC and the status subresource | Nothing beyond that: it cannot judge whether a plan is wise | Kubernetes |
 | Git host (GitHub) | Enforcing the repository's rulesets, scoping installation tokens | The content and size of its responses, which the adapter bounds | GitHub |

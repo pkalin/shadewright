@@ -86,6 +86,9 @@ type Completion struct {
 
 // ModelProvider calls a language model.
 type ModelProvider interface {
-	// Complete sends one request. Throttling and unavailability are returned as retryable errors.
+	// Complete sends one request. Throttling and unavailability are returned as retryable errors. A reply
+	// that breaks the request's contract is an error matching ErrMalformedOutput; the Completion returned
+	// with it carries the Usage and Model of that reply (the call was billed) and nothing else. With any
+	// other error the Completion is empty.
 	Complete(ctx context.Context, req CompletionRequest) (Completion, error)
 }

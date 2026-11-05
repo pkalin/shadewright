@@ -50,6 +50,11 @@ var (
 	// branch name or pull request it does not accept) and the adapter could not resolve the refusal by reading
 	// the state. It is permanent: the same request fails the same way.
 	ErrRejected = errors.New("rejected")
+	// ErrMalformedOutput means a model answered, but its reply breaks the contract of the request: it was cut
+	// off at the output limit, filtered or refused, is not the JSON object a response schema asked for, or
+	// calls a tool the request did not offer. The call was billed, so the [ModelProvider] returns the reply's
+	// Usage with it. It is not retryable as such: whether to ask once more is the caller's decision (ADR-0023).
+	ErrMalformedOutput = errors.New("malformed model output")
 )
 
 // RetryableError is a transient failure with an optional delay requested by the remote system, for example
@@ -98,6 +103,9 @@ func IsForbidden(err error) bool { return errors.Is(err, ErrForbidden) }
 
 // IsRejected reports whether err means the host refused the request as invalid.
 func IsRejected(err error) bool { return errors.Is(err, ErrRejected) }
+
+// IsMalformedOutput reports whether err means a model's reply broke the contract of the request.
+func IsMalformedOutput(err error) bool { return errors.Is(err, ErrMalformedOutput) }
 
 // RetryAfter returns the delay requested by the remote system, if err carries one.
 func RetryAfter(err error) (time.Duration, bool) {

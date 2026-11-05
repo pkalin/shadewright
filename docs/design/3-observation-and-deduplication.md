@@ -39,7 +39,8 @@ Events detect symptoms; they are not a durable audit log. The collector keeps wh
 - the subject;
 - the occurrence (an event UID, a hash naming one container termination, or a hash naming one symptom state of a module symptom source);
 - the occurrence's total as the cluster reports it;
-- the new occurrence count, and when it happened (never later than the collector's clock).
+- the new occurrence count, and when it happened (never later than the collector's clock);
+- whether it is *immediate*: it opens its Incident at its first sighting instead of waiting to be seen again (3.2). Only a container termination read from pod status with the reason `OOMKilled` is. An event never is, whatever its reason, because whoever can create events in a watched namespace writes the reason. Module symptom sources would declare their own immediate reasons, but the collector does not read them yet, so they declare none.
 
 The new count is at most 1,000 per observation: a series count is written by whoever can create events, so one forged jump adds at most that much (each further update as much again). No raw note leaves the collector. Observations go to a bounded channel read by the Incident controller; when it stays full, the reconcile tries again later without recording anything as handled.
 
@@ -118,6 +119,22 @@ Both are pure functions in `internal/incidents/fingerprint`:
 - It cuts the symptom to the 1024 characters `spec.symptom` allows.
 - Every field is length-prefixed in the hash, and a version string is hashed first so that changed rules give new fingerprints instead of merging old and new incidents.
 
+### When a symptom opens an Incident
+
+<span class="sw-status sw-built">built</span> Decided on 2026-11-05 ([#267](https://github.com/pkalin/shadewright/issues/267)). In the v0.1.0 lab run, the first minute after Flux applied a healthy baseline opened four Incidents, each with a count of 1: Warnings from a KEDA scaler and an HPA reading metrics while Prometheus was still starting. Ten minutes later everything was healthy and the Incidents were still open. So a symptom must recur before it opens an Incident:
+
+- An observation of a fingerprint that has no Incident is held in memory as a **first sighting**. It opens the Incident when the symptom is seen again **at least 2 minutes and at most 15 minutes** after the first sighting (`RecurAfter`, `RecurWithin` in `internal/incidents`), by the Incident controller's clock. Every sighting held is then counted, in order, so the Incident's count and `firstSeen` include the first one.
+- A sighting before 2 minutes is held too and keeps waiting: a burst within seconds is not a recurrence. One after 15 minutes starts over as a new first sighting, and the old one is forgotten. A symptom seen once opens nothing.
+- **Immediate** observations open their Incident at once, as before: a container `OOMKilled` read from pod status (3.1). The set is explicit and kept small.
+- Once the Incident exists, every observation is counted at once. Closing an Incident whose symptom has stopped is the lifecycle's rule (see [Incident lifecycle](#incident-lifecycle), #251), not this one.
+
+**Memory only, bounded.** First sightings live in the analyzer's memory, never in a CR, and a restart forgets them. That is safe: a real symptom recurs, and its Incident opens up to 15 minutes later than it would have.
+
+- At most 4,096 fingerprints are held (`Config.MaxFirstSightings`, the size of the collector's owner cache); when that is full, the oldest first sighting is forgotten and its symptom starts over. So a flood of distinct one-off fingerprints cannot grow the memory, only delay other symptoms' Incidents.
+- At most 4 observations are held per fingerprint, sharing one copy of the symptom, about 12 MiB for all of them at most. A further sighting before 2 minutes is not held, so it is not counted when the Incident opens (an undercount).
+- First sightings older than 15 minutes are dropped on the writer's tick. The gauge `shadewright_incident_first_sightings_held` reports how many are held.
+- The cap on Incidents applies when a sighting opens one, not when it is held.
+
 ### Timing values
 
 Starting values, to be tuned on real traffic:
@@ -125,6 +142,7 @@ Starting values, to be tuned on real traffic:
 | Mechanism | MVP value |
 | --- | --- |
 | Debounce before analysis | 45 s (30-60 s) |
+| A symptom opens an Incident when seen again (not immediate) | 2 to 15 min after its first sighting |
 | Aggregation window for similar observations | 5 min |
 | Longest wait to settle, from the first unsettled observation | 5 min (the aggregation window) |
 | Cooldown before any re-analysis, new symptom and lost analysis included | 15 min |
@@ -138,7 +156,7 @@ Starting values, to be tuned on real traffic:
 
 **Batching.** The Incident controller runs in the analyzer, in the leader only, and writes in batches.
 
-- The first observation of an Incident in a process is written at once. Later ones are gathered and written once per aggregation window (5 min), so a burst costs a few writes, not one per observation.
+- The observations that open an Incident, or the first one of an existing Incident in a process, are written at once. Later ones are gathered and written once per aggregation window (5 min), so a burst costs a few writes, not one per observation.
 - Writes run apart from the consumption of observations, so a slow API server delays the writes, not the collector.
 - Each write reads the Incident from the API server, not the cache, and retries on a conflict.
 
@@ -286,7 +304,7 @@ Decided on 2026-11-05 ([#251](https://github.com/pkalin/shadewright/issues/251))
 
 | From phase | Event | To phase | Written by | State |
 | --- | --- | --- | --- | --- |
-| none | first observation of a fingerprint is written | `Open` | Incident controller (analyzer) | Built |
+| none | a symptom seen again 2 to 15 min after its first sighting, or an immediate one (`OOMKilled`), is written | `Open` | Incident controller (analyzer) | Built |
 | `Open` | the trigger marks it due and the analysis starts | `Analyzing` | analyzer (analysis, #16) | Planned |
 | `Analyzing` | the analysis produced a RemediationRequest | `Proposed` | analyzer | Planned |
 | `Analyzing` | the analysis made no proposal | `Escalated` | analyzer | Planned |
@@ -307,7 +325,7 @@ A person fixing the cause by hand needs no step of its own: the symptom stops, a
 ```mermaid
 stateDiagram-v2
     classDef planned stroke-dasharray: 5 5
-    [*] --> Open: first observation written
+    [*] --> Open: symptom recurs or is immediate
     Open --> Analyzing: due, analysis starts
     Analyzing --> Proposed: request created
     Analyzing --> Escalated: no proposal

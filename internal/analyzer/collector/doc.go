@@ -22,7 +22,9 @@ limitations under the License.
 // termination (OOMKilled or a non-zero exit code). OOMKilled comes from container status, never from an
 // event reason, so the pod watch is how it is seen. There is no core/v1 Event watch: those are the same
 // objects in an older version, and watching both would count each event twice. Both watches use the
-// manager's cache, which the analyzer restricts to the watched namespaces.
+// manager's cache, which the analyzer restricts to the watched namespaces. A termination OOMKilled is
+// marked Immediate, so its Incident opens at its first sighting; every other symptom, events included
+// whatever their reason, waits to be seen again (package incidents).
 //
 // Observation-level deduplication: per event the collector remembers the UID and the last handled
 // occurrence count (the series count, or the count of an older recorder, or one), and emits only the

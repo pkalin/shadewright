@@ -23,6 +23,15 @@ limitations under the License.
 // occurrencesDroppedThrough. Nothing from the cluster goes into the Incident beyond the subject, the reason
 // and the normalized, redacted symptom the collector computed.
 //
+// A symptom opens its Incident only when it recurs or is immediate (#267). A fingerprint without an
+// Incident is held in memory as a first sighting and opens its Incident when it is seen again at least
+// [RecurAfter] (2 minutes) and at most [RecurWithin] (15 minutes) after the first sighting, with every
+// sighting held counted; a sighting before 2 minutes keeps waiting, one after 15 minutes starts over, and a
+// symptom seen once opens nothing. An observation the collector marks Immediate (a container OOMKilled in
+// pod status) opens its Incident at once. First sightings are bounded (Config.MaxFirstSightings, 4,096,
+// oldest forgotten first, at most 4 observations each), forgotten after 15 minutes and on a restart, and
+// counted in the gauge shadewright_incident_first_sightings_held.
+//
 // Writes are batched: the first observation of an Incident is written at once, and the ones that follow
 // within the aggregation window (5 minutes) go into one status write after it. Writes run in their own
 // goroutine, so a slow API server does not hold up the observations. Each write reads the Incident fresh

@@ -216,7 +216,8 @@ func startWith(t *testing.T, ns string, cfg Config, setup func(*Controller, *cou
 
 func fp(n int) string { return fmt.Sprintf("sha256:%064x", n) }
 
-// observation returns an observation of fingerprint fp(f), occurrence eventID(i).
+// observation returns an observation of fingerprint fp(f), occurrence eventID(i). It is Immediate, so the
+// tests of counting and writing need no second sighting; sightings_test.go covers what waits for one.
 func observation(f, i int, total, count int64, began time.Time) collector.Observation {
 	return collector.Observation{
 		Fingerprint: fp(f),
@@ -227,7 +228,7 @@ func observation(f, i int, total, count int64, began time.Time) collector.Observ
 		Source: "demo",
 		Reason: "BackOff", Type: corev1.EventTypeWarning, ReportingController: "kubelet",
 		Symptom:    "Back-off restarting failed container worker",
-		Occurrence: eventID(i), Total: total, Count: count, Began: began, ObservedAt: began,
+		Occurrence: eventID(i), Total: total, Count: count, Began: began, ObservedAt: began, Immediate: true,
 	}
 }
 

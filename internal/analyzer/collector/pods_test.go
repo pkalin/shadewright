@@ -324,3 +324,33 @@ func TestRebuiltPodStateKeepsTheStartBound(t *testing.T) {
 		t.Fatalf("pending after a rebuilt state = %+v, want the second termination marked mayRepeat", got)
 	}
 }
+
+// TestOnlyOOMKilledFromStatusIsImmediate checks the immediate set (#267): a container OOMKilled in pod status
+// opens an Incident at once; another termination, and an event that only names OOMKilled as its reason, do
+// not.
+func TestOnlyOOMKilledFromStatusIsImmediate(t *testing.T) {
+	d, rs, pod := workload()
+	withTermination(pod, "containerd://oom", ReasonOOMKilled, 137, t0)
+	h := newHarness(t, Config{}, d, rs, pod)
+	h.reconcilePod(pod.Name)
+	if got := h.one(); !got.Immediate {
+		t.Errorf("OOMKilled from pod status: Immediate = false, want true")
+	}
+
+	pod.Status.ContainerStatuses[0].State.Terminated = &corev1.ContainerStateTerminated{
+		ContainerID: "containerd://crash", Reason: reasonError, ExitCode: 1, FinishedAt: metav1.NewTime(t0),
+	}
+	h.update(pod)
+	h.reconcilePod(pod.Name)
+	if got := h.one(); got.Immediate {
+		t.Errorf("a crash with exit code 1: Immediate = true, want false")
+	}
+
+	ev := warning("forged-oom", 0)
+	ev.Reason = ReasonOOMKilled
+	h.create(ev)
+	h.reconcileEvent(ev.Name)
+	if got := h.one(); got.Immediate {
+		t.Errorf("an event with reason OOMKilled: Immediate = true, want false")
+	}
+}

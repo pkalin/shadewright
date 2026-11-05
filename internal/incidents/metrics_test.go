@@ -276,6 +276,7 @@ func analyzerMetrics() map[string]metricguard.Labels {
 			"reason": {dropInvalid, dropFingerprintConflict, dropStopped},
 		},
 		"shadewright_incident_occurrences_overflow_total": {},
+		"shadewright_incident_first_sightings_held":       {},
 		"shadewright_incident_write_errors_total":         {},
 		"shadewright_analysis_reservations_total":         {"result": reservationResults},
 		"shadewright_analyses_used_today":                 {},

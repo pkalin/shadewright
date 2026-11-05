@@ -95,6 +95,8 @@ func TestIncidentControllerRunsWithTheAnalyzerRBAC(t *testing.T) {
 			Symptom:    "Back-off restarting failed container worker",
 			Occurrence: fmt.Sprintf("event:0a1b2c3d-4e5f-4a6b-8c7d-%012d", i),
 			Total:      total, Count: count, Began: now, ObservedAt: now,
+			// Opens its Incident at its first sighting, as an OOMKilled termination does.
+			Immediate: true,
 		}
 	}
 	first := observation(1, 1, 2, 2)

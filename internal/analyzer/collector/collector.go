@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -113,6 +114,24 @@ type Observation struct {
 	// occurrences at least as old to stay within its bounds, and no HandledFunc settled it. The consumer must
 	// then count Increase(what it already counted for this Occurrence).
 	MayRepeat bool
+	// Immediate is set when the symptom opens an Incident at its first sighting instead of waiting to be
+	// seen again (design 3.2, #267). Only the collector sets it, from what it read itself: a container
+	// termination in pod status whose reason is OOMKilled. An event never sets it, whatever its reason,
+	// because whoever can create events in a watched namespace writes the reason.
+	Immediate bool
+}
+
+// immediateTerminationReasons are the container termination reasons, read from pod status, that open an
+// Incident at their first sighting: OOMKilled, because a container killed for its memory is a fault on its
+// own, not noise of a cluster that is starting. The set is kept small on purpose; every other symptom opens
+// an Incident only when it is seen again (package incidents). Module symptom sources declare no immediate
+// reason, because the collector does not watch them yet.
+var immediateTerminationReasons = []string{ReasonOOMKilled}
+
+// immediateTermination reports whether a termination reason read from pod status is in
+// immediateTerminationReasons.
+func immediateTermination(reason string) bool {
+	return slices.Contains(immediateTerminationReasons, reason)
 }
 
 // Increase returns how many of the occurrence's Total are new when handled of them were counted before:

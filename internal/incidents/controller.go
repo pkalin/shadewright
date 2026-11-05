@@ -140,6 +140,10 @@ type Config struct {
 	// DefaultNamespaceShareDivisor and MaxPendingOccurrencesPerIncident, so the share never lowers the cap of
 	// one Incident; any value is then taken down to MaxPendingOccurrences, and is at least one.
 	MaxPendingOccurrencesPerNamespace int
+	// MaxFirstSightings bounds the fingerprints held in memory as first sightings, waiting to be seen again
+	// before they open an Incident (RecurAfter, RecurWithin); zero takes DefaultMaxFirstSightings. When it is
+	// full the oldest first sighting is forgotten, and that symptom starts over.
+	MaxFirstSightings int
 	// Debounce, SettleLimit, Cooldown, AnalysisTimeout and TriggerInterval drive the analysis trigger
 	// ([Due]): how long an Incident must go without a new observation, the longest it waits to settle after
 	// its first unsettled observation (the aggregation window by default), the least time between the start
@@ -203,6 +207,8 @@ type Controller struct {
 	// write are pruned.
 	nextWrite map[string]time.Time
 	refused   *boundedSet
+	// sightings holds the first sightings of fingerprints without an Incident (RecurAfter, RecurWithin).
+	sightings *sightings
 	// waiting holds, per Incident name, when the analysis trigger first saw the Incident waiting only to
 	// settle or for budget ([Controller.rememberWaiting]). Only the trigger goroutine uses it.
 	waiting map[string]time.Time
@@ -288,6 +294,9 @@ func New(cfg Config) (*Controller, error) {
 		return nil, fmt.Errorf("incidents: the budget read timeout %s must be shorter than the trigger pass timeout %s",
 			cfg.ReadTimeout, cfg.PassTimeout)
 	}
+	if cfg.MaxFirstSightings <= 0 {
+		cfg.MaxFirstSightings = DefaultMaxFirstSightings
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -304,6 +313,7 @@ func New(cfg Config) (*Controller, error) {
 		kick:      make(chan struct{}, 1),
 		nextWrite: map[string]time.Time{},
 		refused:   newBoundedSet(refusedRemembered),
+		sightings: newSightings(cfg.MaxFirstSightings),
 		waiting:   map[string]time.Time{},
 	}, nil
 }
@@ -383,6 +393,9 @@ func (c *Controller) writeLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		}
+		c.mu.Lock()
+		c.sightings.expire(c.cfg.Now())
+		c.mu.Unlock()
 		c.flushDue(ctx, false)
 	}
 }
@@ -511,25 +524,51 @@ func (c *Controller) handled(occurrence string, began time.Time) (int64, bool) {
 	return 0, false
 }
 
-// consume counts one observation into the pending batch of its Incident. An observation marked MayRepeat
-// counts Increase of what Handled would answer. Any other counts its Count (the collector knows that much
-// is new), but never more than Increase of the occurrence's record, so an occurrence another process
-// already counted is not counted again; the drop bound does not apply to it. A new fingerprint at the cap
-// is refused. A new occurrence over the caps on occurrences held unwritten is not counted ([Config]); its
-// observation only moves the batch's first and last seen, so the Incident is still written.
+// consume counts one observation into the pending batch of its Incident, once the Incident exists or the
+// observation opens it. An observation of a fingerprint without an Incident that is not Immediate is held
+// as a first sighting until the symptom is seen again ([RecurAfter], [RecurWithin]); the sighting that opens
+// the Incident counts every observation held for it, in order. An observation with nothing new to count is
+// neither held nor counted.
 //
 // It reports whether the batch is due at once: the Incident has not been written by this process yet.
 func (c *Controller) consume(ctx context.Context, o collector.Observation) bool {
 	o.Began = o.Began.Truncate(time.Second)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	n := o.Count
+	if c.increase(o) <= 0 {
+		return false
+	}
+	if _, ok := c.names[Name(o.Fingerprint)]; ok || o.Immediate {
+		return c.count(ctx, o)
+	}
+	due := false
+	for _, h := range c.sightings.admit(o, c.cfg.Now()) {
+		due = c.count(ctx, h) || due
+	}
+	return due
+}
+
+// increase returns how much of o is new. An observation marked MayRepeat counts Increase of what Handled
+// would answer. Any other counts its Count (the collector knows that much is new), but never more than
+// Increase of the occurrence's record, so an occurrence another process already counted is not counted
+// again; the drop bound does not apply to it. The caller holds mu.
+func (c *Controller) increase(o collector.Observation) int64 {
 	if o.MayRepeat {
 		handled, _ := c.handled(o.Occurrence, o.Began)
-		n = o.Increase(handled)
-	} else if r, ok := c.records[o.Occurrence]; ok {
-		n = min(n, o.Increase(r.total))
+		return o.Increase(handled)
 	}
+	if r, ok := c.records[o.Occurrence]; ok {
+		return min(o.Count, o.Increase(r.total))
+	}
+	return o.Count
+}
+
+// count counts one observation into the pending batch of its Incident, creating the Incident's place under
+// the cap when it has none. A new fingerprint at the cap is refused. A new occurrence over the caps on
+// occurrences held unwritten is not counted ([Config]); its observation only moves the batch's first and
+// last seen, so the Incident is still written. It reports what consume does. The caller holds mu.
+func (c *Controller) count(ctx context.Context, o collector.Observation) bool {
+	n := c.increase(o)
 	if n <= 0 {
 		return false
 	}

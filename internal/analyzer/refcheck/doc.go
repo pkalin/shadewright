@@ -29,8 +29,8 @@ limitations under the License.
 //   - a container (or init container) of the pod waiting with reason CreateContainerConfigError and a message
 //     that is exactly the kubelet's error for that container's own non-optional env or envFrom reference: the
 //     object not found, or a referenced key not in it;
-//   - a Warning FailedMount Event from the kubelet about this pod (same namespace, name and UID), while the pod
-//     is Pending, whose note is exactly the kubelet's error for one of the pod's own non-optional secret,
+//   - a Warning FailedMount Event from the kubelet about this pod (same namespace, name and UID), last observed
+//     within [EventWindow], while the pod is Pending, whose note is exactly the kubelet's error for one of the pod's own non-optional secret,
 //     configMap or projected volume sources: the object not found.
 //
 // Untrusted input (invariant 4): the pod status and every Event field are untrusted; anyone who may create

@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
@@ -89,6 +90,14 @@ type Result struct {
 	Volume string
 }
 
+// EventWindow is how recent a FailedMount Event must be to count, by its last observation. A mount that still
+// fails keeps its Event fresh: the kubelet retries a failed mount at least every 2m2s
+// (pkg/util/goroutinemap/exponentialbackoff maxDurationBeforeRetry), and client-go's recorder lets at least
+// one Event or count update per object through every 5 minutes once its burst of 25 is spent
+// (tools/record/events_cache.go defaultSpamBurst and defaultSpamQPS). An older Event may be about a mount
+// that has since succeeded while the pod waits for something else.
+const EventWindow = 10 * time.Minute
+
 // maxMessage is the longest status message or Event note the check compares, in bytes. The texts it looks
 // for are far shorter: a longer message is never one of them, and is not scanned.
 const maxMessage = 4096
@@ -144,9 +153,10 @@ func missingKeyText(kind Kind, namespace, name, key string) string {
 }
 
 // Check answers whether the object of kind and name, as the pod references it, is missing. events are the
-// Events the analyzer read in the pod's namespace; those about other objects are skipped. name is untrusted
-// (it may come from a model) and is only compared with the names in the pod spec.
-func Check(pod *corev1.Pod, events []eventsv1.Event, kind Kind, name string) Result {
+// Events the analyzer read in the pod's namespace; those about other objects, and those last observed more
+// than [EventWindow] before now, are skipped. name is untrusted (it may come from a model) and is only
+// compared with the names in the pod spec.
+func Check(pod *corev1.Pod, events []eventsv1.Event, kind Kind, name string, now time.Time) Result {
 	if kind != KindSecret && kind != KindConfigMap {
 		return Result{Answer: Unknown}
 	}
@@ -162,7 +172,7 @@ func Check(pod *corev1.Pod, events []eventsv1.Event, kind Kind, name string) Res
 	if r, ok := fromStatus(pod, kind, name, refs); ok {
 		return r
 	}
-	if r, ok := fromEvents(pod, events, kind, name, refs); ok {
+	if r, ok := fromEvents(pod, events, kind, name, refs, now); ok {
 		return r
 	}
 	return unknown
@@ -290,9 +300,10 @@ func fromStatus(pod *corev1.Pod, kind Kind, name string, r refs) (Result, bool) 
 	return Result{}, false
 }
 
-// fromEvents looks for a kubelet FailedMount Event about this pod whose note is the kubelet's error for one
-// of the pod's own volumes that reference the object. Only a Pending pod is checked: a volume that failed to
-// mount keeps the pod Pending, so on a running pod such an Event is old.
+// fromEvents looks for a recent kubelet FailedMount Event about this pod whose note is the kubelet's error for
+// one of the pod's own volumes that reference the object. Only a Pending pod is checked: a volume that failed
+// to mount keeps the pod Pending, so on a running pod such an Event is old. An Event last observed before
+// now - [EventWindow], or with no time at all, is skipped too.
 //
 // The note's shape: pkg/volume/util/operationexecutor/operation_generator.go GenerateMountVolumeFunc records
 // VolumeToMount.GenerateError("MountVolume.SetUp failed", err), which operation_executor.go generateVolumeMsg
@@ -301,14 +312,14 @@ func fromStatus(pod *corev1.Pod, kind Kind, name string, r refs) (Result, bool) 
 // pkg/volume/configmap/configmap.go SetUpAt); for a projected volume it is
 // apimachinery's errors.NewAggregate of the sources' errors (pkg/volume/projected/projected.go collectData),
 // which is the error itself when there is one, or `[<err>, <err>]` when there are several different ones.
-func fromEvents(pod *corev1.Pod, events []eventsv1.Event, kind Kind, name string, r refs) (Result, bool) {
+func fromEvents(pod *corev1.Pod, events []eventsv1.Event, kind Kind, name string, r refs, now time.Time) (Result, bool) {
 	if len(r.volumes) == 0 || pod.Status.Phase != corev1.PodPending || pod.UID == "" {
 		return Result{}, false
 	}
 	texts := notFoundTexts(kind, name)
 	for i := range events {
 		ev := &events[i]
-		if !aboutPod(ev, pod) || len(ev.Note) > maxMessage {
+		if !aboutPod(ev, pod) || len(ev.Note) > maxMessage || lastObserved(ev).Before(now.Add(-EventWindow)) {
 			continue
 		}
 		note := strings.TrimPrefix(ev.Note, combinedPrefix)
@@ -325,6 +336,19 @@ func fromEvents(pod *corev1.Pod, events []eventsv1.Event, kind Kind, name string
 		}
 	}
 	return Result{}, false
+}
+
+// lastObserved is the latest time the Event says it was seen: its series' last observation, its event time,
+// or the time the core/v1 API kept (deprecatedLastTimestamp). It is the zero time when it has none.
+func lastObserved(ev *eventsv1.Event) time.Time {
+	t := ev.EventTime.Time
+	if ev.Series != nil && ev.Series.LastObservedTime.After(t) {
+		t = ev.Series.LastObservedTime.Time
+	}
+	if ev.DeprecatedLastTimestamp.After(t) {
+		t = ev.DeprecatedLastTimestamp.Time
+	}
+	return t
 }
 
 // aboutPod reports whether ev is a kubelet Warning FailedMount Event about pod, by namespace, name and UID.

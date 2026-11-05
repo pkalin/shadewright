@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
@@ -105,15 +106,20 @@ func waiting(p *corev1.Pod, init bool, container, reason, message string) *corev
 	return p
 }
 
+// now is the time of the tests; kubeletEvent's Events were last observed a minute before it, and so was the
+// recorded one in testdata.
+var now = time.Date(2026, 11, 3, 8, 15, 16, 0, time.UTC)
+
 // kubeletEvent is a FailedMount event as the kubelet writes it about testPod, read through events.k8s.io/v1.
 func kubeletEvent(note string) eventsv1.Event {
 	return eventsv1.Event{
-		ObjectMeta:          metav1.ObjectMeta{Namespace: ns, Name: podName + ".18a1b2c3d4e5f606"},
-		ReportingController: "kubelet",
-		Reason:              "FailedMount",
-		Type:                "Warning",
-		Regarding:           corev1.ObjectReference{APIVersion: "v1", Kind: "Pod", Namespace: ns, Name: podName, UID: podUID},
-		Note:                note,
+		DeprecatedLastTimestamp: metav1.NewTime(now.Add(-time.Minute)),
+		ObjectMeta:              metav1.ObjectMeta{Namespace: ns, Name: podName + ".18a1b2c3d4e5f606"},
+		ReportingController:     "kubelet",
+		Reason:                  "FailedMount",
+		Type:                    "Warning",
+		Regarding:               corev1.ObjectReference{APIVersion: "v1", Kind: "Pod", Namespace: ns, Name: podName, UID: podUID},
+		Note:                    note,
 	}
 }
 
@@ -129,7 +135,7 @@ func TestRecordedFailedMountEvent(t *testing.T) {
 	if err := json.Unmarshal(b, &ev); err != nil {
 		t.Fatal(err)
 	}
-	got := Check(testPod(), []eventsv1.Event{ev}, KindSecret, secret)
+	got := Check(testPod(), []eventsv1.Event{ev}, KindSecret, secret, now)
 	want := Result{Answer: Missing, Kind: KindSecret, Name: secret, Referenced: true, What: WhatObject,
 		Source: SourceEvent, Volume: creds}
 	if got != want {
@@ -160,7 +166,7 @@ func TestMissingFromContainerStatus(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := Check(c.pod, nil, c.kind, c.ref)
+			got := Check(c.pod, nil, c.kind, c.ref, now)
 			want := Result{Answer: Missing, Kind: c.kind, Name: c.ref, Referenced: true, What: c.what,
 				Source: SourceContainerStatus, Key: c.key, Container: c.container}
 			if got != want {
@@ -184,7 +190,7 @@ func TestMissingFromFailedMountEvent(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := Check(testPod(), []eventsv1.Event{kubeletEvent(c.note)}, c.kind, c.ref)
+			got := Check(testPod(), []eventsv1.Event{kubeletEvent(c.note)}, c.kind, c.ref, now)
 			want := Result{Answer: Missing, Kind: c.kind, Name: c.ref, Referenced: true, What: WhatObject,
 				Source: SourceEvent, Volume: c.volume}
 			if got != want {
@@ -219,9 +225,44 @@ func TestUnknownWithoutEvidence(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := Check(c.pod, c.events, c.kind, c.ref)
+			got := Check(c.pod, c.events, c.kind, c.ref, now)
 			if got.Answer != Unknown || got.Referenced != c.refd || got.What != "" || got.Source != "" {
 				t.Errorf("got %+v, want Unknown with Referenced %v and no evidence", got, c.refd)
+			}
+		})
+	}
+}
+
+// TestEventWindow: a FailedMount Event counts only when it was last observed within EventWindow, by its
+// series, its event time or its core/v1 last timestamp. An older one may be about a mount that has since
+// succeeded while the pod stays Pending for another reason.
+func TestEventWindow(t *testing.T) {
+	const note = `MountVolume.SetUp failed for volume "creds" : secret "db-creds" not found`
+	old := metav1.NewTime(now.Add(-EventWindow - time.Second))
+	cases := []struct {
+		name string
+		set  func(*eventsv1.Event)
+		want Answer
+	}{
+		{"recent last timestamp", func(*eventsv1.Event) {}, Missing},
+		{"old last timestamp", func(e *eventsv1.Event) { e.DeprecatedLastTimestamp = old }, Unknown},
+		{"no time at all", func(e *eventsv1.Event) { e.DeprecatedLastTimestamp = metav1.Time{} }, Unknown},
+		{"old event time, recent series", func(e *eventsv1.Event) {
+			e.DeprecatedLastTimestamp = metav1.Time{}
+			e.EventTime = metav1.NewMicroTime(old.Time)
+			e.Series = &eventsv1.EventSeries{Count: 9, LastObservedTime: metav1.NewMicroTime(now.Add(-time.Minute))}
+		}, Missing},
+		{"recent event time", func(e *eventsv1.Event) {
+			e.DeprecatedLastTimestamp = metav1.Time{}
+			e.EventTime = metav1.NewMicroTime(now.Add(-time.Minute))
+		}, Missing},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ev := kubeletEvent(note)
+			c.set(&ev)
+			if got := Check(testPod(), []eventsv1.Event{ev}, KindSecret, secret, now); got.Answer != c.want {
+				t.Errorf("got %+v, want %s", got, c.want)
 			}
 		})
 	}
@@ -231,7 +272,7 @@ func TestUnknownWithoutEvidence(t *testing.T) {
 // in a status does not make an optional reference missing.
 func TestOptionalOnlyReferenceIsUnknown(t *testing.T) {
 	p := waiting(testPod(), false, app, "CreateContainerConfigError", `secret "admin-token" not found`)
-	if got := Check(p, nil, KindSecret, other); got.Answer != Unknown {
+	if got := Check(p, nil, KindSecret, other, now); got.Answer != Unknown {
 		t.Errorf("got %+v, want Unknown", got)
 	}
 }
@@ -284,7 +325,7 @@ func TestCraftedInputCannotNameUnreferencedObjects(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := Check(c.pod, c.events, KindSecret, c.ref)
+			got := Check(c.pod, c.events, KindSecret, c.ref, now)
 			if got.Answer != Unknown {
 				t.Errorf("got %+v, want Unknown", got)
 			}
@@ -351,7 +392,7 @@ func FuzzCheck(f *testing.F) {
 			kind = KindSecret
 		}
 		p := waiting(testPod(), false, container, "CreateContainerConfigError", message)
-		got := Check(p, []eventsv1.Event{kubeletEvent(note)}, kind, ref)
+		got := Check(p, []eventsv1.Event{kubeletEvent(note)}, kind, ref, now)
 		if got.Answer != Missing && got.Answer != Unknown {
 			t.Fatalf("answer %q", got.Answer)
 		}

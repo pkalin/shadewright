@@ -169,3 +169,37 @@ Takes a dict with .component ("executor" or "analyzer") and .context. Renders no
 {{- end -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+The DNS egress rule of networkPolicy.dns: the one rule the analyzer and executor NetworkPolicies and the helm test
+hook's NetworkPolicy all use, so the test passes only if the workloads can resolve too. Mode "kubeDns" (default)
+selects the kube-dns Pods in kube-system; mode "resolverCIDRs" selects the listed resolver addresses (NodeLocal
+DNSCache). Port 53 over UDP and TCP in both.
+*/}}
+{{- define "shadewright.dnsEgressRule" -}}
+{{- $dns := .Values.networkPolicy.dns -}}
+- ports:
+  - port: 53
+    protocol: UDP
+  - port: 53
+    protocol: TCP
+  to:
+{{- if eq $dns.mode "resolverCIDRs" }}
+{{- if not $dns.resolverCIDRs }}
+{{- fail "networkPolicy.dns.resolverCIDRs is empty: list the resolver address of NodeLocal DNSCache, or use networkPolicy.dns.mode=kubeDns" }}
+{{- end }}
+{{- range $dns.resolverCIDRs }}
+  - ipBlock:
+      cidr: {{ . | quote }}
+{{- end }}
+{{- else if eq $dns.mode "kubeDns" }}
+  - namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+{{- else }}
+{{- fail (printf "networkPolicy.dns.mode %q is not kubeDns or resolverCIDRs" $dns.mode) }}
+{{- end }}
+{{- end }}

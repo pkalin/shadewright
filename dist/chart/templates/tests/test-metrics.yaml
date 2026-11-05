@@ -31,12 +31,8 @@ spec:
   policyTypes:
   - Egress
   egress:
-  {{- /* DNS to any destination: NodeLocal DNSCache and CoreDNS under other labels are not kube-dns Pods. */}}
-  - ports:
-    - port: 53
-      protocol: UDP
-    - port: 53
-      protocol: TCP
+  {{- /* The same DNS rule as the workloads (networkPolicy.dns), so the test fails where they could not resolve. */}}
+  {{- include "shadewright.dnsEgressRule" $ | nindent 2 }}
   - ports:
     - port: {{ .Values.metrics.port }}
       protocol: TCP

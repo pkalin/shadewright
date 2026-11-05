@@ -172,6 +172,15 @@ An action contributed by an integration module (`AdjustKedaMaxReplicas` needs `k
 
 The shipped NetworkPolicies also gate the network: the namespace is default-deny for ingress and egress, and ingress to port 8443 is allowed only from namespaces labeled `metrics: enabled`. Egress for both components is limited to cluster DNS and TCP 443 and 6443 (the Kubernetes API, Git host and Key Vault are on those ports).
 
+**DNS egress profile (chart only).** One value, `networkPolicy.dns`, decides where port 53 (UDP and TCP) is open, and the analyzer policy, the executor policy and the NetworkPolicy of the `helm test` Pod all use that same rule, so the test cannot pass where the workloads could not resolve. Pick the profile that matches the resolver your Pods query (`kubectl exec` into a Pod and read `/etc/resolv.conf`):
+
+| `networkPolicy.dns.mode` | Allows | Pick it when |
+| --- | --- | --- |
+| `kubeDns` (default) | Pods labeled `k8s-app: kube-dns` in the `kube-system` namespace | `nameserver` in `/etc/resolv.conf` is the cluster DNS Service IP and CoreDNS or kube-dns serves it. This is what `config/default` ships, so a default install renders the same rules as before. |
+| `resolverCIDRs` | The addresses in `networkPolicy.dns.resolverCIDRs` (at least one IPv4 or IPv6 CIDR, no duplicates, at most 8) | Pods query an address that is not a `kube-dns` Pod, such as NodeLocal DNSCache on `169.254.20.10`: set `resolverCIDRs={169.254.20.10/32}`. With kube-proxy in IPVS mode, NodeLocal DNSCache listens on the cluster DNS Service IP as well; add that address too. |
+
+The schema refuses an unknown mode and an empty or malformed `resolverCIDRs`. The `kubeDns` profile is the only one tried on the lab (Cilium); `resolverCIDRs` is checked by the chart's render tests only, not on any CNI. NodeLocal DNSCache and other CNIs are untested, so after choosing a profile run `helm test` and resolve a name from a Pod in the namespace. The kustomize manifests (`config/default`) have only the `kubeDns` rule: edit the policies there if you use them with NodeLocal DNSCache.
+
 The metrics each component serves are listed in the [metrics reference](metrics.md).
 
 The certificate is self-signed unless you set `--metrics-cert-path` (the cert-manager overlay is commented out in `config/default`). `config/prometheus/monitor.yaml` is a `ServiceMonitor` for the Prometheus Operator, not included by default; it scrapes with the Pod's ServiceAccount token and `insecureSkipVerify: true`, so use a real certificate and `serverName` if you care about that. Do not use `--metrics-secure=false` outside a test.

@@ -8,18 +8,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   egress:
-  - ports:
-    - port: 53
-      protocol: UDP
-    - port: 53
-      protocol: TCP
-    to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: kube-system
-      podSelector:
-        matchLabels:
-          k8s-app: kube-dns
+  {{- include "shadewright.dnsEgressRule" $ | nindent 2 }}
   - ports:
     - port: 443
       protocol: TCP

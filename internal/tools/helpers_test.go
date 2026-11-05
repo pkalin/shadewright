@@ -166,7 +166,7 @@ func newEnv(t testing.TB, objs []client.Object, mutate ...func(*Config)) *env {
 	}
 	cfg := Config{
 		Pods: e.pods, Events: e.events, Objects: e.objects, Logs: e.logs, Metrics: e.metrics, Delivery: e.delivery,
-		Redactor: red, Namespaces: []string{testNS}, Now: func() time.Time { return testNow },
+		Redactor: red, Namespaces: []string{testNS}, DeliveryNamespaces: []string{fluxNS}, Now: func() time.Time { return testNow },
 	}
 	for _, m := range mutate {
 		m(&cfg)

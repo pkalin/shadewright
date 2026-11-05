@@ -85,8 +85,8 @@ type Config struct {
 	Namespaces []string
 	// DeliveryNamespaces is the set of namespaces whose delivery objects get_delivery_status may read: Flux
 	// keeps its Kustomizations and HelmReleases in its own namespace, not in the workloads'. It is separate
-	// from Namespaces and widens no other read. nil means [DefaultDeliveryNamespace] alone; an empty, non-nil
-	// set refuses every one. The analyzer flag that sets it comes with the Flux adapter and its grant.
+	// from Namespaces and widens no other read. nil or empty refuses every one (fail closed); which namespaces
+	// the analyzer passes is decided with the Flux adapter and its grant.
 	DeliveryNamespaces []string
 	// Timeout bounds the reads of one call; zero means [DefaultTimeout], at most [MaxTimeout].
 	Timeout time.Duration
@@ -125,9 +125,6 @@ func New(cfg Config) (*Set, error) {
 	if err != nil {
 		return nil, fmt.Errorf("watched namespaces: %w", err)
 	}
-	if cfg.DeliveryNamespaces == nil {
-		cfg.DeliveryNamespaces = []string{DefaultDeliveryNamespace}
-	}
 	dns, err := namespaceSet(cfg.DeliveryNamespaces)
 	if err != nil {
 		return nil, fmt.Errorf("delivery namespaces: %w", err)
@@ -141,9 +138,6 @@ func New(cfg Config) (*Set, error) {
 		redactor: cfg.Redactor, namespaces: ns, deliveryNamespaces: dns, timeout: cfg.Timeout, now: cfg.Now,
 	}, nil
 }
-
-// DefaultDeliveryNamespace is the one delivery namespace when Config.DeliveryNamespaces is nil: Flux's own.
-const DefaultDeliveryNamespace = "flux-system"
 
 func namespaceSet(names []string) (map[string]struct{}, error) {
 	set := make(map[string]struct{}, len(names))

@@ -186,7 +186,7 @@ func TestDeliveryNamespacesAreSeparate(t *testing.T) {
 	e := newEnv(t, []client.Object{pod()})
 	e.delivery.Set(providers.DeliveryUnit{Kind: kustomization, Namespace: fluxNS, Name: unitName}, providers.DeliveryStatus{Ready: true})
 	if r := e.call(t, NameGetDeliveryStatus, with(NameGetDeliveryStatus, nil)); r.Status != StatusOK {
-		t.Errorf("flux-system by default: %q %s", r.Status, r.Text)
+		t.Errorf("the delivery namespace: %q %s", r.Status, r.Text)
 	}
 	for _, ns := range []string{testNS, otherNS, "", "Flux-System"} {
 		if r := e.call(t, NameGetDeliveryStatus, with(NameGetDeliveryStatus, map[string]any{argNamespace: ns})); r.Status != StatusRefused {
@@ -198,9 +198,11 @@ func TestDeliveryNamespacesAreSeparate(t *testing.T) {
 			t.Errorf("%s reads the delivery namespace: %q", name, r.Status)
 		}
 	}
-	none := newEnv(t, nil, func(c *Config) { c.DeliveryNamespaces = []string{} })
-	if r := none.call(t, NameGetDeliveryStatus, with(NameGetDeliveryStatus, nil)); r.Status != StatusRefused || none.reads() != 0 {
-		t.Errorf("an empty delivery set: %q, %d reads", r.Status, none.reads())
+	for _, set := range [][]string{nil, {}} {
+		none := newEnv(t, nil, func(c *Config) { c.DeliveryNamespaces = set })
+		if r := none.call(t, NameGetDeliveryStatus, with(NameGetDeliveryStatus, nil)); r.Status != StatusRefused || none.reads() != 0 {
+			t.Errorf("delivery set %#v: %q, %d reads", set, r.Status, none.reads())
+		}
 	}
 	if _, err := New(Config{Pods: e.pods, Events: e.events, Objects: e.objects, Redactor: canary{}, DeliveryNamespaces: []string{"Flux"}}); err == nil {
 		t.Error("an invalid delivery namespace was accepted")

@@ -38,7 +38,7 @@ limitations under the License.
 //     either), Flux's Kustomization and HelmRelease for the delivery status;
 //   - the namespace check: a namespace outside the watched set is refused before any read, and an empty
 //     set refuses every namespace; get_delivery_status checks against the delivery namespaces instead
-//     (Config.DeliveryNamespaces, Flux's own by default), which widen no other read;
+//     (Config.DeliveryNamespaces, none unless set), which widen no other read;
 //   - a timeout for its reads (Config.Timeout), and a byte bound on its result.
 //
 // Arguments come from the model and are untrusted (invariant 4, and invariant 1: model output is never

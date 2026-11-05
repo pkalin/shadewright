@@ -510,13 +510,24 @@ func TestGapRulesKeepUsefulText(t *testing.T) {
 	}
 }
 
+// skipLarge skips the timing tests on large inputs in short mode and under the race detector, whose
+// instrumentation makes these single-goroutine scans 10 to 20 times slower than the time limit assumes. make test
+// runs this package a second time without -race so that they still run.
+func skipLarge(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("large inputs")
+	}
+	if raceDetector {
+		t.Skip("timing test: runs without -race")
+	}
+}
+
 // Repeating the shapes the scanning rules look for must cost linear time: each value is scanned once and
 // keys inside a value already redacted are skipped. Each input takes about a second; a quadratic scan of
 // them takes minutes.
 func TestRepeatedPatternsStayLinear(t *testing.T) {
-	if testing.Short() {
-		t.Skip("large inputs")
-	}
+	skipLarge(t)
 	const size = 1 << 20
 	for name, unit := range map[string]string{
 		"yaml empty headers":       "password:\n",
@@ -549,9 +560,7 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 
 // Nested entries whose lines all belong to the first one: each match reads a bounded part of them.
 func TestNestedBlocksStayLinear(t *testing.T) {
-	if testing.Short() {
-		t.Skip("large inputs")
-	}
+	skipLarge(t)
 	for name, line := range map[string]func(indent string) string{
 		"env entries":   func(in string) string { return in + "- name: DB_PASSWORD\n" },
 		"empty headers": func(in string) string { return in + "password:\n" },

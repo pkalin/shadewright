@@ -339,6 +339,22 @@ func TestObservedAtIsClamped(t *testing.T) {
 	}
 }
 
+// A send with room in the channel never times out, even when the send timer has already fired by the time the
+// select runs (a loaded node, -race): a 1 ns timeout makes that the normal case here.
+func TestSendWithRoomNeverTimesOut(t *testing.T) {
+	const events = 200
+	h := newHarness(t, Config{Buffer: events, SendTimeout: time.Nanosecond})
+	h.events.reader = generatedEvents{}
+	for i := range events {
+		if res := h.reconcileEvent(fmt.Sprintf("room-%d", i)); res.RequeueAfter != 0 {
+			t.Fatalf("room-%d: send timed out with room in the channel", i)
+		}
+	}
+	if got := len(h.drain()); got != events {
+		t.Fatalf("got %d observations, want %d", got, events)
+	}
+}
+
 func TestFullChannelKeepsTheCount(t *testing.T) {
 	h := newHarness(t, Config{Buffer: 1})
 	first := warning("first", 0)

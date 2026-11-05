@@ -296,6 +296,13 @@ func (c *Collector) deliver(ctx context.Context, o Observation) (bool, error) {
 // at a time, so while the consumer is slow every other event (or pod) waits too, up to that long per
 // observation; the blocked one is retried 5 seconds after its send timed out.
 func (c *Collector) emit(ctx context.Context, o Observation) bool {
+	// Room in the channel always wins: below, a timer that fired before the select runs (a loaded node) would be
+	// picked at random over a free slot, and the observation would wait a retry for nothing.
+	select {
+	case c.out <- o:
+		return true
+	default:
+	}
 	t := time.NewTimer(c.cfg.SendTimeout)
 	defer t.Stop()
 	select {

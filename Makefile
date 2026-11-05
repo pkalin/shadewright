@@ -89,7 +89,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test-scripts
-test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest and CI change detection scripts (hack/*_test.sh).
+test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest, CI change detection and fuzz target scripts (hack/*_test.sh).
 	hack/release-notes-by-scope_test.sh
 	hack/check-chart-docs_test.sh
 	hack/chart-crds_test.sh
@@ -97,10 +97,28 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 	hack/ci-changed_test.sh
 	hack/release-verify-notes_test.sh
 	hack/require-on-main_test.sh
+	hack/fuzz-targets_test.sh
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -coverprofile cover.out
+	@# The redact timing tests skip under -race (internal/redact/race_test.go): run them again without it.
+	go test -run 'StayLinear$$' ./internal/redact
+
+# Fuzz targets as <package dir>:<FuzzName>. hack/fuzz-targets.sh checks this list against the tree both ways, so a
+# new target cannot be left out of the weekly Fuzz workflow and a stale entry cannot fuzz nothing and pass.
+FUZZ_TARGETS := internal/redact:FuzzString internal/gitops/patch:FuzzPatch internal/incidents/fingerprint:FuzzNormalize internal/policy/pathmatch:FuzzMatch
+FUZZ ?= $(FUZZ_TARGETS)
+FUZZTIME ?= 30s
+
+.PHONY: fuzz
+fuzz: ## Run each fuzz target (FUZZ, default all) for FUZZTIME (default 30s); a failing input is saved under the package's testdata/fuzz.
+	@hack/fuzz-targets.sh "$(CURDIR)" $(FUZZ_TARGETS)
+	@$(if $(filter-out $(FUZZ_TARGETS),$(FUZZ)),echo "Not in FUZZ_TARGETS: $(filter-out $(FUZZ_TARGETS),$(FUZZ))" >&2; exit 1)
+	@for t in $(FUZZ); do \
+		echo "fuzz ./$${t%%:*} $${t##*:} for $(FUZZTIME)"; \
+		go test -run '^$$' -fuzz "^$${t##*:}\$$" -fuzztime "$(FUZZTIME)" "./$${t%%:*}" || exit 1; \
+	done
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The kind target installs the pinned Kind (KIND_VERSION) into bin/. The setup builds/loads the Manager Docker image locally.

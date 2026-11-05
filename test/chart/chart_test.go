@@ -720,3 +720,128 @@ func TestSettingsObjectIsAHookThatHelmNeverDeletes(t *testing.T) {
 		t.Error("templates/settings.yaml does not check for an existing object with lookup")
 	}
 }
+
+func analyzerArgs(t *testing.T, r rendered) []string {
+	t.Helper()
+	var dep appsv1.Deployment
+	u := r.chart["Deployment/"+operatorNS+"/shadewright-analyzer"]
+	if u == nil {
+		t.Fatal("no analyzer Deployment rendered")
+	}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &dep); err != nil {
+		t.Fatal(err)
+	}
+	return dep.Spec.Template.Spec.Containers[0].Args
+}
+
+func watchRoleHasPodLogs(t *testing.T, r rendered) bool {
+	t.Helper()
+	u := r.chart["ClusterRole//shadewright-analyzer-watch-role"]
+	if u == nil {
+		t.Fatal("no analyzer watch ClusterRole rendered")
+	}
+	var cr rbacv1.ClusterRole
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &cr); err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range cr.Rules {
+		if slices.Contains(rule.Resources, "pods/log") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAnalyzerContextSourcesFollowValues checks that the pod logs grant and flag go together (on by default,
+// off together), and that the Prometheus flags appear only when set.
+func TestAnalyzerContextSourcesFollowValues(t *testing.T) {
+	on := render(t, false)
+	if !watchRoleHasPodLogs(t, on) {
+		t.Error("default values: the watch role has no pods/log rule")
+	}
+	for _, a := range analyzerArgs(t, on) {
+		if strings.HasPrefix(a, "--pod-logs") || strings.HasPrefix(a, "--prometheus") {
+			t.Errorf("default values render %s, want none", a)
+		}
+	}
+
+	off := render(t, false, "analyzer.podLogs.enabled=false")
+	if watchRoleHasPodLogs(t, off) {
+		t.Error("podLogs.enabled=false still renders the pods/log rule")
+	}
+	if !slices.Contains(analyzerArgs(t, off), "--pod-logs=false") {
+		t.Errorf("podLogs.enabled=false renders no --pod-logs=false: %v", analyzerArgs(t, off))
+	}
+
+	prom := render(t, false, "analyzer.prometheus.url=http://prometheus-server.prometheus.svc",
+		"analyzer.prometheus.cluster=lab")
+	args := analyzerArgs(t, prom)
+	for _, want := range []string{"--prometheus-url=http://prometheus-server.prometheus.svc", "--prometheus-cluster=lab"} {
+		if !slices.Contains(args, want) {
+			t.Errorf("args %v lack %s", args, want)
+		}
+	}
+	// A cluster without a URL renders neither flag.
+	for _, a := range analyzerArgs(t, render(t, false, "analyzer.prometheus.cluster=lab")) {
+		if strings.HasPrefix(a, "--prometheus") {
+			t.Errorf("cluster without url renders %s", a)
+		}
+	}
+}
+
+func TestChartRefusesBadContextSourceValues(t *testing.T) {
+	for name, set := range map[string]string{
+		"url without scheme":   "analyzer.prometheus.url=prometheus:9090",
+		"url with a space":     "analyzer.prometheus.url=http://a b",
+		"url with user info":   "analyzer.prometheus.url=http://user@prometheus:9090",
+		"url with a query":     "analyzer.prometheus.url=http://prometheus:9090/?x=1",
+		"url with a fragment":  "analyzer.prometheus.url=http://prometheus:9090/#x",
+		"url with a bare ?":    "analyzer.prometheus.url=http://prometheus:9090?",
+		"url without a host":   "analyzer.prometheus.url=http:///path",
+		"ftp url":              "analyzer.prometheus.url=ftp://prometheus:9090",
+		"keda not boolean":     "analyzer.modules.keda.enabled=maybe",
+		"unknown module":       "analyzer.modules.other.enabled=true",
+		"podLogs not boolean":  "analyzer.podLogs.enabled=maybe",
+		"unknown prometheus":   "analyzer.prometheus.token=x",
+		"cluster with a space": "analyzer.prometheus.cluster=a b",
+	} {
+		t.Run(name, func(t *testing.T) { helmFails(t, set) })
+	}
+	for _, flag := range []string{"pod-logs", "prometheus-url", "prometheus-cluster"} {
+		if out := helmFails(t, "analyzer.extraArgs={--"+flag+"=x}"); !strings.Contains(out, "--"+flag) {
+			t.Errorf("extra arg %s not refused:\n%s", flag, out)
+		}
+	}
+}
+
+func watchRoleHasScaledObjects(t *testing.T, r rendered) bool {
+	t.Helper()
+	u := r.chart["ClusterRole//shadewright-analyzer-watch-role"]
+	if u == nil {
+		t.Fatal("no analyzer watch ClusterRole rendered")
+	}
+	var cr rbacv1.ClusterRole
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &cr); err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range cr.Rules {
+		if slices.Contains(rule.Resources, "scaledobjects") {
+			if !slices.Equal(rule.Verbs, []string{"get"}) {
+				t.Errorf("scaledobjects verbs = %v, want only get", rule.Verbs)
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// TestKedaGrantFollowsTheModuleValue checks the scaledobjects rule: on by default (equal to config/), gone
+// with analyzer.modules.keda.enabled=false.
+func TestKedaGrantFollowsTheModuleValue(t *testing.T) {
+	if !watchRoleHasScaledObjects(t, render(t, false)) {
+		t.Error("default values: the watch role has no scaledobjects rule")
+	}
+	if watchRoleHasScaledObjects(t, render(t, false, "analyzer.modules.keda.enabled=false")) {
+		t.Error("analyzer.modules.keda.enabled=false still renders the scaledobjects rule")
+	}
+}

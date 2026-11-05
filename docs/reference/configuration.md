@@ -36,6 +36,14 @@ executor:
       clientId: <client ID of the executor managed identity>
 analyzer:
   watchNamespaces: [<namespace to watch>]
+  podLogs:
+    enabled: true   # false: --pod-logs=false and no pods/log rule
+  modules:
+    keda:
+      enabled: true   # false: no scaledobjects rule (KEDA not installed)
+  prometheus:
+    url: ""         # --prometheus-url, when set
+    cluster: ""     # --prometheus-cluster, when set
 ```
 
 Each component also takes the standard Pod values, bounded by the schema: `nodeSelector`, `tolerations`, `affinity`, `topologySpreadConstraints`, `priorityClassName`, `imagePullSecrets` (added to the global list) and `podAnnotations`. Every object carries the `app.kubernetes.io/*` labels and `helm.sh/chart`. The chart passes `ct lint` and `ct install` (chart-testing, with the default values on Kind) and `helm lint --strict` in CI.
@@ -90,7 +98,7 @@ Flags are passed as container args. A flag given twice takes its last value. The
 | `--watch-namespaces` | empty (no namespace) | Comma-separated namespaces whose events, pods and workloads are read. Each must be a valid namespace name (`*` is refused); spaces and duplicates are dropped. An empty list watches no namespace, never "all namespaces": the analyzer starts and is Ready, starts no collector, records no Incident, logs `Watching no namespaces` and reports the condition `NoWatchedNamespaces` True in the settings status | `demo` (the lab) |
 | `--cluster-id` | none, **required** | See [cluster ID](#cluster-id) | `lab` (the lab) |
 | `--max-incidents` | `500` | Most Incidents kept in the operator namespace; at least 1. At the cap a new fingerprint is not stored, is counted in `shadewright_incident_observations_refused_total` and reported in a Warning event (at most one per 10 minutes) | unset |
-| `--pod-logs` | `true` | Give the context builder the pod logs source: bounded, redacted excerpts of one container per call, in the watched namespaces only (`get` on `pods/log` through the watch role, see [design 2.3.2](../design/2-architecture.md#232-pod-logs-adapter)). The source takes at most 256 namespaces: with more in `--watch-namespaces`, the analyzer refuses to start with a configuration error that names the limit, unless this is `false`. `false` reads no logs but does not remove the grant from the watch role | unset |
+| `--pod-logs` | `true` | Give the context builder the pod logs source: bounded, redacted excerpts of one container per call, in the watched namespaces only (`get` on `pods/log` through the watch role, see [design 2.3.2](../design/2-architecture.md#232-pod-logs-adapter)). The source takes at most 256 namespaces: with more in `--watch-namespaces`, the analyzer refuses to start with a configuration error that names the limit, unless this is `false`. `false` reads no logs. The Helm chart removes the grant from the watch role too (`analyzer.podLogs.enabled=false` renders this flag and no `pods/log` rule); `config/` always keeps it | unset |
 | `--prometheus-url` | empty (no metrics) | Base URL of the Prometheus query API the context builder reads metrics from, with the approved query templates only (see [metrics source profile](#metrics-source-profile-prometheus)), such as `http://prometheus-server.prometheus.svc`: `http` or `https`, no credentials, query or fragment. At most 256 watched namespaces when set, as for `--pod-logs` | unset |
 | `--prometheus-cluster` | empty | The `cluster` label value of this cluster's series in a Prometheus shared by several clusters; needs `--prometheus-url`. See [metrics source profile](#metrics-source-profile-prometheus) for the check at startup | unset |
 

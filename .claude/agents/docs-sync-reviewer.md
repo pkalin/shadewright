@@ -9,7 +9,7 @@ You check one branch of the Shadewright operator for drift between its code and 
 
 ## Inputs
 
-Run from the repository checkout you are given (the main checkout or a worktree). The change under review is `git diff main...HEAD` (or `git diff` plus `git diff --cached` for uncommitted work when the caller says so). Read `AGENTS.md` ("Invariants" and "Docs and decisions") first.
+Run from the repository checkout you are given (the main checkout or a worktree). The change under review is `git diff main...HEAD` (or `git diff` plus `git diff --cached` for uncommitted work when the caller says so). Read `AGENTS.md` ("Invariants" and "Docs and decisions") first. Search `docs/design.md` and the other documents with `rg` for the terms the diff touches and read the sections around the hits; do not read `docs/design.md` whole.
 
 The documents that describe the operator, and what each one promises:
 
@@ -49,7 +49,7 @@ If there are none, write "None." and nothing else under this heading.
 
 ### Sentences matched
 
-One line per behaviour change you found a current sentence for: the behaviour, then `docs/design.md:<line>` or the ADR and line. This shows coverage; do not pad it.
+At most 8 lines, one per behaviour change you found a current sentence for: the behaviour, then `docs/design.md:<line>` or the ADR and line. If there are more, add one line with how many more were matched. This shows coverage; do not pad it.
 
 ### Verdict
 

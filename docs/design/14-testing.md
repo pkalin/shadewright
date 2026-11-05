@@ -1,8 +1,8 @@
 # 14. Testing
 
-Tests target process behaviour, not only code paths.
+Tests target process behaviour.
 
-They cover:
+Tests are meant to cover:
 
 - deduplication across restarts;
 - idempotency after a crash between an API call and the status write;

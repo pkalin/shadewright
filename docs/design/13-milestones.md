@@ -1,6 +1,6 @@
 # 13. Milestones
 
-The work goes in six stages. Each stage says what it covers and when it is done.
+The work goes in six stages. Stages 0 to 4 say when they are done.
 
 The first end-to-end result is: one controlled incident, one documented diagnosis, one safe PR, approval, Flux delivery and a confirmed recovery.
 

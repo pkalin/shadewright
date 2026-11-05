@@ -1,6 +1,6 @@
 # Design
 
-Status: draft for the MVP. Built so far:
+Status: draft for the MVP.
 
 **Built**
 
@@ -28,7 +28,10 @@ Status: draft for the MVP. Built so far:
 - The generic and AKS platforms, and the EKS and GKE platforms (detection only).
 - The cloudflared, Flux, KEDA, Kyverno and Secrets Store CSI driver integrations.
 - Platform and integration detection. The analyzer runs it and reports it in the settings status (5.4).
-- Not used yet: the diagnosis rules and the cloudflared, Flux, KEDA and Kyverno symptom sources feed nothing.
+**Built, but feeding nothing yet**
+
+- The diagnosis rules.
+- The cloudflared, Flux, KEDA and Kyverno symptom sources.
 
 **Not built yet**
 

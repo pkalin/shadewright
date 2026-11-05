@@ -561,6 +561,72 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
 	})
 
+	// second creates another request on the same target as request, and reconciles it with a new reconciler
+	// each time, as after a restart. It is deleted after the spec.
+	second := func() (*remediationv1alpha1.RemediationRequest, func() *remediationv1alpha1.RemediationRequest) {
+		rr := fx.MemoryLimitRequest(requestNamespace, request.Name+"-second")
+		rr.Spec.PolicyRef = request.Spec.PolicyRef
+		rr.Spec.TargetRef = request.Spec.TargetRef
+		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+		DeferCleanup(func() {
+			got := &remediationv1alpha1.RemediationRequest{}
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got); err == nil {
+				base := got.DeepCopy()
+				controllerutil.RemoveFinalizer(got, FinalizerName)
+				Expect(k8sClient.Patch(ctx, got, client.MergeFrom(base))).To(Succeed())
+			}
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, rr))).To(Succeed())
+		})
+		return rr, func() *remediationv1alpha1.RemediationRequest {
+			_, err := reconciler().Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
+			Expect(err).NotTo(HaveOccurred())
+			got := &remediationv1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+			return got
+		}
+	}
+	expectLocked := func(got *remediationv1alpha1.RemediationRequest) {
+		GinkgoHelper()
+		Expect(got.Status.Phase).To(BeEmpty())
+		queued := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionQueued)
+		Expect(queued).NotTo(BeNil())
+		Expect(queued.Reason).To(Equal(ReasonTargetLocked))
+	}
+
+	It("keeps the target locked while a stopped request's pull request is open, across restarts, until it is deleted", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		_, err := git.Push(freshness.BranchName(got), "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+
+		_, reconcileSecond := second()
+		for range 3 {
+			expectLocked(reconcileSecond())
+		}
+		Expect(git.ChangeRequests()).To(HaveLen(1), "no second pull request while the first may be open")
+
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		expectLocked(reconcileSecond()) // the finalizer has not closed the pull request yet
+		Expect(reconcileOnce()).To(Succeed())
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+		next := reconcileSecond()
+		Expect(next.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+		Expect(meta.FindStatusCondition(next.Status.Conditions, remediationv1alpha1.ConditionQueued)).To(BeNil())
+	})
+
+	It("frees the target once the executor sees the pull request closed", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		Expect(git.CloseChangeRequest(ctx, got.Status.PullRequest.Number)).To(Succeed())
+		_, reconcileSecond := second()
+		expectLocked(reconcileSecond()) // the first request still waits for review in its status
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(reconcileSecond().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+	})
+
 	It("never closes a pull request without its marker, also on deletion", func() {
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
 		base, err := git.BranchHead(ctx, mainBranch)

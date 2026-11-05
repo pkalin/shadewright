@@ -208,6 +208,112 @@ func TestLimitsLockPerTargetUID(t *testing.T) {
 	})
 }
 
+// withPullRequest records a pull request on o, with PullRequestOpened True and reason, as the pull request step
+// leaves it (PullRequestOpened) or markClosed rewrites it (PullRequestClosed, ChangeRequestClosed); an empty reason
+// writes no PullRequestOpened at all.
+func withPullRequest(o *remediationv1alpha1.RemediationRequest, reason string) *remediationv1alpha1.RemediationRequest {
+	o.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: 7, URL: "https://github.com/o/r/pull/7",
+		HeadSHA: "0123456789abcdef0123456789abcdef01234567"}
+	if reason != "" {
+		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionPROpened,
+			Status: metav1.ConditionTrue, Reason: reason, Message: "Pull request #7"})
+	}
+	return o
+}
+
+// TestLimitsLockHeldWhilePullRequestMayBeOpen checks #294: a request that stopped with a recorded pull request
+// its status does not show closed or merged keeps the lock on its target (fail closed), and frees it once the
+// status says the pull request is closed or merged, or once it is deleted and its finalizer is gone. It holds
+// no slot under maxConcurrentRemediations: only the lock is held longer.
+func TestLimitsLockHeldWhilePullRequestMayBeOpen(t *testing.T) {
+	stopped := func(phase remediationv1alpha1.RemediationPhase, reason string) *remediationv1alpha1.RemediationRequest {
+		return withPullRequest(otherRequest("stopped", limitsTarget, phase, time.Minute), reason)
+	}
+	held := map[string]*remediationv1alpha1.RemediationRequest{
+		"NeedsIntervention, head moved":        stopped(remediationv1alpha1.PhaseNeedsIntervention, ReasonPullRequestOpened),
+		"Expired":                              stopped(remediationv1alpha1.PhaseExpired, ReasonPullRequestOpened),
+		"Failed":                               stopped(remediationv1alpha1.PhaseFailed, ReasonPullRequestOpened),
+		"unknown phase":                        stopped("SomethingNew", ReasonPullRequestOpened),
+		"NeedsIntervention, no PROpened":       stopped(remediationv1alpha1.PhaseNeedsIntervention, ""),
+		"NeedsIntervention, gone":              stopped(remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone),
+		"Cancelled, close not recorded":        stopped(remediationv1alpha1.PhaseCancelled, ReasonPullRequestOpened),
+		"Denied with a pull request somehow":   stopped(remediationv1alpha1.PhaseDenied, ReasonPullRequestOpened),
+		"no phase with a pull request somehow": stopped("", ReasonPullRequestOpened),
+	}
+	for name, o := range held {
+		t.Run("held: "+name, func(t *testing.T) {
+			r, _, rr, stub := limitsWorld(t, 20, o)
+			res, got, err := reconcileLimits(t, r, rr)
+			expectQueued(t, r, rr, res, err, got, stub, ReasonTargetLocked)
+		})
+	}
+	released := map[string]*remediationv1alpha1.RemediationRequest{
+		"closed by Shadewright": stopped(remediationv1alpha1.PhaseNeedsIntervention, ReasonPullRequestClosed),
+		"closed by a person":    stopped(remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestClosed),
+		"Expired and closed":    stopped(remediationv1alpha1.PhaseExpired, ReasonPullRequestClosed),
+		"Merged":                stopped(remediationv1alpha1.PhaseMerged, ReasonPullRequestOpened),
+		"Succeeded":             stopped(remediationv1alpha1.PhaseSucceeded, ReasonPullRequestOpened),
+		"Superseded":            stopped(remediationv1alpha1.PhaseSuperseded, ReasonPullRequestOpened),
+		"another target": withPullRequest(otherRequest("stopped", "44444444-4444-4444-8444-444444444444",
+			remediationv1alpha1.PhaseNeedsIntervention, time.Minute), ReasonPullRequestOpened),
+		"no pull request recorded": otherRequest("stopped", limitsTarget, remediationv1alpha1.PhaseNeedsIntervention,
+			time.Minute),
+	}
+	for name, o := range released {
+		t.Run("released: "+name, func(t *testing.T) {
+			r, _, rr, _ := limitsWorld(t, 20, o)
+			_, got, err := reconcileLimits(t, r, rr)
+			expectAdmitted(t, err, got)
+		})
+	}
+	t.Run("released once the status says closed", func(t *testing.T) {
+		r, c, rr, stub := limitsWorld(t, 20, stopped(remediationv1alpha1.PhaseNeedsIntervention, ReasonPullRequestOpened))
+		res, got, err := reconcileLimits(t, r, rr)
+		expectQueued(t, r, rr, res, err, got, stub, ReasonTargetLocked)
+		holder := &remediationv1alpha1.RemediationRequest{}
+		if err := c.Get(context.Background(), types.NamespacedName{Namespace: requestNamespace, Name: "stopped"}, holder); err != nil {
+			t.Fatal(err)
+		}
+		markClosed(holder, ReasonChangeRequestClosed, "was closed without a merge")
+		if err := c.Status().Update(context.Background(), holder); err != nil {
+			t.Fatal(err)
+		}
+		_, got, err = reconcileLimits(t, r, rr)
+		expectAdmitted(t, err, got)
+	})
+	t.Run("deleting with the finalizer holds the lock, without it frees it", func(t *testing.T) {
+		for _, finalizer := range []string{FinalizerName, "example.com/other"} {
+			o := stopped(remediationv1alpha1.PhaseNeedsIntervention, ReasonPullRequestOpened)
+			o.Finalizers = []string{finalizer}
+			r, c, rr, stub := limitsWorld(t, 20, o)
+			if err := c.Delete(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			res, got, err := reconcileLimits(t, r, rr)
+			if finalizer == FinalizerName {
+				expectQueued(t, r, rr, res, err, got, stub, ReasonTargetLocked)
+			} else {
+				expectAdmitted(t, err, got)
+			}
+		}
+	})
+	t.Run("holds no slot", func(t *testing.T) {
+		o := withPullRequest(otherRequest("stopped", "44444444-4444-4444-8444-444444444444",
+			remediationv1alpha1.PhaseNeedsIntervention, time.Minute), ReasonPullRequestOpened)
+		r, _, rr, _ := limitsWorld(t, 1, o)
+		_, got, err := reconcileLimits(t, r, rr)
+		expectAdmitted(t, err, got)
+	})
+	t.Run("a list that fails lets nothing through", func(t *testing.T) {
+		r, base, rr, _ := limitsWorld(t, 20, stopped(remediationv1alpha1.PhaseNeedsIntervention, ReasonPullRequestClosed))
+		r.APIReader = interceptorClient(base, func() error { return errors.New("list refused") })
+		_, got, err := reconcileLimits(t, r, rr)
+		if err == nil || got.Status.Phase != "" {
+			t.Fatalf("phase = %q, err = %v; want no decision and an error", got.Status.Phase, err)
+		}
+	})
+}
+
 // TestLimitsMaxConcurrentRemediations checks the cap: a request waits while maxConcurrentRemediations other
 // requests are active, and goes through while fewer are. A request being deleted holds no slot, and a phase
 // the executor does not know holds one (fail closed).

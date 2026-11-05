@@ -42,11 +42,14 @@ import (
 //
 // A request is active while the executor can still move it on before the merge (progresses: a phase before the
 // merge with a plan digest), and while it is being deleted and still holds the finalizer, since its pull
-// request may still be open until the finalizer is gone. Before the policy check writes an allowed decision it
-// counts the active requests and reads the outcomes of the others, straight from the API server (never the
-// cache, which may not show a request let through a moment ago), and lets the request through only when
+// request may still be open until the finalizer is gone. The lock is held longer than that (holdsLock, #294): a
+// request that recorded a pull request holds it until its status says the pull request is closed or merged, so
+// a request that stopped (NeedsIntervention, Expired) with its pull request still open keeps a second pull
+// request off the target. Before the policy check writes an allowed decision it counts the active requests and
+// reads the outcomes of the others, straight from the API server (never the cache, which may not show a request
+// let through a moment ago), and lets the request through only when
 //
-//   - no other active request names the same target UID (the lock),
+//   - no other request that holds the lock names the same target UID (the lock),
 //   - fewer than maxConcurrentRemediations of RemediationSettings are active (the cap), and
 //   - the breaker lets it through: it is closed, or it is half-open and no probe is running (the request
 //     becomes the probe then).
@@ -93,7 +96,7 @@ import (
 
 // Reasons of the Queued condition. The metrics (limits_metrics.go) map them to the values of a label.
 const (
-	// ReasonTargetLocked: another active request names the same target UID.
+	// ReasonTargetLocked: another request that holds the lock (holdsLock) names the same target UID.
 	ReasonTargetLocked = "TargetLocked"
 	// ReasonConcurrencyLimit: maxConcurrentRemediations requests are active.
 	ReasonConcurrencyLimit = "ConcurrencyLimitReached"
@@ -108,7 +111,8 @@ const (
 
 // Fixed messages of the Queued condition.
 var queuedMessages = map[string]string{
-	ReasonTargetLocked:     "Another active request changes the same target; this one waits until that one ends",
+	ReasonTargetLocked: "Another request changes the same target, or its pull request may still be open; this one " +
+		"waits until that one ends and its pull request is closed or merged",
 	ReasonConcurrencyLimit: "RemediationSettings default allows no more active requests (maxConcurrentRemediations); this one waits for a slot",
 	ReasonCircuitOpen: "The circuit breaker is open after consecutive failed requests; this one waits for the " +
 		"cool-down to end",
@@ -172,6 +176,38 @@ func active(rr *remediationv1alpha1.RemediationRequest) bool {
 		return controllerutil.ContainsFinalizer(rr, FinalizerName)
 	}
 	return progresses(rr)
+}
+
+// holdsLock reports whether a request holds the lock on its target (#294): it is being deleted and still holds
+// the finalizer that closes its pull request, or it is not being deleted and it is active or the pull request
+// it recorded may still be open (prMayBeOpen). A deleted request whose finalizer is gone has had its pull
+// request closed, or found nothing it could close, so it holds nothing; deleting is a person's decision.
+func holdsLock(rr *remediationv1alpha1.RemediationRequest) bool {
+	if !rr.DeletionTimestamp.IsZero() {
+		return controllerutil.ContainsFinalizer(rr, FinalizerName)
+	}
+	return progresses(rr) || prMayBeOpen(rr)
+}
+
+// prMayBeOpen reports whether the pull request a request recorded in status may still be open: it is known
+// closed or merged only when the status says so. Merged and the phases after it mean the merge; Superseded is
+// written only after its pull request was closed; and PullRequestOpened with reason PullRequestClosed or
+// ChangeRequestClosed (markClosed) means Shadewright closed it or saw it closed. Anything else, a stop that left
+// it open (HeadMoved, a refused close), one that could not see it (ChangeRequestGone), Failed or an unknown
+// phase included, may still be open (fail closed). The executor does not look at the pull request of a stopped
+// request again, so a close or merge made by a person after the stop is not seen; deleting the request closes
+// it and frees the lock. A request without a recorded pull request has none to hold the lock with.
+func prMayBeOpen(rr *remediationv1alpha1.RemediationRequest) bool {
+	if rr.Status.PullRequest == nil {
+		return false
+	}
+	switch rr.Status.Phase {
+	case remediationv1alpha1.PhaseMerged, remediationv1alpha1.PhaseWaitingForDelivery,
+		remediationv1alpha1.PhaseVerifying, remediationv1alpha1.PhaseSucceeded, remediationv1alpha1.PhaseSuperseded:
+		return false
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+	return c == nil || (c.Reason != ReasonPullRequestClosed && c.Reason != ReasonChangeRequestClosed)
 }
 
 // Outcomes of a request for the circuit breaker.
@@ -252,9 +288,9 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		}
 		if active(other) {
 			s.active++
-			if other.Spec.TargetRef.UID == rr.Spec.TargetRef.UID {
-				locked = true
-			}
+		}
+		if other.Spec.TargetRef.UID == rr.Spec.TargetRef.UID && holdsLock(other) {
+			locked = true
 		}
 		switch breakerOutcome(other) {
 		case outcomeSuccess:

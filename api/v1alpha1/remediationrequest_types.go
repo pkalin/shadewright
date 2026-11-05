@@ -227,7 +227,8 @@ const (
 	ConditionWritesPaused = "WritesPaused"
 	// ConditionQueued is True, with reason TargetLocked, ConcurrencyLimitReached, CircuitOpen or
 	// CircuitHalfOpen, while a limit of the executor holds back a request the policy check has not let through
-	// yet: another request is active on the same target, maxConcurrentRemediations requests are active, the
+	// yet: another request holds the lock on the same target (it is active, or a pull request it recorded is not
+	// known closed or merged), maxConcurrentRemediations requests are active, the
 	// circuit breaker is open, or it is half-open and another request runs as its probe. The
 	// request keeps no phase or Pending and is checked again every 30 seconds; the condition is removed once the
 	// limits let the request through, or at the decision of the policy check.

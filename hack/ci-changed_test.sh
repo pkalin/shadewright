@@ -39,6 +39,13 @@ check "docs only skips everything" "false false false" $pr docs/a.md
 check "readme only skips everything" "false false false" $pr README.md
 check "generated api docs run go and images" "true true false" $pr docs/reference/api.md
 check "go file runs everything" "true true true" $pr api/x.go
+# The chart install tests build and run the images, so every input of the binaries and the image build runs them.
+check "executor main runs everything" "true true true" $pr cmd/main.go
+check "analyzer main runs everything" "true true true" $pr cmd/analyzer/main.go
+check "internal package runs everything" "true true true" $pr internal/cmdutil/manager.go
+check "root go file runs everything" "true true true" $pr tools.go
+check "dockerfile runs everything" "true true true" $pr Dockerfile
+check "dockerignore runs everything" "true true true" $pr .dockerignore
 check "chart only runs chart" "false false true" $pr dist/chart/values.yaml
 check "chart ci values run chart" "false false true" $pr dist/chart/ci/default-values.yaml
 check "ct config runs chart" "false false true" $pr ct.yaml

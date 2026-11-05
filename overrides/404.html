@@ -1,0 +1,12 @@
+{% extends "main.html" %}
+{% block content %}
+  <div class="sw-404">
+    <h1>Page not found</h1>
+    <p>This page does not exist, or it moved. Use the search above, or start from one of these.</p>
+    <p>
+      <a class="md-button md-button--primary" href="{{ config.site_url }}">Home</a>
+      <a class="md-button" href="{{ config.site_url }}getting-started/">Getting started</a>
+      <a class="md-button" href="{{ config.site_url }}adr/">Decisions</a>
+    </p>
+  </div>
+{% endblock %}

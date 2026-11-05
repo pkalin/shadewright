@@ -57,6 +57,8 @@ check "a called workflow runs everything" "true true true true" $pr .github/work
 check "an unrelated workflow runs nothing" "false false false false" $pr .github/workflows/docs.yml
 check "docs workflow runs everything" "true true true true" $pr .github/workflows/docs-check.yml
 check "zensical config runs docs only" "false false false true" $pr zensical.toml
+check "theme overrides run docs only" "false false false true" $pr overrides/main.html
+check "glossary snippet runs docs only" "false false false true" $pr includes/glossary.md
 check "docs requirements run docs only" "false false false true" $pr requirements-docs.txt
 check "published paths list runs everything" "true true true true" $pr hack/docs-published-paths.txt
 check "readme only skips docs" "false false false false" $pr README.md

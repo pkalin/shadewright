@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{#- Announcement bar: the early-stage notice, on every page (moved from the home page box, #365). -#}
+{% block announce %}
+  <strong>Early:</strong> Shadewright is built up to the reviewed pull request. Analysis, auto-merge, delivery and verification are not built yet.
+  <a href="{{ config.site_url }}#status">What is built</a>
+{% endblock %}
+
+{#- Link previews: Open Graph and Twitter tags with one static brand image (no social cards service). -#}
+{% block extrahead %}
+  {% set sw_title = page.meta.title if page.meta and page.meta.title else (page.title | striptags if page and page.title and not page.is_homepage else config.site_name) %}
+  {% set sw_desc = page.meta.description if page.meta and page.meta.description else config.site_description %}
+  {% set sw_image = config.site_url ~ "assets/og.png" %}
+  <link rel="apple-touch-icon" href="{{ 'assets/logo.png' | url }}">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:title" content="{{ sw_title | e }}">
+  <meta property="og:description" content="{{ sw_desc | e }}">
+  <meta property="og:image" content="{{ sw_image }}">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Shadewright: Kubernetes incidents to reviewed GitOps pull requests">
+  {% if page.canonical_url %}<meta property="og:url" content="{{ page.canonical_url }}">{% endif %}
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ sw_title | e }}">
+  <meta name="twitter:description" content="{{ sw_desc | e }}">
+  <meta name="twitter:image" content="{{ sw_image }}">
+{% endblock %}

@@ -27,6 +27,14 @@ rules:
   verbs:
   - get
 - apiGroups:
+  - autoscaling
+  resources:
+  - horizontalpodautoscalers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - events.k8s.io
   resources:
   - events
@@ -34,3 +42,9 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - keda.sh
+  resources:
+  - scaledobjects
+  verbs:
+  - get

@@ -156,25 +156,6 @@ func main() {
 		setupLog.Error(err, "Failed to create the Incident controller")
 		os.Exit(1)
 	}
-	col, err := collector.New(collector.Config{ClusterID: clusterID, Handled: inc.Handled})
-	if err != nil {
-		setupLog.Error(err, "Failed to create the collector")
-		os.Exit(1)
-	}
-	// With no watched namespace the collector is not set up, so no informer on events or pods is started: the
-	// cache would hold the operator namespace only (analyzer.CacheOptions), where the analyzer has no grant on
-	// them, and its sync would fail. Its observation channel then stays empty.
-	if len(watched) > 0 {
-		if err := col.SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "Failed to set up the collector")
-			os.Exit(1)
-		}
-	}
-	if err := inc.SetupWithManager(mgr, col.Observations()); err != nil {
-		setupLog.Error(err, "Failed to set up the Incident controller")
-		os.Exit(1)
-	}
-
 	// The compiled-in modules (ADR-0019). The generic platform is always added by modules.New; a refusal stops
 	// the start. A module is active only when RemediationSettings enables it and it is detected.
 	registry, err := modules.New([]modules.Platform{aks.Platform{}, eks.Platform{}, gke.Platform{}},
@@ -190,6 +171,27 @@ func main() {
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to create platform detection")
+		os.Exit(1)
+	}
+
+	// The collector evaluates the symptom sources of the modules detection makes active (#380): their kinds
+	// (collector.SourceKinds) are watched, and a source runs only while its module is enabled and detected.
+	col, err := collector.New(collector.Config{ClusterID: clusterID, Handled: inc.Handled, Modules: det.Selection})
+	if err != nil {
+		setupLog.Error(err, "Failed to create the collector")
+		os.Exit(1)
+	}
+	// With no watched namespace the collector is not set up, so no informer on events or pods is started: the
+	// cache would hold the operator namespace only (analyzer.CacheOptions), where the analyzer has no grant on
+	// them, and its sync would fail. Its observation channel then stays empty.
+	if len(watched) > 0 {
+		if err := col.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to set up the collector")
+			os.Exit(1)
+		}
+	}
+	if err := inc.SetupWithManager(mgr, col.Observations()); err != nil {
+		setupLog.Error(err, "Failed to set up the Incident controller")
 		os.Exit(1)
 	}
 	if err := det.SetupWithManager(mgr); err != nil {

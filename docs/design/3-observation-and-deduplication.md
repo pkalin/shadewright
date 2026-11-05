@@ -1,8 +1,8 @@
 # 3. Observation and deduplication
 
-This section covers how the analyzer turns cluster symptoms into `Incident` objects and decides when one is due for analysis. The collector (3.1) reads Warning events and pod status. Two levels of deduplication (3.2) keep the counts bounded and stable across restarts. The analysis (3.3) is only partly built: the context builder is built and given the real Prometheus and pod logs adapters but not called yet, and the analysis loop is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)).
+This section covers how the analyzer turns cluster symptoms into `Incident` objects and decides when one is due for analysis. The collector (3.1) reads Warning events, pod status and the objects of active modules' symptom sources. Two levels of deduplication (3.2) keep the counts bounded and stable across restarts. The analysis (3.3) is only partly built: the context builder is built and given the real Prometheus and pod logs adapters but not called yet, and the analysis loop is <span class="sw-status sw-planned">planned</span> ([#76](https://github.com/pkalin/shadewright/issues/76)).
 
-[![Shadewright analyzer: the collector turns events and pod status of the watched namespaces into deduplicated, bounded Incidents; the analysis trigger decides when one is due, using analysis.maxAnalysesPerDay from the settings and a Budget ConfigMap; Prometheus and pod logs have adapters that the analyzer gives to the context builder, which is built but not called yet and makes a bounded, redacted context in provenance-tagged blocks; planned, drawn dashed: the model call with read tools on escalation, the model provider and the typed RemediationRequest.](../assets/diagrams/analyzer.svg)](../assets/diagrams/analyzer.svg "Open full size")
+[![Shadewright analyzer: the collector turns events, pod status and the HPAs of active modules' symptom sources in the watched namespaces into deduplicated, bounded Incidents; the analysis trigger decides when one is due, using analysis.maxAnalysesPerDay from the settings and a Budget ConfigMap; Prometheus and pod logs have adapters that the analyzer gives to the context builder, which is built but not called yet and makes a bounded, redacted context in provenance-tagged blocks; planned, drawn dashed: the model call with read tools on escalation, the model provider and the typed RemediationRequest.](../assets/diagrams/analyzer.svg)](../assets/diagrams/analyzer.svg "Open full size")
 
 ## 3.1. Collecting
 
@@ -19,6 +19,10 @@ Events detect symptoms; they are not a durable audit log. The collector keeps wh
     - A reason that is not a plain CamelCase word within the schema's length is reported as `Terminated`.
     - A termination is one observation, identified by its container ID, or without one by its start and finish times, exit code and reason (not the restart count, which changes when the termination moves to the last state). Two such terminations of one container in the same seconds with the same exit code and reason count once.
     - The symptom is the container name and the exit code. The termination message is never read: the container writes it.
+- **Module symptom sources:** the kinds whose sources are wired (for now `autoscaling/v2` HorizontalPodAutoscalers), read through the same cache. On each object the collector runs the source an active module declares for the kind (2.5.1); with the module not enabled or not detected the source does not run and its owner kind is not read. Only creates and updates that the active source shows a symptom on, before or after the change, reach the collector's reconcile (an HPA's status is written on every sync); when a module becomes active for a kind, the collector checks every 30 seconds and then evaluates the cached objects its source shows a symptom on. Only objects that showed a symptom take room in its bounded memory of handled states.
+    - Each symptom state is one observation with the symptom's reason, the source's reporting controller and type `Warning`. Its symptom is the module's fixed summary followed by its evidence (`field=value`, each value redacted and cut to 256 bytes), normalized and redacted again as a whole. The fingerprint hashes the summary, not the evidence.
+    - The occurrence is `condition:` and a hash of the object UID, kind, reason and when the state began, with a total of 1: a state that lasts counts once, one that ends and comes back counts again. The start is hashed as the object reports it, so a start later than the collector's clock keeps one occurrence when the clock passes it; the observation's `Began` is never later than the clock. A state without a known start is settled by the Incident controller like any occurrence that may repeat. A state the collector sees end (a reconcile without it) and come back with the same start, as when `ScalingLimited` stays True with another reason in between or has no `lastTransitionTime`, is a new occurrence, identified by when the collector saw it come back. The limit: that time is not known after a restart, so a new process identifies a state by its start alone. A state that came back before the restart and still lasts then matches the first state's occurrence and is not counted again, and a return the collector did not see (while it was down, or between two reconciles) is not counted.
+    - The subject is the owner kind the source declares once it is verified (the `ScaledObject` of a KEDA HPA, 2.5.3), otherwise the object itself.
 
 **Owners.** The subject of an observation is the owning workload, following controller owner references (only those marked `controller`) from Pod to ReplicaSet to Deployment and from Pod to StatefulSet.
 
@@ -33,7 +37,7 @@ Events detect symptoms; they are not a durable audit log. The collector keeps wh
 
 - the fingerprint and the normalized, redacted symptom from `internal/incidents/fingerprint`;
 - the subject;
-- the occurrence (an event UID, or a hash naming one container termination);
+- the occurrence (an event UID, a hash naming one container termination, or a hash naming one symptom state of a module symptom source);
 - the occurrence's total as the cluster reports it;
 - the new occurrence count, and when it happened (never later than the collector's clock).
 
@@ -63,7 +67,7 @@ Reasons differ by component and version. `OOMKilled`, for example, comes from co
 
 <span class="sw-status sw-built">built</span> The collector remembers the event UID and the last handled count. On a series update it processes the increase, not the total, and at most 1,000 per observation. A single event without a series counts once, or as its `deprecatedCount` when an older recorder kept one. The series count includes the first occurrence, so a single event that becomes a series of 2 adds 1.
 
-**Collector state.** It is kept in memory, in maps with a fixed capacity (10,000 events and 5,000 pods by default) that drop the least recently used entry. Memory alone does not survive a restart, so the collector cannot tell how much of an occurrence is new when:
+**Collector state.** It is kept in memory, in maps with a fixed capacity (10,000 events, 5,000 pods and 5,000 objects of module symptom sources by default) that drop the least recently used entry. Memory alone does not survive a restart, so the collector cannot tell how much of an occurrence is new when:
 
 - the event or termination is older than its first reconcile (a restart, or a new leader); or
 - it is no newer than state the collector dropped to stay within its capacity.

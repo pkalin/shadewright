@@ -30,7 +30,7 @@ import (
 
 // occurrenceID matches the occurrence IDs the Incident schema accepts. An ID that does not match is counted
 // but not recorded, so a status write never fails on it.
-var occurrenceID = regexp.MustCompile(`^(event|termination):[A-Za-z0-9-]{1,64}$`)
+var occurrenceID = regexp.MustCompile(`^(event|termination|condition):[A-Za-z0-9-]{1,64}$`)
 
 // noBegin stands for the time an occurrence began when the cluster did not report one. Such an occurrence
 // sorts as the oldest, so it is dropped first, and dropping one still marks that something was dropped. The

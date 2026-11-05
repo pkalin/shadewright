@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/modules"
 )
 
 // Defaults for the zero values of [Config].
@@ -40,10 +41,12 @@ const (
 	DefaultBuffer        = 256
 	DefaultMaxEvents     = 10000
 	DefaultMaxPods       = 5000
+	DefaultMaxObjects    = 5000
 	DefaultMaxOwners     = 4096
 	DefaultOwnerTTL      = 10 * time.Minute
 	DefaultLookupTimeout = 5 * time.Second
 	DefaultSendTimeout   = 10 * time.Second
+	DefaultSelectionPoll = 30 * time.Second
 )
 
 // retryAfter is how long a reconcile waits before trying again when the consumer did not take an
@@ -69,29 +72,34 @@ type Observation struct {
 	// Subject is the object the symptom is correlated to: the owning workload when the owner chain could be
 	// verified, otherwise the object itself.
 	Subject remediationv1alpha1.ObjectRef
-	// Source is the namespace the observation came from: the event's own namespace, or the pod's for a
-	// container termination read from pod status. It is the namespace RBAC grants the creation of the event
-	// in, so it is never empty, unlike Subject's namespace for a cluster-scoped subject (a Node).
+	// Source is the namespace the observation came from: the event's own namespace, the pod's for a
+	// container termination read from pod status, or the watched object's for a module symptom source. It is
+	// the namespace RBAC grants the creation of the event (or the write of the object) in, so it is never
+	// empty, unlike Subject's namespace for a cluster-scoped subject (a Node).
 	Source string
-	// Reason, Type and ReportingController are the event's, or OOMKilled (or the termination reason),
-	// Warning and kubelet for a container termination read from pod status.
+	// Reason, Type and ReportingController are the event's; or OOMKilled (or the termination reason),
+	// Warning and kubelet for a container termination read from pod status; or the symptom's reason, Warning
+	// and the source's reporting controller for a module symptom source.
 	Reason              string
 	Type                string
 	ReportingController string
-	// Symptom is the normalized, redacted note (at most 1024 bytes).
+	// Symptom is the normalized, redacted note (at most 1024 bytes); for a module symptom source, the
+	// module's fixed summary and its bounded evidence.
 	Symptom string
-	// Occurrence identifies what Total counts: "event:" and the Event UID, or "termination:" and a hash of
-	// the pod UID, the container name and the termination's ID. Several occurrences (pods, events) can share
-	// one fingerprint.
+	// Occurrence identifies what Total counts: "event:" and the Event UID, "termination:" and a hash of the
+	// pod UID, the container name and the termination's ID, or "condition:" and a hash of the object UID, its
+	// kind, the symptom's reason and when the state began, for a module symptom source. Several occurrences
+	// (pods, events, objects) can share one fingerprint.
 	Occurrence string
 	// Total is how many times the occurrence happened as the cluster reports it: the event's series count
-	// (or the count of an older recorder, or 1), or 1 for a container termination. It is cumulative and not
-	// capped: a consumer computes an increase from it only with [Observation.Increase], which applies
-	// MaxCount.
+	// (or the count of an older recorder, or 1), or 1 for a container termination or a symptom state. It is
+	// cumulative and not capped: a consumer computes an increase from it only with [Observation.Increase],
+	// which applies MaxCount.
 	Total int64
-	// Began is when the occurrence began, as the cluster reports it: the event's creation time, or the
-	// termination's finish time (zero when the cluster did not report one), never later than the collector's
-	// clock. It orders occurrences for a consumer that keeps a bounded number of them.
+	// Began is when the occurrence began, as the cluster reports it: the event's creation time, the
+	// termination's finish time or the symptom state's start (zero when the cluster did not report one),
+	// never later than the collector's clock. It orders occurrences for a consumer that keeps a bounded number
+	// of them.
 	Began time.Time
 	// Count is how many new occurrences this observation stands for: the increase of Total since this
 	// collector last handled it, at most MaxCount, never the total of a series the collector cannot account
@@ -152,6 +160,15 @@ type Config struct {
 	// Handled, when set, settles observations that would be marked MayRepeat: their Count becomes what the
 	// Incident has not counted yet, and they are dropped when that is nothing.
 	Handled HandledFunc
+	// Modules, when set, returns the modules active now (detection.Detector.Selection). The collector then
+	// also watches the kinds in [SourceKinds] and evaluates on each object the symptom source an active module
+	// declares for its kind (sources.go). Nil watches none of them.
+	Modules func() modules.Selection
+	// MaxObjects bounds the number of objects whose handled symptom states are remembered.
+	MaxObjects int
+	// SelectionPoll is how often the collector checks whether a module became active for a kind in
+	// [SourceKinds], to evaluate then the objects of that kind it filtered out while none was.
+	SelectionPoll time.Duration
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
 }
@@ -168,6 +185,9 @@ type Collector struct {
 	series *seriesTracker
 	pods   *terminationTracker
 	owners *ownerResolver
+	// conditions remembers the handled symptom states of objects read by module symptom sources, keyed by
+	// kind and name.
+	conditions *stateTracker
 }
 
 // New validates cfg, applies defaults and returns a collector. Call [Collector.SetupWithManager] to start
@@ -179,10 +199,12 @@ func New(cfg Config) (*Collector, error) {
 	setDefault(&cfg.Buffer, DefaultBuffer)
 	setDefault(&cfg.MaxEvents, DefaultMaxEvents)
 	setDefault(&cfg.MaxPods, DefaultMaxPods)
+	setDefault(&cfg.MaxObjects, DefaultMaxObjects)
 	setDefault(&cfg.MaxOwners, DefaultMaxOwners)
 	setDefault(&cfg.OwnerTTL, DefaultOwnerTTL)
 	setDefault(&cfg.LookupTimeout, DefaultLookupTimeout)
 	setDefault(&cfg.SendTimeout, DefaultSendTimeout)
+	setDefault(&cfg.SelectionPoll, DefaultSelectionPoll)
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -192,6 +214,9 @@ func New(cfg Config) (*Collector, error) {
 		now:    cfg.Now,
 		series: newSeriesTracker(cfg.MaxEvents),
 		pods:   newTerminationTracker(cfg.MaxPods),
+		// A tracker of its own, keyed by kind and name, so a pod and a watched object of the same name, or two
+		// watched kinds, keep apart.
+		conditions: newStateTracker(cfg.MaxObjects),
 	}, nil
 }
 
@@ -207,8 +232,8 @@ func (c *Collector) Observations() <-chan Observation {
 }
 
 // SetupWithManager registers the two watches: events.k8s.io/v1 Events of type Warning and Pods with a
-// terminated container. Both read through the manager's cache, which the analyzer restricts to the watched
-// namespaces (analyzer.CacheOptions). Owners are read with the API reader, one object at a time with a
+// terminated container, and, when [Config.Modules] is set, one watch per kind in [SourceKinds]. All read
+// through the manager's cache, which the analyzer restricts to the watched namespaces (analyzer.CacheOptions). Owners are read with the API reader, one object at a time with a
 // deadline, so no informer is started for ReplicaSets, Deployments or StatefulSets. There is deliberately no
 // watch on core/v1 Events: they are the same objects, and watching both would count each event twice.
 func (c *Collector) SetupWithManager(mgr ctrl.Manager) error {
@@ -231,7 +256,7 @@ func (c *Collector) SetupWithManager(mgr ctrl.Manager) error {
 	if err != nil {
 		return fmt.Errorf("setting up the pod collector: %w", err)
 	}
-	return nil
+	return c.setupSources(mgr)
 }
 
 // started returns the time of the first reconcile.

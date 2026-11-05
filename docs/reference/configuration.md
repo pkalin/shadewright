@@ -133,7 +133,7 @@ The permissions, as installed:
 
 | Identity | Scope | Grants |
 | --- | --- | --- |
-| Analyzer, each watched namespace | RoleBinding to `analyzer-watch-role` | `get`, `list`, `watch` Pods and `events.k8s.io` Events; `get` on `pods/log` (the pod logs source, `--pod-logs`); `get` Deployments, ReplicaSets, StatefulSets |
+| Analyzer, each watched namespace | RoleBinding to `analyzer-watch-role` | `get`, `list`, `watch` Pods, `events.k8s.io` Events and `autoscaling` HorizontalPodAutoscalers; `get` on `pods/log` (the pod logs source, `--pod-logs`); `get` Deployments, ReplicaSets, StatefulSets and KEDA `scaledobjects` (read only while the `keda` integration is active) |
 | Analyzer, cluster | `analyzer-role` ClusterRole | `list` Nodes; `get`, `list`, `watch` `remediationsettings`; `update` `remediationsettings/status` |
 | Analyzer, operator namespace | `analyzer-role` Role | `get`, `update` the ConfigMap `shadewright-analysis-budget` only (no create); `create`, `get`, `list`, `watch` Incidents and RemediationRequests; `update` `incidents/status`; its own Lease, and `create`, `patch` on core Events (leader election) |
 | Executor, cluster | `executor-role` ClusterRole | `get` only: Deployments, StatefulSets, KEDA `scaledobjects`, Flux `kustomizations` and `gitrepositories`, `remediationpolicies`, `remediationsettings` |

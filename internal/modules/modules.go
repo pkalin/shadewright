@@ -123,6 +123,58 @@ type SymptomSource struct {
 	// unstructured object). Everything in it is untrusted. Symptoms only reads obj, never changes it, and
 	// does no I/O.
 	Symptoms func(obj map[string]any) []Symptom
+	// Subject, when set (any field), is the kind of controller owner the symptoms are about instead of the
+	// watched object itself, for example the ScaledObject that owns an HPA. The evaluator in the analyzer
+	// verifies the owner before it uses it (design 3.1); an owner it cannot verify leaves the watched object
+	// as the subject.
+	Subject SubjectOwner
+}
+
+// SubjectOwner is the kind of controller owner a symptom source's symptoms are about. The evaluator takes the
+// watched object's owner reference marked controller with this group, version and kind, reads that object
+// with a get in the watched object's namespace, and uses it only when it exists with the referenced UID and
+// Claims, when set, accepts it. Owner references are untrusted: whoever can write the watched object can
+// write them.
+type SubjectOwner struct {
+	// Group, Version and Kind are those of the owner, for example "keda.sh", "v1alpha1" and "ScaledObject".
+	Group   string
+	Version string
+	Kind    string
+	// Resource is the plural resource name, for RBAC rules, for example "scaledobjects".
+	Resource string
+	// Claims, when set, reports whether owner, the owner as read, names the watched object called name as
+	// its own, from a field its controller writes: [ClaimOwned], [ClaimNotOwned] when it names another object
+	// or none can be read, or [ClaimPending] when the field is not written yet, which the evaluator retries.
+	// Everything in owner is untrusted. Claims only reads owner, never changes it, and does no I/O.
+	Claims func(owner map[string]any, name string) Claim
+}
+
+// Claim is what a [SubjectOwner]'s Claims found.
+type Claim int
+
+const (
+	// ClaimNotOwned: the owner names another object, or nothing that can be read as a claim. The evaluator
+	// takes the watched object as the subject.
+	ClaimNotOwned Claim = iota
+	// ClaimOwned: the owner names the watched object.
+	ClaimOwned
+	// ClaimPending: the owner has not written its claim yet (a controller that has not reconciled it). The
+	// evaluator waits and reads the owner again, with a bounded backoff, instead of settling on the watched
+	// object as the subject.
+	ClaimPending
+)
+
+// IsSet reports whether any field of the subject owner is set.
+func (o SubjectOwner) IsSet() bool {
+	return o.Group != "" || o.Version != "" || o.Kind != "" || o.Resource != "" || o.Claims != nil
+}
+
+// APIVersion returns the owner's group version in the form of an apiVersion field.
+func (o SubjectOwner) APIVersion() string {
+	if o.Group == "" {
+		return o.Version
+	}
+	return o.Group + "/" + o.Version
 }
 
 // Tool is a read-only tool for the analyzer. It is a placeholder: its fields come with the first module that

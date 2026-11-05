@@ -19,6 +19,7 @@ package keda
 import (
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/pkalin/shadewright/internal/kedaready"
 	"github.com/pkalin/shadewright/internal/modules"
@@ -247,7 +248,40 @@ func hpaSymptoms(obj map[string]any) []modules.Symptom {
 		{Field: "status.conditions." + conditionScalingLimited + ".reason", Value: hpaTooManyReplicas},
 	}}
 	s.Evidence = append(s.Evidence, metricEvidence(spec, status)...)
+	s.Since = transitionTime(limited)
 	return []modules.Symptom{s}
+}
+
+// transitionTime is a condition's lastTransitionTime, zero when it is missing or not an RFC 3339 time.
+func transitionTime(cond map[string]any) time.Time {
+	v, _ := cond["lastTransitionTime"].(string)
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// claimsHPA reports whether a ScaledObject names the HPA called name as its own: KEDA writes the name of the
+// HPA it manages to status.hpaName (apis/keda/v1alpha1/scaledobject_types.go at v2.21.0, set in
+// controllers/keda/hpa.go). The owner reference alone is written by whoever can write the HPA; the
+// ScaledObject's status is written by KEDA. A ScaledObject whose status.hpaName is missing or empty has not
+// been reconciled yet (KEDA sets it when it creates the HPA), so the claim is pending; any other value, or a
+// value that is not a string, is no claim.
+func claimsHPA(owner map[string]any, name string) modules.Claim {
+	if !is(owner, Group+"/"+Version, KindScaledObject) || name == "" {
+		return modules.ClaimNotOwned
+	}
+	status, _ := owner["status"].(map[string]any)
+	v := status["hpaName"]
+	if v == nil || v == "" {
+		return modules.ClaimPending
+	}
+	hpaName, ok := v.(string)
+	if !ok || hpaName != name {
+		return modules.ClaimNotOwned
+	}
+	return modules.ClaimOwned
 }
 
 // scaledObjectOwner returns the name of the ScaledObject in metadata.ownerReferences that controls the HPA,

@@ -78,7 +78,7 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 
 **What it may read.**
 
-- Events (`events.k8s.io/v1`) and pods (`get`, `list`, `watch`), pod logs (`get` on `pods/log`, for the pod logs source of the context builder, 2.3.2), and workloads (ReplicaSets, Deployments and StatefulSets, `get` only), only in the namespaces it is started with (`--watch-namespaces`).
+- Events (`events.k8s.io/v1`), pods and HorizontalPodAutoscalers (`autoscaling`, for the KEDA module's symptom source, 2.5.3) (`get`, `list`, `watch`), pod logs (`get` on `pods/log`, for the pod logs source of the context builder, 2.3.2), and workloads (ReplicaSets, Deployments and StatefulSets) and KEDA `ScaledObject`s (`get` only), only in the namespaces it is started with (`--watch-namespaces`). The analyzer reads `ScaledObject`s only while the KEDA module is active; the grant itself does not depend on it.
 - That is a ClusterRole that is only a catalogue of verbs, bound by one RoleBinding per watched namespace and never cluster-wide.
 - Its cache is restricted to the same list for those kinds, and to the operator namespace for Incidents and requests.
 - The cache drops managed fields before it stores an object.
@@ -119,6 +119,7 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 **What it cannot read today.**
 
 - Kyverno kinds: reading them (`get`, `list`, `watch` on `kyverno.io` `clusterpolicies` and `policies`, and on `wgpolicyk8s.io` `policyreports` and `clusterpolicyreports`) is granted only with the wiring of symptom sources (planned, 2.5).
+- Flux kinds, KEDA `scaledjobs`, and `list` or `watch` on `scaledobjects`: granted with the wiring of their symptom sources (planned, 2.5.1).
 - Secrets Store CSI driver kinds (`secrets-store.csi.x-k8s.io` `secretproviderclasses` and `secretproviderclasspodstatuses`): that module needs none. It watches no kind and reads only the kubelet's events (2.5).
 - The cloudflared module's symptom source reads Pods, which the analyzer already reads in the watched namespaces, so it needs no new grant.
 
@@ -373,13 +374,17 @@ Later candidates: External Secrets Operator, Reloader, cert-manager, Trivy Opera
 
 - A symptom has a reason (a CamelCase word of at most 128 characters) and a summary (at most 256 bytes) that the rule writes itself, never cluster text.
 - It has at most 8 evidence entries: values read from the object, each with the field it came from.
-- Evidence values are untrusted and left as read. The planned evaluator ([#61](https://github.com/pkalin/shadewright/issues/61)) checks each symptom against these limits (`ValidSymptom`), redacts every value with the fingerprint normalization and cuts it to 256 bytes.
-- `New` refuses a source with an invalid group version, kind, resource or controller, or without a function, and a kind watched twice, by one module or by two on either axis.
+- Evidence values are untrusted and left as read. The evaluator (`modules.EvaluateSource`) checks each symptom against these limits (`ValidSymptom`), drops one it refuses or that has no summary, redacts every value with the fingerprint normalization and cuts it to 256 bytes. A source that panics shows nothing.
+- A symptom may say when the state it reports began (`Since`, the condition's `lastTransitionTime`).
+- A source may name the kind of controller owner its symptoms are about (`Subject`), with a function that checks the owner claims the object (`Claims`: owned, not owned, or pending while the owner's controller has not written its claim yet, which the collector waits for with a backoff of 2 seconds doubling up to 2 minutes instead of settling on the object itself). The KEDA HPA source names the `ScaledObject`.
+- `New` refuses a source with an invalid group version, kind, resource or controller, or without a function, a subject owner with an invalid group version, kind or resource or of the watched kind itself, and a kind watched twice, by one module or by two on either axis.
 - It keeps a copy of each module's hooks as validated, and lookups return that copy.
+
+**Wiring** <span class="sw-status sw-built">built</span> for the HPA, <span class="sw-status sw-planned">planned</span> for the other kinds. The collector (3.1) watches the kinds whose sources are wired (`collector.SourceKinds`, for now `autoscaling/v2` `HorizontalPodAutoscaler`) in the watched namespaces, and on each object runs the source an active module declares for that kind, so a source runs only while its module is enabled and detected. Each symptom becomes an observation for the Incident controller (3.1). The Flux, Kyverno, cloudflared, `ScaledObject` and `ScaledJob` sources go through the same evaluator once their kinds are wired (planned), each with its read-only grant ([#380](https://github.com/pkalin/shadewright/issues/380), P2).
 
 ### 2.5.2. Flux
 
-**What it does.** The module (`internal/modules/flux`) is built. It contributes once the analyzer wires symptom sources (planned). It is detected by `kustomize.toolkit.fluxcd.io/v1`, `helm.toolkit.fluxcd.io/v2` or `source.toolkit.fluxcd.io/v1` (Flux 2.3 and later; beta versions are not read). It watches `Kustomization`, `HelmRelease` and `GitRepository` and reports at most one symptom per object.
+**What it does.** The module (`internal/modules/flux`) is built. It contributes once the collector wires its kinds (planned, 2.5.1). It is detected by `kustomize.toolkit.fluxcd.io/v1`, `helm.toolkit.fluxcd.io/v2` or `source.toolkit.fluxcd.io/v1` (Flux 2.3 and later; beta versions are not read). It watches `Kustomization`, `HelmRelease` and `GitRepository` and reports at most one symptom per object.
 
 **Which condition is reported.**
 
@@ -403,11 +408,11 @@ When the Kustomization or HelmRelease comparison differs, the summary says the c
 - The module has no actions and no tools, and reads objects only. A fix is a pull request to the manifest, values or Kustomization (section 7), never a change to a Flux object.
 - The read-only access to these kinds comes with the wiring. Flux objects usually live in `flux-system`, which then has to be among the analyzer's watched namespaces.
 
-**Revisions and redaction.** A revision evidence value is kept unredacted only when the whole value is a Flux revision: an optional reference name, `@`, `sha1:` and exactly 40 lower-case hex digits (`redact.IsFluxRevision`). The evaluator that applies this is planned (#61). Inside any other text, such as a condition message, the commit hash is redacted like any long hex run, so `sha1:` written in front of a secret keeps nothing.
+**Revisions and redaction.** A revision evidence value is kept unredacted only when the whole value is a Flux revision: an optional reference name, `@`, `sha1:` and exactly 40 lower-case hex digits (`redact.IsFluxRevision`). The evaluator applies this (`modules.BoundValue`, 2.5.1). Inside any other text, such as a condition message, the commit hash is redacted like any long hex run, so `sha1:` written in front of a secret keeps nothing.
 
 ### 2.5.3. KEDA
 
-**What it does.** The module (`internal/modules/keda`) is built and in the analyzer's registry. Its symptom sources are not consumed yet (planned). It is detected by `keda.sh/v1alpha1`, the only group version of `ScaledObject`, `ScaledJob` and `TriggerAuthentication` in KEDA 2.x.
+**What it does.** The module (`internal/modules/keda`) is built and in the analyzer's registry. Its HPA source is consumed: a replica ceiling becomes an Incident about the `ScaledObject` (below). Its `ScaledObject` and `ScaledJob` sources are not consumed yet (planned, 2.5.1). It is detected by `keda.sh/v1alpha1`, the only group version of `ScaledObject`, `ScaledJob` and `TriggerAuthentication` in KEDA 2.x.
 
 It watches `ScaledObject`, `ScaledJob` and the `HorizontalPodAutoscaler` (`autoscaling/v2`) that KEDA creates for each `ScaledObject`, and reports at most one symptom per object. Conditions and reasons were read from KEDA v2.21.0 (the release the lab installs) and Kubernetes v1.37.2.
 
@@ -431,7 +436,9 @@ It watches `ScaledObject`, `ScaledJob` and the `HorizontalPodAutoscaler` (`autos
 - a status for the current generation;
 - no `ScalingActive=False` (when metrics fail the HPA stops updating `ScalingLimited`, so an old `TooManyReplicas` can remain).
 
-Its evidence is the `ScaledObject`'s name, `spec.maxReplicas`, `status.currentReplicas`, the limit reason and, for up to two external metrics, the current value (the backlog the HPA sees) and its target.
+Its evidence is the `ScaledObject`'s name, `spec.maxReplicas`, `status.currentReplicas`, the limit reason and, for up to two external metrics, the current value (the backlog the HPA sees) and its target. It begins at `ScalingLimited`'s `lastTransitionTime`.
+
+**The Incident is about the `ScaledObject`** (decided 2026-11-05, [#380](https://github.com/pkalin/shadewright/issues/380)): the object `AdjustKedaMaxReplicas` patches, with the HPA condition as evidence. The source declares the `ScaledObject` as its subject owner. The collector takes it as the subject only when the HPA's controller reference names it, a `get` finds it in the same namespace with the referenced UID, and its `status.hpaName`, which KEDA writes, names the HPA; while `status.hpaName` is empty (KEDA has not reconciled the `ScaledObject` yet) the collector waits and reads it again, from 2 seconds doubling to 2 minutes, at most 15 times (about 20 minutes); after that it logs that the owner never claimed the HPA and takes the HPA itself as the subject, so the symptom is not hidden for good; otherwise the HPA itself is the subject. The fingerprint hashes the `ScaledObject`'s UID and the fixed summary, so a recreated HPA and changing metric values keep one Incident. A ceiling that lasts is one occurrence; one that ends and comes back (a new `lastTransitionTime`, or one the collector saw end, 3.1) is another.
 
 **Why a ceiling is only a candidate.**
 
@@ -454,7 +461,7 @@ Its evidence is the `ScaledObject`'s name, `spec.maxReplicas`, `status.currentRe
 - The module contributes the verification check `KedaReady`: the `ScaledObject` is `Ready=True`, not paused (partial pauses and the pause annotations included), not being deleted, not on fallback, and `HPAActive` is not `False`. It is a pure function over the object. It offers no tools.
 - The action `AdjustKedaMaxReplicas` is allowed only while the cluster admin enables the `keda` integration in `RemediationSettings` `spec.modules.integrations`. The policy check refuses it otherwise (`Denied`, `ModuleNotEnabled`), reading the spec only, never the status. Disabling the module after approval supersedes the plan.
 - The function, KEDA's API version, condition names and pause annotations live in `internal/kedaready`, which imports only the standard library. The policy check and the module share one definition without the policy depending on the module registry or on the module.
-- Consuming its symptom sources needs read-only access (`get`, `list`, `watch`) to `scaledobjects`, `scaledjobs` and `horizontalpodautoscalers` in the watched namespaces. That comes with the wiring.
+- Consuming the HPA source needs `get`, `list`, `watch` on `horizontalpodautoscalers` and `get` on `scaledobjects` (to verify the subject) in the watched namespaces, granted by the analyzer watch role (2.2.2). The analyzer reads nothing of `keda.sh` while the module is not active, though the grant does not depend on it. Consuming the `ScaledObject` and `ScaledJob` sources needs `list` and `watch` on `scaledobjects` and `get`, `list`, `watch` on `scaledjobs`, which come with their wiring.
 
 **Known limit.** The registry allows one symptom source per kind, so this module's `HorizontalPodAutoscaler` source is the only one. A later core-workloads HPA rule must share it (move into it or be split out of it) rather than add a second source.
 

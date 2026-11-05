@@ -54,7 +54,8 @@ func (module) Detection() modules.IntegrationDetection {
 	return modules.IntegrationDetection{GroupVersions: []string{Group + "/" + Version}}
 }
 
-// Hooks contributes the symptom sources for ScaledObject, ScaledJob and the HPAs KEDA owns, the KedaReady
+// Hooks contributes the symptom sources for ScaledObject, ScaledJob and the HPAs KEDA owns (whose symptoms are
+// about the owning ScaledObject once the evaluator has verified it), the KedaReady
 // verification check and the AdjustKedaMaxReplicas action, which has its typed parameters, policy rule, GitOps
 // patcher and refusal tests. The policy check refuses the action unless the ScaledObject is ready by the same
 // rule as KedaReady (CheckTargetReady in internal/policy), at the decision and before every write. It offers
@@ -76,6 +77,11 @@ func (module) Hooks() modules.Hooks {
 				Group: AutoscalingGroup, Versions: []string{AutoscalingVersion}, Kind: KindHPA,
 				Resource: "horizontalpodautoscalers", ReportingController: "horizontal-pod-autoscaler",
 				Symptoms: hpaSymptoms,
+				// The Incident is about the ScaledObject, the object AdjustKedaMaxReplicas patches (#380).
+				Subject: modules.SubjectOwner{
+					Group: Group, Version: Version, Kind: KindScaledObject, Resource: "scaledobjects",
+					Claims: claimsHPA,
+				},
 			},
 		},
 		Actions: []v1alpha1.ActionType{v1alpha1.ActionAdjustKedaMaxReplicas},

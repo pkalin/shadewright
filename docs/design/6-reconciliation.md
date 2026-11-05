@@ -1,6 +1,6 @@
 # 6. Reconciliation
 
-[![Shadewright executor: a RemediationRequest passes the source mapping, the policy engine, the limits, the freshness check, the patcher with the semantic diff and the kill switch gate; the Key Vault signer lets the GitHub App open the pull request, the request waits in AwaitingApproval and stops in Merged when a person merges; refusals end in Denied, NeedsIntervention or Superseded; built up to Merged, with auto-merge, the delivery check and the verifier planned, drawn dashed.](../assets/diagrams/executor.svg)](../assets/diagrams/executor.svg "Open full size")
+[![Shadewright executor: a RemediationRequest passes the policy's field checks, the source mapping, the full policy decision, the limits, the freshness check, the patcher with the semantic diff and the kill switch gate; the Key Vault signer lets the GitHub App open the pull request, the request waits in AwaitingApproval and stops in Merged when a person merges; refusals end in Denied, NeedsIntervention or Superseded; built up to Merged, with auto-merge, the delivery check and the verifier planned, drawn dashed.](../assets/diagrams/executor.svg)](../assets/diagrams/executor.svg "Open full size")
 
 [![RemediationRequest phases: Pending, PolicyChecked, PRCreated, AwaitingApproval or AutoMergeQueued, Merged, WaitingForDelivery, Verifying, Succeeded; only the steps up to Merged are built; any step can end in Denied, Failed, Expired, Cancelled, Superseded or NeedsIntervention.](../assets/diagrams/phases.svg)](../assets/diagrams/phases.svg "Open full size")
 
@@ -63,9 +63,25 @@ stateDiagram-v2
 
 The policy check is the first step. It loads the policy the request names, the `default` RemediationSettings and the live target, and then maps the target to its file in Git (ADR-0012).
 
+It refuses in this order, and the first refusal decides:
+
+1. A missing policy or settings object (`Denied`).
+2. A kind the action cannot change, before the target is read (`NeedsIntervention`).
+3. A missing target (`NeedsIntervention`) or one with another UID (`Denied`).
+4. A field the live target does not set (`NeedsIntervention`), or a previous value that is not the live one (`Denied`, `PreviousValueMismatch`).
+5. The policy's field checks (`internal/policy.Preflight`, section 5.3): request, action, module, target and bounds.
+6. The source mapping, the first step that reads Flux objects or Git and so may need a GitHub token.
+7. The full decision (`internal/policy.Decide`) on everything, the resolved source included.
+
+Steps 1 to 5 read only the Kubernetes API, so a request refused there costs no Git read, no signing and no token.
+
+The order is intended (#242): a refusal in step 5 wins over anything step 6 would have said, a stop for a person or a Git error worth a retry included, because the mapping does not run. A request refused in step 5 therefore has no `status.source`: no Git read happened.
+
 ### Why the target is read twice
 
 The target is read again after the mapping, and the check starts over if its UID or resourceVersion changed. This way the previous value and the file in Git always describe the same object.
+
+The same second read comes before a step 5 refusal by the policy's target check (kind, namespace, labels), the one field check that rests on what was read from the live object. A `Denied` is final, so a target that Flux relabelled after the first read starts the check over instead of being refused on its old labels. The other step 5 refusals depend only on the request, the policy and the settings, and need no second read.
 
 ### What it stores
 
@@ -97,6 +113,7 @@ All of them are listed in the [metrics reference](../reference/metrics.md).
 | The previous value in the request is not the live value (the policy measures increases and decreases from it) | `Denied` (`PreviousValueMismatch`) | `False` |
 | The live object does not set the field the action changes | `NeedsIntervention` (`FieldNotFound`) | `Unknown` |
 | Source mapping denies (repository, branch, path or inventory) or `policy.Decide` denies | `Denied`, reason of the check | `False` |
+| `policy.Preflight` denies (step 5), before the mapping; no `status.source` is written, since no Git read happened | `Denied`, reason of the check | `False` |
 | `AdjustKedaMaxReplicas` without the `keda` integration enabled in `spec.modules` | `Denied` (`ModuleNotEnabled`) | `False` |
 | `AdjustKedaMaxReplicas` on a `ScaledObject` that is definitely not ready (see "A `ScaledObject` that is not ready" below), checked after every check that denies | `NeedsIntervention` (`ScaledObjectNotReady`) | `Unknown` |
 | `AdjustKedaMaxReplicas` on a `ScaledObject` KEDA has not reported on yet (no status, no `Ready` condition, `Ready=Unknown` other than `PartialTriggerError`) | no phase: see "A `ScaledObject` KEDA has not reported on" below | `Unknown` (`ScaledObjectReadinessUnknown`) while it waits |

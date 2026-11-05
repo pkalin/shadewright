@@ -83,7 +83,11 @@ func deadlineWorld(t *testing.T) (client.Client, *remediationv1alpha1.Remediatio
 				Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")}}}}}}},
 	}
 	pol := fx.RemediationPolicy("mem")
+	// The policy accepts the request on its own fields (namespace, bounds), so the check gets past the preflight
+	// to the resolver.
 	pol.Spec.Actions = []remediationv1alpha1.PolicyAction{fx.MemoryLimitPolicyAction()}
+	pol.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 50
+	pol.Spec.RequestNamespaces = []remediationv1alpha1.Name{requestNamespace}
 	rr := fx.MemoryLimitRequest(requestNamespace, "rr")
 	rr.Spec.PolicyRef = "mem"
 	rr.Spec.TargetRef.Name = dep.Name

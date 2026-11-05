@@ -435,6 +435,11 @@ func needsIntervention(reason, message string) outcome {
 }
 
 // check gathers the input and decides. The error is non-nil only for a failure worth retrying.
+//
+// The refusal order (design 5.3): a missing policy or settings object, a kind the action cannot change, a missing
+// target or one with another UID, a previous value that is not the live one, then the policy's checks on the
+// request's own fields (policy.Preflight). Only after all of them does the source mapping read Flux objects and
+// Git, and policy.Decide decide on everything, the resolved source included.
 func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	outcome, error) {
 	pol := &remediationv1alpha1.RemediationPolicy{}
@@ -474,6 +479,24 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 	if o, stop := checkBaseline(rr.Spec.Action, field, live); stop {
 		return o, nil
 	}
+	in := policy.DecisionInput{Request: rr, Policy: pol, Settings: settings, Target: policyTarget(live)}
+	// Refuse what the policy refuses on the request's own fields before the source mapping, so such a request
+	// costs no Git read and no token. Preflight runs the first checks of Decide and only refuses; a request it
+	// lets through is decided by Decide in full below, once the source is resolved. Its refusal wins over
+	// anything the mapping would have said (a stop, a refusal or an error to retry): the request's own fields are
+	// checked first (#242).
+	switch d, v := policy.Preflight(in); v {
+	case policy.PreflightContinue:
+	case policy.PreflightRefusedOnTarget:
+		// The refusal rests on one read of the target (its labels, say), and ends the request for good. Flux may
+		// have applied a change since, so confirm it is the object that was checked, as after the mapping below.
+		if err := r.unchanged(ctx, ref, live); err != nil {
+			return outcome{}, err
+		}
+		return preflightRefusal(d, pol), nil
+	default:
+		return preflightRefusal(d, pol), nil
+	}
 
 	res, err := r.Source.Resolve(ctx, sourcemap.Input{
 		Target:       ref,
@@ -491,13 +514,8 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 	// that differs from Git, a field not found) could end a request that the current object does not stop.
 	// Read once more, for every outcome, and start over when the object is not the one checked: an unchanged
 	// resourceVersion means nothing changed in between.
-	again, ok, err := r.target(ctx, ref)
-	if err != nil {
+	if err := r.unchanged(ctx, ref, live); err != nil {
 		return outcome{}, err
-	}
-	if !ok || again.GetUID() != live.GetUID() || again.GetResourceVersion() != live.GetResourceVersion() {
-		return outcome{}, fmt.Errorf("%s %s/%s changed during the policy check, checking again",
-			ref.Kind, ref.Namespace, ref.Name)
 	}
 
 	switch res.Outcome {
@@ -512,25 +530,71 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 		return needsIntervention(string(res.Reason), res.Message), nil
 	}
 
-	d := policy.Decide(policy.DecisionInput{
-		Request:  rr,
-		Policy:   pol,
-		Settings: settings,
-		Source:   res.Source,
-		Target: &policy.Target{
-			APIVersion: live.GetAPIVersion(),
-			Kind:       live.GetKind(),
-			Namespace:  live.GetNamespace(),
-			Name:       live.GetName(),
-			UID:        remediationv1alpha1.UID(live.GetUID()),
-			Labels:     live.GetLabels(),
-			Object:     live.Object,
-		},
-	})
+	in.Source = res.Source
+	d := policy.Decide(in)
+	o := decided(d, pol)
+	o.source = res.Source
+	if d.Outcome != policy.OutcomeAllowed {
+		return o, nil
+	}
+	// The plan is fixed here, from the very objects the decision was made on, so no later read of the
+	// policy or the settings can slip in between the decision and the digest.
+	digest, err := freshness.ComputeDigest(rr, res.Source, pol, settings)
+	if err != nil {
+		return needsIntervention(string(sourcemap.ReasonInvalidInput), "The plan digest cannot be computed"), nil
+	}
+	o.planDigest = digest
+	// The pull request step's deadline starts with the decision, so it also ends a request whose
+	// freshness check never passes. A pause would use it up without any chance to act, so a request
+	// decided while paused gets its deadline once the pause has ended (recheck).
+	if !freshness.Paused(settings) {
+		o.deadline = &metav1.Time{Time: r.now().Add(r.pullRequestTimeout())}
+	}
+	for _, repo := range settings.Spec.Repositories {
+		if repo.Name == res.Source.RepositoryRef {
+			o.planRepository = freshness.RepositoryOf(repo)
+		}
+	}
+	return o, nil
+}
+
+// unchanged reads the target again and returns nil when it is still live, with the UID and resourceVersion of
+// live, the object the check read first. Otherwise it returns an error, so the check starts over on the next
+// attempt with the object as it is now: a terminal answer is never given on an object that has changed since.
+func (r *RemediationRequestReconciler) unchanged(ctx context.Context, ref remediationv1alpha1.ObjectRef,
+	live *unstructured.Unstructured) error {
+	again, ok, err := r.target(ctx, ref)
+	if err != nil {
+		return err
+	}
+	if !ok || again.GetUID() != live.GetUID() || again.GetResourceVersion() != live.GetResourceVersion() {
+		return fmt.Errorf("%s %s/%s changed during the policy check, checking again",
+			ref.Kind, ref.Namespace, ref.Name)
+	}
+	return nil
+}
+
+// policyTarget is the live target as the policy reads it.
+func policyTarget(live *unstructured.Unstructured) *policy.Target {
+	return &policy.Target{
+		APIVersion: live.GetAPIVersion(),
+		Kind:       live.GetKind(),
+		Namespace:  live.GetNamespace(),
+		Name:       live.GetName(),
+		UID:        remediationv1alpha1.UID(live.GetUID()),
+		Labels:     live.GetLabels(),
+		Object:     live.Object,
+	}
+}
+
+// decided is the outcome of a policy decision d made under pol, without the source and without the plan an
+// allowed decision fixes (digest, deadline, repository): the caller adds those, or returns another outcome when
+// it cannot. Each outcome's phase and condition status match its reason; an outcome other than Allowed, Denied
+// or Wait needs a person, so an unknown one never proceeds.
+func decided(d policy.Decision, pol *remediationv1alpha1.RemediationPolicy) outcome {
 	o := outcome{
 		reason:         string(d.Reason),
 		message:        d.Message,
-		source:         res.Source,
 		policyUID:      remediationv1alpha1.UID(pol.UID),
 		policyRevision: fmt.Sprintf("%s/%d", pol.Name, pol.Generation),
 	}
@@ -538,32 +602,24 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 	case policy.OutcomeAllowed:
 		o.phase, o.status = remediationv1alpha1.PhasePolicyChecked, metav1.ConditionTrue
 		o.approval = &d.EffectiveApprovalRequired
-		// The plan is fixed here, from the very objects the decision was made on, so no later read of the
-		// policy or the settings can slip in between the decision and the digest.
-		digest, err := freshness.ComputeDigest(rr, res.Source, pol, settings)
-		if err != nil {
-			return needsIntervention(string(sourcemap.ReasonInvalidInput), "The plan digest cannot be computed"), nil
-		}
-		o.planDigest = digest
-		// The pull request step's deadline starts with the decision, so it also ends a request whose
-		// freshness check never passes. A pause would use it up without any chance to act, so a request
-		// decided while paused gets its deadline once the pause has ended (recheck).
-		if !freshness.Paused(settings) {
-			o.deadline = &metav1.Time{Time: r.now().Add(r.pullRequestTimeout())}
-		}
-		for _, repo := range settings.Spec.Repositories {
-			if repo.Name == res.Source.RepositoryRef {
-				o.planRepository = freshness.RepositoryOf(repo)
-			}
-		}
 	case policy.OutcomeDenied:
 		o.phase, o.status = remediationv1alpha1.PhaseDenied, metav1.ConditionFalse
 	case policy.OutcomeWait:
 		o.wait = true
 	default:
+		// NeedsIntervention, and anything unknown.
 		o.phase, o.status = remediationv1alpha1.PhaseNeedsIntervention, metav1.ConditionUnknown
 	}
-	return o, nil
+	return o
+}
+
+// preflightRefusal is the outcome of a refusal by policy.Preflight. Preflight never allows; should it ever
+// return Allowed, the request goes to a person instead, since no plan was fixed for it.
+func preflightRefusal(d policy.Decision, pol *remediationv1alpha1.RemediationPolicy) outcome {
+	if d.Outcome == policy.OutcomeAllowed {
+		return needsIntervention(string(policy.ReasonIncompleteInput), "The policy preflight cannot allow a request")
+	}
+	return decided(d, pol)
 }
 
 // target reads the live target. It reports false when the object, or its kind, does not exist.

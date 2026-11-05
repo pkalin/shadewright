@@ -195,8 +195,8 @@ conditions of the request (see the end of this step and step 7). Reasons to look
 - `GitForbidden` or `GitRejected`: GitHub refused the App (permissions, installation, ruleset); the request ends
   `NeedsIntervention` before a pull request exists;
 - no reason at all: a signer that cannot be built (no workload identity) or a Key Vault or GitHub error that
-  may pass is retried quietly. Source mapping opens the repository and its signer before the policy decision, so
-  the request stays `Pending`, not `PolicyChecked`. The pull request deadline starts only after an `Allowed`
+  may pass is retried quietly. Source mapping opens the repository and its signer before the full policy
+  decision (after the field checks, design 6.2), so the request stays `Pending`, not `PolicyChecked`. The pull request deadline starts only after an `Allowed`
   decision, so nothing ends such a request. Read the executor log
   (`kubectl -n shadewright-system logs deploy/shadewright-executor`) and fix the identity or the Key Vault
   access it names.

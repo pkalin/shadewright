@@ -169,19 +169,23 @@ func memoryBounds(in *policy.DecisionInput) *v1alpha1.MemoryLimitBounds {
 	return in.Policy.Spec.Actions[0].SetContainerMemoryLimit
 }
 
-func TestDecide(t *testing.T) {
+// decideCase is one case of the Decide table: an input made by base and changed by mutate, and its decision.
+type decideCase struct {
+	name    string
+	base    func() policy.DecisionInput
+	mutate  func(in *policy.DecisionInput)
+	outcome policy.Outcome
+	reason  policy.Reason
+}
+
+// decideCases is the Decide table. TestPreflightAgreesWithDecide runs Preflight on it too.
+func decideCases() []decideCase {
 	const (
 		allowed = policy.OutcomeAllowed
 		denied  = policy.OutcomeDenied
 		needs   = policy.OutcomeNeedsIntervention
 	)
-	tests := []struct {
-		name    string
-		base    func() policy.DecisionInput
-		mutate  func(in *policy.DecisionInput)
-		outcome policy.Outcome
-		reason  policy.Reason
-	}{
+	return []decideCase{
 		{name: "keda baseline", base: kedaInput, mutate: func(*policy.DecisionInput) {},
 			outcome: allowed, reason: policy.ReasonWithinApprovedBounds},
 		{name: "memory baseline", base: memoryInput, mutate: func(*policy.DecisionInput) {},
@@ -626,7 +630,10 @@ func TestDecide(t *testing.T) {
 			},
 			outcome: allowed, reason: policy.ReasonWithinApprovedBounds},
 	}
-	for _, tt := range tests {
+}
+
+func TestDecide(t *testing.T) {
+	for _, tt := range decideCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			in := tt.base()
 			tt.mutate(&in)

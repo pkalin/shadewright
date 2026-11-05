@@ -188,6 +188,7 @@ make docs-requirements      # after editing requirements-docs.in: regenerate the
 ## Docs and decisions
 
 - Published URLs are kept: `hack/docs-published-paths.txt` lists every page path of shadewright.io, and the `docs-check` job of the PR graph (`docs-check.yml`, group `docs` of `hack/ci-changed.sh`) fails when a listed path no longer resolves to a page or a redirect page. Adding a page needs no change; moving or deleting one means a redirect, or removing its line from the list in the same pull request, which makes it a visible decision. Regenerate the list from a build with `python3 -I hack/docs-check.py list site`. External links are not checked on pull requests; `docs-links.yml` reports the ones that do not answer weekly, without failing.
+- `docs/design.md` is the system design; its section 15 lists decisions made and open questions. `docs/adr/` holds decisions (template and index there). A new page or ADR must also be added to `nav` in `zensical.toml`, in the section that matches what a reader does with it.
 - When a change implements or alters a design decision, update the design or add an ADR in the same PR.
 - Docs are written with the code, in the same PR, not later:
   - Every package has a doc comment, and every exported identifier is documented.

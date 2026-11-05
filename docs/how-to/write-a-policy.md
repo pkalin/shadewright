@@ -4,7 +4,7 @@ title: Write or tighten a policy
 
 # Write or tighten a policy
 
-A `RemediationPolicy` is what decides, with fixed rules, whether a request may run and within which bounds. Only the cluster admin should be able to create or edit it (it is cluster-scoped). Background: [design 5.3](../design.md#53-remediationpolicy) and [ADR-0011](../adr/0011-policy-as-cluster-scoped-crd.md). Every field is in the [API reference](../reference/api.md#remediationpolicy).
+A `RemediationPolicy` is what decides, with fixed rules, whether a request may run and within which bounds. Only the cluster admin should be able to create or edit it (it is cluster-scoped). Background: [design 5.3](../design/5-api.md#53-remediationpolicy) and [ADR-0011](../adr/0011-policy-as-cluster-scoped-crd.md). Every field is in the [API reference](../reference/api.md#remediationpolicy).
 
 ## A starting point
 

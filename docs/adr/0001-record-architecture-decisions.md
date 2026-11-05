@@ -9,7 +9,7 @@ Shadewright is a public project whose value depends on safety properties that ar
 
 ## Decision
 
-Record every significant decision as a short ADR in `docs/adr/`, numbered, using `template.md`. A new ADR supersedes an accepted one that it reverses or replaces; smaller changes are dated amendments ([ADR-0021](0021-amending-accepted-adrs.md)). Changes that weaken an invariant in `AGENTS.md` need an ADR first. Open questions live in [design section 15](../design.md#15-decisions-made-and-open-questions) until they become ADRs.
+Record every significant decision as a short ADR in `docs/adr/`, numbered, using `template.md`. A new ADR supersedes an accepted one that it reverses or replaces; smaller changes are dated amendments ([ADR-0021](0021-amending-accepted-adrs.md)). Changes that weaken an invariant in `AGENTS.md` need an ADR first. Open questions live in [design section 15](../design/15-decisions-made-and-open-questions.md#15-decisions-made-and-open-questions) until they become ADRs.
 
 ## Consequences
 

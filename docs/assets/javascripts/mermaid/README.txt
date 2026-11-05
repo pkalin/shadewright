@@ -9,4 +9,4 @@ SHA-256: `a8a6a6f805b074a8261a2825c86f99c8054acb3b35f50bb7e24a4f9f2c3c3b9f`
 
 Dependabot does not see this file. To update: `npm pack mermaid@<version>`, check the integrity against
 `npm view mermaid@<version> dist.integrity`, copy `package/dist/mermaid.min.js` and `package/LICENSE` here, rename
-the file, update `extra_javascript` and this README, and render every diagram in `docs/design.md` before merging.
+the file, update `extra_javascript` and this README, and render every diagram in `docs/design/` before merging.

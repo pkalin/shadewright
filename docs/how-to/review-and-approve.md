@@ -4,7 +4,7 @@ title: Review and approve a proposal
 
 # Review and approve a proposal
 
-A proposal reaches you as a pull request in your GitOps repository, made by the Shadewright GitHub App. Approving it is your ordinary review and merge. Background: [the life of a request](../request-lifecycle.md) and [design 8.1](../design.md#81-what-approvalrequired-means).
+A proposal reaches you as a pull request in your GitOps repository, made by the Shadewright GitHub App. Approving it is your ordinary review and merge. Background: [the life of a request](../request-lifecycle.md) and [design 8.1](../design/8-gitops-on-github.md#81-what-approvalrequired-means).
 
 ## Steps
 

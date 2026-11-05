@@ -24,4 +24,4 @@ A cluster-scoped `RemediationPolicy` CRD. Each object lists allowed action types
 
 ## Amendments
 
-- 2026-11-04: the target selector has no `kinds`. Each action type fixes the kinds it may target in the catalog ([design 5.1](../design.md#51-remediationrequest)), so a policy cannot widen them; the Decision now matches the CRD and the design. This narrows the original wording and widens nothing ([#244](https://github.com/pkalin/shadewright/issues/244)).
+- 2026-11-04: the target selector has no `kinds`. Each action type fixes the kinds it may target in the catalog ([design 5.1](../design/5-api.md#51-remediationrequest)), so a policy cannot widen them; the Decision now matches the CRD and the design. This narrows the original wording and widens nothing ([#244](https://github.com/pkalin/shadewright/issues/244)).

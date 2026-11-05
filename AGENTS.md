@@ -56,7 +56,7 @@ so the **pull request title** is what counts; a required check (`Conventional PR
 
 Work is tracked as GitHub issues, written with the "Task" template so that any contributor or coding agent
 can work on one without further context. Milestones are releases (`v0.1.0`, `v0.2.0`, ...), each with a due
-date and a one-line goal; the design stages (`docs/design.md` section 13) are tracked by the epics instead.
+date and a one-line goal; the design stages (`docs/design/13-milestones.md`) are tracked by the epics instead.
 A task takes the milestone of the release it is needed for, which may be earlier than its epic's.
 Feature sets are `epic` issues (the "Epic" template) and tasks are their sub-issues. Issues for all three
 repositories live here; a task for `shadewright-azure` or `shadewright-fleet` names that repository in its
@@ -188,7 +188,7 @@ make docs-requirements      # after editing requirements-docs.in: regenerate the
 ## Docs and decisions
 
 - Published URLs are kept: `hack/docs-published-paths.txt` lists every page path of shadewright.io, and the `docs-check` job of the PR graph (`docs-check.yml`, group `docs` of `hack/ci-changed.sh`) fails when a listed path no longer resolves to a page or a redirect page. Adding a page needs no change; moving or deleting one means a redirect, or removing its line from the list in the same pull request, which makes it a visible decision. Regenerate the list from a build with `python3 -I hack/docs-check.py list site`. External links are not checked on pull requests; `docs-links.yml` reports the ones that do not answer weekly, without failing.
-- `docs/design.md` is the system design; its section 15 lists decisions made and open questions. `docs/adr/` holds decisions (template and index there). A new page or ADR must also be added to `nav` in `zensical.toml`, in the section that matches what a reader does with it.
+- `docs/design.md` is the index of the system design, one page per section in `docs/design/` (named from the section heading, e.g. `docs/design/6-reconciliation.md`); section 15 (`docs/design/15-decisions-made-and-open-questions.md`) lists decisions made and open questions. `docs/adr/` holds decisions (template and index there). A new page or ADR must also be added to `nav` in `zensical.toml`, in the section that matches what a reader does with it.
 - When a change implements or alters a design decision, update the design or add an ADR in the same PR.
 - Docs are written with the code, in the same PR, not later:
   - Every package has a doc comment, and every exported identifier is documented.

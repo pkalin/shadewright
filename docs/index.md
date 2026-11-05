@@ -34,7 +34,7 @@ Built so far: the API and its validation, the policy check with source mapping a
 
     Events and object status in the namespaces you choose, deduplicated into incidents.
 
--   [**2. Diagnose**](design.md#33-analysis)
+-   [**2. Diagnose**](design/3-observation-and-deduplication.md#33-analysis)
 
     Rules first, then a model with read-only tools and redacted context. No evidence, no proposal.
 
@@ -46,7 +46,7 @@ Built so far: the API and its validation, the policy check with source mapping a
 
     On a branch, in the one repository it may write to, with the evidence and a rollback plan.
 
--   [**5. Verify**](design.md#6-reconciliation)
+-   [**5. Verify**](design/6-reconciliation.md#6-reconciliation)
 
     After merge, it follows the GitOps controller (Flux today) to the applied revision and checks that the symptom is gone.
 

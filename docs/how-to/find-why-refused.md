@@ -4,7 +4,7 @@ title: Find why a request was refused
 
 # Find why a request was refused
 
-A request that is refused or stops says why in its conditions. Background: [design 6](../design.md#6-reconciliation) and [the life of a request](../request-lifecycle.md).
+A request that is refused or stops says why in its conditions. Background: [design 6](../design/6-reconciliation.md#6-reconciliation) and [the life of a request](../request-lifecycle.md).
 
 ## Steps
 

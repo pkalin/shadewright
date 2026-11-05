@@ -18,7 +18,7 @@ A safe-remediation controller for Kubernetes clusters run with GitOps. It watche
 
 ## How it works
 
-Observe, diagnose, propose, open a pull request, verify: the five steps are on the [home page](index.md#how-it-works), the flow with its components is in the [design](design.md#2-architecture), and the order in which a request moves is in [design 6](design.md#6-reconciliation).
+Observe, diagnose, propose, open a pull request, verify: the five steps are on the [home page](index.md#how-it-works), the flow with its components is in the [design](design/2-architecture.md#2-architecture), and the order in which a request moves is in [design 6](design/6-reconciliation.md#6-reconciliation).
 
 ## Requirements and compatibility
 
@@ -26,7 +26,7 @@ A cluster whose API server supports CEL validation rules, Flux delivering the ta
 
 ## Status
 
-The project is early. The [status section](index.md#status) of the home page lists what is built and what is not, the [threat model](threat-model.md) marks each guarantee as built or planned, and the [milestones](design.md#13-milestones) say what comes next.
+The project is early. The [status section](index.md#status) of the home page lists what is built and what is not, the [threat model](threat-model.md) marks each guarantee as built or planned, and the [milestones](design/13-milestones.md#13-milestones) say what comes next.
 
 ## Where to go next
 

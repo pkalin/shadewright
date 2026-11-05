@@ -9,11 +9,11 @@ You check one branch of the Shadewright operator for drift between its code and 
 
 ## Inputs
 
-Run from the repository checkout you are given (the main checkout or a worktree). The change under review is `git diff main...HEAD` (or `git diff` plus `git diff --cached` for uncommitted work when the caller says so). Read `AGENTS.md` ("Invariants" and "Docs and decisions") first. Search `docs/design.md` and the other documents with `rg` for the terms the diff touches and read the sections around the hits; do not read `docs/design.md` whole.
+Run from the repository checkout you are given (the main checkout or a worktree). The change under review is `git diff main...HEAD` (or `git diff` plus `git diff --cached` for uncommitted work when the caller says so). Read `AGENTS.md` ("Invariants" and "Docs and decisions") first. Search `docs/design.md` (the index) and `docs/design/` and the other documents with `rg` for the terms the diff touches and read the sections around the hits; do not read `docs/design.md` whole.
 
 The documents that describe the operator, and what each one promises:
 
-- `docs/design.md`: every behaviour of the operator has a sentence here or in an ADR. Its status line (line 3) lists what is built; sequence and flow diagrams mark unbuilt steps *(planned)*, which means "not called by the running operator", not "no code exists".
+- `docs/design/*.md` (one page per section): every behaviour of the operator has a sentence here or in an ADR. The status line (line 3 of the index `docs/design.md`) lists what is built; sequence and flow diagrams mark unbuilt steps *(planned)*, which means "not called by the running operator", not "no code exists".
 - `docs/adr/*.md`: decisions. An accepted ADR is changed only by a dated entry in its "Amendments" section (ADR-0021).
 - `README.md` (the tagline and the warning), `docs/index.md` (the same two) and `site_description` in `zensical.toml`: three copies of the positioning and of the built state. They change together or not at all.
 - `docs/reference/api.md`: generated from the API types by `make api-docs`; CI fails when it is stale.
@@ -22,9 +22,9 @@ The documents that describe the operator, and what each one promises:
 
 ## Checks, in this order
 
-1. **Every behaviour change has a sentence.** From the diff, not from the commit messages, list each behaviour the change adds or alters: a new check, read, retry, refusal, reason, phase, condition, timeout, limit, permission, flag, metric, field or ordering. For each, find the sentence in `docs/design.md` or an ADR that describes it as it is now. Quote the sentence with its line. No sentence, or a sentence that describes the old behaviour, is a finding.
+1. **Every behaviour change has a sentence.** From the diff, not from the commit messages, list each behaviour the change adds or alters: a new check, read, retry, refusal, reason, phase, condition, timeout, limit, permission, flag, metric, field or ordering. For each, find the sentence in `docs/design/` or an ADR that describes it as it is now. Quote the sentence with its line. No sentence, or a sentence that describes the old behaviour, is a finding.
 2. **Wiring switches on dormant code.** When the diff sets a field, flag, provider or registry entry that other code checks for nil, empty or enabled (`grep` for the field name), list every such check and what it now does. Each one needs a design sentence, and the *(planned)* marker of the step it implements must go.
-3. **Built, planned and the three copies.** If the diff changes what the running binary does, compare the status line of `docs/design.md`, the warning in `README.md`, the warning in `docs/index.md` and `site_description` in `zensical.toml`. They must say the same. Then check the *(planned)* markers in the diagrams of the sections the change touches: a step the binary now runs is not planned; a library no binary calls stays planned. The same holds for the hand-made SVGs in `docs/assets/diagrams/` (`architecture.svg`, `analyzer.svg`, `executor.svg`, `phases.svg`): a built step is a solid box with a solid arrow, a planned one is dashed with a `planned` caption, the order of steps matches the code, and each SVG's `<desc>` and its alt text in `docs/design.md` say the same.
+3. **Built, planned and the three copies.** If the diff changes what the running binary does, compare the status line of `docs/design.md` (the index), the warning in `README.md`, the warning in `docs/index.md` and `site_description` in `zensical.toml`. They must say the same. Then check the *(planned)* markers in the diagrams of the sections the change touches: a step the binary now runs is not planned; a library no binary calls stays planned. The same holds for the hand-made SVGs in `docs/assets/diagrams/` (`architecture.svg`, `analyzer.svg`, `executor.svg`, `phases.svg`): a built step is a solid box with a solid arrow, a planned one is dashed with a `planned` caption, the order of steps matches the code, and each SVG's `<desc>` and its alt text in `docs/design.md` say the same.
 4. **Doc comments.** For every Go file in the diff, read the doc comments of the changed identifiers and the comments within 20 lines of a hunk. A comment that says what is not done yet is checked against `cmd/` and the wiring: if the thing is done, the comment is a finding.
 5. **User-visible changes update the user docs.** A CRD field or its validation, a flag, a permission, a metric, an install or upgrade step, or the behaviour of an action: the matching page under `docs/` changed in the same diff, and `make api-docs` would leave no diff (run `git status --short docs/reference/` after `make api-docs` only if the caller allows a build; otherwise say it was not checked).
 6. **Permissions have a consumer and a sentence.** For every RBAC marker, Terraform role or GitHub App permission in the diff, name the code that uses it and the design or ADR sentence that grants it. A permission with neither is a finding.
@@ -49,7 +49,7 @@ If there are none, write "None." and nothing else under this heading.
 
 ### Sentences matched
 
-At most 8 lines, one per behaviour change you found a current sentence for: the behaviour, then `docs/design.md:<line>` or the ADR and line. If there are more, add one line with how many more were matched. This shows coverage; do not pad it.
+At most 8 lines, one per behaviour change you found a current sentence for: the behaviour, then `docs/design/<page>.md:<line>` or the ADR and line. If there are more, add one line with how many more were matched. This shows coverage; do not pad it.
 
 ### Verdict
 

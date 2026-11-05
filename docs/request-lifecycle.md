@@ -4,7 +4,7 @@ title: The life of a request
 
 # The life of a request
 
-What a `RemediationRequest` goes through, what you see at each step, what moves it on and what you can do. This summarises [design 6](design.md#6-reconciliation); every condition reason is explained in [troubleshooting](troubleshooting.md).
+What a `RemediationRequest` goes through, what you see at each step, what moves it on and what you can do. This summarises [design 6](design/6-reconciliation.md#6-reconciliation); every condition reason is explained in [troubleshooting](troubleshooting.md).
 
 Only the steps up to `Merged` are built. Delivery tracking and verification are <span class="sw-status sw-planned">planned</span>: after a merge the request stops at `Merged`.
 
@@ -56,7 +56,7 @@ Conditions give the reasons: `PolicyAllowed` (the policy check), `PullRequestOpe
 
 ## What approving means
 
-Shadewright never approves its own pull request and does not check reviews itself. Approval is your normal review on GitHub, enforced by your branch rules (required reviews and checks, `CODEOWNERS`). When a person merges, the executor sees it and ends the request `Merged`. See [design 8.1](design.md#81-what-approvalrequired-means).
+Shadewright never approves its own pull request and does not check reviews itself. Approval is your normal review on GitHub, enforced by your branch rules (required reviews and checks, `CODEOWNERS`). When a person merges, the executor sees it and ends the request `Merged`. See [design 8.1](design/8-gitops-on-github.md#81-what-approvalrequired-means).
 
 ## When the plan changes after the pull request
 

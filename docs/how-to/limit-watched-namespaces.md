@@ -4,7 +4,7 @@ title: Limit the namespaces it watches
 
 # Limit the namespaces it watches
 
-The analyzer reads events and pods only in the namespaces you name. An empty list watches none, never all. Background: [data handling](../data-handling.md#what-it-reads) and [design 3.1](../design.md#31-collecting). The flag is in the [configuration reference](../reference/configuration.md#analyzer-only).
+The analyzer reads events and pods only in the namespaces you name. An empty list watches none, never all. Background: [data handling](../data-handling.md#what-it-reads) and [design 3.1](../design/3-observation-and-deduplication.md#31-collecting). The flag is in the [configuration reference](../reference/configuration.md#analyzer-only).
 
 ## With the Helm chart
 

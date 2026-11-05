@@ -515,9 +515,8 @@ func checkTestNetworkPolicy(t *testing.T, k string, h *unstructured.Unstructured
 		for _, p := range rule.Ports {
 			dns = dns || (p.Port != nil && p.Port.IntValue() == 53)
 		}
-		if dns && len(rule.To) != 0 {
-			t.Errorf("%s: DNS egress limited to %+v; NodeLocal DNSCache and other CoreDNS labels need any destination",
-				k, rule.To)
+		if dns && len(rule.To) == 0 {
+			t.Errorf("%s: DNS egress to any destination; it must follow networkPolicy.dns like the workloads", k)
 		}
 	}
 	for _, rule := range np.Spec.Ingress {

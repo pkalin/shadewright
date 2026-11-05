@@ -142,6 +142,8 @@ helm uninstall shadewright --namespace shadewright-system
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | networkPolicy.enabled | bool | `true` | Install the NetworkPolicies: default deny for the namespace, DNS and TCP 443 and 6443 egress per component, and ingress to the metrics port from namespaces labeled `metrics: enabled`. Setting `false` installs no NetworkPolicy at all, so the namespace loses its default deny too and every Pod in it can talk to anything unless you restrict it yourself (`helm install` prints a warning). |
+| networkPolicy.dns.mode | string | `"kubeDns"` | How the analyzer, the executor and the `helm test` Pod may reach cluster DNS (port 53, UDP and TCP). `kubeDns` allows the `kube-dns` Pods of `kube-system` (label `k8s-app: kube-dns`, CoreDNS and kube-dns). `resolverCIDRs` allows only the addresses in `resolverCIDRs`: choose it when Pods query a resolver that is not a `kube-dns` Pod, such as NodeLocal DNSCache on a link-local address. Only `kubeDns` was tried on the lab CNI (Cilium). |
+| networkPolicy.dns.resolverCIDRs | list | `["169.254.20.10/32"]` | Resolver addresses for `mode: resolverCIDRs`, at least one IPv4 or IPv6 CIDR such as `169.254.20.10/32`, the default address of NodeLocal DNSCache (check the listen address of your node-local-dns DaemonSet; with kube-proxy in IPVS mode that is the kube-dns Service IP as well). Ignored in `kubeDns` mode. |
 
 ### CRDs
 

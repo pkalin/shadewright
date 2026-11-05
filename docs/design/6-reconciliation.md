@@ -31,7 +31,7 @@ stateDiagram-v2
             PolicyChecked --> PRCreated: branch, commit, pull request
             PRCreated --> AwaitingApproval: review required
             PRCreated --> AutoMergeQueued: policy allows automation (planned)
-            AwaitingApproval --> Merged: a person merged it (observed; the request stops here today)
+            AwaitingApproval --> Merged: a person merged it (observed, the request stops here today)
             PRCreated --> Merged: merged before the first review step (observed)
             PolicyChecked --> Merged: an existing merged pull request is adopted (observed)
             AutoMergeQueued --> Merged: checks pass (planned)

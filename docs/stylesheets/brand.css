@@ -453,3 +453,102 @@
 [data-md-color-scheme="slate"] .md-nav__link--active {
   color: var(--sw-link-hover);
 }
+
+/*
+ * Diagram overlay (docs/javascripts/diagram-zoom.js). Contrast: dark, button text #f1edff on #1d1b2b 14.7,
+ * on hover #2a2740 12.5, focus ring #a879ff on the #0e0e16 window 6.3; light, button text #1b1830 on
+ * #f3effd 15.2, on hover #d9d2ee 11.8, focus ring #6a14e8 on the white window 7.3.
+ */
+[data-sw-zoom] {
+  cursor: zoom-in;
+}
+div.mermaid[data-sw-zoom]:focus-visible,
+a[data-sw-zoom]:focus-visible {
+  outline: 2px solid var(--sw-brand-text);
+  outline-offset: 4px;
+}
+html.sw-zoom-open {
+  overflow: hidden;
+}
+.sw-zoom {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(14, 14, 22, 0.6);
+}
+.sw-zoom__stage {
+  position: absolute;
+  inset: 5vh 5vw;
+  overflow: hidden;
+  border: 1px solid var(--sw-line);
+  border-radius: 0.5rem;
+  box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.5);
+  background: #ffffff;
+  cursor: grab;
+  touch-action: none;
+}
+.sw-zoom__stage:active {
+  cursor: grabbing;
+}
+.sw-zoom__content {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  opacity: 0;
+}
+.sw-zoom--ready .sw-zoom__content {
+  opacity: 1;
+}
+.sw-zoom__content img,
+.sw-zoom__content svg {
+  display: block;
+  max-width: none;
+  user-select: none;
+}
+.sw-zoom__bar {
+  position: absolute;
+  top: calc(5vh + 0.6rem);
+  right: calc(5vw + 0.6rem);
+  display: flex;
+  gap: 0.4rem;
+}
+.sw-zoom__btn {
+  min-width: 2.4rem;
+  height: 2.4rem;
+  padding: 0 0.6rem;
+  border: 1px solid var(--sw-line);
+  border-radius: 0.3rem;
+  background: var(--sw-surface);
+  font: inherit;
+  font-size: 1rem;
+  cursor: pointer;
+}
+[data-md-color-scheme="slate"] .sw-zoom__stage {
+  background: #0e0e16;
+}
+[data-md-color-scheme="slate"] .sw-zoom__btn {
+  color: #f1edff;
+}
+[data-md-color-scheme="default"] .sw-zoom__btn {
+  color: #1b1830;
+}
+.sw-zoom__btn:hover {
+  background: var(--sw-line);
+}
+.sw-zoom__btn:focus-visible {
+  outline: 2px solid var(--sw-brand-text);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .sw-zoom {
+    animation: sw-zoom-in 0.15s ease-out;
+  }
+  .sw-zoom__content {
+    transition: opacity 0.15s;
+  }
+}
+@keyframes sw-zoom-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

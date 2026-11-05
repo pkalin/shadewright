@@ -78,23 +78,27 @@ type decoder struct {
 	series []providers.Series
 	// vector and matrix record which element shapes were seen ("value" and "values").
 	vector, matrix bool
+	// warnings counts the entries of the response's warnings list; their text is never kept.
+	warnings int
 }
 
-// decode reads a response of the Prometheus query API.
-func decode(r io.Reader, win window, labels []string) ([]providers.Series, error) {
+// decode reads a response of the Prometheus query API. A successful response that carries warnings is
+// returned as Partial.
+func decode(r io.Reader, win window, labels []string) (providers.MetricsResult, error) {
 	d := &decoder{dec: json.NewDecoder(r), win: win, labels: labels}
 	d.dec.UseNumber()
 	err := d.top()
 	switch {
 	case errors.Is(err, errBodyTooLarge):
-		return nil, fmt.Errorf("prometheus response is larger than %d bytes: %w", MaxBodyBytes, providers.ErrTooLarge)
+		return providers.MetricsResult{}, fmt.Errorf("prometheus response is larger than %d bytes: %w", MaxBodyBytes,
+			providers.ErrTooLarge)
 	case errors.Is(err, providers.ErrTooLarge), errors.Is(err, ErrInvalidResponse):
-		return nil, err
+		return providers.MetricsResult{}, err
 	case err != nil:
 		// A syntax error or a failed read: the text of either may quote the response.
-		return nil, fmt.Errorf("prometheus response cannot be decoded: %w", ErrInvalidResponse)
+		return providers.MetricsResult{}, fmt.Errorf("prometheus response cannot be decoded: %w", ErrInvalidResponse)
 	}
-	return d.series, nil
+	return providers.MetricsResult{Series: d.series, Partial: d.warnings > 0}, nil
 }
 
 func invalid(msg string) error {
@@ -123,7 +127,11 @@ func (d *decoder) top() error {
 			if resultType, err = d.data(); err != nil {
 				return err
 			}
-		default: // warnings, infos, errorType, error: never returned.
+		case "warnings":
+			if d.warnings, err = d.countStrings(); err != nil {
+				return err
+			}
+		default: // infos, errorType, error: never returned. Infos annotate the query, they do not cut the data.
 			if err := d.skip(0); err != nil {
 				return err
 			}
@@ -379,6 +387,33 @@ func (d *decoder) delim(want json.Delim) error {
 }
 
 // skip reads and drops one value, refusing nesting deeper than maxSkipDepth.
+// countStrings reads a list of strings, or null, and returns its length without keeping the text.
+func (d *decoder) countStrings() (int, error) {
+	tok, err := d.dec.Token()
+	if err != nil {
+		return 0, err
+	}
+	if tok == nil {
+		return 0, nil
+	}
+	if tok != json.Delim('[') {
+		return 0, invalid("has malformed warnings")
+	}
+	n := 0
+	for d.dec.More() {
+		tok, err := d.dec.Token()
+		if err != nil {
+			return 0, err
+		}
+		if _, ok := tok.(string); !ok {
+			return 0, invalid("has malformed warnings")
+		}
+		n++
+	}
+	_, err = d.dec.Token()
+	return n, err
+}
+
 func (d *decoder) skip(depth int) error {
 	tok, err := d.dec.Token()
 	if err != nil {

@@ -420,19 +420,27 @@ func TestDecodesVectorAndMatrix(t *testing.T) {
 		writeJSON(w, `{"data":{"result":[{"values":[[1793793570,"1.5"],[1793793585.0,"+Inf"],[`+nowSecs+
 			`,"2e3"]],"metric":{}}],"resultType":"matrix"},"status":"success"}`)
 	})
-	got, err := s.Query(testCtx(t), instant("container_restarts_total"))
+	res, err := s.Query(testCtx(t), instant("container_restarts_total"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !res.Partial {
+		t.Error("a result with a warning is not partial")
+	}
+	got := res.Series
 	if len(got) != 2 || got[0].Labels["pod"] != "web-7d9c8b6f4-x2x9q" || got[0].Labels["container"] != "app" ||
 		len(got[0].Samples) != 1 || got[0].Samples[0].Value != 3 || !got[0].Samples[0].Time.Equal(now) ||
 		!math.IsNaN(got[1].Samples[0].Value) {
 		t.Errorf("vector = %+v", got)
 	}
-	got, err = s.Query(testCtx(t), rangeQuery(3))
+	res, err = s.Query(testCtx(t), rangeQuery(3))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if res.Partial {
+		t.Error("a result without warnings is partial")
+	}
+	got = res.Series
 	if len(got) != 1 || len(got[0].Labels) != 0 || len(got[0].Samples) != 3 || got[0].Samples[0].Value != 1.5 ||
 		!math.IsInf(got[0].Samples[1].Value, 1) || got[0].Samples[2].Value != 2000 ||
 		!got[0].Samples[0].Time.Equal(now.Add(-30*time.Second)) {
@@ -580,7 +588,10 @@ func TestInvalidResponsesAreRefused(t *testing.T) {
 		"trailing data":          in(``) + `{}`,
 		"malformed":              `{"status":"success","data":{"resultType":"vector","result":[` + leak,
 		"not an object":          `[]`,
-		"nested too deeply":      `{"status":"success","warnings":` + strings.Repeat("[", 40) + strings.Repeat("]", 40) + `,"data":{"resultType":"vector","result":[]}}`,
+		"nested too deeply":      `{"status":"success","extra":` + strings.Repeat("[", 40) + strings.Repeat("]", 40) + `,"data":{"resultType":"vector","result":[]}}`,
+		"warnings not a list":    `{"status":"success","warnings":"partial","data":{"resultType":"vector","result":[]}}`,
+		"warning not a string":   `{"status":"success","warnings":[{"text":"` + leak + `"}],"data":{"resultType":"vector","result":[]}}`,
+		"nested warnings":        `{"status":"success","warnings":[["a"]],"data":{"resultType":"vector","result":[]}}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -591,6 +602,41 @@ func TestInvalidResponsesAreRefused(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), leak) || strings.Contains(err.Error(), srv.URL) {
 				t.Errorf("error repeats the response or the URL: %v", err)
+			}
+		})
+	}
+}
+
+// A successful answer with warnings may lack data (a store that did not answer): it is returned as Partial,
+// without the warning text. Infos annotate the query and do not make it partial.
+func TestWarningsMarkThePartialResult(t *testing.T) {
+	const result = `"data":{"resultType":"vector","result":[{"metric":{"pod":"web-0","container":"app"},"value":[` +
+		nowSecs + `,"1"]}]}`
+	cases := map[string]struct {
+		body    string
+		partial bool
+	}{
+		"no warnings":      {`{"status":"success",` + result + `}`, false},
+		"null warnings":    {`{"status":"success","warnings":null,` + result + `}`, false},
+		"empty warnings":   {`{"status":"success","warnings":[],` + result + `}`, false},
+		"a warning":        {`{"status":"success","warnings":["store unavailable"],` + result + `}`, true},
+		"warnings after":   {`{"status":"success",` + result + `,"warnings":["a","b"]}`, true},
+		"infos only":       {`{"status":"success","infos":["metric might not be a counter"],` + result + `}`, false},
+		"empty warning":    {`{"status":"success","warnings":[""],` + result + `}`, true},
+		"warning and info": {`{"status":"success","infos":["i"],"warnings":["w"],` + result + `}`, true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			s, _, _ := testSource(t, func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, c.body) })
+			res, err := s.Query(testCtx(t), instant("container_restarts_total"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Partial != c.partial || len(res.Series) != 1 {
+				t.Errorf("partial = %v with %d series, want %v with 1", res.Partial, len(res.Series), c.partial)
+			}
+			if strings.Contains(fmt.Sprintf("%+v", res), "store unavailable") {
+				t.Error("the result keeps the warning text")
 			}
 		})
 	}

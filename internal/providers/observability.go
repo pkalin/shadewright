@@ -45,10 +45,20 @@ type Series struct {
 	Samples []Sample
 }
 
+// MetricsResult is the answer to one query.
+type MetricsResult struct {
+	Series []Series
+	// Partial means the source answered but warned that the answer may be incomplete, for example because a
+	// store behind it did not respond. A series missing from a partial result may exist; a value in it may
+	// lack samples or contributions. The warning text is not kept: it is untrusted and may quote the query.
+	// A caller that draws a conclusion from absence or from a total treats a partial result as not knowing.
+	Partial bool
+}
+
 // MetricsSource answers metric queries.
 type MetricsSource interface {
 	// Query runs an approved template. ErrNotFound when the template is unknown.
-	Query(ctx context.Context, q MetricsQuery) ([]Series, error)
+	Query(ctx context.Context, q MetricsQuery) (MetricsResult, error)
 }
 
 // DefaultLogBytes is the excerpt size an adapter and the fake use when a query sets no MaxBytes.

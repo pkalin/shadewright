@@ -117,13 +117,17 @@ func TestMetricsAndLogs(t *testing.T) {
 		t.Errorf("unknown template: %v", err)
 	}
 	m.Set(memory, []providers.Series{{Labels: map[string]string{"pod": web}}})
-	s, err := m.Query(ctx, providers.MetricsQuery{Template: memory})
-	if err != nil || len(s) != 1 {
-		t.Fatalf("query = %v, %v", s, err)
+	r, err := m.Query(ctx, providers.MetricsQuery{Template: memory})
+	if err != nil || len(r.Series) != 1 || r.Partial {
+		t.Fatalf("query = %v, %v", r, err)
 	}
-	s[0].Labels["pod"] = "changed"
-	if again, _ := m.Query(ctx, providers.MetricsQuery{Template: memory}); again[0].Labels["pod"] != web {
+	r.Series[0].Labels["pod"] = "changed"
+	if again, _ := m.Query(ctx, providers.MetricsQuery{Template: memory}); again.Series[0].Labels["pod"] != web {
 		t.Error("changing a result changed the stored series")
+	}
+	m.SetResult(memory, providers.MetricsResult{Partial: true})
+	if r, err := m.Query(ctx, providers.MetricsQuery{Template: memory}); err != nil || !r.Partial || len(r.Series) != 0 {
+		t.Errorf("partial result = %v, %v", r, err)
 	}
 
 	var l fake.Logs

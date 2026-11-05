@@ -171,22 +171,22 @@ type window struct {
 
 // Query runs an approved template. [providers.ErrNotFound] when the template is unknown, [ErrInvalidQuery]
 // when the parameters or times are refused; see the package documentation for the other errors.
-func (s *Source) Query(ctx context.Context, q providers.MetricsQuery) ([]providers.Series, error) {
+func (s *Source) Query(ctx context.Context, q providers.MetricsQuery) (providers.MetricsResult, error) {
 	t, ok := registry[q.Template]
 	if !ok {
-		return nil, fmt.Errorf("unknown metrics template: %w", providers.ErrNotFound)
+		return providers.MetricsResult{}, fmt.Errorf("unknown metrics template: %w", providers.ErrNotFound)
 	}
 	expr, err := t.renderQuery(q.Params)
 	if err != nil {
-		return nil, err
+		return providers.MetricsResult{}, err
 	}
 	// After renderQuery, which requires the namespace parameter. The error never repeats the value.
 	if _, ok := s.namespaces[q.Params[ParamNamespace]]; !ok {
-		return nil, fmt.Errorf("parameter %s is not an allowed namespace: %w", ParamNamespace, ErrInvalidQuery)
+		return providers.MetricsResult{}, fmt.Errorf("parameter %s is not an allowed namespace: %w", ParamNamespace, ErrInvalidQuery)
 	}
 	path, form, win, err := s.timeParams(q)
 	if err != nil {
-		return nil, err
+		return providers.MetricsResult{}, err
 	}
 	form.Set("query", expr)
 
@@ -194,7 +194,7 @@ func (s *Source) Query(ctx context.Context, q providers.MetricsQuery) ([]provide
 	defer cancel()
 	server, err := serverTimeout(ctx)
 	if err != nil {
-		return nil, err
+		return providers.MetricsResult{}, err
 	}
 	form.Set("timeout", strconv.FormatInt(server.Milliseconds(), 10)+"ms")
 	return s.do(ctx, path, form, win, t.info.Labels)
@@ -269,38 +269,38 @@ func formatMs(ms int64) string {
 
 // do sends one request and decodes the response. Errors carry fixed text and the status code only.
 func (s *Source) do(ctx context.Context, path string, form url.Values, win window, labels []string,
-) ([]providers.Series, error) {
+) (providers.MetricsResult, error) {
 	u := s.base.JoinPath(path)
 	u.RawQuery = form.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("prometheus request cannot be built: %w", providers.ErrInvalidConfig)
+		return providers.MetricsResult{}, fmt.Errorf("prometheus request cannot be built: %w", providers.ErrInvalidConfig)
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, transportError(ctx, "prometheus request failed")
+		return providers.MetricsResult{}, transportError(ctx, "prometheus request failed")
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if err := statusError(resp, s.now()); err != nil {
-		return nil, err
+		return providers.MetricsResult{}, err
 	}
 	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err != nil || mt != "application/json" {
-		return nil, fmt.Errorf("prometheus response is not JSON: %w", ErrInvalidResponse)
+		return providers.MetricsResult{}, fmt.Errorf("prometheus response is not JSON: %w", ErrInvalidResponse)
 	}
 	if resp.ContentLength > MaxBodyBytes {
-		return nil, fmt.Errorf("prometheus response is larger than %d bytes: %w", MaxBodyBytes, providers.ErrTooLarge)
+		return providers.MetricsResult{}, fmt.Errorf("prometheus response is larger than %d bytes: %w", MaxBodyBytes, providers.ErrTooLarge)
 	}
 	body := &capReader{r: resp.Body, left: MaxBodyBytes}
-	series, err := decode(body, win, labels)
+	res, err := decode(body, win, labels)
 	if err != nil {
 		// A body cut short by the connection (a reset, an unexpected EOF) is transient, not a bad answer.
 		if ctx.Err() != nil || body.readErr != nil {
-			return nil, transportError(ctx, "prometheus response was not read")
+			return providers.MetricsResult{}, transportError(ctx, "prometheus response was not read")
 		}
-		return nil, err
+		return providers.MetricsResult{}, err
 	}
-	return series, nil
+	return res, nil
 }
 
 // transportError reports a failed request or body read. The error of the HTTP client is dropped: it holds

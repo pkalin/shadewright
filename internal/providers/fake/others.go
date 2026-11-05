@@ -160,31 +160,36 @@ func (m *Model) Complete(ctx context.Context, req providers.CompletionRequest) (
 type Metrics struct {
 	Hook
 	mu      sync.Mutex
-	results map[string][]providers.Series
+	results map[string]providers.MetricsResult
 }
 
-// Set registers the result for a template.
+// Set registers a complete result for a template.
 func (m *Metrics) Set(template string, s []providers.Series) {
+	m.SetResult(template, providers.MetricsResult{Series: s})
+}
+
+// SetResult registers the result for a template, a partial one included.
+func (m *Metrics) SetResult(template string, r providers.MetricsResult) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.results == nil {
-		m.results = map[string][]providers.Series{}
+		m.results = map[string]providers.MetricsResult{}
 	}
-	m.results[template] = cloneSeries(s)
+	m.results[template] = providers.MetricsResult{Series: cloneSeries(r.Series), Partial: r.Partial}
 }
 
 // Query returns the registered result for the template.
-func (m *Metrics) Query(ctx context.Context, q providers.MetricsQuery) ([]providers.Series, error) {
+func (m *Metrics) Query(ctx context.Context, q providers.MetricsQuery) (providers.MetricsResult, error) {
 	if err := m.before("Query"); err != nil {
-		return nil, err
+		return providers.MetricsResult{}, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s, ok := m.results[q.Template]
+	r, ok := m.results[q.Template]
 	if !ok {
-		return nil, fmt.Errorf("template %q: %w", q.Template, providers.ErrNotFound)
+		return providers.MetricsResult{}, fmt.Errorf("template %q: %w", q.Template, providers.ErrNotFound)
 	}
-	return cloneSeries(s), nil
+	return providers.MetricsResult{Series: cloneSeries(r.Series), Partial: r.Partial}, nil
 }
 
 func cloneSeries(in []providers.Series) []providers.Series {

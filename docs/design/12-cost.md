@@ -52,6 +52,7 @@ An Azure budget only alerts. It does not stop usage ([budgets](https://learn.mic
 The count lives in the ConfigMap `shadewright-analysis-budget` in the operator namespace. Only the analyzer and admins may write it.
 
 - A count that cannot be read or written, or that is missing, means refuse, not allow (section 3.2, [#43](https://github.com/pkalin/shadewright/issues/43)).
+- <span class="sw-status sw-planned">planned</span> One unit is one claimed attempt, not a call and not money; see [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md).
 - It is enforced once the analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76)) reserves a unit before each model call.
 
 ### The spend limit

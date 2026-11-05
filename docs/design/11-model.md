@@ -90,10 +90,10 @@ At most one escalation per incident fingerprint per cooldown window. A runbook m
 A change to a prompt, model or schema must pass the scenario evaluation before merge.
 
 - **In CI** it runs against a fake model. It covers plumbing, schemas and refusal paths only. It does not test the prompt's defences or model quality.
-- **Quality** is gated by a recorded real-model evaluation, keyed by model ID and version plus the prompt hash, stored in this repository (for example `test/eval/results/`).
+- **Quality** is gated by a recorded real-model evaluation, keyed by model ID and version plus the prompt hash (to become the manifest digest of [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md)), stored in this repository (for example `test/eval/results/`).
 - **Recorded contexts** from the fleet scenarios live here too (for example `test/eval/contexts/`). The fleet's `scenarios/*/expected.yaml` are the expectations, and each result pins the fleet commit it read them from.
 
-**It fails closed.** The analyzer embeds the list of evaluated (model, prompt hash) pairs. It refuses automatic analysis, with the reason reported, when the configured deployment's model (or `Completion.Model`) has no passing record. Details in [ADR-0023](../adr/0023-how-the-analyzer-calls-the-model.md).
+**It fails closed.** The analyzer embeds the list of evaluated (model, prompt hash) pairs (to become manifest digests, [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md)). It refuses automatic analysis, with the reason reported, when the configured deployment's model (or `Completion.Model`) has no passing record. Details in [ADR-0023](../adr/0023-how-the-analyzer-calls-the-model.md). <span class="sw-status sw-planned">planned</span> [ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md) proposes keying the pass on a manifest of every behaviour-affecting input (model and version, prompt and tools hashes, context builder, redaction configuration, rubric, thresholds, repeats), so a change to any of them invalidates it.
 
 ### Choosing concrete models
 

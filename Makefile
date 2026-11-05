@@ -76,6 +76,11 @@ docs-requirements: ## Regenerate requirements-docs.txt (versions and sha256 hash
 	pipx run --spec 'pip-tools==7.6.2' pip-compile --generate-hashes --strip-extras --allow-unsafe --annotation-style=line \
 		--output-file=requirements-docs.txt requirements-docs.in
 
+.PHONY: docs-check
+docs-check: ## Build the docs site and check its internal links, heading anchors and published URLs (needs .venv, see AGENTS.md).
+	.venv/bin/zensical build --clean
+	python3 -I hack/docs-check.py check site hack/docs-published-paths.txt
+
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt",year=$(YEAR) paths="./..."
@@ -89,7 +94,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test-scripts
-test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest, CI change detection and fuzz target scripts (hack/*_test.sh).
+test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest, CI change detection and fuzz target and docs link check scripts (hack/*_test.sh).
 	hack/release-notes-by-scope_test.sh
 	hack/check-chart-docs_test.sh
 	hack/chart-crds_test.sh
@@ -100,6 +105,7 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 	hack/release-verify-notes_test.sh
 	hack/require-on-main_test.sh
 	hack/fuzz-targets_test.sh
+	hack/docs-check_test.sh
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.

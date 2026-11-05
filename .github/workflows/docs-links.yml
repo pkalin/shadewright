@@ -1,0 +1,35 @@
+name: Docs links
+
+# Weekly report of external links in the docs site that no longer answer. Never runs on pull requests, so a pull
+# request does not depend on third-party sites, and never fails on a dead link: read the warnings in the run log.
+# Internal links, anchors and published URLs are checked on pull requests by docs.yml (hack/docs-check.py).
+on:
+  schedule:
+    - cron: "17 5 * * 3" # Wednesdays 05:17 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  external:
+    permissions:
+      contents: read
+    name: external links
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.x"
+
+      - run: pip install --require-hashes -r requirements-docs.txt
+
+      - run: zensical build --clean
+
+      - name: Report external links that do not answer
+        run: python3 -I hack/docs-check.py external site

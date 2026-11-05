@@ -66,10 +66,11 @@ Quantity under another anchor. */ -}}
 {{- end -}}
 
 {{- /* A code span for a table cell: a pipe would split the cell, and an escaped one would show its backslash
-on the docs site, so text with a pipe becomes a <code> element with the pipe as an entity. */ -}}
+on the docs site, so text with a pipe becomes a <code> element with the pipe as an entity. A "[" is an entity too, or the Markdown renderer reads a pattern such as
+[a-z]([-a-z]*) inside the element as a link. */ -}}
 {{- define "tablecode" -}}
 {{- if contains "|" . -}}
-<code>{{ . | replace "&" "&amp;" | replace "<" "&lt;" | replace "|" "&#124;" }}</code>
+<code>{{ . | replace "&" "&amp;" | replace "<" "&lt;" | replace "|" "&#124;" | replace "[" "&#91;" }}</code>
 {{- else -}}
 `{{ . }}`
 {{- end -}}

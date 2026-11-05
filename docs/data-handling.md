@@ -60,7 +60,7 @@ When it is built, this page gets the exact fields sent.
 
 No telemetry, usage reporting or update check exists in either binary: the only packages that open outbound HTTP connections are the GitHub adapter, its token source and the Key Vault signer, and, once wired, the Prometheus adapter. That adapter exists but is not wired into either binary yet; once it is, the analyzer queries the configured Prometheus with the approved templates of the [design](design.md#4-tools), and the analyzer's NetworkPolicy needs an egress rule for the Prometheus port (9090 in the lab), which it does not have yet ([design, section 10](design.md#10-security)). Opt-in sharing of outcomes is **planned** and off by default ([#284](https://github.com/pkalin/shadewright/issues/284)). OpenTelemetry traces per analysis are **planned** ([#90](https://github.com/pkalin/shadewright/issues/90)); the NetworkPolicies allow no destination for them yet.
 
-The NetworkPolicies limit ports and directions (DNS, TCP 443 and 6443), not destinations: what keeps the analyzer away from GitHub is that its binary has no GitHub adapter and holds no GitHub credential. See the [design](design.md#10-security) for the two ways to narrow it.
+The NetworkPolicies limit ports and directions (DNS, TCP 443 and 6443, and for the analyzer, if you enable it in the chart, TCP to the one Prometheus you name), not destinations: what keeps the analyzer away from GitHub is that its binary has no GitHub adapter and holds no GitHub credential. See the [design](design.md#10-security) for the two ways to narrow it.
 
 ## What is published
 

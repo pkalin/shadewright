@@ -69,6 +69,18 @@ settings:
       integrations: [flux]
 ```
 
+## Network policy
+
+On by default (`networkPolicy.enabled: true`). The chart installs a default deny for the release namespace (ingress and egress), one egress policy per component and one ingress policy for the metrics port:
+
+- Both components may send DNS (`networkPolicy.dns`) and TCP 443 and 6443 to any address. 443 is the model endpoint, Key Vault, Entra ID, GitHub and the API server of a managed cluster; 6443 is the API server on kubeadm and kind. The two policies are separate objects, so you can narrow one without touching the other.
+- The analyzer gets one more rule when you set `networkPolicy.analyzer.prometheus.enabled`: TCP to the Prometheus Pods you name (default port 9090). It is off because the analyzer does not query Prometheus yet. The executor never gets it. Allow the analyzer in the ingress policy of the Prometheus namespace as well; the chart changes nothing outside its own namespace.
+- Ingress to the metrics port comes only from namespaces labeled `metrics: enabled`. Nothing else is allowed in.
+
+**What this does not do.** A NetworkPolicy cannot match host names, and the API server has no label to select, so the chart limits ports and directions, not destinations. The analyzer can reach any HTTPS address at the network level, `api.github.com` included. What keeps it away from GitHub is that its binary has no GitHub adapter and holds no GitHub credential, not the policy. Restricting egress by host name (for example a Cilium `CiliumNetworkPolicy` with `toFQDNs`, or Azure CNI powered by Cilium on AKS with an FQDN policy) is your choice and is not shipped or tested here. The API server address is unknown when the chart renders, so the rule allows 443 and 6443 to any address; to narrow it, replace that rule with `ipBlock` ranges for the API server (on AKS, the private cluster endpoint or the address in `kubectl get endpoints kubernetes`) through your own policy.
+
+A CNI that does not enforce NetworkPolicy accepts the objects and ignores them. Setting `networkPolicy.enabled: false` installs none of them, so the namespace loses its default deny too. Whether the lab CNI (Cilium) lets the API server through the `ipBlock` rule is checked in the lab (#216); until then a missing API server connection after install is the first thing to look at.
+
 ## Verify the signatures
 
 The chart and the images are signed with cosign keyless (GitHub OIDC) by digest. Verify before you install. The identity of the chart is the chart workflow on a release tag of this repository:

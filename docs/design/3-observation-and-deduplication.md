@@ -397,7 +397,7 @@ The result has a fixed schema: hypotheses, evidence, missing data, uncertainty, 
 
 ### Escalation
 
-<span class="sw-status sw-planned">planned</span> Not built (the read tools are [#74](https://github.com/pkalin/shadewright/issues/74)). Escalation runs on deterministic signals only:
+<span class="sw-status sw-planned">planned</span> Not built; the read tools are <span class="sw-status sw-built">built</span> ([#74](https://github.com/pkalin/shadewright/issues/74)) and wait for the analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76)). Escalation runs on deterministic signals only:
 
 - the context builder truncated the context or could not fetch a source; or
 - the small model's output failed schema validation after one retry.

@@ -81,3 +81,13 @@ func keepTail(s string, n int) (string, bool) {
 	}
 	return s[start:], true
 }
+
+// KeepHead is keepHead for other packages that bound redacted text the same way (internal/tools).
+func KeepHead(s string, n int) (string, bool) { return keepHead(s, n) }
+
+// KeepTail is keepTail for other packages that bound redacted text the same way (internal/tools).
+func KeepTail(s string, n int) (string, bool) { return keepTail(s, n) }
+
+// DropLeadingContinuation is dropLeadingContinuation for other packages that show a log excerpt
+// (internal/tools): it must run on the excerpt before redaction, for the reason given there.
+func DropLeadingContinuation(s string) (string, bool) { return dropLeadingContinuation(s) }

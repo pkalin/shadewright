@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -88,6 +89,43 @@ func TestSignBodyReadFailureIsRetryable(t *testing.T) {
 			t.Errorf("%s: %d authorized requests, want 2 (one retry)", name, got)
 		}
 	}
+}
+
+// lateBodyReader reads each request body once more after it returned the response, as net/http's transport
+// may (it copies the body in its own goroutine and can still read it, if only for the final EOF, after the
+// response came back). wait blocks until every such read is done.
+type lateBodyReader struct {
+	inner policy.Transporter
+	wg    sync.WaitGroup
+}
+
+func (l *lateBodyReader) Do(req *http.Request) (*http.Response, error) {
+	resp, err := l.inner.Do(req)
+	if body := req.Body; body != nil {
+		l.wg.Go(func() {
+			time.Sleep(5 * time.Millisecond)
+			_, _ = io.Copy(io.Discard, body)
+		})
+	}
+	return resp, err
+}
+
+// TestRetryGivesTheTransportItsOwnBody checks that azcore rewinding the request body for a retry never
+// touches the body a previous attempt handed to the HTTP transport: run with -race, the late read of the
+// first attempt's body and the rewind for the second are unsynchronized when they share one reader.
+func TestRetryGivesTheTransportItsOwnBody(t *testing.T) {
+	kid := "https://" + testHost + "/keys/github-app/" + testVersion
+	var late *lateBodyReader
+	wrap := func(inner policy.Transporter) policy.Transporter {
+		late = &lateBodyReader{inner: &breakBodies{inner: inner, n: 1, err: io.ErrUnexpectedEOF}}
+		return late
+	}
+	s, v := setupWith(t, kid, Options{MaxRetries: 1}, &fakeCredential{}, wrap, clientConfig{})
+	v.respond = v.signOK(kid)
+	if _, err := s.Sign(context.Background(), digestOf("x")); err != nil {
+		t.Fatalf("Sign with a retry left: %v", err)
+	}
+	late.wg.Wait()
 }
 
 // TestSignBodyReadKeepsCancellation checks that a body read that fails because the caller gave up is still

@@ -51,6 +51,8 @@ const maxResponseBody = 64 << 10
 //     prints transport errors, sees the request URL or the network stack's text.
 //   - On the credential's client (entra), it records the outcome of each exchange for the token request
 //     in the request's context (tokenRequest), because azidentity passes on only an error's text.
+//   - It gives each attempt its own copy of the request body (ownBody), because the HTTP transport may still
+//     read a body after it returned the response while azcore rewinds it for the next attempt.
 //
 // Every error it returns carries no response, URL or network text. Each fixed error gets the same retry
 // decision from azcore and from Sign: the final ones (both refusals, a refused certificate, any other
@@ -76,6 +78,10 @@ func (g guardTransport) Do(req *http.Request) (*http.Response, error) {
 }
 
 func (g guardTransport) do(req *http.Request) (*http.Response, error) {
+	req, err := ownBody(req)
+	if err != nil {
+		return nil, final{errRequestSDK}
+	}
 	resp, err := g.inner.Do(req)
 	if err != nil {
 		return nil, cleanTransportError(err)
@@ -240,4 +246,23 @@ func defaultTransport() policy.Transporter {
 			return http.ErrUseLastResponse
 		},
 	}
+}
+
+// ownBody returns req with a private copy of its body. net/http's transport copies a request body in its own
+// goroutine and may still read it after it returned the response, while azcore rewinds that same body before
+// it sends the request again: two unsynchronized uses of one reader. The bodies sent here are small (a digest to
+// sign, a token request form), so each attempt gets a copy the transport alone reads.
+func ownBody(req *http.Request) (*http.Request, error) {
+	if req.Body == nil || req.Body == http.NoBody {
+		return req, nil
+	}
+	b, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	out := req.Clone(req.Context())
+	out.Body = io.NopCloser(bytes.NewReader(b))
+	out.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(b)), nil }
+	out.ContentLength = int64(len(b))
+	return out, nil
 }

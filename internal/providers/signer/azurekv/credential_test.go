@@ -273,7 +273,17 @@ func TestTokenFileIsReused(t *testing.T) {
 // context error, recorded in place of an earlier exchange.
 func TestTokenFileMissingForAMoment(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "azure-identity-token")
-	time.AfterFunc(tokenFileRetryDelay/3, func() { _ = os.WriteFile(path, []byte(testAssertion), 0o600) })
+	// The file appears during the wait before the one retry. Writing it from the wait itself, instead of from a
+	// timer racing the retry delay, keeps the test independent of the scheduler (it failed now and then under
+	// -race on a loaded machine).
+	wait := tokenFileRetryWait
+	t.Cleanup(func() { tokenFileRetryWait = wait })
+	tokenFileRetryWait = func(d time.Duration) <-chan time.Time {
+		if err := os.WriteFile(path, []byte(testAssertion), 0o600); err != nil {
+			t.Error(err)
+		}
+		return wait(d)
+	}
 	tr := &tokenRequest{}
 	got, err := (&tokenFile{path: path}).assertion(context.WithValue(context.Background(), tokenRequestKey{}, tr))
 	if err != nil || got != testAssertion || tr.readErr != nil {

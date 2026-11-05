@@ -151,7 +151,7 @@ func (f *tokenFile) assertion(ctx context.Context) (string, error) {
 	content, err := readTokenFile(f.path)
 	if errors.Is(err, errTokenFileMissing) {
 		select {
-		case <-time.After(tokenFileRetryDelay):
+		case <-tokenFileRetryWait(tokenFileRetryDelay):
 			content, err = readTokenFile(f.path)
 		case <-ctx.Done():
 			// Recorded as the end of the request, so the class is the context's and not that of an
@@ -171,6 +171,10 @@ func (f *tokenFile) assertion(ctx context.Context) (string, error) {
 	f.content, f.expiresAt = content, time.Now().Add(tokenFileReuse)
 	return content, nil
 }
+
+// tokenFileRetryWait is time.After; a test replaces it to make the file appear before the retry without
+// depending on the scheduler.
+var tokenFileRetryWait = time.After
 
 // readTokenFile reads a regular file of at most maxTokenFile bytes. It opens the path without blocking, so
 // a pipe cannot hold the read, and checks the opened file, so nothing can be swapped in between. Errors

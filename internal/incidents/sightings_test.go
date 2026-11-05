@@ -17,8 +17,10 @@ limitations under the License.
 package incidents
 
 import (
+	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -154,8 +156,8 @@ func TestSightingsAreBoundedUnderAFlood(t *testing.T) {
 		s.admit(sightingOf(0, i, t0), t0)
 	}
 	if got := s.admit(sightingOf(0, -1, t0.Add(RecurAfter)), t0.Add(RecurAfter)); len(got) != maxHeldPerFingerprint+1 {
-		t.Errorf("opened with %d observations, want the %d held and the one that opened it", len(got),
-			maxHeldPerFingerprint)
+		t.Errorf("opened with %d observations, want %d: the %d held and the one that opened it", len(got),
+			maxHeldPerFingerprint+1, maxHeldPerFingerprint)
 	}
 	s.expire(t0.Add(RecurWithin + time.Second))
 	if s.len() != 0 {
@@ -163,6 +165,59 @@ func TestSightingsAreBoundedUnderAFlood(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(firstSightingsHeld); got != 0 {
 		t.Errorf("shadewright_incident_first_sightings_held = %v after the window, want 0", got)
+	}
+}
+
+func TestRecurs(t *testing.T) {
+	t0 := time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name        string
+		total       int64
+		began, last time.Time
+		want        bool
+	}{
+		{"a single fresh sighting", 1, t0, t0, false},
+		{"a series counted twice", 2, t0, t0, true},
+		{"repeated just before the least time", 1, t0, t0.Add(RecurAfter - time.Second), false},
+		{"repeated at the least time", 1, t0, t0.Add(RecurAfter), true},
+		{"no begin time", 1, time.Time{}, t0, false},
+	}
+	for _, c := range cases {
+		o := sightingOf(1, 1, c.last)
+		o.Total, o.Began = c.total, c.began
+		if got := recurs(o); got != c.want {
+			t.Errorf("%s: recurs = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// Copies of an occurrence already held are merged into it, so they neither take the slots of new
+// occurrences nor count twice, and the total held for it is the highest.
+func TestHeldOccurrencesAreMergedByID(t *testing.T) {
+	t0 := time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
+	s := newSightings(10)
+	for range 10 {
+		s.admit(sightingOf(1, 1, t0), t0)
+	}
+	grown := sightingOf(1, 1, t0.Add(time.Second))
+	grown.Total = 3
+	s.admit(grown, t0.Add(time.Second))
+	if got, ok := s.total(eventID(1)); !ok || got != 3 {
+		t.Fatalf("total held for the occurrence = %d, %v; want 3, true", got, ok)
+	}
+	for i := 2; i <= maxHeldPerFingerprint; i++ {
+		s.admit(sightingOf(1, i, t0), t0)
+	}
+	got := s.admit(sightingOf(1, 99, t0.Add(RecurAfter)), t0.Add(RecurAfter))
+	if len(got) != maxHeldPerFingerprint+1 {
+		t.Fatalf("opened %v, want the %d occurrences held and the one that opened it", occurrencesOf(got),
+			maxHeldPerFingerprint)
+	}
+	if got[0].Total != 3 || got[0].Count != 11 {
+		t.Errorf("the merged occurrence has total %d, count %d; want 3, 11", got[0].Total, got[0].Count)
+	}
+	if _, ok := s.total(eventID(1)); ok {
+		t.Error("a total is still held for an occurrence whose Incident opened")
 	}
 }
 
@@ -265,5 +320,194 @@ func TestKedaCeilingOpensAtOnceWhileAWarningWaits(t *testing.T) {
 	err := env.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: Name(fp(2))}, inc)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("the one-off Warning opened an Incident (%v), want none yet", err)
+	}
+}
+
+// An events.k8s.io series refreshed about every 30 minutes (kube-scheduler's FailedScheduling) is never
+// seen twice within RecurWithin, and a replay after a restart arrives all at once: each opens its Incident
+// at once, because the observation itself proves that the symptom recurs.
+func TestObservationThatProvesRecurrenceOpensAtOnce(t *testing.T) {
+	ns := namespace(t)
+	t0 := time.Now().Truncate(time.Second)
+	r := start(t, ns, Config{Now: (&fakeClock{now: t0}).Now})
+	series := sightingOf(1, 1, t0)
+	series.Total, series.Count = 2, 1
+	r.obs <- series
+	eventually(t, ns, 1, countIs(1))
+	lasting := sightingOf(2, 2, t0)
+	lasting.Began = t0.Add(-RecurAfter)
+	r.obs <- lasting
+	eventually(t, ns, 2, countIs(1))
+	// A single, fresh sighting still waits.
+	r.obs <- sightingOf(3, 3, t0)
+	waitHeld(t, r, "the fresh sighting held", func() bool { return r.sightings.len() == 1 })
+}
+
+// An observation that opens its Incident at once counts the sightings held for its fingerprint too, and
+// they are forgotten.
+func TestOpeningAtOnceCountsTheHeldSightings(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		open func(collector.Observation) collector.Observation
+	}{
+		{"a series", func(o collector.Observation) collector.Observation { o.Total, o.Count = 2, 2; return o }},
+		{"an immediate one", immediate},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ns := namespace(t)
+			t0 := time.Now().Truncate(time.Second)
+			clock := &fakeClock{now: t0}
+			r := start(t, ns, Config{Now: clock.Now})
+			r.obs <- sightingOf(1, 1, t0)
+			r.obs <- sightingOf(1, 2, t0.Add(time.Second))
+			waitHeld(t, r, "two sightings held", func() bool {
+				e := r.sightings.items[fp(1)]
+				return e != nil && len(e.Value.(*sighting).held) == 2
+			})
+			o := c.open(sightingOf(1, 3, t0.Add(30*time.Second)))
+			clock.set(t0.Add(30 * time.Second))
+			r.obs <- o
+			inc := eventually(t, ns, 1, countIs(2+o.Count))
+			if !inc.Status.FirstSeen.Time.Equal(t0) {
+				t.Errorf("firstSeen %v, want the first sighting %v", inc.Status.FirstSeen.Time, t0)
+			}
+			waitHeld(t, r, "the sightings forgotten", func() bool { return r.sightings.len() == 0 })
+			if got := testutil.ToFloat64(firstSightingsHeld); got != 0 {
+				t.Errorf("shadewright_incident_first_sightings_held = %v, want 0", got)
+			}
+		})
+	}
+}
+
+// Handled answers for an occurrence held as a first sighting, so a copy the collector sends again (after it
+// dropped its state, MayRepeat) is not held or counted twice.
+func TestHandledAnswersForHeldOccurrences(t *testing.T) {
+	ns := namespace(t)
+	t0 := time.Now().Truncate(time.Second)
+	clock := &fakeClock{now: t0}
+	r := start(t, ns, Config{Now: clock.Now})
+	held := sightingOf(1, 1, t0)
+	held.Began = time.Time{} // so only what is held can answer, not a drop mark
+	r.obs <- held
+	waitHeld(t, r, "the sighting held", func() bool { return r.sightings.len() == 1 })
+	if got, found, err := r.Handled(t.Context(), eventID(1), time.Time{}); err != nil || !found || got != 1 {
+		t.Fatalf("Handled for a held occurrence = %d, %v, %v; want 1, true", got, found, err)
+	}
+	again := held
+	again.Count, again.MayRepeat = 0, true
+	for range maxHeldPerFingerprint {
+		r.obs <- again
+	}
+	// The copies took no room: the other occurrences seen before RecurAfter are held and counted.
+	for i := 2; i <= maxHeldPerFingerprint; i++ {
+		r.obs <- sightingOf(1, i, t0)
+	}
+	clock.set(t0.Add(RecurAfter))
+	r.obs <- sightingOf(1, 99, t0.Add(RecurAfter))
+	eventually(t, ns, 1, func(inc *remediationv1alpha1.Incident) bool { return inc.Status.Count > 0 })
+	time.Sleep(300 * time.Millisecond)
+	if inc := get(t, ns); inc.Status.Count != maxHeldPerFingerprint+1 {
+		t.Fatalf("count %d, want %d: every occurrence once", inc.Status.Count, maxHeldPerFingerprint+1)
+	}
+}
+
+// The sightings that open an Incident are counted under the caps: the cap on Incidents refuses each of them,
+// and the cap on occurrences held unwritten leaves the ones over it uncounted.
+func TestOpeningSightingsAreCountedUnderTheCaps(t *testing.T) {
+	t.Run("the cap on Incidents", func(t *testing.T) {
+		ns := namespace(t)
+		t0 := time.Now().Truncate(time.Second)
+		clock := &fakeClock{now: t0}
+		r := start(t, ns, Config{Now: clock.Now, MaxIncidents: 1})
+		r.obs <- immediate(sightingOf(1, 1, t0))
+		eventually(t, ns, 1, countIs(1))
+		before := testutil.ToFloat64(refusedObservations)
+		r.obs <- sightingOf(2, 2, t0)
+		r.obs <- sightingOf(2, 3, t0)
+		clock.set(t0.Add(RecurAfter))
+		r.obs <- sightingOf(2, 4, t0.Add(RecurAfter))
+		waitHeld(t, r, "the sightings refused", func() bool { return testutil.ToFloat64(refusedObservations)-before == 3 })
+		if n := r.sightings.len(); n != 0 {
+			t.Errorf("%d first sightings held after the refusal, want none", n)
+		}
+	})
+	t.Run("the caps on occurrences held unwritten", func(t *testing.T) {
+		ns := namespace(t)
+		t0 := time.Now().Truncate(time.Second)
+		clock := &fakeClock{now: t0}
+		r := start(t, ns, Config{Now: clock.Now, Window: time.Hour, MaxPendingOccurrencesPerIncident: 2,
+			MaxPendingOccurrencesPerNamespace: 2})
+		// Another Incident's first write holds one occurrence of the namespace until the window ends.
+		r.obs <- immediate(sightingOf(9, 9, t0))
+		eventually(t, ns, 9, countIs(1))
+		r.obs <- immediate(sightingOf(9, 10, t0))
+		before := testutil.ToFloat64(overflowedOccurrences)
+		for i := 1; i <= maxHeldPerFingerprint; i++ {
+			r.obs <- sightingOf(1, i, t0)
+		}
+		series := sightingOf(1, 5, t0)
+		series.Total, series.Count = 2, 2
+		r.obs <- series
+		eventually(t, ns, 1, countIs(1))
+		// The first occurrence is counted whatever the share; the rest are over the namespace's share.
+		if got := testutil.ToFloat64(overflowedOccurrences) - before; got != maxHeldPerFingerprint {
+			t.Errorf("overflowed metric grew by %v, want %d", got, maxHeldPerFingerprint)
+		}
+	})
+}
+
+// A fingerprint refused at the cap on Incidents is refused again as each observation arrives, instead of
+// being held as a first sighting again.
+func TestRefusedFingerprintIsNotHeldAgain(t *testing.T) {
+	ns := namespace(t)
+	t0 := time.Now().Truncate(time.Second)
+	clock := &fakeClock{now: t0}
+	r := start(t, ns, Config{Now: clock.Now, MaxIncidents: 1})
+	r.obs <- immediate(sightingOf(1, 1, t0))
+	eventually(t, ns, 1, countIs(1))
+	before := testutil.ToFloat64(refusedObservations)
+	r.obs <- immediate(sightingOf(2, 2, t0))
+	waitHeld(t, r, "the first refusal", func() bool { return testutil.ToFloat64(refusedObservations)-before == 1 })
+	r.obs <- sightingOf(2, 3, t0)
+	waitHeld(t, r, "the second refusal", func() bool { return testutil.ToFloat64(refusedObservations)-before == 2 })
+	if n := r.sightings.len(); n != 0 {
+		t.Errorf("%d first sightings held for a refused fingerprint, want none", n)
+	}
+}
+
+// The write that opens an Incident from the sightings held is recognised when its answer was lost, so the
+// retry does not count them twice.
+func TestLostAnswerOfAnOpeningWriteIsNotCountedTwice(t *testing.T) {
+	ns := namespace(t)
+	t0 := time.Now().Truncate(time.Second)
+	clock := &fakeClock{now: t0}
+	r := start(t, ns, Config{Now: clock.Now, Window: 200 * time.Millisecond, RetryAfter: 100 * time.Millisecond})
+	var lost atomic.Bool
+	r.writes.after = func(err error) error {
+		if err == nil && lost.CompareAndSwap(false, true) {
+			return context.DeadlineExceeded
+		}
+		return err
+	}
+	r.obs <- sightingOf(1, 1, t0)
+	r.obs <- sightingOf(1, 2, t0)
+	clock.set(t0.Add(RecurAfter))
+	r.obs <- sightingOf(1, 3, t0.Add(RecurAfter))
+	eventually(t, ns, 1, countIs(3))
+	// Let the batch that went back be tried again: it is recognised as written.
+	for range 10 {
+		clock.set(clock.Now().Add(time.Second))
+		time.Sleep(100 * time.Millisecond)
+	}
+	if inc := get(t, ns); inc.Status.Count != 3 {
+		t.Fatalf("count %d after a lost answer, want 3", inc.Status.Count)
+	}
+	if !lost.Load() || r.writes.updates.Load() != 1 {
+		t.Fatalf("lost %v, %d status writes: want the retry to find the batch applied without writing",
+			lost.Load(), r.writes.updates.Load())
+	}
+	r.stop()
+	if r.pending[fp(1)] != nil || r.failed[fp(1)] != nil {
+		t.Fatal("the batch is still pending after the retry")
 	}
 }

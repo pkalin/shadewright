@@ -286,6 +286,12 @@ func newBoundedSet(n int) *boundedSet {
 	return &boundedSet{items: make(map[string]struct{}, n), ring: make([]string, 0, n)}
 }
 
+// has reports whether s is remembered.
+func (b *boundedSet) has(s string) bool {
+	_, ok := b.items[s]
+	return ok
+}
+
 // add remembers s and reports whether it was new.
 func (b *boundedSet) add(s string) bool {
 	if _, ok := b.items[s]; ok {

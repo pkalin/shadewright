@@ -512,8 +512,8 @@ func (c *Controller) Handled(ctx context.Context, occurrence string, began time.
 
 // handled is Handled without the wait. The caller holds mu.
 func (c *Controller) handled(occurrence string, began time.Time) (int64, bool) {
-	if r, ok := c.records[occurrence]; ok {
-		return r.total, true
+	if total, ok := c.counted(occurrence); ok {
+		return total, true
 	}
 	// The drop mark answers only for an occurrence with a known begin time: without one it cannot be placed
 	// before or after the mark, and a possible overcount is preferred to a count silently lost.
@@ -524,25 +524,47 @@ func (c *Controller) handled(occurrence string, began time.Time) (int64, bool) {
 	return 0, false
 }
 
+// counted returns the highest total of an occurrence counted by any Incident or held as a first sighting,
+// and whether there is one. The caller holds mu.
+func (c *Controller) counted(occurrence string) (int64, bool) {
+	r, found := c.records[occurrence]
+	total := r.total
+	if t, ok := c.sightings.total(occurrence); ok {
+		total, found = max(total, t), true
+	}
+	return total, found
+}
+
 // consume counts one observation into the pending batch of its Incident, once the Incident exists or the
-// observation opens it. An observation of a fingerprint without an Incident that is not Immediate is held
-// as a first sighting until the symptom is seen again ([RecurAfter], [RecurWithin]); the sighting that opens
-// the Incident counts every observation held for it, in order. An observation with nothing new to count is
-// neither held nor counted.
+// observation opens it. An observation of a fingerprint without an Incident opens it at once when it is
+// Immediate, proves on its own that the symptom recurs ([recurs]), or its fingerprint was refused at the
+// cap before (so it is refused again at once while the cap holds); the observations held for the
+// fingerprint are then counted first. Any other is held as a first sighting until the symptom is seen again
+// ([RecurAfter], [RecurWithin]); the sighting that opens the Incident counts every observation held for it,
+// in order. An observation with nothing new to count is neither held nor counted.
 //
 // It reports whether the batch is due at once: the Incident has not been written by this process yet.
 func (c *Controller) consume(ctx context.Context, o collector.Observation) bool {
 	o.Began = o.Began.Truncate(time.Second)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.increase(o) <= 0 {
+	n := c.increase(o)
+	if n <= 0 {
 		return false
 	}
-	if _, ok := c.names[Name(o.Fingerprint)]; ok || o.Immediate {
+	// From here on Count is what is new of o, whatever MayRepeat said.
+	o.Count, o.MayRepeat = n, false
+	if _, ok := c.names[Name(o.Fingerprint)]; ok {
 		return c.count(ctx, o)
 	}
+	var open []collector.Observation
+	if o.Immediate || recurs(o) || c.refused.has(o.Fingerprint) {
+		open = append(c.sightings.take(o.Fingerprint), o)
+	} else {
+		open = c.sightings.admit(o, c.cfg.Now())
+	}
 	due := false
-	for _, h := range c.sightings.admit(o, c.cfg.Now()) {
+	for _, h := range open {
 		due = c.count(ctx, h) || due
 	}
 	return due
@@ -550,15 +572,16 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 
 // increase returns how much of o is new. An observation marked MayRepeat counts Increase of what Handled
 // would answer. Any other counts its Count (the collector knows that much is new), but never more than
-// Increase of the occurrence's record, so an occurrence another process already counted is not counted
-// again; the drop bound does not apply to it. The caller holds mu.
+// Increase of the highest total counted or held for the occurrence, so an occurrence another process
+// already counted, or a copy of one held, is not counted again; the drop bound does not apply to it. The
+// caller holds mu.
 func (c *Controller) increase(o collector.Observation) int64 {
 	if o.MayRepeat {
 		handled, _ := c.handled(o.Occurrence, o.Began)
 		return o.Increase(handled)
 	}
-	if r, ok := c.records[o.Occurrence]; ok {
-		return min(o.Count, o.Increase(r.total))
+	if total, ok := c.counted(o.Occurrence); ok {
+		return min(o.Count, o.Increase(total))
 	}
 	return o.Count
 }
@@ -566,9 +589,10 @@ func (c *Controller) increase(o collector.Observation) int64 {
 // count counts one observation into the pending batch of its Incident, creating the Incident's place under
 // the cap when it has none. A new fingerprint at the cap is refused. A new occurrence over the caps on
 // occurrences held unwritten is not counted ([Config]); its observation only moves the batch's first and
-// last seen, so the Incident is still written. It reports what consume does. The caller holds mu.
+// last seen, so the Incident is still written. o.Count is what is new of it ([Controller.increase], once
+// per observation, in consume). It reports what consume does. The caller holds mu.
 func (c *Controller) count(ctx context.Context, o collector.Observation) bool {
-	n := c.increase(o)
+	n := o.Count
 	if n <= 0 {
 		return false
 	}

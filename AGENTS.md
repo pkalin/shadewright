@@ -116,7 +116,7 @@ Every issue names the ADRs it is tied to:
   that has `packages: write`. `make docker-build-images` builds both for the host platform.
 - **CI scope.** `.github/workflows/ci.yml` is the one graph of a pull request and of a push to main. Its
   `changes` job runs `hack/ci-changed.sh` once on the files the pull request changes; the jobs that call the
-  workflows holding the checks (lint, test, e2e, govulncheck, image build, chart tests, workflow lint) get
+  workflows holding the checks (lint, test, e2e, govulncheck, image build, chart tests, docs check, workflow lint) get
   `run: true|false` and skip when their paths did not change. A skipped job counts as passing. `ci-ok` needs
   all of them and is the single required CI check: it fails when `changes` failed or any job failed or was
   cancelled. The required checks are `ci-ok`, `Conventional PR title` and `Dependency review`. A new job goes
@@ -125,7 +125,7 @@ Every issue names the ADRs it is tied to:
   change skip its check, so extend the groups and `hack/ci-changed_test.sh` when a job starts reading a new
   directory. Concurrency (cancel a superseded pull request run) lives in `ci.yml` only. Called workflows
   (`lint.yml`, `test.yml`, `test-e2e.yml`, `vulncheck.yml`, `workflow-lint.yml`, `images-build.yml`,
-  `chart-test.yml`) have no triggers of their own, except the weekly `vulncheck.yml` schedule. `images.yml`
+  `chart-test.yml`, `docs-check.yml`) have no triggers of their own, except the weekly `vulncheck.yml` schedule. `images.yml`
   (publishes from main and `v*` tags) and `chart.yml` (runs the chart tests, publishes, then adds the digests to the release, on `v*` tags only)
   stay separate, because their signatures are verified against those file names.
   Scans that are not part of the pull request graph: `codeql.yml` (CodeQL for `go` and `actions`) runs on pushes to
@@ -181,13 +181,13 @@ Docs site (Zensical, published to shadewright.io by `.github/workflows/docs.yml`
 python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements-docs.txt
 .venv/bin/zensical serve    # preview on localhost:8000
 .venv/bin/zensical build --clean   # must say "No issues found"
-make docs-check             # build, then check internal links, heading anchors and published URLs (hack/docs-check.py; the Docs workflow runs it on pull requests)
+make docs-check             # build, then check internal links, heading anchors and published URLs (hack/docs-check.py; the `docs-check` CI job runs it on pull requests; `docs.yml` only builds and publishes)
 make docs-requirements      # after editing requirements-docs.in: regenerate the hash-locked requirements-docs.txt
 ```
 
 ## Docs and decisions
 
-- Published URLs are kept: `hack/docs-published-paths.txt` lists every page path of shadewright.io, and the Docs workflow fails when a listed path no longer resolves to a page or a redirect page. Adding a page needs no change; moving or deleting one means a redirect, or removing its line from the list in the same pull request, which makes it a visible decision. Regenerate the list from a build with `python3 -I hack/docs-check.py list site`. External links are not checked on pull requests; `docs-links.yml` reports the ones that do not answer weekly, without failing.
+- Published URLs are kept: `hack/docs-published-paths.txt` lists every page path of shadewright.io, and the `docs-check` job of the PR graph (`docs-check.yml`, group `docs` of `hack/ci-changed.sh`) fails when a listed path no longer resolves to a page or a redirect page. Adding a page needs no change; moving or deleting one means a redirect, or removing its line from the list in the same pull request, which makes it a visible decision. Regenerate the list from a build with `python3 -I hack/docs-check.py list site`. External links are not checked on pull requests; `docs-links.yml` reports the ones that do not answer weekly, without failing.
 - `docs/design.md` is the system design; its section 15 lists decisions made and open questions. `docs/adr/` holds decisions (template and index there). A new page or ADR must also be added to `nav` in `zensical.toml`.
 - When a change implements or alters a design decision, update the design or add an ADR in the same PR.
 - Docs are written with the code, in the same PR, not later:

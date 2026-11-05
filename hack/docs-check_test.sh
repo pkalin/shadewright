@@ -41,6 +41,12 @@ expect "broken link fails" fail "$s"; mentions "broken link" "broken link ../mis
 build "$s"; page "$s/index.html" '<a href="a/#nope">x</a>'
 expect "broken anchor fails" fail "$s"; mentions "broken anchor" "no #nope"
 
+build "$s"; page "$s/index.html" '<a href="a/index.html#nope">x</a>'
+expect "broken anchor via index.html fails" fail "$s"; mentions "index.html anchor" "no #nope"
+
+build "$s"; page "$s/index.html" '<a href="a/index.html#sec">x</a>'
+expect "good anchor via index.html passes" pass "$s"
+
 build "$s"; page "$s/index.html" '<a href="#nope">x</a>'
 expect "broken anchor on the same page fails" fail "$s"
 

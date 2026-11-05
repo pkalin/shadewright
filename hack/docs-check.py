@@ -100,7 +100,9 @@ def check(site, listed_file):
                 problems.append(f"{url}: broken link {href} (no page {path})")
                 continue
             if frag:
-                t = parsed.get(path) or parsed.get(path + "/")
+                # A link may name index.html explicitly; pages are keyed by their folder path.
+                folder = path[: -len("index.html")] if path.endswith("/index.html") else path
+                t = parsed.get(folder) or parsed.get(path) or parsed.get(path + "/")
                 if t is not None and frag not in t.ids:
                     problems.append(f"{url}: broken anchor {href} (no #{frag} on {path})")
         if p.refresh:

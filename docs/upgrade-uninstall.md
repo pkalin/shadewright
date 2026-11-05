@@ -125,7 +125,7 @@ The order matters only if requests exist. Do it in this order:
 6. **Delete the CRDs last.** Removing them deletes every Incident, request, policy and settings object. Incidents hold the deduplication state and are the record of what the collector saw; export them first if you want it (`kubectl -n shadewright-system get incidents -o yaml`, which holds the redacted symptom and no raw logs, see [data handling](data-handling.md)).
 7. **Outside the cluster**: uninstall the GitHub App from the repository (or delete its private key on GitHub) and delete the Key Vault key and the federated credential. Branches `shadewright/*` that were left are yours to delete. Analysis records in blob storage are kept for their retention, see [data handling](data-handling.md#retention).
 
-With Flux, removing the `Kustomization` that installs Shadewright prunes its objects, and Flux does not wait for Shadewright's requests to finish their cleanup, so do steps 1 to 3 first. The reference lab is the exception that makes this harmless in practice: it is destroyed as a whole, and any pull request still open stays open on GitHub, to be closed by hand.
+With Flux, removing the `Kustomization` that installs Shadewright prunes its objects, and Flux does not wait for Shadewright's requests to finish their cleanup, so do steps 1 to 3 first. The budget ConfigMap is not kept on this path: `kubectl delete -k .` and the Flux prune delete it with the rest, and the next apply creates it empty, so the day's count starts again (unless you exclude the namespace or the object from the prune). The reference lab is the exception that makes this harmless in practice: it is destroyed as a whole, and any pull request still open stays open on GitHub, to be closed by hand.
 
 ### Uninstall with Helm
 
@@ -139,7 +139,8 @@ What this removes: the two Deployments, the ServiceAccounts, the RBAC, the Netwo
 
 - **The CRDs, by default** (`crd.keep: true` adds `helm.sh/resource-policy: keep`), and with them every Incident, request and policy object. A later `helm install` of the same release name finds them and goes on with them.
 - **The `RemediationSettings` object `default`**, if the chart created it, see below.
-- The namespace, when `--create-namespace` made it (Helm never deletes it), and with it the budget ConfigMap, the Leases and anything you created there. Delete it yourself when it holds nothing you need.
+- **The budget ConfigMap `shadewright-analysis-budget`** (it carries `helm.sh/resource-policy: keep`), so a `helm install` of the same release name in the same namespace within the same UTC day adopts it and continues the day's count instead of starting from zero. The two leader election Leases are deleted with the release and recreated by the next install; they hold no state worth keeping. To reset the count on purpose, delete the ConfigMap by hand (the next install creates it empty): `kubectl delete configmap shadewright-analysis-budget --namespace shadewright-system`.
+- The namespace, when `--create-namespace` made it (Helm never deletes it), and with it anything you created there. Delete it yourself when it holds nothing you need; deleting the namespace deletes the kept budget ConfigMap too.
 - What you created by hand: your `RemediationPolicy` objects and a metrics reader binding for Prometheus.
 
 **Remove the CRDs deliberately** (step 6), after the uninstall:

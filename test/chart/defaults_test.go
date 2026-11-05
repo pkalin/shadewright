@@ -592,3 +592,31 @@ func TestServiceMonitorSelectsEachMetricsService(t *testing.T) {
 		}
 	}
 }
+
+// TestOnlyTheBudgetConfigMapSurvivesUninstall checks the lifecycle the uninstall guide promises: the analysis
+// budget ConfigMap is kept by Helm (a reinstall of the same release adopts it and the day's count goes on),
+// while the leader election Leases are recreated and carry no such policy.
+func TestOnlyTheBudgetConfigMapSurvivesUninstall(t *testing.T) {
+	const keep = "helm.sh/resource-policy"
+	r := defaultRender(t)
+	budget := r.chart["ConfigMap/"+operatorNS+"/shadewright-analysis-budget"]
+	if budget == nil {
+		t.Fatalf("budget ConfigMap not rendered; have %v", keys(r.chart))
+	}
+	if got := budget.GetAnnotations()[keep]; got != "keep" {
+		t.Errorf("budget ConfigMap annotation %s = %q, want keep", keep, got)
+	}
+	n := 0
+	for k, u := range r.chart {
+		if u.GetKind() != "Lease" {
+			continue
+		}
+		n++
+		if v, ok := u.GetAnnotations()[keep]; ok {
+			t.Errorf("%s has %s = %q: Leases are recreated and must not be kept", k, keep, v)
+		}
+	}
+	if n != 2 {
+		t.Errorf("rendered %d Leases, want 2", n)
+	}
+}

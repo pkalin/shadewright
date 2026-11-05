@@ -474,6 +474,10 @@ chart-ct-cluster: kind ## Create the Kind cluster of the chart-testing job and l
 test-chart-defaults: chart-ct-cluster ## Install the chart with the default values (plus image.allowTag) on the chart-testing Kind cluster, check what it may read and write, then run helm test.
 	hack/chart-default-install-test.sh "$(KUBECTL)" "$(HELM)" "$(CHART_CT_VALUES)"
 
+.PHONY: test-chart-metrics-tls
+test-chart-metrics-tls: chart-ct-cluster ## Install the chart with the metrics TLS trust profile on the chart-testing Kind cluster and scrape both metrics Services with the right CA (200), a wrong CA and a wrong server name (TLS failure).
+	hack/chart-metrics-tls-test.sh "$(KUBECTL)" "$(HELM)" "$(CHART_CT_VALUES)"
+
 .PHONY: chart-ct-kind-delete
 chart-ct-kind-delete: kind ## Delete the Kind cluster of the chart-testing job.
 	@$(KIND) delete cluster --name $(CHART_CT_KIND_CLUSTER)

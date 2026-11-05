@@ -37,7 +37,8 @@ Pick the version on the [releases page](https://github.com/pkalin/shadewright/re
 
 ## Guides
 
-- [Getting started](https://shadewright.io/getting-started/): tests without a cluster, an observe-only install, and a hand-written request to a reviewed pull request.
+- [Getting started](https://shadewright.io/getting-started/): an observe-only install, then a hand-written request to a reviewed pull request.
+- [Contribute](https://shadewright.io/contribute/): run the tests without a cluster.
 - [Configuration reference](https://shadewright.io/reference/configuration/): flags, namespaces and RoleBindings, images, metrics and workload identity.
 - [Troubleshooting](https://shadewright.io/troubleshooting/): every request condition reason with its cause and fix.
 - [Upgrade and uninstall](https://shadewright.io/upgrade-uninstall/): the order, open pull requests and finalizers, and what deleting a request does.

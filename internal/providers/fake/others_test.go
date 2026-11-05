@@ -166,6 +166,18 @@ func TestMetricsAndLogs(t *testing.T) {
 	if err != nil || e.Text != "6789" || !e.Truncated {
 		t.Errorf("bounded logs = %+v, %v", e, err)
 	}
+	if !e.InstanceUncertain || e.CollectedAt.IsZero() {
+		t.Errorf("logs without an instance: uncertain %v, collected %v", e.InstanceUncertain, e.CollectedAt)
+	}
+	inst := providers.LogInstance{PodUID: "uid-1", ContainerID: "containerd://abc", RestartCount: 2}
+	l.SetInstance(k, inst, false)
+	if e, _ := l.Logs(ctx, q); e.Instance != inst || e.InstanceUncertain {
+		t.Errorf("logs with an instance: %+v, uncertain %v", e.Instance, e.InstanceUncertain)
+	}
+	l.SetInstance(k, inst, true)
+	if e, _ := l.Logs(ctx, q); !e.InstanceUncertain {
+		t.Error("instance set uncertain returned certain")
+	}
 	l.Set(k, strings.Repeat("x", providers.DefaultLogBytes+10))
 	q.MaxBytes = 0
 	if e, _ := l.Logs(ctx, q); len(e.Text) != providers.DefaultLogBytes || !e.Truncated {

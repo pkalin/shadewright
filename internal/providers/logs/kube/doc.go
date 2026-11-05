@@ -16,8 +16,26 @@ limitations under the License.
 
 // Package kube is the Kubernetes pod logs adapter of [providers.LogSource] (ADR-0013, design sections 2.3 and
 // 4). It reads the log of one container of one pod through the pods/log subresource of the API server, with
-// client-go's pods client ([PodsGetter], which CoreV1() of a clientset, real or fake, satisfies). It is built
-// but not wired: the analyzer does not create it yet, and has no grant on pods/log.
+// client-go's pods client ([PodsGetter], which CoreV1() of a clientset, real or fake, satisfies), and reads
+// the pod itself to tie the excerpt to an instance (get on pods, which the analyzer's watch role already
+// grants). It is built but not wired: the analyzer does not create it yet, and has no grant on pods/log.
+//
+// Instance: a log request names a pod and a container by name only. It cannot ask for a pod UID or a
+// container ID, and Previous is relative to the instance running when the kubelet answers. So the adapter
+// reads the pod before the first and after the last logs request, and records in the excerpt the pod UID, the
+// container ID of the instance asked for (the current container, or for Previous the last terminated one)
+// and the restart count from the check before, and the time the reading ended ([providers.LogExcerpt]). Pod
+// UIDs are never reused and a restart count only grows, so equal checks mean that no other instance answered
+// either logs request, the second one included. The excerpt is marked InstanceUncertain when the checks
+// differ in any of the three, when the pod is gone at the second check, or when the status names no instance
+// for the container or an ID longer than [providers.MaxLogInstanceIDLength] or with other characters than
+// letters, digits and ._:/+- (such an ID is recorded empty). What a log request still cannot guarantee: the
+// instance is inferred from the pod's status, not proved by the answer, and the status is the kubelet's
+// report, which can lag the runtime, so a restart the status does not show yet at the second check is not
+// seen; the kubelet keeps the log of one previous instance only, and only while it keeps that container. An
+// uncertain excerpt is a label on the evidence, not a reason to escalate (design section 3.3): restarts and
+// recreation are controlled by whoever runs workloads in a watched namespace. The metadata stays with the
+// excerpt, never in Incident status.
 //
 // Scope and checks, before any request: a query may name only a namespace in [Config.Namespaces] (the
 // analyzer's watched namespaces); any other is refused with [ErrInvalidQuery], an empty set refuses every
@@ -54,10 +72,13 @@ limitations under the License.
 // The adapter logs nothing.
 //
 // Errors carry fixed text and the status code only, never the namespace, pod or container name, log text or
-// the API server's message. The adapter does not retry (client-go's own retries are turned off): 404 is
-// [providers.ErrNotFound]; 401 and 403 are [providers.ErrForbidden]; 408, 429, 5xx, a network error, a stream
-// cut short and the expiry of [Config.Timeout] are a [providers.RetryableError] (with the delay the server
-// asked for, capped at 10 minutes); any other 4xx, such as 400, is [providers.ErrRejected]. When the caller's
-// context is done, its error is returned, so that errors.Is matches [context.Canceled] or
-// [context.DeadlineExceeded].
+// the API server's message. The adapter does not retry, and client-go's own retries are turned off for the
+// logs requests; the pod reads go through the typed client, which may retry a 429 or 5xx that carries
+// Retry-After (at most 10 times) within the query's deadline. The pod reads and the logs requests are
+// classified alike: 404 is [providers.ErrNotFound] (a pod gone at the second check instead marks the excerpt
+// uncertain); 401 and 403 are [providers.ErrForbidden]; 408, 429, 5xx, a network error, a stream cut short
+// and the expiry of [Config.Timeout] are a [providers.RetryableError] (with the delay the server asked for,
+// capped at 10 minutes); any other 4xx, such as 400, is [providers.ErrRejected]. A failed check returns no
+// excerpt. When the caller's context is done, its error is returned, so that errors.Is matches
+// [context.Canceled] or [context.DeadlineExceeded].
 package kube

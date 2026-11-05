@@ -19,6 +19,7 @@ package kube
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -49,7 +50,28 @@ const (
 	testContainer = "app"
 	// planted is text that must never reach an error: it stands for log text and names.
 	planted = "planted-SECRET-9f8e7d"
+	testUID = "6f1c2a9e-3b4d-4e5f-8a7b-0c1d2e3f4a5b"
+	// testCID and prevCID are the container IDs of the running and the last terminated instance.
+	testCID = "containerd://aaaa1111"
+	prevCID = "containerd://bbbb2222"
 )
+
+var podsResource = corev1.SchemeGroupVersion.WithResource("pods")
+
+// testPodObject is the pod the queries name: its container restarted once.
+func testPodObject() *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: testPod, UID: testUID},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+			Name:         testContainer,
+			ContainerID:  testCID,
+			RestartCount: 1,
+			LastTerminationState: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{ContainerID: prevCID},
+			},
+		}}},
+	}
+}
 
 // logServer is a fake clientset whose pods/log answers with current or previous text, and which records the
 // options of each logs request. Like the API server, it keeps the last TailLines lines and then cuts the
@@ -62,6 +84,9 @@ type logServer struct {
 	err          error
 	ignoreLimits bool
 	opts         []*corev1.PodLogOptions
+	// onLog, when set, runs at each logs request (n counts from 1) before it is answered. It runs under the
+	// fake clientset's lock, so it may change objects through the tracker only.
+	onLog func(n int)
 }
 
 // serve applies TailLines and LimitBytes to text the way the API server does.
@@ -83,13 +108,16 @@ func serve(text []byte, o *corev1.PodLogOptions) []byte {
 }
 
 func newLogServer(current string) *logServer {
-	l := &logServer{cs: fake.NewClientset(), current: []byte(current)}
+	l := &logServer{cs: fake.NewClientset(testPodObject()), current: []byte(current)}
 	l.cs.PrependReactor("get", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		if a.GetSubresource() != "log" {
 			return false, nil, nil
 		}
 		opts := a.(k8stesting.GenericAction).GetValue().(*corev1.PodLogOptions)
 		l.opts = append(l.opts, opts)
+		if l.onLog != nil {
+			l.onLog(len(l.opts))
+		}
 		if l.err != nil {
 			return true, nil, l.err
 		}
@@ -453,6 +481,11 @@ func TestNamespaceMustBeAllowed(t *testing.T) {
 		t.Errorf("%d requests sent for a namespace outside the set", n)
 	}
 	q.Namespace = "other"
+	other := testPodObject()
+	other.Namespace = q.Namespace
+	if err := l.cs.Tracker().Add(other); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.Logs(context.Background(), q); err != nil {
 		t.Errorf("allowed namespace refused: %v", err)
 	}
@@ -614,11 +647,23 @@ func TestNewValidatesTheConfig(t *testing.T) {
 }
 
 // apiSource returns a Source on a real clientset talking to an HTTP server, so that the request path of
-// client-go (status decoding, its own retries, the body stream) is the one a cluster sees.
+// client-go (status decoding, its own retries, the body stream) is the one a cluster sees. The server answers
+// a read of the pod itself with testPodObject; h gets every other request, which it counts.
 func apiSource(t *testing.T, timeout time.Duration, h http.HandlerFunc) (*Source, *atomic.Int32) {
 	t.Helper()
+	p := testPodObject()
+	p.TypeMeta = metav1.TypeMeta{Kind: "Pod", APIVersion: "v1"}
+	pod, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var n atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/namespaces/"+testNS+"/pods/"+testPod {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(pod)
+			return
+		}
 		n.Add(1)
 		h(w, r)
 	}))
@@ -721,5 +766,190 @@ func TestCallerDeadlineEndsAStalledStream(t *testing.T) {
 	got, err := s.Logs(ctx, query())
 	if !errors.Is(err, context.DeadlineExceeded) || providers.IsRetryable(err) {
 		t.Errorf("Logs = %+v, %v; want context.DeadlineExceeded", got, err)
+	}
+}
+
+// podReads counts the reads of the pod itself (not of its log) a fake clientset saw.
+func podReads(cs *fake.Clientset) int {
+	n := 0
+	for _, a := range cs.Actions() {
+		if a.GetVerb() == "get" && a.GetResource() == podsResource && a.GetSubresource() == "" {
+			n++
+		}
+	}
+	return n
+}
+
+// An excerpt records the pod UID and the container instance it was read from, and when.
+func TestExcerptIsTiedToTheInstance(t *testing.T) {
+	for name, tc := range map[string]struct {
+		previous bool
+		id       string
+	}{"current": {false, testCID}, "previous": {true, prevCID}} {
+		t.Run(name, func(t *testing.T) {
+			l := newLogServer("hello\n")
+			l.previous = []byte("bye\n")
+			q := query()
+			q.Previous = tc.previous
+			start := time.Now()
+			got, err := l.source(t).Logs(context.Background(), q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := providers.LogInstance{PodUID: testUID, ContainerID: tc.id, RestartCount: 1}
+			if got.Instance != want || got.InstanceUncertain {
+				t.Errorf("instance %+v, uncertain %v; want %+v, certain", got.Instance, got.InstanceUncertain, want)
+			}
+			if got.CollectedAt.Before(start) || got.CollectedAt.After(time.Now()) {
+				t.Errorf("CollectedAt %v outside the call", got.CollectedAt)
+			}
+			if n := podReads(l.cs); n != 2 {
+				t.Errorf("%d pod reads, want 2 (before and after)", n)
+			}
+		})
+	}
+}
+
+// A StatefulSet pod is recreated under the same name while its logs are read: the excerpt may be the new
+// pod's, so it is marked uncertain and keeps the UID of the pod checked before.
+func TestStatefulSetPodRecreatedUnderTheSameName(t *testing.T) {
+	l := newLogServer("hello\n")
+	l.onLog = func(int) {
+		recreated := testPodObject()
+		recreated.UID = "0a0b0c0d-1111-2222-3333-444455556666"
+		recreated.OwnerReferences = []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "StatefulSet", Name: "web"}}
+		// Same container ID and restart count: only the pod UID tells the instances apart.
+		if err := l.cs.Tracker().Delete(podsResource, testNS, testPod); err != nil {
+			t.Error(err)
+		}
+		if err := l.cs.Tracker().Create(podsResource, recreated, testNS); err != nil {
+			t.Error(err)
+		}
+	}
+	got, err := l.source(t).Logs(context.Background(), query())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.InstanceUncertain || got.Instance.PodUID != testUID {
+		t.Errorf("instance %+v, uncertain %v; want the first UID, uncertain", got.Instance, got.InstanceUncertain)
+	}
+}
+
+// The container restarts between the adapter's two requests. The first read the old instance, the second
+// the new one (or, for Previous, which is relative, the instance the first read as current): uncertain.
+func TestRestartBetweenTheTwoRequests(t *testing.T) {
+	for name, previous := range map[string]bool{"current": false, "previous": true} {
+		t.Run(name, func(t *testing.T) {
+			text := numbered(TailLines, 1000) // over MaxReadBytes: two requests
+			l := newLogServer(text)
+			l.previous = []byte(text)
+			l.onLog = func(n int) {
+				if n != 1 {
+					return
+				}
+				restarted := testPodObject()
+				cs := &restarted.Status.ContainerStatuses[0]
+				cs.RestartCount = 2
+				cs.ContainerID = "containerd://cccc3333"
+				cs.LastTerminationState.Terminated.ContainerID = testCID
+				if err := l.cs.Tracker().Update(podsResource, restarted, testNS); err != nil {
+					t.Error(err)
+				}
+			}
+			q := query()
+			q.Previous = previous
+			got, err := l.source(t).Logs(context.Background(), q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(l.opts) != 2 {
+				t.Fatalf("%d logs requests, want 2", len(l.opts))
+			}
+			if !got.InstanceUncertain || got.Instance.RestartCount != 1 {
+				t.Errorf("instance %+v, uncertain %v; want restart count 1, uncertain", got.Instance, got.InstanceUncertain)
+			}
+		})
+	}
+}
+
+// A pod missing before any logs request is not found, and no logs request is sent; a pod gone after the
+// read leaves the excerpt uncertain.
+func TestPodGoneBeforeOrAfterTheRead(t *testing.T) {
+	l := newLogServer("hello\n")
+	if err := l.cs.Tracker().Delete(podsResource, testNS, testPod); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.source(t).Logs(context.Background(), query()); !providers.IsNotFound(err) || len(l.opts) != 0 {
+		t.Errorf("err = %v after %d logs requests; want not found and none", err, len(l.opts))
+	}
+
+	l = newLogServer("hello\n")
+	l.onLog = func(int) {
+		if err := l.cs.Tracker().Delete(podsResource, testNS, testPod); err != nil {
+			t.Error(err)
+		}
+	}
+	got, err := l.source(t).Logs(context.Background(), query())
+	if err != nil || !got.InstanceUncertain || got.Text != "hello\n" {
+		t.Errorf("Logs = %+v, %v; want the text, uncertain", got, err)
+	}
+}
+
+// A failed check of the pod, before or after reading, returns no excerpt, and its error carries no name or
+// server text.
+func TestPodReadErrors(t *testing.T) {
+	for name, after := range map[string]bool{"before": false, "after": true} {
+		t.Run(name, func(t *testing.T) {
+			l := newLogServer("hello\n")
+			reads := 0
+			l.cs.PrependReactor("get", podsResource.Resource, func(a k8stesting.Action) (bool, runtime.Object, error) {
+				if a.GetSubresource() != "" {
+					return false, nil, nil
+				}
+				if reads++; after && reads == 1 {
+					return false, nil, nil
+				}
+				return true, nil, apierrors.NewInternalError(errors.New("pod " + planted))
+			})
+			got, err := l.source(t).Logs(context.Background(), query())
+			if !providers.IsRetryable(err) || got.Text != "" {
+				t.Fatalf("Logs = %+v, %v; want a retryable error", got, err)
+			}
+			if strings.Contains(err.Error(), planted) || strings.Contains(err.Error(), testPod) {
+				t.Errorf("error carries a name or the server's text: %v", err)
+			}
+			if want := map[bool]int{false: 0, true: 1}[after]; len(l.opts) != want {
+				t.Errorf("%d logs requests, want %d", len(l.opts), want)
+			}
+		})
+	}
+}
+
+// A status that names no instance, or an ID out of bounds, never ties an excerpt.
+func TestUnknownInstanceIsUncertain(t *testing.T) {
+	for name, change := range map[string]func(*corev1.Pod){
+		"no status":       func(p *corev1.Pod) { p.Status.ContainerStatuses = nil },
+		"empty ID":        func(p *corev1.Pod) { p.Status.ContainerStatuses[0].ContainerID = "" },
+		"ID too long":     func(p *corev1.Pod) { p.Status.ContainerStatuses[0].ContainerID = strings.Repeat("a", 129) },
+		"ID bad bytes":    func(p *corev1.Pod) { p.Status.ContainerStatuses[0].ContainerID = "x://a\nb" },
+		"UID bad bytes":   func(p *corev1.Pod) { p.UID = "a b" },
+		"other container": func(p *corev1.Pod) { p.Status.ContainerStatuses[0].Name = "sidecar" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := testPodObject()
+			change(p)
+			l := newLogServer("hello\n")
+			if err := l.cs.Tracker().Update(podsResource, p, testNS); err != nil {
+				t.Fatal(err)
+			}
+			got, err := l.source(t).Logs(context.Background(), query())
+			if err != nil || !got.InstanceUncertain {
+				t.Errorf("Logs = %+v, %v; want uncertain", got, err)
+			}
+			if len(got.Instance.ContainerID) > providers.MaxLogInstanceIDLength ||
+				strings.ContainsAny(got.Instance.ContainerID+got.Instance.PodUID, " \n") {
+				t.Errorf("instance out of bounds: %+v", got.Instance)
+			}
+		})
 	}
 }

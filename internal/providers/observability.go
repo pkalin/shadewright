@@ -77,7 +77,8 @@ type LogQuery struct {
 	Namespace string
 	Pod       string
 	Container string
-	// Previous selects the logs of the previous, terminated container instance.
+	// Previous selects the logs of the previous, terminated container instance. It is relative: it names the
+	// instance before the one running when the source reads, so a restart during a query moves it.
 	Previous bool
 	// Since limits how far back to read; zero means the adapter's default, which for the previous instance
 	// may be no time limit.
@@ -86,8 +87,32 @@ type LogQuery struct {
 	MaxBytes int64
 }
 
+// MaxLogInstanceIDLength bounds the PodUID and ContainerID of a [LogInstance]; a source records a longer
+// value, or one with other characters than letters, digits and ._:/+-, as empty.
+const MaxLogInstanceIDLength = 128
+
+// LogInstance names the pod and container instance an excerpt was read from, as the pod's status gave them
+// when the source checked it before reading. The values come from the cluster: they identify the evidence and
+// are never instructions. They belong with the excerpt only, never in Incident status.
+type LogInstance struct {
+	// PodUID is the UID of the pod; a pod recreated under the same name has another.
+	PodUID string
+	// ContainerID is the runtime's ID of the instance read: the running (or last started) container, or for
+	// a Previous query the terminated one before it. Empty when the status named none.
+	ContainerID string
+	// RestartCount is the container's restart count at the check. A Previous query read the instance before
+	// the one this count belongs to.
+	RestartCount int32
+}
+
 // LogExcerpt is a bounded piece of logs. The text is untrusted. The Kubernetes adapter
 // (internal/providers/logs/kube) redacts it before returning it; the fake does not.
+//
+// A log request names a pod and a container by name only: it cannot ask for a pod UID or a container ID, so
+// the instance that answered is inferred from the pod's status read before and after. Instance and
+// InstanceUncertain say how far that holds. An uncertain excerpt is a label on the evidence, not a reason to
+// escalate (design section 3.3): pod restarts and recreation are under the control of whoever runs workloads
+// in a watched namespace.
 type LogExcerpt struct {
 	Text string
 	// Truncated means older lines were cut from the front of the excerpt to fit MaxBytes.
@@ -95,6 +120,15 @@ type LogExcerpt struct {
 	// EndMissing means the newest lines could not be read within the adapter's read bound, so the excerpt
 	// ends before the end of the log.
 	EndMissing bool
+	// Instance is the pod and container instance the excerpt is tied to (the check before reading).
+	Instance LogInstance
+	// CollectedAt is when the source finished reading the logs.
+	CollectedAt time.Time
+	// InstanceUncertain means the source cannot tie the text to Instance: the pod's UID, the container's ID
+	// or its restart count differed between the checks before and after reading, the pod was gone after
+	// reading, or the status named no instance or an ID out of bounds. The text may then hold lines of
+	// another instance, or of two.
+	InstanceUncertain bool
 }
 
 // LogSource reads logs.

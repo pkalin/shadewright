@@ -28,6 +28,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 
@@ -86,14 +87,14 @@ type PodsGetter = corev1client.PodsGetter
 
 // Config configures a [Source].
 type Config struct {
-	// Pods reads the logs, usually CoreV1() of the analyzer's clientset. Required.
+	// Pods reads the logs and the pods, usually CoreV1() of the analyzer's clientset. Required.
 	Pods PodsGetter
 	// Namespaces are the namespaces a query may name, each a DNS-1123 label, at most MaxNamespaces; the
 	// analyzer passes its watched namespaces (--watch-namespaces). Empty refuses every query.
 	Namespaces []string
 	// Redactor redacts the excerpt; nil means the built-in rules of package redact.
 	Redactor *redact.Redactor
-	// Timeout bounds one query, both requests included, to the end of the last stream. Zero means
+	// Timeout bounds one query, both logs requests and both pod reads included. Zero means
 	// DefaultTimeout; at most MaxTimeout.
 	Timeout time.Duration
 }
@@ -151,6 +152,13 @@ func (s *Source) Logs(ctx context.Context, q providers.LogQuery) (providers.LogE
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
+	// The log request names the pod and container by name only, so the instance is checked before the first
+	// and after the last request. Pod UIDs are never reused and a restart count only grows, so equal checks
+	// mean no other instance answered either request in between.
+	before, err := s.instance(ctx, parent, q)
+	if err != nil {
+		return providers.LogExcerpt{}, err
+	}
 	data, over, err := s.read(ctx, parent, q, opts)
 	if err != nil {
 		return providers.LogExcerpt{}, err
@@ -164,12 +172,81 @@ func (s *Source) Logs(ctx context.Context, q providers.LogQuery) (providers.LogE
 			return providers.LogExcerpt{}, err
 		}
 	}
+	collected := time.Now().UTC()
+	after, err := s.instance(ctx, parent, q)
+	switch {
+	case errors.Is(err, providers.ErrNotFound):
+		// The pod is gone: nothing ties the text to the instance checked before.
+		after = instance{}
+	case err != nil:
+		return providers.LogExcerpt{}, err
+	}
 	text, truncated := cut(data, over, keep)
 	return providers.LogExcerpt{
-		Text:       s.redact(strings.ToValidUTF8(text, "?")),
-		Truncated:  truncated,
-		EndMissing: over,
+		Text:              s.redact(strings.ToValidUTF8(text, "?")),
+		Truncated:         truncated,
+		EndMissing:        over,
+		Instance:          before.LogInstance,
+		CollectedAt:       collected,
+		InstanceUncertain: !before.known || after != before,
 	}, nil
+}
+
+// instance is the pod and container instance a query names, as the pod's status gives it. known is false
+// when the status names no instance or an ID is out of bounds; such an instance never ties an excerpt.
+type instance struct {
+	providers.LogInstance
+	known bool
+}
+
+// instance reads the pod a query names and returns the instance of its container. A missing pod is
+// providers.ErrNotFound; other errors are classified like those of a logs request.
+func (s *Source) instance(ctx, parent context.Context, q providers.LogQuery) (instance, error) {
+	pod, err := s.pods.Pods(q.Namespace).Get(ctx, q.Pod, metav1.GetOptions{})
+	if err != nil {
+		return instance{}, requestError(ctx, parent, "pod read", err)
+	}
+	if err := contextError(ctx, parent); err != nil {
+		return instance{}, err
+	}
+	uid, uidOK := boundedID(string(pod.UID))
+	inst := instance{LogInstance: providers.LogInstance{PodUID: uid}}
+	for _, statuses := range [][]corev1.ContainerStatus{
+		pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses, pod.Status.EphemeralContainerStatuses,
+	} {
+		for _, cs := range statuses {
+			if cs.Name != q.Container {
+				continue
+			}
+			raw := cs.ContainerID
+			if q.Previous {
+				raw = ""
+				if t := cs.LastTerminationState.Terminated; t != nil {
+					raw = t.ContainerID
+				}
+			}
+			id, idOK := boundedID(raw)
+			inst.ContainerID, inst.RestartCount = id, cs.RestartCount
+			inst.known = uidOK && idOK && uid != "" && id != ""
+			return inst, nil
+		}
+	}
+	return inst, nil
+}
+
+// boundedID returns s when it is at most providers.MaxLogInstanceIDLength bytes of letters, digits and
+// ._:/+-, and "" and false otherwise. An empty s is returned with true.
+func boundedID(s string) (string, bool) {
+	if len(s) > providers.MaxLogInstanceIDLength {
+		return "", false
+	}
+	for _, c := range []byte(s) {
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("._:/+-", c) >= 0
+		if !ok {
+			return "", false
+		}
+	}
+	return s, true
 }
 
 // read sends one request and reads at most MaxReadBytes+1 of the stream. over reports that the stream held
@@ -178,7 +255,7 @@ func (s *Source) read(ctx, parent context.Context, q providers.LogQuery, opts *c
 ) (data []byte, over bool, err error) {
 	stream, err := s.pods.Pods(q.Namespace).GetLogs(q.Pod, opts).MaxRetries(0).Stream(ctx)
 	if err != nil {
-		return nil, false, requestError(ctx, parent, err)
+		return nil, false, requestError(ctx, parent, "logs request", err)
 	}
 	defer func() { _ = stream.Close() }()
 	data, err = readAll(io.LimitReader(stream, MaxReadBytes+1))
@@ -313,22 +390,22 @@ func (s *Source) options(q providers.LogQuery) (*corev1.PodLogOptions, int, erro
 	return opts, int(keep), nil
 }
 
-// requestError classifies a failed request by its status code. The error of client-go is dropped: its
-// message holds the server's text, which can repeat names and log text.
-func requestError(ctx, parent context.Context, err error) error {
+// requestError classifies a failed request by its status code; what is a fixed name of the request. The
+// error of client-go is dropped: its message holds the server's text, which can repeat names and log text.
+func requestError(ctx, parent context.Context, what string, err error) error {
 	if cerr := contextError(ctx, parent); cerr != nil {
 		return cerr
 	}
 	var st apierrors.APIStatus
 	if !errors.As(err, &st) {
-		return &providers.RetryableError{Err: errors.New("logs request failed")}
+		return &providers.RetryableError{Err: fmt.Errorf("%s failed", what)}
 	}
 	code := int(st.Status().Code)
 	switch {
 	case code == http.StatusNotFound:
-		return fmt.Errorf("pod or container not found (status %d): %w", code, providers.ErrNotFound)
+		return fmt.Errorf("%s: pod or container not found (status %d): %w", what, code, providers.ErrNotFound)
 	case code == http.StatusUnauthorized || code == http.StatusForbidden:
-		return fmt.Errorf("the API server refused the identity (status %d): %w", code, providers.ErrForbidden)
+		return fmt.Errorf("%s: the API server refused the identity (status %d): %w", what, code, providers.ErrForbidden)
 	case code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500:
 		var delay time.Duration
 		if secs, ok := apierrors.SuggestsClientDelay(err); ok {
@@ -337,9 +414,9 @@ func requestError(ctx, parent context.Context, err error) error {
 		}
 		return &providers.RetryableError{
 			RetryAfter: delay,
-			Err:        fmt.Errorf("the API server could not serve the logs (status %d)", code),
+			Err:        fmt.Errorf("%s: the API server could not serve it (status %d)", what, code),
 		}
 	default:
-		return fmt.Errorf("the API server refused the logs request (status %d): %w", code, providers.ErrRejected)
+		return fmt.Errorf("%s: the API server refused it (status %d): %w", what, code, providers.ErrRejected)
 	}
 }

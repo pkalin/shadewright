@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Resolves the digests of the executor and analyzer images of a release tag and verifies each one (cosign
-# signature and SPDX SBOM attestation) against the identity of the Images workflow on that very tag. Prints
+# signature, and the SPDX SBOM attestation of each platform image) against the identity of the Images workflow
+# on that very tag. Prints
 # `executor=<digest>` and `analyzer=<digest>` on stdout (the format of $GITHUB_OUTPUT); progress goes to stderr.
 # The Chart workflow runs this once, in its `images` job: the install test and the publish job both use these
 # digests, so the chart that is published points at the images that were tested. Usage:
@@ -20,6 +21,19 @@ poll="${POLL_SECONDS:-30}" wait_for="${WAIT_SECONDS:-1800}"
 issuer="https://token.actions.githubusercontent.com"
 identity="https://github.com/${repository}/.github/workflows/images.yml@refs/tags/${tag}"
 deadline=$(( $(date +%s) + wait_for ))
+here="$(cd "$(dirname "$0")" && pwd)"
+
+# The SBOM is attested per platform image (#341): every child digest of the index must carry one.
+sboms_verify() { # image reference, index digest
+  local children child
+  children="$("${here}/image-platform-digests.sh" "$1@$2" 2>/dev/null | sed 's/^[a-z0-9]*=//')" || return 1
+  [ -n "${children}" ] || return 1
+  for child in ${children}; do
+    cosign verify-attestation --type spdxjson \
+      --certificate-identity "${identity}" --certificate-oidc-issuer "${issuer}" \
+      "$1@${child}" > /dev/null 2>&1 || return 1
+  done
+}
 
 found_executor="" found_analyzer=""
 for image in executor analyzer; do
@@ -29,9 +43,7 @@ for image in executor analyzer; do
     got="$(docker buildx imagetools inspect "${ref}:${tag#v}" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
     if printf '%s' "${got}" | grep -Eq '^sha256:[a-f0-9]{64}$' && cosign verify \
         --certificate-identity "${identity}" --certificate-oidc-issuer "${issuer}" \
-        "${ref}@${got}" > /dev/null 2>&1 && cosign verify-attestation --type spdxjson \
-        --certificate-identity "${identity}" --certificate-oidc-issuer "${issuer}" \
-        "${ref}@${got}" > /dev/null 2>&1; then
+        "${ref}@${got}" > /dev/null 2>&1 && sboms_verify "${ref}" "${got}"; then
       d="${got}"
     elif [ "$(date +%s)" -ge "${deadline}" ]; then
       echo "no image ${ref}:${tag#v} signed and attested by ${identity} after $((wait_for / 60)) minutes; re-run this job once the Images workflow of ${tag} has finished" >&2

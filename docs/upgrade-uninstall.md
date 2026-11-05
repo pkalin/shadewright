@@ -30,7 +30,7 @@ Deleting a request before merge is today the only way to cancel it, and what it 
 
 ## Verify a release
 
-Images built from `main` or a `v*` tag after [#82](https://github.com/pkalin/shadewright/issues/82) are signed keyless with cosign (the certificate comes from GitHub's OIDC token, there is no key to trust), carry an SPDX SBOM as a signed attestation, and have a GitHub build provenance attestation. v0.1.0 images are not signed. Verify by digest, never by tag, and use the digest you will deploy. You need [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x or later (the signatures are stored as Sigstore bundles, which cosign 2.x does not find) and the [GitHub CLI](https://cli.github.com/).
+Images built from `main` or a `v*` tag after [#82](https://github.com/pkalin/shadewright/issues/82) are signed keyless with cosign (the certificate comes from GitHub's OIDC token, there is no key to trust), carry an SPDX SBOM per platform image (linux/amd64 and linux/arm64) as a signed attestation, and have a GitHub build provenance attestation. v0.1.0 images are not signed. Verify by digest, never by tag, and use the digest you will deploy. You need [Docker](https://docs.docker.com/engine/install/) (for `buildx imagetools`), [jq](https://jqlang.org/), [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x or later (the signatures are stored as Sigstore bundles, which cosign 2.x does not find) and the [GitHub CLI](https://cli.github.com/).
 
 ```bash
 IMAGE=ghcr.io/pkalin/shadewright-executor   # and shadewright-analyzer
@@ -44,11 +44,16 @@ cosign verify \
   --certificate-oidc-issuer "$ISSUER" \
   "$IMAGE@$DIGEST"
 
-# SBOM (SPDX JSON) attestation: the same identity; the predicate is the SBOM.
-cosign verify-attestation --type spdxjson \
-  --certificate-identity-regexp "$IDENTITY" \
-  --certificate-oidc-issuer "$ISSUER" \
-  "$IMAGE@$DIGEST" | jq -r '.payload | @base64d | fromjson | .predicate' > sbom.spdx.json
+# SBOM (SPDX JSON) attestations: one per platform image, on the digest of each child of the index,
+# with the same identity; the predicate is the SBOM.
+for ARCH in amd64 arm64; do
+  CHILD=$(docker buildx imagetools inspect --raw "$IMAGE@$DIGEST" | jq -r --arg a "$ARCH" \
+    '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a) | .digest')
+  cosign verify-attestation --type spdxjson \
+    --certificate-identity-regexp "$IDENTITY" \
+    --certificate-oidc-issuer "$ISSUER" \
+    "$IMAGE@$CHILD" | jq -r '.payload | @base64d | fromjson | .predicate' > "sbom-$ARCH.spdx.json"
+done
 
 # Build provenance: built by this repository's images workflow.
 gh attestation verify "oci://$IMAGE@$DIGEST" \
@@ -58,7 +63,7 @@ gh attestation verify "oci://$IMAGE@$DIGEST" \
 
 Releases after v0.1.0 list the digests of its two images and its chart, with these commands filled in for that tag (the identity pinned to it), once the images and the chart are published. A pre-release tag such as `v0.2.0-rc.1` is built, signed and verified the same way: the identity regexp above accepts it, it is tagged `0.2.0-rc.1` only (no `latest`, no `X.Y`), and its chart has that version and `appVersion`.
 
-Each command exits non-zero when the signature, the identity or the issuer does not match. To pin a single release instead of any `main` or tag build, replace the end of `IDENTITY` with `refs/tags/vX.Y.Z$`. The SBOM lists the packages of the linux/amd64 image. The same checks run in the [images workflow](https://github.com/pkalin/shadewright/blob/main/.github/workflows/images.yml) right after every push, so a build that cannot be verified fails there.
+Each command exits non-zero when the signature, the identity or the issuer does not match. To pin a single release instead of any `main` or tag build, replace the end of `IDENTITY` with `refs/tags/vX.Y.Z$`. Each SBOM lists the packages of one platform image; the signature and the provenance are on the index digest, the SBOMs on the child digests (images from before [#341](https://github.com/pkalin/shadewright/issues/341) have a single SBOM on the index digest, made from the linux/amd64 image). The same checks run in the [images workflow](https://github.com/pkalin/shadewright/blob/main/.github/workflows/images.yml) right after every push, so a build that cannot be verified fails there.
 
 ## Upgrade
 

@@ -20,10 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
-	"unicode"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -252,26 +249,11 @@ func abandoned(ctx context.Context) error {
 	return nil
 }
 
-// redact makes s valid UTF-8 (each invalid run becomes one "?", so it never grows) and redacts it.
-func (b *Builder) redact(s string) string {
-	return b.redactor.String(strings.ToValidUTF8(s, "?"))
-}
+// redact makes s valid UTF-8 and redacts it ([Redact]).
+func (b *Builder) redact(s string) string { return Redact(b.redactor.String, s) }
 
-// value redacts one value from the cluster for a line of a section: a value longer than maxValueBytes once
-// redacted is left out whole, and control characters and Unicode line and paragraph separators become spaces,
-// so a value never adds lines of its own, nor anything a reader could take for a line break.
-func (b *Builder) value(s string) string {
-	r := b.redact(s)
-	if len(r) > maxValueBytes {
-		return "(" + strconv.Itoa(len(r)) + " bytes left out)"
-	}
-	return strings.Map(func(c rune) rune {
-		if unicode.IsControl(c) || c == '\u2028' || c == '\u2029' {
-			return ' '
-		}
-		return c
-	}, r)
-}
+// value redacts one value from the cluster for a line of a section ([Value]).
+func (b *Builder) value(s string) string { return Value(b.redactor.String, s) }
 
 // finish redacts the assembled text of a section block as a whole, then cuts it to n bytes in whole lines,
 // keeping the head: the sections it finishes are written most relevant first.

@@ -23,7 +23,7 @@ import (
 
 // FuzzArguments feeds arbitrary arguments to every tool's parser. It never panics, and arguments it accepts
 // are within the bounds: at most MaxArgumentBytes, one JSON object, and a namespace, when they name one, in
-// the watched set.
+// the watched set (the delivery set for get_delivery_status).
 func FuzzArguments(f *testing.F) {
 	for _, name := range Names() {
 		f.Add(name, with(name, nil))
@@ -48,7 +48,11 @@ func FuzzArguments(f *testing.F) {
 		if err := json.Unmarshal([]byte(args), &m); err != nil && len(args) > 0 {
 			t.Fatalf("accepted arguments that are not one object: %q", args)
 		}
-		if ns, ok := m[argNamespace]; ok && ns != testNS {
+		want := testNS
+		if tl.name == NameGetDeliveryStatus {
+			want = fluxNS
+		}
+		if ns, ok := m[argNamespace]; ok && ns != want {
 			t.Fatalf("accepted namespace %v", ns)
 		}
 		if _, ok := m[argNamespace]; !ok && tl.name != NameReadGitFile && tl.name != NameGetRecentChanges {

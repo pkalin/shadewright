@@ -42,6 +42,10 @@ import (
 const (
 	testNS    = "shop"
 	otherNS   = "kube-system"
+	fluxNS    = "flux-system"
+	initName  = "init"
+	debugName = "debug"
+	jsonNull  = "null"
 	podName   = "web-abc-1"
 	container = "app"
 	webName   = "web"

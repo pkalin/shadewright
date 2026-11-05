@@ -252,3 +252,26 @@ func TestRecentPodSubjectIsCertain(t *testing.T) {
 		t.Fatalf("state %d, uncertain %t, pods %v", got.state, got.uncertain, podNames(&got))
 	}
 }
+
+// RenderLog budgets the header first: the whole text stays within the budget and keeps the newest line,
+// however long the header; FitLog keeps both after a second pass that grows the text.
+func TestRenderLogBudgetsTheHeaderFirst(t *testing.T) {
+	var body strings.Builder
+	for i := 0; body.Len() < 900; i++ {
+		fmt.Fprintf(&body, "line %03d\n", i)
+	}
+	body.WriteString("newest\n")
+	id := func(s string) string { return s }
+	ex := providers.LogExcerpt{Text: body.String(), Instance: providers.LogInstance{ContainerID: strings.Repeat("c", 400)}}
+	v := RenderLog(id, "pod p container c, current instance", ex, nil, 1000, 1000)
+	if len(v.Text) > 1000 || !strings.HasSuffix(v.Text, "newest\n") || !v.Cut || v.HeadLen < 400 ||
+		!strings.HasPrefix(v.Text, "pod p container c") {
+		t.Fatalf("%d bytes, header %d, cut %t:\n%s", len(v.Text), v.HeadLen, v.Cut, v.Text)
+	}
+	grow := func(s string) string { return strings.ReplaceAll(s, "line", "line+") }
+	text, head, cut := FitLog(grow, v.Text, v.HeadLen, 1000)
+	if len(text) > 1000 || !strings.HasSuffix(text, "newest\n") || !cut || head != v.HeadLen ||
+		!strings.Contains(text, strings.Repeat("c", 400)) {
+		t.Fatalf("%d bytes, header %d, cut %t:\n%s", len(text), head, cut, text)
+	}
+}

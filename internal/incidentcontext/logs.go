@@ -19,7 +19,6 @@ package incidentcontext
 import (
 	"cmp"
 	"context"
-	"errors"
 	"slices"
 	"time"
 
@@ -127,10 +126,9 @@ func (b *Builder) logBlocks(ctx context.Context, t *target, w window) ([]Block, 
 }
 
 // logBlock turns one answer of the log source into a block: a header naming the container and instance,
-// then the redacted excerpt cut to its newest lines. It reports whether the source failed.
+// then the redacted excerpt cut to its newest lines ([RenderLog]). It reports whether the source failed.
 func (b *Builder) logBlock(pick logPick, ex providers.LogExcerpt, err error, budget int) (Block, bool) {
 	blk := Block{Section: SectionLogs, Provenance: ProvenanceLogExcerpt, Availability: Available}
-	var h lines
 	kind, instance := "container", "current instance"
 	if pick.init {
 		kind = "init container"
@@ -138,51 +136,23 @@ func (b *Builder) logBlock(pick logPick, ex providers.LogExcerpt, err error, bud
 	if pick.previous {
 		instance = "previous instance"
 	}
-	h.add("pod %s %s %s, %s", b.value(pick.pod), kind, b.value(pick.container), instance)
-	var body string
-	failed := false
-	switch {
-	case errors.Is(err, providers.ErrNotFound):
-		h.add("no logs: the pod no longer exists")
-	case errors.Is(err, providers.ErrRejected):
-		h.add("no logs: the source refused the request (the container has not started, or has no previous instance)")
-	case err != nil:
-		blk.Availability, failed = CouldNotFetch, true
-		h.add("could not fetch")
-	case len(ex.Text) > 2*budget:
-		// More than was asked for, beyond what redaction markers could add: the source broke its bound, and
-		// the text is not read further.
-		blk.Availability, failed = CouldNotFetch, true
-		h.add("could not fetch: the answer was larger than asked for")
-	default:
-		in := ex.Instance
-		h.add("instance: pod uid %s, container id %s, restarts %d, read at %s", b.value(in.PodUID),
-			b.value(in.ContainerID), in.RestartCount, ex.CollectedAt.UTC().Format(time.RFC3339))
-		// Before redaction: the lines that may continue an entry whose first line the source left out go, so a
-		// secret value whose key line was cut never reaches the redactor alone.
-		var dropped bool
-		if body, dropped = dropLeadingContinuation(ex.Text); dropped {
-			blk.addLabel(LabelLeadingLinesDropped)
-		}
-		if ex.Truncated {
-			blk.addLabel(LabelLogTruncated)
-		}
-		if ex.EndMissing {
-			blk.addLabel(LabelLogEndMissing)
-		}
-		if ex.InstanceUncertain {
-			blk.addLabel(LabelLogInstanceUncertain)
+	title := "pod " + b.value(pick.pod) + " " + kind + " " + b.value(pick.container) + ", " + instance
+	v := RenderLog(b.redactor.String, title, ex, err, budget, budget)
+	failed := v.Read == LogReadFailed || v.Read == LogReadOversized
+	if failed {
+		blk.Availability = CouldNotFetch
+	}
+	for _, m := range []struct {
+		on bool
+		l  Label
+	}{
+		{v.LeadingDropped, LabelLeadingLinesDropped}, {v.Truncated, LabelLogTruncated},
+		{v.EndMissing, LabelLogEndMissing}, {v.InstanceUncertain, LabelLogInstanceUncertain}, {v.Cut, LabelSectionCut},
+	} {
+		if m.on {
+			blk.addLabel(m.l)
 		}
 	}
-	head := b.redact(h.String())
-	if len(head) > budget {
-		head, _ = keepHead(head, budget)
-	}
-	tail := b.redact(body)
-	tail, cut := keepTail(tail, budget-len(head))
-	if cut {
-		blk.addLabel(LabelSectionCut)
-	}
-	blk.Text, blk.headLen = head+tail, len(head)
+	blk.Text, blk.headLen = v.Text, v.HeadLen
 	return blk, failed
 }

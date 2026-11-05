@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -35,6 +36,7 @@ const (
 	refuseShape     refusal = "the arguments do not match the schema"
 	refuseSize      refusal = "the arguments are larger than allowed"
 	refuseNamespace refusal = "the namespace is not one the analyzer watches"
+	refuseDelivery  refusal = "the namespace is not one of the delivery namespaces"
 	refuseKind      refusal = "the kind is not in the tool's allow list"
 	refuseName      refusal = "a name is not a valid Kubernetes object name"
 	refuseRange     refusal = "a number is outside the range the schema allows"
@@ -85,6 +87,9 @@ func decode(raw []byte, dst any) error {
 	strict := json.NewDecoder(bytes.NewReader(raw))
 	strict.DisallowUnknownFields()
 	if err := strict.Decode(dst); err != nil {
+		if why, ok := errors.AsType[refusal](err); ok {
+			return why
+		}
 		return refuseShape
 	}
 	return nil
@@ -109,6 +114,14 @@ func (s *Set) namespace(ns string) error {
 	return nil
 }
 
+// deliveryNamespace checks the namespace of a delivery object: a DNS-1123 label in the delivery set.
+func (s *Set) deliveryNamespace(ns string) error {
+	if _, ok := s.deliveryNamespaces[ns]; !ok || len(validation.IsDNS1123Label(ns)) > 0 {
+		return refuseDelivery
+	}
+	return nil
+}
+
 // objectName checks the name of an object: a DNS-1123 subdomain.
 func objectName(n string) error {
 	if len(validation.IsDNS1123Subdomain(n)) > 0 {
@@ -125,9 +138,107 @@ func labelName(n string) error {
 	return nil
 }
 
-// inRange checks an optional number: zero means unset; otherwise it is within lo and hi.
-func inRange(v, lo, hi int) error {
-	if v != 0 && (v < lo || v > hi) {
+// optInt is an optional integer argument. JSON Schema's "integer" is any number with a zero fractional part,
+// so 30, 30.0 and 3e1 are the same value; a fraction is a type error and a value too large for an int64 is
+// out of range. The number is read exactly from its text, never through a float.
+type optInt struct {
+	// set: the argument was given.
+	set bool
+	// v is the value once checked, or the default when the argument was absent.
+	v int
+	// over: the value does not fit an int64.
+	over bool
+}
+
+// maxIntDigits bounds the digits of a value an optInt holds; every bound of the schemas is far smaller.
+const maxIntDigits = 18
+
+// maxExpDigits bounds the digits of an exponent that is computed with; a longer one decides on the digits.
+const maxExpDigits = 6
+
+// UnmarshalJSON reads a JSON number with an integral value; null, strings and fractions are refused.
+func (o *optInt) UnmarshalJSON(b []byte) error {
+	t, neg := strings.CutPrefix(string(b), "-")
+	mant, exp, hasExp := strings.Cut(strings.ToLower(t), "e")
+	intPart, frac, hasFrac := strings.Cut(mant, ".")
+	if !digits(intPart) || (hasFrac && !digits(frac)) {
+		return refuseShape
+	}
+	// The value is d * 10^e, with d the digits without leading or trailing zeros.
+	d := strings.TrimLeft(intPart+frac, "0")
+	e := -len(frac)
+	if hasExp {
+		exp = strings.TrimPrefix(exp, "+")
+		exp, eneg := strings.CutPrefix(exp, "-")
+		if !digits(exp) {
+			return refuseShape
+		}
+		exp = strings.TrimLeft(exp, "0")
+		if len(exp) > maxExpDigits {
+			// So long an exponent makes any value but zero a fraction or too large.
+			switch {
+			case d == "":
+			case eneg:
+				return refuseShape
+			default:
+				o.over = true
+			}
+			o.set = true
+			return nil
+		}
+		x, _ := strconv.Atoi("0" + exp)
+		if eneg {
+			x = -x
+		}
+		e += x
+	}
+	for strings.HasSuffix(d, "0") {
+		d, e = d[:len(d)-1], e+1
+	}
+	o.set = true
+	switch {
+	case d == "":
+		o.v = 0
+		return nil
+	case e < 0:
+		return refuseShape
+	case len(d)+e > maxIntDigits:
+		o.over = true
+		return nil
+	}
+	v, err := strconv.ParseInt(d+strings.Repeat("0", e), 10, 64)
+	if err != nil {
+		o.over = true
+		return nil
+	}
+	if neg {
+		v = -v
+	}
+	o.v = int(v)
+	return nil
+}
+
+// digits reports whether s is one or more ASCII digits.
+func digits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// check checks an optional argument against lo and hi; an absent one takes def. Zero is a value like any
+// other, refused when outside the range.
+func (o *optInt) check(lo, hi, def int) error {
+	if !o.set {
+		o.v = def
+		return nil
+	}
+	if o.over || o.v < lo || o.v > hi {
 		return refuseRange
 	}
 	return nil

@@ -676,7 +676,8 @@ func TestMetricsTLSProfileMountsTheSecretAndVerifiesTheCertificate(t *testing.T)
 				"metrics.serviceMonitor.tls.serverName=metrics.shadewright.example",
 				"metrics.serviceMonitor.tls.ca."+source+".name=metrics-ca", "metrics.serviceMonitor.tls.ca."+source+".key=ca.pem",
 				"executor.metricsTLS.secretName=executor-metrics-tls", "analyzer.metricsTLS.secretName=analyzer-metrics-tls")
-			for comp, secret := range map[string]string{"executor": "executor-metrics-tls", "analyzer": "analyzer-metrics-tls"} {
+			secrets := map[string]string{executorComp: "executor-metrics-tls", analyzerComp: "analyzer-metrics-tls"}
+			for comp, secret := range secrets {
 				k := "Deployment/" + operatorNS + "/shadewright-" + comp
 				d := convert[appsv1.Deployment](t, r.chart[k])
 				c := container(t, r, k)

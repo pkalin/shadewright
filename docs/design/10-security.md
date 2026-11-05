@@ -1,8 +1,8 @@
 # 10. Security
 
-This section is the security design. It states ten invariants (10.1 to 10.10), then shows what each identity can read and write (10.11). The [threat model](../threat-model.md) names the adversaries and says which invariants are built, with the code and the tests behind each. Numbers and edge cases that only matter when you build or debug are in the table "Details" at the end (10.12).
+This section is the security design. It states ten security rules (10.1 to 10.10; the project's invariants are the six in `AGENTS.md`), then shows what each identity can read and write (10.11). The [threat model](../threat-model.md) names the adversaries and says which invariants are built, with the code and the tests behind each. Numbers and edge cases that only matter when you build or debug are in the table "Details" at the end (10.12).
 
-## 10.1. Least privilege RBAC (invariant 1)
+## 10.1. Least privilege RBAC
 
 **What it does.** No component has `cluster-admin`. Each reads only selected namespaces and kinds. Analysis, proposal, status and execution have separate roles.
 
@@ -10,11 +10,11 @@ This section is the security design. It states ten invariants (10.1 to 10.10), t
 
 **Limit.** An empty namespace list watches nothing. It is never read as "all namespaces" (2.2).
 
-## 10.2. Untrusted data (invariant 2)
+## 10.2. Untrusted data
 
 Events, logs, annotations, tool descriptions and Git files may carry prompt injection. They never change instructions, permissions or the action catalog.
 
-## 10.3. Redaction (invariant 3)
+## 10.3. Redaction
 
 **What it does.** Secrets, tokens, connection strings and personal data are removed before the model sees them. One function does it: `internal/redact`. A match becomes a marker that names its kind, and the output is never longer than the input.
 
@@ -33,18 +33,18 @@ Events, logs, annotations, tool descriptions and Git files may carry prompt inje
 **Why the answer is never "exists".** Whether a Secret or ConfigMap that a pod references is missing is inferred from what the analyzer already reads (the missing reference check, section 4). The answer is `missing` or `unknown`, never `exists`.
 
 - Kubernetes RBAC has no metadata-only verb. `get`, `list` or `watch` on secrets returns the data, also through the metadata API (`PartialObjectMetadata`).
-- So a true answer that a Secret exists would need a grant that breaks invariant 6.
+- So a true answer that a Secret exists would need a grant that breaks invariant 6 (separate identities, `AGENTS.md`).
 - The absence of the kubelet's error is no proof either: the kubelet may not have tried yet, the Event may have expired, or the reference may be optional.
 
-## 10.4. Bounded actions (invariant 4)
+## 10.4. Bounded actions
 
 Actions are typed operations with a namespace and path scope, change limits and a per-environment policy. The model never generates commands.
 
-## 10.5. Approval of a specific change (invariant 5)
+## 10.5. Approval of a specific change
 
 Approval is bound to the current plan and head commit. A field set by an untrusted author never replaces an admin or reviewer decision.
 
-## 10.6. Network (invariant 6)
+## 10.6. Network
 
 **What it does.** Egress is limited by port and direction. The destinations the components need are the Kubernetes API, the model endpoint, Key Vault, GitHub and Entra ID. The analyzer also needs the in-cluster metrics source and the trace exporter (below).
 
@@ -78,7 +78,7 @@ The chart has a rule for Prometheus, off by default because the analyzer does no
 
 A standard NetworkPolicy cannot match host names, and the API server has no label to select. So the policies limit ports and directions, not destinations. The analyzer can reach any HTTPS address at the network level, including `api.github.com`.
 
-What keeps the analyzer away from GitHub is that its binary has no GitHub adapter and holds no GitHub credential (invariant 6), not the policy. The lab check that the analyzer cannot reach GitHub's API at the network level is therefore not possible with this policy.
+What keeps the analyzer away from GitHub is that its binary has no GitHub adapter and holds no GitHub credential (`AGENTS.md` invariant 6), not the policy. The lab check that the analyzer cannot reach GitHub's API at the network level is therefore not possible with this policy.
 
 The API server rule is 443 and 6443 to any address because its address is unknown when the chart renders and differs per cluster. The manifests in `config/` follow the same established pattern. The trade-off is that a pod of the component can reach any HTTPS address too.
 
@@ -104,7 +104,7 @@ Helm deletes both after the test, also when it fails. A `helm test` that is canc
 - `test/netpol` renders `config/default` and asserts every NetworkPolicy in the build.
 - `test/chart` asserts that the chart's policies equal `config/`, and that the Prometheus rule exists only for the analyzer and only when enabled.
 
-## 10.7. Loop protection (invariant 7)
+## 10.7. Loop protection
 
 **What it does.** The design has retry limits, a global limit on concurrent fixes, cooldowns, a circuit breaker and an automation kill switch, to keep the agent from looping on a target. Only some are built (below).
 
@@ -139,6 +139,8 @@ A request that ended `Denied`, `Cancelled` or `Superseded`, holds no lock and is
 
 ### The target lock
 
+The lock lasts longer than the active state that counts against `maxConcurrentRemediations` (#294, #376).
+
 The lock is per target object, not per file in Git. Two targets declared in one file can each have an active request. The plan digest and the freshness check supersede the second plan when the first one changes the file.
 
 The executor records the lock in `status.holdsTarget` (#294, #376). It is set in the status write of the allowed decision and cleared only when the release is proven. The release is proven by one of these:
@@ -156,7 +158,7 @@ Everything else keeps the lock (fail closed):
 
 ### Stopped holders
 
-A stopped request that holds the lock is looked at every 10 minutes. Its pull request is found by its branch and marker (invariant 5) and recorded when the status did not have it. The lock is released once the pull request is closed or merged, so a person who closes it frees the target without deleting the request. A look-up that fails keeps the lock.
+A stopped request that holds the lock is looked at every 10 minutes. Its pull request is found by its branch and marker (`AGENTS.md` invariant 5) and recorded when the status did not have it. The lock is released once the pull request is closed or merged, so a person who closes it frees the target without deleting the request. A look-up that fails keeps the lock.
 
 A request queued behind a stopped holder checks the limits every 10 minutes instead of every 30 seconds, and at once when the holder changes.
 
@@ -173,9 +175,11 @@ Such requests get `status.holdsTarget` once, from their status:
 - A request that ended without a plan digest (a refusal) gets `false`.
 - Any other gets the lock it may hold (fail closed).
 
-Such a request holds no slot under `maxConcurrentRemediations`. Requests that ended before `lastPhaseTransitionTime` existed are not counted, so after an upgrade the breaker starts closed.
+Such a request holds no slot under `maxConcurrentRemediations`.
 
 ### The circuit breaker
+
+Requests that ended before `lastPhaseTransitionTime` existed are not counted, so after an upgrade the breaker starts closed.
 
 **It trips** when three failures came after the latest success, among the requests that went through the policy check.
 
@@ -220,15 +224,15 @@ Everything is read from the requests on the API server: their phase, `lastPhaseT
 
 **Cost.** A request that ended `Denied`, `Cancelled` or `Superseded`, holds no lock and is not a probe is never read, so refusals do not add to the cost. The breaker still reads every success and failure (a bound on that is a follow-up). Such a request being deleted with the finalizer no longer counts against the cap: its deletion writes nothing to Git, and a `Denied` one never opened a pull request.
 
-## 10.8. Audit (invariant 8)
+## 10.8. Audit
 
-The audit trail records input references, model and tool versions, the policy decision, the plan digest, the PR, the delivered revision and the outcome. Large or sensitive data stays outside the CR.
+The target: an audit trail of input references, model and tool versions, the policy decision, the plan digest, the PR, the delivered revision and the outcome. Today the request records its policy decision, plan digest and pull request in its status; the rest is planned with the analysis records (ADR-0015). Large or sensitive data stays outside the CR.
 
-## 10.9. Verification (invariant 9)
+## 10.9. Verification
 
-Metrics and health are watched after the change. A failed fix leads to escalation or a reviewed revert PR, never to further unbounded experiments.
+**Planned (#92).** Metrics and health are watched after the change. A failed fix leads to escalation or a reviewed revert PR, never to further unbounded experiments.
 
-## 10.10. Excluded from the MVP (invariant 10)
+## 10.10. Excluded from the MVP
 
 These are not done by the agent: deleting PVCs, databases or namespaces, removing finalizers, widening permissions, changing network security, Secrets, protected branches or approval rules.
 

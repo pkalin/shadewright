@@ -4,7 +4,7 @@ title: Troubleshooting
 
 # Troubleshooting
 
-A `RemediationRequest` that stops says why in its conditions. Find the reason, then the row below. Every reason in the executor and the policy code is listed, taken from the code at v0.1.0.
+A `RemediationRequest` that stops says why in its conditions. Find the reason, then the row below. Every reason in the executor and the policy code is listed, taken from the code on `main`.
 
 ```bash
 kubectl -n shadewright-system get remediationrequest <name> \

@@ -18,13 +18,13 @@ What you need:
 - The namespaces to watch already exist.
 - `kubectl` with built-in kustomize (`kubectl apply -k`).
 
-The base is `config/default` of the release tag `v0.1.0`, so the manifests match the images. Both Deployments use the placeholder image `controller:latest`, and the two images are published as separate repositories, so the overlay replaces each by digest. Check the digests against the [release](https://github.com/pkalin/shadewright/releases/tag/v0.1.0) before you use them. Create a directory outside any Git repository of the project with two files.
+The base is `config/default` of the release tag `v0.2.0`, so the manifests match the images. Both Deployments use the placeholder image `controller:latest`, and the two images are published as separate repositories, so the overlay replaces each by digest. Check the digests against the [release](https://github.com/pkalin/shadewright/releases/tag/v0.2.0) before you use them. Create a directory outside any Git repository of the project with two files.
 
 `kustomization.yaml`:
 
 ```yaml
 resources:
-  - github.com/pkalin/shadewright/config/default?ref=v0.1.0
+  - github.com/pkalin/shadewright/config/default?ref=v0.2.0
   - watch-rolebinding.yaml
 patches:
   - target:
@@ -33,14 +33,14 @@ patches:
     patch: |-
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: ghcr.io/pkalin/shadewright-executor@sha256:66df21ea967a22e8e50b73284254b796665ef5e9470b320707900983aca37f9c
+        value: ghcr.io/pkalin/shadewright-executor@sha256:88e2ab1f102509d2b4ff0656b2a7b6fac270967f3511fd214bdab010f6d326f3
   - target:
       kind: Deployment
       name: shadewright-analyzer
     patch: |-
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: ghcr.io/pkalin/shadewright-analyzer@sha256:697defe7774b29621f64c967ff93e83b309455c2a72d50b190e179f9ff3fc8e4
+        value: ghcr.io/pkalin/shadewright-analyzer@sha256:df08dcc65a3396fa5d3d63222c1bb20869234979ed74b3c6d6c0ae338c708aab
       # The base passes --watch-namespaces=demo and --cluster-id=lab. A repeated flag takes its last value,
       # so appending is enough.
       - op: add

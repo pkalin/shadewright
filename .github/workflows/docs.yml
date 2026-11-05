@@ -8,6 +8,10 @@ on:
     paths: ["docs/**", "overrides/**", "includes/**", "zensical.toml", "requirements-docs.in", "requirements-docs.txt", ".github/workflows/docs.yml"]
   pull_request:
     paths: ["docs/**", "overrides/**", "includes/**", "zensical.toml", "requirements-docs.in", "requirements-docs.txt", ".github/workflows/docs.yml"]
+  # A daily build refreshes the latest release and the star count in the top bar (step "Fetch release facts").
+  # Not a release trigger: that runs on the tag, and the github-pages environment deploys from main only.
+  schedule:
+    - cron: "17 5 * * *"
   workflow_dispatch:
 
 permissions:
@@ -28,6 +32,25 @@ jobs:
         with:
           python-version: "3.x"
       - run: pip install --require-hashes -r requirements-docs.txt
+      # The top bar shows the latest release and the star count, fetched here at build time so that no reader's
+      # browser calls api.github.com (#365). The partial is git-ignored; a failure only leaves it out.
+      - name: Fetch release facts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          version=$(gh api "repos/${REPO}/releases/latest" --jq .tag_name) || version=
+          stars=$(gh api "repos/${REPO}" --jq .stargazers_count) || stars=
+          if [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && "$stars" =~ ^[0-9]+$ ]]; then
+            {
+              echo '<ul class="md-source__facts">'
+              echo "  <li class=\"md-source__fact md-source__fact--version\">${version}</li>"
+              echo "  <li class=\"md-source__fact md-source__fact--stars\">${stars}</li>"
+              echo '</ul>'
+            } > overrides/partials/source-facts.html
+          else
+            echo "::warning::Could not read the release facts; the top bar shows none."
+          fi
       - run: zensical build --clean
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         if: github.event_name != 'pull_request'

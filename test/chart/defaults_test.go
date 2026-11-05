@@ -33,6 +33,7 @@ import (
 )
 
 const (
+	smTLS              = "metrics.serviceMonitor.enabled=true,metrics.serviceMonitor.tls.enabled=true"
 	executorDeployment = "Deployment/" + operatorNS + "/shadewright-executor"
 	analyzerDeployment = "Deployment/" + operatorNS + "/shadewright-analyzer"
 	identityLabel      = "azure.workload.identity/use"
@@ -328,17 +329,32 @@ func TestStandardValuesReachOnlyTheirComponent(t *testing.T) {
 // TestSchemaBoundsTheStandardValues checks that the schema refuses standard values outside their bounds.
 func TestSchemaBoundsTheStandardValues(t *testing.T) {
 	cases := map[string]refusalCase{
-		"unknown toleration field":      {"executor.tolerations[0].keys=a", unknownField},
-		"bad toleration operator":       {"executor.tolerations[0].operator=Maybe", "operator"},
-		"unknown affinity kind":         {"analyzer.affinity.nodeAntiAffinity.a=b", unknownField},
-		"spread without a policy":       {"executor.topologySpreadConstraints[0].maxSkew=1", "whenUnsatisfiable"},
-		"bad priority class":            {"executor.priorityClassName=Not_A_Name", "priorityClassName"},
-		"bad pull secret name":          {"imagePullSecrets[0].name=Bad_Name", "name"},
-		"unknown pull secret field":     {"analyzer.imagePullSecrets[0].secret=a", unknownField},
-		"all namespaces":                {"analyzer.watchNamespaces={*}", "watchNamespaces"},
-		"service monitor bad interval":  {"metrics.serviceMonitor.interval=often", "interval"},
-		"service monitor without port":  {"metrics.serviceMonitor.enabled=true,metrics.enabled=false", "metrics.enabled"},
-		"test image by tag":             {"tests.image.digest=8.23.0", "digest"},
+		"unknown toleration field":       {"executor.tolerations[0].keys=a", unknownField},
+		"bad toleration operator":        {"executor.tolerations[0].operator=Maybe", "operator"},
+		"unknown affinity kind":          {"analyzer.affinity.nodeAntiAffinity.a=b", unknownField},
+		"spread without a policy":        {"executor.topologySpreadConstraints[0].maxSkew=1", "whenUnsatisfiable"},
+		"bad priority class":             {"executor.priorityClassName=Not_A_Name", "priorityClassName"},
+		"bad pull secret name":           {"imagePullSecrets[0].name=Bad_Name", "name"},
+		"unknown pull secret field":      {"analyzer.imagePullSecrets[0].secret=a", unknownField},
+		"all namespaces":                 {"analyzer.watchNamespaces={*}", "watchNamespaces"},
+		"service monitor bad interval":   {"metrics.serviceMonitor.interval=often", "interval"},
+		"service monitor without port":   {"metrics.serviceMonitor.enabled=true,metrics.enabled=false", "metrics.enabled"},
+		"test image by tag":              {"tests.image.digest=8.23.0", "digest"},
+		"metrics secret not a name":      {"executor.metricsTLS.secretName=Bad_Name", "secretName"},
+		"metrics tls unknown field":      {"analyzer.metricsTLS.cert=a", unknownField},
+		"metrics secret without TLS":     {"executor.metricsTLS.secretName=a,metrics.secure=false", "metrics.secure"},
+		"metrics secret without metrics": {"analyzer.metricsTLS.secretName=a,metrics.enabled=false", "metrics.enabled"},
+		"monitor tls without a CA":       {smTLS + ",metrics.serviceMonitor.tls.serverName=m.example", "needs a CA"},
+		"monitor tls without a name":     {smTLS + ",metrics.serviceMonitor.tls.ca.secret.name=ca", "serverName"},
+		"monitor tls without component certificates": {smTLS + ",metrics.serviceMonitor.tls.serverName=m.example" +
+			",metrics.serviceMonitor.tls.ca.secret.name=ca,executor.metricsTLS.secretName=a", "analyzer.metricsTLS.secretName"},
+		"monitor tls with two CAs": {smTLS + ",metrics.serviceMonitor.tls.serverName=m.example" +
+			",metrics.serviceMonitor.tls.ca.secret.name=ca,metrics.serviceMonitor.tls.ca.configMap.name=ca", "not both"},
+		"monitor tls bad CA name":       {"metrics.serviceMonitor.tls.ca.secret.name=Bad_Name", "name"},
+		"monitor tls bad CA key":        {"metrics.serviceMonitor.tls.ca.configMap.key=a/b", "key"},
+		"monitor tls bad server name":   {"metrics.serviceMonitor.tls.serverName=a b", "serverName"},
+		"monitor tls unknown field":     {"metrics.serviceMonitor.tls.verify=true", unknownField},
+		"metrics cert flag in extra":    {"executor.extraArgs={--metrics-cert-path=/x}", "--metrics-cert-path"},
 		"cluster ID with a bad charset": {"clusterId=my cluster", "clusterId"},
 		"executor memory limit removed": {"executor.resources.limits.memory=null", memoryLimit},
 		"analyzer memory limit removed": {"analyzer.resources.limits.memory=null", memoryLimit},
@@ -621,5 +637,78 @@ func TestOnlyTheBudgetConfigMapSurvivesUninstall(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("rendered %d Leases, want 2", n)
+	}
+}
+
+// TestMetricsTLSProfileIsOffByDefault checks that without the profile the Deployments mount nothing and pass no
+// certificate flag, and the ServiceMonitors skip verification as before.
+func TestMetricsTLSProfileIsOffByDefault(t *testing.T) {
+	r := render(t, false, "metrics.serviceMonitor.enabled=true")
+	for _, k := range []string{executorDeployment, analyzerDeployment} {
+		d := convert[appsv1.Deployment](t, r.chart[k])
+		c := container(t, r, k)
+		if len(d.Spec.Template.Spec.Volumes) != 0 || len(c.VolumeMounts) != 0 {
+			t.Errorf("%s has volumes %v or mounts %v by default", k, d.Spec.Template.Spec.Volumes, c.VolumeMounts)
+		}
+		for _, a := range c.Args {
+			if strings.HasPrefix(a, "--metrics-cert") {
+				t.Errorf("%s has %s by default", k, a)
+			}
+		}
+	}
+	for _, comp := range components {
+		sm := r.chart["ServiceMonitor/"+operatorNS+"/shadewright-"+comp+"-metrics"]
+		eps, _, _ := unstructured.NestedSlice(sm.Object, "spec", "endpoints")
+		cfg := eps[0].(map[string]any)["tlsConfig"].(map[string]any)
+		if cfg["insecureSkipVerify"] != true || len(cfg) != 1 {
+			t.Errorf("%s ServiceMonitor tlsConfig %v, want only insecureSkipVerify: true", comp, cfg)
+		}
+	}
+}
+
+// TestMetricsTLSProfileMountsTheSecretAndVerifiesTheCertificate checks the profile: each Deployment mounts its
+// Secret read-only and passes the certificate directory to the binary, and the ServiceMonitors verify with the
+// CA and the server name, from a Secret or from a ConfigMap, with no insecureSkipVerify.
+func TestMetricsTLSProfileMountsTheSecretAndVerifiesTheCertificate(t *testing.T) {
+	for _, source := range []string{"secret", "configMap"} {
+		t.Run(source, func(t *testing.T) {
+			r := render(t, false, "metrics.serviceMonitor.enabled=true", "metrics.serviceMonitor.tls.enabled=true",
+				"metrics.serviceMonitor.tls.serverName=metrics.shadewright.example",
+				"metrics.serviceMonitor.tls.ca."+source+".name=metrics-ca", "metrics.serviceMonitor.tls.ca."+source+".key=ca.pem",
+				"executor.metricsTLS.secretName=executor-metrics-tls", "analyzer.metricsTLS.secretName=analyzer-metrics-tls")
+			secrets := map[string]string{executorComp: "executor-metrics-tls", analyzerComp: "analyzer-metrics-tls"}
+			for comp, secret := range secrets {
+				k := "Deployment/" + operatorNS + "/shadewright-" + comp
+				d := convert[appsv1.Deployment](t, r.chart[k])
+				c := container(t, r, k)
+				if !slices.Contains(c.Args, "--metrics-cert-path=/etc/shadewright/metrics-tls") {
+					t.Errorf("%s args %v lack --metrics-cert-path", comp, c.Args)
+				}
+				vols := d.Spec.Template.Spec.Volumes
+				if len(vols) != 1 || vols[0].Secret == nil || vols[0].Secret.SecretName != secret {
+					t.Fatalf("%s volumes %v, want the Secret %s", comp, vols, secret)
+				}
+				// The images run as 65532 and the pod sets no fsGroup, so Secret files (owned by root) must be
+				// world-readable or the binary cannot read its own certificate.
+				if m := vols[0].Secret.DefaultMode; m == nil || *m != 0o444 {
+					t.Errorf("%s Secret defaultMode %v, want 0444 (readable by the non-root user)", comp, m)
+				}
+				if len(c.VolumeMounts) != 1 || !c.VolumeMounts[0].ReadOnly || c.VolumeMounts[0].Name != vols[0].Name ||
+					c.VolumeMounts[0].MountPath != "/etc/shadewright/metrics-tls" {
+					t.Errorf("%s mounts %v, want the volume read-only at the certificate path", comp, c.VolumeMounts)
+				}
+				sm := r.chart["ServiceMonitor/"+operatorNS+"/shadewright-"+comp+"-metrics"]
+				eps, _, _ := unstructured.NestedSlice(sm.Object, "spec", "endpoints")
+				cfg := eps[0].(map[string]any)["tlsConfig"].(map[string]any)
+				if _, skip := cfg["insecureSkipVerify"]; skip || cfg["serverName"] != "metrics.shadewright.example" {
+					t.Errorf("%s tlsConfig %v, want serverName and no insecureSkipVerify", comp, cfg)
+				}
+				ca, _ := cfg["ca"].(map[string]any)
+				got, _ := ca[source].(map[string]any)
+				if len(ca) != 1 || got["name"] != "metrics-ca" || got["key"] != "ca.pem" {
+					t.Errorf("%s ca %v, want %s metrics-ca key ca.pem", comp, ca, source)
+				}
+			}
+		})
 	}
 }

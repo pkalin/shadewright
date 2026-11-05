@@ -58,6 +58,9 @@ spec:
         {{- if not .Values.metrics.secure }}
         - --metrics-secure=false
         {{- end }}
+        {{- with $c.metricsTLS.secretName }}
+        - --metrics-cert-path=/etc/shadewright/metrics-tls
+        {{- end }}
         {{- end }}
         {{- /* Always rendered: an empty value watches no namespace (never all of them), and says so in the Pod spec. */}}
         - --watch-namespaces={{ join "," (.Values.analyzer.watchNamespaces | default list) }}
@@ -106,6 +109,19 @@ spec:
           periodSeconds: 10
         resources:
           {{- toYaml $c.resources | nindent 10 }}
+        {{- with $c.metricsTLS.secretName }}
+        volumeMounts:
+        - name: metrics-tls
+          mountPath: /etc/shadewright/metrics-tls
+          readOnly: true
+        {{- end }}
+      {{- with $c.metricsTLS.secretName }}
+      volumes:
+      - name: metrics-tls
+        secret:
+          secretName: {{ . | quote }}
+          defaultMode: 0444
+      {{- end }}
       {{- with $c.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

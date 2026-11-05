@@ -155,6 +155,9 @@
         },
         "imagePullSecrets": {
           "$ref": "#/definitions/pullSecrets"
+        },
+        "metricsTLS": {
+          "$ref": "#/definitions/metricsTLS"
         }
       }
     },
@@ -224,6 +227,9 @@
         },
         "imagePullSecrets": {
           "$ref": "#/definitions/pullSecrets"
+        },
+        "metricsTLS": {
+          "$ref": "#/definitions/metricsTLS"
         }
       }
     },
@@ -378,6 +384,26 @@
       "type": "string",
       "maxLength": 253,
       "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"
+    },
+    "dnsName": {
+      "type": "string",
+      "maxLength": 253,
+      "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"
+    },
+    "dataKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253,
+      "pattern": "^[-._a-zA-Z0-9]+$"
+    },
+    "metricsTLS": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "secretName": {
+          "$ref": "#/definitions/dnsName"
+        }
+      }
     }
   },
   "properties": {
@@ -435,6 +461,68 @@
             },
             "labels": {
               "$ref": "#/definitions/labelMap"
+            },
+            "tls": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "serverName": {
+                  "$ref": "#/definitions/dnsName"
+                },
+                "ca": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "secret": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": {
+                          "$ref": "#/definitions/dnsName"
+                        },
+                        "key": {
+                          "$ref": "#/definitions/dataKey"
+                        }
+                      }
+                    },
+                    "configMap": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": {
+                          "$ref": "#/definitions/dnsName"
+                        },
+                        "key": {
+                          "$ref": "#/definitions/dataKey"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              },
+              "then": {
+                "required": [
+                  "serverName"
+                ],
+                "properties": {
+                  "serverName": {
+                    "minLength": 1
+                  }
+                }
+              }
             }
           }
         }

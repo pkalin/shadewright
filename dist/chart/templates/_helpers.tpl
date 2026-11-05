@@ -136,7 +136,7 @@ leader election, the metrics authentication or the watched namespaces. Keep in s
 templates/workloads. "namespace" is not an arg of the chart but the Pods get it from POD_NAMESPACE.
 */}}
 {{- define "shadewright.reservedFlags" -}}
-leader-elect health-probe-bind-address metrics-bind-address metrics-secure namespace watch-namespaces cluster-id max-incidents
+leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents
 {{- end }}
 
 {{/*
@@ -159,6 +159,11 @@ Takes a dict with .component ("executor" or "analyzer") and .context. Renders no
 {{- range $k, $_ := $c.podLabels -}}
 {{- if or (hasPrefix "azure.workload.identity/" $k) (hasPrefix "app.kubernetes.io/" $k) (hasPrefix "helm.sh/" $k) (eq $k "control-plane") -}}
 {{- fail (printf "%s.podLabels may not set %q: the chart sets it (identity labels come from %s.identity.azure.clientId)" $.component $k $.component) -}}
+{{- end -}}
+{{- end -}}
+{{- if $c.metricsTLS.secretName -}}
+{{- if not (and $v.metrics.enabled $v.metrics.secure) -}}
+{{- fail (printf "%s.metricsTLS.secretName needs metrics.enabled and metrics.secure: a serving certificate is only used by the HTTPS metrics endpoint" $.component) -}}
 {{- end -}}
 {{- end -}}
 {{- $reserved := splitList " " (include "shadewright.reservedFlags" .context) -}}

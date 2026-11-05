@@ -89,7 +89,7 @@ func TestDNSEgressProfilesRenderAndTheHookUsesTheWorkloadRule(t *testing.T) {
 			analyzer := dnsRule(t, analyzerEgressKey, r.chart[analyzerEgressKey])
 			executor := dnsRule(t, executorEgressKey, r.chart[executorEgressKey])
 			hook := dnsRule(t, testEgressKey, r.tests[testEgressKey])
-			for k, got := range map[string]string{"analyzer": analyzer, "executor": executor, "test hook": hook} {
+			for k, got := range map[string]string{analyzerComp: analyzer, executorComp: executor, "test hook": hook} {
 				// Compare the decoded rule, not the text: key order is not part of the rule.
 				var w networkingv1.NetworkPolicyEgressRule
 				if err := json.Unmarshal([]byte(c.want), &w); err != nil {

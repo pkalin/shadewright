@@ -55,11 +55,13 @@ const (
 	chartName              = "shadewright"
 	unknownField           = "additional properties"
 	// memoryLimit is the key the schema requires under resources.limits.
-	memoryLimit = "memory"
+	memoryLimit  = "memory"
+	analyzerComp = "analyzer"
+	executorComp = "executor"
 )
 
 // components are the two Deployments of the chart.
-var components = []string{"executor", "analyzer"}
+var components = []string{executorComp, analyzerComp}
 
 // helperRole matches the admin, editor and viewer ClusterRoles for people; the chart installs them only on request.
 var helperRole = regexp.MustCompile(`-(admin|editor|viewer)-role$`)

@@ -53,7 +53,7 @@ cosign verify \
 
 The digest is in the run summary of the Chart workflow, or from `helm pull oci://ghcr.io/pkalin/charts/shadewright --version <version>` (it prints `Digest:`). Image signatures are verified the same way, with the image name and the `images\.yml` workflow in the identity. Releases after v0.1.0 list the chart and image digests on their GitHub release, with these commands filled in. Install the chart you verified by digest, `helm install shadewright oci://ghcr.io/pkalin/charts/shadewright@sha256:<chart digest>` (Helm accepts a digest in an OCI chart reference: `ValidateReference` in `pkg/registry` and the "oci ref with sha256" cases of `pkg/downloader/chart_downloader_test.go`, present in Helm 3.17 and in 4.3, the version CI pins), so the chart cannot change between the check and the install. A pre-release (`v0.2.0-rc.1`) publishes the chart as version `0.2.0-rc.1` (also its `appVersion`), signed by the same workflow; installed by digest it needs no `--version`, otherwise pass `--version 0.2.0-rc.1`, as Helm does not pick pre-releases by itself.
 
-`metrics.serviceMonitor.enabled` (off by default, as `config/default` leaves `config/prometheus` out) installs a Prometheus Operator `ServiceMonitor` per component; Prometheus then needs the `metrics-reader` ClusterRole for its ServiceAccount and the label `metrics: enabled` on its namespace. Not in the chart: cert-manager and webhooks (none are installed), and the `Namespace` (use `--create-namespace`). The security contexts, probes, ports and the replica count (1, with leader election) are fixed to what `config/` sets.
+The optional [TLS trust profile](#tls-trust-profile-helm-chart-optional) (`<component>.metricsTLS.secretName`, `metrics.serviceMonitor.tls`) mounts an administrator-issued serving certificate and makes the ServiceMonitors verify it. `metrics.serviceMonitor.enabled` (off by default, as `config/default` leaves `config/prometheus` out) installs a Prometheus Operator `ServiceMonitor` per component; Prometheus then needs the `metrics-reader` ClusterRole for its ServiceAccount and the label `metrics: enabled` on its namespace. Not in the chart: cert-manager and webhooks (none are installed), and the `Namespace` (use `--create-namespace`). The security contexts, probes, ports and the replica count (1, with leader election) are fixed to what `config/` sets.
 
 ## Flags
 
@@ -184,6 +184,41 @@ The schema refuses an unknown mode and an empty or malformed `resolverCIDRs`. Th
 The metrics each component serves are listed in the [metrics reference](metrics.md).
 
 The certificate is self-signed unless you set `--metrics-cert-path` (the cert-manager overlay is commented out in `config/default`). `config/prometheus/monitor.yaml` is a `ServiceMonitor` for the Prometheus Operator, not included by default; it scrapes with the Pod's ServiceAccount token and `insecureSkipVerify: true`, so use a real certificate and `serverName` if you care about that. Do not use `--metrics-secure=false` outside a test.
+
+### TLS trust profile (Helm chart, optional)
+
+By default the endpoint serves a certificate the binary generates for itself, so a scraper cannot tell that it reached the genuine endpoint, and the chart's `ServiceMonitor` skips verification (the token is still checked with a TokenReview). The chart has an optional profile that turns this around. Issuance stays with you: the chart creates no cert-manager object, and the private key never goes through `values`.
+
+1. Issue one serving certificate per component from a CA you control. Both list the DNS name you will give as `serverName` as a subject alternative name (the chart's two ServiceMonitors take one value).
+2. Create a Secret of type `kubernetes.io/tls` for each component in the release namespace, and the CA certificate as a Secret or ConfigMap Prometheus can read through its ServiceMonitor (the same namespace as the release):
+
+```bash
+kubectl -n shadewright-system create secret tls shadewright-executor-metrics-tls --cert=executor.crt --key=executor.key
+kubectl -n shadewright-system create secret tls shadewright-analyzer-metrics-tls --cert=analyzer.crt --key=analyzer.key
+kubectl -n shadewright-system create configmap shadewright-metrics-ca --from-file=ca.crt=ca.crt
+```
+
+3. Point the chart at them:
+
+```yaml
+executor:
+  metricsTLS:
+    secretName: shadewright-executor-metrics-tls
+analyzer:
+  metricsTLS:
+    secretName: shadewright-analyzer-metrics-tls
+metrics:
+  serviceMonitor:
+    enabled: true
+    tls:
+      enabled: true
+      serverName: metrics.shadewright.example   # a SAN of both certificates
+      ca:
+        configMap:
+          name: shadewright-metrics-ca          # or ca.secret.name; key defaults to ca.crt
+```
+
+`<component>.metricsTLS.secretName` mounts the Secret read-only at `/etc/shadewright/metrics-tls` and passes `--metrics-cert-path` (the files are `tls.crt` and `tls.key`, the defaults of `--metrics-cert-name` and `--metrics-cert-key`). The binary reloads the files when they change, so a renewal that updates the Secret needs no restart. `metrics.serviceMonitor.tls.enabled` makes each ServiceMonitor send `tlsConfig` with the `ca` and the `serverName` and no `insecureSkipVerify`; rendering fails when it is on without a CA (or with a Secret and a ConfigMap both), and the schema refuses names that are not DNS-1123 and keys it does not know. Without a profile nothing changes. TokenReview, the RBAC (the `metrics-reader` ClusterRole for Prometheus) and the NetworkPolicies are the same with or without it. Not covered by the chart tests yet: a scrape on a real cluster that succeeds with the right CA and fails with a wrong one ([#343](https://github.com/pkalin/shadewright/issues/343) follow-up).
 
 ## Workload identity (Azure)
 

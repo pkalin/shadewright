@@ -30,23 +30,23 @@ Built so far: the API and its validation, the policy check with source mapping a
 
 <div class="grid cards" markdown>
 
--   **1. Observe**
+-   [**1. Observe**](concepts.md#incident-built)
 
     Events and object status in the namespaces you choose, deduplicated into incidents.
 
--   **2. Diagnose**
+-   [**2. Diagnose**](design.md#33-analysis)
 
     Rules first, then a model with read-only tools and redacted context. No evidence, no proposal.
 
--   **3. Propose**
+-   [**3. Propose**](concepts.md#remediationrequest-built)
 
     A typed `RemediationRequest` from a closed catalog of actions, checked by deterministic policy.
 
--   **4. Open a PR**
+-   [**4. Open a PR**](request-lifecycle.md)
 
     On a branch, in the one repository it may write to, with the evidence and a rollback plan.
 
--   **5. Verify**
+-   [**5. Verify**](design.md#6-reconciliation)
 
     After merge, it follows the GitOps controller (Flux today) to the applied revision and checks that the symptom is gone.
 

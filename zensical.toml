@@ -24,7 +24,21 @@ nav = [
   ] },
   { "Use" = [
     { "Use" = "use.md" },
+    { "Concepts" = "concepts.md" },
+    { "The life of a request" = "request-lifecycle.md" },
+    { "How-to guides" = [
+      { "Overview" = "how-to/index.md" },
+      { "Review and approve a proposal" = "how-to/review-and-approve.md" },
+      { "Reject a proposal" = "how-to/reject-a-proposal.md" },
+      { "Write or tighten a policy" = "how-to/write-a-policy.md" },
+      { "Pause and resume writes" = "how-to/pause-and-resume.md" },
+      { "Limit the namespaces it watches" = "how-to/limit-watched-namespaces.md" },
+      { "Read an Incident" = "how-to/read-an-incident.md" },
+      { "Find why a request was refused" = "how-to/find-why-refused.md" },
+    ] },
     { "Troubleshooting" = "troubleshooting.md" },
+    { "FAQ" = "faq.md" },
+    { "Glossary" = "glossary.md" },
   ] },
   { "Operate" = [
     { "Operate" = "operate.md" },

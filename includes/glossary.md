@@ -6,3 +6,8 @@
 *[PR]: Pull request
 *[RBAC]: Role-based access control
 *[TTL]: Time to live
+*[UID]: Unique identifier Kubernetes gives an object
+*[JWT]: JSON Web Token
+*[SHA]: Secure hash algorithm; the ID of a Git commit
+*[KEDA]: Kubernetes Event-driven Autoscaling
+*[HPA]: HorizontalPodAutoscaler

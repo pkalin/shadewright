@@ -53,7 +53,7 @@ This section lists the components (2.2), the two binaries and what each may read
 | --- | --- | --- |
 | Collector | Watches, event normalization, correlation through `ownerReferences` | Read selected namespaces and kinds |
 | Incident store | Fingerprints, counters, timestamps, analysis history, operation IDs | Redacted data only |
-| Analyzer | Builds context, makes one structured model call, runs a bounded tool loop on escalation (planned); detects the platform and integrations | Read; in the operator namespace write Incidents, create requests, write its own Warning events; update the `RemediationSettings` status with the detection report |
+| Analyzer | Builds context (built, not wired); makes one structured model call, runs a bounded tool loop on escalation (planned); detects the platform and integrations | Read; in the operator namespace write Incidents, create requests, write its own Warning events; update the `RemediationSettings` status with the detection report |
 | Policy engine | Allowed actions, scope, bounds, whether review is required | Rules owned by the cluster admin |
 | Remediation controller | Reconciles `RemediationRequest`, runs the approved plan, handles failures | CR status, Events about a request in the operator namespace, Git through the GitHub App |
 | GitOps adapter | Reads the repository, prepares the change, branch, commit, PR, auto-merge | One repository, allowed paths |

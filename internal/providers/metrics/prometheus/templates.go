@@ -38,8 +38,10 @@ const (
 
 // Bounds of MetricsQuery.Pods for the pod templates.
 const (
-	// MaxPods bounds the pods of one query. It equals MaxSeries: every pod with data adds at least one series
-	// to the result, so a larger set could not be answered within MaxSeries anyway.
+	// MaxPods bounds the distinct pods of one query. It equals MaxSeries: every pod with data adds at least
+	// one series to the result, so a larger set could never be answered within MaxSeries. A pod template
+	// returns a series per container, so a set within the bound can still give more than MaxSeries series;
+	// that answer is refused with providers.ErrTooLarge, and the caller splits the set.
 	MaxPods = MaxSeries
 	// MaxPodName bounds the name of each pod. The pods of a Deployment (through its ReplicaSet) and of a
 	// DaemonSet get their names from generateName, which the API server cuts to 58 characters before it adds 5
@@ -58,7 +60,7 @@ type TemplateInfo struct {
 	// Params are the parameter names the template requires; no other is accepted.
 	Params []string
 	// Pods says the template selects exactly the pods named by MetricsQuery.Pods, which it then requires (1 to
-	// MaxPods names); a template without it refuses any pod.
+	// MaxPods distinct names); a template without it refuses any pod.
 	Pods bool
 	// Labels are the labels a result series may carry; a response with any other is refused.
 	Labels []string
@@ -77,7 +79,7 @@ const rateWindow = "[5m]"
 // podsOf selects exactly the given pods of the namespace. The names are joined as anchored alternatives
 // ("^(web-7d9c8b6f4-k8m2p|web-7d9c8b6f4-x2x9q)$"), each with its regular expression metacharacters escaped, so
 // a pod of another workload whose name extends a target pod's name never matches. Prometheus anchors a
-// regular expression matcher anyway; the anchors only make it explicit.
+// regular expression matcher anyway; the explicit anchors keep the match exact on a backend that would not.
 func podsOf(namespace string, pods []string) string {
 	quoted := make([]string, len(pods))
 	for i, p := range pods {
@@ -261,9 +263,9 @@ func (t template) renderQuery(params map[string]string, pods []string) (string, 
 	return t.render(ns, w, selected), selected, nil
 }
 
-// validPods checks the pods of a query: none for a template that does not select pods, 1 to MaxPods otherwise,
-// each a DNS-1123 subdomain of at most MaxPodName characters. It returns them sorted and without duplicates,
-// so that the same set always gives the same query text.
+// validPods checks the pods of a query: none for a template that does not select pods, 1 to MaxPods distinct
+// names otherwise, each a DNS-1123 subdomain of at most MaxPodName characters. It returns them sorted and
+// without duplicates, so that the same set always gives the same query text.
 func (t template) validPods(pods []string) ([]string, error) {
 	if !t.info.Pods {
 		if len(pods) > 0 {
@@ -271,11 +273,8 @@ func (t template) validPods(pods []string) ([]string, error) {
 		}
 		return nil, nil
 	}
-	switch {
-	case len(pods) == 0:
+	if len(pods) == 0 {
 		return nil, fmt.Errorf("the template requires the target's pods: %w", ErrInvalidQuery)
-	case len(pods) > MaxPods:
-		return nil, fmt.Errorf("more than %d pods: %w", MaxPods, ErrInvalidQuery)
 	}
 	for i, p := range pods {
 		if len(p) > MaxPodName || len(validation.IsDNS1123Subdomain(p)) > 0 {
@@ -283,5 +282,10 @@ func (t template) validPods(pods []string) ([]string, error) {
 				ErrInvalidQuery)
 		}
 	}
-	return slices.Compact(slices.Sorted(slices.Values(pods))), nil
+	// Duplicates do not count towards the cap: it bounds the names in the query.
+	unique := slices.Compact(slices.Sorted(slices.Values(pods)))
+	if len(unique) > MaxPods {
+		return nil, fmt.Errorf("more than %d pods: %w", MaxPods, ErrInvalidQuery)
+	}
+	return unique, nil
 }

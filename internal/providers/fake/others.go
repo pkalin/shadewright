@@ -159,8 +159,13 @@ func (m *Model) Complete(ctx context.Context, req providers.CompletionRequest) (
 // Metrics answers queries from results registered per template.
 type Metrics struct {
 	Hook
-	mu      sync.Mutex
-	results map[string]providers.MetricsResult
+	// PodTemplates names the templates that select pods, as an adapter lists them. When it is set, a query of
+	// one of them without Pods, or of any other template with Pods, is refused with providers.ErrRejected
+	// before a result is looked up, so a test catches a caller that forgets the pod set or sends one where it
+	// does not belong. Set it before the first query.
+	PodTemplates []string
+	mu           sync.Mutex
+	results      map[string]providers.MetricsResult
 }
 
 // Set registers a complete result for a template.
@@ -183,6 +188,15 @@ func (m *Metrics) SetResult(template string, r providers.MetricsResult) {
 func (m *Metrics) Query(ctx context.Context, q providers.MetricsQuery) (providers.MetricsResult, error) {
 	if err := m.before("Query"); err != nil {
 		return providers.MetricsResult{}, err
+	}
+	if m.PodTemplates != nil {
+		takesPods := slices.Contains(m.PodTemplates, q.Template)
+		switch {
+		case takesPods && len(q.Pods) == 0:
+			return providers.MetricsResult{}, fmt.Errorf("template %q requires pods: %w", q.Template, providers.ErrRejected)
+		case !takesPods && len(q.Pods) > 0:
+			return providers.MetricsResult{}, fmt.Errorf("template %q takes no pods: %w", q.Template, providers.ErrRejected)
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()

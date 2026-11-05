@@ -248,12 +248,31 @@ func TestPodNamesAreEscapedInRegexp(t *testing.T) {
 		emptyVector(w, r)
 	})
 	q := instant("container_restarts_total")
-	q.Pods = []string{"web.v2-0", "web.v2-1", "web.v2-0"}
+	const dotted = "web.v2-0"
+	q.Pods = []string{dotted, "web.v2-1", dotted}
 	if _, err := s.Query(testCtx(t), q); err != nil {
 		t.Fatal(err)
 	}
 	if want := `pod=~"^(web\\.v2-0|web\\.v2-1)$"`; !strings.Contains(query, want) {
 		t.Errorf("query = %s, want %s in it", query, want)
+	}
+	// The matcher is exact on its own, also on a backend that would not anchor it as Prometheus does.
+	m := regexp.MustCompile(`pod=~("(?:[^"\\]|\\.)*")`).FindStringSubmatch(query)
+	if m == nil {
+		t.Fatalf("query has no pod matcher: %s", query)
+	}
+	re, err := strconv.Unquote(m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	unanchored := regexp.MustCompile(re)
+	for pod, want := range map[string]bool{
+		dotted: true, "web.v2-1": true, "webxv2-0": false, "web.v2-0-0": false, "web.v2-10": false,
+		"xweb.v2-1": false,
+	} {
+		if got := unanchored.MatchString(pod); got != want {
+			t.Errorf("%s: matched = %v, want %v", pod, got, want)
+		}
 	}
 }
 
@@ -390,10 +409,12 @@ func TestPodSetIsValidated(t *testing.T) {
 		full[i] = fmt.Sprintf("%s-%d", strings.Repeat("a", MaxPodName-3), i%100)
 	}
 	for name, pods := range map[string][]string{
-		"MaxPods names":   full,
-		"MaxPodName long": {strings.Repeat("a", MaxPodName)},
-		"duplicates":      {testStatefulPod, testStatefulPod},
-		"dots":            {"web.v2-1"},
+		"MaxPods names": full,
+		// Duplicates do not count towards the cap: MaxPods+1 names, one of them twice.
+		"MaxPods names and a duplicate": append(slices.Clone(full), full[0]),
+		"MaxPodName long":               {strings.Repeat("a", MaxPodName)},
+		"duplicates":                    {testStatefulPod, testStatefulPod},
+		"dots":                          {"web.v3-1"},
 	} {
 		q := instant("container_restarts_total")
 		q.Pods = pods
@@ -511,10 +532,14 @@ func TestLargestPodSetKeepsTheURLBounded(t *testing.T) {
 		length = len(r.URL.RequestURI())
 		emptyVector(w, r)
 	})
+	const alnum = "abcdefghijklmnopqrstuvwxyz0123456789"
 	pods := make([]string, MaxPods)
 	for i := range pods {
-		// "a.a.a. ... .a" with a distinct tail: 31 dots in 63 characters.
-		pods[i] = strings.Repeat("a.", (MaxPodName-3)/2) + fmt.Sprintf("%03d", i)
+		// 32 one-character labels: 31 dots in 63 characters, the last two labels distinct per pod.
+		pods[i] = strings.Repeat("a.", 30) + string(alnum[i/len(alnum)]) + "." + string(alnum[i%len(alnum)])
+		if len(pods[i]) != MaxPodName || strings.Count(pods[i], ".") != 31 {
+			t.Fatalf("pod %d is %d characters with %d dots", i, len(pods[i]), strings.Count(pods[i], "."))
+		}
 	}
 	q := instant("container_cpu_throttled_ratio") // the template that repeats the selector
 	q.Pods = pods

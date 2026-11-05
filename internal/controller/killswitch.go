@@ -41,7 +41,9 @@ import (
 // as the write checkpoint of the context ([providers.WithWriteCheckpoint]): an adapter calls it again right
 // before each write request it sends, so a method that makes several (the GitHub commit: blob, tree, commit,
 // branch update) or retries one after a backoff sends no further write once the pause is seen. A request
-// already sent may still complete; the idempotent writes of the next reconcile pick up from there. writeAllowed
+// already handed to the HTTP client may still complete, and so may one whose check read the settings just
+// before the pause was set (there is no lock with the API server); the idempotent writes of the next
+// reconcile pick up from there. writeAllowed
 // reads the settings from the API server, never from the cache, so a pause set at any moment, also after the
 // freshness check passed and between the reads of one step, stops the next write. It fails closed: settings that cannot be read, or that are gone,
 // block the write as well. The freshness check, the watch of a recorded pull request and the close of a change
@@ -142,12 +144,13 @@ func (g *gatedGit) FindChangeRequest(ctx context.Context, headBranch string) (pr
 
 // gate calls allow before a write method and returns the context to call the wrapped provider with: it
 // carries allow as the write checkpoint ([providers.WithWriteCheckpoint]), so an adapter that makes several
-// requests in one method, or retries one, asks the gate again right before each of them.
+// requests in one method, or retries one, asks the gate again right before each of them. The adapter gets
+// only the class of a refusal (a pause, or settings that cannot be read), never the API server's error text.
 func (g *gatedGit) gate(ctx context.Context) (context.Context, error) {
 	if err := g.allow(ctx); err != nil {
 		return ctx, err
 	}
-	return providers.WithWriteCheckpoint(ctx, g.allow), nil
+	return providers.WithWriteCheckpoint(ctx, g.allow, freshness.ErrPaused, freshness.ErrWriteBlocked), nil
 }
 
 func (g *gatedGit) CreateBranch(ctx context.Context, branch, fromCommit string) error {

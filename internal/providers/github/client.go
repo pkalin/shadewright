@@ -238,14 +238,11 @@ func (r response) ok() bool { return r.status >= 200 && r.status <= 299 }
 var errBodyTooLarge = errors.New("GitHub response is too large")
 
 // do sends a call, retrying transient failures with backoff and jitter. Statuses other than 2xx and
-// transient failures are returned as a response, for the method to classify. Every attempt of a write passes
-// checkWrite first, so a checkpoint that refuses stops the call before the request, the first or a retry,
-// goes out.
+// transient failures are returned as a response, for the method to classify. Every attempt goes through once,
+// which asks the write checkpoint right before a write request is sent; its refusal is not retryable, so it
+// ends the call.
 func (p *Provider) do(ctx context.Context, c call) (response, error) {
 	for attempt := 0; ; attempt++ {
-		if err := checkWrite(ctx, c); err != nil {
-			return response{}, err
-		}
 		resp, err := p.once(ctx, c)
 		if err == nil || !providers.IsRetryable(err) || attempt+1 >= p.attempts {
 			return resp, err
@@ -266,10 +263,11 @@ func (p *Provider) do(ctx context.Context, c call) (response, error) {
 	}
 }
 
-// checkWrite runs the caller's write checkpoint ([providers.CheckWrite]) before an attempt of a call that
-// writes. Every method other than GET is a write, so the GraphQL mutation (a POST) is one, and a write method
-// added later is checked without a change here. An ended context is reported as such, before the checkpoint
-// is asked. The checkpoint's error is the caller's own and is returned wrapped, never retried here.
+// checkWrite runs the caller's write checkpoint ([providers.CheckWrite]) right before a request that writes is
+// handed to the HTTP client. Every method other than GET is a write, so the GraphQL mutation (a POST) is one,
+// and a write method added later is checked without a change here. An ended context is reported as such,
+// before the checkpoint is asked. A refusal is fixed text wrapping only the class CheckWrite returns (never
+// the checkpoint's own text), and is not retryable.
 func checkWrite(ctx context.Context, c call) error {
 	if c.method == http.MethodGet {
 		return nil
@@ -325,6 +323,11 @@ func (p *Provider) once(ctx context.Context, c call) (response, error) {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
+	// Last thing before the send, after the token (which may take a signature and a request to mint) and the
+	// body: nothing slow sits between the check and the request.
+	if err := checkWrite(ctx, c); err != nil {
+		return response{}, err
+	}
 	resp, err := p.client.Do(req)
 	if err != nil {
 		// The error of http.Client.Do holds the URL and possibly response-controlled text: replace it.

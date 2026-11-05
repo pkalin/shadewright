@@ -19,15 +19,20 @@ package github
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
-// errStopped stands for the kill switch's refusal, which the adapter must return as it is, wrapped.
+// errStopped stands for the kill switch's refusal: a class the adapter must keep, wrapped in fixed text.
 var errStopped = errors.New("writes are paused")
+
+// blobsPath is where the commit's first write goes.
+const blobsPath = "/git/blobs"
 
 // deployYAML is apps/deploy.yaml at shaBase (blob shaDeploy).
 const deployYAML = "replicas: 2\n"
@@ -42,7 +47,7 @@ func pauseAfter(n int) (context.Context, *int) {
 			return errStopped
 		}
 		return nil
-	}), &asked
+	}, errStopped), &asked
 }
 
 // requests renders steps as the script records the requests that went out.
@@ -113,7 +118,7 @@ func TestPauseAfterRetryableRejectionSendsNoRetry(t *testing.T) {
 // between still go out.
 func TestPauseBetweenCommitWrites(t *testing.T) {
 	all := append(commitSteps(), updateSteps("graphql_update_refs.json")...)
-	writes := []string{"/git/blobs", "/git/trees", "/git/commits", graphQLPath}
+	writes := []string{blobsPath, "/git/trees", "/git/commits", graphQLPath}
 	for n, w := range writes {
 		t.Run("before "+w, func(t *testing.T) {
 			// The requests up to the write the pause stops, that write excluded.
@@ -193,15 +198,70 @@ func TestCheckpointDoesNotGateReads(t *testing.T) {
 	}
 }
 
-// TestCheckpointAfterCancellation: a canceled call reports the cancellation, not the checkpoint's answer.
+// TestCheckpointAfterCancellation: a call canceled while its token is fetched reports the cancellation, not
+// the checkpoint's answer, and sends nothing.
 func TestCheckpointAfterCancellation(t *testing.T) {
 	h := newHarness(t)
 	c, cancel := context.WithCancel(ctx)
-	cancel()
+	defer cancel()
+	h.p.token = func(context.Context) (string, error) { cancel(); return testToken, nil }
 	asked := 0
-	c = providers.WithWriteCheckpoint(c, func(context.Context) error { asked++; return errStopped })
-	_, err := h.p.do(c, call{op: opCommitFile, method: http.MethodPost, path: "/git/blobs"})
+	c = providers.WithWriteCheckpoint(c, func(context.Context) error { asked++; return errStopped }, errStopped)
+	_, err := h.p.do(c, call{op: opCommitFile, method: http.MethodPost, path: blobsPath})
 	if !errors.Is(err, context.Canceled) || errors.Is(err, errStopped) || asked != 0 {
 		t.Fatalf("got %v after %d checks, want the cancellation without a check", err, asked)
+	}
+	assertSent(t, h, nil)
+}
+
+// TestPauseDuringTokenFetchSendsNothing: the check comes after the token, which may take a signature and a
+// request to mint, so a pause set while it is fetched stops the write.
+func TestPauseDuringTokenFetchSendsNothing(t *testing.T) {
+	steps := []step{get(mainRef, "ref_main.json")}
+	h := newHarness(t, steps...)
+	paused := false
+	h.p.token = func(context.Context) (string, error) {
+		if len(h.s.sent) == len(steps) { // the token for the create request
+			paused = true
+		}
+		return testToken, nil
+	}
+	c := providers.WithWriteCheckpoint(ctx, func(context.Context) error {
+		if paused {
+			return errStopped
+		}
+		return nil
+	}, errStopped)
+	if err := h.p.CreateBranch(c, branch, shaBase); !errors.Is(err, errStopped) {
+		t.Fatalf("got %v, want the checkpoint's error", err)
+	}
+	assertSent(t, h, requests(steps))
+}
+
+// TestCheckpointErrorCarriesOnlyItsClass: the adapter's error matches the class of the refusal but holds none of
+// its text (an API server error with a URL); a refusal of no known class is ErrWriteStopped.
+func TestCheckpointErrorCarriesOnlyItsClass(t *testing.T) {
+	const leak = "https://10.0.0.1:6443/apis/remediation.shadewright.io/v1alpha1/remediationsettings/default"
+	for _, tc := range []struct {
+		name  string
+		err   error
+		class error
+	}{
+		{"known class", fmt.Errorf("%w: get settings: Get %q: dial tcp: timeout", errStopped, leak), errStopped},
+		{"unknown class", fmt.Errorf("Get %q: connection refused", leak), providers.ErrWriteStopped},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			c := providers.WithWriteCheckpoint(ctx, func(context.Context) error { return tc.err }, errStopped)
+			_, err := h.p.do(c, call{op: opCommitFile, method: http.MethodPost, path: blobsPath})
+			if !errors.Is(err, tc.class) || providers.IsRetryable(err) {
+				t.Fatalf("got %v, want the class %v", err, tc.class)
+			}
+			if strings.Contains(err.Error(), "10.0.0.1") || strings.Contains(err.Error(), "dial") ||
+				strings.Contains(err.Error(), "connection refused") {
+				t.Fatalf("the checkpoint's text reached the adapter's error: %v", err)
+			}
+			assertSafe(t, err)
+		})
 	}
 }

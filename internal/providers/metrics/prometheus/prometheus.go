@@ -27,8 +27,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -95,6 +97,48 @@ type Config struct {
 	// own, so this set is what keeps queries to the namespaces the analyzer may read. Empty refuses every
 	// query.
 	Namespaces []string
+	// Matchers scope a shared source to this cluster's series: each entry is an equality label matcher
+	// (label name to value) added to every selector of every template. The supported source holds the series
+	// of one cluster only (see the package documentation); a source that holds several needs at least the
+	// label that tells them apart. The only label name accepted is cluster; each value is 1 to
+	// [MaxMatcherValue] letters, digits, '.', '_' or '-', starting and ending with a letter or digit. Only
+	// the administrator sets them: neither a query, the model nor a custom resource can. Empty adds none.
+	Matchers map[string]string
+}
+
+// matcherLabels are the label names [Config.Matchers] may set. Only a label that every series of every
+// template carries with the same value for one cluster can scope a source: cluster, the external label a
+// shared backend (Thanos, Mimir, Grafana Cloud, Azure Monitor managed Prometheus) uses to tell clusters apart.
+// job is not one: cAdvisor and kube-state-metrics are scraped by different jobs, so one job matcher on every
+// selector would leave the templates of the other source silently empty, and duplicate jobs are already
+// removed by the templates (see templates.go).
+var matcherLabels = []string{"cluster"}
+
+// MaxMatcherValue bounds the value of each matcher in [Config.Matchers]: the longest cluster name of AKS (63
+// characters), EKS (100) and GKE (40).
+const MaxMatcherValue = 100
+
+// labelName is the Prometheus label name syntax; names starting with "__" are reserved.
+var labelName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// matcherValue is the plain-name syntax of a value of Config.Matchers.
+var matcherValue = regexp.MustCompile(fmt.Sprintf(`^[A-Za-z0-9]([A-Za-z0-9._-]{0,%d}[A-Za-z0-9])?$`, MaxMatcherValue-2))
+
+// validMatchers checks Config.Matchers. Errors name an allowed label, never a value or a refused name.
+func validMatchers(m map[string]string) error {
+	if len(m) > len(matcherLabels) {
+		return fmt.Errorf("more than %d matchers: %w", len(matcherLabels), providers.ErrInvalidConfig)
+	}
+	for name, value := range m {
+		if !labelName.MatchString(name) || strings.HasPrefix(name, "__") || !slices.Contains(matcherLabels, name) {
+			return fmt.Errorf("a matcher label is not one of %v: %w", matcherLabels, providers.ErrInvalidConfig)
+		}
+		if !matcherValue.MatchString(value) {
+			return fmt.Errorf("matcher %s must be 1 to %d letters, digits, '.', '_' or '-': %w", name,
+				MaxMatcherValue, providers.ErrInvalidConfig)
+		}
+	}
+	return nil
 }
 
 // Source is a [providers.MetricsSource] for one Prometheus-compatible query API. It is safe for concurrent
@@ -104,13 +148,15 @@ type Source struct {
 	client     *http.Client
 	timeout    time.Duration
 	namespaces map[string]struct{}
-	now        func() time.Time
+	// scope is Config.Matchers rendered for every selector (renderScope).
+	scope string
+	now   func() time.Time
 }
 
 var _ providers.MetricsSource = (*Source)(nil)
 
-// New validates cfg and returns a Source. It makes no network call. Errors never repeat the URL or a
-// namespace.
+// New validates cfg and returns a Source. It makes no network call. Errors never repeat the URL, a
+// namespace or a matcher.
 func New(cfg Config) (*Source, error) {
 	u, err := url.Parse(cfg.URL)
 	if err != nil {
@@ -139,6 +185,9 @@ func New(cfg Config) (*Source, error) {
 		}
 		namespaces[ns] = struct{}{}
 	}
+	if err := validMatchers(cfg.Matchers); err != nil {
+		return nil, err
+	}
 	timeout := cfg.Timeout
 	if timeout == 0 {
 		timeout = DefaultTimeout
@@ -151,7 +200,10 @@ func New(cfg Config) (*Source, error) {
 	}
 	// Go keeps some headers, Authorization among them, on a redirect to the same host; never follow one.
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Source{base: u, client: &client, timeout: timeout, namespaces: namespaces, now: time.Now}, nil
+	return &Source{
+		base: u, client: &client, timeout: timeout, namespaces: namespaces, scope: renderScope(cfg.Matchers),
+		now: time.Now,
+	}, nil
 }
 
 func defaultTransport() http.RoundTripper {
@@ -177,7 +229,7 @@ func (s *Source) Query(ctx context.Context, q providers.MetricsQuery) (providers
 	if !ok {
 		return providers.MetricsResult{}, fmt.Errorf("unknown metrics template: %w", providers.ErrNotFound)
 	}
-	expr, pods, err := t.renderQuery(q.Params, q.Pods)
+	expr, pods, err := t.renderQuery(q.Params, q.Pods, s.scope)
 	if err != nil {
 		return providers.MetricsResult{}, err
 	}

@@ -67,10 +67,11 @@ type TemplateInfo struct {
 }
 
 // template is an approved query. render gets values that are already validated: workload is empty unless the
-// template takes it, and pods is sorted, without duplicates, and empty unless info.Pods is set.
+// template takes it, pods is sorted, without duplicates, and empty unless info.Pods is set, and scope is the
+// rendered Config.Matchers (empty, or each matcher preceded by a comma), which every selector must carry.
 type template struct {
 	info   TemplateInfo
-	render func(namespace, workload string, pods []string) string
+	render func(namespace, workload string, pods []string, scope string) string
 }
 
 // Rate windows are fixed: a query never takes a duration from its parameters.
@@ -80,17 +81,28 @@ const rateWindow = "[5m]"
 // ("^(web-7d9c8b6f4-k8m2p|web-7d9c8b6f4-x2x9q)$"), each with its regular expression metacharacters escaped, so
 // a pod of another workload whose name extends a target pod's name never matches. Prometheus anchors a
 // regular expression matcher anyway; the explicit anchors keep the match exact on a backend that would not.
-func podsOf(namespace string, pods []string) string {
+// scope is the source scope of Config.Matchers, already rendered by renderScope.
+func podsOf(namespace string, pods []string, scope string) string {
 	quoted := make([]string, len(pods))
 	for i, p := range pods {
 		quoted[i] = regexp.QuoteMeta(p)
 	}
-	return eq("namespace", namespace) + "," + matchRegexp("pod", "^("+strings.Join(quoted, "|")+")$")
+	return eq("namespace", namespace) + scope + "," + matchRegexp("pod", "^("+strings.Join(quoted, "|")+")$")
 }
 
 // containersOf is podsOf without the pod-level cgroup series of cAdvisor (no container label, or "POD").
-func containersOf(namespace string, pods []string) string {
-	return podsOf(namespace, pods) + `,container!="",container!="POD"`
+func containersOf(namespace string, pods []string, scope string) string {
+	return podsOf(namespace, pods, scope) + `,container!="",container!="POD"`
+}
+
+// renderScope renders validated matchers (Config.Matchers) as equality matchers, each preceded by a comma, in
+// the order of their label names, so that the same configuration always gives the same query text.
+func renderScope(matchers map[string]string) string {
+	var b strings.Builder
+	for _, name := range slices.Sorted(maps.Keys(matchers)) {
+		b.WriteString("," + eq(name, matchers[name]))
+	}
+	return b.String()
 }
 
 // eq and matchRegexp build label matchers. The value is a Go-quoted string, which PromQL reads with the same
@@ -101,6 +113,25 @@ func matchRegexp(label, re string) string { return label + "=~" + strconv.Quote(
 
 var podContainer = []string{"pod", "container"}
 
+// Deduplication. A source may hold several series of one measurement: two scrape jobs (or a standalone
+// cAdvisor next to the kubelet's, or two kube-state-metrics replicas) collect the same series with different
+// job or instance labels, and a container that restarted has a series per container instance (cAdvisor gives
+// each its own cgroup, so its own id label). Each template first reduces the series of one container
+// (namespace, pod, container; the selector pins the namespace) to one value, so that no measurement counts
+// twice, and only then aggregates, with the operation that is right for that metric:
+//
+//   - A gauge or a state (memory working set, limit, restart count, last termination, waiting reason,
+//     unavailable replicas) takes max over the container: duplicates carry the same value, and two instances
+//     of a container do not hold memory, a limit or a state at the same time, so a sum would describe nothing
+//     that existed.
+//   - A rate of a cAdvisor counter (CPU usage, CFS periods) takes max over each container instance (the id
+//     label, its cgroup) to drop duplicate scrapes, then sums the instances: they ran one after the other
+//     within the 5-minute window, and each rate covers only its own instance's part of it, so the sum is the
+//     container's average over the window. A source that drops the id label folds the instances into the max,
+//     which can only understate a window with a restart, never double it.
+//
+// None of this tells two clusters apart: series of the same namespace, pod and container in two clusters are
+// one container to these templates. That is what Config.Matchers is for (see the package documentation).
 var registry = buildRegistry([]template{
 	{
 		info: TemplateInfo{
@@ -109,8 +140,11 @@ var registry = buildRegistry([]template{
 			Pods:        true,
 			Labels:      podContainer,
 		},
-		render: func(ns, _ string, pods []string) string {
-			return "sum by (pod, container) (container_memory_working_set_bytes{" + containersOf(ns, pods) + "})"
+		// Gauge: max over the container. Across a restart, the larger of the old and the new instance while
+		// both still have series (the old one's goes stale within a scrape or two).
+		render: func(ns, _ string, pods []string, scope string) string {
+			return "max by (pod, container) (container_memory_working_set_bytes{" + containersOf(ns, pods, scope) +
+				"})"
 		},
 	},
 	{
@@ -120,8 +154,9 @@ var registry = buildRegistry([]template{
 			Pods:        true,
 			Labels:      podContainer,
 		},
-		render: func(ns, _ string, pods []string) string {
-			return "max by (pod, container) (kube_pod_container_resource_limits{" + podsOf(ns, pods) +
+		// kube-state-metrics has one series per container and resource, not per instance: max drops duplicates.
+		render: func(ns, _ string, pods []string, scope string) string {
+			return "max by (pod, container) (kube_pod_container_resource_limits{" + podsOf(ns, pods, scope) +
 				`,resource="memory"})`
 		},
 	},
@@ -132,9 +167,10 @@ var registry = buildRegistry([]template{
 			Pods:        true,
 			Labels:      podContainer,
 		},
-		render: func(ns, _ string, pods []string) string {
-			return "sum by (pod, container) (rate(container_cpu_usage_seconds_total{" + containersOf(ns, pods) +
-				"}" + rateWindow + "))"
+		// Counter rate: max per instance (id) drops duplicates, the sum adds the instances of the window.
+		render: func(ns, _ string, pods []string, scope string) string {
+			return "sum by (pod, container) (" + perInstanceRate("container_cpu_usage_seconds_total",
+				containersOf(ns, pods, scope)) + ")"
 		},
 	},
 	{
@@ -145,11 +181,12 @@ var registry = buildRegistry([]template{
 			Pods:   true,
 			Labels: podContainer,
 		},
-		render: func(ns, _ string, pods []string) string {
-			sel := containersOf(ns, pods)
-			return "sum by (pod, container) (rate(container_cpu_cfs_throttled_periods_total{" + sel + "}" +
-				rateWindow + ")) / sum by (pod, container) (rate(container_cpu_cfs_periods_total{" + sel + "}" +
-				rateWindow + "))"
+		// Both counters as in container_cpu_usage_cores, so the ratio is the throttled periods of all the
+		// container's instances in the window over all their periods, and duplicates change neither side.
+		render: func(ns, _ string, pods []string, scope string) string {
+			sel := containersOf(ns, pods, scope)
+			return "sum by (pod, container) (" + perInstanceRate("container_cpu_cfs_throttled_periods_total", sel) +
+				") / sum by (pod, container) (" + perInstanceRate("container_cpu_cfs_periods_total", sel) + ")"
 		},
 	},
 	{
@@ -159,8 +196,10 @@ var registry = buildRegistry([]template{
 			Pods:        true,
 			Labels:      podContainer,
 		},
-		render: func(ns, _ string, pods []string) string {
-			return "max by (pod, container) (kube_pod_container_status_restarts_total{" + podsOf(ns, pods) + "})"
+		// One series per container, which counts its restarts itself: max drops duplicates.
+		render: func(ns, _ string, pods []string, scope string) string {
+			return "max by (pod, container) (kube_pod_container_status_restarts_total{" + podsOf(ns, pods, scope) +
+				"})"
 		},
 	},
 	{
@@ -171,9 +210,10 @@ var registry = buildRegistry([]template{
 			Pods:   true,
 			Labels: podContainer,
 		},
-		render: func(ns, _ string, pods []string) string {
+		// A 0 or 1 state per container: max drops duplicates.
+		render: func(ns, _ string, pods []string, scope string) string {
 			return "max by (pod, container) (kube_pod_container_status_last_terminated_reason{" +
-				podsOf(ns, pods) + `,reason="OOMKilled"})`
+				podsOf(ns, pods, scope) + `,reason="OOMKilled"})`
 		},
 	},
 	{
@@ -184,9 +224,10 @@ var registry = buildRegistry([]template{
 			Pods:   true,
 			Labels: []string{"pod", "container", "reason"},
 		},
-		render: func(ns, _ string, pods []string) string {
+		// A 0 or 1 state per container and reason: max drops duplicates.
+		render: func(ns, _ string, pods []string, scope string) string {
 			return "max by (pod, container, reason) (kube_pod_container_status_waiting_reason{" +
-				podsOf(ns, pods) + "} == 1)"
+				podsOf(ns, pods, scope) + "} == 1)"
 		},
 	},
 	{
@@ -196,12 +237,19 @@ var registry = buildRegistry([]template{
 			Params:      []string{ParamWorkload},
 			Labels:      []string{"deployment"},
 		},
-		render: func(ns, w string, _ []string) string {
+		// One series per Deployment: max drops duplicates.
+		render: func(ns, w string, _ []string, scope string) string {
 			return "max by (deployment) (kube_deployment_status_replicas_unavailable{" + eq("namespace", ns) +
-				"," + eq("deployment", w) + "})"
+				scope + "," + eq("deployment", w) + "})"
 		},
 	},
 })
+
+// perInstanceRate is the 5-minute rate of a cAdvisor counter per container instance: the series of one cgroup
+// (id) reduced to one with max, so that duplicate scrapes of it count once.
+func perInstanceRate(metric, selector string) string {
+	return "max by (pod, container, id) (rate(" + metric + "{" + selector + "}" + rateWindow + "))"
+}
 
 // buildRegistry indexes the templates by name and puts ParamNamespace first in each one's parameters.
 func buildRegistry(ts []template) map[string]template {
@@ -234,7 +282,7 @@ func Templates() []TemplateInfo {
 // renderQuery validates params and pods against the template and returns the query and, for a pod template,
 // the pods it selects (sorted, without duplicates). Errors name the parameter only when it is one of the
 // template's, and the position of a refused pod only, never a value or an unknown key.
-func (t template) renderQuery(params map[string]string, pods []string) (string, []string, error) {
+func (t template) renderQuery(params map[string]string, pods []string, scope string) (string, []string, error) {
 	for k := range params {
 		if !slices.Contains(t.info.Params, k) {
 			return "", nil, fmt.Errorf("unexpected parameter: %w", ErrInvalidQuery)
@@ -260,7 +308,7 @@ func (t template) renderQuery(params map[string]string, pods []string) (string, 
 	if err != nil {
 		return "", nil, err
 	}
-	return t.render(ns, w, selected), selected, nil
+	return t.render(ns, w, selected, scope), selected, nil
 }
 
 // validPods checks the pods of a query: none for a template that does not select pods, 1 to MaxPods distinct

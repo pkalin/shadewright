@@ -19,7 +19,8 @@ limitations under the License.
 // Azure Monitor managed Prometheus serve the same API, but the adapter is untested against them.
 //
 // The adapter runs only the approved query templates of this package, listed by [Templates]. There is no way
-// to send PromQL text: neither the model, the cluster nor the configuration can add or change a query. A
+// to send PromQL text: neither the model, the cluster nor the configuration can add or change a query (the
+// configuration can only scope every selector to one cluster, see Source profile below). A
 // template takes named parameters only, each a Kubernetes name: the namespace must be a DNS-1123 label and
 // the workload, which only deployment_replicas_unavailable takes, a DNS-1123 subdomain, and anything else, an
 // unknown or a missing parameter included, is refused with [ErrInvalidQuery] before a request is made.
@@ -46,8 +47,28 @@ limitations under the License.
 //
 // The names are sorted and joined as escaped alternatives of one anchored regular expression; a series of
 // any other pod in the response, or one without a pod label, is refused with [ErrInvalidResponse]. The
-// longest query, every name at its longest, keeps the request URL within 32 KiB. Values are inserted as quoted PromQL strings, and into
-// regular expressions only after their metacharacters are escaped.
+// longest query, every name and matcher at its longest, keeps the request URL within 32 KiB. Values, the
+// matchers' included, are inserted as quoted PromQL strings, and into regular expressions only after their
+// metacharacters are escaped.
+//
+// Source profile. The supported source holds the series of one cluster: a Prometheus dedicated to the cluster,
+// such as the one of the lab (ADR-0017). A shared backend that holds several clusters is supported only with
+// [Config.Matchers] set to the label that tells them apart (cluster, the only label name accepted): each
+// matcher is added, as a quoted equality matcher, to every selector of every template. Without it, the series
+// of the same namespace, pod and container in two clusters are one container to the templates, and the adapter
+// cannot tell: the result mixes both. Only the administrator sets the matchers; neither a query, the model nor
+// a custom resource can, and [New] refuses another label name, more than one matcher, or a
+// value that is not 1 to [MaxMatcherValue] letters, digits, '.', '_' or '-' (starting and ending with a letter
+// or digit), with [providers.ErrInvalidConfig] and an error that does not repeat the value.
+//
+// Within that profile, a measurement counts once even when several series hold it. Two scrape jobs that collect
+// the same cAdvisor or kube-state-metrics series (or two kube-state-metrics replicas) differ only in job or
+// instance, and every template reduces the series of one container (namespace, pod, container) before it
+// aggregates: gauges and states take the max over the container, and the CPU templates take the max over each
+// container instance (the cAdvisor id label) and then sum the instances. A restarted container therefore gives
+// the larger working set of its old and new instance while both have series, never their sum, and a CPU rate
+// over the 5-minute window that counts each instance's part of it once. The comment above the templates in
+// templates.go gives the reason per metric.
 //
 // Limits, checked before the request on the times as sent (whole milliseconds): the time range of a range
 // query is at most [MaxRange] and its step at least [MinStep], so it asks for at most 361 points per series;

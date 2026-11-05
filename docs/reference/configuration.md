@@ -220,6 +220,23 @@ metrics:
 
 `<component>.metricsTLS.secretName` mounts the Secret read-only at `/etc/shadewright/metrics-tls` and passes `--metrics-cert-path` (the files are `tls.crt` and `tls.key`, the defaults of `--metrics-cert-name` and `--metrics-cert-key`). The binary reloads the files when they change, so a renewal that updates the Secret needs no restart. `metrics.serviceMonitor.tls.enabled` makes each ServiceMonitor send `tlsConfig` with the `ca` and the `serverName` and no `insecureSkipVerify`; rendering fails when it is on without a CA (or with a Secret and a ConfigMap both), and the schema refuses names that are not DNS-1123 and keys it does not know. Without a profile nothing changes. TokenReview, the RBAC (the `metrics-reader` ClusterRole for Prometheus) and the NetworkPolicies are the same with or without it. Not covered by the chart tests yet: a scrape on a real cluster that succeeds with the right CA and fails with a wrong one ([#343](https://github.com/pkalin/shadewright/issues/343) follow-up).
 
+## Metrics source profile (Prometheus)
+
+The analyzer's `query_metrics` tool reads cAdvisor and kube-state-metrics series through the Prometheus adapter (`internal/providers/metrics/prometheus`, [design section 4](../design.md#4-tools)). The adapter is built but **not wired** into the analyzer yet ([#70](https://github.com/pkalin/shadewright/issues/70)), so there is no flag or Helm value for it; this section states what source it supports, so that the wiring and your Prometheus agree.
+
+| Source | Supported | What to set |
+| --- | --- | --- |
+| A Prometheus that holds the series of this cluster only (the lab's, [ADR-0017](../adr/0017-prometheus-in-the-lab.md)) | yes, the default | nothing |
+| The same, with cAdvisor or kube-state-metrics scraped by two jobs (a ServiceMonitor next to a static job, a standalone cAdvisor next to the kubelet's, two kube-state-metrics replicas) | yes | nothing: duplicates count once |
+| A shared backend that holds several clusters (Thanos, Mimir, Grafana Cloud, Azure Monitor managed Prometheus), each cluster's series under a `cluster` label | yes, with a matcher | the adapter's `Matchers`: `cluster: <this cluster's label value>` |
+| A shared backend whose clusters are not told apart by a `cluster` label | **no** | give the analyzer a source with this cluster's series only |
+
+Without a matcher, the series of the same namespace, pod and container in two clusters are one container to the adapter, and it cannot tell: a result mixes both clusters (a memory value is the larger of the two, a CPU rate their sum). Nothing in a result shows that this happened, so do not point the analyzer at a multi-cluster source without the matcher.
+
+`Matchers` is set by the administrator only, in the adapter's configuration; no query, model output or custom resource can set or change it. Each entry is added as a quoted equality matcher (`cluster="aks-lab"`) to every selector of every query template. The adapter refuses to start (invalid configuration) on any label name other than `cluster`, or a value that is not 1 to 100 letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit; the error does not repeat the value. `job` is not accepted: cAdvisor and kube-state-metrics are scraped by different jobs, so one `job` matcher on every selector would leave half of the templates silently empty, and duplicate jobs need no matcher.
+
+How duplicates and restarts are counted: each template first reduces the series of one container (namespace, pod, container) to one value and only then aggregates. Memory, limits, restart counts and states take the largest series of the container: duplicates carry the same value, and after a restart the result is the larger of the old and the new instance while both still have series, never their sum. The CPU templates take the largest series of each container instance (cAdvisor's `id` label, its cgroup) and add the instances, since they ran one after the other within the 5-minute window; a scrape configuration that drops `id` folds the instances into the largest, which can understate a window with a restart but never doubles it.
+
 ## Workload identity (Azure)
 
 Only the executor needs a cloud identity today: it signs the GitHub App's JWT with a non-exportable Key Vault key. The key never enters the cluster. On AKS with workload identity:

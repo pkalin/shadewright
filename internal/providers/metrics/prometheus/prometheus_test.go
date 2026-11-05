@@ -54,13 +54,20 @@ func testSource(t *testing.T, h http.HandlerFunc) (*Source, *httptest.Server, *a
 // testSourceIn is testSource with the given allowed namespaces.
 func testSourceIn(t *testing.T, namespaces []string, h http.HandlerFunc) (*Source, *httptest.Server, *atomic.Int32) {
 	t.Helper()
+	return testSourceWith(t, Config{Namespaces: namespaces}, h)
+}
+
+// testSourceWith is testSource with cfg, whose URL it sets.
+func testSourceWith(t *testing.T, cfg Config, h http.HandlerFunc) (*Source, *httptest.Server, *atomic.Int32) {
+	t.Helper()
 	var n atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n.Add(1)
 		h(w, r)
 	}))
 	t.Cleanup(srv.Close)
-	s, err := New(Config{URL: srv.URL + "/prom", Namespaces: namespaces})
+	cfg.URL = srv.URL + "/prom"
+	s, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,15 +149,16 @@ func TestTemplatesRender(t *testing.T) {
 	const pods = `namespace="demo",pod=~"^(web-0|web-7d9c8b6f4-x2x9q)$"`
 	const containers = pods + `,container!="",container!="POD"`
 	want := map[string]string{
-		"container_memory_working_set_bytes": `sum by (pod, container) (container_memory_working_set_bytes{` +
+		"container_memory_working_set_bytes": `max by (pod, container) (container_memory_working_set_bytes{` +
 			containers + `})`,
 		"container_memory_limit_bytes": `max by (pod, container) (kube_pod_container_resource_limits{` + pods +
 			`,resource="memory"})`,
-		"container_cpu_usage_cores": `sum by (pod, container) (rate(container_cpu_usage_seconds_total{` +
-			containers + `}[5m]))`,
-		"container_cpu_throttled_ratio": `sum by (pod, container) (rate(container_cpu_cfs_throttled_periods_total{` +
-			containers + `}[5m])) / sum by (pod, container) (rate(container_cpu_cfs_periods_total{` + containers +
-			`}[5m]))`,
+		"container_cpu_usage_cores": `sum by (pod, container) (max by (pod, container, id) ` +
+			`(rate(container_cpu_usage_seconds_total{` + containers + `}[5m])))`,
+		"container_cpu_throttled_ratio": `sum by (pod, container) (max by (pod, container, id) ` +
+			`(rate(container_cpu_cfs_throttled_periods_total{` + containers + `}[5m]))) / ` +
+			`sum by (pod, container) (max by (pod, container, id) (rate(container_cpu_cfs_periods_total{` +
+			containers + `}[5m])))`,
 		"container_restarts_total": `max by (pod, container) (kube_pod_container_status_restarts_total{` +
 			pods + `})`,
 		"container_last_terminated_oomkilled": `max by (pod, container) ` +
@@ -525,13 +533,22 @@ func TestSeriesOfOtherPodsAreRefused(t *testing.T) {
 }
 
 // The query text lists every pod, and is sent in the URL: even the largest pod set, with every name as long as
-// allowed and as many escaped dots as a name can hold, keeps the request URL within maxQueryURL (32 KiB).
+// allowed and as many escaped dots as a name can hold, and every matcher as long as allowed, keeps the request
+// URL within maxQueryURL (32 KiB).
 func TestLargestPodSetKeepsTheURLBounded(t *testing.T) {
 	var length int
-	s, _, _ := testSource(t, func(w http.ResponseWriter, r *http.Request) {
-		length = len(r.URL.RequestURI())
-		emptyVector(w, r)
-	})
+	matchers := map[string]string{}
+	for _, name := range matcherLabels {
+		matchers[name] = strings.Repeat("a.", MaxMatcherValue/2-1) + "aa"
+		if len(matchers[name]) != MaxMatcherValue {
+			t.Fatalf("matcher value is %d characters", len(matchers[name]))
+		}
+	}
+	s, _, _ := testSourceWith(t, Config{Namespaces: []string{testNS}, Matchers: matchers},
+		func(w http.ResponseWriter, r *http.Request) {
+			length = len(r.URL.RequestURI())
+			emptyVector(w, r)
+		})
 	const alnum = "abcdefghijklmnopqrstuvwxyz0123456789"
 	pods := make([]string, MaxPods)
 	for i := range pods {

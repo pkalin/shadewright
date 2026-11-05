@@ -66,8 +66,8 @@ At most one escalation per incident fingerprint per cooldown window. A runbook m
 `ModelProvider` is built as `Complete(ctx, CompletionRequest) (Completion, error)`.
 
 - In: messages, tool definitions, an optional response schema and `MaxOutputTokens`.
-- Out: `Content` (a string), tool calls, `Usage` and a `Model` field.
-- Throttling and unavailability come back as `ErrRetryable`.
+- Out: `Content` (a string), tool calls, `Usage`, `UsageUnknown` (a billed reply whose usage could not be read) and a `Model` field.
+- Throttling and transient failures (408, 429, 5xx, timeouts) come back as `ErrRetryable`; an unknown deployment is `ErrNotFound`, final.
 - A reply that breaks the request's contract is `ErrMalformedOutput`, returned with the reply's `Usage` and `Model`.
 
 <span class="sw-status sw-built">built</span> The interface, a fake and the Foundry adapter for OpenAI-format models (`internal/providers/model/foundry`, [#75](https://github.com/pkalin/shadewright/issues/75)). The adapter:

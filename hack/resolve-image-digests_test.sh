@@ -11,16 +11,19 @@ trap 'rm -rf "${tmp}"' EXIT
 mkdir "${tmp}/bin"
 ex="sha256:$(printf 'a%.0s' $(seq 64))"
 an="sha256:$(printf 'b%.0s' $(seq 64))"
+cm="sha256:$(printf 'e%.0s' $(seq 64))"
+cr="sha256:$(printf 'f%.0s' $(seq 64))"
 fail=0
 
 check() { # name, condition result (0 ok)
   if [ "$2" != 0 ]; then echo "FAIL: $1" >&2; fail=1; else echo "ok: $1"; fi
 }
 
-# docker prints a digest by image name; cosign fails when COSIGN_FAIL names the subcommand.
+# docker prints a digest by image name (an index of two platforms for --raw); cosign fails when COSIGN_FAIL names the subcommand.
 cat > "${tmp}/bin/docker" <<EOT
 #!/usr/bin/env bash
 case "\$*" in
+  *--raw*) echo '{"manifests":[{"digest":"${cm}","platform":{"os":"linux","architecture":"amd64"}},{"digest":"${cr}","platform":{"os":"linux","architecture":"arm64"}}]}' ;;
   *shadewright-executor:*) echo "\"\${EXECUTOR_RESOLVED:-${ex}}\"" ;;
   *shadewright-analyzer:*) echo "\"${an}\"" ;;
 esac
@@ -38,7 +41,7 @@ export COSIGN_LOG="${tmp}/cosign-ok.log"
 out="$("${script}" v1.2.3 Owner/shadewright Owner 2>/dev/null)"
 check "executor digest printed" "$([ "$(sed -n 's/^executor=//p' <<<"${out}")" = "${ex}" ] && echo 0 || echo 1)"
 check "analyzer digest printed" "$([ "$(sed -n 's/^analyzer=//p' <<<"${out}")" = "${an}" ] && echo 0 || echo 1)"
-check "both checks ran on each image by digest" "$([ "$(grep -c "@sha256:" "${COSIGN_LOG}")" = 4 ] && echo 0 || echo 1)"
+check "signature on the index, SBOM on each platform image, per image" "$([ "$(grep -c "@sha256:" "${COSIGN_LOG}")" = 6 ] && grep -q "verify-attestation.*@${cm}" "${COSIGN_LOG}" && grep -q "verify-attestation.*@${cr}" "${COSIGN_LOG}" && ! grep -q "verify-attestation.*@${ex}" "${COSIGN_LOG}" && echo 0 || echo 1)"
 check "identity is the Images workflow on the tag" "$(grep -qF 'Owner/shadewright/.github/workflows/images.yml@refs/tags/v1.2.3' "${COSIGN_LOG}" && echo 0 || echo 1)"
 
 for sub in verify verify-attestation; do

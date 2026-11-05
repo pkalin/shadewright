@@ -56,6 +56,13 @@ func TestErrorKinds(t *testing.T) {
 	if providers.IsForbidden(rt) || providers.IsRejected(rt) {
 		t.Error("a rate limit is neither forbidden nor rejected")
 	}
+	mo := fmt.Errorf("complete: %w", providers.ErrMalformedOutput)
+	if !providers.IsMalformedOutput(mo) || providers.IsRetryable(mo) || providers.IsRejected(mo) {
+		t.Error("malformed output misclassified")
+	}
+	if providers.IsMalformedOutput(rj) || providers.IsMalformedOutput(rt) {
+		t.Error("rejected or retryable counted as malformed output")
+	}
 	if !providers.IsRetryable(fmt.Errorf("x: %w", providers.ErrRetryable)) {
 		t.Error("plain ErrRetryable not retryable")
 	}

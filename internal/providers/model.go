@@ -82,10 +82,20 @@ type Completion struct {
 	Usage     Usage
 	// Model identifies the deployed model and version that answered.
 	Model string
+	// UsageUnknown says that the model answered at least one attempt of the call (so it was billed) but the
+	// usage of that answer could not be read, for example a reply too large to read or not a chat completion.
+	// Usage then counts only what was read; a budget should count the call conservatively, for example as
+	// the request's whole output limit.
+	UsageUnknown bool
 }
 
 // ModelProvider calls a language model.
 type ModelProvider interface {
-	// Complete sends one request. Throttling and unavailability are returned as retryable errors.
+	// Complete sends one request. Throttling and transient failures are returned as retryable errors; an
+	// unknown deployment is ErrNotFound. A reply that breaks the request's contract is an error matching
+	// ErrMalformedOutput; the Completion returned
+	// with it carries the Usage and Model of that reply (the call was billed) and nothing else. With any
+	// other error the Completion carries at most UsageUnknown, set when an answer was billed but not
+	// counted.
 	Complete(ctx context.Context, req CompletionRequest) (Completion, error)
 }

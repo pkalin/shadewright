@@ -51,6 +51,11 @@ limitations under the License.
 //
 // Checks run in a fixed order and the first that fails gives the reason, so a given input always yields the
 // same reason.
+//
+// The checks that read only the request, the policy, the settings and the live target's identity and labels
+// come first. [Preflight] runs exactly those, before the controller maps the target to Git, so a request the
+// policy refuses on its own fields costs no Git read and no token. It only refuses: it never returns
+// [OutcomeAllowed], and a request it lets through is decided by [Decide] in full once the source is resolved.
 package policy
 
 import (
@@ -210,14 +215,7 @@ type Decision struct {
 // the rules.
 func Decide(in DecisionInput) Decision {
 	if r, msg := check(in); r != "" {
-		outcome := OutcomeDenied
-		switch r {
-		case ReasonIncompleteInput, ReasonScaledObjectNotReady:
-			outcome = OutcomeNeedsIntervention
-		case ReasonScaledObjectReadinessUnknown:
-			outcome = OutcomeWait
-		}
-		return Decision{Outcome: outcome, Reason: r, Message: msg, EffectiveApprovalRequired: true}
+		return refusal(r, msg)
 	}
 	return Decision{
 		Outcome:                   OutcomeAllowed,
@@ -225,6 +223,35 @@ func Decide(in DecisionInput) Decision {
 		Message:                   "The change is within the policy bounds",
 		EffectiveApprovalRequired: approvalRequired(in.Policy.Spec.Approval, in.Request.Spec.ApprovalRequired),
 	}
+}
+
+// Preflight runs the checks of [Decide] that need no resolved source, in the same order and with the same
+// reasons, outcomes and messages, so that the controller can refuse a request before it reads Git or requests a
+// token. in.Source is ignored. It returns the refusal and true when one of those checks fails, and false when the
+// request must go on to source mapping and [Decide]. It never allows anything: a request it lets through is not
+// decided yet, and a refusal it returns is the decision Decide returns for the same input with any resolved
+// source, because the checks it runs come first in Decide's order.
+//
+// The target state check is not among them, although it reads only the live target: Decide runs it last, so a
+// plan the source checks refuse is Denied whatever state its target is in, and running it here would change
+// that.
+func Preflight(in DecisionInput) (Decision, bool) {
+	if r, msg := preflight(in); r != "" {
+		return refusal(r, msg), true
+	}
+	return Decision{}, false
+}
+
+// refusal is the decision of a failed check with reason r. It is never Allowed.
+func refusal(r Reason, msg string) Decision {
+	outcome := OutcomeDenied
+	switch r {
+	case ReasonIncompleteInput, ReasonScaledObjectNotReady:
+		outcome = OutcomeNeedsIntervention
+	case ReasonScaledObjectReadinessUnknown:
+		outcome = OutcomeWait
+	}
+	return Decision{Outcome: outcome, Reason: r, Message: msg, EffectiveApprovalRequired: true}
 }
 
 // approvalRequired is false only when the policy is Optional and the request explicitly asked for no
@@ -235,12 +262,41 @@ func approvalRequired(mode v1alpha1.ApprovalMode, requested *bool) bool {
 
 // check runs every check in order and returns the first failure, or an empty reason if all pass.
 func check(in DecisionInput) (Reason, string) {
-	if in.Request == nil || in.Policy == nil || in.Settings == nil || in.Source == nil || in.Target == nil {
-		return ReasonIncompleteInput, "The request, policy, settings, resolved source and live target are all needed"
+	if in.Source == nil {
+		return ReasonIncompleteInput, incompleteInputMessage
 	}
-	for _, c := range []func(DecisionInput) (Reason, string){
-		checkRequest, checkAction, checkModule, checkTarget, checkPolicyAction, checkSource, checkTargetState,
-	} {
+	if r, msg := preflight(in); r != "" {
+		return r, msg
+	}
+	return runChecks(in, sourceChecks)
+}
+
+// checkFunc is one check: it returns the reason and message of a failure, or an empty reason.
+type checkFunc func(DecisionInput) (Reason, string)
+
+// fieldChecks read only the request, the policy, the settings and the live target, never the resolved source.
+// They run first in Decide and are all that Preflight runs, so both share one implementation and one order.
+var fieldChecks = []checkFunc{checkRequest, checkAction, checkModule, checkTarget, checkPolicyAction}
+
+// sourceChecks need the resolved source, or must run after the checks that do (the target state check, see
+// checkTargetState). Only Decide runs them.
+var sourceChecks = []checkFunc{checkSource, checkTargetState}
+
+// incompleteInputMessage is the message of ReasonIncompleteInput.
+const incompleteInputMessage = "The request, policy, settings, resolved source and live target are all needed"
+
+// preflight runs the field checks in order and returns the first failure, or an empty reason if all pass. It
+// never reads in.Source.
+func preflight(in DecisionInput) (Reason, string) {
+	if in.Request == nil || in.Policy == nil || in.Settings == nil || in.Target == nil {
+		return ReasonIncompleteInput, incompleteInputMessage
+	}
+	return runChecks(in, fieldChecks)
+}
+
+// runChecks runs checks in order and returns the first failure, or an empty reason if all pass.
+func runChecks(in DecisionInput, checks []checkFunc) (Reason, string) {
+	for _, c := range checks {
 		if r, msg := c(in); r != "" {
 			return r, msg
 		}

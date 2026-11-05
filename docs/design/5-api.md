@@ -203,6 +203,8 @@ A cluster-scoped CR, writable only by the cluster admin ([ADR-0011](../adr/0011-
 
 The first check that fails gives the reason. All of this is built (`internal/policy.Decide`). Before them, a request with an input missing stops with `NeedsIntervention`, reason `IncompleteInput`.
 
+The first five checks read only the request, the policy, the settings and the live target, never the resolved source. The executor runs exactly those first (`internal/policy.Preflight`), before the source mapping, so a request the policy refuses on its own fields costs no Flux or Git read, no signing and no GitHub token. The preflight uses the same code, order, reasons and conditions as `Decide`, and it only refuses: a request it lets through is mapped to its source, and then `Decide` runs every check again, in full. The target state check stays last, after the source checks, so a plan the source checks refuse is `Denied` whatever state its target is in.
+
 - The request's `policyRef` and namespace (`requestNamespaces`), and the `GitOps` mode.
 - The action type is in the catalog and its parameters are well formed.
 - The integration module that contributes the action, if any, is enabled in `RemediationSettings` `spec.modules.integrations` (`AdjustKedaMaxReplicas` needs `keda`).
@@ -213,13 +215,17 @@ The first check that fails gives the reason. All of this is built (`internal/pol
 
 ```mermaid
 flowchart TD
-    start([Request, policy, settings, resolved source, live target])
+    start([Request, policy, settings, live target])
     c0{All present?}
-    c1["Request: policyRef, requestNamespaces, GitOps mode"]
-    c2["Action: in the catalog, parameters well formed"]
-    c2m["Module: the action's integration enabled in spec.modules"]
-    c3["Target: the object targetRef names, kind allowed and not excluded, namespace and labels in targets"]
-    c4["Policy action: listed, change within min, max, maxIncreasePercent, maxDecreasePercent"]
+    subgraph pre ["Field checks: Preflight runs these before the source mapping, Decide runs them again"]
+        c1["Request: policyRef, requestNamespaces, GitOps mode"]
+        c2["Action: in the catalog, parameters well formed"]
+        c2m["Module: the action's integration enabled in spec.modules"]
+        c3["Target: the object targetRef names, kind allowed and not excluded, namespace and labels in targets"]
+        c4["Policy action: listed, change within min, max, maxIncreasePercent, maxDecreasePercent"]
+    end
+    map["Source mapping (ADR-0012): Flux objects and Git read for the first time"]
+    again["Decide: the field checks again, on the same input and the resolved source"]
     c5["Source: the policy's repositoryRef, configured with this targetBranch, file in allowedPaths"]
     c6["Target state: for AdjustKedaMaxReplicas, the ScaledObject ready (KedaReady)"]
     ok[Allowed: WithinApprovedBounds]
@@ -230,7 +236,10 @@ flowchart TD
     c2 -- passes --> c2m
     c2m -- passes --> c3
     c3 -- passes --> c4
-    c4 -- passes --> c5
+    c4 -- passes --> map
+    map -- resolved --> again
+    map -- stops --> ms[Denied or NeedsIntervention: the mapping's reason]
+    again -- passes --> c5
     c5 -- passes --> c6
     c6 -- passes --> ok
     ok --> ap

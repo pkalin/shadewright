@@ -63,6 +63,18 @@ stateDiagram-v2
 
 The policy check is the first step. It loads the policy the request names, the `default` RemediationSettings and the live target, and then maps the target to its file in Git (ADR-0012).
 
+It refuses in this order, and the first refusal decides:
+
+1. A missing policy or settings object (`Denied`).
+2. A kind the action cannot change, before the target is read (`NeedsIntervention`).
+3. A missing target (`NeedsIntervention`) or one with another UID (`Denied`).
+4. A field the live target does not set (`NeedsIntervention`), or a previous value that is not the live one (`Denied`, `PreviousValueMismatch`).
+5. The policy's field checks (`internal/policy.Preflight`, section 5.3): request, action, module, target and bounds.
+6. The source mapping, the first step that reads Flux objects or Git and so may need a GitHub token.
+7. The full decision (`internal/policy.Decide`) on everything, the resolved source included.
+
+Steps 1 to 5 read only the Kubernetes API, so a request refused there costs no Git read, no signing and no token.
+
 ### Why the target is read twice
 
 The target is read again after the mapping, and the check starts over if its UID or resourceVersion changed. This way the previous value and the file in Git always describe the same object.

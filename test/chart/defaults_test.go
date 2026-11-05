@@ -346,6 +346,8 @@ func TestSchemaBoundsTheStandardValues(t *testing.T) {
 		"metrics secret without metrics": {"analyzer.metricsTLS.secretName=a,metrics.enabled=false", "metrics.enabled"},
 		"monitor tls without a CA":       {smTLS + ",metrics.serviceMonitor.tls.serverName=m.example", "needs a CA"},
 		"monitor tls without a name":     {smTLS + ",metrics.serviceMonitor.tls.ca.secret.name=ca", "serverName"},
+		"monitor tls without component certificates": {smTLS + ",metrics.serviceMonitor.tls.serverName=m.example" +
+			",metrics.serviceMonitor.tls.ca.secret.name=ca,executor.metricsTLS.secretName=a", "analyzer.metricsTLS.secretName"},
 		"monitor tls with two CAs": {smTLS + ",metrics.serviceMonitor.tls.serverName=m.example" +
 			",metrics.serviceMonitor.tls.ca.secret.name=ca,metrics.serviceMonitor.tls.ca.configMap.name=ca", "not both"},
 		"monitor tls bad CA name":       {"metrics.serviceMonitor.tls.ca.secret.name=Bad_Name", "name"},
@@ -684,6 +686,11 @@ func TestMetricsTLSProfileMountsTheSecretAndVerifiesTheCertificate(t *testing.T)
 				vols := d.Spec.Template.Spec.Volumes
 				if len(vols) != 1 || vols[0].Secret == nil || vols[0].Secret.SecretName != secret {
 					t.Fatalf("%s volumes %v, want the Secret %s", comp, vols, secret)
+				}
+				// The images run as 65532 and the pod sets no fsGroup, so Secret files (owned by root) must be
+				// world-readable or the binary cannot read its own certificate.
+				if m := vols[0].Secret.DefaultMode; m == nil || *m != 0o444 {
+					t.Errorf("%s Secret defaultMode %v, want 0444 (readable by the non-root user)", comp, m)
 				}
 				if len(c.VolumeMounts) != 1 || !c.VolumeMounts[0].ReadOnly || c.VolumeMounts[0].Name != vols[0].Name ||
 					c.VolumeMounts[0].MountPath != "/etc/shadewright/metrics-tls" {

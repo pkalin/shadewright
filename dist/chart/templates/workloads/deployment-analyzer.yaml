@@ -120,7 +120,7 @@ spec:
       - name: metrics-tls
         secret:
           secretName: {{ . | quote }}
-          defaultMode: 0440
+          defaultMode: 0444
       {{- end }}
       {{- with $c.nodeSelector }}
       nodeSelector:

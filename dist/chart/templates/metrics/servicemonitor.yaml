@@ -23,6 +23,9 @@ executor.metricsTLS and analyzer.metricsTLS) and the ServiceMonitor verifies it 
 {{- if not $tls.serverName }}
 {{- fail "metrics.serviceMonitor.tls.enabled needs metrics.serviceMonitor.tls.serverName" }}
 {{- end }}
+{{- if not (and $.Values.executor.metricsTLS.secretName $.Values.analyzer.metricsTLS.secretName) }}
+{{- fail "metrics.serviceMonitor.tls.enabled needs executor.metricsTLS.secretName and analyzer.metricsTLS.secretName: a component without its certificate serves a self-signed one the CA does not verify" }}
+{{- end }}
 {{- end }}
 {{- range $component := list "executor" "analyzer" }}
 ---

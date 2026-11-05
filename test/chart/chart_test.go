@@ -54,6 +54,8 @@ const (
 	kindClusterRoleBinding = "ClusterRoleBinding"
 	chartName              = "shadewright"
 	unknownField           = "additional properties"
+	// memoryLimit is the key the schema requires under resources.limits.
+	memoryLimit = "memory"
 )
 
 // components are the two Deployments of the chart.

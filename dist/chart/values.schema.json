@@ -26,7 +26,19 @@
               "number"
             ]
           },
-          "minProperties": 1
+          "properties": {
+            "memory": {
+              "type": [
+                "string",
+                "number"
+              ],
+              "minLength": 1,
+              "exclusiveMinimum": 0
+            }
+          },
+          "required": [
+            "memory"
+          ]
         },
         "requests": {
           "type": "object",

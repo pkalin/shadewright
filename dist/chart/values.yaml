@@ -84,10 +84,11 @@ executor:
     annotations: {}
   resources:
     limits:
-      # -- CPU limit. `limits` is required and cannot be empty, so the container is never unbounded.
+      # -- CPU limit (optional; removing it with `null` lets the container use idle CPU).
       # @section -- Executor
       cpu: 500m
-      # -- Memory limit.
+      # -- Memory limit. Required by the schema (a `null` override is refused), so the container's memory is never
+      # unbounded.
       # @section -- Executor
       memory: 128Mi
     requests:
@@ -158,10 +159,11 @@ analyzer:
     annotations: {}
   resources:
     limits:
-      # -- CPU limit. `limits` is required and cannot be empty, so the container is never unbounded.
+      # -- CPU limit (optional; removing it with `null` lets the container use idle CPU).
       # @section -- Analyzer
       cpu: 500m
-      # -- Memory limit.
+      # -- Memory limit. Required by the schema (a `null` override is refused), so the container's memory is never
+      # unbounded.
       # @section -- Analyzer
       memory: 128Mi
     requests:

@@ -168,8 +168,8 @@ helm uninstall shadewright --namespace shadewright-system
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | executor.serviceAccount.annotations | object | `{}` | Further ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `executor.identity.azure.clientId`. |
-| executor.resources.limits.cpu | string | `"500m"` | CPU limit. `limits` is required and cannot be empty, so the container is never unbounded. |
-| executor.resources.limits.memory | string | `"128Mi"` | Memory limit. |
+| executor.resources.limits.cpu | string | `"500m"` | CPU limit (optional; removing it with `null` lets the container use idle CPU). |
+| executor.resources.limits.memory | string | `"128Mi"` | Memory limit. Required by the schema (a `null` override is refused), so the container's memory is never unbounded. |
 | executor.resources.requests.cpu | string | `"10m"` | CPU request. |
 | executor.resources.requests.memory | string | `"64Mi"` | Memory request. |
 | executor.extraArgs | list | `[]` | Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--namespace`, `--watch-namespaces`, `--cluster-id` and `--max-incidents`. |
@@ -189,8 +189,8 @@ helm uninstall shadewright --namespace shadewright-system
 | analyzer.watchNamespaces | list | empty (no namespace) | Unique namespace names, at most 256. The analyzer reads events, Pods and workloads only in these namespaces: the chart passes them as `--watch-namespaces` and binds the read-only watch ClusterRole with one RoleBinding in each (`kube-system` included only if you list it). Empty (the default) watches no namespace, never all of them: the analyzer starts, is Ready and records no Incident, and no RoleBinding is created. `*` is refused. |
 | analyzer.maxIncidents | string | null (the binary's default, 500) | Most Incidents kept in the operator namespace (`--max-incidents`), 1 or more. Null (unset) keeps the binary's default of 500. |
 | analyzer.serviceAccount.annotations | object | `{}` | Further ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `analyzer.identity.azure.clientId`. |
-| analyzer.resources.limits.cpu | string | `"500m"` | CPU limit. `limits` is required and cannot be empty, so the container is never unbounded. |
-| analyzer.resources.limits.memory | string | `"128Mi"` | Memory limit. |
+| analyzer.resources.limits.cpu | string | `"500m"` | CPU limit (optional; removing it with `null` lets the container use idle CPU). |
+| analyzer.resources.limits.memory | string | `"128Mi"` | Memory limit. Required by the schema (a `null` override is refused), so the container's memory is never unbounded. |
 | analyzer.resources.requests.cpu | string | `"10m"` | CPU request. |
 | analyzer.resources.requests.memory | string | `"64Mi"` | Memory request. |
 | analyzer.extraArgs | list | `[]` | Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--namespace`, `--watch-namespaces`, `--cluster-id` and `--max-incidents`. |

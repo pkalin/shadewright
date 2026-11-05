@@ -196,7 +196,8 @@ func holdsLock(rr *remediationv1alpha1.RemediationRequest) bool {
 // it open (HeadMoved, a refused close), one that could not see it (ChangeRequestGone), Failed or an unknown
 // phase included, may still be open (fail closed). The executor does not look at the pull request of a stopped
 // request again, so a close or merge made by a person after the stop is not seen; deleting the request closes
-// it and frees the lock. A request without a recorded pull request has none to hold the lock with.
+// it where the finalizer can (finalize) and frees the lock. A request without a recorded pull request has none
+// to hold the lock with.
 func prMayBeOpen(rr *remediationv1alpha1.RemediationRequest) bool {
 	if rr.Status.PullRequest == nil {
 		return false

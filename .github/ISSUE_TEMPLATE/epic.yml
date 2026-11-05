@@ -13,7 +13,11 @@ body:
     id: scope
     attributes:
       label: Scope
-      description: What belongs to this feature set, with links to the design sections.
+      description: >-
+        What belongs to this feature set, with links to the design sections. Cut it into slices by priority
+        (P1, P2, ...), each one shippable and testable on its own, so the epic is useful after P1. An idea not
+        yet decided starts with an assessment instead: the evidence and a go, clarify or stop decision, before
+        any task is filed.
     validations:
       required: true
   - type: textarea

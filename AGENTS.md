@@ -70,12 +70,18 @@ Every issue names the ADRs it is tied to:
 - If the work needs a decision no ADR covers, or would change an accepted one, the first task is to write
   that ADR (status Proposed), and the dependent tasks list it under "Depends on".
 
-- Pick an open issue labelled `agent-ready` whose "Depends on" issues are closed. Read the linked design
-  sections and the ADRs the issue and its epic list first.
+- Pick an open issue labelled `agent-ready` whose "Depends on" issues are closed, and whose "Decisions" are
+  answered. Read the linked design sections and the ADRs the issue and its epic list first.
 - One issue, one branch (`<issue-number>-<short-slug>`), one pull request with `Closes #<n>` in the body.
 - Stay inside the issue's scope. If something outside it needs to change, or the issue is ambiguous, say so
-  in the pull request or the issue instead of guessing.
-- Meet every acceptance criterion and run the "How to verify" commands before opening the pull request.
+  in the pull request or the issue instead of guessing: write `[NEEDS CLARIFICATION: <question>]` under "Open
+  points" and stop at that point.
+- Meet every acceptance criterion and run the "How to verify" commands before opening the pull request. Before
+  asking for review, converge: check each criterion and scope item of the issue against the code and list it in
+  the pull request with its evidence (a test, a command and its result), or as "not met" with a follow-up issue.
+- A bug fix shows the symptom reproduced before the fix (a test or a command) and a verdict: verified, partial
+  (what remains, with a follow-up issue) or failed. A test that fails without the fix is required too, but it
+  proves the test; the verdict is about the symptom that was reported.
 - If the work touches an invariant, say which one and how it still holds.
 
 ## Engineering and security practices

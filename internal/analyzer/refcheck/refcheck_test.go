@@ -44,7 +44,12 @@ import (
 //   - FailedMount: pkg/volume/util/operationexecutor/operation_generator.go records the event with
 //     VolumeToMount.GenerateError("MountVolume.SetUp failed", err), `<prefix> for volume "<v>" : <err>`
 //     (operation_executor.go generateVolumeMsg and errSuffix); pkg/volume/projected/projected.go aggregates the
-//     sources' errors with utilerrors.NewAggregate, `[<err>, <err>]` for several.
+//     sources' errors with utilerrors.NewAggregate, `[<err>, <err>]` for several. When the kubelet's wait for
+//     the pod's volumes times out, pkg/kubelet/kubelet.go SyncPod records another FailedMount, "Unable to attach
+//     or mount volumes: %v" around pkg/kubelet/volumemanager/volume_manager.go WaitForAttachAndMount's
+//     "unmounted volumes=%v, unattached volumes=%v, failed to process volumes=%v: %w". SyncPod waits for the
+//     volumes before containerRuntime.SyncPod pulls images or starts containers; until then a container status
+//     shows ContainerCreating or PodInitializing (pkg/kubelet/kubelet_pods.go convertToAPIContainerStatuses).
 const (
 	ns       = "demo"
 	podName  = "web-7d4b9c-x2x8q"
@@ -217,8 +222,12 @@ func TestUnknownWithoutEvidence(t *testing.T) {
 		{"no status, no event", testPod(), nil, KindSecret, secret, true},
 		{"no pod", nil, nil, KindSecret, secret, false},
 		{"another waiting reason", otherReason, nil, KindSecret, secret, true},
-		{"old event on a running pod", running,
-			[]eventsv1.Event{kubeletEvent(`MountVolume.SetUp failed for volume "creds" : secret "db-creds" not found`)}, KindSecret, secret, true},
+		{"recent event on a running pod", running, []eventsv1.Event{kubeletEvent(setUpNotFound)}, KindSecret, secret, true},
+		{"event older than the window on a pending pod", testPod(), []eventsv1.Event{func() eventsv1.Event {
+			e := kubeletEvent(setUpNotFound)
+			e.DeprecatedLastTimestamp = metav1.NewTime(now.Add(-EventWindow - time.Minute))
+			return e
+		}()}, KindSecret, secret, true},
 		{"optional reference", testPod(), nil, KindSecret, other, true},
 		{"unknown kind", testPod(), nil, Kind("ServiceAccount"), secret, false},
 		{"invalid name", testPod(), nil, KindSecret, "../db-creds", false},
@@ -228,6 +237,84 @@ func TestUnknownWithoutEvidence(t *testing.T) {
 			got := Check(c.pod, c.events, c.kind, c.ref, now)
 			if got.Answer != Unknown || got.Referenced != c.refd || got.What != "" || got.Source != "" {
 				t.Errorf("got %+v, want Unknown with Referenced %v and no evidence", got, c.refd)
+			}
+		})
+	}
+}
+
+// setUpNotFound is the kubelet's SetUp error note for testPod's secret volume when db-creds is missing.
+const setUpNotFound = `MountVolume.SetUp failed for volume "creds" : secret "db-creds" not found`
+
+// unmountedNote is the kubelet's note when its wait for the pod's volumes times out
+// (pkg/kubelet/kubelet.go SyncPod around volume_manager.go WaitForAttachAndMount), listing volumes.
+func unmountedNote(volumes string) string {
+	return "Unable to attach or mount volumes: unmounted volumes=[" + volumes +
+		"], unattached volumes=[], failed to process volumes=[]: context deadline exceeded"
+}
+
+// TestEventsIgnoredPastVolumeSetup: the kubelet mounts every volume before it pulls an image or starts any
+// container, so once a container runs, ran, or waits for anything but the default reasons, a FailedMount
+// Event is about a mount that has since succeeded.
+func TestEventsIgnoredPastVolumeSetup(t *testing.T) {
+	cases := []struct {
+		name string
+		set  func(*corev1.Pod)
+		want Answer
+	}{
+		{"container still creating", func(p *corev1.Pod) { waiting(p, false, app, "ContainerCreating", "") }, Missing},
+		{"waiting for init containers", func(p *corev1.Pod) { waiting(p, false, app, "PodInitializing", "") }, Missing},
+		{"image pull back-off", func(p *corev1.Pod) { waiting(p, false, app, "ImagePullBackOff", "Back-off pulling image") }, Unknown},
+		{"init container running", func(p *corev1.Pod) {
+			p.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: initName,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
+		}, Unknown},
+		{"init container terminated before", func(p *corev1.Pod) {
+			p.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: initName,
+				State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}},
+				LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}}}}
+		}, Unknown},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := testPod()
+			c.set(p)
+			if got := Check(p, []eventsv1.Event{kubeletEvent(setUpNotFound)}, KindSecret, secret, now); got.Answer != c.want {
+				t.Errorf("got %+v, want %s", got, c.want)
+			}
+		})
+	}
+}
+
+// TestStuckMountStaysMissing: on a pod stuck for long, client-go's spam filter (one budget for all Warning
+// Events about the pod) may leave the SetUp error unrefreshed for longer than EventWindow while the
+// kubelet's "unmounted volumes" Event is refreshed. That Event keeps the older SetUp error current for the
+// volumes it lists, unless a later SetUp error of the volume names another cause.
+func TestStuckMountStaysMissing(t *testing.T) {
+	at := func(note string, age time.Duration) eventsv1.Event {
+		e := kubeletEvent(note)
+		e.DeprecatedLastTimestamp = metav1.NewTime(now.Add(-age))
+		return e
+	}
+	oldSetUp := at(setUpNotFound, time.Hour)
+	cases := []struct {
+		name   string
+		events []eventsv1.Event
+		want   Answer
+	}{
+		{"old SetUp error, fresh timeout listing the volume", []eventsv1.Event{oldSetUp, at(unmountedNote("bundle creds"), time.Minute)}, Missing},
+		{"aggregated timeout note", []eventsv1.Event{oldSetUp, at("(combined from similar events): "+unmountedNote("creds"), time.Minute)}, Missing},
+		{"old SetUp error alone", []eventsv1.Event{oldSetUp}, Unknown},
+		{"fresh timeout for other volumes only", []eventsv1.Event{oldSetUp, at(unmountedNote("bundle"), time.Minute)}, Unknown},
+		{"old timeout", []eventsv1.Event{oldSetUp, at(unmountedNote("creds"), EventWindow+time.Minute)}, Unknown},
+		{"timeout list with a crafted prefix", []eventsv1.Event{oldSetUp, at(unmountedNote("xcreds"), time.Minute)}, Unknown},
+		{"a later SetUp error of the volume names another cause", []eventsv1.Event{oldSetUp,
+			at(`MountVolume.SetUp failed for volume "creds" : references non-existent secret key: tls.crt`, 30*time.Minute),
+			at(unmountedNote("creds"), time.Minute)}, Unknown},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := Check(testPod(), c.events, KindSecret, secret, now); got.Answer != c.want {
+				t.Errorf("got %+v, want %s", got, c.want)
 			}
 		})
 	}
@@ -351,6 +438,9 @@ func specNames(p *corev1.Pod) []string {
 				}
 			}
 			for _, e := range c.Env {
+				if e.ValueFrom == nil {
+					continue
+				}
 				if s := e.ValueFrom.SecretKeyRef; s != nil {
 					out = append(out, s.Name, s.Key)
 				}
@@ -364,6 +454,9 @@ func specNames(p *corev1.Pod) []string {
 		out = append(out, v.Name)
 		if v.Secret != nil {
 			out = append(out, v.Secret.SecretName)
+		}
+		if v.ConfigMap != nil {
+			out = append(out, v.ConfigMap.Name)
 		}
 		if v.Projected != nil {
 			for _, s := range v.Projected.Sources {
@@ -382,17 +475,24 @@ func specNames(p *corev1.Pod) []string {
 // FuzzCheck feeds untrusted status messages, Event notes, container names and asked names to the check: it
 // never panics, answers only Missing or Unknown, and every name in a Result comes from the pod spec.
 func FuzzCheck(f *testing.F) {
-	f.Add("app", `secret "db-creds" not found`, `MountVolume.SetUp failed for volume "creds" : secret "db-creds" not found`, "db-creds", true)
-	f.Add("migrate", `configmap "app-config" not found`, `MountVolume.SetUp failed for volume "bundle" : [configmap "app-config" not found, x]`, "app-config", false)
-	f.Add("app", "couldn't find key password in Secret demo/db-creds", "", "db-creds", true)
-	f.Add("evil", `secret "kube-admin" not found`, `MountVolume.SetUp failed for volume "evil" : secret "kube-admin" not found`, "kube-admin", true)
-	f.Fuzz(func(t *testing.T, container, message, note, ref string, isSecret bool) {
+	f.Add("app", `secret "db-creds" not found`, `MountVolume.SetUp failed for volume "creds" : secret "db-creds" not found`, "", "db-creds", true, true)
+	f.Add("app", "", `MountVolume.SetUp failed for volume "creds" : secret "db-creds" not found`, unmountedNote("creds"), "db-creds", true, false)
+	f.Add("migrate", `configmap "app-config" not found`, `MountVolume.SetUp failed for volume "bundle" : [configmap "app-config" not found, x]`, "", "app-config", false, false)
+	f.Add("app", "couldn't find key password in Secret demo/db-creds", "", "", "db-creds", true, true)
+	f.Add("evil", `secret "kube-admin" not found`, `MountVolume.SetUp failed for volume "evil" : secret "kube-admin" not found`, unmountedNote("evil"), "kube-admin", true, false)
+	f.Fuzz(func(t *testing.T, container, message, note, note2, ref string, isSecret, configError bool) {
 		kind := KindConfigMap
 		if isSecret {
 			kind = KindSecret
 		}
-		p := waiting(testPod(), false, container, "CreateContainerConfigError", message)
-		got := Check(p, []eventsv1.Event{kubeletEvent(note)}, kind, ref, now)
+		reason := "ContainerCreating"
+		if configError {
+			reason = "CreateContainerConfigError"
+		}
+		p := waiting(testPod(), false, container, reason, message)
+		older := kubeletEvent(note)
+		older.DeprecatedLastTimestamp = metav1.NewTime(now.Add(-time.Hour))
+		got := Check(p, []eventsv1.Event{kubeletEvent(note), older, kubeletEvent(note2)}, kind, ref, now)
 		if got.Answer != Missing && got.Answer != Unknown {
 			t.Fatalf("answer %q", got.Answer)
 		}

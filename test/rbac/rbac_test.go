@@ -434,25 +434,12 @@ func TestAnalyzerGrantsNothingOnSecrets(t *testing.T) {
 	roles := 0
 	for _, path := range files {
 		for _, u := range decodeAll(t, path) {
-			var rules []rbacv1.PolicyRule
-			switch u["kind"] {
-			case kindRole:
-				var r rbacv1.Role
-				if err := decodeInto(u, &r); err != nil {
-					t.Fatalf("%s: %v", path, err)
-				}
-				rules = r.Rules
-			case kindCR:
-				var r rbacv1.ClusterRole
-				if err := decodeInto(u, &r); err != nil {
-					t.Fatalf("%s: %v", path, err)
-				}
-				if r.AggregationRule != nil {
-					t.Errorf("%s: ClusterRole %s aggregates other roles, whose rules this test cannot see", path, r.Name)
-				}
-				rules = r.Rules
-			default:
+			rules, aggregated, ok := policyRules(t, path, u)
+			if !ok {
 				continue
+			}
+			if aggregated {
+				t.Errorf("%s: a ClusterRole aggregates other roles, whose rules this test cannot see", path)
 			}
 			roles++
 			for _, rule := range rules {
@@ -508,17 +495,13 @@ func TestLeaseNamesMatchTheBinaries(t *testing.T) {
 			if err := dec.Decode(&u); err != nil {
 				break
 			}
-			switch u["kind"] {
-			case "Lease":
+			if u["kind"] == "Lease" {
 				leaseName = "shadewright-" + u["metadata"].(map[string]any)["name"].(string)
-			case kindRole:
-				var r rbacv1.Role
-				if err := decodeInto(u, &r); err != nil {
-					t.Fatal(err)
-				}
-				for _, rule := range r.Rules {
-					resourceNames = append(resourceNames, rule.ResourceNames...)
-				}
+				continue
+			}
+			rules, _, _ := policyRules(t, id+"/leader_election.yaml", u)
+			for _, rule := range rules {
+				resourceNames = append(resourceNames, rule.ResourceNames...)
 			}
 		}
 		_ = f.Close()
@@ -879,6 +862,27 @@ func TestWatchBindingsMatchTheFlag(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("config/watch binds %v, --watch-namespaces is %v", got, want)
 	}
+}
+
+// policyRules returns the rules of a decoded Role or ClusterRole, whether it is a ClusterRole with an
+// aggregation rule, and false for any other kind. path is only for the failure message.
+func policyRules(t *testing.T, path string, u map[string]any) (rules []rbacv1.PolicyRule, aggregated, ok bool) {
+	t.Helper()
+	switch u["kind"] {
+	case kindRole:
+		var r rbacv1.Role
+		if err := decodeInto(u, &r); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		return r.Rules, false, true
+	case kindCR:
+		var r rbacv1.ClusterRole
+		if err := decodeInto(u, &r); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		return r.Rules, r.AggregationRule != nil, true
+	}
+	return nil, false, false
 }
 
 func decodeAll(t *testing.T, path string) []map[string]any {

@@ -29,12 +29,17 @@ limitations under the License.
 //   - a container (or init container) of the pod waiting with reason CreateContainerConfigError and a message
 //     that is exactly the kubelet's error for that container's own non-optional env or envFrom reference: the
 //     object not found, or a referenced key not in it;
-//   - a Warning FailedMount Event from the kubelet about this pod (same namespace, name and UID), last observed
-//     within [EventWindow], while the pod is Pending, whose note is exactly the kubelet's error for one of the pod's own non-optional secret,
-//     configMap or projected volume sources: the object not found.
+//   - while the pod is Pending and none of its containers got past volume setup, a Warning FailedMount Event
+//     from the kubelet about this pod (same namespace, name and UID) whose note is exactly the kubelet's error
+//     for one of the pod's own non-optional secret, configMap or projected volume sources: the object not
+//     found. It must be the latest SetUp error of that volume, and the volume must still fail: that Event, or
+//     the kubelet's "unmounted volumes" Event listing the volume, was last observed within [EventWindow].
+//
+// Nothing is parsed out of a message but the list of unmounted volumes, and its names are only compared with
+// those of the pod spec.
 //
 // Untrusted input (invariant 4): the pod status and every Event field are untrusted; anyone who may create
-// Events in the namespace can write one. Nothing is parsed out of a message. The check builds the exact
+// Events in the namespace can write one. No name is taken from a message. The check builds the exact
 // texts the kubelet would write for each reference in the pod spec and compares them with the message, so
 // the name, key, container and volume in a [Result] always come from the pod spec, and a crafted message
 // cannot make the check name an object the pod does not reference. A crafted Event can still make a

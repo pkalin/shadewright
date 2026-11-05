@@ -70,7 +70,7 @@ const (
 )
 
 // Result is the answer for one reference. Every string in it is either a constant of this package or was
-// copied from the pod spec after it was checked against its API pattern, so its size is bounded: at most
+// copied from the pod spec, whose names and keys the API server validated, so its size is bounded: at most
 // four names of 253 bytes. It never holds text from a status message or an Event.
 type Result struct {
 	Answer Answer
@@ -90,12 +90,17 @@ type Result struct {
 	Volume string
 }
 
-// EventWindow is how recent a FailedMount Event must be to count, by its last observation. A mount that still
-// fails keeps its Event fresh: the kubelet retries a failed mount at least every 2m2s
-// (pkg/util/goroutinemap/exponentialbackoff maxDurationBeforeRetry), and client-go's recorder lets at least
-// one Event or count update per object through every 5 minutes once its burst of 25 is spent
-// (tools/record/events_cache.go defaultSpamBurst and defaultSpamQPS). An older Event may be about a mount
-// that has since succeeded while the pod waits for something else.
+// EventWindow is how recent the kubelet's FailedMount evidence must be, by its last observation, to show that
+// a volume still fails to mount. While a mount fails the kubelet writes two FailedMount Events about the pod:
+// the SetUp error, at each retry of the mount (at least every 2m2s, pkg/util/goroutinemap/exponentialbackoff
+// maxDurationBeforeRetry), and "Unable to attach or mount volumes: unmounted volumes=[...]" each time its
+// wait for the pod's volumes times out (2m3s, pkg/kubelet/volumemanager/volume_manager.go
+// podAttachAndMountTimeout, recorded by pkg/kubelet/kubelet.go SyncPod). client-go's recorder spends one spam
+// budget on all Warning Events about the same object, whatever their reason or message (tools/record/
+// events_cache.go getSpamKey: source, object and type), and once its burst of 25 is gone lets one through
+// every 5 minutes (defaultSpamBurst, defaultSpamQPS). So either Event may go unrefreshed for a long time, but
+// one of the two is refreshed at least every 5 minutes; 10 minutes leave one spare refill. A SetUp error older
+// than the window still counts while a fresh "unmounted volumes" Event lists its volume (fromEvents).
 const EventWindow = 10 * time.Minute
 
 // maxMessage is the longest status message or Event note the check compares, in bytes. The texts it looks
@@ -116,19 +121,24 @@ const (
 	kindPod          = "Pod"
 	// combinedPrefix is what client-go's tools/record/events_cache.go puts before an aggregated message.
 	combinedPrefix = "(combined from similar events): "
+	// unmountedPrefix starts the note of the kubelet's FailedMount Event when its wait for the pod's volumes
+	// times out: pkg/kubelet/kubelet.go SyncPod records "Unable to attach or mount volumes: %v" around
+	// pkg/kubelet/volumemanager/volume_manager.go WaitForAttachAndMount's error, "unmounted volumes=%v,
+	// unattached volumes=%v, failed to process volumes=%v: %w", where %v of a []string of volume names (DNS
+	// labels, so no blanks or brackets) is "[a b]".
+	unmountedPrefix = "Unable to attach or mount volumes: unmounted volumes=["
+	// The default waiting reasons of a container whose pod the kubelet has not started yet
+	// (pkg/kubelet/kubelet_pods.go ContainerCreating and PodInitializing).
+	waitingContainerCreating = "ContainerCreating"
+	waitingPodInitializing   = "PodInitializing"
 )
 
-var (
-	// The API's patterns: an object name is a DNS subdomain of at most 253 bytes, a container or volume name a
-	// DNS label of at most 63, a ConfigMap or Secret key [-._a-zA-Z0-9]+ of at most 253.
-	subdomainPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
-	labelPattern     = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
-	keyPattern       = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
-)
+// subdomainPattern is the API's pattern of an object name, a DNS subdomain of at most 253 bytes. Only the
+// asked name, which is untrusted, is checked against it: the names in the pod spec were validated by the API
+// server.
+var subdomainPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
 
-func validName(s string) bool  { return len(s) <= 253 && subdomainPattern.MatchString(s) }
-func validLabel(s string) bool { return len(s) <= 63 && labelPattern.MatchString(s) }
-func validKey(s string) bool   { return len(s) <= 253 && keyPattern.MatchString(s) }
+func validName(s string) bool { return len(s) <= 253 && subdomainPattern.MatchString(s) }
 
 // notFoundTexts are the kubelet's errors for a missing object, built for one name from the spec.
 //
@@ -153,26 +163,27 @@ func missingKeyText(kind Kind, namespace, name, key string) string {
 }
 
 // Check answers whether the object of kind and name, as the pod references it, is missing. events are the
-// Events the analyzer read in the pod's namespace; those about other objects, and those last observed more
-// than [EventWindow] before now, are skipped. name is untrusted (it may come from a model) and is only
-// compared with the names in the pod spec.
+// Events the analyzer read in the pod's namespace; those about other objects are skipped, and an Event counts
+// only while it is fresh ([EventWindow]) and the pod has not got past volume setup. name is untrusted (it may
+// come from a model) and is only compared with the names in the pod spec.
 func Check(pod *corev1.Pod, events []eventsv1.Event, kind Kind, name string, now time.Time) Result {
 	if kind != KindSecret && kind != KindConfigMap {
 		return Result{Answer: Unknown}
 	}
 	unknown := Result{Answer: Unknown, Kind: kind}
-	if pod == nil || !validName(name) || !validLabel(pod.Namespace) {
+	if pod == nil || !validName(name) {
 		return unknown
 	}
 	refs := references(pod, kind, name)
-	if len(refs.containers) == 0 && len(refs.volumes) == 0 && !refs.optionalOnly {
+	if len(refs.containers) == 0 && len(refs.volumes) == 0 && !refs.anyOptional {
 		return unknown
 	}
 	unknown.Name, unknown.Referenced = name, true
-	if r, ok := fromStatus(pod, kind, name, refs); ok {
+	texts := notFoundTexts(kind, name)
+	if r, ok := fromStatus(pod, kind, name, texts, refs); ok {
 		return r
 	}
-	if r, ok := fromEvents(pod, events, kind, name, refs, now); ok {
+	if r, ok := fromEvents(pod, events, kind, name, texts, refs, now); ok {
 		return r
 	}
 	return unknown
@@ -183,8 +194,9 @@ func Check(pod *corev1.Pod, events []eventsv1.Event, kind Kind, name string, now
 type refs struct {
 	containers map[string][]string
 	volumes    []volumeRef
-	// optionalOnly is set when the object is referenced, but only as optional.
-	optionalOnly bool
+	// anyOptional is set when at least one reference is marked optional. The kubelet ignores a missing object
+	// there, so such a reference is never evidence; it still makes the object referenced.
+	anyOptional bool
 }
 
 func references(pod *corev1.Pod, kind Kind, name string) refs {
@@ -246,7 +258,7 @@ func (r *refs) addVolume(v corev1.Volume, kind Kind, name string) {
 
 func (r *refs) noteContainer(container, key string, optional bool) {
 	if optional {
-		r.optionalOnly = true
+		r.anyOptional = true
 		return
 	}
 	keys := r.containers[container]
@@ -258,7 +270,7 @@ func (r *refs) noteContainer(container, key string, optional bool) {
 
 func (r *refs) noteVolume(volume string, projected, optional bool) {
 	if optional {
-		r.optionalOnly = true
+		r.anyOptional = true
 		return
 	}
 	r.volumes = append(r.volumes, volumeRef{name: volume, projected: projected})
@@ -272,11 +284,11 @@ type volumeRef struct {
 
 // fromStatus looks for a container waiting with CreateContainerConfigError whose message is the kubelet's
 // error for one of that container's own references.
-func fromStatus(pod *corev1.Pod, kind Kind, name string, r refs) (Result, bool) {
+func fromStatus(pod *corev1.Pod, kind Kind, name string, texts []string, r refs) (Result, bool) {
 	for _, list := range [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
 		for _, cs := range list {
 			keys, ok := r.containers[cs.Name]
-			if !ok || !validLabel(cs.Name) || cs.State.Waiting == nil {
+			if !ok || cs.State.Waiting == nil {
 				continue
 			}
 			w := cs.State.Waiting
@@ -285,12 +297,12 @@ func fromStatus(pod *corev1.Pod, kind Kind, name string, r refs) (Result, bool) 
 			}
 			base := Result{Answer: Missing, Kind: kind, Name: name, Referenced: true,
 				Source: SourceContainerStatus, Container: cs.Name}
-			if slices.Contains(notFoundTexts(kind, name), w.Message) {
+			if slices.Contains(texts, w.Message) {
 				base.What = WhatObject
 				return base, true
 			}
 			for _, k := range keys {
-				if validKey(k) && w.Message == missingKeyText(kind, pod.Namespace, name, k) {
+				if w.Message == missingKeyText(kind, pod.Namespace, name, k) {
 					base.What, base.Key = WhatKey, k
 					return base, true
 				}
@@ -300,42 +312,117 @@ func fromStatus(pod *corev1.Pod, kind Kind, name string, r refs) (Result, bool) 
 	return Result{}, false
 }
 
-// fromEvents looks for a recent kubelet FailedMount Event about this pod whose note is the kubelet's error for
-// one of the pod's own volumes that reference the object. Only a Pending pod is checked: a volume that failed
-// to mount keeps the pod Pending, so on a running pod such an Event is old. An Event last observed before
-// now - [EventWindow], or with no time at all, is skipped too.
+// fromEvents looks for the kubelet's FailedMount Events about this pod that show one of the pod's own volumes
+// that reference the object failing to mount because the object is not found. Events count only while the
+// pod is Pending and no container has got past volume setup ([pastVolumeSetup]): once the volumes are
+// mounted, such an Event is old.
 //
-// The note's shape: pkg/volume/util/operationexecutor/operation_generator.go GenerateMountVolumeFunc records
-// VolumeToMount.GenerateError("MountVolume.SetUp failed", err), which operation_executor.go generateVolumeMsg
-// and errSuffix write as `MountVolume.SetUp failed for volume "<volume>" : <err>`. For a secret or configMap
-// volume err is the manager's NotFound unchanged (pkg/volume/secret/secret.go and
-// pkg/volume/configmap/configmap.go SetUpAt); for a projected volume it is
-// apimachinery's errors.NewAggregate of the sources' errors (pkg/volume/projected/projected.go collectData),
-// which is the error itself when there is one, or `[<err>, <err>]` when there are several different ones.
-func fromEvents(pod *corev1.Pod, events []eventsv1.Event, kind Kind, name string, r refs, now time.Time) (Result, bool) {
-	if len(r.volumes) == 0 || pod.Status.Phase != corev1.PodPending || pod.UID == "" {
+// For one volume, the evidence is the latest SetUp error Event of that volume (by last observation, so an
+// error the kubelet wrote later for another cause wins), when its note is the kubelet's not found error for
+// the object, and the volume still fails now: that Event, or an "unmounted volumes" Event that lists the
+// volume, was last observed within [EventWindow]. Events with no time at all are skipped.
+//
+// The SetUp note's shape: pkg/volume/util/operationexecutor/operation_generator.go GenerateMountVolumeFunc
+// records VolumeToMount.GenerateError("MountVolume.SetUp failed", err), which operation_executor.go
+// generateVolumeMsg and errSuffix write as `MountVolume.SetUp failed for volume "<volume>" : <err>`. For a
+// secret or configMap volume err is the manager's NotFound unchanged (pkg/volume/secret/secret.go and
+// pkg/volume/configmap/configmap.go SetUpAt); for a projected volume it is apimachinery's errors.NewAggregate
+// of the sources' errors (pkg/volume/projected/projected.go collectData), which is the error itself when
+// there is one, or `[<err>, <err>]` when there are several different ones.
+func fromEvents(pod *corev1.Pod, events []eventsv1.Event, kind Kind, name string, texts []string, r refs,
+	now time.Time) (Result, bool) {
+	if len(r.volumes) == 0 || pod.Status.Phase != corev1.PodPending || pod.UID == "" || pastVolumeSetup(pod) {
 		return Result{}, false
 	}
-	texts := notFoundTexts(kind, name)
+	cutoff := now.Add(-EventWindow)
+	type seen struct {
+		latest   time.Time // last observation of the latest SetUp error Event of the volume
+		missing  bool      // whether that Event is the not found error for the object
+		fresh    bool      // whether the volume was reported failing within the window
+		setUpPfx string
+	}
+	vols := make([]seen, len(r.volumes))
+	for i, v := range r.volumes {
+		vols[i].setUpPfx = fmt.Sprintf("MountVolume.SetUp failed for volume %q : ", v.name)
+	}
 	for i := range events {
 		ev := &events[i]
-		if !aboutPod(ev, pod) || len(ev.Note) > maxMessage || lastObserved(ev).Before(now.Add(-EventWindow)) {
+		t := lastObserved(ev)
+		if !aboutPod(ev, pod) || len(ev.Note) > maxMessage || t.IsZero() {
 			continue
 		}
 		note := strings.TrimPrefix(ev.Note, combinedPrefix)
-		for _, v := range r.volumes {
-			if !validLabel(v.name) {
+		unmounted, isUnmounted := unmountedVolumes(note)
+		for j, v := range r.volumes {
+			sv := &vols[j]
+			if isUnmounted {
+				if !t.Before(cutoff) && slices.Contains(unmounted, v.name) {
+					sv.fresh = true
+				}
 				continue
 			}
-			rest, ok := strings.CutPrefix(note, fmt.Sprintf("MountVolume.SetUp failed for volume %q : ", v.name))
-			if !ok || !matchesError(rest, texts, v.projected) {
+			rest, ok := strings.CutPrefix(note, sv.setUpPfx)
+			if !ok {
 				continue
 			}
+			match := matchesError(rest, texts, v.projected)
+			switch {
+			case t.After(sv.latest):
+				sv.latest, sv.missing = t, match
+			case t.Equal(sv.latest) && !match:
+				// Two errors seen at the same time: not sure which is current.
+				sv.missing = false
+			}
+			if match && !t.Before(cutoff) {
+				sv.fresh = true
+			}
+		}
+	}
+	for j, v := range r.volumes {
+		if vols[j].missing && vols[j].fresh {
 			return Result{Answer: Missing, Kind: kind, Name: name, Referenced: true, What: WhatObject,
 				Source: SourceEvent, Volume: v.name}, true
 		}
 	}
 	return Result{}, false
+}
+
+// unmountedVolumes returns the volume names listed after "unmounted volumes=" in the kubelet's timeout note,
+// and false for any other note. The names are only compared with those of the pod spec.
+func unmountedVolumes(note string) ([]string, bool) {
+	rest, ok := strings.CutPrefix(note, unmountedPrefix)
+	if !ok {
+		return nil, false
+	}
+	list, _, ok := strings.Cut(rest, "]")
+	if !ok {
+		return nil, false
+	}
+	return strings.Fields(list), true
+}
+
+// pastVolumeSetup reports whether any container or init container of the pod got past volume setup. The
+// kubelet waits for all of the pod's volumes to mount (pkg/kubelet/kubelet.go SyncPod,
+// volumeManager.WaitForAttachAndMount) before it pulls an image or starts any container
+// (containerRuntime.SyncPod), and until then a container shows only the default waiting reason
+// (ContainerCreating, or PodInitializing for the containers of a pod with init containers,
+// pkg/kubelet/kubelet_pods.go convertToAPIContainerStatuses). So a
+// container that runs, ran, or waits for any other reason (ImagePullBackOff, CreateContainerConfigError, ...)
+// means the volumes are mounted, and an older FailedMount Event is stale.
+func pastVolumeSetup(pod *corev1.Pod) bool {
+	for _, list := range [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
+		for _, cs := range list {
+			st := cs.State
+			if st.Running != nil || st.Terminated != nil || cs.LastTerminationState.Terminated != nil {
+				return true
+			}
+			if w := st.Waiting; w != nil && w.Reason != "" && w.Reason != waitingContainerCreating &&
+				w.Reason != waitingPodInitializing {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // lastObserved is the latest time the Event says it was seen: its series' last observation, its event time,

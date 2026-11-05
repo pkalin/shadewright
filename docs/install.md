@@ -14,7 +14,7 @@ Observe-only means the analyzer watches the namespaces you name and records `Inc
 
 What you need:
 
-- A cluster with `kubectl` access that may create CRDs, ClusterRoles and a namespace. The CRDs use CEL validation rules, so the API server must support them. The tested Kubernetes versions are in the [compatibility](reference/compatibility.md) page; the envtest suites run against Kubernetes 1.37.
+- A cluster with `kubectl` access that may create CRDs, ClusterRoles and a namespace. Kubernetes 1.32 or later: the executor lists requests with CRD field selectors. The CRDs use CEL validation rules, so the API server must support them. The tested Kubernetes versions are in the [compatibility](reference/compatibility.md) page; the envtest suites run against Kubernetes 1.37.
 - The namespaces to watch already exist.
 - `kubectl` with built-in kustomize (`kubectl apply -k`).
 

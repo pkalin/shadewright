@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -99,9 +100,7 @@ var closedReasons = map[string]bool{
 // else, a stop that left the pull request open (HeadMoved, a refused close), one the executor could not find
 // (ChangeRequestGone), Failed or an unknown phase included, may still be open (fail closed).
 func prMayBeOpen(rr *remediationv1alpha1.RemediationRequest) bool {
-	switch rr.Status.Phase {
-	case remediationv1alpha1.PhaseMerged, remediationv1alpha1.PhaseWaitingForDelivery,
-		remediationv1alpha1.PhaseVerifying, remediationv1alpha1.PhaseSucceeded, remediationv1alpha1.PhaseSuperseded:
+	if slices.Contains(successPhases, rr.Status.Phase) || rr.Status.Phase == remediationv1alpha1.PhaseSuperseded {
 		return false
 	}
 	if rr.Status.PullRequest == nil {
@@ -119,10 +118,11 @@ func settleLock(rr *remediationv1alpha1.RemediationRequest) {
 	}
 }
 
-// backfillLock writes status.holdsTarget once on a request that went through the policy check before the field
-// existed, from derivedHold, so the requests of an older release keep the lock their status gives them.
+// backfillLock writes status.holdsTarget once on a request decided before the field existed, from derivedHold,
+// so the requests of an older release keep the lock their status gives them; one refused then (ended without a
+// plan digest) gets false, so the limits' lock list (status.holdsTarget!=false) stops reading it.
 func (r *RemediationRequestReconciler) backfillLock(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	if rr.Status.HoldsTarget != nil || rr.Status.PlanDigest == "" {
+	if rr.Status.HoldsTarget != nil || (rr.Status.PlanDigest == "" && !ended(rr.Status.Phase)) {
 		return nil
 	}
 	rr.Status.HoldsTarget = new(derivedHold(rr))

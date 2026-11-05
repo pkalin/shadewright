@@ -12,7 +12,7 @@ This chart installs the two components (the analyzer and the executor), their RB
 
 ## Prerequisites
 
-- Kubernetes version `>=1.28.0-0` (the `kubeVersion` of Chart.yaml).
+- Kubernetes version `>=1.32.0-0` (the `kubeVersion` of Chart.yaml).
 - Flux, the GitOps controller that deploys the pull requests the executor opens (Argo CD is not supported yet).
 - Workload identity for the executor: a managed identity (Azure) with a federated credential for the executor ServiceAccount, allowed to sign with the GitHub App key in Key Vault. Its client ID is `executor.identity.azure.clientId`. The ServiceAccount names derive from the release name: install as release `shadewright` in the namespace `shadewright-system` to get `shadewright-executor` and `shadewright-analyzer`, and check them with `helm template` before you create the credential.
 - The images: the published chart runs the release's signed images by digest (written into its `values.yaml` when the chart is published). A chart from a source checkout has no digests and refuses to render until you set them, or opt in with `image.allowTag: true` to run the `appVersion` tag with images built from that same checkout (the v0.1.0 images stop at start with an empty watch list).

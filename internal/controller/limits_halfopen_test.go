@@ -116,7 +116,7 @@ func TestBreakerHalfOpenLetsOneProbeThrough(t *testing.T) {
 	expectProbe(t, got2, false)
 
 	later := limitsNow.Add(time.Hour)
-	restarted := &RemediationRequestReconciler{Client: c, APIReader: c, Scheme: c.Scheme(), Source: r.Source,
+	restarted := &RemediationRequestReconciler{Client: c, APIReader: &apiServerReader{Reader: c}, Scheme: c.Scheme(), Source: r.Source,
 		BreakerCooldown: halfOpenCooldown, Now: func() time.Time { return later }}
 	for _, phase := range []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhasePRCreated,
 		remediationv1alpha1.PhaseAwaitingApproval, remediationv1alpha1.PhaseAutoMergeQueued} {
@@ -258,7 +258,7 @@ func TestBreakerSkewedLeadersAdmitOneProbe(t *testing.T) {
 			leaderA.Now = func() time.Time { return limitsNow.Add(time.Minute) }
 			_, got, err := reconcileLimits(t, leaderA, rr)
 			expectAdmitted(t, err, got)
-			leaderB := &RemediationRequestReconciler{Client: c, APIReader: c, Scheme: c.Scheme(),
+			leaderB := &RemediationRequestReconciler{Client: c, APIReader: &apiServerReader{Reader: c}, Scheme: c.Scheme(),
 				Source: leaderA.Source, BreakerCooldown: halfOpenCooldown,
 				Now: func() time.Time { return limitsNow.Add(skew) }}
 			res, got2, err := reconcileLimits(t, leaderB, rr2)

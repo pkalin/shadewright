@@ -164,7 +164,7 @@ func newKedaWorld(t *testing.T, conditions []any) *kedaWorld {
 
 func (w *kedaWorld) reconciler() *RemediationRequestReconciler {
 	return &RemediationRequestReconciler{
-		Client: w.c, APIReader: w.c, Scheme: w.c.Scheme(),
+		Client: w.c, APIReader: &apiServerReader{Reader: w.c}, Scheme: w.c.Scheme(),
 		Source: sourceFunc(func(ctx context.Context, _ sourcemap.Input) (sourcemap.Result, error) {
 			head, _ := w.git.BranchHead(ctx, mainBranch)
 			return sourcemap.Result{Outcome: sourcemap.Resolved, Reason: sourcemap.ReasonResolved,

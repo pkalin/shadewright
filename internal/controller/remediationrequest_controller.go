@@ -302,6 +302,9 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 		// The lock on the target is taken in the same status write (targetlock.go).
 		rr.Status.HoldsTarget = new(true)
+	} else if rr.Status.HoldsTarget == nil {
+		// A refusal never takes the lock; false keeps it out of the limits' lock list (limitsSelectors).
+		rr.Status.HoldsTarget = new(false)
 	}
 
 	rr.Status.ObservedGeneration = rr.Generation

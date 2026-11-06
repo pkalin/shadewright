@@ -19,6 +19,7 @@ package azurekv
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -379,34 +380,95 @@ func TestSignEmptyAnswerAfterDeadline(t *testing.T) {
 	}
 }
 
+// guardDo calls guardTransport directly, for Key Vault or Entra ID, with a request whose context is ctx and
+// an inner transport that returns resp. It returns the result and what was recorded for the token request.
+func guardDo(t *testing.T, ctx context.Context, entra bool, resp *http.Response) (*http.Response, *tokenRequest, error) {
+	t.Helper()
+	tr := &tokenRequest{}
+	req, err := http.NewRequestWithContext(context.WithValue(ctx, tokenRequestKey{}, tr), http.MethodPost,
+		"https://"+testHost+"/keys/k/sign", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := guardTransport{entra: entra, inner: transporterFunc(func(req *http.Request) (*http.Response, error) {
+		resp.Request = req
+		return resp, nil
+	})}
+	got, err := g.Do(req)
+	return got, tr, err
+}
+
+// safeTestChallenge is a Key Vault challenge that safeChallenge accepts for testHost.
+const safeTestChallenge = `Bearer authorization="https://login.microsoftonline.com/tenant", resource="https://vault.azure.net"`
+
 // TestGuardTransportEmptyAnswerAfterDeadline calls guardTransport directly, for Key Vault and for Entra
-// ID, with a response without a body returned after the request's deadline: it returns the deadline and,
-// for a token request, records it, so the credential classes it as a transient deadline and not by the
-// status.
+// ID, with a response without a body (http.NoBody or a nil Body) of several statuses, including a 401 with
+// a challenge the Key Vault check accepts. Returned after the request's deadline, it becomes the deadline
+// and, for a token request, is recorded as such, so the credential classes it as a transient deadline and
+// not by the status. Returned in time, it passes through unchanged and its status is recorded.
 func TestGuardTransportEmptyAnswerAfterDeadline(t *testing.T) {
-	for _, entra := range []bool{false, true} {
-		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
-		tr := &tokenRequest{}
-		req, err := http.NewRequestWithContext(context.WithValue(ctx, tokenRequestKey{}, tr), http.MethodPost,
-			"https://"+testHost+"/keys/k/sign", nil)
-		if err != nil {
-			t.Fatal(err)
+	cases := []struct {
+		name   string
+		status int
+		header http.Header
+		body   io.ReadCloser
+	}{
+		{"400 NoBody", http.StatusBadRequest, http.Header{}, http.NoBody},
+		{"200 nil body", http.StatusOK, http.Header{}, nil},
+		{"404 NoBody", http.StatusNotFound, http.Header{}, http.NoBody},
+		{"401 safe challenge", http.StatusUnauthorized, http.Header{"Www-Authenticate": {safeTestChallenge}}, http.NoBody},
+	}
+	for _, c := range cases {
+		for _, entra := range []bool{false, true} {
+			for _, late := range []bool{true, false} {
+				name := fmt.Sprintf("%s entra=%v late=%v", c.name, entra, late)
+				ctx, cancel := context.WithCancel(context.Background())
+				if late {
+					ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				}
+				resp := &http.Response{StatusCode: c.status, Header: c.header, Body: c.body}
+				got, tr, err := guardDo(t, ctx, entra, resp)
+				cancel()
+				if late {
+					if got != nil || !errors.Is(err, context.DeadlineExceeded) {
+						t.Errorf("%s: resp %v, err = %v; want no response and context.DeadlineExceeded", name, got, err)
+					}
+					if entra {
+						if cause, retry := entraCause(tr.transportErr); cause != context.DeadlineExceeded || !retry || tr.status != 0 {
+							t.Errorf("%s: recorded %+v, class %v, %v; want a transient deadline and no status", name, tr, cause, retry)
+						}
+					}
+					continue
+				}
+				if err != nil || got != resp || got.StatusCode != c.status || got.Body != c.body {
+					t.Errorf("%s: resp %+v, err = %v; want the response unchanged", name, got, err)
+				}
+				if entra && (tr.status != c.status || tr.transportErr != nil) {
+					t.Errorf("%s: recorded %+v; want status %d and no error", name, tr, c.status)
+				}
+			}
 		}
-		g := guardTransport{entra: entra, inner: transporterFunc(func(req *http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{}, Request: req,
-				Body: http.NoBody}, nil
-		})}
-		resp, err := g.Do(req)
-		cancel()
-		if resp != nil {
-			t.Errorf("entra=%v: got a response, want none", entra)
-		}
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("entra=%v: err = %v, want context.DeadlineExceeded", entra, err)
-		}
-		if entra {
-			if cause, retry := entraCause(tr.transportErr); cause != context.DeadlineExceeded || !retry || tr.status != 0 {
-				t.Errorf("recorded %+v, class %v, %v; want a transient deadline and no status", tr, cause, retry)
+	}
+}
+
+// TestGuardTransportEmptyAnswerAfterCancel calls guardTransport directly, for Key Vault and for Entra ID,
+// with a response without a body returned after the caller cancelled: it returns the cancellation, which
+// azcore does not retry, and for a token request records it, so the credential classes it as a final
+// cancellation and not by the status (an empty 200 would otherwise be "a successful answer that cannot be
+// used", which is transient).
+func TestGuardTransportEmptyAnswerAfterCancel(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusServiceUnavailable} {
+		for _, entra := range []bool{false, true} {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			got, tr, err := guardDo(t, ctx, entra, &http.Response{StatusCode: status, Header: http.Header{}, Body: http.NoBody})
+			if got != nil || !errors.Is(err, context.Canceled) || providers.IsRetryable(err) {
+				t.Errorf("%d entra=%v: resp %v, err = %v; want no response and a final context.Canceled", status, entra, got, err)
+			}
+			if entra {
+				if cause, retry := entraCause(tr.transportErr); cause != context.Canceled || retry || tr.status != 0 {
+					t.Errorf("%d: recorded %+v, class %v, %v; want a final cancellation and no status", status, tr, cause, retry)
+				}
 			}
 		}
 	}

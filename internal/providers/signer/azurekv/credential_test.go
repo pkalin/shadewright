@@ -345,20 +345,44 @@ func TestCredentialCancelBeatsAnswer(t *testing.T) {
 	}
 }
 
-// lateRefusal hands out an already expired token on its first call, so that Sign learns the Key Vault
-// challenge and the next Sign asks for a token again. Later calls wait for the context to end and then
-// return Entra's refusal, as when a 400 arrives just as the deadline passes.
+// lateRefusal hands out valid tokens that expire after lateRefusalTokenLife until armed, so that a Sign
+// learns the Key Vault challenge and the test can wait for the token to expire. Once armed, it waits for
+// the context to end and then returns Entra's refusal, as when a 400 arrives just as the deadline passes.
 type lateRefusal struct {
-	status int
-	calls  atomic.Int32
+	status   int
+	armed    atomic.Bool
+	refusals atomic.Int32
+	mu       sync.Mutex
+	// expiresOn is the expiry of the last token handed out.
+	expiresOn time.Time
 }
 
+// lateRefusalTokenLife is how long a token of lateRefusal is valid: long enough to be valid when azcore
+// receives it, short enough that the test waits little for it to expire.
+const lateRefusalTokenLife = 10 * time.Millisecond
+
 func (l *lateRefusal) GetToken(ctx context.Context, _ policy.TokenRequestOptions) (azcore.AccessToken, error) {
-	if l.calls.Add(1) == 1 {
-		return azcore.AccessToken{Token: testToken, ExpiresOn: time.Now().Add(-time.Minute)}, nil
+	if !l.armed.Load() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.expiresOn = time.Now().Add(lateRefusalTokenLife)
+		return azcore.AccessToken{Token: testToken, ExpiresOn: l.expiresOn}, nil
 	}
+	l.refusals.Add(1)
 	<-ctx.Done()
 	return azcore.AccessToken{}, authFailure(l.status, "")
+}
+
+// expire waits until the last token handed out has expired and arms the refusal, so the next Sign must ask
+// for a token again.
+func (l *lateRefusal) expire() {
+	l.mu.Lock()
+	expiresOn := l.expiresOn
+	l.mu.Unlock()
+	for !time.Now().After(expiresOn) {
+		time.Sleep(time.Until(expiresOn) + time.Millisecond)
+	}
+	l.armed.Store(true)
 }
 
 // atTryDeadline returns a context that gives one Sign call a per-try timeout of 1 ms and no retry. It is
@@ -370,8 +394,9 @@ func atTryDeadline() context.Context {
 
 // TestSignCredentialAnswerBeatsDeadline checks that Entra's answer decides the class even when the
 // per-try deadline has passed by the time it arrives: a refusal stays final, throttling stays retryable.
-// The first Sign learns the challenge under a generous try timeout; the second asks for a token first thing
-// in its try, and the credential answers only once that try's deadline has passed. Before #447 the test ran
+// The first Sign learns the challenge under a generous try timeout with a valid token; once that token has
+// expired, the second Sign asks for a token first thing in its try, and the credential answers only once
+// that try's deadline has passed. Before #447 the test ran
 // the challenge round trip inside a 50 ms try, which a slow TLS handshake (race detector, one CPU) could
 // outlast, giving the try's own retryable deadline instead of the answer.
 func TestSignCredentialAnswerBeatsDeadline(t *testing.T) {
@@ -388,12 +413,13 @@ func TestSignCredentialAnswerBeatsDeadline(t *testing.T) {
 		if _, err := s.Sign(context.Background(), digestOf("x")); err != nil {
 			t.Fatalf("%d: first Sign: %v", status, err)
 		}
+		cred.expire()
 		_, err := s.Sign(atTryDeadline(), digestOf("x"))
 		if providers.IsRetryable(err) != retryable || errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("%d: err = %v, want retryable %v and no deadline error", status, err, retryable)
 		}
-		if n := cred.calls.Load(); n != 2 {
-			t.Errorf("%d: %d token requests, want 2", status, n)
+		if n := cred.refusals.Load(); n != 1 {
+			t.Errorf("%d: %d token requests after the token expired, want 1", status, n)
 		}
 		assertCleanChain(t, http.StatusText(status), err)
 	}

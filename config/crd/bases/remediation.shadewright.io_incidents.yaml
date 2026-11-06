@@ -22,6 +22,7 @@ spec:
       type: string
     - jsonPath: .spec.subject.kind
       name: Kind
+      priority: 1
       type: string
     - jsonPath: .spec.subject.name
       name: Subject
@@ -29,11 +30,29 @@ spec:
     - jsonPath: .spec.reason
       name: Reason
       type: string
+    - description: 'Reason of the AnalysisDue condition: why the incident is or is
+        not due for analysis'
+      jsonPath: .status.conditions[?(@.type=="AnalysisDue")].reason
+      name: Due
+      type: string
+    - description: 'Reason of the Analyzed condition: the outcome of the last analysis'
+      jsonPath: .status.conditions[?(@.type=="Analyzed")].reason
+      name: Outcome
+      priority: 1
+      type: string
     - jsonPath: .status.count
       name: Count
+      priority: 1
       type: integer
+    - jsonPath: .status.lastAnalysisTime
+      name: Last analysis
+      type: date
     - jsonPath: .status.lastSeen
       name: Last seen
+      priority: 1
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
       type: date
     name: v1alpha1
     schema:

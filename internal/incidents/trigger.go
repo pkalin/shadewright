@@ -125,7 +125,7 @@ type TriggerSettings struct {
 	// incident that settles is due for at least a moment. Zero means no window: any incident never analyzed
 	// may be due, and its unsettled observations start at firstSeen.
 	RecentWindow time.Duration
-	// MaxAnalysesPerDay is the daily limit of the RemediationSettings ([maxAnalysesPerDay]): the analyses
+	// MaxAnalysesPerDay is the daily limit of the RemediationSettings ([MaxAnalysesPerDay]): the analyses
 	// allowed per UTC day across all Incidents. 0 disables analysis.
 	MaxAnalysesPerDay int
 }

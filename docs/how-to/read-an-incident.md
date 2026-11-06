@@ -12,7 +12,7 @@ An `Incident` is the record of one repeated symptom on one workload. Reading it 
 kubectl -n shadewright-system get incidents
 ```
 
-The columns are Phase, Kind and Subject (the workload the symptom is correlated to), Reason (such as `OOMKilled` or `FailedScheduling`), Count and Last seen. Names look like `incident-<64 hex digits>`, from the fingerprint, which hashes the cluster ID, namespace, owner, reason and normalized symptom. Repeated events raise `Count` on the same Incident instead of creating another.
+The columns are Phase, Subject (the workload the symptom is correlated to), Reason (such as `OOMKilled` or `FailedScheduling`), Due (the reason of the `AnalysisDue` condition), Last analysis and Age; `-o wide` adds Kind, Outcome (the reason of the `Analyzed` condition), Count and Last seen. For the Incidents with their requests, budget and kill switch in one view, use [`kubectl shadewright status`](check-status.md). Names look like `incident-<64 hex digits>`, from the fingerprint, which hashes the cluster ID, namespace, owner, reason and normalized symptom. Repeated events raise `Count` on the same Incident instead of creating another.
 
 ## Read one
 

@@ -159,7 +159,7 @@ func (c *Controller) markDue(ctx context.Context) error {
 	return nil
 }
 
-// readBudget reads the daily limit from the RemediationSettings (into s, see [maxAnalysesPerDay]) and the
+// readBudget reads the daily limit from the RemediationSettings (into s, see [MaxAnalysesPerDay]) and the
 // analyses used today from the budget ConfigMap. closed is the not-due reason of every Incident when the
 // budget is unknown, settings without a limit included, and empty otherwise; readErr is set when a read
 // failed for another reason than a missing object. Both reads together
@@ -183,7 +183,7 @@ func (c *Controller) readBudget(ctx context.Context, now time.Time, s *TriggerSe
 		analysesUsedToday.clear()
 		return 0, ReasonSettingsUnreadable, fmt.Errorf("reading RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 	}
-	limit, ok := maxAnalysesPerDay(&settings)
+	limit, ok := MaxAnalysesPerDay(&settings)
 	if !ok {
 		analysesPerDayLimit.clear()
 		analysesUsedToday.clear()

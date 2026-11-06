@@ -361,6 +361,7 @@ type RemediationRequestStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=rr,categories=shadewright
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Policy",type=string,JSONPath=`.status.conditions[?(@.type=="PolicyAllowed")].reason`,description="Reason of the PolicyAllowed condition: the policy decision"
 // +kubebuilder:printcolumn:name="Action",type=string,JSONPath=`.spec.action.type`
 // +kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.spec.targetRef.name`
 // +kubebuilder:printcolumn:name="PR",type=integer,JSONPath=`.status.pullRequest.number`

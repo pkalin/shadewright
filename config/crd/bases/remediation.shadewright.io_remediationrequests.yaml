@@ -22,6 +22,10 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - description: 'Reason of the PolicyAllowed condition: the policy decision'
+      jsonPath: .status.conditions[?(@.type=="PolicyAllowed")].reason
+      name: Policy
+      type: string
     - jsonPath: .spec.action.type
       name: Action
       type: string

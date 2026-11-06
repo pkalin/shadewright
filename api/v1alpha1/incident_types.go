@@ -174,11 +174,15 @@ type IncidentStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:categories=shadewright
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
-// +kubebuilder:printcolumn:name="Kind",type=string,JSONPath=`.spec.subject.kind`
+// +kubebuilder:printcolumn:name="Kind",type=string,JSONPath=`.spec.subject.kind`,priority=1
 // +kubebuilder:printcolumn:name="Subject",type=string,JSONPath=`.spec.subject.name`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.spec.reason`
-// +kubebuilder:printcolumn:name="Count",type=integer,JSONPath=`.status.count`
-// +kubebuilder:printcolumn:name="Last seen",type=date,JSONPath=`.status.lastSeen`
+// +kubebuilder:printcolumn:name="Due",type=string,JSONPath=`.status.conditions[?(@.type=="AnalysisDue")].reason`,description="Reason of the AnalysisDue condition: why the incident is or is not due for analysis"
+// +kubebuilder:printcolumn:name="Outcome",type=string,JSONPath=`.status.conditions[?(@.type=="Analyzed")].reason`,priority=1,description="Reason of the Analyzed condition: the outcome of the last analysis"
+// +kubebuilder:printcolumn:name="Count",type=integer,JSONPath=`.status.count`,priority=1
+// +kubebuilder:printcolumn:name="Last analysis",type=date,JSONPath=`.status.lastAnalysisTime`
+// +kubebuilder:printcolumn:name="Last seen",type=date,JSONPath=`.status.lastSeen`,priority=1
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Incident groups repeated symptoms of one problem on one workload.
 type Incident struct {

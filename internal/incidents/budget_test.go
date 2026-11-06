@@ -65,8 +65,8 @@ func TestMaxAnalysesPerDayFailsClosedAndTakesTheLower(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &remediationv1alpha1.RemediationSettings{}
 			s.Spec.Analysis, s.Spec.MaxAnalysesPerDay = tc.analysis, tc.old
-			if got, ok := maxAnalysesPerDay(s); got != tc.want || ok != tc.wantOK {
-				t.Fatalf("maxAnalysesPerDay = %d, %v; want %d, %v", got, ok, tc.want, tc.wantOK)
+			if got, ok := MaxAnalysesPerDay(s); got != tc.want || ok != tc.wantOK {
+				t.Fatalf("MaxAnalysesPerDay = %d, %v; want %d, %v", got, ok, tc.want, tc.wantOK)
 			}
 		})
 	}

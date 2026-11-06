@@ -151,7 +151,7 @@ Every issue names the ADRs it is tied to:
 ## Design choices
 
 - Providers sit behind interfaces so the project stays generic: `GitProvider` (GitHub first, Azure DevOps later), `DeliveryVerifier` (Flux first, Argo CD later), `ModelProvider` (Microsoft Foundry first). Do not import a provider SDK outside its adapter package.
-- Layout beyond the Kubebuilder scaffold: `cmd/analyzer`, `internal/analyzer` (with the collector), `internal/{incidents,incidentcontext,tools,analysis,policy,gitops,redact,providers,modules,groupversion,cmdutil}` (`incidentcontext` is the context builder, not named `context` so that it never shadows the standard library package; `tools` holds the read tools for the model; `analysis` is the analysis loop and its controller), `internal/testutil` (helpers for tests only); planned: `internal/{remediation,verification}`, `test/scenarios`.
+- Layout beyond the Kubebuilder scaffold: `cmd/analyzer`, `cmd/kubectl-shadewright` (the read-only kubectl plugin, run by people with their own kubeconfig), `internal/analyzer` (with the collector), `internal/{incidents,incidentcontext,tools,analysis,policy,gitops,redact,providers,modules,groupversion,cmdutil}` (`incidentcontext` is the context builder, not named `context` so that it never shadows the standard library package; `tools` holds the read tools for the model; `analysis` is the analysis loop and its controller), `internal/testutil` (helpers for tests only); planned: `internal/{remediation,verification}`, `test/scenarios`.
 - `Incident` keeps deduplication state (fingerprint, counters, timestamps) and must survive restarts. Never put raw logs or large payloads in a CR.
 
 ## Commands
@@ -170,7 +170,8 @@ make fuzz                 # each Go fuzz target for FUZZTIME (default 30s), or o
 KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.37.0 --bin-dir "$PWD/bin" -p path)" \
   go test ./internal/controller/... -ginkgo.focus "RemediationRequest"   # one spec; run `make test` once first, the bin dir must be absolute
 make test-e2e             # installs the pinned kind (KIND_VERSION) into bin/ and creates an isolated cluster; CI runs it, not needed locally
-make build                # bin/manager
+make build                # bin/manager and bin/analyzer
+make build-plugin         # bin/kubectl-shadewright, the read-only `kubectl shadewright status` plugin
 make run                  # controller against the current kubeconfig context
 ```
 

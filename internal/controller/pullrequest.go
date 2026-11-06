@@ -1008,7 +1008,7 @@ func commitTitle(rr *remediationv1alpha1.RemediationRequest) string {
 // that looks like a secret reaches the Git host. The exceptions are incident, the Incident name as
 // verifiedIncidentName returned it, and the request's own "namespace/name" as keptRequestName returns it: when
 // not empty, their whole occurrences are kept (redact.StringKeeping), because the names the collector and the
-// analyzer give are long hex runs the redactor takes for a token.
+// analyzer derive are long hex runs the redactor takes for a token.
 func pullRequestBody(rr *remediationv1alpha1.RemediationRequest, incident string) string {
 	what, previous, desired := change(rr)
 	t, src := rr.Spec.TargetRef, rr.Status.Source
@@ -1035,18 +1035,18 @@ func pullRequestBody(rr *remediationv1alpha1.RemediationRequest, incident string
 	return out + marker(rr) + "\n"
 }
 
-// analyzerRequestName matches the name the analyzer gives a request: "remediation-" and 24 lower-case hex digits
-// of a hash of the Incident's UID and the spec (requestName in internal/analysis, which the executor does not
-// import).
-var analyzerRequestName = regexp.MustCompile(`^remediation-[0-9a-f]{24}$`)
-
 // keptRequestName returns the request's "namespace/name", as the body shows it, when the body may show it
-// unredacted, and "" otherwise. Both parts are the object's metadata as the API server stored it (the name
-// cannot change after create), never model output or a spec field. The name is kept only in the analyzer's
-// form, so a longer hex run written as a request's name by whoever created it is still redacted, and only when
-// the redactor leaves the namespace alone, so keeping the pair never lets a token-like namespace through.
+// unredacted, and "" otherwise. metadata.name is chosen by whoever created the request, so its shape proves
+// nothing: a hex secret could be written as "remediation-<secret>". The name is kept only when it equals
+// remediationv1alpha1.RequestName of the request's own spec as the API server stored it (spec.incidentRef.uid
+// and the plan; the spec is immutable), the name the analyzer derives: a hash nobody can steer to a chosen
+// value. The namespace is kept only when the redactor leaves it alone, so keeping the pair never lets a
+// token-like namespace through. Anything else gives "" and so a redacted name.
 func keptRequestName(rr *remediationv1alpha1.RemediationRequest) string {
-	if !analyzerRequestName.MatchString(rr.Name) || redact.String(rr.Namespace) != rr.Namespace {
+	if rr.Spec.IncidentRef.UID == "" || redact.String(rr.Namespace) != rr.Namespace {
+		return ""
+	}
+	if name, err := remediationv1alpha1.RequestName(rr.Spec); err != nil || string(name) != rr.Name {
 		return ""
 	}
 	return rr.Namespace + "/" + rr.Name

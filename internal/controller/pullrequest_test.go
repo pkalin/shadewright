@@ -2031,11 +2031,14 @@ var _ = Describe("Pull request body", func() {
 		Expect(hasMarker(body, rr)).To(BeTrue())
 	})
 
-	It("names a request called in the analyzer's form verbatim and still redacts free text (#433)", func() {
+	It("names a request called by the derivation of its own spec verbatim and still redacts free text (#433)", func() {
 		rr := bodyRequest()
-		// The analyzer names a request "remediation-" plus 24 hex digits, a run the redactor would otherwise
-		// take for a token, so a reviewer could not find the request from the pull request.
-		rr.Name = "remediation-3f1c9a7be2d84f06a5b1c3e9"
+		// The analyzer names a request "remediation-" plus 24 hex digits of a hash of its spec, a run the
+		// redactor would otherwise take for a token, so a reviewer could not find the request from the pull
+		// request.
+		name, err := remediationv1alpha1.RequestName(rr.Spec)
+		Expect(err).NotTo(HaveOccurred())
+		rr.Name = string(name)
 		hexToken := "3f1c9a7be2d84f06a5b1c3e9d7f2a4b6c8e0d1f3" // #nosec G101 -- made-up hex run, not a credential
 		rr.Status.Source.Path = remediationv1alpha1.GitFilePath("apps/" + hexToken + "/deployment.yaml")
 		body := pullRequestBody(rr, "")
@@ -2045,14 +2048,29 @@ var _ = Describe("Pull request body", func() {
 		Expect(hasMarker(body, rr)).To(BeTrue())
 	})
 
-	It("redacts a request name that is not in the analyzer's form or sits in a token-like namespace", func() {
+	It("redacts a request name that is not the derivation of its spec or sits in a token-like namespace", func() {
 		hex40 := strings.Repeat("3f1c9a7b", 5)
-		for _, tc := range []struct{ namespace, name, secret string }{
-			{requestNamespace, hex40, hex40},
-			{requestNamespace, "remediation-" + hex40, hex40},
-			{hex40, "remediation-3f1c9a7be2d84f06a5b1c3e9", hex40},
+		secret24 := "3f1c9a7be2d84f06a5b1c3e9" // #nosec G101 -- made-up hex run, not a credential
+		derived, err := remediationv1alpha1.RequestName(bodyRequest().Spec)
+		Expect(err).NotTo(HaveOccurred())
+		otherPlan := bodyRequest()
+		otherPlan.Spec.Action.SetContainerMemoryLimit.Desired = resource.MustParse("512Mi")
+		for _, tc := range []struct {
+			namespace, name, secret string
+			spec                    *remediationv1alpha1.RemediationRequest
+		}{
+			{requestNamespace, hex40, hex40, nil},
+			{requestNamespace, "remediation-" + hex40, hex40, nil},
+			// The attack: a chosen hex secret in the analyzer's shape, not the hash of the spec.
+			{requestNamespace, "remediation-" + secret24, secret24, nil},
+			// The derivation of another plan is not this request's name.
+			{requestNamespace, string(derived), strings.TrimPrefix(string(derived), "remediation-"), otherPlan},
+			{hex40, string(derived), hex40, nil},
 		} {
 			rr := bodyRequest()
+			if tc.spec != nil {
+				rr = tc.spec
+			}
 			rr.Namespace, rr.Name = tc.namespace, tc.name
 			body := pullRequestBody(rr, "")
 			Expect(body).NotTo(ContainSubstring(tc.secret), tc.namespace+"/"+tc.name)

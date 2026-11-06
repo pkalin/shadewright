@@ -18,9 +18,6 @@ package analysis
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -477,14 +474,13 @@ func (c *Controller) claim(ctx context.Context, inc *remediationv1alpha1.Inciden
 
 // requestName derives the request's name from the Incident's UID and the spec it carries, so a retried
 // create, or a later round after a crash that proposes the same plan, finds the request already made instead
-// of adding another (invariant 5).
+// of adding another (invariant 5). It is remediationv1alpha1.RequestName, which the executor recomputes to show
+// the name in a pull request body; spec.incidentRef.uid must be the Incident's UID, as requestSpec sets it.
 func requestName(inc *remediationv1alpha1.Incident, spec remediationv1alpha1.RemediationRequestSpec) (remediationv1alpha1.Name, error) {
-	b, err := json.Marshal(spec)
-	if err != nil {
-		return "", fmt.Errorf("encoding the request spec: %w", err)
+	if spec.IncidentRef.UID != remediationv1alpha1.UID(inc.UID) {
+		return "", errors.New("the request spec names another Incident")
 	}
-	h := sha256.Sum256(append([]byte(string(inc.UID)+"/"), b...))
-	return remediationv1alpha1.Name("remediation-" + hex.EncodeToString(h[:12])), nil
+	return remediationv1alpha1.RequestName(spec)
 }
 
 // requestSpec is the spec of the request of a plan: nothing in it comes from the model but the action and the

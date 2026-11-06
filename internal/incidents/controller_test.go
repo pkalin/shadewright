@@ -401,24 +401,39 @@ func TestLostAnswerIsNotCountedTwice(t *testing.T) {
 			r := start(t, ns, Config{Window: 200 * time.Millisecond, RetryAfter: 100 * time.Millisecond})
 			var lost atomic.Bool
 			stored := storedWrites(r, &lost)
+			// otherErr is what the other writer met; it runs on the controller's goroutine, so the test
+			// goroutine checks it.
+			otherErr := make(chan error, 1)
 			if conflict {
 				// Another write (the analysis trigger's, in #438) lands between the read and the first update:
 				// that update conflicts and is sent again on a fresh read.
 				var once sync.Once
-				r.writes.before = func(ctx context.Context, _ *remediationv1alpha1.Incident) {
+				r.writes.before = func(ctx context.Context, cur *remediationv1alpha1.Incident) {
 					once.Do(func() {
-						inc := get(t, ns)
-						meta.SetStatusCondition(&inc.Status.Conditions, metav1.Condition{
-							Type: "Reviewed", Status: metav1.ConditionTrue, Reason: "Test", Message: "set by another writer",
-						})
-						if err := env.admin.Status().Update(ctx, inc); err != nil {
-							t.Errorf("updating as another writer: %v", err)
+						inc := &remediationv1alpha1.Incident{}
+						err := env.admin.Get(ctx, client.ObjectKeyFromObject(cur), inc)
+						if err == nil {
+							meta.SetStatusCondition(&inc.Status.Conditions, metav1.Condition{
+								Type: "Reviewed", Status: metav1.ConditionTrue, Reason: "Test", Message: "set by another writer",
+							})
+							err = env.admin.Status().Update(ctx, inc)
 						}
+						otherErr <- err
 					})
 				}
+			} else {
+				otherErr <- nil
 			}
 			r.obs <- immediate(observation(1, 1, 4, 4, time.Now().Truncate(time.Second)))
 			eventually(t, ns, 1, countIs(4))
+			select {
+			case err := <-otherErr:
+				if err != nil {
+					t.Fatalf("writing as another writer: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("the other writer never ran")
+			}
 			// Let the batch that went back be tried again: it is recognised as written.
 			time.Sleep(time.Second)
 			if inc := get(t, ns); inc.Status.Count != 4 {

@@ -9,7 +9,7 @@ name: Images
 # attestation, records a GitHub build provenance attestation on the index, and verifies all of them against the identity of this workflow, so a mismatch fails the
 # run (#82). The id-token and attestations permissions exist only on the publish job, which never runs for a
 # pull request (forks included). Tags are cut by the release workflow (release-please) or, for a pre-release, by hand
-# (`gh release create vX.Y.Z-rc.1 --prerelease --target main`). A tag must point at a commit on main (checked
+# (push the tag, then `gh release create --verify-tag --draft --prerelease`). A tag must point at a commit on main (checked
 # before anything is pushed). On a tag docker/metadata-action adds no sha tag; a release gets X.Y.Z and X.Y, a
 # pre-release only the full version (0.2.0-rc.1): no X.Y, no latest, so it never moves a floating tag.
 on:

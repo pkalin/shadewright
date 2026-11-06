@@ -10,8 +10,8 @@ name: Release plugin
 # (the signature against the identity of this workflow, the provenance with gh attestation verify), so a
 # mismatch fails the run before anything is uploaded. A tag must point at a commit on main
 # (hack/require-on-main.sh, in the first job). Tags are cut by release-please or, for a pre-release, by hand
-# (`gh release create vX.Y.Z-rc.1 --prerelease --target main`); the release exists at the moment of the tag, but
-# the upload job retries for five minutes in case it does not, and re-uploads with --clobber on a rerun.
+# (push the tag, then `gh release create --verify-tag --draft --prerelease`). The upload job waits up to five
+# minutes for the draft and re-uploads with --clobber on a rerun. Published releases are immutable.
 on:
   push:
     tags: ["v*"]
@@ -139,6 +139,22 @@ jobs:
           DIST: ${{ runner.temp }}/dist
         run: |
           set -euo pipefail
+          draft=false
+          for _ in $(seq 1 20); do
+            if state="$(gh release view "${TAG}" --json isDraft --jq .isDraft)"; then
+              if [ "${state}" != true ]; then
+                echo "release ${TAG} is already published and immutable; refusing asset upload" >&2
+                exit 1
+              fi
+              draft=true
+              break
+            fi
+            sleep 15
+          done
+          if [ "${draft}" != true ]; then
+            echo "no draft release for ${TAG} after 5 minutes; create the draft, then re-run this job" >&2
+            exit 1
+          fi
           uploaded=false
           for _ in $(seq 1 20); do
             if gh release upload "${TAG}" --clobber \
@@ -150,7 +166,7 @@ jobs:
             sleep 15
           done
           if [ "${uploaded}" != true ]; then
-            echo "no upload to the release ${TAG} after 5 minutes (last error: $(cat "${RUNNER_TEMP}/upload.err")); create the release, then re-run this job" >&2
+            echo "no upload to the release ${TAG} after 5 minutes (last error: $(cat "${RUNNER_TEMP}/upload.err")); check the draft and re-run this job" >&2
             exit 1
           fi
           echo "release ${TAG}: kubectl-shadewright archives, checksums.txt and its signature uploaded" >> "${GITHUB_STEP_SUMMARY}"

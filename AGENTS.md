@@ -28,13 +28,19 @@ so the **pull request title** is what counts; a required check (`Conventional PR
   `perf` a patch, `!` or a `BREAKING CHANGE:` footer a breaking release (a minor one while the version is
   0.x). `revert` is listed too; `refactor`, `test`, `docs`, `build`, `ci` and `chore` stay out of the changelog.
 - The release workflow keeps one release pull request open (opened by the `shadewright-release` App). Merging it
-  is the release: it tags `vX.Y.Z`, updates `CHANGELOG.md` and creates the GitHub release. Never tag a plain `vX.Y.Z` by
+  starts the release: it tags `vX.Y.Z`, updates `CHANGELOG.md` and creates a draft GitHub release
+  (`draft: true`, `force-tag-creation: true`). Never tag a plain `vX.Y.Z` by
   hand (pre-releases: see below), and never edit `CHANGELOG.md` or `.release-please-manifest.json` outside that pull request.
   The GitHub release notes are then regrouped by scope by `hack/release-notes-by-scope.sh` (see the comment in
   `.github/workflows/release-please.yml`, which also shows how to regroup an existing release).
-  Once the images and the chart of the tag are published, the last job of `chart.yml` appends their digests and
-  the cosign verify commands to the release body (idempotent, between markers).
-- A pre-release is the one tag made by hand: `gh release create vX.Y.Z-rc.1 --prerelease --target main`. It
+  Once the images and the chart of the tag are published, the release-notes job of `chart.yml` appends their digests and
+  the cosign verify commands to the release body (idempotent, between markers). The final job publishes the
+  draft only when that exact section and all six plugin assets are present; otherwise it fails and leaves
+  the draft unpublished. Keep immutable releases enabled: published releases accept no new assets.
+- A pre-release is the one tag made by hand: tag the intended commit on main with
+  `git tag vX.Y.Z-rc.1 <commit-on-main>`, then `git push origin vX.Y.Z-rc.1`, then immediately
+  `gh release create vX.Y.Z-rc.1 --verify-tag --draft --prerelease`. The tag push starts the workflows;
+  creating a draft emits no `release: published` event. The final Chart job publishes it with its assets. It
   publishes images and chart (version and appVersion from the tag, no bump commit, no floating tags) and does
   not disturb release-please. Never create a plain `vX.Y.Z` tag by hand.
 - Merge the release pull request when the milestone of that version is done, not on every change.

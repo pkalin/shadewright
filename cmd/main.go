@@ -73,19 +73,15 @@ func main() {
 		"Defaults to 9443. Set -1 to disable the webhook server.")
 	flag.DurationVar(&pollInterval, "pull-request-poll-interval", controller.DefaultPullRequestPollInterval,
 		"How often the executor looks at a pull request that waits for review, so a merge or a close is seen "+
-			"within it. Between "+controller.MinPullRequestPollInterval.String()+" and "+
-			controller.MaxPullRequestPollInterval.String()+"; the full recheck of the plan stays every "+
-			controller.MaxPullRequestPollInterval.String()+".")
+			"within it. Between "+controller.ShortDuration(controller.MinPullRequestPollInterval)+" and "+
+			controller.ShortDuration(controller.MaxPullRequestPollInterval)+" (0 uses the default); "+
+			"the full recheck of the plan stays every "+controller.ShortDuration(controller.FullRecheckInterval)+".")
 	flag.Parse()
 
 	ctrl.SetLogger(cmdutil.NewLogger(&opts))
 
 	if namespace == "" {
 		setupLog.Error(nil, "The operator namespace is not set: use --namespace or POD_NAMESPACE")
-		os.Exit(1)
-	}
-	if err := controller.ValidatePullRequestPollInterval(pollInterval); err != nil {
-		setupLog.Error(err, "Invalid --pull-request-poll-interval")
 		os.Exit(1)
 	}
 

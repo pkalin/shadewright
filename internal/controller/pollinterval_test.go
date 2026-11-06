@@ -21,34 +21,46 @@ import (
 	"time"
 )
 
-// TestPullRequestPollIntervalBounds checks that the flag refuses a poll interval out of its bounds and that the
-// reconciler never polls faster or slower than them (#434).
+// TestPullRequestPollIntervalBounds checks that a poll interval out of its bounds is refused, never changed, and
+// that zero means the default (#434).
 func TestPullRequestPollIntervalBounds(t *testing.T) {
 	for _, tc := range []struct {
-		in      time.Duration
-		valid   bool
-		applied time.Duration
+		in    time.Duration
+		valid bool
+		used  time.Duration
 	}{
-		{in: 0, valid: false, applied: DefaultPullRequestPollInterval},
-		{in: -time.Second, valid: false, applied: DefaultPullRequestPollInterval},
-		{in: time.Second, valid: false, applied: MinPullRequestPollInterval},
-		{in: MinPullRequestPollInterval - time.Nanosecond, valid: false, applied: MinPullRequestPollInterval},
-		{in: MinPullRequestPollInterval, valid: true, applied: MinPullRequestPollInterval},
-		{in: DefaultPullRequestPollInterval, valid: true, applied: DefaultPullRequestPollInterval},
-		{in: MaxPullRequestPollInterval, valid: true, applied: MaxPullRequestPollInterval},
-		{in: MaxPullRequestPollInterval + time.Nanosecond, valid: false, applied: MaxPullRequestPollInterval},
-		{in: time.Hour, valid: false, applied: MaxPullRequestPollInterval},
+		{in: 0, valid: true, used: DefaultPullRequestPollInterval},
+		{in: -time.Second, valid: false, used: -time.Second},
+		{in: time.Second, valid: false, used: time.Second},
+		{in: MinPullRequestPollInterval - time.Nanosecond, valid: false, used: MinPullRequestPollInterval - time.Nanosecond},
+		{in: MinPullRequestPollInterval, valid: true, used: MinPullRequestPollInterval},
+		{in: DefaultPullRequestPollInterval, valid: true, used: DefaultPullRequestPollInterval},
+		{in: MaxPullRequestPollInterval, valid: true, used: MaxPullRequestPollInterval},
+		{in: MaxPullRequestPollInterval + time.Nanosecond, valid: false, used: MaxPullRequestPollInterval + time.Nanosecond},
+		{in: time.Hour, valid: false, used: time.Hour},
 	} {
-		if err := ValidatePullRequestPollInterval(tc.in); (err == nil) != tc.valid {
-			t.Errorf("ValidatePullRequestPollInterval(%s) = %v, want valid %v", tc.in, err, tc.valid)
-		}
 		r := &RemediationRequestReconciler{PullRequestPollInterval: tc.in}
-		if got := r.pullRequestPollInterval(); got != tc.applied {
-			t.Errorf("pullRequestPollInterval() with %s = %s, want %s", tc.in, got, tc.applied)
+		if err := r.validatePullRequestPollInterval(); (err == nil) != tc.valid {
+			t.Errorf("validatePullRequestPollInterval() with %s = %v, want valid %v", tc.in, err, tc.valid)
+		}
+		if got := r.pullRequestPollInterval(); got != tc.used {
+			t.Errorf("pullRequestPollInterval() with %s = %s, want %s", tc.in, got, tc.used)
 		}
 	}
-	if DefaultPullRequestPollInterval >= freshRecheckInterval {
+	if DefaultPullRequestPollInterval >= FullRecheckInterval {
 		t.Errorf("the default poll interval %s does not poll between the full rechecks (%s)",
-			DefaultPullRequestPollInterval, freshRecheckInterval)
+			DefaultPullRequestPollInterval, FullRecheckInterval)
+	}
+}
+
+// TestShortDuration checks the format of the bounds in the flag's help and in the refusal.
+func TestShortDuration(t *testing.T) {
+	for in, want := range map[time.Duration]string{
+		5 * time.Minute: "5m", time.Minute: "1m", 15 * time.Second: "15s", 10 * time.Second: "10s",
+		90 * time.Second: "1m30s", 0: "0s",
+	} {
+		if got := ShortDuration(in); got != want {
+			t.Errorf("ShortDuration(%s) = %q, want %q", in, got, want)
+		}
 	}
 }

@@ -982,6 +982,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(wait).To(BeZero())
 			Expect(finds).To(Equal(1))
 			Expect(heads).To(BeZero(), "a merge is recorded before any freshness read")
+			_, kept := r.checked.Load(key().NamespacedName)
+			Expect(kept).To(BeFalse(), "an ended request is not remembered")
 		})
 
 		It("checks the plan in full on the first look of a process and when the full recheck is due", func() {
@@ -1001,16 +1003,64 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(heads).To(BeNumerically(">", 0), "a new process starts with a full recheck")
 		})
 
-		It("waits as long as the Git host asks when a look is rate limited", func() {
+		It("waits as long as the Git host asks when a look is rate limited, up to the full recheck's period", func() {
 			drive(remediationv1alpha1.PhaseAwaitingApproval)
 			r := reconciler()
 			look(r)
 			clock = clock.Add(DefaultPullRequestPollInterval)
-			faulty.failOn(opFind, &providers.RetryableError{RetryAfter: 10 * time.Minute, Err: errors.New("rate limited")})
+			faulty.failOn(opFind, &providers.RetryableError{RetryAfter: 3 * time.Minute, Err: errors.New("rate limited")})
 			wait, _, heads := look(r)
-			Expect(wait).To(Equal(10*time.Minute), "not the poll interval")
+			Expect(wait).To(Equal(3*time.Minute), "not the poll interval")
 			Expect(heads).To(BeZero(), "the freshness check does not call the host again at once")
+			faulty.failOn(opFind, &providers.RetryableError{RetryAfter: time.Hour, Err: errors.New("rate limited")})
+			wait, _, _ = look(r)
+			Expect(wait).To(Equal(FullRecheckInterval), "never longer than the full recheck's period")
 			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		})
+
+		Context("when writes were paused", func() {
+			setPaused := func(on bool) {
+				live := &remediationv1alpha1.RemediationSettings{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, live)).To(Succeed())
+				live.Spec.Paused = new(on)
+				Expect(k8sClient.Update(ctx, live)).To(Succeed())
+			}
+			paused := func() *metav1.Condition {
+				return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionWritesPaused)
+			}
+			// pauseBetweenFullRechecks reaches a waiting request whose last full recheck is recent and which
+			// carries WritesPaused, as a pause between two full rechecks leaves it.
+			pauseBetweenFullRechecks := func() *RemediationRequestReconciler {
+				recorder = record.NewFakeRecorder(20)
+				drive(remediationv1alpha1.PhaseAwaitingApproval)
+				r := reconciler()
+				look(r)
+				setPaused(true)
+				clock = clock.Add(DefaultPullRequestPollInterval)
+				look(r)
+				Expect(paused()).NotTo(BeNil())
+				Expect(recorder.Events).To(Receive(Equal("Normal " + ReasonWritesPaused + " " + messageWritesPaused)))
+				setPaused(false)
+				clock = clock.Add(DefaultPullRequestPollInterval)
+				return r
+			}
+
+			It("resumes at the first look after the pause lifts, not at the next full recheck", func() {
+				r := pauseBetweenFullRechecks()
+				look(r)
+				Expect(paused()).To(BeNil())
+				Expect(recorder.Events).To(Receive(Equal("Normal " + EventWritesResumed + " " + messageWritesResumed)))
+			})
+
+			It("resumes also when that look is rate limited", func() {
+				r := pauseBetweenFullRechecks()
+				faulty.failOn(opFind, &providers.RetryableError{RetryAfter: 3 * time.Minute, Err: errors.New("rate limited")})
+				wait, _, heads := look(r)
+				Expect(heads).To(BeNumerically(">", 0), "the full recheck runs")
+				Expect(wait).To(Equal(DefaultPullRequestPollInterval))
+				Expect(paused()).To(BeNil())
+				Expect(recorder.Events).To(Receive(Equal("Normal " + EventWritesResumed + " " + messageWritesResumed)))
+			})
 		})
 
 		It("gives a look that fails otherwise the full recheck", func() {

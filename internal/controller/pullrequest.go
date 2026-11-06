@@ -244,23 +244,32 @@ type pollState struct {
 	at  time.Time
 }
 
-// pullRequestPollInterval returns PullRequestPollInterval, its default when zero, within its bounds.
+// pullRequestPollInterval returns PullRequestPollInterval, or its default when zero. SetupWithManager has
+// refused any other value outside its bounds, so nothing is clamped here.
 func (r *RemediationRequestReconciler) pullRequestPollInterval() time.Duration {
-	if r.PullRequestPollInterval <= 0 {
+	if r.PullRequestPollInterval == 0 {
 		return DefaultPullRequestPollInterval
 	}
-	return min(max(r.PullRequestPollInterval, MinPullRequestPollInterval), MaxPullRequestPollInterval)
+	return r.PullRequestPollInterval
 }
 
-// ValidatePullRequestPollInterval returns an error unless d is within [MinPullRequestPollInterval,
-// MaxPullRequestPollInterval]. cmd/main.go checks the flag with it, so a value out of bounds stops the executor at
-// start instead of being clamped without a word.
-func ValidatePullRequestPollInterval(d time.Duration) error {
-	if d < MinPullRequestPollInterval || d > MaxPullRequestPollInterval {
+// validatePullRequestPollInterval returns an error unless the interval in use (zero gives the default) is within
+// [MinPullRequestPollInterval, MaxPullRequestPollInterval]. It is the only check of the bounds; SetupWithManager
+// runs it, so a value out of bounds stops the executor at start instead of being changed without a word.
+func (r *RemediationRequestReconciler) validatePullRequestPollInterval() error {
+	if d := r.pullRequestPollInterval(); d < MinPullRequestPollInterval || d > MaxPullRequestPollInterval {
 		return fmt.Errorf("the pull request poll interval %s is not between %s and %s", d,
-			MinPullRequestPollInterval, MaxPullRequestPollInterval)
+			ShortDuration(MinPullRequestPollInterval), ShortDuration(MaxPullRequestPollInterval))
 	}
 	return nil
+}
+
+// ShortDuration formats d as the flags are written: whole minutes as "5m", anything else as time.Duration does.
+func ShortDuration(d time.Duration) string {
+	if d > 0 && d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", d/time.Minute)
+	}
+	return d.String()
 }
 
 // waited ends a full recheck of a request whose pull request waits and needs nothing retried: it notes when, and
@@ -271,17 +280,28 @@ func (r *RemediationRequestReconciler) waited(rr *remediationv1alpha1.Remediatio
 	return reconcile.Result{RequeueAfter: r.pullRequestPollInterval()}
 }
 
+// lookOnly reports whether a request whose pull request was looked at may skip the full recheck now: it waits
+// for review, and carries nothing the full recheck must settle at once, neither the mark of a stale plan's
+// cleanup (staleMark) nor WritesPaused, which resumeIfAllowed removes with the WritesResumed Event at the first
+// reconcile after the pause lifts. A PlanFresh Unknown of a refusal is left to the next full recheck, as before
+// the looks: asking a host that refused again every look would only cost calls.
+func lookOnly(rr *remediationv1alpha1.RemediationRequest) bool {
+	if p := rr.Status.Phase; p != remediationv1alpha1.PhasePRCreated && p != remediationv1alpha1.PhaseAwaitingApproval {
+		return false
+	}
+	return staleMark(rr) == nil &&
+		meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionWritesPaused) == nil
+}
+
 // pollOnly reports whether recheck may stop after looking at the pull request, and the requeue then: the pull
-// request was read and is still open (a failed look gets the full recheck and its error handling), the request
-// waits for review with no stale plan's cleanup started, and its last full recheck in this process ended less
-// than freshRecheckInterval ago. Nothing is written to Git on a look, so skipping the freshness check there never
-// lets a write through on a stale plan: every write still comes right after a full check (design section 6).
+// request was read and is still open (a failed look gets the full recheck and its error handling), lookOnly
+// holds, and the last full recheck of this request (same name and UID) in this process ended less than
+// freshRecheckInterval ago. Nothing is written to Git on a look, so skipping the freshness check there never lets
+// a write through on a stale plan: every write still comes right after a full check (design section 6).
+// recheck calls it only for a request with a recorded pull request.
 func (r *RemediationRequestReconciler) pollOnly(rr *remediationv1alpha1.RemediationRequest, outcome prOutcome) (
 	time.Duration, bool) {
-	if outcome != prOpen || rr.Status.PullRequest == nil || staleMark(rr) != nil {
-		return 0, false
-	}
-	if p := rr.Status.Phase; p != remediationv1alpha1.PhasePRCreated && p != remediationv1alpha1.PhaseAwaitingApproval {
+	if outcome != prOpen || !lookOnly(rr) {
 		return 0, false
 	}
 	v, ok := r.checked.Load(client.ObjectKeyFromObject(rr))

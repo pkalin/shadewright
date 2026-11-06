@@ -122,16 +122,18 @@ type RemediationRequestReconciler struct {
 	// [DefaultBreakerCooldown].
 	BreakerCooldown time.Duration
 	// PullRequestPollInterval is how often a request whose pull request waits for review (PRCreated,
-	// AwaitingApproval) looks at that pull request alone, between the full rechecks every freshRecheckInterval,
-	// so a merge or a close is seen within it. Zero means [DefaultPullRequestPollInterval]; a value outside
-	// [MinPullRequestPollInterval, MaxPullRequestPollInterval] is clamped to it.
+	// AwaitingApproval) looks at that pull request alone, between the full rechecks every [FullRecheckInterval],
+	// so a merge or a close is seen within it. Zero means [DefaultPullRequestPollInterval]; SetupWithManager
+	// refuses a value outside [MinPullRequestPollInterval, MaxPullRequestPollInterval].
 	PullRequestPollInterval time.Duration
 
 	// admitMu makes the check of the limits and the status write that lets a request through the policy check
 	// one step, so two workers can never both take the last slot or the same target.
 	admitMu sync.Mutex
-	// checked holds, per request name, when the last full recheck of a waiting pull request ended (pollState).
-	// It is memory only: after a restart or a change of leader every request gets a full recheck first.
+	// checked holds, per request name, when the last full recheck of a waiting pull request ended, with the
+	// request's UID (pollState): an entry of another UID under the same name is not used. It is memory only:
+	// after a restart or a change of leader every request gets a full recheck first. Entries are dropped when the
+	// request ends, is being deleted or is gone.
 	checked sync.Map
 }
 
@@ -200,15 +202,20 @@ const freshRecheckDelay = time.Minute
 // when nothing else wakes the request. A waiting pull request is looked at more often (PullRequestPollInterval).
 const freshRecheckInterval = 5 * time.Minute
 
+// FullRecheckInterval is freshRecheckInterval, for the executor's flag help.
+const FullRecheckInterval = freshRecheckInterval
+
 // Bounds of PullRequestPollInterval. One look reads the settings from the API server and lists the pull
 // requests of the request's branch on the Git host (one GitHub REST call); a full recheck makes about eight
 // (the look, three reads of the target branch head and the target file: its tree, one per directory and the
 // blob). The lower bound keeps a waiting pull request to at most 240 looks an hour; the upper bound is
-// freshRecheckInterval, where every look is a full recheck.
+// freshRecheckInterval, where every look is a full recheck. Each status write of the executor on a waiting
+// request (the move to AwaitingApproval, a new render head, a refusal, a pause and its end) wakes the request once
+// more, which costs one more look; those writes happen on a change only, not on every look.
 const (
 	// DefaultPullRequestPollInterval is the poll interval of a waiting pull request by default: a merge is seen
 	// within about a minute, for about 150 GitHub REST calls an hour per waiting pull request (48 looks and 12
-	// full rechecks), against about 100 with full rechecks only.
+	// full rechecks), against about 100 with full rechecks only, plus one look per status write.
 	DefaultPullRequestPollInterval = time.Minute
 	// MinPullRequestPollInterval is the shortest poll interval.
 	MinPullRequestPollInterval = 15 * time.Second
@@ -280,7 +287,12 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 			// Stopped: nothing is written to Git any more, but a lock still held waits for its pull request.
 			return r.checkHeld(ctx, rr)
 		}
-		return r.recheck(ctx, rr)
+		res, err := r.recheck(ctx, rr)
+		if !progresses(rr) {
+			// The recheck ended the request (Merged, Superseded, NeedsIntervention, ...): it is never looked at again.
+			r.checked.Delete(req.NamespacedName)
+		}
+		return res, err
 	}
 	// A request a limit holds back (Queued) checks only the limits until they let it through, so it does not
 	// read Git while it waits. Every other request is decided first, so a refusal is never held back.
@@ -679,6 +691,9 @@ func (r *RemediationRequestReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	if r.Namespace == "" {
 		return errors.New("the operator namespace is required")
 	}
+	if err := r.validatePullRequestPollInterval(); err != nil {
+		return err
+	}
 	requestPhases.setNamespace(r.Namespace)
 	if err := mgr.Add(requestPhases.source.Runnable(mgr.GetCache(), &remediationv1alpha1.RemediationRequest{})); err != nil {
 		return fmt.Errorf("adding the source of the RemediationRequest phase metric: %w", err)
@@ -741,9 +756,13 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		if outcome, lookErr = r.watchPullRequest(ctx, rr); outcome == prStopped {
 			return ctrl.Result{}, nil
 		}
-		if retryAfterOf(lookErr) > 0 {
-			// The Git host asked for a delay (a rate limit): the freshness check would ask it again at once.
-			return r.waitOrFail(ctx, rr, lookErr)
+		if pe, ok := errors.AsType[*freshness.ProviderError](lookErr); ok && pe.RetryAfter > 0 && lookOnly(rr) {
+			// The Git host asked for a delay (a rate limit): the freshness check would ask it again at once. A
+			// request that carries a stale plan's mark or WritesPaused goes on to the full recheck instead, which
+			// settles those (and honours a delay of its own calls). The wait never passes the full recheck's period.
+			capped := *pe
+			capped.RetryAfter = min(pe.RetryAfter, freshRecheckInterval)
+			return r.waitOrFail(ctx, rr, &capped)
 		}
 		if wait, ok := r.pollOnly(rr, outcome); ok {
 			// Still open, and the last full recheck is recent: only the pull request was read (#434).

@@ -27,23 +27,24 @@ import (
 // azureSDK is the import path prefix of the Azure SDK for Go, including Entra ID and MSAL.
 var azureSDK = []string{"github.com/Azure/", "github.com/AzureAD/"}
 
-// TestAzureSDKOnlyHere enforces ADR-0013 for this adapter: no Go file in the module outside this package
-// imports the Azure SDK.
+// TestAzureSDKOnlyHere enforces ADR-0013 for the Azure adapters: no Go file in the module outside this package
+// and the Blob Storage analysis store imports the Azure SDK.
 func TestAzureSDKOnlyHere(t *testing.T) {
 	here, err := filepath.Abs(".")
 	if err != nil {
 		t.Fatal(err)
 	}
 	root := importguard.ModuleRoot(t)
+	allowed := map[string]bool{here: true, filepath.Join(root, "internal", "providers", "store", "azureblob"): true}
 	checked := importguard.WalkGoFiles(t, root, func(path string) {
-		if filepath.Dir(path) == here {
+		if allowed[filepath.Dir(path)] {
 			return
 		}
 		for _, p := range importguard.FileImports(t, path) {
 			for _, prefix := range azureSDK {
 				if strings.HasPrefix(p, prefix) {
 					rel, _ := filepath.Rel(root, path)
-					t.Errorf("%s imports %q: the Azure SDK is allowed only in internal/providers/signer/azurekv", rel, p)
+					t.Errorf("%s imports %q: the Azure SDK is allowed only in internal/providers/signer/azurekv and internal/providers/store/azureblob", rel, p)
 				}
 			}
 		}

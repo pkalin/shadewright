@@ -31,7 +31,10 @@ import (
 	"github.com/pkalin/shadewright/internal/analyzer"
 	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/incidents"
+	"github.com/pkalin/shadewright/internal/providers"
+	providersfake "github.com/pkalin/shadewright/internal/providers/fake"
 	"github.com/pkalin/shadewright/internal/providers/model/foundry"
+	"github.com/pkalin/shadewright/internal/providers/store/azureblob"
 	"github.com/pkalin/shadewright/internal/redact"
 )
 
@@ -149,5 +152,53 @@ func TestAnalysisClaimFollowsTheTriggersTimeout(t *testing.T) {
 	c, err := buildAnalysis(f, testDeps(t), ok)
 	if err != nil || c.ClaimTimeout != 12*time.Minute {
 		t.Errorf("controller %v, error %v, want a claim of 12m", c, err)
+	}
+}
+
+// Settings of the analysis record store in the tests.
+const (
+	storeAccount   = "stswanabc"
+	storeContainer = "analyses"
+)
+
+// The analysis record store is configured by its two flags together, only with the analysis on, and its
+// settings are validated before anything starts.
+func TestAnalysisStoreFlags(t *testing.T) {
+	ok := func() (foundry.TokenSource, error) { return noTokens{}, nil }
+	for name, edit := range map[string]func(*analysisFlags){
+		"without a triage model": func(f *analysisFlags) {
+			f.triageModel, f.storeAccount, f.storeContainer = "", storeAccount, storeContainer
+		},
+		"account only":    func(f *analysisFlags) { f.storeAccount = storeAccount },
+		"container only":  func(f *analysisFlags) { f.storeContainer = storeContainer },
+		"invalid account": func(f *analysisFlags) { f.storeAccount, f.storeContainer = "st.evil.example", storeContainer },
+		"invalid container": func(f *analysisFlags) {
+			f.storeAccount, f.storeContainer = storeAccount, "../analyses"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := validFlags()
+			edit(&f)
+			if _, err := buildAnalysis(f, testDeps(t), ok); err == nil {
+				t.Error("buildAnalysis accepted the store flags")
+			}
+		})
+	}
+
+	f := validFlags()
+	c, err := buildAnalysis(f, testDeps(t), ok)
+	if err != nil || c == nil || c.Store != nil {
+		t.Fatalf("without the store flags: controller %v, error %v; want one without a store", c, err)
+	}
+	f.storeAccount, f.storeContainer = storeAccount, storeContainer
+	d := testDeps(t)
+	var got azureblob.Config
+	d.newStore = func(cfg azureblob.Config) (providers.AnalysisStore, error) {
+		got = cfg
+		return &providersfake.Store{}, nil
+	}
+	c, err = buildAnalysis(f, d, ok)
+	if err != nil || c.Store == nil || got != (azureblob.Config{Account: storeAccount, Container: storeContainer}) {
+		t.Fatalf("with the store flags: config %+v, error %v; want a store", got, err)
 	}
 }

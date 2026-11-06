@@ -30,11 +30,16 @@ type AnalysisRecord struct {
 	CreatedAt   time.Time
 	// Data is the redacted record, typically JSON.
 	Data []byte
+	// Verified are values in Data that the caller made or read back from the API server and knows are not
+	// secrets, such as an object name that ends in a hash. A store that checks Data with the redactor before
+	// it writes keeps their whole occurrences. Never text from a model, a user or the cluster.
+	Verified []string
 }
 
 // AnalysisStore keeps analysis records. Records are written once and never changed.
 type AnalysisStore interface {
 	// Put writes a record and returns a reference to it. Writing the same ID with the same data again
-	// returns the same reference; the same ID with other data returns ErrConflict.
+	// returns the same reference; the same ID with other data returns ErrConflict. A store whose identity
+	// may not read records cannot compare, and returns ErrConflict for any ID that exists.
 	Put(ctx context.Context, rec AnalysisRecord) (string, error)
 }

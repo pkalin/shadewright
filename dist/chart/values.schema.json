@@ -246,6 +246,27 @@
                 "maxLength": 253,
                 "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
               }
+            },
+            "recordStore": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "azureBlob": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "account": {
+                      "type": "string",
+                      "pattern": "^([a-z0-9]{3,24})?$"
+                    },
+                    "container": {
+                      "type": "string",
+                      "maxLength": 63,
+                      "pattern": "^([a-z0-9](-?[a-z0-9])+)?$"
+                    }
+                  }
+                }
+              }
             }
           }
         },

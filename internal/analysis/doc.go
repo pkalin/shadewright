@@ -58,8 +58,14 @@ limitations under the License.
 // The [Controller] claims an Incident the trigger marked due for its current generation (Open, or Analyzing
 // taken as lost; never Resolved) by writing the phase Analyzing, lastAnalysisTime and the AnalysisDue
 // condition in one status update, and writes the outcome (Proposed or Escalated, the Analyzed condition, the
-// request's name) in another. A stop leaves the Incident Analyzing, which the
-// trigger takes as lost after its analysis timeout.
+// request's name and, with a store, the analysis record's ID) in another. A stop leaves the Incident Analyzing,
+// which the trigger takes as lost after its analysis timeout.
+//
+// With a [providers.AnalysisStore] configured (Controller.Store), the controller writes one record of each run
+// before the outcome ([Record], ADR-0015): counts, reason, models, prompt version, the request's name and the
+// result's summary and missing data, every string from the cluster or the model redacted, never the context, the
+// prompt or the raw reply. Its ID derives from the Incident's UID and the run's lastAnalysisTime and goes into
+// status.analysisRecords (the newest 20). A record that cannot be written is logged and changes nothing else.
 //
 // The run is identified by the lastAnalysisTime its claim wrote, and the claim expires the trigger's analysis
 // timeout after it (ADR-0025). Just before the create and in the outcome update the controller reads the

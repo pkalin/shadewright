@@ -819,6 +819,9 @@ const analyzerClientID = "analyzer.identity.azure.clientId=22222222-2222-2222-22
 // labSuffix is the allow-list a triage model needs.
 const labSuffix = "analyzer.analysis.endpointSuffixes={.lab.services.ai.azure.com}"
 
+// triageMini turns the analysis on with a triage model.
+const triageMini = "analyzer.analysis.triageModel=gpt-4.1-mini"
+
 // TestAnalyzerAnalysisFollowsValues checks that the analysis flags appear only with a triage model (the
 // analysis is off by default), and together with it.
 func TestAnalyzerAnalysisFollowsValues(t *testing.T) {
@@ -850,12 +853,23 @@ func TestAnalyzerAnalysisFollowsValues(t *testing.T) {
 			t.Errorf("args %v lack %s", args, want)
 		}
 	}
+	// No record store unless its account is set; with it, both flags, the container defaulting to analyses.
+	if slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "--analysis-store-") }) {
+		t.Errorf("args %v hold a record store without its account", args)
+	}
+	args = analyzerArgs(t, render(t, false, analyzerClientID, labSuffix,
+		"analyzer.analysis.triageModel=gpt-4.1-mini-2025-04-14", "analyzer.analysis.recordStore.azureBlob.account=stswanabc"))
+	for _, want := range []string{"--analysis-store-account=stswanabc", "--analysis-store-container=analyses"} {
+		if !slices.Contains(args, want) {
+			t.Errorf("args %v lack %s", args, want)
+		}
+	}
 }
 
 func TestChartRefusesBadAnalysisValues(t *testing.T) {
 	for name, set := range map[string][]string{
-		"triage model without identity":  {"analyzer.analysis.triageModel=gpt-4.1-mini", labSuffix},
-		"triage model without suffixes":  {analyzerClientID, "analyzer.analysis.triageModel=gpt-4.1-mini"},
+		"triage model without identity":  {triageMini, labSuffix},
+		"triage model without suffixes":  {analyzerClientID, triageMini},
 		"escalation without triage":      {analyzerClientID, "analyzer.analysis.escalationModel=gpt-4.1"},
 		"model with a space":             {analyzerClientID, labSuffix, "analyzer.analysis.triageModel=gpt 4"},
 		"model with a comma":             {analyzerClientID, labSuffix, "analyzer.analysis.triageModel=a\\,b"},
@@ -865,10 +879,20 @@ func TestChartRefusesBadAnalysisValues(t *testing.T) {
 		"policy for an unknown action":   {"analyzer.analysis.actionPolicies.Exec=all"},
 		"policy name with an underscore": {"analyzer.analysis.actionPolicies.SetContainerMemoryLimit=a_b"},
 		"unknown analysis value":         {"analyzer.analysis.apiKey=x"},
+		"record store without triage":    {analyzerClientID, "analyzer.analysis.recordStore.azureBlob.account=stswanabc"},
+		"record store without container": {analyzerClientID, labSuffix, triageMini,
+			"analyzer.analysis.recordStore.azureBlob.account=stswanabc", "analyzer.analysis.recordStore.azureBlob.container="},
+		"account with a dot":           {"analyzer.analysis.recordStore.azureBlob.account=st.evil.example"},
+		"account in upper case":        {"analyzer.analysis.recordStore.azureBlob.account=StAnalyses"},
+		"container with a slash":       {"analyzer.analysis.recordStore.azureBlob.container=a/b"},
+		"container with two hyphens":   {"analyzer.analysis.recordStore.azureBlob.container=a--b"},
+		"record store with a key":      {"analyzer.analysis.recordStore.azureBlob.accountKey=x"},
+		"record store of another kind": {"analyzer.analysis.recordStore.s3.bucket=x"},
 	} {
 		t.Run(name, func(t *testing.T) { helmFails(t, set...) })
 	}
-	for _, flag := range []string{"triage-model", "escalation-model", "model-endpoint-suffixes", "action-policies"} {
+	for _, flag := range []string{"triage-model", "escalation-model", "model-endpoint-suffixes", "action-policies",
+		"analysis-store-account", "analysis-store-container"} {
 		if out := helmFails(t, "analyzer.extraArgs={--"+flag+"=x}"); !strings.Contains(out, "--"+flag) {
 			t.Errorf("extra arg %s not refused:\n%s", flag, out)
 		}

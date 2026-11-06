@@ -39,6 +39,7 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/incidents"
+	"github.com/pkalin/shadewright/internal/providers"
 )
 
 // ConditionAnalyzed is the Incident condition the analysis writes with the final phase: True, with the
@@ -80,7 +81,8 @@ const LabelIncidentUID = "remediation.shadewright.io/incident-uid"
 // Analyzing) in one status update with the resourceVersion it read, so two runs never claim the same round;
 // the claim also records any request of the Incident that an earlier run created and did not record. It then
 // runs the [Analyzer], creates the RemediationRequest of a plan, and writes the phase Proposed or Escalated
-// with the Analyzed condition and the request's name in one more status update.
+// with the Analyzed condition, the request's name and the analysis record's ID (when Store is set) in one more
+// status update.
 //
 // The lastAnalysisTime the claim wrote identifies the run, and the claim expires ClaimTimeout after it
 // (ADR-0025 decision 1). Just before the create and in the outcome update the run reads the Incident live and
@@ -102,6 +104,9 @@ type Controller struct {
 	Namespace string
 	// Analyzer runs the analysis.
 	Analyzer *Analyzer
+	// Store keeps one redacted record of each analysis outside the cluster (ADR-0015); its ID goes into
+	// status.analysisRecords. Nil means no record is written.
+	Store providers.AnalysisStore
 	// Now returns the current time; nil means time.Now.
 	Now func() time.Time
 
@@ -222,7 +227,8 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		return ctrl.Result{}, fmt.Errorf("claiming Incident %s: %w", inc.Name, err)
 	}
-	out, err := c.Analyzer.Analyze(ctx, claimed, LimitsOf(settings))
+	limits := LimitsOf(settings)
+	out, err := c.Analyzer.Analyze(ctx, claimed, limits)
 	if err != nil {
 		// A stop or a lost leadership: the Incident stays Analyzing and the trigger takes it as lost later.
 		return ctrl.Result{}, err
@@ -251,7 +257,8 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	logger.Info("Analyzed Incident", append([]any{"incident", inc.Name, "run", runID, "reason", out.Reason,
 		"escalated", out.Escalated, "calls", out.Calls, "toolCalls", out.ToolCalls, "tokens", out.Tokens,
 		"models", out.Models, "promptVersion", out.PromptVersion, "request", created}, resultFields(out)...)...)
-	switch err := c.finish(ctx, claimed, out, created, attempted); {
+	record := c.storeRecord(ctx, claimed, out, limits, created)
+	switch err := c.finish(ctx, claimed, out, created, attempted, record); {
 	case errors.Is(err, errClaimLost):
 		logger.Info("Dropped the outcome of an analysis whose claim was lost", "incident", inc.Name, "run", runID,
 			"reason", out.Reason, "request", created)
@@ -262,8 +269,8 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 }
 
 // resultFields are the log fields of the result's own words, redacted in the loop and within the result's
-// bounds, only those the result has (#422): what a hand-off asked for is otherwise lost while no analysis
-// record is stored (#77).
+// bounds, only those the result has (#422): without an analysis store (#77) the log is the only place a
+// hand-off's request is kept.
 func resultFields(out Outcome) []any {
 	var kv []any
 	if out.Summary != "" {
@@ -583,7 +590,7 @@ var outcomeMessages = map[Reason]string{
 // its name), it reads that request live and records it if the server created it anyway, as a create whose
 // reply was lost does: the run's own request only, never another one.
 func (c *Controller) finish(ctx context.Context, claimed *remediationv1alpha1.Incident, out Outcome,
-	request, attempted remediationv1alpha1.Name) error {
+	request, attempted remediationv1alpha1.Name, record remediationv1alpha1.RecordID) error {
 	wctx, cancel, err := c.withinClaim(ctx, claimed, finalWriteTimeout, true)
 	if err != nil {
 		return err
@@ -595,6 +602,9 @@ func (c *Controller) finish(ctx context.Context, claimed *remediationv1alpha1.In
 			return err
 		}
 		inc.Status.Phase = remediationv1alpha1.IncidentEscalated
+		if record != "" {
+			inc.Status.AnalysisRecords = appendBounded(inc.Status.AnalysisRecords, record, maxRecordIDs)
+		}
 		if request == "" && attempted != "" {
 			if c.createdAnyway(wctx, inc, attempted) {
 				inc.Status.RemediationRequests = appendBounded(inc.Status.RemediationRequests, attempted, maxRecorded)
@@ -628,7 +638,7 @@ func (c *Controller) createdAnyway(ctx context.Context, inc *remediationv1alpha1
 }
 
 // appendBounded appends name unless present and keeps the newest n.
-func appendBounded(names []remediationv1alpha1.Name, name remediationv1alpha1.Name, n int) []remediationv1alpha1.Name {
+func appendBounded[T comparable](names []T, name T, n int) []T {
 	if slices.Contains(names, name) {
 		return names
 	}

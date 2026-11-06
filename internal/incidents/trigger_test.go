@@ -63,6 +63,16 @@ func quietThenSeen(seenAgo, burstAgo, oldAgo time.Duration) remediationv1alpha1.
 	return st
 }
 
+// conditionID is the occurrence ID of a symptom state of a module's symptom source.
+var conditionID = occurrenceCondition + strings.Repeat("c", 64)
+
+// withDueCondition returns st with an AnalysisDue condition of status and reason, set 30 min ago.
+func withDueCondition(st remediationv1alpha1.IncidentStatus, status metav1.ConditionStatus, reason string) remediationv1alpha1.IncidentStatus {
+	st.Conditions = []metav1.Condition{{Type: ConditionAnalysisDue, Status: status, Reason: reason,
+		LastTransitionTime: metav1.Time{Time: triggerNow.Add(-30 * time.Minute)}}}
+	return st
+}
+
 // incidentStatus returns a status first and last seen seenAgo ago, with one occurrence that began beganAgo
 // ago, and, when analyzedAgo is positive, analyzed that long ago.
 func incidentStatus(seenAgo, beganAgo, analyzedAgo time.Duration) remediationv1alpha1.IncidentStatus {
@@ -281,6 +291,54 @@ func TestDue(t *testing.T) {
 				st := incidentStatus(35*time.Minute, time.Hour, 0)
 				st.Conditions = []metav1.Condition{{Type: ConditionAnalysisDue, Status: metav1.ConditionTrue,
 					Reason: ReasonFirstAnalysis, LastTransitionTime: metav1.Time{Time: triggerNow.Add(-30 * time.Minute)}}}
+				return st
+			},
+			due: true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: a mark taken back by a failed settings read still counts as due",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return withDueCondition(incidentStatus(35*time.Minute, time.Hour, 0), metav1.ConditionFalse, ReasonSettingsUnreadable)
+			},
+			due: true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: a mark taken back by a failed budget read still counts as due",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return withDueCondition(incidentStatus(35*time.Minute, time.Hour, 0), metav1.ConditionFalse, ReasonBudgetReadFailed)
+			},
+			due: true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: a budget missing is no failed read, so its reason tells nothing of a mark",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return withDueCondition(incidentStatus(35*time.Minute, time.Hour, 0), metav1.ConditionFalse, ReasonBudgetNotFound)
+			},
+			reason: ReasonNotRecent,
+		},
+		{
+			name: "not recent: a lasting state seen once an hour ago is recent",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := incidentStatus(time.Hour, time.Hour, 0)
+				st.Occurrences[0].ID = conditionID
+				return st
+			},
+			due: true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: a lasting state counts only when it is the newest occurrence",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := quietThenSeen(35*time.Minute, 35*time.Minute, time.Hour)
+				st.Occurrences[1].ID = conditionID
+				return st
+			},
+			reason: ReasonNotRecent,
+		},
+		{
+			name: "not recent: the newest occurrence is found by its begin time, not its place",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := quietThenSeen(35*time.Minute, time.Hour, 35*time.Minute)
+				st.Occurrences[1].ID = conditionID
 				return st
 			},
 			due: true, reason: ReasonFirstAnalysis,
@@ -633,7 +691,9 @@ func createIncident(t *testing.T, ns string, f int, st remediationv1alpha1.Incid
 	if err := env.admin.Create(t.Context(), inc); err != nil {
 		t.Fatal(err)
 	}
-	st.Occurrences[0].ID = eventID(f)
+	if !strings.HasPrefix(st.Occurrences[0].ID, occurrenceCondition) {
+		st.Occurrences[0].ID = eventID(f)
+	}
 	inc.Status = st
 	if err := env.admin.Status().Update(t.Context(), inc); err != nil {
 		t.Fatal(err)
@@ -1108,6 +1168,45 @@ func TestQuietIncidentsTakeNoBudgetWhenSettingsArriveLate(t *testing.T) {
 	for f := 2; f <= 3; f++ {
 		eventually(t, ns, f, dueIs(false, ReasonNotRecent))
 	}
+}
+
+// Settings applied after Incidents exist: a lasting symptom state of a module (a "condition:" occurrence),
+// emitted once while it lasts, is not taken as gone though it was seen an hour ago, so it is due; an event seen
+// once an hour ago is not (NotRecent).
+func TestLastingStateIsNotSkippedWhenSettingsArriveLate(t *testing.T) {
+	ns := namespace(t)
+	lasting := incidentStatus(time.Hour, time.Hour, 0)
+	lasting.Occurrences[0].ID = conditionID
+	createIncident(t, ns, 1, lasting)
+	createIncident(t, ns, 2, incidentStatus(time.Hour, time.Hour, 0))
+	start(t, ns, triggerConfig)
+	eventually(t, ns, 1, dueIs(false, ReasonSettingsNotFound))
+	createSettings(t, 10)
+	createBudget(t, ns, nil)
+	eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
+	eventually(t, ns, 2, dueIs(false, ReasonNotRecent))
+}
+
+// A failed budget read takes the mark that says due back (BudgetReadFailed). Once the budget reads again, an
+// Incident quiet longer than the recent window meanwhile is due again, not NotRecent: one failed read does not
+// end a pending first analysis.
+func TestFailedReadDoesNotEndAPendingFirstAnalysis(t *testing.T) {
+	ns := namespace(t)
+	createSettings(t, 10)
+	createBudget(t, ns, nil)
+	createIncident(t, ns, 1, incidentStatus(14*time.Minute, time.Hour, 0))
+	var now atomic.Int64
+	now.Store(triggerNow.UnixNano())
+	reader := &failingBudget{Reader: env.admin}
+	startWith(t, ns, Config{TriggerInterval: testTriggerInterval, Now: func() time.Time { return time.Unix(0, now.Load()).UTC() }},
+		func(c *Controller, _ *countingClient) { c.reader = reader })
+	eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
+	reader.fail.Store(true)
+	eventually(t, ns, 1, dueIs(false, ReasonBudgetReadFailed))
+	now.Store(triggerNow.Add(5 * time.Minute).UnixNano())
+	time.Sleep(4 * testTriggerInterval)
+	reader.fail.Store(false)
+	eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
 }
 
 // An Incident that went quiet and was seen again while no settings existed (so no pass decided it NotRecent)

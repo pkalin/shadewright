@@ -18,9 +18,11 @@ package incidents
 
 import (
 	"slices"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 )
@@ -45,10 +47,10 @@ const (
 
 	// ReasonNotObserved: the status records no observation yet.
 	ReasonNotObserved = "NotObserved"
-	// ReasonNotRecent: the incident was never analyzed, is not marked due, and was last seen (in the status or
-	// held) longer ago than the recent window, so a symptom that stopped before analysis was turned on, or
-	// before the daily budget was reset, takes no unit of the budget. A new observation makes it due again
-	// through the debounce.
+	// ReasonNotRecent: the incident was never analyzed, is not marked due, its newest occurrence is no lasting
+	// symptom state of a module, and it was last seen (in the status or held) longer ago than the recent
+	// window, so a symptom that stopped before analysis was turned on, or before the daily budget was reset,
+	// takes no unit of the budget. A new observation makes it due again through the debounce.
 	ReasonNotRecent = "NotRecent"
 	// ReasonAnalyzing: an analysis is running and has not reached the analysis timeout.
 	ReasonAnalyzing = "Analyzing"
@@ -118,10 +120,10 @@ type TriggerSettings struct {
 	// before that analysis is taken as lost. It is due again at the later of AnalysisTimeout and Cooldown.
 	AnalysisTimeout time.Duration
 	// RecentWindow is how recently an incident never analyzed must have been seen to be due for its first
-	// analysis: one last seen longer ago is not due (NotRecent), unless it is already marked due. A window
-	// shorter than Debounce is taken as Debounce, so an incident that settles is due for at least a moment.
-	// Zero means no window: any incident never analyzed may be due, and its unsettled observations start at
-	// firstSeen.
+	// analysis: one last seen longer ago is not due (NotRecent), unless it is already marked due or its newest
+	// occurrence is a lasting state (see [Due]). A window shorter than Debounce is taken as Debounce, so an
+	// incident that settles is due for at least a moment. Zero means no window: any incident never analyzed
+	// may be due, and its unsettled observations start at firstSeen.
 	RecentWindow time.Duration
 	// MaxAnalysesPerDay is the daily limit of the RemediationSettings ([maxAnalysesPerDay]): the analyses
 	// allowed per UTC day across all Incidents. 0 disables analysis.
@@ -144,9 +146,10 @@ type TriggerSettings struct {
 //     (CoolingDown) until the cooldown has passed too, then due again (AnalysisTimedOut); without a
 //     lastAnalysisTime not due (AnalysisStartUnknown), since neither can be placed;
 //   - in phase Open or Resolved (or none), never analyzed: due (FirstAnalysis), unless last seen (in the
-//     status or held) longer ago than RecentWindow (or Debounce, when that is longer) and not marked due
-//     already: not due (NotRecent). A mark that says due is not taken back for that, so the Incidents already
-//     due keep their units of the budget;
+//     status or held) longer ago than RecentWindow (or Debounce, when that is longer), not marked due
+//     already ([markedDue]) and its newest occurrence is no lasting state ([lastingState]): not due
+//     (NotRecent). A mark that says due is not taken back for that, so the Incidents already due keep their
+//     units of the budget, and a lasting state, seen once while it lasts, is not taken as gone;
 //   - nothing seen since the last analysis: not due (NoNewData);
 //   - seen again, within the cooldown since the last analysis: not due (CoolingDown), even with a new
 //     occurrence, so a crash loop is analyzed at most once per cooldown;
@@ -201,7 +204,7 @@ func Due(inc *remediationv1alpha1.Incident, held, waiting, now time.Time, s Trig
 	seen := latest(st.LastSeen.Time, held)
 	// A lastSeen ahead of the controller's clock (skew) is recent: only a past beyond the window is stale.
 	if reason == ReasonFirstAnalysis && s.RecentWindow > 0 && now.After(seen.Add(recentWindow(s))) &&
-		!meta.IsStatusConditionTrue(st.Conditions, ConditionAnalysisDue) {
+		!markedDue(st) && !lastingState(st) {
 		return false, ReasonNotRecent
 	}
 	if now.Before(seen.Add(s.Debounce)) {
@@ -264,6 +267,48 @@ func waitsForData(reason string) bool {
 		return true
 	}
 	return false
+}
+
+// occurrenceCondition is the prefix of the occurrence ID of a symptom state read from an object's status by a
+// module's symptom source (design 3.1).
+const occurrenceCondition = "condition:"
+
+// markedDue reports whether the incident's AnalysisDue condition says due, or said so until a pass could not
+// read the RemediationSettings or the budget ConfigMap: such a pass sets only the marks that say due to not
+// due (SettingsUnreadable, BudgetReadFailed, [Controller.markDue]), and a not-due condition keeps its reason,
+// so those reasons on a False condition mean it was True before. One failed read thus does not end a pending
+// first analysis. The other reasons of a budget that is unknown (an object missing, incomplete or not to be
+// trusted) are written on every Incident, so they tell nothing of a mark before.
+func markedDue(st *remediationv1alpha1.IncidentStatus) bool {
+	cond := meta.FindStatusCondition(st.Conditions, ConditionAnalysisDue)
+	if cond == nil {
+		return false
+	}
+	switch cond.Status {
+	case metav1.ConditionTrue:
+		return true
+	case metav1.ConditionFalse:
+		return cond.Reason == ReasonSettingsUnreadable || cond.Reason == ReasonBudgetReadFailed
+	}
+	return false
+}
+
+// lastingState reports whether the incident's newest occurrence (by begin time; the first record when none
+// has one) is a symptom state of a module's symptom source ("condition:"). Such a state is emitted once while
+// it lasts (design 3.1), so lastSeen does not move while the problem is still present, and the status records
+// no end of it: an ongoing state cannot be told from one that ended, so every such incident is taken as
+// recent.
+func lastingState(st *remediationv1alpha1.IncidentStatus) bool {
+	if len(st.Occurrences) == 0 {
+		return false
+	}
+	newest := st.Occurrences[0]
+	for _, r := range st.Occurrences[1:] {
+		if r.Began != nil && (newest.Began == nil || r.Began.After(newest.Began.Time)) {
+			newest = r
+		}
+	}
+	return strings.HasPrefix(newest.ID, occurrenceCondition)
 }
 
 // recentWindow is the recent window [Due] applies: RecentWindow, but never shorter than Debounce.

@@ -239,9 +239,18 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			out.Reason, out.Plan, created = ReasonRequestNotCreated, nil, ""
 		}
 	}
-	logger.Info("Analyzed Incident", "incident", inc.Name, "run", runID, "reason", out.Reason,
+	kv := []any{"incident", inc.Name, "run", runID, "reason", out.Reason,
 		"escalated", out.Escalated, "calls", out.Calls, "toolCalls", out.ToolCalls, "tokens", out.Tokens,
-		"models", out.Models, "promptVersion", out.PromptVersion, "request", created)
+		"models", out.Models, "promptVersion", out.PromptVersion, "request", created}
+	// The result's own words, redacted and within the result's bounds, only when it has them (#422): what a
+	// hand-off asked for is otherwise lost while no analysis record is stored (#77).
+	if out.Summary != "" {
+		kv = append(kv, "summary", out.Summary)
+	}
+	if len(out.MissingData) > 0 {
+		kv = append(kv, "missingData", out.MissingData)
+	}
+	logger.Info("Analyzed Incident", kv...)
 	switch err := c.finish(ctx, claimed, out, created, attempted); {
 	case errors.Is(err, errClaimLost):
 		logger.Info("Dropped the outcome of an analysis whose claim was lost", "incident", inc.Name, "run", runID,

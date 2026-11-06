@@ -490,6 +490,29 @@ func TestNoProposalHandsOff(t *testing.T) {
 	}
 }
 
+// The outcome carries the result's summary and missing data for the log line, redacted (#422).
+func TestOutcomeCarriesRedactedResultText(t *testing.T) {
+	opaque := strings.Repeat("x9", 10)
+	f := newFixture()
+	f.triage.steps = []step{reply(strings.Replace(strings.Replace(noProposal, `"missingData":[]`,
+		`"missingData":["previous logs","the value of Bearer `+opaque+`"]`, 1), `"summary":"unclear"`,
+		`"summary":"OOM, token Bearer `+opaque+`"`, 1))}
+	out := f.analyze(t, testLimits())
+	if out.Reason != ReasonMissingData || len(out.MissingData) != 2 || out.MissingData[0] != "previous logs" {
+		t.Fatalf("reason %s, missing data %q", out.Reason, out.MissingData)
+	}
+	if strings.Contains(out.MissingData[1], opaque) || strings.Contains(out.Summary, opaque) ||
+		!strings.HasPrefix(out.Summary, "OOM, token") {
+		t.Errorf("summary %q, missing data %q: want the token redacted", out.Summary, out.MissingData)
+	}
+
+	f = newFixture()
+	f.triage.steps = []step{reply(noProposal)}
+	if out := f.analyze(t, testLimits()); out.MissingData != nil || out.Summary != "unclear" {
+		t.Errorf("summary %q, missing data %q", out.Summary, out.MissingData)
+	}
+}
+
 func TestProposalNeedsEvidence(t *testing.T) {
 	for name, evidence := range map[string]string{
 		"none":          `[]`,

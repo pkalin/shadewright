@@ -32,6 +32,7 @@ import (
 	"github.com/pkalin/shadewright/internal/incidents"
 	"github.com/pkalin/shadewright/internal/policy"
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/redact"
 	"github.com/pkalin/shadewright/internal/tools"
 )
 
@@ -196,6 +197,10 @@ type Config struct {
 	MaxTokensPerAnalysis int64
 	// Now returns the current time; nil means time.Now.
 	Now func() time.Time
+	// Redactor redacts the result text the outcome carries for the logs (Outcome.Summary and
+	// Outcome.MissingData): pass the one the context builder uses. Nil means the built-in rules of package
+	// redact.
+	Redactor *redact.Redactor
 }
 
 // Analyzer runs the bounded analysis of one Incident at a time per call. It is safe for concurrent use when
@@ -281,6 +286,12 @@ type Outcome struct {
 	Models []string
 	// PromptVersion is [PromptVersion].
 	PromptVersion string
+	// Summary is the short diagnosis of a valid result, redacted, for the log line of the outcome; empty
+	// without a result. Model text: it is logged, never read to decide anything.
+	Summary string
+	// MissingData is what a valid result said was missing, each item redacted, for the log line of the
+	// outcome (#422); nil when the result listed nothing. Model text: logged, never read to decide anything.
+	MissingData []string
 }
 
 // Analyze runs the analysis of inc with the limits of the settings: runbooks first, then (with a triage
@@ -778,6 +789,10 @@ func estimateInput(req providers.CompletionRequest) int64 {
 // has evidence found in the blocks the model saw, may target the subject and has a policy configured. action
 // is the proposal's action as [DecodeResult] converted and checked it, nil without a proposal.
 func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, error) {
+	r.out.Summary, r.out.MissingData = r.a.redact(res.Summary), nil
+	for _, m := range res.MissingData {
+		r.out.MissingData = append(r.out.MissingData, r.a.redact(m))
+	}
 	if res.Proposal == nil || action == nil {
 		if len(res.MissingData) > 0 {
 			return r.handOff(ReasonMissingData)
@@ -794,6 +809,15 @@ func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, 
 		}
 	}
 	return r.a.accept(r.inc, *r.out, ReasonProposed, Plan{Action: *action, Checks: checks})
+}
+
+// redact redacts model text for the logs. The output is never longer than the input, so the result's bounds
+// (DecodeResult) still hold after it.
+func (a *Analyzer) redact(s string) string {
+	if a.cfg.Redactor == nil {
+		return redact.String(s)
+	}
+	return a.cfg.Redactor.String(s)
 }
 
 // evidenced reports whether at least one quote is found verbatim in a quotable part of the block or tool

@@ -6,17 +6,49 @@ title: Check status with kubectl
 
 `kubectl shadewright status` answers in one command what you would otherwise read from conditions by hand: which Incidents exist, whether each is due for analysis and why, what the last analysis decided, which requests it made with their policy decision and pull request, how much of the day's analysis budget is used, and whether the kill switch is on. It is a kubectl plugin: a separate binary that runs on your machine with your kubeconfig and your permissions. Nothing is installed in the cluster.
 
-## Build and install
+## Install
 
-Build it from a checkout and put it on your `PATH`; kubectl finds any executable named `kubectl-shadewright` there.
+Each release (pre-releases too) carries `kubectl-shadewright` archives for linux and darwin on amd64 and arm64, a `checksums.txt` and its signature `checksums.txt.sigstore.json`, built and signed by the [release-plugin workflow](https://github.com/pkalin/shadewright/blob/main/.github/workflows/release-plugin.yml). Download the files of one release, verify them, and put the binary on your `PATH`; kubectl finds any executable named `kubectl-shadewright` there.
 
 ```bash
-make build-plugin
-install -m 0755 bin/kubectl-shadewright ~/.local/bin/   # any directory on PATH
+VERSION=0.2.0                 # the release without the leading v; the tag is v$VERSION
+OS=linux ARCH=amd64           # linux or darwin, amd64 or arm64
+gh release download "v${VERSION}" --repo pkalin/shadewright \
+  --pattern "kubectl-shadewright_${VERSION}_${OS}_${ARCH}.tar.gz" \
+  --pattern checksums.txt --pattern checksums.txt.sigstore.json
+```
+
+Verify before you run anything. The signature covers `checksums.txt`, which lists the sha256 of every archive; the identity is the workflow file on a release tag of this repository, issued by GitHub's OIDC provider.
+
+```bash
+cosign verify-blob checksums.txt \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp '^https://github\.com/pkalin/shadewright/\.github/workflows/release-plugin\.yml@refs/tags/v[0-9].*$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum --check --ignore-missing checksums.txt     # macOS: shasum -a 256 --check --ignore-missing checksums.txt
+gh attestation verify "kubectl-shadewright_${VERSION}_${OS}_${ARCH}.tar.gz" \
+  --repo pkalin/shadewright \
+  --signer-workflow pkalin/shadewright/.github/workflows/release-plugin.yml
+```
+
+To pin one release, replace `v[0-9].*$` in the regular expression with `vX.Y.Z$`. Each command exits non-zero when the signature, the identity, the checksum or the provenance does not match. Then install:
+
+```bash
+tar -xzf "kubectl-shadewright_${VERSION}_${OS}_${ARCH}.tar.gz" kubectl-shadewright
+install -m 0755 kubectl-shadewright ~/.local/bin/   # any directory on PATH
 kubectl plugin list | grep shadewright
 ```
 
-Release binaries are not published yet ([#439](https://github.com/pkalin/shadewright/issues/439)): build from the tag of the release you run (`git checkout vX.Y.Z`). `make build-plugin` stamps the version from `git describe` (override with `PLUGIN_VERSION=...`); a plain `go build` is `dev`.
+### Build it yourself
+
+For development, build from a checkout or install with Go. These binaries are not signed.
+
+```bash
+make build-plugin      # bin/kubectl-shadewright
+go install github.com/pkalin/shadewright/cmd/kubectl-shadewright@latest   # or @vX.Y.Z; reports version dev
+```
+
+`make build-plugin` stamps the version from `git describe` (override with `PLUGIN_VERSION=...`); a plain `go build` or `go install` is `dev`.
 
 ```bash
 kubectl shadewright version     # kubectl-shadewright v0.2.0

@@ -126,7 +126,8 @@ Every issue names the ADRs it is tied to:
   directory. Concurrency (cancel a superseded pull request run) lives in `ci.yml` only. Called workflows
   (`lint.yml`, `test.yml`, `test-e2e.yml`, `vulncheck.yml`, `workflow-lint.yml`, `images-build.yml`,
   `chart-test.yml`, `docs-check.yml`) have no triggers of their own, except the weekly `vulncheck.yml` schedule and the push, weekly and manual triggers of `codeql.yml`. `images.yml`
-  (publishes from main and `v*` tags) and `chart.yml` (runs the chart tests, publishes, then adds the digests to the release, on `v*` tags only)
+  (publishes from main and `v*` tags) and `chart.yml` (runs the chart tests, publishes, then adds the digests to the release, on `v*` tags only) and
+  `release-plugin.yml` (builds, signs and attaches the `kubectl-shadewright` archives to the release, on `v*` tags only)
   stay separate, because their signatures are verified against those file names.
   `codeql.yml` (CodeQL for `go` and `actions`) runs on pushes to main, weekly and by hand, and `ci.yml` calls it
   as the `codeql` job on pull requests whose files match the `codeql` group of `hack/ci-changed.sh` (Go code,

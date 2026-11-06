@@ -53,6 +53,8 @@ The new count is at most 1,000 per observation: a series count is written by who
 - Event state holds 10,000 entries and pod state 5,000 (see 3.2).
 - The informer cache of the watched namespaces and this state count against the analyzer's memory limit (128 Mi in `config/manager/analyzer.yaml`). Namespaces with many pods or events need a higher limit.
 
+**Lab measurement (2026-11-06).** With `v0.3.0-rc.2` (commit `bbe555ca09db887d1389270e53e6ef64249cd7eb`) on one `Standard_D4as_v5` node, an idle `kubectl top` sample after 3 analyses and 1 pull request showed analyzer memory 19Mi and CPU 2m, executor memory 16Mi and CPU 1m, with 0 restarts (how many namespaces, pods and events were watched was not recorded). Each had requests of 64Mi/10m and a memory limit of 128Mi. Peak memory during an analysis is not measured yet: it needs a metrics query over the run window, not a point sample. The 128Mi limits are therefore not yet backed by a peak measurement.
+
 **First cases.** These are the symptoms the design starts from:
 
 - `FailedScheduling`: insufficient resources, quota, node affinity or taints.

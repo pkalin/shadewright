@@ -103,6 +103,7 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 	hack/resolve-image-digests_test.sh
 	hack/ci-changed_test.sh
 	hack/release-verify-notes_test.sh
+	hack/publish-release_test.sh
 	hack/require-on-main_test.sh
 	hack/fuzz-targets_test.sh
 	hack/docs-check_test.sh

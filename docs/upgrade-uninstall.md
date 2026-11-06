@@ -28,6 +28,33 @@ Deleting a request before merge is today the only way to cancel it, and what it 
 
 `Cancelled` is a phase in the API ("cancelled before the change was merged") and in the [design](design.md), but **nothing sets it yet**: there is no field or action that cancels a request and keeps it as a record, and no issue for it yet. If you need the record, copy the object before deleting it. `Cancelled` and `Superseded` differ: `Superseded` is set by the executor when the plan went stale (policy, settings or target changed) and the pull request was closed; see [troubleshooting](troubleshooting.md#freshness).
 
+## Release publication
+
+Published GitHub releases are immutable: assets must be attached before publication. Merging the
+release-please pull request updates the changelog and creates the version tag and a **draft** release
+(`draft: true`, `force-tag-creation: true`). Never create a stable `vX.Y.Z` tag by hand.
+
+For a pre-release, tag the intended commit on `main`, push the tag, then immediately create the draft:
+
+```bash
+git tag vX.Y.Z-rc.1 <commit-on-main>
+git push origin vX.Y.Z-rc.1
+gh release create vX.Y.Z-rc.1 --verify-tag --draft --prerelease
+```
+
+Images, Chart, Release plugin and Trivy start on the `v*` tag push, including for drafts. Nothing depends
+on a `release: published` event. The plugin workflow waits up to five minutes for the draft, then uploads
+four archives, `checksums.txt` and `checksums.txt.sigstore.json` after signature and provenance checks.
+Chart verifies the image digests, tests and publishes the chart, then appends digests and verification
+commands to the release body. Its final job waits up to 30 minutes for all six nonempty, uploaded plugin
+assets and requires the exact verification section for the image and chart digests that it published.
+Only then does it run `gh release edit --draft=false`, preserving the pre-release flag.
+
+If a prerequisite fails or the wait expires, the job fails and leaves the release a draft. Fix and rerun
+the failed tag workflow, then rerun Chart's **Publish the complete release** job. Do not publish manually
+to bypass the gate or disable immutable releases. Release body edits remain possible after publication;
+asset uploads do not. Re-running the final job on a complete published release makes no change.
+
 ## Verify a release
 
 Images built from `main` or a `v*` tag after [#82](https://github.com/pkalin/shadewright/issues/82) are signed keyless with cosign (the certificate comes from GitHub's OIDC token, there is no key to trust), carry an SPDX SBOM per platform image (linux/amd64 and linux/arm64) as a signed attestation, and have a GitHub build provenance attestation. v0.1.0 images are not signed. Verify by digest, never by tag, and use the digest you will deploy. You need [Docker](https://docs.docker.com/engine/install/) (for `buildx imagetools`), [jq](https://jqlang.org/), [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x or later (the signatures are stored as Sigstore bundles, which cosign 2.x does not find) and the [GitHub CLI](https://cli.github.com/).

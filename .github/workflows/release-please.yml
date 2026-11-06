@@ -1,10 +1,12 @@
 name: Release
 
 # Keeps one release pull request up to date from the Conventional Commits on main (AGENTS.md, "Commits").
-# Merging it tags vX.Y.Z, updates CHANGELOG.md and creates the GitHub release. Images, signatures and the
-# chart are built from that tag by later workflows (epic #22), and the last of them (chart.yml) appends the
+# Merging it tags vX.Y.Z, updates CHANGELOG.md and creates a draft GitHub release (draft and
+# force-tag-creation in release-please-config.json). The App token makes the tag push trigger workflows.
+# Images, signatures and the chart are built from that tag by later workflows (epic #22). Chart appends the
 # image and chart digests and the verify commands to the body of this release, once the images and the chart
-# are published. That append happens minutes after the regrouping below, which only runs right after the
+# are published. Chart publishes the draft only after the plugin assets are attached too. Immutable releases
+# stay enabled. That append happens minutes after the regrouping below, which only runs right after the
 # release is created, so the two do not race; never run the regrouping on a body that already has the section.
 # release-please finds its last release by the version in .release-please-manifest.json, so a hand-made
 # pre-release tag such as v0.2.0-rc.1 does not affect the next release.

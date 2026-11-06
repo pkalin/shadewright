@@ -1005,9 +1005,10 @@ func commitTitle(rr *remediationv1alpha1.RemediationRequest) string {
 
 // pullRequestBody is the evidence, scope, expected effect, risk and rollback plan, and the marker. Every value
 // comes from validated fields of the request and its status; the whole body is redacted once more, so nothing
-// that looks like a secret reaches the Git host. The one exception is incident, the Incident name as
-// verifiedIncidentName returned it: when it is not empty, its whole occurrences are kept
-// (redact.StringKeeping), because the collector's names are a long hex run the redactor takes for a token.
+// that looks like a secret reaches the Git host. The exceptions are incident, the Incident name as
+// verifiedIncidentName returned it, and the request's own "namespace/name" as keptRequestName returns it: when
+// not empty, their whole occurrences are kept (redact.StringKeeping), because the names the collector and the
+// analyzer derive are long hex runs the redactor takes for a token.
 func pullRequestBody(rr *remediationv1alpha1.RemediationRequest, incident string) string {
 	what, previous, desired := change(rr)
 	t, src := rr.Spec.TargetRef, rr.Status.Source
@@ -1029,9 +1030,26 @@ func pullRequestBody(rr *remediationv1alpha1.RemediationRequest, incident string
 		"Any other push to this branch stops the automation.\n\n")
 	b.WriteString("**Rollback:** revert this pull request; the GitOps controller applies the previous value.\n\n")
 	fmt.Fprintf(&b, "**Approval required:** %s.\n\n", approval)
-	out := redact.StringKeeping(b.String(), incident)
+	out := redact.StringKeeping(b.String(), incident, keptRequestName(rr))
 	// The marker is added after redaction: it holds only the UID and the digest, and must stay exact.
 	return out + marker(rr) + "\n"
+}
+
+// keptRequestName returns the request's "namespace/name", as the body shows it, when the body may show it
+// unredacted, and "" otherwise. metadata.name is chosen by whoever created the request, so its shape proves
+// nothing: a hex secret could be written as "remediation-<secret>". The name is kept only when it equals
+// remediationv1alpha1.RequestName of the request's own spec as the API server stored it (spec.incidentRef.uid
+// and the plan; the spec is immutable), the name the analyzer derives: a hash nobody can steer to a chosen
+// value. The namespace is kept only when the redactor leaves it alone, so keeping the pair never lets a
+// token-like namespace through. Anything else gives "" and so a redacted name.
+func keptRequestName(rr *remediationv1alpha1.RemediationRequest) string {
+	if rr.Spec.IncidentRef.UID == "" || redact.String(rr.Namespace) != rr.Namespace {
+		return ""
+	}
+	if name, err := remediationv1alpha1.RequestName(rr.Spec); err != nil || string(name) != rr.Name {
+		return ""
+	}
+	return rr.Namespace + "/" + rr.Name
 }
 
 // collectorIncidentName matches the name the collector gives an Incident: "incident-" and the 64 lower-case hex

@@ -246,6 +246,11 @@ func TestControllerProposes(t *testing.T) {
 		rr.Spec.Action.Type != remediationv1alpha1.ActionSetContainerMemoryLimit {
 		t.Errorf("request spec = %+v", rr.Spec)
 	}
+	// The executor recomputes the name from the spec the API server stored, defaults filled in, to show it in a
+	// pull request body (#433): it must be the name the analyzer gave.
+	if name, err := remediationv1alpha1.RequestName(rr.Spec); err != nil || string(name) != rr.Name {
+		t.Errorf("RequestName of the stored spec = %q, %v, want %q", name, err, rr.Name)
+	}
 	cm := &corev1.ConfigMap{}
 	if err := env.admin.Get(t.Context(), types.NamespacedName{Namespace: ns, Name: incidents.BudgetName}, cm); err != nil {
 		t.Fatal(err)

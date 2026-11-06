@@ -195,12 +195,15 @@ const notRecentWritesPerPass = 20
 // trace is what the analysis trigger remembers of one Incident between passes (see [Memory]): when it first
 // found it waiting only to settle or for budget ([Controller.rememberWaiting]), whether it found it gone
 // quiet, when the passes in a row that looked at it began, and the lastSeen its status held on the last pass
+// that read one, when that pass ran and whether its newest occurrence was a lasting state then
 // ([Controller.watch]).
 type trace struct {
 	waiting      time.Time
 	quiet        bool
 	watchedSince time.Time
 	lastSeen     time.Time
+	sampled      time.Time
+	lasting      bool
 }
 
 // decider returns the decision of [Due] for one Incident, with what the controller knows of it ([Memory])
@@ -231,12 +234,15 @@ func (c *Controller) account(inc *remediationv1alpha1.Incident, due bool, reason
 // watch updates what the controller remembers of the Incidents between passes, before anything is decided,
 // on every pass (one that cannot read the budget included), from the cached list: when the passes in a row
 // that looked at each began ([Memory].WatchedSince), and which ones it found gone quiet ([goneQuiet],
-// [Memory].WentQuiet). A spell that ended between two passes counts when the stored lastSeen is more than the
-// recent window after the one read on the previous pass; it begins at that previous one. Finding one gone quiet forgets when it was first seen waiting if that was not after
-// the spell's begin plus the recent window: such a wait belongs to the spell before. A wait from after it
-// (the new burst seen again, its observation held while its write is pending or failing) is kept, so its
-// settle limit keeps counting. An Incident analyzed since is no longer remembered as gone quiet; one not
-// listed, or held by another fingerprint, is forgotten.
+// [Memory].WentQuiet). When the stored lastSeen is not stale itself, a spell that ended between two passes
+// counts when it is more than the recent window after the one read on the previous pass; it begins at that
+// previous one. That previous lastSeen is used only when its pass ran within the recent window before now (a
+// stalled or paused process did not sample the activity in between) and its newest occurrence was no lasting
+// state then (a frozen lastSeen while the state lasted is no quiet spell). Finding one gone quiet forgets when
+// it was first seen waiting if that was not after the spell's begin plus the recent window: such a wait
+// belongs to the spell before. A wait from after it (the new burst seen again, its observation held while its
+// write is pending or failing) is kept, so its settle limit keeps counting. An Incident analyzed since is no
+// longer remembered as gone quiet; one not listed, or held by another fingerprint, is forgotten.
 func (c *Controller) watch(items []remediationv1alpha1.Incident, now time.Time, s TriggerSettings) {
 	listed := make(map[types.UID]struct{}, len(items))
 	for i := range items {
@@ -260,11 +266,15 @@ func (c *Controller) watch(items []remediationv1alpha1.Incident, now time.Time, 
 			since, quiet = cur, goneQuiet(inc, cur, now, s)
 			// A spell that ended between two passes: the lastSeen read on the previous pass was stale when the
 			// new one was seen, so the gap itself was longer than the window. A shorter gap is no spell, however
-			// late the pass that reads it.
-			if prev := t.lastSeen; !prev.IsZero() && prev.Before(cur) && goneQuiet(inc, prev, cur, s) {
+			// late the pass that reads it. A stored lastSeen stale itself begins the later spell, so it wins.
+			prev := t.lastSeen
+			if now.After(t.sampled.Add(recentWindow(s))) || t.lasting {
+				prev = time.Time{}
+			}
+			if !quiet && !prev.IsZero() && prev.Before(cur) && goneQuiet(inc, prev, cur, s) {
 				since, quiet = prev, true
 			}
-			t.lastSeen = cur
+			t.lastSeen, t.sampled, t.lasting = cur, now, lastingState(&inc.Status)
 		}
 		switch {
 		case quiet:
@@ -468,8 +478,8 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 // reason only while the run lasts; once the run has ended (ended, see [runEnded]) any other reason is written
 // over it, so the condition no longer says an analysis is running.
 func conditionAgrees(inc *remediationv1alpha1.Incident, due bool, reason string, ended bool) bool {
-	cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue)
-	if cond == nil || cond.ObservedGeneration != inc.Generation {
+	cond := DueMark(inc)
+	if cond == nil {
 		return false
 	}
 	switch {

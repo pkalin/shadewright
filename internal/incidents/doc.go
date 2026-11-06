@@ -66,7 +66,8 @@ limitations under the License.
 //
 // The controller also marks which Incidents are due for analysis (design 3.2): every TriggerInterval (10 s)
 // it decides each one with [Due] and sets the condition AnalysisDue, with a reason, when the decision turns
-// from due to not due or back. The analyses used today are read from the budget ConfigMap [BudgetName] in
+// from due to not due or back, and once an analysis run has ended, so the reason Analyzing the analysis
+// wrote stays no longer than the next pass after the run. The analyses used today are read from the budget ConfigMap [BudgetName] in
 // the operator namespace ([UsedToday]), so neither a restart nor deleting Incidents frees the daily budget
 // (RemediationSettings spec.analysis.maxAnalysesPerDay, or the deprecated spec.maxAnalysesPerDay when lower),
 // and no more Incidents are due at once than the budget has left. Without the RemediationSettings object, a

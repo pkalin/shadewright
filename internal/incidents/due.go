@@ -327,7 +327,11 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 // not-due reason: the reason it gave first stays, so a change that turns every Incident's reason (the budget
 // used up, or set to 0) writes nothing. NotRecent is the exception: it is written over another not-due reason,
 // once, so the condition shows why an incident is skipped (with an event, [Controller.reportNotRecent]), and
-// once written it stays while the incident is not due. No decision reads it back.
+// once written it stays while the incident is not due. No decision reads it back. Analyzing, which the
+// analysis writes when it claims the incident, is the other exception (#424): it agrees only while the
+// analysis runs, so once the run has ended (the phase is no longer Analyzing, or the decision comes from the
+// incident's own data and is not Analyzing, as after the analysis timeout) the condition takes the reason
+// decided, Proposed or Escalated for a run that wrote its outcome, and no longer says an analysis is running.
 func conditionAgrees(inc *remediationv1alpha1.Incident, due bool, reason string) bool {
 	cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue)
 	if cond == nil || cond.ObservedGeneration != inc.Generation {
@@ -338,6 +342,9 @@ func conditionAgrees(inc *remediationv1alpha1.Incident, due bool, reason string)
 		return cond.Status == metav1.ConditionTrue && cond.Reason == reason
 	case reason == ReasonNotRecent:
 		return cond.Status == metav1.ConditionFalse && cond.Reason == ReasonNotRecent
+	case cond.Reason == ReasonAnalyzing && reason != ReasonAnalyzing &&
+		(inc.Status.Phase != remediationv1alpha1.IncidentAnalyzing || waitsForData(reason)):
+		return false
 	}
 	return cond.Status == metav1.ConditionFalse
 }

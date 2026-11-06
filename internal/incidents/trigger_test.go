@@ -994,6 +994,60 @@ func TestDueFollowsTheClockAndTheAnalysis(t *testing.T) {
 	eventually(t, ns, 1, dueIs(false, ReasonNoNewData))
 }
 
+// claimed returns st as an analysis claimed it analyzedAgo ago: phase Analyzing, lastAnalysisTime and the
+// AnalysisDue condition (not due, Analyzing) for generation 1, as the analysis controller writes it.
+func claimed(st remediationv1alpha1.IncidentStatus, analyzedAgo time.Duration) remediationv1alpha1.IncidentStatus {
+	st.Phase = remediationv1alpha1.IncidentAnalyzing
+	st.LastAnalysisTime = ago(analyzedAgo)
+	st.Conditions = []metav1.Condition{{Type: ConditionAnalysisDue, Status: metav1.ConditionFalse,
+		Reason: ReasonAnalyzing, Message: dueMessages[ReasonAnalyzing], ObservedGeneration: 1,
+		LastTransitionTime: *ago(analyzedAgo)}}
+	return st
+}
+
+// The AnalysisDue condition says an analysis is running only while one is (#424): it keeps Analyzing while
+// the run is within the analysis timeout, takes the outcome's reason once the run writes phase Escalated or
+// Proposed, and CoolingDown once a run is past the timeout; after that the passes rewrite nothing.
+func TestAnalyzingEndsWithTheRun(t *testing.T) {
+	ns := namespace(t)
+	createSettings(t, 10)
+	createBudget(t, ns, nil)
+	for f := 1; f <= 3; f++ {
+		createIncident(t, ns, f, claimed(incidentStatus(2*time.Minute, time.Hour, 0), time.Minute))
+	}
+	// fp(4) was claimed 12 minutes ago: past the analysis timeout, within the cooldown.
+	createIncident(t, ns, 4, claimed(incidentStatus(2*time.Minute, time.Hour, 0), 12*time.Minute))
+	r := start(t, ns, triggerConfig)
+	eventually(t, ns, 4, dueIs(false, ReasonCoolingDown))
+	for f := 1; f <= 3; f++ {
+		eventually(t, ns, f, dueIs(false, ReasonAnalyzing))
+	}
+
+	// The runs of fp(1) and fp(2) end as the analysis controller's outcome write ends them: it sets the phase
+	// and leaves AnalysisDue to the trigger.
+	for f, phase := range map[int]remediationv1alpha1.IncidentPhase{
+		1: remediationv1alpha1.IncidentEscalated, 2: remediationv1alpha1.IncidentProposed,
+	} {
+		inc := &remediationv1alpha1.Incident{}
+		if err := env.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: Name(fp(f))}, inc); err != nil {
+			t.Fatal(err)
+		}
+		inc.Status.Phase = phase
+		if err := env.admin.Status().Update(t.Context(), inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eventually(t, ns, 1, dueIs(false, ReasonEscalated))
+	eventually(t, ns, 2, dueIs(false, ReasonProposed))
+
+	marks := r.writes.marks.Load()
+	time.Sleep(10 * triggerConfig.TriggerInterval)
+	if got := r.writes.marks.Load() - marks; got != 0 {
+		t.Fatalf("%d conditions rewritten after the runs ended", got)
+	}
+	eventually(t, ns, 3, dueIs(false, ReasonAnalyzing))
+}
+
 // An Incident marked due whose condition cannot be rewritten keeps its unit of the budget, so a failed
 // write never lets more Incidents be due than the budget allows.
 func TestFailedMarkKeepsItsBudget(t *testing.T) {

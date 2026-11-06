@@ -146,12 +146,12 @@ func UsedToday(cm *corev1.ConfigMap, now time.Time) (used int, ok bool) {
 	return b.used, true
 }
 
-// maxAnalysesPerDay returns the analyses the settings allow per UTC day: spec.analysis.maxAnalysesPerDay, or
+// MaxAnalysesPerDay returns the analyses the settings allow per UTC day: spec.analysis.maxAnalysesPerDay, or
 // the deprecated spec.maxAnalysesPerDay when that is set and lower, so a 0 stored before the field moved keeps
 // analysis off. ok is false when spec.analysis or its maxAnalysesPerDay is unset, which the API server's
 // defaults never leave; the caller then takes the budget as unknown and allows no analysis, rather than
 // guessing a limit.
-func maxAnalysesPerDay(settings *remediationv1alpha1.RemediationSettings) (limit int, ok bool) {
+func MaxAnalysesPerDay(settings *remediationv1alpha1.RemediationSettings) (limit int, ok bool) {
 	a := settings.Spec.Analysis
 	if a == nil || a.MaxAnalysesPerDay == nil {
 		return 0, false
@@ -167,7 +167,7 @@ func maxAnalysesPerDay(settings *remediationv1alpha1.RemediationSettings) (limit
 // the RemediationSettings (spec.analysis.maxAnalysesPerDay) and the budget ConfigMap in namespace fresh with reader, adds one
 // to the count (starting at 1 on a new UTC day) and updates the ConfigMap with the resourceVersion it read
 // (an update, not a patch), retrying on conflict, so concurrent callers never take the same unit twice. It
-// refuses with [ErrSettingsIncomplete] when the settings hold no limit ([maxAnalysesPerDay]), with
+// refuses with [ErrSettingsIncomplete] when the settings hold no limit ([MaxAnalysesPerDay]), with
 // [ErrBudgetSpent] when the day's count reached the limit, with [ErrBudgetNotFound]
 // when the ConfigMap does not exist, and with [ErrBudgetUnreadable] when its content cannot be trusted
 // ([UsedToday]).
@@ -181,7 +181,7 @@ func ReserveAnalysis(ctx context.Context, reader client.Reader, writer client.Wr
 		if err := reader.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); err != nil {
 			return fmt.Errorf("reading RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 		}
-		limit, ok := maxAnalysesPerDay(settings)
+		limit, ok := MaxAnalysesPerDay(settings)
 		if !ok {
 			return ErrSettingsIncomplete
 		}

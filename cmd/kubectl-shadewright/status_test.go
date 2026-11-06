@@ -20,6 +20,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"flag"
 	"strings"
 	"testing"
 	"time"
@@ -251,21 +253,41 @@ func TestBudgetAndSettingsStates(t *testing.T) {
 		_ ...client.GetOption) error {
 		return apierrors.NewForbidden(schema.GroupResource{Resource: "x"}, key.Name, nil)
 	}}
+	failing := interceptor.Funcs{Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, _ client.Object,
+		_ ...client.GetOption) error {
+		return errors.New("connection refused")
+	}}
+	noLimit := testSettings()
+	noLimit.Spec.Analysis = nil
+	zero := testSettings()
+	zero.Spec.Analysis.MaxAnalysesPerDay = new(int32(0))
 	cases := map[string]struct {
 		objs     []client.Object
 		funcs    *interceptor.Funcs
 		budget   string
 		settings string
+		stopped  string
 		text     string
 	}{
-		"not found": {nil, nil, stateNotFound, stateNotFound, "unknown (budget ConfigMap: not found)"},
-		"forbidden": {nil, &forbidden, stateForbidden, stateForbidden, "forbidden, see the viewer role"},
+		"settings not found": {nil, nil, stateNotFound, stateNotFound, incidents.ReasonSettingsNotFound,
+			"analysis stopped: the RemediationSettings object default does not exist (SettingsNotFound)"},
+		"limit unset": {[]client.Object{noLimit, budgetMap("2026-11-06", "1")}, nil, stateOK, stateOK,
+			incidents.ReasonSettingsIncomplete, "analysis stopped: RemediationSettings sets no"},
+		"budget not found": {[]client.Object{testSettings()}, nil, stateNotFound, stateOK,
+			incidents.ReasonBudgetNotFound, "analysis stopped: the ConfigMap shadewright-analysis-budget does not exist"},
+		"limit 0": {[]client.Object{zero, budgetMap("2026-11-06", "0")}, nil, stateOK, stateOK,
+			incidents.ReasonAnalysisDisabled, "0 of 0, analysis stopped: the daily limit is 0 (AnalysisDisabled)"},
+		"limit reached": {[]client.Object{testSettings(), budgetMap("2026-11-06", "20")}, nil, stateOK, stateOK,
+			incidents.ReasonDailyBudgetReached, "20 of 20, analysis stopped: the daily limit is reached"},
+		"forbidden is not a stop": {nil, &forbidden, stateForbidden, stateForbidden, "",
+			"unknown (RemediationSettings not readable with your permissions (see the viewer role); ConfigMap"},
+		"read error is not a stop": {nil, &failing, stateError, stateError, "", "could not be read: connection refused"},
 		"earlier day": {[]client.Object{testSettings(), budgetMap("2026-11-05", "9")}, nil,
-			stateOK, stateOK, "0 of 20"},
+			stateOK, stateOK, "", "Analyses today (UTC): 0 of 20\n"},
 		"future day": {[]client.Object{testSettings(), budgetMap("2026-11-07", "1")}, nil,
-			stateUnreadable, stateOK, "taken as spent"},
+			stateUnreadable, stateOK, incidents.ReasonBudgetUnreadable, "taken as spent"},
 		"garbage is refused": {[]client.Object{testSettings(), budgetMap("2026-11-06", "\x1b[31m1")}, nil,
-			stateUnreadable, stateOK, "taken as spent"},
+			stateUnreadable, stateOK, incidents.ReasonBudgetUnreadable, "taken as spent"},
 	}
 	for name, tc := range cases {
 		b := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(tc.objs...)
@@ -276,15 +298,17 @@ func TestBudgetAndSettingsStates(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if got := r.Namespaces[0].Budget.State; got != tc.budget {
-			t.Errorf("%s: budget state = %q, want %q", name, got, tc.budget)
-		}
-		if got := r.Settings.State; got != tc.settings {
-			t.Errorf("%s: settings state = %q, want %q", name, got, tc.settings)
+		bud := r.Namespaces[0].Budget
+		if bud.State != tc.budget || r.Settings.State != tc.settings || bud.AnalysisStopped != tc.stopped {
+			t.Errorf("%s: budget %q, settings %q, stopped %q; want %q, %q, %q", name, bud.State, r.Settings.State,
+				bud.AnalysisStopped, tc.budget, tc.settings, tc.stopped)
 		}
 		text, _ := render(t, r)
 		if !strings.Contains(text, tc.text) {
 			t.Errorf("%s: text lacks %q:\n%s", name, tc.text, text)
+		}
+		if tc.stopped == "" && strings.Contains(text, "analysis stopped") {
+			t.Errorf("%s: says analysis stopped:\n%s", name, text)
 		}
 	}
 }
@@ -301,12 +325,59 @@ func TestAllNamespaces(t *testing.T) {
 	if len(r.Namespaces) != 1 || len(r.Namespaces[0].Incidents) != 1 {
 		t.Errorf("one namespace: %+v", r.Namespaces)
 	}
-	r, err = collect(context.Background(), c, Options{AllNamespaces: true}, testNow)
+	r, err = collect(context.Background(), c, Options{Namespace: testNS, AllNamespaces: true}, testNow)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(r.Namespaces) != 2 || r.Namespaces[0].Namespace != testNS || r.Namespaces[1].Namespace != "team-b" {
 		t.Errorf("all namespaces: %+v", r.Namespaces)
+	}
+}
+
+// TestAllNamespacesEmpty: -A on a cluster without Incidents still shows the kubeconfig namespace with its
+// budget and "No Incidents.", and the JSON has an empty list, not null.
+func TestAllNamespacesEmpty(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(testSettings(), budgetMap("2026-11-06", "2")).Build()
+	r, err := collect(context.Background(), c, Options{Namespace: testNS, AllNamespaces: true}, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, js := render(t, r)
+	for _, want := range []string{"Namespace " + testNS, "Analyses today (UTC): 2 of 20", "No Incidents."} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text lacks %q:\n%s", want, text)
+		}
+	}
+	if !strings.Contains(js, `"incidents": []`) {
+		t.Errorf("JSON has no empty incidents list:\n%s", js)
+	}
+	empty, err := collect(context.Background(), c, Options{AllNamespaces: true}, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, js = render(t, empty)
+	if !strings.Contains(js, `"namespaces": []`) {
+		t.Errorf("JSON with no namespace is not an empty list:\n%s", js)
+	}
+}
+
+func TestConditionWithoutTime(t *testing.T) {
+	inc := testIncident("incident-a", "a", testSubject, "")
+	inc.Status.Conditions[0].LastTransitionTime = metav1.Time{}
+	r := incidentReport(inc)
+	if r.Due.Since != nil {
+		t.Errorf("Since = %v, want nil", r.Due.Since)
+	}
+	if got := condition(r.Due, testNow); strings.Contains(got, "since") {
+		t.Errorf("condition = %q, want no since", got)
+	}
+	var b bytes.Buffer
+	if err := renderJSON(&b, &Report{Namespaces: []NamespaceReport{{Incidents: []IncidentReport{r}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), `"since": null`) || strings.Count(b.String(), `"since"`) != 1 {
+		t.Errorf("JSON should hold one since (the Analyzed condition's):\n%s", b.String())
 	}
 }
 
@@ -320,21 +391,6 @@ func TestListFailureIsAnError(t *testing.T) {
 	}
 }
 
-func TestMaxAnalysesPerDay(t *testing.T) {
-	s := testSettings()
-	if got, ok := maxAnalysesPerDay(s); !ok || got != 20 {
-		t.Errorf("limit = %d, %v", got, ok)
-	}
-	s.Spec.MaxAnalysesPerDay = ptr.To[int32](0)
-	if got, ok := maxAnalysesPerDay(s); !ok || got != 0 {
-		t.Errorf("a lower deprecated limit = %d, %v, want 0", got, ok)
-	}
-	s.Spec.Analysis = nil
-	if _, ok := maxAnalysesPerDay(s); ok {
-		t.Error("no spec.analysis gave a limit")
-	}
-}
-
 func TestConditionAnalyzedMatchesAnalysis(t *testing.T) {
 	if conditionAnalyzed != analysis.ConditionAnalyzed {
 		t.Errorf("conditionAnalyzed = %q, analysis.ConditionAnalyzed = %q", conditionAnalyzed, analysis.ConditionAnalyzed)
@@ -342,21 +398,53 @@ func TestConditionAnalyzedMatchesAnalysis(t *testing.T) {
 }
 
 func TestParseStatus(t *testing.T) {
-	var stderr bytes.Buffer
-	f, err := parseStatus([]string{"-n", "x", "-o", outputJSON}, &stderr)
-	if err != nil || f.namespace != "x" || f.output != outputJSON {
+	f, err := parseStatus([]string{"-n", "x", "-o", outputJSON})
+	if err != nil || f.namespace != "x" || f.output != outputJSON || f.timeout != 30*time.Second {
 		t.Errorf("parseStatus = %+v, %v", f, err)
 	}
-	f, err = parseStatus([]string{"--all-namespaces"}, &stderr)
+	f, err = parseStatus([]string{"--all-namespaces"})
 	if err != nil || !f.allNamespaces || f.output != outputText {
 		t.Errorf("parseStatus = %+v, %v", f, err)
 	}
-	for _, args := range [][]string{{"-o", "yaml"}, {"extra"}, {"--request-timeout", "0s"}, {"--watch"}} {
-		if _, err := parseStatus(args, &stderr); err == nil {
+	for _, args := range [][]string{
+		{"-o", "yaml"}, {"extra"}, {"--request-timeout", "-1"}, {"--request-timeout", "1x"}, {"--watch"},
+	} {
+		if _, err := parseStatus(args); err == nil {
 			t.Errorf("parseStatus(%q) succeeded", args)
 		}
 	}
-	if err := run([]string{"delete"}, &stderr, &stderr); err == nil {
+	if _, err := parseStatus([]string{"-h"}); !errors.Is(err, flag.ErrHelp) {
+		t.Errorf("-h gave %v, want flag.ErrHelp", err)
+	}
+}
+
+func TestParseTimeout(t *testing.T) {
+	for in, want := range map[string]time.Duration{
+		"30": 30 * time.Second, "0": 0, "1m": time.Minute, "0s": 0, "1.5s": 1500 * time.Millisecond,
+	} {
+		if got, err := parseTimeout(in); err != nil || got != want {
+			t.Errorf("parseTimeout(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"-5", "-1s", "abc", "", "99999999999999999999"} {
+		if _, err := parseTimeout(in); err == nil {
+			t.Errorf("parseTimeout(%q) succeeded", in)
+		}
+	}
+}
+
+// TestRunPrintsErrorsOnce: run prints nothing itself for a bad flag, so main prints the error once, and
+// status -h prints the usage on stdout and succeeds.
+func TestRunPrintsErrorsOnce(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"status", "--watch"}, &stdout, &stderr)
+	if err == nil || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Errorf("bad flag: err %v, stdout %q, stderr %q; want an error and no output", err, stdout.String(), stderr.String())
+	}
+	if err := run([]string{"status", "-h"}, &stdout, &stderr); err != nil || !strings.Contains(stdout.String(), "Usage:") {
+		t.Errorf("status -h: err %v, stdout %q", err, stdout.String())
+	}
+	if err := run([]string{"delete"}, &stdout, &stderr); err == nil {
 		t.Error("an unknown command succeeded")
 	}
 }

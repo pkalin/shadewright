@@ -22,23 +22,23 @@ Release binaries are not published yet ([#439](https://github.com/pkalin/shadewr
 kubectl shadewright version     # kubectl-shadewright v0.2.0
 ```
 
-`status` compares that version with the label `app.kubernetes.io/version` that the Helm chart puts on the Shadewright CRDs, and prints a one-line warning on standard error when they differ (a leading `v` is ignored): the plugin may then miss or misread fields. No warning is printed for a `dev` build, for CRDs installed with kustomize (they carry no such label), or when your role may not read the CRDs.
+`status` compares that version with the label `app.kubernetes.io/version` that the Helm chart puts on the Shadewright CRDs, and prints a one-line warning on standard error when the release differs: the plugin may then miss or misread fields. Only the release is compared: a leading `v` and the suffix `git describe` adds (`-3-gabc1234`, `-dirty`) are ignored, so a local build a few commits past `v0.2.0` matches CRDs labelled `0.2.0`. No warning is printed for a `dev` build or one with no tag (a bare commit SHA), for CRDs installed with kustomize (they carry no such label), or when your role may not read the CRDs.
 
 ## Run it
 
 ```bash
 kubectl shadewright status -n shadewright-system
-kubectl shadewright status -A            # every namespace that holds Incidents or requests
+kubectl shadewright status -A            # every namespace that holds Incidents or requests, and the context's
 kubectl shadewright status -n shadewright-system -o json
 ```
 
 | Flag | Meaning |
 | --- | --- |
 | `-n`, `--namespace` | The operator namespace. Default: the namespace of the kubeconfig context, as for kubectl |
-| `-A`, `--all-namespaces` | Read Incidents and requests in every namespace, grouped by namespace |
+| `-A`, `--all-namespaces` | Read Incidents and requests in every namespace, grouped by namespace. The namespace of `-n` or of the context is always shown, with its budget, even without Incidents |
 | `-o`, `--output` | `text` (default) or `json`. The JSON holds the same fields, with times in RFC 3339 |
 | `--kubeconfig`, `--context` | As for kubectl |
-| `--request-timeout` | Limit for all reads together (default `30s`) |
+| `--request-timeout` | Limit for all reads together, as kubectl takes it: seconds (`30`), a duration (`30s`, `1m`), or `0` for no limit (default `30s`). The CRD version check has its own 5 second limit and runs next to the reads |
 
 The text output, per namespace:
 
@@ -61,10 +61,10 @@ Namespace shadewright-system
 - **Due** is the `AnalysisDue` condition: `yes` or `no`, its reason and its message. The reasons are explained in [troubleshooting](../troubleshooting.md#not-request-reasons).
 - **Analysis** is when the last analysis began (`status.lastAnalysisTime`) and the outcome the analysis wrote in the `Analyzed` condition. The model and the tokens of a run are not stored in the cluster yet: they are in the analyzer log (`Analyzed Incident`), until analysis records are stored ([#77](https://github.com/pkalin/shadewright/issues/77)).
 - **Request** lines list the RemediationRequests whose `spec.incidentRef` names the Incident (name and UID), oldest first, with the phase, the reason of the `PolicyAllowed` condition and the pull request. A request that names an Incident not in the list (deleted, or another UID) is listed under "Requests without a listed Incident".
-- **Analyses today** is the analysis budget ConfigMap `shadewright-analysis-budget`, read with the analyzer's own parser, against the daily limit in `RemediationSettings`. Content the analyzer does not trust is shown as "taken as spent", which is what the analyzer does.
+- **Analyses today** is the analysis budget ConfigMap `shadewright-analysis-budget`, read with the analyzer's own parser, against the daily limit in `RemediationSettings`. When the analyzer refuses every analysis, the line says `analysis stopped:`, why, and the analyzer's own `AnalysisDue` reason: `SettingsNotFound`, `SettingsIncomplete`, `BudgetNotFound` (recreate the ConfigMap empty), `BudgetUnreadable` (content the analyzer does not trust, taken as spent), `AnalysisDisabled` (limit 0) or `DailyBudgetReached` (resets at 00:00 UTC). These are checked in the analyzer's order.
 - **Kill switch** is `spec.paused` of `RemediationSettings` `default` ([pause and resume](pause-and-resume.md)).
 
-A setting or the budget that your role may not read is shown as unknown with the reason; a list of Incidents or requests that fails stops the command with an error.
+A setting or the budget that the plugin cannot read with your permissions, or that fails to read, is shown as unknown with the reason, never as "analysis stopped": it says nothing about what the analyzer can read; a list of Incidents or requests that fails stops the command with an error.
 
 ## What it does not do
 

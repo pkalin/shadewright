@@ -31,6 +31,9 @@ import (
 // testPluginVersion is the plugin version the CRD version tests compare against.
 const testPluginVersion = "v0.2.0"
 
+// testRelease is the release of testPluginVersion, as the chart labels CRDs.
+const testRelease = "0.2.0"
+
 func testCRD(name, label string) *apiextensionsv1.CustomResourceDefinition {
 	crd := &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	if label != "" {
@@ -50,12 +53,17 @@ func TestCRDVersionWarning(t *testing.T) {
 		plugin string
 		want   string
 	}{
-		"same version": {[]client.Object{testCRD(incidentsCRD, "0.2.0")}, testPluginVersion, ""},
+		"same version": {[]client.Object{testCRD(incidentsCRD, testRelease)}, testPluginVersion, ""},
 		"other version": {[]client.Object{testCRD(incidentsCRD, "0.1.0"), testCRD(requestsCRD, "0.1.0")}, "v0.2.0",
 			"version 0.1.0 and this plugin is v0.2.0"},
-		"no label":         {[]client.Object{testCRD(incidentsCRD, "")}, testPluginVersion, ""},
-		"no CRD readable":  {nil, testPluginVersion, ""},
-		"dev build":        {[]client.Object{testCRD(incidentsCRD, "0.1.0")}, devVersion, ""},
+		"no label":           {[]client.Object{testCRD(incidentsCRD, "")}, testPluginVersion, ""},
+		"no CRD readable":    {nil, testPluginVersion, ""},
+		"dev build":          {[]client.Object{testCRD(incidentsCRD, "0.1.0")}, devVersion, ""},
+		"build past the tag": {[]client.Object{testCRD(incidentsCRD, testRelease)}, "v0.2.0-3-gabc1234-dirty", ""},
+		"dirty build":        {[]client.Object{testCRD(incidentsCRD, testRelease)}, "v0.2.0-dirty", ""},
+		"rc past the tag": {[]client.Object{testCRD(incidentsCRD, testRelease)}, "v0.3.0-rc.2-1-gce333cd",
+			"version 0.2.0 and this plugin is v0.3.0-rc.2-1-gce333cd"},
+		"untagged SHA":     {[]client.Object{testCRD(incidentsCRD, "0.1.0")}, "ce333cd", ""},
 		"label is cleaned": {[]client.Object{testCRD(incidentsCRD, "0.1.0\x1b[2J")}, testPluginVersion, "version 0.1.0 and"},
 	}
 	for name, tc := range cases {
@@ -77,5 +85,17 @@ func TestVersionCommand(t *testing.T) {
 	}
 	if err := run([]string{"version", "extra"}, &out, &out); err == nil {
 		t.Error("version with an argument succeeded")
+	}
+}
+
+func TestReleaseVersion(t *testing.T) {
+	for in, want := range map[string]string{
+		"v0.2.0": testRelease, "0.2.0": testRelease, "v0.2.0-dirty": testRelease, "v0.2.0-3-gabc1234": testRelease,
+		"v0.3.0-rc.2-1-gce333cd-dirty": "0.3.0-rc.2", "v0.3.0-rc.2": "0.3.0-rc.2",
+		"dev": "", "": "", "ce333cd": "", "ce333cd-dirty": "",
+	} {
+		if got := releaseVersion(in); got != want {
+			t.Errorf("releaseVersion(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

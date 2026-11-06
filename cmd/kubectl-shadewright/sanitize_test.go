@@ -52,14 +52,24 @@ func TestClean(t *testing.T) {
 }
 
 func TestCleanCuts(t *testing.T) {
+	const whole = "abcdef"
 	if got := clean("abcdefghij", 6); got != "abc..." {
 		t.Errorf("clean cut = %q, want %q", got, "abc...")
 	}
-	if got := clean("abcdef", 6); got != "abcdef" {
+	if got := clean(whole, 6); got != whole {
 		t.Errorf("clean at the bound = %q, want it whole", got)
 	}
-	if got := clean("ab\x1b[31mcdef", 6); got != "abcdef" {
-		t.Errorf("clean with an escape at the bound = %q, want %q", got, "abcdef")
+	// Only invisible text after the bound: nothing visible was cut, so no "...".
+	for _, in := range []string{"abcdef\x1b[0m", "abcdef\u200b", "abcdef\x1b]0;title\x07"} {
+		if got := clean(in, 6); got != whole {
+			t.Errorf("clean(%q, 6) = %q, want %q", in, got, whole)
+		}
+	}
+	if got := clean("abcdef\u200bg", 6); got != "abc..." {
+		t.Errorf("clean with visible text after an invisible one = %q, want %q", got, "abc...")
+	}
+	if got := clean("ab\x1b[31mcdef", 6); got != whole {
+		t.Errorf("clean with an escape at the bound = %q, want %q", got, whole)
 	}
 }
 

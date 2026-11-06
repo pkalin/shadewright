@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -29,7 +30,7 @@ import (
 
 // version is the plugin's version, stamped at build time with -ldflags "-X main.version=<version>" (make
 // build-plugin uses git describe). A build without it is "dev".
-var version = "dev"
+var version = devVersion
 
 // devVersion is the version of a build that was not stamped.
 const devVersion = "dev"
@@ -50,7 +51,8 @@ var shadewrightCRDs = []string{
 // could be read (a viewer without get on customresourcedefinitions) or carries the label. It reads only the
 // CRDs' metadata, with get.
 func crdVersionWarning(ctx context.Context, c client.Reader, plugin string) string {
-	if plugin == "" || plugin == devVersion {
+	release := releaseVersion(plugin)
+	if release == "" {
 		return ""
 	}
 	var others []string
@@ -61,7 +63,7 @@ func crdVersionWarning(ctx context.Context, c client.Reader, plugin string) stri
 			continue
 		}
 		v := m.Labels[crdVersionLabel]
-		if v == "" || sameVersion(v, plugin) {
+		if v == "" || strings.TrimPrefix(v, "v") == release {
 			continue
 		}
 		v = clean(v, 63)
@@ -76,7 +78,16 @@ func crdVersionWarning(ctx context.Context, c client.Reader, plugin string) stri
 		"fields may be missing or misread", strings.Join(others, ", "), clean(plugin, 63))
 }
 
-// sameVersion compares two versions, ignoring a leading "v".
-func sameVersion(a, b string) bool {
-	return strings.TrimPrefix(a, "v") == strings.TrimPrefix(b, "v")
+// describeSuffix is what git describe adds after the tag: -<commits since>-g<abbreviated SHA>, then -dirty.
+var describeSuffix = regexp.MustCompile(`(-[0-9]+-g[0-9a-f]{4,40})?(-dirty)?$`)
+
+// releaseVersion returns the release a build comes from: the version without a leading "v" and without the
+// suffix git describe adds, so a local build a few commits past v0.2.0 compares as 0.2.0. It returns "" for a
+// dev build and for a describe that found no tag (a bare SHA), which cannot be compared.
+func releaseVersion(v string) string {
+	v = describeSuffix.ReplaceAllString(strings.TrimPrefix(v, "v"), "")
+	if v == "" || v[0] < '0' || v[0] > '9' || v == devVersion {
+		return ""
+	}
+	return v
 }

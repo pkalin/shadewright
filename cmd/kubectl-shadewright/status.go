@@ -90,6 +90,12 @@ type BudgetReport struct {
 	Error string `json:"error,omitempty"`
 	// UsedToday is the analyses started on the current UTC day.
 	UsedToday *int `json:"usedToday,omitempty"`
+	// AnalysisStopped is the reason, one of the analyzer's AnalysisDue reasons, for which the analyzer refuses
+	// every analysis in this namespace, as read from the same settings and ConfigMap: SettingsNotFound,
+	// SettingsIncomplete, BudgetNotFound, BudgetUnreadable, AnalysisDisabled or DailyBudgetReached. Empty
+	// when analyses may run, or when the plugin could not read what the analyzer reads (State "forbidden" or
+	// "error" here or in the settings), which says nothing about the analyzer.
+	AnalysisStopped string `json:"analysisStopped,omitempty"`
 }
 
 // IncidentReport is one Incident.
@@ -136,8 +142,8 @@ type ConditionReport struct {
 	Reason string `json:"reason"`
 	// Message is the condition's message.
 	Message string `json:"message,omitempty"`
-	// Since is the condition's lastTransitionTime.
-	Since metav1.Time `json:"since"`
+	// Since is the condition's lastTransitionTime; absent when the condition has none.
+	Since *metav1.Time `json:"since,omitempty"`
 }
 
 // RequestReport is one RemediationRequest.
@@ -188,7 +194,7 @@ func collect(ctx context.Context, c client.Reader, opts Options, now time.Time) 
 		return nil, fmt.Errorf("listing RemediationRequests: %w", err)
 	}
 
-	report := &Report{}
+	report := &Report{Namespaces: []NamespaceReport{}}
 	settings := readSettings(ctx, c, &report.Settings)
 
 	byNamespace := map[string]*NamespaceReport{}
@@ -200,7 +206,9 @@ func collect(ctx context.Context, c client.Reader, opts Options, now time.Time) 
 		byNamespace[name] = r
 		return r
 	}
-	if !opts.AllNamespaces {
+	// The namespace given (or the kubeconfig context's, with -A too) is always shown, with its budget, so an
+	// empty cluster still says where it looked.
+	if opts.Namespace != "" {
 		ns(opts.Namespace)
 	}
 
@@ -232,6 +240,7 @@ func collect(ctx context.Context, c client.Reader, opts Options, now time.Time) 
 
 	for name, r := range byNamespace {
 		r.Budget = readBudget(ctx, c, name, now)
+		r.Budget.AnalysisStopped = analysisStopped(report.Settings, r.Budget)
 		slices.SortStableFunc(r.Incidents, func(a, b IncidentReport) int {
 			return cmp.Or(compareTimeDesc(a.LastSeen, b.LastSeen), cmp.Compare(a.Name, b.Name))
 		})
@@ -284,8 +293,16 @@ func conditionReport(conds []metav1.Condition, t string) *ConditionReport {
 		Status:  clean(string(c.Status), maxName),
 		Reason:  clean(c.Reason, maxName),
 		Message: clean(c.Message, maxMessage),
-		Since:   c.LastTransitionTime,
+		Since:   nonZero(c.LastTransitionTime),
 	}
+}
+
+// nonZero returns t, or nil when it is the zero time.
+func nonZero(t metav1.Time) *metav1.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
 
 // requestReport takes the fields of one request the status shows, each string cleaned. The pull request link
@@ -358,25 +375,36 @@ func readSettings(ctx context.Context, c client.Reader, r *SettingsReport) *reme
 	r.State = stateOK
 	paused := s.Spec.Paused != nil && *s.Spec.Paused
 	r.Paused = &paused
-	if limit, ok := maxAnalysesPerDay(s); ok {
+	if limit, ok := incidents.MaxAnalysesPerDay(s); ok {
 		r.MaxAnalysesPerDay = &limit
 	}
 	return s
 }
 
-// maxAnalysesPerDay is the limit the analyzer applies (internal/incidents, maxAnalysesPerDay):
-// spec.analysis.maxAnalysesPerDay, or the deprecated spec.maxAnalysesPerDay when that is set and lower. ok
-// is false when spec.analysis.maxAnalysesPerDay is unset, which the analyzer takes as an unknown budget.
-func maxAnalysesPerDay(s *remediationv1alpha1.RemediationSettings) (int, bool) {
-	a := s.Spec.Analysis
-	if a == nil || a.MaxAnalysesPerDay == nil {
-		return 0, false
+// analysisStopped returns the not-due reason the analyzer gives every Incident of a namespace, in the order the
+// analyzer decides it (internal/incidents, readBudget and the decision): the settings first, then the budget
+// ConfigMap, then the limit and the count. It returns "" when analyses may run, and when the plugin's own read
+// failed (forbidden or an error), since that says nothing about what the analyzer could read.
+func analysisStopped(s SettingsReport, b BudgetReport) string {
+	switch {
+	case s.State == stateNotFound:
+		return incidents.ReasonSettingsNotFound
+	case s.State != stateOK:
+		return ""
+	case s.MaxAnalysesPerDay == nil:
+		return incidents.ReasonSettingsIncomplete
+	case b.State == stateNotFound:
+		return incidents.ReasonBudgetNotFound
+	case b.State == stateUnreadable:
+		return incidents.ReasonBudgetUnreadable
+	case b.State != stateOK:
+		return ""
+	case *s.MaxAnalysesPerDay == 0:
+		return incidents.ReasonAnalysisDisabled
+	case b.UsedToday != nil && *b.UsedToday >= *s.MaxAnalysesPerDay:
+		return incidents.ReasonDailyBudgetReached
 	}
-	limit := int(*a.MaxAnalysesPerDay)
-	if old := s.Spec.MaxAnalysesPerDay; old != nil {
-		limit = min(limit, int(*old))
-	}
-	return limit, true
+	return ""
 }
 
 // readBudget reads the analysis budget ConfigMap of namespace with the analyzer's own parser.

@@ -32,7 +32,8 @@ const (
 // whole ANSI escape sequences (CSI, OSC, DCS, SOS, PM, APC and two-character ESC sequences, in their 7-bit
 // and 8-bit forms), then every other control character (Unicode Cc), format character (Cf, which holds the
 // bidirectional overrides and zero-width characters) and line or paragraph separator. Tabs and line breaks
-// become one space, invalid UTF-8 becomes U+FFFD, and the result is cut to max runes. The payload of a
+// become one space, invalid UTF-8 becomes U+FFFD, and the result is cut to max runes, ending in "..." only
+// when visible text was cut off (not when only escapes or invisible characters follow). The payload of a
 // string sequence (an OSC title or hyperlink target) is dropped with it, so a name cannot set the window
 // title, write a hidden link, move the cursor or rewrite earlier lines.
 func clean(s string, maxRunes int) string {
@@ -67,7 +68,7 @@ func clean(s string, maxRunes int) string {
 		i += size
 	}
 	out := b.String()
-	if i < len(s) && maxRunes > 3 {
+	if i < len(s) && maxRunes > 3 && clean(s[i:], 1) != "" {
 		out = string([]rune(out)[:maxRunes-3]) + "..."
 	}
 	return out

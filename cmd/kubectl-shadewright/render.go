@@ -21,10 +21,13 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/duration"
+
+	"github.com/pkalin/shadewright/internal/incidents"
 )
 
 // renderJSON writes the report as indented JSON. Its strings were cleaned in collect; the encoder also
@@ -46,6 +49,10 @@ func renderText(w io.Writer, r *Report, now time.Time) error {
 		p.line("  Analyses today (UTC): %s", budget(ns.Budget, r.Settings))
 		if len(ns.Incidents) == 0 {
 			p.line("  No Incidents.")
+			if ns.Budget.AnalysisStopped == incidents.ReasonBudgetNotFound && len(ns.OtherRequests) == 0 {
+				// The likeliest cause of both is a namespace that is not the operator namespace.
+				p.line("  Is this the operator namespace? Pass it with -n.")
+			}
 		}
 		for _, inc := range ns.Incidents {
 			p.line("")
@@ -88,35 +95,67 @@ func (p *printer) line(format string, args ...any) {
 func killSwitch(s SettingsReport) string {
 	switch {
 	case s.State != stateOK:
-		return "unknown (RemediationSettings: " + readFailure(s.State, s.Error) + ")"
+		return "unknown (RemediationSettings " + readFailure(s.State, s.Error) + ")"
 	case s.Paused != nil && *s.Paused:
 		return "ON: writes are paused (spec.paused)"
 	}
 	return "off: writes are allowed"
 }
 
-func budget(b BudgetReport, s SettingsReport) string {
-	limit := "unknown limit"
-	if s.MaxAnalysesPerDay != nil {
-		limit = strconv.Itoa(*s.MaxAnalysesPerDay)
-	}
-	switch b.State {
-	case stateOK:
-		return fmt.Sprintf("%d of %s", *b.UsedToday, limit)
-	case stateUnreadable:
-		return "budget ConfigMap not trusted by the analyzer, taken as spent"
-	}
-	return "unknown (budget ConfigMap: " + readFailure(b.State, b.Error) + ")"
+// stoppedWords say in words why the analyzer refuses every analysis, by its AnalysisDue reason.
+var stoppedWords = map[string]string{
+	incidents.ReasonSettingsNotFound:   "the RemediationSettings object default does not exist",
+	incidents.ReasonSettingsIncomplete: "RemediationSettings sets no spec.analysis.maxAnalysesPerDay",
+	incidents.ReasonBudgetNotFound:     "the ConfigMap " + incidents.BudgetName + " does not exist; recreate it empty",
+	incidents.ReasonBudgetUnreadable: "the ConfigMap " + incidents.BudgetName +
+		" holds content the analyzer does not trust, so the budget is taken as spent",
+	incidents.ReasonAnalysisDisabled:   "the daily limit is 0",
+	incidents.ReasonDailyBudgetReached: "the daily limit is reached; it resets at 00:00 UTC",
 }
 
+func budget(b BudgetReport, s SettingsReport) string {
+	used := ""
+	if b.State == stateOK && b.UsedToday != nil {
+		limit := "an unknown limit"
+		if s.MaxAnalysesPerDay != nil {
+			limit = strconv.Itoa(*s.MaxAnalysesPerDay)
+		}
+		used = fmt.Sprintf("%d of %s", *b.UsedToday, limit)
+	}
+	if b.AnalysisStopped != "" {
+		out := "analysis stopped: " + stoppedWords[b.AnalysisStopped] + " (" + b.AnalysisStopped + ")"
+		if used != "" {
+			out = used + ", " + out
+		}
+		return out
+	}
+	var unknown []string
+	if s.State != stateOK {
+		unknown = append(unknown, "RemediationSettings "+readFailure(s.State, s.Error))
+	}
+	if b.State != stateOK {
+		unknown = append(unknown, "ConfigMap "+incidents.BudgetName+" "+readFailure(b.State, b.Error))
+	}
+	if len(unknown) > 0 {
+		prefix := "unknown"
+		if used != "" {
+			prefix = used + ", but whether analysis may run is unknown"
+		}
+		return prefix + " (" + strings.Join(unknown, "; ") + ")"
+	}
+	return used
+}
+
+// readFailure says why the plugin could not read an object. Forbidden and read errors are the plugin's own
+// reads, with the caller's permissions, not the analyzer's.
 func readFailure(state, msg string) string {
 	switch state {
 	case stateNotFound:
 		return "not found"
 	case stateForbidden:
-		return "forbidden, see the viewer role"
+		return "not readable with your permissions (see the viewer role)"
 	}
-	return "read failed: " + msg
+	return "could not be read: " + msg
 }
 
 func subject(s SubjectReport) string {
@@ -138,7 +177,10 @@ func condition(c *ConditionReport, now time.Time) string {
 	if c.Message != "" {
 		s += ": " + c.Message
 	}
-	return s + " (since " + ago(&c.Since, now) + ")"
+	if c.Since == nil {
+		return s
+	}
+	return s + " (since " + ago(c.Since, now) + ")"
 }
 
 func analysisLine(inc IncidentReport, now time.Time) string {

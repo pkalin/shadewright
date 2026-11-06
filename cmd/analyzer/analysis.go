@@ -139,6 +139,7 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	}
 	a, err := analysis.New(analysis.Config{
 		Builder: d.builder, Tools: set, Models: factory, Policies: policies, ExpectedModels: expected,
+		Redactor: d.redactor,
 		Reserve: func(ctx context.Context, now time.Time) error {
 			return incidents.ReserveAnalysis(ctx, d.apiReader, d.client, f.namespace, now)
 		},

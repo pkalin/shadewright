@@ -21,11 +21,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -365,6 +369,68 @@ func TestControllerHandsOffWithoutProposal(t *testing.T) {
 	}
 	if cond := meta.FindStatusCondition(rc.updates[1].Conditions, ConditionAnalyzed); cond == nil || cond.Reason != string(ReasonNoProposal) {
 		t.Errorf("Analyzed condition %+v", cond)
+	}
+}
+
+// logged returns a context whose logger records every line, and a function that returns the last line with
+// the message msg, or "" when none was logged.
+func logged(t *testing.T) (context.Context, func(msg string) string) {
+	var mu sync.Mutex
+	var lines []string
+	ctx := logr.NewContext(t.Context(), funcr.New(func(_, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, args)
+	}, funcr.Options{}))
+	return ctx, func(msg string) string {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, l := range slices.Backward(lines) {
+			if strings.Contains(l, `"msg"="`+msg+`"`) {
+				return l
+			}
+		}
+		return ""
+	}
+}
+
+// The "Analyzed Incident" line names what a MissingData hand-off asked for, and leaves the field out when the
+// result listed nothing (#422).
+func TestControllerLogsMissingData(t *testing.T) {
+	for name, tc := range map[string]struct {
+		reply, want string
+		missing     bool
+	}{
+		"missing data": {reply: strings.Replace(noProposal, `"missingData":[]`,
+			`"missingData":["previous container logs","node memory pressure"]`, 1),
+			want: `"missingData"=["previous container logs" "node memory pressure"]`, missing: true},
+		"none": {reply: noProposal},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ns := namespace(t)
+			setSettings(t, 10)
+			inc := dueIncident(t, ns, nil)
+			f := newFixture()
+			f.triage.steps = []step{reply(tc.reply)}
+			c, _ := newController(t, ns, f)
+			ctx, last := logged(t)
+			if _, err := c.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(inc)}); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			line := last("Analyzed Incident")
+			if line == "" {
+				t.Fatal("no Analyzed Incident line was logged")
+			}
+			if !strings.Contains(line, `"summary"="unclear"`) {
+				t.Errorf("line %s: want the summary", line)
+			}
+			if tc.missing && !strings.Contains(line, tc.want) {
+				t.Errorf("line %s: want %s", line, tc.want)
+			}
+			if !tc.missing && strings.Contains(line, "missingData") {
+				t.Errorf("line %s: want no missingData field", line)
+			}
+		})
 	}
 }
 

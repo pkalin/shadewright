@@ -228,8 +228,9 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		created, err = c.publish(ctx, claimed, *out.Plan)
 		switch {
 		case errors.Is(err, errClaimLost):
-			logger.Info("Dropped the result of an analysis whose claim was lost", "incident", inc.Name,
-				"run", runID, "reason", out.Reason, "calls", out.Calls, "tokens", out.Tokens, "models", out.Models)
+			logger.Info("Dropped the result of an analysis whose claim was lost", append([]any{"incident", inc.Name,
+				"run", runID, "reason", out.Reason, "calls", out.Calls, "tokens", out.Tokens, "models", out.Models},
+				resultFields(out)...)...)
 			return ctrl.Result{}, nil
 		case err != nil:
 			if ctx.Err() != nil {
@@ -239,9 +240,9 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			out.Reason, out.Plan, created = ReasonRequestNotCreated, nil, ""
 		}
 	}
-	logger.Info("Analyzed Incident", "incident", inc.Name, "run", runID, "reason", out.Reason,
+	logger.Info("Analyzed Incident", append([]any{"incident", inc.Name, "run", runID, "reason", out.Reason,
 		"escalated", out.Escalated, "calls", out.Calls, "toolCalls", out.ToolCalls, "tokens", out.Tokens,
-		"models", out.Models, "promptVersion", out.PromptVersion, "request", created)
+		"models", out.Models, "promptVersion", out.PromptVersion, "request", created}, resultFields(out)...)...)
 	switch err := c.finish(ctx, claimed, out, created, attempted); {
 	case errors.Is(err, errClaimLost):
 		logger.Info("Dropped the outcome of an analysis whose claim was lost", "incident", inc.Name, "run", runID,
@@ -250,6 +251,20 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("writing the analysis outcome of Incident %s: %w", inc.Name, err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// resultFields are the log fields of the result's own words, redacted in the loop and within the result's
+// bounds, only those the result has (#422): what a hand-off asked for is otherwise lost while no analysis
+// record is stored (#77).
+func resultFields(out Outcome) []any {
+	var kv []any
+	if out.Summary != "" {
+		kv = append(kv, "summary", out.Summary)
+	}
+	if len(out.MissingData) > 0 {
+		kv = append(kv, "missingData", out.MissingData)
+	}
+	return kv
 }
 
 // errClaimLost: the run no longer owns its claim, or the claim expired, so its result is dropped.

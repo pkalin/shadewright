@@ -55,8 +55,8 @@ const (
 // left out whole, never cut, and replaced by a note of its size.
 const maxValueBytes = 1024
 
-// Redactor redacts text: in the analyzer, a *redact.Redactor with the built-in rules and the operator's
-// patterns. Its output must never be longer than its input, as package redact guarantees.
+// Redactor redacts text: in the analyzer, a *redact.Redactor with the built-in rules (operator patterns are
+// planned; nothing configures them yet). Its output must never be longer than its input, as package redact guarantees.
 type Redactor interface {
 	String(s string) string
 }

@@ -490,6 +490,47 @@ func TestNoProposalHandsOff(t *testing.T) {
 	}
 }
 
+// The outcome carries the result's summary and missing data for the log line, redacted (#422).
+func TestOutcomeCarriesRedactedResultText(t *testing.T) {
+	opaque := strings.Repeat("x9", 10)
+	f := newFixture()
+	f.triage.steps = []step{reply(strings.Replace(strings.Replace(noProposal, `"missingData":[]`,
+		`"missingData":["previous logs","the value of Bearer `+opaque+`"]`, 1), `"summary":"unclear"`,
+		`"summary":"OOM, token Bearer `+opaque+`"`, 1))}
+	out := f.analyze(t, testLimits())
+	if out.Reason != ReasonMissingData || len(out.MissingData) != 2 || out.MissingData[0] != "previous logs" {
+		t.Fatalf("reason %s, missing data %q", out.Reason, out.MissingData)
+	}
+	if strings.Contains(out.MissingData[1], opaque) || strings.Contains(out.Summary, opaque) ||
+		!strings.HasPrefix(out.Summary, "OOM, token") {
+		t.Errorf("summary %q, missing data %q: want the token redacted", out.Summary, out.MissingData)
+	}
+
+	f = newFixture()
+	f.triage.steps = []step{reply(noProposal)}
+	if out := f.analyze(t, testLimits()); out.MissingData != nil || out.Summary != "unclear" {
+		t.Errorf("summary %q, missing data %q", out.Summary, out.MissingData)
+	}
+
+	// The Incident's name, a long hex run the redactor takes for a token, stays readable.
+	inc := incident()
+	inc.Name = incidents.Name(inc.Spec.Fingerprint)
+	f = newFixture()
+	f.triage.steps = []step{reply(strings.Replace(strings.Replace(noProposal, `"missingData":[]`,
+		`"missingData":["events of `+inc.Name+`"]`, 1), `"summary":"unclear"`, `"summary":"`+inc.Name+` OOM"`, 1))}
+	a, err := New(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err = a.Analyze(t.Context(), inc, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Summary != inc.Name+" OOM" || len(out.MissingData) != 1 || out.MissingData[0] != "events of "+inc.Name {
+		t.Errorf("summary %q, missing data %q: want the Incident's name kept", out.Summary, out.MissingData)
+	}
+}
+
 func TestProposalNeedsEvidence(t *testing.T) {
 	for name, evidence := range map[string]string{
 		"none":          `[]`,

@@ -19,12 +19,14 @@ package analysis
 import (
 	"context"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -91,10 +93,18 @@ func TestControllerDropsTheResultOfALostClaim(t *testing.T) {
 				}
 			})
 			c, rc := newController(t, ns, f)
-			reconcile(t, c, inc)
+			ctx, last := logged(t)
+			if _, err := c.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(inc)}); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
 
 			if n := len(requestsIn(t, ns)); n != 0 {
 				t.Errorf("%d requests created after the claim was taken over", n)
+			}
+			// The dropped result still logs its own words (#422); a hand-off logged them before the drop.
+			if line := last("Dropped the result of an analysis whose claim was lost"); result == validResult &&
+				!strings.Contains(line, `"summary"="The container runs out of memory."`) {
+				t.Errorf("line %q: want the summary of the dropped result", line)
 			}
 			if len(rc.updates) != 1 {
 				t.Errorf("%d status updates, want the claim only", len(rc.updates))

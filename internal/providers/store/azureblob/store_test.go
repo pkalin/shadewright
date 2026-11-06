@@ -435,8 +435,8 @@ func TestPutKeepsVerifiedValues(t *testing.T) {
 }
 
 // A verified name does not exempt what follows it inside the same match: a password whose value starts with
-// the name is refused (#451 review), and so is a verified value that is not an object name, so arbitrary text
-// cannot be exempted.
+// the name is refused (#451 review), and so is a verified value that is not an object name or a fingerprint
+// that is not "sha256:" and 64 lower-case hex digits, so arbitrary text cannot be exempted.
 func TestPutVerifiedValuesExemptOnlyNames(t *testing.T) {
 	name := "incident-" + strings.Repeat("9f86d081", 8)
 	for tc, edit := range map[string]func(*providers.AnalysisRecord){
@@ -457,6 +457,20 @@ func TestPutVerifiedValuesExemptOnlyNames(t *testing.T) {
 		},
 		"verified empty": func(r *providers.AnalysisRecord) {
 			r.Verified = []providers.VerifiedName{""}
+		},
+		"fingerprint that is a secret": func(r *providers.AnalysisRecord) {
+			r.Data = []byte(`{"summary":"password: hunter2xyz9"}`)
+			r.Fingerprint = "password: hunter2xyz9"
+		},
+		"fingerprint that is a token": func(r *providers.AnalysisRecord) {
+			r.Fingerprint = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+			r.Data = []byte(`{"fingerprint":"` + r.Fingerprint + `"}`)
+		},
+		"fingerprint in upper case": func(r *providers.AnalysisRecord) {
+			r.Fingerprint = "sha256:" + strings.Repeat("AB", 32)
+		},
+		"fingerprint empty": func(r *providers.AnalysisRecord) {
+			r.Fingerprint = ""
 		},
 	} {
 		t.Run(tc, func(t *testing.T) {

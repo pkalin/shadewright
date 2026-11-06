@@ -165,8 +165,8 @@ var recordMessages = map[string]string{
 // storeRecord writes the run's record when a store is configured, and returns its ID for
 // status.analysisRecords, or "" when there is no store or no record was stored. It first reads the Incident
 // live, so a record is written only for a run that still owns its claim: errClaimLost is returned then, and
-// the caller drops the outcome as finish would. When the create failed (request empty, attempted its name),
-// a request the server created anyway is named in the record, as finish records it.
+// the caller drops the outcome as finish would. request is the run's request, created or recovered after a
+// failed create (conclude), so the record names the one the outcome records.
 //
 // The write is bounded by storeTimeout and ends early enough that the outcome write keeps its full timeout
 // inside the claim; with less time left it is skipped. Any other failure is logged, counted in
@@ -174,7 +174,7 @@ var recordMessages = map[string]string{
 // outcome: the record is evidence, not state. A conflict means the record's ID exists; the ID is the run's
 // own, so an earlier try of this write stored it (one whose answer was lost), and the ID is returned.
 func (c *Controller) storeRecord(ctx context.Context, claimed *remediationv1alpha1.Incident, out Outcome,
-	limits Limits, request, attempted remediationv1alpha1.Name) (remediationv1alpha1.RecordID, error) {
+	limits Limits, request remediationv1alpha1.Name) (remediationv1alpha1.RecordID, error) {
 	if c.Store == nil {
 		return "", nil
 	}
@@ -186,7 +186,7 @@ func (c *Controller) storeRecord(ctx context.Context, claimed *remediationv1alph
 		return "", nil
 	}
 	defer cancel()
-	live, err := c.recheck(sctx, claimed)
+	_, err = c.recheck(sctx, claimed)
 	switch {
 	case errors.Is(err, errClaimLost):
 		logger.Info("Skipped the analysis record: the run no longer owns its claim")
@@ -196,9 +196,6 @@ func (c *Controller) storeRecord(ctx context.Context, claimed *remediationv1alph
 		logger.Error(err, "Failed to read the Incident before the analysis record; no record was written")
 		c.recordResult(claimed, recordFailed)
 		return "", nil
-	}
-	if request == "" && attempted != "" && c.createdAnyway(sctx, live, attempted) {
-		request = attempted
 	}
 	rec, err := c.buildRecord(claimed, out, limits, request)
 	if err != nil {

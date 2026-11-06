@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -31,9 +32,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	kfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -314,7 +317,7 @@ func TestStoreRecordSkippedNearTheClaimsEnd(t *testing.T) {
 	c := &Controller{Store: store, Reader: env.admin, ClaimTimeout: time.Hour + finalWriteTimeout - time.Second,
 		Now: func() time.Time { return now }, Analyzer: &Analyzer{}}
 	before := testutil.ToFloat64(analysisRecords.WithLabelValues(recordSkipped))
-	if id, err := c.storeRecord(t.Context(), inc, Outcome{Reason: ReasonNoProposal}, Limits{}, "", ""); id != "" ||
+	if id, err := c.storeRecord(t.Context(), inc, Outcome{Reason: ReasonNoProposal}, Limits{}, ""); id != "" ||
 		err != nil || len(store.Records()) != 0 {
 		t.Errorf("storeRecord = %q, %v with %d records, want it skipped", id, err, len(store.Records()))
 	}
@@ -322,7 +325,7 @@ func TestStoreRecordSkippedNearTheClaimsEnd(t *testing.T) {
 		t.Errorf("skipped counted %v times, want once", d)
 	}
 	c.ClaimTimeout = time.Hour + finalWriteTimeout + time.Minute
-	if id, err := c.storeRecord(t.Context(), inc, Outcome{Reason: ReasonNoProposal}, Limits{}, "", ""); id == "" ||
+	if id, err := c.storeRecord(t.Context(), inc, Outcome{Reason: ReasonNoProposal}, Limits{}, ""); id == "" ||
 		err != nil || len(store.Records()) != 1 {
 		t.Errorf("storeRecord = %q, %v with %d records, want one written", id, err, len(store.Records()))
 	}
@@ -335,4 +338,116 @@ func TestAnalysisRecordsMetric(t *testing.T) {
 	want := map[string]metricguard.Labels{"shadewright_analysis_records_total": {"result": recordResults}}
 	metricguard.Check(t, reg, want)
 	metricguard.Documented(t, filepath.Join("..", "..", "docs", "reference", "metrics.md"), want)
+}
+
+// claimedIncident returns a controller on a fake API server holding an Incident claimed by a run, with a
+// store, for the steps after the analysis.
+func claimedIncident(t *testing.T) (*Controller, *remediationv1alpha1.Incident) {
+	t.Helper()
+	inc := incident()
+	inc.Name, inc.Namespace = "incident-claimed", "operator"
+	inc.UID = "6f1e0b4a-3c2d-4e5f-8a9b-0c1d2e3f4a5b"
+	inc.Generation = 1
+	inc.Status.Phase = remediationv1alpha1.IncidentAnalyzing
+	at := metav1.NewTime(time.Now().UTC().Truncate(time.Second))
+	inc.Status.LastAnalysisTime = &at
+	scheme := runtime.NewScheme()
+	if err := remediationv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	k := kfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&remediationv1alpha1.Incident{}).
+		WithObjects(inc).Build()
+	return &Controller{Client: k, Reader: k, Namespace: inc.Namespace, Analyzer: &Analyzer{}, Store: &fake.Store{}}, inc
+}
+
+// eofStatusClient fails the first status update with a connection closed before the API server answered.
+type eofStatusClient struct {
+	client.Client
+	tries int
+}
+
+func (c *eofStatusClient) Status() client.SubResourceWriter {
+	return eofStatus{SubResourceWriter: c.Client.Status(), c: c}
+}
+
+type eofStatus struct {
+	client.SubResourceWriter
+	c *eofStatusClient
+}
+
+func (s eofStatus) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	s.c.tries++
+	if s.c.tries == 1 {
+		return fmt.Errorf("updating Incident status: %w", io.EOF)
+	}
+	return s.SubResourceWriter.Update(ctx, obj, opts...)
+}
+
+// An outcome write whose connection closed without an answer (EOF, a reset) is tried again like a transient
+// error of the API server, so the stored record keeps its ID in the status (#451 review).
+func TestFinishRetriesAClosedConnection(t *testing.T) {
+	c, inc := claimedIncident(t)
+	out := Outcome{Reason: ReasonNoProposal}
+	id, err := c.storeRecord(t.Context(), inc, out, Limits{}, "")
+	if err != nil || id == "" {
+		t.Fatalf("storeRecord: %q, %v", id, err)
+	}
+	k := &eofStatusClient{Client: c.Client}
+	c.Client = k
+	if err := c.finish(t.Context(), inc, out, "", "", id); err != nil {
+		t.Fatalf("finish dropped stored record %s after %d write(s): %v", id, k.tries, err)
+	}
+}
+
+// failingRequestReader fails the first live read of a RemediationRequest with a transient error.
+type failingRequestReader struct {
+	client.Reader
+	reads int
+}
+
+func (r *failingRequestReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*remediationv1alpha1.RemediationRequest); ok {
+		r.reads++
+		if r.reads == 1 {
+			return apierrors.NewServiceUnavailable("temporary read failure")
+		}
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+// After a create whose answer was lost, the request the server created is looked up once, so the record and
+// the outcome name the same request even when one read fails (#451 review).
+func TestConcludeRecordAndOutcomeAgreeOnARecoveredRequest(t *testing.T) {
+	c, inc := claimedIncident(t)
+	_, action, err := DecodeResult(validResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Analyzer.cfg.Policies = map[remediationv1alpha1.ActionType]remediationv1alpha1.Name{action.Type: memoryPolicy}
+	spec := requestSpec(inc, Plan{Action: *action, PolicyRef: memoryPolicy})
+	name, err := requestName(inc, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := &remediationv1alpha1.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Name: string(name),
+		Namespace: inc.Namespace}, Spec: spec}
+	if err := c.Client.Create(t.Context(), rr); err != nil {
+		t.Fatal(err)
+	}
+	c.Reader = &failingRequestReader{Reader: c.Reader}
+	id, err := c.conclude(t.Context(), inc, Outcome{Reason: ReasonRequestNotCreated}, Limits{}, "", name)
+	if err != nil || id == "" {
+		t.Fatalf("conclude: %q, %v", id, err)
+	}
+	live := &remediationv1alpha1.Incident{}
+	if err := c.Client.Get(t.Context(), client.ObjectKeyFromObject(inc), live); err != nil {
+		t.Fatal(err)
+	}
+	var rec Record
+	if err := json.Unmarshal(c.Store.(*fake.Store).Records()[string(id)].Data, &rec); err != nil {
+		t.Fatal(err)
+	}
+	if len(live.Status.RemediationRequests) != 1 || rec.Request != string(live.Status.RemediationRequests[0]) {
+		t.Fatalf("record request = %q, Incident requests = %v", rec.Request, live.Status.RemediationRequests)
+	}
 }

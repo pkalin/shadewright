@@ -74,6 +74,9 @@ var (
 	containerPattern = regexp.MustCompile(`^([a-z0-9](-?[a-z0-9]){2,}|[a-z0-9]-[a-z0-9])$`)
 	// idPattern bounds a record ID, so that the blob name is one path segment with nothing to escape.
 	idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,199}$`)
+	// fingerprintPattern is the form of an incident fingerprint (package fingerprint, and the CRD's pattern of
+	// spec.fingerprint), so the fingerprint the check keeps cannot exempt other text.
+	fingerprintPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	// errorCodePattern is what an x-ms-error-code header must look like to be kept in an error.
 	errorCodePattern = regexp.MustCompile(`^[A-Za-z]{1,64}$`)
 )
@@ -91,6 +94,7 @@ const (
 	errNoIdentity      fixedError = "azureblob: the Azure workload identity is not configured"
 	errBadID           fixedError = "azureblob: the record ID is not a lower-case name of at most 200 letters, digits and hyphens"
 	errBadVerified     fixedError = "azureblob: a verified value of the record is not an object name; nothing was sent"
+	errBadFingerprint  fixedError = "azureblob: the record's fingerprint is not sha256 and 64 lower-case hex digits; nothing was sent"
 	errEmpty           fixedError = "azureblob: the record has no data"
 	errTooLarge        fixedError = "azureblob: the record is larger than 1 MiB"
 	errNotJSON         fixedError = "azureblob: the record is not valid JSON"
@@ -198,8 +202,8 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// check refuses a record before anything is sent: a bad ID, a verified value that is not an object name, no
-// data, data too large or not JSON, or data the redactor would still change (see clean).
+// check refuses a record before anything is sent: a bad ID or fingerprint, a verified value that is not an
+// object name, no data, data too large or not JSON, or data the redactor would still change (see clean).
 func (s *Store) check(rec providers.AnalysisRecord) error {
 	for _, v := range rec.Verified {
 		if !v.Valid() {
@@ -209,6 +213,8 @@ func (s *Store) check(rec providers.AnalysisRecord) error {
 	switch {
 	case !idPattern.MatchString(rec.ID):
 		return fmt.Errorf("%w: %w", errBadID, providers.ErrRejected)
+	case !fingerprintPattern.MatchString(rec.Fingerprint):
+		return fmt.Errorf("%w: %w", errBadFingerprint, providers.ErrRejected)
 	case len(rec.Data) == 0:
 		return fmt.Errorf("%w: %w", errEmpty, providers.ErrRejected)
 	case len(rec.Data) > MaxRecordBytes:

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"sync"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/wait"
 	corerecord "k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
@@ -60,6 +62,10 @@ const busyRequeue = 10 * time.Second
 // finalWriteTimeout bounds the write of the outcome, which also runs after the analysis deadline. It is cut
 // to the time left on the claim when that is shorter.
 const finalWriteTimeout = 30 * time.Second
+
+// recoverTimeout bounds the live read, with its retries, of the request of a failed create (recoverRequest).
+// It is cut to the time left on the claim before the outcome write's timeout.
+const recoverTimeout = 10 * time.Second
 
 // createTimeout bounds one live read of the recheck, and the create of a request with its reuse check (ADR-0025 decision 1). It is
 // cut to the time left on the claim when that is shorter.
@@ -275,10 +281,7 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// The record is written after a live read confirms the claim, so a run whose outcome is dropped leaves no
 	// record, and before the outcome, which carries its ID: a record ID in the status always names a record
 	// that was stored.
-	record, err := c.storeRecord(ctx, claimed, out, limits, created, attempted)
-	if err == nil {
-		err = c.finish(ctx, claimed, out, created, attempted, record)
-	}
+	record, err := c.conclude(ctx, claimed, out, limits, created, attempted)
 	switch {
 	case errors.Is(err, errClaimLost):
 		logger.Info("Dropped the outcome of an analysis whose claim was lost", "incident", inc.Name, "run", runID,
@@ -291,6 +294,26 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("writing the analysis outcome of Incident %s: %w", inc.Name, err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// conclude writes the record and then the outcome, and returns the record's ID. When the create failed
+// (created empty, attempted its name), it first reads once, live, whether the server created that request
+// anyway, so the record and the outcome name the same request or neither does.
+func (c *Controller) conclude(ctx context.Context, claimed *remediationv1alpha1.Incident, out Outcome, limits Limits,
+	created, attempted remediationv1alpha1.Name) (remediationv1alpha1.RecordID, error) {
+	var recovered remediationv1alpha1.Name
+	if created == "" && attempted != "" {
+		recovered = c.recoverRequest(ctx, claimed, attempted)
+	}
+	request := created
+	if request == "" {
+		request = recovered
+	}
+	record, err := c.storeRecord(ctx, claimed, out, limits, request)
+	if err != nil {
+		return "", err
+	}
+	return record, c.finish(ctx, claimed, out, created, recovered, record)
 }
 
 // resultFields are the log fields of the result's own words, redacted in the loop and within the result's
@@ -615,19 +638,18 @@ var outcomeMessages = map[Reason]string{
 // Analyzed condition. It rechecks the claim live and writes with the resourceVersion of that read, retrying
 // on conflict with a new recheck, so a stale run never overwrites a newer one; it returns errClaimLost and
 // writes nothing once the run no longer owns the claim. It runs with its own timeout, cut to the time left on
-// the claim, after the analysis deadline and a stop too. When the create failed (request empty, attempted
-// its name), it reads that request live and records it if the server created it anyway, as a create whose
-// reply was lost does: the run's own request only, never another one.
+// the claim, after the analysis deadline and a stop too. recovered is the run's own request of a failed
+// create that the server created anyway (recoverRequest), recorded without the phase Proposed.
 func (c *Controller) finish(ctx context.Context, claimed *remediationv1alpha1.Incident, out Outcome,
-	request, attempted remediationv1alpha1.Name, record remediationv1alpha1.RecordID) error {
+	request, recovered remediationv1alpha1.Name, record remediationv1alpha1.RecordID) error {
 	wctx, cancel, err := c.withinClaim(ctx, claimed, finalWriteTimeout, 0, true)
 	if err != nil {
 		return err
 	}
 	defer cancel()
-	// A conflict is retried with a new recheck, and so is a transient error of the API server while the
-	// write's own timeout lasts, so a passing failure does not lose the outcome and the record ID with it (the
-	// next run has another ID). A try that failed so may still have been applied: the next one first looks
+	// A conflict is retried with a new recheck, and so is a transient error of the API server or of the
+	// connection to it (transientAPIError) while the write's own timeout lasts, so a passing failure does not
+	// lose the outcome and the record ID with it (the next run has another ID). A try that failed so may still have been applied: the next one first looks
 	// whether the outcome is there, so it is not taken for a lost claim.
 	uncertain := false
 	return retry.OnError(finishBackoff, func(err error) bool {
@@ -649,10 +671,8 @@ func (c *Controller) finish(ctx context.Context, claimed *remediationv1alpha1.In
 			inc.Status.AnalysisRecords = appendBounded(inc.Status.AnalysisRecords, record,
 				remediationv1alpha1.MaxAnalysisRecords)
 		}
-		if request == "" && attempted != "" {
-			if c.createdAnyway(wctx, inc, attempted) {
-				inc.Status.RemediationRequests = appendBounded(inc.Status.RemediationRequests, attempted, maxRecorded)
-			}
+		if recovered != "" {
+			inc.Status.RemediationRequests = appendBounded(inc.Status.RemediationRequests, recovered, maxRecorded)
 		}
 		if out.Plan != nil && request != "" {
 			inc.Status.Phase = remediationv1alpha1.IncidentProposed
@@ -684,25 +704,46 @@ func (c *Controller) outcomeWritten(ctx context.Context, claimed *remediationv1a
 // finishBackoff spaces the tries of the outcome write: about 3 s in all, well inside finalWriteTimeout.
 var finishBackoff = wait.Backoff{Steps: 5, Duration: 200 * time.Millisecond, Factor: 2, Jitter: 0.1}
 
-// transientAPIError reports whether err is a failure of the API server that the same write may get past:
-// a timeout, throttling or an unavailable server.
+// transientAPIError reports whether err is a failure that the same call may get past: a timeout, throttling
+// or an unavailable API server, or a connection to it that closed or was reset before an answer came (the
+// call may still have been applied).
 func transientAPIError(err error) bool {
 	return apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) || apierrors.IsTooManyRequests(err) ||
-		apierrors.IsServiceUnavailable(err) || apierrors.IsInternalError(err)
+		apierrors.IsServiceUnavailable(err) || apierrors.IsInternalError(err) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || utilnet.IsProbableEOF(err) ||
+		utilnet.IsConnectionReset(err)
 }
 
-// createdAnyway reports whether the request of a failed create exists, read live, with the form the analysis
-// gives a request of inc. A read error is logged and counts as no: a later claim's record step finds it.
-func (c *Controller) createdAnyway(ctx context.Context, inc *remediationv1alpha1.Incident, name remediationv1alpha1.Name) bool {
-	rr := &remediationv1alpha1.RemediationRequest{}
-	if err := c.Reader.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: string(name)}, rr); err != nil {
-		if !apierrors.IsNotFound(err) {
-			log.FromContext(ctx).Error(err, "Failed to read the RemediationRequest of a failed create", "incident", inc.Name,
-				"request", name)
-		}
-		return false
+// recoverRequest returns name when the request of a failed create exists, read live, with the form the
+// analysis gives a request of claimed, and "" otherwise. A transient read error is retried within
+// recoverTimeout, cut to the time left on the claim before the outcome write's timeout; it runs after a stop
+// too, as the outcome write does. Any other read error, or no time left, is logged and counts as no: a later
+// claim's record step finds the request.
+func (c *Controller) recoverRequest(ctx context.Context, claimed *remediationv1alpha1.Incident,
+	name remediationv1alpha1.Name) remediationv1alpha1.Name {
+	logger := log.FromContext(ctx).WithValues("incident", claimed.Name, "request", name)
+	rctx, cancel, err := c.withinClaim(ctx, claimed, recoverTimeout, finalWriteTimeout, true)
+	if err != nil {
+		logger.Info("Did not read the RemediationRequest of a failed create: no time is left on the claim")
+		return ""
 	}
-	return c.isAnalysisRequest(inc, rr)
+	defer cancel()
+	rr := &remediationv1alpha1.RemediationRequest{}
+	err = retry.OnError(finishBackoff, func(err error) bool {
+		return rctx.Err() == nil && transientAPIError(err)
+	}, func() error {
+		return c.Reader.Get(rctx, client.ObjectKey{Namespace: c.Namespace, Name: string(name)}, rr)
+	})
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			logger.Error(err, "Failed to read the RemediationRequest of a failed create")
+		}
+		return ""
+	}
+	if !c.isAnalysisRequest(claimed, rr) {
+		return ""
+	}
+	return name
 }
 
 // appendBounded appends name unless present and keeps the newest n.

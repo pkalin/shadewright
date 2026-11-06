@@ -182,20 +182,35 @@ func (r *Redactor) Clean(s string, keep ...string) bool {
 	return true
 }
 
-// markerPattern matches the markers [marker] writes; markers checks the kind of the short form.
+// markerPattern matches the shapes of the markers [marker] writes; markers keeps only the exact ones.
 var markerPattern = regexp.MustCompile(`\[REDACTED(?::[a-z][a-z0-9-]{0,31})?\]|\[[a-z][a-z0-9-]{0,31}\]|\*+`)
 
-// markers returns the byte ranges of the markers of r's rules in s, in order and not overlapping.
+// markers returns the byte ranges of the markers of r's rules in s, in order and not overlapping: a long or
+// short form naming a kind of one of r's rules, "[REDACTED]", or a run of at most three "*" (the longest
+// [marker] writes). A longer run of "*" or a marker naming another kind is not one this redactor wrote, so
+// Clean does not take it as clean.
 func (r *Redactor) markers(s string) []span {
 	var out []span
 	for _, m := range markerPattern.FindAllStringIndex(s, -1) {
-		text := s[m[0]:m[1]]
-		if text[0] == '[' && !strings.HasPrefix(text, "[REDACTED") && !r.hasKind(text[1:len(text)-1]) {
-			continue
+		if r.isMarker(s[m[0]:m[1]]) {
+			out = append(out, span{start: m[0], end: m[1]})
 		}
-		out = append(out, span{start: m[0], end: m[1]})
 	}
 	return out
+}
+
+// isMarker reports whether text, a match of markerPattern, is a marker [marker] writes for one of r's rules.
+func (r *Redactor) isMarker(text string) bool {
+	switch {
+	case text[0] == '*':
+		return len(text) <= len("***")
+	case text == "[REDACTED]":
+		return true
+	case strings.HasPrefix(text, "[REDACTED:"):
+		return r.hasKind(text[len("[REDACTED:") : len(text)-1])
+	default:
+		return r.hasKind(text[1 : len(text)-1])
+	}
 }
 
 // hasKind reports whether one of r's rules has the kind.

@@ -753,6 +753,9 @@ func TestClean(t *testing.T) {
 		"token=ghp_abcdefghijklmnopqrstuvwxyz0123456789",
 		`password: "` + name + ` hunter2"`,
 		"password: [hunter2]",
+		"password: [REDACTED:hunter2]",
+		"token=****",
+		"password: *****",
 	} {
 		if defaultRedactor.Clean(in, name) {
 			t.Errorf("Clean(%q) = true, want the secret found", in)

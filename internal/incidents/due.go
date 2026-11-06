@@ -85,7 +85,7 @@ func (c *Controller) markDue(ctx context.Context) error {
 	}
 	now := c.cfg.Now()
 	s := TriggerSettings{Debounce: c.cfg.Debounce, SettleLimit: c.cfg.SettleLimit, Cooldown: c.cfg.Cooldown,
-		AnalysisTimeout: c.cfg.AnalysisTimeout}
+		AnalysisTimeout: c.cfg.AnalysisTimeout, RecentWindow: c.cfg.RecentWindow}
 	used, closed, readErr := c.readBudget(ctx, now, &s)
 
 	items := list.Items
@@ -119,7 +119,7 @@ func (c *Controller) markDue(ctx context.Context) error {
 				return Due(fresh, held, waiting, now, s, used)
 			}
 		}
-		due, reason, err := c.setDue(ctx, inc, decide)
+		due, reason, wrote, err := c.setDue(ctx, inc, decide)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -128,6 +128,9 @@ func (c *Controller) markDue(ctx context.Context) error {
 		}
 		if closed == "" {
 			c.rememberWaiting(inc.Name, reason, now)
+		}
+		if wrote && reason == ReasonNotRecent {
+			c.reportNotRecent(inc)
 		}
 		// A failed write may still have landed (a lost answer), and a mark it did not change still says due:
 		// either way the Incident takes its unit of the budget.
@@ -251,18 +254,33 @@ func (c *Controller) heldSince(fp string) time.Time {
 	return t
 }
 
+// reportNotRecent counts an Incident newly marked NotRecent and reports it in a Normal event about the
+// Incident, so a skipped analysis is visible. It runs once per write of that reason ([conditionAgrees]), not on
+// every pass. The event is written in the operator namespace, the Incident's, with the grant on core Events the
+// analyzer holds there; its message holds nothing from the cluster.
+func (c *Controller) reportNotRecent(inc *remediationv1alpha1.Incident) {
+	notRecentSkips.Inc()
+	if c.cfg.Recorder == nil {
+		return
+	}
+	c.cfg.Recorder.Eventf(inc, corev1.EventTypeNormal, "AnalysisSkipped",
+		"Not analyzed: never analyzed and not seen within the recent window of %s; a new observation makes it due again",
+		c.cfg.RecentWindow)
+}
+
 // setDue sets the AnalysisDue condition of one Incident to what decide says. cached is the Incident as the
 // cache holds it: when its condition already agrees ([conditionAgrees]), nothing is written. Otherwise the
 // Incident is read fresh from the API server, decided again on that copy, and its status updated, retrying
 // on conflict (the observation writer updates the same status). It reports the decision it last made, also
-// with an error, since a write whose answer was lost may have landed; an Incident gone meanwhile is reported
-// not due (NotObserved).
+// with an error, since a write whose answer was lost may have landed, and whether it wrote that decision (an
+// answer received, not lost); an Incident gone meanwhile is reported not due (NotObserved).
 func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Incident,
-	decide func(*remediationv1alpha1.Incident) (bool, string)) (bool, string, error) {
+	decide func(*remediationv1alpha1.Incident) (bool, string)) (bool, string, bool, error) {
 	due, reason := decide(cached)
 	if conditionAgrees(cached, due, reason) {
-		return due, reason, nil
+		return due, reason, false, nil
 	}
+	wrote := false
 	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 	defer cancel()
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
@@ -271,6 +289,7 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 			return err
 		}
 		due, reason = decide(inc)
+		wrote = false
 		if conditionAgrees(inc, due, reason) {
 			return nil
 		}
@@ -288,28 +307,37 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 			ObservedGeneration: inc.Generation,
 			LastTransitionTime: metav1.NewTime(c.cfg.Now()),
 		})
-		return c.client.Status().Update(wctx, inc, client.FieldOwner(triggerFieldOwner))
+		if err := c.client.Status().Update(wctx, inc, client.FieldOwner(triggerFieldOwner)); err != nil {
+			return err
+		}
+		wrote = true
+		return nil
 	})
 	if apierrors.IsNotFound(err) {
-		return false, ReasonNotObserved, nil
+		return false, ReasonNotObserved, false, nil
 	}
 	if err != nil {
-		return due, reason, fmt.Errorf("setting AnalysisDue on Incident %s: %w", cached.Name, err)
+		return due, reason, false, fmt.Errorf("setting AnalysisDue on Incident %s: %w", cached.Name, err)
 	}
-	return due, reason, nil
+	return due, reason, wrote, nil
 }
 
 // conditionAgrees reports whether the Incident's AnalysisDue condition already holds the decision (due,
 // reason). A condition that says due must hold the same reason. One that says not due agrees with any
 // not-due reason: the reason it gave first stays, so a change that turns every Incident's reason (the budget
-// used up, or set to 0) writes nothing.
+// used up, or set to 0) writes nothing. NotRecent is the exception: it is written over another not-due reason,
+// once, so the condition shows why an incident is skipped (with an event, [Controller.reportNotRecent]), and
+// once written it stays while the incident is not due. No decision reads it back.
 func conditionAgrees(inc *remediationv1alpha1.Incident, due bool, reason string) bool {
 	cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue)
 	if cond == nil || cond.ObservedGeneration != inc.Generation {
 		return false
 	}
-	if due {
+	switch {
+	case due:
 		return cond.Status == metav1.ConditionTrue && cond.Reason == reason
+	case reason == ReasonNotRecent:
+		return cond.Status == metav1.ConditionFalse && cond.Reason == ReasonNotRecent
 	}
 	return cond.Status == metav1.ConditionFalse
 }
@@ -321,6 +349,7 @@ var dueMessages = map[string]string{
 	ReasonCooldownExpired:      "The symptom recurred and the cooldown since the last analysis has passed",
 	ReasonAnalysisTimedOut:     "The last analysis did not finish within the analysis timeout and the cooldown has passed",
 	ReasonNotObserved:          "No observation is recorded yet",
+	ReasonNotRecent:            "The incident was never analyzed and was not seen within the recent window; a new observation makes it due again",
 	ReasonAnalyzing:            "An analysis is running",
 	ReasonAnalysisStartUnknown: "The incident is in phase Analyzing without a lastAnalysisTime, so the cooldown cannot be placed",
 	ReasonProposed:             "The last analysis made a proposal",

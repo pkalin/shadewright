@@ -23,6 +23,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -50,6 +51,44 @@ func TestIncidentControllerRunsWithTheAnalyzerRBAC(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
+	// The settings, the budget and an Incident never analyzed and last seen an hour ago, so the analysis
+	// trigger skips it (NotRecent) with a Normal event about the Incident.
+	settings := &remediationv1alpha1.RemediationSettings{
+		ObjectMeta: metav1.ObjectMeta{Name: remediationv1alpha1.SettingsName},
+	}
+	budget := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: operatorNS, Name: incidents.BudgetName}}
+	for _, obj := range []client.Object{settings, budget} {
+		if err := admin.Create(ctx, obj); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = admin.Delete(context.Background(), obj) })
+	}
+	quietFP := fmt.Sprintf("sha256:%064x", 0xfeed10)
+	quiet := &remediationv1alpha1.Incident{
+		ObjectMeta: metav1.ObjectMeta{Namespace: operatorNS, Name: incidents.Name(quietFP)},
+		Spec: remediationv1alpha1.IncidentSpec{
+			Fingerprint: quietFP, Reason: reason,
+			Subject: remediationv1alpha1.ObjectRef{
+				APIVersion: subjectAPIVersion, Kind: subjectKind, Namespace: otherNS, Name: "rbac-quiet",
+				UID: "55555555-5555-4555-8555-555555555555",
+			},
+		},
+	}
+	if err := admin.Create(ctx, quiet); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Delete(context.Background(), quiet) })
+	hourAgo := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
+	quiet.Status = remediationv1alpha1.IncidentStatus{
+		Phase: remediationv1alpha1.IncidentOpen, FirstSeen: &hourAgo, LastSeen: &hourAgo, Count: 1,
+		Occurrences: []remediationv1alpha1.OccurrenceRecord{
+			{ID: "event:0a1b2c3d-4e5f-4a6b-8c7d-000000000099", Total: 1, Began: &hourAgo},
+		},
+	}
+	if err := admin.Status().Update(ctx, quiet); err != nil {
+		t.Fatal(err)
+	}
+
 	var existing remediationv1alpha1.IncidentList
 	if err := admin.List(ctx, &existing, client.InNamespace(operatorNS)); err != nil {
 		t.Fatal(err)
@@ -72,7 +111,8 @@ func TestIncidentControllerRunsWithTheAnalyzerRBAC(t *testing.T) {
 	}
 	inc, err := incidents.New(incidents.Config{
 		Namespace: operatorNS, MaxIncidents: len(existing.Items) + 1, Window: 100 * time.Millisecond,
-		Recorder: mgr.GetEventRecorderFor("shadewright-analyzer"), Regarding: pod, //nolint:staticcheck // as cmd/analyzer
+		TriggerInterval: 100 * time.Millisecond, Regarding: pod,
+		Recorder: mgr.GetEventRecorderFor("shadewright-analyzer"), //nolint:staticcheck // as cmd/analyzer
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -143,4 +183,25 @@ func TestIncidentControllerRunsWithTheAnalyzerRBAC(t *testing.T) {
 		}
 		return false
 	})
+
+	// The skipped first analysis: the condition written and a Normal event about the Incident.
+	wait("no AnalysisSkipped event about the quiet Incident", func() bool {
+		var events corev1.EventList
+		if err := admin.List(ctx, &events, client.InNamespace(operatorNS)); err != nil {
+			return false
+		}
+		for _, e := range events.Items {
+			if e.Reason == "AnalysisSkipped" && e.Type == corev1.EventTypeNormal && e.InvolvedObject.Name == quiet.Name {
+				return true
+			}
+		}
+		return false
+	})
+	if err := admin.Get(ctx, client.ObjectKeyFromObject(quiet), quiet); err != nil {
+		t.Fatal(err)
+	}
+	cond := meta.FindStatusCondition(quiet.Status.Conditions, incidents.ConditionAnalysisDue)
+	if cond == nil || cond.Reason != incidents.ReasonNotRecent {
+		t.Fatalf("the quiet Incident's AnalysisDue condition is %+v, want reason NotRecent", cond)
+	}
 }

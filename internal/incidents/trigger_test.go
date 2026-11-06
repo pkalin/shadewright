@@ -20,14 +20,17 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corerecord "k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -48,7 +51,26 @@ func ago(d time.Duration) *metav1.Time { return &metav1.Time{Time: triggerNow.Ad
 
 var triggerSettings = TriggerSettings{
 	Debounce: 45 * time.Second, SettleLimit: 5 * time.Minute, Cooldown: 15 * time.Minute,
-	AnalysisTimeout: 10 * time.Minute, MaxAnalysesPerDay: 100,
+	AnalysisTimeout: 10 * time.Minute, RecentWindow: 15 * time.Minute, MaxAnalysesPerDay: 100,
+}
+
+// quietThenSeen returns the status of an incident never analyzed, first seen an hour ago, whose first
+// occurrence began oldAgo ago and whose newest began burstAgo ago, last seen seenAgo ago.
+func quietThenSeen(seenAgo, burstAgo, oldAgo time.Duration) remediationv1alpha1.IncidentStatus {
+	st := incidentStatus(seenAgo, burstAgo, 0)
+	st.FirstSeen = ago(time.Hour)
+	st.Occurrences = append(st.Occurrences, remediationv1alpha1.OccurrenceRecord{ID: eventID(2), Total: 1, Began: ago(oldAgo)})
+	return st
+}
+
+// conditionID is the occurrence ID of a symptom state of a module's symptom source.
+var conditionID = occurrenceCondition + strings.Repeat("c", 64)
+
+// withDueCondition returns st with an AnalysisDue condition of status and reason, set 30 min ago.
+func withDueCondition(st remediationv1alpha1.IncidentStatus, status metav1.ConditionStatus, reason string) remediationv1alpha1.IncidentStatus {
+	st.Conditions = []metav1.Condition{{Type: ConditionAnalysisDue, Status: status, Reason: reason,
+		LastTransitionTime: metav1.Time{Time: triggerNow.Add(-30 * time.Minute)}}}
+	return st
 }
 
 // incidentStatus returns a status first and last seen seenAgo ago, with one occurrence that began beganAgo
@@ -167,6 +189,197 @@ func TestDue(t *testing.T) {
 				return st
 			},
 			reason: ReasonEscalated,
+		},
+		{
+			name:   "not recent: never analyzed and last seen longer ago than the window",
+			status: func() remediationv1alpha1.IncidentStatus { return incidentStatus(35*time.Minute, time.Hour, 0) },
+			reason: ReasonNotRecent,
+		},
+		{
+			name: "not recent: last seen just over the window ago",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return incidentStatus(15*time.Minute+time.Nanosecond, time.Hour, 0)
+			},
+			reason: ReasonNotRecent,
+		},
+		{
+			name:   "not recent: last seen exactly the window ago is still recent",
+			status: func() remediationv1alpha1.IncidentStatus { return incidentStatus(15*time.Minute, time.Hour, 0) },
+			due:    true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name:   "not recent: wins over the budget, so it takes no unit",
+			status: func() remediationv1alpha1.IncidentStatus { return incidentStatus(35*time.Minute, time.Hour, 0) },
+			used:   100,
+			reason: ReasonNotRecent,
+		},
+		{
+			name:     "not recent: wins over a disabled budget",
+			status:   func() remediationv1alpha1.IncidentStatus { return incidentStatus(35*time.Minute, time.Hour, 0) },
+			settings: func(s *TriggerSettings) { s.MaxAnalysesPerDay = 0 },
+			reason:   ReasonNotRecent,
+		},
+		{
+			name:   "not recent: an observation held unwritten makes it recent (and firstSeen is past the settle limit)",
+			status: func() remediationv1alpha1.IncidentStatus { return incidentStatus(35*time.Minute, time.Hour, 0) },
+			held:   10 * time.Second,
+			due:    true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: a new occurrence after going quiet debounces, though firstSeen is past the settle limit",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return quietThenSeen(10*time.Second, 10*time.Second, time.Hour)
+			},
+			reason: ReasonDebouncing,
+		},
+		{
+			name: "not recent: after going quiet, the settle limit counts from the new burst",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return quietThenSeen(10*time.Second, 5*time.Minute, time.Hour)
+			},
+			due: true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: after going quiet, a burst that began 4 min ago has not reached the settle limit",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return quietThenSeen(10*time.Second, 4*time.Minute, time.Hour)
+			},
+			reason: ReasonDebouncing,
+		},
+		{
+			name: "not recent: a new occurrence after going quiet is due once settled",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return quietThenSeen(45*time.Second, 45*time.Second, time.Hour)
+			},
+			due: true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: a gap of exactly the window is no quiet spell",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return quietThenSeen(10*time.Second, 10*time.Second, 15*time.Minute+10*time.Second)
+			},
+			due: true, reason: ReasonFirstAnalysis, // the settle limit counts from firstSeen, an hour ago
+		},
+		{
+			name: "not recent: a gap just over the window is a quiet spell",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return quietThenSeen(10*time.Second, 10*time.Second, 15*time.Minute+10*time.Second+time.Nanosecond)
+			},
+			reason: ReasonDebouncing,
+		},
+		{
+			name: "not recent: a quiet spell before the dropped records counts too",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := incidentStatus(10*time.Second, 10*time.Second, 0)
+				st.FirstSeen = ago(2 * time.Hour)
+				st.OccurrencesDroppedThrough = ago(time.Hour)
+				return st
+			},
+			reason: ReasonDebouncing,
+		},
+		{
+			name: "not recent: without a window the settle limit counts from firstSeen",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return quietThenSeen(10*time.Second, 10*time.Second, time.Hour)
+			},
+			settings: func(s *TriggerSettings) { s.RecentWindow = 0 },
+			due:      true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: an Incident already marked due stays due",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := incidentStatus(35*time.Minute, time.Hour, 0)
+				st.Conditions = []metav1.Condition{{Type: ConditionAnalysisDue, Status: metav1.ConditionTrue,
+					Reason: ReasonFirstAnalysis, LastTransitionTime: metav1.Time{Time: triggerNow.Add(-30 * time.Minute)}}}
+				return st
+			},
+			due: true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: a mark taken back by a failed settings read still counts as due",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return withDueCondition(incidentStatus(35*time.Minute, time.Hour, 0), metav1.ConditionFalse, ReasonSettingsUnreadable)
+			},
+			due: true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: a mark taken back by a failed budget read still counts as due",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return withDueCondition(incidentStatus(35*time.Minute, time.Hour, 0), metav1.ConditionFalse, ReasonBudgetReadFailed)
+			},
+			due: true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: a budget missing is no failed read, so its reason tells nothing of a mark",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return withDueCondition(incidentStatus(35*time.Minute, time.Hour, 0), metav1.ConditionFalse, ReasonBudgetNotFound)
+			},
+			reason: ReasonNotRecent,
+		},
+		{
+			name: "not recent: a lasting state seen once an hour ago is recent",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := incidentStatus(time.Hour, time.Hour, 0)
+				st.Occurrences[0].ID = conditionID
+				return st
+			},
+			due: true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: a lasting state counts only when it is the newest occurrence",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := quietThenSeen(35*time.Minute, 35*time.Minute, time.Hour)
+				st.Occurrences[1].ID = conditionID
+				return st
+			},
+			reason: ReasonNotRecent,
+		},
+		{
+			name: "not recent: the newest occurrence is found by its begin time, not its place",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := quietThenSeen(35*time.Minute, time.Hour, 35*time.Minute)
+				st.Occurrences[1].ID = conditionID
+				return st
+			},
+			due: true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: a lastSeen ahead of the clock (skew) is recent",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := incidentStatus(35*time.Minute, time.Hour, 0)
+				st.LastSeen = ago(-time.Hour)
+				return st
+			},
+			due: true, reason: ReasonFirstAnalysis, // firstSeen is past the settle limit
+
+		},
+		{
+			name:     "not recent: the window is never shorter than the debounce",
+			status:   func() remediationv1alpha1.IncidentStatus { return incidentStatus(45*time.Second, time.Hour, 0) },
+			settings: func(s *TriggerSettings) { s.RecentWindow = 10 * time.Second },
+			due:      true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name:     "not recent: no window, any incident never analyzed may be due",
+			status:   func() remediationv1alpha1.IncidentStatus { return incidentStatus(35*time.Minute, time.Hour, 0) },
+			settings: func(s *TriggerSettings) { s.RecentWindow = 0 },
+			due:      true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: applies only to a first analysis, not to a re-analysis",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return incidentStatus(35*time.Minute, 36*time.Minute, time.Hour)
+			},
+			due: true, reason: ReasonNewOccurrence,
+		},
+		{
+			name: "not recent: not to a timed-out analysis either",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := incidentStatus(time.Hour, time.Hour, 30*time.Minute)
+				st.Phase = remediationv1alpha1.IncidentAnalyzing
+				return st
+			},
+			due: true, reason: ReasonAnalysisTimedOut,
 		},
 		{
 			name:   "debounce: a new incident seen 10 s ago has not settled",
@@ -478,7 +691,9 @@ func createIncident(t *testing.T, ns string, f int, st remediationv1alpha1.Incid
 	if err := env.admin.Create(t.Context(), inc); err != nil {
 		t.Fatal(err)
 	}
-	st.Occurrences[0].ID = eventID(f)
+	if !strings.HasPrefix(st.Occurrences[0].ID, occurrenceCondition) {
+		st.Occurrences[0].ID = eventID(f)
+	}
 	inc.Status = st
 	if err := env.admin.Status().Update(t.Context(), inc); err != nil {
 		t.Fatal(err)
@@ -889,6 +1104,131 @@ func TestFlappingIncidentIsDueWithinTheSettleLimit(t *testing.T) {
 	eventually(t, ns, 1, dueIs(true, ReasonCooldownExpired))
 }
 
+// Settings applied after Incidents exist (#423): the never-analyzed Incidents last seen longer ago than the
+// recent window are not due (NotRecent) and take no unit of the budget, so the recent one is due though it is
+// the newest. Each skip is reported once, in an event and the metric, not again on later passes. One of the
+// quiet ones seen again is due once it has settled, not at once, though its firstSeen, and the controller's
+// first sight of it not due, are past the settle limit.
+func TestQuietIncidentsTakeNoBudgetWhenSettingsArriveLate(t *testing.T) {
+	ns := namespace(t)
+	for f := 1; f <= 3; f++ {
+		createIncident(t, ns, f, incidentStatus(35*time.Minute, 35*time.Minute, 0))
+	}
+	const recent = 4
+	createIncident(t, ns, recent, incidentStatus(2*time.Minute, 2*time.Minute, 0))
+	var now atomic.Int64
+	now.Store(triggerNow.UnixNano())
+	clock := func() time.Time { return time.Unix(0, now.Load()).UTC() }
+	rec := corerecord.NewFakeRecorder(20)
+	r := start(t, ns, Config{TriggerInterval: testTriggerInterval, Now: clock, Recorder: rec})
+	for f := 1; f <= recent; f++ {
+		eventually(t, ns, f, dueIs(false, ReasonSettingsNotFound))
+	}
+	skips := testutil.ToFloat64(notRecentSkips)
+	createSettings(t, 2)
+	createBudget(t, ns, nil)
+	eventually(t, ns, recent, dueIs(true, ReasonFirstAnalysis))
+	for f := 1; f <= 3; f++ {
+		eventually(t, ns, f, dueIs(false, ReasonNotRecent))
+	}
+	time.Sleep(4 * testTriggerInterval) // later passes report nothing more
+	for range 3 {
+		select {
+		case e := <-rec.Events:
+			if !strings.HasPrefix(e, "Normal AnalysisSkipped ") || !strings.Contains(e, "15m0s") {
+				t.Fatalf("event %q", e)
+			}
+		default:
+			t.Fatal("fewer than 3 AnalysisSkipped events")
+		}
+	}
+	select {
+	case e := <-rec.Events:
+		t.Fatalf("an event more than one per skipped Incident: %q", e)
+	default:
+	}
+	if got := testutil.ToFloat64(notRecentSkips) - skips; got != 3 {
+		t.Fatalf("skips counted %v, want 3", got)
+	}
+
+	// 10 min later, past the settle limit since the quiet ones were first found not recent, fp(1) is seen
+	// again: it debounces (its condition keeps NotRecent meanwhile), then takes the unit left.
+	again := triggerNow.Add(10 * time.Minute)
+	now.Store(again.UnixNano())
+	time.Sleep(4 * testTriggerInterval)
+	r.obs <- immediate(observation(1, 99, 1, 1, again))
+	written := &metav1.Time{Time: again}
+	eventually(t, ns, 1, func(inc *remediationv1alpha1.Incident) bool { return inc.Status.LastSeen.Equal(written) })
+	time.Sleep(4 * testTriggerInterval)
+	if inc := get(t, ns); meta.IsStatusConditionTrue(inc.Status.Conditions, ConditionAnalysisDue) {
+		t.Fatalf("an Incident seen again after going quiet is due before the debounce: %+v", inc.Status.Conditions)
+	}
+	now.Store(again.Add(45 * time.Second).UnixNano())
+	eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
+	for f := 2; f <= 3; f++ {
+		eventually(t, ns, f, dueIs(false, ReasonNotRecent))
+	}
+}
+
+// Settings applied after Incidents exist: a lasting symptom state of a module (a "condition:" occurrence),
+// emitted once while it lasts, is not taken as gone though it was seen an hour ago, so it is due; an event seen
+// once an hour ago is not (NotRecent).
+func TestLastingStateIsNotSkippedWhenSettingsArriveLate(t *testing.T) {
+	ns := namespace(t)
+	lasting := incidentStatus(time.Hour, time.Hour, 0)
+	lasting.Occurrences[0].ID = conditionID
+	createIncident(t, ns, 1, lasting)
+	createIncident(t, ns, 2, incidentStatus(time.Hour, time.Hour, 0))
+	start(t, ns, triggerConfig)
+	eventually(t, ns, 1, dueIs(false, ReasonSettingsNotFound))
+	createSettings(t, 10)
+	createBudget(t, ns, nil)
+	eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
+	eventually(t, ns, 2, dueIs(false, ReasonNotRecent))
+}
+
+// A failed budget read takes the mark that says due back (BudgetReadFailed). Once the budget reads again, an
+// Incident quiet longer than the recent window meanwhile is due again, not NotRecent: one failed read does not
+// end a pending first analysis.
+func TestFailedReadDoesNotEndAPendingFirstAnalysis(t *testing.T) {
+	ns := namespace(t)
+	createSettings(t, 10)
+	createBudget(t, ns, nil)
+	createIncident(t, ns, 1, incidentStatus(14*time.Minute, time.Hour, 0))
+	var now atomic.Int64
+	now.Store(triggerNow.UnixNano())
+	reader := &failingBudget{Reader: env.admin}
+	startWith(t, ns, Config{TriggerInterval: testTriggerInterval, Now: func() time.Time { return time.Unix(0, now.Load()).UTC() }},
+		func(c *Controller, _ *countingClient) { c.reader = reader })
+	eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
+	reader.fail.Store(true)
+	eventually(t, ns, 1, dueIs(false, ReasonBudgetReadFailed))
+	now.Store(triggerNow.Add(5 * time.Minute).UnixNano())
+	time.Sleep(4 * testTriggerInterval)
+	reader.fail.Store(false)
+	eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
+}
+
+// An Incident that went quiet and was seen again while no settings existed (so no pass decided it NotRecent)
+// is not due at once when the settings arrive, though its firstSeen is past the settle limit: the settle limit
+// counts from the new burst, which its records show, so it is due once it has settled.
+func TestQuietIncidentSeenAgainBeforeSettingsDebounces(t *testing.T) {
+	ns := namespace(t)
+	createIncident(t, ns, 1, quietThenSeen(10*time.Second, 10*time.Second, time.Hour))
+	var now atomic.Int64
+	now.Store(triggerNow.UnixNano())
+	start(t, ns, Config{TriggerInterval: testTriggerInterval, Now: func() time.Time { return time.Unix(0, now.Load()).UTC() }})
+	eventually(t, ns, 1, dueIs(false, ReasonSettingsNotFound))
+	createSettings(t, 10)
+	createBudget(t, ns, nil)
+	time.Sleep(6 * testTriggerInterval)
+	if inc := get(t, ns); meta.IsStatusConditionTrue(inc.Status.Conditions, ConditionAnalysisDue) {
+		t.Fatalf("an Incident seen again after going quiet is due before the debounce: %+v", inc.Status.Conditions)
+	}
+	now.Store(triggerNow.Add(35 * time.Second).UnixNano())
+	eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
+}
+
 // When the budget does not cover every Incident that is due, the oldest by firstSeen goes first, whatever
 // their names, so new fingerprints cannot push an older incident out of the day's budget.
 func TestOldestIncidentTakesTheBudgetFirst(t *testing.T) {
@@ -1072,5 +1412,27 @@ func TestNewBoundsTheTriggerDeadlines(t *testing.T) {
 	}
 	if c.cfg.PassTimeout != 900*time.Millisecond || c.cfg.ReadTimeout != 675*time.Millisecond {
 		t.Errorf("from a 1 s interval: pass %s, read %s", c.cfg.PassTimeout, c.cfg.ReadTimeout)
+	}
+}
+
+// New resolves the recent window: the cooldown by default, never shorter than the debounce.
+func TestNewResolvesTheRecentWindow(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cfg  Config
+		want time.Duration
+	}{
+		"default":            {Config{}, DefaultCooldown},
+		"follows cooldown":   {Config{Cooldown: 20 * time.Minute}, 20 * time.Minute},
+		"set":                {Config{RecentWindow: 30 * time.Minute}, 30 * time.Minute},
+		"below the debounce": {Config{Debounce: 2 * time.Minute, RecentWindow: time.Minute}, 2 * time.Minute},
+	} {
+		tc.cfg.Namespace = "ns"
+		c, err := New(tc.cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.cfg.RecentWindow != tc.want {
+			t.Errorf("%s: recent window %s, want %s", name, c.cfg.RecentWindow, tc.want)
+		}
 	}
 }

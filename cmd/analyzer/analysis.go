@@ -31,7 +31,9 @@ import (
 	"github.com/pkalin/shadewright/internal/analyzer"
 	"github.com/pkalin/shadewright/internal/analyzer/models"
 	"github.com/pkalin/shadewright/internal/incidents"
+	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/model/foundry"
+	"github.com/pkalin/shadewright/internal/providers/store/azureblob"
 	"github.com/pkalin/shadewright/internal/redact"
 	"github.com/pkalin/shadewright/internal/tools"
 )
@@ -43,6 +45,8 @@ type analysisFlags struct {
 	triageModel, escalationModel string
 	endpointSuffixes             string
 	actionPolicies               string
+	// storeAccount and storeContainer name the Blob Storage container of the analysis records (ADR-0015).
+	storeAccount, storeContainer string
 	// claimTimeout is the Incident trigger's AnalysisTimeout: how long a claim lasts (ADR-0025 decision 1).
 	claimTimeout time.Duration
 }
@@ -69,6 +73,13 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 		"Comma-separated ActionType=policy pairs: the RemediationPolicy a proposed RemediationRequest of each "+
 			"action type refers to, such as SetContainerMemoryLimit=memory-limits. An action type without one is "+
 			"never proposed (NoPolicyForAction). Used only with --triage-model.")
+	fs.StringVar(&f.storeAccount, "analysis-store-account", "",
+		"The Azure storage account name (3 to 24 lower-case letters and digits) of the Blob Storage container that "+
+			"keeps one redacted record of each analysis (ADR-0015), written create-only with the analyzer's workload "+
+			"identity (Storage audience, no key or SAS) to https://<account>.blob.core.windows.net. Empty (the "+
+			"default) writes no record. Used only with --triage-model, and needs --analysis-store-container.")
+	fs.StringVar(&f.storeContainer, "analysis-store-container", "",
+		"The container of the analysis records in --analysis-store-account, such as analyses.")
 }
 
 // analysisDeps are what the analysis reads and writes with: the manager's cache and API reader, its client,
@@ -80,6 +91,8 @@ type analysisDeps struct {
 	sources          analyzer.Sources
 	redactor         *redact.Redactor
 	log              logr.Logger
+	// newStore builds the analysis record store; nil means the Blob Storage adapter with the workload identity.
+	newStore func(cfg azureblob.Config) (providers.AnalysisStore, error)
 }
 
 // buildAnalysis returns the analysis controller, or nil when --triage-model is empty: then no model is
@@ -92,7 +105,13 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 		if f.escalationModel != "" {
 			return nil, errors.New("--escalation-model needs --triage-model")
 		}
+		if f.storeAccount != "" || f.storeContainer != "" {
+			return nil, errors.New("--analysis-store-account and --analysis-store-container need --triage-model")
+		}
 		return nil, nil
+	}
+	if (f.storeAccount == "") != (f.storeContainer == "") {
+		return nil, errors.New("--analysis-store-account and --analysis-store-container are set together or not at all")
 	}
 	triage, err := models.ParseModelName(f.triageModel)
 	if err != nil {
@@ -149,6 +168,20 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	}
 	c := &analysis.Controller{Client: d.client, Reader: d.apiReader, Namespace: f.namespace, Analyzer: a,
 		ClaimTimeout: f.claimTimeout}
+	if f.storeAccount != "" {
+		newStore := d.newStore
+		if newStore == nil {
+			newStore = func(cfg azureblob.Config) (providers.AnalysisStore, error) {
+				// The analyzer's redactor runs the store's last check, so operator patterns count there too.
+				return azureblob.New(cfg, azureblob.Options{Redactor: d.redactor})
+			}
+		}
+		store, err := newStore(azureblob.Config{Account: f.storeAccount, Container: f.storeContainer})
+		if err != nil {
+			return nil, fmt.Errorf("the analysis record store: %w", err)
+		}
+		c.Store = store
+	}
 	if err := c.CheckTimeBudget(); err != nil {
 		return nil, err
 	}
@@ -170,7 +203,14 @@ func setupAnalysis(mgr ctrl.Manager, f analysisFlags, builder analysis.ContextBu
 		setupLog.Info("The analysis is off: --triage-model is not set, so no model is called and Incidents are not analyzed")
 		return nil
 	}
+	if c.Store != nil {
+		// The Warning event of a record not written is about the Incident, in the operator namespace, with the
+		// grant on core Events there that the leader election Role holds (see the Incident controller's
+		// recorder in main.go).
+		c.Recorder = mgr.GetEventRecorderFor("shadewright-analyzer") //nolint:staticcheck // as in main.go
+	}
 	setupLog.Info("The analysis is on", "triageModel", f.triageModel, "escalationModel", f.escalationModel,
-		"endpointSuffixes", f.endpointSuffixes, "actionPolicies", f.actionPolicies)
+		"endpointSuffixes", f.endpointSuffixes, "actionPolicies", f.actionPolicies,
+		"analysisStoreAccount", f.storeAccount, "analysisStoreContainer", f.storeContainer)
 	return c.SetupWithManager(mgr)
 }

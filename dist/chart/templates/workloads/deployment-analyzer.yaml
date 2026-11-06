@@ -92,6 +92,12 @@ spec:
         {{- end }}
         - --action-policies={{ join "," $pairs }}
         {{- end }}
+        {{- with $c.analysis.recordStore.azureBlob }}
+        {{- if .account }}
+        - --analysis-store-account={{ .account }}
+        - --analysis-store-container={{ .container }}
+        {{- end }}
+        {{- end }}
         {{- end }}
         {{- with $c.extraArgs }}
         {{- toYaml . | nindent 8 }}

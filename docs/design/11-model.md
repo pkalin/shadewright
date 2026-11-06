@@ -27,7 +27,7 @@ The endpoint decides where the analyzer's Entra ID token and the redacted contex
 
 - refuses a host outside an operator-held allow-list of suffixes (`--model-endpoint-suffixes`, required with `--triage-model`, no default; an entry such as `.<resource>.services.ai.azure.com` allows that one host), and a port other than 443, before it builds a provider or requests a token (`EndpointNotAllowed`);
 - refuses private, loopback and link-local addresses when dialing;
-- requests the Cognitive Services audience only.
+- requests the Cognitive Services audience only for the model (the analysis record store asks for its own Storage token, section 9.1).
 
 <span class="sw-status sw-built">built</span> The allow-list in the analyzer (`internal/analyzer/models`, [#76](https://github.com/pkalin/shadewright/issues/76)), the last two in the Foundry adapter ([#75](https://github.com/pkalin/shadewright/issues/75)). The analysis loop reads `spec.analysis.models` when the analyzer runs with `--triage-model`.
 

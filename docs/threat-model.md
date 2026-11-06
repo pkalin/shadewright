@@ -17,7 +17,7 @@ Paths are relative to the repository root. Tests are named by file and test (Go 
 | Workloads and configuration in the cluster | Integrity | The point of the project: they change only through a merged commit that Flux applies |
 | The protected branch of the GitOps repository (`targetBranch`, `main` in the lab) | Integrity | Flux applies whatever lands there, with Flux's own permissions |
 | The GitHub App private key and its installation tokens | Confidentiality | They are the only write access to Git |
-| Secrets and personal data in the cluster | Confidentiality | Cluster data goes to a model and to analysis records (planned) |
+| Secrets and personal data in the cluster | Confidentiality | Cluster data goes to a model and, redacted, to analysis records (when a record store is configured) |
 | `RemediationPolicy` and `RemediationSettings` | Integrity | They decide what may change, where, and whether a human reviews it; the model endpoints in the settings (`spec.analysis.models`, read when the analyzer runs with `--triage-model`) decide where the analyzer's Entra ID token and the redacted context go, so write access to the settings, the `patch` right the [emergency runbook](emergency.md) hands out for the kill switch included, is security-relevant |
 | The status of a `RemediationRequest` | Integrity | It is the decision: phase, resolved source, plan digest, effective approval |
 

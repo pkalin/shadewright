@@ -226,9 +226,17 @@ analyzer:
     # -- The RemediationPolicy a proposed RemediationRequest of each action type refers to (`--action-policies`), a map from `AdjustKedaMaxReplicas` or `SetContainerMemoryLimit` to a policy name, such as `{SetContainerMemoryLimit: memory-limits}`. An action type without one is never proposed. Used only with `triageModel`.
     # @section -- Analyzer
     actionPolicies: {}
+    recordStore:
+      azureBlob:
+        # -- Storage account name (3 to 24 lower-case letters and digits) of the Blob Storage container that keeps one redacted record of each analysis (`--analysis-store-account`, ADR-0015). Records are written create-only (`If-None-Match: *`) to `https://<account>.blob.core.windows.net` with the analyzer's workload identity (a token for the Storage audience, no key or SAS); the identity needs a role that may write blobs in that container, such as the analysis writer role of `shadewright-azure/foundation`. Empty (the default) writes no record. Used only with `triageModel` (the chart refuses to render it without one).
+        # @section -- Analyzer
+        account: ""
+        # -- Container of the analysis records in `account` (`--analysis-store-container`), `analyses` in the reference lab. Rendered only with `account`.
+        # @section -- Analyzer
+        container: analyses
   identity:
     azure:
-      # -- Client ID (a UUID, not a secret) of the analyzer's Azure managed identity, for the model call's Entra ID token (Cognitive Services audience only). Sets the ServiceAccount annotation `azure.workload.identity/client-id` and the Pod label `azure.workload.identity/use`. Needed when `analyzer.analysis.triageModel` is set; leave it empty otherwise. It must differ from the executor's or the chart refuses to render (separate identities, never one for both).
+      # -- Client ID (a UUID, not a secret) of the analyzer's Azure managed identity, for the analyzer's Entra ID tokens: the model call (Cognitive Services audience) and, with `analyzer.analysis.recordStore.azureBlob.account`, the analysis records (Storage audience). Sets the ServiceAccount annotation `azure.workload.identity/client-id` and the Pod label `azure.workload.identity/use`. Needed when `analyzer.analysis.triageModel` is set; leave it empty otherwise. It must differ from the executor's or the chart refuses to render (separate identities, never one for both).
       # @default -- empty (no identity)
       # @section -- Identity
       clientId: ""

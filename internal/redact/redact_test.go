@@ -714,6 +714,58 @@ func TestFluxRevisions(t *testing.T) {
 	})
 }
 
+// A kept string inside a longer match does not split it: the value of a password that starts with a kept
+// name is redacted whole, the name with it (#451 review). A match that is only the kept string stays.
+func TestStringKeepingDoesNotSplitAMatch(t *testing.T) {
+	name := "incident-" + rep("9f86d081", 8)
+	for _, in := range []string{
+		`password: "` + name + ` hunter2"`,
+		`password: "hunter2 ` + name + `"`,
+		`{"note":"password: \"` + name + ` hunter2\""}`,
+		"postgres://" + name + ":hunter2xyz9@db/orders",
+	} {
+		if out := StringKeeping(in, name); strings.Contains(out, "hunter2") {
+			t.Errorf("StringKeeping let the password through:\n in: %s\nout: %s", in, out)
+		}
+	}
+	in := `secret: "` + name + `"`
+	if out := StringKeeping(in, name); out != in {
+		t.Errorf("StringKeeping = %q, want the value that is only the kept name kept", out)
+	}
+}
+
+// Clean takes text that was redacted already as clean, the markers in it included, and finds what is left
+// to redact; a kept name exempts only a match that is wholly the name.
+func TestClean(t *testing.T) {
+	name := "incident-" + rep("9f86d081", 8)
+	for _, in := range []string{
+		"the container ran out of memory",
+		"token=ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+		"Authorization: Bearer " + rep("aB3", 12),
+		`password: "hunter2 more"`,
+		"pw=hunter2",
+	} {
+		if out := String(in); !defaultRedactor.Clean(out) {
+			t.Errorf("Clean(%q) = false for the redactor's own output", out)
+		}
+	}
+	for _, in := range []string{
+		"token=ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+		`password: "` + name + ` hunter2"`,
+		"password: [hunter2]",
+		"password: [REDACTED:hunter2]",
+		"token=****",
+		"password: *****",
+	} {
+		if defaultRedactor.Clean(in, name) {
+			t.Errorf("Clean(%q) = true, want the secret found", in)
+		}
+	}
+	if !defaultRedactor.Clean("incident `"+name+"`", name) || defaultRedactor.Clean("incident `"+name+"`") {
+		t.Errorf("Clean does not keep exactly the whole kept name")
+	}
+}
+
 // A Redactor's StringKeeping applies its own rules, extra patterns included, around the kept strings.
 func TestRedactorStringKeeping(t *testing.T) {
 	r, err := New(Pattern{Kind: "ticket", Expr: `TICKET-[0-9]{4}`})

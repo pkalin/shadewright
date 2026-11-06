@@ -40,5 +40,5 @@ limitations under the License.
 // larger than 64 KiB and authentication challenges the SDK would parse unsafely are refused there too,
 // before any SDK code reads them.
 //
-// This is the only package allowed to import the Azure SDK for Key Vault and Entra ID.
+// This package and package azureblob (the analysis store) are the only ones allowed to import the Azure SDK.
 package azurekv

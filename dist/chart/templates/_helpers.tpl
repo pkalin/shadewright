@@ -136,7 +136,7 @@ leader election, the metrics authentication or the watched namespaces. Keep in s
 templates/workloads. "namespace" is not an arg of the chart but the Pods get it from POD_NAMESPACE.
 */}}
 {{- define "shadewright.reservedFlags" -}}
-leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies
+leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies analysis-store-account analysis-store-container
 {{- end }}
 
 {{/*
@@ -176,6 +176,13 @@ Takes a dict with .component ("executor" or "analyzer") and .context. Renders no
 {{- end -}}
 {{- if and $a.escalationModel (not $a.triageModel) -}}
 {{- fail "analyzer.analysis.escalationModel needs analyzer.analysis.triageModel" -}}
+{{- end -}}
+{{- $blob := (($a.recordStore | default dict).azureBlob | default dict) -}}
+{{- if and $blob.account (not $a.triageModel) -}}
+{{- fail "analyzer.analysis.recordStore.azureBlob.account needs analyzer.analysis.triageModel: records are written only by the analysis" -}}
+{{- end -}}
+{{- if and $blob.account (not $blob.container) -}}
+{{- fail "analyzer.analysis.recordStore.azureBlob.account needs analyzer.analysis.recordStore.azureBlob.container" -}}
 {{- end -}}
 {{- end -}}
 {{- $reserved := splitList " " (include "shadewright.reservedFlags" .context) -}}

@@ -445,8 +445,12 @@ Since shadewright-fleet [#37](https://github.com/pkalin/shadewright-fleet/pull/3
    summary and, for a `MissingData` hand-off, the `missingData` list from the `Analyzed Incident` line, and the
    request's spec if one was made. A wrong or unsupported proposal is a
    finding for #78, not something to fix in the run. The summary and `missingData` are in the log from
-   [#422](https://github.com/pkalin/shadewright/issues/422) on; no record is stored until
-   [#77](https://github.com/pkalin/shadewright/issues/77).
+   [#422](https://github.com/pkalin/shadewright/issues/422) on. With the record store set
+   (`analyzer.analysis.recordStore.azureBlob.account`, the `analysis_store` output of `foundation`), the same
+   fields are in the record named by the Incident's `status.analysisRecords`, in the `analyses` container
+   ([#77](https://github.com/pkalin/shadewright/issues/77)); a record not written is logged (such as `Failed to write the
+   analysis record`), counted in `shadewright_analysis_records_total` and reported with a Warning event
+   `AnalysisRecordNotWritten` on the Incident, and changes nothing else.
 
 4. To stop the analysis in a lab that stays up, set `maxAnalysesPerDay: 0` in
    `infrastructure/shadewright-lab-config/remediationsettings.yaml` on `cluster/lab`. Otherwise `make lab-down`.

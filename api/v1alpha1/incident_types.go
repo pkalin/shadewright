@@ -76,10 +76,15 @@ const (
 	IncidentResolved IncidentPhase = "Resolved"
 )
 
-// RecordID identifies an analysis record in the analysis store.
+// RecordID identifies an analysis record in the analysis store: lower-case letters, digits and hyphens, as
+// a blob name of one path segment with nothing to escape.
 // +kubebuilder:validation:MinLength=1
-// +kubebuilder:validation:MaxLength=256
+// +kubebuilder:validation:MaxLength=200
+// +kubebuilder:validation:Pattern=`^[a-z0-9][a-z0-9-]{0,199}$`
 type RecordID string
+
+// MaxAnalysisRecords is the most record IDs an Incident's status.analysisRecords keeps.
+const MaxAnalysisRecords = 20
 
 // MaxIncidentCount is the value at which an Incident's status.count saturates.
 const MaxIncidentCount = 1000000
@@ -151,7 +156,7 @@ type IncidentStatus struct {
 	// +optional
 	LastAnalysisTime *metav1.Time `json:"lastAnalysisTime,omitempty"`
 
-	// analysisRecords are the newest analysis record IDs, oldest first.
+	// analysisRecords are the newest analysis record IDs, oldest first (at most MaxAnalysisRecords).
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=20
 	// +optional

@@ -127,30 +127,147 @@ func String(s string) string {
 	return defaultRedactor.String(s)
 }
 
-// StringKeeping is String, except that each whole occurrence of a string in keep stays as it is. keep holds
-// values the caller has verified are not secrets (an object name it read back from the API server, for
-// example), never text from a model, a user or the cluster; s may be any text, a template the caller renders
-// or a model's answer. An occurrence counts only when the bytes on both sides are not token characters (ASCII
-// letters, digits and "+/_-=."), so a kept string inside a longer run is redacted with that run. The text
-// between kept occurrences is redacted piece by piece; empty strings in keep are ignored.
+// StringKeeping is String, except that a match of a rule that lies wholly inside whole occurrences of strings
+// in keep stays as it is. keep holds values the caller has verified are not secrets (an object name it read back
+// from the API server, for example), never text from a model, a user or the cluster; s may be any text, a
+// template the caller renders or a model's answer. An occurrence counts only when the bytes on both sides are not
+// token characters (ASCII letters, digits and "+/_-=."), so a kept string inside a longer run is redacted with
+// that run. The rules run over the whole of s, so a match that holds a kept string and anything else (a
+// password's value that starts with a kept name, for example) is redacted whole, kept string included. Empty
+// strings in keep are ignored.
 func StringKeeping(s string, keep ...string) string {
 	return defaultRedactor.StringKeeping(s, keep...)
 }
 
+// Clean is the package's Clean with the built-in rules.
+func Clean(s string, keep ...string) bool {
+	return defaultRedactor.Clean(s, keep...)
+}
+
 // StringKeeping is the package's StringKeeping with r's rules.
 func (r *Redactor) StringKeeping(s string, keep ...string) string {
-	var b strings.Builder
-	rest := s
-	for {
-		at, n := firstWhole(rest, keep)
-		if at < 0 {
-			b.WriteString(r.String(rest))
-			return b.String()
-		}
-		b.WriteString(r.String(rest[:at]))
-		b.WriteString(rest[at : at+n])
-		rest = rest[at+n:]
+	spans := r.spans(s)
+	if len(spans) == 0 {
+		return s
 	}
+	kept := wholeOccurrences(s, keep)
+	if len(kept) == 0 {
+		return render(s, spans)
+	}
+	out := spans[:0]
+	for _, sp := range spans {
+		if !covered(sp, kept) {
+			out = append(out, sp)
+		}
+	}
+	return render(s, out)
+}
+
+// Clean reports whether s holds nothing the rules would redact, besides matches that lie wholly inside whole
+// occurrences of strings in keep (as [StringKeeping] keeps them) or inside markers this redactor writes. It is
+// the check of text that was redacted already: redaction is not idempotent, as a marker in the place of a value
+// can be taken for a value again ("token=[REDACTED:token]"), so comparing s with its redaction would refuse
+// such text.
+func (r *Redactor) Clean(s string, keep ...string) bool {
+	spans := r.spans(s)
+	if len(spans) == 0 {
+		return true
+	}
+	ok := mergeRanges(append(wholeOccurrences(s, keep), r.markers(s)...))
+	for _, sp := range spans {
+		if !covered(sp, ok) {
+			return false
+		}
+	}
+	return true
+}
+
+// markerPattern matches the shapes of the markers [marker] writes; markers keeps only the exact ones.
+var markerPattern = regexp.MustCompile(`\[REDACTED(?::[a-z][a-z0-9-]{0,31})?\]|\[[a-z][a-z0-9-]{0,31}\]|\*+`)
+
+// markers returns the byte ranges of the markers of r's rules in s, in order and not overlapping: a long or
+// short form naming a kind of one of r's rules, "[REDACTED]", or a run of at most three "*" (the longest
+// [marker] writes). A longer run of "*" or a marker naming another kind is not one this redactor wrote, so
+// Clean does not take it as clean.
+func (r *Redactor) markers(s string) []span {
+	var out []span
+	for _, m := range markerPattern.FindAllStringIndex(s, -1) {
+		if r.isMarker(s[m[0]:m[1]]) {
+			out = append(out, span{start: m[0], end: m[1]})
+		}
+	}
+	return out
+}
+
+// isMarker reports whether text, a match of markerPattern, is a marker [marker] writes for one of r's rules.
+func (r *Redactor) isMarker(text string) bool {
+	switch {
+	case text[0] == '*':
+		return len(text) <= len("***")
+	case text == "[REDACTED]":
+		return true
+	case strings.HasPrefix(text, "[REDACTED:"):
+		return r.hasKind(text[len("[REDACTED:") : len(text)-1])
+	default:
+		return r.hasKind(text[1 : len(text)-1])
+	}
+}
+
+// hasKind reports whether one of r's rules has the kind.
+func (r *Redactor) hasKind(kind string) bool {
+	for _, ru := range r.rules {
+		if ru.kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeRanges sorts ranges by start and joins the ones that overlap or touch.
+func mergeRanges(rs []span) []span {
+	slices.SortFunc(rs, func(a, b span) int { return a.start - b.start })
+	out := rs[:0]
+	for _, x := range rs {
+		if n := len(out); n > 0 && x.start <= out[n-1].end {
+			out[n-1].end = max(out[n-1].end, x.end)
+			continue
+		}
+		out = append(out, x)
+	}
+	return out
+}
+
+// wholeOccurrences returns the byte ranges of the whole occurrences in s of the non-empty strings of keep, in
+// order and not overlapping (the longest one where two start at the same offset).
+func wholeOccurrences(s string, keep []string) []span {
+	var occ []span
+	for pos := 0; pos < len(s); {
+		at, n := firstWhole(s[pos:], keep)
+		if at < 0 {
+			break
+		}
+		occ = append(occ, span{start: pos + at, end: pos + at + n})
+		pos += at + n
+	}
+	return occ
+}
+
+// covered reports whether every byte of sp lies inside the sorted, disjoint ranges of occ.
+func covered(sp span, occ []span) bool {
+	pos := sp.start
+	for _, o := range occ {
+		if o.end <= pos {
+			continue
+		}
+		if o.start > pos {
+			return false
+		}
+		pos = o.end
+		if pos >= sp.end {
+			return true
+		}
+	}
+	return false
 }
 
 // firstWhole returns the offset and length of the first whole occurrence in s of a non-empty string of keep
@@ -194,6 +311,12 @@ type span struct {
 // String returns s with every match of every rule replaced by a marker. Overlapping matches are merged
 // into one, named after the match that starts first (the first rule, on a tie).
 func (r *Redactor) String(s string) string {
+	return render(s, r.spans(s))
+}
+
+// spans returns the matches of every rule in s, sorted, with overlapping matches merged into one named after
+// the match that starts first (the first rule, on a tie).
+func (r *Redactor) spans(s string) []span {
 	var spans []span
 	for i, ru := range r.rules {
 		prevEnd := 0
@@ -228,7 +351,7 @@ func (r *Redactor) String(s string) string {
 		}
 	}
 	if len(spans) == 0 {
-		return s
+		return nil
 	}
 	slices.SortFunc(spans, func(a, b span) int {
 		if a.start != b.start {
@@ -240,14 +363,26 @@ func (r *Redactor) String(s string) string {
 		return b.end - a.end
 	})
 
-	var b strings.Builder
-	b.Grow(len(s))
-	pos := 0
+	merged := spans[:0]
 	for i := 0; i < len(spans); {
 		cur := spans[i]
 		for i++; i < len(spans) && spans[i].start < cur.end; i++ {
 			cur.end = max(cur.end, spans[i].end)
 		}
+		merged = append(merged, cur)
+	}
+	return merged
+}
+
+// render returns s with each of the sorted, disjoint spans replaced by its marker.
+func render(s string, spans []span) string {
+	if len(spans) == 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	pos := 0
+	for _, cur := range spans {
 		b.WriteString(s[pos:cur.start])
 		b.WriteString(marker(cur.kind, cur.end-cur.start))
 		pos = cur.end

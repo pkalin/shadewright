@@ -324,3 +324,90 @@ func TestSignTryTimeoutDuringBodyRead(t *testing.T) {
 	}
 	assertCleanChain(t, "try timeout during body read", err)
 }
+
+// emptyAfter returns, for each authorized request once armed is set, a response with status and no body
+// after calling end (when set) and waiting for the request's context to end: an answer that the HTTP client
+// hands back after the try or the caller gave up, as from a server that sees the client leave and returns
+// from its handler.
+func emptyAfter(armed *atomic.Bool, status int, end func()) func(policy.Transporter) policy.Transporter {
+	return func(inner policy.Transporter) policy.Transporter {
+		return transporterFunc(func(req *http.Request) (*http.Response, error) {
+			if !armed.Load() || req.Header.Get("Authorization") == "" {
+				return inner.Do(req)
+			}
+			if end != nil {
+				end()
+			}
+			<-req.Context().Done()
+			return &http.Response{StatusCode: status, Header: http.Header{"Content-Length": {"0"}},
+				Body: http.NoBody, Request: req}, nil
+		})
+	}
+}
+
+// TestSignEmptyAnswerAfterDeadline covers a Key Vault response without a body that the HTTP client returns
+// after the per-try deadline (#447, the race #438 found in the model client): it is the try's retryable
+// deadline, not a final "response does not name the key" (an empty 200) or a final status. When the caller
+// cancelled instead, it is a final cancellation. The first Sign learns the challenge under a generous try
+// timeout, so the timed try holds only the authorized request.
+func TestSignEmptyAnswerAfterDeadline(t *testing.T) {
+	kid := "https://" + testHost + "/keys/github-app/" + testVersion
+	for _, status := range []int{http.StatusOK, http.StatusBadRequest, http.StatusNotFound} {
+		var armed atomic.Bool
+		s, v := setupWith(t, kid, Options{Timeout: time.Minute, MaxRetries: -1}, &fakeCredential{},
+			emptyAfter(&armed, status, nil), clientConfig{tryTimeout: 30 * time.Second})
+		v.respond = v.signOK(kid)
+		if _, err := s.Sign(context.Background(), digestOf("x")); err != nil {
+			t.Fatalf("%d: first Sign: %v", status, err)
+		}
+		armed.Store(true)
+		_, err := s.Sign(atTryDeadline(), digestOf("x"))
+		if !providers.IsRetryable(err) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("%d after the try deadline: err = %v, want a retryable deadline error", status, err)
+		}
+		assertCleanChain(t, "empty answer after the try deadline", err)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		s, v = setupWith(t, kid, Options{Timeout: time.Minute, MaxRetries: -1}, &fakeCredential{},
+			emptyAfter(&armed, status, cancel), clientConfig{tryTimeout: 30 * time.Second})
+		v.respond = v.signOK(kid)
+		_, err = s.Sign(ctx, digestOf("x"))
+		if !errors.Is(err, context.Canceled) || providers.IsRetryable(err) {
+			t.Errorf("%d after a cancel: err = %v, want a non-retryable cancellation", status, err)
+		}
+		cancel()
+	}
+}
+
+// TestGuardTransportEmptyAnswerAfterDeadline calls guardTransport directly, for Key Vault and for Entra
+// ID, with a response without a body returned after the request's deadline: it returns the deadline and,
+// for a token request, records it, so the credential classes it as a transient deadline and not by the
+// status.
+func TestGuardTransportEmptyAnswerAfterDeadline(t *testing.T) {
+	for _, entra := range []bool{false, true} {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		tr := &tokenRequest{}
+		req, err := http.NewRequestWithContext(context.WithValue(ctx, tokenRequestKey{}, tr), http.MethodPost,
+			"https://"+testHost+"/keys/k/sign", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g := guardTransport{entra: entra, inner: transporterFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{}, Request: req,
+				Body: http.NoBody}, nil
+		})}
+		resp, err := g.Do(req)
+		cancel()
+		if resp != nil {
+			t.Errorf("entra=%v: got a response, want none", entra)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("entra=%v: err = %v, want context.DeadlineExceeded", entra, err)
+		}
+		if entra {
+			if cause, retry := entraCause(tr.transportErr); cause != context.DeadlineExceeded || !retry || tr.status != 0 {
+				t.Errorf("recorded %+v, class %v, %v; want a transient deadline and no status", tr, cause, retry)
+			}
+		}
+	}
+}

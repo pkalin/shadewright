@@ -56,7 +56,8 @@ The rule for everything below: no PATs, no client secrets, no long-lived API key
 - what is still failing after the 3 retries;
 - a token request that gets no answer from Entra ID;
 - a token request that gets a successful answer that cannot be used;
-- a token request that runs into the per-try deadline.
+- a token request that runs into the per-try deadline;
+- a response from Key Vault or Entra ID that the HTTP client hands back only after the try's deadline has passed, when it has no body (an empty 200, for example) or its body was still being read (#447).
 
 **Final (reported as permanent; the caller does not retry):**
 
@@ -67,7 +68,7 @@ The rule for everything below: no PATs, no client secrets, no long-lived API key
 - a token failure the signer cannot see into, from a credential it did not build;
 - a caller that cancels.
 
-**Limits.** When Entra ID answers, its status decides, unless the caller cancelled. Errors keep only fixed text, the status code and the class.
+**Limits.** When Entra ID's answer reaches the signer before the try's deadline, its status decides, even if the deadline passes before the token request returns, unless the caller cancelled. Errors keep only fixed text, the status code and the class.
 
 ## 9.5. In Go
 

@@ -94,6 +94,14 @@ func (g guardTransport) do(req *http.Request) (*http.Response, error) {
 		return nil, final{errMalformedChallenge}
 	}
 	if resp.Body == nil || resp.Body == http.NoBody {
+		// A response without a body that the HTTP client returns after the try or the caller gave up is
+		// that context error, whatever its status (#447, as #438 in the model client): a server that sees
+		// the client leave may still send an empty 200, which would otherwise come back as a final "response
+		// does not name the key" instead of a retryable timeout.
+		if ctxErr := req.Context().Err(); ctxErr != nil {
+			closeBody(resp)
+			return nil, ctxErr
+		}
 		return resp, nil
 	}
 	if resp.ContentLength > maxResponseBody {

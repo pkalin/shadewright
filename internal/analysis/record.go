@@ -19,9 +19,11 @@ package analysis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -33,12 +35,14 @@ import (
 // goes away.
 const RecordSchemaVersion = 1
 
-// storeTimeout bounds the write of the analysis record. It is cut so that the outcome write still has its own
-// full timeout inside the claim.
+// storeTimeout bounds the write of the analysis record with the live read of the claim before it. It is cut so
+// that the outcome write still has its own full timeout inside the claim; [Controller.CheckTimeBudget] counts
+// it when a store is set.
 const storeTimeout = 30 * time.Second
 
-// maxRecordIDs is the most record IDs status.analysisRecords keeps.
-const maxRecordIDs = 20
+// EventRecordNotWritten is the reason of the Warning event on an Incident whose analysis record was not
+// written.
+const EventRecordNotWritten = "AnalysisRecordNotWritten"
 
 // Record is the analysis record written to the [providers.AnalysisStore] (ADR-0015). Every string from the
 // cluster, the settings or a model is redacted; the counts, the reason and the prompt version come from code. It holds no
@@ -97,9 +101,16 @@ func recordID(claimed *remediationv1alpha1.Incident) remediationv1alpha1.RecordI
 func (c *Controller) buildRecord(claimed *remediationv1alpha1.Incident, out Outcome, limits Limits,
 	request remediationv1alpha1.Name) (providers.AnalysisRecord, error) {
 	red := c.Analyzer.cfg.Redactor
-	keep := []string{claimed.Name}
+	verified := []providers.VerifiedName{providers.VerifiedName(claimed.Name)}
 	if request != "" {
-		keep = append(keep, string(request))
+		verified = append(verified, providers.VerifiedName(request))
+	}
+	keep := make([]string, 0, len(verified))
+	for _, v := range verified {
+		if !v.Valid() {
+			return providers.AnalysisRecord{}, fmt.Errorf("a name of the analysis record is not an object name")
+		}
+		keep = append(keep, string(v))
 	}
 	r := func(s string) string {
 		if red == nil {
@@ -139,37 +150,88 @@ func (c *Controller) buildRecord(claimed *remediationv1alpha1.Incident, out Outc
 		return providers.AnalysisRecord{}, fmt.Errorf("encoding the analysis record: %w", err)
 	}
 	return providers.AnalysisRecord{
-		ID: rec.ID, Fingerprint: claimed.Spec.Fingerprint, CreatedAt: rec.FinishedAt, Data: data, Verified: keep,
+		ID: rec.ID, Fingerprint: claimed.Spec.Fingerprint, CreatedAt: rec.FinishedAt, Data: data, Verified: verified,
 	}, nil
 }
 
-// storeRecord writes the run's record when a store is configured, and returns its ID, or "" when there is no
-// store or the write failed. A failure is logged and never changes the outcome: the record is evidence, not
-// state. The write is bounded by storeTimeout and ends early enough that the outcome write keeps its full
-// timeout inside the claim; with less time left it is skipped.
+// recordMessages are the messages of the Warning event EventRecordNotWritten, by result. They are fixed text:
+// no error, URL or record data.
+var recordMessages = map[string]string{
+	recordFailed:  "The analysis record was not written: the write failed; the outcome is in the status and the analyzer log",
+	recordSkipped: "The analysis record was not written: no time was left on the claim, or the claim was lost",
+	recordRefused: "The analysis record was not written: the store refused it, or it could not be built; see the analyzer log",
+}
+
+// storeRecord writes the run's record when a store is configured, and returns its ID for
+// status.analysisRecords, or "" when there is no store or no record was stored. It first reads the Incident
+// live, so a record is written only for a run that still owns its claim: errClaimLost is returned then, and
+// the caller drops the outcome as finish would. When the create failed (request empty, attempted its name),
+// a request the server created anyway is named in the record, as finish records it.
+//
+// The write is bounded by storeTimeout and ends early enough that the outcome write keeps its full timeout
+// inside the claim; with less time left it is skipped. Any other failure is logged, counted in
+// shadewright_analysis_records_total and reported with a Warning event on the Incident, and never changes the
+// outcome: the record is evidence, not state. A conflict means the record's ID exists; the ID is the run's
+// own, so an earlier try of this write stored it (one whose answer was lost), and the ID is returned.
 func (c *Controller) storeRecord(ctx context.Context, claimed *remediationv1alpha1.Incident, out Outcome,
-	limits Limits, request remediationv1alpha1.Name) remediationv1alpha1.RecordID {
+	limits Limits, request, attempted remediationv1alpha1.Name) (remediationv1alpha1.RecordID, error) {
 	if c.Store == nil {
-		return ""
+		return "", nil
 	}
-	logger := log.FromContext(ctx).WithValues("incident", claimed.Name)
-	left := c.expiry(claimed).Add(-finalWriteTimeout).Sub(c.now())
-	if left <= 0 {
+	logger := log.FromContext(ctx).WithValues("incident", claimed.Name, "record", string(recordID(claimed)))
+	sctx, cancel, err := c.withinClaim(ctx, claimed, storeTimeout, finalWriteTimeout, false)
+	if err != nil {
 		logger.Info("Skipped the analysis record: no time is left on the claim before the outcome write")
-		return ""
+		c.recordResult(claimed, recordSkipped)
+		return "", nil
+	}
+	defer cancel()
+	live, err := c.recheck(sctx, claimed)
+	switch {
+	case errors.Is(err, errClaimLost):
+		logger.Info("Skipped the analysis record: the run no longer owns its claim")
+		c.recordResult(claimed, recordSkipped)
+		return "", err
+	case err != nil:
+		logger.Error(err, "Failed to read the Incident before the analysis record; no record was written")
+		c.recordResult(claimed, recordFailed)
+		return "", nil
+	}
+	if request == "" && attempted != "" && c.createdAnyway(sctx, live, attempted) {
+		request = attempted
 	}
 	rec, err := c.buildRecord(claimed, out, limits, request)
 	if err != nil {
 		logger.Error(err, "Failed to build the analysis record")
-		return ""
+		c.recordResult(claimed, recordRefused)
+		return "", nil
 	}
-	sctx, cancel := context.WithTimeout(ctx, min(storeTimeout, left))
-	defer cancel()
 	// The store's errors are fixed text: no URL, token or record data.
-	if _, err := c.Store.Put(sctx, rec); err != nil {
-		logger.Error(err, "Failed to write the analysis record", "record", rec.ID,
-			"exists", providers.IsConflict(err), "retryable", providers.IsRetryable(err))
-		return ""
+	_, err = c.Store.Put(sctx, rec)
+	switch {
+	case err == nil:
+		c.recordResult(claimed, recordWritten)
+	case providers.IsConflict(err):
+		logger.Info("The analysis record exists already: its ID is this run's own, so an earlier try of the "+
+			"write stored it; its ID is recorded", "error", err.Error())
+		c.recordResult(claimed, recordExists)
+	case providers.IsRejected(err) || providers.IsTooLarge(err):
+		logger.Error(err, "The analysis store refused the analysis record")
+		c.recordResult(claimed, recordRefused)
+		return "", nil
+	default:
+		logger.Error(err, "Failed to write the analysis record", "retryable", providers.IsRetryable(err),
+			"canceled", ctx.Err() != nil)
+		c.recordResult(claimed, recordFailed)
+		return "", nil
 	}
-	return remediationv1alpha1.RecordID(rec.ID)
+	return remediationv1alpha1.RecordID(rec.ID), nil
+}
+
+// recordResult counts a record write and, when no record was stored, writes the Warning event on the Incident.
+func (c *Controller) recordResult(claimed *remediationv1alpha1.Incident, result string) {
+	analysisRecords.WithLabelValues(result).Inc()
+	if msg, ok := recordMessages[result]; ok && c.Recorder != nil {
+		c.Recorder.Event(claimed, corev1.EventTypeWarning, EventRecordNotWritten, msg)
+	}
 }

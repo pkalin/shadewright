@@ -203,6 +203,12 @@ func setupAnalysis(mgr ctrl.Manager, f analysisFlags, builder analysis.ContextBu
 		setupLog.Info("The analysis is off: --triage-model is not set, so no model is called and Incidents are not analyzed")
 		return nil
 	}
+	if c.Store != nil {
+		// The Warning event of a record not written is about the Incident, in the operator namespace, with the
+		// grant on core Events there that the leader election Role holds (see the Incident controller's
+		// recorder in main.go).
+		c.Recorder = mgr.GetEventRecorderFor("shadewright-analyzer") //nolint:staticcheck // as in main.go
+	}
 	setupLog.Info("The analysis is on", "triageModel", f.triageModel, "escalationModel", f.escalationModel,
 		"endpointSuffixes", f.endpointSuffixes, "actionPolicies", f.actionPolicies,
 		"analysisStoreAccount", f.storeAccount, "analysisStoreContainer", f.storeContainer)

@@ -886,6 +886,7 @@ func TestChartRefusesBadAnalysisValues(t *testing.T) {
 		"account in upper case":        {"analyzer.analysis.recordStore.azureBlob.account=StAnalyses"},
 		"container with a slash":       {"analyzer.analysis.recordStore.azureBlob.container=a/b"},
 		"container with two hyphens":   {"analyzer.analysis.recordStore.azureBlob.container=a--b"},
+		"container of two letters":     {"analyzer.analysis.recordStore.azureBlob.container=ab"},
 		"record store with a key":      {"analyzer.analysis.recordStore.azureBlob.accountKey=x"},
 		"record store of another kind": {"analyzer.analysis.recordStore.s3.bucket=x"},
 	} {

@@ -342,6 +342,9 @@ var _ = Describe("Incident", func() {
 			}
 			s.Occurrences[0] = record("termination:"+strings.Repeat("ab", 16), 1)
 			s.OccurrencesDroppedThrough = &metav1.Time{Time: time.Unix(1700000000, 0)}
+			for i := range v1alpha1.MaxAnalysisRecords {
+				s.AnalysisRecords = append(s.AnalysisRecords, v1alpha1.RecordID(fmt.Sprintf("%d-", i)+strings.Repeat("a", 190)))
+			}
 		})).To(Succeed())
 	})
 
@@ -375,6 +378,20 @@ var _ = Describe("Incident", func() {
 		Entry("a total above a series count", func(s *v1alpha1.IncidentStatus) {
 			s.Occurrences = []v1alpha1.OccurrenceRecord{record("event:abc", 2147483648)}
 		}, "status.occurrences[0].total"),
+		Entry("a record ID with a slash", func(s *v1alpha1.IncidentStatus) {
+			s.AnalysisRecords = []v1alpha1.RecordID{"a/b"}
+		}, "status.analysisRecords[0]"),
+		Entry("a record ID in upper case", func(s *v1alpha1.IncidentStatus) {
+			s.AnalysisRecords = []v1alpha1.RecordID{"Abc"}
+		}, "status.analysisRecords[0]"),
+		Entry("a record ID longer than the store takes", func(s *v1alpha1.IncidentStatus) {
+			s.AnalysisRecords = []v1alpha1.RecordID{v1alpha1.RecordID(strings.Repeat("a", 201))}
+		}, "status.analysisRecords[0]"),
+		Entry("more record IDs than the bound", func(s *v1alpha1.IncidentStatus) {
+			for i := range v1alpha1.MaxAnalysisRecords + 1 {
+				s.AnalysisRecords = append(s.AnalysisRecords, v1alpha1.RecordID(fmt.Sprintf("r%d", i)))
+			}
+		}, "status.analysisRecords"),
 	)
 })
 

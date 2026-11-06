@@ -18,11 +18,13 @@ package azureblob
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +32,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/redact"
@@ -199,6 +202,22 @@ func TestPutExistingIsFinal(t *testing.T) {
 	}
 }
 
+// Only BlobAlreadyExists (409) and a failed condition (412) mean the record exists. Other 409 answers, such as
+// a container being deleted or disabled, or a 409 without an error code, are final refusals: nothing says the
+// record was stored.
+func TestPutOtherConflictsAreRejected(t *testing.T) {
+	for _, code := range []string{"ContainerBeingDeleted", "ContainerDisabled", "LeaseIdMissing", ""} {
+		t.Run(code, func(t *testing.T) {
+			s := newServer(t, status(http.StatusConflict, "x-ms-error-code", code))
+			st, _ := testStore(t, s)
+			_, err := st.Put(t.Context(), testRecord())
+			if !providers.IsRejected(err) || providers.IsConflict(err) || providers.IsRetryable(err) {
+				t.Fatalf("Put = %v, want a final refusal that is not a conflict", err)
+			}
+		})
+	}
+}
+
 // A transient server error is retried, honouring Retry-After, and the next try creates the record.
 func TestPutRetriesTransientThenCreates(t *testing.T) {
 	s := newServer(t, status(http.StatusServiceUnavailable, "Retry-After", "2", "x-ms-error-code", "ServerBusy"),
@@ -358,6 +377,12 @@ func TestPutRefusesBeforeAnyCall(t *testing.T) {
 		"password": {func(r *providers.AnalysisRecord) {
 			r.Data = []byte(`{"summary":"password: hunter2xyz9"}`)
 		}, providers.IsRejected},
+		"password as a member": {func(r *providers.AnalysisRecord) {
+			r.Data = []byte(`{"note":{"password":"hunter2xyz9"}}`)
+		}, providers.IsRejected},
+		"token in a list": {func(r *providers.AnalysisRecord) {
+			r.Data = []byte(`{"missingData":["ok","ghp_abcdefghijklmnopqrstuvwxyz0123456789"]}`)
+		}, providers.IsRejected},
 		"jwt": {func(r *providers.AnalysisRecord) {
 			r.Data = []byte(`{"summary":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"}`)
 		}, providers.IsRejected},
@@ -403,9 +428,81 @@ func TestPutKeepsVerifiedValues(t *testing.T) {
 	rec := testRecord()
 	name := "remediation-0a1b2c3d4e5f6a7b8c9d0e1f"
 	rec.Data = []byte(`{"request":"` + name + `","fingerprint":"` + rec.Fingerprint + `"}`)
-	rec.Verified = []string{name}
+	rec.Verified = []providers.VerifiedName{providers.VerifiedName(name)}
 	if _, err := st.Put(t.Context(), rec); err != nil {
 		t.Fatalf("Put: %v", err)
+	}
+}
+
+// A verified name does not exempt what follows it inside the same match: a password whose value starts with
+// the name is refused (#451 review), and so is a verified value that is not an object name, so arbitrary text
+// cannot be exempted.
+func TestPutVerifiedValuesExemptOnlyNames(t *testing.T) {
+	name := "incident-" + strings.Repeat("9f86d081", 8)
+	for tc, edit := range map[string]func(*providers.AnalysisRecord){
+		"password after a name": func(r *providers.AnalysisRecord) {
+			r.Data = []byte(`{"summary":"password: \"` + name + ` hunter2\""}`)
+			r.Verified = []providers.VerifiedName{providers.VerifiedName(name)}
+		},
+		"connection string with a name": func(r *providers.AnalysisRecord) {
+			r.Data = []byte(`{"summary":"postgres://` + name + `:hunter2xyz9@db/orders"}`)
+			r.Verified = []providers.VerifiedName{providers.VerifiedName(name)}
+		},
+		"verified text with a key": func(r *providers.AnalysisRecord) {
+			r.Data = []byte(`{"summary":"password: hunter2xyz9"}`)
+			r.Verified = []providers.VerifiedName{"password: hunter2xyz9"}
+		},
+		"verified text in upper case": func(r *providers.AnalysisRecord) {
+			r.Verified = []providers.VerifiedName{"Incident"}
+		},
+		"verified empty": func(r *providers.AnalysisRecord) {
+			r.Verified = []providers.VerifiedName{""}
+		},
+	} {
+		t.Run(tc, func(t *testing.T) {
+			s := newServer(t, status(http.StatusCreated))
+			st, _ := testStore(t, s)
+			rec := testRecord()
+			edit(&rec)
+			if _, err := st.Put(t.Context(), rec); !providers.IsRejected(err) {
+				t.Fatalf("Put = %v, want a refusal", err)
+			}
+			if n := len(s.requests()); n != 0 {
+				t.Errorf("%d requests, want none", n)
+			}
+		})
+	}
+}
+
+// The final check runs over the JSON text, not the single strings. Strings that are clean on their own, or
+// redacted already, stay clean once encoded: quotes and newlines escaped, markers next to other fields.
+func TestPutCheckAcceptsCleanEncodedStrings(t *testing.T) {
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, summary := range []string{
+		`the container "web" ran out of memory`,
+		"line one\nline two\ttabbed",
+		red.String(`password: "hunter2 more"`),
+		red.String(`token=ghp_abcdefghijklmnopqrstuvwxyz0123456789`),
+		red.String("Authorization: Bearer " + strings.Repeat("aB3", 12)),
+		`a path C:\\temp\\x and a quote \"`,
+		`ends with a key:`,
+	} {
+		data, err := json.Marshal(map[string]any{
+			"summary": summary, "missingData": []string{summary, "secret"}, "request": "", "usage": 1234,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := newServer(t, status(http.StatusCreated))
+		st, _ := testStore(t, s)
+		rec := testRecord()
+		rec.Data = data
+		if _, err := st.Put(t.Context(), rec); err != nil {
+			t.Errorf("Put of %s = %v, want it written", data, err)
+		}
 	}
 }
 
@@ -421,6 +518,27 @@ func TestPutTokenErrors(t *testing.T) {
 	}
 	if n := len(s.requests()); n != 0 {
 		t.Errorf("%d requests to Blob Storage without a token, want none", n)
+	}
+}
+
+// Entra ID answers that can change on a retry (a request timeout, throttling, a server error) are retried
+// like the blob write's; a refusal of the identity is final.
+func TestPutTokenAnswers(t *testing.T) {
+	for code, retryable := range map[int]bool{
+		http.StatusRequestTimeout: true, http.StatusTooManyRequests: true, http.StatusInternalServerError: true,
+		http.StatusServiceUnavailable: true, http.StatusBadRequest: false, http.StatusUnauthorized: false,
+	} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			s := newServer(t, status(http.StatusCreated))
+			st, _ := testStore(t, s)
+			st.cred = &staticCredential{err: &azidentity.AuthenticationFailedError{RawResponse: &http.Response{
+				StatusCode: code, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("")),
+			}}}
+			_, err := st.Put(t.Context(), testRecord())
+			if providers.IsRetryable(err) != retryable || (!retryable && !providers.IsForbidden(err)) {
+				t.Fatalf("Put = %v, want retryable %v", err, retryable)
+			}
+		})
 	}
 }
 
@@ -452,12 +570,19 @@ func TestNewValidatesConfig(t *testing.T) {
 		"double hyphen":        {Account: testAccount, Container: "ana--lyses"},
 		"trailing hyphen":      {Account: testAccount, Container: "analyses-"},
 		"long container":       {Account: testAccount, Container: strings.Repeat("a", 64)},
+		"two-letter container": {Account: testAccount, Container: "ab"},
+		"one-letter container": {Account: testAccount, Container: "a"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := New(cfg, Options{Credential: cred}); !providers.IsInvalidConfig(err) {
 				t.Errorf("New = %v, want invalid configuration", err)
 			}
 		})
+	}
+	for _, c := range []string{"abc", "a-b", "a1-b2", strings.Repeat("a", 63)} {
+		if _, err := New(Config{Account: testAccount, Container: c}, Options{Credential: cred}); err != nil {
+			t.Errorf("New with container %q = %v, want it accepted", c, err)
+		}
 	}
 	st, err := New(Config{Account: testAccount, Container: testContainer}, Options{Credential: cred})
 	if err != nil {

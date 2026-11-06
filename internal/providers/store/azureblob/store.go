@@ -68,8 +68,10 @@ var (
 	// accountPattern is Azure's rule for storage account names.
 	accountPattern = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
 	// containerPattern is Azure's rule for container names: 3 to 63 lower-case letters, digits and single
-	// hyphens, starting and ending with a letter or digit.
-	containerPattern = regexp.MustCompile(`^[a-z0-9](-?[a-z0-9])+$`)
+	// hyphens, starting and ending with a letter or digit. A name of at least three characters has two more
+	// letters or digits after the first, or is one letter or digit, a hyphen and another; the upper bound is
+	// checked apart. values.schema.json of the chart holds the same pattern.
+	containerPattern = regexp.MustCompile(`^([a-z0-9](-?[a-z0-9]){2,}|[a-z0-9]-[a-z0-9])$`)
 	// idPattern bounds a record ID, so that the blob name is one path segment with nothing to escape.
 	idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,199}$`)
 	// errorCodePattern is what an x-ms-error-code header must look like to be kept in an error.
@@ -88,6 +90,7 @@ const (
 	errBadContainer    fixedError = "azureblob: the container name is not a valid Blob Storage container name"
 	errNoIdentity      fixedError = "azureblob: the Azure workload identity is not configured"
 	errBadID           fixedError = "azureblob: the record ID is not a lower-case name of at most 200 letters, digits and hyphens"
+	errBadVerified     fixedError = "azureblob: a verified value of the record is not an object name; nothing was sent"
 	errEmpty           fixedError = "azureblob: the record has no data"
 	errTooLarge        fixedError = "azureblob: the record is larger than 1 MiB"
 	errNotJSON         fixedError = "azureblob: the record is not valid JSON"
@@ -195,9 +198,14 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// check refuses a record before anything is sent: a bad ID, no data, data too large or not JSON, or data the
-// redactor would still change (whole occurrences of the ID, the fingerprint and rec.Verified are kept).
+// check refuses a record before anything is sent: a bad ID, a verified value that is not an object name, no
+// data, data too large or not JSON, or data the redactor would still change (see clean).
 func (s *Store) check(rec providers.AnalysisRecord) error {
+	for _, v := range rec.Verified {
+		if !v.Valid() {
+			return fmt.Errorf("%w: %w", errBadVerified, providers.ErrRejected)
+		}
+	}
 	switch {
 	case !idPattern.MatchString(rec.ID):
 		return fmt.Errorf("%w: %w", errBadID, providers.ErrRejected)
@@ -208,16 +216,65 @@ func (s *Store) check(rec providers.AnalysisRecord) error {
 	case !json.Valid(rec.Data):
 		return fmt.Errorf("%w: %w", errNotJSON, providers.ErrRejected)
 	}
-	keep := append([]string{rec.ID, rec.Fingerprint}, rec.Verified...)
-	if s.redactor.StringKeeping(string(rec.Data), keep...) != string(rec.Data) {
+	keep := []string{rec.ID, rec.Fingerprint}
+	for _, v := range rec.Verified {
+		keep = append(keep, string(v))
+	}
+	if !s.clean(rec.Data, keep) {
 		return fmt.Errorf("%w: %w", errRedactable, providers.ErrRejected)
 	}
 	return nil
 }
 
+// clean reports whether the redactor finds nothing in the JSON data besides its own markers and whole
+// occurrences of keep (redact.Redactor.Clean). It checks the decoded strings, each member of an object once
+// more as "key: value" when the value is a string, a number, a boolean or null, so that a key that names a
+// credential is seen with its value, and each key alone. It does not check the JSON text as a whole: there
+// the redactor takes an unquoted value to run on over the quote and the members after it, and refuses clean
+// records.
+func (s *Store) clean(data []byte, keep []string) bool {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return false
+	}
+	return s.cleanValue(v, keep)
+}
+
+func (s *Store) cleanValue(v any, keep []string) bool {
+	switch x := v.(type) {
+	case string:
+		return s.redactor.Clean(x, keep...)
+	case []any:
+		for _, e := range x {
+			if !s.cleanValue(e, keep) {
+				return false
+			}
+		}
+	case map[string]any:
+		for k, e := range x {
+			if !s.redactor.Clean(k, keep...) {
+				return false
+			}
+			switch e.(type) {
+			case string, json.Number, bool, nil:
+				if !s.redactor.Clean(k+": "+fmt.Sprint(e), keep...) {
+					return false
+				}
+			}
+			if !s.cleanValue(e, keep) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // Put writes rec as "<ID>.json" with If-None-Match: *, and returns the blob's URL. A blob that exists is
-// never replaced: Put returns an error matching [providers.ErrConflict], also when an earlier try of the same
-// Put may have written it, because the identity cannot read the blob to compare.
+// never replaced: Put returns an error matching [providers.ErrConflict] (409 BlobAlreadyExists or 412), also
+// when an earlier try of the same Put may have written it, because the identity cannot read the blob to
+// compare. A caller whose IDs are unique per write takes that conflict as its own record.
 func (s *Store) Put(ctx context.Context, rec providers.AnalysisRecord) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", ctxError(err)
@@ -316,8 +373,16 @@ func classify(resp *http.Response, now time.Time) (time.Duration, error) {
 	}
 	e := &statusError{status: resp.StatusCode, code: code}
 	switch resp.StatusCode {
-	case http.StatusConflict, http.StatusPreconditionFailed:
+	case http.StatusPreconditionFailed:
 		e.cause, e.kind = errExists, providers.ErrConflict
+	case http.StatusConflict:
+		// Only BlobAlreadyExists says the blob is there; a container being deleted or disabled, a lease and
+		// the like are refusals that stored nothing.
+		if code == "BlobAlreadyExists" {
+			e.cause, e.kind = errExists, providers.ErrConflict
+		} else {
+			e.cause, e.kind = errRejected, providers.ErrRejected
+		}
 	case http.StatusUnauthorized, http.StatusForbidden:
 		e.cause, e.kind = errRefused, providers.ErrForbidden
 	case http.StatusNotFound:
@@ -364,7 +429,7 @@ func (s *Store) tokenError(ctx context.Context, err error) error {
 	var failed *azidentity.AuthenticationFailedError
 	if errors.As(err, &failed) && failed.RawResponse != nil {
 		st := failed.RawResponse.StatusCode
-		if st == http.StatusTooManyRequests || st >= 500 {
+		if st == http.StatusRequestTimeout || st == http.StatusTooManyRequests || st >= 500 {
 			return &providers.RetryableError{Err: errEntraNoAnswer}
 		}
 		return fmt.Errorf("%w: %w", errEntraRefused, providers.ErrForbidden)

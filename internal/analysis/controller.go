@@ -29,6 +29,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
+	corerecord "k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -107,6 +109,8 @@ type Controller struct {
 	// Store keeps one redacted record of each analysis outside the cluster (ADR-0015); its ID goes into
 	// status.analysisRecords. Nil means no record is written.
 	Store providers.AnalysisStore
+	// Recorder writes a Warning event on an Incident whose analysis record was not written. Nil writes none.
+	Recorder corerecord.EventRecorder
 	// Now returns the current time; nil means time.Now.
 	Now func() time.Time
 
@@ -122,9 +126,10 @@ func (c *Controller) claimTimeout() time.Duration {
 	return incidents.DefaultAnalysisTimeout
 }
 
-// CheckTimeBudget returns an error unless the analysis deadline, the create and the outcome write together
-// fit inside the claim (ADR-0025 decision 1), with a second to spare for lastAnalysisTime, which is written
-// in whole seconds. It also refuses a controller without an analyzer or a live reader.
+// CheckTimeBudget returns an error unless the analysis deadline, the create, the record write (with a Store)
+// and the outcome write together fit inside the claim (ADR-0025 decision 1), with a second to spare for
+// lastAnalysisTime, which is written in whole seconds. It also refuses a controller without an analyzer or a
+// live reader.
 func (c *Controller) CheckTimeBudget() error {
 	if c.Analyzer == nil {
 		return errors.New("analysis: the controller needs an analyzer")
@@ -132,12 +137,22 @@ func (c *Controller) CheckTimeBudget() error {
 	if c.Reader == nil {
 		return errors.New("analysis: the controller needs a live reader")
 	}
-	need := c.Analyzer.Timeout() + createTimeout + finalWriteTimeout + time.Second
+	need := c.Analyzer.Timeout() + createTimeout + c.afterCreate() + time.Second
 	if need >= c.claimTimeout() {
-		return fmt.Errorf("analysis: the deadline %s, the create (%s) and the outcome write (%s) do not fit "+
-			"inside the claim of %s", c.Analyzer.Timeout(), createTimeout, finalWriteTimeout, c.claimTimeout())
+		return fmt.Errorf("analysis: the deadline %s, the create (%s), the record write (%s) and the outcome "+
+			"write (%s) do not fit inside the claim of %s", c.Analyzer.Timeout(), createTimeout,
+			c.afterCreate()-finalWriteTimeout, finalWriteTimeout, c.claimTimeout())
 	}
 	return nil
+}
+
+// afterCreate is the time the claim keeps for the writes after the create: the record write when a Store is
+// set, and the outcome write.
+func (c *Controller) afterCreate() time.Duration {
+	if c.Store != nil {
+		return storeTimeout + finalWriteTimeout
+	}
+	return finalWriteTimeout
 }
 
 // SetupWithManager registers the controller. It runs on the leader only and looks at Incidents in the
@@ -257,12 +272,22 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	logger.Info("Analyzed Incident", append([]any{"incident", inc.Name, "run", runID, "reason", out.Reason,
 		"escalated", out.Escalated, "calls", out.Calls, "toolCalls", out.ToolCalls, "tokens", out.Tokens,
 		"models", out.Models, "promptVersion", out.PromptVersion, "request", created}, resultFields(out)...)...)
-	record := c.storeRecord(ctx, claimed, out, limits, created)
-	switch err := c.finish(ctx, claimed, out, created, attempted, record); {
+	// The record is written after a live read confirms the claim, so a run whose outcome is dropped leaves no
+	// record, and before the outcome, which carries its ID: a record ID in the status always names a record
+	// that was stored.
+	record, err := c.storeRecord(ctx, claimed, out, limits, created, attempted)
+	if err == nil {
+		err = c.finish(ctx, claimed, out, created, attempted, record)
+	}
+	switch {
 	case errors.Is(err, errClaimLost):
 		logger.Info("Dropped the outcome of an analysis whose claim was lost", "incident", inc.Name, "run", runID,
 			"reason", out.Reason, "request", created)
 	case err != nil:
+		if record != "" {
+			logger.Error(err, "The analysis record was written but the outcome write failed, so its ID is not in the "+
+				"status", "incident", inc.Name, "run", runID, "record", record)
+		}
 		return ctrl.Result{}, fmt.Errorf("writing the analysis outcome of Incident %s: %w", inc.Name, err)
 	}
 	return ctrl.Result{}, nil
@@ -290,12 +315,17 @@ func (c *Controller) expiry(claimed *remediationv1alpha1.Incident) time.Time {
 	return claimed.Status.LastAnalysisTime.Add(c.claimTimeout())
 }
 
-// withinClaim returns a context bounded by limit and by the claim's expiry, or errClaimLost when the claim
-// has expired, so no write starts after it. With detach the context keeps no cancellation of ctx (the
+// claimLeft is the time left on the claim once reserve is kept for the writes after this one.
+func (c *Controller) claimLeft(claimed *remediationv1alpha1.Incident, reserve time.Duration) time.Duration {
+	return c.expiry(claimed).Add(-reserve).Sub(c.now())
+}
+
+// withinClaim returns a context bounded by limit and by the claim's expiry less reserve, or errClaimLost when
+// no time is left, so no write starts after it. With detach the context keeps no cancellation of ctx (the
 // outcome write, which also runs after a stop).
-func (c *Controller) withinClaim(ctx context.Context, claimed *remediationv1alpha1.Incident, limit time.Duration,
+func (c *Controller) withinClaim(ctx context.Context, claimed *remediationv1alpha1.Incident, limit, reserve time.Duration,
 	detach bool) (context.Context, context.CancelFunc, error) {
-	left := c.expiry(claimed).Sub(c.now())
+	left := c.claimLeft(claimed, reserve)
 	if left <= 0 {
 		return nil, nil, errClaimLost
 	}
@@ -337,7 +367,7 @@ func (c *Controller) publish(ctx context.Context, claimed *remediationv1alpha1.I
 	if err := c.recheckRetrying(ctx, claimed); err != nil {
 		return "", err
 	}
-	cctx, cancel, err := c.withinClaim(ctx, claimed, createTimeout, false)
+	cctx, cancel, err := c.withinClaim(ctx, claimed, createTimeout, 0, false)
 	if err != nil {
 		return "", err
 	}
@@ -356,10 +386,9 @@ const (
 // only when that time runs out is the error returned, and the result handed off. A lost claim or a stop is
 // returned at once.
 func (c *Controller) recheckRetrying(ctx context.Context, claimed *remediationv1alpha1.Incident) error {
-	deadline := c.expiry(claimed).Add(-finalWriteTimeout - createTimeout)
 	backoff := recheckFirstBackoff
 	for {
-		rctx, cancel, err := c.withinClaim(ctx, claimed, createTimeout, false)
+		rctx, cancel, err := c.withinClaim(ctx, claimed, createTimeout, 0, false)
 		if err != nil {
 			return err
 		}
@@ -368,7 +397,7 @@ func (c *Controller) recheckRetrying(ctx context.Context, claimed *remediationv1
 		if err == nil || errors.Is(err, errClaimLost) || ctx.Err() != nil {
 			return err
 		}
-		if c.now().Add(backoff).After(deadline) {
+		if c.claimLeft(claimed, c.afterCreate()+createTimeout) < backoff {
 			return err
 		}
 		log.FromContext(ctx).Info("Retrying the live read of an Incident before the create", "incident",
@@ -591,19 +620,34 @@ var outcomeMessages = map[Reason]string{
 // reply was lost does: the run's own request only, never another one.
 func (c *Controller) finish(ctx context.Context, claimed *remediationv1alpha1.Incident, out Outcome,
 	request, attempted remediationv1alpha1.Name, record remediationv1alpha1.RecordID) error {
-	wctx, cancel, err := c.withinClaim(ctx, claimed, finalWriteTimeout, true)
+	wctx, cancel, err := c.withinClaim(ctx, claimed, finalWriteTimeout, 0, true)
 	if err != nil {
 		return err
 	}
 	defer cancel()
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	// A conflict is retried with a new recheck, and so is a transient error of the API server while the
+	// write's own timeout lasts, so a passing failure does not lose the outcome and the record ID with it (the
+	// next run has another ID). A try that failed so may still have been applied: the next one first looks
+	// whether the outcome is there, so it is not taken for a lost claim.
+	uncertain := false
+	return retry.OnError(finishBackoff, func(err error) bool {
+		if apierrors.IsConflict(err) {
+			return true
+		}
+		uncertain = wctx.Err() == nil && transientAPIError(err)
+		return uncertain
+	}, func() error {
+		if uncertain && c.outcomeWritten(wctx, claimed, record) {
+			return nil
+		}
 		inc, err := c.recheck(wctx, claimed)
 		if err != nil {
 			return err
 		}
 		inc.Status.Phase = remediationv1alpha1.IncidentEscalated
 		if record != "" {
-			inc.Status.AnalysisRecords = appendBounded(inc.Status.AnalysisRecords, record, maxRecordIDs)
+			inc.Status.AnalysisRecords = appendBounded(inc.Status.AnalysisRecords, record,
+				remediationv1alpha1.MaxAnalysisRecords)
 		}
 		if request == "" && attempted != "" {
 			if c.createdAnyway(wctx, inc, attempted) {
@@ -621,6 +665,30 @@ func (c *Controller) finish(ctx context.Context, claimed *remediationv1alpha1.In
 		})
 		return c.Client.Status().Update(wctx, inc, client.FieldOwner(FieldOwner))
 	})
+}
+
+// outcomeWritten reports whether the live Incident holds the outcome of the run: its lastAnalysisTime, a
+// final phase and, when there is one, the record ID. A read error counts as no.
+func (c *Controller) outcomeWritten(ctx context.Context, claimed *remediationv1alpha1.Incident,
+	record remediationv1alpha1.RecordID) bool {
+	live := &remediationv1alpha1.Incident{}
+	if err := c.Reader.Get(ctx, client.ObjectKeyFromObject(claimed), live); err != nil {
+		return false
+	}
+	return live.UID == claimed.UID && live.Status.LastAnalysisTime != nil &&
+		live.Status.LastAnalysisTime.Equal(claimed.Status.LastAnalysisTime) &&
+		(live.Status.Phase == remediationv1alpha1.IncidentProposed || live.Status.Phase == remediationv1alpha1.IncidentEscalated) &&
+		(record == "" || slices.Contains(live.Status.AnalysisRecords, record))
+}
+
+// finishBackoff spaces the tries of the outcome write: about 3 s in all, well inside finalWriteTimeout.
+var finishBackoff = wait.Backoff{Steps: 5, Duration: 200 * time.Millisecond, Factor: 2, Jitter: 0.1}
+
+// transientAPIError reports whether err is a failure of the API server that the same write may get past:
+// a timeout, throttling or an unavailable server.
+func transientAPIError(err error) bool {
+	return apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) || apierrors.IsTooManyRequests(err) ||
+		apierrors.IsServiceUnavailable(err) || apierrors.IsInternalError(err)
 }
 
 // createdAnyway reports whether the request of a failed create exists, read live, with the form the analysis

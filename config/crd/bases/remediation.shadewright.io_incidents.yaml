@@ -159,12 +159,14 @@ spec:
             properties:
               analysisRecords:
                 description: analysisRecords are the newest analysis record IDs, oldest
-                  first.
+                  first (at most MaxAnalysisRecords).
                 items:
-                  description: RecordID identifies an analysis record in the analysis
-                    store.
-                  maxLength: 256
+                  description: |-
+                    RecordID identifies an analysis record in the analysis store: lower-case letters, digits and hyphens, as
+                    a blob name of one path segment with nothing to escape.
+                  maxLength: 200
                   minLength: 1
+                  pattern: ^[a-z0-9][a-z0-9-]{0,199}$
                   type: string
                 maxItems: 20
                 type: array

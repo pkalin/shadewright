@@ -377,7 +377,7 @@ Used by: [Incident](#incident).
 | `occurrences` | [OccurrenceRecord](#occurrencerecord) array | No | occurrences are the newest occurrences counted for this incident, newest first, at most 32: for each, the highest total the cluster reported that was counted, and when it began. After a restart the analyzer reads them to count only what is new. Older ones are dropped.<br>Maximum items: 32<br>List type: atomic |
 | `occurrencesDroppedThrough` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | occurrencesDroppedThrough is when the newest occurrence dropped from occurrences began. An occurrence with no record that began no later than this is treated as counted in full, so the bound never counts one twice. |
 | `lastAnalysisTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | lastAnalysisTime is when the analyzer last ran; it drives the cooldown. |
-| `analysisRecords` | [RecordID](#recordid) array | No | analysisRecords are the newest analysis record IDs, oldest first.<br>Maximum items: 20<br>Maximum length: 256<br>Minimum length: 1<br>List type: atomic |
+| `analysisRecords` | [RecordID](#recordid) array | No | analysisRecords are the newest analysis record IDs, oldest first (at most MaxAnalysisRecords).<br>Maximum items: 20<br>Maximum length: 200<br>Minimum length: 1<br>Pattern: `^[a-z0-9][a-z0-9-]{0,199}$`<br>List type: atomic |
 | `remediationRequests` | [Name](#name) array | No | remediationRequests are the names of requests made for this incident, oldest first.<br>Maximum items: 20<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`<br>List type: atomic |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase.<br>List type: map<br>List key: `type` |
 
@@ -625,11 +625,13 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 
 ### RecordID
 
-RecordID identifies an analysis record in the analysis store.
+RecordID identifies an analysis record in the analysis store: lower-case letters, digits and hyphens, as
+a blob name of one path segment with nothing to escape.
 
 - Underlying type: string
-- Maximum length: 256
+- Maximum length: 200
 - Minimum length: 1
+- Pattern: `^[a-z0-9][a-z0-9-]{0,199}$`
 
 Used by: [IncidentStatus](#incidentstatus).
 

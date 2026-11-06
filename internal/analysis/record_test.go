@@ -17,19 +17,29 @@ limitations under the License.
 package analysis
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/fake"
 	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/pkalin/shadewright/internal/testutil/metricguard"
 )
 
 // With a store, a run writes one record and its ID goes into status.analysisRecords in the outcome update. The
@@ -76,9 +86,16 @@ func TestControllerWritesTheRecord(t *testing.T) {
 		r.Deployments.Triage != testLimits().Triage.Deployment || r.Deployments.Escalation != "" {
 		t.Errorf("record %+v", r)
 	}
-	keep := append([]string{rec.ID, rec.Fingerprint}, rec.Verified...)
-	if s := string(rec.Data); redact.StringKeeping(s, keep...) != s {
-		t.Errorf("the record does not pass the redactor unchanged:\n%s\n%s", s, redact.StringKeeping(s, keep...))
+	keep := make([]string, 0, 2+len(rec.Verified))
+	keep = append(keep, rec.ID, rec.Fingerprint)
+	for _, v := range rec.Verified {
+		if !v.Valid() {
+			t.Errorf("verified value %q is not an object name", v)
+		}
+		keep = append(keep, string(v))
+	}
+	if s := string(rec.Data); !redact.Clean(s, keep...) {
+		t.Errorf("the record does not pass the redactor:\n%s\n%s", s, redact.StringKeeping(s, keep...))
 	}
 	if !strings.HasPrefix(rec.ID, string(got.UID)+"-") || rec.ID != strings.ToLower(rec.ID) {
 		t.Errorf("record ID %q, want the Incident's UID and the run's time in lower case", rec.ID)
@@ -86,8 +103,53 @@ func TestControllerWritesTheRecord(t *testing.T) {
 }
 
 // A store that fails leaves the outcome as it is: the phase, the condition and the request are written, and no
-// record ID is.
+// record ID is. The failure is counted and reported with a Warning event on the Incident.
 func TestControllerRecordFailureKeepsTheOutcome(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err    error
+		result string
+	}{
+		"transient": {&providers.RetryableError{Err: errors.New("azureblob: no answer from Blob Storage")}, recordFailed},
+		"refused":   {fmt.Errorf("azureblob: the record still holds data: %w", providers.ErrRejected), recordRefused},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ns := namespace(t)
+			setSettings(t, 10)
+			inc := dueIncident(t, ns, nil)
+			f := newFixture()
+			f.triage.steps = []step{reply(validResult)}
+			c, _ := newController(t, ns, f)
+			store := &fake.Store{}
+			store.SetFail(func(string) error { return tc.err })
+			c.Store = store
+			events := record.NewFakeRecorder(4)
+			c.Recorder = events
+			before := testutil.ToFloat64(analysisRecords.WithLabelValues(tc.result))
+			reconcile(t, c, inc)
+
+			got := liveIncident(t, inc)
+			if got.Status.Phase != remediationv1alpha1.IncidentProposed || len(got.Status.RemediationRequests) != 1 ||
+				len(got.Status.AnalysisRecords) != 0 {
+				t.Fatalf("status = %+v, want Proposed with the request and no record ID", got.Status)
+			}
+			if d := testutil.ToFloat64(analysisRecords.WithLabelValues(tc.result)) - before; d != 1 {
+				t.Errorf("result %s counted %v times, want once", tc.result, d)
+			}
+			select {
+			case e := <-events.Events:
+				if !strings.HasPrefix(e, "Warning "+EventRecordNotWritten+" ") || strings.Contains(e, "azureblob") {
+					t.Errorf("event %q, want the fixed Warning %s", e, EventRecordNotWritten)
+				}
+			default:
+				t.Error("no event for the record that was not written")
+			}
+		})
+	}
+}
+
+// A conflict means the record's ID exists. The ID is the run's own, so an earlier try whose answer was lost
+// stored it: the ID is recorded in the status, as for a write that succeeded (#451 review).
+func TestControllerRecordsTheIDOfARecordThatExists(t *testing.T) {
 	ns := namespace(t)
 	setSettings(t, 10)
 	inc := dueIncident(t, ns, nil)
@@ -96,37 +158,181 @@ func TestControllerRecordFailureKeepsTheOutcome(t *testing.T) {
 	c, _ := newController(t, ns, f)
 	store := &fake.Store{}
 	store.SetFail(func(string) error {
-		return errors.Join(errors.New("azureblob: the analysis record already exists"), providers.ErrConflict)
+		return fmt.Errorf("azureblob: the analysis record already exists (409 BlobAlreadyExists): %w", providers.ErrConflict)
 	})
+	c.Store = store
+	before := testutil.ToFloat64(analysisRecords.WithLabelValues(recordExists))
+	reconcile(t, c, inc)
+
+	got := liveIncident(t, inc)
+	if want := recordID(got); !slices.Equal(got.Status.AnalysisRecords, []remediationv1alpha1.RecordID{want}) {
+		t.Fatalf("status.analysisRecords = %v, want [%s]", got.Status.AnalysisRecords, want)
+	}
+	if d := testutil.ToFloat64(analysisRecords.WithLabelValues(recordExists)) - before; d != 1 {
+		t.Errorf("exists counted %v times, want once", d)
+	}
+}
+
+// A run whose claim another run took over writes no record: its outcome is dropped, so a record would describe
+// an outcome that never happened (#451 review).
+func TestControllerWritesNoRecordForALostClaim(t *testing.T) {
+	ns := namespace(t)
+	setSettings(t, 10)
+	inc := dueIncident(t, ns, nil)
+	f := newFixture()
+	f.triage.steps = []step{reply(noProposal)}
+	successor := metav1.NewTime(time.Now().Add(time.Minute).Truncate(time.Second))
+	withHook(f, func(ctx context.Context) {
+		live := liveIncident(t, inc)
+		live.Status.LastAnalysisTime = &successor
+		if err := env.admin.Status().Update(ctx, live); err != nil {
+			t.Error(err)
+		}
+	})
+	c, rc := newController(t, ns, f)
+	store := &fake.Store{}
+	c.Store = store
+	reconcile(t, c, inc)
+	if n := len(store.Records()); n != 0 {
+		t.Errorf("%d records written for a run whose claim was lost, want none", n)
+	}
+	if len(rc.updates) != 1 {
+		t.Errorf("%d status updates, want the claim only", len(rc.updates))
+	}
+}
+
+// flakyStatusClient fails the first outcome update (the second status update) with a transient error of the
+// API server, after or without applying it.
+type flakyStatusClient struct {
+	*recordingClient
+	apply bool
+}
+
+func (c flakyStatusClient) Status() client.SubResourceWriter {
+	return flakyStatus{SubResourceWriter: c.recordingClient.Status(), c: c}
+}
+
+type flakyStatus struct {
+	client.SubResourceWriter
+	c flakyStatusClient
+}
+
+func (s flakyStatus) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	s.c.mu.Lock()
+	n := len(s.c.updates)
+	s.c.mu.Unlock()
+	if n != 1 {
+		return s.SubResourceWriter.Update(ctx, obj, opts...)
+	}
+	if s.c.apply {
+		if err := s.SubResourceWriter.Update(ctx, obj, opts...); err != nil {
+			return err
+		}
+	} else {
+		s.c.mu.Lock()
+		s.c.updates = append(s.c.updates, remediationv1alpha1.IncidentStatus{})
+		s.c.mu.Unlock()
+	}
+	return apierrors.NewServiceUnavailable("the API server is restarting")
+}
+
+// An outcome write that fails once with a transient error is tried again, so the record that was written keeps
+// its ID in the status: the next run has another ID, and the reference would be lost for good (#451 review). A
+// failed try that the API server applied anyway is recognised and not taken for a lost claim.
+func TestControllerOutcomeWriteSurvivesATransientError(t *testing.T) {
+	for name, apply := range map[string]bool{"not applied": false, "applied": true} {
+		t.Run(name, func(t *testing.T) {
+			ns := namespace(t)
+			setSettings(t, 10)
+			inc := dueIncident(t, ns, nil)
+			f := newFixture()
+			f.triage.steps = []step{reply(validResult)}
+			c, rc := newController(t, ns, f)
+			c.Client = flakyStatusClient{recordingClient: rc, apply: apply}
+			c.Store = &fake.Store{}
+			ctx, last := logged(t)
+			if _, err := c.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(inc)}); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			got := liveIncident(t, inc)
+			if got.Status.Phase != remediationv1alpha1.IncidentProposed ||
+				!slices.Equal(got.Status.AnalysisRecords, []remediationv1alpha1.RecordID{recordID(got)}) {
+				t.Errorf("status = %+v, want Proposed with the record ID", got.Status)
+			}
+			if line := last("Dropped the outcome of an analysis whose claim was lost"); line != "" {
+				t.Errorf("an applied outcome was logged as dropped: %s", line)
+			}
+		})
+	}
+}
+
+// A request the server created although its create failed is named in the record, as the outcome write
+// records it (#451 review).
+func TestControllerRecordNamesARequestCreatedAnyway(t *testing.T) {
+	ns := namespace(t)
+	setSettings(t, 10)
+	inc := dueIncident(t, ns, nil)
+	f := newFixture()
+	f.triage.steps = []step{reply(validResult)}
+	c, rc := newController(t, ns, f)
+	c.Client = laggingClient{Client: rc, createErr: context.DeadlineExceeded}
+	store := &fake.Store{}
 	c.Store = store
 	reconcile(t, c, inc)
 
-	got := &remediationv1alpha1.Incident{}
-	if err := env.admin.Get(t.Context(), client.ObjectKeyFromObject(inc), got); err != nil {
-		t.Fatal(err)
+	created := requestsIn(t, ns)
+	if len(created) != 1 {
+		t.Fatalf("%d requests created, want 1", len(created))
 	}
-	if got.Status.Phase != remediationv1alpha1.IncidentProposed || len(got.Status.RemediationRequests) != 1 ||
-		len(got.Status.AnalysisRecords) != 0 {
-		t.Fatalf("status = %+v, want Proposed with the request and no record ID", got.Status)
+	recs := store.Records()
+	if len(recs) != 1 {
+		t.Fatalf("%d records, want 1", len(recs))
+	}
+	for _, rec := range recs {
+		var r Record
+		if err := json.Unmarshal(rec.Data, &r); err != nil {
+			t.Fatal(err)
+		}
+		if r.Request != created[0].Name {
+			t.Errorf("record names request %q, want %q, which the server created", r.Request, created[0].Name)
+		}
 	}
 }
 
 // With too little time left on the claim, the record is skipped so that the outcome write keeps its own full
-// timeout.
+// timeout; with enough, the claim is read live first and the record written.
 func TestStoreRecordSkippedNearTheClaimsEnd(t *testing.T) {
-	now := time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)
-	inc := incident()
-	inc.Name, inc.UID = "incident-x", "6f1e0b4a-3c2d-4e5f-8a9b-0c1d2e3f4a5b"
-	started := now.Add(-time.Hour)
-	inc.Status.LastAnalysisTime = &metav1.Time{Time: started}
+	ns := namespace(t)
+	inc := dueIncident(t, ns, nil)
+	now := time.Now().Truncate(time.Second)
+	started := metav1.NewTime(now.Add(-time.Hour))
+	inc.Status.Phase, inc.Status.LastAnalysisTime = remediationv1alpha1.IncidentAnalyzing, &started
+	if err := env.admin.Status().Update(t.Context(), inc); err != nil {
+		t.Fatal(err)
+	}
 	store := &fake.Store{}
-	c := &Controller{Store: store, ClaimTimeout: time.Hour + finalWriteTimeout - time.Second,
+	c := &Controller{Store: store, Reader: env.admin, ClaimTimeout: time.Hour + finalWriteTimeout - time.Second,
 		Now: func() time.Time { return now }, Analyzer: &Analyzer{}}
-	if id := c.storeRecord(t.Context(), inc, Outcome{Reason: ReasonNoProposal}, Limits{}, ""); id != "" || len(store.Records()) != 0 {
-		t.Errorf("storeRecord = %q with %d records, want it skipped", id, len(store.Records()))
+	before := testutil.ToFloat64(analysisRecords.WithLabelValues(recordSkipped))
+	if id, err := c.storeRecord(t.Context(), inc, Outcome{Reason: ReasonNoProposal}, Limits{}, "", ""); id != "" ||
+		err != nil || len(store.Records()) != 0 {
+		t.Errorf("storeRecord = %q, %v with %d records, want it skipped", id, err, len(store.Records()))
+	}
+	if d := testutil.ToFloat64(analysisRecords.WithLabelValues(recordSkipped)) - before; d != 1 {
+		t.Errorf("skipped counted %v times, want once", d)
 	}
 	c.ClaimTimeout = time.Hour + finalWriteTimeout + time.Minute
-	if id := c.storeRecord(t.Context(), inc, Outcome{Reason: ReasonNoProposal}, Limits{}, ""); id == "" || len(store.Records()) != 1 {
-		t.Errorf("storeRecord = %q with %d records, want one written", id, len(store.Records()))
+	if id, err := c.storeRecord(t.Context(), inc, Outcome{Reason: ReasonNoProposal}, Limits{}, "", ""); id == "" ||
+		err != nil || len(store.Records()) != 1 {
+		t.Errorf("storeRecord = %q, %v with %d records, want one written", id, err, len(store.Records()))
 	}
+}
+
+// The record counter takes only its closed set of results and is documented.
+func TestAnalysisRecordsMetric(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(analysisRecords)
+	want := map[string]metricguard.Labels{"shadewright_analysis_records_total": {"result": recordResults}}
+	metricguard.Check(t, reg, want)
+	metricguard.Documented(t, filepath.Join("..", "..", "docs", "reference", "metrics.md"), want)
 }

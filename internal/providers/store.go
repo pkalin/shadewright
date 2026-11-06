@@ -18,8 +18,25 @@ package providers
 
 import (
 	"context"
+	"regexp"
 	"time"
 )
+
+// verifiedNamePattern is a DNS-1123 subdomain, the shape of a Kubernetes object name.
+var verifiedNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
+
+// maxVerifiedName is the longest DNS-1123 subdomain.
+const maxVerifiedName = 253
+
+// VerifiedName is a Kubernetes object name that the caller made or read back from the API server and knows is
+// not a secret, such as an Incident's name that ends in a hash. It is a DNS-1123 subdomain (lower-case letters,
+// digits, "-" and ".", at most 253 bytes), so no key, separator or space can be passed off as one.
+type VerifiedName string
+
+// Valid reports whether n is a DNS-1123 subdomain.
+func (n VerifiedName) Valid() bool {
+	return len(n) <= maxVerifiedName && verifiedNamePattern.MatchString(string(n))
+}
 
 // AnalysisRecord is one redacted analysis, kept outside the cluster (ADR-0015).
 type AnalysisRecord struct {
@@ -30,10 +47,11 @@ type AnalysisRecord struct {
 	CreatedAt   time.Time
 	// Data is the redacted record, typically JSON.
 	Data []byte
-	// Verified are values in Data that the caller made or read back from the API server and knows are not
-	// secrets, such as an object name that ends in a hash. A store that checks Data with the redactor before
-	// it writes keeps their whole occurrences. Never text from a model, a user or the cluster.
-	Verified []string
+	// Verified are object names in Data that the caller made or read back from the API server and knows are
+	// not secrets. A store that checks Data with the redactor before it writes keeps a match of the redactor
+	// only when it is wholly one of their whole occurrences, and refuses a record with a name that is not
+	// [VerifiedName.Valid]. Never text from a model, a user or the cluster.
+	Verified []VerifiedName
 }
 
 // AnalysisStore keeps analysis records. Records are written once and never changed.

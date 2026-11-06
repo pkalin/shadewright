@@ -31,6 +31,7 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/providers/fake"
 )
 
 // hookModel runs before ahead of each call of the model it wraps.
@@ -284,6 +285,7 @@ func TestCheckTimeBudget(t *testing.T) {
 		{DefaultTimeout, 0, true},
 		{MaxTimeout, 0, true},
 		{MaxTimeout, 9*time.Minute + 50*time.Second, false},
+		{MaxTimeout, 10*time.Minute + 22*time.Second, true}, // the record write fits too
 		{DefaultTimeout, 8 * time.Minute, false},
 	} {
 		f := newFixture()
@@ -296,11 +298,27 @@ func TestCheckTimeBudget(t *testing.T) {
 		if err := c.CheckTimeBudget(); (err == nil) != tc.ok {
 			t.Errorf("deadline %s, claim %s: %v", tc.timeout, tc.claim, err)
 		}
+		c.Store = &fake.Store{}
+		if err := c.CheckTimeBudget(); tc.claim > 10*time.Minute && err != nil {
+			t.Errorf("deadline %s, claim %s with a store: %v", tc.timeout, tc.claim, err)
+		}
+	}
+	// With a store, the record write counts too: the longest deadline with the default claim leaves the
+	// outcome write its time only without one (#451 review).
+	a, err := New(func() Config { f := newFixture(); f.cfg.Timeout = MaxTimeout; return f.cfg }())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Controller{Analyzer: a, Reader: env.admin}).CheckTimeBudget(); err != nil {
+		t.Errorf("without a store: %v", err)
+	}
+	if err := (&Controller{Analyzer: a, Reader: env.admin, Store: &fake.Store{}}).CheckTimeBudget(); err == nil {
+		t.Error("with a store, the record write was not counted in the claim")
 	}
 	if err := (&Controller{}).CheckTimeBudget(); err == nil {
 		t.Error("a controller without an analyzer passed")
 	}
-	a, err := New(newFixture().cfg)
+	a, err = New(newFixture().cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +334,7 @@ func TestWritesStopAtTheClaimsExpiry(t *testing.T) {
 	claimed := incident()
 	start := metav1.NewTime(now.Add(-10*time.Minute + 5*time.Second))
 	claimed.Status.LastAnalysisTime = &start
-	ctx, cancel, err := c.withinClaim(t.Context(), claimed, finalWriteTimeout, true)
+	ctx, cancel, err := c.withinClaim(t.Context(), claimed, finalWriteTimeout, 0, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +344,7 @@ func TestWritesStopAtTheClaimsExpiry(t *testing.T) {
 	}
 	late := metav1.NewTime(now.Add(-10 * time.Minute))
 	claimed.Status.LastAnalysisTime = &late
-	if _, _, err := c.withinClaim(t.Context(), claimed, finalWriteTimeout, true); err == nil {
+	if _, _, err := c.withinClaim(t.Context(), claimed, finalWriteTimeout, 0, true); err == nil {
 		t.Error("a write started after the claim expired")
 	}
 }

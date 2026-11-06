@@ -192,11 +192,13 @@ const notRecentWritesPerPass = 20
 
 // trace is what the analysis trigger remembers of one Incident between passes (see [Memory]): when it first
 // found it waiting only to settle or for budget ([Controller.rememberWaiting]), whether it found it gone
-// quiet, and when the passes in a row that looked at it began ([Controller.watch]).
+// quiet, when the passes in a row that looked at it began, and the lastSeen its status held on the last pass
+// ([Controller.watch]).
 type trace struct {
 	waiting      time.Time
 	quiet        bool
 	watchedSince time.Time
+	lastSeen     time.Time
 }
 
 // decider returns the decision of [Due] for one Incident, with what the controller knows of it ([Memory])
@@ -227,10 +229,12 @@ func (c *Controller) account(inc *remediationv1alpha1.Incident, due bool, reason
 // watch updates what the controller remembers of the Incidents between passes, before anything is decided,
 // on every pass (one that cannot read the budget included), from the cached list: when the passes in a row
 // that looked at each began ([Memory].WatchedSince), and which ones it found gone quiet ([goneQuiet],
-// [Memory].WentQuiet). Finding one gone quiet with nothing held unwritten either forgets when it was first
-// seen waiting: that wait belongs to the spell before. While a new observation is held (a write pending or
-// failed) the wait of the new burst is kept, so its settle limit keeps counting. An Incident analyzed since is
-// no longer remembered as gone quiet; one not listed, or held by another fingerprint, is forgotten.
+// [Memory].WentQuiet). The spell is taken to begin at the earlier of the stored lastSeen and the one read on
+// the previous pass. Finding one gone quiet forgets when it was first seen waiting if that was not after
+// the spell's begin plus the recent window: such a wait belongs to the spell before. A wait from after it
+// (the new burst seen again, its observation held while its write is pending or failing) is kept, so its
+// settle limit keeps counting. An Incident analyzed since is no longer remembered as gone quiet; one not
+// listed, or held by another fingerprint, is forgotten.
 func (c *Controller) watch(items []remediationv1alpha1.Incident, now time.Time, s TriggerSettings) {
 	listed := make(map[types.UID]struct{}, len(items))
 	for i := range items {
@@ -247,10 +251,18 @@ func (c *Controller) watch(items []remediationv1alpha1.Incident, now time.Time, 
 		if t.watchedSince.IsZero() {
 			t.watchedSince = now
 		}
+		var since time.Time
+		if inc.Status.LastSeen != nil {
+			since = inc.Status.LastSeen.Time
+			if !t.lastSeen.IsZero() && t.lastSeen.Before(since) {
+				since = t.lastSeen
+			}
+			t.lastSeen = inc.Status.LastSeen.Time
+		}
 		switch {
-		case goneQuiet(inc, now, s):
+		case !since.IsZero() && goneQuiet(inc, since, now, s):
 			t.quiet = true
-			if held := c.heldSince(inc.Spec.Fingerprint); now.After(held.Add(recentWindow(s))) {
+			if !t.waiting.After(since.Add(recentWindow(s))) {
 				t.waiting = time.Time{}
 			}
 		case inc.Status.LastAnalysisTime != nil || inc.Status.Phase == remediationv1alpha1.IncidentAnalyzing:

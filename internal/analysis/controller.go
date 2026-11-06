@@ -165,10 +165,12 @@ func (c *Controller) now() time.Time {
 
 // claimable reports whether the trigger marked inc due in a phase an analysis may start from: Open (or none)
 // or Analyzing taken as lost (reason AnalysisTimedOut). Never Resolved: reopening a Resolved Incident is a
-// later part of #251, and until it is built a Resolved Incident is not analyzed again.
+// later part of #251, and until it is built a Resolved Incident is not analyzed again. A mark written for
+// another generation of the Incident is no mark, as the trigger takes it (#430): it fails closed, and the
+// trigger writes it again for the current generation if the Incident is still due.
 func claimable(inc *remediationv1alpha1.Incident) bool {
 	cond := meta.FindStatusCondition(inc.Status.Conditions, incidents.ConditionAnalysisDue)
-	if cond == nil || cond.Status != metav1.ConditionTrue {
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.ObservedGeneration != inc.Generation {
 		return false
 	}
 	switch inc.Status.Phase {

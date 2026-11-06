@@ -1808,3 +1808,53 @@ func TestNotRecentWritesComeLastAndAreBounded(t *testing.T) {
 		eventually(t, ns, f, dueIs(false, ReasonNotRecent))
 	}
 }
+
+// A quiet spell that ends between two passes, a little after lastSeen crossed the recent window, is never
+// stale at a pass instant, but the jump of the stored lastSeen across the window shows it: the new burst
+// debounces instead of being due at once (#430 item 2).
+func TestQuietSpellBetweenTwoPassesDebounces(t *testing.T) {
+	c, err := New(Config{Namespace: "ns", Now: func() time.Time { return triggerNow }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := triggerSettings
+	window := recentWindow(s)
+	last := triggerNow.Add(-time.Hour)
+	inc := quietIncident("uid-1")
+	inc.Status.LastSeen = &metav1.Time{Time: last}
+	// Passes every 10 s since before lastSeen, so the gap in the records is one this process watched; the
+	// last of them 5 s before lastSeen crosses the window.
+	first := last.Add(window - 5*time.Second)
+	for p := first.Add(-90 * 10 * time.Second); !p.After(first); p = p.Add(10 * time.Second) {
+		c.watch([]remediationv1alpha1.Incident{inc}, p, s)
+	}
+	// The spell lasts the window and 2 s; the new occurrence is written 7 s after that pass.
+	seen := last.Add(window + 2*time.Second)
+	inc.Status.LastSeen = &metav1.Time{Time: seen}
+	inc.Status.Occurrences = append(inc.Status.Occurrences,
+		remediationv1alpha1.OccurrenceRecord{ID: eventID(2), Total: 1, Began: &metav1.Time{Time: seen}})
+	next := first.Add(10 * time.Second)
+	c.watch([]remediationv1alpha1.Incident{inc}, next, s)
+	used := 0
+	if due, reason := c.decider(&inc, next, s, &used)(&inc); due || reason != ReasonDebouncing {
+		t.Fatalf("Due = %v, %s; want false, Debouncing", due, reason)
+	}
+}
+
+// A wait from before the quiet spell is forgotten even while a new observation is held unwritten (a failed
+// write): it is older than the spell's begin plus the recent window, so it is not the new burst's.
+func TestWaitFromBeforeTheSpellIsForgottenWhileHeld(t *testing.T) {
+	c, err := New(Config{Namespace: "ns", Now: func() time.Time { return triggerNow }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := triggerSettings
+	inc := quietIncident("uid-1") // last seen 35 min ago
+	c.memory[inc.UID] = &trace{waiting: triggerNow.Add(-40 * time.Minute)}
+	c.failed[inc.Spec.Fingerprint] = &batch{first: triggerNow.Add(-5 * time.Second), last: triggerNow.Add(-5 * time.Second)}
+	c.watch([]remediationv1alpha1.Incident{inc}, triggerNow, s)
+	used := 0
+	if due, reason := c.decider(&inc, triggerNow, s, &used)(&inc); due {
+		t.Fatalf("Due = %v, %s; want not due", due, reason)
+	}
+}

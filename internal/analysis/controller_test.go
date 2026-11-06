@@ -177,11 +177,29 @@ func dueIncident(t *testing.T, ns string, budget map[string]string) *remediation
 	inc.Status.Phase = remediationv1alpha1.IncidentOpen
 	inc.Status.FirstSeen, inc.Status.LastSeen, inc.Status.Count = &now, &now, 3
 	meta.SetStatusCondition(&inc.Status.Conditions, metav1.Condition{Type: incidents.ConditionAnalysisDue,
-		Status: metav1.ConditionTrue, Reason: incidents.ReasonFirstAnalysis, Message: "due"})
+		Status: metav1.ConditionTrue, Reason: incidents.ReasonFirstAnalysis, Message: "due", ObservedGeneration: inc.Generation})
 	if err := env.admin.Status().Update(ctx, inc); err != nil {
 		t.Fatal(err)
 	}
 	return inc
+}
+
+// A mark that says due but was written for another generation of the Incident is no mark (#430), as the
+// trigger takes it: the Incident is not claimed.
+func TestControllerLeavesAMarkOfAnotherGeneration(t *testing.T) {
+	ns := namespace(t)
+	setSettings(t, 10)
+	inc := dueIncident(t, ns, nil)
+	inc.Status.Conditions[0].ObservedGeneration = inc.Generation - 1
+	if err := env.admin.Status().Update(t.Context(), inc); err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture()
+	c, rc := newController(t, ns, f)
+	reconcile(t, c, inc)
+	if len(rc.updates) != 0 || f.triage.calls() != 0 || f.reserved != 0 {
+		t.Errorf("a mark of another generation got %d updates, %d calls, %d reservations", len(rc.updates), f.triage.calls(), f.reserved)
+	}
 }
 
 func newController(t *testing.T, ns string, f *fixture) (*Controller, *recordingClient) {

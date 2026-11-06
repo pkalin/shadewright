@@ -1883,3 +1883,35 @@ func TestShortGapReadByALatePassIsNotQuiet(t *testing.T) {
 		t.Fatalf("gap of window-2s taken as a quiet spell")
 	}
 }
+
+// failingList is a cache whose Lists fail.
+type failingList struct{ client.Reader }
+
+func (failingList) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return errors.New("list failed")
+}
+
+// A pass whose list fails breaks the run of passes, so the lastSeen read before it is not compared with the
+// one read after it: activity that went on unwatched is no quiet spell (#448 review).
+func TestFailedListForgetsTheSampledLastSeen(t *testing.T) {
+	c, err := New(Config{Namespace: "ns", Now: func() time.Time { return triggerNow }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := triggerSettings
+	window := recentWindow(s)
+	last := triggerNow.Add(-time.Hour)
+	inc := quietIncident("uid-1")
+	inc.Status.LastSeen = &metav1.Time{Time: last}
+	c.watch([]remediationv1alpha1.Incident{inc}, last.Add(time.Second), s)
+	c.cache = failingList{}
+	if err := c.markDue(t.Context()); err == nil {
+		t.Fatal("markDue with a failing list returned no error")
+	}
+	seen := last.Add(window + 5*time.Minute) // observations went on unwatched while the lists failed
+	inc.Status.LastSeen = &metav1.Time{Time: seen}
+	c.watch([]remediationv1alpha1.Incident{inc}, seen.Add(time.Second), s)
+	if c.memory[inc.UID].quiet {
+		t.Fatal("a lastSeen sampled before failed passes was compared with the one after them")
+	}
+}

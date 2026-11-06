@@ -83,9 +83,11 @@ func (c *Controller) pass(ctx context.Context) error {
 func (c *Controller) markDue(ctx context.Context) error {
 	var list remediationv1alpha1.IncidentList
 	if err := c.cache.List(ctx, &list, client.InNamespace(c.cfg.Namespace)); err != nil {
-		// A pass that looked at no Incident breaks every run of passes that watched one.
+		// A pass that looked at no Incident breaks every run of passes that watched one, and the lastSeen read
+		// before it says nothing about a spell between it and the next pass that lists.
 		for _, t := range c.memory {
 			t.watchedSince = time.Time{}
+			t.lastSeen = time.Time{}
 		}
 		return fmt.Errorf("listing the Incidents: %w", err)
 	}

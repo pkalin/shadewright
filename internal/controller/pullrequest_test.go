@@ -1018,6 +1018,27 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 		})
 
+		It("finishes a stale plan's cleanup at the next look instead of waiting for the full recheck", func() {
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			r := reconciler()
+			look(r)
+			// A cleanup that wrote its mark but lost the close (a restart, a deadline) leaves this status.
+			got := fetch()
+			meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{
+				Type: remediationv1alpha1.ConditionPlanFresh, Status: metav1.ConditionFalse,
+				Reason: freshness.ReasonPolicyChanged, Message: "The policy changed",
+			})
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+			clock = clock.Add(DefaultPullRequestPollInterval)
+			wait, _, _ := look(r)
+			Expect(wait).To(BeZero(), "not the poll interval")
+			got = fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh).Reason).
+				To(Equal(freshness.ReasonPolicyChanged))
+			Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestClosed), "the close is done again")
+		})
+
 		Context("when writes were paused", func() {
 			setPaused := func(on bool) {
 				live := &remediationv1alpha1.RemediationSettings{}

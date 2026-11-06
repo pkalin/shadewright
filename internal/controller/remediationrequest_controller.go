@@ -208,17 +208,21 @@ const FullRecheckInterval = freshRecheckInterval
 // Bounds of PullRequestPollInterval. One look reads the settings from the API server and lists the pull
 // requests of the request's branch on the Git host (one GitHub REST call); a full recheck makes about eight
 // (the look, three reads of the target branch head and the target file: its tree, one per directory and the
-// blob). The lower bound keeps a waiting pull request to at most 240 looks an hour; the upper bound is
-// freshRecheckInterval, where every look is a full recheck. Each status write of the executor on a waiting
-// request (the move to AwaitingApproval, a new render head, a refusal, a pause and its end) wakes the request once
-// more, which costs one more look; those writes happen on a change only, not on every look.
+// blob). At the lower bound a waiting pull request costs about 200 calls an hour (108 looks and 12 full
+// rechecks), so 20 of them (the most maxConcurrentRemediations allows) about 4,000, against an installation limit
+// of at least 5,000 an hour that the policy check's source mapping and the writes share. A full recheck after a
+// merge to the target branch also maps the source again at the new commit (its read cache is keyed by commit),
+// up to 512 file reads. The upper bound is freshRecheckInterval, where every look is a full recheck.
+// Each status write of the executor on a waiting request (the move to AwaitingApproval, a new render head, a
+// refusal, a pause and its end) wakes the request once more, which costs one more look; those writes happen on a
+// change only, not on every look.
 const (
 	// DefaultPullRequestPollInterval is the poll interval of a waiting pull request by default: a merge is seen
 	// within about a minute, for about 150 GitHub REST calls an hour per waiting pull request (48 looks and 12
 	// full rechecks), against about 100 with full rechecks only, plus one look per status write.
 	DefaultPullRequestPollInterval = time.Minute
 	// MinPullRequestPollInterval is the shortest poll interval.
-	MinPullRequestPollInterval = 15 * time.Second
+	MinPullRequestPollInterval = 30 * time.Second
 	// MaxPullRequestPollInterval is the longest poll interval: every look is then a full recheck, as before #434.
 	MaxPullRequestPollInterval = freshRecheckInterval
 )

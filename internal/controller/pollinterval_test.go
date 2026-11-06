@@ -32,6 +32,8 @@ func TestPullRequestPollIntervalBounds(t *testing.T) {
 		{in: 0, valid: true, used: DefaultPullRequestPollInterval},
 		{in: -time.Second, valid: false, used: -time.Second},
 		{in: time.Second, valid: false, used: time.Second},
+		{in: 15 * time.Second, valid: false, used: 15 * time.Second},
+		{in: 30 * time.Second, valid: true, used: 30 * time.Second},
 		{in: MinPullRequestPollInterval - time.Nanosecond, valid: false, used: MinPullRequestPollInterval - time.Nanosecond},
 		{in: MinPullRequestPollInterval, valid: true, used: MinPullRequestPollInterval},
 		{in: DefaultPullRequestPollInterval, valid: true, used: DefaultPullRequestPollInterval},

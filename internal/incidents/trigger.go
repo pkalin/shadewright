@@ -246,8 +246,9 @@ func Due(inc *remediationv1alpha1.Incident, m Memory, now time.Time, s TriggerSe
 //     series counting up again adds no occurrence, and a new observation may still be held unwritten), and
 //     every older time, an m.Waiting from before the spell included, belongs to the spell before. When the
 //     controller finds the incident gone quiet, with the spell beginning at a lastSeen L (the stored one, or
-//     the one of its previous pass when the stored one is more than the recent window after it), it forgets an m.Waiting not after L plus the recent
-//     window, and keeps a later one: that is the new burst's, seen while its observation is held;
+//     the one of its previous pass when the stored one is more than the recent window after it,
+//     [Controller.watch]), it forgets an m.Waiting not after L plus the recent window, and keeps a later one:
+//     that is the new burst's, seen while its observation is held;
 //   - else the begin of its newest burst when the records show a gap before it ([quietUntil]) that no pass of
 //     this process watched (m.WatchedSince is zero or after the gap began): a watched one would have set
 //     m.WentQuiet had the incident gone quiet in it;
@@ -308,6 +309,18 @@ func waitsForData(reason string) bool {
 // module's symptom source (design 3.1).
 const occurrenceCondition = "condition:"
 
+// DueMark returns the incident's AnalysisDue condition when it was written for the incident's current
+// generation, and nil otherwise: a condition written for another generation is no mark. The trigger reads its
+// marks only through it ([markedDue], [conditionAgrees]), and so does the analysis when it decides what to
+// claim, so both apply the same rule.
+func DueMark(inc *remediationv1alpha1.Incident) *metav1.Condition {
+	cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue)
+	if cond == nil || cond.ObservedGeneration != inc.Generation {
+		return nil
+	}
+	return cond
+}
+
 // markedDue reports whether the incident's AnalysisDue condition says due, or said so until a pass could not
 // read the RemediationSettings or the budget ConfigMap: such a pass sets only the marks that say due to not
 // due (SettingsUnreadable, BudgetReadFailed, [Controller.markDue]), and a not-due condition keeps its reason,
@@ -317,8 +330,8 @@ const occurrenceCondition = "condition:"
 // another generation of the Incident is no mark, as for [conditionAgrees]: that only takes the exemption from
 // NotRecent away, so it never makes more analyses.
 func markedDue(inc *remediationv1alpha1.Incident) bool {
-	cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue)
-	if cond == nil || cond.ObservedGeneration != inc.Generation {
+	cond := DueMark(inc)
+	if cond == nil {
 		return false
 	}
 	switch cond.Status {
@@ -363,10 +376,11 @@ func stale(inc *remediationv1alpha1.Incident, seen, now time.Time, s TriggerSett
 // goneQuiet reports whether the incident, never analyzed and not in phase Analyzing, went quiet: last, a
 // lastSeen its status held, is [stale] at now. The controller asks it of the stored lastSeen at now, and of
 // the lastSeen it read on its previous pass at the stored one, so a spell that ended between two passes (the
-// gap between the two is longer than the recent window) counts too, and a shorter gap never does. Unlike the NotRecent check of [Due] it leaves
-// the observations held unwritten out, so an incident seen again while its new observation waits for the
-// next write still counts as gone quiet. The controller asks it on every pass, one that cannot read the
-// budget included, and remembers the answer ([Memory].WentQuiet).
+// gap between the two is longer than the recent window) counts too, and a shorter gap never does
+// ([Controller.watch]). Unlike the NotRecent check of [Due] it leaves the observations held unwritten out, so
+// an incident seen again while its new observation waits for the next write still counts as gone quiet. The
+// controller asks it on every pass, one that cannot read the budget included, and remembers the answer
+// ([Memory].WentQuiet).
 func goneQuiet(inc *remediationv1alpha1.Incident, last, now time.Time, s TriggerSettings) bool {
 	st := &inc.Status
 	return st.LastAnalysisTime == nil && st.Phase != remediationv1alpha1.IncidentAnalyzing && stale(inc, last, now, s)

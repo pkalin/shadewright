@@ -156,6 +156,8 @@ On `PolicyAllowed`; all `Denied` unless marked. These are the checks of the poli
 
 Stops before a pull request is recorded are on `PullRequestOpened`; after, on `Approved`. All end `NeedsIntervention` unless marked.
 
+**A merge or a close is seen late.** The executor polls; it has no webhook. It looks at a waiting pull request every `--pull-request-poll-interval` (one minute by default, see the [configuration reference](reference/configuration.md#executor-only)), so the request should reach `Merged` within that interval plus one reconcile. Later than that: the executor may have restarted or changed leader (its first look at each request is a full recheck, a few seconds longer), writes may be paused (nothing is looked at until the pause ends), or the GitHub App may be rate limited (the executor log says it waits for the limit to reset). Each waiting pull request costs about 150 GitHub REST calls an hour at the default, against about 100 with no looks between the full rechecks; a shorter interval costs more.
+
 | Reason | Cause | Fix |
 | --- | --- | --- |
 | `PlanIncomplete` | `status.source` has no `buildPath`, so the change cannot be rendered | Apply a new request |
@@ -179,7 +181,7 @@ Stops before a pull request is recorded are on `PullRequestOpened`; after, on `A
 
 ## Freshness
 
-Before merge the executor rechecks every five minutes, and on any change, that the plan still matches the world. A stale plan ends `Superseded` with `PlanFresh=False`, and its pull request is closed (branch left in place). If the close cannot be done the phase is `NeedsIntervention` with `TargetBranchChanged`, `ForeignChangeRequest`, `RepositoryUnavailable`, `RepositoryUnusable`, `GitForbidden` or `GitRejected` as above.
+Before merge the executor rechecks every five minutes, and on any change to the request (once its pull request waits, only when none ran in the last five minutes), that the plan still matches the world. A stale plan ends `Superseded` with `PlanFresh=False`, and its pull request is closed (branch left in place). If the close cannot be done the phase is `NeedsIntervention` with `TargetBranchChanged`, `ForeignChangeRequest`, `RepositoryUnavailable`, `RepositoryUnusable`, `GitForbidden` or `GitRejected` as above.
 
 | Reason | Cause | Fix |
 | --- | --- | --- |

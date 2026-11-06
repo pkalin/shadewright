@@ -121,10 +121,18 @@ type RemediationRequestReconciler struct {
 	// BreakerCooldown is how long the circuit breaker stays open after the latest of those failures. Zero means
 	// [DefaultBreakerCooldown].
 	BreakerCooldown time.Duration
+	// PullRequestPollInterval is how often a request whose pull request waits for review (PRCreated,
+	// AwaitingApproval) looks at that pull request alone, between the full rechecks every freshRecheckInterval,
+	// so a merge or a close is seen within it. Zero means [DefaultPullRequestPollInterval]; a value outside
+	// [MinPullRequestPollInterval, MaxPullRequestPollInterval] is clamped to it.
+	PullRequestPollInterval time.Duration
 
 	// admitMu makes the check of the limits and the status write that lets a request through the policy check
 	// one step, so two workers can never both take the last slot or the same target.
 	admitMu sync.Mutex
+	// checked holds, per request name, when the last full recheck of a waiting pull request ended (pollState).
+	// It is memory only: after a restart or a change of leader every request gets a full recheck first.
+	checked sync.Map
 }
 
 // DefaultTargetStateTimeout is how long the policy check waits by default for KEDA to report on a
@@ -187,9 +195,26 @@ var ErrSuperseded = errors.New("the plan is superseded")
 // freshRecheckDelay is how long a request waits to be re-checked when writes are paused.
 const freshRecheckDelay = time.Minute
 
-// freshRecheckInterval is how often a fresh request before merge is looked at again. It bounds how long a
-// stale plan keeps an open change request when nothing else wakes the request.
+// freshRecheckInterval is how often a fresh request before merge gets a full recheck (the freshness check and,
+// while its pull request waits, the render check). It bounds how long a stale plan keeps an open change request
+// when nothing else wakes the request. A waiting pull request is looked at more often (PullRequestPollInterval).
 const freshRecheckInterval = 5 * time.Minute
+
+// Bounds of PullRequestPollInterval. One look reads the settings from the API server and lists the pull
+// requests of the request's branch on the Git host (one GitHub REST call); a full recheck makes about eight
+// (the look, three reads of the target branch head and the target file: its tree, one per directory and the
+// blob). The lower bound keeps a waiting pull request to at most 240 looks an hour; the upper bound is
+// freshRecheckInterval, where every look is a full recheck.
+const (
+	// DefaultPullRequestPollInterval is the poll interval of a waiting pull request by default: a merge is seen
+	// within about a minute, for about 150 GitHub REST calls an hour per waiting pull request (48 looks and 12
+	// full rechecks), against about 100 with full rechecks only.
+	DefaultPullRequestPollInterval = time.Minute
+	// MinPullRequestPollInterval is the shortest poll interval.
+	MinPullRequestPollInterval = 15 * time.Second
+	// MaxPullRequestPollInterval is the longest poll interval: every look is then a full recheck, as before #434.
+	MaxPullRequestPollInterval = freshRecheckInterval
+)
 
 // errRepositoryGone means the repository a plan was made for is not in the settings any more (or was never
 // recorded), so its change request cannot be closed safely.
@@ -237,9 +262,13 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	rr := &remediationv1alpha1.RemediationRequest{}
 	if err := r.Get(ctx, req.NamespacedName, rr); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.checked.Delete(req.NamespacedName)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !rr.DeletionTimestamp.IsZero() {
+		r.checked.Delete(req.NamespacedName)
 		return r.finalize(ctx, rr)
 	}
 	if err := r.backfillLock(ctx, rr); err != nil {
@@ -247,6 +276,7 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	if rr.Status.Phase != "" && rr.Status.Phase != remediationv1alpha1.PhasePending {
 		if !progresses(rr) {
+			r.checked.Delete(req.NamespacedName)
 			// Stopped: nothing is written to Git any more, but a lock still held waits for its pull request.
 			return r.checkHeld(ctx, rr)
 		}
@@ -707,8 +737,17 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 	}
 	outcome := prOpen
 	if rr.Status.PullRequest != nil {
-		if outcome = r.watchPullRequest(ctx, rr); outcome == prStopped {
+		var lookErr error
+		if outcome, lookErr = r.watchPullRequest(ctx, rr); outcome == prStopped {
 			return ctrl.Result{}, nil
+		}
+		if retryAfterOf(lookErr) > 0 {
+			// The Git host asked for a delay (a rate limit): the freshness check would ask it again at once.
+			return r.waitOrFail(ctx, rr, lookErr)
+		}
+		if wait, ok := r.pollOnly(rr, outcome); ok {
+			// Still open, and the last full recheck is recent: only the pull request was read (#434).
+			return ctrl.Result{RequeueAfter: wait}, nil
 		}
 	}
 	if mark := staleMark(rr); mark != nil && outcome == prClosed {

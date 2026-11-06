@@ -530,7 +530,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		})
 		res, err := reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res.RequeueAfter).To(Equal(freshRecheckInterval), "the pull request is looked at again")
+		Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval), "the pull request is looked at again at the next poll")
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "a refusal does not end the watch")
 		c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
@@ -768,7 +768,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 	It("schedules the next check of a fresh plan", func() {
 		res, err := reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res.RequeueAfter).To(Equal(freshRecheckInterval))
+		Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval), "its pull request is looked at at the next poll")
 	})
 
 	It("does not schedule anything for a superseded request", func() {

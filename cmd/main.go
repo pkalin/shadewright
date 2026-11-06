@@ -22,6 +22,7 @@ import (
 	"context"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -60,6 +61,7 @@ func main() {
 	var namespace string
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var webhookPort int
+	var pollInterval time.Duration
 	opts.BindFlags(flag.CommandLine)
 	flag.StringVar(&namespace, "namespace", os.Getenv("POD_NAMESPACE"),
 		"The operator namespace: the only namespace whose RemediationRequests are reconciled. "+
@@ -69,12 +71,21 @@ func main() {
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
 	flag.IntVar(&webhookPort, "webhook-port", 9443, "Port the webhook server listens on. "+
 		"Defaults to 9443. Set -1 to disable the webhook server.")
+	flag.DurationVar(&pollInterval, "pull-request-poll-interval", controller.DefaultPullRequestPollInterval,
+		"How often the executor looks at a pull request that waits for review, so a merge or a close is seen "+
+			"within it. Between "+controller.MinPullRequestPollInterval.String()+" and "+
+			controller.MaxPullRequestPollInterval.String()+"; the full recheck of the plan stays every "+
+			controller.MaxPullRequestPollInterval.String()+".")
 	flag.Parse()
 
 	ctrl.SetLogger(cmdutil.NewLogger(&opts))
 
 	if namespace == "" {
 		setupLog.Error(nil, "The operator namespace is not set: use --namespace or POD_NAMESPACE")
+		os.Exit(1)
+	}
+	if err := controller.ValidatePullRequestPollInterval(pollInterval); err != nil {
+		setupLog.Error(err, "Invalid --pull-request-poll-interval")
 		os.Exit(1)
 	}
 
@@ -113,11 +124,12 @@ func main() {
 	}}
 
 	reconciler := &controller.RemediationRequestReconciler{
-		Client:         mgr.GetClient(),
-		Scheme:         mgr.GetScheme(),
-		Namespace:      namespace,
-		APIReader:      mgr.GetAPIReader(),
-		OpenRepository: repos.Open,
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		Namespace:               namespace,
+		APIReader:               mgr.GetAPIReader(),
+		OpenRepository:          repos.Open,
+		PullRequestPollInterval: pollInterval,
 		// The core/v1 recorder writes with the grant on core Events that the executor's leader election Role
 		// already holds in the operator namespace, where the requests are, as the analyzer's recorder does.
 		Recorder: mgr.GetEventRecorderFor("shadewright-executor"), //nolint:staticcheck // see above

@@ -62,7 +62,7 @@ kubectl patch remediationsettings default --type merge -p '{"spec":{"paused":tru
 
 ## 3. Close an open pull request by hand
 
-Close it on GitHub, without merging, as you would any pull request. The executor does not fight this: it never reopens a pull request. When it next looks (within about five minutes, since it polls; after the pause ends if paused), it sees the closed pull request and ends the `RemediationRequest` in phase `NeedsIntervention` with reason `ChangeRequestClosed`. Nothing is pushed or opened again for it.
+Close it on GitHub, without merging, as you would any pull request. The executor does not fight this: it never reopens a pull request. When it next looks (within about a minute, `--pull-request-poll-interval`, since it polls; after the pause ends if paused), it sees the closed pull request and ends the `RemediationRequest` in phase `NeedsIntervention` with reason `ChangeRequestClosed`. Nothing is pushed or opened again for it.
 
 Deleting the `RemediationRequest` also closes its pull request, but only while not paused, so do not use that to stop things during a pause. A pull request that does not carry the request's marker is never closed by the executor.
 

@@ -90,6 +90,7 @@ Flags are passed as container args. A flag given twice takes its last value. The
 | --- | --- | --- |
 | `--webhook-port` | `9443` (`-1` disables) | Webhook server port |
 | `--webhook-cert-path`, `--webhook-cert-name`, `--webhook-cert-key` | empty, `tls.crt`, `tls.key` | Webhook certificate |
+| `--pull-request-poll-interval` | `1m` | How often the executor looks at a pull request that waits for review (`PRCreated`, `AwaitingApproval`), so a merge or a close is seen within this interval plus one reconcile. A look lists the pull requests of the request's branch (one GitHub REST call); the full recheck of the plan stays every 5 min. From `15s` to `5m`; a value outside refuses to start. At the default a waiting pull request costs about 150 GitHub REST calls an hour (48 looks of one call and 12 full rechecks of about 8 calls; about 100 without the looks), so with `maxConcurrentRemediations` at its maximum of 20 about 3,000, against the installation's limit of at least 5,000 an hour. Set it in the chart with `executor.extraArgs` |
 
 `config/default` installs no admission webhook (the webhook and cert-manager sections are commented out), so the webhook flags have no use in the shipped manifests.
 
@@ -126,7 +127,7 @@ These are compiled in. Changing one needs a code change.
 | Executor: policy check, cleanup and one Git write step | 2 min each |
 | Executor: time from `PolicyChecked` to an open pull request | 30 min, then `Expired` |
 | Executor: wait for KEDA to report a `ScaledObject` | 10 min, then `NeedsIntervention` |
-| Executor: freshness recheck of a waiting request | every 5 min and on any change to the request |
+| Executor: freshness recheck of a waiting request | every 5 min, and on a change to the request when no full recheck ran in the last 5 min (between those, a waiting pull request is only looked at, see `--pull-request-poll-interval`) |
 | Source mapping limits | directories 8 deep, 256 files, 512 reads, 1 MiB per file |
 
 ## Cluster ID

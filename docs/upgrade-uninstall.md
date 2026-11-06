@@ -80,7 +80,7 @@ Both Deployments run one replica with leader election and have no state of their
 
 What happens to requests that are waiting for a person when you upgrade:
 
-- A request in `PRCreated` or `AwaitingApproval` keeps its pull request. The executor rechecks it every five minutes and on any change, as before.
+- A request in `PRCreated` or `AwaitingApproval` keeps its pull request. The executor rechecks it every five minutes and looks at its pull request every `--pull-request-poll-interval` (one minute by default) in between.
 - A release that changes how the plan digest is computed or what the freshness check compares would end such a request as `Superseded` (`PlanChanged`) and close its pull request. This follows from the freshness check, not from a promise of a release, so read the notes of every upgrade.
 - A change to the settings or the policy in the same step has the same effect, whatever the release, and one that removes or re-identifies the repository (URL or installation) closes nothing: see [freshness](troubleshooting.md#freshness) and [identity rotation](identity-rotation.md#2-the-github-app-installation).
 - The release that closes #294 records the lock on a target in `status.holdsTarget`. A request written before has no such field: the executor sets it once from the request's status, keeping the lock for a request that the executor still moves on, that is being deleted with its finalizer, or that stopped with a recorded pull request its status does not show closed or merged (see [limits](troubleshooting.md#limits)). Such a stopped request then looks its pull request up every 10 minutes and frees the target once it is closed or merged. A request that ended without a plan digest (a refusal) gets `false`, so the limits stop reading it.

@@ -466,9 +466,11 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 }
 
 // once sends one attempt and returns the body of a 200 reply. Every other outcome is a classified error with
-// fixed text. billed is true once a 200 arrived, error or not: the model answered and the service bills it.
-// With an error, data is the body when it was read whole within the bound (a Content-Type other than JSON),
-// so that its usage can still be read, and nil otherwise.
+// fixed text. billed is true once a 200 arrived before the attempt's deadline, error or not: the model
+// answered and the service bills it. A response that net/http returns after the attempt's context ended is
+// the timeout whatever its status, and not billed (#438). With an error, data is the body when it was read
+// whole within the bound (a Content-Type other than JSON), so that its usage can still be read, and nil
+// otherwise.
 func (p *Provider) once(ctx context.Context, body []byte) (data []byte, billed bool, err error) {
 	if ctx.Err() != nil {
 		return nil, false, ctxError(ctx)
@@ -496,6 +498,12 @@ func (p *Provider) once(ctx context.Context, body []byte) (data []byte, billed b
 		return nil, false, transportError(ctx, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if actx.Err() != nil {
+		// net/http returns a response that raced the end of the request's context, such as the empty 200 a
+		// server sends when its handler gives up on the client going away (#438). The deadline came first:
+		// it is the timeout, retryable, never malformed output or a refusal, and nothing of it is read.
+		return nil, false, transportError(ctx, context.DeadlineExceeded)
+	}
 
 	code := resp.StatusCode
 	if code != http.StatusOK {

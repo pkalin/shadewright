@@ -621,34 +621,58 @@ func TestCompleteCancellation(t *testing.T) {
 
 // One attempt that hangs times out and is retried; the call's own deadline ends it as retryable.
 func TestCompleteTimeouts(t *testing.T) {
+	// hang reads the request and waits for the client to go away, then aborts the connection without a
+	// reply. A handler that returned would send an empty 200, which can still reach the client while it
+	// closes the connection (TestCompleteReplyRacingDeadline covers that case).
+	hang := func(r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body) // the server sees the client go away only after the body is read
+		<-r.Context().Done()
+		panic(http.ErrAbortHandler)
+	}
 	t.Run("attempt timeout is retried", func(t *testing.T) {
-		var n atomic.Int32
+		// The first request that reaches the server hangs, every later one is answered. The attempt timeout
+		// leaves room for the dial and the TLS handshake on a loaded runner with the race detector; one that
+		// still takes longer only adds an attempt before the hanging one, within MaxAttempts.
+		var hung, answered atomic.Int32
 		h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
-			if n.Add(1) == 1 {
-				_, _ = io.Copy(io.Discard, r.Body) // the server sees the client go away only after the body is read
-				<-r.Context().Done()
-				return
+			if hung.CompareAndSwap(0, 1) {
+				hang(r)
 			}
+			answered.Add(1)
 			reply(w, completionJSON("stop", `{"content":"{}"}`))
-		}, func(c *Config) { c.AttemptTimeout = 100 * time.Millisecond })
-		if _, err := h.p.Complete(context.Background(), structuredRequest()); err != nil {
+		}, func(c *Config) { c.AttemptTimeout = time.Second })
+		c, err := h.p.Complete(context.Background(), structuredRequest())
+		if err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
-		if h.requests.Load() != 2 {
-			t.Errorf("sent %d requests, want 2", h.requests.Load())
+		if hung.Load() != 1 || answered.Load() != 1 {
+			t.Errorf("hung %d, answered %d: want one attempt timed out, then one answered", hung.Load(), answered.Load())
+		}
+		if c.Usage != wantUsage || c.UsageUnknown {
+			t.Errorf("completion %+v, want the usage of the answer, known", c)
 		}
 	})
 	t.Run("call deadline", func(t *testing.T) {
+		// A first call, under the default timeouts, opens the connection; the timed call reuses it, so its
+		// deadline is spent waiting for the reply rather than on the handshake.
+		var n atomic.Int32
 		h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
-			_, _ = io.Copy(io.Discard, r.Body) // the server sees the client go away only after the body is read
-			<-r.Context().Done()
-		}, func(c *Config) { c.Timeout = 100 * time.Millisecond })
-		_, err := h.p.Complete(context.Background(), structuredRequest())
+			if n.Add(1) > 1 {
+				hang(r)
+			}
+			reply(w, completionJSON("stop", `{"content":"{}"}`))
+		}, nil)
+		if _, err := h.p.Complete(context.Background(), structuredRequest()); err != nil {
+			t.Fatalf("first call: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		_, err := h.p.Complete(ctx, structuredRequest())
 		if !errors.Is(err, context.DeadlineExceeded) || !providers.IsRetryable(err) {
 			t.Fatalf("err = %v, want deadline exceeded, retryable", err)
 		}
-		if h.requests.Load() != 1 {
-			t.Errorf("sent %d requests, want 1", h.requests.Load())
+		if got := h.requests.Load() - 1; got > 1 {
+			t.Errorf("the timed call sent %d requests, want at most 1: no retry past the deadline", got)
 		}
 	})
 	t.Run("no backoff past the deadline", func(t *testing.T) {
@@ -660,6 +684,85 @@ func TestCompleteTimeouts(t *testing.T) {
 			t.Fatalf("err %v requests %d sleeps %v", err, h.requests.Load(), h.sleeps)
 		}
 	})
+}
+
+// roundTripFunc is an http.RoundTripper made of a function.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestCompleteReplyRacingDeadline checks the class of a response that net/http returns after the request's
+// context ended (#438), as it does when the response raced the deadline: here the empty 200 without a
+// Content-Type that a server sends when its handler returns on the client going away, or a 400. Whatever
+// its status, it is the timeout, retryable, and not billed.
+func TestCompleteReplyRacingDeadline(t *testing.T) {
+	late := map[string]func() *http.Response{
+		"empty 200": func() *http.Response {
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody}
+		},
+		"400": func() *http.Response {
+			return &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{}, Body: http.NoBody}
+		},
+	}
+	// newLate returns a provider whose first attempt waits for the end of its context and then returns
+	// racing; later attempts get a complete reply.
+	newLate := func(t *testing.T, racing func() *http.Response, mod func(*Config)) (*Provider, *atomic.Int32) {
+		t.Helper()
+		var sent atomic.Int32
+		rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			if sent.Add(1) > 1 {
+				return &http.Response{
+					StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}},
+					Body: io.NopCloser(strings.NewReader(completionJSON("stop", `{"content":"{}"}`))), Request: r,
+				}, nil
+			}
+			<-r.Context().Done()
+			resp := racing()
+			resp.Request = r
+			return resp, nil
+		})
+		cfg := Config{Endpoint: testEndpoint, Deployment: testDeployment, APIVersion: "v1", Tokens: &fakeTokens{tok: goodToken}}
+		mod(&cfg)
+		p, err := newProvider(cfg, testHooks{
+			transport: rt,
+			sleep:     func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
+			jitter:    func(d time.Duration) time.Duration { return d },
+		})
+		if err != nil {
+			t.Fatalf("newProvider: %v", err)
+		}
+		return p, &sent
+	}
+	for name, racing := range late {
+		t.Run(name+", call deadline", func(t *testing.T) {
+			p, sent := newLate(t, racing, func(c *Config) { c.Timeout = 50 * time.Millisecond })
+			c, err := p.Complete(context.Background(), structuredRequest())
+			if !errors.Is(err, context.DeadlineExceeded) || !providers.IsRetryable(err) ||
+				errors.Is(err, providers.ErrMalformedOutput) || errors.Is(err, providers.ErrRejected) {
+				t.Fatalf("err = %v, want deadline exceeded, retryable", err)
+			}
+			if c.UsageUnknown {
+				t.Error("UsageUnknown is set: a response after the deadline is not billed")
+			}
+			if sent.Load() != 1 {
+				t.Errorf("sent %d requests, want 1", sent.Load())
+			}
+		})
+		t.Run(name+", attempt timeout is retried", func(t *testing.T) {
+			p, sent := newLate(t, racing, func(c *Config) { c.AttemptTimeout = 50 * time.Millisecond })
+			c, err := p.Complete(context.Background(), structuredRequest())
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			if sent.Load() != 2 {
+				t.Errorf("sent %d requests, want 2", sent.Load())
+			}
+			if c.Usage != wantUsage || c.UsageUnknown {
+				t.Errorf("completion %+v, want the usage of the second attempt, known", c)
+			}
+		})
+	}
 }
 
 func TestCompleteTokenAudience(t *testing.T) {

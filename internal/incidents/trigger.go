@@ -19,6 +19,9 @@ package incidents
 import (
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 )
 
@@ -42,6 +45,10 @@ const (
 
 	// ReasonNotObserved: the status records no observation yet.
 	ReasonNotObserved = "NotObserved"
+	// ReasonNotRecent: the incident was never analyzed and was last seen (in the status or held) longer ago
+	// than the recent window, so a symptom that stopped before analysis was turned on, or before the daily
+	// budget was reset, takes no unit of the budget. A new observation makes it due again through the debounce.
+	ReasonNotRecent = "NotRecent"
 	// ReasonAnalyzing: an analysis is running and has not reached the analysis timeout.
 	ReasonAnalyzing = "Analyzing"
 	// ReasonAnalysisStartUnknown: the incident is in phase Analyzing without a lastAnalysisTime, so neither
@@ -109,6 +116,11 @@ type TriggerSettings struct {
 	// AnalysisTimeout is how long an incident may stay in phase Analyzing after its last analysis began
 	// before that analysis is taken as lost. It is due again at the later of AnalysisTimeout and Cooldown.
 	AnalysisTimeout time.Duration
+	// RecentWindow is how recently an incident never analyzed must have been seen to be due for its first
+	// analysis: one last seen longer ago is not due (NotRecent). The window is never shorter than Debounce, so
+	// an incident that settles is due for at least a moment. Zero means no window: any incident never analyzed
+	// may be due.
+	RecentWindow time.Duration
 	// MaxAnalysesPerDay is the daily limit of the RemediationSettings ([maxAnalysesPerDay]): the analyses
 	// allowed per UTC day across all Incidents. 0 disables analysis.
 	MaxAnalysesPerDay int
@@ -129,7 +141,8 @@ type TriggerSettings struct {
 //   - in phase Analyzing: not due (Analyzing) until AnalysisTimeout after lastAnalysisTime, then not due
 //     (CoolingDown) until the cooldown has passed too, then due again (AnalysisTimedOut); without a
 //     lastAnalysisTime not due (AnalysisStartUnknown), since neither can be placed;
-//   - in phase Open or Resolved (or none), never analyzed: due (FirstAnalysis);
+//   - in phase Open or Resolved (or none), never analyzed: due (FirstAnalysis), unless last seen (in the
+//     status or held) longer ago than RecentWindow (or Debounce, when that is longer): not due (NotRecent);
 //   - nothing seen since the last analysis: not due (NoNewData);
 //   - seen again, within the cooldown since the last analysis: not due (CoolingDown), even with a new
 //     occurrence, so a crash loop is analyzed at most once per cooldown;
@@ -181,7 +194,12 @@ func Due(inc *remediationv1alpha1.Incident, held, waiting, now time.Time, s Trig
 			}
 		}
 	}
-	if seen := latest(st.LastSeen.Time, held); now.Before(seen.Add(s.Debounce)) {
+	seen := latest(st.LastSeen.Time, held)
+	// A lastSeen ahead of the controller's clock (skew) is recent: only a past beyond the window is stale.
+	if reason == ReasonFirstAnalysis && s.RecentWindow > 0 && now.After(seen.Add(max(s.RecentWindow, s.Debounce))) {
+		return false, ReasonNotRecent
+	}
+	if now.Before(seen.Add(s.Debounce)) {
 		since := unsettledSince(st, waiting)
 		if s.SettleLimit <= 0 || since.IsZero() || now.Before(since.Add(s.SettleLimit)) {
 			return false, ReasonDebouncing
@@ -197,7 +215,9 @@ func Due(inc *remediationv1alpha1.Incident, held, waiting, now time.Time, s Trig
 }
 
 // unsettledSince returns when the incident's first observation that the last analysis did not see was made,
-// as far as it is known, or zero: firstSeen for an incident never analyzed; else the begin of the earliest
+// as far as it is known, or zero: firstSeen for an incident never analyzed, unless its AnalysisDue condition
+// still says NotRecent (it went quiet for longer than the recent window, so its unsettled observations began
+// after firstSeen, at a time the status does not keep); else the begin of the earliest
 // occurrence that began after lastAnalysisTime (the drop mark standing in for the dropped records). waiting,
 // the controller's own first sight of the incident waiting, is taken when it is earlier, or when the status
 // does not tell (a recurrence of an occurrence the last analysis already counted). The status values survive
@@ -211,7 +231,7 @@ func unsettledSince(st *remediationv1alpha1.IncidentStatus, waiting time.Time) t
 	}
 	switch {
 	case st.LastAnalysisTime == nil && st.Phase != remediationv1alpha1.IncidentAnalyzing:
-		if st.FirstSeen != nil {
+		if st.FirstSeen != nil && !wentQuiet(st) {
 			earliest(st.FirstSeen.Time)
 		}
 	case st.LastAnalysisTime != nil:
@@ -234,11 +254,19 @@ func unsettledSince(st *remediationv1alpha1.IncidentStatus, waiting time.Time) t
 // controller forgets when it first saw it waiting.
 func waitsForData(reason string) bool {
 	switch reason {
-	case ReasonNotObserved, ReasonProposed, ReasonEscalated, ReasonAnalyzing, ReasonAnalysisStartUnknown,
+	case ReasonNotObserved, ReasonNotRecent, ReasonProposed, ReasonEscalated, ReasonAnalyzing, ReasonAnalysisStartUnknown,
 		ReasonNoNewData, ReasonCoolingDown, ReasonForeignFingerprint:
 		return true
 	}
 	return false
+}
+
+// wentQuiet reports whether the incident's AnalysisDue condition says NotRecent. The condition keeps that
+// reason while the incident stays not due (a later not-due reason is not written, [conditionAgrees]), so it
+// marks, across restarts, an incident never analyzed that went quiet and was seen again.
+func wentQuiet(st *remediationv1alpha1.IncidentStatus) bool {
+	c := meta.FindStatusCondition(st.Conditions, ConditionAnalysisDue)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == ReasonNotRecent
 }
 
 // newOccurrences returns the number of distinct occurrences that began after since: the records that did,

@@ -85,7 +85,7 @@ func (c *Controller) markDue(ctx context.Context) error {
 	}
 	now := c.cfg.Now()
 	s := TriggerSettings{Debounce: c.cfg.Debounce, SettleLimit: c.cfg.SettleLimit, Cooldown: c.cfg.Cooldown,
-		AnalysisTimeout: c.cfg.AnalysisTimeout}
+		AnalysisTimeout: c.cfg.AnalysisTimeout, RecentWindow: c.cfg.RecentWindow}
 	used, closed, readErr := c.readBudget(ctx, now, &s)
 
 	items := list.Items
@@ -302,14 +302,19 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 // conditionAgrees reports whether the Incident's AnalysisDue condition already holds the decision (due,
 // reason). A condition that says due must hold the same reason. One that says not due agrees with any
 // not-due reason: the reason it gave first stays, so a change that turns every Incident's reason (the budget
-// used up, or set to 0) writes nothing.
+// used up, or set to 0) writes nothing. NotRecent is the exception: it is written over another not-due reason,
+// since it also marks an incident that went quiet ([wentQuiet]), and once written it stays while the incident
+// is not due.
 func conditionAgrees(inc *remediationv1alpha1.Incident, due bool, reason string) bool {
 	cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue)
 	if cond == nil || cond.ObservedGeneration != inc.Generation {
 		return false
 	}
-	if due {
+	switch {
+	case due:
 		return cond.Status == metav1.ConditionTrue && cond.Reason == reason
+	case reason == ReasonNotRecent:
+		return cond.Status == metav1.ConditionFalse && cond.Reason == ReasonNotRecent
 	}
 	return cond.Status == metav1.ConditionFalse
 }
@@ -321,6 +326,7 @@ var dueMessages = map[string]string{
 	ReasonCooldownExpired:      "The symptom recurred and the cooldown since the last analysis has passed",
 	ReasonAnalysisTimedOut:     "The last analysis did not finish within the analysis timeout and the cooldown has passed",
 	ReasonNotObserved:          "No observation is recorded yet",
+	ReasonNotRecent:            "The incident was never analyzed and was not seen within the recent window; a new observation makes it due again",
 	ReasonAnalyzing:            "An analysis is running",
 	ReasonAnalysisStartUnknown: "The incident is in phase Analyzing without a lastAnalysisTime, so the cooldown cannot be placed",
 	ReasonProposed:             "The last analysis made a proposal",

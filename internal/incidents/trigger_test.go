@@ -48,8 +48,12 @@ func ago(d time.Duration) *metav1.Time { return &metav1.Time{Time: triggerNow.Ad
 
 var triggerSettings = TriggerSettings{
 	Debounce: 45 * time.Second, SettleLimit: 5 * time.Minute, Cooldown: 15 * time.Minute,
-	AnalysisTimeout: 10 * time.Minute, MaxAnalysesPerDay: 100,
+	AnalysisTimeout: 10 * time.Minute, RecentWindow: 15 * time.Minute, MaxAnalysesPerDay: 100,
 }
+
+// quietMark is an AnalysisDue condition that says NotRecent, as the trigger leaves an incident that went quiet.
+var quietMark = metav1.Condition{Type: ConditionAnalysisDue, Status: metav1.ConditionFalse, Reason: ReasonNotRecent,
+	LastTransitionTime: metav1.Time{Time: triggerNow.Add(-time.Hour)}}
 
 // incidentStatus returns a status first and last seen seenAgo ago, with one occurrence that began beganAgo
 // ago, and, when analyzedAgo is positive, analyzed that long ago.
@@ -167,6 +171,110 @@ func TestDue(t *testing.T) {
 				return st
 			},
 			reason: ReasonEscalated,
+		},
+		{
+			name:   "not recent: never analyzed and last seen longer ago than the window",
+			status: func() remediationv1alpha1.IncidentStatus { return incidentStatus(35*time.Minute, time.Hour, 0) },
+			reason: ReasonNotRecent,
+		},
+		{
+			name: "not recent: last seen just over the window ago",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return incidentStatus(15*time.Minute+time.Nanosecond, time.Hour, 0)
+			},
+			reason: ReasonNotRecent,
+		},
+		{
+			name:   "not recent: last seen exactly the window ago is still recent",
+			status: func() remediationv1alpha1.IncidentStatus { return incidentStatus(15*time.Minute, time.Hour, 0) },
+			due:    true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name:   "not recent: wins over the budget, so it takes no unit",
+			status: func() remediationv1alpha1.IncidentStatus { return incidentStatus(35*time.Minute, time.Hour, 0) },
+			used:   100,
+			reason: ReasonNotRecent,
+		},
+		{
+			name:     "not recent: wins over a disabled budget",
+			status:   func() remediationv1alpha1.IncidentStatus { return incidentStatus(35*time.Minute, time.Hour, 0) },
+			settings: func(s *TriggerSettings) { s.MaxAnalysesPerDay = 0 },
+			reason:   ReasonNotRecent,
+		},
+		{
+			name:   "not recent: an observation held unwritten makes it recent (and firstSeen is past the settle limit)",
+			status: func() remediationv1alpha1.IncidentStatus { return incidentStatus(35*time.Minute, time.Hour, 0) },
+			held:   10 * time.Second,
+			due:    true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: a new observation after going quiet debounces, though firstSeen is past the settle limit",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := incidentStatus(10*time.Second, 10*time.Second, 0)
+				st.FirstSeen = ago(time.Hour)
+				st.Conditions = []metav1.Condition{quietMark}
+				return st
+			},
+			reason: ReasonDebouncing,
+		},
+		{
+			name: "not recent: after going quiet, the settle limit counts from the controller's first sight",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := incidentStatus(10*time.Second, 10*time.Second, 0)
+				st.FirstSeen = ago(time.Hour)
+				st.Conditions = []metav1.Condition{quietMark}
+				return st
+			},
+			waiting: 5 * time.Minute,
+			due:     true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: a new observation after going quiet is due once settled",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := incidentStatus(45*time.Second, 45*time.Second, 0)
+				st.FirstSeen = ago(time.Hour)
+				st.Conditions = []metav1.Condition{quietMark}
+				return st
+			},
+			due: true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: a lastSeen ahead of the clock (skew) is recent",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := incidentStatus(35*time.Minute, time.Hour, 0)
+				st.LastSeen = ago(-time.Hour)
+				return st
+			},
+			due: true, reason: ReasonFirstAnalysis, // firstSeen is past the settle limit
+
+		},
+		{
+			name:     "not recent: the window is never shorter than the debounce",
+			status:   func() remediationv1alpha1.IncidentStatus { return incidentStatus(45*time.Second, time.Hour, 0) },
+			settings: func(s *TriggerSettings) { s.RecentWindow = 10 * time.Second },
+			due:      true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name:     "not recent: no window, any incident never analyzed may be due",
+			status:   func() remediationv1alpha1.IncidentStatus { return incidentStatus(35*time.Minute, time.Hour, 0) },
+			settings: func(s *TriggerSettings) { s.RecentWindow = 0 },
+			due:      true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: applies only to a first analysis, not to a re-analysis",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return incidentStatus(35*time.Minute, 36*time.Minute, time.Hour)
+			},
+			due: true, reason: ReasonNewOccurrence,
+		},
+		{
+			name: "not recent: not to a timed-out analysis either",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := incidentStatus(time.Hour, time.Hour, 30*time.Minute)
+				st.Phase = remediationv1alpha1.IncidentAnalyzing
+				return st
+			},
+			due: true, reason: ReasonAnalysisTimedOut,
 		},
 		{
 			name:   "debounce: a new incident seen 10 s ago has not settled",
@@ -887,6 +995,50 @@ func TestFlappingIncidentIsDueWithinTheSettleLimit(t *testing.T) {
 	}
 	recur(30) // 5 min after the first recurrence, still flapping
 	eventually(t, ns, 1, dueIs(true, ReasonCooldownExpired))
+}
+
+// Settings applied after Incidents exist (#423): the never-analyzed Incidents last seen longer ago than the
+// recent window are not due (NotRecent) and take no unit of the budget, so the recent one is due though it is
+// the newest. One of the quiet ones seen again is due once it has settled, not at once, though its firstSeen,
+// and the controller's first sight of it not due, are past the settle limit.
+func TestQuietIncidentsTakeNoBudgetWhenSettingsArriveLate(t *testing.T) {
+	ns := namespace(t)
+	for f := 1; f <= 3; f++ {
+		createIncident(t, ns, f, incidentStatus(35*time.Minute, 35*time.Minute, 0))
+	}
+	const recent = 4
+	createIncident(t, ns, recent, incidentStatus(2*time.Minute, 2*time.Minute, 0))
+	var now atomic.Int64
+	now.Store(triggerNow.UnixNano())
+	clock := func() time.Time { return time.Unix(0, now.Load()).UTC() }
+	r := start(t, ns, Config{TriggerInterval: testTriggerInterval, Now: clock})
+	for f := 1; f <= recent; f++ {
+		eventually(t, ns, f, dueIs(false, ReasonSettingsNotFound))
+	}
+	createSettings(t, 2)
+	createBudget(t, ns, nil)
+	eventually(t, ns, recent, dueIs(true, ReasonFirstAnalysis))
+	for f := 1; f <= 3; f++ {
+		eventually(t, ns, f, dueIs(false, ReasonNotRecent))
+	}
+
+	// 10 min later, past the settle limit since the quiet ones were first found not recent, fp(1) is seen
+	// again: it debounces (its condition keeps NotRecent meanwhile), then takes the unit left.
+	again := triggerNow.Add(10 * time.Minute)
+	now.Store(again.UnixNano())
+	time.Sleep(4 * testTriggerInterval)
+	r.obs <- immediate(observation(1, 99, 1, 1, again))
+	written := &metav1.Time{Time: again}
+	eventually(t, ns, 1, func(inc *remediationv1alpha1.Incident) bool { return inc.Status.LastSeen.Equal(written) })
+	time.Sleep(4 * testTriggerInterval)
+	if inc := get(t, ns); meta.IsStatusConditionTrue(inc.Status.Conditions, ConditionAnalysisDue) {
+		t.Fatalf("an Incident seen again after going quiet is due before the debounce: %+v", inc.Status.Conditions)
+	}
+	now.Store(again.Add(45 * time.Second).UnixNano())
+	eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
+	for f := 2; f <= 3; f++ {
+		eventually(t, ns, f, dueIs(false, ReasonNotRecent))
+	}
 }
 
 // When the budget does not cover every Incident that is due, the oldest by firstSeen goes first, whatever

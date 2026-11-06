@@ -144,15 +144,17 @@ type Config struct {
 	// before they open an Incident (RecurAfter, RecurWithin); zero takes DefaultMaxFirstSightings. When it is
 	// full the oldest first sighting is forgotten, and that symptom starts over.
 	MaxFirstSightings int
-	// Debounce, SettleLimit, Cooldown, AnalysisTimeout and TriggerInterval drive the analysis trigger
-	// ([Due]): how long an Incident must go without a new observation, the longest it waits to settle after
-	// its first unsettled observation (the aggregation window by default), the least time between the start
-	// of one analysis and the next, how long an analysis may run before it is taken as lost, and how often
-	// the Incidents are decided again.
+	// Debounce, SettleLimit, Cooldown, AnalysisTimeout, RecentWindow and TriggerInterval drive the analysis
+	// trigger ([Due]): how long an Incident must go without a new observation, the longest it waits to settle
+	// after its first unsettled observation (the aggregation window by default), the least time between the
+	// start of one analysis and the next, how long an analysis may run before it is taken as lost, how
+	// recently an Incident never analyzed must have been seen to be due for its first analysis (the cooldown
+	// by default), and how often the Incidents are decided again.
 	Debounce        time.Duration
 	SettleLimit     time.Duration
 	Cooldown        time.Duration
 	AnalysisTimeout time.Duration
+	RecentWindow    time.Duration
 	TriggerInterval time.Duration
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
@@ -273,6 +275,9 @@ func New(cfg Config) (*Controller, error) {
 	}
 	if cfg.Cooldown <= 0 {
 		cfg.Cooldown = DefaultCooldown
+	}
+	if cfg.RecentWindow <= 0 {
+		cfg.RecentWindow = cfg.Cooldown
 	}
 	if cfg.AnalysisTimeout <= 0 {
 		cfg.AnalysisTimeout = DefaultAnalysisTimeout

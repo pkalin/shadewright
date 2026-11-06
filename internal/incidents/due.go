@@ -19,6 +19,7 @@ package incidents
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -83,7 +84,9 @@ func (c *Controller) markDue(ctx context.Context) error {
 	var list remediationv1alpha1.IncidentList
 	if err := c.cache.List(ctx, &list, client.InNamespace(c.cfg.Namespace)); err != nil {
 		// A pass that looked at no Incident breaks every run of passes that watched one.
-		clear(c.watched)
+		for _, t := range c.memory {
+			t.watchedSince = time.Time{}
+		}
 		return fmt.Errorf("listing the Incidents: %w", err)
 	}
 	now := c.cfg.Now()
@@ -98,7 +101,8 @@ func (c *Controller) markDue(ctx context.Context) error {
 	// skips are the Incidents this pass decides NotRecent over another reason: their writes come after every
 	// other decision, at most notRecentWritesPerPass of them, so a backlog of quiet Incidents (the first pass
 	// after an upgrade, late settings or a budget reset) neither holds up the marks that say due nor runs the
-	// pass into its deadline.
+	// pass into its deadline. The decision is made on the cached copy with the observations held unwritten,
+	// like every other, so an Incident seen again is no skip and is decided in its place in dueOrder.
 	var skips []*remediationv1alpha1.Incident
 	for i := range items {
 		inc := &items[i]
@@ -128,25 +132,45 @@ func (c *Controller) markDue(ctx context.Context) error {
 			}
 		default:
 			decide = c.decider(inc, now, s, &used)
-			// A NotRecent decision takes no unit of the budget, so its write can wait for the others. Not over a
-			// mark that says due (one of another generation): that mark keeps its unit until it is taken back.
-			if due, reason := decide(inc); !wasDue && !due && reason == ReasonNotRecent &&
-				!conditionAgrees(inc, due, reason, runEnded(inc, now, c.cfg.AnalysisTimeout)) {
-				c.rememberWaiting(inc.Name, reason, now)
-				skips = append(skips, inc)
-				continue
-			}
 		}
-		if err := c.decideOne(ctx, inc, now, closed == "", wasDue, decide, &used); err != nil {
+		due, reason := decide(inc)
+		if closed == "" && reason == ReasonNotRecent &&
+			!conditionAgrees(inc, due, reason, runEnded(inc, now, c.cfg.AnalysisTimeout)) {
+			// A NotRecent decision takes no unit of the budget, so its write can wait for the others. A mark
+			// that says due but is no mark ([markedDue]: written for another generation) still says due
+			// until it is written over, so it keeps its unit meanwhile.
+			c.rememberWaiting(inc.UID, reason, now)
+			skips = append(skips, inc)
+			if wasDue {
+				used++
+			}
+			continue
+		}
+		due, reason, wrote, err := c.setDue(ctx, inc, now, due, reason, decide, "")
+		if closed == "" {
+			c.rememberWaiting(inc.UID, reason, now)
+		}
+		if err := c.account(inc, due, reason, wrote, wasDue, err, &used); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			errs = append(errs, err)
 		}
 	}
-	for _, inc := range skips[:min(len(skips), notRecentWritesPerPass)] {
-		// Decided again on the fresh copy, against the budget left now: one seen again meanwhile may be due.
-		if err := c.decideOne(ctx, inc, now, true, false, c.decider(inc, now, s, &used), &used); err != nil {
+	writes := 0
+	for _, inc := range skips {
+		if writes == notRecentWritesPerPass {
+			// The rest are NotRecent too, so the next pass, deciding them again, loses nothing.
+			break
+		}
+		// Only NotRecent is written here: a fresh copy that says otherwise (seen again since the cache was
+		// filled) is left to the next pass, which decides it in its place in dueOrder.
+		wasDue := meta.IsStatusConditionTrue(inc.Status.Conditions, ConditionAnalysisDue)
+		_, _, wrote, err := c.setDue(ctx, inc, now, false, ReasonNotRecent, c.decider(inc, now, s, &used), ReasonNotRecent)
+		if wrote || err != nil {
+			writes++
+		}
+		if err := c.account(inc, false, ReasonNotRecent, wrote, wasDue, err, nil); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -166,30 +190,35 @@ func (c *Controller) markDue(ctx context.Context) error {
 // a backlog of quiet Incidents is written over the next passes instead.
 const notRecentWritesPerPass = 20
 
+// trace is what the analysis trigger remembers of one Incident between passes (see [Memory]): when it first
+// found it waiting only to settle or for budget ([Controller.rememberWaiting]), whether it found it gone
+// quiet, and when the passes in a row that looked at it began ([Controller.watch]).
+type trace struct {
+	waiting      time.Time
+	quiet        bool
+	watchedSince time.Time
+}
+
 // decider returns the decision of [Due] for one Incident, with what the controller knows of it ([Memory])
 // and the budget used so far in this pass (*used, read when called).
 func (c *Controller) decider(inc *remediationv1alpha1.Incident, now time.Time, s TriggerSettings,
 	used *int) func(*remediationv1alpha1.Incident) (bool, string) {
-	m := Memory{Held: c.heldSince(inc.Spec.Fingerprint), Waiting: c.waiting[inc.Name], WatchedSince: c.watched[inc.Name]}
-	_, m.WentQuiet = c.quiet[inc.Name]
+	m := Memory{Held: c.heldSince(inc.Spec.Fingerprint)}
+	if t := c.memory[inc.UID]; t != nil {
+		m.Waiting, m.WentQuiet, m.WatchedSince = t.waiting, t.quiet, t.watchedSince
+	}
 	return func(fresh *remediationv1alpha1.Incident) (bool, string) { return Due(fresh, m, now, s, *used) }
 }
 
-// decideOne sets the AnalysisDue condition of one Incident to what decide says ([Controller.setDue]),
-// remembers when it was first found waiting when the budget is known (known), reports a NotRecent it wrote
-// and counts a unit of the budget in *used for a mark that says due: a failed write may still have landed (a
-// lost answer), and a mark it did not change still says due (wasDue), so either way the Incident takes its
-// unit.
-func (c *Controller) decideOne(ctx context.Context, inc *remediationv1alpha1.Incident, now time.Time, known, wasDue bool,
-	decide func(*remediationv1alpha1.Incident) (bool, string), used *int) error {
-	due, reason, wrote, err := c.setDue(ctx, inc, now, decide)
-	if known {
-		c.rememberWaiting(inc.Name, reason, now)
-	}
+// account reports a NotRecent that setDue wrote, counts a unit of the budget in *used (when used is not nil)
+// for a mark that says due, and returns err: a failed write may still have landed (a lost answer), and a
+// mark it did not change still says due (wasDue), so either way the Incident takes its unit.
+func (c *Controller) account(inc *remediationv1alpha1.Incident, due bool, reason string, wrote, wasDue bool, err error,
+	used *int) error {
 	if wrote && reason == ReasonNotRecent {
 		c.reportNotRecent(inc)
 	}
-	if due || (err != nil && wasDue) {
+	if used != nil && (due || (err != nil && wasDue)) {
 		*used++
 	}
 	return err
@@ -198,40 +227,40 @@ func (c *Controller) decideOne(ctx context.Context, inc *remediationv1alpha1.Inc
 // watch updates what the controller remembers of the Incidents between passes, before anything is decided,
 // on every pass (one that cannot read the budget included), from the cached list: when the passes in a row
 // that looked at each began ([Memory].WatchedSince), and which ones it found gone quiet ([goneQuiet],
-// [Memory].WentQuiet). Finding one gone quiet forgets when it was first seen waiting: that wait belongs to
-// the spell before. An Incident analyzed since is no longer remembered as gone quiet; one not listed, or held
-// by another fingerprint, is forgotten.
+// [Memory].WentQuiet). Finding one gone quiet with nothing held unwritten either forgets when it was first
+// seen waiting: that wait belongs to the spell before. While a new observation is held (a write pending or
+// failed) the wait of the new burst is kept, so its settle limit keeps counting. An Incident analyzed since is
+// no longer remembered as gone quiet; one not listed, or held by another fingerprint, is forgotten.
 func (c *Controller) watch(items []remediationv1alpha1.Incident, now time.Time, s TriggerSettings) {
-	listed := make(map[string]struct{}, len(items))
+	listed := make(map[types.UID]struct{}, len(items))
 	for i := range items {
 		inc := &items[i]
 		if inc.Name != Name(inc.Spec.Fingerprint) {
 			continue
 		}
-		listed[inc.Name] = struct{}{}
-		if _, ok := c.watched[inc.Name]; !ok {
-			c.watched[inc.Name] = now
+		listed[inc.UID] = struct{}{}
+		t := c.memory[inc.UID]
+		if t == nil {
+			t = &trace{}
+			c.memory[inc.UID] = t
+		}
+		if t.watchedSince.IsZero() {
+			t.watchedSince = now
 		}
 		switch {
 		case goneQuiet(inc, now, s):
-			c.quiet[inc.Name] = struct{}{}
-			delete(c.waiting, inc.Name)
-		case inc.Status.LastAnalysisTime != nil || inc.Status.Phase == remediationv1alpha1.IncidentAnalyzing:
-			delete(c.quiet, inc.Name)
-		}
-	}
-	for _, m := range []map[string]time.Time{c.waiting, c.watched} {
-		for name := range m {
-			if _, ok := listed[name]; !ok {
-				delete(m, name)
+			t.quiet = true
+			if held := c.heldSince(inc.Spec.Fingerprint); now.After(held.Add(recentWindow(s))) {
+				t.waiting = time.Time{}
 			}
+		case inc.Status.LastAnalysisTime != nil || inc.Status.Phase == remediationv1alpha1.IncidentAnalyzing:
+			t.quiet = false
 		}
 	}
-	for name := range c.quiet {
-		if _, ok := listed[name]; !ok {
-			delete(c.quiet, name)
-		}
-	}
+	maps.DeleteFunc(c.memory, func(uid types.UID, _ *trace) bool {
+		_, ok := listed[uid]
+		return !ok
+	})
 }
 
 // readBudget reads the daily limit from the RemediationSettings (into s, see [MaxAnalysesPerDay]) and the
@@ -311,14 +340,15 @@ func dueOrder(a, b remediationv1alpha1.Incident) int {
 
 // rememberWaiting keeps when the controller first saw an Incident waiting only to settle or for budget (see
 // [Due]), and forgets it once the Incident waits for data again (analyzed, cooling down, or in a phase that is
-// not due).
-func (c *Controller) rememberWaiting(name, reason string, now time.Time) {
-	if waitsForData(reason) {
-		delete(c.waiting, name)
-		return
-	}
-	if _, ok := c.waiting[name]; !ok {
-		c.waiting[name] = now
+// not due). Only an Incident [Controller.watch] remembers is kept.
+func (c *Controller) rememberWaiting(uid types.UID, reason string, now time.Time) {
+	t := c.memory[uid]
+	switch {
+	case t == nil:
+	case waitsForData(reason):
+		t.waiting = time.Time{}
+	case t.waiting.IsZero():
+		t.waiting = now
 	}
 }
 
@@ -353,15 +383,16 @@ func (c *Controller) reportNotRecent(inc *remediationv1alpha1.Incident) {
 }
 
 // setDue sets the AnalysisDue condition of one Incident to what decide says. cached is the Incident as the
-// cache holds it: when its condition already agrees ([conditionAgrees]), nothing is written. Otherwise the
-// Incident is read fresh from the API server, decided again on that copy, and its status updated, retrying
-// on conflict (the observation writer updates the same status). It reports the decision it last made, also
-// with an error, since a write whose answer was lost may have landed, and whether it wrote that decision (an
-// answer received, not lost); an Incident gone meanwhile is reported not due (NotObserved). now is the
-// pass's clock, against which [runEnded] places the analysis timeout.
-func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Incident, now time.Time,
-	decide func(*remediationv1alpha1.Incident) (bool, string)) (bool, string, bool, error) {
-	due, reason := decide(cached)
+// cache holds it and (due, reason) what decide said of it: when its condition already agrees
+// ([conditionAgrees]), nothing is written. Otherwise the Incident is read fresh from the API server, decided
+// again on that copy, and its status updated, retrying on conflict (the observation writer updates the same
+// status). With only set, a fresh decision of another reason is not written (reported, wrote false). It
+// reports the decision it last made, also with an error, since a write whose answer was lost may have
+// landed, and whether it wrote that decision (an answer received, not lost); an Incident gone meanwhile is
+// reported not due (NotObserved). now is the pass's clock, against which [runEnded] places the analysis
+// timeout.
+func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Incident, now time.Time, due bool, reason string,
+	decide func(*remediationv1alpha1.Incident) (bool, string), only string) (bool, string, bool, error) {
 	if conditionAgrees(cached, due, reason, runEnded(cached, now, c.cfg.AnalysisTimeout)) {
 		return due, reason, false, nil
 	}
@@ -375,7 +406,7 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 		}
 		due, reason = decide(inc)
 		wrote = false
-		if conditionAgrees(inc, due, reason, runEnded(inc, now, c.cfg.AnalysisTimeout)) {
+		if (only != "" && reason != only) || conditionAgrees(inc, due, reason, runEnded(inc, now, c.cfg.AnalysisTimeout)) {
 			return nil
 		}
 		status := metav1.ConditionFalse

@@ -214,14 +214,10 @@ type Controller struct {
 	refused   *boundedSet
 	// sightings holds the first sightings of fingerprints without an Incident (RecurAfter, RecurWithin).
 	sightings *sightings
-	// waiting holds, per Incident name, when the analysis trigger first saw the Incident waiting only to
-	// settle or for budget ([Controller.rememberWaiting]). Only the trigger goroutine uses it.
-	waiting map[string]time.Time
-	// quiet holds the Incidents, never analyzed, the analysis trigger found gone quiet ([goneQuiet]), and
-	// watched, per Incident, when the passes in a row that looked at it began ([Controller.watch]). Only the
-	// trigger goroutine uses them.
-	quiet   map[string]struct{}
-	watched map[string]time.Time
+	// memory holds what the analysis trigger remembers of each Incident between passes ([trace]), by UID, so
+	// an Incident deleted and created again under the same name starts with nothing. Only the trigger
+	// goroutine uses it.
+	memory map[types.UID]*trace
 	// lastEvent is when the last Warning event at the cap was written.
 	lastEvent time.Time
 }
@@ -327,9 +323,7 @@ func New(cfg Config) (*Controller, error) {
 		nextWrite: map[string]time.Time{},
 		refused:   newBoundedSet(refusedRemembered),
 		sightings: newSightings(cfg.MaxFirstSightings),
-		waiting:   map[string]time.Time{},
-		quiet:     map[string]struct{}{},
-		watched:   map[string]time.Time{},
+		memory:    map[types.UID]*trace{},
 	}, nil
 }
 

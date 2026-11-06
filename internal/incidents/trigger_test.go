@@ -1858,3 +1858,28 @@ func TestWaitFromBeforeTheSpellIsForgottenWhileHeld(t *testing.T) {
 		t.Fatalf("Due = %v, %s; want not due", due, reason)
 	}
 }
+
+// A gap between two lastSeen values shorter than the recent window is no quiet spell, even when the pass that
+// reads the new one runs a little after the old one plus the window (#448 review).
+func TestShortGapReadByALatePassIsNotQuiet(t *testing.T) {
+	c, err := New(Config{Namespace: "ns", Now: func() time.Time { return triggerNow }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := triggerSettings
+	window := recentWindow(s)
+	last := triggerNow.Add(-time.Hour)
+	inc := quietIncident("uid-1")
+	inc.Status.LastSeen = &metav1.Time{Time: last}
+	first := last.Add(window - 5*time.Second)
+	for p := first.Add(-90 * 10 * time.Second); !p.After(first); p = p.Add(10 * time.Second) {
+		c.watch([]remediationv1alpha1.Incident{inc}, p, s)
+	}
+	seen := last.Add(window - 2*time.Second) // gap 2 s shorter than the window: no spell
+	inc.Status.LastSeen = &metav1.Time{Time: seen}
+	next := first.Add(10 * time.Second) // 5 s after last + window
+	c.watch([]remediationv1alpha1.Incident{inc}, next, s)
+	if c.memory[inc.UID].quiet {
+		t.Fatalf("gap of window-2s taken as a quiet spell")
+	}
+}

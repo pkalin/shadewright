@@ -229,8 +229,8 @@ func (c *Controller) account(inc *remediationv1alpha1.Incident, due bool, reason
 // watch updates what the controller remembers of the Incidents between passes, before anything is decided,
 // on every pass (one that cannot read the budget included), from the cached list: when the passes in a row
 // that looked at each began ([Memory].WatchedSince), and which ones it found gone quiet ([goneQuiet],
-// [Memory].WentQuiet). The spell is taken to begin at the earlier of the stored lastSeen and the one read on
-// the previous pass. Finding one gone quiet forgets when it was first seen waiting if that was not after
+// [Memory].WentQuiet). A spell that ended between two passes counts when the stored lastSeen is more than the
+// recent window after the one read on the previous pass; it begins at that previous one. Finding one gone quiet forgets when it was first seen waiting if that was not after
 // the spell's begin plus the recent window: such a wait belongs to the spell before. A wait from after it
 // (the new burst seen again, its observation held while its write is pending or failing) is kept, so its
 // settle limit keeps counting. An Incident analyzed since is no longer remembered as gone quiet; one not
@@ -252,15 +252,20 @@ func (c *Controller) watch(items []remediationv1alpha1.Incident, now time.Time, 
 			t.watchedSince = now
 		}
 		var since time.Time
+		quiet := false
 		if inc.Status.LastSeen != nil {
-			since = inc.Status.LastSeen.Time
-			if !t.lastSeen.IsZero() && t.lastSeen.Before(since) {
-				since = t.lastSeen
+			cur := inc.Status.LastSeen.Time
+			since, quiet = cur, goneQuiet(inc, cur, now, s)
+			// A spell that ended between two passes: the lastSeen read on the previous pass was stale when the
+			// new one was seen, so the gap itself was longer than the window. A shorter gap is no spell, however
+			// late the pass that reads it.
+			if prev := t.lastSeen; !prev.IsZero() && prev.Before(cur) && goneQuiet(inc, prev, cur, s) {
+				since, quiet = prev, true
 			}
-			t.lastSeen = inc.Status.LastSeen.Time
+			t.lastSeen = cur
 		}
 		switch {
-		case !since.IsZero() && goneQuiet(inc, since, now, s):
+		case quiet:
 			t.quiet = true
 			if !t.waiting.After(since.Add(recentWindow(s))) {
 				t.waiting = time.Time{}

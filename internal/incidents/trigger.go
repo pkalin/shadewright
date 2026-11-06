@@ -245,8 +245,8 @@ func Due(inc *remediationv1alpha1.Incident, m Memory, now time.Time, s TriggerSe
 //     controller's first sight of it waiting again. Nothing in the status dates the new burst (an event
 //     series counting up again adds no occurrence, and a new observation may still be held unwritten), and
 //     every older time, an m.Waiting from before the spell included, belongs to the spell before. When the
-//     controller finds the incident gone quiet, with the spell beginning at a lastSeen L (the earlier of the
-//     stored one and the one of its previous pass), it forgets an m.Waiting not after L plus the recent
+//     controller finds the incident gone quiet, with the spell beginning at a lastSeen L (the stored one, or
+//     the one of its previous pass when the stored one is more than the recent window after it), it forgets an m.Waiting not after L plus the recent
 //     window, and keeps a later one: that is the new burst's, seen while its observation is held;
 //   - else the begin of its newest burst when the records show a gap before it ([quietUntil]) that no pass of
 //     this process watched (m.WatchedSince is zero or after the gap began): a watched one would have set
@@ -361,9 +361,9 @@ func stale(inc *remediationv1alpha1.Incident, seen, now time.Time, s TriggerSett
 }
 
 // goneQuiet reports whether the incident, never analyzed and not in phase Analyzing, went quiet: last, a
-// lastSeen its status held, is [stale] at now. The controller passes the earlier of the stored lastSeen and
-// the one it read on its previous pass, so a spell that ended between two passes (lastSeen crossed the
-// window after one pass and moved before the next) counts too. Unlike the NotRecent check of [Due] it leaves
+// lastSeen its status held, is [stale] at now. The controller asks it of the stored lastSeen at now, and of
+// the lastSeen it read on its previous pass at the stored one, so a spell that ended between two passes (the
+// gap between the two is longer than the recent window) counts too, and a shorter gap never does. Unlike the NotRecent check of [Due] it leaves
 // the observations held unwritten out, so an incident seen again while its new observation waits for the
 // next write still counts as gone quiet. The controller asks it on every pass, one that cannot read the
 // budget included, and remembers the answer ([Memory].WentQuiet).

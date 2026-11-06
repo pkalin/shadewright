@@ -17,6 +17,7 @@ limitations under the License.
 package incidents
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"strconv"
@@ -1005,47 +1006,117 @@ func claimed(st remediationv1alpha1.IncidentStatus, analyzedAgo time.Duration) r
 	return st
 }
 
-// The AnalysisDue condition says an analysis is running only while one is (#424): it keeps Analyzing while
-// the run is within the analysis timeout, takes the outcome's reason once the run writes phase Escalated or
-// Proposed, and CoolingDown once a run is past the timeout; after that the passes rewrite nothing.
+// passCounter is a cache that counts the trigger's passes: each pass lists the Incidents once, first.
+type passCounter struct {
+	client.Reader
+	lists atomic.Int32
+}
+
+func (p *passCounter) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	p.lists.Add(1)
+	return p.Reader.List(ctx, list, opts...)
+}
+
+// afterPasses waits until at least n passes have run from start to end since it was called.
+func (p *passCounter) afterPasses(t *testing.T, n int32) {
+	t.Helper()
+	// The pass running now may have listed already: n + 1 more lists mean n whole passes.
+	want := p.lists.Load() + n + 1
+	deadline := time.Now().Add(10 * time.Second)
+	for p.lists.Load() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("fewer than %d passes ran", n)
+		}
+		time.Sleep(testTriggerInterval / 4)
+	}
+}
+
+// setPhase sets the phase of the Incident of fp(1), as the analysis's outcome write does: the phase only,
+// AnalysisDue is the trigger's.
+func setPhase(t *testing.T, ns string, phase remediationv1alpha1.IncidentPhase) {
+	t.Helper()
+	inc := get(t, ns)
+	inc.Status.Phase = phase
+	if err := env.admin.Status().Update(t.Context(), inc); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The AnalysisDue condition says an analysis is running only while one is (#424). It keeps Analyzing while
+// the run is within the analysis timeout; once the run has ended (an outcome written, or the timeout reached)
+// the reason the trigger decides replaces it, whatever it is, and with the budget unknown an outcome still
+// shows as Proposed or Escalated. The passes after that rewrite nothing.
 func TestAnalyzingEndsWithTheRun(t *testing.T) {
-	ns := namespace(t)
-	createSettings(t, 10)
-	createBudget(t, ns, nil)
-	for f := 1; f <= 3; f++ {
-		createIncident(t, ns, f, claimed(incidentStatus(2*time.Minute, time.Hour, 0), time.Minute))
+	recent := incidentStatus(10*time.Second, time.Hour, 0)
+	settled := incidentStatus(2*time.Minute, time.Hour, 0)
+	withPhase := func(st remediationv1alpha1.IncidentStatus, phase remediationv1alpha1.IncidentPhase) remediationv1alpha1.IncidentStatus {
+		st.Phase = phase
+		return st
 	}
-	// fp(4) was claimed 12 minutes ago: past the analysis timeout, within the cooldown.
-	createIncident(t, ns, 4, claimed(incidentStatus(2*time.Minute, time.Hour, 0), 12*time.Minute))
-	r := start(t, ns, triggerConfig)
-	eventually(t, ns, 4, dueIs(false, ReasonCoolingDown))
-	for f := 1; f <= 3; f++ {
-		eventually(t, ns, f, dueIs(false, ReasonAnalyzing))
-	}
-
-	// The runs of fp(1) and fp(2) end as the analysis controller's outcome write ends them: it sets the phase
-	// and leaves AnalysisDue to the trigger.
-	for f, phase := range map[int]remediationv1alpha1.IncidentPhase{
-		1: remediationv1alpha1.IncidentEscalated, 2: remediationv1alpha1.IncidentProposed,
+	for _, tc := range []struct {
+		name string
+		// settings is the daily limit of the RemediationSettings; -1 means none exist.
+		settings int32
+		budget   map[string]string
+		cfg      Config
+		status   remediationv1alpha1.IncidentStatus
+		// unreadable makes the reads of the RemediationSettings fail.
+		unreadable bool
+		want       string
+		// then runs after want is reached, and then is the reason expected after it.
+		then     func(t *testing.T, ns string)
+		thenWant string
+	}{
+		{name: "running", settings: 10, status: claimed(settled, time.Minute), want: ReasonAnalyzing},
+		{name: "running, settings missing", settings: -1, status: claimed(settled, time.Minute), want: ReasonAnalyzing},
+		{name: "escalated", settings: 10, status: withPhase(claimed(settled, time.Minute), remediationv1alpha1.IncidentEscalated),
+			want: ReasonEscalated},
+		{name: "proposed", settings: 10, status: withPhase(claimed(settled, time.Minute), remediationv1alpha1.IncidentProposed),
+			want: ReasonProposed},
+		{name: "ends while running", settings: 10, status: claimed(settled, time.Minute), want: ReasonAnalyzing,
+			then: func(t *testing.T, ns string) { setPhase(t, ns, remediationv1alpha1.IncidentEscalated) }, thenWant: ReasonEscalated},
+		{name: "timed out, cooling down", settings: 10, status: claimed(settled, 12*time.Minute), want: ReasonCoolingDown},
+		{name: "timed out past the cooldown, debouncing", settings: 10, status: claimed(recent, 20*time.Minute),
+			want: ReasonDebouncing},
+		{name: "timed out past the cooldown, budget spent", settings: 10, budget: usedToday(10),
+			status: claimed(settled, 20*time.Minute), want: ReasonDailyBudgetReached},
+		{name: "cooldown shorter than the timeout", settings: 10,
+			cfg:    Config{Cooldown: 5 * time.Minute, AnalysisTimeout: 10 * time.Minute},
+			status: claimed(recent, 12*time.Minute), want: ReasonDebouncing},
+		{name: "timed out, settings missing", settings: -1, status: claimed(settled, 12*time.Minute),
+			want: ReasonSettingsNotFound},
+		{name: "escalated, settings missing", settings: -1,
+			status: withPhase(claimed(settled, time.Minute), remediationv1alpha1.IncidentEscalated), want: ReasonEscalated,
+			then: func(t *testing.T, _ string) { createSettings(t, 10) }, thenWant: ReasonEscalated},
+		{name: "proposed, settings unreadable", settings: 10, unreadable: true,
+			status: withPhase(claimed(settled, time.Minute), remediationv1alpha1.IncidentProposed), want: ReasonProposed},
 	} {
-		inc := &remediationv1alpha1.Incident{}
-		if err := env.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: Name(fp(f))}, inc); err != nil {
-			t.Fatal(err)
-		}
-		inc.Status.Phase = phase
-		if err := env.admin.Status().Update(t.Context(), inc); err != nil {
-			t.Fatal(err)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			ns := namespace(t)
+			if tc.settings >= 0 {
+				createSettings(t, tc.settings)
+			}
+			createBudget(t, ns, tc.budget)
+			createIncident(t, ns, 1, tc.status)
+			cfg := tc.cfg
+			cfg.TriggerInterval, cfg.Now = triggerConfig.TriggerInterval, triggerConfig.Now
+			settings := &failingSettings{Reader: env.admin}
+			settings.fail.Store(tc.unreadable)
+			passes := &passCounter{Reader: settings}
+			r := startWith(t, ns, cfg, func(c *Controller, _ *countingClient) { c.cache = passes })
+			eventually(t, ns, 1, dueIs(false, tc.want))
+			if tc.then != nil {
+				tc.then(t, ns)
+				eventually(t, ns, 1, dueIs(false, tc.thenWant))
+			}
+			marks := r.writes.marks.Load()
+			passes.afterPasses(t, 3)
+			if got := r.writes.marks.Load() - marks; got != 0 {
+				t.Fatalf("%d conditions rewritten after the reason settled", got)
+			}
+			eventually(t, ns, 1, dueIs(false, cmp.Or(tc.thenWant, tc.want)))
+		})
 	}
-	eventually(t, ns, 1, dueIs(false, ReasonEscalated))
-	eventually(t, ns, 2, dueIs(false, ReasonProposed))
-
-	marks := r.writes.marks.Load()
-	time.Sleep(10 * triggerConfig.TriggerInterval)
-	if got := r.writes.marks.Load() - marks; got != 0 {
-		t.Fatalf("%d conditions rewritten after the runs ended", got)
-	}
-	eventually(t, ns, 3, dueIs(false, ReasonAnalyzing))
 }
 
 // An Incident marked due whose condition cannot be rewritten keeps its unit of the budget, so a failed

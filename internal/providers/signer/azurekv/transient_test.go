@@ -19,6 +19,7 @@ package azurekv
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -323,4 +324,152 @@ func TestSignTryTimeoutDuringBodyRead(t *testing.T) {
 		t.Errorf("err = %v, want a retryable deadline error", err)
 	}
 	assertCleanChain(t, "try timeout during body read", err)
+}
+
+// emptyAfter returns, for each authorized request once armed is set, a response with status and no body
+// after calling end (when set) and waiting for the request's context to end: an answer that the HTTP client
+// hands back after the try or the caller gave up, as from a server that sees the client leave and returns
+// from its handler.
+func emptyAfter(armed *atomic.Bool, status int, end func()) func(policy.Transporter) policy.Transporter {
+	return func(inner policy.Transporter) policy.Transporter {
+		return transporterFunc(func(req *http.Request) (*http.Response, error) {
+			if !armed.Load() || req.Header.Get("Authorization") == "" {
+				return inner.Do(req)
+			}
+			if end != nil {
+				end()
+			}
+			<-req.Context().Done()
+			return &http.Response{StatusCode: status, Header: http.Header{"Content-Length": {"0"}},
+				Body: http.NoBody, Request: req}, nil
+		})
+	}
+}
+
+// TestSignEmptyAnswerAfterDeadline covers a Key Vault response without a body that the HTTP client returns
+// after the per-try deadline (#447, the race #438 found in the model client): it is the try's retryable
+// deadline, not a final "response does not name the key" (an empty 200) or a final status. When the caller
+// cancelled instead, it is a final cancellation. The first Sign learns the challenge under a generous try
+// timeout, so the timed try holds only the authorized request.
+func TestSignEmptyAnswerAfterDeadline(t *testing.T) {
+	kid := "https://" + testHost + "/keys/github-app/" + testVersion
+	for _, status := range []int{http.StatusOK, http.StatusBadRequest, http.StatusNotFound} {
+		var armed atomic.Bool
+		s, v := setupWith(t, kid, Options{Timeout: time.Minute, MaxRetries: -1}, &fakeCredential{},
+			emptyAfter(&armed, status, nil), clientConfig{tryTimeout: 30 * time.Second})
+		v.respond = v.signOK(kid)
+		if _, err := s.Sign(context.Background(), digestOf("x")); err != nil {
+			t.Fatalf("%d: first Sign: %v", status, err)
+		}
+		armed.Store(true)
+		_, err := s.Sign(atTryDeadline(), digestOf("x"))
+		if !providers.IsRetryable(err) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("%d after the try deadline: err = %v, want a retryable deadline error", status, err)
+		}
+		assertCleanChain(t, "empty answer after the try deadline", err)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		s, v = setupWith(t, kid, Options{Timeout: time.Minute, MaxRetries: -1}, &fakeCredential{},
+			emptyAfter(&armed, status, cancel), clientConfig{tryTimeout: 30 * time.Second})
+		v.respond = v.signOK(kid)
+		_, err = s.Sign(ctx, digestOf("x"))
+		if !errors.Is(err, context.Canceled) || providers.IsRetryable(err) {
+			t.Errorf("%d after a cancel: err = %v, want a non-retryable cancellation", status, err)
+		}
+		cancel()
+	}
+}
+
+// guardDo calls guardTransport directly, for Key Vault or Entra ID, with a request whose context is ctx and
+// an inner transport that returns resp. It returns the result and what was recorded for the token request.
+func guardDo(t *testing.T, ctx context.Context, entra bool, resp *http.Response) (*http.Response, *tokenRequest, error) {
+	t.Helper()
+	tr := &tokenRequest{}
+	req, err := http.NewRequestWithContext(context.WithValue(ctx, tokenRequestKey{}, tr), http.MethodPost,
+		"https://"+testHost+"/keys/k/sign", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := guardTransport{entra: entra, inner: transporterFunc(func(req *http.Request) (*http.Response, error) {
+		resp.Request = req
+		return resp, nil
+	})}
+	got, err := g.Do(req)
+	return got, tr, err
+}
+
+// safeTestChallenge is a Key Vault challenge that safeChallenge accepts for testHost.
+const safeTestChallenge = `Bearer authorization="https://login.microsoftonline.com/tenant", resource="https://vault.azure.net"`
+
+// TestGuardTransportEmptyAnswerAfterDeadline calls guardTransport directly, for Key Vault and for Entra
+// ID, with a response without a body (http.NoBody or a nil Body) of several statuses, including a 401 with
+// a challenge the Key Vault check accepts. Returned after the request's deadline, it becomes the deadline
+// and, for a token request, is recorded as such, so the credential classes it as a transient deadline and
+// not by the status. Returned in time, it passes through unchanged and its status is recorded.
+func TestGuardTransportEmptyAnswerAfterDeadline(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		header http.Header
+		body   io.ReadCloser
+	}{
+		{"400 NoBody", http.StatusBadRequest, http.Header{}, http.NoBody},
+		{"200 nil body", http.StatusOK, http.Header{}, nil},
+		{"404 NoBody", http.StatusNotFound, http.Header{}, http.NoBody},
+		{"401 safe challenge", http.StatusUnauthorized, http.Header{"Www-Authenticate": {safeTestChallenge}}, http.NoBody},
+	}
+	for _, c := range cases {
+		for _, entra := range []bool{false, true} {
+			for _, late := range []bool{true, false} {
+				name := fmt.Sprintf("%s entra=%v late=%v", c.name, entra, late)
+				ctx, cancel := context.WithCancel(context.Background())
+				if late {
+					ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				}
+				resp := &http.Response{StatusCode: c.status, Header: c.header, Body: c.body}
+				got, tr, err := guardDo(t, ctx, entra, resp)
+				cancel()
+				if late {
+					if got != nil || !errors.Is(err, context.DeadlineExceeded) {
+						t.Errorf("%s: resp %v, err = %v; want no response and context.DeadlineExceeded", name, got, err)
+					}
+					if entra {
+						if cause, retry := entraCause(tr.transportErr); cause != context.DeadlineExceeded || !retry || tr.status != 0 {
+							t.Errorf("%s: recorded %+v, class %v, %v; want a transient deadline and no status", name, tr, cause, retry)
+						}
+					}
+					continue
+				}
+				if err != nil || got != resp || got.StatusCode != c.status || got.Body != c.body {
+					t.Errorf("%s: resp %+v, err = %v; want the response unchanged", name, got, err)
+				}
+				if entra && (tr.status != c.status || tr.transportErr != nil) {
+					t.Errorf("%s: recorded %+v; want status %d and no error", name, tr, c.status)
+				}
+			}
+		}
+	}
+}
+
+// TestGuardTransportEmptyAnswerAfterCancel calls guardTransport directly, for Key Vault and for Entra ID,
+// with a response without a body returned after the caller cancelled: it returns the cancellation, which
+// azcore does not retry, and for a token request records it, so the credential classes it as a final
+// cancellation and not by the status (an empty 200 would otherwise be "a successful answer that cannot be
+// used", which is transient).
+func TestGuardTransportEmptyAnswerAfterCancel(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusServiceUnavailable} {
+		for _, entra := range []bool{false, true} {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			got, tr, err := guardDo(t, ctx, entra, &http.Response{StatusCode: status, Header: http.Header{}, Body: http.NoBody})
+			if got != nil || !errors.Is(err, context.Canceled) || providers.IsRetryable(err) {
+				t.Errorf("%d entra=%v: resp %v, err = %v; want no response and a final context.Canceled", status, entra, got, err)
+			}
+			if entra {
+				if cause, retry := entraCause(tr.transportErr); cause != context.Canceled || retry || tr.status != 0 {
+					t.Errorf("%d: recorded %+v, class %v, %v; want a final cancellation and no status", status, tr, cause, retry)
+				}
+			}
+		}
+	}
 }

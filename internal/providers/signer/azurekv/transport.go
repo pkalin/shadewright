@@ -93,28 +93,39 @@ func (g guardTransport) do(req *http.Request) (*http.Response, error) {
 		closeBody(resp)
 		return nil, final{errMalformedChallenge}
 	}
-	if resp.Body == nil || resp.Body == http.NoBody {
-		return resp, nil
-	}
-	if resp.ContentLength > maxResponseBody {
+	empty := resp.Body == nil || resp.Body == http.NoBody
+	var body []byte
+	if !empty {
+		if resp.ContentLength > maxResponseBody {
+			closeBody(resp)
+			return nil, final{errResponseTooLarge}
+		}
+		body, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
 		closeBody(resp)
-		return nil, final{errResponseTooLarge}
+		// An oversized body is final whenever the read ended: a try that runs out while it is read must not
+		// turn it into a retryable timeout.
+		if len(body) > maxResponseBody {
+			return nil, final{errResponseTooLarge}
+		}
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
-	closeBody(resp)
-	// An oversized body is final whenever the read ended: a try that runs out while it is read must not
-	// turn it into a retryable timeout.
-	if len(body) > maxResponseBody {
-		return nil, final{errResponseTooLarge}
-	}
-	// A read that ended after the try or the caller gave up returns the context error, whether or not
-	// the read itself failed: the HTTP client's read error does not match it, and a read can also end
-	// cleanly with a cut body (closing a TLS connection sends close_notify before the socket closes, and a
-	// server that sees it may end a chunked response early). azcore reports a parent context error
-	// itself but a per-try deadline only as returned here, so a cut body would otherwise reach the JSON
-	// decoder and come back as a final SDK error instead of a retryable timeout.
+	// A response that the HTTP client returns, or whose body read ends, after the try or the caller gave up
+	// is that context error, whatever its status and whether or not the read failed (#447, as #438 in the
+	// model client):
+	//   - a server that sees the client leave may still send an empty 200, which would otherwise come back
+	//     as a final "response does not name the key" instead of a retryable timeout;
+	//   - the HTTP client's read error does not match the context error, and a read can also end cleanly
+	//     with a cut body (closing a TLS connection sends close_notify before the socket closes, and a
+	//     server that sees it may end a chunked response early).
+	// azcore reports a parent context error itself but a per-try deadline only as returned here, so either
+	// would otherwise reach the SDK and come back as a final error instead of a retryable timeout.
 	if ctxErr := req.Context().Err(); ctxErr != nil {
+		if empty {
+			closeBody(resp) // A read body is closed already.
+		}
 		return nil, ctxErr
+	}
+	if empty {
+		return resp, nil
 	}
 	if err != nil {
 		return nil, cleanBodyError(err)

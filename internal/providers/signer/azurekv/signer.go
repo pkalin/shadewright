@@ -390,7 +390,10 @@ type cleanCredential struct {
 // order:
 //
 //  1. A caller that cancelled gets a final cancellation, whatever else happened.
-//  2. When Entra ID answered, its status decides, even if the deadline has passed by now.
+//  2. When Entra ID's answer reached the signer before the try's deadline, its status decides, even if
+//     the deadline has passed by the time the token request returns. An answer that the HTTP client hands
+//     back after the deadline without a body, or whose body was still being read, is that deadline
+//     (guardTransport), so step 3 classes it as transient.
 //  3. Otherwise the last thing recorded for this request decides (tokenRequest): a token file that could
 //     not be read is final; an exchange with Entra ID is classed as guardTransport classed it, and a
 //     successful answer that still failed is transient.

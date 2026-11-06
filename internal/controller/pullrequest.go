@@ -217,7 +217,7 @@ func (r *RemediationRequestReconciler) renderWaiting(ctx context.Context, rr *re
 		return r.retry(ctx, rr, errNoHead)
 	}
 	if pr.RenderedTargetHead == fresh.Head {
-		return reconcile.Result{RequeueAfter: freshRecheckInterval}, nil
+		return r.waited(rr), nil
 	}
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	err := r.renderWaitingStep(stepCtx, rr, fresh)
@@ -233,7 +233,91 @@ func (r *RemediationRequestReconciler) renderWaiting(ctx context.Context, rr *re
 	case err != nil:
 		return r.retry(ctx, rr, err)
 	}
-	return reconcile.Result{RequeueAfter: freshRecheckInterval}, nil
+	return r.waited(rr), nil
+}
+
+// pollState is what PullRequestPollInterval needs to know of a request: when its last full recheck while its
+// pull request waits ended, and the UID of the request it was, so a request made again with the same name starts
+// with a full recheck.
+type pollState struct {
+	uid types.UID
+	at  time.Time
+}
+
+// pullRequestPollInterval returns PullRequestPollInterval, or its default when zero. SetupWithManager has
+// refused any other value outside its bounds, so nothing is clamped here.
+func (r *RemediationRequestReconciler) pullRequestPollInterval() time.Duration {
+	if r.PullRequestPollInterval == 0 {
+		return DefaultPullRequestPollInterval
+	}
+	return r.PullRequestPollInterval
+}
+
+// validatePullRequestPollInterval returns an error unless the interval in use (zero gives the default) is within
+// [MinPullRequestPollInterval, MaxPullRequestPollInterval]. It is the only check of the bounds; SetupWithManager
+// runs it, so a value out of bounds stops the executor at start instead of being changed without a word.
+func (r *RemediationRequestReconciler) validatePullRequestPollInterval() error {
+	if d := r.pullRequestPollInterval(); d < MinPullRequestPollInterval || d > MaxPullRequestPollInterval {
+		return fmt.Errorf("the pull request poll interval %s is not between %s and %s", d,
+			ShortDuration(MinPullRequestPollInterval), ShortDuration(MaxPullRequestPollInterval))
+	}
+	return nil
+}
+
+// ShortDuration formats d as the flags are written: whole minutes as "5m", anything else as time.Duration does.
+func ShortDuration(d time.Duration) string {
+	if d > 0 && d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", d/time.Minute)
+	}
+	return d.String()
+}
+
+// waited ends a full recheck of a request whose pull request waits and needs nothing retried: it notes when, and
+// requeues after the poll interval. The looks until freshRecheckInterval has passed read only the pull request
+// (pollOnly).
+func (r *RemediationRequestReconciler) waited(rr *remediationv1alpha1.RemediationRequest) reconcile.Result {
+	r.checked.Store(client.ObjectKeyFromObject(rr), pollState{uid: rr.UID, at: r.now()})
+	return reconcile.Result{RequeueAfter: r.pullRequestPollInterval()}
+}
+
+// lookOnly reports whether a request whose pull request was looked at may skip the full recheck now: it waits
+// for review, and carries nothing the full recheck must settle at once, neither the mark of a stale plan's
+// cleanup (staleMark) nor WritesPaused, which resumeIfAllowed removes with the WritesResumed Event at the first
+// reconcile after the pause lifts. A PlanFresh Unknown of a refusal is left to the next full recheck, as before
+// the looks: asking a host that refused again every look would only cost calls.
+func lookOnly(rr *remediationv1alpha1.RemediationRequest) bool {
+	if p := rr.Status.Phase; p != remediationv1alpha1.PhasePRCreated && p != remediationv1alpha1.PhaseAwaitingApproval {
+		return false
+	}
+	return staleMark(rr) == nil &&
+		meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionWritesPaused) == nil
+}
+
+// pollOnly reports whether recheck may stop after looking at the pull request, and the requeue then: the pull
+// request was read and is still open (a failed look gets the full recheck and its error handling), lookOnly
+// holds, and the last full recheck of this request (same name and UID) in this process ended less than
+// freshRecheckInterval ago. Nothing is written to Git on a look, so skipping the freshness check there never lets
+// a write through on a stale plan: every write still comes right after a full check (design section 6).
+// recheck calls it only for a request with a recorded pull request.
+func (r *RemediationRequestReconciler) pollOnly(rr *remediationv1alpha1.RemediationRequest, outcome prOutcome) (
+	time.Duration, bool) {
+	if outcome != prOpen || !lookOnly(rr) {
+		return 0, false
+	}
+	v, ok := r.checked.Load(client.ObjectKeyFromObject(rr))
+	if !ok {
+		return 0, false
+	}
+	last, ok := v.(pollState)
+	if !ok || last.uid != rr.UID {
+		return 0, false
+	}
+	left := last.at.Add(freshRecheckInterval).Sub(r.now())
+	if left <= 0 || left > freshRecheckInterval {
+		// Due, or the clock went back: a full recheck.
+		return 0, false
+	}
+	return min(left, r.pullRequestPollInterval()), true
 }
 
 // renderWaitingStep reads the target file at the recorded head of the pull request, checks that merging it
@@ -569,8 +653,12 @@ func (r *RemediationRequestReconciler) checkRender(ctx context.Context, git prov
 type prOutcome int
 
 const (
-	// prOpen: open with Shadewright's head, or it could not be checked; the freshness check decides next.
+	// prOpen: open with Shadewright's head; the freshness check decides next.
 	prOpen prOutcome = iota
+	// prUnchecked: it could not be checked. recheck waits out a delay the host asked for first; otherwise it goes
+	// on as for prOpen, always with the full recheck, whose error handling covers paused writes, changed settings
+	// and the error backoff.
+	prUnchecked
 	// prStopped: the request ended (Merged, gone, head moved).
 	prStopped
 	// prClosed: closed without a merge. That is a rejection only if the plan is still fresh; a stale plan's
@@ -581,23 +669,25 @@ const (
 // watchPullRequest looks at the recorded pull request: a merge ends the request (Merged), a pull request
 // that is gone or a moved head too (NeedsIntervention); open with the head Shadewright pushed moves PRCreated
 // to AwaitingApproval. On an error the caller goes on to the freshness check, which owns the handling of
-// paused writes, changed settings and provider failures. Delivery after the merge is a later step (#94, #95).
+// paused writes, changed settings and provider failures; the error is returned with prUnchecked, so a delay the
+// host asked for is kept. Delivery after the merge is a later step (#94, #95).
 func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
-	rr *remediationv1alpha1.RemediationRequest) prOutcome {
+	rr *remediationv1alpha1.RemediationRequest) (prOutcome, error) {
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
 	err := r.watchStep(stepCtx, rr)
 	err = boundErr(ctx, stepCtx, "pull request check", err)
 	switch {
 	case errors.Is(err, errStopped):
-		return prStopped
+		return prStopped, nil
 	case errors.Is(err, errClosed):
-		return prClosed
+		return prClosed, nil
 	case err != nil:
 		logf.FromContext(ctx).V(1).Info("Could not check the pull request of RemediationRequest",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		return prUnchecked, err
 	}
-	return prOpen
+	return prOpen, nil
 }
 
 // rejected ends a fresh request whose pull request a person closed without a merge. It may also be
@@ -777,7 +867,8 @@ func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *rem
 		logf.FromContext(ctx).Info("Paused writes of RemediationRequest after a refusal of the Git host",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "reason", reason)
 	}
-	return reconcile.Result{RequeueAfter: freshRecheckInterval}, nil
+	// The refusal is asked again at the next full recheck; the looks until then read only the pull request.
+	return r.waited(rr), nil
 }
 
 // refusedWhileWatching is the fixed PlanFresh message of a refusal while a recorded pull request waits.

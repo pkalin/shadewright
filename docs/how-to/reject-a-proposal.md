@@ -9,7 +9,7 @@ Rejecting is closing the pull request without merging it. Nothing in the cluster
 ## Steps
 
 1. Close the pull request on your Git host, without merging. Add a comment saying why if your team wants one.
-2. Within about five minutes the request ends in phase `NeedsIntervention` with reason `ChangeRequestClosed`. It is final, and the executor never reopens a pull request.
+2. Within about a minute (the executor's `--pull-request-poll-interval`) the request ends in phase `NeedsIntervention` with reason `ChangeRequestClosed`. It is final, and the executor never reopens a pull request.
 
     ```bash
     kubectl -n shadewright-system get remediationrequest <name> \

@@ -319,8 +319,9 @@ kubectl patch remediationpolicy demo-memory --type json \
 kubectl -n shadewright-system get rr web-memory-001 -w
 ```
 
-The freshness check runs every five minutes and at once on a change to the request, so allow up to five minutes;
-you can nudge it with `kubectl -n shadewright-system annotate rr web-memory-001 touched=$(date +%s) --overwrite`.
+While the pull request waits, the plan is checked at most five minutes after the last full recheck, so allow up to
+five minutes. A nudge (`kubectl -n shadewright-system annotate rr web-memory-001 touched=$(date +%s) --overwrite`)
+only makes the executor look at the pull request; it does not bring the plan check forward.
 Expect the phase `Superseded`, the condition `PlanFresh=False` with the reason and message naming the policy, and
 the pull request closed, not merged, with its branch left in place:
 

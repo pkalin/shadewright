@@ -937,6 +937,166 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		)
 	})
 
+	// Issue #434: a merge was seen about four minutes late, because a waiting pull request was looked at only
+	// with the full recheck, every five minutes. It is now looked at every poll interval in between.
+	Context("while the pull request waits for review", func() {
+		BeforeEach(func() {
+			faulty = newFaultyGit(git)
+		})
+
+		// look runs one reconcile with r and returns its requeue, and how many pull request look-ups and
+		// target branch head reads it made.
+		look := func(r *RemediationRequestReconciler) (time.Duration, int, int) {
+			finds, heads := faulty.count(opFind), faulty.count(opBranchHead)
+			res, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			return res.RequeueAfter, faulty.count(opFind) - finds, faulty.count(opBranchHead) - heads
+		}
+
+		It("looks at the pull request every poll interval and sees a merge within it", func() {
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			// One reconciler from here on, as one executor process: it remembers its last full recheck.
+			r := reconciler()
+			wait, finds, heads := look(r)
+			Expect(wait).To(Equal(DefaultPullRequestPollInterval), "the next look is after the poll interval")
+			Expect(finds).To(Equal(1))
+			Expect(heads).To(BeNumerically(">", 0), "the first look of a process is a full recheck")
+			for i := range 4 {
+				clock = clock.Add(DefaultPullRequestPollInterval)
+				wait, finds, heads = look(r)
+				Expect(wait).To(Equal(DefaultPullRequestPollInterval), "poll %d", i+1)
+				Expect(finds).To(Equal(1), "poll %d looks at the pull request", i+1)
+				Expect(heads).To(BeZero(), "poll %d reads nothing else from Git", i+1)
+			}
+			clock = clock.Add(DefaultPullRequestPollInterval)
+			wait, _, heads = look(r)
+			Expect(wait).To(Equal(DefaultPullRequestPollInterval))
+			Expect(heads).To(BeNumerically(">", 0), "the plan gets its full recheck every five minutes")
+
+			_, err := git.Merge(got.Status.PullRequest.Number)
+			Expect(err).NotTo(HaveOccurred())
+			clock = clock.Add(DefaultPullRequestPollInterval)
+			wait, finds, heads = look(r)
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged), "the merge is seen at the next poll")
+			Expect(wait).To(BeZero())
+			Expect(finds).To(Equal(1))
+			Expect(heads).To(BeZero(), "a merge is recorded before any freshness read")
+			_, kept := r.checked.Load(key().NamespacedName)
+			Expect(kept).To(BeFalse(), "an ended request is not remembered")
+		})
+
+		It("checks the plan in full on the first look of a process and when the full recheck is due", func() {
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			r := reconciler()
+			r.PullRequestPollInterval = 2 * time.Minute
+			wait, _, _ := look(r)
+			Expect(wait).To(Equal(2 * time.Minute))
+			clock = clock.Add(4 * time.Minute)
+			wait, _, heads := look(r)
+			Expect(heads).To(BeZero())
+			Expect(wait).To(Equal(time.Minute), "the poll before the full recheck ends when it is due")
+			clock = clock.Add(time.Minute)
+			_, _, heads = look(r)
+			Expect(heads).To(BeNumerically(">", 0))
+			_, _, heads = look(reconciler())
+			Expect(heads).To(BeNumerically(">", 0), "a new process starts with a full recheck")
+		})
+
+		It("waits as long as the Git host asks when a look is rate limited, up to the full recheck's period", func() {
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			r := reconciler()
+			look(r)
+			clock = clock.Add(DefaultPullRequestPollInterval)
+			faulty.failOn(opFind, &providers.RetryableError{RetryAfter: 3 * time.Minute, Err: errors.New("rate limited")})
+			wait, _, heads := look(r)
+			Expect(wait).To(Equal(3*time.Minute), "not the poll interval")
+			Expect(heads).To(BeZero(), "the freshness check does not call the host again at once")
+			faulty.failOn(opFind, &providers.RetryableError{RetryAfter: time.Hour, Err: errors.New("rate limited")})
+			wait, _, _ = look(r)
+			Expect(wait).To(Equal(FullRecheckInterval), "never longer than the full recheck's period")
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		})
+
+		It("finishes a stale plan's cleanup at the next look instead of waiting for the full recheck", func() {
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			r := reconciler()
+			look(r)
+			// A cleanup that wrote its mark but lost the close (a restart, a deadline) leaves this status.
+			got := fetch()
+			meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{
+				Type: remediationv1alpha1.ConditionPlanFresh, Status: metav1.ConditionFalse,
+				Reason: freshness.ReasonPolicyChanged, Message: "The policy changed",
+			})
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+			clock = clock.Add(DefaultPullRequestPollInterval)
+			wait, _, _ := look(r)
+			Expect(wait).To(BeZero(), "not the poll interval")
+			got = fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh).Reason).
+				To(Equal(freshness.ReasonPolicyChanged))
+			Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestClosed), "the close is done again")
+		})
+
+		Context("when writes were paused", func() {
+			setPaused := func(on bool) {
+				live := &remediationv1alpha1.RemediationSettings{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, live)).To(Succeed())
+				live.Spec.Paused = new(on)
+				Expect(k8sClient.Update(ctx, live)).To(Succeed())
+			}
+			paused := func() *metav1.Condition {
+				return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionWritesPaused)
+			}
+			// pauseBetweenFullRechecks reaches a waiting request whose last full recheck is recent and which
+			// carries WritesPaused, as a pause between two full rechecks leaves it.
+			pauseBetweenFullRechecks := func() *RemediationRequestReconciler {
+				recorder = record.NewFakeRecorder(20)
+				drive(remediationv1alpha1.PhaseAwaitingApproval)
+				r := reconciler()
+				look(r)
+				setPaused(true)
+				clock = clock.Add(DefaultPullRequestPollInterval)
+				look(r)
+				Expect(paused()).NotTo(BeNil())
+				Expect(recorder.Events).To(Receive(Equal("Normal " + ReasonWritesPaused + " " + messageWritesPaused)))
+				setPaused(false)
+				clock = clock.Add(DefaultPullRequestPollInterval)
+				return r
+			}
+
+			It("resumes at the first look after the pause lifts, not at the next full recheck", func() {
+				r := pauseBetweenFullRechecks()
+				look(r)
+				Expect(paused()).To(BeNil())
+				Expect(recorder.Events).To(Receive(Equal("Normal " + EventWritesResumed + " " + messageWritesResumed)))
+			})
+
+			It("resumes also when that look is rate limited", func() {
+				r := pauseBetweenFullRechecks()
+				faulty.failOn(opFind, &providers.RetryableError{RetryAfter: 3 * time.Minute, Err: errors.New("rate limited")})
+				wait, _, heads := look(r)
+				Expect(heads).To(BeNumerically(">", 0), "the full recheck runs")
+				Expect(wait).To(Equal(DefaultPullRequestPollInterval))
+				Expect(paused()).To(BeNil())
+				Expect(recorder.Events).To(Receive(Equal("Normal " + EventWritesResumed + " " + messageWritesResumed)))
+			})
+		})
+
+		It("gives a look that fails otherwise the full recheck", func() {
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			r := reconciler()
+			look(r)
+			clock = clock.Add(DefaultPullRequestPollInterval)
+			faulty.failOn(opFind, errors.New("connection reset"))
+			wait, _, heads := look(r)
+			Expect(heads).To(BeNumerically(">", 0), "the full recheck runs, as it did before the polls")
+			Expect(wait).To(Equal(DefaultPullRequestPollInterval))
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		})
+	})
+
 	// Issue #181: the target branch can move under the change twice, between cutting the branch and the commit,
 	// and while the pull request waits. Both are covered by one rule: the change is rendered at the head of the
 	// target branch, and while the pull request waits, again whenever that head moves.
@@ -1050,7 +1210,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				builds := faulty.count(opReadFile + " " + buildKustomize)
 				res, err := reconcileResult()
 				Expect(err).NotTo(HaveOccurred())
-				Expect(res.RequeueAfter).To(Equal(freshRecheckInterval))
+				Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval))
 				// The freshness check's own reads only: the head before and after the target file, and the file.
 				Expect(faulty.count(opReadFile)-reads).To(Equal(1), "only the freshness check reads a file")
 				Expect(faulty.count(opBranchHead)-heads).To(Equal(2), "only the freshness check reads the head")

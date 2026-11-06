@@ -67,7 +67,8 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        # The Warning event at the Incident cap is about this Pod.
+        # The Warning event at the Incident cap is about this Pod. Without it neither that event nor the
+        # Normal AnalysisSkipped event about an Incident (a first analysis skipped, NotRecent) is written.
         - name: POD_NAME
           valueFrom:
             fieldRef:

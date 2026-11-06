@@ -153,6 +153,14 @@ func (g *optionalGauge) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
+// notRecentSkips counts the Incidents the analysis trigger marked NotRecent: never analyzed and not seen
+// within the recent window, so their first analysis is skipped. Each is counted once per write of that
+// reason, not on every pass.
+var notRecentSkips = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "shadewright_analysis_skipped_not_recent_total",
+	Help: "Incidents never analyzed whose first analysis was skipped because they were not seen within the recent window.",
+})
+
 // triggerPassErrors counts the passes of the analysis trigger that failed (each is retried at the next
 // interval).
 var triggerPassErrors = prometheus.NewCounter(prometheus.CounterOpts{
@@ -178,7 +186,7 @@ var incidentPhases = &incidentCollector{
 
 func init() {
 	metrics.Registry.MustRegister(refusedObservations, droppedBatches, overflowedOccurrences, firstSightingsHeld,
-		analysisReservations, analysesUsedToday, analysesPerDayLimit, triggerPassErrors, incidentWriteErrors,
+		analysisReservations, analysesUsedToday, analysesPerDayLimit, triggerPassErrors, notRecentSkips, incidentWriteErrors,
 		incidentPhases)
 	// The closed sets start at zero, so a rate is defined before the first event.
 	for _, r := range []string{dropInvalid, dropFingerprintConflict, dropStopped} {

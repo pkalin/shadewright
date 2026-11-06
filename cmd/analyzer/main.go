@@ -137,10 +137,11 @@ func main() {
 	}
 
 	// The Incident controller consumes the collector's observations and tells it what each occurrence has
-	// already counted. Its Warning events are about this Pod (POD_NAME, from the downward API); without a
-	// Pod name (make run) the refusals are only logged and counted. It also marks the Incidents due for
-	// analysis (condition AnalysisDue), with the default debounce, settle limit, cooldown and analysis
-	// timeout, and the daily budget kept in the ConfigMap incidents.BudgetName in the operator namespace.
+	// already counted. Its Warning events are about this Pod (POD_NAME, from the downward API), its Normal
+	// events about a skipped first analysis about the Incident; without a Pod name (make run) neither is
+	// written, and the refusals and skips are only logged or counted. It also marks the Incidents due for
+	// analysis (condition AnalysisDue), with the default debounce, settle limit, cooldown, analysis timeout
+	// and recent window, and the daily budget kept in the ConfigMap incidents.BudgetName in the operator namespace.
 	cfg := incidents.Config{Namespace: namespace, MaxIncidents: maxIncidents}
 	if pod := os.Getenv("POD_NAME"); pod != "" {
 		// The core/v1 recorder writes with the grant on core Events that the leader election Role already

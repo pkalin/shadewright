@@ -1808,3 +1808,192 @@ func TestNotRecentWritesComeLastAndAreBounded(t *testing.T) {
 		eventually(t, ns, f, dueIs(false, ReasonNotRecent))
 	}
 }
+
+// A quiet spell that ends between two passes, a little after lastSeen crossed the recent window, is never
+// stale at a pass instant, but the jump of the stored lastSeen across the window shows it: the new burst
+// debounces instead of being due at once (#430 item 2).
+func TestQuietSpellBetweenTwoPassesDebounces(t *testing.T) {
+	c, err := New(Config{Namespace: "ns", Now: func() time.Time { return triggerNow }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := triggerSettings
+	window := recentWindow(s)
+	last := triggerNow.Add(-time.Hour)
+	inc := quietIncident("uid-1")
+	inc.Status.LastSeen = &metav1.Time{Time: last}
+	// Passes every 10 s since before lastSeen, so the gap in the records is one this process watched; the
+	// last of them 5 s before lastSeen crosses the window.
+	first := last.Add(window - 5*time.Second)
+	for p := first.Add(-90 * 10 * time.Second); !p.After(first); p = p.Add(10 * time.Second) {
+		c.watch([]remediationv1alpha1.Incident{inc}, p, s)
+	}
+	// The spell lasts the window and 2 s; the new occurrence is written 7 s after that pass.
+	seen := last.Add(window + 2*time.Second)
+	inc.Status.LastSeen = &metav1.Time{Time: seen}
+	inc.Status.Occurrences = append(inc.Status.Occurrences,
+		remediationv1alpha1.OccurrenceRecord{ID: eventID(2), Total: 1, Began: &metav1.Time{Time: seen}})
+	next := first.Add(10 * time.Second)
+	c.watch([]remediationv1alpha1.Incident{inc}, next, s)
+	used := 0
+	if due, reason := c.decider(&inc, next, s, &used)(&inc); due || reason != ReasonDebouncing {
+		t.Fatalf("Due = %v, %s; want false, Debouncing", due, reason)
+	}
+}
+
+// A wait from before the quiet spell is forgotten even while a new observation is held unwritten (a failed
+// write): it is older than the spell's begin plus the recent window, so it is not the new burst's.
+func TestWaitFromBeforeTheSpellIsForgottenWhileHeld(t *testing.T) {
+	c, err := New(Config{Namespace: "ns", Now: func() time.Time { return triggerNow }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := triggerSettings
+	inc := quietIncident("uid-1") // last seen 35 min ago
+	c.memory[inc.UID] = &trace{waiting: triggerNow.Add(-40 * time.Minute)}
+	c.failed[inc.Spec.Fingerprint] = &batch{first: triggerNow.Add(-5 * time.Second), last: triggerNow.Add(-5 * time.Second)}
+	c.watch([]remediationv1alpha1.Incident{inc}, triggerNow, s)
+	if w := c.memory[inc.UID].waiting; !w.IsZero() {
+		t.Errorf("the wait from before the spell (%s) is still remembered", w)
+	}
+	used := 0
+	if due, reason := c.decider(&inc, triggerNow, s, &used)(&inc); due || reason != ReasonDebouncing {
+		t.Fatalf("Due = %v, %s; want false, Debouncing", due, reason)
+	}
+}
+
+// A gap between two lastSeen values shorter than the recent window is no quiet spell, even when the pass that
+// reads the new one runs a little after the old one plus the window (#448 review).
+func TestShortGapReadByALatePassIsNotQuiet(t *testing.T) {
+	c, err := New(Config{Namespace: "ns", Now: func() time.Time { return triggerNow }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := triggerSettings
+	window := recentWindow(s)
+	last := triggerNow.Add(-time.Hour)
+	inc := quietIncident("uid-1")
+	inc.Status.LastSeen = &metav1.Time{Time: last}
+	first := last.Add(window - 5*time.Second)
+	for p := first.Add(-90 * 10 * time.Second); !p.After(first); p = p.Add(10 * time.Second) {
+		c.watch([]remediationv1alpha1.Incident{inc}, p, s)
+	}
+	seen := last.Add(window - 2*time.Second) // gap 2 s shorter than the window: no spell
+	inc.Status.LastSeen = &metav1.Time{Time: seen}
+	next := first.Add(10 * time.Second) // 5 s after last + window
+	c.watch([]remediationv1alpha1.Incident{inc}, next, s)
+	if c.memory[inc.UID].quiet {
+		t.Fatalf("gap of window-2s taken as a quiet spell")
+	}
+}
+
+// failingList is a cache whose Lists fail.
+type failingList struct{ client.Reader }
+
+func (failingList) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return errors.New("list failed")
+}
+
+// A pass whose list fails breaks the run of passes, so the lastSeen read before it is not compared with the
+// one read after it: activity that went on unwatched is no quiet spell (#448 review).
+func TestFailedListForgetsTheSampledLastSeen(t *testing.T) {
+	c, err := New(Config{Namespace: "ns", Now: func() time.Time { return triggerNow }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := triggerSettings
+	window := recentWindow(s)
+	last := triggerNow.Add(-time.Hour)
+	inc := quietIncident("uid-1")
+	inc.Status.LastSeen = &metav1.Time{Time: last}
+	// Sampled 10 min after lastSeen, so a gap longer than the window fits in the next 7 min, within the window
+	// of that sample.
+	sampled := last.Add(10 * time.Minute)
+	c.watch([]remediationv1alpha1.Incident{inc}, sampled, s)
+	c.cache = failingList{}
+	if err := c.markDue(t.Context()); err == nil {
+		t.Fatal("markDue with a failing list returned no error")
+	}
+	// Observations went on unwatched while the lists failed, from a minute after the sample: the real gap was
+	// 11 min, but the two samples are further apart than the window.
+	seen := sampled.Add(7 * time.Minute)
+	if !seen.After(last.Add(window)) {
+		t.Fatal("setup: the samples are not further apart than the window")
+	}
+	inc.Status.LastSeen = &metav1.Time{Time: seen}
+	c.watch([]remediationv1alpha1.Incident{inc}, seen.Add(time.Second), s)
+	if c.memory[inc.UID].quiet {
+		t.Fatal("a lastSeen sampled before failed passes was compared with the one after them")
+	}
+}
+
+// When the stored lastSeen is stale itself, the spell it ends is the later one: a wait seen after the previous
+// sample's spell but before the stored lastSeen plus the window belongs to that later spell and is forgotten,
+// not kept as the new burst's (#448 review).
+func TestStaleStoredLastSeenBeginsTheSpell(t *testing.T) {
+	c, err := New(Config{Namespace: "ns", Now: func() time.Time { return triggerNow }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := triggerSettings
+	inc := quietIncident("uid-1") // last seen 35 min ago, stale at triggerNow
+	// The previous pass, 10 s ago, read a lastSeen two hours old: the stored one jumped across the window too.
+	c.memory[inc.UID] = &trace{lastSeen: triggerNow.Add(-2 * time.Hour), sampled: triggerNow.Add(-10 * time.Second),
+		waiting: triggerNow.Add(-time.Hour)}
+	c.watch([]remediationv1alpha1.Incident{inc}, triggerNow, s)
+	tr := c.memory[inc.UID]
+	if !tr.quiet || !tr.waiting.IsZero() {
+		t.Fatalf("quiet = %v, waiting = %s; want quiet and the wait from before the stored lastSeen forgotten",
+			tr.quiet, tr.waiting)
+	}
+}
+
+// A lastSeen read while the newest occurrence was a lasting state is frozen while that state lasts, so a new
+// occurrence more than the recent window after it is no quiet spell (#448 review).
+func TestLastingStateBeforeANewOccurrenceIsNotQuiet(t *testing.T) {
+	c, err := New(Config{Namespace: "ns", Now: func() time.Time { return triggerNow }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := triggerSettings
+	window := recentWindow(s)
+	last := triggerNow.Add(-time.Hour)
+	inc := quietIncident("uid-1")
+	inc.Status.LastSeen = &metav1.Time{Time: last}
+	inc.Status.Occurrences = []remediationv1alpha1.OccurrenceRecord{
+		{ID: occurrenceCondition + "ScalingLimited", Total: 1, Began: &metav1.Time{Time: last}}}
+	first := last.Add(window + 10*time.Second)
+	for p := last; !p.After(first); p = p.Add(10 * time.Second) {
+		c.watch([]remediationv1alpha1.Incident{inc}, p, s)
+	}
+	seen := first.Add(5 * time.Second)
+	inc.Status.LastSeen = &metav1.Time{Time: seen}
+	inc.Status.Occurrences = append(inc.Status.Occurrences,
+		remediationv1alpha1.OccurrenceRecord{ID: eventID(2), Total: 1, Began: &metav1.Time{Time: seen}})
+	c.watch([]remediationv1alpha1.Incident{inc}, first.Add(10*time.Second), s)
+	if c.memory[inc.UID].quiet {
+		t.Fatal("a frozen lastSeen of a lasting state taken as the begin of a quiet spell")
+	}
+}
+
+// A lastSeen sampled longer ago than the recent window (the process stalled or was paused) says nothing about
+// the activity since: a jump across the window from it is no quiet spell (#448 review).
+func TestLastSeenSampledLongAgoIsNotCompared(t *testing.T) {
+	c, err := New(Config{Namespace: "ns", Now: func() time.Time { return triggerNow }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := triggerSettings
+	window := recentWindow(s)
+	last := triggerNow.Add(-time.Hour)
+	inc := quietIncident("uid-1")
+	inc.Status.LastSeen = &metav1.Time{Time: last}
+	c.watch([]remediationv1alpha1.Incident{inc}, last.Add(time.Second), s)
+	// No pass for longer than the window; observations went on meanwhile, the last one 30 s ago.
+	now := last.Add(window + time.Minute)
+	inc.Status.LastSeen = &metav1.Time{Time: now.Add(-30 * time.Second)}
+	c.watch([]remediationv1alpha1.Incident{inc}, now, s)
+	if c.memory[inc.UID].quiet {
+		t.Fatal("a lastSeen sampled longer ago than the window was compared with the stored one")
+	}
+}

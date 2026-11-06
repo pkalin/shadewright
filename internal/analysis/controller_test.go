@@ -177,11 +177,80 @@ func dueIncident(t *testing.T, ns string, budget map[string]string) *remediation
 	inc.Status.Phase = remediationv1alpha1.IncidentOpen
 	inc.Status.FirstSeen, inc.Status.LastSeen, inc.Status.Count = &now, &now, 3
 	meta.SetStatusCondition(&inc.Status.Conditions, metav1.Condition{Type: incidents.ConditionAnalysisDue,
-		Status: metav1.ConditionTrue, Reason: incidents.ReasonFirstAnalysis, Message: "due"})
+		Status: metav1.ConditionTrue, Reason: incidents.ReasonFirstAnalysis, Message: "due", ObservedGeneration: inc.Generation})
 	if err := env.admin.Status().Update(ctx, inc); err != nil {
 		t.Fatal(err)
 	}
 	return inc
+}
+
+// A mark that says due but was written for another generation of the Incident is no mark (#430), as the
+// trigger takes it: the Incident is not claimed. The spec is immutable, so the generation moves on by a
+// deletion held by a finalizer, which the analysis does not look at otherwise; the mark keeps the generation it
+// was written for.
+func TestControllerLeavesAMarkOfAnotherGeneration(t *testing.T) {
+	ns := namespace(t)
+	setSettings(t, 10)
+	inc := dueIncident(t, ns, nil)
+	ctx := t.Context()
+	inc.Finalizers = append(inc.Finalizers, "test.shadewright.io/hold")
+	if err := env.admin.Update(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		fresh := &remediationv1alpha1.Incident{}
+		if err := env.admin.Get(context.Background(), client.ObjectKeyFromObject(inc), fresh); err != nil {
+			return
+		}
+		fresh.Finalizers = nil
+		_ = env.admin.Update(context.Background(), fresh)
+	})
+	if err := env.admin.Delete(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.admin.Get(ctx, client.ObjectKeyFromObject(inc), inc); err != nil {
+		t.Fatal(err)
+	}
+	mark := meta.FindStatusCondition(inc.Status.Conditions, incidents.ConditionAnalysisDue)
+	if mark == nil || mark.ObservedGeneration == 0 || mark.ObservedGeneration >= inc.Generation {
+		t.Fatalf("setup: mark %+v, generation %d; want a mark of an older, real generation", mark, inc.Generation)
+	}
+	f := newFixture()
+	c, rc := newController(t, ns, f)
+	if c.markedDue(inc) {
+		t.Error("a mark of another generation starts a reconcile")
+	}
+	reconcile(t, c, inc)
+	if len(rc.updates) != 0 || f.triage.calls() != 0 || f.reserved != 0 {
+		t.Errorf("a mark of another generation got %d updates, %d calls, %d reservations", len(rc.updates), f.triage.calls(), f.reserved)
+	}
+}
+
+// The controller starts a reconcile only for an Incident in the operator namespace marked due for its current
+// generation: a mark of an older generation, or a mark elsewhere, starts none.
+func TestControllerWatchesMarksOfTheCurrentGeneration(t *testing.T) {
+	c := &Controller{Namespace: "operator"}
+	mark := func(gen, observed int64, status metav1.ConditionStatus, ns string) *remediationv1alpha1.Incident {
+		inc := incident()
+		inc.Namespace, inc.Generation = ns, gen
+		inc.Status.Conditions = []metav1.Condition{{Type: incidents.ConditionAnalysisDue, Status: status,
+			Reason: incidents.ReasonFirstAnalysis, ObservedGeneration: observed}}
+		return inc
+	}
+	for _, tt := range []struct {
+		name string
+		inc  *remediationv1alpha1.Incident
+		want bool
+	}{
+		{"current generation", mark(3, 3, metav1.ConditionTrue, "operator"), true},
+		{"older generation", mark(3, 2, metav1.ConditionTrue, "operator"), false},
+		{"not due", mark(3, 3, metav1.ConditionFalse, "operator"), false},
+		{"another namespace", mark(3, 3, metav1.ConditionTrue, "elsewhere"), false},
+	} {
+		if got := c.markedDue(tt.inc); got != tt.want {
+			t.Errorf("%s: markedDue = %v, want %v", tt.name, got, tt.want)
+		}
+	}
 }
 
 func newController(t *testing.T, ns string, f *fixture) (*Controller, *recordingClient) {

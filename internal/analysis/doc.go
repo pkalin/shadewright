@@ -55,10 +55,10 @@ limitations under the License.
 // calls per analysis, which the retry counts toward; otherwise it, ErrNotFound, ErrForbidden and malformed
 // escalated output hand the incident off.
 //
-// The [Controller] claims an Incident the trigger marked due (Open, or Analyzing taken as lost; never
-// Resolved) by writing the phase Analyzing, lastAnalysisTime and the AnalysisDue condition in one status
-// update, and writes the outcome (Proposed or Escalated, the Analyzed condition, the request's name) in
-// another. A stop leaves the Incident Analyzing, which the
+// The [Controller] claims an Incident the trigger marked due for its current generation (Open, or Analyzing
+// taken as lost; never Resolved) by writing the phase Analyzing, lastAnalysisTime and the AnalysisDue
+// condition in one status update, and writes the outcome (Proposed or Escalated, the Analyzed condition, the
+// request's name) in another. A stop leaves the Incident Analyzing, which the
 // trigger takes as lost after its analysis timeout.
 //
 // The run is identified by the lastAnalysisTime its claim wrote, and the claim expires the trigger's analysis

@@ -136,7 +136,8 @@ func (c *Controller) CheckTimeBudget() error {
 }
 
 // SetupWithManager registers the controller. It runs on the leader only and looks at Incidents in the
-// operator namespace whose AnalysisDue condition is True.
+// operator namespace whose AnalysisDue condition is True for their current generation
+// ([Controller.markedDue]).
 func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	if c.Reader == nil {
 		c.Reader = mgr.GetAPIReader()
@@ -144,16 +145,24 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	if err := c.CheckTimeBudget(); err != nil {
 		return err
 	}
-	due := predicate.NewPredicateFuncs(func(o client.Object) bool {
-		inc, ok := o.(*remediationv1alpha1.Incident)
-		return ok && inc.Namespace == c.Namespace &&
-			meta.IsStatusConditionTrue(inc.Status.Conditions, incidents.ConditionAnalysisDue)
-	})
+	due := predicate.NewPredicateFuncs(c.markedDue)
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("analysis").
 		For(&remediationv1alpha1.Incident{}, builder.WithPredicates(due)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: maxWorkers}).
 		Complete(c)
+}
+
+// markedDue reports whether o is an Incident in the operator namespace that the trigger marked due for its
+// current generation ([incidents.DueMark]): the controller starts a reconcile for no other, so a mark of
+// another generation does not.
+func (c *Controller) markedDue(o client.Object) bool {
+	inc, ok := o.(*remediationv1alpha1.Incident)
+	if !ok || inc.Namespace != c.Namespace {
+		return false
+	}
+	cond := incidents.DueMark(inc)
+	return cond != nil && cond.Status == metav1.ConditionTrue
 }
 
 func (c *Controller) now() time.Time {
@@ -165,9 +174,11 @@ func (c *Controller) now() time.Time {
 
 // claimable reports whether the trigger marked inc due in a phase an analysis may start from: Open (or none)
 // or Analyzing taken as lost (reason AnalysisTimedOut). Never Resolved: reopening a Resolved Incident is a
-// later part of #251, and until it is built a Resolved Incident is not analyzed again.
+// later part of #251, and until it is built a Resolved Incident is not analyzed again. A mark written for
+// another generation of the Incident is no mark, as the trigger takes it (#430): it fails closed, and the
+// trigger writes it again for the current generation if the Incident is still due.
 func claimable(inc *remediationv1alpha1.Incident) bool {
-	cond := meta.FindStatusCondition(inc.Status.Conditions, incidents.ConditionAnalysisDue)
+	cond := incidents.DueMark(inc)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
 		return false
 	}

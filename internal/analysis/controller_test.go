@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -454,5 +455,18 @@ func TestControllerStopLeavesTheClaim(t *testing.T) {
 	}
 	if len(rc.updates) != 1 || rc.updates[0].Phase != remediationv1alpha1.IncidentAnalyzing {
 		t.Errorf("updates %+v, want the claim only", rc.updates)
+	}
+}
+
+// The executor keeps a request's name unredacted in the pull request body only in this form
+// (analyzerRequestName in internal/controller, #433); a change here must change it there too.
+func TestRequestNameForm(t *testing.T) {
+	inc := &remediationv1alpha1.Incident{ObjectMeta: metav1.ObjectMeta{UID: "11111111-1111-4111-8111-111111111111"}}
+	name, err := requestName(inc, remediationv1alpha1.RemediationRequestSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`^remediation-[0-9a-f]{24}$`).MatchString(string(name)) {
+		t.Errorf("requestName = %q, want remediation- and 24 lower-case hex digits", name)
 	}
 }

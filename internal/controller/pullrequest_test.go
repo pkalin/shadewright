@@ -2031,6 +2031,36 @@ var _ = Describe("Pull request body", func() {
 		Expect(hasMarker(body, rr)).To(BeTrue())
 	})
 
+	It("names a request called in the analyzer's form verbatim and still redacts free text (#433)", func() {
+		rr := bodyRequest()
+		// The analyzer names a request "remediation-" plus 24 hex digits, a run the redactor would otherwise
+		// take for a token, so a reviewer could not find the request from the pull request.
+		rr.Name = "remediation-3f1c9a7be2d84f06a5b1c3e9"
+		hexToken := "3f1c9a7be2d84f06a5b1c3e9d7f2a4b6c8e0d1f3" // #nosec G101 -- made-up hex run, not a credential
+		rr.Status.Source.Path = remediationv1alpha1.GitFilePath("apps/" + hexToken + "/deployment.yaml")
+		body := pullRequestBody(rr, "")
+		Expect(body).To(ContainSubstring("RemediationRequest `" + requestNamespace + "/" + rr.Name + "` (UID"))
+		Expect(body).NotTo(ContainSubstring(hexToken), "a hex token in other text is still redacted")
+		Expect(body).To(ContainSubstring("[REDACTED:token]"))
+		Expect(hasMarker(body, rr)).To(BeTrue())
+	})
+
+	It("redacts a request name that is not in the analyzer's form or sits in a token-like namespace", func() {
+		hex40 := strings.Repeat("3f1c9a7b", 5)
+		for _, tc := range []struct{ namespace, name, secret string }{
+			{requestNamespace, hex40, hex40},
+			{requestNamespace, "remediation-" + hex40, hex40},
+			{hex40, "remediation-3f1c9a7be2d84f06a5b1c3e9", hex40},
+		} {
+			rr := bodyRequest()
+			rr.Namespace, rr.Name = tc.namespace, tc.name
+			body := pullRequestBody(rr, "")
+			Expect(body).NotTo(ContainSubstring(tc.secret), tc.namespace+"/"+tc.name)
+			Expect(body).To(ContainSubstring("RemediationRequest `[REDACTED:token]` (UID"), tc.namespace+"/"+tc.name)
+			Expect(hasMarker(body, rr)).To(BeTrue())
+		}
+	})
+
 	It("redacts a hex token used as the Incident name when it was not verified", func() {
 		hex40 := strings.Repeat("3f1c9a7b", 5)
 		for _, token := range []string{

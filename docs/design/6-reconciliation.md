@@ -232,12 +232,12 @@ Without an existing change request, the step does these things in order:
 
 Every write names the head it expects, so a lost status write or a concurrent reconcile finds the work instead of repeating it.
 
-The title and body are built from validated fields and redacted. One value stays out of the redactor: the Incident name. It is kept only when both of these hold:
+The title and body are built from validated fields and redacted. Two values stay out of the redactor. The first is the request's own `namespace/name`, taken from its metadata as the API server stored it: it is kept only when the name has the analyzer's form (exactly `remediation-` and 24 lower-case hex digits) and the redactor leaves the namespace unchanged (`keptRequestName`, #433). The second is the Incident name. It is kept only when both of these hold:
 
 - it has the collector's form (exactly `incident-` and 64 lower-case hex digits);
 - the executor has read that Incident from the API server in the request's namespace, with the UID of `spec.incidentRef` and a fingerprint that gives that name (`verifiedIncidentName`, `redact.StringKeeping`).
 
-Otherwise, or when the read fails, the name is redacted like the rest. So a hex secret written as `incident-<secret>` in a request does not reach the Git host.
+Otherwise, or when the read fails, the name is redacted like the rest, and so is a request name of any other form. So a hex secret written as `incident-<secret>` in a request does not reach the Git host.
 
 ### Step 4: recording the pull request
 

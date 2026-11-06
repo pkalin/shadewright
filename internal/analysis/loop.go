@@ -789,9 +789,9 @@ func estimateInput(req providers.CompletionRequest) int64 {
 // has evidence found in the blocks the model saw, may target the subject and has a policy configured. action
 // is the proposal's action as [DecodeResult] converted and checked it, nil without a proposal.
 func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, error) {
-	r.out.Summary, r.out.MissingData = r.a.redact(res.Summary), nil
+	r.out.Summary, r.out.MissingData = r.redact(res.Summary), nil
 	for _, m := range res.MissingData {
-		r.out.MissingData = append(r.out.MissingData, r.a.redact(m))
+		r.out.MissingData = append(r.out.MissingData, r.redact(m))
 	}
 	if res.Proposal == nil || action == nil {
 		if len(res.MissingData) > 0 {
@@ -811,13 +811,15 @@ func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, 
 	return r.a.accept(r.inc, *r.out, ReasonProposed, Plan{Action: *action, Checks: checks})
 }
 
-// redact redacts model text for the logs. The output is never longer than the input, so the result's bounds
-// (DecodeResult) still hold after it.
-func (a *Analyzer) redact(s string) string {
-	if a.cfg.Redactor == nil {
-		return redact.String(s)
+// redact redacts model text for the logs, keeping whole occurrences of the Incident's name: the name was read
+// from the API server, and the collector's names are a long hex run the redactor takes for a token, as in the
+// pull request body. The output is never longer than the input, so the result's bounds (DecodeResult) still
+// hold after it.
+func (r *run) redact(s string) string {
+	if r.a.cfg.Redactor == nil {
+		return redact.StringKeeping(s, r.inc.Name)
 	}
-	return a.cfg.Redactor.String(s)
+	return r.a.cfg.Redactor.StringKeeping(s, r.inc.Name)
 }
 
 // evidenced reports whether at least one quote is found verbatim in a quotable part of the block or tool

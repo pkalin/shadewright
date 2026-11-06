@@ -511,6 +511,24 @@ func TestOutcomeCarriesRedactedResultText(t *testing.T) {
 	if out := f.analyze(t, testLimits()); out.MissingData != nil || out.Summary != "unclear" {
 		t.Errorf("summary %q, missing data %q", out.Summary, out.MissingData)
 	}
+
+	// The Incident's name, a long hex run the redactor takes for a token, stays readable.
+	inc := incident()
+	inc.Name = incidents.Name(inc.Spec.Fingerprint)
+	f = newFixture()
+	f.triage.steps = []step{reply(strings.Replace(strings.Replace(noProposal, `"missingData":[]`,
+		`"missingData":["events of `+inc.Name+`"]`, 1), `"summary":"unclear"`, `"summary":"`+inc.Name+` OOM"`, 1))}
+	a, err := New(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err = a.Analyze(t.Context(), inc, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Summary != inc.Name+" OOM" || len(out.MissingData) != 1 || out.MissingData[0] != "events of "+inc.Name {
+		t.Errorf("summary %q, missing data %q: want the Incident's name kept", out.Summary, out.MissingData)
+	}
 }
 
 func TestProposalNeedsEvidence(t *testing.T) {

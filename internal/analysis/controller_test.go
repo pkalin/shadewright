@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -371,6 +372,28 @@ func TestControllerHandsOffWithoutProposal(t *testing.T) {
 	}
 }
 
+// logged returns a context whose logger records every line, and a function that returns the last line with
+// the message msg, or "" when none was logged.
+func logged(t *testing.T) (context.Context, func(msg string) string) {
+	var mu sync.Mutex
+	var lines []string
+	ctx := logr.NewContext(t.Context(), funcr.New(func(_, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, args)
+	}, funcr.Options{}))
+	return ctx, func(msg string) string {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, l := range slices.Backward(lines) {
+			if strings.Contains(l, `"msg"="`+msg+`"`) {
+				return l
+			}
+		}
+		return ""
+	}
+}
+
 // The "Analyzed Incident" line names what a MissingData hand-off asked for, and leaves the field out when the
 // result listed nothing (#422).
 func TestControllerLogsMissingData(t *testing.T) {
@@ -390,20 +413,14 @@ func TestControllerLogsMissingData(t *testing.T) {
 			f := newFixture()
 			f.triage.steps = []step{reply(tc.reply)}
 			c, _ := newController(t, ns, f)
-			var mu sync.Mutex
-			var line string
-			ctx := logr.NewContext(t.Context(), funcr.New(func(_, args string) {
-				mu.Lock()
-				defer mu.Unlock()
-				if strings.Contains(args, `"msg"="Analyzed Incident"`) {
-					line = args
-				}
-			}, funcr.Options{}))
+			ctx, last := logged(t)
 			if _, err := c.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(inc)}); err != nil {
 				t.Fatalf("Reconcile: %v", err)
 			}
-			mu.Lock()
-			defer mu.Unlock()
+			line := last("Analyzed Incident")
+			if line == "" {
+				t.Fatal("no Analyzed Incident line was logged")
+			}
 			if !strings.Contains(line, `"summary"="unclear"`) {
 				t.Errorf("line %s: want the summary", line)
 			}

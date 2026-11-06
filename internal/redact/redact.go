@@ -127,22 +127,27 @@ func String(s string) string {
 	return defaultRedactor.String(s)
 }
 
-// StringKeeping is String, except that each whole occurrence of a string in keep stays as it is. It is for
-// text the caller renders from a fixed template, where keep holds values the caller has verified are not
-// secrets (an object name it read back from the API server, for example), never text from a model, a user or
-// the cluster. An occurrence counts only when the bytes on both sides are not token characters (ASCII letters,
-// digits and "+/_-=."), so a kept string inside a longer run is redacted with that run. The text between kept
-// occurrences is redacted piece by piece; empty strings in keep are ignored.
+// StringKeeping is String, except that each whole occurrence of a string in keep stays as it is. keep holds
+// values the caller has verified are not secrets (an object name it read back from the API server, for
+// example), never text from a model, a user or the cluster; s may be any text, a template the caller renders
+// or a model's answer. An occurrence counts only when the bytes on both sides are not token characters (ASCII
+// letters, digits and "+/_-=."), so a kept string inside a longer run is redacted with that run. The text
+// between kept occurrences is redacted piece by piece; empty strings in keep are ignored.
 func StringKeeping(s string, keep ...string) string {
+	return defaultRedactor.StringKeeping(s, keep...)
+}
+
+// StringKeeping is the package's StringKeeping with r's rules.
+func (r *Redactor) StringKeeping(s string, keep ...string) string {
 	var b strings.Builder
 	rest := s
 	for {
 		at, n := firstWhole(rest, keep)
 		if at < 0 {
-			b.WriteString(String(rest))
+			b.WriteString(r.String(rest))
 			return b.String()
 		}
-		b.WriteString(String(rest[:at]))
+		b.WriteString(r.String(rest[:at]))
 		b.WriteString(rest[at : at+n])
 		rest = rest[at+n:]
 	}

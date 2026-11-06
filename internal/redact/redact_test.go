@@ -714,6 +714,19 @@ func TestFluxRevisions(t *testing.T) {
 	})
 }
 
+// A Redactor's StringKeeping applies its own rules, extra patterns included, around the kept strings.
+func TestRedactorStringKeeping(t *testing.T) {
+	r, err := New(Pattern{Kind: "ticket", Expr: `TICKET-[0-9]{4}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "incident-" + rep("9f86d081", 8)
+	if out := r.StringKeeping("TICKET-1234 for "+name, name); !strings.HasSuffix(out, " for "+name) ||
+		strings.Contains(out, "TICKET-1234") {
+		t.Errorf("StringKeeping = %q, want the ticket redacted and the name kept", out)
+	}
+}
+
 // StringKeeping keeps only whole occurrences of the verified strings; everything else is redacted as String
 // redacts it (#264).
 func TestStringKeeping(t *testing.T) {

@@ -161,7 +161,7 @@ A call names one namespace, pod and container, and optionally the previous, term
 
 - It is the newest 64 KiB of the read by default, at most 256 KiB, in whole lines. When older bytes are dropped, the first line goes too unless it starts right after a newline, and the excerpt is marked truncated. When the read was cut, its partial last line is dropped. So a cut never hands half a secret to the redactor.
 - Lines the server leaves out because of `tailLines` or the window are not reported.
-- Invalid UTF-8 is replaced, and the excerpt is redacted with `internal/redact` (built-in rules plus any operator patterns) inside the adapter, before it leaves it.
+- Invalid UTF-8 is replaced, and the excerpt is redacted with `internal/redact` (built-in rules; operator patterns are <span class="sw-status sw-planned">planned</span>, nothing configures them yet) inside the adapter, before it leaves it.
 - A truncated excerpt, or one with its end missing, is not a reason to escalate (3.3).
 
 **Deadlines.** Logs are never followed. Each call has a deadline (30 seconds by default, at most 2 minutes). A stream that ends with it, or makes no progress for 100 reads in a row, is an error, not an excerpt.

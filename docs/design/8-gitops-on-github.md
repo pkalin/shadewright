@@ -36,7 +36,7 @@ The executor runs steps 1 to 7; step 8 is planned (section 6). Every Git write n
 7. Bind the PR to the request UID and plan digest. Any new push to the branch invalidates the plan.
 8. After merge, follow delivery and the success criteria instead of stopping at "merged".
 
-**Lab measurement (2026-11-06).** On one `Standard_D4as_v5` node running `v0.3.0-rc.2` (commit `bbe555ca09db887d1389270e53e6ef64249cd7eb`), symptom to pull request took 3 min 34 s; the model call took about 10 s, policy 26 s and pull request creation 42 s. The idle `kubectl top` sample after 3 analyses and 1 pull request is recorded in [3.1](3-observation-and-deduplication.md#31-collecting). It does not measure peak memory during an analysis: that needs a metrics query over the run window, so the 128Mi limits are not yet backed by a peak measurement.
+**Lab measurement (2026-11-06).** On one `Standard_D4as_v5` node running `v0.3.0-rc.2` (commit `bbe555ca09db887d1389270e53e6ef64249cd7eb`), symptom to pull request took 3 min 34 s. Measured between object timestamps, not per step: 2 min 16 s from the first `OOMKilled` to the analysis claim (Incident creation, debounce and a trigger pass), 10 s from the claim to the RemediationRequest (context and one model call), 26 s from the request to `PolicyAllowed` (source mapping and the policy check) and 42 s from there to the pull request opened. The idle `kubectl top` sample after 3 analyses and 1 pull request is recorded in [3.1](3-observation-and-deduplication.md#31-collecting). It does not measure peak memory during an analysis: that needs a metrics query over the run window, so the 128Mi limits are not yet backed by a peak measurement.
 
 ### 8.2.1. Step 1: source mapping
 

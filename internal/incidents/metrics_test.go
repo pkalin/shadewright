@@ -282,6 +282,7 @@ func analyzerMetrics() map[string]metricguard.Labels {
 		"shadewright_analyses_used_today":                 {},
 		"shadewright_analyses_per_day_limit":              {},
 		"shadewright_analysis_trigger_errors_total":       {},
+		"shadewright_analysis_skipped_not_recent_total":   {},
 		"shadewright_incidents":                           {"phase": phasegauge.Labels(incidentPhaseList)},
 		"shadewright_incidents_analysis_due":              {},
 	}

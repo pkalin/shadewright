@@ -106,7 +106,8 @@ type Config struct {
 	// RetryAfter is how long a batch whose write failed waits before it is tried again.
 	RetryAfter time.Duration
 	// Recorder and Regarding report a refused fingerprint as a Warning event about Regarding (the analyzer's
-	// Pod). No event is written when either is nil. It is a core/v1 recorder, so the event is written with the
+	// Pod). No event is written when either is nil. Recorder also reports an Incident skipped as not recent
+	// in a Normal event about the Incident, which lives in the operator namespace too. It is a core/v1 recorder, so the event is written with the
 	// grant on core Events that the analyzer's leader election Role already holds in the operator namespace,
 	// and no other.
 	Recorder  corerecord.EventRecorder
@@ -148,8 +149,9 @@ type Config struct {
 	// trigger ([Due]): how long an Incident must go without a new observation, the longest it waits to settle
 	// after its first unsettled observation (the aggregation window by default), the least time between the
 	// start of one analysis and the next, how long an analysis may run before it is taken as lost, how
-	// recently an Incident never analyzed must have been seen to be due for its first analysis (the cooldown
-	// by default), and how often the Incidents are decided again.
+	// recently an Incident never analyzed must have been seen to be due for its first analysis (zero takes
+	// the cooldown; [New] raises it to the debounce when shorter), and how often the Incidents are decided
+	// again.
 	Debounce        time.Duration
 	SettleLimit     time.Duration
 	Cooldown        time.Duration
@@ -279,6 +281,7 @@ func New(cfg Config) (*Controller, error) {
 	if cfg.RecentWindow <= 0 {
 		cfg.RecentWindow = cfg.Cooldown
 	}
+	cfg.RecentWindow = max(cfg.RecentWindow, cfg.Debounce)
 	if cfg.AnalysisTimeout <= 0 {
 		cfg.AnalysisTimeout = DefaultAnalysisTimeout
 	}

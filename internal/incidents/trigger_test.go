@@ -20,14 +20,17 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corerecord "k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -51,9 +54,14 @@ var triggerSettings = TriggerSettings{
 	AnalysisTimeout: 10 * time.Minute, RecentWindow: 15 * time.Minute, MaxAnalysesPerDay: 100,
 }
 
-// quietMark is an AnalysisDue condition that says NotRecent, as the trigger leaves an incident that went quiet.
-var quietMark = metav1.Condition{Type: ConditionAnalysisDue, Status: metav1.ConditionFalse, Reason: ReasonNotRecent,
-	LastTransitionTime: metav1.Time{Time: triggerNow.Add(-time.Hour)}}
+// quietThenSeen returns the status of an incident never analyzed, first seen an hour ago, whose first
+// occurrence began oldAgo ago and whose newest began burstAgo ago, last seen seenAgo ago.
+func quietThenSeen(seenAgo, burstAgo, oldAgo time.Duration) remediationv1alpha1.IncidentStatus {
+	st := incidentStatus(seenAgo, burstAgo, 0)
+	st.FirstSeen = ago(time.Hour)
+	st.Occurrences = append(st.Occurrences, remediationv1alpha1.OccurrenceRecord{ID: eventID(2), Total: 1, Began: ago(oldAgo)})
+	return st
+}
 
 // incidentStatus returns a status first and last seen seenAgo ago, with one occurrence that began beganAgo
 // ago, and, when analyzedAgo is positive, analyzed that long ago.
@@ -208,32 +216,71 @@ func TestDue(t *testing.T) {
 			due:    true, reason: ReasonFirstAnalysis,
 		},
 		{
-			name: "not recent: a new observation after going quiet debounces, though firstSeen is past the settle limit",
+			name: "not recent: a new occurrence after going quiet debounces, though firstSeen is past the settle limit",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return quietThenSeen(10*time.Second, 10*time.Second, time.Hour)
+			},
+			reason: ReasonDebouncing,
+		},
+		{
+			name: "not recent: after going quiet, the settle limit counts from the new burst",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return quietThenSeen(10*time.Second, 5*time.Minute, time.Hour)
+			},
+			due: true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: after going quiet, a burst that began 4 min ago has not reached the settle limit",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return quietThenSeen(10*time.Second, 4*time.Minute, time.Hour)
+			},
+			reason: ReasonDebouncing,
+		},
+		{
+			name: "not recent: a new occurrence after going quiet is due once settled",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return quietThenSeen(45*time.Second, 45*time.Second, time.Hour)
+			},
+			due: true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "not recent: a gap of exactly the window is no quiet spell",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return quietThenSeen(10*time.Second, 10*time.Second, 15*time.Minute+10*time.Second)
+			},
+			due: true, reason: ReasonFirstAnalysis, // the settle limit counts from firstSeen, an hour ago
+		},
+		{
+			name: "not recent: a gap just over the window is a quiet spell",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return quietThenSeen(10*time.Second, 10*time.Second, 15*time.Minute+10*time.Second+time.Nanosecond)
+			},
+			reason: ReasonDebouncing,
+		},
+		{
+			name: "not recent: a quiet spell before the dropped records counts too",
 			status: func() remediationv1alpha1.IncidentStatus {
 				st := incidentStatus(10*time.Second, 10*time.Second, 0)
-				st.FirstSeen = ago(time.Hour)
-				st.Conditions = []metav1.Condition{quietMark}
+				st.FirstSeen = ago(2 * time.Hour)
+				st.OccurrencesDroppedThrough = ago(time.Hour)
 				return st
 			},
 			reason: ReasonDebouncing,
 		},
 		{
-			name: "not recent: after going quiet, the settle limit counts from the controller's first sight",
+			name: "not recent: without a window the settle limit counts from firstSeen",
 			status: func() remediationv1alpha1.IncidentStatus {
-				st := incidentStatus(10*time.Second, 10*time.Second, 0)
-				st.FirstSeen = ago(time.Hour)
-				st.Conditions = []metav1.Condition{quietMark}
-				return st
+				return quietThenSeen(10*time.Second, 10*time.Second, time.Hour)
 			},
-			waiting: 5 * time.Minute,
-			due:     true, reason: ReasonFirstAnalysis,
+			settings: func(s *TriggerSettings) { s.RecentWindow = 0 },
+			due:      true, reason: ReasonFirstAnalysis,
 		},
 		{
-			name: "not recent: a new observation after going quiet is due once settled",
+			name: "not recent: an Incident already marked due stays due",
 			status: func() remediationv1alpha1.IncidentStatus {
-				st := incidentStatus(45*time.Second, 45*time.Second, 0)
-				st.FirstSeen = ago(time.Hour)
-				st.Conditions = []metav1.Condition{quietMark}
+				st := incidentStatus(35*time.Minute, time.Hour, 0)
+				st.Conditions = []metav1.Condition{{Type: ConditionAnalysisDue, Status: metav1.ConditionTrue,
+					Reason: ReasonFirstAnalysis, LastTransitionTime: metav1.Time{Time: triggerNow.Add(-30 * time.Minute)}}}
 				return st
 			},
 			due: true, reason: ReasonFirstAnalysis,
@@ -999,8 +1046,9 @@ func TestFlappingIncidentIsDueWithinTheSettleLimit(t *testing.T) {
 
 // Settings applied after Incidents exist (#423): the never-analyzed Incidents last seen longer ago than the
 // recent window are not due (NotRecent) and take no unit of the budget, so the recent one is due though it is
-// the newest. One of the quiet ones seen again is due once it has settled, not at once, though its firstSeen,
-// and the controller's first sight of it not due, are past the settle limit.
+// the newest. Each skip is reported once, in an event and the metric, not again on later passes. One of the
+// quiet ones seen again is due once it has settled, not at once, though its firstSeen, and the controller's
+// first sight of it not due, are past the settle limit.
 func TestQuietIncidentsTakeNoBudgetWhenSettingsArriveLate(t *testing.T) {
 	ns := namespace(t)
 	for f := 1; f <= 3; f++ {
@@ -1011,15 +1059,36 @@ func TestQuietIncidentsTakeNoBudgetWhenSettingsArriveLate(t *testing.T) {
 	var now atomic.Int64
 	now.Store(triggerNow.UnixNano())
 	clock := func() time.Time { return time.Unix(0, now.Load()).UTC() }
-	r := start(t, ns, Config{TriggerInterval: testTriggerInterval, Now: clock})
+	rec := corerecord.NewFakeRecorder(20)
+	r := start(t, ns, Config{TriggerInterval: testTriggerInterval, Now: clock, Recorder: rec})
 	for f := 1; f <= recent; f++ {
 		eventually(t, ns, f, dueIs(false, ReasonSettingsNotFound))
 	}
+	skips := testutil.ToFloat64(notRecentSkips)
 	createSettings(t, 2)
 	createBudget(t, ns, nil)
 	eventually(t, ns, recent, dueIs(true, ReasonFirstAnalysis))
 	for f := 1; f <= 3; f++ {
 		eventually(t, ns, f, dueIs(false, ReasonNotRecent))
+	}
+	time.Sleep(4 * testTriggerInterval) // later passes report nothing more
+	for range 3 {
+		select {
+		case e := <-rec.Events:
+			if !strings.HasPrefix(e, "Normal AnalysisSkipped ") || !strings.Contains(e, "15m0s") {
+				t.Fatalf("event %q", e)
+			}
+		default:
+			t.Fatal("fewer than 3 AnalysisSkipped events")
+		}
+	}
+	select {
+	case e := <-rec.Events:
+		t.Fatalf("an event more than one per skipped Incident: %q", e)
+	default:
+	}
+	if got := testutil.ToFloat64(notRecentSkips) - skips; got != 3 {
+		t.Fatalf("skips counted %v, want 3", got)
 	}
 
 	// 10 min later, past the settle limit since the quiet ones were first found not recent, fp(1) is seen
@@ -1039,6 +1108,26 @@ func TestQuietIncidentsTakeNoBudgetWhenSettingsArriveLate(t *testing.T) {
 	for f := 2; f <= 3; f++ {
 		eventually(t, ns, f, dueIs(false, ReasonNotRecent))
 	}
+}
+
+// An Incident that went quiet and was seen again while no settings existed (so no pass decided it NotRecent)
+// is not due at once when the settings arrive, though its firstSeen is past the settle limit: the settle limit
+// counts from the new burst, which its records show, so it is due once it has settled.
+func TestQuietIncidentSeenAgainBeforeSettingsDebounces(t *testing.T) {
+	ns := namespace(t)
+	createIncident(t, ns, 1, quietThenSeen(10*time.Second, 10*time.Second, time.Hour))
+	var now atomic.Int64
+	now.Store(triggerNow.UnixNano())
+	start(t, ns, Config{TriggerInterval: testTriggerInterval, Now: func() time.Time { return time.Unix(0, now.Load()).UTC() }})
+	eventually(t, ns, 1, dueIs(false, ReasonSettingsNotFound))
+	createSettings(t, 10)
+	createBudget(t, ns, nil)
+	time.Sleep(6 * testTriggerInterval)
+	if inc := get(t, ns); meta.IsStatusConditionTrue(inc.Status.Conditions, ConditionAnalysisDue) {
+		t.Fatalf("an Incident seen again after going quiet is due before the debounce: %+v", inc.Status.Conditions)
+	}
+	now.Store(triggerNow.Add(35 * time.Second).UnixNano())
+	eventually(t, ns, 1, dueIs(true, ReasonFirstAnalysis))
 }
 
 // When the budget does not cover every Incident that is due, the oldest by firstSeen goes first, whatever
@@ -1224,5 +1313,27 @@ func TestNewBoundsTheTriggerDeadlines(t *testing.T) {
 	}
 	if c.cfg.PassTimeout != 900*time.Millisecond || c.cfg.ReadTimeout != 675*time.Millisecond {
 		t.Errorf("from a 1 s interval: pass %s, read %s", c.cfg.PassTimeout, c.cfg.ReadTimeout)
+	}
+}
+
+// New resolves the recent window: the cooldown by default, never shorter than the debounce.
+func TestNewResolvesTheRecentWindow(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cfg  Config
+		want time.Duration
+	}{
+		"default":            {Config{}, DefaultCooldown},
+		"follows cooldown":   {Config{Cooldown: 20 * time.Minute}, 20 * time.Minute},
+		"set":                {Config{RecentWindow: 30 * time.Minute}, 30 * time.Minute},
+		"below the debounce": {Config{Debounce: 2 * time.Minute, RecentWindow: time.Minute}, 2 * time.Minute},
+	} {
+		tc.cfg.Namespace = "ns"
+		c, err := New(tc.cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.cfg.RecentWindow != tc.want {
+			t.Errorf("%s: recent window %s, want %s", name, c.cfg.RecentWindow, tc.want)
+		}
 	}
 }

@@ -12,6 +12,7 @@ One task each. They assume Shadewright is installed ([get started](../getting-st
 - [Pause and resume writes](pause-and-resume.md)
 - [Limit the namespaces it watches](limit-watched-namespaces.md)
 - [Read an Incident](read-an-incident.md)
+- [Check status with kubectl](check-status.md)
 - [Find why a request was refused](find-why-refused.md)
 
 !!! note "Not yet run"

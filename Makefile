@@ -115,7 +115,7 @@ test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
 
 # Fuzz targets as <package dir>:<FuzzName>. hack/fuzz-targets.sh checks this list against the tree both ways, so a
 # new target cannot be left out of the weekly Fuzz workflow and a stale entry cannot fuzz nothing and pass.
-FUZZ_TARGETS := internal/redact:FuzzString internal/incidentcontext:FuzzLogExcerpt internal/gitops/patch:FuzzPatch internal/incidents/fingerprint:FuzzNormalize internal/policy/pathmatch:FuzzMatch internal/analyzer/refcheck:FuzzCheck internal/providers/model/foundry:FuzzParseResponse internal/tools:FuzzArguments
+FUZZ_TARGETS := cmd/kubectl-shadewright:FuzzClean internal/redact:FuzzString internal/incidentcontext:FuzzLogExcerpt internal/gitops/patch:FuzzPatch internal/incidents/fingerprint:FuzzNormalize internal/policy/pathmatch:FuzzMatch internal/analyzer/refcheck:FuzzCheck internal/providers/model/foundry:FuzzParseResponse internal/tools:FuzzArguments
 FUZZ ?= $(FUZZ_TARGETS)
 FUZZTIME ?= 30s
 
@@ -199,6 +199,13 @@ verify-generated: ## Regenerate all generated files from scratch and fail if the
 build: manifests generate fmt vet ## Build the executor (bin/manager) and analyzer binaries.
 	go build -o bin/manager cmd/main.go
 	go build -o bin/analyzer ./cmd/analyzer
+
+# PLUGIN_VERSION is stamped into the plugin (kubectl shadewright version); status compares it with the CRDs' version label.
+PLUGIN_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
+.PHONY: build-plugin
+build-plugin: fmt vet ## Build the read-only kubectl plugin (bin/kubectl-shadewright; put it on PATH to run kubectl shadewright status).
+	go build -trimpath -ldflags="-s -w -X main.version=$(PLUGIN_VERSION)" -o bin/kubectl-shadewright ./cmd/kubectl-shadewright
 
 .PHONY: run
 run: manifests generate fmt vet ## Run the executor from your host (operator namespace from NAMESPACE).

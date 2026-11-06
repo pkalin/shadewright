@@ -6,6 +6,8 @@ title: Troubleshooting
 
 A `RemediationRequest` that stops says why in its conditions. Find the reason, then the row below. Every reason in the executor and the policy code is listed, taken from the code on `main`.
 
+For an overview first, run [`kubectl shadewright status`](how-to/check-status.md): per Incident its due reason, the outcome of the last analysis and its requests with phase, policy decision and pull request, then the day's analysis budget and the kill switch, read-only with your own permissions.
+
 ```bash
 kubectl -n shadewright-system get remediationrequest <name> \
   -o jsonpath='{.status.phase}{"\n"}{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'

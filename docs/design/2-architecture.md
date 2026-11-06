@@ -72,6 +72,8 @@ The analyzer and the remediation controller are separate binaries in one Go modu
 
 Their roles are generated from kubebuilder RBAC markers (`internal/analyzer`, `internal/analyzer/collector`, `internal/controller`).
 
+A third binary in the module, `cmd/kubectl-shadewright`, is not deployed: it is a kubectl plugin that a person runs with their own kubeconfig and permissions (`kubectl shadewright status`). It only gets and lists Incidents, RemediationRequests, the RemediationSettings, the analysis budget ConfigMap and the version label of the Shadewright CRDs, holds no identity of its own, and cleans every string from the cluster of control characters and terminal escape sequences before printing it (invariant 4); see [check status with kubectl](../how-to/check-status.md).
+
 No model runs in the cluster and no GPU is needed: the analyzer calls a managed model endpoint (Microsoft Foundry first). The call, and the bounded tool loop on escalation, are our own code, not a hosted agent service.
 
 ### 2.2.2. Analyzer permissions

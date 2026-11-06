@@ -440,10 +440,11 @@ Since shadewright-fleet [#37](https://github.com/pkalin/shadewright-fleet/pull/3
    names both. `EndpointNotAllowed`, `ModelForbidden` or `ModelNotFound` point at the endpoint, the role assignment or
    the deployment name.
 
-3. Record the outcome for the field log: the reason, the call and token counts, the models and the prompt version
-   from the `Analyzed Incident` line, and the request's spec if one was made. A wrong or unsupported proposal is a
-   finding for #78, not something to fix in the run. The result's `missingData` is not logged yet
-   ([#422](https://github.com/pkalin/shadewright/issues/422)) and no record is stored until
+3. Record the outcome for the field log: the reason, the call and token counts, the models, the prompt version, the
+   summary and, for a `MissingData` hand-off, the `missingData` list from the `Analyzed Incident` line, and the
+   request's spec if one was made. A wrong or unsupported proposal is a
+   finding for #78, not something to fix in the run. The summary and `missingData` are in the log from
+   [#422](https://github.com/pkalin/shadewright/issues/422) on; no record is stored until
    [#77](https://github.com/pkalin/shadewright/issues/77).
 
 4. To stop the analysis in a lab that stays up, set `maxAnalysesPerDay: 0` in

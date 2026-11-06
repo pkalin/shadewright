@@ -267,6 +267,9 @@ func (c *Controller) watch(items []remediationv1alpha1.Incident, now time.Time, 
 			// A spell that ended between two passes: the lastSeen read on the previous pass was stale when the
 			// new one was seen, so the gap itself was longer than the window. A shorter gap is no spell, however
 			// late the pass that reads it. A stored lastSeen stale itself begins the later spell, so it wins.
+			// Only the newest observation is stored, so within one pass interval of the window this is a guess:
+			// observations landing together can hide one that broke the gap. It errs towards a spell, which
+			// only delays the first analysis (another debounce), never brings it forward.
 			prev := t.lastSeen
 			if now.After(t.sampled.Add(recentWindow(s))) || t.lasting {
 				prev = time.Time{}

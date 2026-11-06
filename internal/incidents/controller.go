@@ -150,8 +150,9 @@ type Config struct {
 	// after its first unsettled observation (the aggregation window by default), the least time between the
 	// start of one analysis and the next, how long an analysis may run before it is taken as lost, how
 	// recently an Incident never analyzed must have been seen to be due for its first analysis (zero takes
-	// the cooldown; [New] raises it to the debounce when shorter), and how often the Incidents are decided
-	// again.
+	// the cooldown, so the controller always has a window, unlike [TriggerSettings] where zero means none;
+	// one shorter than the debounce is taken as the debounce by [Due], the one place that does), and how
+	// often the Incidents are decided again.
 	Debounce        time.Duration
 	SettleLimit     time.Duration
 	Cooldown        time.Duration
@@ -216,6 +217,11 @@ type Controller struct {
 	// waiting holds, per Incident name, when the analysis trigger first saw the Incident waiting only to
 	// settle or for budget ([Controller.rememberWaiting]). Only the trigger goroutine uses it.
 	waiting map[string]time.Time
+	// quiet holds the Incidents, never analyzed, the analysis trigger found gone quiet ([goneQuiet]), and
+	// watched, per Incident, when the passes in a row that looked at it began ([Controller.watch]). Only the
+	// trigger goroutine uses them.
+	quiet   map[string]struct{}
+	watched map[string]time.Time
 	// lastEvent is when the last Warning event at the cap was written.
 	lastEvent time.Time
 }
@@ -281,7 +287,6 @@ func New(cfg Config) (*Controller, error) {
 	if cfg.RecentWindow <= 0 {
 		cfg.RecentWindow = cfg.Cooldown
 	}
-	cfg.RecentWindow = max(cfg.RecentWindow, cfg.Debounce)
 	if cfg.AnalysisTimeout <= 0 {
 		cfg.AnalysisTimeout = DefaultAnalysisTimeout
 	}
@@ -323,6 +328,8 @@ func New(cfg Config) (*Controller, error) {
 		refused:   newBoundedSet(refusedRemembered),
 		sightings: newSightings(cfg.MaxFirstSightings),
 		waiting:   map[string]time.Time{},
+		quiet:     map[string]struct{}{},
+		watched:   map[string]time.Time{},
 	}, nil
 }
 

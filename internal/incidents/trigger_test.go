@@ -20,8 +20,10 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -99,6 +101,9 @@ func TestDue(t *testing.T) {
 		settings func(*TriggerSettings)
 		held     time.Duration // how long ago the newest observation held unwritten was made; 0 for none
 		waiting  time.Duration // how long ago the controller first saw the incident waiting; 0 for never
+		quiet    bool          // the controller found the incident gone quiet (Memory.WentQuiet)
+		watched  time.Duration // how long ago the passes in a row that looked at it began; 0 for none
+		gen      int64         // the Incident's generation
 		used     int
 		due      bool
 		reason   string
@@ -224,7 +229,78 @@ func TestDue(t *testing.T) {
 			name:   "not recent: an observation held unwritten makes it recent (and firstSeen is past the settle limit)",
 			status: func() remediationv1alpha1.IncidentStatus { return incidentStatus(35*time.Minute, time.Hour, 0) },
 			held:   10 * time.Second,
-			due:    true, reason: ReasonFirstAnalysis,
+			// Without Memory.WentQuiet; the controller sets it from the stored lastSeen before it decides.
+			due: true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name:   "gone quiet (#430 item 2): seen again while its observation is held, it debounces",
+			status: func() remediationv1alpha1.IncidentStatus { return incidentStatus(35*time.Minute, time.Hour, 0) },
+			held:   10 * time.Second,
+			quiet:  true,
+			reason: ReasonDebouncing,
+		},
+		{
+			name:    "gone quiet: the settle limit counts from the first sight of it waiting again",
+			status:  func() remediationv1alpha1.IncidentStatus { return incidentStatus(10*time.Second, time.Hour, 0) },
+			quiet:   true,
+			waiting: 5 * time.Minute,
+			due:     true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name:    "gone quiet: first seen waiting again 4 min ago has not reached the settle limit",
+			status:  func() remediationv1alpha1.IncidentStatus { return incidentStatus(10*time.Second, time.Hour, 0) },
+			quiet:   true,
+			waiting: 4 * time.Minute,
+			reason:  ReasonDebouncing,
+		},
+		{
+			name: "gone quiet (#430 item 6): an event series counting up again after NotRecent debounces, after a restart too",
+			status: func() remediationv1alpha1.IncidentStatus {
+				// One occurrence, begun an hour ago: no gap in the records, only lastSeen moved.
+				st := withDueCondition(incidentStatus(10*time.Second, time.Hour, 0), metav1.ConditionFalse, ReasonNotRecent)
+				st.FirstSeen = ago(time.Hour)
+				return st
+			},
+			reason: ReasonDebouncing,
+		},
+		{
+			name: "gone quiet: a burst older than the NotRecent spell does not count",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return withDueCondition(quietThenSeen(10*time.Second, 40*time.Minute, time.Hour), metav1.ConditionFalse, ReasonNotRecent)
+			},
+			reason: ReasonDebouncing,
+		},
+		{
+			name: "watched (#430 item 5): a gap between begins this process watched is no quiet spell",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return quietThenSeen(10*time.Second, 10*time.Second, time.Hour)
+			},
+			watched: 2 * time.Hour,
+			due:     true, reason: ReasonFirstAnalysis, // the settle limit counts from firstSeen, an hour ago
+		},
+		{
+			name: "watched: a mark that says due is not taken back for a gap this process watched",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return withDueCondition(quietThenSeen(10*time.Second, 10*time.Second, time.Hour), metav1.ConditionTrue, ReasonFirstAnalysis)
+			},
+			watched: time.Hour,
+			due:     true, reason: ReasonFirstAnalysis,
+		},
+		{
+			name: "watched: a gap that began before this process watched still counts",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return quietThenSeen(10*time.Second, 10*time.Second, time.Hour)
+			},
+			watched: 30 * time.Minute,
+			reason:  ReasonDebouncing,
+		},
+		{
+			name: "generation (#430 item 8): a mark of another generation is no mark, so NotRecent",
+			status: func() remediationv1alpha1.IncidentStatus {
+				return withDueCondition(incidentStatus(35*time.Minute, time.Hour, 0), metav1.ConditionTrue, ReasonFirstAnalysis)
+			},
+			gen:    2,
+			reason: ReasonNotRecent,
 		},
 		{
 			name: "not recent: a new occurrence after going quiet debounces, though firstSeen is past the settle limit",
@@ -584,15 +660,18 @@ func TestDue(t *testing.T) {
 				tt.settings(&s)
 			}
 			inc := &remediationv1alpha1.Incident{Status: tt.status()}
-			var held time.Time
+			inc.Generation = tt.gen
+			m := Memory{WentQuiet: tt.quiet}
 			if tt.held > 0 {
-				held = triggerNow.Add(-tt.held)
+				m.Held = triggerNow.Add(-tt.held)
 			}
-			var waiting time.Time
 			if tt.waiting > 0 {
-				waiting = triggerNow.Add(-tt.waiting)
+				m.Waiting = triggerNow.Add(-tt.waiting)
 			}
-			due, reason := Due(inc, held, waiting, triggerNow, s, tt.used)
+			if tt.watched > 0 {
+				m.WatchedSince = triggerNow.Add(-tt.watched)
+			}
+			due, reason := Due(inc, m, triggerNow, s, tt.used)
 			if due != tt.due || reason != tt.reason {
 				t.Fatalf("Due = %v, %s; want %v, %s", due, reason, tt.due, tt.reason)
 			}
@@ -1540,18 +1619,22 @@ func TestNewBoundsTheTriggerDeadlines(t *testing.T) {
 	}
 }
 
-// New resolves the recent window: the cooldown by default, never shorter than the debounce.
+// New resolves the recent window: the cooldown by default. One shorter than the debounce is passed on as set
+// (#430 item 9): Due alone raises it to the debounce, and the skip event names the window Due applies.
 func TestNewResolvesTheRecentWindow(t *testing.T) {
 	for name, tc := range map[string]struct {
-		cfg  Config
-		want time.Duration
+		cfg       Config
+		want      time.Duration
+		effective string
 	}{
-		"default":            {Config{}, DefaultCooldown},
-		"follows cooldown":   {Config{Cooldown: 20 * time.Minute}, 20 * time.Minute},
-		"set":                {Config{RecentWindow: 30 * time.Minute}, 30 * time.Minute},
-		"below the debounce": {Config{Debounce: 2 * time.Minute, RecentWindow: time.Minute}, 2 * time.Minute},
+		"default":            {Config{}, DefaultCooldown, "15m0s"},
+		"follows cooldown":   {Config{Cooldown: 20 * time.Minute}, 20 * time.Minute, "20m0s"},
+		"set":                {Config{RecentWindow: 30 * time.Minute}, 30 * time.Minute, "30m0s"},
+		"below the debounce": {Config{Debounce: 2 * time.Minute, RecentWindow: time.Minute}, time.Minute, "2m0s"},
 	} {
 		tc.cfg.Namespace = "ns"
+		rec := corerecord.NewFakeRecorder(1)
+		tc.cfg.Recorder = rec
 		c, err := New(tc.cfg)
 		if err != nil {
 			t.Fatal(err)
@@ -1559,5 +1642,94 @@ func TestNewResolvesTheRecentWindow(t *testing.T) {
 		if c.cfg.RecentWindow != tc.want {
 			t.Errorf("%s: recent window %s, want %s", name, c.cfg.RecentWindow, tc.want)
 		}
+		c.reportNotRecent(&remediationv1alpha1.Incident{})
+		if e := <-rec.Events; !strings.Contains(e, "recent window of "+tc.effective+";") {
+			t.Errorf("%s: event %q, want the window %s", name, e, tc.effective)
+		}
+	}
+}
+
+// The trigger finds an Incident gone quiet before it decides, from the stored lastSeen, on every pass
+// (#430 items 2 and 3): it forgets when it first saw it waiting, which belongs to the spell before, and a new
+// observation still held unwritten does not let it skip the debounce.
+func TestWatchFindsAnIncidentGoneQuiet(t *testing.T) {
+	c, err := New(Config{Namespace: "ns", Now: func() time.Time { return triggerNow }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := triggerSettings
+	inc := remediationv1alpha1.Incident{ObjectMeta: metav1.ObjectMeta{Name: Name(fp(1))},
+		Spec: specOf(observation(1, 1, 1, 1, triggerNow)), Status: incidentStatus(35*time.Minute, time.Hour, 0)}
+	inc.Status.FirstSeen = ago(time.Hour)
+	// Waiting since before an outage of the budget, which wrote nothing while the Incident went quiet.
+	c.waiting[inc.Name] = triggerNow.Add(-time.Hour)
+	c.watch([]remediationv1alpha1.Incident{inc}, triggerNow, s)
+	if _, ok := c.waiting[inc.Name]; ok {
+		t.Fatal("the wait of the spell before is kept")
+	}
+	if _, ok := c.quiet[inc.Name]; !ok {
+		t.Fatal("the Incident is not remembered gone quiet")
+	}
+	// Seen again: the new observation is held unwritten.
+	c.pending[inc.Spec.Fingerprint] = &batch{first: triggerNow.Add(-10 * time.Second), last: triggerNow.Add(-10 * time.Second)}
+	used := 0
+	if due, reason := c.decider(&inc, triggerNow, s, &used)(&inc); due || reason != ReasonDebouncing {
+		t.Fatalf("Due = %v, %s; want false, Debouncing", due, reason)
+	}
+	// Once analyzed, it is no longer remembered gone quiet; once gone, nothing of it is kept.
+	inc.Status.LastAnalysisTime = ago(time.Minute)
+	c.watch([]remediationv1alpha1.Incident{inc}, triggerNow, s)
+	if _, ok := c.quiet[inc.Name]; ok {
+		t.Fatal("an analyzed Incident is still remembered gone quiet")
+	}
+	c.watch(nil, triggerNow, s)
+	if len(c.watched)+len(c.quiet)+len(c.waiting) != 0 {
+		t.Fatalf("a gone Incident is remembered: %v %v %v", c.watched, c.quiet, c.waiting)
+	}
+}
+
+// The first pass after settings arrive with many quiet Incidents (#430 item 4) writes the mark of the one due
+// first, though it is the newest, and at most notRecentWritesPerPass NotRecent conditions per pass; the
+// rest follow on later passes.
+func TestNotRecentWritesComeLastAndAreBounded(t *testing.T) {
+	ns := namespace(t)
+	const quiet = notRecentWritesPerPass + 5
+	for f := 1; f <= quiet; f++ {
+		createIncident(t, ns, f, incidentStatus(35*time.Minute, 35*time.Minute, 0))
+	}
+	const recent = quiet + 1
+	createIncident(t, ns, recent, incidentStatus(2*time.Minute, 2*time.Minute, 0))
+	var mu sync.Mutex
+	var reasons []string
+	startWith(t, ns, Config{TriggerInterval: 2 * time.Second, Now: func() time.Time { return triggerNow }},
+		func(_ *Controller, w *countingClient) {
+			w.mark = func(obj client.Object) error {
+				if c := meta.FindStatusCondition(obj.(*remediationv1alpha1.Incident).Status.Conditions, ConditionAnalysisDue); c != nil {
+					mu.Lock()
+					reasons = append(reasons, c.Reason)
+					mu.Unlock()
+				}
+				return nil
+			}
+		})
+	eventually(t, ns, recent, dueIs(false, ReasonSettingsNotFound)) // the last one the pass decides
+	mu.Lock()
+	reasons = nil
+	mu.Unlock()
+	createSettings(t, 10)
+	createBudget(t, ns, nil)
+	eventually(t, ns, recent, dueIs(true, ReasonFirstAnalysis))
+	time.Sleep(time.Second) // within the pass that marked it, well before the next one
+	mu.Lock()
+	first := slices.Clone(reasons)
+	mu.Unlock()
+	if len(first) == 0 || first[0] != ReasonFirstAnalysis {
+		t.Fatalf("the first write of the pass is %v, want FirstAnalysis first", first)
+	}
+	if n := len(first) - 1; n != notRecentWritesPerPass {
+		t.Fatalf("the pass wrote %d NotRecent conditions, want %d", n, notRecentWritesPerPass)
+	}
+	for f := 1; f <= quiet; f++ {
+		eventually(t, ns, f, dueIs(false, ReasonNotRecent))
 	}
 }

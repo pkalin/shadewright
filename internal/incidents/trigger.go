@@ -50,7 +50,8 @@ const (
 	// ReasonNotRecent: the incident was never analyzed, is not marked due, its newest occurrence is no lasting
 	// symptom state of a module, and it was last seen (in the status or held) longer ago than the recent
 	// window, so a symptom that stopped before analysis was turned on, or before the daily budget was reset,
-	// takes no unit of the budget. A new observation makes it due again through the debounce.
+	// takes no unit of the budget. A new observation makes it due again through the debounce, the settle
+	// limit counting from the controller's first sight of it waiting again ([unsettledSince]).
 	ReasonNotRecent = "NotRecent"
 	// ReasonAnalyzing: an analysis is running and has not reached the analysis timeout.
 	ReasonAnalyzing = "Analyzing"
@@ -121,21 +122,37 @@ type TriggerSettings struct {
 	AnalysisTimeout time.Duration
 	// RecentWindow is how recently an incident never analyzed must have been seen to be due for its first
 	// analysis: one last seen longer ago is not due (NotRecent), unless it is already marked due or its newest
-	// occurrence is a lasting state (see [Due]). A window shorter than Debounce is taken as Debounce, so an
-	// incident that settles is due for at least a moment. Zero means no window: any incident never analyzed
-	// may be due, and its unsettled observations start at firstSeen.
+	// occurrence is a lasting state (see [Due]). A window shorter than Debounce is taken as Debounce, here
+	// only ([Config].RecentWindow is passed unchanged), so an incident that settles is due for at least a
+	// moment. Zero means no window: any incident never analyzed may be due, and its unsettled observations
+	// start at firstSeen. The controller never passes zero: a zero Config.RecentWindow takes the cooldown.
 	RecentWindow time.Duration
 	// MaxAnalysesPerDay is the daily limit of the RemediationSettings ([MaxAnalysesPerDay]): the analyses
 	// allowed per UTC day across all Incidents. 0 disables analysis.
 	MaxAnalysesPerDay int
 }
 
+// Memory is what the controller knows of an incident beyond its status, in this process: [Due] reads it, and
+// a restart loses it.
+type Memory struct {
+	// Held is the newest observation of the incident the controller holds but has not written yet, or zero.
+	Held time.Time
+	// Waiting is when the controller first found the incident waiting only to settle or for budget, or zero;
+	// [unsettledSince] uses it when the status does not tell.
+	Waiting time.Time
+	// WentQuiet: a pass found the incident gone quiet ([goneQuiet]) while it was never analyzed, whether or
+	// not that pass could write NotRecent (a pass without the settings or the budget writes nothing).
+	WentQuiet bool
+	// WatchedSince is when the first of the passes in a row, up to now, that looked at the incident ran
+	// (zero when none did): a quiet spell since then would have set WentQuiet, so [unsettledSince] does not
+	// read one from the occurrence records.
+	WatchedSince time.Time
+}
+
 // Due decides whether an incident is due for analysis at now, and gives the reason (one of the Reason
-// constants). held is the newest observation of the incident the controller holds but has not written yet
-// (zero when none). waiting is when the controller first found the incident waiting only to settle or for
-// budget, in this process (zero when not); [unsettledSince] uses it when the status does not tell. usedToday
-// is the number of analyses already counted against the current UTC day, read from the budget ConfigMap
-// ([UsedToday]), not from memory. Due reads only its arguments.
+// constants). m is what the controller knows of it beyond the status ([Memory]). usedToday is the number of
+// analyses already counted against the current UTC day, read from the budget ConfigMap ([UsedToday]), not
+// from memory. Due reads only its arguments.
 //
 // An incident is due when it has data the last analysis did not see, it has settled (or the settle limit has
 // passed), the cooldown has passed and the budget allows:
@@ -162,7 +179,7 @@ type TriggerSettings struct {
 //
 // An occurrence without a known begin time is never taken as new, since it cannot be placed after the last
 // analysis; its observation still counts as seen again.
-func Due(inc *remediationv1alpha1.Incident, held, waiting, now time.Time, s TriggerSettings, usedToday int) (bool, string) {
+func Due(inc *remediationv1alpha1.Incident, m Memory, now time.Time, s TriggerSettings, usedToday int) (bool, string) {
 	st := &inc.Status
 	if st.LastSeen == nil {
 		return false, ReasonNotObserved
@@ -201,14 +218,12 @@ func Due(inc *remediationv1alpha1.Incident, held, waiting, now time.Time, s Trig
 			}
 		}
 	}
-	seen := latest(st.LastSeen.Time, held)
-	// A lastSeen ahead of the controller's clock (skew) is recent: only a past beyond the window is stale.
-	if reason == ReasonFirstAnalysis && s.RecentWindow > 0 && now.After(seen.Add(recentWindow(s))) &&
-		!markedDue(st) && !lastingState(st) {
+	seen := latest(st.LastSeen.Time, m.Held)
+	if reason == ReasonFirstAnalysis && stale(inc, seen, now, s) {
 		return false, ReasonNotRecent
 	}
 	if now.Before(seen.Add(s.Debounce)) {
-		since := unsettledSince(st, waiting, s)
+		since := unsettledSince(inc, m, s)
 		if s.SettleLimit <= 0 || since.IsZero() || now.Before(since.Add(s.SettleLimit)) {
 			return false, ReasonDebouncing
 		}
@@ -223,12 +238,24 @@ func Due(inc *remediationv1alpha1.Incident, held, waiting, now time.Time, s Trig
 }
 
 // unsettledSince returns when the incident's first observation that the last analysis did not see was made,
-// as far as it is known, or zero: for an incident never analyzed, firstSeen, or the begin of its newest burst
-// when the records show it went quiet before it ([quietUntil]); else the begin of the earliest occurrence that began after lastAnalysisTime (the drop mark standing in for the dropped records). waiting,
-// the controller's own first sight of the incident waiting, is taken when it is earlier, or when the status
-// does not tell (a recurrence of an occurrence the last analysis already counted). The status values survive
-// a restart; waiting does not.
-func unsettledSince(st *remediationv1alpha1.IncidentStatus, waiting time.Time, s TriggerSettings) time.Time {
+// as far as it is known, or zero (still settling). For an incident never analyzed:
+//
+//   - gone quiet (m.WentQuiet, or its condition says NotRecent, [saysNotRecent]): m.Waiting only, the
+//     controller's first sight of it waiting again. Nothing in the status dates the new burst (an event
+//     series counting up again adds no occurrence, and a new observation may still be held unwritten), and
+//     every older time, an m.Waiting from before the spell included, belongs to the spell before; the
+//     controller forgets m.Waiting when it finds the incident gone quiet;
+//   - else the begin of its newest burst when the records show a gap before it ([quietUntil]) that no pass of
+//     this process watched (m.WatchedSince is zero or after the gap began): a watched one would have set
+//     m.WentQuiet had the incident gone quiet in it;
+//   - else firstSeen, or m.Waiting when earlier.
+//
+// For one analyzed: the begin of the earliest occurrence that began after lastAnalysisTime (the drop mark
+// standing in for the dropped records), or m.Waiting when earlier, or when the status does not tell (a
+// recurrence of an occurrence the last analysis already counted). The status values survive a restart; m
+// does not, and a NotRecent condition stands in for m.WentQuiet after one.
+func unsettledSince(inc *remediationv1alpha1.Incident, m Memory, s TriggerSettings) time.Time {
+	st := &inc.Status
 	var since time.Time
 	earliest := func(t time.Time) {
 		if !t.IsZero() && (since.IsZero() || t.Before(since)) {
@@ -237,9 +264,14 @@ func unsettledSince(st *remediationv1alpha1.IncidentStatus, waiting time.Time, s
 	}
 	switch {
 	case st.LastAnalysisTime == nil && st.Phase != remediationv1alpha1.IncidentAnalyzing:
-		if burst := quietUntil(st, s); !burst.IsZero() {
-			earliest(burst)
-		} else if st.FirstSeen != nil {
+		if m.WentQuiet || saysNotRecent(inc) {
+			return m.Waiting
+		}
+		if burst, gapFrom := quietUntil(st, s); !burst.IsZero() &&
+			(m.WatchedSince.IsZero() || m.WatchedSince.After(gapFrom)) {
+			return burst
+		}
+		if st.FirstSeen != nil {
 			earliest(st.FirstSeen.Time)
 		}
 	case st.LastAnalysisTime != nil:
@@ -253,7 +285,7 @@ func unsettledSince(st *remediationv1alpha1.IncidentStatus, waiting time.Time, s
 			earliest(st.OccurrencesDroppedThrough.Time)
 		}
 	}
-	earliest(waiting)
+	earliest(m.Waiting)
 	return since
 }
 
@@ -278,10 +310,12 @@ const occurrenceCondition = "condition:"
 // due (SettingsUnreadable, BudgetReadFailed, [Controller.markDue]), and a not-due condition keeps its reason,
 // so those reasons on a False condition mean it was True before. One failed read thus does not end a pending
 // first analysis. The other reasons of a budget that is unknown (an object missing, incomplete or not to be
-// trusted) are written on every Incident, so they tell nothing of a mark before.
-func markedDue(st *remediationv1alpha1.IncidentStatus) bool {
-	cond := meta.FindStatusCondition(st.Conditions, ConditionAnalysisDue)
-	if cond == nil {
+// trusted) are written on every Incident, so they tell nothing of a mark before. A condition written for
+// another generation of the Incident is no mark, as for [conditionAgrees]: that only takes the exemption from
+// NotRecent away, so it never makes more analyses.
+func markedDue(inc *remediationv1alpha1.Incident) bool {
+	cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue)
+	if cond == nil || cond.ObservedGeneration != inc.Generation {
 		return false
 	}
 	switch cond.Status {
@@ -311,18 +345,47 @@ func lastingState(st *remediationv1alpha1.IncidentStatus) bool {
 	return strings.HasPrefix(newest.ID, occurrenceCondition)
 }
 
-// recentWindow is the recent window [Due] applies: RecentWindow, but never shorter than Debounce.
+// recentWindow is the recent window [Due] applies: RecentWindow, but never shorter than Debounce. It is the
+// one place that raises it.
 func recentWindow(s TriggerSettings) time.Duration { return max(s.RecentWindow, s.Debounce) }
 
+// stale reports whether an incident never analyzed, last seen at seen, is skipped at now (NotRecent): a
+// window is set, seen is longer ago than it, the incident is not marked due already ([markedDue]) and its
+// newest occurrence is no lasting state ([lastingState]). A seen ahead of the controller's clock (skew) is
+// recent: only a past beyond the window is stale. The caller checks that the incident was never analyzed.
+func stale(inc *remediationv1alpha1.Incident, seen, now time.Time, s TriggerSettings) bool {
+	return s.RecentWindow > 0 && now.After(seen.Add(recentWindow(s))) && !markedDue(inc) && !lastingState(&inc.Status)
+}
+
+// goneQuiet reports whether the incident, never analyzed and not in phase Analyzing, has a lastSeen in its
+// status that is [stale] at now. Unlike the NotRecent check of [Due] it leaves the observations held
+// unwritten out, so an incident seen again while its new observation waits for the next write still counts
+// as gone quiet. The controller asks it on every pass, one that cannot read the budget included, and
+// remembers the answer ([Memory].WentQuiet).
+func goneQuiet(inc *remediationv1alpha1.Incident, now time.Time, s TriggerSettings) bool {
+	st := &inc.Status
+	return st.LastSeen != nil && st.LastAnalysisTime == nil && st.Phase != remediationv1alpha1.IncidentAnalyzing &&
+		stale(inc, st.LastSeen.Time, now, s)
+}
+
+// saysNotRecent reports whether the incident's AnalysisDue condition says not due, NotRecent: a pass found it
+// gone quiet, and it has not been marked due since. Whatever generation the condition was written for, it
+// only makes the incident wait longer to settle ([unsettledSince]).
+func saysNotRecent(inc *remediationv1alpha1.Incident) bool {
+	cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue)
+	return cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == ReasonNotRecent
+}
+
 // quietUntil returns the begin of the incident's newest burst when its occurrence records show a gap longer
-// than the recent window before it (the incident went quiet and was seen again), or zero: no window, fewer
+// than the recent window before it, and the begin before that gap (gapFrom), or zeros: no window, fewer
 // than two begin times, or no such gap. The burst begins at the earliest begin time after the newest gap. It
-// reads the status only, so it holds across restarts and whatever passes ran while the incident was quiet.
-// A recurrence that adds no new occurrence (an event series counting up again) shows no gap, so its
-// unsettled observations still start at firstSeen.
-func quietUntil(st *remediationv1alpha1.IncidentStatus, s TriggerSettings) time.Time {
+// reads the status only, so it holds across restarts and passes that never decided the incident. A gap
+// between begins is no proof of a quiet spell (an event series may have counted up all through it), so
+// [unsettledSince] takes it only when no pass of this process watched it. A recurrence that adds no new
+// occurrence shows no gap.
+func quietUntil(st *remediationv1alpha1.IncidentStatus, s TriggerSettings) (burst, gapFrom time.Time) {
 	if s.RecentWindow <= 0 {
-		return time.Time{}
+		return time.Time{}, time.Time{}
 	}
 	began := make([]time.Time, 0, len(st.Occurrences)+1)
 	for _, r := range st.Occurrences {
@@ -338,10 +401,10 @@ func quietUntil(st *remediationv1alpha1.IncidentStatus, s TriggerSettings) time.
 	window := recentWindow(s)
 	for i := 0; i+1 < len(began); i++ {
 		if began[i].Sub(began[i+1]) > window {
-			return began[i]
+			return began[i], began[i+1]
 		}
 	}
-	return time.Time{}
+	return time.Time{}, time.Time{}
 }
 
 // newOccurrences returns the number of distinct occurrences that began after since: the records that did,

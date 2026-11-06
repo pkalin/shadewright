@@ -46,7 +46,9 @@ limitations under the License.
 // returned as a [providers.RetryableError] carrying it. There is no fallback to another deployment (#80):
 // after the last attempt the error is retryable and the caller hands the incident off. 401 and 403 are
 // [providers.ErrForbidden], 404 (an unknown or removed deployment) is [providers.ErrNotFound], 413 is
-// [providers.ErrTooLarge] and any other 4xx is [providers.ErrRejected]; none of them is retried.
+// [providers.ErrTooLarge] and any other 4xx is [providers.ErrRejected]; none of them is retried. A reply
+// that arrives as a deadline ends and is not whole JSON (an empty 200, for example) is that timeout, never
+// malformed output.
 //
 // A reply is untrusted (invariant 4). Its body is read up to Config.MaxResponseBytes, must be one JSON value
 // of the chat completion shape with exactly one choice and a usage block, and is then checked against the

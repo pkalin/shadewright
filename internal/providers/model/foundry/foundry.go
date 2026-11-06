@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -516,7 +517,15 @@ func (p *Provider) once(ctx context.Context, body []byte) (data []byte, billed b
 	if int64(len(data)) > p.maxBody {
 		return nil, true, tooLarge
 	}
-	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+	mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	isJSON := err == nil && mt == "application/json"
+	// net/http returns a reply that raced the end of the attempt's context (#438), such as the empty 200 a
+	// server sends when its handler gives up on the client going away. Past the deadline, a reply that is
+	// not whole JSON is the timeout, retryable, not malformed model output.
+	if actx.Err() != nil && (!isJSON || !json.Valid(data)) {
+		return data, true, transportError(ctx, context.DeadlineExceeded)
+	}
+	if !isJSON {
 		return data, true, fmt.Errorf("foundry: the reply is not JSON: %w", providers.ErrMalformedOutput)
 	}
 	return data, true, nil

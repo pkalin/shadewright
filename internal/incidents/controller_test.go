@@ -375,29 +375,67 @@ func TestConflictRetriesWithoutLosingCounts(t *testing.T) {
 	}
 }
 
-func TestLostAnswerIsNotCountedTwice(t *testing.T) {
-	ns := namespace(t)
-	r := start(t, ns, Config{Window: 200 * time.Millisecond, RetryAfter: 100 * time.Millisecond})
-	var lost atomic.Bool
+// storedWrites makes the first status update that the API server stores answer as lost (a deadline), and
+// counts the updates it stores. It counts those, not every update sent (#438): the analysis trigger writes
+// the AnalysisDue condition on its own schedule, and when that lands between the read and the update of an
+// observation write, the update meets a conflict, stores nothing and is sent again on a fresh read.
+func storedWrites(r *running, lost *atomic.Bool) *atomic.Int32 {
+	var stored atomic.Int32
 	r.writes.after = func(err error) error {
-		if err == nil && lost.CompareAndSwap(false, true) {
+		if err != nil {
+			return err
+		}
+		stored.Add(1)
+		if lost.CompareAndSwap(false, true) {
 			return context.DeadlineExceeded
 		}
-		return err
+		return nil
 	}
-	r.obs <- immediate(observation(1, 1, 4, 4, time.Now().Truncate(time.Second)))
-	eventually(t, ns, 1, countIs(4))
-	// Let the batch that went back be tried again: it is recognised as written.
-	time.Sleep(time.Second)
-	if inc := get(t, ns); inc.Status.Count != 4 {
-		t.Fatalf("count %d after a lost answer, want 4", inc.Status.Count)
-	}
-	if !lost.Load() || r.writes.updates.Load() != 1 {
-		t.Fatalf("lost %v, %d status writes: want the retry to find the batch applied without writing", lost.Load(), r.writes.updates.Load())
-	}
-	r.stop()
-	if r.pending[fp(1)] != nil || r.failed[fp(1)] != nil {
-		t.Fatal("the batch is still pending after the retry")
+	return &stored
+}
+
+func TestLostAnswerIsNotCountedTwice(t *testing.T) {
+	for name, conflict := range map[string]bool{"lost answer": false, "lost answer after a conflict": true} {
+		t.Run(name, func(t *testing.T) {
+			ns := namespace(t)
+			r := start(t, ns, Config{Window: 200 * time.Millisecond, RetryAfter: 100 * time.Millisecond})
+			var lost atomic.Bool
+			stored := storedWrites(r, &lost)
+			if conflict {
+				// Another write (the analysis trigger's, in #438) lands between the read and the first update:
+				// that update conflicts and is sent again on a fresh read.
+				var once sync.Once
+				r.writes.before = func(ctx context.Context, _ *remediationv1alpha1.Incident) {
+					once.Do(func() {
+						inc := get(t, ns)
+						meta.SetStatusCondition(&inc.Status.Conditions, metav1.Condition{
+							Type: "Reviewed", Status: metav1.ConditionTrue, Reason: "Test", Message: "set by another writer",
+						})
+						if err := env.admin.Status().Update(ctx, inc); err != nil {
+							t.Errorf("updating as another writer: %v", err)
+						}
+					})
+				}
+			}
+			r.obs <- immediate(observation(1, 1, 4, 4, time.Now().Truncate(time.Second)))
+			eventually(t, ns, 1, countIs(4))
+			// Let the batch that went back be tried again: it is recognised as written.
+			time.Sleep(time.Second)
+			if inc := get(t, ns); inc.Status.Count != 4 {
+				t.Fatalf("count %d after a lost answer, want 4", inc.Status.Count)
+			}
+			if !lost.Load() || stored.Load() != 1 {
+				t.Fatalf("lost %v, %d status writes stored: want the retry to find the batch applied without writing",
+					lost.Load(), stored.Load())
+			}
+			if sent := r.writes.updates.Load(); conflict && sent < 2 {
+				t.Fatalf("%d status updates sent: the conflict did not happen", sent)
+			}
+			r.stop()
+			if r.pending[fp(1)] != nil || r.failed[fp(1)] != nil {
+				t.Fatal("the batch is still pending after the retry")
+			}
+		})
 	}
 }
 

@@ -17,7 +17,6 @@ limitations under the License.
 package incidents
 
 import (
-	"context"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -410,6 +409,10 @@ func TestHandledAnswersForHeldOccurrences(t *testing.T) {
 	for i := 2; i <= maxHeldPerFingerprint; i++ {
 		r.obs <- sightingOf(1, i, t0)
 	}
+	// A send returns once the controller has received the observation, not consumed it. The clock moves
+	// only once the last one is held: consumed after the move, it would open the Incident itself (#438),
+	// and the next sighting would wait for a window that the stopped clock never ends.
+	waitHeld(t, r, "every occurrence held", func() bool { return len(r.sightings.totals) == maxHeldPerFingerprint })
 	clock.set(t0.Add(RecurAfter))
 	r.obs <- sightingOf(1, 99, t0.Add(RecurAfter))
 	// Wait for every batch to be written, however slow the writes, then check that no copy adds to it.
@@ -492,14 +495,11 @@ func TestLostAnswerOfAnOpeningWriteIsNotCountedTwice(t *testing.T) {
 	clock := &fakeClock{now: t0}
 	r := start(t, ns, Config{Now: clock.Now, Window: 200 * time.Millisecond, RetryAfter: 100 * time.Millisecond})
 	var lost atomic.Bool
-	r.writes.after = func(err error) error {
-		if err == nil && lost.CompareAndSwap(false, true) {
-			return context.DeadlineExceeded
-		}
-		return err
-	}
+	stored := storedWrites(r, &lost)
 	r.obs <- sightingOf(1, 1, t0)
 	r.obs <- sightingOf(1, 2, t0)
+	// As in TestHandledAnswersForHeldOccurrences, the clock moves only once both are held.
+	waitHeld(t, r, "both occurrences held", func() bool { return len(r.sightings.totals) == 2 })
 	clock.set(t0.Add(RecurAfter))
 	r.obs <- sightingOf(1, 3, t0.Add(RecurAfter))
 	eventually(t, ns, 1, countIs(3))
@@ -511,9 +511,9 @@ func TestLostAnswerOfAnOpeningWriteIsNotCountedTwice(t *testing.T) {
 	if inc := get(t, ns); inc.Status.Count != 3 {
 		t.Fatalf("count %d after a lost answer, want 3", inc.Status.Count)
 	}
-	if !lost.Load() || r.writes.updates.Load() != 1 {
-		t.Fatalf("lost %v, %d status writes: want the retry to find the batch applied without writing",
-			lost.Load(), r.writes.updates.Load())
+	if !lost.Load() || stored.Load() != 1 {
+		t.Fatalf("lost %v, %d status writes stored: want the retry to find the batch applied without writing",
+			lost.Load(), stored.Load())
 	}
 	r.stop()
 	if r.pending[fp(1)] != nil || r.failed[fp(1)] != nil {

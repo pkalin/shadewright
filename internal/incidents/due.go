@@ -107,19 +107,26 @@ func (c *Controller) markDue(ctx context.Context) error {
 			}
 			decide = func(*remediationv1alpha1.Incident) (bool, string) { return false, ReasonForeignFingerprint }
 		case closed != "":
-			if readErr != nil && !wasDue {
+			if _, outcome := outcomeReason(inc); readErr != nil && !wasDue && (!outcome || !saysAnalyzing(inc)) {
 				// Without the settings or the budget nothing else changes: the marks that say due are taken
-				// back, no more.
+				// back, and the outcome of a run that ended replaces Analyzing, no more.
 				continue
 			}
-			decide = func(*remediationv1alpha1.Incident) (bool, string) { return false, closed }
+			// The outcome of a run that ended is not a budget's state: Proposed or Escalated shows it, as
+			// [Due] gives it with a known budget.
+			decide = func(fresh *remediationv1alpha1.Incident) (bool, string) {
+				if r, ok := outcomeReason(fresh); ok {
+					return false, r
+				}
+				return false, closed
+			}
 		default:
 			held, waiting := c.heldSince(inc.Spec.Fingerprint), c.waiting[inc.Name]
 			decide = func(fresh *remediationv1alpha1.Incident) (bool, string) {
 				return Due(fresh, held, waiting, now, s, used)
 			}
 		}
-		due, reason, wrote, err := c.setDue(ctx, inc, decide)
+		due, reason, wrote, err := c.setDue(ctx, inc, now, decide)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -273,11 +280,12 @@ func (c *Controller) reportNotRecent(inc *remediationv1alpha1.Incident) {
 // Incident is read fresh from the API server, decided again on that copy, and its status updated, retrying
 // on conflict (the observation writer updates the same status). It reports the decision it last made, also
 // with an error, since a write whose answer was lost may have landed, and whether it wrote that decision (an
-// answer received, not lost); an Incident gone meanwhile is reported not due (NotObserved).
-func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Incident,
+// answer received, not lost); an Incident gone meanwhile is reported not due (NotObserved). now is the
+// pass's clock, against which [runEnded] places the analysis timeout.
+func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Incident, now time.Time,
 	decide func(*remediationv1alpha1.Incident) (bool, string)) (bool, string, bool, error) {
 	due, reason := decide(cached)
-	if conditionAgrees(cached, due, reason) {
+	if conditionAgrees(cached, due, reason, runEnded(cached, now, c.cfg.AnalysisTimeout)) {
 		return due, reason, false, nil
 	}
 	wrote := false
@@ -290,7 +298,7 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 		}
 		due, reason = decide(inc)
 		wrote = false
-		if conditionAgrees(inc, due, reason) {
+		if conditionAgrees(inc, due, reason, runEnded(inc, now, c.cfg.AnalysisTimeout)) {
 			return nil
 		}
 		status := metav1.ConditionFalse
@@ -327,8 +335,11 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 // not-due reason: the reason it gave first stays, so a change that turns every Incident's reason (the budget
 // used up, or set to 0) writes nothing. NotRecent is the exception: it is written over another not-due reason,
 // once, so the condition shows why an incident is skipped (with an event, [Controller.reportNotRecent]), and
-// once written it stays while the incident is not due. No decision reads it back.
-func conditionAgrees(inc *remediationv1alpha1.Incident, due bool, reason string) bool {
+// once written it stays while the incident is not due. No decision reads it back. Analyzing, which the
+// analysis writes when it claims the incident, is the other exception (#424): it agrees with another not-due
+// reason only while the run lasts; once the run has ended (ended, see [runEnded]) any other reason is written
+// over it, so the condition no longer says an analysis is running.
+func conditionAgrees(inc *remediationv1alpha1.Incident, due bool, reason string, ended bool) bool {
 	cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue)
 	if cond == nil || cond.ObservedGeneration != inc.Generation {
 		return false
@@ -338,8 +349,39 @@ func conditionAgrees(inc *remediationv1alpha1.Incident, due bool, reason string)
 		return cond.Status == metav1.ConditionTrue && cond.Reason == reason
 	case reason == ReasonNotRecent:
 		return cond.Status == metav1.ConditionFalse && cond.Reason == ReasonNotRecent
+	case cond.Reason == ReasonAnalyzing && reason != ReasonAnalyzing:
+		return cond.Status == metav1.ConditionFalse && !ended
 	}
 	return cond.Status == metav1.ConditionFalse
+}
+
+// runEnded reports whether the incident's last analysis run has ended at now: the phase is no longer
+// Analyzing (the run wrote its outcome, or the status was changed), the run has reached the analysis timeout
+// since lastAnalysisTime and is taken as lost, or there is no lastAnalysisTime to place it by.
+func runEnded(inc *remediationv1alpha1.Incident, now time.Time, timeout time.Duration) bool {
+	st := &inc.Status
+	if st.Phase != remediationv1alpha1.IncidentAnalyzing || st.LastAnalysisTime == nil {
+		return true
+	}
+	return !now.Before(st.LastAnalysisTime.Add(timeout))
+}
+
+// outcomeReason returns the not-due reason of an incident whose last run wrote its outcome (phase Proposed or
+// Escalated), as [Due] gives it, and whether there is one.
+func outcomeReason(inc *remediationv1alpha1.Incident) (string, bool) {
+	switch inc.Status.Phase {
+	case remediationv1alpha1.IncidentProposed:
+		return ReasonProposed, true
+	case remediationv1alpha1.IncidentEscalated:
+		return ReasonEscalated, true
+	}
+	return "", false
+}
+
+// saysAnalyzing reports whether the incident's AnalysisDue condition is the claim's: not due, Analyzing.
+func saysAnalyzing(inc *remediationv1alpha1.Incident) bool {
+	cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue)
+	return cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == ReasonAnalyzing
 }
 
 // dueMessages are the fixed messages of the AnalysisDue condition. They hold nothing from the cluster.

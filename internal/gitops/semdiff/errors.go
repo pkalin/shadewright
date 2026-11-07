@@ -35,7 +35,8 @@ const (
 	// ([MaxBuildDocuments]) or the rendered objects ([MaxObjects]).
 	ReasonTooLarge Reason = "TooLarge"
 	// ReasonInvalidYAML means a kustomization file does not parse or has a duplicate key, or a file of the
-	// build holds a YAML anchor that contains itself, which kustomize cannot build without crashing.
+	// build is not UTF-8, does not parse, or uses YAML anchors, aliases or merge keys, which kustomize would
+	// expand before the document count could bound them ([documents]).
 	ReasonInvalidYAML Reason = "InvalidYAML"
 	// ReasonRenderFailed means kustomize could not build the path, before or after the change.
 	ReasonRenderFailed Reason = "RenderFailed"

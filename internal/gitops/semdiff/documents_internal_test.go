@@ -16,12 +16,13 @@ limitations under the License.
 package semdiff
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf16"
 
-	yaml "go.yaml.in/yaml/v3"
 	"sigs.k8s.io/kustomize/api/provider"
 )
 
@@ -35,31 +36,39 @@ func cm(name string) string {
 	return fmt.Sprintf("{apiVersion: v1, kind: ConfigMap, metadata: {name: %s}}", name)
 }
 
+// cms returns a YAML flow sequence of n ConfigMaps.
+func cms(n int) string {
+	items := make([]string, n)
+	for i := range items {
+		items[i] = cm(fmt.Sprintf("c%d", i))
+	}
+	return "[" + strings.Join(items, ", ") + "]"
+}
+
 func TestDocumentsBoundWhatKustomizeReads(t *testing.T) {
 	cases := map[string]struct {
 		in   string
 		want int // documents' answer; kustomize must read at most this many objects
 	}{
-		"one":                    {"apiVersion: v1\nkind: ConfigMap\nmetadata: {name: a}\n", 1},
-		"separators and empties": {"---\n" + cm("a") + "\n--- # c\n" + cm("b") + "\n---\n---\n", 4},
+		"one": {"apiVersion: v1\nkind: ConfigMap\nmetadata: {name: a}\n", 1},
+		// kustomize splits at "\n---" up to the end of the line, so "---\n---\n" is one separator and one part.
+		"separators and empties": {"---\n" + cm("a") + "\n--- # c\n" + cm("b") + "\n---\n---\n", 3},
 		"CRLF":                   {cm("a") + "\r\n---\r\n" + cm("b") + "\r\n", 2},
+		"UTF-8 byte order mark":  {"\uFEFF" + cm("a") + "\n", 1},
 		"a volume with items":    {"kind: Deployment\nmetadata: {name: a}\nspec: {items: [1, 2, 3]}\n", 1},
-		"List":                   {"apiVersion: v1\nkind: List\nitems: [" + cm("a") + ", " + cm("b") + ", " + cm("c") + "]\n", 3},
-		"empty List":             {"apiVersion: v1\nkind: ConfigMapList\nitems: []\n", 0},
-		"List among documents":   {cm("x") + "\n---\nkind: ConfigMapList\nitems: [" + cm("a") + ", " + cm("b") + "]\n", 3},
+		"List":                   {"apiVersion: v1\nkind: List\nitems: [" + cm("a") + ", " + cm("b") + ", " + cm("c") + "]\n", 4},
+		"empty List":             {"apiVersion: v1\nkind: ConfigMapList\nitems: []\n", 1},
+		"List among documents":   {cm("x") + "\n---\nkind: ConfigMapList\nitems: [" + cm("a") + ", " + cm("b") + "]\n", 4},
 		"nested Lists": {"kind: List\nitems:\n  - kind: List\n    items: [" + cm("a") + ", " + cm("b") + "]\n  - " + cm("c") +
-			"\n", 3},
-		"aliases count per use": {"kind: List\nx: &a " + cm("a") + "\nitems: [*a, *a, *a, *a]\n", 4},
-		"aliased inner List": {"kind: List\nx: &l {kind: List, items: [" + cm("a") + ", " + cm("b") + "]}\n" +
-			"items: [*l, *l, *l]\n", 6},
-		"merge key":          {"x: &m {kind: List, items: [" + cm("a") + ", " + cm("b") + "]}\n<<: *m\n", 2},
-		"escaped kind":       {"\"k\\x69nd\": \"Config\\x4dapList\"\n\"\\x69tems\": [" + cm("a") + ", " + cm("b") + "]\n", 2},
-		"items as a mapping": {"kind: List\nitems: {a: " + cm("a") + ", b: " + cm("b") + "}\n", 4},
-		"not YAML":           {"kind: List\nitems: [\n", 1},
+			"\n", 5},
+		"escaped kind":       {"\"k\\x69nd\": \"Config\\x4dapList\"\n\"\\x69tems\": [" + cm("a") + ", " + cm("b") + "]\n", 3},
+		"items as a mapping": {"kind: List\nitems: {a: " + cm("a") + ", b: " + cm("b") + "}\n", 5},
+		"two kind keys":      {"kind: ConfigMap\nkind: List\nitems: [" + cm("a") + "]\n", 2},
+		"a quoted << value":  {"kind: ConfigMap\nmetadata: {name: a}\ndata: {x: \"<<\"}\n", 1},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			got, err := documents([]byte(c.in))
+			got, err := documents("f.yaml", []byte(c.in))
 			if err != nil || got != c.want {
 				t.Fatalf("documents = %d, %v, want %d", got, err, c.want)
 			}
@@ -70,85 +79,123 @@ func TestDocumentsBoundWhatKustomizeReads(t *testing.T) {
 	}
 }
 
-// kustomize crashes the process on these (a Go stack overflow in kyaml's deAnchor), so they are not given to it.
-func TestDocumentsRefuseAnAnchorThatContainsItself(t *testing.T) {
-	for _, in := range []string{
-		"kind: List\nitems: &s [*s]\n",
-		cm("a") + "\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: b}\ndata: &d {x: *d}\n",
-		"a: &a {b: &b [*a]}\n",
-		"m: &m {<<: *m}\n",
-	} {
-		if _, err := documents([]byte(in)); !errors.Is(err, errSelfAlias) {
-			t.Fatalf("documents(%q): %v, want errSelfAlias", in, err)
-		}
+// utf16LE returns s in UTF-16, little endian, with a byte order mark, which kustomize reads.
+func utf16LE(s string) []byte {
+	b := binary.LittleEndian.AppendUint16(make([]byte, 0, 2+2*len(s)), 0xFEFF)
+	for _, u := range utf16.Encode([]rune(s)) {
+		b = binary.LittleEndian.AppendUint16(b, u)
 	}
-	for _, in := range []string{"a: &a {x: 1}\nb: *a\nc: [*a, *a]\n", "a: &a 1\nb: &b [*a, *a]\nc: [*b, *b]\n"} {
-		if _, err := documents([]byte(in)); err != nil {
-			t.Fatalf("documents(%q): %v, want no error", in, err)
-		}
+	return b
+}
+
+// aliasKeyList returns a List of n objects whose "kind" and "items" keys are aliases to other values: kustomize
+// matches an alias key by the anchor's name, so it reads a List, while the value it stands for names none. About
+// 1 MiB for n = 25,000.
+func aliasKeyList(n int) string {
+	var b strings.Builder
+	b.WriteString("x: &kind a\ny: &items b\n*kind : List\n*items :\n")
+	for i := range n {
+		fmt.Fprintf(&b, "- {kind: A, metadata: {name: c%d}}\n", i)
+	}
+	return b.String()
+}
+
+// aliasBomb returns a few hundred bytes that expand into 10^9 nodes when aliases are replaced by copies.
+func aliasBomb() string {
+	var b strings.Builder
+	b.WriteString("kind: List\nl0: &l0 [x, x, x, x, x, x, x, x, x, x]\n")
+	for i := 1; i <= 9; i++ {
+		fmt.Fprintf(&b, "l%d: &l%d [%s]\n", i, i, strings.TrimSuffix(strings.Repeat(fmt.Sprintf("*l%d, ", i-1), 10), ", "))
+	}
+	b.WriteString("items: *l9\n")
+	return b.String()
+}
+
+// Each of these expanded in kustomize into far more objects than an earlier count gave (#488, #492), so they
+// are refused before kustomize reads them. The anchors that contain themselves crashed the process (a Go stack
+// overflow in kyaml's deAnchor), so none of these is given to kustomize.
+func TestDocumentsRefuseWhatKustomizeExpands(t *testing.T) {
+	const line1, line2 = "line 1:", "line 2:"
+	cases := map[string]struct {
+		in   []byte
+		line string
+	}{
+		"alias keys, 1 MiB":   {[]byte(aliasKeyList(25000)), line1},
+		"UTF-16, 5,000 items": {utf16LE("apiVersion: v1\nkind: List\nitems: " + cms(5000) + "\n"), ""},
+		"UTF-16 big endian":   {[]byte{0xFE, 0xFF, 0, 'a', 0, ':', 0, ' ', 0, '1', 0, '\n'}, ""},
+		"UTF-32":              {[]byte{0xFF, 0xFE, 0, 0, 'a', 0, 0, 0}, ""},
+		"invalid UTF-8":       {[]byte(cm("a") + "\xC3\n"), ""},
+		"a !!merge tag, 5,000 items": {[]byte("apiVersion: v1\nkind: List\n!!merge ignored: {items: " + cms(5000) + "}\n"),
+			"line 3:"},
+		"a merge tag in long form": {[]byte("kind: List\n!<tag:yaml.org,2002:merge> x: {items: []}\n"), line2},
+		"a merge tag by handle": {[]byte("%TAG !y! tag:yaml.org,2002:\n---\nkind: List\n!y!m%65rge x: {items: []}\n"),
+			""},
+		"a << key":           {[]byte("x: {a: 1}\n<<: {kind: List}\n"), line2},
+		"a quoted << key":    {[]byte("\"<<\": {kind: List}\n"), line1},
+		"a plain << value":   {[]byte("kind: ConfigMap\ndata: {x: <<}\n"), line2},
+		"an alias bomb":      {[]byte(aliasBomb()), line2},
+		"an unused anchor":   {[]byte(cm("a") + "\n---\nkind: ConfigMap\nmetadata: &m {name: b}\n"), "line 4:"},
+		"a self alias":       {[]byte("kind: List\nitems: &s [*s]\n"), line2},
+		"a self alias deep":  {[]byte("a: &a {b: &b [*a]}\n"), line1},
+		"a self merge":       {[]byte("m: &m {<<: *m}\n"), line1},
+		"does not parse":     {[]byte(cm("a") + "\n---\nkind: List\nitems: [\n"), ""},
+		"control characters": {[]byte("a: \x00\n"), ""},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if name == "alias keys, 1 MiB" && len(c.in) > 1<<20 {
+				t.Fatalf("the reproduction is %d bytes, over 1 MiB", len(c.in))
+			}
+			_, err := documents("f.yaml", c.in)
+			if !errors.Is(err, ErrInvalidYAML) {
+				t.Fatalf("documents: %v, want InvalidYAML", err)
+			}
+			if !strings.Contains(err.Error(), "f.yaml") || !strings.Contains(err.Error(), c.line) {
+				t.Fatalf("documents: %v, want the file and %q named", err, c.line)
+			}
+		})
 	}
 }
 
 func TestDocumentsStopAtTheBudget(t *testing.T) {
-	plain := strings.Repeat("\n---", 3*MaxBuildDocuments)
-	if got, _ := documents([]byte(plain)); got != MaxBuildDocuments+1 {
-		t.Fatalf("documents = %d, want %d", got, MaxBuildDocuments+1)
-	}
-	// Each level multiplies the items by 8 through aliases: 8^6 objects, counted without expanding them.
-	var b strings.Builder
-	b.WriteString("kind: List\nl0: &l0 " + cm("a") + "\n")
-	for i := 1; i <= 6; i++ {
-		fmt.Fprintf(&b, "l%d: &l%d {kind: List, items: [%s]}\n", i, i, strings.TrimSuffix(strings.Repeat(fmt.Sprintf("*l%d, ", i-1), 8), ", "))
-	}
-	b.WriteString("items: [*l6]\n")
-	if got, _ := documents([]byte(b.String())); got != MaxBuildDocuments+1 {
-		t.Fatalf("documents = %d, want %d", got, MaxBuildDocuments+1)
+	for name, in := range map[string]string{
+		"separators": strings.Repeat("\n---", 3*MaxBuildDocuments),
+		// Each costs kustomize a node, so 20,000 of them counted as none slipped past the budget.
+		"empty Lists": strings.Repeat("kind: List\nitems: []\n---\n", 20000),
+		"a long List": "kind: List\nitems: " + cms(MaxBuildDocuments) + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, err := documents("f.yaml", []byte(in)); err != nil || got != MaxBuildDocuments+1 {
+				t.Fatalf("documents = %d, %v, want %d", got, err, MaxBuildDocuments+1)
+			}
+		})
 	}
 }
 
-// FuzzDocuments checks that documents never counts fewer objects than kustomize reads from the same bytes.
+// FuzzDocuments checks that documents never panics, refuses only with InvalidYAML, and never counts fewer
+// objects than kustomize reads from bytes it accepts. Every input reaches kustomize: anchors are refused, so
+// nothing accepted expands.
 func FuzzDocuments(f *testing.F) {
 	f.Add([]byte("kind: List\nitems: [" + cm("a") + ", " + cm("b") + "]\n"))
 	f.Add([]byte(cm("a") + "\n---\n" + cm("b") + "\n"))
 	f.Add([]byte("kind: List\nx: &a " + cm("a") + "\nitems: [*a, *a]\n"))
 	f.Add([]byte("\"\\x69tems\": [" + cm("a") + "]\nkind: \"\\x4cist\"\n"))
+	f.Add([]byte("kind: List\n!!merge x: {items: [" + cm("a") + "]}\n"))
+	f.Add([]byte("kind: List\nitems: []\n---\nkind: List\nitems: []\n"))
+	f.Add(utf16LE("kind: List\nitems: [" + cm("a") + "]\n"))
 	f.Fuzz(func(t *testing.T, data []byte) {
-		if len(data) > 4096 {
+		got, err := documents("f.yaml", data)
+		if err != nil {
+			if !errors.Is(err, ErrInvalidYAML) {
+				t.Fatalf("documents(%q): %v, want only InvalidYAML", data, err)
+			}
 			return
 		}
-		got, err := documents(data)
-		if err != nil || got > MaxBuildDocuments || expansionLarge(data) {
-			return
+		if got < 1 || got > MaxBuildDocuments+1 {
+			t.Fatalf("documents(%q) = %d, out of range", data, got)
 		}
 		if n, ok := kustomizeObjects(data); ok && n > got {
 			t.Fatalf("kustomize reads %d objects from %q, more than the bound %d", n, data, got)
 		}
 	})
-}
-
-// expansionLarge reports whether replacing the aliases of data by copies, as kustomize does, makes more than
-// 100,000 nodes, too many for kustomize to read quickly in a fuzz run.
-func expansionLarge(data []byte) bool {
-	var root yaml.Node
-	if yaml.Unmarshal(data, &root) != nil {
-		return false
-	}
-	memo := map[*yaml.Node]int{}
-	var size func(n *yaml.Node) int
-	size = func(n *yaml.Node) int {
-		if n == nil {
-			return 0
-		}
-		if c, ok := memo[n]; ok {
-			return c
-		}
-		memo[n] = 1
-		c := 1 + size(n.Alias)
-		for _, k := range n.Content {
-			c = min(c+size(k), 1<<20)
-		}
-		memo[n] = c
-		return c
-	}
-	return size(&root) > 100000
 }

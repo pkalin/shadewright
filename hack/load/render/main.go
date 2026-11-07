@@ -32,7 +32,8 @@ limitations under the License.
 //     (one label each, files of 1,000): with n = 3072 the build is at the document bound with the most objects
 //     the render accepts, every one patched three times.
 //   - heavy:   as docs, each ConfigMap padded so that the build is just under the 4 MiB byte budget: both
-//     input bounds at once.
+//     input bounds at once. Files hold as many as fit in 1 MiB, and a ConfigMap is at most about 1 MiB, so
+//     with n below 4 the build stays under the byte budget.
 package main
 
 import (
@@ -244,16 +245,18 @@ func build(shape string, n int) (map[string][]byte, string) {
 		files["apps/kustomization.yaml"] = kust("", overlays...)
 	case shapeDocs, shapeHeavy:
 		files["apps/deployment.yaml"] = []byte(deployment)
-		pad := 0
+		pad, per := 0, 1000
 		if shape == shapeHeavy {
-			pad = (semdiff.MaxBuildBytes - 8192 - len(deployment)) / n
+			// One padded ConfigMap must fit in a file, so with a small n the build stays under the byte budget.
+			pad = min((semdiff.MaxBuildBytes-8192-len(deployment))/n, semdiff.MaxFileBytes-1024)
+			per = max(1, min(per, (semdiff.MaxFileBytes-1024)/max(pad, 128)))
 		}
-		// Files of at most 1,000 ConfigMaps each, so that each stays under the 1 MiB file limit.
+		// Files of at most per ConfigMaps each, so that each stays under the 1 MiB file limit.
 		res := []string{"deployment.yaml"}
-		for i := 0; i*1000 < n; i++ {
+		for i := 0; i*per < n; i++ {
 			f := fmt.Sprintf("cm%d.yaml", i)
 			res = append(res, f)
-			files["apps/"+f] = paddedConfigMaps(i*1000, min(n-i*1000, 1000), pad)
+			files["apps/"+f] = paddedConfigMaps(i*per, min(n-i*per, per), pad)
 		}
 		files["apps/kustomization.yaml"] = kust("", res...)
 	case shapePatches:

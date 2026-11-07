@@ -57,7 +57,7 @@ const (
 	MaxObjects = 1024
 	// MaxBuildDocuments bounds the objects kustomize reads before it renders, with repetition like
 	// MaxBuildBytes: every visit of a directory adds the YAML documents of the resource and patch files it lists
-	// and of its inline patches, a List counted as its items ([documents]). The byte budget alone lets 4 MiB of
+	// and of its inline patches, a List counted as 1 plus its items ([documents]). The byte budget alone lets 4 MiB of
 	// tiny objects through, about 54,000, which kustomize cannot build in 128 MiB; MaxObjects is checked only on
 	// the render's output. The count is an upper bound of the objects the render returns (generators are
 	// refused, so only overlays reaching a base more than once multiply objects, and each visit counts), and
@@ -82,7 +82,7 @@ const (
 // functions), openapi, crds, configurations, replacements, the deprecated bases, patchesStrategicMerge and
 // patchesJson6902, buildMetadata and sortOptions.
 var allowedKeys = map[string]bool{
-	"apiVersion": true, "kind": true, "metadata": true,
+	"apiVersion": true, keyKind: true, "metadata": true,
 	keyResources: true, keyComponents: true, keyPatches: true,
 	"namespace": true, "namePrefix": true, "nameSuffix": true,
 	"labels": true, "commonLabels": true, "commonAnnotations": true,
@@ -176,8 +176,8 @@ func (w *walker) walk(ctx context.Context, dir, want string, depth int) error {
 			d, ok := w.docs[f]
 			if !ok {
 				var err error
-				if d, err = documents(w.files[f]); err != nil {
-					return refuse(ReasonInvalidYAML, f+" holds a YAML anchor that contains itself")
+				if d, err = documents(f, w.files[f]); err != nil {
+					return err
 				}
 				w.docs[f] = d
 			}
@@ -291,6 +291,14 @@ func (w *walker) parse(ctx context.Context, dir, want string) (*refs, error) {
 		return nil, w.noKustomization(ctx, dir)
 	}
 	w.files[name] = data
+	// The YAML parser below replaces aliases by copies, so what documents refuses (anchors, aliases, merge keys,
+	// input that is not UTF-8) is refused here too, before it runs. documents stops reading at its budget, so a
+	// file over it is refused as well: the rest of it was not checked.
+	if d, err := documents(name, data); err != nil {
+		return nil, err
+	} else if d > MaxBuildDocuments {
+		return nil, refuse(ReasonTooLarge, fmt.Sprintf("%s holds more than %d YAML documents", name, MaxBuildDocuments))
+	}
 	var k map[string]any
 	if err := yaml.UnmarshalStrict(data, &k); err != nil {
 		return nil, refuse(ReasonInvalidYAML, name+" is not a valid kustomization file")
@@ -348,7 +356,7 @@ func (w *walker) generated(ctx context.Context, dir string) (string, []byte, err
 		refs = append(refs, rel)
 	}
 	// Marshalled, not written as text, so a name such as "true" or "1" stays a string.
-	data, err := yaml.Marshal(map[string]any{"apiVersion": apiKustomization, "kind": kindKustomization, keyResources: refs})
+	data, err := yaml.Marshal(map[string]any{"apiVersion": apiKustomization, keyKind: kindKustomization, keyResources: refs})
 	if err != nil {
 		return "", nil, refuse(ReasonInvalidInput, "the kustomization Flux generates for "+dir+" cannot be written")
 	}
@@ -383,7 +391,7 @@ func checkHeader(name string, k map[string]any, want string) error {
 		}
 		return refuse(ReasonUnsupportedKustomization, name+" uses "+what)
 	}
-	kind, hasKind := k["kind"]
+	kind, hasKind := k[keyKind]
 	api, hasAPI := k["apiVersion"]
 	wantAPI := apiKustomization
 	if want == kindComponent {
@@ -477,9 +485,9 @@ func patchFiles(name, dir string, raw any, bad error) ([]string, int, error) {
 			files = append(files, p)
 		}
 		if s, ok := m["patch"].(string); ok {
-			d, err := documents([]byte(s))
+			d, err := documents("an inline patch in "+name, []byte(s))
 			if err != nil {
-				return nil, 0, refuse(ReasonInvalidYAML, "an inline patch in "+name+" holds a YAML anchor that contains itself")
+				return nil, 0, err
 			}
 			docs = min(docs+d, MaxBuildDocuments+1)
 		}

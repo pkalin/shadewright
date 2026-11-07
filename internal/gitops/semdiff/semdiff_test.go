@@ -635,8 +635,9 @@ const atBudget = "exactly the budget"
 const documentBudget = 4096
 
 // emptyDocs returns a file of n empty YAML documents: each counts against the document budget, and kustomize
-// skips them, so a build at the budget renders at once.
-func emptyDocs(n int) []byte { return []byte(strings.Repeat("---\n", n)) }
+// skips them, so a build at the budget renders at once. The blank lines keep the separators apart, as kustomize
+// reads "---\n---\n" as a single one.
+func emptyDocs(n int) []byte { return []byte(strings.Repeat("---\n\n", n)) }
 
 // docsRepo is ordersRepo with an extra resource file of empty documents, so that one visit of apps/orders
 // holds total documents: the two of scaledobject.yaml and the extra ones.
@@ -714,15 +715,48 @@ func TestCheckDocumentBudget(t *testing.T) {
 	}
 }
 
-// kustomize recurses without end on an anchor that contains itself and the Go stack overflow ends the process,
-// so the walk refuses it before the render.
-func TestCheckRefusesAnAnchorThatContainsItself(t *testing.T) {
-	files := ordersRepo()
-	files[soKust] = kust("scaledobject.yaml", "loop.yaml")
-	files["apps/orders/loop.yaml"] = []byte("apiVersion: v1\nkind: ConfigMap\nmetadata: {name: loop, namespace: orders}\n" +
-		"data: &d {x: *d}\n")
-	_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
-	wantReason(t, err, semdiff.ErrInvalidYAML)
+// Anchors, aliases and merge keys are refused in every file the build reads, before kustomize expands them:
+// an anchor that contains itself made it recurse until the Go stack overflowed, which ends the process, and
+// aliases can turn a few bytes into many objects (#488, #492).
+func TestCheckRefusesAnchors(t *testing.T) {
+	cases := map[string]func(map[string][]byte){
+		"an anchor that contains itself": func(f map[string][]byte) {
+			f[soKust] = kust("scaledobject.yaml", "loop.yaml")
+			f["apps/orders/loop.yaml"] = []byte("apiVersion: v1\nkind: ConfigMap\nmetadata: {name: loop, namespace: orders}\n" +
+				"data: &d {x: *d}\n")
+		},
+		"alias keys": func(f map[string][]byte) {
+			f[soKust] = kust("scaledobject.yaml", "list.yaml")
+			f["apps/orders/list.yaml"] = []byte("x: &kind a\ny: &items b\n*kind : List\n*items :\n" +
+				"- {apiVersion: v1, kind: ConfigMap, metadata: {name: c, namespace: orders}}\n")
+		},
+		"a kustomization file": func(f map[string][]byte) {
+			f[soKust] = []byte("r: &r scaledobject.yaml\nresources: [*r]\n")
+		},
+		"a kustomization file past the document budget": func(f map[string][]byte) {
+			f[soKust] = append(append(kust("scaledobject.yaml"), emptyDocs(documentBudget+1)...),
+				"x: &x 1\ny: *x\n"...)
+		},
+		"an inline patch": func(f map[string][]byte) {
+			f[soKust] = fmt.Appendf(nil, "resources: [scaledobject.yaml]\npatches:\n  - patch: %q\n",
+				"apiVersion: v1\nkind: Service\nmetadata: &m {name: orders-worker, namespace: orders}\n")
+		},
+	}
+	for name, edit := range cases {
+		t.Run(name, func(t *testing.T) {
+			files := ordersRepo()
+			edit(files)
+			_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
+			if strings.HasSuffix(name, "past the document budget") {
+				wantReason(t, err, semdiff.ErrTooLarge)
+				return
+			}
+			wantReason(t, err, semdiff.ErrInvalidYAML)
+			if !strings.Contains(err.Error(), "anchors") {
+				t.Fatalf("got %v, want anchors named", err)
+			}
+		})
+	}
 }
 
 func TestLoadDocumentBudget(t *testing.T) {

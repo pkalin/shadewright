@@ -16,192 +16,164 @@ limitations under the License.
 package semdiff
 
 import (
-	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	yaml "go.yaml.in/yaml/v3"
 )
 
 // documentSeparator is kustomize's own document separator (kio.splitDocuments, kyaml v0.21): a line that starts
-// with "---". Each match starts with "\n---" and matches do not overlap, so a file holds at most one document
-// more than it has "\n---" sequences.
+// with "---". kustomize splits a file at each match, after replacing "\r\n" by "\n", and decodes each part
+// on its own.
 var documentSeparator = regexp.MustCompile(`\n---.*\n`)
 
-// errSelfAlias is returned by [documents] for a document with an anchor that contains an alias to itself. The
-// YAML parser accepts it, but kustomize, which replaces every alias by a copy of its anchor before anything else,
-// then recurses until the Go stack overflows, which ends the process; recover cannot stop it.
-var errSelfAlias = errors.New("a YAML anchor contains itself")
+// yamlLine finds the line number in a YAML parser error.
+var yamlLine = regexp.MustCompile(`line (\d+)`)
 
-// documents returns an upper bound of the objects kustomize reads from one manifest or patch file, or from an
-// inline patch, at most MaxBuildDocuments+1 (the count stops there). Without a List it is the number of YAML
-// documents, counted from the separators alone: empty documents count too, and nothing is decoded.
+// documents returns an upper bound of the objects kustomize processes from one manifest or patch file, or from
+// an inline patch, at most MaxBuildDocuments+1 (the count stops there). name is the file, or what holds the
+// inline patch, for the refusal's detail.
 //
-// kustomize replaces a document whose kind ends in "List" and that has items by its items, recursively, after
-// resolving anchors and merge keys, so one document can hold many objects. A document that could be such a
-// List is decoded, one at a time, and its items counted with every alias reference ([listObjects]). The text
-// filter is safe: such a document names "items" and a kind ending in "List" in its text, unless it spells them
-// with an escape in a double-quoted scalar, which needs a backslash.
+// It fails closed instead of mimicking kustomize's YAML handling, so that no input expands past its count
+// (#488, #492). It refuses with InvalidYAML:
+//   - input that is not UTF-8: kustomize also reads UTF-16 and UTF-32 with a byte order mark, which a check of
+//     the raw bytes misses;
+//   - every YAML anchor, alias and merge key ("<<" or the !!merge tag, however spelled): kustomize replaces
+//     aliases by copies and resolves merges before it looks for Lists, so a few bytes could expand into
+//     thousands of objects, or without end through an anchor that contains itself, which overflowed the Go
+//     stack and ended the process;
+//   - a part that does not parse, which kustomize could not build either.
 //
-// A document that holds both an anchor and an alias ("&" and "*", which have no escaped form) is decoded too,
-// and refused with errSelfAlias when an anchor contains itself.
-func documents(data []byte) (int, error) {
-	if !mustDecode(data) {
-		return min(1+bytes.Count(data, []byte("\n---")), MaxBuildDocuments+1), nil
+// Each part between separators is decoded as kustomize decodes it, and every document in it counts: 1 for a
+// document that is not a List, empty ones too, and 1 plus its items, each counted the same way, for a List
+// ([listObjects]).
+// Once the count is over MaxBuildDocuments the rest of the input is not read, nor checked: the caller must
+// refuse it.
+func documents(name string, data []byte) (int, error) {
+	if !utf8.Valid(data) {
+		return 0, refuse(ReasonInvalidYAML, name+" is not UTF-8")
 	}
 	s := strings.ReplaceAll(string(data), "\r\n", "\n")
-	n, prev := 0, 0
+	n, prev, line := 0, 0, 1
 	parts := append(documentSeparator.FindAllStringIndex(s, -1), []int{len(s), len(s)})
 	for _, loc := range parts {
 		c, err := objectsIn(s[prev:loc[0]])
 		if err != nil {
-			return 0, err
+			return 0, refuse(ReasonInvalidYAML, fmt.Sprintf("%s line %d: %v", name, line+err.line-1, err.err))
 		}
 		if n += c; n > MaxBuildDocuments {
 			break
 		}
+		line += strings.Count(s[prev:loc[1]], "\n")
 		prev = loc[1]
 	}
 	return min(n, MaxBuildDocuments+1), nil
 }
 
-// mustDecode says whether text may hold a List kustomize expands or an anchor that contains itself: see
-// [documents].
-func mustDecode[T string | []byte](text T) bool {
-	s := string(text)
-	return strings.Contains(s, `\`) || strings.Contains(s, "items") && strings.Contains(s, "List") ||
-		strings.Contains(s, "&") && strings.Contains(s, "*")
+// keyKind is the key that names an object's kind.
+const keyKind = "kind"
+
+// Errors of [objectsIn]; their text goes into a refusal's detail, so it holds no text from the file.
+var (
+	errAnchor   = errors.New("YAML anchors, aliases and merge keys are not supported")
+	errNotParse = errors.New("does not parse as YAML")
+)
+
+// partError is an error of [objectsIn] at a line of the part, counted from 1.
+type partError struct {
+	line int
+	err  error
 }
 
-// objectsIn returns an upper bound of the objects one document holds: 1 unless it may be a List.
-func objectsIn(doc string) (int, error) {
-	if !mustDecode(doc) {
-		return 1, nil
-	}
-	var root yaml.Node
-	if yaml.Unmarshal([]byte(doc), &root) != nil {
-		// kustomize, which parses with the same library, refuses the document, so the render fails.
-		return 1, nil
-	}
-	if selfAlias(&root, map[*yaml.Node]bool{}, map[*yaml.Node]bool{}) {
-		return 0, errSelfAlias
-	}
-	return listObjects(&root, map[*yaml.Node]int{}), nil
-}
-
-// selfAlias reports whether an alias below n leads back to a node it is inside of. open holds the nodes on the
-// current path, done those already searched.
-func selfAlias(n *yaml.Node, open, done map[*yaml.Node]bool) bool {
-	if n == nil || done[n] {
-		return false
-	}
-	if open[n] {
-		return true
-	}
-	open[n] = true
-	if n.Kind == yaml.AliasNode && selfAlias(n.Alias, open, done) {
-		return true
-	}
-	for _, c := range n.Content {
-		if selfAlias(c, open, done) {
-			return true
+// objectsIn returns an upper bound of the objects in one part of a file: every document it holds counts, an
+// empty part as 1.
+func objectsIn(part string) (int, *partError) {
+	dec := yaml.NewDecoder(strings.NewReader(part))
+	n := 0
+	for {
+		var doc yaml.Node
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
 		}
-	}
-	delete(open, n)
-	done[n] = true
-	return false
-}
-
-// listObjects counts the objects kustomize makes of n (kustomize api resource.Factory.inlineAnyEmbeddedLists
-// and kio.ByteReader): a mapping whose kind may end in "List" and that has items is replaced by them, each
-// counted the same way; every other node is one object. It errs high: a kind that is not a plain string, or
-// items given as a mapping (which kio.ByteReader unwraps key by key), count as a List. memo holds the count of
-// each mapping already counted, so a node reached through many aliases is counted once and its count added
-// per reference, and a node that contains itself counts as one. The result stops at MaxBuildDocuments+1.
-func listObjects(n *yaml.Node, memo map[*yaml.Node]int) int {
-	n = resolve(n)
-	if n == nil || n.Kind != yaml.MappingNode {
-		return 1
-	}
-	if c, ok := memo[n]; ok {
-		return c
-	}
-	memo[n] = 1
-	kind := field(n, "kind", map[*yaml.Node]bool{})
-	if kind == nil || kind.Kind == yaml.ScalarNode && !strings.HasSuffix(kind.Value, "List") {
-		return 1
-	}
-	items := field(n, "items", map[*yaml.Node]bool{})
-	c := 1
-	switch {
-	case items == nil:
-	case items.Kind == yaml.SequenceNode:
-		c = 0
-		for _, it := range items.Content {
-			c = min(c+listObjects(it, memo), MaxBuildDocuments+1)
-		}
-	case items.Kind == yaml.MappingNode:
-		c = 0
-		for i := 1; i < len(items.Content); i += 2 {
-			c = min(c+1+listObjects(items.Content[i], memo), MaxBuildDocuments+1)
-		}
-	}
-	memo[n] = c
-	return c
-}
-
-// resolve follows aliases and document nodes to the node they stand for. An anchor cannot be set on an alias,
-// so a chain is short; one of more than 100 steps gives nil, as a guard.
-func resolve(n *yaml.Node) *yaml.Node {
-	for i := 0; n != nil && i < 100; i++ {
-		switch {
-		case n.Kind == yaml.AliasNode:
-			n = n.Alias
-		case n.Kind == yaml.DocumentNode && len(n.Content) == 1:
-			n = n.Content[0]
-		default:
-			return n
-		}
-	}
-	return nil
-}
-
-// field returns the resolved value of key in mapping m, its own or merged in through a "<<" key, or nil.
-// seen holds the mappings already searched, so merges that refer to each other end.
-func field(m *yaml.Node, key string, seen map[*yaml.Node]bool) *yaml.Node {
-	m = resolve(m)
-	if m == nil || m.Kind != yaml.MappingNode || seen[m] {
-		return nil
-	}
-	seen[m] = true
-	var merges []*yaml.Node
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		k := resolve(m.Content[i])
-		if k == nil || k.Kind != yaml.ScalarNode {
-			continue
-		}
-		if k.Value == key {
-			return resolve(m.Content[i+1])
-		}
-		if k.Value == "<<" {
-			merges = append(merges, m.Content[i+1])
-		}
-	}
-	for _, v := range merges {
-		v = resolve(v)
-		if v == nil {
-			continue
-		}
-		srcs := []*yaml.Node{v}
-		if v.Kind == yaml.SequenceNode {
-			srcs = v.Content
-		}
-		for _, s := range srcs {
-			if f := field(s, key, seen); f != nil {
-				return f
+		if err != nil {
+			l := 1
+			if m := yamlLine.FindStringSubmatch(err.Error()); m != nil {
+				l, _ = strconv.Atoi(m[1])
 			}
+			return 0, &partError{line: l, err: errNotParse}
+		}
+		if a := anchored(&doc); a != nil {
+			return 0, &partError{line: a.Line, err: errAnchor}
+		}
+		n = min(n+listObjects(&doc), MaxBuildDocuments+1)
+	}
+	return max(n, 1), nil
+}
+
+// anchored returns the first node below n that has an anchor, is an alias, has the merge tag (a plain "<<"
+// has it too) or is a "<<" key however quoted, or nil.
+func anchored(n *yaml.Node) *yaml.Node {
+	if n.Anchor != "" || n.Kind == yaml.AliasNode || n.ShortTag() == "!!merge" {
+		return n
+	}
+	for i, c := range n.Content {
+		if n.Kind == yaml.MappingNode && i%2 == 0 && c.Kind == yaml.ScalarNode && c.Value == "<<" {
+			return c
+		}
+		if a := anchored(c); a != nil {
+			return a
 		}
 	}
 	return nil
+}
+
+// listObjects counts the objects kustomize may make of n, which holds no alias (kustomize api
+// resource.Factory.inlineAnyEmbeddedLists and kio.ByteReader): 1 for any node, plus, for a mapping that may be
+// a List, its items, each counted the same way. It errs high: a List counts itself besides its items, a mapping
+// is a List when any "kind" key is not a plain string or ends in "List", all its "items" keys count, and items
+// given as a mapping (which kio.ByteReader unwraps key by key) count 2 per entry besides what each value holds.
+// The result stops at MaxBuildDocuments+1.
+func listObjects(n *yaml.Node) int {
+	if n.Kind == yaml.DocumentNode && len(n.Content) == 1 {
+		n = n.Content[0]
+	}
+	if n.Kind != yaml.MappingNode {
+		return 1
+	}
+	list := false
+	var items []*yaml.Node
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		switch k, v := n.Content[i], n.Content[i+1]; {
+		case k.Kind != yaml.ScalarNode:
+		case k.Value == keyKind:
+			list = list || v.Kind != yaml.ScalarNode || strings.HasSuffix(v.Value, "List")
+		case k.Value == "items":
+			items = append(items, v)
+		}
+	}
+	if !list {
+		return 1
+	}
+	c := 1
+	for _, it := range items {
+		switch it.Kind {
+		case yaml.SequenceNode:
+			for _, e := range it.Content {
+				c = min(c+listObjects(e), MaxBuildDocuments+1)
+			}
+		case yaml.MappingNode:
+			for i := 1; i < len(it.Content); i += 2 {
+				c = min(c+1+listObjects(it.Content[i]), MaxBuildDocuments+1)
+			}
+		default:
+			c = min(c+1, MaxBuildDocuments+1)
+		}
+	}
+	return c
 }

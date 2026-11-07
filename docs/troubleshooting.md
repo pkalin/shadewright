@@ -214,8 +214,8 @@ Before committing, and again when the target branch moves while the pull request
 | `UnsupportedKustomization` | A kustomization file uses generators, Helm charts, plugins, replacements or anything outside the allow-list |
 | `InvalidReference` | A kustomization refers to a URL, remote base, absolute path or a path leaving the repository, or a path without a kustomization file holds a manifest or base whose name is not a plain path segment |
 | `FileMissing` | The build needs a file that is missing, a listed directory has no kustomization file or more than one, or the path is not a directory (a path without a kustomization file is rendered from the one Flux would generate) |
-| `TooLarge` | A limit was hit: file size, number of files or reads, depth, directory visits, the build budget of 4 MiB or 4,096 YAML documents (counted with repetition, the tree after the change included; a List counts as its items) or 1,024 rendered objects. The input limits are checked at the policy check already; see [A build over the budget](#a-build-over-the-budget) for what the request shows |
-| `InvalidYAML` | A kustomization file does not parse or has a duplicate key |
+| `TooLarge` | A limit was hit: file size, number of files or reads, depth, directory visits, the build budget of 4 MiB or 4,096 YAML documents (counted with repetition, the tree after the change included; a List counts 1 plus its items) or 1,024 rendered objects. The input limits are checked at the policy check already; see [A build over the budget](#a-build-over-the-budget) for what the request shows |
+| `InvalidYAML` | A kustomization file does not parse or has a duplicate key, or a file of the build is not UTF-8, does not parse, or uses YAML anchors, aliases or merge keys; see [YAML the render check refuses](#yaml-the-render-check-refuses) |
 | `RenderFailed` | Kustomize cannot build the path, before or after the change |
 | `FileNotInBuild` | The changed file is not a resource of the build |
 | `TargetNotFound` | The rendered output does not hold the target |
@@ -247,6 +247,29 @@ The render message does not name the limit, since the render check's own text ma
 - Move bulk data out of the build. Large ConfigMaps or CRD bundles that rarely change can live under a separate Kustomization the target's path does not include.
 
 Then apply a new request; the refused one stays `NeedsIntervention`.
+
+### YAML the render check refuses
+
+Every file the render check reads (kustomization files, the resource and patch files they list, and inline patches) must be UTF-8 YAML without anchors (`&name`), aliases (`*name`) or merge keys (`<<: *name`, or the `!!merge` tag). Kustomize expands these before it counts or builds anything, so a few bytes can become thousands of objects or crash the executor; the check refuses them with `InvalidYAML` instead (#488, #492). The request shows only the reason, not the file; look for these constructs in the files of the target's build.
+
+To fix a file, write out what the anchor stood for:
+
+```yaml
+# Refused
+defaults: &limits {cpu: 500m, memory: 256Mi}
+resources:
+  limits: *limits
+  requests:
+    <<: *limits
+    cpu: 100m
+
+# Accepted
+resources:
+  limits: {cpu: 500m, memory: 256Mi}
+  requests: {cpu: 100m, memory: 256Mi}
+```
+
+For values shared by many objects, use a Kustomize patch or a component instead of an anchor. Save a file in UTF-16 or UTF-32 as UTF-8 (a UTF-8 byte order mark is accepted). Then apply a new request.
 
 The patcher reasons named inside a `PatchRefused` message are `PreviousValueDiffers` (the file no longer holds the planned baseline), `FieldMissing` (object, field or container absent), `AmbiguousContainer` (two containers with the name), `TargetNotFound`, `AmbiguousTarget`, `Unsupported` (YAML the in-place edit does not handle), `InvalidInput`, `InvalidYAML` (does not parse, duplicate key or too large) and `VerificationFailed` (the patched file differs from the original in more than the one value).
 

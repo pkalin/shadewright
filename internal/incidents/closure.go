@@ -228,12 +228,19 @@ func closeQuiet(inc *remediationv1alpha1.Incident, held, now time.Time) (remedia
 	return remediationv1alpha1.IncidentResolved, ReasonSymptomQuiet, true
 }
 
-// createdSinceResolved reports whether request rr was created at or after resolvedTime, so the closure rules
-// that resolved the Incident may have decided on a listing made before it existed. Both times are whole
-// seconds and a creation can share the second of the decision, so that second counts too. A missing
-// resolvedTime tells nothing, so no request counts.
+// ResolvedClockSkew is how far before resolvedTime a request's creation may be stamped and still count as
+// created after the resolve. resolvedTime comes from the analyzer's clock, creationTimestamp from the API
+// server's, and the two may differ by a few seconds. A request created that close before a quiet resolve
+// cannot have been seen by it: an analysis comes before each request, and the quiet rule waits an hour after
+// one.
+const ResolvedClockSkew = 30 * time.Second
+
+// createdSinceResolved reports whether request rr was created at or after resolvedTime, less
+// [ResolvedClockSkew], so the closure rules that resolved the Incident may have decided on a listing made
+// before it existed. A missing resolvedTime tells nothing, so no request counts.
 func createdSinceResolved(rr *remediationv1alpha1.RemediationRequest, resolvedTime *metav1.Time) bool {
-	return resolvedTime != nil && !resolvedTime.IsZero() && !rr.CreationTimestamp.Before(resolvedTime)
+	return resolvedTime != nil && !resolvedTime.IsZero() &&
+		!rr.CreationTimestamp.Time.Before(resolvedTime.Add(-ResolvedClockSkew))
 }
 
 // newer reports whether request a is newer than b: created later; at the same time, b is Superseded and a is

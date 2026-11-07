@@ -218,6 +218,9 @@ func TestClosure(t *testing.T) {
 			requests: []remediationv1alpha1.RemediationRequest{request("a", 5*time.Minute, remediationv1alpha1.PhaseSucceeded)}},
 		{name: "resolved, a request merged after resolvedTime moves nothing", inc: resolvedQuietly,
 			requests: []remediationv1alpha1.RemediationRequest{request("a", 5*time.Minute, remediationv1alpha1.PhaseMerged)}},
+		{name: "resolved, a request stamped seconds before resolvedTime (clock skew) escalates", inc: resolvedQuietly,
+			requests: []remediationv1alpha1.RemediationRequest{request("a", resolvedAgo+2*time.Second, remediationv1alpha1.PhaseDenied)},
+			phase:    escalated, reason: ReasonRequestDenied},
 		{name: "resolved, a request denied before resolvedTime moves nothing", inc: resolvedQuietly,
 			requests: []remediationv1alpha1.RemediationRequest{request("a", resolvedAgo+time.Minute, remediationv1alpha1.PhaseDenied)}},
 		{name: "resolved, a newer request ended before resolvedTime moves nothing", inc: resolvedQuietly,
@@ -947,10 +950,8 @@ func TestRequestEndedBeforeTheNextPassEscalatesTheResolve(t *testing.T) {
 		t.Fatal(err)
 	}
 	c = loaded(t, cl)
-	for range 2 {
-		if err := c.closeIncidents(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+	if err := c.closeIncidents(t.Context()); err != nil {
+		t.Fatal(err)
 	}
 	got := getIncident(t, cl)
 	if got.Status.Phase != remediationv1alpha1.IncidentEscalated || got.Status.ResolvedTime != nil ||

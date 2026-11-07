@@ -196,10 +196,14 @@ func startWith(t *testing.T, ns string, cfg Config, setup func(*Controller, *cou
 		// The short test window would otherwise make the settle limit 1 s too.
 		cfg.SettleLimit = DefaultWindow
 	}
+	// A test that sets no trigger interval drives the observation writes alone: no trigger pass runs, so
+	// neither the closure rules nor the due marks write its Incidents behind its back (#486).
+	noTrigger := cfg.TriggerInterval == 0
 	c, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.noTrigger = noTrigger
 	r := &running{Controller: c, writes: &countingClient{Client: env.admin}, obs: make(chan collector.Observation)}
 	c.client, c.reader, c.cache, c.obs = r.writes, env.admin, env.admin, r.obs
 	if setup != nil {
@@ -214,6 +218,9 @@ func startWith(t *testing.T, ns string, cfg Config, setup func(*Controller, *cou
 			cancel()
 			if err := <-done; err != nil {
 				t.Errorf("controller stopped with %v", err)
+			}
+			if m := r.writes.marks.Load(); noTrigger && m != 0 {
+				t.Errorf("%d writes of the analysis trigger in a test that runs none", m)
 			}
 		})
 	}

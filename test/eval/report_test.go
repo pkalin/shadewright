@@ -163,8 +163,8 @@ type manifest struct {
 	Redaction      manifestRedaction      `json:"redaction"`
 	// RunLimits are the loop limits of the run (the sample settings' maxToolSteps and maxOutputTokens).
 	RunLimits manifestRunLimits `json:"runLimits"`
-	// Scenarios is the hash of every scenario's incident.yaml, objects.yaml and replies.yaml: what the model is
-	// shown (and, in fake mode, answers).
+	// Scenarios is the hash of every scenario's incident.yaml, objects.yaml, metrics.yaml and replies.yaml: what
+	// the model is shown (and, in fake mode, answers).
 	Scenarios string         `json:"scenarios"`
 	Rubric    manifestRubric `json:"rubric"`
 	// MinPassRate is the pass threshold of the run, 0 to 1.
@@ -234,7 +234,8 @@ func buildManifestIn(dir string, src source, models modelSource, defs []provider
 		ContextBuilder: manifestContextBuilder{
 			Limits: manifestLimits{Total: l.Total, Summary: l.Summary, Status: l.Status, Logs: l.Logs,
 				Metrics: l.Metrics, Git: l.Git},
-			Sources: []string{"pods", "objects"},
+			// Recorded metrics: the metrics.yaml of the scenarios that have one, replayed (metrics_test.go).
+			Sources: []string{"pods", "objects", "recorded metrics"},
 		},
 		RunLimits: manifestRunLimits{MaxToolSteps: evalMaxToolSteps, MaxOutputTokens: evalMaxOutputTokens},
 		Rubric:    manifestRubric{FleetRepository: src.FleetRepository, FleetCommit: src.FleetCommit},
@@ -270,7 +271,7 @@ func buildManifestIn(dir string, src source, models modelSource, defs []provider
 		return m, err
 	}
 	if m.Scenarios, err = hashFiles(filepath.Join(dir, "*", "incident.yaml"), filepath.Join(dir, "*", "objects.yaml"),
-		filepath.Join(dir, "*", "replies.yaml")); err != nil {
+		filepath.Join(dir, "*", metricsFile), filepath.Join(dir, "*", "replies.yaml")); err != nil {
 		return m, err
 	}
 	if m.Digest, err = manifestDigest(m); err != nil {

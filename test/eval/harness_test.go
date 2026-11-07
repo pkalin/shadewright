@@ -101,6 +101,16 @@ func newClient(scheme *runtime.Scheme, objs []client.Object) client.Client {
 	return clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 }
 
+// metricsSource is the metrics source of a run: the scenario's recording replayed through the
+// providers.MetricsSource interface, or none (a nil interface, not a nil value) when the scenario has no
+// metrics.yaml, so the context says no metrics source is configured, as an analyzer without --prometheus-url.
+func (s *scenario) metricsSource() providers.MetricsSource {
+	if s.metrics == nil {
+		return nil
+	}
+	return newReplayMetrics(s.metrics)
+}
+
 // runScenario builds the scenario's context with the real context builder and runs the real analysis loop
 // once.
 func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, models modelSource) (scenarioResult, error) {
@@ -111,12 +121,13 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 		return res, err
 	}
 	now := func() time.Time { return fixtureNow }
+	metrics := s.metricsSource()
 	builder, err := incidentcontext.New(incidentcontext.Config{Pods: c, Objects: c, Namespaces: watchedNamespaces,
-		Redactor: redactor, Now: now})
+		Metrics: metrics, Redactor: redactor, Now: now})
 	if err != nil {
 		return res, err
 	}
-	set, err := tools.New(tools.Config{Pods: c, Events: c, Objects: c, Redactor: redactor,
+	set, err := tools.New(tools.Config{Pods: c, Events: c, Objects: c, Metrics: metrics, Redactor: redactor,
 		Namespaces: watchedNamespaces, Now: now})
 	if err != nil {
 		return res, err

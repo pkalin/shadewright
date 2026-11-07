@@ -112,8 +112,10 @@ type MemoryLimitChange struct {
 	Container string `json:"container" bound:"maxLen=63" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"`
 	// Previous is the limit the plan was made against: the pod template's, as it is now. The loop replaces it
 	// with the value the context builder read from the template (#494), so its pattern also takes the decimal
-	// suffixes a template may use (50M); desired keeps the binary ones.
-	Previous string `json:"previous" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti|k|M|G|T)?$" desc:"The memory limit the workload's pod template sets for the container now, in Kubernetes' canonical form (for example 48Mi or 50M), as the context's pod template line shows it. Not a running pod's own limit, which may still be an older value during a rollout, and not a byte count from a metric."`
+	// suffixes a template may use (50M); desired keeps the binary ones. Its description stays one plain
+	// sentence: a longer one that warned off metric byte counts and running pods' limits came with oom
+	// diagnoses that dropped the restart count and the metric lines (#499), and the loop replaces the value.
+	Previous string `json:"previous" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti|k|M|G|T)?$" desc:"The memory limit the workload's pod template sets for the container now."`
 	// Desired is the new limit.
 	Desired string `json:"desired" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti)?$"`
 }

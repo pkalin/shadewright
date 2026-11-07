@@ -142,6 +142,59 @@ func TestRecordedMetricsReachTheContext(t *testing.T) {
 	}
 }
 
+// The recorded OOM contexts keep the restart count and the metric lines the rubric scores as plain as
+// before #498: the OOMKilled pod's container line, which holds the restart count, does not repeat the memory
+// limit the pod template line shows, and only a pod that runs under another limit (the old pod of the
+// rollout variant) shows its own. With the limit repeated there, and a prompt that warned off metric byte
+// counts, oom diagnoses of every model stopped naming the restart count and quoting the metric lines (#499).
+func TestOOMContextKeepsTheScoredEvidencePlain(t *testing.T) {
+	scheme, err := newScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, err := loadScenarios(scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{scnOOM: 0, scnOOM + "/rollout": 1}
+	for _, s := range all {
+		limits, ok := want[s.name]
+		if !ok {
+			continue
+		}
+		delete(want, s.name)
+		c := buildContext(t, s, s.metricsSource(), nil)
+		var status string
+		for _, b := range c.Blocks {
+			if b.Section == incidentcontext.SectionStatus {
+				status = b.Text
+			}
+		}
+		const tmplLine = "pod template (the workload's current spec): container web, memory limit 48Mi"
+		if got := strings.Count(status, tmplLine); got != 1 {
+			t.Errorf("%s: %d pod template lines for web, want 1:\n%s", s.name, got, status)
+		}
+		if got := strings.Count(status, "this pod's memory limit"); got != limits {
+			t.Errorf("%s: %d running pod limits shown, want %d:\n%s", s.name, got, limits, status)
+		}
+		for line := range strings.SplitSeq(status, "\n") {
+			if strings.Contains(line, "reason OOMKilled") && strings.Contains(line, "memory limit") {
+				t.Errorf("%s: the OOMKilled container's line repeats the template's limit: %q", s.name, line)
+			}
+		}
+		blk, _ := metricsBlock(t, c)
+		for _, m := range []string{tmplRestarts + "{", "container_memory_working_set_bytes{",
+			"container_memory_limit_bytes{"} {
+			if !strings.Contains(blk.Text, m) {
+				t.Errorf("%s: the metrics block has no %q", s.name, m)
+			}
+		}
+	}
+	if len(want) != 0 {
+		t.Errorf("scenarios not found: %v", slices.Collect(maps.Keys(want)))
+	}
+}
+
 // A scenario without metrics.yaml has no metrics source, as an analyzer without --prometheus-url: the
 // section says so and is no escalation signal.
 func TestNoMetricsRecordingIsNotConfigured(t *testing.T) {

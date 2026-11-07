@@ -721,3 +721,44 @@ func TestTemplateAndRunningPodLimitsAreLabelled(t *testing.T) {
 		}
 	}
 }
+
+// A running pod's own memory limit is shown only where it differs from the pod template's, as during a
+// rollout (#494). A limit equal to the template's, written in any form, is not repeated on the line that
+// holds the restart count: with it there, oom diagnoses stopped naming the restart count and quoting the
+// metric lines (#499). A subject without a pod template has nothing to tell apart and shows none.
+func TestRunningPodLimitShownOnlyWhereItDiffers(t *testing.T) {
+	d := deployment()
+	d.Spec.Template.Spec.Containers = []corev1.Container{{Name: appName, Resources: limits("48Mi")}}
+	rs := replicaSet("web-abc", "uid-rs-abc", d, longAgo)
+	ref := controllerRef(kindReplicaSet, rs.Name, rs.UID)
+	same := crashing(pod(crashPod, rs.Labels, longAgo, ref), "exited")
+	same.Spec.Containers = []corev1.Container{{Name: appName, Resources: limits("50331648")}}
+	older := pod("web-abc-2", rs.Labels, longAgo, ref)
+	older.Spec.Containers = []corev1.Container{{Name: appName, Resources: limits("64Mi")}}
+	unset := pod("web-abc-3", rs.Labels, longAgo, ref)
+	unset.Spec.Containers = []corev1.Container{{Name: appName}}
+
+	text := one(t, build(t, newBuilder(t, reader(t, d, rs, same, older, unset), sources{}, nil),
+		incident(deploymentRef())), SectionStatus).Text
+	if got := strings.Count(text, "this pod's memory limit"); got != 2 {
+		t.Errorf("%d pod limits shown, want 2 (the ones that differ):\n%s", got, text)
+	}
+	for line := range strings.SplitSeq(text, "\n") {
+		if strings.Contains(line, "restarts 4") && strings.Contains(line, "memory limit") {
+			t.Errorf("the restart line of a pod whose limit is the template's repeats it: %q", line)
+		}
+	}
+	for _, want := range []string{"; this pod's memory limit 64Mi\n", "; this pod's memory limit not set\n"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the status block lacks %q:\n%s", want, text)
+		}
+	}
+
+	rsRef := remediationv1alpha1.ObjectRef{APIVersion: apiApps, Kind: kindReplicaSet, Namespace: testNS, Name: rs.Name,
+		UID: remediationv1alpha1.UID(rs.UID)}
+	text = one(t, build(t, newBuilder(t, reader(t, d, rs, same, older, unset), sources{}, nil), incident(rsRef)),
+		SectionStatus).Text
+	if strings.Contains(text, "memory limit") {
+		t.Errorf("a ReplicaSet subject shows a memory limit:\n%s", text)
+	}
+}

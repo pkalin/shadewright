@@ -1,0 +1,71 @@
+# Synthetic: what the lab's Prometheus (cAdvisor and kube-state-metrics, ADR-0017) would hold for this
+# scenario, written from the scenario manifests and objects.yaml, not recorded in the lab. The web container
+# loads 36 MB against its 48Mi (50331648 bytes) limit: its working set climbs to just under the limit, it is
+# OOMKilled, restarts and climbs again; since 11:56 it waits in CrashLoopBackOff, so cAdvisor has no newer
+# sample. Every approved template is listed (internal/providers/metrics/prometheus); the harness replays them
+# through the MetricsSource interface (test/eval/metrics_test.go).
+source: synthetic
+namespace: demo
+templates:
+  - name: container_last_terminated_oomkilled
+    series:
+      - labels: {pod: web-8d4c6b9f7-t5r9k, container: web}
+        samples:
+          - {at: "2026-11-04T11:40:00Z", value: 1}
+          - {at: "2026-11-04T11:44:00Z", value: 1}
+          - {at: "2026-11-04T11:48:00Z", value: 1}
+          - {at: "2026-11-04T11:52:00Z", value: 1}
+          - {at: "2026-11-04T11:56:00Z", value: 1}
+          - {at: "2026-11-04T11:59:30Z", value: 1}
+  - name: container_waiting_reason
+    series:
+      - labels: {pod: web-8d4c6b9f7-t5r9k, container: web, reason: CrashLoopBackOff}
+        samples:
+          - {at: "2026-11-04T11:56:30Z", value: 1}
+          - {at: "2026-11-04T11:59:30Z", value: 1}
+  - name: container_restarts_total
+    series:
+      - labels: {pod: web-8d4c6b9f7-t5r9k, container: web}
+        samples:
+          - {at: "2026-11-04T11:38:30Z", value: 0}
+          - {at: "2026-11-04T11:40:30Z", value: 1}
+          - {at: "2026-11-04T11:47:30Z", value: 2}
+          - {at: "2026-11-04T11:55:30Z", value: 3}
+          - {at: "2026-11-04T11:59:30Z", value: 3}
+  - name: container_memory_working_set_bytes
+    series:
+      - labels: {pod: web-8d4c6b9f7-t5r9k, container: web}
+        samples:
+          - {at: "2026-11-04T11:38:30Z", value: 18874368}
+          - {at: "2026-11-04T11:39:30Z", value: 49807360}
+          - {at: "2026-11-04T11:41:00Z", value: 20971520}
+          - {at: "2026-11-04T11:44:00Z", value: 39845888}
+          - {at: "2026-11-04T11:47:00Z", value: 50069504}
+          - {at: "2026-11-04T11:48:00Z", value: 22020096}
+          - {at: "2026-11-04T11:52:00Z", value: 41943040}
+          - {at: "2026-11-04T11:55:45Z", value: 50135040}
+  - name: container_memory_limit_bytes
+    series:
+      - labels: {pod: web-8d4c6b9f7-t5r9k, container: web}
+        samples:
+          - {at: "2026-11-04T11:38:30Z", value: 50331648}
+          - {at: "2026-11-04T11:59:30Z", value: 50331648}
+  - name: container_cpu_usage_cores
+    series:
+      - labels: {pod: web-8d4c6b9f7-t5r9k, container: web}
+        samples:
+          - {at: "2026-11-04T11:38:30Z", value: 0.012}
+          - {at: "2026-11-04T11:45:00Z", value: 0.018}
+          - {at: "2026-11-04T11:52:00Z", value: 0.016}
+          - {at: "2026-11-04T11:56:00Z", value: 0.004}
+  - name: container_cpu_throttled_ratio
+    series:
+      - labels: {pod: web-8d4c6b9f7-t5r9k, container: web}
+        samples:
+          - {at: "2026-11-04T11:56:00Z", value: 0}
+  - name: deployment_replicas_unavailable
+    series:
+      - labels: {deployment: web}
+        samples:
+          - {at: "2026-11-04T11:40:00Z", value: 1}
+          - {at: "2026-11-04T11:59:30Z", value: 1}

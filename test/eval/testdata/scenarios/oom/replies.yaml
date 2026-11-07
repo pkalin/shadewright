@@ -5,11 +5,13 @@ replies:
     usage: {inputTokens: 2300, outputTokens: 310}
     content: |
       {"summary": "The web container of Deployment demo/web was OOMKilled (exit code 137) and has restarted 3 times: it needs more memory than its limit. Raising the memory limit within the policy's bounds should stop the kills.",
-       "hypotheses": [{"description": "The working set exceeds the 48Mi limit at start-up."}],
+       "hypotheses": [{"description": "The memory working set climbs to just under the 48Mi limit after each start, then the container is killed."}],
        "evidence": [{"source": "c1", "quote": "OOMKilled"},
-                    {"source": "c2", "quote": "OOMKilled"}],
+                    {"source": "c2", "quote": "OOMKilled"},
+                    {"source": "c4", "quote": "container_memory_working_set_bytes{container=web,pod=web-8d4c6b9f7-t5r9k} last 5.0135e+07"},
+                    {"source": "c4", "quote": "container_memory_limit_bytes{container=web,pod=web-8d4c6b9f7-t5r9k} 5.03316e+07"}],
        "missingData": [],
-       "uncertainty": "Without memory metrics the needed headroom is estimated, not measured.",
+       "uncertainty": "The working set peaks at 5.0135e+07 bytes against a 5.03316e+07 byte limit, so the needed headroom above the limit is estimated from the peak, not measured.",
        "proposal": {"action": {"type": "SetContainerMemoryLimit", "adjustKedaMaxReplicas": null,
                                "setContainerMemoryLimit": {"container": "web", "previous": "48Mi", "desired": "64Mi"}},
                     "expectedEffect": "The container stays under its limit and stops being OOMKilled.",

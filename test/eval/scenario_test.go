@@ -51,7 +51,10 @@ const scenariosDir = "testdata/scenarios"
 var fixtureNow = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 
 // watchedNamespaces is the analyzer's --watch-namespaces in the lab (the demo workloads).
-var watchedNamespaces = []string{"demo"}
+var watchedNamespaces = []string{nsDemo}
+
+// nsDemo is the namespace of the lab scenarios.
+const nsDemo = "demo"
 
 // source says where the vendored expected.yaml files come from: the rubric field of the manifest.
 type source struct {
@@ -163,6 +166,9 @@ type scenario struct {
 	incident  *remediationv1alpha1.Incident
 	objects   []client.Object
 	recording recording
+	// metrics is what the scenario's Prometheus holds (metrics.yaml); nil when the scenario has no metrics
+	// source.
+	metrics *metricsRecording
 }
 
 func newScheme() (*runtime.Scheme, error) {
@@ -256,6 +262,9 @@ func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error
 	if err := s.checkIncident(); err != nil {
 		return nil, err
 	}
+	if err := s.loadMetrics(dir); err != nil {
+		return nil, err
+	}
 	raw, err = os.ReadFile(filepath.Join(dir, "objects.yaml"))
 	if err != nil {
 		return nil, err
@@ -284,6 +293,30 @@ func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error
 		s.objects = append(s.objects, co)
 	}
 	return s, nil
+}
+
+// loadMetrics reads the scenario's metrics.yaml, if it has one, and checks it against the approved templates
+// and the Incident's namespace.
+func (s *scenario) loadMetrics(dir string) error {
+	path := filepath.Join(dir, metricsFile)
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	rec := &metricsRecording{}
+	if err := readStrict(path, rec); err != nil {
+		return err
+	}
+	if err := rec.check(); err != nil {
+		return err
+	}
+	if rec.Namespace != s.incident.Spec.Subject.Namespace {
+		return fmt.Errorf("metrics.yaml: namespace %q is not the Incident subject's %q", rec.Namespace,
+			s.incident.Spec.Subject.Namespace)
+	}
+	s.metrics = rec
+	return nil
 }
 
 // isComment reports whether a YAML document holds only comments.

@@ -187,7 +187,7 @@ type sources struct {
 }
 
 func webSources() sources {
-	s := sources{logs: &fake.Logs{}, metrics: &fake.Metrics{}}
+	s := sources{logs: &fake.Logs{Now: func() time.Time { return testNow }}, metrics: &fake.Metrics{}}
 	s.logs.Set(fake.LogKey{Namespace: testNS, Pod: crashPod, Container: appName, Previous: true}, "starting\npanic: boom\n")
 	s.logs.SetInstance(fake.LogKey{Namespace: testNS, Pod: crashPod, Container: appName, Previous: true},
 		providers.LogInstance{PodUID: "uid-web-abc-1", RestartCount: 4}, false)

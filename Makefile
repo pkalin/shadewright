@@ -464,10 +464,17 @@ test-chart-pin: ## Test hack/chart-pin-digests.sh with the pinned helm (chart-te
 	HELM="$(HELM)" hack/chart-pin-digests_test.sh
 
 .PHONY: test-chart-install
-test-chart-install: kind ## Install the chart on a Kind cluster (created here) and check the Deployments and the permissions.
+test-chart-install: kind ## Install the chart on a Kind cluster (created here) and check the Deployments and the permissions. Without EXECUTOR_DIGEST and ANALYZER_DIGEST (a tag run) it builds the images from this checkout under the chart's repository:appVersion and loads them into Kind.
 	@$(KIND) get clusters | grep -qx '$(CHART_KIND_CLUSTER)' \
 		&& echo "Kind cluster '$(CHART_KIND_CLUSTER)' already exists." \
 		|| $(KIND) create cluster --name $(CHART_KIND_CLUSTER)
+	@if [ -z "$$EXECUTOR_DIGEST$$ANALYZER_DIGEST" ]; then \
+		if printf '%s\n' "$(CHART_CT_EXECUTOR)" "$(CHART_CT_ANALYZER)" | grep -Evxq '[a-z0-9./_-]+:[0-9A-Za-z.+-]+'; then \
+			echo "no image repository or appVersion in $(CHART_DIR): '$(CHART_CT_EXECUTOR)' '$(CHART_CT_ANALYZER)'" >&2; exit 1; \
+		fi; \
+		$(MAKE) docker-build-images IMG_EXECUTOR=$(CHART_CT_EXECUTOR) IMG_ANALYZER=$(CHART_CT_ANALYZER) \
+			&& $(KIND) load docker-image --name $(CHART_KIND_CLUSTER) $(CHART_CT_EXECUTOR) $(CHART_CT_ANALYZER); \
+	fi
 	$(KUBECTL) config use-context kind-$(CHART_KIND_CLUSTER)
 	hack/chart-install-test.sh "$(KUBECTL)" "$(HELM)"
 

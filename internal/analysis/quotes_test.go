@@ -28,6 +28,9 @@ import (
 // logExcerpt is a log block of two lines, indented as a multi-line message would be.
 const logExcerpt = "fatal error: runtime: out of memory\n    goroutine 1 [running]: main.load\n"
 
+// labelAndValue is a label of the status block with the start of its value.
+const labelAndValue = "pod web-1: container app"
+
 // statusBlock is the name of the status section, as a quote failure names it.
 const statusBlock = string(incidentcontext.SectionStatus)
 
@@ -43,7 +46,7 @@ func TestNoEvidenceClassifiesEachQuote(t *testing.T) {
 		"unknown source":  {"t1", "container app terminated OOMKilled", QuoteUnknownSource, ""},
 		"not available":   {"c4", "no Git source is configured", QuoteUnquotableSource, "git"},
 		"wrong block":     {"c1", "container app terminated OOMKilled", QuoteWrongBlock, "summary"},
-		"label and value": {"c2", "pod web-1: container app", QuoteOutsideData, statusBlock},
+		"label and value": {"c2", labelAndValue, QuoteOutsideData, statusBlock},
 		"unescaped":       {"c3", "main.load <oom>", QuoteUnescaped, "log excerpt"},
 		"joined lines":    {"c3", "runtime: out of memory goroutine 1", QuoteJoinedLines, "log excerpt"},
 		"whitespace":      {"c2", "memory  limit\t256Mi", QuoteWhitespace, statusBlock},
@@ -108,7 +111,7 @@ func TestLongestPrefixKeepsRunes(t *testing.T) {
 // model quoting a whole status line ("reason: OOMKilled (Warning)") was refused.
 func TestPromptAndSchemaSayWhatAQuoteIs(t *testing.T) {
 	sys := systemPrompt(false, 0)
-	for _, want := range []string{`the one block it comes from`, `at least 8 characters copied exactly`,
+	for _, want := range []string{`the one block it comes from`, `at least 8 bytes long in UTF-8 once spaces at both ends are trimmed`, `nor has a tool result that was refused`,
 		`Copy from within one value the block shows`, `without the label`,
 		`from the line "reason: OOMKilled (Warning)" quote "OOMKilled", not the whole line`,
 		`Do not paraphrase, join lines, change spacing or case`} {
@@ -131,7 +134,7 @@ func TestPromptAndSchemaSayWhatAQuoteIs(t *testing.T) {
 		t.Fatal(err)
 	}
 	props := schema.Properties.Evidence.Items.Properties
-	if d := props["quote"].Description; !strings.Contains(d, "copied exactly") || !strings.Contains(d, "one value") ||
+	if d := props["quote"].Description; !strings.Contains(d, "copied exactly") || !strings.Contains(d, "8 bytes in UTF-8") || !strings.Contains(d, "one value") ||
 		!strings.Contains(d, "without its label") {
 		t.Errorf("the quote's schema description %q does not say what the check compares", d)
 	}
@@ -153,5 +156,35 @@ func TestThePromptsExampleQuoteIsEvidence(t *testing.T) {
 		if out := f.analyze(t, testLimits()); out.Reason != want {
 			t.Errorf("quote %q: reason %s, want %s", quote, out.Reason, want)
 		}
+	}
+}
+
+// The cited block is judged before the others, other blocks are searched as shown (labels included), and the
+// classes after wrong-block search only the cited block's values (#474 review).
+func TestClassifyQuoteJudgesTheCitedBlockFirst(t *testing.T) {
+	shown := map[string]shownBlock{
+		"c1": {name: "summary", text: "Deployment shop/web, reason OOMKilled\n", parts: []string{exampleQuote}},
+		"c2": {name: statusBlock, text: statusText, parts: []string{statusValue}},
+		// Another block whose value holds a label and value of c2's text.
+		"c3": {name: "metrics", text: "x pod web-1: container app y\n", parts: []string{"x pod web-1: container app y"}},
+		// A block whose label and value sit on two lines.
+		"c4": {name: "logs", text: "label:\n  value one here\n", parts: []string{"value one here"}},
+	}
+	cases := map[string]struct {
+		source, quote string
+		want          QuoteClass
+	}{
+		"in the cited text and inside another value": {"c2", labelAndValue, QuoteOutsideData},
+		"a label line of another block":              {"c2", "Deployment shop/web, reason", QuoteWrongBlock},
+		"whitespace only across a label":             {"c2", "web-1:  container app", QuoteNotFound},
+		"joined lines only across a label":           {"c4", "label: value one", QuoteNotFound},
+		"whitespace within a value":                  {"c4", "value  one here", QuoteWhitespace},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := classifyQuote(shown, Evidence{Source: tc.source, Quote: tc.quote}); got.Class != tc.want {
+				t.Errorf("class %s, want %s", got.Class, tc.want)
+			}
+		})
 	}
 }

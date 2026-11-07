@@ -72,7 +72,7 @@ type Evidence struct {
 	Source string `json:"source" bound:"maxLen=3" pattern:"^[ct][1-9][0-9]?$" desc:"The ID of the one block the quote is copied from: c1, c2... for the context, t1, t2... for tool results."`
 	// Quote is a verbatim excerpt of one data value of that block. A proposal needs at least one quote found
 	// within one data value of its block (#474: the description says so, since labels are never quotable).
-	Quote string `json:"quote" bound:"maxLen=512" desc:"At least 8 characters copied exactly, with the same case, spacing and punctuation, from one value the cited block shows (a reason, a message, a name, a log line or a metric line), without its label or the words the block writes around it. Never paraphrased, joined across lines or shortened with an ellipsis."`
+	Quote string `json:"quote" bound:"maxLen=512" desc:"At least 8 bytes in UTF-8 once spaces at both ends are trimmed (8 characters of plain ASCII), copied exactly, with the same case, spacing and punctuation, from one value the cited block shows (a reason, a message, a name, a log line or a metric line), without its label or the words the block writes around it. Never paraphrased, joined across lines or shortened with an ellipsis."`
 }
 
 // Proposal is a typed change from the closed catalog (invariant 2). Its target is always the Incident's

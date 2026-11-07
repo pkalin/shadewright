@@ -128,24 +128,28 @@ The report holds no prompt, no model text, no token and no endpoint.
 A proposal needs a quote copied exactly from within one data value of the block it cites
 ([design 3.3](design/3-observation-and-deduplication.md#the-prompt-and-the-result)). When none of its quotes passes,
 the loop ends `NoEvidence` and the report gives each quote the first class that fits, in this order
-(`internal/analysis/quotes.go`, [#474](https://github.com/pkalin/shadewright/issues/474)). The class only diagnoses
-the prompt and the check; nothing reads it to decide, and the check itself stays exact.
+(`internal/analysis/quotes.go`, [#474](https://github.com/pkalin/shadewright/issues/474)). From `unescaped` on,
+only the cited block's data values are searched, never its labels, so each of those classes names the change that
+would have made the quote pass. The class only diagnoses
+the prompt and the check; nothing reads it to decide, and the check itself stays exact. The classification is
+evaluation-only: the analyzer computes it for a refused result, but neither logs nor records it in production
+(no log line, event, status or trace carries it), and nothing ever logs the text of a quote.
 
 | Class | The quote |
 | --- | --- |
 | `too-short` | is under 8 bytes, spaces trimmed |
 | `unknown-source` | cites an ID the model was not shown |
 | `unquotable-source` | cites a block with nothing quotable: not available, a refused or failed tool call, a tool answer not about the subject |
-| `wrong-block` | is found verbatim within a data value of another block |
-| `outside-data` | is found verbatim in the cited block, but takes in a label or a line code wrote, or spans two values |
-| `unescaped` | is found once its angle brackets are escaped as the block shows them |
-| `joined-lines` | is found once the block's line breaks (and the indentation after them) become one space or nothing |
-| `whitespace` | is found once every run of white space, in the quote and the block, becomes one space |
-| `case` | is found with white space collapsed and case ignored |
-| `partial` | starts with at least 8 bytes, and half the quote, found in the block, then differs (`matchedBytes`) |
-| `not-found` | none of the above: a paraphrase |
+| `outside-data` | is found verbatim in the cited block's text, but takes in a label or a line code wrote, or spans two values (judged before `wrong-block`, wherever else the quote is) |
+| `wrong-block` | is not in the cited block, but is found verbatim in another block's text as shown, within a data value or not |
+| `unescaped` | is found within one data value of the cited block once its angle brackets are escaped as the block shows them |
+| `joined-lines` | is found within one data value once its line breaks (and the spaces around them) become one space or nothing |
+| `whitespace` | is found within one data value once every run of white space, in the quote and the value, becomes one space |
+| `case` | is found within one data value with white space collapsed and case ignored |
+| `partial` | starts with at least 8 bytes, and half the quote, found within one data value, then differs (`matchedBytes`) |
+| `not-found` | none of the above: a paraphrase, or a change that would not have passed anyway because it takes in a label |
 
-The Markdown report lists them in a table after the runs. `test/eval/testdata/quotes/` holds one recorded reply
+The Markdown report lists them in a table after the runs. `test/eval/testdata/quotes/` holds at least one recorded reply
 per class (all but `unescaped`, which no scenario's context can produce; the analysis package's tests cover it),
 replayed over a scenario's real context by `TestQuoteFailureCorpus`, which also checks that the report holds no
 quote.

@@ -1,0 +1,8 @@
+# Synthetic: two lines of the status block, each from another value, joined with a space. The check refuses it and the report calls it not-found, since joined-lines and the classes after it search within one value only.
+scenario: oom
+classes: [not-found]
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2000, outputTokens: 200}
+    content: '{"summary": "Synthetic reply for the quote corpus.", "hypotheses": [], "evidence": [{"source": "c2", "quote": "minimum availability. owns ReplicaSet web-8d4c6b9f7"}], "missingData": [], "uncertainty": "", "proposal": {"action": {"type": "SetContainerMemoryLimit", "adjustKedaMaxReplicas": null, "setContainerMemoryLimit": {"container": "web", "previous": "48Mi", "desired": "64Mi"}}, "expectedEffect": "The container stays under its limit and stops being OOMKilled.", "verificationChecks": []}}'

@@ -562,7 +562,7 @@ func TestFixedContextLinesAreNotEvidence(t *testing.T) {
 		"metrics fixed line":   {"c4", fixedMetric},
 		"metrics across fixed": {"c4", "7\n" + fixedMetric},
 		"across two values":    {"c1", "Deployment shop/web"},
-		"code text and value":  {"c2", "pod web-1: container app"},
+		"code text and value":  {"c2", labelAndValue},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture()

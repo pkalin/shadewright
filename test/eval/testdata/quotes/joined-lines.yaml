@@ -1,8 +1,18 @@
-# Synthetic: two lines of the status block joined with a space. The loop must refuse it (NoEvidence) and classify each quote.
+# Synthetic: two invalid triage replies escalate, so that the read tools are offered; then two lines of one value (the Deployment's JSON from get_resource) joined with a space. The loop must refuse it (NoEvidence) and classify each quote.
 scenario: oom
 classes: [joined-lines]
 source: synthetic
 replies:
   - model: eval-fake-1
+    usage: {inputTokens: 2000, outputTokens: 20}
+    content: 'not json'
+  - model: eval-fake-1
+    usage: {inputTokens: 2000, outputTokens: 20}
+    content: 'not json'
+  - model: eval-fake-1
     usage: {inputTokens: 2000, outputTokens: 200}
-    content: '{"summary": "Synthetic reply for the quote corpus.", "hypotheses": [], "evidence": [{"source": "c2", "quote": "minimum availability. owns ReplicaSet web-8d4c6b9f7"}], "missingData": [], "uncertainty": "", "proposal": {"action": {"type": "SetContainerMemoryLimit", "adjustKedaMaxReplicas": null, "setContainerMemoryLimit": {"container": "web", "previous": "48Mi", "desired": "64Mi"}}, "expectedEffect": "The container stays under its limit and stops being OOMKilled.", "verificationChecks": []}}'
+    toolCalls:
+      - {id: c1, name: get_resource, arguments: {kind: Deployment, namespace: demo, name: web}}
+  - model: eval-fake-1
+    usage: {inputTokens: 2000, outputTokens: 200}
+    content: '{"summary": "Synthetic reply for the quote corpus.", "hypotheses": [], "evidence": [{"source": "t1", "quote": "\"cpu\": \"200m\", \"memory\": \"48Mi\""}], "missingData": [], "uncertainty": "", "proposal": {"action": {"type": "SetContainerMemoryLimit", "adjustKedaMaxReplicas": null, "setContainerMemoryLimit": {"container": "web", "previous": "48Mi", "desired": "64Mi"}}, "expectedEffect": "The container stays under its limit and stops being OOMKilled.", "verificationChecks": []}}'

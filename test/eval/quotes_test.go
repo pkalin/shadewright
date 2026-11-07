@@ -86,8 +86,9 @@ func TestQuoteFailureCorpus(t *testing.T) {
 						Quote string `json:"quote"`
 					} `json:"evidence"`
 				}
-				if err := json.Unmarshal([]byte(reply.Content), &body); err != nil {
-					t.Fatal(err)
+				// A tool call or an invalid reply holds no quote.
+				if json.Unmarshal([]byte(reply.Content), &body) != nil {
+					continue
 				}
 				for _, e := range body.Evidence {
 					if len(e.Quote) > 4 && (strings.Contains(string(raw), e.Quote) || strings.Contains(md, e.Quote)) {

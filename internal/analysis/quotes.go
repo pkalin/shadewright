@@ -17,6 +17,7 @@ limitations under the License.
 package analysis
 
 import (
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -46,23 +47,28 @@ const (
 	// QuoteUnquotableSource: the cited block has no quotable part (not available, a refused or failed tool
 	// call, a tool answer not about the subject).
 	QuoteUnquotableSource QuoteClass = "unquotable-source"
-	// QuoteWrongBlock: found verbatim within one quotable part of another block.
-	QuoteWrongBlock QuoteClass = "wrong-block"
 	// QuoteOutsideData: found verbatim in the cited block as shown, but not within one of its data values: it
-	// takes in a label or a line written by code, or spans two values.
+	// takes in a label or a line written by code, or spans two values. It is judged before [QuoteWrongBlock],
+	// so a quote found in the cited block is never reported as another block's.
 	QuoteOutsideData QuoteClass = "outside-data"
-	// QuoteUnescaped: found once its angle brackets are escaped as the block shows them.
+	// QuoteWrongBlock: not in the cited block, but found verbatim in the text of another block as shown, within
+	// one of its values or not.
+	QuoteWrongBlock QuoteClass = "wrong-block"
+	// The classes below search only the cited block's data values, never its labels or the lines code wrote:
+	// each says what change would have made the quote pass.
+
+	// QuoteUnescaped: found within one value once its angle brackets are escaped as the block shows them.
 	QuoteUnescaped QuoteClass = "unescaped"
-	// QuoteJoinedLines: found once the line breaks of the block (and the indentation after them) are replaced
-	// by one space or by nothing.
+	// QuoteJoinedLines: found within one value once its line breaks (and the spaces and tabs around them) are
+	// replaced by one space or by nothing.
 	QuoteJoinedLines QuoteClass = "joined-lines"
-	// QuoteWhitespace: found once every run of spaces, tabs and line breaks, in the quote and in the block, is
-	// collapsed to one space.
+	// QuoteWhitespace: found within one value once every run of spaces, tabs and line breaks, in the quote and
+	// in the value, is collapsed to one space.
 	QuoteWhitespace QuoteClass = "whitespace"
-	// QuoteCase: found with whitespace collapsed and case ignored.
+	// QuoteCase: found within one value with whitespace collapsed and case ignored.
 	QuoteCase QuoteClass = "case"
-	// QuotePartial: a prefix of the quote of at least the shortest quote's length and half the quote is found in
-	// the cited block, and the rest is not: a line cut and then changed or ended with an ellipsis.
+	// QuotePartial: a prefix of the quote of at least the shortest quote's length and half the quote is found
+	// within one value, and the rest is not: a line cut and then changed or ended with an ellipsis.
 	QuotePartial QuoteClass = "partial"
 	// QuoteNotFound: none of the above, a paraphrase.
 	QuoteNotFound QuoteClass = "not-found"
@@ -107,20 +113,29 @@ func classifyQuote(shown map[string]shownBlock, e Evidence) QuoteFailure {
 		f.Class = QuoteUnknownSource
 	case len(blk.parts) == 0:
 		f.Class = QuoteUnquotableSource
-	case inOtherBlock(shown, e.Source, q):
-		f.Class = QuoteWrongBlock
+	// The cited block is judged first: a quote in its text but within none of its values took in text outside
+	// them, wherever else it is found.
 	case strings.Contains(blk.text, q):
 		f.Class = QuoteOutsideData
-	case strings.Contains(blk.text, tools.EscapeAngles(q)):
+	case inOtherBlock(shown, e.Source, q):
+		f.Class = QuoteWrongBlock
+	// From here on only the cited block's values are searched, so each class says what would have passed.
+	case slices.ContainsFunc(blk.parts, func(p string) bool { return strings.Contains(p, tools.EscapeAngles(q)) }):
 		f.Class = QuoteUnescaped
-	case joinedLines(blk.text, q):
+	case slices.ContainsFunc(blk.parts, func(p string) bool { return joinedLines(p, q) }):
 		f.Class = QuoteJoinedLines
-	case strings.Contains(collapse(blk.text), collapse(q)):
+	case slices.ContainsFunc(blk.parts, func(p string) bool { return strings.Contains(collapse(p), collapse(q)) }):
 		f.Class = QuoteWhitespace
-	case strings.Contains(strings.ToLower(collapse(blk.text)), strings.ToLower(collapse(q))):
+	case slices.ContainsFunc(blk.parts, func(p string) bool {
+		return strings.Contains(strings.ToLower(collapse(p)), strings.ToLower(collapse(q)))
+	}):
 		f.Class = QuoteCase
 	default:
-		if n := longestPrefix(blk.text, q); n >= minQuoteBytes && 2*n >= len(q) {
+		n := 0
+		for _, p := range blk.parts {
+			n = max(n, longestPrefix(p, q))
+		}
+		if n >= minQuoteBytes && 2*n >= len(q) {
 			f.Class, f.MatchedBytes = QuotePartial, n
 		} else {
 			f.Class = QuoteNotFound
@@ -129,22 +144,18 @@ func classifyQuote(shown map[string]shownBlock, e Evidence) QuoteFailure {
 	return f
 }
 
-// inOtherBlock reports whether q lies within a quotable part of a block other than id.
+// inOtherBlock reports whether q is found verbatim in the text of a block other than id, as shown: within
+// one of its values or not.
 func inOtherBlock(shown map[string]shownBlock, id, q string) bool {
 	for other, blk := range shown {
-		if other == id {
-			continue
-		}
-		for _, p := range blk.parts {
-			if strings.Contains(p, q) {
-				return true
-			}
+		if other != id && strings.Contains(blk.text, q) {
+			return true
 		}
 	}
 	return false
 }
 
-// joinedLines reports whether a quote of one line is found in text once its line breaks, with the spaces and
+// joinedLines reports whether a quote of one line is found in a value once its line breaks, with the spaces and
 // tabs around them, become one space or nothing.
 func joinedLines(text, q string) bool {
 	if strings.Contains(q, "\n") {

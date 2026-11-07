@@ -305,7 +305,8 @@ type Outcome struct {
 	// outcome (#422); nil when the result listed nothing. Model text: logged, never read to decide anything.
 	MissingData []string
 	// QuoteFailures classifies every quote of a result refused with ReasonNoEvidence, for the evaluation's
-	// report (#474): classes and lengths only, no text. Never read to decide anything; nil for any other reason.
+	// report (#474): classes and lengths only, no text. Evaluation-only: the analyzer neither logs nor records it,
+	// and never reads it to decide anything; nil for any other reason.
 	QuoteFailures []QuoteFailure
 }
 

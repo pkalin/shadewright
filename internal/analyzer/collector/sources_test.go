@@ -806,8 +806,8 @@ func TestSymptomTextKeepsMetricValues(t *testing.T) {
 	}}
 	want := "At the ceiling. Evidence: status.currentMetrics.0.external.current.averageValue=6500m; " +
 		"spec.metrics.0.external.target.averageValue=50; status.conditions.ScalingLimited.message=waited (duration)"
-	if got := symptomText(s); got != want {
-		t.Errorf("symptomText()\n got: %q\nwant: %q", got, want)
+	if got := SymptomText(s); got != want {
+		t.Errorf("SymptomText()\n got: %q\nwant: %q", got, want)
 	}
 }
 

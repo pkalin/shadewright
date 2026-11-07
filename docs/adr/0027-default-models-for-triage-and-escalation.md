@@ -13,7 +13,7 @@ Decided on 2026-11-05 ([#80](https://github.com/pkalin/shadewright/issues/80)), 
 2. Data Zone EU deployments are the documented default. Global Standard is an operator's documented choice.
 3. Ranking: zero false fixes is a hard gate; then correct diagnoses; then cost per resolved incident; latency only breaks ties.
 4. No runtime fallback. One deployment per role; throttling or an outage means bounded retries, then a hand-off to a person.
-5. No model is named in code. An operator sets the deployment (endpoint and deployment name) in `RemediationSettings` (`spec.analysis.models`) and the model ID and version that deployment serves in the chart values `analyzer.analysis.triageModel` and `analyzer.analysis.escalationModel` (the flags `--triage-model` and `--escalation-model`). A reply that names another model is refused ([ADR-0023](0023-model-provider-foundry-entra.md)), so the value must be the exact ID and version.
+5. No model is named in code. An operator sets the deployment (endpoint and deployment name) in `RemediationSettings` (`spec.analysis.models`) and the model ID and version that deployment serves in the chart values `analyzer.analysis.triageModel` and `analyzer.analysis.escalationModel` (the flags `--triage-model` and `--escalation-model`). A reply that names another model is refused ([ADR-0023](0023-how-the-analyzer-calls-the-model.md)), so the value must be the exact ID and version.
 
 ## Decision
 

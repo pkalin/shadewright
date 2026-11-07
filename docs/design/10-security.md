@@ -80,7 +80,9 @@ The chart has a rule for Prometheus, off by default because the analyzer sends P
 
 A standard NetworkPolicy cannot match host names, and the API server has no label to select. So the policies limit ports and directions, not destinations. The analyzer can reach any HTTPS address at the network level, including `api.github.com`.
 
-What keeps the analyzer away from GitHub is that its binary has no GitHub adapter and holds no GitHub credential (`AGENTS.md` invariant 6), not the policy. The lab check that the analyzer cannot reach GitHub's API at the network level is therefore not possible with this policy.
+What keeps the analyzer away from GitHub is that its binary has no GitHub adapter and holds no GitHub credential (`AGENTS.md` invariant 6), not the policy. The lab confirmed it on 2026-11-07. A test pod in the operator namespace with the analyzer's labels (`app.kubernetes.io/name=shadewright`, `app.kubernetes.io/component=analyzer`), so under the same NetworkPolicies, with the restricted security context and no service account token, got HTTP 200 from `https://github.com` and `https://api.github.com` (`curl -sS -m 10 -o /dev/null -w '%{http_code}' <url>`), and could not connect to `http://github.com` (port 80). The port rules are enforced, the destination is not.
+
+This is accepted ([#391](https://github.com/pkalin/shadewright/issues/391)): the analyzer may open TCP 443 to any address, including GitHub, and is kept from GitHub by having no GitHub client in its binary and no GitHub identity or credential, not by the network. An FQDN egress policy stays the operator's option, not shipped. On AKS, host-name rules need Advanced Container Networking Services, a paid add-on the lab does not use.
 
 The API server rule is 443 and 6443 to any address because its address is unknown when the chart renders and differs per cluster. The manifests in `config/` follow the same established pattern. The trade-off is that a pod of the component can reach any HTTPS address too.
 
@@ -92,7 +94,7 @@ The per-component split exists so that narrowing is possible without touching th
 ### What can go wrong
 
 - **No enforcing CNI.** NetworkPolicy needs a CNI that enforces it (kindnet in recent kind, Azure CNI with Azure Network Policy or Cilium on AKS). On one that does not, the objects are accepted and do nothing.
-- **Cilium is unverified.** It treats the API server as the `kube-apiserver` entity, and the `ipBlock 0.0.0.0/0` rule on 443 and 6443 may not match it. That would cut the operator off from the API server and leader election. Checking this in the lab is [#216](https://github.com/pkalin/shadewright/issues/216). The fallback is a `CiliumNetworkPolicy` overlay with `toEntities: [kube-apiserver]`.
+- **Cilium and the API server.** Cilium treats the API server as the `kube-apiserver` entity, so the `ipBlock 0.0.0.0/0` rule on 443 and 6443 might not match it and would cut the operator off from the API server and leader election. Verified in the lab on 2026-11-07 (AKS, Azure CNI powered by Cilium, [#216](https://github.com/pkalin/shadewright/issues/216)): both leader election Leases renewed under the shipped policies, so the analyzer and the executor reach the API server. Cilium enforces the port rules of the core NetworkPolicy. Host-name rules were not tried (they need Advanced Container Networking Services on AKS). On another cluster or CNI version, check again; the fallback is a `CiliumNetworkPolicy` overlay with `toEntities: [kube-apiserver]`.
 - **Switching off.** The chart's policies are on by default (`networkPolicy.enabled`). `false` removes the default deny too.
 
 ### The `helm test` policies

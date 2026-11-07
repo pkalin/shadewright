@@ -225,9 +225,12 @@ type LogKey struct {
 
 // Logs returns logs registered per container, honouring MaxBytes (providers.DefaultLogBytes when zero). An
 // excerpt carries the instance registered with SetInstance (zero and uncertain when none is) and the time
-// of the call as CollectedAt.
+// of the call as CollectedAt: Now, or time.Now when Now is nil.
 type Logs struct {
 	Hook
+	// Now is the clock of CollectedAt; time.Now when nil. A test that compares two excerpts sets it, so a
+	// second boundary between the calls does not tell them apart.
+	Now       func() time.Time
 	mu        sync.Mutex
 	logs      map[LogKey]string
 	instances map[LogKey]logInstance
@@ -282,10 +285,14 @@ func (l *Logs) Logs(ctx context.Context, q providers.LogQuery) (providers.LogExc
 		limit = providers.DefaultLogBytes
 	}
 	inst, ok := l.instances[key]
+	now := time.Now
+	if l.Now != nil {
+		now = l.Now
+	}
 	e := providers.LogExcerpt{
 		Text:              t,
 		Instance:          inst.instance,
-		CollectedAt:       time.Now().UTC(),
+		CollectedAt:       now().UTC(),
 		InstanceUncertain: !ok || inst.uncertain,
 	}
 	if int64(len(t)) > limit {

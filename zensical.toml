@@ -79,6 +79,7 @@ nav = [
       { "14. Testing" = "design/14-testing.md" },
       { "15. Decisions made and open questions" = "design/15-decisions-made-and-open-questions.md" },
       { "16. Prior art" = "design/16-prior-art.md" },
+      { "The analyzer as a harness" = "design/harness.md" },
     ] },
     { "Threat model" = "threat-model.md" },
     { "The name" = "name.md" },

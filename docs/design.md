@@ -13,6 +13,7 @@ Status: draft for the MVP.
 - The kill switch of section 5.4: `spec.paused`, one gate right before every Git write.
 - The concurrency limit, the lock per target and the circuit breaker of section 10.7. Retry limits and cooldowns between attempts are not built.
 - The collector of section 3.1 and both levels of deduplication of section 3.2, with the Incident controller that keeps them in `Incident` objects.
+- The Incident lifecycle of section 3.2: the closure rules (`Resolved` after an hour quiet or a request `Succeeded`, `Escalated` on a request that ended without success), recurrence after resolution, and the Warning event `IncidentCapNear` at 80% of the Incident cap.
 - The RBAC of sections 2.2 and 10.
 - The Prometheus metrics of both components ([reference](reference/metrics.md)).
 - Optional OpenTelemetry traces per analysis, off by default ([reference](reference/traces.md)).

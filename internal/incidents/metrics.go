@@ -176,6 +176,20 @@ var incidentWriteErrors = prometheus.NewCounter(prometheus.CounterOpts{
 	Help: "Writes of an Incident that failed and are retried.",
 })
 
+// incidentCap and incidentCapNear report the Incident cap (Config.MaxIncidents) and whether the Incidents
+// that exist or are pending reached capNearPercent of it, as the last pass of the analysis trigger counted
+// them ([Controller.reportCap]). Both stay 0 until the first pass, and on a replica that is not the leader.
+var (
+	incidentCap = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "shadewright_incident_cap",
+		Help: "The cap on Incidents (--max-incidents), set by each pass of the analysis trigger.",
+	})
+	incidentCapNear = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "shadewright_incident_cap_near",
+		Help: "1 when the Incidents that exist or are pending reached 80% of the cap at the last trigger pass, else 0.",
+	})
+)
+
 // incidentPhases reports the Incidents in the operator namespace by phase, and those due for analysis.
 var incidentPhases = &incidentCollector{
 	phases: prometheus.NewDesc("shadewright_incidents",
@@ -188,7 +202,7 @@ var incidentPhases = &incidentCollector{
 func init() {
 	metrics.Registry.MustRegister(refusedObservations, droppedBatches, overflowedOccurrences, firstSightingsHeld,
 		analysisReservations, analysesUsedToday, analysesPerDayLimit, triggerPassErrors, notRecentSkips, incidentWriteErrors,
-		incidentPhases)
+		incidentCap, incidentCapNear, incidentPhases)
 	// The closed sets start at zero, so a rate is defined before the first event.
 	for _, r := range []string{dropInvalid, dropFingerprintConflict, dropStopped, dropDeleted} {
 		droppedBatches.WithLabelValues(r)

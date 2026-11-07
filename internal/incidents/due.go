@@ -18,6 +18,7 @@ package incidents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -52,7 +53,7 @@ func (c *Controller) triggerLoop(ctx context.Context) {
 	for {
 		if err := c.pass(ctx); err != nil && ctx.Err() == nil {
 			triggerPassErrors.Inc()
-			logf.FromContext(ctx).Error(err, "Failed to decide which Incidents are due for analysis, will retry")
+			logf.FromContext(ctx).Error(err, "Failed a pass of the analysis trigger (closure rules or due marks), will retry")
 		}
 		select {
 		case <-tick.C:
@@ -62,11 +63,21 @@ func (c *Controller) triggerLoop(ctx context.Context) {
 	}
 }
 
-// pass runs one [Controller.markDue] under PassTimeout.
+// pass reports how near the Incident cap is ([Controller.reportCap], from memory), runs the closure rules
+// ([Controller.closeIncidents]) within the first half of PassTimeout, then one [Controller.markDue] within the
+// rest, so a closure pass that runs into its deadline never takes the marks' time. A failure of one does not
+// stop the other; the joined error names the Incidents whose writes failed.
 func (c *Controller) pass(ctx context.Context) error {
 	pctx, cancel := context.WithTimeout(ctx, c.cfg.PassTimeout)
 	defer cancel()
-	return c.markDue(pctx)
+	c.reportCap(pctx)
+	cctx, cancelClose := context.WithTimeout(pctx, c.cfg.PassTimeout/2)
+	closeErr := c.closeIncidents(cctx)
+	cancelClose()
+	if pctx.Err() != nil {
+		return errors.Join(closeErr, pctx.Err())
+	}
+	return errors.Join(closeErr, c.markDue(pctx))
 }
 
 // markDue decides, for every Incident in the namespace, whether it is due for analysis ([Due]) and sets its
@@ -390,6 +401,11 @@ func (c *Controller) rememberWaiting(uid types.UID, reason string, now time.Time
 func (c *Controller) heldSince(fp string) time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.heldLocked(fp)
+}
+
+// heldLocked is [Controller.heldSince] for a caller that holds mu.
+func (c *Controller) heldLocked(fp string) time.Time {
 	var t time.Time
 	for _, b := range []*batch{c.pending[fp], c.failed[fp]} {
 		if b != nil {

@@ -616,8 +616,18 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 	if d.Outcome != policy.OutcomeAllowed {
 		return o, nil
 	}
-	if stop, tooLarge, err := r.buildTooLarge(ctx, settings, res.Source); tooLarge || err != nil {
-		return stop, err
+	stop, tooLarge, err := r.buildTooLarge(ctx, settings, res.Source)
+	if err != nil {
+		return outcome{}, err
+	}
+	if tooLarge {
+		// The refusal ends the request for good, and the build was read at the commit the mapping found for
+		// the object checked above. Flux may have applied a new revision during those reads, so confirm the
+		// target is still that object, and start over against the current one when it is not.
+		if err := r.unchanged(ctx, ref, live); err != nil {
+			return outcome{}, err
+		}
+		return stop, nil
 	}
 	// The plan is fixed here, from the very objects the decision was made on, so no later read of the
 	// policy or the settings can slip in between the decision and the digest.

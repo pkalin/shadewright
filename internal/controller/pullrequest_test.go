@@ -2240,6 +2240,24 @@ func withMemoryRequest(manifest []byte, request string) []byte {
 }
 
 var _ = Describe("Pull request body", func() {
+	It("shows the size of the step beside the policy, from the request's numbers (ADR-0026)", func() {
+		rr := bodyRequest()
+		m := rr.Spec.Action.SetContainerMemoryLimit
+		m.Previous, m.Desired = resource.MustParse("48Mi"), resource.MustParse("64Mi")
+		body := pullRequestBody(rr, "")
+		Expect(body).To(ContainSubstring("**Size:** an increase of 34% of the previous value, within policy `" +
+			string(rr.Spec.PolicyRef) + "`."))
+		Expect(body).To(ContainSubstring("The diagnosis names the evidence that sets the size (ADR-0026)"))
+		m.Previous, m.Desired = resource.MustParse("100Mi"), resource.MustParse("80Mi")
+		Expect(pullRequestBody(rr, "")).To(ContainSubstring("**Size:** a decrease of 20% of the previous value"))
+		k := remediationv1alpha1.AdjustKedaMaxReplicas{PreviousValue: 2, DesiredValue: 3}
+		rr.Spec.Action = remediationv1alpha1.Action{Type: remediationv1alpha1.ActionAdjustKedaMaxReplicas,
+			AdjustKedaMaxReplicas: &k}
+		Expect(stepSize(rr)).To(Equal("an increase of 50% of the previous value"))
+		k.PreviousValue = 0
+		Expect(stepSize(rr)).To(BeEmpty())
+	})
+
 	It("carries no secret and keeps the marker exact", func() {
 		rr := bodyRequest()
 		// Names are validated by the schema; the body is redacted anyway, so a token that slipped through a

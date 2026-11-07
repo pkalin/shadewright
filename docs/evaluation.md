@@ -168,7 +168,9 @@ pod still runs with 64Mi, and the reply takes the old pod's 64Mi as the previous
 value from the pod template instead
 ([design 3.3](design/3-observation-and-deduplication.md#the-prompt-and-the-result)), so the plan goes from 48Mi
 and passes the outcome check ([Scoring](#scoring)). The lab's model asked for 96Mi, which `demo-memory` refuses from
-48Mi; the reply asks for 72Mi, the most the policy bounds block shows.
+48Mi. The block shows 64Mi to 72Mi from 48Mi; the reply asks for 72Mi, a little above the 64Mi the old pod runs
+under without kills, and its summary names that evidence, not the policy's maximum, as what sets the size
+([ADR-0026](adr/0026-the-analyzer-shows-the-model-the-policy-bounds.md)).
 
 **Recorded metrics.** `metrics.yaml` is replayed through the `providers.MetricsSource` interface, the one the
 Prometheus adapter implements (`test/eval/metrics_test.go`). The harness refuses a recording that the adapter could

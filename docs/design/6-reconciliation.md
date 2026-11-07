@@ -228,7 +228,7 @@ Without an existing change request, the step does these things in order:
 1. Creates the branch at the head of the target branch at which the freshness check has just found the file holding the previous value. It does not use a head read again, which may hold a file no check saw.
 2. Renders the change at the head of the target branch that the freshness check of that later reconcile has read. This may be newer than the branch (the render rule in 6.5.2).
 3. Commits the typed change on top of the branch head it read (the patch checks the previous value).
-4. Opens the pull request with the evidence, scope, expected effect, risk, rollback and the marker.
+4. Opens the pull request with the evidence, scope, the size of the step beside the policy (ADR-0026), expected effect, risk, rollback and the marker.
 
 Every write names the head it expects, so a lost status write or a concurrent reconcile finds the work instead of repeating it.
 

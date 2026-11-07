@@ -4,7 +4,7 @@ replies:
   - model: eval-fake-1
     usage: {inputTokens: 2500, outputTokens: 320}
     content: |
-      {"summary": "Pod cache-1 of StatefulSet demo/cache, on the new revision, is OOMKilled and has restarted 2 times, while cache-0 on the old revision runs without restarts: the new template's memory limit is too low. Raising the cache container's limit within the policy's bounds should stop the kills.",
+      {"summary": "Pod cache-1 of StatefulSet demo/cache, on the new revision, is OOMKilled and has restarted 2 times, while cache-0 on the old revision runs without restarts: the new template's memory limit is too low. Raising the cache container's limit to 64Mi, the smallest value within the policy's bounds, should stop the kills; the policy's minimum, not a measured need, sets the size.",
        "hypotheses": [{"description": "The rollout set a 48Mi memory limit, and cache-1's memory working set climbs to just under it before each kill."}],
        "evidence": [{"source": "c1", "quote": "OOMKilled"},
                     {"source": "c2", "quote": "cache-7d9f4b8c6"},

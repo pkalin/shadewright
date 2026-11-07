@@ -351,6 +351,83 @@ func TestNormalize(t *testing.T) {
 	}
 }
 
+// TestSymptomKeepsMilliQuantities: a milli quantity after a key ("averageValue=6500m", #479) is evidence the
+// Incident and the model must see, so Symptom keeps it, while Normalize still replaces it and the fingerprint
+// stays the same when the value changes. Real durations and other quantities are as in Normalize.
+func TestSymptomKeepsMilliQuantities(t *testing.T) {
+	tests := []struct {
+		name, note, symptom, normalized string
+	}{
+		{
+			name:       "KEDA metric value",
+			note:       `current averageValue=6500m above target averageValue=50`,
+			symptom:    `current averageValue=6500m above target averageValue=50`,
+			normalized: `current averageValue=<duration> above target averageValue=50`,
+		},
+		{
+			name:       "after a colon, with and without a space",
+			note:       `cpu: 250m, limit:1.5m; Evidence: status.currentMetrics.0.external.current.averageValue=212500m`,
+			symptom:    `cpu: 250m, limit:1.5m; Evidence: status.currentMetrics.0.external.current.averageValue=212500m`,
+			normalized: `cpu: <duration>, limit:<duration>; Evidence: status.currentMetrics.0.external.current.averageValue=<duration>`,
+		},
+		{
+			name:       "real durations",
+			note:       `Back-off 5m0s restarting, timeout=250ms, wait=1m30s, period: 10s, retry in 30 seconds, after 5m`,
+			symptom:    `Back-off <duration> restarting, timeout=<duration>, wait=<duration>, period: <duration>, retry in <duration>, after <duration>`,
+			normalized: `Back-off <duration> restarting, timeout=<duration>, wait=<duration>, period: <duration>, retry in <duration>, after <duration>`,
+		},
+		{
+			name:       "milli quantity without a key, or glued to a name",
+			note:       `value 6500m, = 5m, db-10m`,
+			symptom:    `value <duration>, = <duration>, db-10m`,
+			normalized: `value <duration>, = <duration>, db-10m`,
+		},
+		{
+			name:       "binary and decimal suffixes",
+			note:       `memory=512Mi limit: 2Gi rate=100k size=1G value=6500m`,
+			symptom:    `memory=512Mi limit: 2Gi rate=100k size=1G value=6500m`,
+			normalized: `memory=512Mi limit: 2Gi rate=100k size=1G value=<duration>`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := Observation{Note: tt.note}
+			if got := Symptom(o); got != tt.symptom {
+				t.Errorf("Symptom()\n got: %q\nwant: %q", got, tt.symptom)
+			}
+			if got := Normalize(o); got != tt.normalized {
+				t.Errorf("Normalize()\n got: %q\nwant: %q", got, tt.normalized)
+			}
+		})
+	}
+	a := Observation{ClusterID: "c", Namespace: "ns", OwnerUID: "u", Reason: "R", Note: "averageValue=6500m"}
+	b := a
+	b.Note = "averageValue=212500m"
+	if Fingerprint(a) != Fingerprint(b) {
+		t.Errorf("a changed metric value changed the fingerprint")
+	}
+}
+
+// TestValueKeepsWholeMilliQuantity: an evidence value is the value of its field, so a value that is a milli
+// quantity as a whole is kept, and anything else is as in Symptom.
+func TestValueKeepsWholeMilliQuantity(t *testing.T) {
+	for in, want := range map[string]string{
+		"212500m":           "212500m",
+		" 6500m ":           "6500m",
+		"1.5m":              "1.5m",
+		"50":                "50",
+		"512Mi":             "512Mi",
+		"5m0s":              "<duration>",
+		"250ms":             "<duration>",
+		"waited 5m":         "waited <duration>",
+		"averageValue=500m": "averageValue=500m",
+	} {
+		if got := Value(in); got != want {
+			t.Errorf("Value(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestNormalizeRedacts(t *testing.T) {
 	tests := []struct {
 		name, note, secret string
@@ -437,6 +514,7 @@ func FuzzNormalize(f *testing.F) {
 		{"password=", "token:"},
 		{"-----BEGIN PRIVATE KEY-----", ""},
 		{"postgres://u:p@h", "2026-11-02T10:15:30Z 10.0.0.1:80 5m0s"},
+		{"averageValue=6500m cpu: 250m", " timeout=5m0s 512Mi"},
 		{"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.", "\xff\x00<redacted>"},
 		{strings.Repeat("A1", 600), strings.Repeat("ż ", 600)},
 	}
@@ -446,18 +524,19 @@ func FuzzNormalize(f *testing.F) {
 	f.Fuzz(func(t *testing.T, prefix, suffix string) {
 		for _, note := range []string{prefix + suffix, prefix + " " + canary + " " + suffix} {
 			o := Observation{Note: note, Reason: prefix, ReportingController: suffix}
-			got := Normalize(o)
-			if len(got) > MaxSymptomLength {
-				t.Fatalf("length %d > %d", len(got), MaxSymptomLength)
-			}
-			if !utf8.ValidString(got) {
-				t.Fatalf("invalid UTF-8: %q", got)
-			}
-			if unredacted(got) {
-				t.Fatalf("output changes when redacted: %q", got)
-			}
-			if strings.Contains(got, canary) {
-				t.Fatalf("canary token kept: %q", got)
+			for _, got := range []string{Normalize(o), Symptom(o), Value(note)} {
+				if len(got) > MaxSymptomLength {
+					t.Fatalf("length %d > %d", len(got), MaxSymptomLength)
+				}
+				if !utf8.ValidString(got) {
+					t.Fatalf("invalid UTF-8: %q", got)
+				}
+				if unredacted(got) {
+					t.Fatalf("output changes when redacted: %q", got)
+				}
+				if strings.Contains(got, canary) {
+					t.Fatalf("canary token kept: %q", got)
+				}
 			}
 			if fp := Fingerprint(o); !crdPattern.MatchString(fp) {
 				t.Fatalf("fingerprint %q does not match the CRD pattern", fp)

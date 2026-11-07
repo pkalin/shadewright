@@ -47,7 +47,7 @@ jobs:
           make test
 
       # The evaluation on the fake model ran inside make test; its report goes into the job summary (format:
-      # docs/evaluation.md), also when the tests failed. The real model is `make eval-model`, by hand.
+      # docs/evaluation.md), also when the tests failed. The real model is the manual Evaluation workflow.
       - name: Evaluation report (fake model)
         if: always()
         run: |

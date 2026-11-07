@@ -795,6 +795,22 @@ func TestSymptomTextIsRedactedAndBounded(t *testing.T) {
 	}
 }
 
+// TestSymptomTextKeepsMetricValues: the shown symptom keeps a milli quantity after its field (#479); the
+// fingerprint hashes the summary only, so a changed value keeps the Incident. A placeholder from BoundValue
+// shows in brackets, as the second normalization sanitizes it.
+func TestSymptomTextKeepsMetricValues(t *testing.T) {
+	s := modules.Symptom{Reason: "ReplicaCeiling", Summary: "At the ceiling.", Evidence: []modules.Evidence{
+		{Field: "status.currentMetrics.0.external.current.averageValue", Value: modules.BoundValue("6500m")},
+		{Field: "spec.metrics.0.external.target.averageValue", Value: modules.BoundValue("50")},
+		{Field: "status.conditions.ScalingLimited.message", Value: modules.BoundValue("waited 5m0s")},
+	}}
+	want := "At the ceiling. Evidence: status.currentMetrics.0.external.current.averageValue=6500m; " +
+		"spec.metrics.0.external.target.averageValue=50; status.conditions.ScalingLimited.message=waited (duration)"
+	if got := SymptomText(s); got != want {
+		t.Errorf("SymptomText()\n got: %q\nwant: %q", got, want)
+	}
+}
+
 // TestSourceKindsAreGranted keeps SourceKinds and the subject owners of the compiled-in sources for those kinds
 // within the generated roles: a built-in kind needs list and watch in the watch role (the markers in doc.go),
 // any other kind in a module role (package modulerbac), and every kind needs a compiled-in source.

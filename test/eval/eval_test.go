@@ -246,7 +246,7 @@ func TestEvalReplay(t *testing.T) {
 }
 
 // TestEvalFoundry runs the scenarios against the real model. It runs only with EVAL_MODEL=foundry, from the
-// by hand with a workload identity (`make eval-model`; the Evaluation workflow is planned); it costs money.
+// Evaluation workflow or by hand with a workload identity; it costs money.
 func TestEvalFoundry(t *testing.T) {
 	if os.Getenv(envModel) != "foundry" {
 		t.Skip("set EVAL_MODEL=foundry to evaluate the real model")

@@ -304,6 +304,10 @@ type Outcome struct {
 	// MissingData is what a valid result said was missing, each item redacted, for the log line of the
 	// outcome (#422); nil when the result listed nothing. Model text: logged, never read to decide anything.
 	MissingData []string
+	// QuoteFailures classifies every quote of a result refused with ReasonNoEvidence, for the evaluation's
+	// report (#474): classes and lengths only, no text. Evaluation-only: the analyzer neither logs nor records it,
+	// and never reads it to decide anything; nil for any other reason.
+	QuoteFailures []QuoteFailure
 }
 
 // Analyze runs the analysis of inc with the limits of the settings: runbooks first, then (with a triage
@@ -477,8 +481,8 @@ type run struct {
 	out         *Outcome
 	pods        []string
 	contextText string
-	// shown is the quotable parts of each block and tool result as the model saw them, by ID.
-	shown map[string][]string
+	// shown is each block and tool result as the model saw it, by ID, with its quotable parts.
+	shown map[string]shownBlock
 	// maxCalls is the most model calls of the analysis, retries included: 3 + MaxToolSteps (ADR-0023
 	// decision 6).
 	maxCalls int
@@ -664,9 +668,7 @@ func (r *run) callTool(call providers.ToolCall, offered map[string]bool) (string
 		return "", err
 	}
 	span.SetAttributes(attrQuotable.Bool(len(quotable) > 0))
-	if len(quotable) > 0 {
-		r.shown[id] = quotable
-	}
+	r.shown[id] = shownBlock{name: toolLabel(call.Name, offered), text: content, parts: quotable}
 	return "Tool result " + id + ".\n" + content, nil
 }
 
@@ -949,6 +951,7 @@ func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, 
 		return r.handOff(ReasonNoProposal)
 	}
 	if !r.evidenced(res.Evidence) {
+		r.out.QuoteFailures = r.quoteFailures(res.Evidence)
 		return r.handOff(ReasonNoEvidence)
 	}
 	var checks []remediationv1alpha1.VerificationCheck
@@ -979,7 +982,7 @@ func (r *run) evidenced(ev []Evidence) bool {
 		if len(q) < minQuoteBytes {
 			continue
 		}
-		for _, part := range r.shown[e.Source] {
+		for _, part := range r.shown[e.Source].parts {
 			if strings.Contains(part, q) {
 				return true
 			}

@@ -80,7 +80,7 @@ const (
 // nothing or only local files the walk validates. Everything else is refused: generators (configMapGenerator,
 // secretGenerator), helmCharts and helmGlobals, generators, transformers and validators (plugins and KRM
 // functions), openapi, crds, configurations, replacements, the deprecated bases, patchesStrategicMerge and
-// patchesJson6902, buildMetadata and sortOptions.
+// patchesJson6902, buildMetadata and sortOptions. A patch may not use JSON patch copy operations ([refuseCopy]).
 var allowedKeys = map[string]bool{
 	"apiVersion": true, keyKind: true, "metadata": true,
 	keyResources: true, keyComponents: true, keyPatches: true,
@@ -137,7 +137,9 @@ type dirKind struct{ dir, kind string }
 // refs are the references of one kustomization file, and the bytes one visit of it adds to the build.
 type refs struct {
 	dirs, components, files []string
-	bytes                   int
+	// patches are the patch files among files, checked by [refuseCopy].
+	patches []string
+	bytes   int
 	// docs is what one visit adds to the documents of the build: those of its files and inline patches.
 	docs int
 }
@@ -182,6 +184,11 @@ func (w *walker) walk(ctx context.Context, dir, want string, depth int) error {
 				w.docs[f] = d
 			}
 			r.docs = min(r.docs+d, MaxBuildDocuments+1)
+		}
+		for _, f := range r.patches {
+			if err := refuseCopy(f, w.files[f]); err != nil {
+				return err
+			}
 		}
 		w.parsed[key] = r
 	}
@@ -450,12 +457,14 @@ func collectRefs(name, dir string, k map[string]any, resources map[string]bool, 
 		return nil, err
 	}
 	r.files = append(r.files, patches...)
+	r.patches = patches
 	r.docs = inline
 	return r, nil
 }
 
 // patchFiles validates the patches list and returns the local files it reads, and the documents of its inline
-// patches ([documents]), which kustomize reads like a patch file.
+// patches ([documents]), which kustomize reads like a patch file. An inline patch with a JSON patch copy
+// operation is refused ([refuseCopy]); the walk checks patch files the same way.
 func patchFiles(name, dir string, raw any, bad error) ([]string, int, error) {
 	if raw == nil {
 		return nil, 0, nil
@@ -487,6 +496,9 @@ func patchFiles(name, dir string, raw any, bad error) ([]string, int, error) {
 		if s, ok := m["patch"].(string); ok {
 			d, err := documents("an inline patch in "+name, []byte(s))
 			if err != nil {
+				return nil, 0, err
+			}
+			if err := refuseCopy("an inline patch in "+name, []byte(s)); err != nil {
 				return nil, 0, err
 			}
 			docs = min(docs+d, MaxBuildDocuments+1)

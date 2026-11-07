@@ -22,7 +22,8 @@ const (
 	// ReasonInvalidInput means the target, action, paths or file set given to the check are not usable.
 	ReasonInvalidInput Reason = "InvalidInput"
 	// ReasonUnsupportedKustomization means a kustomization file uses a field the renderer does not allow:
-	// generators, Helm charts, plugins, OpenAPI schemas, replacements or anything else outside the allow-list.
+	// generators, Helm charts, plugins, OpenAPI schemas, replacements or anything else outside the allow-list,
+	// or a patch holds a JSON patch copy operation, which can double a value per copy ([refuseCopy]).
 	ReasonUnsupportedKustomization Reason = "UnsupportedKustomization"
 	// ReasonInvalidReference means a kustomization file refers to something that is not a plain relative path
 	// inside the repository: a URL, a remote base, an absolute path or a path that leaves the repository.
@@ -35,7 +36,7 @@ const (
 	// ([MaxBuildDocuments]) or the rendered objects ([MaxObjects]).
 	ReasonTooLarge Reason = "TooLarge"
 	// ReasonInvalidYAML means a kustomization file does not parse or has a duplicate key, or a file of the
-	// build is not UTF-8, does not parse, or uses YAML anchors, aliases or merge keys, which kustomize would
+	// build is not UTF-8, does not parse, or uses YAML anchors, aliases or merge keys (a "<<" key, not a "<<" value), which kustomize would
 	// expand before the document count could bound them ([documents]).
 	ReasonInvalidYAML Reason = "InvalidYAML"
 	// ReasonRenderFailed means kustomize could not build the path, before or after the change.

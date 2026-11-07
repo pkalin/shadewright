@@ -43,8 +43,8 @@ var yamlLine = regexp.MustCompile(`line (\d+)`)
 // (#488, #492). It refuses with InvalidYAML:
 //   - input that is not UTF-8: kustomize also reads UTF-16 and UTF-32 with a byte order mark, which a check of
 //     the raw bytes misses;
-//   - every YAML anchor, alias and merge key ("<<" or the !!merge tag, however spelled): kustomize replaces
-//     aliases by copies and resolves merges before it looks for Lists, so a few bytes could expand into
+//   - every YAML anchor, alias and merge key (a "<<" key or a key with the !!merge tag, however spelled; a
+//     "<<" value is plain text): kustomize replaces aliases by copies and resolves merges before it looks for Lists, so a few bytes could expand into
 //     thousands of objects, or without end through an anchor that contains itself, which overflowed the Go
 //     stack and ended the process;
 //   - a part that does not parse, which kustomize could not build either.
@@ -116,14 +116,15 @@ func objectsIn(part string) (int, *partError) {
 	return max(n, 1), nil
 }
 
-// anchored returns the first node below n that has an anchor, is an alias, has the merge tag (a plain "<<"
-// has it too) or is a "<<" key however quoted, or nil.
+// anchored returns the first node below n that has an anchor, is an alias, or is a merge key: a mapping key
+// with the merge tag (a plain "<<" has it too) or a "<<" key however quoted, or nil. A "<<" value is plain
+// text: only a key merges.
 func anchored(n *yaml.Node) *yaml.Node {
-	if n.Anchor != "" || n.Kind == yaml.AliasNode || n.ShortTag() == "!!merge" {
+	if n.Anchor != "" || n.Kind == yaml.AliasNode {
 		return n
 	}
 	for i, c := range n.Content {
-		if n.Kind == yaml.MappingNode && i%2 == 0 && c.Kind == yaml.ScalarNode && c.Value == "<<" {
+		if n.Kind == yaml.MappingNode && i%2 == 0 && (c.ShortTag() == "!!merge" || c.Kind == yaml.ScalarNode && c.Value == "<<") {
 			return c
 		}
 		if a := anchored(c); a != nil {
@@ -176,4 +177,52 @@ func listObjects(n *yaml.Node) int {
 		}
 	}
 	return c
+}
+
+// errCopy is the error of [refuseCopy]; its text goes into a refusal's detail.
+var errCopy = errors.New("JSON patch copy operations are not supported")
+
+// refuseCopy refuses, with UnsupportedKustomization, a patch file or inline patch that holds a JSON patch
+// (RFC 6902) copy operation: a mapping, anywhere in the patch, whose "op" key is "copy" however quoted or
+// escaped. Each copy can double a value, so a patch of a few hundred bytes renders gigabytes, past every
+// bound the build checks before the render (#488). It looks at every mapping rather than only at the items of
+// a top-level list, so how kustomize tells a JSON patch from a strategic merge patch does not matter; a
+// strategic merge patch that sets a field "op" to "copy" is refused too. It decodes data as [documents] does,
+// and is called after it, which has refused input that is not UTF-8, does not parse or holds an alias.
+func refuseCopy(name string, data []byte) error {
+	s := strings.ReplaceAll(string(data), "\r\n", "\n")
+	prev, line := 0, 1
+	for _, loc := range append(documentSeparator.FindAllStringIndex(s, -1), []int{len(s), len(s)}) {
+		dec := yaml.NewDecoder(strings.NewReader(s[prev:loc[0]]))
+		for {
+			var doc yaml.Node
+			err := dec.Decode(&doc)
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return refuse(ReasonInvalidYAML, fmt.Sprintf("%s line %d: %v", name, line, errNotParse))
+			}
+			if c := copyOp(&doc); c != nil {
+				return refuse(ReasonUnsupportedKustomization, fmt.Sprintf("%s line %d: %v", name, line+c.Line-1, errCopy))
+			}
+		}
+		line += strings.Count(s[prev:loc[1]], "\n")
+		prev = loc[1]
+	}
+	return nil
+}
+
+// copyOp returns the first "op" key below n whose value is "copy", or nil. Aliases are not followed.
+func copyOp(n *yaml.Node) *yaml.Node {
+	for i, c := range n.Content {
+		if n.Kind == yaml.MappingNode && i%2 == 0 && i+1 < len(n.Content) && c.Kind == yaml.ScalarNode &&
+			c.Value == "op" && n.Content[i+1].Kind == yaml.ScalarNode && n.Content[i+1].Value == "copy" {
+			return c
+		}
+		if o := copyOp(c); o != nil {
+			return o
+		}
+	}
+	return nil
 }

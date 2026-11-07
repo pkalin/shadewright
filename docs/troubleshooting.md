@@ -211,7 +211,7 @@ Before committing, and again when the target branch moves while the pull request
 | Reason | Cause |
 | --- | --- |
 | `InvalidInput` | The target, action, paths or file set are not usable |
-| `UnsupportedKustomization` | A kustomization file uses generators, Helm charts, plugins, replacements or anything outside the allow-list |
+| `UnsupportedKustomization` | A kustomization file uses generators, Helm charts, plugins, replacements or anything outside the allow-list, or a patch holds a JSON patch `copy` operation (each copy can double a value; write the value out, or use `add`) |
 | `InvalidReference` | A kustomization refers to a URL, remote base, absolute path or a path leaving the repository, or a path without a kustomization file holds a manifest or base whose name is not a plain path segment |
 | `FileMissing` | The build needs a file that is missing, a listed directory has no kustomization file or more than one, or the path is not a directory (a path without a kustomization file is rendered from the one Flux would generate) |
 | `TooLarge` | A limit was hit: file size, number of files or reads, depth, directory visits, the build budget of 4 MiB or 4,096 YAML documents (counted with repetition, the tree after the change included; a List counts 1 plus its items) or 1,024 rendered objects. The input limits are checked at the policy check already; see [A build over the budget](#a-build-over-the-budget) for what the request shows |
@@ -250,7 +250,7 @@ Then apply a new request; the refused one stays `NeedsIntervention`.
 
 ### YAML the render check refuses
 
-Every file the render check reads (kustomization files, the resource and patch files they list, and inline patches) must be UTF-8 YAML without anchors (`&name`), aliases (`*name`) or merge keys (`<<: *name`, or the `!!merge` tag). Kustomize expands these before it counts or builds anything, so a few bytes can become thousands of objects or crash the executor; the check refuses them with `InvalidYAML` instead (#488, #492). The request shows only the reason, not the file; look for these constructs in the files of the target's build.
+Every file the render check reads (kustomization files, the resource and patch files they list, and inline patches) must be UTF-8 YAML without anchors (`&name`), aliases (`*name`) or merge keys (`<<: *name`, or a key with the `!!merge` tag; `<<` as a plain value is accepted). Kustomize expands these before it counts or builds anything, so a few bytes can become thousands of objects or crash the executor; the check refuses them with `InvalidYAML` instead (#488, #492). The request shows only the reason, not the file; look for these constructs in the files of the target's build.
 
 To fix a file, write out what the anchor stood for:
 

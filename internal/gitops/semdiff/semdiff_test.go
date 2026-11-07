@@ -715,6 +715,72 @@ func TestCheckDocumentBudget(t *testing.T) {
 	}
 }
 
+// copyOps returns a JSON patch that adds a value to the orders-worker Service and copies it n times, each copy
+// doubling it: 17 copies of a few bytes rendered 10 MB, 25 would reach a gigabyte (#488).
+func copyOps(n int) string {
+	var b strings.Builder
+	b.WriteString("- op: add\n  path: /spec/payload\n  value: {a: x, b: y}\n")
+	for i := range n {
+		fmt.Fprintf(&b, "- op: copy\n  from: /spec/payload\n  path: /spec/payload/n%d\n", i)
+	}
+	return b.String()
+}
+
+const serviceTarget = "target: {kind: Service, name: orders-worker}"
+
+// A JSON patch copy operation is refused before the render in every form kustomize reads a patch in, since
+// copies amplify the output past every bound checked before it.
+func TestCheckRefusesJSONPatchCopy(t *testing.T) {
+	jsonCopy := `[{"op": "add", "path": "/spec/payload", "value": {"a": "x"}},` +
+		`{"\u006fp": "c\u006fpy", "from": "/spec/payload", "path": "/spec/payload/n"}]`
+	withPatch := func(entry string, extra map[string]string) func(map[string][]byte) {
+		return func(f map[string][]byte) {
+			f[soKust] = []byte("resources: [scaledobject.yaml]\npatches:\n  - " + entry + "\n")
+			for p, d := range extra {
+				f[p] = []byte(d)
+			}
+		}
+	}
+	cases := map[string]func(map[string][]byte){
+		"an inline YAML patch":          withPatch(fmt.Sprintf("%s\n    patch: %q", serviceTarget, copyOps(17)), nil),
+		"an inline JSON patch, escaped": withPatch(fmt.Sprintf("%s\n    patch: %q", serviceTarget, jsonCopy), nil),
+		"a quoted op": withPatch(fmt.Sprintf("%s\n    patch: %q", serviceTarget,
+			"- {op: add, path: /spec/p, value: 1}\n- {'op': \"copy\", from: /spec/p, path: /spec/q}\n"), nil),
+		"a YAML patch file": withPatch(serviceTarget+"\n    path: copy.yaml",
+			map[string]string{"apps/orders/copy.yaml": copyOps(3)}),
+		"a JSON patch file": withPatch(serviceTarget+"\n    path: copy.json",
+			map[string]string{"apps/orders/copy.json": jsonCopy}),
+		"a patch file after other documents": withPatch(serviceTarget+"\n    path: copy.yaml",
+			map[string]string{"apps/orders/copy.yaml": "---\n# none\n---\n" + copyOps(1)}),
+		"a patch in a component": func(f map[string][]byte) {
+			f[soKust] = []byte("resources: [scaledobject.yaml]\ncomponents: [../c]\n")
+			f["apps/c/kustomization.yaml"] = fmt.Appendf(nil, "apiVersion: kustomize.config.k8s.io/v1alpha1\n"+
+				"kind: Component\npatches:\n  - %s\n    patch: %q\n", serviceTarget, copyOps(1))
+		},
+	}
+	for name, edit := range cases {
+		t.Run(name, func(t *testing.T) {
+			files := ordersRepo()
+			edit(files)
+			_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
+			wantReason(t, err, semdiff.ErrUnsupportedKustomization)
+			if !strings.Contains(err.Error(), "copy operations") {
+				t.Fatalf("got %v, want copy operations named", err)
+			}
+		})
+	}
+	// Other JSON patch operations, and "copy" under a key other than op, still build.
+	t.Run("add and move", func(t *testing.T) {
+		files := ordersRepo()
+		withPatch(fmt.Sprintf("%s\n    patch: %q", serviceTarget,
+			"- {op: add, path: /spec/p, value: {mode: copy}}\n- {op: move, from: /spec/p, path: /spec/q}\n"), nil)(files)
+		res, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
+		if err != nil || res.Objects != 2 {
+			t.Fatalf("got %+v, %v, want the build accepted", res, err)
+		}
+	})
+}
+
 // Anchors, aliases and merge keys are refused in every file the build reads, before kustomize expands them:
 // an anchor that contains itself made it recurse until the Go stack overflowed, which ends the process, and
 // aliases can turn a few bytes into many objects (#488, #492).

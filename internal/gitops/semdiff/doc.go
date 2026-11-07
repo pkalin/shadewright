@@ -40,9 +40,11 @@ limitations under the License.
 //
 // Rendering is locked down. Every kustomization file is checked against an allow-list before kustomize
 // sees it: plain resources, components, patches (inline or from a local file) and the built-in name,
-// namespace, label, annotation, image and replica transformers. Generators, Helm charts, plugins, KRM
-// functions, OpenAPI schemas and every other field are refused, and so is every reference kustomize could
-// read as remote (a URL, an SCP-style Git address, a github.com path) or that leaves the repository.
+// namespace, label, annotation, image and replica transformers. A JSON patch copy operation is refused in
+// every patch, since each copy can double a value past the limits checked before the render. Generators, Helm
+// charts, plugins, KRM functions, OpenAPI schemas and every other field are refused, and so is every reference
+// kustomize could read as remote (a URL, an SCP-style Git address, a github.com path) or that leaves the
+// repository.
 // kustomize runs with built-in plugins only and Helm off, on a file system that holds only the build's files,
 // so it cannot execute anything, fetch a remote base or read a file from disk.
 //

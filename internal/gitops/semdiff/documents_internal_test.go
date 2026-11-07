@@ -65,6 +65,9 @@ func TestDocumentsBoundWhatKustomizeReads(t *testing.T) {
 		"items as a mapping": {"kind: List\nitems: {a: " + cm("a") + ", b: " + cm("b") + "}\n", 5},
 		"two kind keys":      {"kind: ConfigMap\nkind: List\nitems: [" + cm("a") + "]\n", 2},
 		"a quoted << value":  {"kind: ConfigMap\nmetadata: {name: a}\ndata: {x: \"<<\"}\n", 1},
+		// Only a key merges: a plain "<<" value has the merge tag but is plain text to kustomize.
+		"a plain << value":     {"kind: ConfigMap\nmetadata: {name: a}\ndata: {operator: <<}\n", 1},
+		"a plain << in a list": {"kind: ConfigMap\nmetadata: {name: a}\nx: [<<, a]\n", 1},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -132,7 +135,6 @@ func TestDocumentsRefuseWhatKustomizeExpands(t *testing.T) {
 			""},
 		"a << key":           {[]byte("x: {a: 1}\n<<: {kind: List}\n"), line2},
 		"a quoted << key":    {[]byte("\"<<\": {kind: List}\n"), line1},
-		"a plain << value":   {[]byte("kind: ConfigMap\ndata: {x: <<}\n"), line2},
 		"an alias bomb":      {[]byte(aliasBomb()), line2},
 		"an unused anchor":   {[]byte(cm("a") + "\n---\nkind: ConfigMap\nmetadata: &m {name: b}\n"), "line 4:"},
 		"a self alias":       {[]byte("kind: List\nitems: &s [*s]\n"), line2},

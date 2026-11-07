@@ -15,10 +15,13 @@ evaluation run, not production use.
 
 For each scenario in `test/eval/testdata/scenarios/`, the harness:
 
-1. Loads the recorded Incident and the cluster objects into a fake API server.
+1. Loads the recorded Incident and the cluster objects into a fake API server, and the scenario's recorded metrics,
+   if it has any, into a replayed metrics source.
 2. Builds the context with the real context builder (`internal/incidentcontext`, default limits, the lab's watched
    namespace `demo`, the built-in redaction rules) and runs the real analysis loop (`internal/analysis`) with the
-   real read tools. In CI the model is a fake that answers with the scenario's recorded replies, in order; on
+   real read tools. A scenario with recorded metrics gives the builder and the `query_metrics` tool the same
+   `MetricsSource` (below); one without them has no metrics source, so its metrics section says "not available: no
+   metrics source is configured", as an analyzer without `--prometheus-url`. No scenario has a log source. In CI the model is a fake that answers with the scenario's recorded replies, in order; on
    demand it is the Foundry deployment the run names.
 3. Scores the outcome and the diagnosis against the scenario's `expected.yaml`.
 
@@ -97,7 +100,25 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 | `rubric.yaml` | How each fact of `expected.yaml` is scored (above) |
 | `incident.yaml` | The Incident as the analyzer would have it; its reason and subject must match `expected.yaml` |
 | `objects.yaml` | The objects the context builder and the read tools read: Deployments, StatefulSets, ReplicaSets, Pods, Events |
+| `metrics.yaml` | Optional. What the scenario's Prometheus holds: for every approved query template, the series it answers (labels and timed samples). Only `oom` and `statefulset-oom` have one |
 | `replies.yaml` | The model replies the fake model replays, in order, and their `source` |
+
+**Recorded metrics.** `metrics.yaml` is replayed through the `providers.MetricsSource` interface, the one the
+Prometheus adapter implements (`test/eval/metrics_test.go`). The harness refuses a recording that the adapter could
+not have returned: every approved template listed once (with no series when the source has none), no unknown
+template, only the template's labels, plain-name label values, a pod label on every series of a pod template, and
+samples in time order. The replay checks what the scenarios exercise, not every check of the adapter (it skips the name format, lookback and future end checks): it refuses a query with other parameters than the
+template's, or pods for a template that takes none (and none for one that does); it returns only the pods (or the
+Deployment) asked for, in the recorded namespace; an instant query gets the latest sample at its end and a range
+query one point per step, each sample answering for 5 minutes, Prometheus's default lookback. The context builder
+renders, redacts, bounds and labels the answers as in the analyzer (design 3.3), so a model can quote a series line
+of the metrics block verbatim as evidence.
+
+**What the recordings cannot carry yet.** `keda-at-ceiling` has no `metrics.yaml`: no approved template reads HPA or
+external metrics, and its subject, a `ScaledObject`, resolves no pods, so the builder has nothing to ask. The external
+metric value against its target is evidence of the Incident's symptom in the analyzer (design 2.5.3), but the
+recorded Incident leaves it out: the analyzer's symptom normalization turns a milli quantity such as `6500m` into a
+placeholder, so a real Incident would not reliably hold it either. Both facts stay unscored, with that reason in the rubric.
 
 Today every context and reply is `source: synthetic`: written by hand from the scenario manifests and the
 observations in `expected.yaml`, so CI checks the harness, the loop and the scoring end to end. They hold no
@@ -131,11 +152,11 @@ and `digest` is the SHA-256 of its JSON without the digest, so a change to any f
 | --- | --- |
 | `models` | Per role: `deployment`, `model` (the ID and version replies must name), `apiVersion` |
 | `promptVersion` | `analysis.PromptVersion()`: the prompt templates, the generated schema and the catalog |
-| `toolDefinitions` | Hash of the tool definitions offered on escalation |
+| `toolDefinitions` | Hash of the tool definitions offered on escalation, `query_metrics` included; a scenario without `metrics.yaml` is offered them without it |
 | `outputSchema` | Hash of the generated output schema and the action catalog |
-| `contextBuilder` | `source` (hash of the Go sources of `internal/incidentcontext`, which has no version of its own), `limits` (the byte bounds), `sources` (what the context reads in the run) |
+| `contextBuilder` | `source` (hash of the Go sources of `internal/incidentcontext`, which has no version of its own), `limits` (the byte bounds), `sources` (what the context reads in the run: `pods`, `objects`, `recorded metrics`) |
 | `runLimits` | The loop limits of the run: `maxToolSteps` and `maxOutputTokens` |
-| `scenarios` | Hash of every scenario's `incident.yaml`, `objects.yaml` and `replies.yaml` (what the model is shown) |
+| `scenarios` | Hash of every scenario's `incident.yaml`, `objects.yaml`, `metrics.yaml` and `replies.yaml` (what the model is shown) |
 | `redaction` | `builtInRules` (hash of the Go sources of `internal/redact`), `operatorPatterns` (their number: 0, nothing configures them yet) |
 | `rubric` | `fleetRepository`, `fleetCommit`, and `files` (hash of every `expected.yaml` and `rubric.yaml`) |
 | `minPassRate`, `repeats` | The threshold and the number of runs of each scenario |

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -79,6 +80,16 @@ type Config struct {
 	// Logs is the log source; nil means not configured, so the log section is "not available". Its excerpts
 	// are redacted again here, whatever the source did.
 	Logs providers.LogSource
+	// Policies names the RemediationPolicy a request of each action type refers to: the analyzer's
+	// --action-policies, the same map the analysis loop puts in a request's policyRef.
+	Policies map[remediationv1alpha1.ActionType]remediationv1alpha1.Name
+	// PolicyReader gets the RemediationPolicies Policies names and the RemediationSettings, one object each by
+	// name, from the API server: the analyzer may get those policies, not list or watch them. Nil means the
+	// policy bounds section is "not available".
+	PolicyReader client.Reader
+	// RequestNamespace is the namespace the analyzer creates requests in, the operator namespace: a policy's
+	// requestNamespaces must list it. Required with PolicyReader.
+	RequestNamespace string
 	// Redactor redacts every piece of text. Required.
 	Redactor Redactor
 	// Limits are the byte bounds; the zero value means [DefaultLimits].
@@ -93,15 +104,18 @@ type Config struct {
 
 // Builder builds the context of an Incident. It is safe for concurrent use when its sources are.
 type Builder struct {
-	pods, objects client.Reader
-	namespaces    map[string]struct{}
-	metrics       providers.MetricsSource
-	logs          providers.LogSource
-	redactor      Redactor
-	limits        Limits
-	timeout       time.Duration
-	buildTimeout  time.Duration
-	now           func() time.Time
+	pods, objects    client.Reader
+	namespaces       map[string]struct{}
+	policies         map[remediationv1alpha1.ActionType]remediationv1alpha1.Name
+	policyReader     client.Reader
+	requestNamespace string
+	metrics          providers.MetricsSource
+	logs             providers.LogSource
+	redactor         Redactor
+	limits           Limits
+	timeout          time.Duration
+	buildTimeout     time.Duration
+	now              func() time.Time
 }
 
 // New returns a builder, or an error when a required field is missing or a bound is out of range.
@@ -111,6 +125,9 @@ func New(cfg Config) (*Builder, error) {
 	}
 	if cfg.Redactor == nil {
 		return nil, errors.New("context builder: a redactor is required")
+	}
+	if cfg.PolicyReader != nil && cfg.RequestNamespace == "" {
+		return nil, errors.New("context builder: a policy reader needs the request namespace")
 	}
 	if cfg.Limits == (Limits{}) {
 		cfg.Limits = DefaultLimits()
@@ -140,6 +157,7 @@ func New(cfg Config) (*Builder, error) {
 	return &Builder{
 		pods: cfg.Pods, objects: cfg.Objects, namespaces: namespaces, metrics: cfg.Metrics, logs: cfg.Logs, redactor: cfg.Redactor,
 		limits: cfg.Limits, timeout: cfg.SourceTimeout, buildTimeout: cfg.BuildTimeout, now: cfg.Now,
+		policies: maps.Clone(cfg.Policies), policyReader: cfg.PolicyReader, requestNamespace: cfg.RequestNamespace,
 	}, nil
 }
 
@@ -212,6 +230,7 @@ func (b *Builder) Build(ctx context.Context, inc *remediationv1alpha1.Incident) 
 		Section: SectionGit, Provenance: ProvenanceGit, Availability: NotAvailable,
 		Text: "not available: no Git source is configured\n",
 	})
+	c.Blocks = append(c.Blocks, b.policyBlock(ctx, inc, &t))
 	if err := abandoned(ctx); err != nil {
 		return nil, err
 	}
@@ -272,7 +291,7 @@ func (b *Builder) finish(blk *Block, l *lines, n int) {
 
 // cutOrder is the order in which the total bound cuts sections: the attacker-controlled bulk first, the
 // summary last.
-var cutOrder = []Section{SectionLogs, SectionMetrics, SectionStatus, SectionGit, SectionSummary}
+var cutOrder = []Section{SectionLogs, SectionMetrics, SectionStatus, SectionGit, SectionPolicy, SectionSummary}
 
 // fitTotal cuts the context to the total bound, latest block of a section first, and marks it truncated
 // when it had to. A log block keeps its header and the tail of its excerpt; other blocks keep their head.

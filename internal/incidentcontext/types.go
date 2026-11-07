@@ -38,7 +38,9 @@ const (
 	// DefaultMetricsBytes bounds the metrics section.
 	DefaultMetricsBytes = 8 << 10
 	// DefaultGitBytes is reserved for the Git section; unused while it is "not available" (#373).
-	DefaultGitBytes = 6 << 10
+	DefaultGitBytes = 4 << 10
+	// DefaultPolicyBytes bounds the policy bounds section (#493): a few lines per catalog action.
+	DefaultPolicyBytes = 2 << 10
 )
 
 // Range of each bound accepted by [Limits.Validate]. The upper end equals the largest maxContextBytes the
@@ -58,15 +60,16 @@ type Limits struct {
 	Logs    int
 	Metrics int
 	Git     int
+	Policy  int
 }
 
-// DefaultLimits returns the default bounds. The sections, Git included, add up to the total, so with these
+// DefaultLimits returns the default bounds. The sections, Git and policy bounds included, add up to the total, so with these
 // bounds the total cut is a backstop; it marks the context truncated when bounds that add up to more are
 // configured (#372).
 func DefaultLimits() Limits {
 	return Limits{
 		Total: DefaultTotalBytes, Summary: DefaultSummaryBytes, Status: DefaultStatusBytes,
-		Logs: DefaultLogBytes, Metrics: DefaultMetricsBytes, Git: DefaultGitBytes,
+		Logs: DefaultLogBytes, Metrics: DefaultMetricsBytes, Git: DefaultGitBytes, Policy: DefaultPolicyBytes,
 	}
 }
 
@@ -79,7 +82,7 @@ func (l Limits) Validate() error {
 	for _, s := range []struct {
 		name string
 		v    int
-	}{{"summary", l.Summary}, {"status", l.Status}, {"logs", l.Logs}, {"metrics", l.Metrics}, {"git", l.Git}} {
+	}{{"summary", l.Summary}, {"status", l.Status}, {"logs", l.Logs}, {"metrics", l.Metrics}, {"git", l.Git}, {"policy", l.Policy}} {
 		if s.v < MinSectionBytes || s.v > MaxLimitBytes {
 			return fmt.Errorf("%s bound %d is outside %d to %d bytes", s.name, s.v, MinSectionBytes, MaxLimitBytes)
 		}
@@ -97,6 +100,7 @@ const (
 	SectionLogs    Section = "log excerpt"
 	SectionMetrics Section = "metrics"
 	SectionGit     Section = "git"
+	SectionPolicy  Section = "policy bounds"
 )
 
 // Provenance says where the text of a block came from, for the provenance tag of its delimited block
@@ -115,6 +119,9 @@ const (
 	ProvenanceMetric Provenance = "metric"
 	// ProvenanceGit is a Git file or change.
 	ProvenanceGit Provenance = "git file"
+	// ProvenanceConfiguration is operator configuration: the RemediationPolicy that would decide a proposal,
+	// rendered from its typed fields only (#493). It is not evidence about the incident and is never quotable.
+	ProvenanceConfiguration Provenance = "operator configuration"
 )
 
 // Availability says whether a block holds data.
@@ -213,7 +220,7 @@ func (b *Block) addLabel(l Label) {
 
 // Context is the bounded, redacted context of one Incident.
 type Context struct {
-	// Blocks are in section order: summary, status, logs, metrics, Git.
+	// Blocks are in section order: summary, status, logs, metrics, Git, policy bounds.
 	Blocks []Block
 	// Truncated means the builder cut the context to [Limits.Total]: an escalation signal. A section cut to its
 	// own bound does not set it.

@@ -2,13 +2,15 @@
 
 This section covers who the two workloads are in Azure and how they prove it: the analyzer (9.1), the executor and its GitHub App key (9.2), the workload identity wiring (9.3), how Key Vault signing fails and retries (9.4) and the Go side (9.5). Edge cases and numbers are in the table "Details" at the end (9.6).
 
-[![Workload identity chain for the analyzer and the executor: pod and ServiceAccount, projected token, federated credential in Entra ID, managed identity, then Foundry and the analysis records container, or a sign-only Key Vault key.](../assets/diagrams/identity.svg)](../assets/diagrams/identity.svg "Open full size")
+[![Workload identity chain for the analyzer and the executor: pod and ServiceAccount, projected token, federated credential in Entra ID, managed identity, then Foundry and the analysis records container, or a sign-only Key Vault key. In the cluster the analyzer is read-only, and of the RemediationPolicies it may only get those its action policies name.](../assets/diagrams/identity.svg)](../assets/diagrams/identity.svg "Open full size")
 
 The rule for everything below: no PATs, no client secrets, no long-lived API keys. Tokens for Foundry, Key Vault and GitHub are never interchangeable.
 
 ## 9.1. Analyzer
 
 **What it does.** The analyzer has its own managed identity. It holds only the inference role on the model deployment, and permission to create blobs in the analysis records container (ADR-0015). It asks Entra ID for a token of the Cognitive Services audience for the model and, only with a record store configured, one of the Storage audience for the records (`internal/providers/store/azureblob`, azidentity's workload identity credential).
+
+In the cluster its ServiceAccount is read-only ([2.2.2](2-architecture.md#222-analyzer-permissions), the full list in [Configuration](../reference/configuration.md)). Of the RemediationPolicies it may only `get` the ones `--action-policies` names, by `resourceNames` (no `list` or `watch`, no rule without a name), so the context can show the model the bounds of the policy that will decide its proposal (3.3, [#493](https://github.com/pkalin/shadewright/issues/493)). Reading a policy decides nothing: the executor reads it again and decides (invariant 1).
 
 **Why.** The analyzer talks to a model and writes records.
 

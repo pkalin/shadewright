@@ -163,8 +163,8 @@ type manifest struct {
 	Redaction      manifestRedaction      `json:"redaction"`
 	// RunLimits are the loop limits of the run (the sample settings' maxToolSteps and maxOutputTokens).
 	RunLimits manifestRunLimits `json:"runLimits"`
-	// Scenarios is the hash of every scenario's incident.yaml, objects.yaml, metrics.yaml and replies.yaml, and
-	// of every file of its variants: what the model is shown (and, in fake mode, answers).
+	// Scenarios is the hash of every scenario's incident.yaml, objects.yaml, metrics.yaml, replies.yaml and
+	// policy.yaml, and of every file of its variants: what the model is shown (and, in fake mode, answers).
 	Scenarios string         `json:"scenarios"`
 	Rubric    manifestRubric `json:"rubric"`
 	// MinPassRate is the pass threshold of the run, 0 to 1.
@@ -201,6 +201,7 @@ type manifestLimits struct {
 	Logs    int `json:"logs"`
 	Metrics int `json:"metrics"`
 	Git     int `json:"git"`
+	Policy  int `json:"policy"`
 }
 
 type manifestRedaction struct {
@@ -233,9 +234,10 @@ func buildManifestIn(dir string, src source, models modelSource, defs []provider
 		MinPassRate:   minPassRate, Repeats: repeats,
 		ContextBuilder: manifestContextBuilder{
 			Limits: manifestLimits{Total: l.Total, Summary: l.Summary, Status: l.Status, Logs: l.Logs,
-				Metrics: l.Metrics, Git: l.Git},
+				Metrics: l.Metrics, Git: l.Git, Policy: l.Policy},
 			// Recorded metrics: the metrics.yaml of the scenarios that have one, replayed (metrics_test.go).
-			Sources: []string{"pods", "objects", "recorded metrics"},
+			// Policies: each scenario's policy.yaml, for the policy bounds section (#493).
+			Sources: []string{"pods", "objects", "recorded metrics", "policies"},
 		},
 		RunLimits: manifestRunLimits{MaxToolSteps: evalMaxToolSteps, MaxOutputTokens: evalMaxOutputTokens},
 		Rubric:    manifestRubric{FleetRepository: src.FleetRepository, FleetCommit: src.FleetCommit},
@@ -271,7 +273,7 @@ func buildManifestIn(dir string, src source, models modelSource, defs []provider
 		return m, err
 	}
 	if m.Scenarios, err = hashFiles(filepath.Join(dir, "*", "incident.yaml"), filepath.Join(dir, "*", "objects.yaml"),
-		filepath.Join(dir, "*", metricsFile), filepath.Join(dir, "*", "replies.yaml"),
+		filepath.Join(dir, "*", metricsFile), filepath.Join(dir, "*", "replies.yaml"), filepath.Join(dir, "*", policyFile),
 		filepath.Join(dir, "*", variantsDir, "*", "*.yaml")); err != nil {
 		return m, err
 	}

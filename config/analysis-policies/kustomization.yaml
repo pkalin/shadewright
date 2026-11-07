@@ -1,0 +1,18 @@
+# The analyzer's read of the RemediationPolicies its requests name (#493): the ClusterRole analyzer-policy-reader,
+# restricted to those names, and its ClusterRoleBinding. It goes with an analyzer that runs the analysis with
+# --action-policies; set resourceNames below to the policy names of that flag, one each. The chart renders it
+# only with analyzer.analysis.triageModel and at least one analyzer.analysis.actionPolicies name, with exactly
+# those names. Names get the prefix of config/default.
+namePrefix: shadewright-
+resources:
+- ../rbac/analyzer/policies
+- cluster_role_binding.yaml
+patches:
+- target:
+    kind: ClusterRole
+    name: analyzer-policy-reader
+  patch: |-
+    - op: add
+      path: /rules/0/resourceNames
+      value:
+      - demo-memory

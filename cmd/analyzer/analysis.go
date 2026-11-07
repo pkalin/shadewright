@@ -31,6 +31,7 @@ import (
 	"github.com/pkalin/shadewright/internal/analysis"
 	"github.com/pkalin/shadewright/internal/analyzer"
 	"github.com/pkalin/shadewright/internal/analyzer/models"
+	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/incidents"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/model/foundry"
@@ -96,6 +97,25 @@ type analysisDeps struct {
 	tracerProvider trace.TracerProvider
 	// newStore builds the analysis record store; nil means the Blob Storage adapter with the workload identity.
 	newStore func(cfg azureblob.Config) (providers.AnalysisStore, error)
+}
+
+// contextPolicies configures the context builder's policy bounds section (#493): the policies of
+// --action-policies, read by name through reader (the API reader: the analyzer may get those policies, not
+// list or watch them), for requests in the operator namespace. With no policy configured, or no model
+// (--triage-model empty: nothing is proposed), it returns no reader and the section is "not available".
+func contextPolicies(f analysisFlags, reader client.Reader, namespace string, cfg *incidentcontext.Config) error {
+	if f.triageModel == "" {
+		return nil
+	}
+	policies, err := models.ParseActionPolicies(f.actionPolicies)
+	if err != nil {
+		return fmt.Errorf("invalid --action-policies: %w", err)
+	}
+	if len(policies) == 0 {
+		return nil
+	}
+	cfg.Policies, cfg.PolicyReader, cfg.RequestNamespace = policies, reader, namespace
+	return nil
 }
 
 // buildAnalysis returns the analysis controller, or nil when --triage-model is empty: then no model is

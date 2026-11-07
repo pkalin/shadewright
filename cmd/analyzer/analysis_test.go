@@ -63,8 +63,11 @@ func testDeps(t *testing.T) analysisDeps {
 		redactor: r, log: logr.Discard()}
 }
 
+// operatorNamespace is the namespace the analyzer creates requests in.
+const operatorNamespace = "shadewright-system"
+
 func validFlags() analysisFlags {
-	return analysisFlags{namespace: "shadewright-system", watched: []string{"shop"},
+	return analysisFlags{namespace: operatorNamespace, watched: []string{"shop"},
 		triageModel:      "gpt-4.1-mini-2025-04-14",
 		endpointSuffixes: ".lab.services.ai.azure.com", actionPolicies: "SetContainerMemoryLimit=memory",
 		claimTimeout: incidents.DefaultAnalysisTimeout}
@@ -200,5 +203,36 @@ func TestAnalysisStoreFlags(t *testing.T) {
 	c, err = buildAnalysis(f, d, ok)
 	if err != nil || c.Store == nil || got != (azureblob.Config{Account: storeAccount, Container: storeContainer}) {
 		t.Fatalf("with the store flags: config %+v, error %v; want a store", got, err)
+	}
+}
+
+// The context builder reads the policies the analysis puts in its requests, by name through the API reader,
+// for the operator namespace (#493); with no policy or no model it reads none.
+func TestContextPoliciesFollowTheFlags(t *testing.T) {
+	r := testDeps(t).apiReader
+	var cfg incidentcontext.Config
+	if err := contextPolicies(validFlags(), r, operatorNamespace, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PolicyReader != r || cfg.RequestNamespace != operatorNamespace ||
+		cfg.Policies[remediationv1alpha1.ActionSetContainerMemoryLimit] != "memory" || len(cfg.Policies) != 1 {
+		t.Errorf("config %+v", cfg)
+	}
+	for name, mutate := range map[string]func(*analysisFlags){
+		"no policy": func(f *analysisFlags) { f.actionPolicies = "" },
+		"no model":  func(f *analysisFlags) { f.triageModel = "" },
+	} {
+		f := validFlags()
+		mutate(&f)
+		var cfg incidentcontext.Config
+		err := contextPolicies(f, r, operatorNamespace, &cfg)
+		if err != nil || cfg.PolicyReader != nil || cfg.Policies != nil {
+			t.Errorf("%s: config %+v, error %v", name, cfg, err)
+		}
+	}
+	f := validFlags()
+	f.actionPolicies = "Exec=all"
+	if err := contextPolicies(f, r, operatorNamespace, &cfg); err == nil {
+		t.Error("an invalid --action-policies was accepted")
 	}
 }

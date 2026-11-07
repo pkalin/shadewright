@@ -27,6 +27,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,16 +36,42 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analysis"
 	"github.com/pkalin/shadewright/internal/incidentcontext"
+	"github.com/pkalin/shadewright/internal/policy"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/redact"
 	"github.com/pkalin/shadewright/internal/tools"
 )
 
 // evalPolicies names a RemediationPolicy for every action type, so that an outcome is never decided by a
-// missing policy: the harness scores the model, not the lab's policy set.
+// missing policy name. Each scenario's policy.yaml holds the policies (#493): the lab's demo-memory, and a
+// demo-keda the lab does not have yet.
 var evalPolicies = map[remediationv1alpha1.ActionType]remediationv1alpha1.Name{
-	remediationv1alpha1.ActionSetContainerMemoryLimit: "eval-memory-limit",
-	remediationv1alpha1.ActionAdjustKedaMaxReplicas:   "eval-keda-max-replicas",
+	remediationv1alpha1.ActionSetContainerMemoryLimit: "demo-memory",
+	remediationv1alpha1.ActionAdjustKedaMaxReplicas:   "demo-keda",
+}
+
+// evalRequestNamespace is the operator namespace, where the analyzer creates requests: the policies'
+// requestNamespaces must list it.
+const evalRequestNamespace = "shadewright-system"
+
+// evalSettings is the cluster's RemediationSettings as far as the policy check reads it: the KEDA module
+// enabled, so that AdjustKedaMaxReplicas is not refused for it.
+func evalSettings() *remediationv1alpha1.RemediationSettings {
+	return &remediationv1alpha1.RemediationSettings{
+		ObjectMeta: metav1.ObjectMeta{Name: remediationv1alpha1.SettingsName},
+		Spec: remediationv1alpha1.RemediationSettingsSpec{Modules: &remediationv1alpha1.Modules{
+			Integrations: []remediationv1alpha1.ModuleName{"keda"}}},
+	}
+}
+
+// clusterObjects are what the scenario's cluster holds for the analyzer: its recorded objects, its policies
+// and the settings.
+func (s *scenario) clusterObjects() []client.Object {
+	objs := slices.Clone(s.objects)
+	for _, p := range s.policies {
+		objs = append(objs, p.DeepCopy())
+	}
+	return append(objs, evalSettings())
 }
 
 // Limits of an evaluation run: the sample RemediationSettings' maxToolSteps and maxOutputTokens.
@@ -115,7 +142,7 @@ func (s *scenario) metricsSource() providers.MetricsSource {
 // once.
 func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, models modelSource) (scenarioResult, error) {
 	res := scenarioResult{Name: s.name, Recording: s.recording.Source}
-	c := newClient(scheme, s.objects)
+	c := newClient(scheme, s.clusterObjects())
 	redactor, err := redact.New()
 	if err != nil {
 		return res, err
@@ -123,7 +150,8 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	now := func() time.Time { return fixtureNow }
 	metrics := s.metricsSource()
 	builder, err := incidentcontext.New(incidentcontext.Config{Pods: c, Objects: c, Namespaces: watchedNamespaces,
-		Metrics: metrics, Redactor: redactor, Now: now})
+		Metrics: metrics, Redactor: redactor, Now: now,
+		Policies: evalPolicies, PolicyReader: c, RequestNamespace: evalRequestNamespace})
 	if err != nil {
 		return res, err
 	}
@@ -244,6 +272,9 @@ func scoreProposal(scn *scenario, out analysis.Outcome) (bool, string) {
 			return false, detail
 		}
 	}
+	if detail := checkPolicy(scn, out.Plan); detail != "" {
+		return false, detail
+	}
 	b := e.Outcome.Bounds
 	if b == nil {
 		return true, ""
@@ -271,6 +302,39 @@ func scoreProposal(scn *scenario, out analysis.Outcome) (bool, string) {
 		return false, "the plan carries no parameters to check against the bounds"
 	}
 	return true, ""
+}
+
+// checkPolicy returns why the scenario's policy would refuse the plan, or "": the checks of policy.Preflight,
+// the executor's own, on a request of the plan for the Incident's subject (#493). The harness only scores with
+// it: nothing it computes authorizes anything. The checks of the resolved source and the target's state need
+// Git and the live object, which the scenarios do not record.
+func checkPolicy(scn *scenario, p *analysis.Plan) string {
+	i := slices.IndexFunc(scn.policies, func(q *remediationv1alpha1.RemediationPolicy) bool {
+		return q.Name == string(p.PolicyRef)
+	})
+	if i < 0 {
+		return fmt.Sprintf("the scenario has no policy %q", p.PolicyRef)
+	}
+	subject := scn.incident.Spec.Subject
+	approval := true
+	rr := &remediationv1alpha1.RemediationRequest{
+		ObjectMeta: metav1.ObjectMeta{Namespace: evalRequestNamespace, Name: "eval"},
+		Spec: remediationv1alpha1.RemediationRequestSpec{TargetRef: subject, PolicyRef: p.PolicyRef,
+			Mode: remediationv1alpha1.RemediationModeGitOps, ApprovalRequired: &approval, Action: p.Action},
+	}
+	target := &policy.Target{APIVersion: subject.APIVersion, Kind: subject.Kind, Namespace: subject.Namespace,
+		Name: subject.Name, UID: subject.UID}
+	for _, o := range scn.objects {
+		if remediationv1alpha1.UID(o.GetUID()) == subject.UID {
+			target.Labels = o.GetLabels()
+		}
+	}
+	d, verdict := policy.Preflight(policy.DecisionInput{Request: rr, Policy: scn.policies[i], Settings: evalSettings(),
+		Target: target})
+	if verdict != policy.PreflightContinue {
+		return fmt.Sprintf("policy %s refuses the plan: %s (%s)", p.PolicyRef, d.Reason, d.Message)
+	}
+	return ""
 }
 
 // checkMemoryTarget returns why a SetContainerMemoryLimit does not fit the scenario, or "".

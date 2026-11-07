@@ -576,6 +576,10 @@ var allToggles = []string{
 	"analyzer.modules.flux.enabled=true",
 	kyvernoOn,
 	"analyzer.modules.kyverno.clusterWide.enabled=true",
+	// The analysis with a policy, for the policy reader role (#493), which config/analysis-policies installs.
+	"analyzer.analysis.triageModel=gpt-4.1-mini-2025-04-14",
+	labSuffix,
+	"analyzer.analysis.actionPolicies.SetContainerMemoryLimit=demo-memory",
 }
 
 func TestRBACEqualsKustomizeWithEveryToggleOn(t *testing.T) {
@@ -591,6 +595,7 @@ func TestRBACEqualsKustomizeWithEveryToggleOn(t *testing.T) {
 			addKustomize(t, &r, m.dir)
 		}
 	}
+	addKustomize(t, &r, "config/analysis-policies")
 	names := []string{"shadewright-analyzer-watch"}
 	for _, m := range moduleRoles {
 		if !m.clusterWide {
@@ -1050,5 +1055,38 @@ func TestModuleGrantsFollowTheirValues(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// policyReader is the ClusterRole of the analyzer's read of the policies its requests name (#493).
+const policyReader = "ClusterRole//shadewright-analyzer-policy-reader"
+
+// TestPolicyReaderFollowsActionPolicies checks that the analyzer may get exactly the policies of
+// --action-policies, and that with no name, or no analysis, there is no rule at all.
+func TestPolicyReaderFollowsActionPolicies(t *testing.T) {
+	for name, set := range map[string][]string{
+		"defaults":         nil,
+		"policy, no model": {"analyzer.analysis.actionPolicies.SetContainerMemoryLimit=demo-memory"},
+		"model, no policy": {analyzerClientID, labSuffix, triageMini},
+	} {
+		r := render(t, false, set...)
+		for k := range r.chart {
+			if strings.Contains(k, "analyzer-policy-reader") {
+				t.Errorf("%s: %s rendered", name, k)
+			}
+		}
+	}
+	r := render(t, false, analyzerClientID, labSuffix, triageMini,
+		"analyzer.analysis.actionPolicies.SetContainerMemoryLimit=memory-limits",
+		"analyzer.analysis.actionPolicies.AdjustKedaMaxReplicas=keda")
+	role := r.chart[policyReader]
+	if role == nil || r.chart["ClusterRoleBinding//shadewright-analyzer-policy-reader"] == nil {
+		t.Fatal("the policy reader role or its binding is missing")
+	}
+	got := describe(t, role)
+	want := []string{"remediation.shadewright.io|remediationpolicies|get|keda",
+		"remediation.shadewright.io|remediationpolicies|get|memory-limits"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("rules %v, want %v", got, want)
 	}
 }

@@ -84,7 +84,7 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 - That is a ClusterRole that is only a catalogue of verbs, bound by one RoleBinding per watched namespace and never cluster-wide.
 - Its cache is restricted to the same list for those kinds, and to the operator namespace for Incidents and requests.
 - The cache drops managed fields before it stores an object.
-- Cluster-wide it may read the cluster-scoped `RemediationSettings`, and `list` Nodes for platform detection, with no `get` or `watch`, so it starts no informer on them. The discovery API needs no grant. With the chart value `analyzer.modules.kyverno.clusterWide.enabled` (off by default) it may also read Kyverno's cluster-scoped kinds (below).
+- Cluster-wide it may read the cluster-scoped `RemediationSettings`, and `list` Nodes for platform detection, with no `get` or `watch`, so it starts no informer on them. The discovery API needs no grant. With the chart value `analyzer.modules.kyverno.clusterWide.enabled` (off by default) it may also read Kyverno's cluster-scoped kinds (below). With the analysis on and `analyzer.analysis.actionPolicies` set, it may `get` the RemediationPolicies named there, and only those (`resourceNames`; no `list` or `watch`), so the context builder can show the model the bounds of the policy that will decide its proposal (3.3, [#493](https://github.com/pkalin/shadewright/issues/493)). Without a name there is no rule.
 
 **What it may write.** All of this is in the operator namespace (a Role), except the settings status.
 

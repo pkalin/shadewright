@@ -1,6 +1,8 @@
 # Synthetic: a triage reply written by hand to the output schema for the variant's context, as the lab's
 # model answered on 2026-11-07 (#494): it took the old pod's 64Mi as the previous value. The loop takes the
-# previous value from the pod template (48Mi) instead, so the plan is 48Mi to 96Mi.
+# previous value from the pod template (48Mi) instead. The lab's model asked for 96Mi, which demo-memory
+# refuses from 48Mi (at most +50%, #493); the context now shows the policy's 64Mi to 72Mi from 48Mi, so this
+# reply asks for 72Mi and the plan is 48Mi to 72Mi.
 source: synthetic
 replies:
   - model: eval-fake-1
@@ -15,6 +17,6 @@ replies:
        "missingData": [],
        "uncertainty": "The old pod ran under a higher limit without kills, so the needed limit is estimated from the new pod's peak, not measured.",
        "proposal": {"action": {"type": "SetContainerMemoryLimit", "adjustKedaMaxReplicas": null,
-                               "setContainerMemoryLimit": {"container": "web", "previous": "64Mi", "desired": "96Mi"}},
+                               "setContainerMemoryLimit": {"container": "web", "previous": "64Mi", "desired": "72Mi"}},
                     "expectedEffect": "The container stays under its limit and stops being OOMKilled.",
                     "verificationChecks": []}}

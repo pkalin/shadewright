@@ -441,6 +441,13 @@ Since shadewright-fleet [#37](https://github.com/pkalin/shadewright-fleet/pull/3
    names both. `EndpointNotAllowed`, `ModelForbidden` or `ModelNotFound` point at the endpoint, the role assignment or
    the deployment name.
 
+   The model is shown the bounds of `demo-memory` for the subject (the policy bounds block, design 3.3, #493): from
+   the template's 48Mi, `desired from 64Mi to 72Mi`. A proposal the executor then Denies on its bounds
+   (`IncreaseTooLarge`, `AboveMaximum`) despite that is a finding for #78. The analyzer's startup line `Context sources`
+   says `policyBounds=true` when it reads the policies; with the chart from this release on, it holds `get` on
+   `demo-memory` only (`kubectl auth can-i get remediationpolicies/demo-memory --as
+   system:serviceaccount:shadewright-system:shadewright-analyzer` says `yes`).
+
 3. Record the outcome for the field log: the reason, the call and token counts, the models, the prompt version, the
    summary and, for a `MissingData` hand-off, the `missingData` list from the `Analyzed Incident` line, and the
    request's spec if one was made. A wrong or unsupported proposal is a

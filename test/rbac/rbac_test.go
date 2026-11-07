@@ -1151,3 +1151,52 @@ func eventuallyCan(t *testing.T, id, verb, apiGroup, resource, namespace string)
 	}
 	return false
 }
+
+// TestPolicyReaderGetsOnlyTheNamedPolicies checks the analyzer's read of the policies its requests name (#493):
+// unbound (no --action-policies) no read of any policy; bound with the names the chart and
+// config/analysis-policies set, get on exactly those, and no list, watch, write or other policy.
+func TestPolicyReaderGetsOnlyTheNamedPolicies(t *testing.T) {
+	ctx := context.Background()
+	const group, resource, named = "remediation.shadewright.io", "remediationpolicies", "demo-memory"
+	for _, verb := range []string{"get", "list", "watch"} {
+		if can(t, analyzer, verb, group, resource, "", "") {
+			t.Errorf("default analyzer: %s %s allowed, want refused", verb, resource)
+		}
+	}
+	sa := "policy-reader"
+	account := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: sa, Namespace: operatorNS}}
+	if err := admin.Create(ctx, account); err != nil {
+		t.Fatalf("create ServiceAccount: %v", err)
+	}
+	r, err := readClusterRole(filepath.Join("..", "..", "config", "rbac", analyzer, "policies", "role.yaml"))
+	if err != nil {
+		t.Fatalf("read role: %v", err)
+	}
+	if len(r.Rules) != 1 || len(r.Rules[0].ResourceNames) != 0 {
+		t.Fatalf("generated rules %+v: want one rule for the patch to restrict", r.Rules)
+	}
+	// The patch of config/analysis-policies (the chart renders the same rule, test/chart).
+	r.Rules[0].ResourceNames = []string{named}
+	r.Name = "test-" + r.Name
+	if err := admin.Create(ctx, r); err != nil {
+		t.Fatalf("create role: %v", err)
+	}
+	if err := bindIn(ctx, r.Name, sa, ""); err != nil {
+		t.Fatalf("bind role: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for !canNamed(t, sa, "get", group, resource, "", "", named) {
+		if time.Now().After(deadline) {
+			t.Fatalf("bound: get %s %s refused, want allowed", resource, named)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if canNamed(t, sa, "get", group, resource, "", "", "other-policy") {
+		t.Error("bound: get of a policy not named allowed")
+	}
+	for _, verb := range []string{"list", "watch", "create", "update", "patch", "delete"} {
+		if can(t, sa, verb, group, resource, "", "") || canNamed(t, sa, verb, group, resource, "", "", named) {
+			t.Errorf("bound: %s %s allowed, want refused", verb, resource)
+		}
+	}
+}

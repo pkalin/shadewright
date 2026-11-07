@@ -172,6 +172,9 @@ func scheme(t testing.TB) *runtime.Scheme {
 	if err := appsv1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
+	if err := remediationv1alpha1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
 	return s
 }
 

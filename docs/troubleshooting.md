@@ -153,7 +153,7 @@ On `PolicyAllowed`; all `Denied` unless marked. These are the checks of the poli
 | `PolicyInvalid` | The policy is unusable: a malformed selector, an action listed twice, or bounds missing or outside the schema | Fix the policy |
 | `BelowMinimum` | `desired` is below `min` | Choose a value in bounds |
 | `AboveMaximum` | `desired` is above `max` | As above |
-| `IncreaseTooLarge` | The increase is more than `maxIncreasePercent` of `previous` | Smaller step, or raise the limit deliberately |
+| `IncreaseTooLarge` | The increase is more than `maxIncreasePercent` of `previous` | Smaller step, or raise the limit deliberately. On a request the analyzer proposed, its context showed these bounds (design 3.3, #493): check the analyzer's `Context sources` line says `policyBounds=true`, and that it may `get` the policy (`analyzer-policy-reader`) |
 | `DecreaseNotAllowed` | A decrease, and `maxDecreasePercent` is 0 or unset | Decreases are refused by default |
 | `DecreaseTooLarge` | The decrease is more than `maxDecreasePercent` | Smaller step |
 | `ModuleNotEnabled` | The action belongs to an integration module (`AdjustKedaMaxReplicas`: `keda`) that `spec.modules.integrations` does not list | Enable the module in the settings. Also a freshness reason |

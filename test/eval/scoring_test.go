@@ -342,7 +342,7 @@ func TestManifestDigestCoversRunLimitsAndScenarioFiles(t *testing.T) {
 			t.Errorf("%s: digest unchanged (%v)", name, err)
 		}
 	}
-	for _, file := range []string{"incident.yaml", "objects.yaml", metricsFile, "replies.yaml",
+	for _, file := range []string{"incident.yaml", "objects.yaml", metricsFile, "replies.yaml", policyFile,
 		filepath.Join(variantsDir, "rollout", "objects.yaml"), filepath.Join(variantsDir, "rollout", "variant.yaml")} {
 		dir := t.TempDir()
 		if err := os.CopyFS(dir, os.DirFS(scenariosDir)); err != nil {
@@ -486,7 +486,8 @@ func TestMemoryPlanMustFitTheWorkload(t *testing.T) {
 			_, s := mustScenario(t, scnOOM)
 			plan := &analysis.Plan{Action: remediationv1alpha1.Action{Type: remediationv1alpha1.ActionSetContainerMemoryLimit,
 				SetContainerMemoryLimit: &remediationv1alpha1.SetContainerMemoryLimit{Container: "web",
-					Previous: resource.MustParse("48Mi"), Desired: resource.MustParse("64Mi")}}}
+					Previous: resource.MustParse("48Mi"), Desired: resource.MustParse("64Mi")}},
+				PolicyRef: evalPolicies[remediationv1alpha1.ActionSetContainerMemoryLimit]}
 			out := analysis.Outcome{Reason: analysis.ReasonProposed, Plan: plan}
 			if ok, d := scoreProposal(s, out); !ok {
 				t.Fatalf("the matching plan failed: %s", d)
@@ -585,5 +586,43 @@ func TestMemoryPlanForAContainerWithoutALimitFails(t *testing.T) {
 	ok, d := scoreProposal(s, analysis.Outcome{Reason: analysis.ReasonProposed, Plan: plan})
 	if ok || !strings.Contains(d, "sets no memory limit") {
 		t.Errorf("pass %t, detail %q: want a failure for a container without a limit", ok, d)
+	}
+}
+
+// A plan the scenario's policy refuses fails, even inside expected.yaml's bounds: the lab case of #493, the oom
+// scenario with demo-memory (64Mi to 128Mi, at most +50%), where 48Mi to 96Mi was Denied with IncreaseTooLarge.
+// 48Mi to 72Mi, the most the policy allows, passes.
+func TestPlanOutsideThePolicyFails(t *testing.T) {
+	scheme, s := mustScenario(t, scnOOM)
+	reply := &s.recording.Replies[len(s.recording.Replies)-1]
+	original := reply.Content
+	for desired, want := range map[string]string{
+		"96Mi": "policy demo-memory refuses the plan: IncreaseTooLarge",
+		"72Mi": "",
+	} {
+		reply.Content = strings.Replace(original, `"desired": "64Mi"`, `"desired": "`+desired+`"`, 1)
+		if reply.Content == original {
+			t.Fatal("the recorded reply does not propose 64Mi: the test proves nothing")
+		}
+		res := run(t, scheme, s)
+		if res.Reason != string(analysis.ReasonProposed) {
+			t.Fatalf("%s: the loop ended %s", desired, res.Reason)
+		}
+		if want == "" {
+			if !res.Pass {
+				t.Errorf("%s: failed: %+v", desired, res.Outcome)
+			}
+			continue
+		}
+		if res.Pass || res.Outcome.Pass || !strings.Contains(res.Outcome.Detail, want) {
+			t.Errorf("%s: pass %t, outcome %+v: want a failure saying %q", desired, res.Pass, res.Outcome, want)
+		}
+	}
+	// A scenario's policy that does not cover the subject refuses any plan.
+	s.policies[0] = s.policies[0].DeepCopy()
+	s.policies[0].Spec.Targets.Namespaces = []remediationv1alpha1.Name{"elsewhere"}
+	reply.Content = original
+	if res := run(t, scheme, s); res.Pass || !strings.Contains(res.Outcome.Detail, "TargetNamespaceNotAllowed") {
+		t.Errorf("uncovered subject: pass %t, outcome %+v", res.Pass, res.Outcome)
 	}
 }

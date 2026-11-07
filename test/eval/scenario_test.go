@@ -169,6 +169,36 @@ type scenario struct {
 	// metrics is what the scenario's Prometheus holds (metrics.yaml); nil when the scenario has no metrics
 	// source.
 	metrics *metricsRecording
+	// policies are the RemediationPolicies of the scenario's cluster (policy.yaml, #493): the context builder
+	// shows their bounds, and a proposal they refuse fails the scenario.
+	policies []*remediationv1alpha1.RemediationPolicy
+}
+
+// policyFile holds a scenario's RemediationPolicies. Every scenario has one; a variant without its own takes
+// the scenario's.
+const policyFile = "policy.yaml"
+
+// loadPolicies reads the RemediationPolicies of dir's policy.yaml: at least one, each named once.
+func loadPolicies(decoder runtime.Decoder, dir string) ([]*remediationv1alpha1.RemediationPolicy, error) {
+	objs, err := readObjects(decoder, filepath.Join(dir, policyFile))
+	if err != nil {
+		return nil, err
+	}
+	var out []*remediationv1alpha1.RemediationPolicy
+	for i, o := range objs {
+		p, ok := o.(*remediationv1alpha1.RemediationPolicy)
+		if !ok {
+			return nil, fmt.Errorf("%s document %d is a %T, not a RemediationPolicy", policyFile, i, o)
+		}
+		if slices.ContainsFunc(out, func(q *remediationv1alpha1.RemediationPolicy) bool { return q.Name == p.Name }) {
+			return nil, fmt.Errorf("%s names policy %q twice", policyFile, p.Name)
+		}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s holds no RemediationPolicy", policyFile)
+	}
+	return out, nil
 }
 
 func newScheme() (*runtime.Scheme, error) {
@@ -273,6 +303,9 @@ func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error
 	if s.objects, err = readObjects(decoder, filepath.Join(dir, "objects.yaml")); err != nil {
 		return nil, err
 	}
+	if s.policies, err = loadPolicies(decoder, dir); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -323,7 +356,7 @@ func loadVariant(scheme *runtime.Scheme, dir string, base *scenario) (*scenario,
 		return nil, errors.New("variant.yaml: about is required")
 	}
 	s := &scenario{expected: base.expected, rubric: base.rubric, incident: base.incident.DeepCopy(),
-		metrics: base.metrics}
+		metrics: base.metrics, policies: base.policies}
 	if err := readStrict(filepath.Join(dir, "replies.yaml"), &s.recording); err != nil {
 		return nil, err
 	}
@@ -331,8 +364,15 @@ func loadVariant(scheme *runtime.Scheme, dir string, base *scenario) (*scenario,
 		return nil, err
 	}
 	var err error
-	if s.objects, err = readObjects(serializer.NewCodecFactory(scheme).UniversalDeserializer(),
-		filepath.Join(dir, "objects.yaml")); err != nil {
+	decoder := serializer.NewCodecFactory(scheme).UniversalDeserializer()
+	if s.objects, err = readObjects(decoder, filepath.Join(dir, "objects.yaml")); err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(filepath.Join(dir, policyFile)); err == nil {
+		if s.policies, err = loadPolicies(decoder, dir); err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 	return s, nil

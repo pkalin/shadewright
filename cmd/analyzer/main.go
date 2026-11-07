@@ -254,16 +254,21 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	contextBuilder, err := incidentcontext.New(incidentcontext.Config{
+	contextConfig := incidentcontext.Config{
 		Pods: mgr.GetCache(), Objects: mgr.GetAPIReader(), Namespaces: watched,
 		Metrics: sources.Metrics, Logs: sources.Logs, Redactor: redactor,
-	})
+	}
+	if err := contextPolicies(af, mgr.GetAPIReader(), namespace, &contextConfig); err != nil {
+		setupLog.Error(err, "Invalid analysis configuration")
+		os.Exit(1)
+	}
+	contextBuilder, err := incidentcontext.New(contextConfig)
 	if err != nil {
 		setupLog.Error(err, "Failed to create the context builder")
 		os.Exit(1)
 	}
 	setupLog.Info("Context sources", "podLogs", sources.Logs != nil, "metrics", sources.Metrics != nil,
-		"prometheusCluster", prometheusCluster != "")
+		"prometheusCluster", prometheusCluster != "", "policyBounds", contextConfig.PolicyReader != nil)
 
 	// The analysis traces (#90): off unless the OTEL_* environment turns them on.
 	tracerProvider, err := newTracerProvider(ctrl.Log.WithName("tracing"))

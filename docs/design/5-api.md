@@ -207,6 +207,8 @@ The first five checks read only the request, the policy, the settings and the li
 
 This order is intended (#242): a refusal on the request's own fields wins over anything the source mapping would have said, a stop for a person (`NeedsIntervention`) or a Git error worth a retry included, since the mapping is never asked. Of the five, only the target check reads what can change on the live object (its labels). A refusal by it rests on one read, so the executor reads the target again first and starts the check over if its UID or resourceVersion changed, as it does after the mapping (section 6.2). The other refusals hold whatever the target is and need no second read.
 
+The analyzer's context builder runs the same parameter-free checks, with the same functions (`policy.BoundsFor`: request, module, target, the policy's entry and its bounds), and `policy.AllowedMemory` with the same arithmetic, to show the model the bounds of the policy that will decide its proposal (3.3, #493). They decide nothing: the executor runs every check here on the request.
+
 - The request's `policyRef` and namespace (`requestNamespaces`), and the `GitOps` mode.
 - The action type is in the catalog and its parameters are well formed.
 - The integration module that contributes the action, if any, is enabled in `RemediationSettings` `spec.modules.integrations` (`AdjustKedaMaxReplicas` needs `keda`).

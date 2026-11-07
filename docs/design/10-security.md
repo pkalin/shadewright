@@ -135,9 +135,9 @@ The limits count the requests of one namespace, the operator namespace where req
 
 ### Active requests
 
-A request is active while the executor can still move it on before the merge: a phase before `Merged` with a plan digest. It is also active while it is being deleted and still holds the finalizer that closes its pull request.
+A request is active while the executor can still move it on before the merge: a phase before `Merged` with a plan digest. It is also active while it is being deleted and its finalizer may still write to Git: it has not ended, holds the lock, or ended `NeedsIntervention` or `Expired`, whose finalizer closes a pull request that may still be open.
 
-A request that ended `Denied`, `Cancelled` or `Superseded`, holds no lock and is not a probe is not read, so it is not counted.
+Such a request is read while it is being deleted. One that ended `NeedsIntervention` or `Expired` without the lock is not in the other lists, so its finalizer first sets `status.breakerCounts` to `true`, before it closes anything; the breaker's list then reads it (#390). A check made before that write did not count it and may have let another request through in its slot, so the finalizer then checks the limits under the admission lock and closes the pull request only when fewer than `maxConcurrentRemediations` others count; otherwise it waits and checks again in 30 seconds, without writing to Git. Other requests that ended and are being deleted count there only while their own close runs, so two of them never wait on each other. A request that ended in another phase and holds no lock is not counted: its finalizer writes nothing to Git.
 
 ### The target lock
 
@@ -206,6 +206,27 @@ Requests that ended before `lastPhaseTransitionTime` existed are not counted, so
 
 **Reset by a person.** Deleting failed requests closes the breaker. Deleting the probe lets the next request through as a new one. Both are a person's decision: only someone allowed to delete requests can.
 
+### The breaker's watermark
+
+The breaker reads only the outcomes it may still need (#390). Each request carries `status.breakerCounts`, a selectable field:
+
+- **Set** in the status write that ends the request: `true` for a success, a failure, or a probe that ended any other way (`Expired`, `Cancelled`, `Superseded`, `Denied`); `false` for any other end (a refusal, `Expired` outside a probe).
+- **Cleared** to `false` only on outcomes that ended before the latest request in `Succeeded`, the only final success. The same write names that request in `status.breakerClearedBy`, also a selectable field. `Merged`, `WaitingForDelivery` and `Verifying` count as successes for the decision, as before, but clear nothing: verification (#92) may still move them to `Failed`, and that write sets the field `true` again.
+- **Restored** to `true` when the request in `Succeeded` is deleted: its finalizer lists the requests that name it and sets the field back on each before it removes itself. A restore that fails keeps the finalizer, and the deletion is retried.
+- **Unset** while the request has not ended, and on one that ended before the field existed. An unset request is read (fail closed). A one-time pass sets the field on an older ended request from its status, in the same status write as `status.holdsTarget`.
+
+An outcome before the latest success never changes the breaker's state: the failures in a row are counted after the latest success, and a probe that ended before it opens nothing again. So clearing never changes a decision the breaker makes from the same requests, whatever the clocks of the leaders that wrote the times.
+
+**How much is read.** Once cleared, the breaker reads the latest request in `Succeeded` and every outcome that ended after it. A long row without a final success stays read. While the breaker is tripped it grows by about one request per cool-down (one probe each 30 minutes): about 48 a day, about 1,400 in a month, 15 pages of 100. That is accepted. Retention of ended requests is a separate task.
+
+**When it is written.** The executor clears after the check of the limits that found the outcomes, once its decision is written and outside the lock of the admission, so no admission waits for it. One clearing runs at a time, with its own deadline and at most 100 requests, so the first checks after the upgrade clear the history in steps.
+
+- Each write carries the `resourceVersion` that was read: a request that changed since is left as it is and judged again at the next check.
+- A write that fails changes no decision: the request is only read once more. One that fails for good (`Forbidden`, `Invalid`) is logged as an error and counted in `shadewright_circuit_breaker_clear_errors_total`.
+- Before it writes, the clearing checks, under a mutex it shares with the restore, that the success still exists and is not being deleted. So no clearing names a success whose finalizer already restored.
+
+**What can go wrong.** Removing the finalizer of a request in `Succeeded` by hand skips the restore: the outcomes it cleared stay unread. This is a deliberate admin action, like deleting failed requests to close the breaker. Set `status.breakerCounts` back to `true` on the requests whose `status.breakerClearedBy` names it ([troubleshooting](../troubleshooting.md#limits)). A clearing by a former leader that is still running while the new leader deletes the success is not covered: leader election stops the former leader's process.
+
 ### What a held request shows
 
 A request held back stays `Pending` and shows the condition `Queued` with one of `TargetLocked`, `ConcurrencyLimitReached`, `CircuitOpen` or `CircuitHalfOpen`. It checks only the limits every 30 seconds, so it does not read Git. Once they let it through, the whole policy check runs again.
@@ -214,17 +235,17 @@ A request held back stays `Pending` and shows the condition `Queued` with one of
 
 ### How the state is read
 
-Everything is read from the requests on the API server: their phase, `lastPhaseTransitionTime` (kept to the microsecond) and `status.breakerProbe`. It is read right before the decision, under one lock with the status write. So a restart or a new leader forgets nothing (an open breaker, a running probe), and two workers never take the same slot or both become the probe.
+Everything is read from the requests on the API server: their phase, `lastPhaseTransitionTime` (kept to the microsecond), `status.breakerProbe` and `status.breakerCounts`. It is read right before the decision, under one lock with the status write. So a restart or a new leader forgets nothing (an open breaker, a running probe), and two workers never take the same slot or both become the probe.
 
-**Failing closed.** A read that fails lets nothing through. That includes an unsupported field selector, an expired continue token between pages, and a missing API server reader.
+**Failing closed.** A read that fails lets nothing through. That includes an unsupported field selector, an expired continue token between pages, a timeout, and a missing API server reader.
 
-**The three lists** (#293). Each uses a field selector on a selectable field (`status.phase`, `status.holdsTarget`, `status.breakerProbe`), in pages of 100.
+**The three lists** (#293, #390). Each uses a field selector on a selectable field (`status.phase`, `status.holdsTarget`, `status.breakerCounts`), in pages of 100.
 
-1. Every request whose phase is not `Denied`, `Cancelled` or `Superseded`, no phase included. The cap, the requests the executor still moves on, and the breaker's successes and failures come from this one consistent snapshot. A phase added later is read until it is classified.
+1. Every request whose phase has not ended (not a success, a failure or a neutral end), no phase included. The cap and the requests the executor still moves on come from this one consistent snapshot. A phase added later is read until it is classified.
 2. Every request whose `status.holdsTarget` is not `false`, in any phase: every holder of the lock, a stopped one included (also one whose phase was edited to `Denied`), and requests that do not have the field yet. The executor writes `false` with every refusal, and the one-time pass above covers older requests, so only undecided requests lack it after that.
-3. Every probe.
+3. Every request whose `status.breakerCounts` is not `false`, in any phase: the outcomes the breaker still needs, every running probe, requests being deleted whose finalizer may close a pull request, and requests not classified yet (see the watermark above). The breaker's successes, failures and probes come from this list, read last, so a request that ended while the first two were read is seen in its newer state.
 
-**Cost.** A request that ended `Denied`, `Cancelled` or `Superseded`, holds no lock and is not a probe is never read, so refusals do not add to the cost. The breaker still reads every success and failure (a bound on that is a follow-up). Such a request being deleted with the finalizer no longer counts against the cap: its deletion writes nothing to Git, and a `Denied` one never opened a pull request.
+**Cost.** A request that ended, holds no lock and whose outcome the breaker no longer needs is never read. So the cost grows with the requests that run, hold a lock or are not classified yet, and with the outcomes since the latest final success, not with the history before it. After 10,000 ended requests, a check reads only the latest `Succeeded` and the requests that ended after it (`TestBreakerReadsBounded`).
 
 ## 10.8. Audit
 

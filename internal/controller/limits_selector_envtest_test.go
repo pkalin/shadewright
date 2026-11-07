@@ -30,11 +30,11 @@ import (
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
 )
 
-// The limits read requests with field selectors on the CRD's selectable fields (#293). These specs check on a
-// real API server that it honours them: the first list returns a request without a phase (just created) and one
-// in every phase but Denied, Cancelled and Superseded; the lock list returns a stopped holder and requests
-// without status.holdsTarget (a missing field is the empty value) but not one that released it; the probe list
-// returns the probes in any phase.
+// The limits read requests with field selectors on the CRD's selectable fields (#293, #390). These specs check on
+// a real API server that it honours them: the first list returns a request without a phase (just created) and
+// one in every phase that has not ended; the lock list returns a stopped holder and requests without
+// status.holdsTarget (a missing field is the empty value) but not one that released it; the breaker's list
+// returns the requests whose status.breakerCounts is true or missing, in any phase, but not one set to false.
 var _ = Describe("RemediationRequest selectable fields", Ordered, func() {
 	ctx := context.Background()
 	const ns = "limits-selectors"
@@ -59,9 +59,13 @@ var _ = Describe("RemediationRequest selectable fields", Ordered, func() {
 				continue
 			}
 			rr.Status.Phase = p
-			// Probes: one that ended without an outcome, one that runs, one that failed.
-			rr.Status.BreakerProbe = p == remediationv1alpha1.PhaseDenied || p == remediationv1alpha1.PhasePRCreated ||
-				p == remediationv1alpha1.PhaseFailed
+			// The breaker's watermark: one it needs, one it no longer needs; the others never had the field.
+			switch p {
+			case remediationv1alpha1.PhaseMerged:
+				rr.Status.BreakerCounts = new(true)
+			case remediationv1alpha1.PhaseFailed:
+				rr.Status.BreakerCounts = new(false)
+			}
 			// The lock: a stopped holder, one that released it; the others never had the field.
 			switch p {
 			case remediationv1alpha1.PhaseCancelled:
@@ -79,19 +83,21 @@ var _ = Describe("RemediationRequest selectable fields", Ordered, func() {
 		r := &RemediationRequestReconciler{APIReader: k8sClient}
 		sels := limitsSelectors()
 		Expect(sels).To(HaveLen(3))
-		var read, holders []string
+		var read, holders, counted []string
 		for _, p := range all {
-			if !slices.Contains(unreadPhases, p) {
+			if !slices.Contains(endedPhases, p) {
 				read = append(read, name(p))
 			}
 			// Superseded released the lock (false); every other one is true or has no field.
 			if p != remediationv1alpha1.PhaseSuperseded {
 				holders = append(holders, name(p))
 			}
+			// Failed is no longer needed by the breaker (false); every other one is true or has no field.
+			if p != remediationv1alpha1.PhaseFailed {
+				counted = append(counted, name(p))
+			}
 		}
-		probes := []string{name(remediationv1alpha1.PhaseDenied), name(remediationv1alpha1.PhasePRCreated),
-			name(remediationv1alpha1.PhaseFailed)}
-		for i, want := range [][]string{read, holders, probes} {
+		for i, want := range [][]string{read, holders, counted} {
 			var got []string
 			Expect(r.listPages(ctx, ns, sels[i], func(o *remediationv1alpha1.RemediationRequest) {
 				got = append(got, o.Name)

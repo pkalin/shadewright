@@ -56,6 +56,10 @@ var (
 		Name: "shadewright_circuit_breaker_trips_total",
 		Help: "Times this process found the circuit breaker open after it had found it closed or half-open (or at its first check).",
 	})
+	breakerClearErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "shadewright_circuit_breaker_clear_errors_total",
+		Help: "Writes of the circuit breaker's watermark (status.breakerCounts false) that failed in a way that does not go away by itself (forbidden, invalid); the outcomes stay read.",
+	})
 )
 
 // breakerSeen is the state of the breaker the last check of the limits in this process found, plus one: zero
@@ -65,7 +69,8 @@ var (
 var breakerSeen atomic.Int32
 
 func init() {
-	metrics.Registry.MustRegister(remediationsInFlight, concurrencyLimit, remediationWaits, breakerOpen, breakerTrips)
+	metrics.Registry.MustRegister(remediationsInFlight, concurrencyLimit, remediationWaits, breakerOpen, breakerTrips,
+		breakerClearErrors)
 	// The closed set starts at zero, so a rate is defined before the first request is held back.
 	for _, label := range waitReasons {
 		remediationWaits.WithLabelValues(label)

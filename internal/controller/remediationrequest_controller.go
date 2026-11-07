@@ -130,6 +130,12 @@ type RemediationRequestReconciler struct {
 	// admitMu makes the check of the limits and the status write that lets a request through the policy check
 	// one step, so two workers can never both take the last slot or the same target.
 	admitMu sync.Mutex
+	// clearMu lets one clearing of the breaker's watermark run at a time, and orders it with the restore in the
+	// finalizer of the success that cleared (breakercounts.go).
+	clearMu sync.Mutex
+	// closingOnDelete are the requests that ended whose finalizer closes their pull request now
+	// (waitForCapOnDelete), guarded by admitMu.
+	closingOnDelete map[types.UID]struct{}
 	// checked holds, per request name, when the last full recheck of a waiting pull request ended, with the
 	// request's UID (pollState): an entry of another UID under the same name is not used. It is memory only:
 	// after a restart or a change of leader every request gets a full recheck first. Entries are dropped when the
@@ -282,7 +288,14 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 		r.checked.Delete(req.NamespacedName)
 		return r.finalize(ctx, rr)
 	}
-	if err := r.backfillLock(ctx, rr); err != nil {
+	if err := r.backfill(ctx, rr); err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			// A newer version was written, or the request is gone: it is read again shortly, not reported as a
+			// failed reconcile.
+			log.V(1).Info("Retrying the backfill of RemediationRequest", "remediationRequest", req.NamespacedName,
+				"error", err.Error())
+			return ctrl.Result{RequeueAfter: backfillRetryDelay}, nil
+		}
 		return ctrl.Result{}, err
 	}
 	if rr.Status.Phase != "" && rr.Status.Phase != remediationv1alpha1.PhasePending {
@@ -301,7 +314,8 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// A request a limit holds back (Queued) checks only the limits until they let it through, so it does not
 	// read Git while it waits. Every other request is decided first, so a refusal is never held back.
 	if meta.IsStatusConditionTrue(rr.Status.Conditions, remediationv1alpha1.ConditionQueued) {
-		if res, _, stop, err := r.holdBack(ctx, rr, true); stop {
+		if res, _, stop, clr, err := r.holdBack(ctx, rr, true); stop {
+			r.clearStale(ctx, rr.Namespace, clr)
 			return res, err
 		}
 	}
@@ -333,14 +347,27 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 
+	unlock := func() {}
+	var clr clearing
 	if out.phase == remediationv1alpha1.PhasePolicyChecked {
 		// The limits are checked again, now, and the decision is written under the same lock, so the next
 		// check of the limits sees this request as active, and as the breaker's probe when it is one. A
 		// conflict on that write lets nothing through and marks nothing: the request is decided again.
 		r.admitMu.Lock()
-		defer r.admitMu.Unlock()
-		res, probe, stop, err := r.holdBack(ctx, rr, false)
+		locked := true
+		unlock = func() {
+			if locked {
+				locked = false
+				r.admitMu.Unlock()
+			}
+		}
+		defer unlock()
+		var res ctrl.Result
+		var probe, stop bool
+		res, probe, stop, clr, err = r.holdBack(ctx, rr, false)
 		if stop {
+			unlock()
+			r.clearStale(ctx, rr.Namespace, clr)
 			return res, err
 		}
 		if probe {
@@ -354,13 +381,14 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	rr.Status.ObservedGeneration = rr.Generation
-	r.setPhase(rr, out.phase)
 	// The request is decided: no limit holds it back any more.
 	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionQueued)
 	rr.Status.Source = out.source
 	rr.Status.PolicyUID = out.policyUID
 	rr.Status.PolicyRevision = out.policyRevision
 	rr.Status.PlanDigest = out.planDigest
+	// After the plan digest, which tells the breaker whether a refusal counts (classifyBreaker).
+	r.setPhase(rr, out.phase)
 	rr.Status.PlanRepository = out.planRepository
 	rr.Status.EffectiveApprovalRequired = out.approval
 	rr.Status.Deadline = out.deadline
@@ -376,6 +404,9 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	recordDecision(out.phase, out.reason)
 	log.Info("Checked RemediationRequest against policy", "remediationRequest", req.NamespacedName,
 		"phase", out.phase, "reason", out.reason)
+	// The decision is written: the admission lock is released before the breaker's watermark is cleared.
+	unlock()
+	r.clearStale(ctx, rr.Namespace, clr)
 	return ctrl.Result{}, nil
 }
 

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"testing"
@@ -68,17 +69,25 @@ const fakeModelName = "eval-fake-1"
 // replaySource replays each scenario's recorded replies, in order, for both roles.
 type replaySource struct{}
 
-func (replaySource) factory(s *scenario) (analysis.ModelFactory, error) {
+func (replaySource) factory(s *scenario) (analysis.ModelFactory, func() error, error) {
 	if len(s.recording.Replies) == 0 {
-		return nil, errors.New("replies.yaml holds no replies")
+		return nil, nil, errors.New("replies.yaml holds no replies")
 	}
 	m := &fake.Model{}
 	for _, r := range s.recording.Replies {
 		m.Script(r.completion())
 	}
+	// A reply the analysis never asked for means the recording no longer matches the loop (it ends earlier, or
+	// escalates differently): the scenario fails instead of passing on part of its recording.
+	done := func() error {
+		if used, want := len(m.Requests()), len(s.recording.Replies); used != want {
+			return fmt.Errorf("the analysis made %d model calls, replies.yaml records %d replies", used, want)
+		}
+		return nil
+	}
 	return func(analysis.Role, remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
 		return m, nil
-	}, nil
+	}, done, nil
 }
 
 func (replaySource) expectedModels() map[analysis.Role]string {
@@ -136,7 +145,9 @@ func newFoundrySource() (*foundrySource, error) {
 	return src, nil
 }
 
-func (f *foundrySource) factory(*scenario) (analysis.ModelFactory, error) { return f.factoryFn, nil }
+func (f *foundrySource) factory(*scenario) (analysis.ModelFactory, func() error, error) {
+	return f.factoryFn, nil, nil
+}
 
 func (f *foundrySource) expectedModels() map[analysis.Role]string {
 	m := map[analysis.Role]string{analysis.RoleTriage: f.triageModel}
@@ -150,7 +161,8 @@ func (f *foundrySource) deployments() (*remediationv1alpha1.ModelDeployment, *re
 	return f.triage, f.escalation
 }
 
-// toolDefinitions are the definitions the loop offers in an evaluation run, for the manifest.
+// toolDefinitions are the definitions the loop offers on escalation in an evaluation run, for the manifest:
+// the same list as the loop's own (analysis offers every tool but get_delivery_status).
 func toolDefinitions(scheme *runtime.Scheme) ([]providers.ToolDefinition, error) {
 	r, err := redact.New()
 	if err != nil {
@@ -161,7 +173,13 @@ func toolDefinitions(scheme *runtime.Scheme) ([]providers.ToolDefinition, error)
 	if err != nil {
 		return nil, err
 	}
-	return set.Definitions(), nil
+	var offered []providers.ToolDefinition
+	for _, d := range set.Definitions() {
+		if d.Name != tools.NameGetDeliveryStatus {
+			offered = append(offered, d)
+		}
+	}
+	return offered, nil
 }
 
 // evaluate runs every scenario repeats times and returns the report.
@@ -188,6 +206,7 @@ func evaluate(t *testing.T, mode string, src modelSource, repeats int, minPassRa
 		t.Fatalf("building the manifest: %v", err)
 	}
 	r := &report{SchemaVersion: reportSchemaVersion, Mode: mode, Manifest: m}
+	dir := os.Getenv(envReportDir)
 	for _, s := range scenarios {
 		for i := 1; i <= repeats; i++ {
 			ctx, cancel := context.WithTimeout(t.Context(), scenarioTimeout)
@@ -198,14 +217,17 @@ func evaluate(t *testing.T, mode string, src modelSource, repeats int, minPassRa
 				res.Name, res.Pass, res.Error = s.name, false, err.Error()
 			}
 			r.Scenarios = append(r.Scenarios, res)
+			// The report is rewritten after every run, so a run that is cut off (a timeout, a failed login, a
+			// canceled job) still leaves what it paid for.
+			r.summarise(p)
+			if dir != "" {
+				if err := r.write(dir); err != nil {
+					t.Fatalf("writing the report: %v", err)
+				}
+			}
 		}
 	}
 	r.summarise(p)
-	if dir := os.Getenv(envReportDir); dir != "" {
-		if err := r.write(dir); err != nil {
-			t.Fatalf("writing the report: %v", err)
-		}
-	}
 	t.Log("\n" + r.markdown())
 	return r
 }
@@ -269,7 +291,8 @@ func envFloat(name string, def, lo, hi float64) (float64, error) {
 		return def, nil
 	}
 	f, err := strconv.ParseFloat(v, 64)
-	if err != nil || f < lo || f > hi {
+	// NaN passes every comparison with a bound, and an infinity is no threshold or price.
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < lo || f > hi {
 		return 0, fmt.Errorf("%s must be a number from %g to %g", name, lo, hi)
 	}
 	return f, nil

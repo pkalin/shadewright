@@ -17,10 +17,12 @@ limitations under the License.
 package eval
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
@@ -84,7 +87,10 @@ type expected struct {
 		Reason string `json:"reason"`
 		Phase  string `json:"phase"`
 		Action string `json:"action"`
-		Bounds *struct {
+		// Container and Previous are optional: the container the plan must name and the limit it replaces.
+		Container string `json:"container"`
+		Previous  string `json:"previous"`
+		Bounds    *struct {
 			Min intstr.IntOrString `json:"min"`
 			Max intstr.IntOrString `json:"max"`
 		} `json:"bounds"`
@@ -206,7 +212,11 @@ func loadScenarios(scheme *runtime.Scheme) ([]*scenario, error) {
 }
 
 func loadScenario(scheme *runtime.Scheme, name string) (*scenario, error) {
-	dir := filepath.Join(scenariosDir, name)
+	return loadScenarioDir(scheme, filepath.Join(scenariosDir, name), name)
+}
+
+// loadScenarioDir loads the scenario called name from dir.
+func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error) {
 	s := &scenario{name: name}
 	raw, err := os.ReadFile(filepath.Join(dir, "expected.yaml"))
 	if err != nil {
@@ -250,7 +260,16 @@ func loadScenario(scheme *runtime.Scheme, name string) (*scenario, error) {
 	if err != nil {
 		return nil, err
 	}
-	for i, doc := range bytes.Split(raw, []byte("\n---\n")) {
+	// The same splitter as the source mapper (internal/gitops/sourcemap): any valid document separator.
+	docs := utilyaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(raw)))
+	for i := 0; ; i++ {
+		doc, err := docs.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("objects.yaml document %d: %w", i, err)
+		}
 		if len(bytes.TrimSpace(doc)) == 0 || isComment(doc) {
 			continue
 		}

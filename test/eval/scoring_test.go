@@ -17,13 +17,22 @@ limitations under the License.
 package eval
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+
+	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/analysis"
+	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/tools"
 )
 
 // Scenarios the scoring tests change.
@@ -257,5 +266,262 @@ func TestManifestDigestCoversItsFields(t *testing.T) {
 	}
 	if base.Models["triage"].Model != fakeModelName || base.Models["escalation"].Deployment != "eval-escalation" {
 		t.Errorf("models %+v", base.Models)
+	}
+}
+
+// The digest is the hash of the stored manifest without its digest field, as docs/evaluation.md says.
+func TestManifestDigestIsOfTheManifestWithoutIt(t *testing.T) {
+	scheme, err := newScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defs, err := toolDefinitions(scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := loadSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := buildManifest(src, replaySource{}, defs, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(&report{Manifest: m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored report
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatal(err)
+	}
+	digest := stored.Manifest.Digest
+	stored.Manifest.Digest = ""
+	body, err := json.Marshal(stored.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "digest") {
+		t.Errorf("the hashed JSON still has the digest field: %s", body)
+	}
+	if got, err := hashJSON(stored.Manifest); err != nil || got != digest {
+		t.Errorf("recomputed %s (%v), stored %s", got, err, digest)
+	}
+}
+
+// The run limits and each scenario's incident, objects and replies are inputs of the digest, not only the
+// rubric files.
+func TestManifestDigestCoversRunLimitsAndScenarioFiles(t *testing.T) {
+	scheme, err := newScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defs, err := toolDefinitions(scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := loadSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := buildManifest(src, replaySource{}, defs, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.RunLimits.MaxToolSteps != evalMaxToolSteps || base.RunLimits.MaxOutputTokens != evalMaxOutputTokens {
+		t.Errorf("run limits %+v", base.RunLimits)
+	}
+	for name, change := range map[string]func(m *manifest){
+		"max tool steps":    func(m *manifest) { m.RunLimits.MaxToolSteps++ },
+		"max output tokens": func(m *manifest) { m.RunLimits.MaxOutputTokens++ },
+	} {
+		m := base
+		change(&m)
+		if d, err := manifestDigest(m); err != nil || d == base.Digest {
+			t.Errorf("%s: digest unchanged (%v)", name, err)
+		}
+	}
+	for _, file := range []string{"incident.yaml", "objects.yaml", "replies.yaml"} {
+		dir := t.TempDir()
+		if err := os.CopyFS(dir, os.DirFS(scenariosDir)); err != nil {
+			t.Fatal(err)
+		}
+		same, err := buildManifestIn(dir, src, replaySource{}, defs, 1, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.OpenFile(filepath.Join(dir, scnOOM, file), os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString("# changed\n"); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		m, err := buildManifestIn(dir, src, replaySource{}, defs, 1, 1)
+		if err != nil || m.Digest == same.Digest {
+			t.Errorf("%s: digest unchanged (%v)", file, err)
+		}
+	}
+}
+
+// NaN and infinities are not thresholds or prices.
+func TestEnvFloatRejectsNaNAndInfinity(t *testing.T) {
+	for _, v := range []string{"NaN", "nan", "Inf", "+Inf", "-Inf", "infinity"} {
+		t.Setenv("EVAL_TEST_FLOAT", v)
+		if f, err := envFloat("EVAL_TEST_FLOAT", 1, -1e9, 1e9); err == nil {
+			t.Errorf("%q accepted as %v", v, f)
+		}
+	}
+	t.Setenv("EVAL_TEST_FLOAT", "0.5")
+	if f, err := envFloat("EVAL_TEST_FLOAT", 1, 0, 1); err != nil || f != 0.5 {
+		t.Errorf("0.5: %v, %v", f, err)
+	}
+}
+
+// A recorded reply the analysis never used fails the scenario.
+func TestLeftoverReplyFails(t *testing.T) {
+	scheme, s := mustScenario(t, scnBadImage)
+	s.recording.Replies = append(s.recording.Replies, s.recording.Replies[len(s.recording.Replies)-1])
+	_, err := runScenario(t.Context(), scheme, s, replaySource{})
+	if err == nil || !strings.Contains(err.Error(), "replies.yaml records") {
+		t.Fatalf("a leftover reply was accepted: %v", err)
+	}
+}
+
+// spySource records the tools of every request the loop sends.
+type spySource struct {
+	replaySource
+	mu    sync.Mutex
+	tools [][]providers.ToolDefinition
+}
+
+type spyModel struct {
+	inner providers.ModelProvider
+	src   *spySource
+}
+
+func (m spyModel) Complete(ctx context.Context, req providers.CompletionRequest) (providers.Completion, error) {
+	m.src.mu.Lock()
+	m.src.tools = append(m.src.tools, req.Tools)
+	m.src.mu.Unlock()
+	return m.inner.Complete(ctx, req)
+}
+
+func (s *spySource) factory(sc *scenario) (analysis.ModelFactory, func() error, error) {
+	f, done, err := s.replaySource.factory(sc)
+	if err != nil {
+		return nil, nil, err
+	}
+	return func(r analysis.Role, d remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
+		p, err := f(r, d)
+		return spyModel{inner: p, src: s}, err
+	}, done, err
+}
+
+// The manifest hashes the tools the loop really offers on escalation, which leave out get_delivery_status.
+func TestManifestToolsAreTheOnesTheLoopOffers(t *testing.T) {
+	scheme, err := newScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defs, err := toolDefinitions(scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range defs {
+		if d.Name == tools.NameGetDeliveryStatus {
+			t.Fatalf("%s is in the manifest's tools", d.Name)
+		}
+	}
+	// Two invalid triage replies escalate; the escalation request carries the tools the loop offers.
+	_, sc := mustScenario(t, scnOOM)
+	bad := recordedReply{Model: fakeModelName, Content: "not json"}
+	sc.recording.Replies = append([]recordedReply{bad, bad}, sc.recording.Replies...)
+	spy := &spySource{}
+	res, err := runScenario(t.Context(), scheme, sc, spy)
+	if err != nil || !res.Escalated {
+		t.Fatalf("the scenario did not escalate: %+v, %v", res, err)
+	}
+	want, _ := hashJSON(defs)
+	seen := false
+	for _, offered := range spy.tools {
+		if len(offered) == 0 {
+			continue
+		}
+		seen = true
+		if got, _ := hashJSON(offered); got != want {
+			t.Errorf("the loop offered %d tools, the manifest hashes %d", len(offered), len(defs))
+		}
+	}
+	if !seen {
+		t.Fatal("no request carried tools: the check proved nothing")
+	}
+}
+
+// A memory plan must name a container of the scenario's workload and the limit it holds.
+func TestMemoryPlanMustFitTheWorkload(t *testing.T) {
+	cases := map[string]struct {
+		change func(p *remediationv1alpha1.SetContainerMemoryLimit, e *expected)
+		detail string
+	}{
+		"another container": {func(p *remediationv1alpha1.SetContainerMemoryLimit, _ *expected) { p.Container = "sidecar" },
+			`no container "sidecar"`},
+		"wrong previous limit": {func(p *remediationv1alpha1.SetContainerMemoryLimit, _ *expected) {
+			p.Previous = resource.MustParse("32Mi")
+		}, "not the container's current limit"},
+		"expected container": {func(_ *remediationv1alpha1.SetContainerMemoryLimit, e *expected) {
+			e.Outcome.Container = "db"
+		}, `container "db" was expected`},
+		"expected previous": {func(_ *remediationv1alpha1.SetContainerMemoryLimit, e *expected) {
+			e.Outcome.Previous = "96Mi"
+		}, "previous 96Mi was expected"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, s := mustScenario(t, scnOOM)
+			plan := &analysis.Plan{Action: remediationv1alpha1.Action{Type: remediationv1alpha1.ActionSetContainerMemoryLimit,
+				SetContainerMemoryLimit: &remediationv1alpha1.SetContainerMemoryLimit{Container: "web",
+					Previous: resource.MustParse("48Mi"), Desired: resource.MustParse("64Mi")}}}
+			out := analysis.Outcome{Reason: analysis.ReasonProposed, Plan: plan}
+			if ok, d := scoreProposal(s, out); !ok {
+				t.Fatalf("the matching plan failed: %s", d)
+			}
+			c.change(plan.Action.SetContainerMemoryLimit, &s.expected)
+			if ok, d := scoreProposal(s, out); ok || !strings.Contains(d, c.detail) {
+				t.Errorf("pass %t, detail %q: want a failure saying %q", ok, d, c.detail)
+			}
+		})
+	}
+}
+
+// objects.yaml is split like every other manifest file of the project: any document separator line.
+func TestObjectsSplitOnAnySeparator(t *testing.T) {
+	scheme, s := mustScenario(t, scnOOM)
+	dir := t.TempDir()
+	if err := os.CopyFS(dir, os.DirFS(filepath.Join(scenariosDir, scnOOM))); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "objects.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := strings.ReplaceAll(string(raw), "\n---\n", "\n--- # next object\n")
+	if changed == string(raw) {
+		t.Fatal("objects.yaml has no separator to change")
+	}
+	// #nosec G703 -- a file of the test's own temp directory
+	if err := os.WriteFile(path, []byte(changed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadScenarioDir(scheme, dir, scnOOM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.objects) != len(s.objects) {
+		t.Errorf("%d objects with the changed separators, %d with the original", len(got.objects), len(s.objects))
 	}
 }

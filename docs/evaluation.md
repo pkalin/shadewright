@@ -52,7 +52,8 @@ make eval         # only the evaluation, report in bin/eval/ (EVAL_REPORT_DIR to
 make eval-model   # the real model; needs the variables below and an Azure workload identity; costs money
 ```
 
-In CI the `test` job runs `make test` and then `make eval`, and writes the Markdown report into the job summary.
+In CI the `test` job runs `make test` with `EVAL_REPORT_DIR` set, so the evaluation inside it writes its report, and
+adds the Markdown report to the job summary (also when a test failed). The evaluation runs once.
 Evaluation-only changes run there too: everything under `test/` is in the `go` group of `hack/ci-changed.sh`.
 
 ### The real model: the Evaluation workflow
@@ -87,7 +88,8 @@ Before the first run, the maintainer sets up:
 | `EVAL_PRICE_INPUT_PER_MTOK`, `EVAL_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_PRICE_OUTPUT_PER_MTOK` | no | USD per million tokens of the deployment, for the cost estimate: all three or none. Nothing is built in; take them from the Azure price list for the region |
 
 A run of the eight scenarios is eight analyses per repeat, each bounded by the loop's limits (at most 7 model
-calls with 4 tool steps, 2048 output tokens per call, 500,000 tokens per analysis). The job's timeout is 60 minutes, which also
+calls with 4 tool steps, 2048 output tokens per call, 500,000 tokens per analysis). The report is rewritten after every run, and `make eval-model` stops after 50 minutes (the `go test`
+timeout), before the job's own 60, so a long run that is cut off still leaves its report. The job's timeout also
 keeps it inside the lifetime of the access token it exchanged once. The workflow cannot be tested on a fork or
 locally without such an identity; run it once by hand after setting it up.
 
@@ -138,10 +140,17 @@ and `digest` is the SHA-256 of its JSON without the digest, so a change to any f
 | `toolDefinitions` | Hash of the tool definitions offered on escalation |
 | `outputSchema` | Hash of the generated output schema and the action catalog |
 | `contextBuilder` | `source` (hash of the Go sources of `internal/incidentcontext`, which has no version of its own), `limits` (the byte bounds), `sources` (what the context reads in the run) |
+| `runLimits` | The loop limits of the run: `maxToolSteps` and `maxOutputTokens` |
+| `scenarios` | Hash of every scenario's `incident.yaml`, `objects.yaml` and `replies.yaml` (what the model is shown) |
 | `redaction` | `builtInRules` (hash of the Go sources of `internal/redact`), `operatorPatterns` (their number: 0, nothing configures them yet) |
 | `rubric` | `fleetRepository`, `fleetCommit`, and `files` (hash of every `expected.yaml` and `rubric.yaml`) |
 | `minPassRate`, `repeats` | The threshold and the number of runs of each scenario |
 | `digest` | `sha256:` and the hex digest |
+
+The digest has no field for the Go code of `internal/analysis` and `internal/tools`, beyond the prompt version, the
+output schema and the tool definitions: a change to that code that alters behaviour without altering them (for
+example how a tool reads or how a result is checked) needs a new evaluation by hand, as ADR-0025 says for any change
+to the tools or the context.
 
 The analyzer cannot yet compute the same digest at run time (it does not know the rubric, the threshold or the
 repeats, which ADR-0025 checks when the list of passing results is built); that check is the planned follow-up.

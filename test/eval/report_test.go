@@ -148,12 +148,22 @@ type manifest struct {
 	OutputSchema   string                 `json:"outputSchema"`
 	ContextBuilder manifestContextBuilder `json:"contextBuilder"`
 	Redaction      manifestRedaction      `json:"redaction"`
-	Rubric         manifestRubric         `json:"rubric"`
+	// RunLimits are the loop limits of the run (the sample settings' maxToolSteps and maxOutputTokens).
+	RunLimits manifestRunLimits `json:"runLimits"`
+	// Scenarios is the hash of every scenario's incident.yaml, objects.yaml and replies.yaml: what the model is
+	// shown (and, in fake mode, answers).
+	Scenarios string         `json:"scenarios"`
+	Rubric    manifestRubric `json:"rubric"`
 	// MinPassRate is the pass threshold of the run, 0 to 1.
 	MinPassRate float64 `json:"minPassRate"`
 	Repeats     int     `json:"repeats"`
-	// Digest is the SHA-256 of the manifest's JSON without this field.
-	Digest string `json:"digest"`
+	// Digest is the SHA-256 of the manifest's JSON without this field (see manifestDigest).
+	Digest string `json:"digest,omitempty"`
+}
+
+type manifestRunLimits struct {
+	MaxToolSteps    int `json:"maxToolSteps"`
+	MaxOutputTokens int `json:"maxOutputTokens"`
 }
 
 type manifestModel struct {
@@ -197,6 +207,12 @@ type manifestRubric struct {
 // buildManifest fills the manifest of a run and its digest.
 func buildManifest(src source, models modelSource, defs []providers.ToolDefinition, minPassRate float64,
 	repeats int) (manifest, error) {
+	return buildManifestIn(scenariosDir, src, models, defs, minPassRate, repeats)
+}
+
+// buildManifestIn is buildManifest over the scenarios in dir.
+func buildManifestIn(dir string, src source, models modelSource, defs []providers.ToolDefinition,
+	minPassRate float64, repeats int) (manifest, error) {
 	l := incidentcontext.DefaultLimits()
 	m := manifest{
 		Models:        map[string]manifestModel{},
@@ -207,7 +223,8 @@ func buildManifest(src source, models modelSource, defs []providers.ToolDefiniti
 				Metrics: l.Metrics, Git: l.Git},
 			Sources: []string{"pods", "objects"},
 		},
-		Rubric: manifestRubric{FleetRepository: src.FleetRepository, FleetCommit: src.FleetCommit},
+		RunLimits: manifestRunLimits{MaxToolSteps: evalMaxToolSteps, MaxOutputTokens: evalMaxOutputTokens},
+		Rubric:    manifestRubric{FleetRepository: src.FleetRepository, FleetCommit: src.FleetCommit},
 	}
 	triage, escalation := models.deployments()
 	expectedModels := models.expectedModels()
@@ -235,14 +252,25 @@ func buildManifest(src source, models modelSource, defs []providers.ToolDefiniti
 	if m.Redaction.BuiltInRules, err = hashFiles("../../internal/redact/*.go"); err != nil {
 		return m, err
 	}
-	if m.Rubric.Files, err = hashFiles(filepath.Join(scenariosDir, "*", "expected.yaml"),
-		filepath.Join(scenariosDir, "*", "rubric.yaml")); err != nil {
+	if m.Rubric.Files, err = hashFiles(filepath.Join(dir, "*", "expected.yaml"),
+		filepath.Join(dir, "*", "rubric.yaml")); err != nil {
 		return m, err
 	}
-	if m.Digest, err = hashJSON(m); err != nil {
+	if m.Scenarios, err = hashFiles(filepath.Join(dir, "*", "incident.yaml"), filepath.Join(dir, "*", "objects.yaml"),
+		filepath.Join(dir, "*", "replies.yaml")); err != nil {
+		return m, err
+	}
+	if m.Digest, err = manifestDigest(m); err != nil {
 		return m, err
 	}
 	return m, nil
+}
+
+// manifestDigest is the SHA-256 of the manifest's JSON without the digest field, so the stored manifest minus
+// its digest hashes to the stored digest.
+func manifestDigest(m manifest) (string, error) {
+	m.Digest = ""
+	return hashJSON(m)
 }
 
 func hashJSON(v any) (string, error) {

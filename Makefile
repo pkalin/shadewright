@@ -122,8 +122,8 @@ eval: ## Replay every lab scenario's recorded context and replies through the an
 	EVAL_REPORT_DIR="$(EVAL_REPORT_DIR)" go test ./test/eval -run '^TestEvalReplay$$' -count=1 -v
 
 .PHONY: eval-model
-eval-model: ## Evaluate the real model (the EVAL_* and AZURE_* variables, see docs/evaluation.md). Costs money.
-	EVAL_MODEL=foundry EVAL_REPORT_DIR="$(EVAL_REPORT_DIR)" go test ./test/eval -run '^TestEvalFoundry$$' -count=1 -v -timeout 60m
+eval-model: ## Evaluate the real model (the EVAL_* and AZURE_* variables, see docs/evaluation.md). Costs money. Times out at 50m, so a report is written first.
+	EVAL_MODEL=foundry EVAL_REPORT_DIR="$(EVAL_REPORT_DIR)" go test ./test/eval -run '^TestEvalFoundry$$' -count=1 -v -timeout 50m
 
 # Fuzz targets as <package dir>:<FuzzName>. hack/fuzz-targets.sh checks this list against the tree both ways, so a
 # new target cannot be left out of the weekly Fuzz workflow and a stale entry cannot fuzz nothing and pass.

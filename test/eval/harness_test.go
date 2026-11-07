@@ -24,6 +24,8 @@ import (
 	"sync"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -85,8 +87,9 @@ func (r recorded) Complete(ctx context.Context, req providers.CompletionRequest)
 
 // modelSource gives the model factory of one scenario run and the models the replies must name.
 type modelSource interface {
-	// factory returns the factory for a run of s; each call is a new run.
-	factory(s *scenario) (analysis.ModelFactory, error)
+	// factory returns the factory for a run of s; each call is a new run. done, when not nil, is called after
+	// the analysis and returns an error when the run did not use the source as recorded (a reply left over).
+	factory(s *scenario) (f analysis.ModelFactory, done func() error, err error)
 	// expectedModels names the model of each configured role (Config.ExpectedModels).
 	expectedModels() map[analysis.Role]string
 	// deployments are the triage and escalation deployments (escalation nil when not configured).
@@ -118,7 +121,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	if err != nil {
 		return res, err
 	}
-	factory, err := models.factory(s)
+	factory, done, err := models.factory(s)
 	if err != nil {
 		return res, err
 	}
@@ -145,6 +148,11 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	if err != nil {
 		return res, fmt.Errorf("the analysis stopped: %w", err)
 	}
+	if done != nil {
+		if err := done(); err != nil {
+			return res, err
+		}
+	}
 	res.Reason, res.Escalated, res.Calls, res.ToolCalls = string(out.Reason), out.Escalated, out.Calls, out.ToolCalls
 	res.Models = out.Models
 	t.mu.Lock()
@@ -152,7 +160,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 		Charged: out.Tokens, UsageUnknownCalls: t.usageUnknown}
 	last := t.last
 	t.mu.Unlock()
-	res.Outcome = scoreOutcome(s.expected, out)
+	res.Outcome = scoreOutcome(s, out)
 	if !slices.Contains(resultReasons, out.Reason) {
 		// The loop did not accept a result (a refused model, invalid output, a limit): nothing to score.
 		last = ""
@@ -173,7 +181,8 @@ var resultReasons = []analysis.Reason{analysis.ReasonProposed, analysis.ReasonNo
 	analysis.ReasonNoEvidence, analysis.ReasonTargetNotSupported, analysis.ReasonNoPolicyForAction}
 
 // scoreOutcome compares the loop's outcome with expected.yaml's.
-func scoreOutcome(e expected, out analysis.Outcome) outcomeScore {
+func scoreOutcome(scn *scenario, out analysis.Outcome) outcomeScore {
+	e := scn.expected
 	s := outcomeScore{Expected: e.Outcome.Type, Reason: string(out.Reason)}
 	if out.Plan != nil {
 		s.Action = string(out.Plan.Action.Type)
@@ -192,7 +201,7 @@ func scoreOutcome(e expected, out analysis.Outcome) outcomeScore {
 			s.NotScored = append(s.NotScored, "phase "+e.Outcome.Phase+" (the executor's)")
 		}
 	case outcomePullRequest:
-		s.Pass, s.Detail = scoreProposal(e, out)
+		s.Pass, s.Detail = scoreProposal(scn, out)
 		if len(e.Outcome.Paths) > 0 {
 			s.NotScored = append(s.NotScored, "paths "+strings.Join(e.Outcome.Paths, ", ")+" (source mapping, the executor's)")
 		}
@@ -202,14 +211,22 @@ func scoreOutcome(e expected, out analysis.Outcome) outcomeScore {
 	return s
 }
 
-// scoreProposal checks a plan against the expected action and bounds.
-func scoreProposal(e expected, out analysis.Outcome) (bool, string) {
+// scoreProposal checks a plan against the expected action and bounds, and a memory plan against the
+// scenario's workload: the container must exist in its pod template, and the previous limit must be the
+// one it holds (and the one expected.yaml names, when it names one).
+func scoreProposal(scn *scenario, out analysis.Outcome) (bool, string) {
+	e := scn.expected
 	if out.Plan == nil || out.Reason != analysis.ReasonProposed {
 		return false, fmt.Sprintf("a %s proposal was expected, the loop ended %s without one", e.Outcome.Action, out.Reason)
 	}
 	a := out.Plan.Action
 	if string(a.Type) != e.Outcome.Action {
 		return false, fmt.Sprintf("a %s proposal was expected, the loop proposed %s", e.Outcome.Action, a.Type)
+	}
+	if a.SetContainerMemoryLimit != nil {
+		if detail := checkMemoryTarget(scn, a.SetContainerMemoryLimit); detail != "" {
+			return false, detail
+		}
 	}
 	b := e.Outcome.Bounds
 	if b == nil {
@@ -238,6 +255,58 @@ func scoreProposal(e expected, out analysis.Outcome) (bool, string) {
 		return false, "the plan carries no parameters to check against the bounds"
 	}
 	return true, ""
+}
+
+// checkMemoryTarget returns why a SetContainerMemoryLimit does not fit the scenario, or "".
+func checkMemoryTarget(scn *scenario, p *remediationv1alpha1.SetContainerMemoryLimit) string {
+	e := scn.expected
+	if e.Outcome.Container != "" && p.Container != e.Outcome.Container {
+		return fmt.Sprintf("container %q was expected, the loop proposed %q", e.Outcome.Container, p.Container)
+	}
+	if e.Outcome.Previous != "" {
+		want, err := resource.ParseQuantity(e.Outcome.Previous)
+		if err != nil {
+			return fmt.Sprintf("expected.yaml's previous %q is not a quantity", e.Outcome.Previous)
+		}
+		if p.Previous.Cmp(want) != 0 {
+			return fmt.Sprintf("previous %s was expected, the loop proposed %s", want.String(), p.Previous.String())
+		}
+	}
+	o := e.Incident.Object
+	containers, ok := workloadContainers(scn.objects, o.Kind, o.Namespace, o.Name)
+	if !ok {
+		return fmt.Sprintf("the scenario holds no %s %s/%s with a pod template", o.Kind, o.Namespace, o.Name)
+	}
+	for _, c := range containers {
+		if c.Name != p.Container {
+			continue
+		}
+		if cur := c.Resources.Limits.Memory(); !cur.IsZero() && cur.Cmp(p.Previous) != 0 {
+			return fmt.Sprintf("previous %s is not the container's current limit %s", p.Previous.String(), cur.String())
+		}
+		return ""
+	}
+	return fmt.Sprintf("the %s %s/%s has no container %q", o.Kind, o.Namespace, o.Name, p.Container)
+}
+
+// workloadContainers returns the containers of the Deployment or StatefulSet among objs.
+func workloadContainers(objs []client.Object, kind, namespace, name string) ([]corev1.Container, bool) {
+	for _, o := range objs {
+		if o.GetNamespace() != namespace || o.GetName() != name {
+			continue
+		}
+		switch w := o.(type) {
+		case *appsv1.Deployment:
+			if kind == "Deployment" {
+				return w.Spec.Template.Spec.Containers, true
+			}
+		case *appsv1.StatefulSet:
+			if kind == "StatefulSet" {
+				return w.Spec.Template.Spec.Containers, true
+			}
+		}
+	}
+	return nil, false
 }
 
 // diagnosisText is the text of the result the loop accepted, for the rubric: the summary, the hypotheses

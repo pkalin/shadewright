@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/pkalin/shadewright/internal/providers"
@@ -116,6 +117,48 @@ func (g *Git) ReadFile(ctx context.Context, sha, path string, limit int) (provid
 		return providers.File{}, fmt.Errorf("file %q at %s: %w", path, sha, providers.ErrTooLarge)
 	}
 	return providers.File{Path: path, Commit: sha, Data: slices.Clone(data)}, nil
+}
+
+// ListDir returns the files and directories directly in dir at a commit, sorted by name. The fake holds only
+// regular files, so a directory exists when some file is below it. ErrTooLarge when it holds more than
+// providers.MaxDirEntries entries.
+func (g *Git) ListDir(ctx context.Context, sha, dir string) ([]providers.DirEntry, error) {
+	if err := g.before("ListDir"); err != nil {
+		return nil, err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c, ok := g.commits[sha]
+	if !ok {
+		return nil, fmt.Errorf("commit %q: %w", sha, providers.ErrNotFound)
+	}
+	prefix := ""
+	if dir != "." {
+		prefix = dir + "/"
+	}
+	types := map[string]providers.DirEntryType{}
+	for p := range c.files {
+		rest, ok := strings.CutPrefix(p, prefix)
+		if !ok {
+			continue
+		}
+		if name, _, nested := strings.Cut(rest, "/"); nested {
+			types[name] = providers.DirEntryDir
+		} else {
+			types[name] = providers.DirEntryFile
+		}
+	}
+	if len(types) == 0 && dir != "." {
+		return nil, fmt.Errorf("directory %q at %s: %w", dir, sha, providers.ErrPathNotInTree)
+	}
+	if len(types) > providers.MaxDirEntries {
+		return nil, fmt.Errorf("directory %q at %s: %w", dir, sha, providers.ErrTooLarge)
+	}
+	out := make([]providers.DirEntry, 0, len(types))
+	for _, name := range slices.Sorted(maps.Keys(types)) {
+		out = append(out, providers.DirEntry{Name: name, Type: types[name]})
+	}
+	return out, nil
 }
 
 // BranchHead returns the head of a branch.

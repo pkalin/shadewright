@@ -557,7 +557,7 @@ func TestLoadRefuses(t *testing.T) {
 	git := fake.NewGit("main", ordersRepo())
 	_, err := semdiff.Load(ctx, git, head(t, git), "../x")
 	wantReason(t, err, semdiff.ErrInvalidInput)
-	_, err = semdiff.Load(ctx, git, head(t, git), "unrelated")
+	_, err = semdiff.Load(ctx, git, head(t, git), "missing")
 	wantReason(t, err, semdiff.ErrFileMissing)
 
 	big := ordersRepo()

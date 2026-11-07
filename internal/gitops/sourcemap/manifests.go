@@ -43,9 +43,15 @@ const (
 	MaxDepth = 8
 	// MaxFiles is how many manifest files are read.
 	MaxFiles = 256
-	// MaxReads is how many ReadFile calls one mapping makes in all, kustomization file lookups included, so
-	// a build cannot fan out into many directories.
+	// MaxReads is how many ReadFile and ListDir calls one mapping makes in all, kustomization file lookups
+	// included, so a build cannot fan out into many directories.
 	MaxReads = 512
+	// MaxListDepth is how far below the Kustomization's path the mapping lists directories when the path has
+	// no kustomization file and Flux would generate one.
+	MaxListDepth = repopath.MaxListDepth
+	// ListEntryBytes is what one entry of a directory listing costs against MaxTotalBytes
+	// (repopath.ListEntryBytes), so the byte budget bounds listings as it bounds files, from the cache or not.
+	ListEntryBytes = repopath.ListEntryBytes
 	// MaxFileBytes is the largest file read. The provider refuses larger files before downloading them
 	// (providers.ErrTooLarge); the mapping checks the size again in case an adapter does not.
 	MaxFileBytes = providers.MaxFileBytes
@@ -103,6 +109,16 @@ func (w *walker) walk(ctx context.Context, dir string, depth int) (*Result, erro
 		return stop, err
 	}
 	file, stop, err := w.kustomizationFile(ctx, dir)
+	if stop != nil && stop.Reason == reasonNoKustomization {
+		if depth == 0 {
+			// Flux generates a kustomization for its own path only; kustomize needs one in every directory
+			// a kustomization file lists.
+			return w.generated(ctx, dir)
+		}
+		r := needsIntervention(ReasonNoKustomizationFile,
+			"directory %s is listed as a resource but has no kustomization file", dir)
+		return &r, nil
+	}
 	if stop != nil || err != nil {
 		return stop, err
 	}
@@ -141,7 +157,7 @@ func (w *walker) walk(ctx context.Context, dir string, depth int) (*Result, erro
 			return &r, nil
 		}
 		if !repopath.IsManifest(p) {
-			if stop, err := w.walk(ctx, p, depth+1); stop != nil || err != nil {
+			if stop, err := w.walk(ctx, p, depth+repopath.NestDepth(dir, p)); stop != nil || err != nil {
 				return stop, err
 			}
 			continue
@@ -208,9 +224,7 @@ func (w *walker) kustomizationFile(ctx context.Context, dir string) (providers.F
 	}
 	switch len(found) {
 	case 0:
-		r := needsIntervention(ReasonNoKustomizationFile,
-			"directory %s has no kustomization file, so the files Flux builds from it cannot be listed", dir)
-		return providers.File{}, &r, nil
+		return providers.File{}, new(needsIntervention(reasonNoKustomization, "directory %s has no kustomization file", dir)), nil
 	case 1:
 		return found[0], nil, nil
 	default:
@@ -219,8 +233,105 @@ func (w *walker) kustomizationFile(ctx context.Context, dir string) (providers.F
 	}
 }
 
-// reasonFileNotFound is internal to the walker: a file that may legitimately be absent. It is never returned.
-const reasonFileNotFound Reason = "fileNotFound"
+// Reasons internal to the walker, never returned: a file that may legitimately be absent, and a directory
+// without a kustomization file, which the caller turns into a generated build or a stop.
+const (
+	reasonFileNotFound    Reason = "fileNotFound"
+	reasonNoKustomization Reason = "noKustomization"
+)
+
+// errListStopped ends [repopath.Generate] when a listing stopped the mapping; the stop is kept by the caller.
+var errListStopped = errors.New("listing stopped")
+
+// generated adds the files of the kustomization Flux generates for dir, which has none (ADR-0012, #122): every
+// .yaml and .yml file below it, MaxListDepth deep at most, and every directory below it with a kustomization
+// file, which is then walked as such, at its depth below dir so MaxDepth bounds the whole nesting. Entries
+// Flux's default exclusions match are skipped. Each listing counts against MaxReads and the byte budget like a
+// read. A .sourceignore file in a listed directory, or a manifest or base whose name is not a plain path
+// segment, stops the mapping.
+func (w *walker) generated(ctx context.Context, dir string) (*Result, error) {
+	var stop *Result
+	var listed []string
+	resources, err := repopath.Generate(ctx, dir, func(ctx context.Context, d string) ([]providers.DirEntry, error) {
+		entries, s, err := w.list(ctx, d)
+		if s != nil {
+			stop = s
+			return nil, errListStopped
+		}
+		listed = append(listed, d)
+		return entries, err
+	})
+	if stop != nil {
+		return stop, nil
+	}
+	if s, ok := errors.AsType[*repopath.Stop](err); ok {
+		reason := ReasonInvalidPath
+		switch s.Kind {
+		case repopath.StopTooDeep:
+			reason = ReasonTooManyFiles
+		case repopath.StopSourceIgnore:
+			reason = ReasonSourceOptions
+		}
+		return new(needsIntervention(reason, "%s", s.Error())), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Every listed directory was checked for a .sourceignore file by its listing.
+	for _, d := range listed {
+		w.ignoreChecked[d] = true
+	}
+	for _, res := range resources {
+		if res.Dir {
+			if stop, err := w.walk(ctx, res.Path, res.Depth); stop != nil || err != nil {
+				return stop, err
+			}
+			continue
+		}
+		if w.seen[res.Path] {
+			continue
+		}
+		if len(w.files) >= MaxFiles {
+			return new(needsIntervention(ReasonTooManyFiles, "the build lists more than %d files", MaxFiles)), nil
+		}
+		w.seen[res.Path] = true
+		w.files = append(w.files, res.Path)
+	}
+	return nil, nil
+}
+
+// list returns the entries of dir at the walker's commit, or a stop result when the read budget is spent, the
+// host read the tree and dir is not a directory in it, the listing holds an entry no tree can hold, or it is
+// over providers.MaxDirEntries. Any other failure, a plain not found included, is transient. A listing counts as one read against
+// MaxReads and ListEntryBytes per entry against MaxTotalBytes, from the cache or not.
+func (w *walker) list(ctx context.Context, dir string) ([]providers.DirEntry, *Result, error) {
+	if w.reads >= MaxReads {
+		return nil, new(needsIntervention(ReasonTooManyFiles, "the build needs more than %d Git reads", MaxReads)), nil
+	}
+	w.reads++
+	entries, err := w.cache.listDir(ctx, w.git, w.repo, w.commit, dir)
+	shown := shownDir(dir)
+	switch repopath.CheckListing(entries, err) {
+	case repopath.ListNotADirectory:
+		return nil, new(needsIntervention(ReasonNoKustomizationFile,
+			"%s has no kustomization file and is not a directory in the tree", shown)), nil
+	case repopath.ListTooLarge:
+		return nil, new(needsIntervention(ReasonTooManyFiles,
+			"%s holds more than %d entries", shown, providers.MaxDirEntries)), nil
+	case repopath.ListInvalidEntry:
+		return nil, new(needsIntervention(ReasonInvalidPath,
+			"%s holds an entry that no Git tree can hold", shown)), nil
+	case repopath.ListFailed:
+		return nil, nil, transient("list "+shown, err)
+	}
+	cost := len(entries) * ListEntryBytes
+	if cost > MaxTotalBytes-w.bytes {
+		return nil, new(needsIntervention(ReasonInputTooLarge,
+			"the build reads more than %d bytes in all; the listing of %s is over it", MaxTotalBytes, shown)), nil
+	}
+	w.bytes += cost
+	return entries, nil, nil
+}
 
 // read returns a file at the walker's commit, or a stop result when it is missing or too large.
 func (w *walker) read(ctx context.Context, p string) (providers.File, *Result, error) {
@@ -436,4 +547,13 @@ func ReadField(data []byte, target v1alpha1.ObjectRef, field Field) (value any, 
 	}
 	value, found = field.Get(exact)
 	return value, found, nil
+}
+
+// shownDir names a listed directory for a message: its path when every segment is valid, else a fixed text,
+// since a directory Flux descends into may have a hidden or unusual name.
+func shownDir(dir string) string {
+	if p, ok := repopath.Join(".", dir); ok {
+		return "directory " + p
+	}
+	return "a listed directory"
 }

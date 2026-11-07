@@ -19,6 +19,8 @@ package fake_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"sync"
 	"testing"
 
@@ -76,6 +78,47 @@ func TestGitReadFile(t *testing.T) {
 	}
 	if _, err := g.BranchHead(ctx, "nope"); !providers.IsNotFound(err) {
 		t.Errorf("missing branch: %v", err)
+	}
+}
+
+func TestGitListDir(t *testing.T) {
+	const topFile = "top.yaml"
+	ctx := context.Background()
+	files := map[string][]byte{"a/x.yaml": nil, "a/b/y.yaml": nil, "a/c.txt": nil, topFile: nil}
+	g := fake.NewGit(base, files)
+	head, err := g.BranchHead(ctx, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := g.ListDir(ctx, head, "a")
+	want := []providers.DirEntry{{Name: "b", Type: providers.DirEntryDir}, {Name: "c.txt", Type: providers.DirEntryFile},
+		{Name: "x.yaml", Type: providers.DirEntryFile}}
+	if err != nil || !slices.Equal(got, want) {
+		t.Fatalf("ListDir(a) = %v, %v, want %v", got, err, want)
+	}
+	root, err := g.ListDir(ctx, head, ".")
+	if err != nil || len(root) != 2 || root[0].Name != "a" || root[1].Name != topFile {
+		t.Errorf("ListDir(.) = %v, %v", root, err)
+	}
+	for _, p := range []string{"nope", topFile} {
+		if _, err := g.ListDir(ctx, head, p); !providers.IsPathNotInTree(err) {
+			t.Errorf("ListDir(%s) = %v, want a path not in the tree", p, err)
+		}
+	}
+	if _, err := g.ListDir(ctx, "deadbeef", "a"); !providers.IsNotFound(err) || providers.IsPathNotInTree(err) {
+		t.Errorf("missing commit: %v, want a plain not found", err)
+	}
+
+	wide := map[string][]byte{}
+	for i := range providers.MaxDirEntries + 1 {
+		wide[fmt.Sprintf("w/f%d.yaml", i)] = nil
+	}
+	g = fake.NewGit(base, wide)
+	if head, err = g.BranchHead(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.ListDir(ctx, head, "w"); !providers.IsTooLarge(err) {
+		t.Errorf("ListDir of %d entries = %v, want ErrTooLarge", providers.MaxDirEntries+1, err)
 	}
 }
 

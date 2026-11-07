@@ -772,7 +772,7 @@ func TestPolicyChangedDuringTheScanIsRetried(t *testing.T) {
 	wantRetry(t, w.fresh(t))
 }
 
-// readHook wraps a provider and runs after after every ReadFile.
+// readHook wraps a provider and runs after after every ReadFile and ListDir.
 type readHook struct {
 	providers.GitProvider
 	after func()
@@ -782,6 +782,12 @@ func (h readHook) ReadFile(ctx context.Context, ref, path string, limit int) (pr
 	f, err := h.GitProvider.ReadFile(ctx, ref, path, limit)
 	h.after()
 	return f, err
+}
+
+func (h readHook) ListDir(ctx context.Context, ref, path string) ([]providers.DirEntry, error) {
+	entries, err := h.GitProvider.ListDir(ctx, ref, path)
+	h.after()
+	return entries, err
 }
 
 func (w *world) hookRead(after func()) {

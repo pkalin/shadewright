@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -233,5 +234,102 @@ func TestReadCacheIsSafeForConcurrentUse(t *testing.T) {
 	wg.Wait()
 	if c.Len() > 16 {
 		t.Errorf("Len = %d, over the bound 16", c.Len())
+	}
+}
+
+// ListDir lists two entries in any directory, and answers by prefix as ReadFile does: missing* is not in the
+// tree, gone* a plain not found, wide* over MaxDirEntries and fail* a transient failure.
+func (g *countingGit) ListDir(_ context.Context, _, dir string) ([]providers.DirEntry, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.reads["list "+dir]++
+	switch {
+	case strings.HasPrefix(dir, "missing"):
+		return nil, fmt.Errorf("directory: %w", providers.ErrPathNotInTree)
+	case strings.HasPrefix(dir, "gone"):
+		return nil, fmt.Errorf("GitHub returned status 404: %w", providers.ErrNotFound)
+	case strings.HasPrefix(dir, "wide"):
+		return nil, fmt.Errorf("directory: %w", providers.ErrTooLarge)
+	case strings.HasPrefix(dir, "fail"):
+		return nil, &providers.RetryableError{Err: errors.New("host unavailable")}
+	}
+	return []providers.DirEntry{{Name: "a.yaml", Type: providers.DirEntryFile}, {Name: "b", Type: providers.DirEntryDir}}, nil
+}
+
+// A listing, a path not in the tree and a directory over MaxDirEntries are kept; a plain not found and a failed
+// listing are asked again every time. A listing and a file read of one path never answer each other, and a
+// caller cannot change what the cache gives the next one.
+func TestReadCacheKeepsListings(t *testing.T) {
+	c := NewReadCache(10, 1<<20)
+	src := newCountingGit(1)
+	ctx := context.Background()
+	for range 2 {
+		entries, err := c.listDir(ctx, src, repoA, commitA, "d")
+		if err != nil || len(entries) != 2 || entries[0].Name != "a.yaml" {
+			t.Fatalf("list d = %v, %v", entries, err)
+		}
+		entries[0].Name = "changed"
+		if _, err := c.listDir(ctx, src, repoA, commitA, "missing"); !providers.IsPathNotInTree(err) {
+			t.Fatalf("list missing: %v", err)
+		}
+		if _, err := c.listDir(ctx, src, repoA, commitA, "wide"); !providers.IsTooLarge(err) {
+			t.Fatalf("list wide: %v", err)
+		}
+		if _, err := c.listDir(ctx, src, repoA, commitA, "gone"); !providers.IsNotFound(err) || providers.IsPathNotInTree(err) {
+			t.Fatalf("list gone: %v", err)
+		}
+		if _, err := c.listDir(ctx, src, repoA, commitA, "fail"); !providers.IsRetryable(err) {
+			t.Fatalf("list fail: %v", err)
+		}
+	}
+	for p, want := range map[string]int{"list d": 1, "list missing": 1, "list wide": 1, "list gone": 2, "list fail": 2} {
+		if got := src.count(p); got != want {
+			t.Errorf("%s reached the provider %d times, want %d", p, got, want)
+		}
+	}
+	if _, err := c.readFile(ctx, src, repoA, commitA, "d", MaxFileBytes); err != nil || src.count("d") != 1 {
+		t.Errorf("a file read of a listed path was answered from the listing: %v, %d reads", err, src.count("d"))
+	}
+	// A branch name is listed every time.
+	for range 2 {
+		if _, err := c.listDir(ctx, src, repoA, defaultTargetBranch, "e"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if src.count("list e") != 2 {
+		t.Errorf("a listing at a branch name reached the provider %d times, want 2", src.count("list e"))
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := c.listDir(cancelled, src, repoA, commitA, "d"); !errors.Is(err, context.Canceled) {
+		t.Errorf("a cancelled listing the cache could answer = %v, want context.Canceled", err)
+	}
+}
+
+// A kept listing is counted for its names and the string headers of each entry, so many short names cannot
+// hold more memory than the byte bound says.
+func TestReadCacheCountsListingCost(t *testing.T) {
+	c := NewReadCache(10, 1<<20)
+	if _, err := c.listDir(context.Background(), newCountingGit(1), repoA, commitA, "d"); err != nil {
+		t.Fatal(err)
+	}
+	// countingGit lists a.yaml and b; a DirEntry holds two string headers of 16 bytes each.
+	want := int64(len("a.yaml")+32+len("b")+32+len(commitA)+len("d")) + cacheEntryOverhead
+	if c.Bytes() != want {
+		t.Errorf("Bytes = %d, want %d", c.Bytes(), want)
+	}
+}
+
+// A file the cache cannot keep is not copied first.
+func TestReadCacheDoesNotCopyWhatItCannotKeep(t *testing.T) {
+	c := NewReadCache(10, 100)
+	f := providers.File{Path: "f", Commit: commitA, Data: make([]byte, 4096)}
+	k := cacheKey{repo: repoA, commit: commitA, path: "f"}
+	if allocs := testing.AllocsPerRun(10, func() { c.put(k, f, nil, MaxFileBytes) }); allocs > 1 {
+		t.Errorf("put of a file over the byte bound made %.0f allocations, want at most 1 (no copy)", allocs)
+	}
+	if c.Len() != 0 {
+		t.Errorf("Len = %d, want 0", c.Len())
 	}
 }

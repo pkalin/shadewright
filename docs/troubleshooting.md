@@ -116,12 +116,12 @@ All `NeedsIntervention`, on `PolicyAllowed`. The mapping reads plain kustomize m
 
 | Reason | Cause | Fix |
 | --- | --- | --- |
-| `InvalidPath` | `spec.path`, or a path in a kustomization file, is not a plain relative path inside the repository | Use a relative path |
-| `NoKustomizationFile` | A directory has no kustomization file (Flux would generate one) | Add a `kustomization.yaml` listing the resources |
+| `InvalidPath` | `spec.path`, a path in a kustomization file, or a name listed in a path without a kustomization file, is not a plain relative path inside the repository (a hidden manifest such as `.env.yaml`, or a manifest in a hidden directory, in such a path counts; hidden files that are not manifests and names Flux leaves out of its artifact are skipped) | Use a relative path; rename hidden manifests in a path Flux generates a kustomization for, or add a `kustomization.yaml` |
+| `NoKustomizationFile` | A directory that a kustomization file lists as a resource has no kustomization file (kustomize would fail too), or the Kustomization's `spec.path` is not a directory at the branch head. A path without a kustomization file is searched as Flux builds it (#122) | Add a `kustomization.yaml` to the listed directory, or correct `spec.path` |
 | `UnsupportedKustomization` | A kustomization file uses more than plain `resources`: patches, generators, components, transformers, prefixes, a namespace or remote resources | Flatten the layout |
 | `FileNotReadable` | A file the build needs is missing, over 1 MiB or not valid YAML | Fix the file |
-| `TooManyFiles` | The build is deeper than 8 directories, lists more than 256 files or needs more than 512 reads | Simplify the layout |
-| `InputTooLarge` | The build reads more than 16 MiB in all (exactly 16 MiB is accepted; a file past the budget is refused before it is downloaded, even when it is also over 1 MiB) or holds more than 4096 YAML documents | Split the Kustomization or remove what it does not need |
+| `TooManyFiles` | The build is deeper than 8 kustomization directories (5 listed directories below a path without a kustomization file), lists more than 256 files, needs more than 512 reads and listings, or lists a directory of more than 1000 entries | Simplify the layout |
+| `InputTooLarge` | The build reads more than 16 MiB in all, directory listings counted at 128 bytes per entry (exactly 16 MiB is accepted; a file past the budget is refused before it is downloaded, even when it is also over 1 MiB) or holds more than 4096 YAML documents | Split the Kustomization or remove what it does not need |
 | `DeclarationNotFound` | No document declares the object (for example a generator or patch produces it) | Declare it in a plain manifest |
 | `AmbiguousDeclaration` | More than one document could declare it | Keep exactly one |
 
@@ -204,8 +204,8 @@ Before committing, and again when the target branch moves while the pull request
 | --- | --- |
 | `InvalidInput` | The target, action, paths or file set are not usable |
 | `UnsupportedKustomization` | A kustomization file uses generators, Helm charts, plugins, replacements or anything outside the allow-list |
-| `InvalidReference` | A kustomization refers to a URL, remote base, absolute path or a path leaving the repository |
-| `FileMissing` | The build needs a file that is missing, or a directory has no kustomization file or more than one |
+| `InvalidReference` | A kustomization refers to a URL, remote base, absolute path or a path leaving the repository, or a path without a kustomization file holds a manifest or base whose name is not a plain path segment |
+| `FileMissing` | The build needs a file that is missing, a listed directory has no kustomization file or more than one, or the path is not a directory (a path without a kustomization file is rendered from the one Flux would generate) |
 | `TooLarge` | A limit was hit: file size, number of files or reads, depth, or directory visits |
 | `InvalidYAML` | A kustomization file does not parse or has a duplicate key |
 | `RenderFailed` | Kustomize cannot build the path, before or after the change |

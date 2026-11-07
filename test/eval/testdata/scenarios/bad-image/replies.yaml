@@ -1,5 +1,5 @@
 # Synthetic: a triage reply written by hand to the output schema for the recorded context, so that CI checks
-# the harness, the loop and the scoring end to end. A real-model run (`make eval-model`) replaces none of
+# the harness, the loop and the scoring end to end. A real-model run (the Evaluation workflow) replaces none of
 # this; recording its replies here is a follow-up.
 source: synthetic
 replies:

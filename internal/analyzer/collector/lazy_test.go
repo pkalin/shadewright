@@ -277,3 +277,40 @@ func TestClusterScopedKindIsCheckedClusterWide(t *testing.T) {
 		})
 	}
 }
+
+// TestWatchThatCannotStartIsReported: a controller that cannot be built is reported as failed, not watched,
+// and is tried again at the next check.
+func TestWatchThatCannotStartIsReported(t *testing.T) {
+	h := newLazyHarness(t, gvkPolicy, kyvernoActive(t))
+	h.serve(meta.RESTScopeNamespace)
+	h.l.start = func(context.Context, *sourceReconciler) <-chan error {
+		h.starts.Add(1)
+		done := make(chan error, 1)
+		done <- errors.New("cannot build")
+		close(done)
+		return done
+	}
+	h.step()
+	if got := h.notWatched(); !slices.Equal(got, []WatchState{WatchFailed}) {
+		t.Errorf("SourcesNotWatched = %v, want [Failed]", got)
+	}
+	if h.l.running != nil {
+		t.Error("a watch that did not start is kept as running")
+	}
+	h.step()
+	if n := h.starts.Load(); n != 2 {
+		t.Errorf("%d starts, want 2 (tried again)", n)
+	}
+}
+
+// TestNoNamespaceIsNeverWatchedUnchecked: with no watched namespace a namespaced kind is not watched, since
+// its grant could not be checked.
+func TestNoNamespaceIsNeverWatchedUnchecked(t *testing.T) {
+	h := newLazyHarness(t, gvkPolicy, kyvernoActive(t))
+	h.serve(meta.RESTScopeNamespace)
+	h.l.r.c.cfg.Namespaces = nil
+	h.step()
+	if h.starts.Load() != 0 {
+		t.Error("a watch started without a grant check")
+	}
+}

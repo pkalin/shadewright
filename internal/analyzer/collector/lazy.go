@@ -189,7 +189,17 @@ func (l *lazySource) step(ctx context.Context) {
 	}
 	if l.running == nil {
 		cctx, cancel := context.WithCancel(ctx)
-		l.running = &runningWatch{cancel: cancel, done: l.start(cctx, l.r)}
+		done := l.start(cctx, l.r)
+		select {
+		case err := <-done:
+			// The controller could not be built or stopped at once: report it and try again at the next check.
+			cancel()
+			l.removeInformer(ctx)
+			l.r.c.setWatch(l.log, module, gvk, WatchFailed, err)
+			return
+		default:
+		}
+		l.running = &runningWatch{cancel: cancel, done: done}
 	}
 	l.r.c.setWatch(l.log, module, gvk, WatchWatched, nil)
 }
@@ -230,6 +240,10 @@ func (l *lazySource) probe(ctx context.Context) (WatchState, error) {
 	namespaces := l.r.c.cfg.Namespaces
 	if mapping.Scope.Name() == meta.RESTScopeNameRoot {
 		namespaces = []string{""}
+	}
+	if len(namespaces) == 0 {
+		// No namespace to check the grant in: never watch unchecked (setupSources refuses this anyway).
+		return WatchNotGranted, nil
 	}
 	for _, ns := range namespaces {
 		lctx, cancel := context.WithTimeout(ctx, l.r.c.cfg.LookupTimeout)

@@ -230,7 +230,7 @@ analyzer:
       # @section -- Analyzer
       enabled: false
       clusterWide:
-        # -- Grant the analyzer `get`, `list` and `watch` on Kyverno `clusterpolicies` and `wgpolicyk8s.io` `clusterpolicyreports` cluster-wide (ClusterRole and ClusterRoleBinding `analyzer-kyverno-cluster`), for the Kyverno module's cluster-scoped symptom sources. Off by default: it is the one read of an add-on's kinds outside the watched namespaces, and a ClusterPolicyReport names resources of every namespace.
+        # -- Grant the analyzer `get`, `list` and `watch` on Kyverno `clusterpolicies` and `wgpolicyk8s.io` `clusterpolicyreports` cluster-wide (ClusterRole and ClusterRoleBinding `analyzer-kyverno-cluster`), for the Kyverno module's cluster-scoped symptom sources. Off by default: it is the one read of an add-on's kinds outside the watched namespaces, and a ClusterPolicyReport names resources of every namespace. Independent of `kyverno.enabled`: each grants its own kinds.
         # @section -- Analyzer
         enabled: false
   prometheus:

@@ -407,7 +407,7 @@ A state of every kind but the HPA is emitted only once the collector has seen it
 
 ### 2.5.2. Flux
 
-**What it does.** The module (`internal/modules/flux`) is built. It contributes once the collector wires its kinds (planned, 2.5.1). It is detected by `kustomize.toolkit.fluxcd.io/v1`, `helm.toolkit.fluxcd.io/v2` or `source.toolkit.fluxcd.io/v1` (Flux 2.3 and later; beta versions are not read). It watches `Kustomization`, `HelmRelease` and `GitRepository` and reports at most one symptom per object.
+**What it does.** The module (`internal/modules/flux`) is built. Its symptom sources are wired (2.5.1), once `analyzer.modules.flux.enabled` (off by default) grants the reads (2.2.2). It is detected by `kustomize.toolkit.fluxcd.io/v1`, `helm.toolkit.fluxcd.io/v2` or `source.toolkit.fluxcd.io/v1` (Flux 2.3 and later; beta versions are not read). It watches `Kustomization`, `HelmRelease` and `GitRepository` and reports at most one symptom per object.
 
 **Which condition is reported.**
 

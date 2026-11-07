@@ -45,16 +45,19 @@ var recordResults = []string{recordWritten, recordExists, recordFailed, recordSk
 var analysisRecords = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "shadewright_analysis_records_total",
 	Help: "Analysis record writes to the analysis store, by result (written, exists, failed, skipped, refused).",
-}, []string{"result"})
+}, []string{recordResultLabel})
+
+// recordResultLabel is the label of shadewright_analysis_records_total.
+const recordResultLabel = "result"
 
 func init() {
 	metrics.Registry.MustRegister(analysisRecords)
 }
 
-// initRecordMetrics starts every series of analysisRecords at zero; SetupWithManager calls it when a store is
-// configured.
-func initRecordMetrics() {
+// initRecordMetrics starts every series of v (analysisRecords) at zero; SetupWithManager calls it when a store
+// is configured.
+func initRecordMetrics(v *prometheus.CounterVec) {
 	for _, r := range recordResults {
-		analysisRecords.WithLabelValues(r)
+		v.WithLabelValues(r)
 	}
 }

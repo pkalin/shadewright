@@ -333,6 +333,7 @@ func TestStoreRecordSkippedNearTheClaimsEnd(t *testing.T) {
 
 // The record counter takes only its closed set of results and is documented.
 func TestAnalysisRecordsMetric(t *testing.T) {
+	initRecordMetrics(analysisRecords)
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(analysisRecords)
 	want := map[string]metricguard.Labels{"shadewright_analysis_records_total": {"result": recordResults}}
@@ -485,16 +486,18 @@ func TestControllerNamesTheRecordOfADroppedOutcome(t *testing.T) {
 	}
 }
 
-// countingReader counts the live reads of Incidents and fails the first n with a transient error.
+// countingReader counts the live reads of Incidents and fails those for which fail(n) holds (n from 1) with a
+// transient error.
 type countingReader struct {
 	client.Reader
-	fail, reads int
+	fail  func(n int) bool
+	reads int
 }
 
 func (r *countingReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 	if _, ok := obj.(*remediationv1alpha1.Incident); ok {
 		r.reads++
-		if r.reads <= r.fail {
+		if r.fail(r.reads) {
 			return apierrors.NewServiceUnavailable("the API server is restarting")
 		}
 	}
@@ -505,7 +508,7 @@ func (r *countingReader) Get(ctx context.Context, key client.ObjectKey, obj clie
 // outcome that could not have been written: one read for the failed try, one for the write (#454).
 func TestFinishTakesAFailedReadForNoWrite(t *testing.T) {
 	c, inc := claimedIncident(t)
-	r := &countingReader{Reader: c.Reader, fail: 1}
+	r := &countingReader{Reader: c.Reader, fail: func(n int) bool { return n == 1 }}
 	c.Reader = r
 	if err := c.finish(t.Context(), inc, Outcome{Reason: ReasonNoProposal}, "", "", ""); err != nil {
 		t.Fatalf("finish: %v", err)
@@ -531,16 +534,47 @@ func TestCheckTimeBudgetNamesTheRecordWriteOnlyWithAStore(t *testing.T) {
 	}
 }
 
-// The record counter's series start at zero only when a store is configured, so "no store" (no series) and
-// "nothing written" (zeros) differ (#454).
+// initRecordMetrics starts every series at zero; SetupWithManager calls it only with a store, so "no store" (no
+// series) and "nothing written" (zeros) differ (#454).
 func TestRecordMetricsStartOnlyWithAStore(t *testing.T) {
-	analysisRecords.Reset()
-	t.Cleanup(analysisRecords.Reset)
-	if n := testutil.CollectAndCount(analysisRecords); n != 0 {
-		t.Fatalf("%d series before setup, want none", n)
-	}
-	initRecordMetrics()
-	if n := testutil.CollectAndCount(analysisRecords); n != len(recordResults) {
+	v := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "records_total"}, []string{recordResultLabel})
+	initRecordMetrics(v)
+	if n := testutil.CollectAndCount(v); n != len(recordResults) {
 		t.Errorf("%d series with a store, want %d", n, len(recordResults))
+	}
+}
+
+// appliedEOFStatus applies the first status update and then answers with a closed connection.
+type appliedEOFStatus struct {
+	client.SubResourceWriter
+	tries *int
+}
+
+func (s appliedEOFStatus) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	*s.tries++
+	if err := s.SubResourceWriter.Update(ctx, obj, opts...); err != nil || *s.tries > 1 {
+		return err
+	}
+	return fmt.Errorf("updating Incident status: %w", io.EOF)
+}
+
+type appliedEOFClient struct {
+	client.Client
+	tries int
+}
+
+func (c *appliedEOFClient) Status() client.SubResourceWriter {
+	return appliedEOFStatus{SubResourceWriter: c.Client.Status(), tries: &c.tries}
+}
+
+// An outcome write that was applied though its answer was lost, followed by a failed look for it, is looked
+// for again, not taken for a lost claim (#454 review).
+func TestFinishLooksAgainAfterAFailedLook(t *testing.T) {
+	c, inc := claimedIncident(t)
+	c.Client = &appliedEOFClient{Client: c.Client}
+	// Read 1 is the recheck before the write; read 2, the first look for the applied outcome, fails.
+	c.Reader = &countingReader{Reader: c.Reader, fail: func(n int) bool { return n == 2 }}
+	if err := c.finish(t.Context(), inc, Outcome{Reason: ReasonNoProposal}, "", "", ""); err != nil {
+		t.Fatalf("finish took an applied outcome for a lost claim: %v", err)
 	}
 }

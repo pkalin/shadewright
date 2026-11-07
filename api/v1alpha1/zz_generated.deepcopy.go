@@ -787,6 +787,11 @@ func (in *RemediationRequestStatus) DeepCopyInto(out *RemediationRequestStatus) 
 		*out = new(bool)
 		**out = **in
 	}
+	if in.BreakerCounts != nil {
+		in, out := &in.BreakerCounts, &out.BreakerCounts
+		*out = new(bool)
+		**out = **in
+	}
 	if in.EffectiveApprovalRequired != nil {
 		in, out := &in.EffectiveApprovalRequired, &out.EffectiveApprovalRequired
 		*out = new(bool)

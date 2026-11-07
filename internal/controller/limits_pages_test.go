@@ -31,6 +31,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -39,7 +40,8 @@ import (
 )
 
 // apiServerReader serves RemediationRequest lists from base the way the API server does: it applies a field
-// selector on the CRD's selectable fields (status.phase, status.breakerProbe, status.holdsTarget; a missing
+// selector on the CRD's selectable fields (status.phase, status.breakerProbe, status.holdsTarget,
+// status.breakerCounts; a missing
 // value is the empty one, as limits_selector_envtest_test.go shows), and with a limit it returns at most Limit items, sorted by
 // name, and a continue token for the rest. The fake client supports neither != selectors nor pages. It
 // records each call, and with expire set it answers every continued call with the error the API server gives
@@ -77,12 +79,7 @@ func (p *apiServerReader) List(ctx context.Context, list client.ObjectList, opts
 		sel = o.FieldSelector
 	}
 	rl.Items = slices.DeleteFunc(rl.Items, func(i remediationv1alpha1.RemediationRequest) bool {
-		lock := ""
-		if i.Status.HoldsTarget != nil {
-			lock = strconv.FormatBool(*i.Status.HoldsTarget)
-		}
-		return !sel.Matches(fields.Set{phaseField: string(i.Status.Phase),
-			probeField: strconv.FormatBool(i.Status.BreakerProbe), lockField: lock})
+		return !sel.Matches(selectableFields(&i))
 	})
 	slices.SortFunc(rl.Items, func(a, b remediationv1alpha1.RemediationRequest) int {
 		return strings.Compare(a.Name, b.Name)
@@ -109,6 +106,19 @@ func (p *apiServerReader) List(ctx context.Context, list client.ObjectList, opts
 	p.calls = append(p.calls, call)
 	p.mu.Unlock()
 	return nil
+}
+
+// selectableFields are the values of the CRD's selectable fields of rr, as the API server matches them: a
+// missing field is the empty value.
+func selectableFields(rr *remediationv1alpha1.RemediationRequest) fields.Set {
+	optional := func(b *bool) string {
+		if b == nil {
+			return ""
+		}
+		return strconv.FormatBool(*b)
+	}
+	return fields.Set{phaseField: string(rr.Status.Phase), probeField: strconv.FormatBool(rr.Status.BreakerProbe),
+		lockField: optional(rr.Status.HoldsTarget), countsField: optional(rr.Status.BreakerCounts)}
 }
 
 // read returns the names of all requests the reader returned, and whether a list needed more than one page.
@@ -151,7 +161,8 @@ func (p *apiServerReader) expectBoundedPages(t *testing.T, paged bool) {
 // history is n requests on target named prefix-NNNN, in the phases given in turn, whose phase changed n-i
 // hours before limitsNow, so later names are newer. Requests in a phase past Pending have a plan digest; those in
 // an ended phase have released the target lock (status.holdsTarget false), as the executor writes once their
-// pull request is known closed or merged.
+// pull request is known closed or merged, and carry status.breakerCounts as the status write that ended them
+// sets it (classifyBreaker).
 func history(prefix string, n int, target string,
 	phases ...remediationv1alpha1.RemediationPhase) []*remediationv1alpha1.RemediationRequest {
 	out := make([]*remediationv1alpha1.RemediationRequest, 0, n)
@@ -160,13 +171,14 @@ func history(prefix string, n int, target string,
 			time.Duration(n-i)*time.Hour)
 		if ended(o.Status.Phase) {
 			o.Status.HoldsTarget = new(false)
+			classifyBreaker(o)
 		}
 		out = append(out, o)
 	}
 	return out
 }
 
-// refusals are the ended phases the limits never read unless the request is a probe.
+// refusals are ended phases the breaker never needs unless the request is a probe.
 var refusals = []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseDenied,
 	remediationv1alpha1.PhaseCancelled, remediationv1alpha1.PhaseSuperseded}
 
@@ -179,6 +191,7 @@ func TestLimitsDoNotReadRefusals(t *testing.T) {
 	probe := otherRequest("refused-probe", "uid-probe", remediationv1alpha1.PhaseDenied, time.Minute)
 	probe.Status.BreakerProbe = true
 	probe.Status.HoldsTarget = new(false)
+	classifyBreaker(probe)
 	others = append(others, probe)
 	r, base, rr, _ := limitsWorld(t, 1, others...)
 	p := &apiServerReader{Reader: base}
@@ -188,9 +201,9 @@ func TestLimitsDoNotReadRefusals(t *testing.T) {
 	p.expectBoundedPages(t, false)
 	names, _ := p.read()
 	slices.Sort(names)
-	// One check of the limits runs (under the lock, after the policy check). rr itself is listed twice (no
-	// phase yet, and no status.holdsTarget, which the lock's list reads), then skipped.
-	if want := []string{"refused-probe", rr.Name, rr.Name}; !slices.Equal(names, want) {
+	// One check of the limits runs (under the lock, after the policy check). rr itself is listed three times (no
+	// phase yet, no status.holdsTarget and no status.breakerCounts), then skipped.
+	if want := []string{"refused-probe", rr.Name, rr.Name, rr.Name}; !slices.Equal(names, want) {
 		t.Fatalf("read %d requests %v, want only %v", len(names), names, want)
 	}
 }
@@ -238,26 +251,30 @@ func TestLimitsReadInBoundedPages(t *testing.T) {
 }
 
 // TestLimitsCountDeletingRequests checks which requests being deleted with the finalizer still count against
-// the cap: those whose deletion may close a pull request (a phase before the merge, NeedsIntervention, Expired)
-// and every success and failure, which the breaker reads anyway; a Denied, Cancelled or Superseded one, whose
-// deletion writes nothing to Git, is not read (#293).
+// the cap: one in a phase before the merge, and one that ended and still holds the lock, whose pull request may
+// still be open; one that ended and released the lock (its pull request known merged or closed) is not counted,
+// whether or not the breaker still reads it (#293, #390).
 func TestLimitsCountDeletingRequests(t *testing.T) {
 	for _, tc := range []struct {
 		phase   remediationv1alpha1.RemediationPhase
+		holds   bool
 		counted bool
 	}{
-		{remediationv1alpha1.PhasePRCreated, true},
-		{remediationv1alpha1.PhaseExpired, true},
-		{remediationv1alpha1.PhaseNeedsIntervention, true},
-		{remediationv1alpha1.PhaseSucceeded, true},
-		{remediationv1alpha1.PhaseDenied, false},
-		{remediationv1alpha1.PhaseCancelled, false},
-		{remediationv1alpha1.PhaseSuperseded, false},
+		{remediationv1alpha1.PhasePRCreated, true, true},
+		{remediationv1alpha1.PhaseExpired, true, true},
+		{remediationv1alpha1.PhaseNeedsIntervention, true, true},
+		{remediationv1alpha1.PhaseExpired, false, false},
+		{remediationv1alpha1.PhaseNeedsIntervention, false, false},
+		{remediationv1alpha1.PhaseSucceeded, false, false},
+		{remediationv1alpha1.PhaseDenied, false, false},
+		{remediationv1alpha1.PhaseCancelled, false, false},
+		{remediationv1alpha1.PhaseSuperseded, false, false},
 	} {
-		t.Run(string(tc.phase), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s holds %v", tc.phase, tc.holds), func(t *testing.T) {
 			deleting := otherRequest("deleting", "uid-elsewhere", tc.phase, time.Hour)
 			deleting.Finalizers = []string{FinalizerName}
-			deleting.Status.HoldsTarget = new(!ended(tc.phase))
+			deleting.Status.HoldsTarget = new(tc.holds)
+			classifyBreaker(deleting)
 			r, base, rr, _ := limitsWorld(t, 1, deleting)
 			if err := base.Delete(context.Background(), deleting); err != nil {
 				t.Fatal(err)
@@ -327,10 +344,9 @@ func expectHeldBehindStopped(t *testing.T, res reconcile.Result, err error, got 
 	}
 }
 
-// TestLimitsReadThreeLists checks that a check of the limits reads three lists (#293): one of every phase but
-// the unread neutral ends, so the cap, the moved-on requests and the breaker's outcomes come from one consistent
-// snapshot and a request that changes phase between two reads cannot be missed or counted in two states; the
-// holders of the lock; and the probes.
+// TestLimitsReadThreeLists checks that a check of the limits reads three lists (#293, #390): one of every phase
+// that has not ended, so the cap and the moved-on requests come from one consistent snapshot; the holders of the
+// lock; and the outcomes the breaker still needs.
 func TestLimitsReadThreeLists(t *testing.T) {
 	r, base, rr, _ := limitsWorld(t, 20)
 	p := &apiServerReader{Reader: base}
@@ -341,8 +357,10 @@ func TestLimitsReadThreeLists(t *testing.T) {
 	for _, c := range p.calls {
 		sels = append(sels, c.selector)
 	}
-	want := []string{"status.phase!=Denied,status.phase!=Cancelled,status.phase!=Superseded",
-		"status.holdsTarget!=false", "status.breakerProbe=true"}
+	want := []string{"status.phase!=Merged,status.phase!=WaitingForDelivery,status.phase!=Verifying," +
+		"status.phase!=Succeeded,status.phase!=Failed,status.phase!=NeedsIntervention,status.phase!=Expired," +
+		"status.phase!=Denied,status.phase!=Cancelled,status.phase!=Superseded",
+		"status.holdsTarget!=false", "status.breakerCounts!=false"}
 	if !slices.Equal(sels, want) {
 		t.Fatalf("lists read = %q, want %q", sels, want)
 	}
@@ -391,13 +409,29 @@ func TestRefusalsWriteHoldsTargetFalse(t *testing.T) {
 	}
 }
 
-// TestUnreadPhasesMakeNoGitWriteOnDelete checks that the finalizer closes no pull request for a phase the limits
-// do not read (unreadPhases) unless the request holds the lock, so not counting such a request while it is being
-// deleted lets no Git write past the cap.
-func TestUnreadPhasesMakeNoGitWriteOnDelete(t *testing.T) {
-	for _, p := range unreadPhases {
-		if closeOnDelete(p) {
-			t.Errorf("closeOnDelete(%s) = true, but the limits do not read a %s request that holds no lock", p, p)
+// TestDeletingRequestsCountedAreRead checks that every request being deleted that active counts is in one of the
+// lists the limits read whatever its status.breakerCounts: one that has not ended is in the first, one that
+// ended and holds the lock is in the lock's list. So whether the breaker still reads a request never changes the
+// cap.
+func TestDeletingRequestsCountedAreRead(t *testing.T) {
+	sels := limitsSelectors()
+	now := metav1.Now()
+	phases := append([]remediationv1alpha1.RemediationPhase{"", remediationv1alpha1.PhasePending,
+		remediationv1alpha1.PhasePRCreated}, endedPhases...)
+	for _, p := range phases {
+		for _, holds := range []*bool{nil, new(false), new(true)} {
+			o := otherRequest("deleting", "uid-elsewhere", p, time.Hour)
+			o.Finalizers = []string{FinalizerName}
+			o.DeletionTimestamp = &now
+			o.Status.HoldsTarget = holds
+			o.Status.BreakerCounts = new(false)
+			if !active(o) {
+				continue
+			}
+			if !sels[0].Matches(selectableFields(o)) && !sels[1].Matches(selectableFields(o)) {
+				t.Errorf("phase %q, holdsTarget %v: counted against the cap but read by neither the first nor the lock's list",
+					p, holds)
+			}
 		}
 	}
 }

@@ -285,6 +285,9 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.backfillLock(ctx, rr); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.backfillBreaker(ctx, rr); err != nil {
+		return ctrl.Result{}, err
+	}
 	if rr.Status.Phase != "" && rr.Status.Phase != remediationv1alpha1.PhasePending {
 		if !progresses(rr) {
 			r.checked.Delete(req.NamespacedName)
@@ -354,13 +357,14 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	rr.Status.ObservedGeneration = rr.Generation
-	r.setPhase(rr, out.phase)
 	// The request is decided: no limit holds it back any more.
 	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionQueued)
 	rr.Status.Source = out.source
 	rr.Status.PolicyUID = out.policyUID
 	rr.Status.PolicyRevision = out.policyRevision
 	rr.Status.PlanDigest = out.planDigest
+	// After the plan digest, which tells the breaker whether a refusal counts (classifyBreaker).
+	r.setPhase(rr, out.phase)
 	rr.Status.PlanRepository = out.planRepository
 	rr.Status.EffectiveApprovalRequired = out.approval
 	rr.Status.Deadline = out.deadline

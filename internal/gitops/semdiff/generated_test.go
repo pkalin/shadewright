@@ -140,9 +140,10 @@ func TestLoadGeneratedRefuses(t *testing.T) {
 		"a directory over MaxDirEntries": {with(many), semdiff.ErrTooLarge},
 		"a nested .sourceignore": {with(map[string][]byte{"apps/orders/web/.sourceignore": nil}),
 			semdiff.ErrSourceIgnored},
-		"a name Flux leaves out": {with(map[string][]byte{"apps/orders/cloudbuild.yaml": nil}), semdiff.ErrSourceIgnored},
-		"a hidden name":          {with(map[string][]byte{"apps/orders/.x.yaml": nil}), semdiff.ErrInvalidReference},
-		"no such directory":      {map[string][]byte{readme: nil}, semdiff.ErrFileMissing},
+		"a manifest in a hidden directory": {with(map[string][]byte{"apps/orders/.config/x.yaml": nil}),
+			semdiff.ErrInvalidReference},
+		"a hidden name":     {with(map[string][]byte{"apps/orders/.x.yaml": nil}), semdiff.ErrInvalidReference},
+		"no such directory": {map[string][]byte{readme: nil}, semdiff.ErrFileMissing},
 	} {
 		t.Run(name, func(t *testing.T) {
 			git := fake.NewGit("main", tc.files)
@@ -158,6 +159,16 @@ func TestLoadGeneratedRefuses(t *testing.T) {
 	if !errors.As(err, &te) || strings.Contains(err.Error(), "token") {
 		t.Fatalf("got %v, want a TransientError without provider text", err)
 	}
+	// A plain not found (a 404 on a subtree, a token GitHub cannot give) is transient too, not FileMissing.
+	_, err = semdiff.Load(context.Background(), errLister{git, fmt.Errorf("GitHub returned status 404: %w", providers.ErrNotFound)},
+		head(t, git), "apps/orders")
+	if !errors.As(err, &te) {
+		t.Fatalf("plain not found: %v, want a TransientError", err)
+	}
+	// An entry no tree can hold is a permanent refusal.
+	_, err = semdiff.Load(context.Background(), errLister{git, fmt.Errorf("listing: %w", providers.ErrInvalidEntry)},
+		head(t, git), "apps/orders")
+	wantReason(t, err, semdiff.ErrInvalidReference)
 	// A refused listing stops the build too, as a transient error the caller classifies.
 	_, err = semdiff.Load(context.Background(), errLister{git, context.Canceled}, head(t, git), "apps/orders")
 	if !errors.As(err, &te) {
@@ -190,5 +201,57 @@ func TestLoadGeneratedCountsListings(t *testing.T) {
 	wantReason(t, err, semdiff.ErrTooLarge)
 	if !strings.Contains(err.Error(), "bytes") {
 		t.Fatalf("got %v, want the byte budget", err)
+	}
+}
+
+// What Flux leaves out of its artifact is not rendered: a file there that would make the build differ (here a
+// second copy of the target) is skipped, as Flux skips it (#122).
+func TestLoadGeneratedSkipsWhatFluxExcludes(t *testing.T) {
+	files := plainOrders()
+	for _, p := range []string{"cloudbuild.yaml", ".github/ci.yaml", "assets.zip/so.yaml", "logo.png", ".gitkeep"} {
+		files["apps/orders/"+p] = []byte(scaledObjectYAML)
+	}
+	git := fake.NewGit("main", files)
+	got, err := semdiff.Load(context.Background(), git, head(t, git), "apps/orders")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := semdiff.Check(context.Background(), soInput(t, got, "apps/orders", 15)); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+}
+
+// A base directory whose name ends in .yaml is built as a directory, as kustomize builds it.
+func TestLoadGeneratedKeepsDirectoryResources(t *testing.T) {
+	files := map[string][]byte{
+		"apps/orders/svc.yaml/kustomization.yaml": kust("scaledobject.yaml"),
+		"apps/orders/svc.yaml/scaledobject.yaml":  []byte(scaledObjectYAML),
+	}
+	git := fake.NewGit("main", files)
+	got, err := semdiff.Load(context.Background(), git, head(t, git), "apps/orders")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	in := soInput(t, map[string][]byte{soFile: []byte(scaledObjectYAML)}, "apps/orders", 15)
+	in.Files, in.File = got, "apps/orders/svc.yaml/scaledobject.yaml"
+	if _, err := semdiff.Check(context.Background(), in); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+}
+
+// A base found deep below the path counts the directories passed against MaxDepth, as in the source mapping.
+func TestLoadGeneratedBoundsNesting(t *testing.T) {
+	files := map[string][]byte{soFile: []byte(scaledObjectYAML)}
+	chain := "apps/orders" + strings.Repeat("/d", sourcemap.MaxListDepth)
+	for range 4 {
+		files[chain+"/kustomization.yaml"] = kust("k")
+		chain += "/k"
+	}
+	files[chain+"/kustomization.yaml"] = kust()
+	git := fake.NewGit("main", files)
+	_, err := semdiff.Load(context.Background(), git, head(t, git), "apps/orders")
+	wantReason(t, err, semdiff.ErrTooLarge)
+	if !strings.Contains(err.Error(), "nested") {
+		t.Fatalf("got %v, want the depth limit", err)
 	}
 }

@@ -47,8 +47,8 @@ limitations under the License.
 // Git is read only through ReadFile, ListDir and BranchHead, relying on their contract: only regular files
 // are returned, symbolic links and submodules are never followed, files over the read's limit are refused
 // before they are downloaded, and a listing holds at most providers.MaxDirEntries entries. Every listed name
-// must be a plain path segment, and a .sourceignore file or a name Flux leaves out of its artifact by default
-// in a listed directory stops the mapping. Reads are bounded by [MaxDepth], [MaxFiles], [MaxReads] and [MaxFileBytes], whatever cap
+// that would be in the build must be a plain path segment; names Flux's default exclusions match are skipped,
+// as Flux never sees them, and a .sourceignore file in a listed directory stops the mapping. Reads are bounded by [MaxDepth], [MaxFiles], [MaxReads] and [MaxFileBytes], whatever cap
 // the provider enforces itself, and in all by [MaxTotalBytes] and [MaxDocuments] decoded. Each read's limit
 // is what is left of [MaxTotalBytes], at most [MaxFileBytes], so the byte budget bounds the file contents
 // downloaded, cached and parsed; a file over that limit is neither downloaded nor cached. A ListDir call

@@ -38,8 +38,9 @@ const (
 	// cacheEntryOverhead is what one entry is counted for besides its content, commit and path, so that
 	// entries without content (a file not in the tree) are bounded by bytes too.
 	cacheEntryOverhead = 256
-	// dirEntryOverhead is what one entry of a kept listing is counted for besides its name.
-	dirEntryOverhead = 16
+	// dirEntryOverhead is what one entry of a kept listing is counted for besides the bytes of its name: the
+	// two string headers of a providers.DirEntry on a 64-bit platform (its type is a shared constant).
+	dirEntryOverhead = 32
 )
 
 // ReadCache keeps the outcome of ReadFile calls at a full commit ID, which never changes: the content of a
@@ -167,10 +168,14 @@ func (c *ReadCache) listDir(ctx context.Context, git providers.GitProvider, repo
 	e := &cacheEntry{key: k}
 	switch {
 	case err == nil && len(entries) <= providers.MaxDirEntries:
-		e.outcome, e.entries = cachedDir, slices.Clone(entries)
+		e.outcome = cachedDir
 		for _, d := range entries {
 			e.cost += int64(len(d.Name)) + dirEntryOverhead
 		}
+		if !c.fits(e.cost + int64(len(k.commit)+len(k.path)) + cacheEntryOverhead) {
+			return entries, nil
+		}
+		e.entries = slices.Clone(entries)
 	case providers.IsPathNotInTree(err):
 		e.outcome = cachedNotInTree
 	case providers.IsTooLarge(err):
@@ -225,16 +230,24 @@ func (c *ReadCache) put(k cacheKey, f providers.File, err error, limit int) {
 		// the adapter did not refuse, or a file the adapter labelled with another path or commit.
 		return
 	}
+	cost := int64(len(f.Data)+len(k.commit)+len(k.path)) + cacheEntryOverhead
+	if !c.fits(cost) {
+		// Checked before the content is copied, so a file the cache cannot keep is never cloned.
+		return
+	}
 	if e.outcome == cachedFile {
 		e.data = bytes.Clone(f.Data)
 	}
-	c.add(e, int64(len(f.Data)+len(k.commit)+len(k.path))+cacheEntryOverhead)
+	c.add(e, cost)
 }
+
+// fits reports whether one entry of the given cost can be kept at all.
+func (c *ReadCache) fits(cost int64) bool { return c.maxEntries > 0 && cost <= c.maxBytes }
 
 // add keeps e at the given cost, unless it alone is over the bounds, and evicts until the bounds hold.
 func (c *ReadCache) add(e *cacheEntry, cost int64) {
 	e.cost = cost
-	if c.maxEntries <= 0 || e.cost > c.maxBytes {
+	if !c.fits(cost) {
 		return
 	}
 	k := e.key

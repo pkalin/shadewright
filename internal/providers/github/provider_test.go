@@ -524,6 +524,50 @@ func TestListDirNotADirectory(t *testing.T) {
 	}
 }
 
+// A walk lists each directory with one request: a listing below one already read starts from its tree, not
+// from the root again, and a later read of a file in it reads only that tree and the blob.
+func TestListDirWalkCostsOneRequestPerDirectory(t *testing.T) {
+	blob := get("/git/blobs/"+shaDeploy, "")
+	blob.raw = deployYAML
+	apps := get("/git/trees/"+shaApps, "tree_apps.json")
+	h := newHarness(t, get("/git/trees/"+shaBase, "tree_root.json"), apps, apps, blob)
+	if _, err := h.p.ListDir(ctx, shaBase, "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.p.ListDir(ctx, shaBase, "apps"); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := h.p.ReadFile(ctx, shaBase, deployPath, providers.MaxFileBytes); err != nil || string(f.Data) != deployYAML {
+		t.Fatalf("ReadFile = %q, %v", f.Data, err)
+	}
+	if len(h.s.sent) != 4 {
+		t.Errorf("sent %d requests, want 4: %v", len(h.s.sent), h.s.sent)
+	}
+}
+
+// Names are returned as Git stores them, a hidden one included; an entry no tree can hold, or of an unknown
+// type, fails the listing with ErrInvalidEntry, which callers do not retry.
+func TestListDirNames(t *testing.T) {
+	tree := func(body string) step { s := get("/git/trees/"+shaApps, ""); s.raw = body; return s }
+	root := get("/git/trees/"+shaBase, "tree_root.json")
+	h := newHarness(t, root, tree(treeBody(blobEntry(".hidden.yaml"), blobEntry("a:b"))))
+	got, err := h.p.ListDir(ctx, shaBase, "apps")
+	if err != nil || len(got) != 2 || got[0].Name != ".hidden.yaml" {
+		t.Fatalf("ListDir = %v, %v, want both names", got, err)
+	}
+	for name, e := range map[string]string{
+		"slash":        blobEntry("a/b.yaml"),
+		"dot dot":      blobEntry(".."),
+		"empty":        blobEntry(""),
+		"unknown type": `{"path":"x","mode":"100644","type":"tag","sha":"` + shaDeploy + `"}`,
+	} {
+		h = newHarness(t, root, tree(treeBody(e)))
+		if _, err := h.p.ListDir(ctx, shaBase, "apps"); !providers.IsInvalidEntry(err) {
+			t.Errorf("%s: ListDir = %v, want ErrInvalidEntry", name, err)
+		}
+	}
+}
+
 // treeBody returns a tree answer holding the given entries.
 func treeBody(entries ...string) string {
 	return `{"sha":"` + shaApps + `","tree":[` + strings.Join(entries, ",") + `],"truncated":false}`

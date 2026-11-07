@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/pkalin/shadewright/internal/providers"
@@ -168,17 +169,26 @@ func (p *Provider) lookup(ctx context.Context, op, commit, path string) (string,
 	return root, e, nil
 }
 
-// descend reads the root tree at commit, then one tree per segment of dirs, and returns the root tree's SHA and
-// the last tree read. ErrPathNotInTree when a segment is missing or not a directory; any other failure to read
-// a tree is returned as it is.
+// descend reads the tree of the directory dirs at commit and returns the root tree's SHA and that tree. It
+// starts from the deepest directory on the way whose tree SHA an earlier call recorded (p.trees), else from the
+// root tree at commit, and reads one tree per remaining segment, so a walk down a directory tree costs about
+// one request per directory. ErrPathNotInTree when a segment is missing or not a directory; any other failure
+// to read a tree is returned as it is.
 func (p *Provider) descend(ctx context.Context, op, commit string, dirs []string) (string, treeJSON, error) {
-	t, err := p.tree(ctx, op, commit)
-	if err != nil {
+	root, sha, from := p.trees.start(commit, dirs)
+	var t treeJSON
+	var err error
+	if root == "" {
+		if t, err = p.tree(ctx, op, commit); err != nil {
+			return "", treeJSON{}, err
+		}
+		root = t.SHA
+		p.trees.keep(commit, nil, root, root, t)
+	} else if t, err = p.tree(ctx, op, sha); err != nil {
 		return "", treeJSON{}, err
 	}
-	root := t.SHA
-	for _, seg := range dirs {
-		e, err := entry(op, t, seg)
+	for i := from; i < len(dirs); i++ {
+		e, err := entry(op, t, dirs[i])
 		if err != nil {
 			return "", treeJSON{}, err
 		}
@@ -188,8 +198,70 @@ func (p *Provider) descend(ctx context.Context, op, commit string, dirs []string
 		if t, err = p.tree(ctx, op, e.SHA); err != nil {
 			return "", treeJSON{}, err
 		}
+		p.trees.keep(commit, dirs[:i+1], root, e.SHA, t)
 	}
 	return root, t, nil
+}
+
+// maxTreeIndex bounds how many directory trees a Provider remembers; past it, it starts over.
+const maxTreeIndex = 4096
+
+// treeIndex maps a directory at a commit to the SHA of its tree, and a commit to its root tree. It is bounded
+// and safe for concurrent use. Only trees GitHub returned are recorded, and a tree at a commit never changes,
+// so an entry never goes stale.
+type treeIndex struct {
+	mu   sync.Mutex
+	shas map[treeKey]string
+}
+
+type treeKey struct{ commit, dir string }
+
+// start returns where descend can begin for dirs at commit: the root tree's SHA (empty when unknown), the SHA
+// of the deepest directory on the way that is known (the root's when none) and how many segments of dirs it
+// covers.
+func (x *treeIndex) start(commit string, dirs []string) (root, sha string, from int) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	root, ok := x.shas[treeKey{commit, ""}]
+	if !ok {
+		return "", "", 0
+	}
+	for i := len(dirs); i > 0; i-- {
+		if s, ok := x.shas[treeKey{commit, strings.Join(dirs[:i], "/")}]; ok {
+			return root, s, i
+		}
+	}
+	return root, root, 0
+}
+
+// keep records the root tree of commit, the tree sha of dirs and the subtrees t lists.
+func (x *treeIndex) keep(commit string, dirs []string, root, sha string, t treeJSON) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if x.shas == nil || len(x.shas)+len(t.Tree)+2 > maxTreeIndex {
+		x.shas = map[treeKey]string{}
+	}
+	dir := strings.Join(dirs, "/")
+	x.shas[treeKey{commit, ""}] = root
+	if dir != "" {
+		x.shas[treeKey{commit, dir}] = sha
+	}
+	for _, e := range t.Tree {
+		if e.Type != typeTree || e.Mode != modeTree || !validSHA(e.SHA) || !validEntryName(e.Path) {
+			continue
+		}
+		child := e.Path
+		if dir != "" {
+			child = dir + "/" + e.Path
+		}
+		x.shas[treeKey{commit, child}] = e.SHA
+	}
+}
+
+// validEntryName reports whether name can be one entry of a Git tree: not empty, "." or "..", no slash or NUL
+// byte, valid UTF-8.
+func validEntryName(name string) bool {
+	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, "/\x00") && utf8.ValidString(name)
 }
 
 // entry returns the entry of t named seg: ErrPathNotInTree when there is none, an error when t is truncated
@@ -214,11 +286,12 @@ func isRegularFile(e treeEntry) bool {
 	return e.Type == typeBlob && (e.Mode == modeFile || e.Mode == modeExecutable)
 }
 
-// ListDir lists one directory at a commit through the Git Trees API, not recursively: one tree request per
-// directory segment, as for ReadFile. Each answer is bounded by the JSON body limit, and a directory of more
-// than providers.MaxDirEntries entries is refused with ErrTooLarge. Symbolic links (mode 120000) and
-// submodules (type commit) are skipped. Any other entry that is neither a regular file nor a directory, or
-// whose name is not one valid path segment, is an error rather than skipped, since GitHub does not return one.
+// ListDir lists one directory at a commit through the Git Trees API, not recursively. It starts from the
+// deepest directory on the way whose tree an earlier call read, so listing every directory of a walk costs
+// about one request per directory. Each answer is bounded by the JSON body limit, and a directory of more than
+// providers.MaxDirEntries entries is refused with ErrTooLarge. Symbolic links (mode 120000) and submodules
+// (type commit) are skipped. Names are returned as Git stores them; an entry no tree can hold (see
+// validEntryName) or of another type fails the listing with providers.ErrInvalidEntry.
 func (p *Provider) ListDir(ctx context.Context, commit, path string) ([]providers.DirEntry, error) {
 	if !validSHA(commit) {
 		return nil, errors.New(opListDir + ": commit is not a full SHA")
@@ -253,10 +326,10 @@ func (p *Provider) ListDir(ctx context.Context, commit, path string) ([]provider
 		case e.Type == typeTree && e.Mode == modeTree:
 			typ = providers.DirEntryDir
 		default:
-			return nil, errors.New(opListDir + ": GitHub returned an unexpected tree entry")
+			return nil, fmt.Errorf("%s: %w", opListDir, providers.ErrInvalidEntry)
 		}
-		if !validPath(e.Path) || strings.Contains(e.Path, "/") {
-			return nil, errors.New(opListDir + ": GitHub returned an unexpected tree entry")
+		if !validEntryName(e.Path) {
+			return nil, fmt.Errorf("%s: %w", opListDir, providers.ErrInvalidEntry)
 		}
 		out = append(out, providers.DirEntry{Name: e.Path, Type: typ})
 	}

@@ -27,7 +27,7 @@ limitations under the License.
 // [Load] reads the files of a build from a [providers.GitProvider]. When the Kustomization path has no
 // kustomization file, it lists the path as the source mapping does (internal/gitops/repopath.Generate) and
 // adds the kustomization Flux would generate, resources only, to the files, so [Check] renders what Flux
-// renders. It is bounded by [MaxReads], [MaxFiles],
+// renders; what Flux's default exclusions match is skipped, as there. It is bounded by [MaxReads], [MaxFiles],
 // [MaxFileBytes], [MaxDepth], [MaxVisits] and [MaxBuildBytes]; [Check] applies the same walk and limits to
 // the files it is given, and caps a render at [MaxObjects]. Visits and build bytes count with repetition, so
 // a diamond of overlays over a large base is refused before kustomize builds it once per path. A

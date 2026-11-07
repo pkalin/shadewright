@@ -87,9 +87,8 @@ const (
 	// ReasonSourceIncludes means the GitRepository includes other sources (NeedsIntervention).
 	ReasonSourceIncludes Reason = "SourceIncludes"
 	// ReasonSourceOptions means the GitRepository is suspended, or ignores, sparsely checks out or recurses
-	// into files, or the repository holds a .sourceignore file on the searched paths, or a path without a
-	// kustomization file holds a name Flux leaves out of its artifact by default, so the branch head may not be
-	// what Flux applies (NeedsIntervention).
+	// into files, or the repository holds a .sourceignore file on the searched paths, so the branch head may
+	// not be what Flux applies (NeedsIntervention).
 	ReasonSourceOptions Reason = "SourceOptions"
 	// ReasonSourceNotReady means the GitRepository is not Ready for its current generation, so its artifact
 	// may come from an older URL or branch (NeedsIntervention).
@@ -111,8 +110,9 @@ const (
 	ReasonBranchMismatch Reason = "BranchMismatch"
 	// ReasonBranchNotFound means the target branch does not exist in the repository (NeedsIntervention).
 	ReasonBranchNotFound Reason = "BranchNotFound"
-	// ReasonInvalidPath means a path in the Kustomization or a kustomization file, or a name listed in a path
-	// without a kustomization file, is not a plain relative path inside the repository (NeedsIntervention).
+	// ReasonInvalidPath means a path in the Kustomization or a kustomization file, or a manifest or base that
+	// the kustomization Flux generates for a path without one would hold, is not a plain relative path inside
+	// the repository, or a listing holds an entry no tree can hold (NeedsIntervention).
 	ReasonInvalidPath Reason = "InvalidPath"
 	// ReasonNoKustomizationFile means a directory a kustomization file lists as a resource has no kustomization
 	// file, as kustomize would refuse, or the Kustomization's path is not a directory in the tree

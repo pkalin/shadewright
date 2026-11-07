@@ -306,3 +306,30 @@ func TestReadCacheKeepsListings(t *testing.T) {
 		t.Errorf("a cancelled listing the cache could answer = %v, want context.Canceled", err)
 	}
 }
+
+// A kept listing is counted for its names and the string headers of each entry, so many short names cannot
+// hold more memory than the byte bound says.
+func TestReadCacheCountsListingCost(t *testing.T) {
+	c := NewReadCache(10, 1<<20)
+	if _, err := c.listDir(context.Background(), newCountingGit(1), repoA, commitA, "d"); err != nil {
+		t.Fatal(err)
+	}
+	// countingGit lists a.yaml and b; a DirEntry holds two string headers of 16 bytes each.
+	want := int64(len("a.yaml")+32+len("b")+32+len(commitA)+len("d")) + cacheEntryOverhead
+	if c.Bytes() != want {
+		t.Errorf("Bytes = %d, want %d", c.Bytes(), want)
+	}
+}
+
+// A file the cache cannot keep is not copied first.
+func TestReadCacheDoesNotCopyWhatItCannotKeep(t *testing.T) {
+	c := NewReadCache(10, 100)
+	f := providers.File{Path: "f", Commit: commitA, Data: make([]byte, 4096)}
+	k := cacheKey{repo: repoA, commit: commitA, path: "f"}
+	if allocs := testing.AllocsPerRun(10, func() { c.put(k, f, nil, MaxFileBytes) }); allocs > 1 {
+		t.Errorf("put of a file over the byte bound made %.0f allocations, want at most 1 (no copy)", allocs)
+	}
+	if c.Len() != 0 {
+		t.Errorf("Len = %d, want 0", c.Len())
+	}
+}

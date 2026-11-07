@@ -49,11 +49,9 @@ const (
 	// MaxListDepth is how far below the Kustomization's path the mapping lists directories when the path has
 	// no kustomization file and Flux would generate one.
 	MaxListDepth = repopath.MaxListDepth
-	// ListEntryBytes is what one entry of a directory listing costs against MaxTotalBytes: a fixed cost, about
-	// the size of one entry in a GitHub tree answer, since GitProvider.ListDir does not report the size of what
-	// it downloaded. A listing of providers.MaxDirEntries entries so costs 125 KiB, and the byte budget bounds
-	// listings as it bounds files, from the cache or not.
-	ListEntryBytes = 128
+	// ListEntryBytes is what one entry of a directory listing costs against MaxTotalBytes
+	// (repopath.ListEntryBytes), so the byte budget bounds listings as it bounds files, from the cache or not.
+	ListEntryBytes = repopath.ListEntryBytes
 	// MaxFileBytes is the largest file read. The provider refuses larger files before downloading them
 	// (providers.ErrTooLarge); the mapping checks the size again in case an adapter does not.
 	MaxFileBytes = providers.MaxFileBytes
@@ -159,7 +157,7 @@ func (w *walker) walk(ctx context.Context, dir string, depth int) (*Result, erro
 			return &r, nil
 		}
 		if !repopath.IsManifest(p) {
-			if stop, err := w.walk(ctx, p, depth+1); stop != nil || err != nil {
+			if stop, err := w.walk(ctx, p, depth+repopath.NestDepth(dir, p)); stop != nil || err != nil {
 				return stop, err
 			}
 			continue
@@ -247,9 +245,10 @@ var errListStopped = errors.New("listing stopped")
 
 // generated adds the files of the kustomization Flux generates for dir, which has none (ADR-0012, #122): every
 // .yaml and .yml file below it, MaxListDepth deep at most, and every directory below it with a kustomization
-// file, which is then walked as such. Each listing counts against MaxReads and the byte budget like a read.
-// A .sourceignore file in a listed directory, a name that is not a plain path segment or one Flux leaves out
-// of its artifact stops the mapping.
+// file, which is then walked as such, at its depth below dir so MaxDepth bounds the whole nesting. Entries
+// Flux's default exclusions match are skipped. Each listing counts against MaxReads and the byte budget like a
+// read. A .sourceignore file in a listed directory, or a manifest or base whose name is not a plain path
+// segment, stops the mapping.
 func (w *walker) generated(ctx context.Context, dir string) (*Result, error) {
 	var stop *Result
 	var listed []string
@@ -270,7 +269,7 @@ func (w *walker) generated(ctx context.Context, dir string) (*Result, error) {
 		switch s.Kind {
 		case repopath.StopTooDeep:
 			reason = ReasonTooManyFiles
-		case repopath.StopSourceIgnore, repopath.StopFluxIgnored:
+		case repopath.StopSourceIgnore:
 			reason = ReasonSourceOptions
 		}
 		return new(needsIntervention(reason, "%s", s.Error())), nil
@@ -284,7 +283,7 @@ func (w *walker) generated(ctx context.Context, dir string) (*Result, error) {
 	}
 	for _, res := range resources {
 		if res.Dir {
-			if stop, err := w.walk(ctx, res.Path, 1); stop != nil || err != nil {
+			if stop, err := w.walk(ctx, res.Path, res.Depth); stop != nil || err != nil {
 				return stop, err
 			}
 			continue
@@ -301,8 +300,9 @@ func (w *walker) generated(ctx context.Context, dir string) (*Result, error) {
 	return nil, nil
 }
 
-// list returns the entries of dir at the walker's commit, or a stop result when the read budget is spent,
-// the directory does not exist or is over providers.MaxDirEntries. A listing counts as one read against
+// list returns the entries of dir at the walker's commit, or a stop result when the read budget is spent, the
+// host read the tree and dir is not a directory in it, the listing holds an entry no tree can hold, or it is
+// over providers.MaxDirEntries. Any other failure, a plain not found included, is transient. A listing counts as one read against
 // MaxReads and ListEntryBytes per entry against MaxTotalBytes, from the cache or not.
 func (w *walker) list(ctx context.Context, dir string) ([]providers.DirEntry, *Result, error) {
 	if w.reads >= MaxReads {
@@ -310,24 +310,24 @@ func (w *walker) list(ctx context.Context, dir string) ([]providers.DirEntry, *R
 	}
 	w.reads++
 	entries, err := w.cache.listDir(ctx, w.git, w.repo, w.commit, dir)
-	switch {
-	case providers.IsNotFound(err):
+	shown := shownDir(dir)
+	switch repopath.CheckListing(entries, err) {
+	case repopath.ListNotADirectory:
 		return nil, new(needsIntervention(ReasonNoKustomizationFile,
-			"directory %s has no kustomization file and is not a directory in the tree", dir)), nil
-	case providers.IsTooLarge(err):
+			"%s has no kustomization file and is not a directory in the tree", shown)), nil
+	case repopath.ListTooLarge:
 		return nil, new(needsIntervention(ReasonTooManyFiles,
-			"directory %s holds more than %d entries", dir, providers.MaxDirEntries)), nil
-	case err != nil:
-		return nil, nil, transient("list "+dir, err)
-	case len(entries) > providers.MaxDirEntries:
-		// The adapter should have refused it; the bound holds anyway.
-		return nil, new(needsIntervention(ReasonTooManyFiles,
-			"directory %s holds more than %d entries", dir, providers.MaxDirEntries)), nil
+			"%s holds more than %d entries", shown, providers.MaxDirEntries)), nil
+	case repopath.ListInvalidEntry:
+		return nil, new(needsIntervention(ReasonInvalidPath,
+			"%s holds an entry that no Git tree can hold", shown)), nil
+	case repopath.ListFailed:
+		return nil, nil, transient("list "+shown, err)
 	}
 	cost := len(entries) * ListEntryBytes
 	if cost > MaxTotalBytes-w.bytes {
 		return nil, new(needsIntervention(ReasonInputTooLarge,
-			"the build reads more than %d bytes in all; the listing of %s is over it", MaxTotalBytes, dir)), nil
+			"the build reads more than %d bytes in all; the listing of %s is over it", MaxTotalBytes, shown)), nil
 	}
 	w.bytes += cost
 	return entries, nil, nil
@@ -547,4 +547,13 @@ func ReadField(data []byte, target v1alpha1.ObjectRef, field Field) (value any, 
 	}
 	value, found = field.Get(exact)
 	return value, found, nil
+}
+
+// shownDir names a listed directory for a message: its path when every segment is valid, else a fixed text,
+// since a directory Flux descends into may have a hidden or unusual name.
+func shownDir(dir string) string {
+	if p, ok := repopath.Join(".", dir); ok {
+		return "directory " + p
+	}
+	return "a listed directory"
 }

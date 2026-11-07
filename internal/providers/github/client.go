@@ -104,6 +104,10 @@ type Provider struct {
 	sleep    func(context.Context, time.Duration) error
 	jitter   func(time.Duration) time.Duration
 	now      func() time.Time
+
+	// trees remembers the SHA of each directory tree read at a commit, so a later ReadFile or ListDir below it
+	// starts there instead of descending from the root again. A tree at a commit never changes.
+	trees treeIndex
 }
 
 var _ providers.GitProvider = (*Provider)(nil)

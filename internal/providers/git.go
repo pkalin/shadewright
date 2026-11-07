@@ -168,7 +168,10 @@ type GitProvider interface {
 	// for ReadFile; ErrPathNotInTree (which wraps ErrNotFound) only when the implementation read the tree at
 	// that commit and path is not a directory in it. ErrTooLarge when the directory holds more than
 	// MaxDirEntries entries, symbolic links and submodules included; implementations also bound the size of
-	// the host's answer, so a large directory cannot exhaust memory.
+	// the host's answer, so a large directory cannot exhaust memory. A name is returned as Git stores it (it
+	// may be hidden or hold characters no path rule accepts; callers validate what they use), except that an
+	// entry no tree can hold (an empty, "." or ".." name, a slash or NUL byte, invalid UTF-8, an unknown type)
+	// fails the listing with ErrInvalidEntry.
 	ListDir(ctx context.Context, commit, path string) ([]DirEntry, error)
 
 	// BranchHead returns the commit at the head of a branch. ErrNotFound when the branch does not exist.

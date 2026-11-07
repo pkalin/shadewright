@@ -48,19 +48,46 @@ func dir(name string) providers.DirEntry {
 
 func TestGenerate(t *testing.T) {
 	tr := tree{
-		// Listed out of order: the walk sorts.
-		orders:                {file("z.yml"), dir("base"), file("a.yaml"), file("notes.txt"), dir("sub"), file("run.sh")},
-		orders + "/base":      {file("kustomization.yaml"), file("ignored.yaml"), dir("deeper")},
-		orders + "/sub":       {file("b.yaml"), dir("empty")},
+		// Sorted by name, as a GitProvider lists.
+		orders: {file(".gitkeep"), dir(".github"), dir(".hidden"), file("a.yaml"), dir("assets.zip"), dir("base"),
+			file("cloudbuild.yaml"), file("logo.png"), file("notes.txt"), file("run.sh"), dir("sub"), file("z.yml")},
+		orders + "/.hidden": {file("README.md")},
+		// A base is built from its own kustomization file: its other entries are not checked, hidden or not.
+		orders + "/base":      {file(".env.yaml"), file("ignored.yaml"), file("kustomization.yaml"), dir("x:y")},
+		orders + "/sub":       {file(".sops.yaml"), file("b.yaml"), dir("empty")},
 		orders + "/sub/empty": nil,
 	}
 	got, err := repopath.Generate(context.Background(), orders, tr.list)
 	want := []repopath.Resource{
-		{Path: orders + "/a.yaml"}, {Path: orders + "/base", Dir: true}, {Path: orders + "/sub/b.yaml"},
+		{Path: orders + "/a.yaml"}, {Path: orders + "/base", Dir: true, Depth: 1}, {Path: orders + "/sub/b.yaml"},
 		{Path: orders + "/z.yml"},
 	}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("Generate = %v, %v, want %v", got, err, want)
+	}
+}
+
+// Flux's default exclusions, as fluxcd/pkg sourceignore defines them: matched names are left out at any
+// depth, directory patterns only for directories.
+func TestFluxExcludes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dir  bool
+		want bool
+	}{
+		{".git", true, true}, {".gitignore", false, true}, {".gitmodules", false, true}, {".gitattributes", false, true},
+		{"a.jpg", false, true}, {"a.jpeg", false, true}, {"a.gif", false, true}, {"a.png", false, true},
+		{"a.wmv", false, true}, {"a.flv", false, true}, {"a.tar.gz", false, true}, {"a.zip", true, true},
+		{".github", true, true}, {".circleci", true, true}, {".travis.yml", false, true}, {".gitlab-ci.yml", false, true},
+		{"appveyor.yml", false, true}, {".drone.yml", false, true}, {"cloudbuild.yaml", false, true},
+		{"codeship-services.yml", false, true}, {"codeship-steps.yml", false, true}, {".goreleaser.yml", false, true},
+		{".sops.yaml", false, true}, {".flux.yaml", false, true},
+		{".github", false, false}, {".git", false, false}, {"a.yaml", false, false}, {"a.PNG", false, false},
+		{"zip", false, false}, {"github", true, false},
+	} {
+		if got := repopath.FluxExcludes(tc.name, tc.dir); got != tc.want {
+			t.Errorf("FluxExcludes(%q, dir %v) = %v, want %v", tc.name, tc.dir, got, tc.want)
+		}
 	}
 }
 
@@ -87,18 +114,18 @@ func TestGenerateStops(t *testing.T) {
 		tr   tree
 		want repopath.StopKind
 	}{
-		"too deep":            {deep, repopath.StopTooDeep},
-		"hidden name":         {tree{orders: {file(".env.yaml")}}, repopath.StopInvalidName},
-		"hidden directory":    {tree{orders: {dir(".config")}}, repopath.StopInvalidName},
-		"dot dot":             {tree{orders: {dir("..")}}, repopath.StopInvalidName},
-		"ambiguous":           {tree{orders: {file("a..b.yaml")}}, repopath.StopInvalidName},
-		"slash":               {tree{orders: {file("a/b.yaml")}}, repopath.StopInvalidName},
-		"colon":               {tree{orders: {file("https:x.yaml")}}, repopath.StopInvalidName},
-		"empty":               {tree{orders: {file("")}}, repopath.StopInvalidName},
-		"unknown type":        {tree{orders: {{Name: "l.yaml", Type: "Symlink"}}}, repopath.StopInvalidName},
-		"sourceignore":        {tree{orders: {file("a.yaml"), dir("s")}, orders + "/s": {file(".sourceignore")}}, repopath.StopSourceIgnore},
-		"flux default ignore": {tree{orders: {file("cloudbuild.yaml")}}, repopath.StopFluxIgnored},
-		"in a nested base":    {tree{orders: {dir("b")}, orders + "/b": {file("kustomization.yaml"), dir(".github")}}, repopath.StopFluxIgnored},
+		"too deep":                 {deep, repopath.StopTooDeep},
+		"hidden manifest":          {tree{orders: {file(".env.yaml")}}, repopath.StopInvalidName},
+		"manifest in hidden dir":   {tree{orders: {dir(".config")}, orders + "/.config": {file("a.yaml")}}, repopath.StopInvalidName},
+		"base in hidden dir":       {tree{orders: {dir(".b")}, orders + "/.b": {file("kustomization.yaml")}}, repopath.StopInvalidName},
+		"unlistable directory":     {tree{orders: {dir("a\tb")}}, repopath.StopInvalidName},
+		"dot dot directory":        {tree{orders: {dir("..")}}, repopath.StopInvalidName},
+		"ambiguous":                {tree{orders: {file("a..b.yaml")}}, repopath.StopInvalidName},
+		"colon":                    {tree{orders: {file("https:x.yaml")}}, repopath.StopInvalidName},
+		"unknown type":             {tree{orders: {{Name: "l.yaml", Type: "Symlink"}}}, repopath.StopInvalidName},
+		"sourceignore":             {tree{orders: {file("a.yaml"), dir("s")}, orders + "/s": {file(".sourceignore")}}, repopath.StopSourceIgnore},
+		"sourceignore in a base":   {tree{orders: {dir("b")}, orders + "/b": {file(".sourceignore"), file("kustomization.yaml")}}, repopath.StopSourceIgnore},
+		"sourceignore in a hidden": {tree{orders: {dir(".h")}, orders + "/.h": {file(".sourceignore")}}, repopath.StopSourceIgnore},
 		"too long": {tree{orders: {dir(strings.Repeat("a", 200))}, orders + "/" + strings.Repeat("a", 200): {
 			dir(strings.Repeat("b", 200))}, orders + "/" + strings.Repeat("a", 200) + "/" + strings.Repeat("b", 200): {
 			file(strings.Repeat("c", 200) + ".yaml")}}, repopath.StopInvalidName},
@@ -109,8 +136,10 @@ func TestGenerateStops(t *testing.T) {
 			if !ok || s.Kind != tc.want {
 				t.Fatalf("Generate = %v, want stop %d", err, tc.want)
 			}
-			if strings.Contains(s.Error(), ".env") || strings.Contains(s.Error(), "https") {
-				t.Errorf("stop quotes a listed name: %s", s.Error())
+			for _, leak := range []string{".env", "https", ".config", ".b", ".h"} {
+				if strings.Contains(s.Error(), leak+"/") || strings.Contains(s.Error(), leak+" ") {
+					t.Errorf("stop quotes a listed name: %s", s.Error())
+				}
 			}
 		})
 	}
@@ -121,5 +150,40 @@ func TestGenerateStops(t *testing.T) {
 		return nil, boom
 	}); !errors.Is(err, boom) {
 		t.Errorf("lister error = %v, want it returned", err)
+	}
+}
+
+// A plain not found is not a permanent answer: the host may not have the commit yet, or be failing.
+func TestCheckListing(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		n    int
+		want repopath.ListFault
+	}{
+		{nil, 3, repopath.ListOK},
+		{nil, providers.MaxDirEntries + 1, repopath.ListTooLarge},
+		{fmt.Errorf("x: %w", providers.ErrPathNotInTree), 0, repopath.ListNotADirectory},
+		{fmt.Errorf("GitHub returned status 404: %w", providers.ErrNotFound), 0, repopath.ListFailed},
+		{fmt.Errorf("x: %w", providers.ErrTooLarge), 0, repopath.ListTooLarge},
+		{fmt.Errorf("x: %w", providers.ErrInvalidEntry), 0, repopath.ListInvalidEntry},
+		{context.Canceled, 0, repopath.ListFailed},
+	} {
+		if got := repopath.CheckListing(make([]providers.DirEntry, tc.n), tc.err); got != tc.want {
+			t.Errorf("CheckListing(%d entries, %v) = %d, want %d", tc.n, tc.err, got, tc.want)
+		}
+	}
+}
+
+func TestNestDepth(t *testing.T) {
+	for _, tc := range []struct {
+		dir, p string
+		want   int
+	}{
+		{orders, orders + "/base", 1}, {orders, orders + "/a/b/c", 3}, {".", "apps/orders", 2},
+		{orders, "apps/web", 1}, {orders, "apps/orders2/x", 1}, {".", "x", 1},
+	} {
+		if got := repopath.NestDepth(tc.dir, tc.p); got != tc.want {
+			t.Errorf("NestDepth(%s, %s) = %d, want %d", tc.dir, tc.p, got, tc.want)
+		}
 	}
 }

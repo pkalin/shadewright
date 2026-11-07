@@ -31,6 +31,9 @@ import (
 // ordersDir is the Kustomization path of the fixture.
 const ordersDir = "apps/orders"
 
+// configMapX is a manifest that is not the target.
+const configMapX = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n"
+
 // plain removes the kustomization file, so Flux generates one from every manifest in apps/orders (#122).
 func plain(f *fixture) {
 	delete(f.files, ksFile)
@@ -76,7 +79,21 @@ func TestResolveWithoutKustomizationFile(t *testing.T) {
 			f.files["apps/orders/base/so.yaml"] = orderTarget
 			// Not listed in the base's kustomization file, so Flux does not apply it.
 			f.files["apps/orders/base/unused.yaml"] = orderTarget
+			// Nor are the base's other entries checked, as Flux builds it from its kustomization file.
+			f.files["apps/orders/base/.env.yaml"] = orderTarget
 		}, "apps/orders/base/so.yaml"},
+		// What Flux leaves out of the artifact is skipped, so a second declaration there is not one (#122).
+		{"names Flux excludes by default are skipped", func(f *fixture) {
+			plain(f)
+			for _, p := range []string{"cloudbuild.yaml", ".github/ci.yaml", "assets.zip/x.yaml", ".sops.yaml", "sub/.flux.yaml"} {
+				f.files["apps/orders/"+p] = orderTarget
+			}
+		}, soFile},
+		{"hidden files that are not manifests and hidden directories without manifests are skipped", func(f *fixture) {
+			plain(f)
+			f.files["apps/orders/.gitkeep"] = ""
+			f.files["apps/orders/.cache/notes.txt"] = "x\n"
+		}, soFile},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,12 +211,29 @@ func TestResolveWithoutKustomizationFileStops(t *testing.T) {
 		{"a .sourceignore file in a nested directory", func(f *fixture) {
 			plain(f)
 			f.files["apps/orders/sub/.sourceignore"] = "*.txt\n"
-			f.files["apps/orders/sub/x.yaml"] = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n"
+			f.files["apps/orders/sub/x.yaml"] = configMapX
 		}, sourcemap.ReasonSourceOptions},
-		{"a name Flux leaves out of the artifact", func(f *fixture) {
+		{"a manifest in a hidden directory", func(f *fixture) {
 			plain(f)
-			f.files["apps/orders/cloudbuild.yaml"] = orderTarget
-		}, sourcemap.ReasonSourceOptions},
+			f.files["apps/orders/.config/x.yaml"] = configMapX
+		}, sourcemap.ReasonInvalidPath},
+		{"a base MaxListDepth deep counts its depth against MaxDepth", func(f *fixture) {
+			plain(f)
+			base := deep(sourcemap.MaxListDepth)
+			// The base and a chain below it: 5 + 4 levels, over MaxDepth (8); counted from 1 it would be 5.
+			chain := base
+			for range 4 {
+				f.files[chain+"/kustomization.yaml"] = "resources:\n  - k\n"
+				chain += "/k"
+			}
+			f.files[chain+"/kustomization.yaml"] = "resources: []\n"
+		}, sourcemap.ReasonTooManyFiles},
+		{"a listing with an entry no tree can hold", func(f *fixture) {
+			plain(f)
+			f.gitWrap = func(g providers.GitProvider) providers.GitProvider {
+				return failList{GitProvider: g, err: fmt.Errorf("listing: %w", providers.ErrInvalidEntry)}
+			}
+		}, sourcemap.ReasonInvalidPath},
 		{"a hidden name", func(f *fixture) {
 			plain(f)
 			f.files["apps/orders/.hidden.yaml"] = orderTarget
@@ -228,6 +262,30 @@ func TestResolveWithoutKustomizationFileStops(t *testing.T) {
 	}
 }
 
+// failList fails every listing with err.
+type failList struct {
+	providers.GitProvider
+	err error
+}
+
+func (f failList) ListDir(context.Context, string, string) ([]providers.DirEntry, error) {
+	return nil, f.err
+}
+
+// A plain not found from the host (a 404 on a subtree, a token it cannot get) is transient, not the permanent
+// NoKustomizationFile: only ErrPathNotInTree says the host read the tree.
+func TestResolveListingNotFoundIsTransient(t *testing.T) {
+	f := newFixture()
+	plain(f)
+	f.gitWrap = func(g providers.GitProvider) providers.GitProvider {
+		return failList{GitProvider: g, err: fmt.Errorf("GitHub returned status 404: %w", providers.ErrNotFound)}
+	}
+	res, _, err := f.run(t)
+	if !errors.Is(err, sourcemap.ErrTransient) {
+		t.Fatalf("result = %s/%s, error = %v; want ErrTransient", res.Outcome, res.Reason, err)
+	}
+}
+
 // listCounter counts the ListDir calls that reach the provider.
 type listCounter struct {
 	providers.GitProvider
@@ -248,7 +306,7 @@ func TestResolveCachesListings(t *testing.T) {
 	var counters []*listCounter
 	change := func(f *fixture) {
 		plain(f)
-		f.files["apps/orders/sub/x.yaml"] = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n"
+		f.files["apps/orders/sub/x.yaml"] = configMapX
 		f.cache = cache
 		f.gitWrap = func(g providers.GitProvider) providers.GitProvider {
 			c := &listCounter{GitProvider: g}

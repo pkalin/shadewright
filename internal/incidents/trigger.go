@@ -65,8 +65,9 @@ const (
 	// ReasonEscalated: the last analysis, or a request that ended without success ([Closure]), handed the
 	// incident to a person; the closure rules resolve it once it goes quiet.
 	ReasonEscalated = "Escalated"
-	// ReasonResolved: the incident is Resolved and is never analyzed again (design 3.2, #251). A symptom seen
-	// again moves it to Escalated within RecurrenceWindow of resolvedTime, or opens its next occurrence after.
+	// ReasonResolved: the incident is Resolved and is not analyzed while it stays so (design 3.2, #251). A
+	// symptom seen again moves it to Escalated within RecurrenceWindow of resolvedTime (or back to Open when it
+	// was resolved by quiet time before any analysis, [reopens]), or opens its next occurrence after.
 	ReasonResolved = "Resolved"
 	// ReasonRecurred: the incident is Escalated because its symptom came back after it was Resolved (the
 	// condition Recurred), not because of an analysis; a person decides.

@@ -213,6 +213,11 @@ type Controller struct {
 	// entry per name in names.
 	resolvedAt map[string]time.Time
 	pending    map[string]*batch
+	// inflight is, per fingerprint, what the writes in flight hold: how many there are and the newest
+	// observation they carry. flush takes batches out of pending and failed before it writes them, so the
+	// closure rules read it too ([Controller.unwrittenSince]) and never take an Incident as quiet while one of
+	// its observations is being written.
+	inflight map[string]*flight
 	// failed holds, per Incident, the batches of a status write whose answer never came: the API server may
 	// have stored them or not. They stay apart from pending, so the next write can tell from the fresh status
 	// whether they were applied (applied) without new observations hiding it.
@@ -237,6 +242,17 @@ type Controller struct {
 	// Only the trigger goroutine uses them.
 	capNear       bool
 	lastNearEvent time.Time
+	// closeFailed are the Incidents whose last closure write failed: the next pass tries them after the
+	// others, so a few that keep failing never hold up the rest. Only the trigger goroutine uses it, and it
+	// holds only listed names.
+	closeFailed map[string]struct{}
+}
+
+// flight is what the writes of one fingerprint in flight hold: how many there are, and the newest
+// observation in their batches.
+type flight struct {
+	n    int
+	last time.Time
 }
 
 // holding is what one fingerprint's batches hold unwritten: n occurrences, and in how many of them each
@@ -327,23 +343,25 @@ func New(cfg Config) (*Controller, error) {
 		cfg.Now = time.Now
 	}
 	return &Controller{
-		cfg:        cfg,
-		ready:      make(chan struct{}),
-		records:    map[string]record{},
-		recordsOf:  map[string]map[string]struct{}{},
-		held:       map[string]*holding{},
-		heldIn:     map[string]int{},
-		names:      map[string]struct{}{},
-		current:    map[string]int32{},
-		opening:    map[string]struct{}{},
-		resolvedAt: map[string]time.Time{},
-		pending:    map[string]*batch{},
-		failed:     map[string]*batch{},
-		kick:       make(chan struct{}, 1),
-		nextWrite:  map[string]time.Time{},
-		refused:    newBoundedSet(refusedRemembered),
-		sightings:  newSightings(cfg.MaxFirstSightings),
-		memory:     map[types.UID]*trace{},
+		cfg:         cfg,
+		ready:       make(chan struct{}),
+		records:     map[string]record{},
+		recordsOf:   map[string]map[string]struct{}{},
+		held:        map[string]*holding{},
+		heldIn:      map[string]int{},
+		names:       map[string]struct{}{},
+		current:     map[string]int32{},
+		opening:     map[string]struct{}{},
+		resolvedAt:  map[string]time.Time{},
+		pending:     map[string]*batch{},
+		inflight:    map[string]*flight{},
+		failed:      map[string]*batch{},
+		kick:        make(chan struct{}, 1),
+		nextWrite:   map[string]time.Time{},
+		refused:     newBoundedSet(refusedRemembered),
+		sightings:   newSightings(cfg.MaxFirstSightings),
+		memory:      map[types.UID]*trace{},
+		closeFailed: map[string]struct{}{},
 	}, nil
 }
 
@@ -871,7 +889,6 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 	delete(c.pending, fp)
 	name := c.nameOf(fp)
 	_, opening := c.opening[name]
-	c.mu.Unlock()
 	var batches []*batch
 	for _, b := range []*batch{f, p} {
 		if b != nil {
@@ -879,13 +896,17 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 		}
 	}
 	if len(batches) == 0 {
+		c.mu.Unlock()
 		return
 	}
+	c.takeOff(fp, batches)
+	c.mu.Unlock()
 	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 	defer cancel()
 	res, err := c.write(wctx, name, occurrenceOf(name) < 2 || opening, batches)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.landed(fp)
 	defer c.recount(fp)
 	if res.created {
 		delete(c.opening, name)
@@ -1186,8 +1207,12 @@ func (c *Controller) write(ctx context.Context, name string, create bool, batche
 			res.dropped = append(res.dropped, merge(&res.inc.Status, b)...)
 		}
 		if resolved == escalate {
-			escalateRecurrence(res.inc, c.cfg.Now())
-			res.escalated = true
+			if reopens(&res.inc.Status) {
+				reopen(res.inc, c.cfg.Now())
+			} else {
+				escalateRecurrence(res.inc, c.cfg.Now())
+				res.escalated = true
+			}
 		}
 		if err = c.client.Status().Update(ctx, res.inc); apierrors.IsInvalid(err) {
 			return &refusedError{exists: true, err: err}

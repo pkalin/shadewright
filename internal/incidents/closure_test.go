@@ -19,7 +19,9 @@ package incidents
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -99,9 +101,35 @@ func TestClosure(t *testing.T) {
 		{name: "proposed, quiet, a request with no phase yet is active", inc: func() *remediationv1alpha1.Incident {
 			return closureIncident(remediationv1alpha1.IncidentProposed, quiet)
 		}, requests: []remediationv1alpha1.RemediationRequest{request("a", 2*time.Hour, "")}},
-		{name: "proposed, quiet, merged is not final until verified", inc: func() *remediationv1alpha1.Incident {
+		{name: "proposed, quiet, merged counts as final until the verifier", inc: func() *remediationv1alpha1.Incident {
 			return closureIncident(remediationv1alpha1.IncidentProposed, quiet)
-		}, requests: []remediationv1alpha1.RemediationRequest{request("a", 2*time.Hour, remediationv1alpha1.PhaseMerged)}},
+		}, requests: []remediationv1alpha1.RemediationRequest{request("a", 2*time.Hour, remediationv1alpha1.PhaseMerged)},
+			phase: resolved, reason: ReasonSymptomQuiet},
+		{name: "proposed, merged moves nothing by itself", inc: proposed,
+			requests: []remediationv1alpha1.RemediationRequest{request("a", 2*time.Hour, remediationv1alpha1.PhaseMerged)}},
+		{name: "proposed, an older active request blocks the newest outcome", inc: proposed,
+			requests: []remediationv1alpha1.RemediationRequest{
+				request("a", 2*time.Hour, remediationv1alpha1.PhaseAwaitingApproval),
+				request("b", time.Hour, remediationv1alpha1.PhaseDenied),
+			}},
+		{name: "proposed, an older active request blocks the newest success", inc: proposed,
+			requests: []remediationv1alpha1.RemediationRequest{
+				request("a", 2*time.Hour, remediationv1alpha1.PhasePRCreated),
+				request("b", time.Hour, remediationv1alpha1.PhaseSucceeded),
+			}},
+		{name: "escalated by a superseded request, the replacement succeeded", inc: func() *remediationv1alpha1.Incident {
+			inc := closureIncident(remediationv1alpha1.IncidentEscalated, time.Minute)
+			applyClosure(inc, remediationv1alpha1.IncidentEscalated, ReasonRequestSuperseded, triggerNow.Add(-10*time.Minute))
+			return inc
+		}, requests: []remediationv1alpha1.RemediationRequest{
+			request("a", 2*time.Hour, remediationv1alpha1.PhaseSuperseded),
+			request("b", time.Hour, remediationv1alpha1.PhaseSucceeded),
+		}, phase: resolved, reason: ReasonRequestSucceeded},
+		{name: "escalated by a superseded request, still superseded", inc: func() *remediationv1alpha1.Incident {
+			inc := closureIncident(remediationv1alpha1.IncidentEscalated, time.Minute)
+			applyClosure(inc, remediationv1alpha1.IncidentEscalated, ReasonRequestSuperseded, triggerNow.Add(-10*time.Minute))
+			return inc
+		}, requests: []remediationv1alpha1.RemediationRequest{request("a", 2*time.Hour, remediationv1alpha1.PhaseSuperseded)}},
 		{name: "proposed, request succeeded", inc: proposed,
 			requests: []remediationv1alpha1.RemediationRequest{request("a", time.Hour, remediationv1alpha1.PhaseSucceeded)},
 			phase:    resolved, reason: ReasonRequestSucceeded},
@@ -402,6 +430,193 @@ func TestUnreadableRequestsKeepThePhase(t *testing.T) {
 	}
 }
 
+// Findings of the review of #466: an observation in a write in flight keeps the Incident from going quiet. The
+// closure pass runs while the observation writer has taken the batch out of pending and not stored it yet; it
+// must not resolve the Incident, or the observation would count as seen before resolvedTime.
+func TestInFlightObservationKeepsTheIncidentOpen(t *testing.T) {
+	c, cl := closureController(t, closureIncident(remediationv1alpha1.IncidentOpen, 2*time.Hour))
+	w := &countingClient{Client: cl}
+	c.client = w
+	var closeErr error
+	ran := false
+	w.before = func(ctx context.Context, inc *remediationv1alpha1.Incident) {
+		if ran {
+			return
+		}
+		ran = true
+		closeErr = c.closeIncidents(ctx)
+	}
+	c.consume(t.Context(), seenAt(7, triggerNow))
+	c.flush(t.Context(), fp(1))
+	if !ran || closeErr != nil {
+		t.Fatalf("closure pass ran %v, error %v", ran, closeErr)
+	}
+	got := getIncident(t, cl)
+	if got.Status.Phase != remediationv1alpha1.IncidentOpen || !got.Status.LastSeen.Time.Equal(triggerNow) {
+		t.Fatalf("phase %s lastSeen %v, want Open and the new observation", got.Status.Phase, got.Status.LastSeen)
+	}
+	c.mu.Lock()
+	left := len(c.inflight)
+	c.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("%d writes still in flight after the flush", left)
+	}
+}
+
+// Each attempt of a closure write lists the requests again: a replacement created while the first attempt
+// conflicted keeps a Superseded chain from escalating.
+func TestRetryListsTheRequestsAgain(t *testing.T) {
+	c, cl := closureController(t, closureIncident(remediationv1alpha1.IncidentProposed, time.Minute),
+		request("a", 2*time.Hour, remediationv1alpha1.PhaseSuperseded))
+	w := &countingClient{Client: cl}
+	attempts := 0
+	w.instead = func(ctx context.Context) error {
+		attempts++
+		if attempts > 1 {
+			return nil
+		}
+		replacement := request("b", time.Minute, remediationv1alpha1.PhasePRCreated)
+		if err := cl.Create(ctx, &replacement); err != nil {
+			t.Fatal(err)
+		}
+		inc := getIncident(t, cl)
+		inc.Status.Count++
+		if err := cl.Status().Update(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		return apierrors.NewConflict(remediationv1alpha1.GroupVersion.WithResource("incidents").GroupResource(), inc.Name,
+			errors.New("the object has been modified"))
+	}
+	c.client = w
+	if err := c.closeIncidents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := getIncident(t, cl); got.Status.Phase != remediationv1alpha1.IncidentProposed {
+		t.Fatalf("phase %s after a replacement appeared during the retry, want Proposed", got.Status.Phase)
+	}
+}
+
+// A write that fails does not count against the moves of a pass, so Incidents that keep failing never hold up
+// the rest.
+func TestFailedWritesDoNotStarveTheRest(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := remediationv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	n := closureWritesPerPass + 1
+	objs := make([]client.Object, 0, n)
+	for i := 1; i <= n; i++ {
+		inc := closureIncident(remediationv1alpha1.IncidentOpen, 2*time.Hour)
+		spec := specOf(observation(i, 1, 1, 1, triggerNow))
+		inc.Name, inc.Spec, inc.UID = Name(fp(i)), spec, types.UID(fmt.Sprintf("00000000-0000-4000-8000-%012d", i))
+		objs = append(objs, inc)
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&remediationv1alpha1.Incident{}).
+		WithObjects(objs...).Build()
+	c := loaded(t, cl)
+	healthy := Name(fp(n))
+	w := &countingClient{Client: cl}
+	var current string
+	w.before = func(_ context.Context, inc *remediationv1alpha1.Incident) { current = inc.Name }
+	w.instead = func(context.Context) error {
+		if current != healthy {
+			return apierrors.NewServiceUnavailable("unavailable")
+		}
+		return nil
+	}
+	c.client = w
+	if err := c.closeIncidents(t.Context()); err == nil {
+		t.Fatal("the failed writes were not reported")
+	}
+	got := &remediationv1alpha1.Incident{}
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: fakeNamespace, Name: healthy}, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != remediationv1alpha1.IncidentResolved {
+		t.Fatalf("the Incident that could be written has phase %s, want Resolved", got.Status.Phase)
+	}
+	if len(c.closeFailed) != n-1 {
+		t.Fatalf("%d Incidents remembered as failed, want %d", len(c.closeFailed), n-1)
+	}
+}
+
+// A closure step that runs into its deadline leaves the due marks their own time in the pass.
+func TestStalledClosureLeavesTheMarksTheirTime(t *testing.T) {
+	c, cl := closureController(t, closureIncident(remediationv1alpha1.IncidentOpen, 2*time.Hour))
+	c.cfg.PassTimeout, c.cfg.ReadTimeout = 200*time.Millisecond, 50*time.Millisecond
+	lists := &countingLists{Client: cl}
+	c.cache = lists
+	c.reader = &stalling{Client: cl}
+	_ = c.pass(t.Context())
+	if got := lists.incidents.Load(); got != 2 {
+		t.Fatalf("the Incidents were listed %d times in the pass, want 2 (closure and marks)", got)
+	}
+}
+
+// The cap gauges come from memory, so a pass whose listings fail still sets them.
+func TestCapGaugeIsSetWhenTheListingFails(t *testing.T) {
+	c, cl := closureController(t, closureIncident(remediationv1alpha1.IncidentOpen, time.Minute))
+	c.cfg.MaxIncidents = 7
+	c.cache = &failingIncidents{Client: cl}
+	incidentCap.Set(0)
+	if err := c.pass(t.Context()); err == nil {
+		t.Fatal("the failed listing was not reported")
+	}
+	if v := testutil.ToFloat64(incidentCap); v != 7 {
+		t.Fatalf("shadewright_incident_cap = %v, want 7", v)
+	}
+}
+
+// Decision D2 of #466: an Incident resolved by quiet time before any analysis reopens on a recurrence within
+// the window, with no resolvedTime; one that was analyzed, or resolved otherwise, is escalated.
+func TestRecurrenceOfAQuietResolution(t *testing.T) {
+	resolvedQuiet := func(mut func(*remediationv1alpha1.Incident)) *remediationv1alpha1.Incident {
+		inc := closureIncident(remediationv1alpha1.IncidentOpen, 3*time.Hour)
+		applyClosure(inc, remediationv1alpha1.IncidentResolved, ReasonSymptomQuiet, triggerNow.Add(-time.Hour))
+		if mut != nil {
+			mut(inc)
+		}
+		return inc
+	}
+	tests := []struct {
+		name  string
+		inc   *remediationv1alpha1.Incident
+		phase remediationv1alpha1.IncidentPhase
+	}{
+		{"never analyzed reopens", resolvedQuiet(nil), remediationv1alpha1.IncidentOpen},
+		{"analyzed escalates", resolvedQuiet(func(inc *remediationv1alpha1.Incident) {
+			inc.Status.LastAnalysisTime = ago(2 * time.Hour)
+		}), remediationv1alpha1.IncidentEscalated},
+		{"with a request escalates", resolvedQuiet(func(inc *remediationv1alpha1.Incident) {
+			inc.Status.RemediationRequests = []remediationv1alpha1.Name{"a"}
+		}), remediationv1alpha1.IncidentEscalated},
+		{"resolved by a success escalates", resolvedQuiet(func(inc *remediationv1alpha1.Incident) {
+			applyClosure(inc, remediationv1alpha1.IncidentResolved, ReasonRequestSucceeded, triggerNow.Add(-time.Hour))
+		}), remediationv1alpha1.IncidentEscalated},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, cl := closureController(t, tt.inc)
+			c.consume(t.Context(), seenAt(9, triggerNow))
+			c.flush(t.Context(), fp(1))
+			got := getIncident(t, cl)
+			if got.Status.Phase != tt.phase {
+				t.Fatalf("phase %s, want %s", got.Status.Phase, tt.phase)
+			}
+			reopened := tt.phase == remediationv1alpha1.IncidentOpen
+			if reopened != (got.Status.ResolvedTime == nil) {
+				t.Fatalf("resolvedTime %v after phase %s", got.Status.ResolvedTime, got.Status.Phase)
+			}
+			if recurred := meta.FindStatusCondition(got.Status.Conditions, ConditionRecurred) != nil; recurred == reopened {
+				t.Fatalf("condition Recurred set %v for phase %s", recurred, got.Status.Phase)
+			}
+			if reopened && lifecycleReason(got) != ReasonReopened {
+				t.Fatalf("Lifecycle reason %q, want %s", lifecycleReason(got), ReasonReopened)
+			}
+		})
+	}
+}
+
 // A pass whose context ends leaves the Incident as it was.
 func TestCancelledPassKeepsThePhase(t *testing.T) {
 	c, cl := closureController(t, closureIncident(remediationv1alpha1.IncidentOpen, 2*time.Hour))
@@ -483,6 +698,37 @@ type failingRequests struct{ client.Client }
 func (f *failingRequests) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	if _, ok := list.(*remediationv1alpha1.RemediationRequestList); ok {
 		return errors.New("the API server is unavailable")
+	}
+	return f.Client.List(ctx, list, opts...)
+}
+
+// countingLists counts the listings of Incidents.
+type countingLists struct {
+	client.Client
+	incidents atomic.Int32
+}
+
+func (c *countingLists) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*remediationv1alpha1.IncidentList); ok {
+		c.incidents.Add(1)
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+// stalling blocks every Get until its context ends, as an API server that does not answer.
+type stalling struct{ client.Client }
+
+func (s *stalling) Get(ctx context.Context, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// failingIncidents fails every listing of Incidents.
+type failingIncidents struct{ client.Client }
+
+func (f *failingIncidents) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*remediationv1alpha1.IncidentList); ok {
+		return errors.New("the cache is unavailable")
 	}
 	return f.Client.List(ctx, list, opts...)
 }

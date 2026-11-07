@@ -1393,13 +1393,14 @@ func TestQuietIncidentsTakeNoBudgetWhenSettingsArriveLate(t *testing.T) {
 
 // Settings applied after Incidents exist: a lasting symptom state of a module (a "condition:" occurrence),
 // emitted once while it lasts, is not taken as gone though it was seen an hour ago, so it is due; an event seen
-// once an hour ago is not (NotRecent).
+// once 50 minutes ago is not (NotRecent).
 func TestLastingStateIsNotSkippedWhenSettingsArriveLate(t *testing.T) {
 	ns := namespace(t)
 	lasting := incidentStatus(time.Hour, time.Hour, 0)
 	lasting.Occurrences[0].ID = conditionID
 	createIncident(t, ns, 1, lasting)
-	// Seen less than QuietBeforeResolved ago, so the closure rules leave it Open.
+	// Seen 50 minutes ago: past the recent window, so NotRecent, but less than QuietBeforeResolved ago, so the
+	// closure rules leave it Open.
 	createIncident(t, ns, 2, incidentStatus(50*time.Minute, time.Hour, 0))
 	start(t, ns, triggerConfig)
 	eventually(t, ns, 1, dueIs(false, ReasonSettingsNotFound))

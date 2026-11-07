@@ -28,7 +28,8 @@ limitations under the License.
 // occurrence instead, through the same gate as a new fingerprint: a new Incident named "incident-<hex>-<n>"
 // (remediationv1alpha1.IncidentName) whose spec links it to the one before and whose status starts empty,
 // under the cap like a new fingerprint. Any other observation written to it moves it to Escalated in the same
-// status update (condition Recurred), unless it was seen no later than resolvedTime. Which Incidents are
+// status update (condition Recurred), unless it was seen no later than resolvedTime; an Incident the closure
+// rules resolved by quiet time before any analysis goes back to Open instead (#466). Which Incidents are
 // Resolved is known from load, every trigger pass and each write; the latest occurrence of each fingerprint
 // from the names load lists, so a restart writes there. A later occurrence deleted while running is never
 // created again from memory: its batches are dropped and the newest that exists becomes the latest.

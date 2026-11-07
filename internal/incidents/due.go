@@ -53,7 +53,7 @@ func (c *Controller) triggerLoop(ctx context.Context) {
 	for {
 		if err := c.pass(ctx); err != nil && ctx.Err() == nil {
 			triggerPassErrors.Inc()
-			logf.FromContext(ctx).Error(err, "Failed to decide which Incidents are due for analysis, will retry")
+			logf.FromContext(ctx).Error(err, "Failed a pass of the analysis trigger (closure rules or due marks), will retry")
 		}
 		select {
 		case <-tick.C:
@@ -63,15 +63,19 @@ func (c *Controller) triggerLoop(ctx context.Context) {
 	}
 }
 
-// pass runs the closure rules ([Controller.closeIncidents]), then one [Controller.markDue], under
-// PassTimeout. The closure rules go first and write at most closureWritesPerPass Incidents, so the marks
-// always get the rest of the pass; a failure of one does not stop the other.
+// pass reports how near the Incident cap is ([Controller.reportCap], from memory), runs the closure rules
+// ([Controller.closeIncidents]) within the first half of PassTimeout, then one [Controller.markDue] within the
+// rest, so a closure pass that runs into its deadline never takes the marks' time. A failure of one does not
+// stop the other; the joined error names the Incidents whose writes failed.
 func (c *Controller) pass(ctx context.Context) error {
 	pctx, cancel := context.WithTimeout(ctx, c.cfg.PassTimeout)
 	defer cancel()
-	closeErr := c.closeIncidents(pctx)
-	if closeErr != nil && pctx.Err() != nil {
-		return closeErr
+	c.reportCap(pctx)
+	cctx, cancelClose := context.WithTimeout(pctx, c.cfg.PassTimeout/2)
+	closeErr := c.closeIncidents(cctx)
+	cancelClose()
+	if pctx.Err() != nil {
+		return errors.Join(closeErr, pctx.Err())
 	}
 	return errors.Join(closeErr, c.markDue(pctx))
 }

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -63,6 +64,10 @@ const (
 	ReasonRequestCancelled         = "RequestCancelled"
 	ReasonRequestNeedsIntervention = "RequestNeedsIntervention"
 	ReasonRequestSuperseded        = "RequestSuperseded"
+	// ReasonReopened: the Incident was Resolved by quiet time before any analysis, and its symptom came back
+	// within RecurrenceWindow of resolvedTime, so it is Open again, with no resolvedTime, and is analyzed as
+	// usual ([reopens]). It is the one Lifecycle reason the observation writer sets.
+	ReasonReopened = "Reopened"
 )
 
 // lifecycleFieldOwner is the field manager of the closure rules' status writes, so the managed fields tell
@@ -94,14 +99,38 @@ var lifecycleMessages = map[string]string{
 	ReasonRequestCancelled:         "The newest request naming the Incident was cancelled; a person decides",
 	ReasonRequestNeedsIntervention: "The newest request naming the Incident needs intervention; a person decides",
 	ReasonRequestSuperseded:        "The newest request naming the Incident was superseded and no newer one names it; a person decides",
+	ReasonReopened:                 "The symptom came back within 24 hours of a quiet resolution before any analysis; the Incident is Open again",
 }
 
-// finalRequest reports whether a request phase is final (design 3.2): Succeeded or one that ended without
-// success. Every other phase, no phase yet and a phase this version does not know included, is active, so an
-// unknown phase never resolves an Incident.
+// finalRequest reports whether a request phase is final for the closure rules (design 3.2): Succeeded, one
+// that ended without success, or Merged. Merged counts as final until the verifier (#92) writes Succeeded: it
+// no longer keeps the Incident out of the quiet rule, but it moves nothing by itself. Every other phase, no
+// phase yet and a phase this version does not know included, is active, so an unknown phase never resolves
+// an Incident.
 func finalRequest(p remediationv1alpha1.RemediationPhase) bool {
 	_, ended := endedWithoutSuccess[p]
-	return ended || p == remediationv1alpha1.PhaseSucceeded
+	return ended || p == remediationv1alpha1.PhaseSucceeded || p == remediationv1alpha1.PhaseMerged
+}
+
+// decidedByRequest reports whether the newest request naming the Incident may move it: in phase Proposed,
+// and in phase Escalated when a Superseded request escalated it (ReasonRequestSuperseded), so the outcome of
+// a replacement that only appeared after that escalation still applies.
+func decidedByRequest(inc *remediationv1alpha1.Incident) bool {
+	switch inc.Status.Phase {
+	case remediationv1alpha1.IncidentProposed:
+		return true
+	case remediationv1alpha1.IncidentEscalated:
+		return lifecycleReason(inc) == ReasonRequestSuperseded
+	}
+	return false
+}
+
+// lifecycleReason returns the reason of the Incident's Lifecycle condition, or "" without one.
+func lifecycleReason(inc *remediationv1alpha1.Incident) string {
+	if cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionLifecycle); cond != nil {
+		return cond.Reason
+	}
+	return ""
 }
 
 // Closure decides what the closure rules do to an Incident at now (design 3.2, #251): the phase it moves to
@@ -112,12 +141,13 @@ func finalRequest(p remediationv1alpha1.RemediationPhase) bool {
 //
 //   - Only an Incident whose name is derived from its spec, with an observation, in phase Open, Proposed or
 //     Escalated is decided. Analyzing, Resolved and no phase stay.
-//   - In phase Proposed, the newest request naming the Incident (by creation time; at the same time a
-//     Superseded one is the older, then by name) decides when it is final: Succeeded moves it to Resolved,
-//     any other final phase to Escalated. Superseded thus follows the newer request when there is one, and
-//     escalates when there is none.
-//   - Otherwise, with no active request naming it, an Incident quiet for QuietBeforeResolved moves to
-//     Resolved. It is quiet since the latest of lastSeen, held, lastAnalysisTime and the Lifecycle
+//   - Any active request naming it keeps it where it is ([finalRequest]).
+//   - In phase Proposed (or Escalated by a Superseded request, [decidedByRequest]), the newest request naming
+//     the Incident (by creation time; at the same time a Superseded one is the older, then by name) decides:
+//     Succeeded moves it to Resolved, any other final phase but Merged to Escalated. Superseded thus follows
+//     the newer request when there is one, and escalates when there is none. Merged moves nothing until the
+//     verifier is built (#92); the quiet rule then applies.
+//   - Otherwise an Incident quiet for QuietBeforeResolved moves to Resolved. It is quiet since the latest of lastSeen, held, lastAnalysisTime and the Lifecycle
 //     condition's lastTransitionTime, so an escalation stands for at least that long before the Incident can
 //     go on to Resolved. An Incident whose newest occurrence is a lasting symptom state ([lastingState]) is
 //     never quiet: such a state is emitted once while it lasts, so its lastSeen cannot tell that it ended.
@@ -146,15 +176,28 @@ func Closure(inc *remediationv1alpha1.Incident, requests []remediationv1alpha1.R
 			newest = rr
 		}
 	}
-	if st.Phase == remediationv1alpha1.IncidentProposed && newest != nil {
-		switch p := newest.Status.Phase; {
-		case p == remediationv1alpha1.PhaseSucceeded:
+	if active {
+		return "", "", false
+	}
+	if newest != nil && decidedByRequest(inc) {
+		p := newest.Status.Phase
+		if p == remediationv1alpha1.PhaseSucceeded {
 			return remediationv1alpha1.IncidentResolved, ReasonRequestSucceeded, true
-		case finalRequest(p):
-			return remediationv1alpha1.IncidentEscalated, endedWithoutSuccess[p], true
+		}
+		if reason, ended := endedWithoutSuccess[p]; ended {
+			if st.Phase == remediationv1alpha1.IncidentEscalated && lifecycleReason(inc) == reason {
+				// Already escalated for this outcome; only the quiet rule moves it on.
+				return closeQuiet(inc, held, now)
+			}
+			return remediationv1alpha1.IncidentEscalated, reason, true
 		}
 	}
-	if active || lastingState(st) || now.Before(quietSince(inc, held).Add(QuietBeforeResolved)) {
+	return closeQuiet(inc, held, now)
+}
+
+// closeQuiet is the quiet rule of [Closure], for an Incident no active request names.
+func closeQuiet(inc *remediationv1alpha1.Incident, held, now time.Time) (remediationv1alpha1.IncidentPhase, string, bool) {
+	if lastingState(&inc.Status) || now.Before(quietSince(inc, held).Add(QuietBeforeResolved)) {
 		return "", "", false
 	}
 	return remediationv1alpha1.IncidentResolved, ReasonSymptomQuiet, true
@@ -204,66 +247,92 @@ func applyClosure(inc *remediationv1alpha1.Incident, phase remediationv1alpha1.I
 	})
 }
 
+// reopens reports whether a recurrence within RecurrenceWindow moves a Resolved Incident back to Open instead
+// of Escalated (design 3.2, #466): the closure rules resolved it by quiet time (Lifecycle SymptomQuiet), with
+// a known resolvedTime, and it was never analyzed (no lastAnalysisTime, no request recorded). An Incident that
+// was analyzed, or resolved any other way, keeps the escalation.
+func reopens(st *remediationv1alpha1.IncidentStatus) bool {
+	cond := meta.FindStatusCondition(st.Conditions, ConditionLifecycle)
+	return cond != nil && cond.Reason == ReasonSymptomQuiet && st.ResolvedTime != nil && !st.ResolvedTime.IsZero() &&
+		st.LastAnalysisTime == nil && len(st.RemediationRequests) == 0
+}
+
+// reopen moves a Resolved Incident whose symptom came back before any analysis to Open: the same Incident, no
+// new occurrence, resolvedTime cleared, and the Lifecycle condition Reopened. The trigger then decides it as
+// any Incident never analyzed.
+func reopen(inc *remediationv1alpha1.Incident, now time.Time) {
+	applyClosure(inc, remediationv1alpha1.IncidentOpen, ReasonReopened, now)
+	inc.Status.ResolvedTime = nil
+}
+
 // closeIncidents applies the closure rules ([Closure]) to every Incident in the namespace, once per trigger
-// pass, and reports how near the Incident cap is ([Controller.reportCap]). It decides first on the cached
-// Incidents and requests; for each Incident that would move, it decides again on the Incident read fresh
-// from the API server and the requests listed from it (once per pass), and writes only that decision, with
-// optimistic concurrency, retrying on conflict. A move is one status update (phase, resolvedTime and the
-// Lifecycle condition together), so a restart in the middle finds the Incident either moved or not, and
-// decides it again. At most closureWritesPerPass are written per pass.
+// pass. It decides first on the cached Incidents and requests; for each Incident that would move, it decides
+// again on the Incident read fresh from the API server and the requests listed from it on that attempt
+// ([Controller.closeOne]), and writes only that decision, with optimistic concurrency. A move is one status
+// update (phase, resolvedTime and the Lifecycle condition together), so a restart in the middle finds the
+// Incident either moved or not, and decides it again. At most closureWritesPerPass moves are written per pass;
+// a failed write does not count, and the Incidents whose last write failed are tried after the others, so a
+// few that keep failing never hold up the rest.
 //
 // It fails closed: when the Incidents or the requests cannot be listed, nothing moves and the error is
-// returned; an Incident that cannot be read or written keeps its phase.
+// returned; an Incident that cannot be read or written keeps its phase. The errors returned name the
+// Incidents.
 func (c *Controller) closeIncidents(ctx context.Context) error {
 	var list remediationv1alpha1.IncidentList
 	if err := c.cache.List(ctx, &list, client.InNamespace(c.cfg.Namespace)); err != nil {
 		return fmt.Errorf("listing the Incidents for the closure rules: %w", err)
 	}
-	c.reportCap(ctx)
 	var cached remediationv1alpha1.RemediationRequestList
 	if err := c.cache.List(ctx, &cached, client.InNamespace(c.cfg.Namespace)); err != nil {
 		return fmt.Errorf("listing the RemediationRequests for the closure rules: %w", err)
 	}
 	now := c.cfg.Now()
-	var live []remediationv1alpha1.RemediationRequest
-	read := false
-	writes := 0
-	var errs []error
+	listed := make(map[string]struct{}, len(list.Items))
+	var first, last []string
 	for i := range list.Items {
 		inc := &list.Items[i]
-		if _, _, ok := Closure(inc, cached.Items, c.heldSince(inc.Spec.Fingerprint), now); !ok {
+		listed[inc.Name] = struct{}{}
+		if _, _, ok := Closure(inc, cached.Items, c.unwrittenSince(inc.Spec.Fingerprint), now); !ok {
 			continue
 		}
+		if _, failed := c.closeFailed[inc.Name]; failed {
+			last = append(last, inc.Name)
+		} else {
+			first = append(first, inc.Name)
+		}
+	}
+	maps.DeleteFunc(c.closeFailed, func(name string, _ struct{}) bool {
+		_, ok := listed[name]
+		return !ok
+	})
+	writes := 0
+	var errs []error
+	for _, name := range append(first, last...) {
 		if writes == closureWritesPerPass {
 			break
 		}
-		if !read {
-			var fresh remediationv1alpha1.RemediationRequestList
-			if err := c.reader.List(ctx, &fresh, client.InNamespace(c.cfg.Namespace)); err != nil {
-				return errors.Join(append(errs,
-					fmt.Errorf("listing the RemediationRequests for the closure rules: %w", err))...)
-			}
-			live, read = fresh.Items, true
-		}
-		wrote, err := c.closeOne(ctx, inc.Name, live, now)
-		if wrote || err != nil {
-			writes++
-		}
+		wrote, err := c.closeOne(ctx, name, now)
 		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
+			c.closeFailed[name] = struct{}{}
 			errs = append(errs, err)
+			if ctx.Err() != nil {
+				break
+			}
+			continue
+		}
+		delete(c.closeFailed, name)
+		if wrote {
+			writes++
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// closeOne reads the Incident name from the API server, decides the closure rules on it with requests (a
-// fresh listing) and writes the move, retrying on conflict. It reports whether it wrote one (an answer
-// received, not lost). An Incident gone meanwhile is no error.
-func (c *Controller) closeOne(ctx context.Context, name string, requests []remediationv1alpha1.RemediationRequest,
-	now time.Time) (bool, error) {
+// closeOne reads the Incident name and the RemediationRequests from the API server, decides the closure
+// rules on them and writes the move, retrying on conflict; each attempt reads both again, so a request
+// created meanwhile counts. It reports whether it wrote one (an answer received, not lost). An Incident gone
+// meanwhile is no error.
+func (c *Controller) closeOne(ctx context.Context, name string, now time.Time) (bool, error) {
 	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 	defer cancel()
 	var moved *remediationv1alpha1.Incident
@@ -274,7 +343,11 @@ func (c *Controller) closeOne(ctx context.Context, name string, requests []remed
 		if err := c.reader.Get(wctx, types.NamespacedName{Namespace: c.cfg.Namespace, Name: name}, inc); err != nil {
 			return err
 		}
-		phase, r, ok := Closure(inc, requests, c.heldSince(inc.Spec.Fingerprint), now)
+		var requests remediationv1alpha1.RemediationRequestList
+		if err := c.reader.List(wctx, &requests, client.InNamespace(c.cfg.Namespace)); err != nil {
+			return fmt.Errorf("listing the RemediationRequests: %w", err)
+		}
+		phase, r, ok := Closure(inc, requests.Items, c.unwrittenSince(inc.Spec.Fingerprint), now)
 		if !ok {
 			return nil
 		}
@@ -302,6 +375,43 @@ func (c *Controller) closeOne(ctx context.Context, name string, requests []remed
 	return true, nil
 }
 
+// unwrittenSince returns the newest observation of the Incident of fp that is not in its status yet: held in a
+// pending or failed batch, or in a write in flight. The closure rules read it, so an observation being written
+// keeps the Incident from going quiet.
+func (c *Controller) unwrittenSince(fp string) time.Time {
+	t := c.heldSince(fp)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if f := c.inflight[fp]; f != nil {
+		t = latest(t, f.last)
+	}
+	return t
+}
+
+// takeOff records batches, just taken out of pending and failed by flush, as in flight for fp. The caller
+// holds mu.
+func (c *Controller) takeOff(fp string, batches []*batch) {
+	f := c.inflight[fp]
+	if f == nil {
+		f = &flight{}
+		c.inflight[fp] = f
+	}
+	f.n++
+	for _, b := range batches {
+		f.last = latest(f.last, b.last)
+	}
+}
+
+// landed records that one write of fp in flight returned, whatever its outcome: its batches are back in
+// pending or failed, dropped, or stored. The caller holds mu.
+func (c *Controller) landed(fp string) {
+	if f := c.inflight[fp]; f != nil {
+		if f.n--; f.n <= 0 {
+			delete(c.inflight, fp)
+		}
+	}
+}
+
 // capNearPercent is the share of the Incident cap at which the analyzer warns that it is near (design 3.2).
 const capNearPercent = 80
 
@@ -311,7 +421,8 @@ func capNearThreshold(maxIncidents int) int {
 	return max((maxIncidents*capNearPercent+99)/100, 1)
 }
 
-// reportCap sets the cap gauges from the Incidents that exist or are pending (the ones the cap holds), and
+// reportCap sets the cap gauges from the Incidents that exist or are pending (the ones the cap holds, as the
+// controller's memory counts them, so no failed read leaves the gauges stale), and
 // writes a Warning event IncidentCapNear about the analyzer's Pod when their number reaches capNearThreshold
 // of the cap: once per crossing, and at most once per EventInterval. The message holds only numbers.
 func (c *Controller) reportCap(ctx context.Context) {

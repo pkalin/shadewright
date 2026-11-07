@@ -313,7 +313,7 @@ Each identity also has its own leader election Lease, which only it can renew.
 
 | Topic | Detail |
 | --- | --- |
-| Egress ports | DNS 53 to kube-dns in `kube-system`; TCP 443 and 6443 to any address |
+| Egress ports | DNS 53 to kube-dns in `kube-system`; TCP 443 and 6443 to any address; for the analyzer only and only when enabled, the Prometheus rule (`networkPolicy.analyzer.prometheus`) and the trace collector rule (`networkPolicy.analyzer.traceCollector`) |
 | Metrics ingress | Port 8443, only from namespaces labeled `metrics: enabled` |
 | Probe port | 8081, from the node, not blocked by NetworkPolicy |
 | Prometheus port | 9090, off by default (`networkPolicy.analyzer.prometheus.enabled`) |

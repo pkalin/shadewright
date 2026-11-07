@@ -1,0 +1,25 @@
+apiVersion: scenarios.shadewright.io/v1alpha1
+kind: Scenario
+name: bad-image
+summary: The web Deployment points at an image tag that does not exist, so its new pod stays in ErrImagePull and ImagePullBackOff.
+incident:
+  reason: Failed
+  status: observed
+  source: Observed on Kind on 2026-11-04 (vendored agent v0.1.0 at the commit in infrastructure/shadewright/VENDOR). The kubelet's Warning events on the pod, all with reason Failed (the pull error, then Error ErrImagePull, then Error ImagePullBackOff), read by the collector's event watch and attributed to Deployment demo/web through ReplicaSet; three Incidents, each reason Failed, count 1, told apart by their symptom. The kubelet's image-pull BackOff event (Back-off pulling image) is type Normal, so the collector does not read it and BackOff is not an Incident reason here; the restart BackOff of a crash-looping container is a Warning, as in oom. ImagePullBackOff and ErrImagePull appear only inside the symptom text, never as the reason.
+  object:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+diagnosis:
+  status: planned
+  evidence:
+    - fact: the image reference ghcr.io/stefanprodan/podinfo:6.17.99
+      source: the Deployment's pod template, and the text of the Failed event
+    - fact: the pull error (manifest unknown or not found)
+      source: the note of the Failed events
+outcome:
+  type: refusal
+  status: planned
+  reason: Changing an image is not in the catalog (SetContainerMemoryLimit and AdjustKedaMaxReplicas only); the request ends NeedsIntervention and a person is notified through a GitHub issue.
+  phase: NeedsIntervention

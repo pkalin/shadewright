@@ -114,6 +114,17 @@ test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
 	@# The redact timing tests skip under -race (internal/redact/race_test.go): run them again without it.
 	go test -run 'StayLinear$$' ./internal/redact
 
+# The evaluation harness (test/eval, docs/evaluation.md). make test runs it too; these targets write the report.
+EVAL_REPORT_DIR ?= $(LOCALBIN)/eval
+
+.PHONY: eval
+eval: ## Replay every lab scenario's recorded context and replies through the analysis loop; report in EVAL_REPORT_DIR.
+	EVAL_REPORT_DIR="$(EVAL_REPORT_DIR)" go test ./test/eval -run '^TestEvalReplay$$' -count=1 -v
+
+.PHONY: eval-model
+eval-model: ## Evaluate the real model (the EVAL_* and AZURE_* variables, see docs/evaluation.md). Costs money. Times out at 50m, so a report is written first.
+	EVAL_MODEL=foundry EVAL_REPORT_DIR="$(EVAL_REPORT_DIR)" go test ./test/eval -run '^TestEvalFoundry$$' -count=1 -v -timeout 50m
+
 # Fuzz targets as <package dir>:<FuzzName>. hack/fuzz-targets.sh checks this list against the tree both ways, so a
 # new target cannot be left out of the weekly Fuzz workflow and a stale entry cannot fuzz nothing and pass.
 FUZZ_TARGETS := cmd/kubectl-shadewright:FuzzClean internal/redact:FuzzString internal/incidentcontext:FuzzLogExcerpt internal/gitops/patch:FuzzPatch internal/incidents/fingerprint:FuzzNormalize internal/policy/pathmatch:FuzzMatch internal/analyzer/refcheck:FuzzCheck internal/providers/model/foundry:FuzzParseResponse internal/tools:FuzzArguments

@@ -1,0 +1,27 @@
+apiVersion: scenarios.shadewright.io/v1alpha1
+kind: Scenario
+name: broken-keda-trigger
+summary: The worker's ScaledObject trigger points at a Prometheus address that does not exist, so the ScaledObject is not Ready and KEDA reports trigger errors.
+incident:
+  reason: KEDAScalerFailed
+  status: planned
+  source: KEDA's Warning event KEDAScalerFailed about the ScaledObject in demo, read by the collector's event watch (an event about a kind the analyzer does not follow is its own subject). The KEDA module's symptom source, which reads the Ready condition, feeds nothing yet, so the Incident exists only if KEDA writes the event. Not observed yet.
+  object:
+    apiVersion: keda.sh/v1alpha1
+    kind: ScaledObject
+    namespace: demo
+    name: worker
+diagnosis:
+  status: planned
+  evidence:
+    - fact: the ScaledObject condition Ready is False
+      source: the KEDA module's TriggerError symptom (built, not consumed by the analysis yet)
+    - fact: the trigger error (the serverAddress prometheus-server.monitoring.svc.cluster.local cannot be resolved)
+      source: the note of the KEDAScalerFailed event; trigger metadata is never read, so the address comes from the error text only
+    - fact: maxReplicaCount is not the problem
+      source: the design 7 rule that a trigger error is never answered by raising replicas
+outcome:
+  type: refusal
+  status: planned
+  reason: A broken trigger is never fixed by raising maxReplicaCount (design 7), and no catalog action edits a trigger; a person is notified.
+  phase: NeedsIntervention

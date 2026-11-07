@@ -1,0 +1,13 @@
+# How the diagnosis of invalid-manifest is scored: each fact of expected.yaml, verbatim, with the terms the
+# result's summary, hypotheses or evidence quotes must contain (case ignored), or why it is not scored.
+facts:
+  - fact: the failing Kustomization flux-system/apps and its Ready condition False
+    # The condition is not in the context (the Flux module's symptom is not consumed yet); the object is.
+    all: ["Kustomization"]
+    any: ["flux-system/apps", "Kustomization apps"]
+  - fact: the error, a dry-run failure on Service demo/web (ports[0].port, a string where an integer is required)
+    all: ["dry-run"]
+    # fingerprint.Normalize writes the index in parentheses.
+    any: ["ports[0].port", "ports(0).port", "spec.ports"]
+  - fact: the file, apps/demo/web-service.yaml
+    unscored: needs a read of the repository (a planned read-only tool); source mapping cannot find it

@@ -1,0 +1,13 @@
+# Synthetic: a triage reply written by hand to the output schema for the recorded context (see bad-image).
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2100, outputTokens: 230}
+    content: |
+      {"summary": "The web container of Deployment demo/web cannot be created (CreateContainerConfigError): it reads an environment variable from the Secret web-credentials, which does not exist. Creating or changing a Secret is not in the action catalog, so no change is proposed.",
+       "hypotheses": [{"description": "The Secret web-credentials was never created in demo, or the reference names the wrong Secret."}],
+       "evidence": [{"source": "c1", "quote": "Error: secret \"web-credentials\" not found"},
+                    {"source": "c2", "quote": "CreateContainerConfigError"}],
+       "missingData": [],
+       "uncertainty": "Whether the Secret is meant to exist under another name is not visible.",
+       "proposal": null}

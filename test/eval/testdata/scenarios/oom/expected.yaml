@@ -1,0 +1,32 @@
+apiVersion: scenarios.shadewright.io/v1alpha1
+kind: Scenario
+name: oom
+summary: The web container loads 36 MB into memory against a 48Mi limit, so it is OOMKilled and restarts.
+incident:
+  reason: OOMKilled
+  status: observed
+  source: The kubelet writes lastState.terminated.reason on the container status; the collector's pod watch reads it (there is no event with this reason). Observed on the lab on 2026-11-04 together with BackOff and Unhealthy Incidents for Deployment demo/web.
+  object:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+diagnosis:
+  status: planned
+  evidence:
+    - fact: OOMKilled from the container status (last state), not from an event reason
+      source: the Incident reason, and the pod's lastState.terminated.reason
+    - fact: the restart count of the web container
+      source: the pod's containerStatuses[].restartCount (a planned read-only tool; the Incident holds only occurrence counts)
+    - fact: the memory working set from Prometheus (container_memory_working_set_bytes) near the 48Mi limit
+      source: a Prometheus query through the MetricsSource interface (planned, not wired into the analyzer yet)
+outcome:
+  type: pull-request
+  status: observed
+  note: Observed on 2026-11-04 with a hand-written request, not one the analyzer created, so the path from diagnosis to request is still planned. It opened pkalin/shadewright-fleet#26 (one line, 48Mi to 64Mi in apps/demo/web-deployment.yaml), AwaitingApproval in about a minute, then Superseded 307 s after a policy bounds change.
+  action: SetContainerMemoryLimit
+  bounds:
+    min: 64Mi
+    max: 128Mi
+  paths:
+    - apps/demo/web-deployment.yaml

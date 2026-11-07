@@ -1,0 +1,26 @@
+# Synthetic: written from the scenario manifests and the expectation in expected.yaml (not observed yet). The
+# symptom is the scheduler's FailedScheduling note as fingerprint.Normalize leaves it. UIDs and the
+# fingerprint are placeholders.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: inc-unschedulable
+  namespace: shadewright-system
+  uid: 00000000-0000-4000-8000-0000000005e0
+spec:
+  fingerprint: sha256:00000000000000000000000000000000000000000000000000000000000005e0
+  subject:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+    uid: 00000000-0000-4000-8000-0000000005e1
+  reason: FailedScheduling
+  type: Warning
+  reportingController: default-scheduler
+  symptom: '0/3 nodes are available: 3 Insufficient cpu. preemption: 0/3 nodes are available: 3 No preemption victims found for incoming pod.'
+status:
+  phase: Open
+  count: 4
+  firstSeen: "2026-11-04T11:50:00Z"
+  lastSeen: "2026-11-04T11:58:00Z"

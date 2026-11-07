@@ -1,0 +1,27 @@
+# Synthetic: written from the scenario manifests and the expectation in expected.yaml. No Incident exists for
+# this scenario until flux-system is watched (see the scenario's README); this one is what kustomize-controller's
+# ReconciliationFailed event would give, its note as fingerprint.Normalize leaves it. UIDs and the fingerprint
+# are placeholders.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: inc-invalid-manifest
+  namespace: shadewright-system
+  uid: 00000000-0000-4000-8000-000000000880
+spec:
+  fingerprint: sha256:0000000000000000000000000000000000000000000000000000000000000880
+  subject:
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    namespace: flux-system
+    name: apps
+    uid: 00000000-0000-4000-8000-000000000881
+  reason: ReconciliationFailed
+  type: Warning
+  reportingController: kustomize-controller
+  symptom: 'Service/demo/web dry-run failed (Invalid): Service "web" is invalid: spec.ports(0).port: Invalid value: "http": spec.ports(0).port in body must be of type integer: "string"'
+status:
+  phase: Open
+  count: 3
+  firstSeen: "2026-11-04T11:48:00Z"
+  lastSeen: "2026-11-04T11:58:00Z"

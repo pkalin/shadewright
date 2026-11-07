@@ -1,0 +1,27 @@
+apiVersion: scenarios.shadewright.io/v1alpha1
+kind: Scenario
+name: unschedulable
+summary: The web Deployment requests 256 CPUs, more than any node has, so its new pod stays Pending with FailedScheduling.
+incident:
+  reason: FailedScheduling
+  status: planned
+  source: The scheduler's Warning event FailedScheduling on the pending pod, read by the collector's event watch and attributed to Deployment demo/web through ReplicaSet. Not observed yet.
+  object:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+diagnosis:
+  status: planned
+  evidence:
+    - fact: the FailedScheduling event on the pending pod
+      source: the Incident reason and the event
+    - fact: the insufficient resource, Insufficient cpu
+      source: the note of the event (the generic platform's insufficient-capacity rule reads the same text, but its symptoms feed nothing yet)
+    - fact: the 256 CPU request of the web container
+      source: the Deployment's pod template
+outcome:
+  type: refusal
+  status: planned
+  reason: Lowering resource requests or adding nodes is not in the catalog; a person is notified.
+  phase: NeedsIntervention

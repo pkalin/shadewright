@@ -1,0 +1,26 @@
+# Synthetic: written from the scenario manifests and the expectation in expected.yaml (not observed yet). The
+# symptom is KEDA's KEDAScalerFailed note as fingerprint.Normalize leaves it (the IP is a placeholder). UIDs
+# and the fingerprint are placeholders.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: inc-broken-keda-trigger
+  namespace: shadewright-system
+  uid: 00000000-0000-4000-8000-0000000006f0
+spec:
+  fingerprint: sha256:00000000000000000000000000000000000000000000000000000000000006f0
+  subject:
+    apiVersion: keda.sh/v1alpha1
+    kind: ScaledObject
+    namespace: demo
+    name: worker
+    uid: 00000000-0000-4000-8000-0000000006f1
+  reason: KEDAScalerFailed
+  type: Warning
+  reportingController: keda-operator
+  symptom: 'error resolving address: lookup prometheus-server.monitoring.svc.cluster.local on <ip>: no such host'
+status:
+  phase: Open
+  count: 5
+  firstSeen: "2026-11-04T11:45:00Z"
+  lastSeen: "2026-11-04T11:58:00Z"

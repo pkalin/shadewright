@@ -1,0 +1,15 @@
+# Synthetic: a triage reply written by hand to the output schema for the recorded context (see bad-image).
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 1800, outputTokens: 290}
+    content: |
+      {"summary": "The HPA of ScaledObject demo/worker is limited at its maximum of 2 replicas (ScalingLimited, TooManyReplicas) while its trigger asks for more. Raising maxReplicaCount by one, within the policy's bounds, lets it follow the load.",
+       "hypotheses": [{"description": "Steady load needs 3 replicas and maxReplicaCount is 2."}],
+       "evidence": [{"source": "c1", "quote": "ScalingLimited is True, reason TooManyReplicas"}],
+       "missingData": [],
+       "uncertainty": "The metric values behind the desired count are not in the context.",
+       "proposal": {"action": {"type": "AdjustKedaMaxReplicas", "setContainerMemoryLimit": null,
+                               "adjustKedaMaxReplicas": {"previousValue": 2, "desiredValue": 3}},
+                    "expectedEffect": "The HPA scales to 3 replicas and is no longer limited.",
+                    "verificationChecks": []}}

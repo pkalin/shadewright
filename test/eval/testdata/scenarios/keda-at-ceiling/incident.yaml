@@ -1,0 +1,25 @@
+# Synthetic: written from the scenario manifests and the expectation in expected.yaml. No Incident exists for
+# this scenario until the analyzer consumes the KEDA module's symptom sources (#380); this one is what the
+# ReplicaCeiling symptom would carry. UIDs and the fingerprint are placeholders.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: inc-keda-at-ceiling
+  namespace: shadewright-system
+  uid: 00000000-0000-4000-8000-000000000790
+spec:
+  fingerprint: sha256:0000000000000000000000000000000000000000000000000000000000000790
+  subject:
+    apiVersion: keda.sh/v1alpha1
+    kind: ScaledObject
+    namespace: demo
+    name: worker
+    uid: 00000000-0000-4000-8000-000000000791
+  reason: ReplicaCeiling
+  type: Warning
+  symptom: 'HorizontalPodAutoscaler keda-hpa-worker is limited at its maximum: ScalingLimited is True, reason TooManyReplicas: the desired replica count is more than the maximum replica count (maxReplicas 2, currentReplicas 2)'
+status:
+  phase: Open
+  count: 1
+  firstSeen: "2026-11-04T11:40:00Z"
+  lastSeen: "2026-11-04T11:40:00Z"

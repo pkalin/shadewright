@@ -1,0 +1,26 @@
+# Synthetic: written from the scenario manifests and the expectation in expected.yaml (not observed on a
+# cluster yet). The collector follows pod cache-1's controller reference to the StatefulSet. UIDs and the
+# fingerprint are placeholders.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: inc-statefulset-oom
+  namespace: shadewright-system
+  uid: 00000000-0000-4000-8000-0000000004d0
+spec:
+  fingerprint: sha256:00000000000000000000000000000000000000000000000000000000000004d0
+  subject:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    namespace: demo
+    name: cache
+    uid: 00000000-0000-4000-8000-0000000004d1
+  reason: OOMKilled
+  type: Warning
+  reportingController: kubelet
+  symptom: Container cache terminated with exit code 137
+status:
+  phase: Open
+  count: 2
+  firstSeen: "2026-11-04T11:45:00Z"
+  lastSeen: "2026-11-04T11:55:00Z"

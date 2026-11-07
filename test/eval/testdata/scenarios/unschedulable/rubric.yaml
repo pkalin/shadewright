@@ -1,0 +1,9 @@
+# How the diagnosis of unschedulable is scored: each fact of expected.yaml, verbatim, with the terms the
+# result's summary, hypotheses or evidence quotes must contain (case ignored), or why it is not scored.
+facts:
+  - fact: the FailedScheduling event on the pending pod
+    any: ["FailedScheduling", "unschedulable", "cannot be scheduled", "could not be scheduled"]
+  - fact: the insufficient resource, Insufficient cpu
+    all: ["insufficient cpu"]
+  - fact: the 256 CPU request of the web container
+    unscored: the context builder does not show the pod template's requests; only get_resource on escalation reads them

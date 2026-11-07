@@ -1,0 +1,26 @@
+# Synthetic: written from the scenario manifests and the observation in expected.yaml, not recorded in the
+# lab. The symptom is the kubelet's Failed event note as fingerprint.Normalize leaves it. UIDs and the
+# fingerprint are placeholders.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: inc-missing-secret
+  namespace: shadewright-system
+  uid: 00000000-0000-4000-8000-0000000002b0
+spec:
+  fingerprint: sha256:00000000000000000000000000000000000000000000000000000000000002b0
+  subject:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+    uid: 00000000-0000-4000-8000-0000000002b1
+  reason: Failed
+  type: Warning
+  reportingController: kubelet
+  symptom: 'Error: secret "web-credentials" not found'
+status:
+  phase: Open
+  count: 1
+  firstSeen: "2026-11-04T11:53:00Z"
+  lastSeen: "2026-11-04T11:53:00Z"

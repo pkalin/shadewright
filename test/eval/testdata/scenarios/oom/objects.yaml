@@ -1,0 +1,121 @@
+# Synthetic: the objects the context builder and the read tools read for this scenario. The web container
+# loads 36 MB against a 48Mi limit (scenarios/oom/) and restarts. Written from the fleet manifests, not
+# recorded in the lab.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000003c1
+  generation: 2
+  creationTimestamp: "2026-11-04T09:00:00Z"
+  labels:
+    app.kubernetes.io/name: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: web
+    spec:
+      containers:
+        - name: web
+          image: ghcr.io/stefanprodan/podinfo:6.17.0
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 48Mi
+status:
+  observedGeneration: 2
+  replicas: 1
+  updatedReplicas: 1
+  readyReplicas: 0
+  availableReplicas: 0
+  unavailableReplicas: 1
+  conditions:
+    - type: Available
+      status: "False"
+      reason: MinimumReplicasUnavailable
+      message: Deployment does not have minimum availability.
+      lastTransitionTime: "2026-11-04T11:40:00Z"
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web-8d4c6b9f7
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000003c2
+  creationTimestamp: "2026-11-04T11:38:00Z"
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 8d4c6b9f7
+  annotations:
+    deployment.kubernetes.io/revision: "2"
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: web
+      uid: 00000000-0000-4000-8000-0000000003c1
+      controller: true
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+      pod-template-hash: 8d4c6b9f7
+status:
+  replicas: 1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-8d4c6b9f7-t5r9k
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000003c3
+  creationTimestamp: "2026-11-04T11:38:05Z"
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 8d4c6b9f7
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: ReplicaSet
+      name: web-8d4c6b9f7
+      uid: 00000000-0000-4000-8000-0000000003c2
+      controller: true
+spec:
+  containers:
+    - name: web
+      image: ghcr.io/stefanprodan/podinfo:6.17.0
+      resources:
+        limits:
+          memory: 48Mi
+status:
+  phase: Running
+  conditions:
+    - type: Ready
+      status: "False"
+      reason: ContainersNotReady
+      message: "containers with unready status: [web]"
+      lastTransitionTime: "2026-11-04T11:56:00Z"
+  containerStatuses:
+    - name: web
+      ready: false
+      restartCount: 3
+      image: ghcr.io/stefanprodan/podinfo:6.17.0
+      imageID: ""
+      state:
+        waiting:
+          reason: CrashLoopBackOff
+          message: back-off 40s restarting failed container=web pod=web-8d4c6b9f7-t5r9k_demo(00000000-0000-4000-8000-0000000003c3)
+      lastState:
+        terminated:
+          reason: OOMKilled
+          exitCode: 137
+          startedAt: "2026-11-04T11:55:30Z"
+          finishedAt: "2026-11-04T11:56:00Z"

@@ -1,0 +1,27 @@
+apiVersion: scenarios.shadewright.io/v1alpha1
+kind: Scenario
+name: missing-secret
+summary: The web Deployment reads an env var from the Secret web-credentials, which does not exist, so the container stays in CreateContainerConfigError.
+incident:
+  reason: Failed
+  status: observed
+  source: Observed on Kind on 2026-11-04 (vendored agent v0.1.0 at the commit in infrastructure/shadewright/VENDOR). The kubelet's Warning event Failed on the pod, with the note Error secret web-credentials not found, read by the collector's event watch and attributed to Deployment demo/web through ReplicaSet; one Incident, reason Failed, count 1, about 30 seconds after the Flux apply. CreateContainerConfigError is a waiting reason of the container status, which the collector does not read, so it is never the Incident reason.
+  object:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+diagnosis:
+  status: planned
+  evidence:
+    - fact: the missing Secret is named web-credentials, key api-token
+      source: the Deployment's env valueFrom.secretKeyRef, and the note of the Failed event
+    - fact: the container state reason CreateContainerConfigError
+      source: the pod's containerStatuses[].state.waiting.reason (a planned read-only tool; the collector does not read it)
+    - fact: the existence of the Secret learned through the yes/no check, never by reading Secrets
+      source: the existence check of design 10.3 (planned)
+outcome:
+  type: refusal
+  status: planned
+  reason: Secrets are excluded from the MVP (design 10.10) and no catalog action creates or changes one; a person is notified.
+  phase: NeedsIntervention

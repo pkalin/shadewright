@@ -399,8 +399,8 @@ Issue [#58](https://github.com/pkalin/shadewright/issues/58) closes once the fie
 
 Optional, in a lab that is up. A real model reads a real context of the OOM scenario's Incident
 ([#76](https://github.com/pkalin/shadewright/issues/76)). It is an **evaluation run, not production use**: the
-evaluation harness and its fail-closed check ([#78](https://github.com/pkalin/shadewright/issues/78)) are not built,
-and they are the gate before any release that starts the loop
+evaluation harness ([#78](https://github.com/pkalin/shadewright/issues/78), [Evaluate the model](evaluation.md)) is
+built but its fail-closed check in the analyzer is not, and that check is the gate before any release that starts the loop
 ([ADR-0025](adr/0025-analysis-claims-units-and-evaluation-manifest.md), decision 7). A proposal it makes is a
 `RemediationRequest` with `approvalRequired: true`, which the executor checks against policy like a hand-written one;
 do not approve it as a fix.

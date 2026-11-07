@@ -1,0 +1,132 @@
+# Synthetic: the objects the context builder and the read tools read for this scenario. The web Deployment's
+# env reads key api-token of the Secret web-credentials, which does not exist (scenarios/missing-secret/).
+# Written from the fleet manifests, not recorded in the lab. No Secret is listed: the analyzer never reads one.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000002b1
+  generation: 2
+  creationTimestamp: "2026-11-04T09:00:00Z"
+  labels:
+    app.kubernetes.io/name: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: web
+    spec:
+      containers:
+        - name: web
+          image: ghcr.io/stefanprodan/podinfo:6.17.0
+          env:
+            - name: API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: web-credentials
+                  key: api-token
+status:
+  observedGeneration: 2
+  replicas: 1
+  updatedReplicas: 1
+  readyReplicas: 0
+  availableReplicas: 0
+  unavailableReplicas: 1
+  conditions:
+    - type: Available
+      status: "False"
+      reason: MinimumReplicasUnavailable
+      message: Deployment does not have minimum availability.
+      lastTransitionTime: "2026-11-04T11:52:30Z"
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web-6f8b9c7d5
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000002b2
+  creationTimestamp: "2026-11-04T11:52:30Z"
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 6f8b9c7d5
+  annotations:
+    deployment.kubernetes.io/revision: "2"
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: web
+      uid: 00000000-0000-4000-8000-0000000002b1
+      controller: true
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+      pod-template-hash: 6f8b9c7d5
+status:
+  replicas: 1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-6f8b9c7d5-h4n8w
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000002b3
+  creationTimestamp: "2026-11-04T11:52:35Z"
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 6f8b9c7d5
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: ReplicaSet
+      name: web-6f8b9c7d5
+      uid: 00000000-0000-4000-8000-0000000002b2
+      controller: true
+spec:
+  containers:
+    - name: web
+      image: ghcr.io/stefanprodan/podinfo:6.17.0
+      env:
+        - name: API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: web-credentials
+              key: api-token
+status:
+  phase: Pending
+  containerStatuses:
+    - name: web
+      ready: false
+      restartCount: 0
+      image: ghcr.io/stefanprodan/podinfo:6.17.0
+      imageID: ""
+      state:
+        waiting:
+          reason: CreateContainerConfigError
+          message: secret "web-credentials" not found
+---
+apiVersion: events.k8s.io/v1
+kind: Event
+metadata:
+  name: web-6f8b9c7d5-h4n8w.failed
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000002b4
+  creationTimestamp: "2026-11-04T11:53:00Z"
+eventTime: "2026-11-04T11:53:00.000000Z"
+type: Warning
+reason: Failed
+action: Creating
+reportingController: kubelet
+reportingInstance: node-1
+note: 'Error: secret "web-credentials" not found'
+regarding:
+  apiVersion: v1
+  kind: Pod
+  namespace: demo
+  name: web-6f8b9c7d5-h4n8w
+  uid: 00000000-0000-4000-8000-0000000002b3

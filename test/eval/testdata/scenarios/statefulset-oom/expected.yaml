@@ -1,0 +1,32 @@
+apiVersion: scenarios.shadewright.io/v1alpha1
+kind: Scenario
+name: statefulset-oom
+summary: A cache StatefulSet pod loads 36 MB into memory against a 48Mi limit, so it is OOMKilled and restarts.
+incident:
+  reason: OOMKilled
+  status: planned
+  source: The kubelet writes lastState.terminated.reason on the container status of pod cache-1; the collector's pod watch reads it and follows the pod's controller reference to the StatefulSet (internal/analyzer/collector/owners.go in pkalin/shadewright, unit test TestStatefulSetPod). Not seen on a cluster yet.
+  object:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    namespace: demo
+    name: cache
+diagnosis:
+  status: planned
+  evidence:
+    - fact: OOMKilled from the container status (last state), not from an event reason
+      source: the Incident reason, and the lastState.terminated.reason of pod cache-1
+    - fact: the restart count of the cache container in cache-1, and that cache-0 is healthy and on the old template
+      source: the pods' containerStatuses[].restartCount and controller-revision-hash label (a planned read-only tool)
+    - fact: the memory working set of cache-1 from Prometheus (container_memory_working_set_bytes) near the 48Mi limit
+      source: a Prometheus query through the MetricsSource interface, whose pod templates resolve StatefulSet pods by owner reference (planned, not wired into the analyzer yet)
+outcome:
+  type: pull-request
+  status: planned
+  note: Not run. The pull request step has been seen for a Deployment only (pkalin/shadewright-fleet#26); the operator accepts a StatefulSet as target (internal/gitops/sourcemap/field.go, internal/policy/decide.go). After a merge the stuck pod needs a manual delete (see the README).
+  action: SetContainerMemoryLimit
+  bounds:
+    min: 64Mi
+    max: 128Mi
+  paths:
+    - apps/demo/cache-statefulset.yaml

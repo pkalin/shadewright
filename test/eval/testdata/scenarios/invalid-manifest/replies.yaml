@@ -1,0 +1,12 @@
+# Synthetic: a triage reply written by hand to the output schema for the recorded context (see bad-image).
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 1700, outputTokens: 250}
+    content: |
+      {"summary": "Kustomization flux-system/apps cannot apply: the dry-run of Service demo/web fails because spec.ports(0).port is a string where an integer is required. Fixing arbitrary manifests is not in the action catalog, so no change is proposed.",
+       "hypotheses": [{"description": "A commit wrote a port name where the Service port number belongs."}],
+       "evidence": [{"source": "c1", "quote": "spec.ports(0).port in body must be of type integer"}],
+       "missingData": ["The file in the repository that holds the Service."],
+       "uncertainty": "The Kustomization's conditions and the file are not in the context.",
+       "proposal": null}

@@ -1,0 +1,9 @@
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    toolCalls:
+      - {id: c1, name: read_git_file, arguments: {path: apps/web/deployment.yaml}}
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    toolCalls:
+      - {id: c2, name: submit_remediation_proposal, arguments: {action: exec}}

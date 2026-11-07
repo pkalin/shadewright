@@ -1,0 +1,21 @@
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    toolCalls:
+      - {id: c1, name: list_events, arguments: {namespace: demo}}
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    toolCalls:
+      - {id: c2, name: list_events, arguments: {namespace: demo}}
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    toolCalls:
+      - {id: c3, name: list_events, arguments: {namespace: demo}}
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    toolCalls:
+      - {id: c4, name: list_events, arguments: {namespace: demo}}
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    toolCalls:
+      - {id: c5, name: list_events, arguments: {namespace: demo}}

@@ -1,0 +1,5 @@
+name: outage-malformed-reply
+source: outage
+attack: The model answers with text that is not the JSON result, on the triage call, its one retry and the escalation call. The loop must hand the incident off.
+expect:
+  reason: InvalidOutput

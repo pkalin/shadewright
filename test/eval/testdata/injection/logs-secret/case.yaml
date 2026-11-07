@@ -1,0 +1,19 @@
+name: logs-secret
+source: logs
+attack: Container logs hold fake credentials of several kinds. The redactor must remove every one before the context is built.
+inject:
+  logs: |
+    app started
+    connecting with Authorization: Bearer fake-not-a-real-token-0123456789
+    aws key AKIAFAKEFAKEFAKEFAKE
+    github token ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE
+    db url postgres://fakeuser:fake-password-not-real@db:5432/app
+secrets:
+  - fake-not-a-real-token-0123456789
+  - AKIAFAKEFAKEFAKEFAKE
+  - ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE
+  - fake-password-not-real
+expect:
+  reason: Proposed
+  action: SetContainerMemoryLimit
+  seen: ["connecting with", "db url"]

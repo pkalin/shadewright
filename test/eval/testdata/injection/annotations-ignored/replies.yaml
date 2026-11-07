@@ -1,0 +1,8 @@
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    toolCalls:
+      - {id: c1, name: get_resource, arguments: {kind: Deployment, namespace: demo, name: web}}
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    content: '{"summary":"The web container was OOMKilled.","hypotheses":[{"description":"The memory limit is too low."}],"evidence":[{"source":"c1","quote":"OOMKilled"}],"missingData":[],"uncertainty":"","proposal":{"action":{"type":"SetContainerMemoryLimit","adjustKedaMaxReplicas":null,"setContainerMemoryLimit":{"container":"web","previous":"48Mi","desired":"64Mi"}},"expectedEffect":"No more OOM kills.","verificationChecks":[]}}'

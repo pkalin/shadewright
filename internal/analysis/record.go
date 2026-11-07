@@ -96,10 +96,10 @@ func recordID(claimed *remediationv1alpha1.Incident) remediationv1alpha1.RecordI
 		claimed.Status.LastAnalysisTime.UTC().Format("20060102t150405z"))
 }
 
-// buildRecord returns the record of a run. Text from the cluster or the model passes through the analyzer's
+// buildRecord returns the record of a run, with the ID id (recordID). Text from the cluster or the model passes through the analyzer's
 // redactor, keeping the Incident's name and the request's name, which the analysis read back or made.
-func (c *Controller) buildRecord(claimed *remediationv1alpha1.Incident, out Outcome, limits Limits,
-	request remediationv1alpha1.Name) (providers.AnalysisRecord, error) {
+func (c *Controller) buildRecord(claimed *remediationv1alpha1.Incident, id remediationv1alpha1.RecordID, out Outcome,
+	limits Limits, request remediationv1alpha1.Name) (providers.AnalysisRecord, error) {
 	red := c.Analyzer.cfg.Redactor
 	verified := []providers.VerifiedName{providers.VerifiedName(claimed.Name)}
 	if request != "" {
@@ -121,7 +121,7 @@ func (c *Controller) buildRecord(claimed *remediationv1alpha1.Incident, out Outc
 	subject := claimed.Spec.Subject
 	rec := Record{
 		SchemaVersion: RecordSchemaVersion,
-		ID:            string(recordID(claimed)),
+		ID:            string(id),
 		Incident: RecordIncident{
 			Name: claimed.Name, UID: string(claimed.UID), Fingerprint: claimed.Spec.Fingerprint,
 			Reason: r(claimed.Spec.Reason), SubjectKind: r(subject.Kind), Namespace: r(subject.Namespace),
@@ -178,7 +178,8 @@ func (c *Controller) storeRecord(ctx context.Context, claimed *remediationv1alph
 	if c.Store == nil {
 		return "", nil
 	}
-	logger := log.FromContext(ctx).WithValues("incident", claimed.Name, "record", string(recordID(claimed)))
+	id := recordID(claimed)
+	logger := log.FromContext(ctx).WithValues("incident", claimed.Name, "record", string(id))
 	sctx, cancel, err := c.withinClaim(ctx, claimed, storeTimeout, finalWriteTimeout, false)
 	if err != nil {
 		logger.Info("Skipped the analysis record: no time is left on the claim before the outcome write")
@@ -197,7 +198,7 @@ func (c *Controller) storeRecord(ctx context.Context, claimed *remediationv1alph
 		c.recordResult(claimed, recordFailed)
 		return "", nil
 	}
-	rec, err := c.buildRecord(claimed, out, limits, request)
+	rec, err := c.buildRecord(claimed, id, out, limits, request)
 	if err != nil {
 		logger.Error(err, "Failed to build the analysis record")
 		c.recordResult(claimed, recordRefused)
@@ -222,7 +223,7 @@ func (c *Controller) storeRecord(ctx context.Context, claimed *remediationv1alph
 		c.recordResult(claimed, recordFailed)
 		return "", nil
 	}
-	return remediationv1alpha1.RecordID(rec.ID), nil
+	return id, nil
 }
 
 // recordResult counts a record write and, when no record was stored, writes the Warning event on the Incident.

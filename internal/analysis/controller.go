@@ -145,9 +145,13 @@ func (c *Controller) CheckTimeBudget() error {
 	}
 	need := c.Analyzer.Timeout() + createTimeout + c.afterCreate() + time.Second
 	if need >= c.claimTimeout() {
+		if c.Store == nil {
+			return fmt.Errorf("analysis: the deadline %s, the create (%s) and the outcome write (%s) do not fit "+
+				"inside the claim of %s", c.Analyzer.Timeout(), createTimeout, finalWriteTimeout, c.claimTimeout())
+		}
 		return fmt.Errorf("analysis: the deadline %s, the create (%s), the record write (%s) and the outcome "+
-			"write (%s) do not fit inside the claim of %s", c.Analyzer.Timeout(), createTimeout,
-			c.afterCreate()-finalWriteTimeout, finalWriteTimeout, c.claimTimeout())
+			"write (%s) do not fit inside the claim of %s", c.Analyzer.Timeout(), createTimeout, storeTimeout,
+			finalWriteTimeout, c.claimTimeout())
 	}
 	return nil
 }
@@ -170,6 +174,9 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if err := c.CheckTimeBudget(); err != nil {
 		return err
+	}
+	if c.Store != nil {
+		initRecordMetrics()
 	}
 	due := predicate.NewPredicateFuncs(c.markedDue)
 	return ctrl.NewControllerManagedBy(mgr).
@@ -278,14 +285,16 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	logger.Info("Analyzed Incident", append([]any{"incident", inc.Name, "run", runID, "reason", out.Reason,
 		"escalated", out.Escalated, "calls", out.Calls, "toolCalls", out.ToolCalls, "tokens", out.Tokens,
 		"models", out.Models, "promptVersion", out.PromptVersion, "request", created}, resultFields(out)...)...)
-	// The record is written after a live read confirms the claim, so a run whose outcome is dropped leaves no
-	// record, and before the outcome, which carries its ID: a record ID in the status always names a record
-	// that was stored.
+	// The record is written after a live read confirms the claim, so a run whose claim was lost before it leaves
+	// no record, and before the outcome, which carries its ID: a record ID in the status always names a record
+	// that was stored. A claim lost between the two leaves a record whose ID is not in the status.
 	record, err := c.conclude(ctx, claimed, out, limits, created, attempted)
 	switch {
 	case errors.Is(err, errClaimLost):
+		// A record stored before the claim was lost stays in the store, which is create-only: it is the
+		// evidence of a run whose outcome was dropped, and this line names it.
 		logger.Info("Dropped the outcome of an analysis whose claim was lost", "incident", inc.Name, "run", runID,
-			"reason", out.Reason, "request", created)
+			"reason", out.Reason, "request", created, "record", record)
 	case err != nil:
 		if record != "" {
 			logger.Error(err, "The analysis record was written but the outcome write failed, so its ID is not in the "+
@@ -649,16 +658,20 @@ func (c *Controller) finish(ctx context.Context, claimed *remediationv1alpha1.In
 	defer cancel()
 	// A conflict is retried with a new recheck, and so is a transient error of the API server or of the
 	// connection to it (transientAPIError) while the write's own timeout lasts, so a passing failure does not
-	// lose the outcome and the record ID with it (the next run has another ID). A try that failed so may still have been applied: the next one first looks
-	// whether the outcome is there, so it is not taken for a lost claim.
-	uncertain := false
+	// lose the outcome and the record ID with it (the next run has another ID). A status update that failed so
+	// may still have been applied: from then on (uncertain, never reset) each try first looks whether the
+	// outcome is there, so it is not taken for a lost claim. A failed read before the update sends nothing, so
+	// it does not make the write uncertain.
+	uncertain, updating := false, false
 	return retry.OnError(finishBackoff, func(err error) bool {
 		if apierrors.IsConflict(err) {
 			return true
 		}
-		uncertain = wctx.Err() == nil && transientAPIError(err)
-		return uncertain
+		transient := wctx.Err() == nil && transientAPIError(err)
+		uncertain = uncertain || (updating && transient)
+		return transient
 	}, func() error {
+		updating = false
 		if uncertain && c.outcomeWritten(wctx, claimed, record) {
 			return nil
 		}
@@ -683,6 +696,7 @@ func (c *Controller) finish(ctx context.Context, claimed *remediationv1alpha1.In
 			Message: outcomeMessages[out.Reason], ObservedGeneration: inc.Generation,
 			LastTransitionTime: metav1.NewTime(c.now().UTC().Truncate(time.Second)),
 		})
+		updating = true
 		return c.Client.Status().Update(wctx, inc, client.FieldOwner(FieldOwner))
 	})
 }

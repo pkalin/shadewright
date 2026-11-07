@@ -40,7 +40,8 @@ const (
 // recordResults are every value of the label "result".
 var recordResults = []string{recordWritten, recordExists, recordFailed, recordSkipped, recordRefused}
 
-// analysisRecords counts the analysis record writes, by result, when a store is configured.
+// analysisRecords counts the analysis record writes, by result, when a store is configured. Its series exist
+// only then ([initRecordMetrics]), so a dashboard can tell "no store" (no series) from "nothing written" (zeros).
 var analysisRecords = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "shadewright_analysis_records_total",
 	Help: "Analysis record writes to the analysis store, by result (written, exists, failed, skipped, refused).",
@@ -48,6 +49,11 @@ var analysisRecords = prometheus.NewCounterVec(prometheus.CounterOpts{
 
 func init() {
 	metrics.Registry.MustRegister(analysisRecords)
+}
+
+// initRecordMetrics starts every series of analysisRecords at zero; SetupWithManager calls it when a store is
+// configured.
+func initRecordMetrics() {
 	for _, r := range recordResults {
 		analysisRecords.WithLabelValues(r)
 	}

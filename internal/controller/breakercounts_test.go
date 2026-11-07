@@ -31,12 +31,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/policy/freshness"
+	"github.com/pkalin/shadewright/internal/providers"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
 )
 
@@ -864,5 +867,126 @@ func TestClassifyBreaker(t *testing.T) {
 				t.Fatalf("breakerCounts = %s, want %s", got, c.want)
 			}
 		})
+	}
+}
+
+// endedWithPR is a request that ended in phase with a pull request to close on delete, a finalizer, no lock and
+// status.breakerCounts false (Expired, or an outcome a later success cleared).
+func endedWithPR(t *testing.T, name string, phase remediationv1alpha1.RemediationPhase) *remediationv1alpha1.RemediationRequest {
+	t.Helper()
+	o := otherRequest(name, "uid-elsewhere-"+name, phase, time.Hour)
+	o.Finalizers = []string{FinalizerName}
+	o.Status.HoldsTarget = new(false)
+	o.Status.BreakerCounts = new(false)
+	o.Status.PlanRepository = freshness.RepositoryOf(fx.RemediationSettings().Spec.Repositories[0])
+	return o
+}
+
+// countOpens makes r count the repositories its finalizer opens to close a pull request (each open fails).
+func countOpens(r *RemediationRequestReconciler) *int {
+	opens := 0
+	r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+		opens++
+		return nil, errors.New("sanitised")
+	}
+	return &opens
+}
+
+// TestDeleteWaitsForTheCap checks the cap for a request that ended and is deleted while another fills the cap
+// of one: such a request was not active, so the other may have been let through in its slot; its finalizer marks
+// it and then closes its pull request (a Git write) only when it fits the cap, so it waits without writing while
+// the other runs, a new request is held meanwhile, and the close goes on once the other is gone.
+func TestDeleteWaitsForTheCap(t *testing.T) {
+	for _, phase := range []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseExpired,
+		remediationv1alpha1.PhaseNeedsIntervention} {
+		t.Run(string(phase), func(t *testing.T) {
+			ending := endedWithPR(t, "ending", phase)
+			running := otherRequest("running", "uid-elsewhere", remediationv1alpha1.PhasePRCreated, time.Minute)
+			r, base, rr, _ := limitsWorld(t, 1, ending, running)
+			opens := countOpens(r)
+			if err := base.Delete(context.Background(), ending); err != nil {
+				t.Fatal(err)
+			}
+			res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ending)})
+			if err != nil || res.RequeueAfter <= 0 || *opens != 0 {
+				t.Fatalf("res = %+v, err = %v, opens = %d; want a wait without a Git write", res, err, *opens)
+			}
+			res, got, err := reconcileLimits(t, r, rr)
+			expectHeld(t, res, err, got, ReasonConcurrencyLimit)
+			if err := base.Delete(context.Background(), running); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = r.Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ending)})
+			if *opens != 1 {
+				t.Fatalf("opens = %d once the other is gone, want 1", *opens)
+			}
+		})
+	}
+}
+
+// TestDeletesDoNotWaitOnEachOther checks that two requests that ended and are deleted together under a cap of
+// one do not wait on each other for ever: one that waits makes no Git write, so it does not fill the cap.
+func TestDeletesDoNotWaitOnEachOther(t *testing.T) {
+	a := endedWithPR(t, "a", remediationv1alpha1.PhaseExpired)
+	b := endedWithPR(t, "b", remediationv1alpha1.PhaseExpired)
+	r, base, _, _ := limitsWorld(t, 1, a, b)
+	opens := countOpens(r)
+	for _, o := range []*remediationv1alpha1.RemediationRequest{a, b} {
+		if err := base.Delete(context.Background(), o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, o := range []*remediationv1alpha1.RemediationRequest{a, b} {
+		_, _ = r.Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(o)})
+	}
+	if *opens != 2 {
+		t.Fatalf("opens = %d, want 2 (each close in turn)", *opens)
+	}
+	if len(r.closingOnDelete) != 0 {
+		t.Fatalf("closing = %v after the closes, want none", r.closingOnDelete)
+	}
+}
+
+// TestRestoreRefusedIsVisible checks a finalizer whose restore the API server refuses for good: the finalizer
+// stays (fail closed), the refusal is counted and recorded as a Warning Event, and the deletion is tried again
+// after a delay instead of at once.
+func TestRestoreRefusedIsVisible(t *testing.T) {
+	r, base, rr, _ := limitsWorld(t, 20, successHistory()...)
+	_, got, err := reconcileLimits(t, r, rr)
+	expectAdmitted(t, err, got)
+	s2 := &remediationv1alpha1.RemediationRequest{}
+	if err := base.Get(context.Background(), types.NamespacedName{Namespace: requestNamespace, Name: "s2"}, s2); err != nil {
+		t.Fatal(err)
+	}
+	if err := base.Delete(context.Background(), s2); err != nil {
+		t.Fatal(err)
+	}
+	r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch,
+			...client.SubResourcePatchOption) error {
+			return apierrors.NewForbidden(remediationv1alpha1.GroupVersion.WithResource("remediationrequests").GroupResource(),
+				"f1", errors.New("no patch"))
+		},
+	})
+	events := record.NewFakeRecorder(10)
+	r.Recorder = events
+	before := testutil.ToFloat64(breakerClearErrors)
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(s2)})
+	if err != nil || res.RequeueAfter != restoreRetryDelay {
+		t.Fatalf("res = %+v, err = %v; want a retry after %v", res, err, restoreRetryDelay)
+	}
+	if d := testutil.ToFloat64(breakerClearErrors) - before; d != 1 {
+		t.Fatalf("clear errors rose by %v, want 1", d)
+	}
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(s2), s2); err != nil || len(s2.Finalizers) == 0 {
+		t.Fatalf("err = %v, finalizers = %v; want the finalizer kept", err, s2.Finalizers)
+	}
+	select {
+	case e := <-events.Events:
+		if !strings.HasPrefix(e, "Warning "+ReasonBreakerRestoreRefused) {
+			t.Fatalf("event = %q, want a Warning %s", e, ReasonBreakerRestoreRefused)
+		}
+	default:
+		t.Fatal("no Event recorded")
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"slices"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -31,6 +32,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 )
@@ -238,6 +240,30 @@ func markDeleting(rr *remediationv1alpha1.RemediationRequest) bool {
 	rr.Status.BreakerCounts = new(true)
 	rr.Status.BreakerClearedBy = ""
 	return true
+}
+
+// ReasonBreakerRestoreRefused is the reason of the Warning Event on a request in deletion whose finalizer
+// cannot restore the outcomes it cleared because the API server refuses for good.
+const ReasonBreakerRestoreRefused = "BreakerRestoreRefused"
+
+// restoreRetryDelay is how long a finalizer whose restore was refused for good waits before it tries again.
+const restoreRetryDelay = 5 * time.Minute
+
+// restoreRefused handles a restore the API server refused for good (Forbidden, Invalid and the like): the
+// finalizer stays (fail closed), the refusal is logged as an error, counted in
+// shadewright_circuit_breaker_clear_errors_total and recorded as a Warning Event on the request, and the
+// deletion is tried again after restoreRetryDelay rather than at once.
+func (r *RemediationRequestReconciler) restoreRefused(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	err error) reconcile.Result {
+	breakerClearErrors.Inc()
+	logf.FromContext(ctx).Error(err, "Failed to restore the outcomes the circuit breaker reads again after a success is "+
+		"deleted; the finalizer stays", "remediationRequest", client.ObjectKeyFromObject(rr))
+	if r.Recorder != nil {
+		r.Recorder.Event(rr, corev1.EventTypeWarning, ReasonBreakerRestoreRefused,
+			"The outcomes this request's success hid from the circuit breaker could not be restored; the finalizer "+
+				"stays until they are (see the troubleshooting guide, limits)")
+	}
+	return reconcile.Result{RequeueAfter: restoreRetryDelay}
 }
 
 // clearedField is the field selector of status.breakerClearedBy.

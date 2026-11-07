@@ -137,7 +137,7 @@ The limits count the requests of one namespace, the operator namespace where req
 
 A request is active while the executor can still move it on before the merge: a phase before `Merged` with a plan digest. It is also active while it is being deleted and its finalizer may still write to Git: it has not ended, holds the lock, or ended `NeedsIntervention` or `Expired`, whose finalizer closes a pull request that may still be open.
 
-Such a request is read while it is being deleted. One that ended `NeedsIntervention` or `Expired` without the lock is not in the other lists, so its finalizer first sets `status.breakerCounts` to `true`, before it closes anything; the breaker's list then reads it (#390). A request that ended in another phase and holds no lock is not counted: its finalizer writes nothing to Git.
+Such a request is read while it is being deleted. One that ended `NeedsIntervention` or `Expired` without the lock is not in the other lists, so its finalizer first sets `status.breakerCounts` to `true`, before it closes anything; the breaker's list then reads it (#390). A check made before that write did not count it and may have let another request through in its slot, so the finalizer then checks the limits under the admission lock and closes the pull request only when fewer than `maxConcurrentRemediations` others count; otherwise it waits and checks again in 30 seconds, without writing to Git. Other requests that ended and are being deleted count there only while their own close runs, so two of them never wait on each other. A request that ended in another phase and holds no lock is not counted: its finalizer writes nothing to Git.
 
 ### The target lock
 

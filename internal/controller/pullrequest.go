@@ -975,8 +975,18 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 		}
 	}
-	if r.OpenRepository != nil && rr.Status.PlanRepository != nil &&
-		(closeOnDelete(rr.Status.Phase) || ptr.Deref(rr.Status.HoldsTarget, false)) {
+	closes := r.OpenRepository != nil && rr.Status.PlanRepository != nil &&
+		(closeOnDelete(rr.Status.Phase) || ptr.Deref(rr.Status.HoldsTarget, false))
+	if closes && ended(rr.Status.Phase) {
+		// A request that ended was not active until it was deleted, so another may have been let through
+		// meanwhile: the close waits for a slot under the cap (waitForCapOnDelete).
+		release, res, wait, err := r.waitForCapOnDelete(ctx, rr)
+		if wait || err != nil {
+			return res, err
+		}
+		defer release()
+	}
+	if closes {
 		cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 		err := r.closeChangeRequest(cleanCtx, rr)
 		err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
@@ -995,6 +1005,9 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	// The outcomes this request's success cleared are read again before the finalizer goes; until they all are,
 	// the finalizer stays and the deletion is retried.
 	if err := r.restoreCleared(ctx, rr); err != nil {
+		if ctx.Err() == nil && permanentClearError(err) {
+			return r.restoreRefused(ctx, rr, err), nil
+		}
 		return reconcile.Result{}, err
 	}
 	base := rr.DeepCopy()

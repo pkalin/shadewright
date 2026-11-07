@@ -133,6 +133,9 @@ type RemediationRequestReconciler struct {
 	// clearMu lets one clearing of the breaker's watermark run at a time, and orders it with the restore in the
 	// finalizer of the success that cleared (breakercounts.go).
 	clearMu sync.Mutex
+	// closingOnDelete are the requests that ended whose finalizer closes their pull request now
+	// (waitForCapOnDelete), guarded by admitMu.
+	closingOnDelete map[types.UID]struct{}
 	// checked holds, per request name, when the last full recheck of a waiting pull request ended, with the
 	// request's UID (pollState): an entry of another UID under the same name is not used. It is memory only:
 	// after a restart or a change of leader every request gets a full recheck first. Entries are dropped when the

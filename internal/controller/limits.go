@@ -170,6 +170,9 @@ type limitsState struct {
 	stoppedLock bool
 	// clear is what the check found the breaker no longer needs (staleOutcomes), cleared after the decision.
 	clear clearing
+	// endedDeleting are the active requests, other than the one checked, that ended and are being deleted
+	// (waitForCapOnDelete).
+	endedDeleting []types.UID
 }
 
 // recheckDelay is how long a request held back by s waits before it checks the limits again.
@@ -293,6 +296,9 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		}
 		if e.active {
 			s.active++
+			if e.deleting && e.ended {
+				s.endedDeleting = append(s.endedDeleting, uid)
+			}
 		}
 		if e.target == rr.Spec.TargetRef.UID && e.lock {
 			locked = true
@@ -364,8 +370,9 @@ type limitsEntry struct {
 	uid             types.UID
 	// final is a request in Succeeded, the only success that clears older outcomes (staleOutcomes).
 	final bool
-	// deleting is a request being deleted.
+	// deleting is a request being deleted; ended is a request in one of endedPhases.
 	deleting bool
+	ended    bool
 }
 
 // neutralProbe reports whether the entry is a probe that ended without a success or a failure.
@@ -416,7 +423,8 @@ func (r *RemediationRequestReconciler) readLimits(ctx context.Context, namespace
 		err := r.listPages(ctx, namespace, sel, func(o *remediationv1alpha1.RemediationRequest) {
 			e := limitsEntry{active: active(o), lock: holdsLock(o), target: o.Spec.TargetRef.UID,
 				outcome: breakerOutcome(o), counts: ptr.Deref(o.Status.BreakerCounts, false), name: o.Name,
-				resourceVersion: o.ResourceVersion, uid: o.UID, deleting: !o.DeletionTimestamp.IsZero()}
+				resourceVersion: o.ResourceVersion, uid: o.UID, deleting: !o.DeletionTimestamp.IsZero(),
+				ended: ended(o.Status.Phase)}
 			e.final = e.outcome == outcomeSuccess && o.Status.Phase == remediationv1alpha1.PhaseSucceeded
 			if o.Status.LastPhaseTransitionTime != nil {
 				e.at = o.Status.LastPhaseTransitionTime.Time
@@ -558,6 +566,54 @@ func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.Remediat
 	rr.Status.LastPhaseTransitionTime = &t
 	// The breaker's watermark is set in the same status write that ends the request (breakercounts.go).
 	classifyBreaker(rr)
+}
+
+// waitForCapOnDelete holds back the Git write of the finalizer of a request that ended (the close of its pull
+// request) while the cap is reached without it. Such a request was not active until it was deleted, so a check
+// of the limits made before its finalizer marked it (markDeleting) may have let another request through in its
+// slot. Under the admission lock it checks the limits, which now read this request: the others that count are
+// the active ones, less those that ended and are being deleted but are not closing now (they wait here and make
+// no Git write, so two of them never wait on each other). When fewer than maxConcurrentRemediations count, the
+// request is recorded as closing until release is called and the close goes on; else wait is true and the
+// deletion is checked again after admissionRecheckDelay without writing. A failure to read the limits is
+// returned with wait true (fail closed: no close, retried with backoff); missing settings let the close go on,
+// since it then finds no repository. The record of closing requests is the leader's own: a new leader starts
+// with none, after the old one stopped.
+func (r *RemediationRequestReconciler) waitForCapOnDelete(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	release func(), res reconcile.Result, wait bool, err error) {
+	r.admitMu.Lock()
+	defer r.admitMu.Unlock()
+	limCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
+	s, err := r.checkLimits(limCtx, rr)
+	err = boundErr(ctx, limCtx, "check of the limits", err)
+	cancel()
+	switch {
+	case errors.Is(err, errSettingsMissing):
+	case err != nil:
+		return nil, reconcile.Result{}, true, err
+	default:
+		n := s.active
+		for _, uid := range s.endedDeleting {
+			if _, closing := r.closingOnDelete[uid]; !closing {
+				n--
+			}
+		}
+		if n >= s.limit {
+			logf.FromContext(ctx).Info("Waiting for a slot under maxConcurrentRemediations before closing the pull "+
+				"request of a deleted RemediationRequest", "remediationRequest", client.ObjectKeyFromObject(rr),
+				"active", n, "limit", s.limit)
+			return nil, reconcile.Result{RequeueAfter: admissionRecheckDelay}, true, nil
+		}
+	}
+	if r.closingOnDelete == nil {
+		r.closingOnDelete = map[types.UID]struct{}{}
+	}
+	r.closingOnDelete[rr.UID] = struct{}{}
+	return func() {
+		r.admitMu.Lock()
+		delete(r.closingOnDelete, rr.UID)
+		r.admitMu.Unlock()
+	}, reconcile.Result{}, false, nil
 }
 
 // holdBack checks the limits for a request about to go through the policy check, and holds it back (Queued)

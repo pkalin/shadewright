@@ -1,0 +1,10 @@
+# How the diagnosis of missing-secret is scored: each fact of expected.yaml, verbatim, with the terms the
+# result's summary, hypotheses or evidence quotes must contain (case ignored), or why it is not scored.
+facts:
+  - fact: the missing Secret is named web-credentials, key api-token
+    all: ["web-credentials"]
+  - fact: the container state reason CreateContainerConfigError
+    # The context builder's status block shows the container's waiting reason, so it is scored already.
+    all: ["CreateContainerConfigError"]
+  - fact: the existence of the Secret learned through the yes/no check, never by reading Secrets
+    unscored: the existence check (check_missing_reference) is a tool of the escalation, which this context does not trigger

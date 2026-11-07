@@ -1,0 +1,28 @@
+apiVersion: scenarios.shadewright.io/v1alpha1
+kind: Scenario
+name: invalid-manifest
+summary: A Service manifest in apps/demo/ fails schema validation, so the Flux Kustomization apps is not Ready and reports the apply error.
+render: fails
+incident:
+  reason: ReconciliationFailed
+  status: planned
+  source: kustomize-controller's Warning event ReconciliationFailed about Kustomization flux-system/apps. The analyzer watches only demo (--watch-namespaces=demo), so today no Incident is created for it; the scenario needs flux-system watched too, which is not set up (see the README). Not observed yet.
+  object:
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    namespace: flux-system
+    name: apps
+diagnosis:
+  status: planned
+  evidence:
+    - fact: the failing Kustomization flux-system/apps and its Ready condition False
+      source: the Flux module's symptom for the Kustomization (built, not consumed by the analysis yet, and it needs flux-system watched)
+    - fact: the error, a dry-run failure on Service demo/web (ports[0].port, a string where an integer is required)
+      source: the condition message of the Kustomization and the note of the event
+    - fact: the file, apps/demo/web-service.yaml
+      source: read from the repository by a person or a planned read-only tool; source mapping (ADR-0012) cannot find it, because it maps only a Deployment, StatefulSet or ScaledObject behind a Ready Kustomization
+outcome:
+  type: refusal
+  status: planned
+  reason: Fixing arbitrary manifests is not in the catalog, and Shadewright never suspends or changes Flux (design 7); a person is notified.
+  phase: NeedsIntervention

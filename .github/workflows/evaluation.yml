@@ -1,0 +1,106 @@
+name: Evaluation
+
+# Evaluates the analysis loop against the real model (test/eval, docs/evaluation.md): every lab scenario's
+# recorded context through the Foundry deployments the `evaluation` environment names, scored against the
+# scenarios' expected.yaml, with the token counts and an estimated cost. By hand only: it costs money and needs
+# the Azure identity, so it never runs on pull requests, pushes or a schedule, and it is not part of ci.yml.
+# CI runs the same harness on the fake model in the test job.
+#
+# Azure sign-in is OIDC with no secret: the job asks GitHub for an ID token with the audience Entra ID expects
+# and hands it to the analyzer's own workload identity token source (AZURE_FEDERATED_TOKEN_FILE), the code path
+# the analyzer uses in the cluster. The app registration or managed identity needs a federated credential for
+# this repository's `evaluation` environment and the Cognitive Services OpenAI User role on the Foundry
+# resource; see docs/evaluation.md for the variables to set.
+on:
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: Runs of each scenario (more repeats cost more and show how stable the answers are).
+        type: choice
+        options: ["1", "2", "3", "5"]
+        default: "1"
+      min_pass_rate:
+        description: Share of runs that must pass, from 0 to 1.
+        type: string
+        default: "1"
+
+permissions: {}
+
+concurrency:
+  group: evaluation
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    name: evaluate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # The environment holds the variables and can require a reviewer before a run spends money.
+    environment: evaluation
+    permissions:
+      contents: read
+      id-token: write # the OIDC token exchanged for an Entra ID access token
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # GitHub's ID token for the Entra ID audience, written to a file only this job reads. It is never printed.
+      # The analyzer's token source caches the access token it exchanges it for (about an hour), which covers a
+      # run; the job timeout keeps a run inside it.
+      - name: Get the federated token
+        run: |
+          set -euo pipefail
+          umask 077
+          curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" \
+            | jq -er .value > "${RUNNER_TEMP}/azure-federated-token"
+
+      - name: Evaluate the model
+        env:
+          AZURE_CLIENT_ID: ${{ vars.EVAL_AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.EVAL_AZURE_TENANT_ID }}
+          AZURE_FEDERATED_TOKEN_FILE: ${{ runner.temp }}/azure-federated-token
+          EVAL_ENDPOINT: ${{ vars.EVAL_ENDPOINT }}
+          EVAL_ENDPOINT_SUFFIXES: ${{ vars.EVAL_ENDPOINT_SUFFIXES }}
+          EVAL_API_VERSION: ${{ vars.EVAL_API_VERSION }}
+          EVAL_TRIAGE_DEPLOYMENT: ${{ vars.EVAL_TRIAGE_DEPLOYMENT }}
+          EVAL_TRIAGE_MODEL: ${{ vars.EVAL_TRIAGE_MODEL }}
+          EVAL_ESCALATION_DEPLOYMENT: ${{ vars.EVAL_ESCALATION_DEPLOYMENT }}
+          EVAL_ESCALATION_MODEL: ${{ vars.EVAL_ESCALATION_MODEL }}
+          EVAL_PRICE_INPUT_PER_MTOK: ${{ vars.EVAL_PRICE_INPUT_PER_MTOK }}
+          EVAL_PRICE_CACHED_INPUT_PER_MTOK: ${{ vars.EVAL_PRICE_CACHED_INPUT_PER_MTOK }}
+          EVAL_PRICE_OUTPUT_PER_MTOK: ${{ vars.EVAL_PRICE_OUTPUT_PER_MTOK }}
+          EVAL_REPEATS: ${{ inputs.repeats }}
+          EVAL_MIN_PASS_RATE: ${{ inputs.min_pass_rate }}
+        run: make eval-model EVAL_REPORT_DIR="${RUNNER_TEMP}/eval"
+
+      - name: Remove the federated token
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/azure-federated-token"
+
+      - name: Write the job summary
+        if: always()
+        run: |
+          if [ -f "${RUNNER_TEMP}/eval/report.md" ]; then
+            cat "${RUNNER_TEMP}/eval/report.md" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "No report: the run stopped before the scenarios ran (see the log)." >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      # The report holds scores, reasons, token counts and the deployment and model names: no prompt, no model
+      # text, no token, no endpoint.
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evaluation-report
+          path: ${{ runner.temp }}/eval/
+          if-no-files-found: warn
+          retention-days: 90

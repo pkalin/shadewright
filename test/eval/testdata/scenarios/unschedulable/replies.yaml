@@ -1,0 +1,13 @@
+# Synthetic: a triage reply written by hand to the output schema for the recorded context (see bad-image).
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2400, outputTokens: 280}
+    content: |
+      {"summary": "The new pod of Deployment demo/web is Pending with FailedScheduling: no node has enough CPU (Insufficient cpu on all 3 nodes, and preemption finds no victims). Lowering requests or adding nodes is not in the action catalog, so no change is proposed.",
+       "hypotheses": [{"description": "The new template requests more CPU than any node can offer."}],
+       "evidence": [{"source": "c1", "quote": "3 Insufficient cpu"},
+                    {"source": "c2", "quote": "Unschedulable"}],
+       "missingData": ["The container's CPU request in the pod template."],
+       "uncertainty": "The request itself is not in the context; the scheduler's message implies it is large.",
+       "proposal": null}

@@ -1,0 +1,12 @@
+# Synthetic: a triage reply written by hand to the output schema for the recorded context (see bad-image).
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 1700, outputTokens: 240}
+    content: |
+      {"summary": "KEDA cannot query the trigger of ScaledObject demo/worker: the Prometheus address prometheus-server.monitoring.svc.cluster.local does not resolve. A broken trigger is not fixed by raising maxReplicaCount, and no catalog action edits a trigger, so no change is proposed.",
+       "hypotheses": [{"description": "The trigger's serverAddress names a Service that does not exist."}],
+       "evidence": [{"source": "c1", "quote": "lookup prometheus-server.monitoring.svc.cluster.local"}],
+       "missingData": [],
+       "uncertainty": "The ScaledObject's conditions are not in the context.",
+       "proposal": null}

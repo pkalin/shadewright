@@ -1,0 +1,16 @@
+# Synthetic: a triage reply written by hand to the output schema for the recorded context (see bad-image).
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2300, outputTokens: 310}
+    content: |
+      {"summary": "The web container of Deployment demo/web was OOMKilled (exit code 137) and has restarted 3 times: it needs more memory than its limit. Raising the memory limit within the policy's bounds should stop the kills.",
+       "hypotheses": [{"description": "The working set exceeds the 48Mi limit at start-up."}],
+       "evidence": [{"source": "c1", "quote": "OOMKilled"},
+                    {"source": "c2", "quote": "OOMKilled"}],
+       "missingData": [],
+       "uncertainty": "Without memory metrics the needed headroom is estimated, not measured.",
+       "proposal": {"action": {"type": "SetContainerMemoryLimit", "adjustKedaMaxReplicas": null,
+                               "setContainerMemoryLimit": {"container": "web", "previous": "48Mi", "desired": "64Mi"}},
+                    "expectedEffect": "The container stays under its limit and stops being OOMKilled.",
+                    "verificationChecks": []}}

@@ -1,0 +1,36 @@
+apiVersion: scenarios.shadewright.io/v1alpha1
+kind: Scenario
+name: keda-at-ceiling
+summary: The worker's ScaledObject has maxReplicaCount 2 while steady load makes its trigger ask for 3 replicas, so the HPA KEDA manages sits at its ceiling.
+incident:
+  reason: ReplicaCeiling
+  status: planned
+  source: The KEDA module's HorizontalPodAutoscaler symptom source (ScalingLimited=True with reason TooManyReplicas, internal/modules/keda/symptoms.go in pkalin/shadewright). Nothing the collector reads fires at a ceiling (it reads Warning events and terminations only, and has no read access to HPAs), so there is no Incident until the analyzer consumes module symptom sources, planned in pkalin/shadewright#380. Not observed.
+  object:
+    apiVersion: keda.sh/v1alpha1
+    kind: ScaledObject
+    namespace: demo
+    name: worker
+diagnosis:
+  status: planned
+  evidence:
+    - fact: the HPA runs at its maximum, ScalingLimited is True with reason TooManyReplicas, and spec.maxReplicas and status.currentReplicas are both 2
+      source: the KEDA module's ReplicaCeiling symptom evidence (built and unit-tested in pkalin/shadewright, not consumed by the analyzer yet, #380)
+    - fact: the owning ScaledObject is worker
+      source: the ReplicaCeiling symptom evidence (the HPA's controller owner reference)
+    - fact: the backlog, the current external metric value (about 13 requests per second) against its target (5 per replica)
+      source: the ReplicaCeiling symptom evidence (status.currentMetrics and spec.metrics of the HPA); planned
+    - fact: the ScaledObject is Ready, not paused, not on fallback, and its HPA can read its metrics
+      source: the KedaReady rule that the policy gate for AdjustKedaMaxReplicas applies to the live ScaledObject (built; runs at the policy step, not as diagnosis input)
+    - fact: request rate and replica history over time
+      source: a Prometheus query through the MetricsSource interface (planned, not wired into the analyzer yet)
+outcome:
+  type: pull-request
+  status: planned
+  note: Planned. Not run on Kind or the lab. The pull request step has not been exercised for this action against the fleet, and the lab has no policy that allows AdjustKedaMaxReplicas for demo yet (the operator's lab samples hold only a memory limit policy).
+  action: AdjustKedaMaxReplicas
+  bounds:
+    min: 2
+    max: 3
+  paths:
+    - apps/demo/worker-scaledobject.yaml

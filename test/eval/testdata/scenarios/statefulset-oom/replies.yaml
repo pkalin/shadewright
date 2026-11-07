@@ -1,0 +1,16 @@
+# Synthetic: a triage reply written by hand to the output schema for the recorded context (see bad-image).
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2500, outputTokens: 320}
+    content: |
+      {"summary": "Pod cache-1 of StatefulSet demo/cache, on the new revision, is OOMKilled and has restarted 2 times, while cache-0 on the old revision runs without restarts: the new template's memory limit is too low. Raising the cache container's limit within the policy's bounds should stop the kills.",
+       "hypotheses": [{"description": "The rollout lowered the memory limit to 48Mi, below the working set."}],
+       "evidence": [{"source": "c1", "quote": "OOMKilled"},
+                    {"source": "c2", "quote": "cache-7d9f4b8c6"}],
+       "missingData": [],
+       "uncertainty": "Without memory metrics the needed headroom is estimated, not measured.",
+       "proposal": {"action": {"type": "SetContainerMemoryLimit", "adjustKedaMaxReplicas": null,
+                               "setContainerMemoryLimit": {"container": "cache", "previous": "48Mi", "desired": "64Mi"}},
+                    "expectedEffect": "cache-1 stays under its limit and becomes ready.",
+                    "verificationChecks": []}}

@@ -1,0 +1,26 @@
+# Synthetic: written from the scenario manifests (apps/demo/ with scenarios/bad-image/apps/ applied) and the
+# observation in expected.yaml, not recorded in the lab. The symptom is the kubelet's pull error as
+# fingerprint.Normalize leaves it. UIDs and the fingerprint are placeholders.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: inc-bad-image
+  namespace: shadewright-system
+  uid: 00000000-0000-4000-8000-0000000001a0
+spec:
+  fingerprint: sha256:00000000000000000000000000000000000000000000000000000000000001a0
+  subject:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+    uid: 00000000-0000-4000-8000-0000000001a1
+  reason: Failed
+  type: Warning
+  reportingController: kubelet
+  symptom: 'Failed to pull image "ghcr.io/stefanprodan/podinfo:6.17.99": rpc error: code = NotFound desc = failed to pull and unpack image "ghcr.io/stefanprodan/podinfo:6.17.99": failed to resolve reference "ghcr.io/stefanprodan/podinfo:6.17.99": ghcr.io/stefanprodan/podinfo:6.17.99: not found'
+status:
+  phase: Open
+  count: 1
+  firstSeen: "2026-11-04T11:52:00Z"
+  lastSeen: "2026-11-04T11:52:00Z"

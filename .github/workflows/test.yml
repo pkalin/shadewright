@@ -41,3 +41,10 @@ jobs:
         run: |
           go mod tidy
           make test
+
+      # make test has already run the evaluation on the fake model (test/eval); this run writes its report into
+      # the job summary (format: docs/evaluation.md). The real model is the manual Evaluation workflow.
+      - name: Evaluation report (fake model)
+        run: |
+          make eval EVAL_REPORT_DIR="${RUNNER_TEMP}/eval"
+          cat "${RUNNER_TEMP}/eval/report.md" >> "${GITHUB_STEP_SUMMARY}"

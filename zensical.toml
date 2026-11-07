@@ -48,6 +48,7 @@ nav = [
     { "Identity rotation" = "identity-rotation.md" },
     { "Data handling" = "data-handling.md" },
     { "Lab: OOM acceptance run" = "lab-oom-acceptance.md" },
+    { "Evaluate the model" = "evaluation.md" },
   ] },
   { "Reference" = [
     { "Reference" = "reference/index.md" },

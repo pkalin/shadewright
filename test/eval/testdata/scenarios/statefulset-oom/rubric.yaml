@@ -1,0 +1,10 @@
+# How the diagnosis of statefulset-oom is scored: each fact of expected.yaml, verbatim, with the terms the
+# result's summary, hypotheses or evidence quotes must contain (case ignored), or why it is not scored.
+facts:
+  - fact: OOMKilled from the container status (last state), not from an event reason
+    all: ["OOMKilled"]
+  - fact: the restart count of the cache container in cache-1, and that cache-0 is healthy and on the old template
+    # The status block shows both pods, their restarts and the StatefulSet's revisions; the pod names are scored.
+    all: ["cache-1", "cache-0"]
+  - fact: the memory working set of cache-1 from Prometheus (container_memory_working_set_bytes) near the 48Mi limit
+    unscored: the recorded context has no metrics source (MetricsSource is not wired into the analyzer yet)

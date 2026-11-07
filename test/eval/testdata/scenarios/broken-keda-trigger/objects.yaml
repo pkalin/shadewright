@@ -1,0 +1,2 @@
+# No objects: the context builder and the read tools do not read ScaledObjects (the status section says the
+# kind is not read), so the summary of the Incident is all the context holds.

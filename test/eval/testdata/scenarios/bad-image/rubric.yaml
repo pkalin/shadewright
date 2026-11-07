@@ -1,0 +1,7 @@
+# How the diagnosis of bad-image is scored: each fact of expected.yaml, verbatim, with the terms the result's
+# summary, hypotheses or evidence quotes must contain (case ignored), or why it is not scored.
+facts:
+  - fact: the image reference ghcr.io/stefanprodan/podinfo:6.17.99
+    all: ["podinfo:6.17.99"]
+  - fact: the pull error (manifest unknown or not found)
+    any: ["not found", "manifest unknown", "NotFound"]

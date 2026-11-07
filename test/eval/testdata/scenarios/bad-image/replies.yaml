@@ -1,0 +1,15 @@
+# Synthetic: a triage reply written by hand to the output schema for the recorded context, so that CI checks
+# the harness, the loop and the scoring end to end. A real-model run (the Evaluation workflow) replaces none of
+# this; recording its replies here is a follow-up.
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2400, outputTokens: 260}
+    content: |
+      {"summary": "The new pod of Deployment demo/web cannot start: the image ghcr.io/stefanprodan/podinfo:6.17.99 does not exist in the registry (not found), so the pull fails and the kubelet backs off. Changing an image is not in the action catalog, so no change is proposed.",
+       "hypotheses": [{"description": "The tag 6.17.99 was never published; the image reference in the pod template is wrong."}],
+       "evidence": [{"source": "c1", "quote": "ghcr.io/stefanprodan/podinfo:6.17.99: not found"},
+                    {"source": "c2", "quote": "Back-off pulling image \"ghcr.io/stefanprodan/podinfo:6.17.99\""}],
+       "missingData": [],
+       "uncertainty": "Whether the tag was removed or never existed is not visible from the cluster.",
+       "proposal": null}

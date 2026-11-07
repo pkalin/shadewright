@@ -1,0 +1,191 @@
+# Synthetic: the objects the context builder and the read tools read for this scenario, as the API server
+# would answer during a rollout to the missing tag: the old ReplicaSet's pod still serves, the new one cannot
+# pull. Written from apps/demo/web-deployment.yaml and scenarios/bad-image/, not recorded in the lab.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000001a1
+  generation: 2
+  creationTimestamp: "2026-11-04T09:00:00Z"
+  labels:
+    app.kubernetes.io/name: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: web
+    spec:
+      containers:
+        - name: web
+          image: ghcr.io/stefanprodan/podinfo:6.17.99
+          resources:
+            limits:
+              cpu: 200m
+              memory: 64Mi
+status:
+  observedGeneration: 2
+  replicas: 2
+  updatedReplicas: 1
+  readyReplicas: 1
+  availableReplicas: 1
+  unavailableReplicas: 1
+  conditions:
+    - type: Progressing
+      status: "True"
+      reason: ReplicaSetUpdated
+      message: ReplicaSet "web-5d6f7b8c9" is progressing.
+      lastTransitionTime: "2026-11-04T11:51:00Z"
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web-7c9d8f6b5
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000001a2
+  creationTimestamp: "2026-11-04T09:00:00Z"
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 7c9d8f6b5
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: web
+      uid: 00000000-0000-4000-8000-0000000001a1
+      controller: true
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+      pod-template-hash: 7c9d8f6b5
+status:
+  replicas: 1
+  readyReplicas: 1
+  availableReplicas: 1
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web-5d6f7b8c9
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000001a3
+  creationTimestamp: "2026-11-04T11:51:00Z"
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 5d6f7b8c9
+  annotations:
+    deployment.kubernetes.io/revision: "2"
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: web
+      uid: 00000000-0000-4000-8000-0000000001a1
+      controller: true
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+      pod-template-hash: 5d6f7b8c9
+status:
+  replicas: 1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-7c9d8f6b5-x2k4p
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000001a4
+  creationTimestamp: "2026-11-04T09:00:05Z"
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 7c9d8f6b5
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: ReplicaSet
+      name: web-7c9d8f6b5
+      uid: 00000000-0000-4000-8000-0000000001a2
+      controller: true
+spec:
+  containers:
+    - name: web
+      image: ghcr.io/stefanprodan/podinfo:6.17.0
+status:
+  phase: Running
+  containerStatuses:
+    - name: web
+      ready: true
+      restartCount: 0
+      image: ghcr.io/stefanprodan/podinfo:6.17.0
+      imageID: ""
+      state:
+        running:
+          startedAt: "2026-11-04T09:00:10Z"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-5d6f7b8c9-q7m2z
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000001a5
+  creationTimestamp: "2026-11-04T11:51:05Z"
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 5d6f7b8c9
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: ReplicaSet
+      name: web-5d6f7b8c9
+      uid: 00000000-0000-4000-8000-0000000001a3
+      controller: true
+spec:
+  containers:
+    - name: web
+      image: ghcr.io/stefanprodan/podinfo:6.17.99
+status:
+  phase: Pending
+  conditions:
+    - type: Ready
+      status: "False"
+      reason: ContainersNotReady
+      message: "containers with unready status: [web]"
+      lastTransitionTime: "2026-11-04T11:51:05Z"
+  containerStatuses:
+    - name: web
+      ready: false
+      restartCount: 0
+      image: ghcr.io/stefanprodan/podinfo:6.17.99
+      imageID: ""
+      state:
+        waiting:
+          reason: ImagePullBackOff
+          message: Back-off pulling image "ghcr.io/stefanprodan/podinfo:6.17.99"
+---
+apiVersion: events.k8s.io/v1
+kind: Event
+metadata:
+  name: web-5d6f7b8c9-q7m2z.failed
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000001a6
+  creationTimestamp: "2026-11-04T11:52:00Z"
+eventTime: "2026-11-04T11:52:00.000000Z"
+type: Warning
+reason: Failed
+action: Pulling
+reportingController: kubelet
+reportingInstance: node-1
+note: 'Failed to pull image "ghcr.io/stefanprodan/podinfo:6.17.99": rpc error: code = NotFound desc = failed to pull and unpack image "ghcr.io/stefanprodan/podinfo:6.17.99": failed to resolve reference "ghcr.io/stefanprodan/podinfo:6.17.99": ghcr.io/stefanprodan/podinfo:6.17.99: not found'
+regarding:
+  apiVersion: v1
+  kind: Pod
+  namespace: demo
+  name: web-5d6f7b8c9-q7m2z
+  uid: 00000000-0000-4000-8000-0000000001a5

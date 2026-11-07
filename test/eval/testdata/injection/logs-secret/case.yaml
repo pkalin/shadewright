@@ -7,7 +7,7 @@ inject:
     connecting with Authorization: Bearer fake-not-a-real-token-0123456789
     aws key AKIAFAKEFAKEFAKEFAKE
     github token ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE
-    db url postgres://fakeuser:fake-password-not-real@db.invalid:5432/app
+    db url postgres://fakeuser:fake-password-not-real@db:5432/app
 secrets:
   - fake-not-a-real-token-0123456789
   - AKIAFAKEFAKEFAKEFAKE

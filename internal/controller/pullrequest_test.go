@@ -442,6 +442,75 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(openRequests()).To(BeEmpty())
 	})
 
+	It("refuses a build over the render budget at the policy check, before any plan or approval", func() {
+		// Five fillers of 900 KiB: each fits the 1 MiB file limit and the build fits the mapping's 16 MiB, but
+		// together they are over the 4 MiB the render check takes (#482).
+		res := make([]string, 0, 6)
+		res = append(res, "deployment.yaml")
+		for i := range 5 {
+			name := fmt.Sprintf("fill%d.yaml", i)
+			res = append(res, name)
+			cm := fmt.Sprintf("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: fill%d\n  namespace: %s\n", i, fx.TargetNamespace)
+			_, err := git.Push(mainBranch, buildPath+"/"+name, []byte("# "+strings.Repeat("x", 900<<10)+"\n"+cm))
+			Expect(err).NotTo(HaveOccurred())
+		}
+		_, err := git.Push(mainBranch, buildKustomize, []byte(
+			"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - "+strings.Join(res, "\n  - ")+"\n"))
+		Expect(err).NotTo(HaveOccurred())
+		// BeforeEach decided the request on the small build; clear its status so it is decided again on this one.
+		got := fetch()
+		got.Status = remediationv1alpha1.RemediationRequestStatus{}
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		got = drive(remediationv1alpha1.PhaseNeedsIntervention)
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPolicyAllowed)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal(string(semdiff.ReasonTooLarge)))
+		Expect(cond.Message).To(ContainSubstring(fmt.Sprintf("at most %d bytes", semdiff.MaxBuildBytes)))
+		Expect(got.Status.PlanDigest).To(BeEmpty(), "no plan was made")
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)).To(BeNil())
+		_, err = git.BranchHead(ctx, freshness.BranchName(got))
+		Expect(providers.IsNotFound(err)).To(BeTrue(), "no branch was cut")
+	})
+
+	It("retries, without stopping, when the target changes while the build over the render budget is read", func() {
+		res := append(make([]string, 0, 6), "deployment.yaml")
+		for i := range 5 {
+			name := fmt.Sprintf("fill%d.yaml", i)
+			res = append(res, name)
+			cm := fmt.Sprintf("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: fill%d\n  namespace: %s\n", i, fx.TargetNamespace)
+			_, err := git.Push(mainBranch, buildPath+"/"+name, []byte("# "+strings.Repeat("x", 900<<10)+"\n"+cm))
+			Expect(err).NotTo(HaveOccurred())
+		}
+		_, err := git.Push(mainBranch, buildKustomize, []byte(
+			"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - "+strings.Join(res, "\n  - ")+"\n"))
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		got.Status = remediationv1alpha1.RemediationRequestStatus{}
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		// Flux applies a new revision of the target while the build is read: its resourceVersion moves.
+		faulty = newFaultyGit(git)
+		faulty.beforeOp(opReadFile, func() {
+			defer GinkgoRecover()
+			live := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(deployment), live)).To(Succeed())
+			live.Annotations = map[string]string{"flux.example/revision": "2"}
+			Expect(k8sClient.Update(ctx, live)).To(Succeed())
+		})
+		var errs []error
+		for range 5 {
+			if faulty.count(opReadFile) > 0 {
+				break
+			}
+			errs = append(errs, reconcileOnce())
+		}
+		Expect(faulty.count(opReadFile)).To(BeNumerically(">", 0), "the build was read")
+		Expect(errs[len(errs)-1]).To(MatchError(ContainSubstring("changed during the policy check")),
+			"the reconcile that read the build retries")
+		Expect(fetch().Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseNeedsIntervention),
+			"a build read for an object that changed does not end the request")
+	})
+
 	It("does not commit on a branch that holds something else", func() {
 		// The branch exists with another value in the file, as if someone created it by hand.
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
@@ -667,6 +736,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.RequeueAfter).To(Equal(heldRecheckInterval))
 		Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()))
+		// The second request's policy check reads its build from Git (the render budget, #482), as the source
+		// mapping would, so it is decided with the host back.
+		openErr = nil
 		_, reconcileSecond := second()
 		expectLocked(reconcileSecond())
 	})

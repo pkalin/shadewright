@@ -902,7 +902,10 @@ func TestDeleteWaitsForTheCap(t *testing.T) {
 		t.Run(string(phase), func(t *testing.T) {
 			ending := endedWithPR(t, "ending", phase)
 			running := otherRequest("running", "uid-elsewhere", remediationv1alpha1.PhasePRCreated, time.Minute)
-			r, base, rr, _ := limitsWorld(t, 1, ending, running)
+			r, base, rr, stub := limitsWorld(t, 1, ending, running)
+			// A plan without a build directory loads no build at the policy check (#482), so every open counted
+			// is the finalizer's.
+			stub.result.Source.BuildPath = ""
 			opens := countOpens(r)
 			if err := base.Delete(context.Background(), ending); err != nil {
 				t.Fatal(err)

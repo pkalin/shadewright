@@ -174,6 +174,9 @@ type Controller struct {
 	cache  client.Reader
 	obs    <-chan collector.Observation
 	ready  chan struct{}
+	// noTrigger keeps Start from running the analysis trigger (closure rules and due marks). Only tests set
+	// it: those that drive the observation writes alone, so that no pass writes their Incidents meanwhile.
+	noTrigger bool
 
 	mu sync.Mutex
 	// records holds, per occurrence, what was counted and by which Incident: the records of every Incident
@@ -415,7 +418,9 @@ func (c *Controller) Start(ctx context.Context) error {
 	}()
 	go func() {
 		defer close(marked)
-		c.triggerLoop(ctx)
+		if !c.noTrigger {
+			c.triggerLoop(ctx)
+		}
 	}()
 	for {
 		select {

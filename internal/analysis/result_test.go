@@ -215,15 +215,16 @@ func TestPromptVersionCoversTheGeneratedParts(t *testing.T) {
 }
 
 // The prompt and the schema say which value a previous field holds: the workload's spec as it is now (#494).
-// For a memory limit they say it in one plain sentence and name no metric or running pod: a longer warning
-// against "a byte count from a metric" and "a running pod's own limit", in both places, came with oom
-// diagnoses that stopped quoting the metric lines and naming the restart count (#499). The loop takes the
-// previous value from the pod template, so the model's wording of it needs no more.
+// For a memory limit they say it in one sentence that points at the pod template line, with a format
+// example, and warn off no metric or running pod: a longer warning against "a byte count from a metric" and
+// "a running pod's own limit", in both places, came with oom diagnoses that stopped quoting the metric lines
+// and naming the restart count (#499).
 func TestPreviousFieldsAreDescribed(t *testing.T) {
 	schema := string(ResponseSchema())
 	prompt := systemPrompt(false, 0)
 	for _, want := range []string{
-		`"description":"The memory limit the workload's pod template sets for the container now."`,
+		`"description":"The memory limit the workload's pod template sets for the container now, ` +
+			`as the context's pod template line shows it (for example 48Mi)."`,
 		"The maxReplicaCount the ScaledObject's spec holds now",
 	} {
 		if !strings.Contains(schema, want) {
@@ -231,16 +232,19 @@ func TestPreviousFieldsAreDescribed(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"for example 256Mi to 512Mi). previous is the limit the pod template sets now.\n",
+		"for example 256Mi to 512Mi). previous is the limit the pod template sets now, as its \"pod template\" " +
+			"line shows it (for example 48Mi).\n",
 		"previousValue is the maxReplicaCount the ScaledObject's spec holds now",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("the prompt lacks %q", want)
 		}
 	}
-	for _, unwanted := range []string{"byte count from a metric", "running pod's own limit", "canonical form"} {
-		if strings.Contains(prompt, unwanted) {
-			t.Errorf("the prompt or its schema still says %q", unwanted)
+	for _, unwanted := range []string{"byte count from a metric", "running pod's own limit", "from a metric"} {
+		for name, text := range map[string]string{"prompt": prompt, "response schema": schema} {
+			if strings.Contains(text, unwanted) {
+				t.Errorf("the %s still says %q", name, unwanted)
+			}
 		}
 	}
 }

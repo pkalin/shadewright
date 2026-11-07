@@ -722,11 +722,12 @@ func TestTemplateAndRunningPodLimitsAreLabelled(t *testing.T) {
 	}
 }
 
-// A running pod's own memory limit is shown only where it differs from the pod template's, as during a
-// rollout (#494). A limit equal to the template's, written in any form, is not repeated on the line that
-// holds the restart count: with it there, oom diagnoses stopped naming the restart count and quoting the
-// metric lines (#499). A subject without a pod template has nothing to tell apart and shows none.
-func TestRunningPodLimitShownOnlyWhereItDiffers(t *testing.T) {
+// A running pod's own memory limit is left out only where the pod template has the same container with the
+// same limit, written in any form: the template line shows it, and with it repeated on the line that holds
+// the restart count, oom diagnoses stopped naming that count and quoting the metric lines (#499). Everywhere
+// else it is shown: a pod of a rollout under another limit or none (#494), a container the template lacks
+// (an injected sidecar), an init container, and every pod of a subject without a pod template.
+func TestRunningPodLimitHiddenOnlyWhereTheTemplateShowsIt(t *testing.T) {
 	d := deployment()
 	d.Spec.Template.Spec.Containers = []corev1.Container{{Name: appName, Resources: limits("48Mi")}}
 	rs := replicaSet("web-abc", "uid-rs-abc", d, longAgo)
@@ -737,28 +738,47 @@ func TestRunningPodLimitShownOnlyWhereItDiffers(t *testing.T) {
 	older.Spec.Containers = []corev1.Container{{Name: appName, Resources: limits("64Mi")}}
 	unset := pod("web-abc-3", rs.Labels, longAgo, ref)
 	unset.Spec.Containers = []corev1.Container{{Name: appName}}
+	extra := pod("web-abc-4", rs.Labels, longAgo, ref)
+	extra.Spec.Containers = []corev1.Container{{Name: appName, Resources: limits("48Mi")},
+		{Name: "istio-proxy", Resources: limits("128Mi")}}
+	extra.Spec.InitContainers = []corev1.Container{{Name: "setup", Resources: limits("32Mi")}}
+	extra.Status.ContainerStatuses = append(extra.Status.ContainerStatuses, corev1.ContainerStatus{
+		Name: "istio-proxy", Ready: true,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: longAgo}},
+	})
+	extra.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+		Name: "setup", Ready: true,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Completed"}},
+	}}
+	objs := []client.Object{d, rs, same, older, unset, extra}
 
-	text := one(t, build(t, newBuilder(t, reader(t, d, rs, same, older, unset), sources{}, nil),
-		incident(deploymentRef())), SectionStatus).Text
-	if got := strings.Count(text, "this pod's memory limit"); got != 2 {
-		t.Errorf("%d pod limits shown, want 2 (the ones that differ):\n%s", got, text)
-	}
+	text := one(t, build(t, newBuilder(t, reader(t, objs...), sources{}, nil), incident(deploymentRef())),
+		SectionStatus).Text
 	for line := range strings.SplitSeq(text, "\n") {
 		if strings.Contains(line, "restarts 4") && strings.Contains(line, "memory limit") {
 			t.Errorf("the restart line of a pod whose limit is the template's repeats it: %q", line)
 		}
 	}
-	for _, want := range []string{"; this pod's memory limit 64Mi\n", "; this pod's memory limit not set\n"} {
+	for _, want := range []string{
+		"; this pod's memory limit 64Mi\n",
+		"; this pod's memory limit not set\n",
+		"  container istio-proxy: ready true, restarts 0; now running since",
+		"; this pod's memory limit 128Mi\n",
+		"; this pod's memory limit 32Mi\n",
+	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the status block lacks %q:\n%s", want, text)
 		}
 	}
+	if got := strings.Count(text, "this pod's memory limit"); got != 4 {
+		t.Errorf("%d pod limits shown, want 4 (all but the two equal to the template's):\n%s", got, text)
+	}
 
+	// A ReplicaSet subject has no pod template line: every pod shows its own limit.
 	rsRef := remediationv1alpha1.ObjectRef{APIVersion: apiApps, Kind: kindReplicaSet, Namespace: testNS, Name: rs.Name,
 		UID: remediationv1alpha1.UID(rs.UID)}
-	text = one(t, build(t, newBuilder(t, reader(t, d, rs, same, older, unset), sources{}, nil), incident(rsRef)),
-		SectionStatus).Text
-	if strings.Contains(text, "memory limit") {
-		t.Errorf("a ReplicaSet subject shows a memory limit:\n%s", text)
+	text = one(t, build(t, newBuilder(t, reader(t, objs...), sources{}, nil), incident(rsRef)), SectionStatus).Text
+	if got := strings.Count(text, "this pod's memory limit"); got != 6 {
+		t.Errorf("a ReplicaSet subject shows %d pod limits, want 6:\n%s", got, text)
 	}
 }

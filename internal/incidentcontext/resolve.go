@@ -92,6 +92,9 @@ type target struct {
 	// outOfBounds means the workload exists but has more labels, or a larger (or empty) selector, than the
 	// builder follows (package ownership), so its pods are not resolved. The workload is not gone.
 	outOfBounds bool
+	// template is the pod template of a resolved Deployment or StatefulSet target ([templateOf]), set once by
+	// Build; nil otherwise.
+	template []TemplateContainer
 }
 
 // resolve reads the target and its current pods. Owner references are untrusted: each hop is read, must

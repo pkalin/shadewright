@@ -201,7 +201,8 @@ func (b *Builder) Build(ctx context.Context, inc *remediationv1alpha1.Incident) 
 	for i := range t.pods {
 		c.Pods = append(c.Pods, t.pods[i].Name)
 	}
-	c.Template = templateOf(&t)
+	t.template = templateOf(&t)
+	c.Template = t.template
 	status := b.statusBlock(&t)
 	if t.state == targetFailed {
 		c.failed(SectionStatus)

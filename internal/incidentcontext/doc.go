@@ -24,8 +24,8 @@ limitations under the License.
 //   - summary: the Incident itself (subject, reason, symptom, counts and times);
 //   - object status and owners: the target workload's status and conditions, the memory limits of its pod
 //     template, the owner chain and the status of each of its current pods, with that pod's own memory limit
-//     only where it differs from the template's (during a rollout), each labelled as the template's or the
-//     pod's;
+//     unless the template sets the same one for that container (during a rollout they differ), each
+//     labelled as the template's or the pod's;
 //   - log excerpt: at most two excerpts from a [providers.LogSource], of the containers that look most
 //     relevant (a terminated previous instance first, then a waiting or unready container);
 //   - metrics: the approved metric templates for the target's pods from a [providers.MetricsSource];

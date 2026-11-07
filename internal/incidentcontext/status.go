@@ -227,10 +227,11 @@ func templateOf(t *target) []TemplateContainer {
 	return out
 }
 
-// limitDiffers reports whether resources r give the container called name another memory limit than the pod
-// template tmpl does, a limit set on one side only included. It is false when the template has no such
-// container (the subject has no pod template, or the pod is not of it): there is nothing to tell apart.
-func limitDiffers(tmpl []TemplateContainer, name string, r corev1.ResourceRequirements) bool {
+// sameAsTemplate reports whether the pod template tmpl has a regular container called name with the memory
+// limit resources r give it, both unset included. Only then does the template line already show the pod's
+// limit; a container the template lacks (an injected sidecar), or a subject without a template (a ReplicaSet
+// or a pod), is never the same.
+func sameAsTemplate(tmpl []TemplateContainer, name string, r corev1.ResourceRequirements) bool {
 	i := slices.IndexFunc(tmpl, func(c TemplateContainer) bool { return c.Name == name })
 	if i < 0 {
 		return false
@@ -238,12 +239,11 @@ func limitDiffers(tmpl []TemplateContainer, name string, r corev1.ResourceRequir
 	q, ok := r.Limits[corev1.ResourceMemory]
 	want := tmpl[i].MemoryLimit
 	if !ok || want == nil {
-		return ok != (want != nil)
+		return !ok && want == nil
 	}
-	// Cmp may cache a new representation in both quantities, and a copied Quantity shares its decimal with
-	// the pod read from the cache, so it compares deep copies.
-	x, y := q.DeepCopy(), want.DeepCopy()
-	return x.Cmp(y) != 0
+	// Cmp may store a decimal form in its receiver and its argument, never in the decimal they point to: q is
+	// this function's copy and *want is passed by value, so neither the pod nor the template is changed.
+	return q.Cmp(*want) == 0
 }
 
 func desired(r *int32) int32 {
@@ -254,7 +254,6 @@ func desired(r *int32) int32 {
 }
 
 func (b *Builder) podLines(l *lines, t *target) {
-	tmpl := templateOf(t)
 	if t.workload != nil && !t.outOfBounds {
 		if t.total > len(t.pods) {
 			l.add("current pods: %d, the %d most troubled shown", t.total, len(t.pods))
@@ -279,16 +278,16 @@ func (b *Builder) podLines(l *lines, t *target) {
 			}
 		}
 		for _, cs := range allStatuses(p) {
-			b.containerLine(l, p, cs, tmpl)
+			b.containerLine(l, p, cs, t.template)
 		}
 	}
 }
 
-// containerLine describes one container of a running pod. When the pod's own spec gives a regular container
-// another memory limit than the subject's pod template (tmpl) does, as during a rollout, it adds the pod's,
-// labelled as the pod's (#494). A limit equal to the template's is not repeated: the template line shows it,
-// and with it repeated on the line that holds the restart count, oom diagnoses dropped that count and the
-// metric lines (#499).
+// containerLine describes one container of a running pod, with the memory limit of that pod's own spec,
+// labelled as the pod's: during a rollout it may differ from the pod template's (#494). It leaves the limit
+// out only when the subject's pod template (tmpl) has the same container with the same limit, which the
+// template line shows: with it repeated on the line that holds the restart count, oom diagnoses dropped that
+// count and the metric lines (#499).
 func (b *Builder) containerLine(l *lines, p *corev1.Pod, cs containerStatus, tmpl []TemplateContainer) {
 	kind := "container"
 	if cs.init {
@@ -299,7 +298,7 @@ func (b *Builder) containerLine(l *lines, p *corev1.Pod, cs containerStatus, tmp
 	if cs.LastTerminationState.Terminated != nil {
 		parts = append(parts, "last "+b.state(l, cs.LastTerminationState))
 	}
-	if r, ok := podResources(p, cs.Name, cs.init); ok && !cs.init && limitDiffers(tmpl, cs.Name, r) {
+	if r, ok := podResources(p, cs.Name, cs.init); ok && (cs.init || !sameAsTemplate(tmpl, cs.Name, r)) {
 		parts = append(parts, "this pod's memory limit "+b.memoryLimit(l, r))
 	}
 	l.add("  %s %s: %s", kind, l.data(b.value(cs.Name)), strings.Join(parts, "; "))

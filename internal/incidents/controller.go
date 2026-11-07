@@ -882,8 +882,15 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	defer c.recount(fp)
+	if res.created {
+		delete(c.opening, name)
+	}
 	if deleted, ok := errors.AsType[*deletedError](err); ok {
 		c.dropDeleted(ctx, fp, name, batches, deleted)
+		return
+	}
+	if back, ok := errors.AsType[*notResolvedError](err); ok {
+		c.reopen(ctx, fp, name, batches, back)
 		return
 	}
 	if refused, ok := errors.AsType[*refusedError](err); ok {
@@ -990,6 +997,8 @@ func (c *Controller) dropDeleted(ctx context.Context, fp, name string, batches [
 		if deleted.latest != nil {
 			latest = deleted.latest.Spec.Occurrence()
 			c.noteState(deleted.latest)
+			// It exists, so it counts under the cap whether or not this process knew it.
+			c.names[deleted.latest.Name] = struct{}{}
 		}
 		c.setCurrent(fp, latest)
 		if deleted.latest == nil {
@@ -1089,6 +1098,9 @@ type writeResult struct {
 	stored    *remediationv1alpha1.IncidentStatus
 	sent      *batch
 	escalated bool
+	// created says the write created the Incident: from then on it is only updated, and one not found later
+	// was deleted.
+	created bool
 }
 
 // write creates the Incident called name if needed (and create allows it) and adds to its status each batch
@@ -1113,10 +1125,18 @@ func (c *Controller) write(ctx context.Context, name string, create bool, batche
 	}
 	key := types.NamespacedName{Namespace: c.cfg.Namespace, Name: name}
 	var res writeResult
+	created := false
 	err := retry.OnError(retry.DefaultBackoff, retriable, func() error {
-		res = writeResult{inc: &remediationv1alpha1.Incident{}}
+		res = writeResult{inc: &remediationv1alpha1.Incident{}, created: created}
 		err := c.reader.Get(ctx, key, res.inc)
 		if apierrors.IsNotFound(err) {
+			if n >= 2 && create {
+				// Opening n requires occurrence n-1 to be Resolved now, past the window, as read from the API
+				// server: what the controller remembered may be older than a write that escalated it.
+				if perr := c.predecessorResolved(ctx, spec, batches); perr != nil {
+					return perr
+				}
+			}
 			if !create {
 				latest, lerr := c.latestOccurrence(ctx, spec.Fingerprint)
 				if lerr != nil {
@@ -1133,6 +1153,7 @@ func (c *Controller) write(ctx context.Context, name string, create bool, batche
 			} else if err != nil {
 				return fmt.Errorf("creating Incident %s: %w", key.Name, err)
 			}
+			created, create, res.created = true, false, true
 		}
 		if err != nil {
 			return err

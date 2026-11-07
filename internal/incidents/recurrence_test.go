@@ -143,9 +143,9 @@ func absent(t *testing.T, ns, name string) {
 	}
 }
 
-// recurrenceOf is the spec of fp(1) as observation i gives it.
-func recurrenceOf(i int) remediationv1alpha1.IncidentSpec {
-	return specOf(observation(1, i, 1, 1, triggerNow))
+// firstSpec is the spec of fp(1) as its first observation gives it.
+func firstSpec() remediationv1alpha1.IncidentSpec {
+	return specOf(observation(1, 1, 1, 1, triggerNow))
 }
 
 // seenAt is an observation of fp(1), occurrence i, that began and was observed at t.
@@ -307,7 +307,7 @@ func TestRestartFindsTheLatestOccurrence(t *testing.T) {
 	// Occurrence 2 as a crash between its create and its first status write leaves it: no status at all.
 	inc := &remediationv1alpha1.Incident{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: second},
-		Spec:       nextSpec(recurrenceOf(1), 2),
+		Spec:       nextSpec(firstSpec(), 2),
 	}
 	if err := env.admin.Create(t.Context(), inc); err != nil {
 		t.Fatal(err)
@@ -534,7 +534,7 @@ func TestOccurrenceNameWithoutItsNumberIsForeign(t *testing.T) {
 	createBudget(t, ns, nil)
 	squat := &remediationv1alpha1.Incident{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: second},
-		Spec:       recurrenceOf(1),
+		Spec:       firstSpec(),
 	}
 	if err := env.admin.Create(t.Context(), squat); err != nil {
 		t.Fatal(err)

@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analyzer/collector"
@@ -181,4 +183,71 @@ func (c *Controller) latestOccurrence(ctx context.Context, fp string) (*remediat
 		}
 	}
 	return latest, nil
+}
+
+// notResolvedError is an occurrence not opened because the one before it is no longer Resolved past the
+// window when read from the API server (an escalation or another write the controller's memory had not
+// caught up with). previous is that Incident as read, or nil when it is gone.
+type notResolvedError struct {
+	previous *remediationv1alpha1.Incident
+}
+
+func (e *notResolvedError) Error() string {
+	return "the occurrence before is not Resolved more than 24 hours before the observations"
+}
+
+// predecessorResolved reads occurrence n-1 of spec (n is spec.OccurrenceNumber) from the API server and
+// returns nil only when it is Resolved with a resolvedTime more than RecurrenceWindow before the earliest
+// observation in batches, and a [notResolvedError] otherwise.
+func (c *Controller) predecessorResolved(ctx context.Context, spec remediationv1alpha1.IncidentSpec,
+	batches []*batch) error {
+	prev := &remediationv1alpha1.Incident{}
+	key := client.ObjectKey{Namespace: c.cfg.Namespace, Name: spec.PreviousIncident}
+	if err := c.reader.Get(ctx, key, prev); apierrors.IsNotFound(err) {
+		return &notResolvedError{}
+	} else if err != nil {
+		return fmt.Errorf("reading Incident %s before opening the next occurrence: %w", key.Name, err)
+	}
+	var first time.Time
+	for _, b := range batches {
+		first = earliest(first, b.first)
+	}
+	st := &prev.Status
+	if st.Phase != remediationv1alpha1.IncidentResolved || st.ResolvedTime == nil || st.ResolvedTime.IsZero() ||
+		first.IsZero() || first.Sub(st.ResolvedTime.Time) <= RecurrenceWindow {
+		return &notResolvedError{previous: prev}
+	}
+	return nil
+}
+
+// reopen sends the batches meant for an occurrence that was not opened back to the one before it, which is
+// the latest again: their records move with them, they are written there at once (where a write to a
+// Resolved Incident escalates it), and the memory takes that Incident's phase as read. The caller holds mu.
+func (c *Controller) reopen(ctx context.Context, fp, name string, batches []*batch, back *notResolvedError) {
+	c.unopen(fp, name)
+	prev := c.nameOf(fp)
+	merged := combine(batches)
+	if q := c.pending[fp]; q != nil {
+		merged.add(q)
+	}
+	c.pending[fp] = merged
+	c.retag(name, prev, merged)
+	if back.previous != nil {
+		c.noteState(back.previous)
+	} else {
+		delete(c.resolvedAt, prev)
+	}
+	delete(c.nextWrite, fp)
+	logf.FromContext(ctx).Info("Did not open the next occurrence of an Incident that is no longer Resolved",
+		"incident", name, "previous", prev)
+}
+
+// retag moves the records of the occurrences b holds from the Incident from to the Incident to. The caller
+// holds mu.
+func (c *Controller) retag(from, to string, b *batch) {
+	for id := range b.occurrences {
+		if r, ok := c.records[id]; ok && r.incident == from {
+			c.setRecord(id, record{counted: r.counted, incident: to})
+		}
+	}
 }

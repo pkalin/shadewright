@@ -205,8 +205,8 @@ func (c *Collector) fromEvent(ctx context.Context, ev *eventsv1.Event) (Observat
 	return c.observation(fo, subject, ev.Namespace, lastOccurrence(ev)), true, nil
 }
 
-// observation computes the fingerprint and the symptom of fo, which came from namespace source. The raw note
-// is not kept.
+// observation computes the fingerprint (from fingerprint.Normalize) and the shown symptom (fingerprint.Symptom,
+// which keeps a milli quantity after a key) of fo, which came from namespace source. The raw note is not kept.
 func (c *Collector) observation(fo fingerprint.Observation, subject remediationv1alpha1.ObjectRef, source string,
 	at time.Time) Observation {
 	return Observation{
@@ -216,7 +216,7 @@ func (c *Collector) observation(fo fingerprint.Observation, subject remediationv
 		Reason:              fo.Reason,
 		Type:                fo.Type,
 		ReportingController: fo.ReportingController,
-		Symptom:             fingerprint.Normalize(fo),
+		Symptom:             fingerprint.Symptom(fo),
 		ObservedAt:          c.observedAt(at),
 	}
 }

@@ -137,12 +137,46 @@ var durationRules = []rule{
 	{regexp.MustCompile(`(?i)(^|[^-./\w])\d+(?:\.\d+)?\s?(?:nanoseconds?|microseconds?|milliseconds?|seconds?|secs?|minutes?|mins?|hours?|days?)\b`), "${1}" + placeholderDuration},
 }
 
-// Normalize returns the symptom of o. Its note is first redacted with package redact. Then the variable
-// parts (UIDs, digests, timestamps, IPs, pod name suffixes, ReplicaSet hashes and durations) are replaced by
-// placeholders, whitespace is collapsed, and the result is cut to [MaxSymptomLength] bytes. Image names,
-// error codes, the names of missing Secrets or ConfigMaps and dependency kinds are kept. Nothing in the
-// result is changed by redacting it again, apart from placeholders.
+// Normalize returns the normalized symptom of o, the text [Fingerprint] hashes. Its note is first redacted
+// with package redact. Then the variable parts (UIDs, digests, timestamps, IPs, pod name suffixes, ReplicaSet
+// hashes and durations) are replaced by placeholders, whitespace is collapsed, and the result is cut to
+// [MaxSymptomLength] bytes. Image names, error codes, the names of missing Secrets or ConfigMaps and
+// dependency kinds are kept. Nothing in the result is changed by redacting it again, apart from placeholders.
+//
+// A Kubernetes milli quantity ("averageValue=6500m") reads as minutes here and becomes a placeholder: a value
+// that changes while the problem lasts must not split its Incident. The text that is shown uses [Symptom].
 func Normalize(o Observation) string {
+	return normalize(o, keepNone)
+}
+
+// Symptom returns the symptom of o as an Incident shows it and the model reads it: [Normalize], except that a
+// milli quantity that is the value of a key ("averageValue=6500m", "cpu: 250m") is kept, since it is evidence
+// and the fingerprint does not depend on it. Other durations become placeholders as in [Normalize], and the
+// binary and decimal quantity suffixes (Mi, Gi, k, M) are never read as durations. A bare minute count after
+// a key ("timeout=5m") is kept too: it cannot be told from a quantity.
+func Symptom(o Observation) string {
+	return normalize(o, keepAfterKey)
+}
+
+// Value returns an evidence value as it is shown: [Symptom] of the value alone, where the value as a whole
+// counts as the value of its field, so "212500m" is kept.
+func Value(s string) string {
+	return normalize(Observation{Note: s}, keepAfterKeyOrWhole)
+}
+
+// quantityMode says which milli quantities the duration rule leaves alone.
+type quantityMode int
+
+const (
+	// keepNone replaces every match of the duration rules (the fingerprint input).
+	keepNone quantityMode = iota
+	// keepAfterKey keeps a milli quantity right after "key=" or "key:" (with at most one space).
+	keepAfterKey
+	// keepAfterKeyOrWhole also keeps a milli quantity that is the whole text.
+	keepAfterKeyOrWhole
+)
+
+func normalize(o Observation, mode quantityMode) string {
 	if len(o.Note) > maxInputLength {
 		return placeholderRedacted
 	}
@@ -157,9 +191,56 @@ func Normalize(o Observation) string {
 	s = apply(s, ipRules)
 	s = stripRegarding(s, o.RegardingKind, o.RegardingName)
 	s = apply(s, generatedNameRules)
-	s = applyOutsideQuotes(s, durationRules)
+	if mode == keepNone {
+		s = applyOutsideQuotes(s, func(seg string, _ int) string { return apply(seg, durationRules) })
+	} else {
+		full := s
+		whole := mode == keepAfterKeyOrWhole && milliQuantityRe.MatchString(strings.TrimSpace(full))
+		s = applyOutsideQuotes(s, func(seg string, off int) string {
+			if whole {
+				return seg
+			}
+			return apply(keepQuantities(seg, full, off), durationRules[1:])
+		})
+	}
 	s = strings.Join(strings.Fields(s), " ")
 	return finish(s)
+}
+
+// milliQuantityRe matches a whole milli quantity, which the Go style duration rule reads as minutes.
+var milliQuantityRe = regexp.MustCompile(`^\d+(?:\.\d+)?m$`)
+
+// keepQuantities applies the Go style duration rule (durationRules[0]) to seg, which starts at byte off of
+// full, but keeps a match that is a milli quantity right after a key. Matches are found as ReplaceAllString
+// finds them, so every other match is replaced exactly as in [Normalize].
+func keepQuantities(seg, full string, off int) string {
+	var b strings.Builder
+	pos := 0
+	for _, m := range durationRules[0].re.FindAllStringSubmatchIndex(seg, -1) {
+		value := m[3] // the end of the first group: the character before the duration, when there is one
+		if milliQuantityRe.MatchString(seg[value:m[1]]) && afterKey(full, off+value) {
+			continue
+		}
+		b.WriteString(seg[pos:value])
+		b.WriteString(placeholderDuration)
+		pos = m[1]
+	}
+	b.WriteString(seg[pos:])
+	return b.String()
+}
+
+// afterKey reports whether s[:i] ends with a key and "=" or ":", then at most one space. It looks only at the
+// last three bytes, so the cost does not grow with the text.
+func afterKey(s string, i int) bool {
+	if i > 0 && s[i-1] == ' ' {
+		i--
+	}
+	return i >= 2 && (s[i-1] == '=' || s[i-1] == ':') && isKeyChar(s[i-2])
+}
+
+// isKeyChar reports whether c can end a key such as "averageValue" or "status.currentMetrics.0.value".
+func isKeyChar(c byte) bool {
+	return c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 // shortIPv6Re finds IPv6 candidates shorter than the "[ip]" marker, such as "::1".
@@ -181,17 +262,17 @@ func expandShortIPv6(s string) string {
 // quotedRe matches a double-quoted span, such as an object or image name in an event note.
 var quotedRe = regexp.MustCompile(`"[^"]*"`)
 
-// applyOutsideQuotes applies rules to the text outside double-quoted spans, so that names such as
-// secret "db-10s" are never rewritten.
-func applyOutsideQuotes(s string, rules []rule) string {
+// applyOutsideQuotes applies f to the text outside double-quoted spans, so that names such as secret
+// "db-10s" are never rewritten. f gets each span and the byte offset where it starts in s.
+func applyOutsideQuotes(s string, f func(seg string, off int) string) string {
 	var b strings.Builder
 	pos := 0
 	for _, m := range quotedRe.FindAllStringIndex(s, -1) {
-		b.WriteString(apply(s[pos:m[0]], rules))
+		b.WriteString(f(s[pos:m[0]], pos))
 		b.WriteString(s[m[0]:m[1]])
 		pos = m[1]
 	}
-	b.WriteString(apply(s[pos:], rules))
+	b.WriteString(f(s[pos:], pos))
 	return b.String()
 }
 

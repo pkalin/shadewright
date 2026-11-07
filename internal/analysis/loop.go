@@ -377,9 +377,7 @@ func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 	var action *remediationv1alpha1.Action
 	var reason Reason
 	if role == RoleTriage {
-		end := r.phase(spanTriage)
-		res, action, reason, err = r.triage(model)
-		end()
+		res, action, reason, err = r.tracedTriage(model)
 		if err != nil {
 			return out, err
 		}
@@ -397,9 +395,7 @@ func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 			return r.handOff(factoryFailure(err))
 		}
 	}
-	end := r.phase(spanEscalation)
-	res, action, reason, err = r.escalate(model)
-	end()
+	res, action, reason, err = r.tracedEscalate(model)
 	if err != nil {
 		return out, err
 	}
@@ -415,6 +411,10 @@ func (r *run) build() (*incidentcontext.Context, error) {
 	defer span.End()
 	c, err := r.a.cfg.Builder.Build(ctx, r.inc)
 	if err != nil {
+		if r.parent.Err() != nil {
+			setCanceled(span)
+			return nil, err
+		}
 		span.SetAttributes(attrResult.String(resultFailed))
 		span.SetStatus(codes.Error, "the context could not be built")
 		return nil, err
@@ -432,6 +432,8 @@ func (r *run) reserve() error {
 	switch {
 	case err == nil:
 		span.SetAttributes(attrResult.String(resultOK))
+	case r.parent.Err() != nil:
+		setCanceled(span)
 	case errors.Is(err, incidents.ErrBudgetSpent):
 		span.SetAttributes(attrResult.String(resultSpent))
 	default:
@@ -442,7 +444,8 @@ func (r *run) reserve() error {
 }
 
 // phase starts the span of a phase and makes it the parent of the spans that follow, until the returned
-// function ends it. r.ctx keeps its deadline and cancellation: only the span it carries changes.
+// function ends it; callers defer it. r.ctx keeps its deadline and cancellation: only the span it carries
+// changes.
 func (r *run) phase(name string) func() {
 	prev := r.ctx
 	ctx, span := r.a.tracer.Start(r.ctx, name)
@@ -451,6 +454,18 @@ func (r *run) phase(name string) func() {
 		span.End()
 		r.ctx = prev
 	}
+}
+
+// tracedTriage runs triage in the span of its phase.
+func (r *run) tracedTriage(model providers.ModelProvider) (*Result, *remediationv1alpha1.Action, Reason, error) {
+	defer r.phase(spanTriage)()
+	return r.triage(model)
+}
+
+// tracedEscalate runs escalate in the span of its phase.
+func (r *run) tracedEscalate(model providers.ModelProvider) (*Result, *remediationv1alpha1.Action, Reason, error) {
+	defer r.phase(spanEscalation)()
+	return r.escalate(model)
 }
 
 // run is the state of one analysis.
@@ -645,8 +660,7 @@ func (r *run) callTool(call providers.ToolCall, offered map[string]bool) (string
 	defer span.End()
 	content, quotable, err := r.boundCall(ctx, span, call, offered)
 	if err != nil {
-		span.SetAttributes(attrResult.String(resultCanceled))
-		span.SetStatus(codes.Error, "the analysis was canceled")
+		setCanceled(span)
 		return "", err
 	}
 	span.SetAttributes(attrQuotable.Bool(len(quotable) > 0))
@@ -688,7 +702,7 @@ func (r *run) boundCall(ctx context.Context, span trace.Span, call providers.Too
 			return "", nil, fmt.Errorf("analysis: %w", r.parent.Err())
 		}
 		// The analysis deadline passed during the call: the next model call stops the loop.
-		span.SetAttributes(attrResult.String(resultFailed))
+		span.SetAttributes(attrResult.String(resultFailed), attrToolStatus.String(string(tools.StatusCouldNotFetch)))
 		span.SetStatus(codes.Error, "the tool call failed")
 		return refusedResult(call.Name, offered, "could not fetch\n"), nil, nil
 	}
@@ -840,7 +854,7 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 		charge = c.Usage.InputTokens + c.Usage.OutputTokens
 		span.SetAttributes(attrInputTokens.Int64(c.Usage.InputTokens), attrOutputTokens.Int64(c.Usage.OutputTokens))
 	}
-	span.SetAttributes(attrCharged.Int64(charge), attrUsageUnknown.Bool(!billed))
+	span.SetAttributes(attrCharged.Int64(charge), attrUsageUnknown.Bool(c.UsageUnknown))
 	r.out.Tokens += charge
 	r.spent[key] += charge
 	if c.Model != "" {

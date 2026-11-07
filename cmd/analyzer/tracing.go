@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -92,17 +93,50 @@ func newTracerProvider(log logr.Logger) (*sdktrace.TracerProvider, error) {
 	res, err := resource.New(ctx, resource.WithAttributes(attribute.String("service.name", serviceName)),
 		resource.WithTelemetrySDK(), resource.WithFromEnv())
 	if err != nil {
-		return nil, fmt.Errorf("the trace resource: %w", err)
+		// Only the environment detector can fail: a malformed list of key=value pairs.
+		return nil, fmt.Errorf("invalid OTEL_RESOURCE_ATTRIBUTES or OTEL_SERVICE_NAME: %w", err)
 	}
 	exporter, err := otlptracegrpc.New(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("the OTLP trace exporter: %w", err)
 	}
-	// An export failure is reported to the global error handler: log it, never fail anything for it.
-	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
-		log.Error(err, "Failed to export analysis traces")
-	}))
+	// An export failure, or any other OpenTelemetry error, goes to the global error handler: log it at most once
+	// per otelLogInterval, never fail anything for it.
+	otel.SetErrorHandler(newOtelErrorLog(log, time.Now))
 	return sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter), sdktrace.WithResource(res)), nil
+}
+
+// otelLogInterval is the shortest time between two log lines of OpenTelemetry errors: a collector that is down
+// fails every batch, and the log would otherwise repeat it every few seconds.
+const otelLogInterval = time.Minute
+
+// otelErrorLog is the OpenTelemetry error handler: it logs the first error, then at most one per
+// otelLogInterval with the number of errors not logged since the last line.
+type otelErrorLog struct {
+	log     logr.Logger
+	now     func() time.Time
+	mu      sync.Mutex
+	last    time.Time
+	dropped int
+}
+
+func newOtelErrorLog(log logr.Logger, now func() time.Time) *otelErrorLog {
+	return &otelErrorLog{log: log, now: now}
+}
+
+// Handle logs err unless an error was logged less than otelLogInterval ago, in which case it is counted.
+func (h *otelErrorLog) Handle(err error) {
+	h.mu.Lock()
+	now := h.now()
+	if !h.last.IsZero() && now.Sub(h.last) < otelLogInterval {
+		h.dropped++
+		h.mu.Unlock()
+		return
+	}
+	dropped := h.dropped
+	h.last, h.dropped = now, 0
+	h.mu.Unlock()
+	h.log.Error(err, "OpenTelemetry reported an error; traces may be incomplete", "notLoggedSinceLastLine", dropped)
 }
 
 // shutdownTracing flushes the queued spans and stops the exporter within tracingShutdownTimeout, on a context

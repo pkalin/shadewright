@@ -228,7 +228,7 @@ analyzer:
     # @section -- Analyzer
     cluster: ""
   tracing:
-    # -- OTLP gRPC endpoint of an OpenTelemetry collector for the analysis traces (one trace per analysis: phases, model calls with tokens, tool calls; IDs, counts and fixed labels only, never prompt, log or model text), such as `http://otel-collector.observability.svc:4317` (`http` sends plaintext gRPC, `https` TLS). Sets `OTEL_TRACES_EXPORTER=otlp` and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. Empty (the default): no traces and no exporter. Open the NetworkPolicy egress to the collector too (`networkPolicy.analyzer.traceCollector`).
+    # -- OTLP gRPC endpoint of an OpenTelemetry collector for the analysis traces (one trace per analysis: phases, model calls with tokens, tool calls; IDs, counts and fixed labels only, never prompt, log or model text), such as `http://otel-collector.observability.svc:4317` (`http` sends plaintext gRPC, `https` TLS), with an explicit port. Sets `OTEL_TRACES_EXPORTER=otlp` and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. Empty (the default): no traces and no exporter. With the NetworkPolicies on, the chart refuses to render it unless `networkPolicy.analyzer.traceCollector.enabled` opens the egress to the collector.
     # @section -- Analyzer
     endpoint: ""
   analysis:

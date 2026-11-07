@@ -29,6 +29,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
+	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/tools"
 )
@@ -256,4 +257,94 @@ func TestNoTracerProviderIsNoTracing(t *testing.T) {
 	if out := f.analyze(t, testLimits()); out.Reason != ReasonProposed {
 		t.Fatalf("reason %s, want Proposed", out.Reason)
 	}
+}
+
+// spanNamed returns the first ended span with the name, failing when there is none.
+func spanNamed(t *testing.T, rec *tracetest.SpanRecorder, name string) sdktrace.ReadOnlySpan {
+	t.Helper()
+	for _, s := range rec.Ended() {
+		if s.Name() == name {
+			return s
+		}
+	}
+	t.Fatalf("no %s span", name)
+	return nil
+}
+
+// usage_unknown is what the reply reported, not whether the call was charged its upper bound.
+func TestModelCallSpanUsageUnknown(t *testing.T) {
+	f, rec := tracedFixture()
+	s := reply(validResult)
+	s.c.UsageUnknown = true
+	f.triage.steps = []step{s}
+	f.analyze(t, testLimits())
+	if v, _ := attrOf(spanNamed(t, rec, spanModelCall), attrUsageUnknown); !v.AsBool() {
+		t.Error("usage_unknown false for a reply that reported no usage")
+	}
+
+	f, rec = tracedFixture()
+	f.triage.steps = []step{{err: errors.New("failed")}}
+	f.analyze(t, testLimits())
+	if v, _ := attrOf(spanNamed(t, rec, spanModelCall), attrUsageUnknown); v.AsBool() {
+		t.Error("usage_unknown true for a failed call that reported nothing unknown")
+	}
+}
+
+// A tool call that fails records the status the model is shown: could not fetch.
+func TestFailedToolCallSpanStatus(t *testing.T) {
+	f, rec := tracedFixture()
+	f.tools.err = errors.New("read failed")
+	f.triage.steps = []step{reply("not json"), reply("not json")}
+	f.escalation.steps = []step{
+		toolReply(toolCall("1", tools.NameGetResource, `{"kind":"Deployment","namespace":"shop","name":"web"}`)),
+		reply(noProposal),
+	}
+	f.analyze(t, testLimits())
+	s := spanNamed(t, rec, spanToolCall)
+	res, _ := attrOf(s, attrResult)
+	st, _ := attrOf(s, attrToolStatus)
+	if res.AsString() != resultFailed || st.AsString() != string(tools.StatusCouldNotFetch) {
+		t.Errorf("failed tool call: result %q status %q, want failed and could not fetch", res.AsString(), st.AsString())
+	}
+}
+
+// A stop during the context build or the budget reservation labels that span canceled, not failed or
+// unavailable.
+func TestStopDuringBuildOrReserveIsCanceled(t *testing.T) {
+	for _, name := range []string{spanContext, spanReserve} {
+		t.Run(name, func(t *testing.T) {
+			f, rec := tracedFixture()
+			ctx, cancel := context.WithCancel(t.Context())
+			if name == spanContext {
+				f.builder.err = context.Canceled
+				f.cfg.Builder = cancelingBuilder{cancel: cancel, b: f.builder}
+			} else {
+				f.cfg.Reserve = func(context.Context, time.Time) error {
+					cancel()
+					return context.Canceled
+				}
+			}
+			a, err := New(f.cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.Analyze(ctx, incident(), testLimits()); !errors.Is(err, context.Canceled) {
+				t.Fatalf("Analyze = %v, want the cancellation", err)
+			}
+			if v, _ := attrOf(spanNamed(t, rec, name), attrResult); v.AsString() != resultCanceled {
+				t.Errorf("%s result %q, want canceled", name, v.AsString())
+			}
+		})
+	}
+}
+
+// cancelingBuilder stops the analysis, then answers as b.
+type cancelingBuilder struct {
+	cancel context.CancelFunc
+	b      *fakeBuilder
+}
+
+func (c cancelingBuilder) Build(ctx context.Context, inc *remediationv1alpha1.Incident) (*incidentcontext.Context, error) {
+	c.cancel()
+	return c.b.Build(ctx, inc)
 }

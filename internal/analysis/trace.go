@@ -152,8 +152,13 @@ func endAnalysis(span trace.Span, out Outcome, err error) {
 		attrProposed.Bool(out.Plan != nil),
 	)
 	if err != nil {
-		span.SetAttributes(attrResult.String(resultCanceled))
-		span.SetStatus(codes.Error, "the analysis was canceled")
+		setCanceled(span)
 	}
 	span.End()
+}
+
+// setCanceled marks a span whose step the analysis's stop (a shutdown or a lost leadership) cut short.
+func setCanceled(span trace.Span) {
+	span.SetAttributes(attrResult.String(resultCanceled))
+	span.SetStatus(codes.Error, "the analysis was canceled")
 }

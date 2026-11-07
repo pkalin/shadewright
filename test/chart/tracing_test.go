@@ -17,9 +17,13 @@ limitations under the License.
 package chart
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
+
+var collectorOn = []string{"networkPolicy.analyzer.traceCollector.enabled=true",
+	"networkPolicy.analyzer.traceCollector.namespace=observability"}
 
 const (
 	collectorPort     = 4317
@@ -56,7 +60,7 @@ func TestTracingIsOffByDefault(t *testing.T) {
 
 // TestTracingEndpointSetsTheAnalyzersExporter: the endpoint turns on the OTLP exporter of the analyzer only.
 func TestTracingEndpointSetsTheAnalyzersExporter(t *testing.T) {
-	r := defaultRender(t, "analyzer.tracing.endpoint="+collectorEndpoint)
+	r := defaultRender(t, slices.Concat([]string{"analyzer.tracing.endpoint=" + collectorEndpoint}, collectorOn)...)
 	env := otelEnv(t, r, analyzerDeployment)
 	if env["OTEL_TRACES_EXPORTER"] != "otlp" || env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] != collectorEndpoint {
 		t.Errorf("analyzer OTEL_* variables %v, want the otlp exporter and the endpoint", env)
@@ -69,8 +73,7 @@ func TestTracingEndpointSetsTheAnalyzersExporter(t *testing.T) {
 // TestTraceCollectorEgressIsForTheAnalyzerOnly: the optional rule reaches only the named collector Pods on one
 // port, and never appears in the executor's policy.
 func TestTraceCollectorEgressIsForTheAnalyzerOnly(t *testing.T) {
-	on := defaultRender(t, "networkPolicy.analyzer.traceCollector.enabled=true",
-		"networkPolicy.analyzer.traceCollector.namespace=observability")
+	on := defaultRender(t, collectorOn...)
 	var found []string
 	for _, rule := range nonDNSRules(t, analyzerEgressKey, on) {
 		if len(rule.Ports) == 1 && rule.Ports[0].Port.IntValue() == collectorPort {
@@ -100,10 +103,24 @@ func TestTracingValuesAreChecked(t *testing.T) {
 		"bad namespace":       "networkPolicy.analyzer.traceCollector.namespace=Not_A_Name",
 		"unknown key":         "networkPolicy.analyzer.traceCollector.host=x",
 		"endpoint no scheme":  "analyzer.tracing.endpoint=otel:4317",
+		"endpoint no port":    "analyzer.tracing.endpoint=http://otel",
 		"endpoint with user":  "analyzer.tracing.endpoint=http://u@otel:4317",
 		"endpoint with path":  "analyzer.tracing.endpoint=http://otel:4317/v1/traces",
 		"unknown tracing key": "analyzer.tracing.sampler=always_on",
 	} {
 		t.Run(name, func(t *testing.T) { helmFails(t, set) })
+	}
+}
+
+// TestTracingNeedsTheCollectorRule: an endpoint without the collector rule would export into the default-deny
+// policy, so the chart refuses it; with the NetworkPolicies off it renders.
+func TestTracingNeedsTheCollectorRule(t *testing.T) {
+	out := helmFails(t, "analyzer.tracing.endpoint="+collectorEndpoint)
+	if !strings.Contains(out, "networkPolicy.analyzer.traceCollector.enabled") {
+		t.Errorf("error does not name the collector rule:\n%s", out)
+	}
+	r := defaultRender(t, "analyzer.tracing.endpoint="+collectorEndpoint, "networkPolicy.enabled=false")
+	if env := otelEnv(t, r, analyzerDeployment); env["OTEL_TRACES_EXPORTER"] != "otlp" {
+		t.Errorf("without NetworkPolicies: analyzer OTEL_* variables %v, want the exporter", env)
 	}
 }

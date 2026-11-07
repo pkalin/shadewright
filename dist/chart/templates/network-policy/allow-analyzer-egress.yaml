@@ -34,6 +34,9 @@ spec:
           {{- toYaml .podLabels | nindent 10 }}
   {{- end }}
   {{- end }}
+  {{- if and (.Values.analyzer.tracing | default dict).endpoint (not .Values.networkPolicy.analyzer.traceCollector.enabled) }}
+  {{- fail "analyzer.tracing.endpoint is set but networkPolicy.analyzer.traceCollector.enabled is false: the default-deny policy would drop every export; enable it and name the collector's namespace" }}
+  {{- end }}
   {{- with .Values.networkPolicy.analyzer.traceCollector }}
   {{- if .enabled }}
   {{- if not .namespace }}

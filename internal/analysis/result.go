@@ -69,9 +69,10 @@ type Hypothesis struct {
 // Evidence is one quotation from what the model was shown.
 type Evidence struct {
 	// Source is the ID of the block quoted: c1, c2... for the context blocks, t1, t2... for tool results.
-	Source string `json:"source" bound:"maxLen=3" pattern:"^[ct][1-9][0-9]?$"`
-	// Quote is a verbatim excerpt of that block. A proposal needs at least one quote found in its block.
-	Quote string `json:"quote" bound:"maxLen=512"`
+	Source string `json:"source" bound:"maxLen=3" pattern:"^[ct][1-9][0-9]?$" desc:"The ID of the one block the quote is copied from: c1, c2... for the context, t1, t2... for tool results."`
+	// Quote is a verbatim excerpt of one data value of that block. A proposal needs at least one quote found
+	// within one data value of its block (#474: the description says so, since labels are never quotable).
+	Quote string `json:"quote" bound:"maxLen=512" desc:"At least 8 bytes in UTF-8 once spaces at both ends are trimmed (8 characters of plain ASCII), copied exactly, with the same case, spacing and punctuation, from one value the cited block shows (a reason, a message, a name, a log line or a metric line), without its label or the words the block writes around it. Never paraphrased, joined across lines or shortened with an ellipsis."`
 }
 
 // Proposal is a typed change from the closed catalog (invariant 2). Its target is always the Incident's
@@ -196,8 +197,8 @@ func jsonName(f reflect.StructField) string {
 
 // schemaOf builds the JSON schema of t for a strict structured output: every object lists all its
 // properties as required and allows no others, and an optional member is a union with null. It uses only
-// keywords strict modes accept (type, enum, pattern, minimum, maximum, maxItems, anyOf); lengths are
-// enforced in Go by [DecodeResult].
+// keywords strict modes accept (type, enum, pattern, minimum, maximum, maxItems, anyOf, description); lengths
+// are enforced in Go by [DecodeResult]. A field's desc tag, a constant of this file, becomes its description.
 func schemaOf(t reflect.Type, b bounds) map[string]any {
 	switch t.Kind() {
 	case reflect.Pointer:
@@ -207,7 +208,11 @@ func schemaOf(t reflect.Type, b bounds) map[string]any {
 		required := []string{}
 		for f := range t.Fields() {
 			name := jsonName(f)
-			props[name] = schemaOf(f.Type, boundsOf(f))
+			fs := schemaOf(f.Type, boundsOf(f))
+			if d := f.Tag.Get("desc"); d != "" {
+				fs["description"] = d
+			}
+			props[name] = fs
 			required = append(required, name)
 		}
 		return map[string]any{keyType: "object", "properties": props, "required": required, "additionalProperties": false}

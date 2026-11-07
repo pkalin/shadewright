@@ -146,9 +146,12 @@ func lifecycleReason(inc *remediationv1alpha1.Incident) string {
 //
 //   - Only an Incident whose name is derived from its spec, with an observation, in phase Open, Proposed,
 //     Escalated or Resolved is decided. Analyzing and no phase stay.
-//   - A Resolved Incident moves only when an active request names it: back to Proposed (ReasonRequestActive).
-//     Such a request was created after the closure rules listed the requests and resolved it (a listing is
-//     no lock), so the next pass undoes that resolution from what the API server holds, also after a restart.
+//   - A Resolved Incident moves only for a request the closure rules that resolved it cannot have listed (a
+//     listing is no lock), so the next pass undoes that resolution from what the API server holds, also after
+//     a restart: an active request naming it moves it back to Proposed (ReasonRequestActive); otherwise, when
+//     the newest request naming it was created at or after resolvedTime, it applies the request rules of
+//     phase Proposed (ended without success escalates; Succeeded leaves it Resolved; Merged moves nothing). A
+//     final request created before resolvedTime never moves it.
 //   - Any active request naming it keeps it where it is ([finalRequest]).
 //   - In phase Proposed (or Escalated by a Superseded request, [decidedByRequest]), the newest request naming
 //     the Incident (by creation time; at the same time a Superseded one is the older, then by name) decides:
@@ -189,6 +192,13 @@ func Closure(inc *remediationv1alpha1.Incident, requests []remediationv1alpha1.R
 		if active {
 			return remediationv1alpha1.IncidentProposed, ReasonRequestActive, true
 		}
+		if newest == nil || !createdSinceResolved(newest, st.ResolvedTime) {
+			return "", "", false
+		}
+		if reason, ended := endedWithoutSuccess[newest.Status.Phase]; ended {
+			return remediationv1alpha1.IncidentEscalated, reason, true
+		}
+		// Succeeded leaves it Resolved; Merged moves nothing until the verifier (#92).
 		return "", "", false
 	}
 	if active {
@@ -216,6 +226,21 @@ func closeQuiet(inc *remediationv1alpha1.Incident, held, now time.Time) (remedia
 		return "", "", false
 	}
 	return remediationv1alpha1.IncidentResolved, ReasonSymptomQuiet, true
+}
+
+// ResolvedClockSkew is how far before resolvedTime a request's creation may be stamped and still count as
+// created after the resolve. resolvedTime comes from the analyzer's clock, creationTimestamp from the API
+// server's, and the two may differ by a few seconds. A request created that close before a quiet resolve
+// cannot have been seen by it: an analysis comes before each request, and the quiet rule waits an hour after
+// one.
+const ResolvedClockSkew = 30 * time.Second
+
+// createdSinceResolved reports whether request rr was created at or after resolvedTime, less
+// [ResolvedClockSkew], so the closure rules that resolved the Incident may have decided on a listing made
+// before it existed. A missing resolvedTime tells nothing, so no request counts.
+func createdSinceResolved(rr *remediationv1alpha1.RemediationRequest, resolvedTime *metav1.Time) bool {
+	return resolvedTime != nil && !resolvedTime.IsZero() &&
+		!rr.CreationTimestamp.Time.Before(resolvedTime.Add(-ResolvedClockSkew))
 }
 
 // newer reports whether request a is newer than b: created later; at the same time, b is Superseded and a is

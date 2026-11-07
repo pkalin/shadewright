@@ -19,8 +19,10 @@ limitations under the License.
 //
 // A [Detector] is a controller on the one RemediationSettings object, named default. It runs when the
 // analyzer becomes leader, when the settings spec changes (a new generation: its own status writes do not
-// wake it), and again every [DefaultInterval] while the settings exist, so a node pool or an add-on that
-// appears later is found within that time. A failed run is retried with the controller's backoff. Each run:
+// wake it), again every [DefaultInterval] while the settings exist, so a node pool or an add-on that appears
+// later is found within that time, and each time [Config.Recheck] receives: the collector's notice that the
+// watch state of a symptom source kind changed (#409; such a run only reports, ADR-0024 amended 2026-11-07). A
+// failed run is retried with the controller's backoff. Each run:
 //
 //  1. lists the nodes (provider ID and label keys only are kept, at most [MaxNodes]; more give generic) and
 //     the group versions the discovery API serves, each with a deadline;
@@ -28,8 +30,10 @@ limitations under the License.
 //     spec.modules and that detection with [modules.Registry.Select]. No field of the status is ever read for
 //     this or for anything else: it is a report, so a stale or forged status enables nothing;
 //  3. writes status.platform, status.integrations, observedGeneration and the conditions UnknownModules (True
-//     when spec.modules names a module this binary does not have), DetectionFailed and NoWatchedNamespaces
-//     (True when the analyzer watches no namespace, [Config.WatchedNamespaces]) with an update of the
+//     when spec.modules names a module this binary does not have), DetectionFailed, NoWatchedNamespaces
+//     (True when the analyzer watches no namespace, [Config.WatchedNamespaces]) and, while a collector runs,
+//     SymptomSourcesNotWatched (True naming the symptom source kinds of active modules that the collector
+//     does not watch, Unknown while one has not been checked yet, [Config.SourcesNotWatched]) with an update of the
 //     status subresource, read again and retried on a conflict, and only when something changed. The read and
 //     the write of steps 2 and 3, retries included, have a deadline of their own.
 //

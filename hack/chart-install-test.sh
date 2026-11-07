@@ -4,9 +4,11 @@
 # available, the settings object is created from values, and the two ServiceAccounts hold the
 # permissions the design gives them (a spot-check). Usage:
 #   hack/chart-install-test.sh <kubectl> <helm>
-# Images: pull request and main runs use the v0.1.0 digests below (the chart is tested, not the images). A tag
-# run gets EXECUTOR_DIGEST and ANALYZER_DIGEST from the Chart workflow, which resolved and verified them once
-# (hack/resolve-image-digests.sh) and publishes the chart with the same pair; giving only one of the two fails.
+# Images: pull request and main runs install the appVersion tag (image.allowTag) of images built from the same
+# checkout and loaded into Kind by make test-chart-install: the chart renders the flags of its own commit, which a
+# released image may not know (an analyzer exits on an unknown flag). A tag run gets EXECUTOR_DIGEST and
+# ANALYZER_DIGEST from the Chart workflow, which resolved and verified them once (hack/resolve-image-digests.sh)
+# and publishes the chart with the same pair; giving only one of the two fails.
 set -euo pipefail
 
 KUBECTL="${1:-kubectl}"
@@ -27,19 +29,39 @@ if [ -n "${EXECUTOR_DIGEST:-}" ] || [ -n "${ANALYZER_DIGEST:-}" ]; then
     fi
   done
   echo "using the given image digests"
+  IMAGE_ARGS=(--set "executor.image.digest=${EXECUTOR_DIGEST}" --set "analyzer.image.digest=${ANALYZER_DIGEST}")
 else
-  echo "pull request or main run: using the v0.1.0 image digests"
-  EXECUTOR_DIGEST="sha256:66df21ea967a22e8e50b73284254b796665ef5e9470b320707900983aca37f9c"
-  ANALYZER_DIGEST="sha256:697defe7774b29621f64c967ff93e83b309455c2a72d50b190e179f9ff3fc8e4"
+  echo "pull request or main run: using the appVersion images built from this checkout"
+  IMAGE_ARGS=(--set image.allowTag=true)
 fi
+
+# On failure, show why: the Pods, their events and the logs (current and previous) of every container in the
+# release namespace. helm --wait reports only "not ready".
+# shellcheck disable=SC2329 # invoked by the EXIT trap below
+dump() {
+  local rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    echo "::group::diagnostics of ${NS} (exit ${rc})" >&2
+    "${KUBECTL}" -n "${NS}" get pods -o wide >&2 || true
+    "${KUBECTL}" -n "${NS}" describe pods >&2 || true
+    for p in $("${KUBECTL}" -n "${NS}" get pods -o name 2>/dev/null); do
+      echo "--- logs ${p}" >&2
+      "${KUBECTL}" -n "${NS}" logs "${p}" --all-containers --tail=200 >&2 || true
+      echo "--- previous logs ${p}" >&2
+      "${KUBECTL}" -n "${NS}" logs "${p}" --all-containers --previous --tail=200 >&2 || true
+    done
+    echo "::endgroup::" >&2
+  fi
+  return "${rc}"
+}
+trap dump EXIT
 
 "${KUBECTL}" create namespace demo --dry-run=client -o yaml | "${KUBECTL}" apply -f -
 
 "${HELM}" install "${REL}" "${CHART}" --namespace "${NS}" --create-namespace \
   --set clusterId=chart-test \
   --set "analyzer.watchNamespaces={demo}" \
-  --set "executor.image.digest=${EXECUTOR_DIGEST}" \
-  --set "analyzer.image.digest=${ANALYZER_DIGEST}" \
+  "${IMAGE_ARGS[@]}" \
   --set settings.create=true --set settings.spec.paused=false \
   --wait --timeout 5m
 

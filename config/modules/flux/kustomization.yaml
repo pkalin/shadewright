@@ -1,0 +1,7 @@
+# The analyzer's reads of the flux module's kinds (#409): the ClusterRole analyzer-watch-flux, bound in each
+# watched namespace like config/watch binds analyzer-watch-role. The chart renders it only while
+# analyzer.modules.flux.enabled is true. Names get the prefix of config/default here.
+namePrefix: shadewright-
+resources:
+- ../../rbac/analyzer/modules/flux
+- role_binding_demo.yaml

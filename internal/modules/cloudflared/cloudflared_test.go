@@ -453,3 +453,53 @@ func TestNoVendorImports(t *testing.T) {
 	importguard.DirectImportsOnlyStandardOrModule(t, ".")
 	importguard.NoForbiddenDeps(t, ".", ".")
 }
+
+// filterInputs returns what the evaluator hands PodFilter for a pod as decoded from JSON: its string labels and
+// its containers' images.
+func filterInputs(obj map[string]any) (map[string]string, []string) {
+	labels := map[string]string{}
+	meta, _ := obj["metadata"].(map[string]any)
+	l, _ := meta["labels"].(map[string]any)
+	for k, v := range l {
+		if s, ok := v.(string); ok {
+			labels[k] = s
+		}
+	}
+	spec, _ := obj["spec"].(map[string]any)
+	cs, _ := spec["containers"].([]any)
+	images := make([]string, 0, len(cs))
+	for _, c := range cs {
+		m, _ := c.(map[string]any)
+		image, _ := m["image"].(string)
+		images = append(images, image)
+	}
+	return labels, images
+}
+
+// TestPodFilterNeverHidesASymptom (#409 review): the source's PodFilter, which spares the conversion of every
+// pod that is not cloudflared, passes every recorded pod that shows a symptom, and rules out a pod with no
+// cloudflared container.
+func TestPodFilterNeverHidesASymptom(t *testing.T) {
+	filter := Module().Hooks().Symptoms[0].PodFilter
+	if filter == nil {
+		t.Fatal("the Pod source has no PodFilter")
+	}
+	for _, f := range []string{fixtureCrashLoop, fixtureNoConnection, fixtureMirror, fixtureReady} {
+		p := fixture(t, f)
+		labels, images := filterInputs(p)
+		if len(symptoms(p)) > 0 && !filter(labels, images) {
+			t.Errorf("%s: the filter rules out a pod with a symptom", f)
+		}
+		if !filter(labels, images) {
+			t.Errorf("%s: the filter rules out a cloudflared pod", f)
+		}
+		container(p)["image"] = "nginx:1.29"
+		labels, images = filterInputs(p)
+		if filter(labels, images) {
+			t.Errorf("%s with another image: the filter passes it", f)
+		}
+	}
+	if filter(nil, nil) {
+		t.Error("the filter passes a pod with no container")
+	}
+}

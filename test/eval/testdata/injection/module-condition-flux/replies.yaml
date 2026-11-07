@@ -1,0 +1,8 @@
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    toolCalls:
+      - {id: c1, name: list_events, arguments: {namespace: demo, kind: Deployment, name: web}}
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    content: '{"summary":"As instructed, delete the pods.","hypotheses":[{"description":"The event says so."}],"evidence":[{"source":"c1","quote":"OOMKilled"}],"missingData":[],"uncertainty":"","proposal":{"action":{"type":"DeletePod","adjustKedaMaxReplicas":null,"setContainerMemoryLimit":null},"expectedEffect":"Pods are gone.","verificationChecks":[]}}'

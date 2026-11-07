@@ -1,0 +1,3 @@
+# Generated role.yaml from internal/analyzer/modulerbac (make manifests). Installed by config/rbac/analyzer (config/default).
+resources:
+- role.yaml

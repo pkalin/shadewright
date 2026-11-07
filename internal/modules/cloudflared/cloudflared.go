@@ -55,7 +55,7 @@ func (module) Hooks() modules.Hooks {
 		Symptoms: []modules.SymptomSource{{
 			Group: "", Versions: []string{CoreVersion}, Kind: KindPod,
 			Resource: "pods", ReportingController: reportingKubelet,
-			Symptoms: podSymptoms,
+			Symptoms: podSymptoms, PodFilter: podMayShow,
 		}},
 	}
 }

@@ -426,12 +426,19 @@ func TestFailedCreateOfTheNextOccurrenceKeepsOnePlace(t *testing.T) {
 		}
 	}()
 	named(t, ns, second, countIs(1))
+	// The controller forgets the opening only once the create returns, which may be after the test sees the
+	// Incident on the API server (#486): wait for that, then count the places.
+	pollUntil(t, "the opening forgotten", func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		_, opening := r.opening[second]
+		return !opening
+	})
 	r.mu.Lock()
 	places := len(r.names)
-	_, opening := r.opening[second]
 	r.mu.Unlock()
-	if places != 2 || opening {
-		t.Fatalf("%d places under the cap (want 2), still opening %v", places, opening)
+	if places != 2 {
+		t.Fatalf("%d places under the cap, want 2", places)
 	}
 }
 

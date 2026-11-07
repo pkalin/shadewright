@@ -274,7 +274,8 @@ func TestPolicyBlockSaysWhenAContainerHasNoLimit(t *testing.T) {
 	r := reader(t, append(objs, labPolicy(), settingsObject())...)
 	c := build(t, newBuilder(t, r, sources{}, withPolicies(r)), incident(deploymentRef()))
 	blk := one(t, c, SectionPolicy)
-	if !strings.Contains(blk.Text, "container helper: the pod template sets no memory limit, so no proposal can replace it") {
+	if !strings.Contains(blk.Text, "container helper: the pod template sets no memory limit, so no proposal can replace it") ||
+		strings.Count(blk.Text, "container names below are from the workload's pod template (cluster data, untrusted") != 1 {
 		t.Errorf("block:\n%s", blk.Text)
 	}
 }
@@ -289,7 +290,8 @@ func TestPolicyBlockOtherSubjects(t *testing.T) {
 	}
 	pod := remediationv1alpha1.ObjectRef{APIVersion: "v1", Kind: "Pod", Namespace: testNS, Name: crashPod, UID: "uid-" + crashPod}
 	c = build(t, newBuilder(t, r, sources{}, withPolicies(r)), incident(pod))
-	if blk := one(t, c, SectionPolicy); !strings.Contains(blk.Text, "No catalog action can change a Pod") {
+	if blk := one(t, c, SectionPolicy); !strings.Contains(blk.Text,
+		"No catalog action can change a Pod (the subject's kind, from the cluster: untrusted data)") {
 		t.Errorf("pod subject: %+v", blk)
 	}
 	p := labPolicy()

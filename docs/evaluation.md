@@ -107,7 +107,7 @@ Before the first run, the maintainer sets up:
 The identity of step 1 is in `shadewright-azure` (`foundation/evaluation.tf`): a user-assigned identity with the
 federated credential for the `evaluation` environment and the inference role on the Foundry resource.
 
-A run of the eight scenarios and their variant is nine analyses per repeat, each bounded by the loop's limits (at most 7 model
+A run of the eight scenarios and their variants (one so far, `oom/rollout`) is nine analyses per repeat, each bounded by the loop's limits (at most 7 model
 calls with 4 tool steps, 2048 output tokens per call, 500,000 tokens per analysis). The report is rewritten after every run, and `make eval-model` stops after 50 minutes (the `go test`
 timeout), before the job's own 60, so a long run that is cut off still leaves its report. The workflow cannot be tested on a fork or
 locally without such an identity; run it once by hand after setting it up.
@@ -122,7 +122,7 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 | `rubric.yaml` | How each fact of `expected.yaml` is scored (above) |
 | `incident.yaml` | The Incident as the analyzer would have it; its reason and subject must match `expected.yaml` |
 | `objects.yaml` | The objects the context builder and the read tools read: Deployments, StatefulSets, ReplicaSets, Pods, Events |
-| `metrics.yaml` | Optional. What the scenario's Prometheus holds: for every approved query template, the series it answers (labels and timed samples). Only `oom` and `statefulset-oom` have one |
+| `metrics.yaml` | Optional. What the scenario's Prometheus holds: for every approved query template, the series it answers (labels and timed samples). Only `oom` and `statefulset-oom` have one (and the `oom/rollout` variant, below) |
 | `replies.yaml` | The model replies the fake model replays, in order, and their `source` |
 | `variants/<name>/` | Optional. Variants of the scenario, below |
 
@@ -223,7 +223,7 @@ and `digest` is the SHA-256 of its JSON without the digest, so a change to any f
 | `outputSchema` | Hash of the generated output schema and the action catalog |
 | `contextBuilder` | `source` (hash of the Go sources of `internal/incidentcontext`, which has no version of its own), `limits` (the byte bounds), `sources` (what the context reads in the run: `pods`, `objects`, `recorded metrics`) |
 | `runLimits` | The loop limits of the run: `maxToolSteps` and `maxOutputTokens` |
-| `scenarios` | Hash of every scenario's `incident.yaml`, `objects.yaml`, `metrics.yaml` and `replies.yaml` (what the model is shown) |
+| `scenarios` | Hash of every scenario's `incident.yaml`, `objects.yaml`, `metrics.yaml` and `replies.yaml`, and of every file of its variants (what the model is shown) |
 | `redaction` | `builtInRules` (hash of the Go sources of `internal/redact`), `operatorPatterns` (their number: 0, nothing configures them yet) |
 | `rubric` | `fleetRepository`, `fleetCommit`, and `files` (hash of every `expected.yaml` and `rubric.yaml`) |
 | `minPassRate`, `repeats` | The threshold and the number of runs of each scenario |

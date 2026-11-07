@@ -44,8 +44,11 @@ const MaxResultBytes = 64 << 10
 // (decodeResult, and [DecodeResult] with the catalog check) enforces the same bounds in Go. It has no confidence field: a model's self-reported confidence is never read, and a
 // result that carries one is refused as not matching the schema.
 type Result struct {
-	// Summary is a short diagnosis.
-	Summary string `json:"summary" bound:"maxLen=1024"`
+	// Summary is a short diagnosis. Its description asks for the subject's name and the observed values with
+	// their field or metric names: without it, diagnoses after #498 and #500 spent the summary on why no action
+	// was allowed and left out the subject (flux-system/apps), the restart count and the metric names; with it,
+	// the evaluation went from 18 to 27 of 45 runs (#499).
+	Summary string `json:"summary" bound:"maxLen=1024" desc:"The diagnosis in a few sentences: name the incident's subject as kind namespace/name, the cause, and the observed values it rests on with their field or metric names, such as a restart count or a metric."`
 	// Hypotheses are the causes considered.
 	Hypotheses []Hypothesis `json:"hypotheses" bound:"maxItems=5"`
 	// Evidence cites the context blocks and tool results the diagnosis rests on.

@@ -236,3 +236,16 @@ func TestPreviousFieldsAreDescribed(t *testing.T) {
 		}
 	}
 }
+
+// The summary's description asks for the subject's name and the observed values with their names (#499).
+func TestSummaryAsksForTheSubjectAndTheValues(t *testing.T) {
+	schema := string(ResponseSchema())
+	for _, want := range []string{
+		"name the incident's subject as kind namespace/name",
+		"the observed values it rests on with their field or metric names",
+	} {
+		if !strings.Contains(schema, want) {
+			t.Errorf("the schema lacks %q", want)
+		}
+	}
+}

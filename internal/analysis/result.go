@@ -40,8 +40,8 @@ import (
 const MaxResultBytes = 64 << 10
 
 // Result is the structured output of a model call (design 3.3, ADR-0023 decision 5): the only way a proposal
-// is made. Its JSON schema is generated from these types ([ResponseSchema]), and [DecodeResult] enforces the
-// same bounds in Go. It has no confidence field: a model's self-reported confidence is never read, and a
+// is made. Its JSON schema is generated from these types ([ResponseSchema]), and the loop's decoder
+// (decodeResult, and [DecodeResult] with the catalog check) enforces the same bounds in Go. It has no confidence field: a model's self-reported confidence is never read, and a
 // result that carries one is refused as not matching the schema.
 type Result struct {
 	// Summary is a short diagnosis.
@@ -200,7 +200,7 @@ func jsonName(f reflect.StructField) string {
 // schemaOf builds the JSON schema of t for a strict structured output: every object lists all its
 // properties as required and allows no others, and an optional member is a union with null. It uses only
 // keywords strict modes accept (type, enum, pattern, minimum, maximum, maxItems, anyOf, description); lengths
-// are enforced in Go by [DecodeResult]. A field's desc tag, a constant of this file, becomes its description.
+// are enforced in Go by decodeResult. A field's desc tag, a constant of this file, becomes its description.
 func schemaOf(t reflect.Type, b bounds) map[string]any {
 	switch t.Kind() {
 	case reflect.Pointer:
@@ -264,9 +264,9 @@ func ResponseSchema() json.RawMessage { return bytes.Clone(responseSchema()) }
 var (
 	errInvalid = &decodeError{code: "schema", msg: "the reply does not match the result schema"}
 	errAction  = &decodeError{code: "action", msg: "the proposed action does not match its type"}
-	// errOutOfBounds is an action the policy's catalog check refuses. It is never retried and never named to
-	// the model, so the model cannot search for what the policy allows: the analysis ends with
-	// ReasonActionOutOfBounds.
+	// errOutOfBounds is an action the policy's catalog check refuses, an error of [DecodeResult] only: the
+	// loop runs that check itself in finish, after taking the previous value from the pod template, and ends
+	// with ReasonActionOutOfBounds, never retried and never named to the model.
 	errOutOfBounds = errors.New("the proposed action is outside the catalog's bounds")
 )
 

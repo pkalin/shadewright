@@ -572,14 +572,15 @@ func TestVariantsShareTheScenarioRubric(t *testing.T) {
 // A memory plan for a container whose template sets no memory limit fails: the loop takes the previous value
 // from the template (#494), so no previous value fits it.
 func TestMemoryPlanForAContainerWithoutALimitFails(t *testing.T) {
+	const webName = "web"
 	_, s := mustScenario(t, scnOOM)
 	for _, o := range s.objects {
-		if d, ok := o.(*appsv1.Deployment); ok && d.Name == "web" {
+		if d, ok := o.(*appsv1.Deployment); ok && d.Name == webName {
 			d.Spec.Template.Spec.Containers[0].Resources.Limits = nil
 		}
 	}
 	plan := &analysis.Plan{Action: remediationv1alpha1.Action{Type: remediationv1alpha1.ActionSetContainerMemoryLimit,
-		SetContainerMemoryLimit: &remediationv1alpha1.SetContainerMemoryLimit{Container: "web",
+		SetContainerMemoryLimit: &remediationv1alpha1.SetContainerMemoryLimit{Container: webName,
 			Previous: resource.MustParse("48Mi"), Desired: resource.MustParse("64Mi")}}}
 	ok, d := scoreProposal(s, analysis.Outcome{Reason: analysis.ReasonProposed, Plan: plan})
 	if ok || !strings.Contains(d, "sets no memory limit") {

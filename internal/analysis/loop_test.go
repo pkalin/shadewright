@@ -808,6 +808,7 @@ func TestToolResultEvidenceIsTheDataOnly(t *testing.T) {
 // model's (#494): during a rollout an old pod may still run with another limit, and a model may write the
 // value as a byte count. A container the template does not have, or sets no limit for, is handed off.
 func TestPreviousMemoryLimitComesFromThePodTemplate(t *testing.T) {
+	const templateLimit = "48Mi"
 	change := func(previous, desired string) string {
 		return strings.Replace(validResult, `"previous":"256Mi","desired":"512Mi"`,
 			`"previous":"`+previous+`","desired":"`+desired+`"`, 1)
@@ -823,23 +824,23 @@ func TestPreviousMemoryLimitComesFromThePodTemplate(t *testing.T) {
 		// previous and desired are the plan's, for a proposal.
 		previous, desired string
 	}{
-		"an old pod's limit during a rollout": {change("64Mi", desiredLimit), app("48Mi"), ReasonProposed, "48Mi", desiredLimit},
-		"a byte count":                        {change("48012416", desiredLimit), app("48Mi"), ReasonProposed, "48Mi", desiredLimit},
-		"the template's own value": {change("48Mi", desiredLimit),
-			[]incidentcontext.TemplateContainer{{Name: "sidecar"}, {Name: testContainer, MemoryLimit: limit("48Mi")}},
-			ReasonProposed, "48Mi", desiredLimit},
+		"an old pod's limit during a rollout": {change("64Mi", desiredLimit), app(templateLimit), ReasonProposed, templateLimit, desiredLimit},
+		"a byte count":                        {change("48012416", desiredLimit), app(templateLimit), ReasonProposed, templateLimit, desiredLimit},
+		"the template's own value": {change(templateLimit, desiredLimit),
+			[]incidentcontext.TemplateContainer{{Name: "sidecar"}, {Name: testContainer, MemoryLimit: limit(templateLimit)}},
+			ReasonProposed, templateLimit, desiredLimit},
 		// The catalog check runs after the substitution: an old pod's limit as both values is no no-op.
-		"an old pod's limit as both values":   {change(desiredLimit, desiredLimit), app("48Mi"), ReasonProposed, "48Mi", desiredLimit},
-		"a restore to an old pod's limit":     {change("64Mi", "64Mi"), app("48Mi"), ReasonProposed, "48Mi", "64Mi"},
+		"an old pod's limit as both values":   {change(desiredLimit, desiredLimit), app(templateLimit), ReasonProposed, templateLimit, desiredLimit},
+		"a restore to an old pod's limit":     {change("64Mi", "64Mi"), app(templateLimit), ReasonProposed, templateLimit, "64Mi"},
 		"a decimal template limit":            {change("50M", desiredLimit), app("50M"), ReasonProposed, "50M", desiredLimit},
-		"the template's value as desired":     {change("64Mi", "48Mi"), app("48Mi"), ReasonNoChange, "", ""},
+		"the template's value as desired":     {change("64Mi", templateLimit), app(templateLimit), ReasonNoChange, "", ""},
 		"an increase that becomes a decrease": {change("64Mi", "128Mi"), app("256Mi"), ReasonDirectionReversed, "", ""},
 		"a decrease that becomes an increase": {change("256Mi", "128Mi"), app("64Mi"), ReasonDirectionReversed, "", ""},
 		"out of bounds once substituted":      {change("64Mi", "2Mi"), app("2Ti"), ReasonActionOutOfBounds, "", ""},
 		"no limit in the template": {change("64Mi", desiredLimit),
 			[]incidentcontext.TemplateContainer{{Name: testContainer}}, ReasonPreviousValueUnknown, "", ""},
 		"no such container in the template": {change("64Mi", desiredLimit),
-			[]incidentcontext.TemplateContainer{{Name: "sidecar", MemoryLimit: limit("48Mi")}},
+			[]incidentcontext.TemplateContainer{{Name: "sidecar", MemoryLimit: limit(templateLimit)}},
 			ReasonPreviousValueUnknown, "", ""},
 		"the template was not read": {change("64Mi", desiredLimit), nil, ReasonPreviousValueUnknown, "", ""},
 	}

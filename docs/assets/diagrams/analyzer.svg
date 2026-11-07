@@ -135,7 +135,7 @@
   <path class="f" d="M542 576H860" marker-end="url(#m)" marker-start="url(#m)"/>
   <text class="lbl" x="590" y="568">context out, structured result in</text>
   <path class="f" d="M437 612V654" marker-end="url(#a)"/>
-  <text class="lbl" x="447" y="640">model, schema, catalog, evidence, claim, then propose</text>
+  <text class="lbl" x="447" y="640">model, schema, previous value, catalog, evidence, claim, propose</text>
 
   <!-- refusal -->
   <text class="no" x="332" y="752">no evidence → no proposal, hand off to a human</text>

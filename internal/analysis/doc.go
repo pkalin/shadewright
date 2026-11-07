@@ -20,8 +20,9 @@ limitations under the License.
 //
 // The model's structured output ([Result]) is the only way a proposal is made: there is no proposal tool.
 // Its JSON schema is generated from the Go types and the API's enums ([ResponseSchema]), so an action
-// outside the closed catalog cannot be expressed, and [DecodeResult] checks the same bounds in Go, then the
-// policy's catalog check (invariant 2); an action that fails it is handed off (ActionOutOfBounds) with no
+// outside the closed catalog cannot be expressed, and the loop's decoder checks the same bounds in Go; the
+// policy's catalog check (invariant 2) follows on the plan with the pod template's previous value, and an
+// action that fails it is handed off (ActionOutOfBounds) with no
 // retry and no feedback, so the model cannot search for what the policy allows. A proposal needs at least
 // one quote found verbatim within one data value of the context block or tool result it cites: only a value
 // from a source in an available block ([incidentcontext.Block.Data], [tools.Result.Data]), never text code

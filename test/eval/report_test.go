@@ -34,7 +34,9 @@ import (
 
 // reportSchemaVersion is the version of the report format (docs/evaluation.md). Bump it on any change of
 // a field's meaning.
-const reportSchemaVersion = 1
+// Version 2: costUSD sums each role at its own prices (costUSDByRole), and usageUnknownCalls counts failed
+// calls too.
+const reportSchemaVersion = 2
 
 // report is the result of one evaluation run.
 type report struct {
@@ -86,8 +88,37 @@ type tokens struct {
 	// Charged is what the loop charged against its token bound (Outcome.Tokens): the reported usage, or a
 	// call's upper bound when its usage is unknown.
 	Charged int64 `json:"charged"`
-	// UsageUnknownCalls counts calls that were billed with a usage the adapter could not read.
+	// UsageUnknownCalls counts calls without a usage to rest the cost on: a usage the adapter could not read, or
+	// a call that failed (other than with a malformed reply). The loop charges each its upper bound.
 	UsageUnknownCalls int `json:"usageUnknownCalls"`
+	// ByRole splits the reported counts by the role of the call (triage, escalation); roles without a call are
+	// left out. Charged is the loop's count and has no split.
+	ByRole map[string]roleTokens `json:"byRole,omitempty"`
+}
+
+// roleTokens are the token counts of the calls of one role.
+type roleTokens struct {
+	Input             int64 `json:"input"`
+	CachedInput       int64 `json:"cachedInput"`
+	Output            int64 `json:"output"`
+	UsageUnknownCalls int   `json:"usageUnknownCalls"`
+}
+
+func (r roleTokens) plus(o roleTokens) roleTokens {
+	return roleTokens{Input: r.Input + o.Input, CachedInput: r.CachedInput + o.CachedInput, Output: r.Output + o.Output,
+		UsageUnknownCalls: r.UsageUnknownCalls + o.UsageUnknownCalls}
+}
+
+// addRole counts the calls of one role, in the totals and in ByRole.
+func (t *tokens) addRole(role string, o roleTokens) {
+	t.Input += o.Input
+	t.CachedInput += o.CachedInput
+	t.Output += o.Output
+	t.UsageUnknownCalls += o.UsageUnknownCalls
+	if t.ByRole == nil {
+		t.ByRole = map[string]roleTokens{}
+	}
+	t.ByRole[role] = t.ByRole[role].plus(o)
 }
 
 func (t *tokens) add(o tokens) {
@@ -96,6 +127,12 @@ func (t *tokens) add(o tokens) {
 	t.Output += o.Output
 	t.Charged += o.Charged
 	t.UsageUnknownCalls += o.UsageUnknownCalls
+	for role, rt := range o.ByRole {
+		if t.ByRole == nil {
+			t.ByRole = map[string]roleTokens{}
+		}
+		t.ByRole[role] = t.ByRole[role].plus(rt)
+	}
 }
 
 // outcomeScore is the outcome part of a scenario's score.
@@ -141,11 +178,32 @@ type totals struct {
 	Tokens tokens `json:"tokens"`
 	// CostUSD is the estimated cost from the prices the run was given, nil without prices.
 	CostUSD *float64 `json:"costUSD,omitempty"`
+	// CostUSDByRole splits CostUSD by the role of the calls (Tokens.ByRole), each at its deployment's prices.
+	CostUSDByRole map[string]float64 `json:"costUSDByRole,omitempty"`
+	// CostIncomplete says the estimate leaves out calls with unknown usage (Tokens.UsageUnknownCalls): a lower
+	// bound, not the cost.
+	CostIncomplete bool `json:"costIncomplete,omitempty"`
 }
 
 // prices are USD per million tokens of a deployment, from the run's configuration; nothing is built in.
 type prices struct {
 	Input, CachedInput, Output float64
+	// Escalation are the escalation deployment's prices; nil prices the escalation calls as the triage ones.
+	Escalation *prices
+}
+
+// cost is the estimated cost of the counts at these prices. Cached input tokens are part of the input count and
+// billed at their own price.
+func (p *prices) cost(input, cachedInput, output int64) float64 {
+	return (float64(input-cachedInput)*p.Input + float64(cachedInput)*p.CachedInput + float64(output)*p.Output) / 1e6
+}
+
+// forRole returns the prices of a role's deployment.
+func (p *prices) forRole(role string) *prices {
+	if role == string(analysis.RoleEscalation) && p.Escalation != nil {
+		return p.Escalation
+	}
+	return p
 }
 
 // manifest is the evaluation manifest of ADR-0025 decision 3: the inputs that affect behaviour, and its
@@ -167,6 +225,9 @@ type manifest struct {
 	// of every file of its variants: what the model is shown (and, in fake mode, answers).
 	Scenarios string         `json:"scenarios"`
 	Rubric    manifestRubric `json:"rubric"`
+	// ForcedEscalation says every run went to the escalation model (EVAL_FORCE_ESCALATION): a benchmark of
+	// the escalation model, not of the deployment as it runs. Left out when false.
+	ForcedEscalation bool `json:"forcedEscalation,omitempty"`
 	// MinPassRate is the pass threshold of the run, 0 to 1.
 	MinPassRate float64 `json:"minPassRate"`
 	Repeats     int     `json:"repeats"`
@@ -230,7 +291,7 @@ func buildManifestIn(dir string, src source, models modelSource, defs []provider
 	m := manifest{
 		Models:        map[string]manifestModel{},
 		PromptVersion: analysis.PromptVersion(),
-		MinPassRate:   minPassRate, Repeats: repeats,
+		MinPassRate:   minPassRate, Repeats: repeats, ForcedEscalation: models.forcesEscalation(),
 		ContextBuilder: manifestContextBuilder{
 			Limits: manifestLimits{Total: l.Total, Summary: l.Summary, Status: l.Status, Logs: l.Logs,
 				Metrics: l.Metrics, Git: l.Git},
@@ -341,10 +402,19 @@ func (r *report) summarise(p *prices) {
 	}
 	t.Pass = t.Runs > 0 && t.PassRate >= r.Manifest.MinPassRate
 	if p != nil {
-		// Cached input tokens are part of the input count and billed at their own price.
-		cost := (float64(t.Tokens.Input-t.Tokens.CachedInput)*p.Input + float64(t.Tokens.CachedInput)*p.CachedInput +
-			float64(t.Tokens.Output)*p.Output) / 1e6
+		// Every count at the triage prices, then the escalation's counts moved to its own prices: tokens a
+		// result does not attribute to a role stay at the triage prices.
+		cost := p.cost(t.Tokens.Input, t.Tokens.CachedInput, t.Tokens.Output)
+		for role, rt := range t.Tokens.ByRole {
+			c := p.forRole(role).cost(rt.Input, rt.CachedInput, rt.Output)
+			if t.CostUSDByRole == nil {
+				t.CostUSDByRole = map[string]float64{}
+			}
+			t.CostUSDByRole[role] = c
+			cost += c - p.cost(rt.Input, rt.CachedInput, rt.Output)
+		}
 		t.CostUSD = &cost
+		t.CostIncomplete = t.Tokens.UsageUnknownCalls > 0
 	}
 	r.Totals = t
 }
@@ -363,13 +433,33 @@ func (r *report) markdown() string {
 	fmt.Fprintf(&b, "- Passed %d of %d runs (%.0f%%, threshold %.0f%%, %d repeat(s))\n", r.Totals.Passed, r.Totals.Runs,
 		100*r.Totals.PassRate, 100*r.Manifest.MinPassRate, r.Manifest.Repeats)
 	tk := r.Totals.Tokens
+	if r.Manifest.ForcedEscalation {
+		b.WriteString("- Escalation forced (EVAL_FORCE_ESCALATION): every run went to the escalation model\n")
+	}
 	fmt.Fprintf(&b, "- Tokens: input %d (cached %d), output %d, charged %d, calls with unknown usage %d\n",
 		tk.Input, tk.CachedInput, tk.Output, tk.Charged, tk.UsageUnknownCalls)
-	if r.Totals.CostUSD != nil {
-		fmt.Fprintf(&b, "- Estimated cost: USD %.4f\n", *r.Totals.CostUSD)
+	for _, role := range []analysis.Role{analysis.RoleTriage, analysis.RoleEscalation} {
+		rt, ok := tk.ByRole[string(role)]
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(&b, "  - %s: input %d (cached %d), output %d, calls with unknown usage %d", role, rt.Input,
+			rt.CachedInput, rt.Output, rt.UsageUnknownCalls)
+		if c, ok := r.Totals.CostUSDByRole[string(role)]; ok {
+			fmt.Fprintf(&b, ", estimated cost USD %.4f", c)
+		}
+		b.WriteString("\n")
 	}
-	b.WriteString("\n| Scenario | Run | Result | Outcome | Diagnosis | Calls | Tokens |\n")
-	b.WriteString("|---|---|---|---|---|---|---|\n")
+	if r.Totals.CostUSD != nil {
+		fmt.Fprintf(&b, "- Estimated cost: USD %.4f", *r.Totals.CostUSD)
+		if r.Totals.CostIncomplete {
+			fmt.Fprintf(&b, " (incomplete, a lower bound: %d call(s) failed or had unknown usage and are not priced; "+
+				"compare the charged tokens)", tk.UsageUnknownCalls)
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("\n| Scenario | Run | Result | Outcome | Diagnosis | Escalated | Calls | Tokens |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|\n")
 	for _, s := range r.Scenarios {
 		res := "fail"
 		if s.Pass {
@@ -401,8 +491,12 @@ func (r *report) markdown() string {
 		if s.Diagnosis.Detail != "" {
 			diag += "; " + s.Diagnosis.Detail
 		}
-		fmt.Fprintf(&b, "| %s | %d | %s | %s | %s | %d+%d | %d |\n", s.Name, s.Repeat, res, cell(outcome), cell(diag),
-			s.Calls, s.ToolCalls, s.Tokens.Charged)
+		escalated := "no"
+		if s.Escalated {
+			escalated = "yes"
+		}
+		fmt.Fprintf(&b, "| %s | %d | %s | %s | %s | %s | %d+%d | %d |\n", s.Name, s.Repeat, res, cell(outcome), cell(diag),
+			escalated, s.Calls, s.ToolCalls, s.Tokens.Charged)
 	}
 	r.quoteFailuresMarkdown(&b)
 	return b.String()

@@ -55,6 +55,15 @@ const (
 	// MaxObjects is the most objects one render may return, the 1,000 objects of the supported repository
 	// (design 8.2) rounded up.
 	MaxObjects = 1024
+	// MaxBuildDocuments bounds the objects kustomize reads before it renders, with repetition like
+	// MaxBuildBytes: every visit of a directory adds the YAML documents of the resource and patch files it lists
+	// and of its inline patches, a List counted as 1 plus its items ([documents]). The byte budget alone lets 4 MiB of
+	// tiny objects through, about 54,000, which kustomize cannot build in 128 MiB; MaxObjects is checked only on
+	// the render's output. The count is an upper bound of the objects the render returns (generators are
+	// refused, so only overlays reaching a base more than once multiply objects, and each visit counts), and
+	// patches and empty documents count too, so it is set above MaxObjects: the render's own check still
+	// refuses a build of 1,025 to 4,096 objects, after kustomize built them (design 8.2.2, #488).
+	MaxBuildDocuments = 4096
 )
 
 const (
@@ -71,9 +80,9 @@ const (
 // nothing or only local files the walk validates. Everything else is refused: generators (configMapGenerator,
 // secretGenerator), helmCharts and helmGlobals, generators, transformers and validators (plugins and KRM
 // functions), openapi, crds, configurations, replacements, the deprecated bases, patchesStrategicMerge and
-// patchesJson6902, buildMetadata and sortOptions.
+// patchesJson6902, buildMetadata and sortOptions. A patch may not use JSON patch copy operations ([refuseCopy]).
 var allowedKeys = map[string]bool{
-	"apiVersion": true, "kind": true, "metadata": true,
+	"apiVersion": true, keyKind: true, "metadata": true,
 	keyResources: true, keyComponents: true, keyPatches: true,
 	"namespace": true, "namePrefix": true, "nameSuffix": true,
 	"labels": true, "commonLabels": true, "commonAnnotations": true,
@@ -110,6 +119,9 @@ type walker struct {
 	ignoreChecked map[string]bool
 	visits        int
 	buildBytes    int
+	buildDocs     int
+	// docs caches the documents of each file read ([documents]).
+	docs map[string]int
 	// generate, when set, lists directories so that root, the path rendered, may have no kustomization file:
 	// the walk then generates the one Flux would (Load only; Check finds it in the files it is given).
 	generate repopath.Lister
@@ -125,13 +137,18 @@ type dirKind struct{ dir, kind string }
 // refs are the references of one kustomization file, and the bytes one visit of it adds to the build.
 type refs struct {
 	dirs, components, files []string
-	bytes                   int
+	// patches are the patch files among files, checked by [refuseCopy].
+	patches []string
+	bytes   int
+	// docs is what one visit adds to the documents of the build: those of its files and inline patches.
+	docs int
 }
 
 func newWalker(read reader) *walker {
 	w := &walker{
 		read: read, files: map[string][]byte{}, resources: map[string]bool{},
 		parsed: map[dirKind]*refs{}, ignoreChecked: map[string]bool{}, dirResources: map[string]bool{},
+		docs: map[string]int{},
 	}
 	w.isDir = func(p string) bool { return w.dirResources[p] }
 	return w
@@ -158,11 +175,28 @@ func (w *walker) walk(ctx context.Context, dir, want string, depth int) error {
 				return err
 			}
 			r.bytes += len(w.files[f])
+			d, ok := w.docs[f]
+			if !ok {
+				var err error
+				if d, err = documents(f, w.files[f]); err != nil {
+					return err
+				}
+				w.docs[f] = d
+			}
+			r.docs = min(r.docs+d, MaxBuildDocuments+1)
+		}
+		for _, f := range r.patches {
+			if err := refuseCopy(f, w.files[f]); err != nil {
+				return err
+			}
 		}
 		w.parsed[key] = r
 	}
 	if w.buildBytes += r.bytes; w.buildBytes > MaxBuildBytes {
 		return refuse(ReasonTooLarge, fmt.Sprintf("the build processes more than %d bytes", MaxBuildBytes))
+	}
+	if w.buildDocs += r.docs; w.buildDocs > MaxBuildDocuments {
+		return refuse(ReasonTooLarge, fmt.Sprintf("the build reads more than %d YAML documents", MaxBuildDocuments))
 	}
 	// A directory below dir adds one level per directory passed, as in the source mapping, so a base found
 	// deep below a path without a kustomization file is bounded like a chain of kustomizations.
@@ -264,6 +298,14 @@ func (w *walker) parse(ctx context.Context, dir, want string) (*refs, error) {
 		return nil, w.noKustomization(ctx, dir)
 	}
 	w.files[name] = data
+	// The YAML parser below replaces aliases by copies, so what documents refuses (anchors, aliases, merge keys,
+	// input that is not UTF-8) is refused here too, before it runs. documents stops reading at its budget, so a
+	// file over it is refused as well: the rest of it was not checked.
+	if d, err := documents(name, data); err != nil {
+		return nil, err
+	} else if d > MaxBuildDocuments {
+		return nil, refuse(ReasonTooLarge, fmt.Sprintf("%s holds more than %d YAML documents", name, MaxBuildDocuments))
+	}
 	var k map[string]any
 	if err := yaml.UnmarshalStrict(data, &k); err != nil {
 		return nil, refuse(ReasonInvalidYAML, name+" is not a valid kustomization file")
@@ -321,7 +363,7 @@ func (w *walker) generated(ctx context.Context, dir string) (string, []byte, err
 		refs = append(refs, rel)
 	}
 	// Marshalled, not written as text, so a name such as "true" or "1" stays a string.
-	data, err := yaml.Marshal(map[string]any{"apiVersion": apiKustomization, "kind": kindKustomization, keyResources: refs})
+	data, err := yaml.Marshal(map[string]any{"apiVersion": apiKustomization, keyKind: kindKustomization, keyResources: refs})
 	if err != nil {
 		return "", nil, refuse(ReasonInvalidInput, "the kustomization Flux generates for "+dir+" cannot be written")
 	}
@@ -356,7 +398,7 @@ func checkHeader(name string, k map[string]any, want string) error {
 		}
 		return refuse(ReasonUnsupportedKustomization, name+" uses "+what)
 	}
-	kind, hasKind := k["kind"]
+	kind, hasKind := k[keyKind]
 	api, hasAPI := k["apiVersion"]
 	wantAPI := apiKustomization
 	if want == kindComponent {
@@ -410,42 +452,57 @@ func collectRefs(name, dir string, k map[string]any, resources map[string]bool, 
 	if r.components, err = list(keyComponents); err != nil {
 		return nil, err
 	}
-	patches, err := patchFiles(name, dir, k[keyPatches], bad)
+	patches, inline, err := patchFiles(name, dir, k[keyPatches], bad)
 	if err != nil {
 		return nil, err
 	}
 	r.files = append(r.files, patches...)
+	r.patches = patches
+	r.docs = inline
 	return r, nil
 }
 
-// patchFiles validates the patches list and returns the local files it reads.
-func patchFiles(name, dir string, raw any, bad error) ([]string, error) {
+// patchFiles validates the patches list and returns the local files it reads, and the documents of its inline
+// patches ([documents]), which kustomize reads like a patch file. An inline patch with a JSON patch copy
+// operation is refused ([refuseCopy]); the walk checks patch files the same way.
+func patchFiles(name, dir string, raw any, bad error) ([]string, int, error) {
 	if raw == nil {
-		return nil, nil
+		return nil, 0, nil
 	}
 	items, ok := raw.([]any)
 	if !ok {
-		return nil, refuse(ReasonUnsupportedKustomization, "patches in "+name+" is not a list")
+		return nil, 0, refuse(ReasonUnsupportedKustomization, "patches in "+name+" is not a list")
 	}
 	var files []string
+	docs := 0
 	for _, it := range items {
 		m, ok := it.(map[string]any)
 		if !ok {
-			return nil, refuse(ReasonUnsupportedKustomization, "a patch in "+name+" is not a map")
+			return nil, 0, refuse(ReasonUnsupportedKustomization, "a patch in "+name+" is not a map")
 		}
 		for key := range m {
 			if !patchKeys[key] {
-				return nil, refuse(ReasonUnsupportedKustomization, "a patch in "+name+" uses an unsupported field")
+				return nil, 0, refuse(ReasonUnsupportedKustomization, "a patch in "+name+" uses an unsupported field")
 			}
 		}
 		if raw, ok := m["path"]; ok {
 			s, isString := raw.(string)
 			p, valid := repopath.Join(dir, s)
 			if !isString || !valid {
-				return nil, bad
+				return nil, 0, bad
 			}
 			files = append(files, p)
 		}
+		if s, ok := m["patch"].(string); ok {
+			d, err := documents("an inline patch in "+name, []byte(s))
+			if err != nil {
+				return nil, 0, err
+			}
+			if err := refuseCopy("an inline patch in "+name, []byte(s)); err != nil {
+				return nil, 0, err
+			}
+			docs = min(docs+d, MaxBuildDocuments+1)
+		}
 	}
-	return files, nil
+	return files, docs, nil
 }

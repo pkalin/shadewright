@@ -73,7 +73,7 @@ type Result struct {
 //
 // Renders are serialised in the process (kustomize keeps global state). ctx bounds the wait for that turn:
 // when it ends first, Check returns ctx.Err() without rendering. A render that has started runs to its end,
-// since kustomize cannot be cancelled; the limits on the build ([MaxVisits], [MaxBuildBytes]) bound how long
+// since kustomize cannot be cancelled; the limits on the build ([MaxVisits], [MaxBuildBytes], [MaxBuildDocuments]) bound how long
 // it can take.
 func Check(ctx context.Context, in Input) (Result, error) {
 	field, previous, desired, err := plan(in)

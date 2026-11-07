@@ -103,6 +103,8 @@ Before the first run, the maintainer sets up:
 | `EVAL_ESCALATION_MODEL` | with the above | Model ID and version of the escalation replies, as `--escalation-model` |
 | `EVAL_API_VERSION` | no | Inference API version, `v1` by default |
 | `EVAL_PRICE_INPUT_PER_MTOK`, `EVAL_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_PRICE_OUTPUT_PER_MTOK` | no | USD per million tokens of the deployment, for the cost estimate: all three or none. Nothing is built in; take them from the Azure price list for the region |
+| `EVAL_ESCALATION_PRICE_INPUT_PER_MTOK`, `EVAL_ESCALATION_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_ESCALATION_PRICE_OUTPUT_PER_MTOK` | no | The escalation deployment's own prices: all three or none, and only with the ones above and `EVAL_ESCALATION_DEPLOYMENT`. Without them the escalation calls are priced as the triage ones |
+| `EVAL_FORCE_ESCALATION` | no | `1` sends every run to the escalation model with its read tools (below); needs `EVAL_ESCALATION_DEPLOYMENT`. Any other value is an error, checked before the identity is used, and `make eval` (the replay) refuses it |
 
 3. **Network reach to the Foundry endpoint.** A GitHub-hosted runner calls the endpoint from GitHub's shared
    address ranges. If the Foundry resource accepts only selected networks, as the reference lab's does (its AKS
@@ -120,6 +122,25 @@ A run of the eight scenarios and their variants (one so far, `oom/rollout`) is n
 calls with 4 tool steps, 2048 output tokens per call, 500,000 tokens per analysis). The report is rewritten after every run, and `make eval-model` stops after 50 minutes (the `go test`
 timeout), before the job's own 60, so a long run that is cut off still leaves its report. The workflow cannot be tested on a fork or
 locally without such an identity; run it once by hand after setting it up.
+
+### Benchmarking escalation models
+
+Escalation runs only on the deterministic signals (a context cut to its total bound, a configured source that
+failed, or a triage result that failed the schema twice; [design 3.3](design/3-observation-and-deduplication.md)),
+and the recorded scenarios almost never raise them, so a normal run hardly ever calls the escalation model. To
+compare escalation candidates ([#80](https://github.com/pkalin/shadewright/issues/80)), run `make eval-model`
+by hand, with the identity and network reach above (the Evaluation workflow does not pass these variables),
+with `EVAL_FORCE_ESCALATION=1` and the candidate as `EVAL_ESCALATION_DEPLOYMENT` and `EVAL_ESCALATION_MODEL`:
+the harness marks every built context with a failed source, the builder's own signal, so the loop calls the
+escalation model with the read tools from the first call, exactly as on a real outage. No block of the
+context changes: the model is shown what triage would have been shown. The triage deployment is still required
+and named in the manifest, but not called.
+
+The switch lives only in the test package (`test/eval`, a wrapper around the context builder): the analyzer has
+no flag, setting or code path that reaches it, and model output still never triggers an escalation. The
+manifest records it (`forcedEscalation`), so a forced run has its own digest and is never mistaken for a run of
+the deployment as configured, and the Markdown summary says so. Compare candidates on the per-role tokens and
+cost (`tokens.byRole`, `costUSDByRole`) with `EVAL_ESCALATION_PRICE_*` set to each candidate's prices.
 
 ## The scenario files
 
@@ -174,19 +195,19 @@ fix any rubric the harness then refuses.
 
 ## The report
 
-`report.json` (schema version 1) and `report.md`, the same content for a person. The JSON fields:
+`report.json` (schema version 2) and `report.md`, the same content for a person. The JSON fields:
 
 | Field | Meaning |
 | --- | --- |
-| `schemaVersion` | 1; raised on any change of a field's meaning |
+| `schemaVersion` | 2; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too |
 | `mode` | `fake` (recorded replies) or `foundry` (the real model) |
 | `manifest` | The evaluation manifest, below |
 | `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis` and `error` (set when the run could not start; it fails) |
-| `scenarios[].tokens` | `input`, `cachedInput`, `output` as the replies reported them; `charged`, what the loop counted against its bounds (a call with unknown usage at its upper bound); `usageUnknownCalls` |
+| `scenarios[].tokens` | `input`, `cachedInput`, `output` as the replies reported them; `charged`, what the loop counted against its bounds (a call with unknown usage, or one that failed, at its upper bound); `usageUnknownCalls`, the calls without a usage to price: unknown usage, or a call that failed other than with a malformed reply; `byRole`, the same counts except `charged`, per role of the calls (`triage`, `escalation`; a role without a call is left out) |
 | `scenarios[].outcome` | `pass`, `expected` (refusal or pull-request), `reason`, `action` (the planned action type), `detail` (why it failed), `notScored` |
 | `scenarios[].diagnosis` | `pass`, `facts[]` (`fact`, `pass`, `missing` terms), `unscored[]` (`fact`, `why`), `detail` |
 | `scenarios[].quoteFailures` | Only for a run that ended `NoEvidence`: one entry per quote of the refused result, in order, with `source` (the cited ID), `block` (the cited block's context section or tool name), `class` (below), `quoteBytes`, `blockBytes` and, for `partial`, `matchedBytes`. No text of the quote or the block |
-| `totals` | `runs`, `passed`, `passRate`, `pass` (whether the threshold was reached), `tokens` (summed), `costUSD` (only with prices) |
+| `totals` | `runs`, `passed`, `passRate`, `pass` (whether the threshold was reached), `tokens` (summed, with `byRole`), `costUSD` and `costUSDByRole`, each role at its deployment's prices (only with prices), and `costIncomplete` when calls with unknown usage are left out of the estimate, which is then a lower bound (the Markdown summary says so; compare `charged`) |
 
 The report holds no prompt, no model text, no token and no endpoint.
 
@@ -237,6 +258,7 @@ and `digest` is the SHA-256 of its JSON without the digest, so a change to any f
 | `scenarios` | Hash of every scenario's `incident.yaml`, `objects.yaml`, `metrics.yaml`, `replies.yaml` and `policy.yaml`, and of every file of its variants (what the model is shown) |
 | `redaction` | `builtInRules` (hash of the Go sources of `internal/redact`), `operatorPatterns` (their number: 0, nothing configures them yet) |
 | `rubric` | `fleetRepository`, `fleetCommit`, and `files` (hash of every `expected.yaml` and `rubric.yaml`) |
+| `forcedEscalation` | `true` when the run forced every analysis to the escalation model (`EVAL_FORCE_ESCALATION`); left out otherwise |
 | `minPassRate`, `repeats` | The threshold and the number of runs of each scenario |
 | `digest` | `sha256:` and the hex digest |
 

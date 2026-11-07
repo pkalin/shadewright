@@ -53,7 +53,24 @@ The new count is at most 1,000 per observation: a series count is written by who
 - Event state holds 10,000 entries and pod state 5,000 (see 3.2).
 - The informer cache of the watched namespaces and this state count against the analyzer's memory limit (128 Mi in `config/manager/analyzer.yaml`). Namespaces with many pods or events need a higher limit.
 
-**Lab measurement (2026-11-06).** With `v0.3.0-rc.2` (commit `bbe555ca09db887d1389270e53e6ef64249cd7eb`) on one `Standard_D4as_v5` node, an idle `kubectl top` sample after 3 analyses and 1 pull request showed analyzer memory 19Mi and CPU 2m, executor memory 16Mi and CPU 1m, with 0 restarts (how many namespaces, pods and events were watched was not recorded). Each had requests of 64Mi/10m and a memory limit of 128Mi. Peak memory during an analysis is not measured yet: it needs a metrics query over the run window, not a point sample. The 128Mi limits are therefore not yet backed by a peak measurement.
+**Supported load (decided from issue #254).** The 128 Mi limits are meant for a small to mid cluster: up to 20 watched namespaces, 1,000 Pods in them, 10,000 `events.k8s.io/v1` Events in the API server at a time (about an hour of 170 a minute, since the API server keeps Events for an hour; 10% of them Warning), a sustained 200 Events a minute with bursts of 1,000 in a minute, and the default cap of 500 Incidents. The numbers come from the shape of the cache: the analyzer holds every Pod and every Event of the watched namespaces (Normal ones too, see below), so memory grows with Pods plus the Events of the last hour, not with the rate alone. A cluster beyond this needs a higher limit (chart `analyzer.resources`) or fewer watched namespaces.
+
+**Measurement on Kind (2026-11-07).** Method: `hack/load/measure.sh` at commit `b33301732e277695333e589befc9556607f59009`, Kind v0.33.0 with Kubernetes v1.37.0 (one node, arm64 Docker host), chart installed with the images built from that commit and the default 128Mi limit. It created the load above (1,012 Pods, 40 of them running and the rest Pending, 11,202 Events, one crash-looping Pod), restarted both Deployments over it, ran a stream of 200 Events a minute for 5 minutes, then a burst of 1,000 Events, and sampled the kubelet's container working set every 5 s, `/metrics` (`process_resident_memory_bytes`, `go_memstats_heap_inuse_bytes`) and the container's cgroup `memory.peak` afterwards. The model call was off (no `triageModel`), so the analysis context is not part of it. The numbers of a Kind laptop are a sample, not a guarantee.
+
+| Phase | Analyzer working set (max) | Analyzer Go heap in use (max) | Executor working set (max) |
+|---|---|---|---|
+| idle, empty cluster | 24 Mi | 17 Mi | 16 Mi |
+| load created | 63 Mi | 52 Mi | 16 Mi |
+| restart over the full load | 67 Mi | 55 Mi | 17 Mi |
+| stream, 200 Events a minute for 5 minutes | 87 Mi | 72 Mi | 19 Mi |
+| burst of 1,000 Events, then settle | 87 Mi | 77 Mi | 20 Mi |
+
+- **Analyzer peak:** 87 Mi working set and 89 Mi in the cgroup's own `memory.peak` (page cache included) against the 128 Mi limit, so about 70% of it, with 0 restarts and no OOM kill. The growth between the restart and the end comes from the cache of the new Events and the 500 Incidents the load opened (the cap), not from a leak: it stopped during the settle phase.
+- **Time:** the analyzer was Ready 14 s after a restart over the full load (including the old Pod's shutdown), and the collector's Event reconcile took 1.5 ms on average (3,155 reconciles).
+- **Field selector:** the API server supports `fieldSelector=type=Warning` on `events.k8s.io/v1` Events (checked on that cluster), and the cache could take it (`cache.ByObject.Field`). It is not used: the model's read tools (`list_events`, and the reference check of a pod) read Events from the same cache, and the Normal ones (`Scheduled`, `Killing`, `Pulled`) are part of what they show. A Warning-only cache would change the tool output, so it needs its own decision; it would drop about 90% of the Event objects in this load. It was not measured separately.
+- **Executor:** it has no GitHub App on Kind, so its pull request path did not run; idle and under the same load it stayed at 13 to 20 Mi. Its worst-case render is in [8.2.2](8-gitops-on-github.md#822-steps-4-and-5-the-semantic-diff-check).
+
+**Lab data point (2026-11-06).** With `v0.3.0-rc.2` (commit `bbe555ca09db887d1389270e53e6ef64249cd7eb`) on one `Standard_D4as_v5` node of AKS, an idle `kubectl top` sample with 30 Pods and about 400 Events showed analyzer memory 17 Mi (an earlier sample, after 3 analyses and 1 pull request, 19 Mi and 2m CPU) and executor memory 13 Mi (16 Mi, 1m CPU), with 0 restarts. Each had requests of 64Mi/10m and a memory limit of 128Mi. It is an idle point and agrees with the empty-cluster row above; the peak under load is the Kind measurement.
 
 **First cases.** These are the symptoms the design starts from:
 

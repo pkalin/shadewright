@@ -24,6 +24,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -91,7 +92,8 @@ type injectionCase struct {
 		// available" in production, #373), so the case adds the tool as a test tool, to prove the loop treats
 		// its answer as data too.
 		GitFile string `json:"gitFile,omitempty"`
-		// ToolError makes every tool call fail.
+		// ToolError makes the sources of the read tools (the API reader) fail, so that every tool that reads
+		// answers "could not fetch" through its own error path.
 		ToolError bool `json:"toolError,omitempty"`
 	} `json:"inject"`
 	// Secrets are fake secrets planted in the sources. None may reach the model.
@@ -111,10 +113,13 @@ type injectionCase struct {
 	replies []injectionReply
 }
 
+// replyErrors are the values of a reply's error field.
+var replyErrors = []string{"", "unavailable", "forbidden", "not-found", "malformed", "failed"}
+
 // injectionReply is one scripted model answer.
 type injectionReply struct {
 	recordedReply
-	// Error makes the call fail: unavailable, forbidden, not-found, malformed or failed.
+	// Error makes the call fail: one of replyErrors.
 	Error string `json:"error,omitempty"`
 	// Block makes the call wait until the analysis deadline.
 	Block bool `json:"block,omitempty"`
@@ -175,6 +180,9 @@ func (c *injectionCase) check(dir string) error {
 		if r.Model == "" {
 			return errors.New("every reply names its model")
 		}
+		if !slices.Contains(replyErrors, r.Error) {
+			return fmt.Errorf("reply error %q is not one of %v", r.Error, replyErrors)
+		}
 	}
 	return nil
 }
@@ -185,12 +193,15 @@ type injectionModel struct {
 	replies  []injectionReply
 	raw      bool
 	requests []providers.CompletionRequest
+	// overrun counts the calls made after the script ran out.
+	overrun int
 }
 
 func (m *injectionModel) Complete(ctx context.Context, req providers.CompletionRequest) (providers.Completion, error) {
 	m.mu.Lock()
 	m.requests = append(m.requests, req)
 	if len(m.replies) == 0 {
+		m.overrun++
 		m.mu.Unlock()
 		return providers.Completion{}, &providers.RetryableError{Err: errors.New("no scripted reply left")}
 	}
@@ -251,13 +262,28 @@ func (failingMetrics) Query(context.Context, providers.MetricsQuery) (providers.
 const gitFileSchema = `{"type":"object","additionalProperties":false,"required":["path"],` +
 	`"properties":{"path":{"type":"string"}}}`
 
-// spyTools wraps the real read tools: it records the calls that reached them, can fail a call, and can add
-// read_git_file with a fixed answer (redacted as the real tools redact their answers).
+// failingReader is an API reader that fails every read: the source of a tool that is down.
+type failingReader struct{}
+
+func (failingReader) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
+	return errors.New("the API server is down")
+}
+
+func (failingReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return errors.New("the API server is down")
+}
+
+// gitFileBytes is the bound of a Git tool's answer (gitBytes in internal/tools).
+const gitFileBytes = 16 << 10
+
+// spyTools wraps the real read tools: it records the calls that reached them and can add read_git_file with a
+// fixed answer. The production tool answers "not available" (#373), so the test tool puts its text through the
+// same steps as [tools.Set.Call] does for any result: redact (incidentcontext.Redact), then cut to the bound
+// (incidentcontext.KeepHead). It redacts nothing by itself beyond that.
 type spyTools struct {
 	inner   *tools.Set
 	red     *redact.Redactor
 	gitFile string
-	fail    bool
 	mu      sync.Mutex
 	calls   []providers.ToolCall
 }
@@ -275,11 +301,8 @@ func (s *spyTools) Call(ctx context.Context, call providers.ToolCall) (tools.Res
 	s.mu.Lock()
 	s.calls = append(s.calls, call)
 	s.mu.Unlock()
-	if s.fail {
-		return tools.Result{}, errors.New("the tool failed")
-	}
 	if call.Name == tools.NameReadGitFile && s.gitFile != "" {
-		text := s.red.String(s.gitFile)
+		text, _ := incidentcontext.KeepHead(incidentcontext.Redact(s.red.String, s.gitFile), gitFileBytes)
 		return tools.Result{Tool: call.Name, Status: tools.StatusOK, Text: text, Values: []string{text}}, nil
 	}
 	return s.inner.Call(ctx, call)
@@ -296,12 +319,9 @@ func (s *spyTools) names() []string {
 }
 
 // injectionWorld is the oom scenario's objects with the case's planted text, and the Incident.
-func injectionWorld(scheme *runtime.Scheme, c *injectionCase) (*remediationv1alpha1.Incident, []client.Object, error) {
-	base, err := loadScenario(scheme, "oom")
-	if err != nil {
-		return nil, nil, err
-	}
-	var objs []client.Object
+func injectionWorld(base *scenario, c *injectionCase) (*remediationv1alpha1.Incident, []client.Object) {
+	sub := base.incident.Spec.Subject
+	objs := make([]client.Object, 0, len(base.objects)+len(c.Inject.Events))
 	for _, o := range base.objects {
 		o = o.DeepCopyObject().(client.Object)
 		switch v := o.(type) {
@@ -318,14 +338,15 @@ func injectionWorld(scheme *runtime.Scheme, c *injectionCase) (*remediationv1alp
 	}
 	for i, e := range c.Inject.Events {
 		objs = append(objs, &eventsv1.Event{
-			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("injected-%d", i), Namespace: watchedNamespaces[0]},
-			Regarding:  corev1.ObjectReference{Kind: "Deployment", Namespace: watchedNamespaces[0], Name: "web"},
-			Reason:     e.Reason, Note: e.Note, Type: corev1.EventTypeWarning,
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("injected-%d", i), Namespace: sub.Namespace},
+			Regarding: corev1.ObjectReference{APIVersion: sub.APIVersion, Kind: sub.Kind, Namespace: sub.Namespace,
+				Name: sub.Name},
+			Reason: e.Reason, Note: e.Note, Type: corev1.EventTypeWarning,
 			EventTime:           metav1.MicroTime{Time: fixtureNow.Add(-time.Minute)},
 			ReportingController: "injection-corpus",
 		})
 	}
-	return base.incident, objs, nil
+	return base.incident.DeepCopy(), objs
 }
 
 func merge(dst *map[string]string, add map[string]string) {
@@ -343,15 +364,13 @@ type injectionRun struct {
 	out      analysis.Outcome
 	requests []providers.CompletionRequest
 	toolRuns []string
-	left     int
+	calls    int
+	overrun  int
 }
 
-func runInjection(t *testing.T, scheme *runtime.Scheme, c *injectionCase) injectionRun {
+func runInjection(t *testing.T, scheme *runtime.Scheme, base *scenario, c *injectionCase) injectionRun {
 	t.Helper()
-	inc, objs, err := injectionWorld(scheme, c)
-	if err != nil {
-		t.Fatal(err)
-	}
+	inc, objs := injectionWorld(base, c)
 	cl := newClient(scheme, objs)
 	red, err := redact.New()
 	if err != nil {
@@ -366,6 +385,9 @@ func runInjection(t *testing.T, scheme *runtime.Scheme, c *injectionCase) inject
 		Logs: logStub{text: logs}}
 	tc := tools.Config{Pods: cl, Events: cl, Objects: cl, Redactor: red, Namespaces: watchedNamespaces, Now: now,
 		Logs: logStub{text: logs}}
+	if c.Inject.ToolError {
+		tc.Pods, tc.Events, tc.Objects = failingReader{}, failingReader{}, failingReader{}
+	}
 	if c.Escalate {
 		bc.Metrics, tc.Metrics = failingMetrics{}, failingMetrics{}
 	}
@@ -377,7 +399,7 @@ func runInjection(t *testing.T, scheme *runtime.Scheme, c *injectionCase) inject
 	if err != nil {
 		t.Fatal(err)
 	}
-	spy := &spyTools{inner: set, red: red, gitFile: c.Inject.GitFile, fail: c.Inject.ToolError}
+	spy := &spyTools{inner: set, red: red, gitFile: c.Inject.GitFile}
 	m := &injectionModel{replies: slices.Clone(c.replies), raw: c.RawToolCalls}
 	cfg := analysis.Config{
 		Builder: builder, Tools: spy, Policies: evalPolicies, Redactor: red, Now: now,
@@ -401,9 +423,10 @@ func runInjection(t *testing.T, scheme *runtime.Scheme, c *injectionCase) inject
 		t.Fatalf("the analysis stopped: %v", err)
 	}
 	m.mu.Lock()
-	left := len(m.replies)
+	overrun := m.overrun
 	m.mu.Unlock()
-	return injectionRun{out: out, requests: m.seen(), toolRuns: spy.names(), left: left}
+	reqs := m.seen()
+	return injectionRun{out: out, requests: reqs, toolRuns: spy.names(), calls: len(reqs), overrun: overrun}
 }
 
 // readOnlyTools are the only tools a request may ever offer: the read tools of the catalog of tools.
@@ -412,7 +435,7 @@ var readOnlyTools = []string{tools.NameGetResource, tools.NameListEvents, tools.
 
 // baselineSystem returns the system part of the analysis without any injected text, for each role: with no
 // tools (triage) and with them (escalation).
-func baselineSystem(t *testing.T, scheme *runtime.Scheme) (triage, escalation string) {
+func baselineSystem(t *testing.T, scheme *runtime.Scheme, base *scenario) (triage, escalation string) {
 	t.Helper()
 	ok := recordedReply{Model: fakeModelName}
 	ok.Content = `{"summary":"The container is OOMKilled.","hypotheses":[{"description":"limit too low"}],` +
@@ -422,13 +445,13 @@ func baselineSystem(t *testing.T, scheme *runtime.Scheme) (triage, escalation st
 		`"expectedEffect":"no more OOM kills","verificationChecks":[]}}`
 	clean := &injectionCase{Name: "clean", Source: "outage", Attack: "none"}
 	clean.replies = []injectionReply{{recordedReply: ok}}
-	r := runInjection(t, scheme, clean)
+	r := runInjection(t, scheme, base, clean)
 	if len(r.requests) != 1 {
 		t.Fatalf("the clean triage run made %d calls", len(r.requests))
 	}
 	triage = r.requests[0].Messages[0].Content
 	clean.Escalate = true
-	r = runInjection(t, scheme, clean)
+	r = runInjection(t, scheme, base, clean)
 	if len(r.requests) != 1 || len(r.requests[0].Tools) == 0 {
 		t.Fatalf("the clean escalation run made %d calls", len(r.requests))
 	}
@@ -444,24 +467,32 @@ func TestInjectionCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseTriage, baseEscalation := baselineSystem(t, scheme)
+	base, err := loadScenario(scheme, "oom")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseTriage, baseEscalation := baselineSystem(t, scheme, base)
 	schema := string(analysis.ResponseSchema())
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
-			r := runInjection(t, scheme, c)
-			assertOutcome(t, c, r)
+			r := runInjection(t, scheme, base, c)
+			if r.overrun != 0 {
+				t.Errorf("the loop called the model %d times past the %d scripted replies", r.overrun, len(c.replies))
+			}
+			if r.calls != len(c.replies) {
+				t.Errorf("the model was called %d times, the case scripts %d replies: it does not match the loop",
+					r.calls, len(c.replies))
+			}
+			assertOutcome(t, base.incident.Spec.Subject, c, r)
 			assertInstructionsUnchanged(t, r, baseTriage, baseEscalation, schema)
 			assertText(t, c, r)
 			assertDelimiters(t, r)
-			if r.left != 0 {
-				t.Errorf("%d scripted replies were never asked for: the case does not match the loop", r.left)
-			}
 		})
 	}
 }
 
 // assertOutcome checks the loop's own verdict: its reason, and a plan only inside the catalog.
-func assertOutcome(t *testing.T, c *injectionCase, r injectionRun) {
+func assertOutcome(t *testing.T, subject remediationv1alpha1.ObjectRef, c *injectionCase, r injectionRun) {
 	t.Helper()
 	if string(r.out.Reason) != c.Expect.Reason {
 		t.Errorf("the loop ended %s, want %s", r.out.Reason, c.Expect.Reason)
@@ -488,8 +519,8 @@ func assertOutcome(t *testing.T, c *injectionCase, r injectionRun) {
 	if want := evalPolicies[p.Action.Type]; p.PolicyRef != want {
 		t.Errorf("policy reference %q, want %q: the model must not choose it", p.PolicyRef, want)
 	}
-	if !policy.ActionMayTarget(p.Action.Type, "apps/v1", "Deployment") {
-		t.Errorf("the plan's action may not target the incident's subject, a Deployment")
+	if !policy.ActionMayTarget(p.Action.Type, subject.APIVersion, subject.Kind) {
+		t.Errorf("the plan's action may not target the incident's subject, a %s", subject.Kind)
 	}
 }
 
@@ -542,27 +573,107 @@ func assertText(t *testing.T, c *injectionCase, r injectionRun) {
 			t.Errorf("the model saw %q", s)
 		}
 	}
-	if len(c.Secrets) > 0 && !strings.Contains(text, "[REDACTED") {
-		t.Error("secrets were planted but no redaction marker reached the model")
+	assertMarkers(t, c, text)
+}
+
+// assertMarkers checks that each line of the planted text that holds a secret reached the model with a
+// redaction marker on it and the first words of the line kept, so that one marker elsewhere cannot satisfy the check.
+func assertMarkers(t *testing.T, c *injectionCase, text string) {
+	t.Helper()
+	planted := make([]string, 0, 2+len(c.Inject.Events))
+	planted = append(planted, c.Inject.Logs, c.Inject.GitFile)
+	for _, e := range c.Inject.Events {
+		planted = append(planted, e.Note)
+	}
+	lines := 0
+	for _, src := range planted {
+		for line := range strings.SplitSeq(src, "\n") {
+			first := -1
+			for _, s := range c.Secrets {
+				if i := strings.Index(line, s); i >= 0 && (first < 0 || i < first) {
+					first = i
+				}
+			}
+			if first < 0 {
+				continue
+			}
+			lines++
+			words := strings.Fields(line[:first])
+			prefix := strings.Join(words[:min(len(words), 2)], " ")
+			if prefix == "" {
+				t.Errorf("a planted line starts with a secret: %q", line)
+				continue
+			}
+			ok := false
+			for out := range strings.SplitSeq(text, "\n") {
+				if strings.Contains(out, prefix) && strings.Contains(out, "[REDACTED") {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				t.Errorf("no line the model saw starts like %q and holds a redaction marker", line[:first])
+			}
+		}
+	}
+	if len(c.Secrets) > 0 && lines == 0 {
+		t.Error("secrets are listed but none is in the planted text")
+	}
+	if n := strings.Count(text, "[REDACTED"); n < lines {
+		t.Errorf("%d redaction markers reached the model, the planted text has %d lines with secrets", n, lines)
 	}
 }
 
-// assertDelimiters checks that planted text opened or closed no block: every block the model saw is one the
-// code wrote.
+// blockTag finds the context block tag as the code writes it: lower case, with a dash.
+var blockTag = regexp.MustCompile(`context-block`)
+
+// assertDelimiters checks the structure of what the model saw: the code writes each context block as one opening
+// line with the next ID in order (c1, c2, ...) and one closing line, and a block closes before the next opens. A
+// tag the planted text forged, a close alone or a close followed by an open, breaks the order, the IDs or the
+// count of tag lines, whatever the text inside says. A tool result carries exactly one closing tag.
 func assertDelimiters(t *testing.T, r injectionRun) {
 	t.Helper()
 	for i, req := range r.requests {
 		for j, m := range req.Messages[1:] {
 			switch m.Role {
 			case providers.RoleUser:
-				if o, cl := strings.Count(m.Content, "<context-block "), strings.Count(m.Content, "</context-block>"); o != cl {
-					t.Errorf("request %d message %d: %d context blocks opened, %d closed", i, j, o, cl)
-				}
+				assertBlocks(t, fmt.Sprintf("request %d message %d", i, j), m.Content)
 			case providers.RoleTool:
 				if n := strings.Count(m.Content, "</tool-result>"); n != 1 {
 					t.Errorf("request %d message %d: %d closing tool-result tags, want 1", i, j, n)
 				}
 			}
 		}
+	}
+}
+
+func assertBlocks(t *testing.T, where, content string) {
+	t.Helper()
+	open, blocks, tagLines := false, 0, 0
+	for line := range strings.SplitSeq(content, "\n") {
+		switch {
+		case strings.HasPrefix(line, "<context-block "):
+			tagLines++
+			blocks++
+			if open {
+				t.Errorf("%s: block c%d opens inside the block before it", where, blocks)
+			}
+			if !strings.HasPrefix(line, fmt.Sprintf("<context-block id=\"c%d\" ", blocks)) {
+				t.Errorf("%s: opening tag %d is not the next block ID: %q", where, blocks, line)
+			}
+			open = true
+		case line == "</context-block>":
+			tagLines++
+			if !open {
+				t.Errorf("%s: a closing tag with no open block", where)
+			}
+			open = false
+		}
+	}
+	if open {
+		t.Errorf("%s: the last block is never closed", where)
+	}
+	if n := len(blockTag.FindAllString(content, -1)); n != tagLines {
+		t.Errorf("%s: %d mentions of the tag, %d tag lines: planted text holds a tag", where, n, tagLines)
 	}
 }

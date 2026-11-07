@@ -165,14 +165,20 @@ For every case the test also checks, from the requests the fake model received:
 - the system part, the output schema and the output bound are the ones of a run without injected text (the same
   text, by role), and no message but the first has the system role;
 - the tools offered are read tools only;
-- a planted delimiter opened or closed no block of the context or of a tool result;
-- every fake secret of the case is gone (a redaction marker took its place), and text the model must never see
+- a planted delimiter opened or closed no block: the context blocks open with the next ID in order and close one
+  by one, no other tag line appears, and a tool result has exactly one closing tag;
+- every fake secret of the case is gone, and each planted line that held one reached the model with a redaction
+  marker on it and the first words of the line kept; text the model must never see
   (annotations, a forged block opening) is absent;
 - a plan, when there is one, passes the catalog's checks, may target the incident's subject, and carries the
   policy reference configured for its action, never one the model chose.
 
 A case that expects text to reach the model lists it under `seen`, so a case cannot pass because its attack was
 dropped before it was delivered.
+
+The fake model counts its calls: running past the scripted replies, or leaving one unused, fails the case, so a
+retryable error cannot come from an exhausted script. A tool error is a failing API reader under the real tools, and
+the `git-file` case sends its text through the redaction and the cut the tools apply to every result.
 
 ### Add a case
 

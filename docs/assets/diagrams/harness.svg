@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 840" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">The analyzer as a harness around the model</title>
+  <desc id="d">The model sits in the middle and proposes only. Around it, the harness has four groups. Guides are what it follows: the analysis prompt and output schema, the invariants and ADRs, and the closed action catalog with bounded parameters. Context is what it sees: the context builder, which makes redacted, bounded, delimited blocks, from pod logs, Prometheus metrics and the Incident, which the collector made from Events. Tools are what it touches: read-only tools such as list_events, offered on escalation only; the analyzer's RBAC, read-only on the cluster, with writes only to its Incidents, its budget and the requests it proposes; and the analysis budget and time limit; the read_git_file tool is planned. Checks are how its work is checked: malformed output is refused, the evaluation harness and prompt injection corpus, OpenTelemetry traces, and analysis records. Below, outside the model, the output path: a RemediationRequest proposal, the policy check with the plan digest, the executor's GitOps pull request, a person merges, Flux deploys, and the verifier confirms; the verifier is planned. GitHub is outside the cluster; Flux runs in it. Nothing the model says is authorization.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .pl{fill:#1d1b2b;stroke:#5a5478;stroke-width:1.2;stroke-dasharray:5 4}
+      .pn{fill:#8a85a8;font-size:10px;font-weight:600;letter-spacing:.06em}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .id{fill:none;stroke:#7c24fc;stroke-opacity:.45;stroke-width:1}
+      .idt{fill:#a879ff;font-size:11.5px;font-weight:600;letter-spacing:.06em}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .tag{fill:#f1edff;font-size:14px;font-weight:600}
+    </style>
+  </defs>
+
+  <rect width="1120" height="840" rx="18" fill="#0e0e16"/>
+
+  <rect class="lane" x="24" y="24" width="1072" height="618" rx="14"/>
+  <text class="lanet" x="44" y="52">THE HARNESS · built by the analyzer, not by the model</text>
+
+  <rect class="id" x="44" y="70" width="330" height="270" rx="12"/>
+  <text class="idt" x="60" y="92">GUIDES · what it follows</text>
+  <rect class="box" x="60" y="106" width="298" height="50" rx="10"/>
+  <text class="h" x="74" y="128">Prompt and output schema</text>
+  <text class="s" x="74" y="146">embedded template, strict schema</text>
+  <rect class="box" x="60" y="164" width="298" height="50" rx="10"/>
+  <text class="h" x="74" y="186">Invariants and ADRs</text>
+  <text class="s" x="74" y="204">proposes only, policy decides</text>
+  <rect class="box" x="60" y="222" width="298" height="50" rx="10"/>
+  <text class="h" x="74" y="244">Action catalog</text>
+  <text class="s" x="74" y="262">closed set, bounded parameters</text>
+  <rect class="id" x="746" y="70" width="330" height="270" rx="12"/>
+  <text class="idt" x="762" y="92">CONTEXT · what it sees</text>
+  <rect class="box" x="762" y="106" width="298" height="50" rx="10"/>
+  <text class="h" x="776" y="128">Context builder</text>
+  <text class="s" x="776" y="146">redacted, bounded, delimited blocks</text>
+  <rect class="box" x="762" y="164" width="298" height="50" rx="10"/>
+  <text class="h" x="776" y="186">Pod logs and metrics</text>
+  <text class="s" x="776" y="204">approved queries, byte limits</text>
+  <rect class="box" x="762" y="222" width="298" height="50" rx="10"/>
+  <text class="h" x="776" y="244">The Incident</text>
+  <text class="s" x="776" y="262">made from Events; status and owners</text>
+  <rect class="id" x="44" y="356" width="330" height="270" rx="12"/>
+  <text class="idt" x="60" y="378">TOOLS · what it touches</text>
+  <rect class="box" x="60" y="392" width="298" height="50" rx="10"/>
+  <text class="h" x="74" y="414">Read-only tools</text>
+  <text class="s" x="74" y="432">on escalation only, results redacted</text>
+  <rect class="pl" x="60" y="450" width="298" height="50" rx="10"/>
+  <text class="pn" x="350" y="466" text-anchor="end">planned</text>
+  <text class="h" x="74" y="472">read_git_file (#373)</text>
+  <text class="s" x="74" y="490">no Git identity for the analyzer</text>
+  <rect class="box" x="60" y="508" width="298" height="50" rx="10"/>
+  <text class="h" x="74" y="530">Analyzer RBAC</text>
+  <text class="s" x="74" y="548">writes only its Incidents and proposals</text>
+  <rect class="box" x="60" y="566" width="298" height="50" rx="10"/>
+  <text class="h" x="74" y="588">Budget and time limit</text>
+  <text class="s" x="74" y="606">daily budget, step and 8 minute limits</text>
+  <rect class="id" x="746" y="356" width="330" height="270" rx="12"/>
+  <text class="idt" x="762" y="378">CHECKS · how it is checked</text>
+  <rect class="box" x="762" y="392" width="298" height="50" rx="10"/>
+  <text class="h" x="776" y="414">Malformed output refused</text>
+  <text class="s" x="776" y="432">strict schema, quotes must be verbatim</text>
+  <rect class="box" x="762" y="450" width="298" height="50" rx="10"/>
+  <text class="h" x="776" y="472">Eval harness, injection corpus</text>
+  <text class="s" x="776" y="490">test/eval; analyzer gate planned</text>
+  <rect class="box" x="762" y="508" width="298" height="50" rx="10"/>
+  <text class="h" x="776" y="530">OpenTelemetry traces (#90)</text>
+  <text class="s" x="776" y="548">a span per phase, model and tool call</text>
+  <rect class="box" x="762" y="566" width="298" height="50" rx="10"/>
+  <text class="h" x="776" y="588">Analysis records</text>
+  <text class="s" x="776" y="606">prompt version, tokens, outcome</text>
+
+  <!-- centre -->
+  <rect class="key" x="414" y="268" width="292" height="160" rx="14"/>
+  <text class="h" x="560" y="318" text-anchor="middle" style="font-size:20px">The model</text>
+  <text class="s" x="560" y="344" text-anchor="middle">triage, then escalation</text>
+  <text class="s" x="560" y="364" text-anchor="middle">reasons over what it is given</text>
+  <text class="idt" x="560" y="402" text-anchor="middle">PROPOSES ONLY</text>
+
+  <text class="tag" x="560" y="104" text-anchor="middle">The model reasons.</text>
+  <text class="s" x="560" y="130" text-anchor="middle">The harness decides what it sees,</text>
+  <text class="s" x="560" y="150" text-anchor="middle">what it can touch and how its</text>
+  <text class="s" x="560" y="170" text-anchor="middle">work is checked.</text>
+  <text class="idt" x="560" y="204" text-anchor="middle">Nothing it says is authorization.</text>
+
+  <path class="f" d="M374 250H394V310H408" marker-end="url(#a)"/>
+  <path class="f" d="M746 250H726V310H712" marker-end="url(#a)"/>
+  <path class="f" d="M374 476H394V386H408" marker-end="url(#a)" marker-start="url(#a)"/>
+  <path class="f" d="M712 386H726V476H740" marker-end="url(#a)"/>
+
+  <!-- output path -->
+  <rect class="lane" x="24" y="660" width="1072" height="156" rx="14"/>
+  <text class="lanet" x="44" y="688">OUTSIDE THE MODEL · nothing here takes its word for anything</text>
+  <path class="f" d="M560 428V651H125V704" marker-end="url(#a)"/>
+  <text class="lbl" x="572" y="540">proposes</text>
+
+  <rect class="key" x="50" y="704" width="150" height="64" rx="10"/>
+  <text class="h" x="64" y="730">Proposal</text>
+  <text class="s" x="64" y="751" style="font-size:11.5px">RemediationRequest</text>
+  <path class="f" d="M200 736H222" marker-end="url(#a)"/>
+  <rect class="box" x="224" y="704" width="150" height="64" rx="10"/>
+  <text class="h" x="238" y="730">Policy check</text>
+  <text class="s" x="238" y="751" style="font-size:11.5px">plan digest, invariant 1</text>
+  <path class="f" d="M374 736H396" marker-end="url(#a)"/>
+  <rect class="box" x="398" y="704" width="150" height="64" rx="10"/>
+  <text class="h" x="412" y="730">GitOps PR</text>
+  <text class="s" x="412" y="751" style="font-size:11.5px">executor, Git App</text>
+  <path class="f" d="M548 736H570" marker-end="url(#a)"/>
+  <rect class="ext" x="572" y="704" width="150" height="64" rx="10"/>
+  <text class="h" x="586" y="730">A person merges</text>
+  <text class="s" x="586" y="751" style="font-size:11.5px">reviews and checks</text>
+  <path class="f" d="M722 736H744" marker-end="url(#a)"/>
+  <rect class="box" x="746" y="704" width="150" height="64" rx="10"/>
+  <text class="h" x="760" y="730">Flux deploys</text>
+  <text class="s" x="760" y="751" style="font-size:11.5px">applies the merge</text>
+  <path class="f" d="M896 736H918" marker-end="url(#a)" stroke-dasharray="7 5"/>
+  <rect class="pl" x="920" y="704" width="150" height="64" rx="10"/>
+  <text class="pn" x="1062" y="720" text-anchor="end">planned</text>
+  <text class="h" x="934" y="730">Verifier</text>
+  <text class="s" x="934" y="751" style="font-size:11.5px">symptom gone?</text>
+
+  <rect class="box" x="50" y="788" width="30" height="16" rx="4"/>
+  <text class="lbl" x="90" y="801">built</text>
+  <rect class="pl" x="150" y="788" width="30" height="16" rx="4"/>
+  <text class="lbl" x="190" y="801">designed, not built</text>
+  <rect class="ext" x="340" y="788" width="30" height="16" rx="4"/>
+  <text class="lbl" x="380" y="801">GitHub, outside the cluster</text>
+</svg>

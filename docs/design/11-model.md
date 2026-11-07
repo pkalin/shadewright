@@ -2,6 +2,10 @@
 
 This section covers how the analyzer is set up against a managed model endpoint (11.1) and which model does which job (11.2). Prices, dates and other numbers that matter only when you build or compare are in the table "Details" at the end (11.3).
 
+The model is one part of the analyzer, not the part that makes it safe. Code and rules around it, a harness, decide what it is told, what it sees, what it can touch and how its work is checked, and nothing it answers is authorization: its only output is a proposal that policy code and a person check outside it, and that a verifier will check after the deploy (planned, #92). [The analyzer as a harness](harness.md) maps each part to the section that describes it.
+
+[![The analyzer as a harness around the model: guides, context, tools and checks around a model that proposes only, and the path outside it from the proposal through the policy check, the GitOps pull request, a person merging and Flux deploying to the verifier, which is planned.](../assets/diagrams/harness.svg)](../assets/diagrams/harness.svg)
+
 ## 11.1. Setup
 
 The analyzer runs locally during development and in the cluster later, always against a managed endpoint. Seven rules apply.

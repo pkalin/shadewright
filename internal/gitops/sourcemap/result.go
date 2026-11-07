@@ -126,8 +126,10 @@ const (
 	// ReasonTooManyFiles means the build is deeper or wider than the mapping reads: too many nested
 	// directories, manifests or file reads (NeedsIntervention).
 	ReasonTooManyFiles Reason = "TooManyFiles"
-	// ReasonInputTooLarge means the build holds more than the mapping parses in all: more than MaxTotalBytes
-	// read or MaxDocuments YAML documents (NeedsIntervention).
+	// ReasonInputTooLarge means the build holds more than the mapping reads in all: more than MaxTotalBytes
+	// of files or MaxDocuments YAML documents (NeedsIntervention). A file over what is left of the byte budget
+	// is refused before it is downloaded or cached, even when it is also over MaxFileBytes, so a cold and a
+	// warm cache give the same reason.
 	ReasonInputTooLarge Reason = "InputTooLarge"
 	// ReasonDeclarationNotFound means no document declares the object, for example because a generator or
 	// patch produces it (NeedsIntervention).

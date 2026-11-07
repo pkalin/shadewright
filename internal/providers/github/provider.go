@@ -182,9 +182,10 @@ func (p *Provider) lookup(ctx context.Context, op, commit, path string) (string,
 	return "", treeEntry{}, fmt.Errorf("%s: file %w", op, providers.ErrPathNotInTree)
 }
 
-// ReadFile returns a regular file at a commit. The size GitHub reports is checked before the content is
-// downloaded, at most MaxFileBytes+1 bytes are read, and the content must match its Git object ID.
-func (p *Provider) ReadFile(ctx context.Context, commit, path string) (providers.File, error) {
+// ReadFile returns a regular file at a commit. The size GitHub reports in the tree entry is checked against
+// the limit (clamped by providers.ReadLimit) before the content is downloaded, at most limit+1 bytes are read
+// (two for a limit of 0), and the content must match its Git object ID.
+func (p *Provider) ReadFile(ctx context.Context, commit, path string, limit int) (providers.File, error) {
 	if !validSHA(commit) {
 		return providers.File{}, errors.New(opReadFile + ": commit is not a full SHA")
 	}
@@ -197,14 +198,17 @@ func (p *Provider) ReadFile(ctx context.Context, commit, path string) (providers
 	if err != nil {
 		return providers.File{}, err
 	}
-	if e.Size > providers.MaxFileBytes {
+	limit = providers.ReadLimit(limit)
+	if e.Size > int64(limit) {
 		return providers.File{}, fmt.Errorf("%s: %w", opReadFile, providers.ErrTooLarge)
 	}
 	r, err := p.do(ctx, call{
 		op: opReadFile, method: http.MethodGet, path: "/git/blobs/" + e.SHA,
-		accept: "application/vnd.github.raw+json", limit: providers.MaxFileBytes,
+		// A call limit of 0 means the default JSON bound, so an empty file is read with a limit of 1 and its
+		// length checked below.
+		accept: "application/vnd.github.raw+json", limit: int64(max(limit, 1)),
 	})
-	if errors.Is(err, errBodyTooLarge) {
+	if errors.Is(err, errBodyTooLarge) || (err == nil && r.ok() && len(r.body) > limit) {
 		return providers.File{}, fmt.Errorf("%s: %w", opReadFile, providers.ErrTooLarge)
 	}
 	if err != nil {

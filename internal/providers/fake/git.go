@@ -96,8 +96,9 @@ func (g *Git) Capabilities() providers.GitCapabilities {
 	return g.caps
 }
 
-// ReadFile returns a file at a commit.
-func (g *Git) ReadFile(ctx context.Context, sha, path string) (providers.File, error) {
+// ReadFile returns a file at a commit, or ErrTooLarge when it is larger than limit (clamped by
+// providers.ReadLimit).
+func (g *Git) ReadFile(ctx context.Context, sha, path string, limit int) (providers.File, error) {
 	if err := g.before("ReadFile"); err != nil {
 		return providers.File{}, err
 	}
@@ -111,7 +112,7 @@ func (g *Git) ReadFile(ctx context.Context, sha, path string) (providers.File, e
 	if !ok {
 		return providers.File{}, fmt.Errorf("file %q at %s: %w", path, sha, providers.ErrPathNotInTree)
 	}
-	if len(data) > providers.MaxFileBytes {
+	if len(data) > providers.ReadLimit(limit) {
 		return providers.File{}, fmt.Errorf("file %q at %s: %w", path, sha, providers.ErrTooLarge)
 	}
 	return providers.File{Path: path, Commit: sha, Data: slices.Clone(data)}, nil

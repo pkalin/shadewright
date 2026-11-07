@@ -40,7 +40,7 @@ func Load(ctx context.Context, git providers.GitProvider, commit, dir string) (m
 		if reads++; reads > MaxReads {
 			return nil, false, refuse(ReasonTooLarge, fmt.Sprintf("the build needs more than %d file reads", MaxReads))
 		}
-		f, err := git.ReadFile(ctx, commit, p)
+		f, err := git.ReadFile(ctx, commit, p, providers.MaxFileBytes)
 		switch {
 		case providers.IsNotFound(err):
 			return nil, false, nil

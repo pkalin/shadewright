@@ -101,7 +101,7 @@ func (p *checkpointProbe) Capabilities() providers.GitCapabilities {
 	return providers.GitCapabilities{}
 }
 
-func (p *checkpointProbe) ReadFile(ctx context.Context, _, _ string) (providers.File, error) {
+func (p *checkpointProbe) ReadFile(ctx context.Context, _, _ string, _ int) (providers.File, error) {
 	return providers.File{}, p.probe(ctx, "ReadFile")
 }
 

@@ -778,8 +778,8 @@ type readHook struct {
 	after func()
 }
 
-func (h readHook) ReadFile(ctx context.Context, ref, path string) (providers.File, error) {
-	f, err := h.GitProvider.ReadFile(ctx, ref, path)
+func (h readHook) ReadFile(ctx context.Context, ref, path string, limit int) (providers.File, error) {
+	f, err := h.GitProvider.ReadFile(ctx, ref, path, limit)
 	h.after()
 	return f, err
 }

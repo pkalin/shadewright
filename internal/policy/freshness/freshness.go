@@ -637,7 +637,7 @@ func (c Checker) checkFile(ctx context.Context, rr *v1alpha1.RemediationRequest,
 	if head != mapped {
 		return nil, nil, errors.New("the target branch moved while its source was mapped, checking again")
 	}
-	file, err := git.ReadFile(ctx, head, string(src.Path))
+	file, err := git.ReadFile(ctx, head, string(src.Path), providers.MaxFileBytes)
 	// A failed read is returned as it is, so a delay the host asked for (Retry-After) is kept and the host is
 	// not called again at once.
 	if err != nil && !errors.Is(err, providers.ErrNotFound) {

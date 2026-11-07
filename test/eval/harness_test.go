@@ -90,7 +90,9 @@ func (r recorded) Complete(ctx context.Context, req providers.CompletionRequest)
 	u.usage.InputTokens += c.Usage.InputTokens
 	u.usage.CachedInputTokens += c.Usage.CachedInputTokens
 	u.usage.OutputTokens += c.Usage.OutputTokens
-	if c.UsageUnknown {
+	// As the loop charges it (run.attempt): a call that failed, other than with a malformed reply, or whose
+	// usage is unknown, has no usage the cost can rest on; the loop charges its upper bound.
+	if (err != nil && !providers.IsMalformedOutput(err)) || c.UsageUnknown {
 		u.usageUnknown++
 	}
 	if err == nil && c.Content != "" {

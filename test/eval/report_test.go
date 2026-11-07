@@ -34,7 +34,9 @@ import (
 
 // reportSchemaVersion is the version of the report format (docs/evaluation.md). Bump it on any change of
 // a field's meaning.
-const reportSchemaVersion = 1
+// Version 2: costUSD sums each role at its own prices (costUSDByRole), and usageUnknownCalls counts failed
+// calls too.
+const reportSchemaVersion = 2
 
 // report is the result of one evaluation run.
 type report struct {
@@ -86,7 +88,8 @@ type tokens struct {
 	// Charged is what the loop charged against its token bound (Outcome.Tokens): the reported usage, or a
 	// call's upper bound when its usage is unknown.
 	Charged int64 `json:"charged"`
-	// UsageUnknownCalls counts calls that were billed with a usage the adapter could not read.
+	// UsageUnknownCalls counts calls without a usage to rest the cost on: a usage the adapter could not read, or
+	// a call that failed (other than with a malformed reply). The loop charges each its upper bound.
 	UsageUnknownCalls int `json:"usageUnknownCalls"`
 	// ByRole splits the reported counts by the role of the call (triage, escalation); roles without a call are
 	// left out. Charged is the loop's count and has no split.
@@ -177,6 +180,9 @@ type totals struct {
 	CostUSD *float64 `json:"costUSD,omitempty"`
 	// CostUSDByRole splits CostUSD by the role of the calls (Tokens.ByRole), each at its deployment's prices.
 	CostUSDByRole map[string]float64 `json:"costUSDByRole,omitempty"`
+	// CostIncomplete says the estimate leaves out calls with unknown usage (Tokens.UsageUnknownCalls): a lower
+	// bound, not the cost.
+	CostIncomplete bool `json:"costIncomplete,omitempty"`
 }
 
 // prices are USD per million tokens of a deployment, from the run's configuration; nothing is built in.
@@ -408,6 +414,7 @@ func (r *report) summarise(p *prices) {
 			cost += c - p.cost(rt.Input, rt.CachedInput, rt.Output)
 		}
 		t.CostUSD = &cost
+		t.CostIncomplete = t.Tokens.UsageUnknownCalls > 0
 	}
 	r.Totals = t
 }
@@ -444,7 +451,12 @@ func (r *report) markdown() string {
 		b.WriteString("\n")
 	}
 	if r.Totals.CostUSD != nil {
-		fmt.Fprintf(&b, "- Estimated cost: USD %.4f\n", *r.Totals.CostUSD)
+		fmt.Fprintf(&b, "- Estimated cost: USD %.4f", *r.Totals.CostUSD)
+		if r.Totals.CostIncomplete {
+			fmt.Fprintf(&b, " (incomplete, a lower bound: %d call(s) failed or had unknown usage and are not priced; "+
+				"compare the charged tokens)", tk.UsageUnknownCalls)
+		}
+		b.WriteString("\n")
 	}
 	b.WriteString("\n| Scenario | Run | Result | Outcome | Diagnosis | Escalated | Calls | Tokens |\n")
 	b.WriteString("|---|---|---|---|---|---|---|---|\n")

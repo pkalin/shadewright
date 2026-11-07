@@ -18,7 +18,10 @@ package eval
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -230,5 +233,107 @@ func TestReportCostByRole(t *testing.T) {
 	r.summarise(p)
 	if !near(*r.Totals.CostUSD, wantTri+0.0064) {
 		t.Errorf("cost without escalation prices %v", *r.Totals.CostUSD)
+	}
+}
+
+// failingModel fails every call as a timeout would: no usage.
+type failingModel struct{}
+
+func (failingModel) Complete(context.Context, providers.CompletionRequest) (providers.Completion, error) {
+	return providers.Completion{}, &providers.RetryableError{Err: errors.New("timeout")}
+}
+
+// malformedModel returns a billed reply that is malformed: its usage is known.
+type malformedModel struct{}
+
+func (malformedModel) Complete(context.Context, providers.CompletionRequest) (providers.Completion, error) {
+	return providers.Completion{Usage: providers.Usage{InputTokens: 100, OutputTokens: 10}},
+		fmt.Errorf("bad reply: %w", providers.ErrMalformedOutput)
+}
+
+// A failed call has no usage to price: it counts as unknown usage, as the loop charges it at its bound, and
+// the cost is marked incomplete, so a candidate that errors never looks cheaper.
+func TestFailedCallsMakeTheCostIncomplete(t *testing.T) {
+	tl := &tally{}
+	_, _ = recorded{inner: failingModel{}, role: analysis.RoleEscalation, t: tl}.Complete(t.Context(),
+		providers.CompletionRequest{})
+	_, _ = recorded{inner: malformedModel{}, role: analysis.RoleEscalation, t: tl}.Complete(t.Context(),
+		providers.CompletionRequest{})
+	u := tl.usage[analysis.RoleEscalation]
+	if u == nil || u.usageUnknown != 1 || u.usage.InputTokens != 100 {
+		t.Fatalf("usage %+v", u)
+	}
+	var tk tokens
+	tk.addRole(string(analysis.RoleEscalation), roleTokens{UsageUnknownCalls: u.usageUnknown})
+	r := &report{Manifest: manifest{MinPassRate: 1, Repeats: 1}, Scenarios: []scenarioResult{{Name: "a", Tokens: tk}}}
+	r.summarise(&prices{Input: 1, CachedInput: 1, Output: 1})
+	if !r.Totals.CostIncomplete || !strings.Contains(r.markdown(), "incomplete, a lower bound: 1 call(s)") {
+		t.Errorf("totals %+v:\n%s", r.Totals, r.markdown())
+	}
+	r.Scenarios[0].Tokens = tokens{Input: 10}
+	r.summarise(&prices{Input: 1, CachedInput: 1, Output: 1})
+	if r.Totals.CostIncomplete || strings.Contains(r.markdown(), "incomplete") {
+		t.Errorf("a complete run is marked incomplete: %+v", r.Totals)
+	}
+}
+
+func TestEnvPrices(t *testing.T) {
+	tri := []string{envPriceIn, envPriceHit, envPriceOut}
+	esc := []string{envEscPrices + "INPUT_PER_MTOK", envEscPrices + "CACHED_INPUT_PER_MTOK",
+		envEscPrices + "OUTPUT_PER_MTOK"}
+	set := func(names []string, v string) {
+		for _, n := range names {
+			t.Setenv(n, v)
+		}
+	}
+	cases := []struct {
+		name            string
+		tri, esc        string
+		configured, err bool
+		want            *prices
+	}{
+		{name: "none", configured: true},
+		{name: "triage only", tri: "1", want: &prices{Input: 1, CachedInput: 1, Output: 1}},
+		{name: "both", tri: "1", esc: "2", configured: true, want: &prices{Input: 1, CachedInput: 1, Output: 1,
+			Escalation: &prices{Input: 2, CachedInput: 2, Output: 2}}},
+		{name: "escalation without deployment", tri: "1", esc: "2", err: true},
+		{name: "escalation without triage", esc: "2", configured: true, err: true},
+		{name: "escalation not a number", tri: "1", esc: "x", configured: true, err: true},
+	}
+	for _, c := range cases {
+		set(tri, c.tri)
+		set(esc, c.esc)
+		got, err := envPrices(c.configured)
+		if (err != nil) != c.err || !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: %+v, %v", c.name, got, err)
+		}
+	}
+	set(esc, "")
+	t.Setenv(esc[0], "2")
+	if _, err := envPrices(true); err == nil {
+		t.Error("a partial set of escalation prices was accepted")
+	}
+}
+
+// A wrong EVAL_FORCE_ESCALATION fails before the identity is built.
+func TestForceEscalationCheckedBeforeIdentity(t *testing.T) {
+	for _, n := range []string{"AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE", envEscDep} {
+		t.Setenv(n, "")
+	}
+	t.Setenv(envForceEsc, "1")
+	if _, err := newFoundrySource(); err == nil || !strings.Contains(err.Error(), envForceEsc) {
+		t.Errorf("error %v", err)
+	}
+}
+
+// The replay refuses EVAL_FORCE_ESCALATION instead of ignoring it.
+func TestReplayRefusesForcedEscalation(t *testing.T) {
+	t.Setenv(envForceEsc, "")
+	if err := replayEnvError(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envForceEsc, "1")
+	if err := replayEnvError(); err == nil {
+		t.Error("the replay accepted a forced escalation")
 	}
 }

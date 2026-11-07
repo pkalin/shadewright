@@ -105,7 +105,7 @@ A change to a prompt, model or schema must pass the scenario evaluation before m
 
 ### Choosing concrete models
 
-Concrete models are chosen by benchmark on the scenario set. Measure diagnosis accuracy, plan usefulness, false fixes, latency and cost per resolved incident.
+Concrete models are chosen by benchmark on the scenario set. Measure diagnosis accuracy, plan usefulness, false fixes, latency and cost per resolved incident. The defaults from the first benchmark are in [ADR-0027](../adr/0027-default-models-for-triage-and-escalation.md): triage `gpt-5.4-mini`, escalation `gpt-5.4` provisional.
 
 ## 11.3. Details
 

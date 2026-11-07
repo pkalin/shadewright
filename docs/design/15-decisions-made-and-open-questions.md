@@ -13,7 +13,7 @@ Decided on 2026-11-01:
 | Lab metrics | Prometheus in the lab cluster, Grafana later if needed ([ADR-0017](../adr/0017-prometheus-in-the-lab.md)) |
 | Kill switch | A field in a cluster-scoped config object, checked before every write |
 | Evaluation | Recorded contexts per scenario with the expected diagnosis or refusal; CI runs them against a fake model, the real model on demand |
-| Agent observability | controller-runtime Prometheus metrics and Shadewright's own `shadewright_*` metrics on the same endpoint ([reference](../reference/metrics.md)), plus OpenTelemetry traces per analysis (tool calls, tokens, latency; planned) |
+| Agent observability | controller-runtime Prometheus metrics and Shadewright's own `shadewright_*` metrics on the same endpoint ([reference](../reference/metrics.md)), plus OpenTelemetry traces per analysis (phases, model calls with tokens, tool calls, latency; off by default, OTLP gRPC, IDs, counts and fixed labels only: [reference](../reference/traces.md)) |
 | Packaging | Scaffolded once with Kubebuilder's Helm plugin, then maintained by hand and guarded by `test/chart`. Details in the list "Packaging, in detail" below the table |
 | Pluggability | Three axes: platform services, cluster platforms, cluster integrations ([ADR-0018](../adr/0018-three-axes-of-pluggability.md)); security integrations diagnose only; a module contributes hooks only when enabled and detected (2026-11-03) |
 | Extension packaging | Compiled in now, registered at start-up from an explicit list; signed declarative OCI packs later ([ADR-0019](../adr/0019-extension-packaging.md)) |

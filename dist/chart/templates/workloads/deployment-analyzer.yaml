@@ -111,6 +111,15 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
+        {{- with ($c.tracing | default dict).endpoint }}
+        # The analysis traces (#90): OTLP over gRPC, off without an endpoint.
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+          value: {{ . | quote }}
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: {{ printf "service.version=%s" $.Chart.AppVersion | quote }}
+        {{- end }}
         ports:
         - containerPort: 8081
           name: health

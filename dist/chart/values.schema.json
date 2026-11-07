@@ -211,6 +211,17 @@
             }
           }
         },
+        "tracing": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": {
+              "type": "string",
+              "maxLength": 2048,
+              "pattern": "^(https?://[^\\s\"@?#/]+/?)?$"
+            }
+          }
+        },
         "analysis": {
           "type": "object",
           "additionalProperties": false,
@@ -659,6 +670,35 @@
           "additionalProperties": false,
           "properties": {
             "prometheus": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "namespace": {
+                  "type": "string",
+                  "maxLength": 63,
+                  "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"
+                },
+                "podLabels": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "maxProperties": 8,
+                  "additionalProperties": {
+                    "type": "string",
+                    "maxLength": 63,
+                    "pattern": "^([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$"
+                  }
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                }
+              }
+            },
+            "traceCollector": {
               "type": "object",
               "additionalProperties": false,
               "properties": {

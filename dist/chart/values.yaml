@@ -91,6 +91,20 @@ networkPolicy:
       # -- TCP port of the Prometheus HTTP API on the Pod (the container port, not the Service port), 1 to 65535.
       # @section -- Network policy
       port: 9090
+    traceCollector:
+      # -- Let the analyzer, and only the analyzer, send TCP to the OpenTelemetry collector of its traces (`analyzer.tracing.endpoint`). Off by default: with no endpoint the analyzer sends no trace. Set it together with the endpoint, and allow the analyzer in the ingress policy of the collector too, if it has one.
+      # @section -- Network policy
+      enabled: false
+      # -- Namespace of the collector (matched by `kubernetes.io/metadata.name`). Required when `enabled`.
+      # @section -- Network policy
+      namespace: ""
+      # -- Labels of the collector Pods in that namespace. The default matches the opentelemetry-collector chart.
+      # @section -- Network policy
+      podLabels:
+        app.kubernetes.io/name: opentelemetry-collector
+      # -- TCP port of the collector's OTLP gRPC receiver on the Pod, 1 to 65535.
+      # @section -- Network policy
+      port: 4317
 crd:
   # -- Install the CRDs as templates (Helm does not upgrade or delete CRDs from a `crds/` directory). Set `false` only if you install them another way.
   # @section -- CRDs
@@ -213,6 +227,10 @@ analyzer:
     # -- The `cluster` label value of this cluster's series (`--prometheus-cluster`), for a Prometheus shared by several clusters. Empty passes no flag. Used only with `analyzer.prometheus.url`.
     # @section -- Analyzer
     cluster: ""
+  tracing:
+    # -- OTLP gRPC endpoint of an OpenTelemetry collector for the analysis traces (one trace per analysis: phases, model calls with tokens, tool calls; IDs, counts and fixed labels only, never prompt, log or model text), such as `http://otel-collector.observability.svc:4317` (`http` sends plaintext gRPC, `https` TLS). Sets `OTEL_TRACES_EXPORTER=otlp` and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. Empty (the default): no traces and no exporter. Open the NetworkPolicy egress to the collector too (`networkPolicy.analyzer.traceCollector`).
+    # @section -- Analyzer
+    endpoint: ""
   analysis:
     # -- Model ID and version the triage deployment of `RemediationSettings` serves, as its replies name it, such as `gpt-4.1-mini-2025-04-14` (`--triage-model`). A reply naming another model is refused (ADR-0023). Empty (the default) passes no analysis flag: the analysis is off, no model is called and no Azure token is requested. Set, it needs `analyzer.identity.azure.clientId` and `analyzer.analysis.endpointSuffixes` (the chart refuses to render without them). Until the evaluation gate (#78) exists, turn it on only for an evaluation run in the lab.
     # @section -- Analyzer

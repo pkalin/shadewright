@@ -22,6 +22,7 @@ import (
 	"flag"
 	"os"
 
+	"go.opentelemetry.io/otel/trace"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	corev1 "k8s.io/api/core/v1"
@@ -243,8 +244,21 @@ func main() {
 	setupLog.Info("Context sources", "podLogs", sources.Logs != nil, "metrics", sources.Metrics != nil,
 		"prometheusCluster", prometheusCluster != "")
 
+	// The analysis traces (#90): off unless the OTEL_* environment turns them on.
+	tracerProvider, err := newTracerProvider(ctrl.Log.WithName("tracing"))
+	if err != nil {
+		setupLog.Error(err, "Invalid tracing configuration")
+		os.Exit(1)
+	}
+	setupLog.Info("Analysis tracing", "enabled", tracerProvider != nil)
+	// A nil *TracerProvider in the interface would not be a nil interface: pass none when tracing is off.
+	var tp trace.TracerProvider
+	if tracerProvider != nil {
+		tp = tracerProvider
+	}
+
 	af.namespace, af.watched, af.claimTimeout = namespace, watched, inc.AnalysisTimeout()
-	if err := setupAnalysis(mgr, af, contextBuilder, sources, redactor); err != nil {
+	if err := setupAnalysis(mgr, af, contextBuilder, sources, redactor, tp); err != nil {
 		setupLog.Error(err, "Failed to set up the analysis")
 		os.Exit(1)
 	}
@@ -259,7 +273,11 @@ func main() {
 	}
 
 	setupLog.Info("Starting analyzer")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	err = mgr.Start(ctrl.SetupSignalHandler())
+	// The manager has stopped every analysis: flush the spans still queued, bounded. An exit before the start
+	// has made no span.
+	shutdownTracing(tracerProvider, ctrl.Log.WithName("tracing"))
+	if err != nil {
 		setupLog.Error(err, "Failed to run analyzer")
 		os.Exit(1)
 	}

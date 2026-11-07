@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"go.opentelemetry.io/otel/trace"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -91,6 +92,8 @@ type analysisDeps struct {
 	sources          analyzer.Sources
 	redactor         *redact.Redactor
 	log              logr.Logger
+	// tracerProvider makes the analysis spans; nil means no tracing.
+	tracerProvider trace.TracerProvider
 	// newStore builds the analysis record store; nil means the Blob Storage adapter with the workload identity.
 	newStore func(cfg azureblob.Config) (providers.AnalysisStore, error)
 }
@@ -158,7 +161,7 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	}
 	a, err := analysis.New(analysis.Config{
 		Builder: d.builder, Tools: set, Models: factory, Policies: policies, ExpectedModels: expected,
-		Redactor: d.redactor,
+		Redactor: d.redactor, TracerProvider: d.tracerProvider,
 		Reserve: func(ctx context.Context, now time.Time) error {
 			return incidents.ReserveAnalysis(ctx, d.apiReader, d.client, f.namespace, now)
 		},
@@ -191,10 +194,10 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 // setupAnalysis builds the analysis controller and registers it with the manager, or logs that the analysis
 // is off.
 func setupAnalysis(mgr ctrl.Manager, f analysisFlags, builder analysis.ContextBuilder, sources analyzer.Sources,
-	redactor *redact.Redactor) error {
+	redactor *redact.Redactor, tp trace.TracerProvider) error {
 	c, err := buildAnalysis(f, analysisDeps{
 		cache: mgr.GetCache(), apiReader: mgr.GetAPIReader(), client: mgr.GetClient(), builder: builder,
-		sources: sources, redactor: redactor, log: ctrl.Log.WithName("analysis"),
+		sources: sources, redactor: redactor, log: ctrl.Log.WithName("analysis"), tracerProvider: tp,
 	}, func() (foundry.TokenSource, error) { return foundry.NewWorkloadIdentity() })
 	if err != nil {
 		return err

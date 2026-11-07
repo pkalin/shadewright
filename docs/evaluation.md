@@ -90,6 +90,18 @@ Before the first run, the maintainer sets up:
 | `EVAL_API_VERSION` | no | Inference API version, `v1` by default |
 | `EVAL_PRICE_INPUT_PER_MTOK`, `EVAL_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_PRICE_OUTPUT_PER_MTOK` | no | USD per million tokens of the deployment, for the cost estimate: all three or none. Nothing is built in; take them from the Azure price list for the region |
 
+3. **Network reach to the Foundry endpoint.** A GitHub-hosted runner calls the endpoint from GitHub's shared
+   address ranges. If the Foundry resource accepts only selected networks, as the reference lab's does (its AKS
+   subnet and the maintainer's addresses, `shadewright-azure`), the run is refused. Opening the resource to
+   GitHub's published ranges would admit every GitHub-hosted job, so the options are a self-hosted runner inside
+   an allowed network, or running `make eval-model` from inside the lab instead: a Pod or a shell with a token
+   of a service account federated to the same identity (`shadewright-azure` creates one for
+   `shadewright-eval/eval`), with `AZURE_FEDERATED_TOKEN_FILE` pointing at that token. The reference lab uses
+   the second until a runner exists.
+
+The identity of step 1 is in `shadewright-azure` (`foundation/evaluation.tf`): a user-assigned identity with the
+federated credential for the `evaluation` environment and the inference role on the Foundry resource.
+
 A run of the eight scenarios is eight analyses per repeat, each bounded by the loop's limits (at most 7 model
 calls with 4 tool steps, 2048 output tokens per call, 500,000 tokens per analysis). The report is rewritten after every run, and `make eval-model` stops after 50 minutes (the `go test`
 timeout), before the job's own 60, so a long run that is cut off still leaves its report. The workflow cannot be tested on a fork or

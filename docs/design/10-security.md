@@ -293,6 +293,7 @@ flowchart TB
     logs -- get --> an
     set -- read --> an
     nodes -- list --> an
+    pol -- "get, named only" --> an
     an -- update status --> set
     an -- get, update --> budget
     an -. inference .-> fm

@@ -274,7 +274,8 @@ Expect:
   opening sentence and in the evidence. The executor shows the name only after reading that Incident back, so a
   redacted name means the read failed (the executor's log says so) or the request names no such Incident. The
   body also holds the change, scope, evidence (the request, its UID, the incident, the policy revision
-  `<policy name>/<generation>`, the plan digest), expected effect, risk, rollback and `Approval required: yes`,
+  `<policy name>/<generation>`, the plan digest), the size of the step (`an increase of 34% of the previous value`
+  from 48Mi to 64Mi, within policy `demo-memory`; ADR-0026), expected effect, risk, rollback and `Approval required: yes`,
   and a last line `<!-- shadewright request-uid=... plan-digest=sha256:... -->` whose UID and digest match
   `.metadata.uid` and `.status.planDigest` of the request.
 - The required checks run on the pull request, and it is not merged: a person reviews it. Do not merge it before
@@ -440,6 +441,13 @@ Since shadewright-fleet [#37](https://github.com/pkalin/shadewright-fleet/pull/3
    and its reason. `UnexpectedModel` means the reply named another model than `triageModel`: the `Refused` log line
    names both. `EndpointNotAllowed`, `ModelForbidden` or `ModelNotFound` point at the endpoint, the role assignment or
    the deployment name.
+
+   The model is shown the bounds of `demo-memory` for the subject (the policy bounds block, design 3.3, #493): from
+   the template's 48Mi, `desired from 64Mi to 72Mi`. A proposal the executor then Denies on its bounds
+   (`IncreaseTooLarge`, `AboveMaximum`) despite that is a finding for #78. The analyzer's startup line `Context sources`
+   says `policyBounds=true` when it reads the policies; with the chart from this release on, it holds `get` on
+   `demo-memory` only (`kubectl auth can-i get remediationpolicies/demo-memory --as
+   system:serviceaccount:shadewright-system:shadewright-analyzer` says `yes`).
 
 3. Record the outcome for the field log: the reason, the call and token counts, the models, the prompt version, the
    summary and, for a `MissingData` hand-off, the `missingData` list from the `Analyzed Incident` line, and the

@@ -44,7 +44,7 @@ func TestBuildSectionsInOrder(t *testing.T) {
 	for _, blk := range c.Blocks {
 		got = append(got, blk.Section)
 	}
-	want := []Section{SectionSummary, SectionStatus, SectionLogs, SectionMetrics, SectionGit}
+	want := []Section{SectionSummary, SectionStatus, SectionLogs, SectionMetrics, SectionGit, SectionPolicy}
 	if strings.Join(sectionNames(got), ",") != strings.Join(sectionNames(want), ",") {
 		t.Fatalf("sections %v, want %v", got, want)
 	}

@@ -1110,6 +1110,30 @@ func change(rr *remediationv1alpha1.RemediationRequest) (what, previous, desired
 	return string(a.Type), "", ""
 }
 
+// stepSize says how large the planned step is relative to the previous value, from the request's validated
+// numbers only: "an increase of 33% of the previous value". It returns "" when there is no previous value to
+// compare with.
+func stepSize(rr *remediationv1alpha1.RemediationRequest) string {
+	var prev, desired int64
+	a := rr.Spec.Action
+	switch {
+	case a.SetContainerMemoryLimit != nil:
+		p, d := a.SetContainerMemoryLimit.Previous.DeepCopy(), a.SetContainerMemoryLimit.Desired.DeepCopy()
+		prev, desired = p.Value(), d.Value()
+	case a.AdjustKedaMaxReplicas != nil:
+		prev, desired = int64(a.AdjustKedaMaxReplicas.PreviousValue), int64(a.AdjustKedaMaxReplicas.DesiredValue)
+	}
+	if prev <= 0 || desired == prev {
+		return ""
+	}
+	kind, delta := "an increase", desired-prev
+	if delta < 0 {
+		kind, delta = "a decrease", -delta
+	}
+	// Rounded up, so a step is never shown smaller than it is.
+	return fmt.Sprintf("%s of %d%% of the previous value", kind, (delta*100+prev-1)/prev)
+}
+
 // commitTitle is the commit message and pull request title. It follows Conventional Commits, as the GitOps
 // repository's title check requires: lower case, no full stop. Every part is a validated name or value.
 func commitTitle(rr *remediationv1alpha1.RemediationRequest) string {
@@ -1140,6 +1164,12 @@ func pullRequestBody(rr *remediationv1alpha1.RemediationRequest, incident string
 	fmt.Fprintf(&b, "**Evidence:** RemediationRequest `%s/%s` (UID `%s`), incident `%s`, policy `%s` "+
 		"(decision `WithinApprovedBounds`), plan digest `%s`.\n\n",
 		rr.Namespace, rr.Name, rr.UID, rr.Spec.IncidentRef.Name, rr.Status.PolicyRevision, rr.Status.PlanDigest)
+	if size := stepSize(rr); size != "" {
+		fmt.Fprintf(&b, "**Size:** %s, within policy `%s`. The policy bounds the step; it does not say the step is "+
+			"the right size. The diagnosis, with the model's unverified reason for the size, is in the analysis record "+
+			"and the analyzer's log for this request's name, not in this pull request (ADR-0026): check it before "+
+			"approving.\n\n", size, rr.Spec.PolicyRef)
+	}
 	fmt.Fprintf(&b, "**Expected effect:** once merged and delivered, %s is `%s`.\n\n", what, desired)
 	b.WriteString("**Risk:** the change is bounded by the policy's limits and touches one field. " +
 		"Any other push to this branch stops the automation.\n\n")

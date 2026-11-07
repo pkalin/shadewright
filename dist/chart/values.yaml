@@ -254,7 +254,7 @@ analyzer:
     # -- Host suffixes a model endpoint in `RemediationSettings` must end with or, without the leading dot, equal (`--model-endpoint-suffixes`), each a dot and two or more lower-case DNS labels, at most 16. Required with `triageModel`: there is no default, so no Azure AI host is allowed unless listed. Any resource under an allowed suffix receives the context and a token, so list your own resource, such as `.<resource>.services.ai.azure.com`, which allows that host only.
     # @section -- Analyzer
     endpointSuffixes: []
-    # -- The RemediationPolicy a proposed RemediationRequest of each action type refers to (`--action-policies`), a map from `AdjustKedaMaxReplicas` or `SetContainerMemoryLimit` to a policy name, such as `{SetContainerMemoryLimit: memory-limits}`. An action type without one is never proposed. Used only with `triageModel`.
+    # -- The RemediationPolicy a proposed RemediationRequest of each action type refers to (`--action-policies`), a map from `AdjustKedaMaxReplicas` or `SetContainerMemoryLimit` to a policy name, such as `{SetContainerMemoryLimit: memory-limits}`. An action type without one is never proposed. Used only with `triageModel`. With at least one name, the chart grants the analyzer `get` on exactly these RemediationPolicies (ClusterRole and ClusterRoleBinding `analyzer-policy-reader`, `resourceNames` set to the names, no `list` or `watch`), so the context shows the model the bounds of the policy that will decide its proposal; the policy still decides. Without a name there is no such rule.
     # @section -- Analyzer
     actionPolicies: {}
     recordStore:

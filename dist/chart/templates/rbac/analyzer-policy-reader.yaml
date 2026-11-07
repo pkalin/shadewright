@@ -1,0 +1,52 @@
+{{- /*
+The analyzer's read of the RemediationPolicies its requests name (#493): get only, restricted by resourceNames
+to the policy names of analyzer.analysis.actionPolicies (the --action-policies flag), so the context builder can
+show the model the bounds of the policy that will decide a proposal. Rendered only when that flag is: with a
+triage model and at least one policy name. With no name there is no rule at all, never an unrestricted one.
+Keep the rule equal to config/rbac/analyzer/policies plus the resourceNames patch of config/analysis-policies
+(test/chart checks it).
+*/ -}}
+{{- $c := .Values.analyzer }}
+{{- $names := list }}
+{{- if $c.analysis.triageModel }}
+{{- range $type, $policy := ($c.analysis.actionPolicies | default dict) }}
+{{- if $policy }}
+{{- $names = append $names $policy }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $names = $names | uniq | sortAlpha }}
+{{- if $names }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer-policy-reader" "context" $) }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "" "context" $) | nindent 4 }}
+rules:
+- apiGroups:
+  - remediation.shadewright.io
+  resourceNames:
+  {{- range $n := $names }}
+  - {{ $n | quote }}
+  {{- end }}
+  resources:
+  - remediationpolicies
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer-policy-reader" "context" $) }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "analyzer" "context" $) | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer-policy-reader" "context" $) }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -33,6 +33,7 @@ import (
 const (
 	requestNamespace = "shadewright-system"
 	teamLabel        = "team"
+	bogusOperator    = "Bogus"
 	team             = "orders"
 	otherName        = "other"
 	otherNamespace   = "billing"
@@ -378,7 +379,7 @@ func decideCases() []decideCase {
 		{name: "invalid objectSelector", base: kedaInput,
 			mutate: func(in *policy.DecisionInput) {
 				in.Policy.Spec.Targets.ObjectSelector = &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
-					{Key: teamLabel, Operator: "Bogus"},
+					{Key: teamLabel, Operator: bogusOperator},
 				}}
 			},
 			outcome: denied, reason: policy.ReasonPolicyInvalid},

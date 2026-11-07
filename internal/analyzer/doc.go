@@ -32,7 +32,9 @@ limitations under the License.
 //   - Cluster-wide (a ClusterRole with a ClusterRoleBinding): read the cluster-scoped RemediationSettings and
 //     update its status subresource (no resourceNames: the object is cluster-scoped and the schema pins its
 //     name to default; the status is a report that nothing reads back to decide), list Nodes for platform
-//     detection (no get or watch, so no informer on them), and nothing namespaced.
+//     detection (no get or watch, so no informer on them), and nothing namespaced. With the analysis on, a
+//     second ClusterRole (package policyrbac, analyzer-policy-reader) adds get, by resourceNames and with no list
+//     or watch, on the RemediationPolicies --action-policies names, for the context's policy bounds (#493).
 //   - In each watched namespace: the reads in package collector and get on pods/log for the pod logs source
 //     ([NewSources]), a ClusterRole bound by one RoleBinding per namespace in --watch-namespaces, never
 //     cluster-wide.

@@ -19,7 +19,7 @@ limitations under the License.
 // first call. It is named incidentcontext, not context, so that it never shadows the standard library's
 // context package, which it and every caller import.
 //
-// The context has five sections, in this order, each with its own byte bound ([Limits]):
+// The context has six sections, in this order, each with its own byte bound ([Limits]):
 //
 //   - summary: the Incident itself (subject, reason, symptom, counts and times);
 //   - object status and owners: the target workload's status and conditions, the memory limits of its pod
@@ -28,7 +28,17 @@ limitations under the License.
 //   - log excerpt: at most two excerpts from a [providers.LogSource], of the containers that look most
 //     relevant (a terminated previous instance first, then a waiting or unready container);
 //   - metrics: the approved metric templates for the target's pods from a [providers.MetricsSource];
-//   - Git: always "not available" for now: the analyzer has no Git identity (invariant 6, #373).
+//   - Git: always "not available" for now: the analyzer has no Git identity (invariant 6, #373);
+//   - policy bounds (#493): for each catalog action that can change the subject, the bounds of the
+//     RemediationPolicy configured for it (Config.Policies), read by name and checked against the subject by
+//     the policy package's own checks ([policy.BoundsFor]), so what the model is shown is what the executor's
+//     policy step reads; or why any proposal would be Denied. It is operator configuration, not cluster
+//     evidence: written from typed fields only (names, quantities, numbers), with no quotable values. Bounds
+//     are shown only for a subject the builder resolved (or of a kind it does not read, said in the block).
+//     A failed read (not NotFound) is logged, labelled and a failed source (an escalation signal); a missing
+//     policy or settings object is said as the Denied it leads to. For a memory limit it also gives, per
+//     container of the pod template, the desired values the policy allows from its current limit
+//     ([policy.AllowedMemory]), or that the container has no limit. The policy still decides (invariant 1).
 //
 // Each section is one or more [Block]s, tagged with a [Provenance] for the delimited blocks of ADR-0023
 // decision 3. The text of a block is cluster data, untrusted (invariant 4): the caller puts it inside a

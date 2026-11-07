@@ -19,18 +19,20 @@ limitations under the License.
 // Incident and the cluster objects the context builder and the read tools read, for some the series their
 // Prometheus holds (metrics.yaml, replayed through the MetricsSource interface), the scenario's
 // expected.yaml as vendored from a named fleet commit, a rubric that says how each expected fact is scored,
-// and the model replies recorded for it.
+// the RemediationPolicies of its cluster (policy.yaml, #493) and the model replies recorded for it.
 //
 // A run builds each scenario's context with the real context builder (package incidentcontext) over a fake
 // client that holds the recorded objects, and runs the real analysis loop (package analysis) with the real
 // read tools. In CI the model is a fake that replays the recorded replies; on demand (the Evaluation workflow)
 // it is the Foundry deployment the run names. Each scenario is scored against its expected.yaml: the outcome
 // (a refusal is no plan and a reason that the result itself gave, NoProposal or MissingData; a pull request
-// is a plan of the expected action type with a desired value inside the expected bounds) and the diagnosis
+// is a plan of the expected action type with a desired value inside the expected bounds, which the scenario's
+// policy does not refuse by the checks of policy.Preflight) and the diagnosis
 // (each scored fact's terms in the result's summary, hypotheses and evidence quotes).
 //
 // The harness only reads the outcome the loop returned and the reply the loop accepted: nothing it computes
-// authorizes anything (invariant 1), and it runs no executor, no policy decision and no Git write.
+// authorizes anything (invariant 1), and it runs no executor and no Git write. It runs the policy's
+// preflight checks only to score a plan, never to let one through.
 //
 // The report (JSON and Markdown) and its evaluation manifest are documented in docs/evaluation.md.
 package eval

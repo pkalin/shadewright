@@ -341,7 +341,7 @@ func TestManifestDigestCoversRunLimitsAndScenarioFiles(t *testing.T) {
 			t.Errorf("%s: digest unchanged (%v)", name, err)
 		}
 	}
-	for _, file := range []string{"incident.yaml", "objects.yaml", "replies.yaml"} {
+	for _, file := range []string{"incident.yaml", "objects.yaml", metricsFile, "replies.yaml"} {
 		dir := t.TempDir()
 		if err := os.CopyFS(dir, os.DirFS(scenariosDir)); err != nil {
 			t.Fatal(err)

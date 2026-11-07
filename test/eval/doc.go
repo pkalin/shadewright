@@ -16,7 +16,8 @@ limitations under the License.
 
 // Package eval is the evaluation harness of the analysis loop (design 11.1 point 7, ADR-0025 decision 3,
 // #78). Every lab scenario of the fleet repository has a recorded context under testdata/scenarios: the
-// Incident and the cluster objects the context builder and the read tools read, the scenario's
+// Incident and the cluster objects the context builder and the read tools read, for some the series their
+// Prometheus holds (metrics.yaml, replayed through the MetricsSource interface), the scenario's
 // expected.yaml as vendored from a named fleet commit, a rubric that says how each expected fact is scored,
 // and the model replies recorded for it.
 //

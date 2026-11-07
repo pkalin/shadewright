@@ -25,7 +25,7 @@ import (
 // fingerprint is a different incident.
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable; a different symptom is a new Incident"
 // +kubebuilder:validation:XValidation:rule="has(self.occurrenceNumber) == has(self.previousIncident)",message="occurrenceNumber and previousIncident are set together"
-// +kubebuilder:validation:XValidation:rule="!has(self.previousIncident) || self.previousIncident.startsWith('incident-' + self.fingerprint.substring(7))",message="previousIncident must be an Incident of the same fingerprint"
+// +kubebuilder:validation:XValidation:rule="!has(self.occurrenceNumber) || (self.occurrenceNumber == 2 ? self.previousIncident == 'incident-' + self.fingerprint.substring(7) : (self.previousIncident.startsWith('incident-' + self.fingerprint.substring(7) + '-') && self.previousIncident.size() > 74 && int(self.previousIncident.substring(74)) == self.occurrenceNumber - 1))",message="previousIncident must be the occurrence before this one of the same fingerprint"
 type IncidentSpec struct {
 	// fingerprint is the hash of cluster, namespace, owner, reason, action, type, reporting controller and
 	// normalized symptom.
@@ -136,6 +136,7 @@ type OccurrenceRecord struct {
 }
 
 // IncidentStatus holds the deduplication state that must survive restarts (ADR-0007). No logs or transcripts.
+// +kubebuilder:validation:XValidation:rule="!(has(oldSelf.phase) && oldSelf.phase == 'Resolved' && has(oldSelf.resolvedTime) && has(self.phase) && self.phase == 'Resolved') || (has(self.resolvedTime) && self.resolvedTime == oldSelf.resolvedTime)",message="resolvedTime cannot change while the phase stays Resolved"
 type IncidentStatus struct {
 	// phase summarizes the incident.
 	// +optional
@@ -172,7 +173,7 @@ type IncidentStatus struct {
 	OccurrencesDroppedThrough *metav1.Time `json:"occurrencesDroppedThrough,omitempty"`
 
 	// resolvedTime is when the Incident moved to phase Resolved, written in the same status update (design
-	// 3.2). A symptom seen again within 24 hours of it, or with it missing, moves the Incident to Escalated
+	// 3.2). It cannot change while the phase stays Resolved. A symptom seen again within 24 hours of it, or with it missing, moves the Incident to Escalated
 	// without an analysis; seen again later, it opens the next occurrence of the fingerprint as a new Incident.
 	// +optional
 	ResolvedTime *metav1.Time `json:"resolvedTime,omitempty"`

@@ -28,8 +28,8 @@ Incident groups repeated symptoms of one problem on one workload.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
-| `spec` | [IncidentSpec](#incidentspec) | Yes | spec identifies the incident.<br>Rule: spec is immutable; a different symptom is a new Incident<br>Rule: occurrenceNumber and previousIncident are set together<br>Rule: previousIncident must be an Incident of the same fingerprint |
-| `status` | [IncidentStatus](#incidentstatus) | No | status is the deduplication state. |
+| `spec` | [IncidentSpec](#incidentspec) | Yes | spec identifies the incident.<br>Rule: spec is immutable; a different symptom is a new Incident<br>Rule: occurrenceNumber and previousIncident are set together<br>Rule: previousIncident must be the occurrence before this one of the same fingerprint |
+| `status` | [IncidentStatus](#incidentstatus) | No | status is the deduplication state.<br>Rule: resolvedTime cannot change while the phase stays Resolved |
 
 ## RemediationPolicy
 
@@ -350,7 +350,7 @@ Validation rules:
 
 - spec is immutable; a different symptom is a new Incident: `self == oldSelf`
 - occurrenceNumber and previousIncident are set together: `has(self.occurrenceNumber) == has(self.previousIncident)`
-- previousIncident must be an Incident of the same fingerprint: `!has(self.previousIncident) || self.previousIncident.startsWith('incident-' + self.fingerprint.substring(7))`
+- previousIncident must be the occurrence before this one of the same fingerprint: `!has(self.occurrenceNumber) || (self.occurrenceNumber == 2 ? self.previousIncident == 'incident-' + self.fingerprint.substring(7) : (self.previousIncident.startsWith('incident-' + self.fingerprint.substring(7) + '-') && self.previousIncident.size() > 74 && int(self.previousIncident.substring(74)) == self.occurrenceNumber - 1))`
 
 Used by: [Incident](#incident).
 
@@ -370,6 +370,10 @@ Used by: [Incident](#incident).
 IncidentStatus holds the deduplication state that must survive restarts (ADR-0007). No logs or transcripts.
 
 
+Validation rules:
+
+- resolvedTime cannot change while the phase stays Resolved: `!(has(oldSelf.phase) && oldSelf.phase == 'Resolved' && has(oldSelf.resolvedTime) && has(self.phase) && self.phase == 'Resolved') || (has(self.resolvedTime) && self.resolvedTime == oldSelf.resolvedTime)`
+
 Used by: [Incident](#incident).
 
 | Field | Type | Required | Description |
@@ -380,7 +384,7 @@ Used by: [Incident](#incident).
 | `count` | integer | No | count is the number of occurrences counted, counting event series increments, not totals. It saturates at 1,000,000: a series count is written by whoever can create events, so forged updates can raise it without bound otherwise. It is not a count of distinct occurrences.<br>Maximum: 1000000<br>Minimum: 0 |
 | `occurrences` | [OccurrenceRecord](#occurrencerecord) array | No | occurrences are the newest occurrences counted for this incident, newest first, at most 32: for each, the highest total the cluster reported that was counted, and when it began. After a restart the analyzer reads them to count only what is new. Older ones are dropped.<br>Maximum items: 32<br>List type: atomic |
 | `occurrencesDroppedThrough` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | occurrencesDroppedThrough is when the newest occurrence dropped from occurrences began. An occurrence with no record that began no later than this is treated as counted in full, so the bound never counts one twice. |
-| `resolvedTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | resolvedTime is when the Incident moved to phase Resolved, written in the same status update (design 3.2). A symptom seen again within 24 hours of it, or with it missing, moves the Incident to Escalated without an analysis; seen again later, it opens the next occurrence of the fingerprint as a new Incident. |
+| `resolvedTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | resolvedTime is when the Incident moved to phase Resolved, written in the same status update (design 3.2). It cannot change while the phase stays Resolved. A symptom seen again within 24 hours of it, or with it missing, moves the Incident to Escalated without an analysis; seen again later, it opens the next occurrence of the fingerprint as a new Incident. |
 | `lastAnalysisTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | lastAnalysisTime is when the analyzer last ran; it drives the cooldown. |
 | `analysisRecords` | [RecordID](#recordid) array | No | analysisRecords are the newest analysis record IDs, oldest first (at most MaxAnalysisRecords).<br>Maximum items: 20<br>Maximum length: 200<br>Minimum length: 1<br>Pattern: `^[a-z0-9][a-z0-9-]{0,199}$`<br>List type: atomic |
 | `remediationRequests` | [Name](#name) array | No | remediationRequests are the names of requests made for this incident, oldest first.<br>Maximum items: 20<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`<br>List type: atomic |

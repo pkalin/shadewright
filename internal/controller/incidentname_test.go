@@ -149,8 +149,8 @@ func TestVerifiedIncidentName(t *testing.T) {
 	if step.Err() != nil {
 		t.Errorf("the read's deadline ended the step's context: %v", step.Err())
 	}
-	if len(lines) != 1 || !strings.Contains(lines[0], `"reason"="Timeout"`) {
-		t.Errorf("stalled read: logged %q, want one line with reason Timeout", lines)
+	if len(lines) != 1 || !strings.Contains(lines[0], `"reason"="Timeout"`) || !strings.Contains(lines[0], `"error"=`) {
+		t.Errorf("stalled read: logged %q, want one error line with reason Timeout", lines)
 	}
 
 	// An API error that comes as the read's deadline passes keeps its own reason: only a timeout is logged as one.
@@ -167,8 +167,9 @@ func TestVerifiedIncidentName(t *testing.T) {
 	if got := r.verifiedIncidentName(logged(&lines), request(name, uid)); got != "" {
 		t.Errorf("late forbidden read: got %q, want \"\"", got)
 	}
-	if len(lines) != 1 || !strings.Contains(lines[0], `"reason"="Forbidden"`) {
-		t.Errorf("late forbidden read: logged %q, want one line with reason Forbidden", lines)
+	if len(lines) != 1 || !strings.Contains(lines[0], `"reason"="Forbidden"`) || !strings.Contains(lines[0], `"error"=`) ||
+		strings.Contains(lines[0], name) {
+		t.Errorf("late forbidden read: logged %q, want one error line with reason Forbidden and no name", lines)
 	}
 
 	// A short step caps the read at half the time the step has left, whatever IncidentReadTimeout says, so a

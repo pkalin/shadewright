@@ -1194,7 +1194,9 @@ func (r *RemediationRequestReconciler) verifiedIncidentName(ctx context.Context,
 				// error, even one that came as the deadline passed, keeps its own.
 				reason = metav1.StatusReasonTimeout
 			}
-			logf.FromContext(ctx).Info("Failed to read the Incident of RemediationRequest, so its name was redacted",
+			// Logged as an error with the reason only: the API error repeats the name, which may be a secret
+			// written as "incident-<secret>". The name stays redacted (fail closed).
+			logf.FromContext(ctx).Error(nil, "Failed to read the Incident of RemediationRequest, so its name was redacted",
 				"remediationRequest", client.ObjectKeyFromObject(rr), "reason", reason)
 		}
 		return ""

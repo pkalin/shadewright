@@ -28,6 +28,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -364,6 +366,22 @@ var _ = Describe("Incident", func() {
 			inc.Spec.OccurrenceNumber = 2
 			inc.Spec.PreviousIncident = v1alpha1.IncidentName("sha256:"+strings.Repeat("b", 64), 1)
 		}, "same fingerprint"),
+		Entry("a later occurrence of another fingerprint", func(inc *v1alpha1.Incident) {
+			inc.Spec.OccurrenceNumber = 4
+			inc.Spec.PreviousIncident = v1alpha1.IncidentName("sha256:"+strings.Repeat("b", 64), 3)
+		}, "same fingerprint"),
+		Entry("a previous Incident two occurrences back", func(inc *v1alpha1.Incident) {
+			inc.Spec.OccurrenceNumber, inc.Spec.PreviousIncident = 4, previousOf(inc, 2)
+		}, "the occurrence before this one"),
+		Entry("the first occurrence as the previous of occurrence 3", func(inc *v1alpha1.Incident) {
+			inc.Spec.OccurrenceNumber, inc.Spec.PreviousIncident = 3, previousOf(inc, 1)
+		}, "the occurrence before this one"),
+		Entry("a later occurrence as the previous of occurrence 2", func(inc *v1alpha1.Incident) {
+			inc.Spec.OccurrenceNumber, inc.Spec.PreviousIncident = 2, previousOf(inc, 3)
+		}, "the occurrence before this one"),
+		Entry("its own name as the previous Incident", func(inc *v1alpha1.Incident) {
+			inc.Spec.OccurrenceNumber, inc.Spec.PreviousIncident = 5, previousOf(inc, 5)
+		}, "the occurrence before this one"),
 		Entry("a previous Incident with a leading zero", func(inc *v1alpha1.Incident) {
 			inc.Spec.OccurrenceNumber, inc.Spec.PreviousIncident = 3, previousOf(inc, 1)+"-02"
 		}, "spec.previousIncident"),
@@ -371,6 +389,43 @@ var _ = Describe("Incident", func() {
 			inc.Spec.OccurrenceNumber, inc.Spec.PreviousIncident = 2, "orders-scaling"
 		}, "spec.previousIncident"),
 	)
+
+	It("refuses an explicit occurrence number 0", func() {
+		inc := fx.Incident("default", unique("inc"))
+		raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(inc)
+		Expect(err).NotTo(HaveOccurred())
+		obj := &unstructured.Unstructured{Object: raw}
+		obj.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("Incident"))
+		Expect(unstructured.SetNestedField(obj.Object, int64(0), "spec", "occurrenceNumber")).To(Succeed())
+		Expect(unstructured.SetNestedField(obj.Object, previousOf(inc, 1), "spec", "previousIncident")).To(Succeed())
+		expectRefused(obj, "spec.occurrenceNumber")
+	})
+
+	It("keeps resolvedTime while the phase stays Resolved", func() {
+		inc := fx.Incident("default", unique("inc"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		resolved := metav1.NewTime(time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC))
+		inc.Status.Phase, inc.Status.ResolvedTime = v1alpha1.IncidentResolved, &resolved
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+
+		later := metav1.NewTime(resolved.Add(time.Hour))
+		moved := inc.DeepCopy()
+		moved.Status.ResolvedTime = &later
+		err := k8sClient.Status().Update(ctx, moved)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("resolvedTime cannot change"))
+
+		cleared := inc.DeepCopy()
+		cleared.Status.ResolvedTime = nil
+		err = k8sClient.Status().Update(ctx, cleared)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("resolvedTime cannot change"))
+
+		// Leaving Resolved frees it, as a recurrence that escalates the Incident does.
+		escalated := inc.DeepCopy()
+		escalated.Status.Phase = v1alpha1.IncidentEscalated
+		Expect(k8sClient.Status().Update(ctx, escalated)).To(Succeed())
+	})
 
 	It("refuses adding an occurrence number later", func() {
 		inc := fx.Incident("default", unique("inc"))

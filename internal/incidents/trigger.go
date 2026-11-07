@@ -67,6 +67,9 @@ const (
 	// ReasonResolved: the incident is Resolved and is never analyzed again (design 3.2, #251). A symptom seen
 	// again moves it to Escalated within RecurrenceWindow of resolvedTime, or opens its next occurrence after.
 	ReasonResolved = "Resolved"
+	// ReasonRecurred: the incident is Escalated because its symptom came back after it was Resolved (the
+	// condition Recurred), not because of an analysis; a person decides.
+	ReasonRecurred = "Recurred"
 	// ReasonNoNewData: nothing was seen since the last analysis.
 	ReasonNoNewData = "NoNewData"
 	// ReasonCoolingDown: the incident has data the last analysis did not see, but the cooldown since that
@@ -193,7 +196,7 @@ func Due(inc *remediationv1alpha1.Incident, m Memory, now time.Time, s TriggerSe
 	case remediationv1alpha1.IncidentProposed:
 		return false, ReasonProposed
 	case remediationv1alpha1.IncidentEscalated:
-		return false, ReasonEscalated
+		return false, escalatedReason(inc)
 	case remediationv1alpha1.IncidentResolved:
 		return false, ReasonResolved
 	case remediationv1alpha1.IncidentAnalyzing:
@@ -298,12 +301,21 @@ func unsettledSince(inc *remediationv1alpha1.Incident, m Memory, s TriggerSettin
 	return since
 }
 
+// escalatedReason is the not-due reason of an Escalated incident: Recurred when a recurrence after its
+// resolution escalated it (the condition Recurred), Escalated when an analysis did.
+func escalatedReason(inc *remediationv1alpha1.Incident) string {
+	if meta.IsStatusConditionTrue(inc.Status.Conditions, ConditionRecurred) {
+		return ReasonRecurred
+	}
+	return ReasonEscalated
+}
+
 // waitsForData reports whether reason comes from the checks of the incident's own data, before the debounce
 // (Due's not-due reasons up to CoolingDown). An incident with such a reason is not waiting to settle, so the
 // controller forgets when it first saw it waiting.
 func waitsForData(reason string) bool {
 	switch reason {
-	case ReasonNotObserved, ReasonProposed, ReasonEscalated, ReasonResolved, ReasonAnalyzing, ReasonAnalysisStartUnknown,
+	case ReasonNotObserved, ReasonProposed, ReasonEscalated, ReasonResolved, ReasonRecurred, ReasonAnalyzing, ReasonAnalysisStartUnknown,
 		ReasonNotRecent, ReasonNoNewData, ReasonCoolingDown, ReasonForeignFingerprint:
 		return true
 	}

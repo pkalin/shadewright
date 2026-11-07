@@ -54,7 +54,7 @@ The gauge `shadewright_incidents` reports Incidents by `phase` <span class="sw-s
    kubectl -n shadewright-system delete incident <name>
    ```
 
-6. **Restart the analyzer.** It counts Incidents, and finds the latest occurrence of each fingerprint (`incident-<64 hex>-<n>`), only when it starts; deleting an earlier occurrence does not make it open that one again:
+6. **Restart the analyzer.** It counts Incidents, and finds the latest occurrence of each fingerprint (`incident-<64 hex>-<n>`), only when it starts; deleting an earlier occurrence does not make it open that one again. Deleting the latest occurrence of a fingerprint makes the one before it the latest again: if that one is `Resolved`, the next recurrence more than 24 hours after its `resolvedTime` opens a new occurrence under the deleted name; within 24 hours it escalates that earlier Incident:
 
    ```bash
    kubectl -n shadewright-system rollout restart deploy/shadewright-analyzer

@@ -199,6 +199,18 @@ func TestDue(t *testing.T) {
 			reason: ReasonEscalated,
 		},
 		{
+			name: "escalated by a recurrence after resolution: its own reason, not the analysis's",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := incidentStatus(2*time.Minute, 2*time.Minute, time.Hour)
+				st.Phase = remediationv1alpha1.IncidentEscalated
+				meta.SetStatusCondition(&st.Conditions, metav1.Condition{
+					Type: ConditionRecurred, Status: metav1.ConditionTrue, Reason: ReasonRecurredWithinWindow, Message: "x",
+				})
+				return st
+			},
+			reason: ReasonRecurred,
+		},
+		{
 			name:   "not recent: never analyzed and last seen longer ago than the window",
 			status: func() remediationv1alpha1.IncidentStatus { return incidentStatus(35*time.Minute, time.Hour, 0) },
 			reason: ReasonNotRecent,

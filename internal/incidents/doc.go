@@ -23,13 +23,15 @@ limitations under the License.
 // occurrencesDroppedThrough. Nothing from the cluster goes into the Incident beyond the subject, the reason
 // and the normalized, redacted symptom the collector computed.
 //
-// A Resolved Incident is never analyzed again (#251). An observation written to one moves it to Escalated, in
-// the same status update, when its newest sighting is within [RecurrenceWindow] (24 hours) of resolvedTime or
-// resolvedTime is missing; seen later, it goes to the next occurrence of the fingerprint instead, a new
-// Incident named "incident-<hex>-<n>" (remediationv1alpha1.IncidentName) whose spec links it to the one
-// before and whose status starts empty. Nothing else creates a later occurrence. The latest occurrence of
-// each fingerprint is found from the names load lists, so a restart writes there; a next occurrence counts
-// under the cap on Incidents and is refused at it.
+// A Resolved Incident is never analyzed again (#251). An observation of its fingerprint seen more than
+// [RecurrenceWindow] (24 hours) after its resolvedTime, with nothing of it unwritten, opens the next
+// occurrence instead, through the same gate as a new fingerprint: a new Incident named "incident-<hex>-<n>"
+// (remediationv1alpha1.IncidentName) whose spec links it to the one before and whose status starts empty,
+// under the cap like a new fingerprint. Any other observation written to it moves it to Escalated in the same
+// status update (condition Recurred), unless it was seen no later than resolvedTime. Which Incidents are
+// Resolved is known from load, every trigger pass and each write; the latest occurrence of each fingerprint
+// from the names load lists, so a restart writes there. A later occurrence deleted while running is never
+// created again from memory: its batches are dropped and the newest that exists becomes the latest.
 //
 // A symptom opens its Incident only when it recurs or is immediate (#267). An observation that proves
 // recurrence on its own (its occurrence's latest repeat came at least [RecurAfter] after it

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -37,6 +38,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/gitops/semdiff"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
@@ -614,6 +616,9 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 	if d.Outcome != policy.OutcomeAllowed {
 		return o, nil
 	}
+	if stop, tooLarge, err := r.buildTooLarge(ctx, settings, res.Source); tooLarge || err != nil {
+		return stop, err
+	}
 	// The plan is fixed here, from the very objects the decision was made on, so no later read of the
 	// policy or the settings can slip in between the decision and the digest.
 	digest, err := freshness.ComputeDigest(rr, res.Source, pol, settings)
@@ -634,6 +639,49 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 	}
 	return o, nil
 }
+
+// buildTooLarge loads the build the plan names, at the commit the mapping read, with the render check's own
+// limits (semdiff.Load), and returns a NeedsIntervention outcome and true when the build is over one of them
+// (TooLarge). The mapping reads up to 16 MiB while a render takes at most semdiff.MaxBuildBytes, so without this
+// a build in between would be planned and approved, and refused only at the render before the commit (#482).
+// Any other refusal of the tree is left to that render, which gives it with the change in place. A Git failure
+// is returned for a retry. Without a Git adapter (tests) nothing is loaded and the render refuses later.
+func (r *RemediationRequestReconciler) buildTooLarge(ctx context.Context,
+	settings *remediationv1alpha1.RemediationSettings, src *remediationv1alpha1.ResolvedSource) (outcome, bool, error) {
+	if r.OpenRepository == nil || src.BuildPath == "" {
+		return outcome{}, false, nil
+	}
+	i := slices.IndexFunc(settings.Spec.Repositories, func(g remediationv1alpha1.GitRepository) bool {
+		return g.Name == src.RepositoryRef
+	})
+	if i < 0 {
+		return needsIntervention(string(sourcemap.ReasonInvalidInput),
+			"The source mapping named a repository the settings do not hold"), true, nil
+	}
+	git, err := r.openRepository(ctx, settings.Spec.Repositories[i])
+	if providers.IsInvalidConfig(err) {
+		return needsIntervention(string(sourcemap.ReasonRepositoryUnusable),
+			"The settings of the repository cannot be used to open it"), true, nil
+	}
+	if err != nil {
+		d, _ := providers.RetryAfter(err)
+		return outcome{}, false, &sourcemap.TransientError{Op: "open the repository of the plan", RetryAfter: d}
+	}
+	_, err = semdiff.Load(ctx, git, src.BaseCommit, string(src.BuildPath))
+	if se, ok := errors.AsType[*semdiff.Error](err); ok {
+		if se.Reason != semdiff.ReasonTooLarge {
+			return outcome{}, false, nil
+		}
+		return needsIntervention(string(se.Reason), buildTooLargeMessage), true, nil
+	}
+	return outcome{}, false, err
+}
+
+// buildTooLargeMessage is the status message of a request whose build is over a limit of the render check's input
+// (semdiff reason TooLarge), when the policy check finds it. It is fixed text, never content from Git.
+var buildTooLargeMessage = fmt.Sprintf("The build is over a limit of the render check (at most %d bytes of input "+
+	"counted with repetition, %d directory visits, %d files of at most %d bytes); no plan was made",
+	semdiff.MaxBuildBytes, semdiff.MaxVisits, semdiff.MaxFiles, semdiff.MaxFileBytes)
 
 // unchanged reads the target again and returns nil when it is still live, with the UID and resourceVersion of
 // live, the object the check read first. Otherwise it returns an error, so the check starts over on the next

@@ -561,17 +561,22 @@ func budgetRepo(t *testing.T, total int) map[string][]byte {
 }
 
 func TestCheckBuildByteBudget(t *testing.T) {
+	// desired 15 keeps the patched file as long as the original; 100 makes it one byte longer, so a tree at
+	// exactly the budget is over it once patched.
 	cases := map[string]struct {
-		total int
-		want  *semdiff.Error
+		total   int
+		desired int32
+		want    *semdiff.Error
 	}{
-		"exactly the budget": {buildBudget, nil},
-		"one byte over":      {buildBudget + 1, semdiff.ErrTooLarge},
+		"exactly the budget":              {buildBudget, 15, nil},
+		"one byte over":                   {buildBudget + 1, 15, semdiff.ErrTooLarge},
+		"one byte over once patched":      {buildBudget, 100, semdiff.ErrTooLarge},
+		"exactly the budget once patched": {buildBudget - 1, 100, nil},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			files := budgetRepo(t, c.total)
-			_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
+			_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", c.desired))
 			if c.want == nil {
 				if err != nil {
 					t.Fatalf("Check: %v", err)

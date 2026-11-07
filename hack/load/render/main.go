@@ -23,9 +23,9 @@ limitations under the License.
 //   - flat:    n files of about 1 MiB (255 ConfigMaps of 4 KiB each) listed by one kustomization, plus the Deployment.
 //   - diamond: one base of about 1 MiB (255 ConfigMaps) reached through n overlays with a name prefix, plus
 //     the Deployment.
-//   - tiny:    n files of about 1 MiB of ConfigMaps of about 100 bytes each, plus the Deployment: far over the
-//     object cap, which is checked after kustomize has built them, so it measures the render the byte budget
-//     still lets through.
+//   - tiny:    n files of about 1 MiB of ConfigMaps of about 78 bytes each (about 13,400 per file), plus the
+//     Deployment: far over the object cap, which is checked after kustomize has built them, so it measures the
+//     render the byte budget still lets through.
 package main
 
 import (
@@ -181,7 +181,7 @@ func configMaps(prefix string, n int) []byte {
 	return []byte(b.String())
 }
 
-// tinyConfigMaps returns ConfigMaps of about 100 bytes each, at most size bytes in all.
+// tinyConfigMaps returns ConfigMaps of about 78 bytes each (about 13,400 per MiB), at most size bytes in all.
 func tinyConfigMaps(prefix string, size int) []byte {
 	var b strings.Builder
 	for i := 0; ; i++ {

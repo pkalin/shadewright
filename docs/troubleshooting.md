@@ -129,6 +129,7 @@ All `NeedsIntervention`, on `PolicyAllowed`. The mapping reads plain kustomize m
 | `FileNotReadable` | A file the build needs is missing, over 1 MiB or not valid YAML | Fix the file |
 | `TooManyFiles` | The build is deeper than 8 kustomization directories (5 listed directories below a path without a kustomization file), lists more than 256 files, needs more than 512 reads and listings, or lists a directory of more than 1000 entries | Simplify the layout |
 | `InputTooLarge` | The build reads more than 16 MiB in all, directory listings counted at 128 bytes per entry (exactly 16 MiB is accepted; a file past the budget is refused before it is downloaded, even when it is also over 1 MiB) or holds more than 4096 YAML documents | Split the Kustomization or remove what it does not need |
+| `TooLarge` | The build is over the render check's input limits: more than 4 MiB counted with repetition, 256 directory visits or 256 files. Checked once the mapping resolved, so no plan or approval is asked for a change that can never render | See [A build over the budget](#a-build-over-the-budget) |
 | `DeclarationNotFound` | No document declares the object (for example a generator or patch produces it) | Declare it in a plain manifest |
 | `AmbiguousDeclaration` | More than one document could declare it | Keep exactly one |
 
@@ -213,7 +214,7 @@ Before committing, and again when the target branch moves while the pull request
 | `UnsupportedKustomization` | A kustomization file uses generators, Helm charts, plugins, replacements or anything outside the allow-list |
 | `InvalidReference` | A kustomization refers to a URL, remote base, absolute path or a path leaving the repository, or a path without a kustomization file holds a manifest or base whose name is not a plain path segment |
 | `FileMissing` | The build needs a file that is missing, a listed directory has no kustomization file or more than one, or the path is not a directory (a path without a kustomization file is rendered from the one Flux would generate) |
-| `TooLarge` | A limit was hit: file size, number of files or reads, depth, directory visits, the build budget of 4 MiB (the message says "processes more than 4194304 bytes") or 1,024 rendered objects ("renders more than 1024 objects"); see [A build over the budget](#a-build-over-the-budget) |
+| `TooLarge` | A limit was hit: file size, number of files or reads, depth, directory visits, the build budget of 4 MiB (counted with repetition, the tree after the change included) or 1,024 rendered objects. The input limits are checked at the policy check already; see [A build over the budget](#a-build-over-the-budget) for what the request shows |
 | `InvalidYAML` | A kustomization file does not parse or has a duplicate key |
 | `RenderFailed` | Kustomize cannot build the path, before or after the change |
 | `FileNotInBuild` | The changed file is not a resource of the build |
@@ -232,7 +233,14 @@ Fix for all: make the build plain, so the one value is declared once and nothing
 
 ### A build over the budget
 
-The render runs in the executor, inside its 128 Mi memory limit, so the build of one Flux Kustomization path may hold at most 4 MiB of input and 1,024 objects ([design 8.2.2](design/8-gitops-on-github.md#822-steps-4-and-5-the-semantic-diff-check)). Input counts with repetition: every path to a directory adds its kustomization file and the files it lists, so a 1 MiB base under four overlays counts 4 MiB. The limits are fixed in the code; nothing in the settings raises them. To bring the target's build under them:
+The render runs in the executor, inside its 128 Mi memory limit, so the build of one Flux Kustomization path may hold at most 4 MiB of input and 1,024 objects ([design 8.2.2](design/8-gitops-on-github.md#822-steps-4-and-5-the-semantic-diff-check)). Input counts with repetition: every path to a directory adds its kustomization file and the files it lists, so a 1 MiB base under four overlays counts 4 MiB. The limits are fixed in the code; nothing in the settings raises them.
+
+What the request shows (no Event is recorded for either case):
+
+- **At the policy check**, for a build over the input limits (bytes, directory visits, files): phase `NeedsIntervention`, condition `PolicyAllowed` with status `Unknown`, reason `TooLarge` and the message "The build is over a limit of the render check (at most 4194304 bytes of input counted with repetition, 256 directory visits, 256 files of at most 1048576 bytes); no plan was made". No plan digest, branch or pull request is made, and no approval is asked for.
+- **At the render**, for a build over 1,024 objects, a change that takes the tree over the byte budget (a value written with one more digit in a build at the budget), or a pull request that was waiting when you upgraded (see [upgrade](upgrade-uninstall.md#upgrade)): condition `PullRequestOpened` (before a pull request) or `Approved` (after) with status `False`, reason `TooLarge` and the message "The rendered change is not exactly the planned one (TooLarge)", followed by "; nothing was committed" or "; the pull request was closed". The executor logs `Stopped RemediationRequest` with `reason` `TooLarge`.
+
+The render message does not name the limit, since the render check's own text may name files of the repository; the reason and this page say which limits apply. To bring the target's build under them:
 
 - Split the path. Give the target's application its own directory and its own Flux `Kustomization` (its own `spec.path`), instead of one path that builds every application of the cluster. The check renders only the path that delivers the target.
 - Cut repetition. A large base reached through many overlays counts once per overlay; move what only one overlay needs out of the shared base, or give each environment its own Kustomization.

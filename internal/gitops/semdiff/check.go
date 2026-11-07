@@ -92,6 +92,11 @@ func Check(ctx context.Context, in Input) (Result, error) {
 	}
 	afterFiles := maps.Clone(before.files)
 	afterFiles[file] = in.Patched
+	// The patched file may be longer than the original, so the tree after the change is counted against the
+	// limits on its own, with every reference that reaches the file, before it is rendered.
+	if _, err := tree(ctx, afterFiles, dir); err != nil {
+		return Result{}, err
+	}
 
 	objsBefore, err := render(ctx, before.files, dir)
 	if err != nil {

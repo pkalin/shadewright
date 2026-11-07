@@ -629,3 +629,27 @@ func TestOnlySourceValuesAreQuotable(t *testing.T) {
 		t.Errorf("the subject's kind is not quotable: %q", gone.Data())
 	}
 }
+
+// A later occurrence of a fingerprint (design 3.2, #251) is analyzed from its symptoms and context only: the
+// link to the Incident before it never reaches the model, so neither does anything of that one's outcome or
+// policy decision (invariant 1). Its context is the one occurrence 1 would get.
+func TestLaterOccurrenceCarriesNothingOfThePreviousOne(t *testing.T) {
+	b := newBuilder(t, reader(t, webObjects()...), webSources(), nil)
+	first := incident(deploymentRef())
+	later := first.DeepCopy()
+	later.Name = remediationv1alpha1.IncidentName(later.Spec.Fingerprint, 2)
+	later.Spec.OccurrenceNumber = 2
+	later.Spec.PreviousIncident = remediationv1alpha1.IncidentName(later.Spec.Fingerprint, 1)
+	want, got := build(t, b, first), build(t, b, later)
+	if len(got.Blocks) != len(want.Blocks) {
+		t.Fatalf("%d blocks, want %d", len(got.Blocks), len(want.Blocks))
+	}
+	for i := range got.Blocks {
+		if got.Blocks[i].Text != want.Blocks[i].Text {
+			t.Errorf("block %s differs:\n%s\nwant:\n%s", got.Blocks[i].Section, got.Blocks[i].Text, want.Blocks[i].Text)
+		}
+		if strings.Contains(got.Blocks[i].Text, later.Spec.PreviousIncident) {
+			t.Errorf("block %s names the previous Incident", got.Blocks[i].Section)
+		}
+	}
+}

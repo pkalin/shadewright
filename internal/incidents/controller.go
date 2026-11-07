@@ -199,8 +199,25 @@ type Controller struct {
 	// droppedThrough is the newest begin time of a record any Incident dropped.
 	droppedThrough time.Time
 	// names are the Incidents that exist or are pending; their number is held to MaxIncidents.
-	names   map[string]struct{}
-	pending map[string]*batch
+	names map[string]struct{}
+	// current is, per fingerprint, the number of its latest occurrence this process knows of (design 3.2,
+	// #251), when it is 2 or more: from the names load lists, and from each write that reached a later one.
+	// A fingerprint without an entry is at occurrence 1. It holds at most one entry per name in names.
+	current map[string]int32
+	// opening are the later occurrences (n >= 2) this process took a place under the cap for and has not
+	// written yet: only these are created when not found ([Controller.write]); one gone otherwise was deleted.
+	opening map[string]struct{}
+	// resolvedAt is, per Incident name, the resolvedTime of an Incident that is Resolved with one: from load,
+	// every trigger pass (which lists every Incident) and each write. It decides whether a symptom seen again
+	// opens the next occurrence ([Controller.rolls]). It holds only Incidents listed or written, at most one
+	// entry per name in names.
+	resolvedAt map[string]time.Time
+	pending    map[string]*batch
+	// inflight is, per fingerprint, what the writes in flight hold: how many there are and the newest
+	// observation they carry. flush takes batches out of pending and failed before it writes them, so the
+	// closure rules read it too ([Controller.unwrittenSince]) and never take an Incident as quiet while one of
+	// its observations is being written.
+	inflight map[string]*flight
 	// failed holds, per Incident, the batches of a status write whose answer never came: the API server may
 	// have stored them or not. They stay apart from pending, so the next write can tell from the fresh status
 	// whether they were applied (applied) without new observations hiding it.
@@ -220,6 +237,22 @@ type Controller struct {
 	memory map[types.UID]*trace
 	// lastEvent is when the last Warning event at the cap was written.
 	lastEvent time.Time
+	// capNear is whether the last trigger pass found the Incidents at or over capNearThreshold and reported
+	// it, and lastNearEvent when the last Warning event IncidentCapNear was written ([Controller.reportCap]).
+	// Only the trigger goroutine uses them.
+	capNear       bool
+	lastNearEvent time.Time
+	// closeFailed are the Incidents whose last closure write failed: the next pass tries them after the
+	// others, so a few that keep failing never hold up the rest. Only the trigger goroutine uses it, and it
+	// holds only listed names.
+	closeFailed map[string]struct{}
+}
+
+// flight is what the writes of one fingerprint in flight hold: how many there are, and the newest
+// observation in their batches.
+type flight struct {
+	n    int
+	last time.Time
 }
 
 // holding is what one fingerprint's batches hold unwritten: n occurrences, and in how many of them each
@@ -310,20 +343,25 @@ func New(cfg Config) (*Controller, error) {
 		cfg.Now = time.Now
 	}
 	return &Controller{
-		cfg:       cfg,
-		ready:     make(chan struct{}),
-		records:   map[string]record{},
-		recordsOf: map[string]map[string]struct{}{},
-		held:      map[string]*holding{},
-		heldIn:    map[string]int{},
-		names:     map[string]struct{}{},
-		pending:   map[string]*batch{},
-		failed:    map[string]*batch{},
-		kick:      make(chan struct{}, 1),
-		nextWrite: map[string]time.Time{},
-		refused:   newBoundedSet(refusedRemembered),
-		sightings: newSightings(cfg.MaxFirstSightings),
-		memory:    map[types.UID]*trace{},
+		cfg:         cfg,
+		ready:       make(chan struct{}),
+		records:     map[string]record{},
+		recordsOf:   map[string]map[string]struct{}{},
+		held:        map[string]*holding{},
+		heldIn:      map[string]int{},
+		names:       map[string]struct{}{},
+		current:     map[string]int32{},
+		opening:     map[string]struct{}{},
+		resolvedAt:  map[string]time.Time{},
+		pending:     map[string]*batch{},
+		inflight:    map[string]*flight{},
+		failed:      map[string]*batch{},
+		kick:        make(chan struct{}, 1),
+		nextWrite:   map[string]time.Time{},
+		refused:     newBoundedSet(refusedRemembered),
+		sightings:   newSightings(cfg.MaxFirstSightings),
+		memory:      map[types.UID]*trace{},
+		closeFailed: map[string]struct{}{},
 	}, nil
 }
 
@@ -349,10 +387,17 @@ func (c *Controller) AnalysisTimeout() time.Duration { return c.cfg.AnalysisTime
 // NeedLeaderElection reports that only the leader writes Incidents.
 func (c *Controller) NeedLeaderElection() bool { return true }
 
-// Name returns the incident's object name: the fingerprint's hex digest with a fixed prefix, so a
-// fingerprint always names the same Incident and a restart finds it.
+// Name returns the object name of the first occurrence of a fingerprint's Incident: the fingerprint's hex
+// digest with a fixed prefix, so a fingerprint always names the same Incident and a restart finds it. Later
+// occurrences add "-<n>" (remediationv1alpha1.IncidentName).
 func Name(fp string) string {
 	return "incident-" + strings.TrimPrefix(fp, fingerprint.Prefix)
+}
+
+// nameOf returns the name of the latest occurrence of fp's Incident this process knows of. The caller holds
+// mu.
+func (c *Controller) nameOf(fp string) string {
+	return remediationv1alpha1.IncidentName(fp, c.current[fp])
 }
 
 // Start loads the Incidents, then consumes observations until ctx ends. Writes run in a goroutine of their
@@ -458,6 +503,10 @@ func (c *Controller) load(ctx context.Context) error {
 	for _, inc := range list.Items {
 		c.names[inc.Name] = struct{}{}
 		c.remember(inc.Name, &inc.Status)
+		if inc.HasDerivedName() && inc.Spec.Occurrence() > max(c.current[inc.Spec.Fingerprint], 1) {
+			c.current[inc.Spec.Fingerprint] = inc.Spec.Occurrence()
+		}
+		c.noteState(&inc)
 	}
 	close(c.ready)
 	logf.FromContext(ctx).Info("Loaded Incidents", "count", len(list.Items), "namespace", c.cfg.Namespace)
@@ -567,9 +616,11 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 	}
 	// From here on Count is what is new of o, whatever MayRepeat said.
 	o.Count, o.MayRepeat = n, false
-	if _, ok := c.names[Name(o.Fingerprint)]; ok {
+	if _, ok := c.names[c.nameOf(o.Fingerprint)]; ok && !c.rolls(o) {
 		return c.count(ctx, o)
 	}
+	// A fingerprint without an Incident, or whose latest occurrence is Resolved more than RecurrenceWindow
+	// ago: the observation opens one, the next occurrence then, only through the same gate.
 	var open []collector.Observation
 	if o.Immediate || recurs(o) || c.refused.has(o.Fingerprint) {
 		open = append(c.sightings.take(o.Fingerprint), o)
@@ -609,13 +660,22 @@ func (c *Controller) count(ctx context.Context, o collector.Observation) bool {
 	if n <= 0 {
 		return false
 	}
-	name := Name(o.Fingerprint)
+	name := c.nameOf(o.Fingerprint)
+	if c.rolls(o) {
+		name = remediationv1alpha1.IncidentName(o.Fingerprint, occurrenceOf(name)+1)
+	}
 	if _, ok := c.names[name]; !ok {
 		if len(c.names) >= c.cfg.MaxIncidents {
 			c.refuse(ctx, o)
 			return false
 		}
 		c.names[name] = struct{}{}
+		if n := occurrenceOf(name); n >= 2 && n > occurrenceOf(c.nameOf(o.Fingerprint)) {
+			// The next occurrence of a Resolved Incident: it is the latest from now on, and only this process
+			// may create it.
+			c.current[o.Fingerprint] = n
+			c.opening[name] = struct{}{}
+		}
 	}
 	b := c.pending[o.Fingerprint]
 	if b == nil {
@@ -683,7 +743,7 @@ func (c *Controller) overflow(ctx context.Context, o collector.Observation) {
 		return
 	}
 	logf.FromContext(ctx).Info("Left new occurrences uncounted at the cap on occurrences held unwritten",
-		"incident", Name(o.Fingerprint), "uncounted", c.overflowed, "held", c.heldBy(o.Fingerprint),
+		"incident", c.nameOf(o.Fingerprint), "uncounted", c.overflowed, "held", c.heldBy(o.Fingerprint),
 		"heldTotal", c.heldTotal, "namespace", o.Source, "heldInNamespace", c.heldIn[o.Source],
 		"maxPerIncident", c.cfg.MaxPendingOccurrencesPerIncident,
 		"maxPerNamespace", c.cfg.MaxPendingOccurrencesPerNamespace, "max", c.cfg.MaxPendingOccurrences)
@@ -810,13 +870,15 @@ func (c *Controller) flushDue(ctx context.Context, all bool) {
 // flush writes the failed and the pending batch of one Incident in one status write. Both are taken out
 // first, so observations arriving during the write start a new pending batch. Each attempt reads the
 // Incident fresh: a conflict is retried on the new version, and a batch the status already holds (a write
-// that succeeded but whose answer was lost) is not added twice.
+// that succeeded but whose answer was lost) is not added twice. The Incident is the latest occurrence of the
+// fingerprint this process knows; it does not change while a write is in flight ([Controller.rolls]).
 //
 // If the write fails, the batches it sent become the failed batch, tried again RetryAfter later; batches it
 // never sent go back to pending. A write that can never succeed (the API server refuses it as invalid, or
 // the Incident of that name holds another fingerprint) drops its batches, and the memory of their
 // occurrences goes back to what the Incident stores, so Handled does not answer "counted" for what was
-// never stored.
+// never stored. So does a write to a later occurrence that was deleted ([deletedError]): the memory moves
+// back to the newest occurrence that exists.
 //
 // The batches taken out still count as held while they are in flight, so the observations arriving
 // meanwhile cannot take the Incident over its cap; held is set to what is left once the write returns.
@@ -825,7 +887,8 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 	f, p := c.failed[fp], c.pending[fp]
 	delete(c.failed, fp)
 	delete(c.pending, fp)
-	c.mu.Unlock()
+	name := c.nameOf(fp)
+	_, opening := c.opening[name]
 	var batches []*batch
 	for _, b := range []*batch{f, p} {
 		if b != nil {
@@ -833,15 +896,29 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 		}
 	}
 	if len(batches) == 0 {
+		c.mu.Unlock()
 		return
 	}
+	c.takeOff(fp, batches)
+	c.mu.Unlock()
 	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 	defer cancel()
-	res, err := c.write(wctx, batches)
+	res, err := c.write(wctx, name, occurrenceOf(name) < 2 || opening, batches)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.landed(fp)
 	defer c.recount(fp)
-	name := Name(fp)
+	if res.created {
+		delete(c.opening, name)
+	}
+	if deleted, ok := errors.AsType[*deletedError](err); ok {
+		c.dropDeleted(ctx, fp, name, batches, deleted)
+		return
+	}
+	if back, ok := errors.AsType[*notResolvedError](err); ok {
+		c.reopen(ctx, fp, name, batches, back)
+		return
+	}
 	if refused, ok := errors.AsType[*refusedError](err); ok {
 		gone, stored, reason := batches, (*remediationv1alpha1.IncidentStatus)(nil), dropFingerprintConflict
 		if !refused.conflict {
@@ -852,22 +929,23 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 			// the Incident holds.
 			gone, stored = []*batch{res.sent}, res.stored
 		}
-		c.forget(fp, gone, stored)
+		c.forget(fp, name, gone, stored)
 		// A write before this one whose answer was lost may have dropped records that no batch names: they go
 		// too, as after a write that succeeds. What the Incident holds stays: the status as read, or of the
 		// Incident with another fingerprint the records load remembered that its status still holds. That
 		// status is not ours: it is only swept against, never remembered, so neither its records nor its drop
 		// mark enter memory at runtime.
 		if refused.conflict {
-			c.prune(fp, nil, &res.inc.Status, true)
+			c.prune(fp, name, nil, &res.inc.Status, true)
 		} else if stored != nil {
-			c.settle(fp, nil, stored, true)
+			c.settle(fp, name, nil, stored, true)
 		} else {
-			c.prune(fp, nil, &remediationv1alpha1.IncidentStatus{}, true)
+			c.prune(fp, name, nil, &remediationv1alpha1.IncidentStatus{}, true)
 		}
 		if !refused.exists && c.pending[fp] == nil {
-			// An Incident that was never created frees its place under the cap.
-			delete(c.names, name)
+			// An Incident that was never created frees its place under the cap, and a later occurrence that
+			// could not be opened leaves the one before it the latest.
+			c.unopen(fp, name)
 		}
 		c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.Window)
 		droppedBatches.WithLabelValues(reason).Add(float64(len(gone)))
@@ -875,8 +953,11 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 		for _, b := range gone {
 			count += b.count
 		}
-		logf.FromContext(ctx).Error(err, "Dropped observations the API server refuses to store", "incident", name,
-			"reason", reason, "count", count)
+		msg := "Dropped observations the API server refuses to store"
+		if res.escalated {
+			msg = "Dropped observations and the escalation of a recurrence the API server refuses to store"
+		}
+		logf.FromContext(ctx).Error(err, msg, "incident", name, "reason", reason, "count", count)
 		return
 	}
 	if err != nil {
@@ -903,15 +984,71 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 		return
 	}
 	c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.Window)
-	c.settle(fp, res.dropped, &res.inc.Status, f != nil)
+	delete(c.opening, name)
+	c.noteState(res.inc)
+	c.settle(fp, name, res.dropped, &res.inc.Status, f != nil)
+}
+
+// unopen takes back the place under the cap of an Incident that was never created, and when it is a later
+// occurrence makes the one before it the latest again. The caller holds mu.
+func (c *Controller) unopen(fp, name string) {
+	delete(c.names, name)
+	delete(c.opening, name)
+	if n := occurrenceOf(name); n >= 2 && c.current[fp] == n {
+		c.setCurrent(fp, n-1)
+	}
+}
+
+// setCurrent makes occurrence n the latest of fp. The caller holds mu.
+func (c *Controller) setCurrent(fp string, n int32) {
+	if n < 2 {
+		delete(c.current, fp)
+		return
+	}
+	c.current[fp] = n
+}
+
+// dropDeleted handles a write to a later occurrence someone deleted: the batches are dropped and counted
+// (reason "deleted"), their memory goes, the deleted name leaves the cap, and the newest occurrence that still
+// exists becomes the latest. A fingerprint none of whose occurrences exists has no Incident: its next
+// observation passes the gate of a new fingerprint. The caller holds mu.
+func (c *Controller) dropDeleted(ctx context.Context, fp, name string, batches []*batch, deleted *deletedError) {
+	c.forget(fp, name, batches, nil)
+	c.prune(fp, name, nil, &remediationv1alpha1.IncidentStatus{}, true)
+	delete(c.names, name)
+	delete(c.opening, name)
+	delete(c.resolvedAt, name)
+	if c.current[fp] == occurrenceOf(name) {
+		latest := int32(1)
+		if deleted.latest != nil {
+			latest = deleted.latest.Spec.Occurrence()
+			c.noteState(deleted.latest)
+			// It exists, so it counts under the cap whether or not this process knew it.
+			c.names[deleted.latest.Name] = struct{}{}
+		}
+		c.setCurrent(fp, latest)
+		if deleted.latest == nil {
+			// No occurrence is left: the next observation opens one through the gate, as for a new
+			// fingerprint, never from memory.
+			delete(c.names, Name(fp))
+		}
+	}
+	c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.Window)
+	droppedBatches.WithLabelValues(dropDeleted).Add(float64(len(batches)))
+	var count int64
+	for _, b := range batches {
+		count += b.count
+	}
+	logf.FromContext(ctx).Error(deleted, "Dropped observations of a deleted Incident", "incident", name,
+		"latest", c.nameOf(fp), "count", count)
 }
 
 // settle takes into memory the status of fp's Incident after a write that succeeded or was refused: prune
 // forgets what the status no longer holds, and its records and drop mark are remembered. The caller holds
 // mu.
-func (c *Controller) settle(fp string, dropped []string, status *remediationv1alpha1.IncidentStatus, sweep bool) {
-	c.prune(fp, dropped, status, sweep)
-	c.remember(Name(fp), status)
+func (c *Controller) settle(fp, name string, dropped []string, status *remediationv1alpha1.IncidentStatus, sweep bool) {
+	c.prune(fp, name, dropped, status, sweep)
+	c.remember(name, status)
 }
 
 // prune forgets this Incident's records of dropped that status no longer holds, unless a batch still
@@ -919,8 +1056,7 @@ func (c *Controller) settle(fp string, dropped []string, status *remediationv1al
 // is checked the same way, through recordsOf: a write whose answer was lost may have dropped records that
 // neither this write's dropped nor its batches name, and they would otherwise stay in memory for good. It
 // only forgets: nothing of status is taken into memory. The caller holds mu.
-func (c *Controller) prune(fp string, dropped []string, status *remediationv1alpha1.IncidentStatus, sweep bool) {
-	name := Name(fp)
+func (c *Controller) prune(fp, name string, dropped []string, status *remediationv1alpha1.IncidentStatus, sweep bool) {
 	stored := make(map[string]struct{}, len(status.Occurrences))
 	for _, r := range status.Occurrences {
 		stored[r.ID] = struct{}{}
@@ -953,8 +1089,7 @@ func (c *Controller) prune(fp string, dropped []string, status *remediationv1alp
 // forget takes the memory of the occurrences of dropped batches back to what stored (the Incident's status,
 // or nil when it holds none of them) records, keeping what the current pending batch holds. Only records of
 // this Incident are touched. The caller holds mu.
-func (c *Controller) forget(fp string, gone []*batch, stored *remediationv1alpha1.IncidentStatus) {
-	name := Name(fp)
+func (c *Controller) forget(fp, name string, gone []*batch, stored *remediationv1alpha1.IncidentStatus) {
 	kept := map[string]counted{}
 	if stored != nil {
 		for _, r := range stored.Occurrences {
@@ -981,53 +1116,106 @@ func (c *Controller) forget(fp string, gone []*batch, stored *remediationv1alpha
 }
 
 // writeResult is what write did: the Incident as written, the IDs of the records it dropped, and of its last
-// attempt the status as read (stored) and the batches it sent, combined (sent, nil when it sent none).
+// attempt the status as read (stored), the batches it sent, combined (sent, nil when it sent none), and
+// whether it escalated a recurrence.
 type writeResult struct {
-	inc     *remediationv1alpha1.Incident
-	dropped []string
-	stored  *remediationv1alpha1.IncidentStatus
-	sent    *batch
+	inc       *remediationv1alpha1.Incident
+	dropped   []string
+	stored    *remediationv1alpha1.IncidentStatus
+	sent      *batch
+	escalated bool
+	// created says the write created the Incident: from then on it is only updated, and one not found later
+	// was deleted.
+	created bool
 }
 
-// write creates the Incident if needed and adds to its status each batch it does not already hold, retrying
-// on conflict. A conflict or a lost create race means the attempt stored nothing, so only the last attempt's
-// answer can be unknown.
-func (c *Controller) write(ctx context.Context, batches []*batch) (writeResult, error) {
+// write creates the Incident called name if needed (and create allows it) and adds to its status each batch
+// it does not already hold, retrying on conflict. A conflict or a lost create race means the attempt stored
+// nothing, so only the last attempt's answer can be unknown.
+//
+// name is the latest occurrence of the fingerprint this process knows. A later occurrence (n >= 2) is created
+// only when this process opened it ([Controller.count]), from the spec of its observations linked to the
+// occurrence before it ([nextSpec]); its name is deterministic, so a create that races with another replica
+// or follows a restart finds AlreadyExists and adopts the existing object (invariant 5). One this process did
+// not open that is not found was deleted ([deletedError]) and is not created again.
+//
+// A Resolved Incident is never analyzed again (design 3.2, #251): when the Incident read is Resolved and the
+// batches hold something new, [onResolved] decides from their newest observation whether they predate the
+// resolution (counted, still Resolved) or are a recurrence, which the same status update moves to Escalated
+// ([escalateRecurrence]), or back to Open when [reopens] allows it and the observation is within
+// RecurrenceWindow of resolvedTime.
+func (c *Controller) write(ctx context.Context, name string, create bool, batches []*batch) (writeResult, error) {
 	spec := batches[0].spec
-	key := types.NamespacedName{Namespace: c.cfg.Namespace, Name: Name(spec.Fingerprint)}
+	n := occurrenceOf(name)
+	if n >= 2 {
+		spec = nextSpec(spec, n)
+	}
+	key := types.NamespacedName{Namespace: c.cfg.Namespace, Name: name}
 	var res writeResult
+	created := false
 	err := retry.OnError(retry.DefaultBackoff, retriable, func() error {
-		res = writeResult{inc: &remediationv1alpha1.Incident{}}
+		res = writeResult{inc: &remediationv1alpha1.Incident{}, created: created}
 		err := c.reader.Get(ctx, key, res.inc)
 		if apierrors.IsNotFound(err) {
+			if n >= 2 && create {
+				// Opening n requires occurrence n-1 to be Resolved now, past the window, as read from the API
+				// server: what the controller remembered may be older than a write that escalated it.
+				if perr := c.predecessorResolved(ctx, spec, batches); perr != nil {
+					return perr
+				}
+			}
+			if !create {
+				latest, lerr := c.latestOccurrence(ctx, spec.Fingerprint)
+				if lerr != nil {
+					return fmt.Errorf("incident %s was not found: %w", key.Name, lerr)
+				}
+				return &deletedError{name: key.Name, latest: latest}
+			}
 			res.inc = &remediationv1alpha1.Incident{
 				ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name},
 				Spec:       spec,
 			}
 			if err = c.client.Create(ctx, res.inc); apierrors.IsInvalid(err) {
 				return &refusedError{err: err}
+			} else if err != nil {
+				return fmt.Errorf("creating Incident %s: %w", key.Name, err)
 			}
+			created, create, res.created = true, false, true
 		}
 		if err != nil {
 			return err
 		}
-		if res.inc.Spec.Fingerprint != spec.Fingerprint {
+		if res.inc.Spec.Fingerprint != spec.Fingerprint || res.inc.Spec.Occurrence() != n {
 			return &refusedError{exists: true, conflict: true,
-				err: fmt.Errorf("incident %s holds fingerprint %s, not %s", key.Name, res.inc.Spec.Fingerprint, spec.Fingerprint)}
+				err: fmt.Errorf("incident %s holds fingerprint %s occurrence %d, not %s occurrence %d", key.Name,
+					res.inc.Spec.Fingerprint, res.inc.Spec.Occurrence(), spec.Fingerprint, n)}
 		}
 		var send []*batch
+		var seen time.Time
 		for _, b := range batches {
 			if !applied(&res.inc.Status, b) {
 				send = append(send, b)
+				seen = latest(seen, b.last)
 			}
 		}
 		if len(send) == 0 {
 			return nil
 		}
+		resolved := onResolved(&res.inc.Status, seen)
 		res.stored = res.inc.Status.DeepCopy()
 		res.sent = combine(send)
 		for _, b := range send {
 			res.dropped = append(res.dropped, merge(&res.inc.Status, b)...)
+		}
+		if resolved == escalate {
+			// Reopen only within the window: seen later (held while the Incident was Resolved, so it was not
+			// sent to the next occurrence), it is escalated as any recurrence that reaches a Resolved Incident.
+			if reopens(&res.inc.Status) && !seen.IsZero() && seen.Sub(res.inc.Status.ResolvedTime.Time) <= RecurrenceWindow {
+				reopen(res.inc, c.cfg.Now())
+			} else {
+				escalateRecurrence(res.inc, c.cfg.Now())
+				res.escalated = true
+			}
 		}
 		if err = c.client.Status().Update(ctx, res.inc); apierrors.IsInvalid(err) {
 			return &refusedError{exists: true, err: err}

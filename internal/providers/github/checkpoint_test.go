@@ -199,6 +199,13 @@ func TestCheckpointDoesNotGateReads(t *testing.T) {
 	if *asked != 0 {
 		t.Errorf("a read asked the checkpoint %d times", *asked)
 	}
+	h = newHarness(t, readSteps()...)
+	if _, err := h.p.ListDir(c, shaBase, "apps"); err != nil {
+		t.Fatal(err)
+	}
+	if *asked != 0 {
+		t.Errorf("a listing asked the checkpoint %d times", *asked)
+	}
 }
 
 // TestCheckpointAfterCancellation: a call canceled while its token is fetched reports the cancellation, not

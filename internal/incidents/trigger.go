@@ -59,11 +59,19 @@ const (
 	// the analysis timeout nor the cooldown can be placed. It stays not due until the status is repaired, so
 	// that a status without the time never starts analyses faster than the cooldown.
 	ReasonAnalysisStartUnknown = "AnalysisStartUnknown"
-	// ReasonProposed: the last analysis made a proposal; leaving phase Proposed is later work.
+	// ReasonProposed: the last analysis made a proposal; the closure rules move the incident on once its request
+	// ends or it goes quiet ([Closure]).
 	ReasonProposed = "Proposed"
-	// ReasonEscalated: the last analysis handed the incident to a person; leaving phase Escalated is later
-	// work.
+	// ReasonEscalated: the last analysis, or a request that ended without success ([Closure]), handed the
+	// incident to a person; the closure rules resolve it once it goes quiet.
 	ReasonEscalated = "Escalated"
+	// ReasonResolved: the incident is Resolved and is not analyzed while it stays so (design 3.2, #251). A
+	// symptom seen again moves it to Escalated within RecurrenceWindow of resolvedTime (or back to Open when it
+	// was resolved by quiet time before any analysis, [reopens]), or opens its next occurrence after.
+	ReasonResolved = "Resolved"
+	// ReasonRecurred: the incident is Escalated because its symptom came back after it was Resolved (the
+	// condition Recurred), not because of an analysis; a person decides.
+	ReasonRecurred = "Recurred"
 	// ReasonNoNewData: nothing was seen since the last analysis.
 	ReasonNoNewData = "NoNewData"
 	// ReasonCoolingDown: the incident has data the last analysis did not see, but the cooldown since that
@@ -93,8 +101,8 @@ const (
 	// ReasonSettingsIncomplete: the RemediationSettings object sets no spec.analysis.maxAnalysesPerDay (an
 	// object the API server's defaults did not fill in), so the budget is unknown.
 	ReasonSettingsIncomplete = "SettingsIncomplete"
-	// ReasonForeignFingerprint: the Incident's name belongs to another fingerprint, so this controller does
-	// not analyze it.
+	// ReasonForeignFingerprint: the Incident's name is not the one derived from its own fingerprint and
+	// occurrence number (remediationv1alpha1.IncidentName), so this controller does not analyze it.
 	ReasonForeignFingerprint = "ForeignFingerprint"
 )
 
@@ -190,7 +198,9 @@ func Due(inc *remediationv1alpha1.Incident, m Memory, now time.Time, s TriggerSe
 	case remediationv1alpha1.IncidentProposed:
 		return false, ReasonProposed
 	case remediationv1alpha1.IncidentEscalated:
-		return false, ReasonEscalated
+		return false, escalatedReason(inc)
+	case remediationv1alpha1.IncidentResolved:
+		return false, ReasonResolved
 	case remediationv1alpha1.IncidentAnalyzing:
 		if st.LastAnalysisTime == nil {
 			return false, ReasonAnalysisStartUnknown
@@ -293,12 +303,21 @@ func unsettledSince(inc *remediationv1alpha1.Incident, m Memory, s TriggerSettin
 	return since
 }
 
+// escalatedReason is the not-due reason of an Escalated incident: Recurred when a recurrence after its
+// resolution escalated it (the condition Recurred), Escalated when an analysis did.
+func escalatedReason(inc *remediationv1alpha1.Incident) string {
+	if meta.IsStatusConditionTrue(inc.Status.Conditions, ConditionRecurred) {
+		return ReasonRecurred
+	}
+	return ReasonEscalated
+}
+
 // waitsForData reports whether reason comes from the checks of the incident's own data, before the debounce
 // (Due's not-due reasons up to CoolingDown). An incident with such a reason is not waiting to settle, so the
 // controller forgets when it first saw it waiting.
 func waitsForData(reason string) bool {
 	switch reason {
-	case ReasonNotObserved, ReasonProposed, ReasonEscalated, ReasonAnalyzing, ReasonAnalysisStartUnknown,
+	case ReasonNotObserved, ReasonProposed, ReasonEscalated, ReasonResolved, ReasonRecurred, ReasonAnalyzing, ReasonAnalysisStartUnknown,
 		ReasonNotRecent, ReasonNoNewData, ReasonCoolingDown, ReasonForeignFingerprint:
 		return true
 	}

@@ -273,7 +273,7 @@ func analyzerMetrics() map[string]metricguard.Labels {
 	return map[string]metricguard.Labels{
 		"shadewright_incident_observations_refused_total": {},
 		"shadewright_incident_batches_dropped_total": {
-			"reason": {dropInvalid, dropFingerprintConflict, dropStopped},
+			"reason": {dropInvalid, dropFingerprintConflict, dropStopped, dropDeleted},
 		},
 		"shadewright_incident_occurrences_overflow_total": {},
 		"shadewright_incident_first_sightings_held":       {},
@@ -285,6 +285,8 @@ func analyzerMetrics() map[string]metricguard.Labels {
 		"shadewright_analysis_skipped_not_recent_total":   {},
 		"shadewright_incidents":                           {"phase": phasegauge.Labels(incidentPhaseList)},
 		"shadewright_incidents_analysis_due":              {},
+		"shadewright_incident_cap":                        {},
+		"shadewright_incident_cap_near":                   {},
 	}
 }
 

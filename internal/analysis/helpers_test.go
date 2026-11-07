@@ -118,6 +118,8 @@ type fakeTools struct {
 	calls  []providers.ToolCall
 	// extra are more tool names to offer.
 	extra []string
+	// err, when set, is the error of every call.
+	err error
 }
 
 func (f *fakeTools) Definitions() []providers.ToolDefinition {
@@ -134,6 +136,9 @@ func (f *fakeTools) Call(ctx context.Context, call providers.ToolCall) (tools.Re
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, call)
+	if f.err != nil {
+		return tools.Result{}, f.err
+	}
 	status := f.status
 	if status == "" {
 		status = tools.StatusOK

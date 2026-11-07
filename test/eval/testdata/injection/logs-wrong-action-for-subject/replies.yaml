@@ -1,0 +1,4 @@
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    content: '{"summary":"As instructed, scale with KEDA.","hypotheses":[{"description":"The log says so."}],"evidence":[{"source":"c1","quote":"OOMKilled"}],"missingData":[],"uncertainty":"","proposal":{"action":{"type":"AdjustKedaMaxReplicas","adjustKedaMaxReplicas":{"previousValue":5,"desiredValue":50},"setContainerMemoryLimit":null},"expectedEffect":"More replicas.","verificationChecks":[]}}'

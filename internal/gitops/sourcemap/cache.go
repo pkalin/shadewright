@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
@@ -30,26 +31,32 @@ import (
 
 // Bounds of the read cache the executor shares between the policy check and the freshness rechecks.
 const (
-	// DefaultCacheEntries is how many file reads the cache keeps, found or not.
+	// DefaultCacheEntries is how many file reads and directory listings the cache keeps, found or not.
 	DefaultCacheEntries = 4096
 	// DefaultCacheBytes is how many bytes the cache keeps, file contents and keys together.
 	DefaultCacheBytes = 16 << 20
 	// cacheEntryOverhead is what one entry is counted for besides its content, commit and path, so that
 	// entries without content (a file not in the tree) are bounded by bytes too.
 	cacheEntryOverhead = 256
+	// dirEntryOverhead is what one entry of a kept listing is counted for besides the bytes of its name: the
+	// two string headers of a providers.DirEntry on a 64-bit platform (its type is a shared constant).
+	dirEntryOverhead = 32
 )
 
 // ReadCache keeps the outcome of ReadFile calls at a full commit ID, which never changes: the content of a
 // file, that the path is not a regular file in the commit's tree ([providers.ErrPathNotInTree]), or that the
-// file is too large. It is bounded by entries and bytes and evicts the least recently used entry first. It is
-// safe for concurrent use.
+// file is too large; and of ListDir calls the same way: the listing, a path that is not a directory in the
+// tree, or a directory over providers.MaxDirEntries. A tree at a commit ID never changes, so a listing is as
+// safe to keep as a file; a listing and a file read of one path have separate entries. It is bounded by
+// entries and bytes and evicts the least recently used entry first. It is safe for concurrent use.
 //
 // An entry is keyed by the whole RemediationSettings repository entry (URL, provider, target branch and
 // credentials), the commit and the path, so a read through one entry is never answered from another's, even
 // for the same URL. A plain ErrNotFound is never kept: GitProvider also answers it for a commit the host does
 // not have yet, and the GitHub adapter for any 404 or a token it cannot get, so it may not hold on the next
-// read. Branch heads and cluster objects are never cached: the mapping reads them every time. Every read,
-// served from the cache or not, counts against [MaxReads], so the cache never changes a result.
+// read. Branch heads and cluster objects are never cached: the mapping reads them every time. Every read and
+// listing, served from the cache or not, counts against [MaxReads] and [MaxTotalBytes] alike, so the cache
+// never changes a result.
 type ReadCache struct {
 	maxEntries int
 	maxBytes   int64
@@ -72,6 +79,8 @@ type cacheKey struct {
 	repo   [sha256.Size]byte
 	commit string
 	path   string
+	// list is true for a directory listing, so a listing and a file read of one path never share an entry.
+	list bool
 }
 
 type cacheOutcome int
@@ -80,6 +89,7 @@ const (
 	cachedFile cacheOutcome = iota
 	cachedNotInTree
 	cachedTooLarge
+	cachedDir
 )
 
 // cacheEntry is one kept read. Only the content is stored: the path and commit of the file are the key's.
@@ -87,6 +97,7 @@ type cacheEntry struct {
 	key     cacheKey
 	outcome cacheOutcome
 	data    []byte
+	entries []providers.DirEntry
 	cost    int64
 }
 
@@ -131,6 +142,52 @@ func (c *ReadCache) readFile(ctx context.Context, git providers.GitProvider, rep
 	return f, err
 }
 
+// listDir lists dir at commit through git, answering from the cache when it can, as readFile does: a nil
+// cache, or a commit that is not a full object ID, always lists through git. A listing, ErrPathNotInTree and
+// ErrTooLarge (a directory over providers.MaxDirEntries, which no budget changes) are kept, since the tree at a
+// commit ID never changes; any other error, a plain ErrNotFound included, is returned and never kept.
+func (c *ReadCache) listDir(ctx context.Context, git providers.GitProvider, repo [sha256.Size]byte, commit, dir string) (
+	[]providers.DirEntry, error) {
+	if c == nil || !providers.IsObjectID(commit) {
+		return git.ListDir(ctx, commit, dir)
+	}
+	k := cacheKey{repo: repo, commit: commit, path: dir, list: true}
+	if e, ok := c.get(k); ok {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		switch e.outcome {
+		case cachedNotInTree:
+			return nil, errCachedNotInTree
+		case cachedTooLarge:
+			return nil, errCachedTooLarge
+		}
+		return slices.Clone(e.entries), nil
+	}
+	entries, err := git.ListDir(ctx, commit, dir)
+	e := &cacheEntry{key: k}
+	switch {
+	case err == nil && len(entries) <= providers.MaxDirEntries:
+		e.outcome = cachedDir
+		for _, d := range entries {
+			e.cost += int64(len(d.Name)) + dirEntryOverhead
+		}
+		if !c.fits(e.cost + int64(len(k.commit)+len(k.path)) + cacheEntryOverhead) {
+			return entries, nil
+		}
+		e.entries = slices.Clone(entries)
+	case providers.IsPathNotInTree(err):
+		e.outcome = cachedNotInTree
+	case providers.IsTooLarge(err):
+		e.outcome = cachedTooLarge
+	default:
+		// A transient or refused listing, a plain not found, or an adapter that listed more than it may.
+		return entries, err
+	}
+	c.add(e, e.cost+int64(len(k.commit)+len(k.path))+cacheEntryOverhead)
+	return entries, err
+}
+
 // get returns the entry for k and marks it used. An entry never changes once kept, so it can be read without
 // the lock.
 func (c *ReadCache) get(k cacheKey) (*cacheEntry, bool) {
@@ -173,13 +230,27 @@ func (c *ReadCache) put(k cacheKey, f providers.File, err error, limit int) {
 		// the adapter did not refuse, or a file the adapter labelled with another path or commit.
 		return
 	}
-	e.cost = int64(len(f.Data)+len(k.commit)+len(k.path)) + cacheEntryOverhead
-	if c.maxEntries <= 0 || e.cost > c.maxBytes {
+	cost := int64(len(f.Data)+len(k.commit)+len(k.path)) + cacheEntryOverhead
+	if !c.fits(cost) {
+		// Checked before the content is copied, so a file the cache cannot keep is never cloned.
 		return
 	}
 	if e.outcome == cachedFile {
 		e.data = bytes.Clone(f.Data)
 	}
+	c.add(e, cost)
+}
+
+// fits reports whether one entry of the given cost can be kept at all.
+func (c *ReadCache) fits(cost int64) bool { return c.maxEntries > 0 && cost <= c.maxBytes }
+
+// add keeps e at the given cost, unless it alone is over the bounds, and evicts until the bounds hold.
+func (c *ReadCache) add(e *cacheEntry, cost int64) {
+	e.cost = cost
+	if !c.fits(cost) {
+		return
+	}
+	k := e.key
 
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
@@ -968,8 +967,25 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
 		return reconcile.Result{}, nil
 	}
-	if r.OpenRepository != nil && rr.Status.PlanRepository != nil &&
-		(closeOnDelete(rr.Status.Phase) || ptr.Deref(rr.Status.HoldsTarget, false)) {
+	if markDeleting(rr) {
+		// Before the close below: the limits read this request, and count it against the cap, until the
+		// finalizer is gone (breakercounts.go).
+		if err := r.Status().Update(ctx, rr); err != nil {
+			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+		}
+	}
+	closes := r.OpenRepository != nil && rr.Status.PlanRepository != nil &&
+		(closeOnDelete(rr.Status.Phase) || ptr.Deref(rr.Status.HoldsTarget, false))
+	if closes && ended(rr.Status.Phase) {
+		// A request that ended was not active until it was deleted, so another may have been let through
+		// meanwhile: the close waits for a slot under the cap (waitForCapOnDelete).
+		release, res, wait, err := r.waitForCapOnDelete(ctx, rr)
+		if wait || err != nil {
+			return res, err
+		}
+		defer release()
+	}
+	if closes {
 		cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 		err := r.closeChangeRequest(cleanCtx, rr)
 		err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
@@ -984,6 +1000,14 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		default:
 			return r.waitOrFail(ctx, rr, err)
 		}
+	}
+	// The outcomes this request's success cleared are read again before the finalizer goes; until they all are,
+	// the finalizer stays and the deletion is retried.
+	if err := r.restoreCleared(ctx, rr); err != nil {
+		if ctx.Err() == nil && permanentClearError(err) {
+			return r.restoreRefused(ctx, rr, err), nil
+		}
+		return reconcile.Result{}, err
 	}
 	base := rr.DeepCopy()
 	controllerutil.RemoveFinalizer(rr, FinalizerName)
@@ -1143,23 +1167,20 @@ func keptRequestName(rr *remediationv1alpha1.RemediationRequest) string {
 	return rr.Namespace + "/" + rr.Name
 }
 
-// collectorIncidentName matches the name the collector gives an Incident: "incident-" and the 64 lower-case hex
-// digits of its fingerprint (incidents.Name, which the executor does not import: it is analyzer code).
-var collectorIncidentName = regexp.MustCompile(`^incident-[0-9a-f]{64}$`)
-
 // verifiedIncidentName returns the name of the request's Incident when the body may show it unredacted, and ""
 // otherwise. spec.incidentRef is written by whoever created the request, so the name alone proves nothing: a
 // hex secret could be written as "incident-<secret>". The name is kept only when the executor reads an
 // Incident of that name in the request's namespace from the API server (never the cache, so get is enough),
-// its UID is the one in incidentRef, and the name is the one the collector derives from the Incident's
-// fingerprint. Any failure to read it, including a missing permission or a read slower than
+// its UID is the one in incidentRef, and the name is the one the analyzer derives from the Incident's
+// fingerprint and occurrence number (remediationv1alpha1.IncidentName: "incident-<64 hex>", with "-<n>" for
+// occurrence n >= 2; any other suffix is refused before the read). Any failure to read it, including a missing permission or a read slower than
 // IncidentReadTimeout, gives "" and so a redacted name: the body is only less readable, never blocked. The
 // read has a deadline of its own, shorter than the step's, so a stalled API server leaves the step the time to
 // open the pull request; a cancelled step still cancels the read, and the open then fails as it would have.
 func (r *RemediationRequestReconciler) verifiedIncidentName(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) string {
 	ref := rr.Spec.IncidentRef
-	if !collectorIncidentName.MatchString(ref.Name) {
+	if _, _, ok := remediationv1alpha1.ParseIncidentName(ref.Name); !ok {
 		return ""
 	}
 	readCtx, cancel := context.WithTimeout(ctx, incidentReadTimeout(ctx, r.IncidentReadTimeout))
@@ -1173,13 +1194,14 @@ func (r *RemediationRequestReconciler) verifiedIncidentName(ctx context.Context,
 				// error, even one that came as the deadline passed, keeps its own.
 				reason = metav1.StatusReasonTimeout
 			}
-			logf.FromContext(ctx).Info("Failed to read the Incident of RemediationRequest, so its name was redacted",
+			// Logged as an error with the reason only: the API error repeats the name, which may be a secret
+			// written as "incident-<secret>". The name stays redacted (fail closed).
+			logf.FromContext(ctx).Error(nil, "Failed to read the Incident of RemediationRequest, so its name was redacted",
 				"remediationRequest", client.ObjectKeyFromObject(rr), "reason", reason)
 		}
 		return ""
 	}
-	if ref.UID == "" || types.UID(ref.UID) != inc.UID ||
-		"incident-"+strings.TrimPrefix(inc.Spec.Fingerprint, "sha256:") != inc.Name {
+	if ref.UID == "" || types.UID(ref.UID) != inc.UID || !inc.HasDerivedName() {
 		return ""
 	}
 	return inc.Name

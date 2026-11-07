@@ -123,10 +123,17 @@ type countingClient struct {
 	instead func(ctx context.Context) error
 	// mark, when it returns an error, answers a write of the analysis trigger with it without sending it.
 	mark func(obj client.Object) error
+	// create, when it returns an error, answers a create with it without sending it.
+	create func(obj client.Object) error
 }
 
 func (c *countingClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
 	c.creates.Add(1)
+	if c.create != nil {
+		if err := c.create(obj); err != nil {
+			return err
+		}
+	}
 	return c.Client.Create(ctx, obj, opts...)
 }
 
@@ -540,18 +547,31 @@ func TestCapRefusesNewFingerprints(t *testing.T) {
 	if got := testutil.ToFloat64(refusedObservations) - before; got != 3 {
 		t.Fatalf("refused metric grew by %v, want 3", got)
 	}
-	select {
-	case e := <-rec.Events:
-		if !strings.Contains(e, "Warning IncidentCapReached") || !strings.Contains(e, fp(3)) {
-			t.Fatalf("event %q", e)
-		}
-	default:
+	events := capReachedEvents(rec)
+	if len(events) == 0 {
 		t.Fatal("no Warning event")
 	}
-	select {
-	case e := <-rec.Events:
-		t.Fatalf("a second event within the interval: %q", e)
-	default:
+	if !strings.Contains(events[0], "Warning IncidentCapReached") || !strings.Contains(events[0], fp(3)) {
+		t.Fatalf("event %q", events[0])
+	}
+	if len(events) > 1 {
+		t.Fatalf("a second event within the interval: %q", events[1])
+	}
+}
+
+// capReachedEvents drains the events rec holds and returns them without the IncidentCapNear warnings of the
+// trigger passes (closure_test.go tests those).
+func capReachedEvents(rec *corerecord.FakeRecorder) []string {
+	var out []string
+	for {
+		select {
+		case e := <-rec.Events:
+			if !strings.Contains(e, "IncidentCapNear") {
+				out = append(out, e)
+			}
+		default:
+			return out
+		}
 	}
 }
 
@@ -567,13 +587,19 @@ func TestCapEventRepeatsAfterTheInterval(t *testing.T) {
 	r.obs <- immediate(observation(3, 3, 1, 1, now))
 	eventually(t, ns, 1, countIs(1))
 	for _, f := range []int{2, 3} {
-		select {
-		case e := <-rec.Events:
-			if !strings.Contains(e, fp(f)) {
-				t.Fatalf("event %q, want one for %s", e, fp(f))
+		for {
+			select {
+			case e := <-rec.Events:
+				if strings.Contains(e, "IncidentCapNear") {
+					continue
+				}
+				if !strings.Contains(e, fp(f)) {
+					t.Fatalf("event %q, want one for %s", e, fp(f))
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("no Warning event for %s", fp(f))
 			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("no Warning event for %s", fp(f))
+			break
 		}
 	}
 }

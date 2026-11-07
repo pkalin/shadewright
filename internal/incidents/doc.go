@@ -23,6 +23,17 @@ limitations under the License.
 // occurrencesDroppedThrough. Nothing from the cluster goes into the Incident beyond the subject, the reason
 // and the normalized, redacted symptom the collector computed.
 //
+// A Resolved Incident is never analyzed again (#251). An observation of its fingerprint seen more than
+// [RecurrenceWindow] (24 hours) after its resolvedTime, with nothing of it unwritten, opens the next
+// occurrence instead, through the same gate as a new fingerprint: a new Incident named "incident-<hex>-<n>"
+// (remediationv1alpha1.IncidentName) whose spec links it to the one before and whose status starts empty,
+// under the cap like a new fingerprint. Any other observation written to it moves it to Escalated in the same
+// status update (condition Recurred), unless it was seen no later than resolvedTime; an Incident the closure
+// rules resolved by quiet time before any analysis goes back to Open instead (#466). Which Incidents are
+// Resolved is known from load, every trigger pass and each write; the latest occurrence of each fingerprint
+// from the names load lists, so a restart writes there. A later occurrence deleted while running is never
+// created again from memory: its batches are dropped and the newest that exists becomes the latest.
+//
 // A symptom opens its Incident only when it recurs or is immediate (#267). An observation that proves
 // recurrence on its own (its occurrence's latest repeat came at least [RecurAfter] after it
 // began; a total of 2 or more alone is not, as a burst within seconds makes a series too) opens its Incident at once, as does one the collector marks Immediate (a

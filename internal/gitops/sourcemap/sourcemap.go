@@ -41,14 +41,14 @@ const defaultTargetBranch = "main"
 // after the repository has been matched, so the mapping never opens a repository that settings do not name.
 type RepositoryOpener func(ctx context.Context, repo v1alpha1.GitRepository) (providers.GitProvider, error)
 
-// Resolver maps objects to their source. It only reads: Get on the cluster and ReadFile and BranchHead on
-// the repository.
+// Resolver maps objects to their source. It only reads: Get on the cluster and ReadFile, ListDir and
+// BranchHead on the repository.
 type Resolver struct {
 	// Client reads the target, the Flux Kustomization and the GitRepository.
 	Client client.Reader
 	// OpenRepository opens the repository the source URL matched.
 	OpenRepository RepositoryOpener
-	// Cache, when set, keeps file reads at a commit across mappings, such as the freshness rechecks of a
+	// Cache, when set, keeps file reads and directory listings at a commit across mappings, such as the freshness rechecks of a
 	// waiting plan. Branch heads and cluster objects are read every time. Nil reads everything every time.
 	Cache *ReadCache
 }

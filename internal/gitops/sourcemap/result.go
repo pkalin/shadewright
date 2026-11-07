@@ -110,11 +110,13 @@ const (
 	ReasonBranchMismatch Reason = "BranchMismatch"
 	// ReasonBranchNotFound means the target branch does not exist in the repository (NeedsIntervention).
 	ReasonBranchNotFound Reason = "BranchNotFound"
-	// ReasonInvalidPath means a path in the Kustomization or a kustomization file is not a plain relative
-	// path inside the repository (NeedsIntervention).
+	// ReasonInvalidPath means a path in the Kustomization or a kustomization file, or a manifest or base that
+	// the kustomization Flux generates for a path without one would hold, is not a plain relative path inside
+	// the repository, or a listing holds an entry no tree can hold (NeedsIntervention).
 	ReasonInvalidPath Reason = "InvalidPath"
-	// ReasonNoKustomizationFile means a directory has no kustomization file. Flux would generate one from
-	// every manifest in it, which cannot be enumerated through GitProvider reads (NeedsIntervention).
+	// ReasonNoKustomizationFile means a directory a kustomization file lists as a resource has no kustomization
+	// file, as kustomize would refuse, or the Kustomization's path is not a directory in the tree
+	// (NeedsIntervention). A path without one is listed and searched as Flux would generate its kustomization.
 	ReasonNoKustomizationFile Reason = "NoKustomizationFile"
 	// ReasonUnsupportedKustomization means a kustomization file uses more than plain resources: patches,
 	// generators, components, transformers, a namespace or name prefix, or remote resources
@@ -124,7 +126,8 @@ const (
 	// (NeedsIntervention).
 	ReasonFileNotReadable Reason = "FileNotReadable"
 	// ReasonTooManyFiles means the build is deeper or wider than the mapping reads: too many nested
-	// directories, manifests or file reads (NeedsIntervention).
+	// directories (MaxDepth, or MaxListDepth below a path without a kustomization file), manifests, file reads
+	// and listings, or a directory over providers.MaxDirEntries entries (NeedsIntervention).
 	ReasonTooManyFiles Reason = "TooManyFiles"
 	// ReasonInputTooLarge means the build holds more than the mapping reads in all: more than MaxTotalBytes
 	// of files or MaxDocuments YAML documents (NeedsIntervention). A file over what is left of the byte budget

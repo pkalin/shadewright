@@ -20,7 +20,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"path"
 	"reflect"
+	"slices"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
@@ -150,6 +152,14 @@ func tree(ctx context.Context, files map[string][]byte, dir string) (*walker, er
 		data, ok := files[p]
 		return data, ok, nil
 	})
+	// A directory resource whose name ends in .yaml, which only a generated kustomization lists (Load), is
+	// known by the kustomization file Load read in it.
+	w.isDir = func(p string) bool {
+		return slices.ContainsFunc(repopath.KustomizationFileNames, func(n string) bool {
+			_, ok := files[path.Join(p, n)]
+			return ok
+		})
+	}
 	if err := w.walk(ctx, dir, kindKustomization, 0); err != nil {
 		return nil, err
 	}

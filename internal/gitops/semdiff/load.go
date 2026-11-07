@@ -19,12 +19,15 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/pkalin/shadewright/internal/gitops/repopath"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
 // Load reads from git, at commit, every file the kustomization in dir builds from: the kustomization files
-// and the resource and patch files they list, following nested directories and components. The result is
+// and the resource and patch files they list, following nested directories and components. When dir has no
+// kustomization file, the result holds the one Flux would generate for it at dir/kustomization.yaml, built from
+// listings that count against MaxReads and MaxBuildBytes like reads. The result is
 // the Files of an [Input]. dir is the Kustomization's spec.path, relative to the repository root.
 //
 // It refuses with an [*Error] what [Check] would refuse in the tree itself (a field outside the allow-list,
@@ -61,6 +64,37 @@ func Load(ctx context.Context, git providers.GitProvider, commit, dir string) (m
 		downloaded += len(f.Data)
 		return f.Data, true, nil
 	})
+	// A listing counts as a read, and repopath.ListEntryBytes per entry against MaxBuildBytes, as in the
+	// source mapping.
+	w.root = root
+	w.generate = func(ctx context.Context, d string) ([]providers.DirEntry, error) {
+		if reads++; reads > MaxReads {
+			return nil, refuse(ReasonTooLarge, fmt.Sprintf("the build needs more than %d file reads", MaxReads))
+		}
+		entries, err := git.ListDir(ctx, commit, d)
+		shown := "a listed directory"
+		if p, ok := repopath.Join(".", d); ok {
+			shown = "directory " + p
+		}
+		switch repopath.CheckListing(entries, err) {
+		case repopath.ListNotADirectory:
+			return nil, refuse(ReasonFileMissing, shown+" has no kustomization file and is not a directory in the tree")
+		case repopath.ListTooLarge:
+			return nil, refuse(ReasonTooLarge, fmt.Sprintf("%s holds more than %d entries", shown, providers.MaxDirEntries))
+		case repopath.ListInvalidEntry:
+			return nil, refuse(ReasonInvalidReference, shown+" holds an entry that no Git tree can hold")
+		case repopath.ListFailed:
+			// A plain not found too: the host may not have the commit yet, or be failing.
+			retry, _ := providers.RetryAfter(err)
+			return nil, &sourcemap.TransientError{Op: "list " + shown, RetryAfter: retry}
+		}
+		cost := len(entries) * repopath.ListEntryBytes
+		if cost > MaxBuildBytes-downloaded {
+			return nil, refuse(ReasonTooLarge, fmt.Sprintf("the build processes more than %d bytes", MaxBuildBytes))
+		}
+		downloaded += cost
+		return entries, nil
+	}
 	if err := w.walk(ctx, root, kindKustomization, 0); err != nil {
 		return nil, err
 	}

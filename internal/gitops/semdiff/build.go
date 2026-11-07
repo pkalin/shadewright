@@ -17,15 +17,18 @@ package semdiff
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"path"
 	"slices"
+	"strings"
 
 	"sigs.k8s.io/yaml"
 
 	"github.com/pkalin/shadewright/internal/gitops/repopath"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/pkalin/shadewright/internal/providers"
 )
 
 // Limits on a build, so a hostile repository cannot make the check read or render without bound.
@@ -104,6 +107,14 @@ type walker struct {
 	ignoreChecked map[string]bool
 	visits        int
 	buildBytes    int
+	// generate, when set, lists directories so that root, the path rendered, may have no kustomization file:
+	// the walk then generates the one Flux would (Load only; Check finds it in the files it is given).
+	generate repopath.Lister
+	root     string
+	// isDir says whether a resource path is a directory; see collectRefs.
+	isDir func(string) bool
+	// dirResources are the directories the generated kustomization lists, whatever their names end in.
+	dirResources map[string]bool
 }
 
 type dirKind struct{ dir, kind string }
@@ -115,10 +126,12 @@ type refs struct {
 }
 
 func newWalker(read reader) *walker {
-	return &walker{
+	w := &walker{
 		read: read, files: map[string][]byte{}, resources: map[string]bool{},
-		parsed: map[dirKind]*refs{}, ignoreChecked: map[string]bool{},
+		parsed: map[dirKind]*refs{}, ignoreChecked: map[string]bool{}, dirResources: map[string]bool{},
 	}
+	w.isDir = func(p string) bool { return w.dirResources[p] }
+	return w
 }
 
 // walk visits dir, which must hold a kustomization file of kind want, and everything it refers to. Every
@@ -148,13 +161,15 @@ func (w *walker) walk(ctx context.Context, dir, want string, depth int) error {
 	if w.buildBytes += r.bytes; w.buildBytes > MaxBuildBytes {
 		return refuse(ReasonTooLarge, fmt.Sprintf("the build processes more than %d bytes", MaxBuildBytes))
 	}
+	// A directory below dir adds one level per directory passed, as in the source mapping, so a base found
+	// deep below a path without a kustomization file is bounded like a chain of kustomizations.
 	for _, d := range r.dirs {
-		if err := w.walk(ctx, d, kindKustomization, depth+1); err != nil {
+		if err := w.walk(ctx, d, kindKustomization, depth+repopath.NestDepth(dir, d)); err != nil {
 			return err
 		}
 	}
 	for _, d := range r.components {
-		if err := w.walk(ctx, d, kindComponent, depth+1); err != nil {
+		if err := w.walk(ctx, d, kindComponent, depth+repopath.NestDepth(dir, d)); err != nil {
 			return err
 		}
 	}
@@ -236,6 +251,12 @@ func (w *walker) parse(ctx context.Context, dir, want string) (*refs, error) {
 		}
 		name, data = p, d
 	}
+	if name == "" && w.generate != nil && dir == w.root && want == kindKustomization {
+		var err error
+		if name, data, err = w.generated(ctx, dir); err != nil {
+			return nil, err
+		}
+	}
 	if name == "" {
 		return nil, w.noKustomization(ctx, dir)
 	}
@@ -247,12 +268,65 @@ func (w *walker) parse(ctx context.Context, dir, want string) (*refs, error) {
 	if err := checkHeader(name, k, want); err != nil {
 		return nil, err
 	}
-	r, err := collectRefs(name, dir, k, w.resources)
+	r, err := collectRefs(name, dir, k, w.resources, w.isDir)
 	if err != nil {
 		return nil, err
 	}
 	r.bytes = len(data)
 	return r, nil
+}
+
+// generatedFile is the name Flux gives the kustomization it generates for a path without one.
+const generatedFile = "kustomization.yaml"
+
+// generated returns the kustomization file Flux's kustomize-controller generates for dir, which has none: plain
+// resources only, listing every manifest below dir and every directory below it with its own kustomization
+// file ([repopath.Generate]). It is added to the build's files under generatedFile, so [Check] renders what Flux
+// renders without listing anything itself.
+func (w *walker) generated(ctx context.Context, dir string) (string, []byte, error) {
+	var listed []string
+	resources, err := repopath.Generate(ctx, dir, func(ctx context.Context, d string) ([]providers.DirEntry, error) {
+		listed = append(listed, d)
+		return w.generate(ctx, d)
+	})
+	if s, ok := errors.AsType[*repopath.Stop](err); ok {
+		reason := ReasonInvalidReference
+		switch s.Kind {
+		case repopath.StopTooDeep:
+			reason = ReasonTooLarge
+		case repopath.StopSourceIgnore:
+			reason = ReasonSourceIgnored
+		}
+		return "", nil, refuse(reason, s.Error())
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	// Generate stops at a .sourceignore file in any directory it listed, so none needs to be read again.
+	for _, d := range listed {
+		w.ignoreChecked[d] = true
+	}
+	refs := make([]string, 0, len(resources))
+	for _, r := range resources {
+		if r.Dir {
+			w.dirResources[r.Path] = true
+		}
+		rel := r.Path
+		if dir != "." {
+			rel = strings.TrimPrefix(r.Path, dir+"/")
+		}
+		refs = append(refs, rel)
+	}
+	// Marshalled, not written as text, so a name such as "true" or "1" stays a string.
+	data, err := yaml.Marshal(map[string]any{"apiVersion": apiKustomization, "kind": kindKustomization, keyResources: refs})
+	if err != nil {
+		return "", nil, refuse(ReasonInvalidInput, "the kustomization Flux generates for "+dir+" cannot be written")
+	}
+	name := path.Join(dir, generatedFile)
+	if len(w.files) >= MaxFiles {
+		return "", nil, refuse(ReasonTooLarge, fmt.Sprintf("the build reads more than %d files", MaxFiles))
+	}
+	return name, data, nil
 }
 
 // noKustomization explains why dir has no kustomization file. A resource that does not end in .yaml or .yml
@@ -296,7 +370,9 @@ func checkHeader(name string, k map[string]any, want string) error {
 }
 
 // collectRefs validates the references of a kustomization file in dir.
-func collectRefs(name, dir string, k map[string]any, resources map[string]bool) (*refs, error) {
+// isDir, when it holds for a resource, makes it a directory even though its name ends in .yaml or .yml, as
+// kustomize decides by what is on disk.
+func collectRefs(name, dir string, k map[string]any, resources map[string]bool, isDir func(string) bool) (*refs, error) {
 	bad := refuse(ReasonInvalidReference, name+" refers to something that is not a relative path inside the repository")
 	r := &refs{}
 	list := func(key string) ([]string, error) {
@@ -321,7 +397,7 @@ func collectRefs(name, dir string, k map[string]any, resources map[string]bool) 
 		return nil, err
 	}
 	for _, p := range res {
-		if repopath.IsManifest(p) {
+		if repopath.IsManifest(p) && !isDir(p) {
 			r.files = append(r.files, p)
 			resources[p] = true
 		} else {

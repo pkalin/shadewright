@@ -118,20 +118,6 @@ func settleLock(rr *remediationv1alpha1.RemediationRequest) {
 	}
 }
 
-// backfillLock writes status.holdsTarget once on a request decided before the field existed, from derivedHold,
-// so the requests of an older release keep the lock their status gives them; one refused then (ended without a
-// plan digest) gets false, so the limits' lock list (status.holdsTarget!=false) stops reading it.
-func (r *RemediationRequestReconciler) backfillLock(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	if rr.Status.HoldsTarget != nil || (rr.Status.PlanDigest == "" && !ended(rr.Status.Phase)) {
-		return nil
-	}
-	rr.Status.HoldsTarget = new(derivedHold(rr))
-	if err := r.Status().Update(ctx, rr); err != nil {
-		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
-	}
-	return nil
-}
-
 // checkHeld looks up the pull request of a request that stopped and still holds the lock, by its branch and
 // marker. It records one the status does not record yet; it releases the lock when that pull request is
 // closed or merged, or when the branch has none of the request's own (and none is recorded). An open one keeps

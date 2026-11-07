@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -87,11 +88,11 @@ import (
 // running probe nor frees a slot (invariant 5). It fails closed: when the settings
 // or the requests cannot be read, or there is no API server reader, no request is let through.
 //
-// The requests are listed with field selectors on status.phase, status.holdsTarget and status.breakerProbe
-// (#293, see limitsSelectors), so a request that ended Denied, Cancelled or Superseded, released or never took
-// the lock and is not a probe is never read, and each list is read in pages of limitsPageSize. The breaker
-// still reads every success and failure. All lists are read within the check's
-// deadline (CheckTimeout); one that runs out lets nothing through.
+// The requests are listed with field selectors on status.phase, status.holdsTarget and status.breakerCounts
+// (#293, #390, see limitsSelectors), so a request that ended, released or never took the lock and whose outcome
+// the breaker no longer needs (breakercounts.go) is never read, and each list is read in pages of
+// limitsPageSize. All lists are read within the check's deadline (CheckTimeout); one that runs out lets nothing
+// through.
 //
 // Only a request the policy check allows is held back: refusals (Denied, NeedsIntervention) are written at
 // once. A request held back keeps no phase (or Pending), gets the condition Queued with the limit as the
@@ -167,6 +168,11 @@ type limitsState struct {
 	// or deleted): the lock then lasts until a person or a look-up of checkHeld frees it, so the request
 	// waits longer between checks and is woken by lockWaiters when the holder changes.
 	stoppedLock bool
+	// clear is what the check found the breaker no longer needs (staleOutcomes), cleared after the decision.
+	clear clearing
+	// endedDeleting are the active requests, other than the one checked, that ended and are being deleted
+	// (waitForCapOnDelete).
+	endedDeleting []types.UID
 }
 
 // recheckDelay is how long a request held back by s waits before it checks the limits again.
@@ -190,15 +196,24 @@ func progresses(rr *remediationv1alpha1.RemediationRequest) bool {
 	return beforeMerge(rr.Status.Phase) && rr.Status.PlanDigest != ""
 }
 
-// active reports whether a request counts against the lock and the cap: it progresses, or it is being deleted
-// and still holds the finalizer that closes its pull request. The limits never read a request that ended
-// Denied, Cancelled or Superseded, holds no lock and is not a probe (limitsSelectors), so such a request is not
-// counted while it is being deleted.
+// active reports whether a request counts against the cap: it progresses, or it is being deleted and still
+// holds the finalizer, and that finalizer may still write to Git (deleteMayWrite). A request that ended in
+// another phase and released the lock has a pull request known merged or closed (or none of its own), and its
+// finalizer writes nothing to Git, so it is not counted, whichever list read it.
 func active(rr *remediationv1alpha1.RemediationRequest) bool {
 	if !rr.DeletionTimestamp.IsZero() {
-		return controllerutil.ContainsFinalizer(rr, FinalizerName)
+		return controllerutil.ContainsFinalizer(rr, FinalizerName) && (!ended(rr.Status.Phase) || deleteMayWrite(rr))
 	}
 	return progresses(rr)
+}
+
+// deleteMayWrite reports whether the finalizer of a request that ended may write to Git: it closes the pull
+// request of a phase that may have left one open (closeOnDelete: NeedsIntervention, Expired) and of one that
+// holds the lock (finalize). Such a request is read while it is being deleted: by the lock's list when it holds
+// the lock, else by the breaker's list once its finalizer marked it (markDeleting), which it does before the
+// close.
+func deleteMayWrite(rr *remediationv1alpha1.RemediationRequest) bool {
+	return closeOnDelete(rr.Status.Phase) || holdsLock(rr)
 }
 
 // Outcomes of a request for the circuit breaker.
@@ -281,6 +296,9 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		}
 		if e.active {
 			s.active++
+			if e.deleting && e.ended {
+				s.endedDeleting = append(s.endedDeleting, uid)
+			}
 		}
 		if e.target == rr.Spec.TargetRef.UID && e.lock {
 			locked = true
@@ -307,6 +325,7 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 	}
 	s.failures = len(inRow)
 	s.circuit, s.probing = r.breaker(inRow, lastFailure, probes)
+	s.clear = staleOutcomes(seen)
 	switch {
 	case s.circuit == circuitOpen:
 		s.reason = ReasonCircuitOpen
@@ -326,9 +345,10 @@ const limitsPageSize = 100
 
 // Field selectors of RemediationRequest: the selectable fields of the CRD (see the markers on the type).
 const (
-	phaseField = "status.phase"
-	probeField = "status.breakerProbe"
-	lockField  = "status.holdsTarget"
+	phaseField  = "status.phase"
+	probeField  = "status.breakerProbe"
+	lockField   = "status.holdsTarget"
+	countsField = "status.breakerCounts"
 )
 
 // limitsEntry is what the limits need of one request, so a check keeps no whole requests in memory except the
@@ -339,42 +359,59 @@ type limitsEntry struct {
 	lock    bool
 	target  remediationv1alpha1.UID
 	outcome outcomeClass
-	// at is lastPhaseTransitionTime, set when outcome is not outcomeNone.
+	// at is lastPhaseTransitionTime, zero when the request has none.
 	at time.Time
 	// probe is the request when status.breakerProbe is set.
 	probe *remediationv1alpha1.RemediationRequest
+	// counts is status.breakerCounts true; name and resourceVersion are what clearStale writes with.
+	counts          bool
+	name            string
+	resourceVersion string
+	uid             types.UID
+	// final is a request in Succeeded, the only success that clears older outcomes (staleOutcomes).
+	final bool
+	// deleting is a request being deleted; ended is a request in one of endedPhases.
+	deleting bool
+	ended    bool
 }
 
-// limitsSelectors are the three lists the limits read (#293), in this order:
+// neutralProbe reports whether the entry is a probe that ended without a success or a failure.
+func (e limitsEntry) neutralProbe() bool {
+	return e.probe != nil && e.outcome == outcomeNone && ended(e.probe.Status.Phase)
+}
+
+// limitsSelectors are the three lists the limits read (#293, #390), in this order:
 //
-//   - every request whose phase is not one of unreadPhases (Denied, Cancelled, Superseded): no phase and
-//     Pending, every phase the executor still moves on, every success and failure, Expired, and any phase
-//     added later or written by hand (an exclusion list, so a new phase is read until it is classified). This
-//     is one paged list, one consistent snapshot: the cap, the requests the executor moves on (which hold the
-//     lock whatever status.holdsTarget says) and the breaker's outcomes come from the same moment, so a request
-//     that changes phase while the limits are read is never seen twice or in two states;
+//   - every request whose phase is not one of endedPhases: no phase and Pending, every phase the executor
+//     still moves on, and any phase added later or written by hand (an exclusion list, so a new phase is read
+//     until it is classified). This is one paged list, one consistent snapshot: the cap and the requests the
+//     executor moves on (which hold the lock whatever status.holdsTarget says) come from the same moment;
 //   - every request whose status.holdsTarget is not false, in any phase: the holders of the lock (holdsLock),
 //     a stopped one included, also one whose phase was set to Denied by hand, and those that do not have the
 //     field yet (a missing field is the empty value, which is not false). The executor writes the field on
 //     every request it decides (true with the allowed decision, false with a refusal) and once on those
-//     written before it existed (backfillLock), so after that pass only undecided requests lack it;
-//   - every probe (status.breakerProbe=true), also those that ended Denied, Cancelled or Superseded.
+//     written before it existed (backfill), so after that pass only undecided requests lack it;
+//   - every request whose status.breakerCounts is not false (breakercounts.go): the outcomes the breaker still
+//     needs (the latest request in Succeeded and every outcome after it), every probe still running, every
+//     request being deleted whose finalizer may close a pull request (markDeleting), and every request not
+//     classified yet (one that has not ended, or ended before the field existed: a missing field is not false,
+//     so it is read).
 //
-// A request that ended Denied, Cancelled or Superseded, holds no lock (status.holdsTarget false) and is not a
-// probe is never read: it is not active (its deletion makes no Git write, so even while it holds the
-// finalizer it is not counted against the cap), not an outcome and not a holder. The breaker still reads every
-// success and failure, so its reads grow with those (not with refusals and other neutral ends).
+// A request that ended, holds no lock (status.holdsTarget false) and whose outcome the breaker does not need
+// (status.breakerCounts false) is never read: it is not active (not counted against the cap while it is being
+// deleted, see active), not an outcome the breaker needs and not a holder. So the reads grow with the requests
+// that still run, hold the lock or are not classified yet, not with the history of ended ones.
 //
-// The lock and probe lists are read after the first; a later read of a request replaces an earlier one, so a
+// The lock and breaker lists are read after the first; a later read of a request replaces an earlier one, so a
 // request seen twice counts in its newer state, and one that left the first list in between is still read
-// when it holds the lock or is a probe.
+// when it holds the lock or the breaker needs it.
 func limitsSelectors() []fields.Selector {
-	read := make([]fields.Selector, 0, len(unreadPhases))
-	for _, p := range unreadPhases {
+	read := make([]fields.Selector, 0, len(endedPhases))
+	for _, p := range endedPhases {
 		read = append(read, fields.OneTermNotEqualSelector(phaseField, string(p)))
 	}
 	return []fields.Selector{fields.AndSelectors(read...), fields.OneTermNotEqualSelector(lockField, "false"),
-		fields.OneTermEqualSelector(probeField, "true")}
+		fields.OneTermNotEqualSelector(countsField, "false")}
 }
 
 // readLimits reads the requests of namespace that the limits need (limitsSelectors), each list from the API
@@ -382,18 +419,19 @@ func limitsSelectors() []fields.Selector {
 func (r *RemediationRequestReconciler) readLimits(ctx context.Context, namespace string) (
 	map[types.UID]limitsEntry, error) {
 	seen := map[types.UID]limitsEntry{}
-	sels := limitsSelectors()
-	for i, sel := range sels {
-		// The probes are kept from the last list, which holds every probe in its newest state, so each is copied
-		// once.
-		probes := i == len(sels)-1
+	for _, sel := range limitsSelectors() {
 		err := r.listPages(ctx, namespace, sel, func(o *remediationv1alpha1.RemediationRequest) {
 			e := limitsEntry{active: active(o), lock: holdsLock(o), target: o.Spec.TargetRef.UID,
-				outcome: breakerOutcome(o)}
-			if e.outcome != outcomeNone {
+				outcome: breakerOutcome(o), counts: ptr.Deref(o.Status.BreakerCounts, false), name: o.Name,
+				resourceVersion: o.ResourceVersion, uid: o.UID, deleting: !o.DeletionTimestamp.IsZero(),
+				ended: ended(o.Status.Phase)}
+			e.final = e.outcome == outcomeSuccess && o.Status.Phase == remediationv1alpha1.PhaseSucceeded
+			if o.Status.LastPhaseTransitionTime != nil {
 				e.at = o.Status.LastPhaseTransitionTime.Time
 			}
-			if probes {
+			if o.Status.BreakerProbe {
+				// Every probe the breaker needs is in the last list, in its newest state, which replaces a copy
+				// from an earlier list.
 				e.probe = o.DeepCopy()
 			}
 			seen[o.UID] = e
@@ -489,11 +527,8 @@ var (
 	// neutralPhases end a request without saying whether its change works.
 	neutralPhases = []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseExpired,
 		remediationv1alpha1.PhaseDenied, remediationv1alpha1.PhaseCancelled, remediationv1alpha1.PhaseSuperseded}
-	// unreadPhases are the neutral ends the limits do not list unless the request holds the lock or is a probe
-	// (limitsSelectors). Expired is read: its deletion may still close a pull request (closeOnDelete).
-	unreadPhases = []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseDenied,
-		remediationv1alpha1.PhaseCancelled, remediationv1alpha1.PhaseSuperseded}
-	// endedPhases are the phases that end a probe (ended).
+	// endedPhases are the phases that end a probe (ended), and those the first list of the limits leaves out
+	// (limitsSelectors).
 	endedPhases = slices.Concat(successPhases, failurePhases, neutralPhases)
 )
 
@@ -518,7 +553,9 @@ func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *re
 	return reconcile.Result{RequeueAfter: s.recheckDelay()}, nil
 }
 
-// setPhase sets the request's phase and, when it changes, lastPhaseTransitionTime to now.
+// setPhase sets the request's phase and, when it changes, lastPhaseTransitionTime to now and, when the request
+// ended, status.breakerCounts (classifyBreaker). That reads the plan digest and status.breakerProbe, so a caller
+// sets those first.
 func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.RemediationRequest,
 	phase remediationv1alpha1.RemediationPhase) {
 	if rr.Status.Phase == phase && rr.Status.LastPhaseTransitionTime != nil {
@@ -527,41 +564,96 @@ func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.Remediat
 	rr.Status.Phase = phase
 	t := metav1.NewMicroTime(r.now())
 	rr.Status.LastPhaseTransitionTime = &t
+	// The breaker's watermark is set in the same status write that ends the request (breakercounts.go).
+	classifyBreaker(rr)
+}
+
+// waitForCapOnDelete holds back the Git write of the finalizer of a request that ended (the close of its pull
+// request) while the cap is reached without it. Such a request was not active until it was deleted, so a check
+// of the limits made before its finalizer marked it (markDeleting) may have let another request through in its
+// slot. Under the admission lock it checks the limits, which now read this request: the others that count are
+// the active ones, less those that ended and are being deleted but are not closing now (they wait here and make
+// no Git write, so two of them never wait on each other). When fewer than maxConcurrentRemediations count, the
+// request is recorded as closing until release is called and the close goes on; else wait is true and the
+// deletion is checked again after admissionRecheckDelay without writing. A failure to read the limits is
+// returned with wait true (fail closed: no close, retried with backoff); missing settings let the close go on,
+// since it then finds no repository. The record of closing requests is the leader's own: a new leader starts
+// with none, after the old one stopped.
+func (r *RemediationRequestReconciler) waitForCapOnDelete(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	release func(), res reconcile.Result, wait bool, err error) {
+	r.admitMu.Lock()
+	defer r.admitMu.Unlock()
+	limCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
+	s, err := r.checkLimits(limCtx, rr)
+	err = boundErr(ctx, limCtx, "check of the limits", err)
+	cancel()
+	switch {
+	case errors.Is(err, errSettingsMissing):
+	case err != nil:
+		return nil, reconcile.Result{}, true, err
+	default:
+		n := s.active
+		for _, uid := range s.endedDeleting {
+			if _, closing := r.closingOnDelete[uid]; !closing {
+				n--
+			}
+		}
+		if n >= s.limit {
+			logf.FromContext(ctx).Info("Waiting for a slot under maxConcurrentRemediations before closing the pull "+
+				"request of a deleted RemediationRequest", "remediationRequest", client.ObjectKeyFromObject(rr),
+				"active", n, "limit", s.limit)
+			return nil, reconcile.Result{RequeueAfter: admissionRecheckDelay}, true, nil
+		}
+	}
+	if r.closingOnDelete == nil {
+		r.closingOnDelete = map[types.UID]struct{}{}
+	}
+	r.closingOnDelete[rr.UID] = struct{}{}
+	return func() {
+		r.admitMu.Lock()
+		delete(r.closingOnDelete, rr.UID)
+		r.admitMu.Unlock()
+	}, reconcile.Result{}, false, nil
 }
 
 // holdBack checks the limits for a request about to go through the policy check, and holds it back (Queued)
 // when one does not let it through. stop means the caller must return res and err without deciding; else probe
 // is whether the request goes through as the breaker's probe (the caller marks it so in the status write that
 // lets it through). A failure
-// to read the limits stops too, with the error, so the request is retried with backoff (fail closed).
+// to read the limits stops too, with the error, so the request is retried with backoff (fail closed). clr is
+// what a check that read every list found the breaker no longer needs; the caller clears it (clearStale) after
+// its decision is written and outside the admission lock, so an admission never waits for that clearing.
 //
 // queued is the check of a request that is already Queued, made in place of the policy check so that a
 // waiting request does not read Git. Once the limits let it through, Queued is removed (written at once, so it
 // is not left behind when the policy check then fails for a while) and the policy check runs. Missing
 // settings let it go on as well: the policy check denies the request then.
 func (r *RemediationRequestReconciler) holdBack(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	queued bool) (res reconcile.Result, probe, stop bool, err error) {
+	queued bool) (res reconcile.Result, probe, stop bool, clr clearing, err error) {
 	limCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
 	s, err := r.checkLimits(limCtx, rr)
 	err = boundErr(ctx, limCtx, "check of the limits", err)
 	cancel()
+	if err == nil {
+		clr = s.clear
+	}
 	pass := queued && errors.Is(err, errSettingsMissing)
 	if !pass {
 		recordLimits(s, err)
 		if err != nil {
-			return reconcile.Result{}, false, true, err
+			return reconcile.Result{}, false, true, clearing{}, err
 		}
 		if s.reason != "" {
 			res, err = r.waitForLimits(ctx, rr, s)
-			return res, false, true, err
+			return res, false, true, clr, err
 		}
 	}
 	if queued && meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionQueued) != nil {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionQueued)
 		if err := r.Status().Update(ctx, rr); err != nil {
-			return reconcile.Result{}, false, true, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
+			return reconcile.Result{}, false, true, clr, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
 				rr.Namespace, rr.Name, err)
 		}
 	}
-	return reconcile.Result{}, s.probe(), false, nil
+	return reconcile.Result{}, s.probe(), false, clr, nil
 }

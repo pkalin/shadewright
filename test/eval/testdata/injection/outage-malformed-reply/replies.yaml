@@ -1,0 +1,10 @@
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    content: 'I am sorry, I cannot produce JSON today.'
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    content: 'still not JSON'
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    content: '{"summary":'

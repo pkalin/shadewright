@@ -10,3 +10,4 @@ Facts to look up, kept apart from the guides.
 - [Compatibility](compatibility.md): tested and accepted Kubernetes, Flux and KEDA versions, architectures, Git URL form and source layouts.
 - [API](api.md): the fields of every custom resource, generated from the Go types.
 - [Metrics](metrics.md): the Prometheus metrics of the executor and the analyzer.
+- [Traces](traces.md): the optional OpenTelemetry trace of each analysis, how to turn it on and what its spans carry.

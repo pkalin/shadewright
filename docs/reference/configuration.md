@@ -117,6 +117,7 @@ Flags are passed as container args. A flag given twice takes its last value. The
 | --- | --- | --- |
 | `POD_NAMESPACE` | both | Default of `--namespace` |
 | `POD_NAME` | analyzer | The Pod the cap Warning event is about. Without it (running outside a cluster) the cap is only logged and counted |
+| `OTEL_TRACES_EXPORTER`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and the other `OTEL_*` variables | analyzer | The OpenTelemetry trace of each analysis, off unless `OTEL_TRACES_EXPORTER=otlp`; see the [traces reference](traces.md). The chart value `analyzer.tracing.endpoint` sets them |
 
 ### Values with no flag
 
@@ -190,7 +191,7 @@ An action contributed by an integration module (`AdjustKedaMaxReplicas` needs `k
 
 `config/default` patches both Deployments to serve metrics on `:8443` over HTTPS and creates the Services `shadewright-executor-metrics-service` and `shadewright-analyzer-metrics-service` (port `https`, 8443). With `--metrics-secure=true` each request is authenticated by a TokenReview and authorized by a SubjectAccessReview. A scraper therefore needs a ServiceAccount token, and that identity needs the `get` verb on the non-resource URL `/metrics`: the ClusterRole `shadewright-metrics-reader` grants it, and **nothing binds it by default**, so bind it to your Prometheus ServiceAccount.
 
-The shipped NetworkPolicies also gate the network: the namespace is default-deny for ingress and egress, and ingress to port 8443 is allowed only from namespaces labeled `metrics: enabled`. Egress for both components is limited to cluster DNS and TCP 443 and 6443 (the Kubernetes API, Git host and Key Vault are on those ports). With the chart value `networkPolicy.analyzer.prometheus.enabled` (off by default) the analyzer, and only the analyzer, gets one more rule, to the Prometheus Pods you name in one namespace on one port (default 9090); see the chart README.
+The shipped NetworkPolicies also gate the network: the namespace is default-deny for ingress and egress, and ingress to port 8443 is allowed only from namespaces labeled `metrics: enabled`. Egress for both components is limited to cluster DNS and TCP 443 and 6443 (the Kubernetes API, Git host and Key Vault are on those ports). With the chart value `networkPolicy.analyzer.prometheus.enabled` (off by default) the analyzer, and only the analyzer, gets one more rule, to the Prometheus Pods you name in one namespace on one port (default 9090); see the chart README. `networkPolicy.analyzer.traceCollector.enabled` (off by default) adds the same kind of rule to the OpenTelemetry collector of the [analysis traces](traces.md) (default port 4317).
 
 **DNS egress profile (chart only).** One value, `networkPolicy.dns`, decides where port 53 (UDP and TCP) is open, and the analyzer policy, the executor policy and the NetworkPolicy of the `helm test` Pod all use that same rule, so the test cannot pass where the workloads could not resolve. Pick the profile that matches the resolver your Pods query (`kubectl exec` into a Pod and read `/etc/resolv.conf`):
 

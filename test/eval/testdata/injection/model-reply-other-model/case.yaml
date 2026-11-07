@@ -1,0 +1,5 @@
+name: model-reply-other-model
+source: model-reply
+attack: A reply names another model than the one configured for the role (a swapped or proxied deployment). Its content is a valid proposal and must still be refused.
+expect:
+  reason: UnexpectedModel

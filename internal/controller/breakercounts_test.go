@@ -983,10 +983,7 @@ func TestRestoreRefusedIsVisible(t *testing.T) {
 	}
 	select {
 	case e := <-events.Events:
-		if !strings.HasPrefix(e, "Warning "+ReasonBreakerRestoreRefused) {
-			t.Fatalf("event = %q, want a Warning %s", e, ReasonBreakerRestoreRefused)
-		}
+		t.Fatalf("event %q recorded; the executor writes only the kill switch's Events", e)
 	default:
-		t.Fatal("no Event recorded")
 	}
 }

@@ -60,14 +60,15 @@ The executor runs steps 1 to 7; step 8 is planned (section 6). Every Git write n
 
 **What can go wrong: a Kustomization that waits.** Flux includes workload health in Ready only when the Kustomization sets `wait: true` or `healthChecks`. A Kustomization that waits on a broken workload stays not Ready, so it is refused. A Kustomization delivering workloads Shadewright should fix must therefore not wait on them (the fleet's `apps` Kustomizations do not). Accepting applied-but-unhealthy objects needs its own ADR ([#259](https://github.com/pkalin/shadewright/issues/259)).
 
-**What can go wrong: hostile or huge Git contents.** Git contents are untrusted, so the mapping bounds what it parses:
+**What can go wrong: hostile or huge Git contents.** Git contents are untrusted, so the mapping bounds the file contents it downloads, caches and parses:
 
 - Besides the limits of ADR-0012 on depth, files, reads and file size (1 MiB), one mapping reads at most 16 MiB in all and decodes at most 4096 YAML documents (see 8.5). Past either, it stops with `NeedsIntervention` and reason `InputTooLarge`.
-- The byte budget is checked once a file has been read, so it bounds parsing, not the download or the read cache ([#298](https://github.com/pkalin/shadewright/issues/298)).
+- Each read asks the Git provider for at most what is left of the byte budget (and at most 1 MiB). The provider checks the size the host reports before downloading (the tree entry, for GitHub), so a file past the budget is neither downloaded nor kept in the read cache, and a cached file is checked against the budget the same way. A build of exactly 16 MiB resolves; past it, the mapping stops with `InputTooLarge`, also when the file would be over 1 MiB too, so a cold and a warm cache give the same reason. A missing file costs nothing and is never refused for the budget ([#298](https://github.com/pkalin/shadewright/issues/298)).
+- The budget counts file contents only. The tree listings the GitHub adapter reads to find a file are bounded per call (the adapter's JSON body limit) and in number by the read limit, not by the 16 MiB. The semantic diff's loader asks for what is left of its own 16 MiB budget the same way (8.2.2).
 - It decodes one document at a time and keeps only the declaration.
 - It stops with `AmbiguousDeclaration` at the first document that makes the match ambiguous (a second declaration, or one in another version or without a namespace), instead of reading the rest of the build.
 
-Because of this early stop, the reason reported can depend on file order. A near match or second declaration in an earlier file is reported before a problem in a later file (invalid YAML, a missing file, a budget run out). Every one of them is `NeedsIntervention`.
+Because of this early stop, the reason reported can depend on file order. A near match or second declaration in an earlier file is reported before a problem in a later file (invalid YAML, a missing file, a budget run out). Every one of them is `NeedsIntervention`. Near the end of the byte budget, a `.sourceignore` file or a file over 1 MiB is reported as `InputTooLarge`, since its size is not asked for.
 
 ### 8.2.2. Steps 4 and 5: the semantic diff check
 
@@ -192,7 +193,7 @@ sequenceDiagram
 
 | Topic | Detail |
 | --- | --- |
-| Source mapping budget | 16 MiB read in all (kustomization and `.sourceignore` lookups and cached reads included); 4096 YAML documents decoded |
+| Source mapping budget | 16 MiB read in all (kustomization and `.sourceignore` lookups and cached reads included), bounding the file contents downloaded, cached and parsed (tree listings are bounded per call and by the read limit); 4096 YAML documents decoded |
 | YAML documents counted | Ones holding only comments or blank lines are counted; a separator with nothing before it is skipped by the reader and never decoded |
 | File size limit | 1 MiB per file, in the source mapping and in the adapter's reads |
 | Reason when a budget runs out | `InputTooLarge`, a `NeedsIntervention` |

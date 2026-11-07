@@ -50,8 +50,10 @@ const (
 	// (providers.ErrTooLarge); the mapping checks the size again in case an adapter does not.
 	MaxFileBytes = providers.MaxFileBytes
 	// MaxTotalBytes is how many bytes one mapping reads in all, kustomization and .sourceignore lookups and
-	// cached reads included, so that many files near MaxFileBytes cannot add up without bound. The semantic
-	// diff takes its render budget from it (semdiff.MaxBuildBytes).
+	// cached reads included, so that many files near MaxFileBytes cannot add up without bound. Each read asks
+	// the provider for at most what is left of it, so the budget bounds what is downloaded, cached and parsed,
+	// and a build of exactly MaxTotalBytes resolves. The semantic diff takes its render budget from it
+	// (semdiff.MaxBuildBytes).
 	MaxTotalBytes = 16 << 20
 	// MaxDocuments is how many YAML documents one mapping decodes in all manifest files, and [ReadField] in
 	// its one file, ones holding only comments or blank lines included, so that a file of many small
@@ -228,24 +230,29 @@ func (w *walker) read(ctx context.Context, p string) (providers.File, *Result, e
 	}
 	// A read from the cache counts too, so the cache never changes where the budget runs out.
 	w.reads++
-	f, err := w.cache.readFile(ctx, w.git, w.repo, w.commit, p)
+	// The provider, or the cache, refuses a file larger than what is left of the budget before downloading it,
+	// so the mapping downloads, caches and parses at most MaxTotalBytes.
+	limit := min(MaxFileBytes, MaxTotalBytes-w.bytes)
+	f, err := w.cache.readFile(ctx, w.git, w.repo, w.commit, p, limit)
 	if providers.IsNotFound(err) {
+		// A missing file costs nothing, so it is never refused for the budget.
 		r := needsIntervention(reasonFileNotFound, "%s does not exist", p)
 		return providers.File{}, &r, nil
 	}
 	if err != nil && !providers.IsTooLarge(err) {
 		return providers.File{}, nil, transient("read "+p, err)
 	}
-	if err != nil || len(f.Data) > MaxFileBytes {
+	if err != nil || len(f.Data) > limit {
+		if limit < MaxFileBytes {
+			// Over what is left of the budget. Whether it is also over MaxFileBytes is not known, nor asked:
+			// a cold and a warm cache give this one reason alike.
+			return providers.File{}, new(needsIntervention(ReasonInputTooLarge,
+				"the build reads more than %d bytes in all; %s was not downloaded", MaxTotalBytes, p)), nil
+		}
 		r := needsIntervention(ReasonFileNotReadable, "%s is larger than %d bytes", p, MaxFileBytes)
 		return providers.File{}, &r, nil
 	}
-	// The provider has already downloaded the file, at most MaxFileBytes, so the total can exceed the budget
-	// by less than one file before the mapping stops.
-	if w.bytes += len(f.Data); w.bytes > MaxTotalBytes {
-		return providers.File{}, new(needsIntervention(ReasonInputTooLarge,
-			"the build reads more than %d bytes", MaxTotalBytes)), nil
-	}
+	w.bytes += len(f.Data)
 	return f, nil, nil
 }
 

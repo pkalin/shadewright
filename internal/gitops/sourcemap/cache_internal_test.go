@@ -28,28 +28,37 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
-// countingGit serves files of a fixed size at any commit and counts ReadFile calls per path.
+// countingGit serves files of a fixed size at any commit, refuses one over the read's limit as a provider
+// would (before downloading it), and counts ReadFile calls, their limits and the bytes served per path.
 type countingGit struct {
 	providers.GitProvider
 	size int
 
-	mu    sync.Mutex
-	reads map[string]int
+	mu     sync.Mutex
+	reads  map[string]int
+	limits map[string][]int
+	served map[string]int
 }
 
-func newCountingGit(size int) *countingGit { return &countingGit{size: size, reads: map[string]int{}} }
+func newCountingGit(size int) *countingGit {
+	return &countingGit{size: size, reads: map[string]int{}, limits: map[string][]int{}, served: map[string]int{}}
+}
 
-func (g *countingGit) ReadFile(_ context.Context, commit, p string) (providers.File, error) {
+func (g *countingGit) ReadFile(_ context.Context, commit, p string, limit int) (providers.File, error) {
 	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.reads[p]++
-	g.mu.Unlock()
+	g.limits[p] = append(g.limits[p], limit)
 	switch {
 	case strings.HasPrefix(p, "missing"):
 		return providers.File{}, fmt.Errorf("file: %w", providers.ErrPathNotInTree)
 	case strings.HasPrefix(p, "gone"):
 		// What a host answers for a missing commit, or a 404 from a host that is failing.
 		return providers.File{}, fmt.Errorf("GitHub returned status 404: %w", providers.ErrNotFound)
+	case g.size > providers.ReadLimit(limit):
+		return providers.File{}, fmt.Errorf("file: %w", providers.ErrTooLarge)
 	}
+	g.served[p] += g.size
 	return providers.File{Path: p, Commit: commit, Data: bytes.Repeat([]byte{'x'}, g.size)}, nil
 }
 
@@ -69,11 +78,11 @@ func TestReadCacheStaysWithinItsEntries(t *testing.T) {
 	git := newCountingGit(10)
 	ctx := context.Background()
 	for i := range 4 {
-		if _, err := c.readFile(ctx, git, repoA, commitA, fmt.Sprintf("f%d", i)); err != nil {
+		if _, err := c.readFile(ctx, git, repoA, commitA, fmt.Sprintf("f%d", i), MaxFileBytes); err != nil {
 			t.Fatal(err)
 		}
 		// f0 is used after every read, so it is never the least recently used.
-		if _, err := c.readFile(ctx, git, repoA, commitA, "f0"); err != nil {
+		if _, err := c.readFile(ctx, git, repoA, commitA, "f0", MaxFileBytes); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -81,7 +90,7 @@ func TestReadCacheStaysWithinItsEntries(t *testing.T) {
 		t.Fatalf("Len = %d, want 3", c.Len())
 	}
 	for p, want := range map[string]int{"f0": 1, "f1": 2, "f3": 1} {
-		if _, err := c.readFile(ctx, git, repoA, commitA, p); err != nil {
+		if _, err := c.readFile(ctx, git, repoA, commitA, p, MaxFileBytes); err != nil {
 			t.Fatal(err)
 		}
 		if got := git.count(p); got != want {
@@ -98,14 +107,14 @@ func TestReadCacheStaysWithinItsBytes(t *testing.T) {
 	c := NewReadCache(100, limit)
 	git := newCountingGit(size)
 	ctx := context.Background()
-	if _, err := c.readFile(ctx, git, repoA, commitA, "f0"); err != nil {
+	if _, err := c.readFile(ctx, git, repoA, commitA, "f0", MaxFileBytes); err != nil {
 		t.Fatal(err)
 	}
 	if c.Bytes() != entry {
 		t.Fatalf("Bytes = %d after one read, want %d", c.Bytes(), entry)
 	}
 	for i := range 5 {
-		if _, err := c.readFile(ctx, git, repoA, commitA, fmt.Sprintf("f%d", i)); err != nil {
+		if _, err := c.readFile(ctx, git, repoA, commitA, fmt.Sprintf("f%d", i), MaxFileBytes); err != nil {
 			t.Fatal(err)
 		}
 		if c.Bytes() > limit {
@@ -117,10 +126,10 @@ func TestReadCacheStaysWithinItsBytes(t *testing.T) {
 	}
 	// A file that alone is larger than the cache is never kept, and does not push out what is kept.
 	small := NewReadCache(100, 1000)
-	if _, err := small.readFile(ctx, newCountingGit(1), repoA, commitA, "s"); err != nil {
+	if _, err := small.readFile(ctx, newCountingGit(1), repoA, commitA, "s", MaxFileBytes); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := small.readFile(ctx, git, repoA, commitA, "f0"); err != nil {
+	if _, err := small.readFile(ctx, git, repoA, commitA, "f0", MaxFileBytes); err != nil {
 		t.Fatal(err)
 	}
 	if small.Len() != 1 || small.Bytes() > 1000 {
@@ -135,7 +144,7 @@ func TestReadCacheKeepsOnlyReadsAtAFullCommitID(t *testing.T) {
 		c := NewReadCache(10, 1<<20)
 		git := newCountingGit(1)
 		for range 2 {
-			if _, err := c.readFile(ctx, git, repoA, ref, "f"); err != nil {
+			if _, err := c.readFile(ctx, git, repoA, ref, "f", MaxFileBytes); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -151,7 +160,7 @@ func TestReadCacheReturnsCopies(t *testing.T) {
 	git := newCountingGit(4)
 	ctx := context.Background()
 	for range 3 {
-		f, err := c.readFile(ctx, git, repoA, commitA, "f")
+		f, err := c.readFile(ctx, git, repoA, commitA, "f", MaxFileBytes)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -169,11 +178,11 @@ func TestReadCacheKeepsOnlyAPathNotInTheTree(t *testing.T) {
 	git := newCountingGit(1)
 	ctx := context.Background()
 	for range 2 {
-		_, err := c.readFile(ctx, git, repoA, commitA, "gone")
+		_, err := c.readFile(ctx, git, repoA, commitA, "gone", MaxFileBytes)
 		if !providers.IsNotFound(err) || providers.IsPathNotInTree(err) {
 			t.Fatalf("read gone: %v", err)
 		}
-		_, err = c.readFile(ctx, git, repoA, commitA, "missing")
+		_, err = c.readFile(ctx, git, repoA, commitA, "missing", MaxFileBytes)
 		if !providers.IsPathNotInTree(err) || !providers.IsNotFound(err) {
 			t.Fatalf("read missing: %v", err)
 		}
@@ -193,12 +202,12 @@ func TestReadCacheKeepsOnlyAPathNotInTheTree(t *testing.T) {
 func TestReadCacheHonoursCancellation(t *testing.T) {
 	c := NewReadCache(10, 1<<20)
 	git := newCountingGit(1)
-	if _, err := c.readFile(context.Background(), git, repoA, commitA, "f"); err != nil {
+	if _, err := c.readFile(context.Background(), git, repoA, commitA, "f", MaxFileBytes); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := c.readFile(ctx, git, repoA, commitA, "f"); err == nil {
+	if _, err := c.readFile(ctx, git, repoA, commitA, "f", MaxFileBytes); err == nil {
 		t.Error("a cancelled read was answered")
 	}
 }
@@ -213,7 +222,7 @@ func TestReadCacheIsSafeForConcurrentUse(t *testing.T) {
 		wg.Go(func() {
 			for i := range 200 {
 				p := fmt.Sprintf("f%d", (g+i)%32)
-				f, err := c.readFile(ctx, git, repoA, commitA, p)
+				f, err := c.readFile(ctx, git, repoA, commitA, p, MaxFileBytes)
 				if err != nil || f.Path != p || len(f.Data) != 8 {
 					t.Errorf("read %s = %+v, %v", p, f, err)
 					return

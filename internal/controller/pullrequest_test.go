@@ -247,10 +247,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA, RenderedTargetHead: main}),
 			"the change is rendered once more at the target branch head after the pull request is recorded")
 
-		file, err := git.ReadFile(ctx, cr.HeadSHA, sourcePath)
+		file, err := git.ReadFile(ctx, cr.HeadSHA, sourcePath, providers.MaxFileBytes)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(file.Data).To(Equal(manifest("384Mi")), "one value changed, nothing else")
-		onMain, err := git.ReadFile(ctx, main, sourcePath)
+		onMain, err := git.ReadFile(ctx, main, sourcePath, providers.MaxFileBytes)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(onMain.Data).To(Equal(manifest("256Mi")), "the target branch is never written")
 
@@ -394,7 +394,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 		Expect(openRequests()).To(HaveLen(1))
-		file, err := git.ReadFile(ctx, got.Status.PullRequest.HeadSHA, sourcePath)
+		file, err := git.ReadFile(ctx, got.Status.PullRequest.HeadSHA, sourcePath, providers.MaxFileBytes)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(file.Data).To(Equal(manifest("384Mi")))
 	})
@@ -1288,7 +1288,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			crs := openRequests()
 			Expect(crs).To(HaveLen(1))
 			Expect(crs[0].State).To(Equal(providers.ChangeRequestOpen))
-			file, err := git.ReadFile(ctx, crs[0].HeadSHA, sourcePath)
+			file, err := git.ReadFile(ctx, crs[0].HeadSHA, sourcePath, providers.MaxFileBytes)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(file.Data).To(Equal(manifest("384Mi")))
 			Expect(cut).NotTo(Equal(moved), "the branch was cut before the merge")
@@ -1919,7 +1919,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(err).NotTo(HaveOccurred())
 				got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
-				file, err := git.ReadFile(ctx, got.Status.PullRequest.HeadSHA, sourcePath)
+				file, err := git.ReadFile(ctx, got.Status.PullRequest.HeadSHA, sourcePath, providers.MaxFileBytes)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(string(file.Data)).To(ContainSubstring("memory: 384Mi"))
 				Expect(string(file.Data)).To(ContainSubstring("memory: 320Mi"))
@@ -2076,11 +2076,11 @@ func (f *faultyGit) leave(ctx context.Context, op string, err error) error {
 	return nil
 }
 
-func (f *faultyGit) ReadFile(ctx context.Context, sha, path string) (providers.File, error) {
+func (f *faultyGit) ReadFile(ctx context.Context, sha, path string, limit int) (providers.File, error) {
 	if err := f.enter(opReadFile, path); err != nil {
 		return providers.File{}, err
 	}
-	file, err := f.Git.ReadFile(ctx, sha, path)
+	file, err := f.Git.ReadFile(ctx, sha, path, limit)
 	return file, f.leave(ctx, opReadFile, err)
 }
 

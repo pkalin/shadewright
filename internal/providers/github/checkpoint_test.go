@@ -37,6 +37,9 @@ const blobsPath = "/git/blobs"
 // deployYAML is apps/deploy.yaml at shaBase (blob shaDeploy).
 const deployYAML = "replicas: 2\n"
 
+// deployPath is the path of deployYAML.
+const deployPath = "apps/deploy.yaml"
+
 // pauseAfter returns a context whose write checkpoint allows the first n writes and refuses every later one,
 // and a pointer to the number of times it was asked.
 func pauseAfter(n int) (context.Context, *int) {
@@ -190,7 +193,7 @@ func TestCheckpointDoesNotGateReads(t *testing.T) {
 	blob.raw = deployYAML
 	h := newHarness(t, append(readSteps(), blob)...)
 	c, asked := pauseAfter(0)
-	if _, err := h.p.ReadFile(c, shaBase, "apps/deploy.yaml"); err != nil {
+	if _, err := h.p.ReadFile(c, shaBase, "apps/deploy.yaml", providers.MaxFileBytes); err != nil {
 		t.Fatal(err)
 	}
 	if *asked != 0 {

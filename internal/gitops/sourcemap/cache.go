@@ -106,13 +106,17 @@ func repoKey(repo v1alpha1.GitRepository) (key [sha256.Size]byte, ok bool) {
 	return sha256.Sum256(b), true
 }
 
-// readFile reads p at commit through git, answering from the cache when it can. A nil cache, or a commit that
-// is not a full object ID, always reads through git. Only a file, ErrPathNotInTree and ErrTooLarge are kept;
-// any other error, a plain ErrNotFound included, is returned and never kept.
-func (c *ReadCache) readFile(ctx context.Context, git providers.GitProvider, repo [sha256.Size]byte, commit, p string) (
-	providers.File, error) {
+// readFile reads p at commit through git, at most limit bytes (clamped by providers.ReadLimit), answering from
+// the cache when it can. A nil cache, or a commit that is not a full object ID, always reads through git. A
+// kept file larger than limit gives ErrTooLarge as the provider would, so a warm cache refuses what a cold one
+// refuses. Only a file within limit, ErrPathNotInTree and, for a read with the full MaxFileBytes limit,
+// ErrTooLarge are kept: a file over a smaller limit is not too large in general, and a later mapping with more
+// budget left may read it. Any other error, a plain ErrNotFound included, is returned and never kept.
+func (c *ReadCache) readFile(ctx context.Context, git providers.GitProvider, repo [sha256.Size]byte, commit, p string,
+	limit int) (providers.File, error) {
+	limit = providers.ReadLimit(limit)
 	if c == nil || !providers.IsObjectID(commit) {
-		return git.ReadFile(ctx, commit, p)
+		return git.ReadFile(ctx, commit, p, limit)
 	}
 	k := cacheKey{repo: repo, commit: commit, path: p}
 	if e, ok := c.get(k); ok {
@@ -120,10 +124,10 @@ func (c *ReadCache) readFile(ctx context.Context, git providers.GitProvider, rep
 		if err := ctx.Err(); err != nil {
 			return providers.File{}, err
 		}
-		return e.result()
+		return e.result(limit)
 	}
-	f, err := git.ReadFile(ctx, commit, p)
-	c.put(k, f, err)
+	f, err := git.ReadFile(ctx, commit, p, limit)
+	c.put(k, f, err, limit)
 	return f, err
 }
 
@@ -140,30 +144,33 @@ func (c *ReadCache) get(k cacheKey) (*cacheEntry, bool) {
 	return el.Value.(*cacheEntry), true
 }
 
-// result returns the kept outcome, with a copy of the content so a caller cannot change the cache.
-func (e *cacheEntry) result() (providers.File, error) {
-	switch e.outcome {
-	case cachedNotInTree:
+// result returns the kept outcome for a read of at most limit bytes, with a copy of the content so a caller
+// cannot change the cache.
+func (e *cacheEntry) result(limit int) (providers.File, error) {
+	switch {
+	case e.outcome == cachedNotInTree:
 		return providers.File{}, errCachedNotInTree
-	case cachedTooLarge:
+	case e.outcome == cachedTooLarge, len(e.data) > limit:
 		return providers.File{}, errCachedTooLarge
 	}
 	return providers.File{Path: e.key.path, Commit: e.key.commit, Data: bytes.Clone(e.data)}, nil
 }
 
-// put keeps the outcome of a read, if it is one that never changes, and evicts until the bounds hold.
-func (c *ReadCache) put(k cacheKey, f providers.File, err error) {
+// put keeps the outcome of a read of at most limit bytes, if it is one that never changes, and evicts until the
+// bounds hold.
+func (c *ReadCache) put(k cacheKey, f providers.File, err error, limit int) {
 	e := &cacheEntry{key: k}
 	switch {
-	case err == nil && len(f.Data) <= MaxFileBytes && f.Path == k.path && f.Commit == k.commit:
+	case err == nil && len(f.Data) <= limit && f.Path == k.path && f.Commit == k.commit:
 		e.outcome = cachedFile
 	case providers.IsPathNotInTree(err):
 		e.outcome = cachedNotInTree
-	case providers.IsTooLarge(err):
+	case providers.IsTooLarge(err) && limit >= MaxFileBytes:
 		e.outcome = cachedTooLarge
 	default:
-		// A transient or refused read, a plain not found (a missing commit, a failing host), a file over the
-		// limit that the adapter did not refuse, or a file the adapter labelled with another path or commit.
+		// A transient or refused read, a plain not found (a missing commit, a failing host), a file over a
+		// limit smaller than MaxFileBytes (refused for one mapping's budget only), a file over the limit that
+		// the adapter did not refuse, or a file the adapter labelled with another path or commit.
 		return
 	}
 	e.cost = int64(len(f.Data)+len(k.commit)+len(k.path)) + cacheEntryOverhead

@@ -322,7 +322,7 @@ func TestReadFile(t *testing.T) {
 	blob := get("/git/blobs/"+shaDeploy, "")
 	blob.raw = "replicas: 2\n"
 	h := newHarness(t, append(readSteps(), blob)...)
-	f, err := h.p.ReadFile(ctx, shaBase, "apps/deploy.yaml")
+	f, err := h.p.ReadFile(ctx, shaBase, "apps/deploy.yaml", providers.MaxFileBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestReadFileNotRegular(t *testing.T) {
 	for _, path := range []string{"link.yaml", "vendor", "apps", "missing.yaml", "README.md/x", "vendor/x"} {
 		t.Run(path, func(t *testing.T) {
 			h := newHarness(t, get("/git/trees/"+shaBase, "tree_root.json"))
-			_, err := h.p.ReadFile(ctx, shaBase, path)
+			_, err := h.p.ReadFile(ctx, shaBase, path, providers.MaxFileBytes)
 			// Read from the commit's tree, so the answer holds for good: a cache may keep it.
 			if !providers.IsPathNotInTree(err) || !providers.IsNotFound(err) {
 				t.Fatalf("ReadFile(%s) = %v, want a path not in the tree", path, err)
@@ -347,7 +347,7 @@ func TestReadFileNotRegular(t *testing.T) {
 
 func TestReadFileMissingCommit(t *testing.T) {
 	h := newHarness(t, status(http.MethodGet, "/git/trees/"+shaOld, http.StatusNotFound, fxForbidden))
-	_, err := h.p.ReadFile(ctx, shaOld, "apps/deploy.yaml")
+	_, err := h.p.ReadFile(ctx, shaOld, "apps/deploy.yaml", providers.MaxFileBytes)
 	if !providers.IsNotFound(err) || providers.IsPathNotInTree(err) {
 		t.Fatalf("got %v, want a plain not found", err)
 	}
@@ -368,7 +368,7 @@ func TestReadFileHostNotFoundIsNotAPathNotInTree(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, steps...)
-			_, err := h.p.ReadFile(ctx, shaBase, "apps/deploy.yaml")
+			_, err := h.p.ReadFile(ctx, shaBase, "apps/deploy.yaml", providers.MaxFileBytes)
 			if !providers.IsNotFound(err) || providers.IsPathNotInTree(err) {
 				t.Fatalf("ReadFile = %v, want a plain not found", err)
 			}
@@ -379,9 +379,54 @@ func TestReadFileHostNotFoundIsNotAPathNotInTree(t *testing.T) {
 
 func TestReadFileTooLargeBeforeDownload(t *testing.T) {
 	h := newHarness(t, readSteps()...) // no blob request is recorded: the size check must come first
-	_, err := h.p.ReadFile(ctx, shaBase, "apps/big.yaml")
+	_, err := h.p.ReadFile(ctx, shaBase, "apps/big.yaml", providers.MaxFileBytes)
 	if !providers.IsTooLarge(err) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// A caller's limit below MaxFileBytes is checked against the tree entry's size before the blob is requested,
+// and a limit out of range is clamped, never widened (#298).
+func TestReadFileLimitBeforeDownload(t *testing.T) {
+	// apps/deploy.yaml is 12 bytes in the tree; apps/big.yaml is over MaxFileBytes.
+	for name, tc := range map[string]struct {
+		path  string
+		limit int
+	}{
+		"one byte under the size": {deployPath, 11},
+		"zero":                    {deployPath, 0},
+		"negative":                {deployPath, -1},
+		"over MaxFileBytes":       {"apps/big.yaml", 4 * providers.MaxFileBytes},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, readSteps()...) // no blob request is recorded
+			if _, err := h.p.ReadFile(ctx, shaBase, tc.path, tc.limit); !providers.IsTooLarge(err) {
+				t.Fatalf("ReadFile(limit %d) = %v, want ErrTooLarge", tc.limit, err)
+			}
+		})
+	}
+	blob := get("/git/blobs/"+shaDeploy, "")
+	blob.raw = deployYAML
+	h := newHarness(t, append(readSteps(), blob)...)
+	if f, err := h.p.ReadFile(ctx, shaBase, deployPath, 12); err != nil || string(f.Data) != deployYAML {
+		t.Fatalf("ReadFile(limit = size) = %q, %v; want the file", f.Data, err)
+	}
+}
+
+// A stream larger than the caller's limit is cut after about limit+1 bytes, not MaxFileBytes+1 (#298).
+func TestReadFileStopsReadingStreamAtLimit(t *testing.T) {
+	const limit = 100
+	// The tree claims 12 bytes, the stream is larger than the limit: it is not the blob the tree names.
+	big := &countingReader{left: 4 * providers.MaxFileBytes}
+	h := newHarness(t, readSteps()...)
+	h.s.steps = append(h.s.steps, get("/git/blobs/"+shaDeploy, ""))
+	h.p.client.Transport = bodyOverride{h.s, big}
+	_, err := h.p.ReadFile(ctx, shaBase, deployPath, limit)
+	if err == nil || providers.IsTooLarge(err) || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("got %v, want an integrity error: the tree entry said the file fits", err)
+	}
+	if big.read > limit+1+32<<10 {
+		t.Errorf("read %d bytes, want at most about limit+1", big.read)
 	}
 }
 
@@ -391,9 +436,9 @@ func TestReadFileStopsReadingLargeStream(t *testing.T) {
 	h := newHarness(t, readSteps()...)
 	h.s.steps = append(h.s.steps, get("/git/blobs/"+shaDeploy, ""))
 	h.p.client.Transport = bodyOverride{h.s, big}
-	_, err := h.p.ReadFile(ctx, shaBase, "apps/deploy.yaml")
-	if !providers.IsTooLarge(err) {
-		t.Fatalf("got %v", err)
+	_, err := h.p.ReadFile(ctx, shaBase, "apps/deploy.yaml", providers.MaxFileBytes)
+	if err == nil || providers.IsTooLarge(err) || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("got %v, want an integrity error: the tree entry said the file fits", err)
 	}
 	if big.read > providers.MaxFileBytes+1+32<<10 {
 		t.Errorf("read %d bytes, want at most about MaxFileBytes+1", big.read)
@@ -433,7 +478,7 @@ func TestReadFileChecksContentHash(t *testing.T) {
 	blob := get("/git/blobs/"+shaDeploy, "")
 	blob.raw = "replicas: 9\n"
 	h := newHarness(t, append(readSteps(), blob)...)
-	if _, err := h.p.ReadFile(ctx, shaBase, "apps/deploy.yaml"); err == nil {
+	if _, err := h.p.ReadFile(ctx, shaBase, "apps/deploy.yaml", providers.MaxFileBytes); err == nil {
 		t.Fatal("content that does not match its object ID was accepted")
 	}
 }
@@ -442,12 +487,12 @@ func TestReadFileRefusesBadInput(t *testing.T) {
 	h := newHarness(t)
 	for _, path := range []string{"", "/apps/x", "apps/", "apps//x", "../x", "apps/../x", "./x", ".git/config",
 		"a/.GIT/x", "a\x00b", "a\nb", "a\\b", strings.Repeat("a/", 40) + "x"} {
-		if _, err := h.p.ReadFile(ctx, shaBase, path); err == nil {
+		if _, err := h.p.ReadFile(ctx, shaBase, path, providers.MaxFileBytes); err == nil {
 			t.Errorf("ReadFile(%q) was allowed", path)
 		}
 	}
 	for _, sha := range []string{"", target, "HEAD", strings.ToUpper(shaDeploy), shaBase[:39], "../" + shaBase[3:]} {
-		if _, err := h.p.ReadFile(ctx, sha, "apps/deploy.yaml"); err == nil {
+		if _, err := h.p.ReadFile(ctx, sha, "apps/deploy.yaml", providers.MaxFileBytes); err == nil {
 			t.Errorf("ReadFile at %q was allowed", sha)
 		}
 	}
@@ -1306,7 +1351,7 @@ func TestRedirectIsNotFollowed(t *testing.T) {
 func TestResponseBodyIsBounded(t *testing.T) {
 	h := newHarness(t, step{method: http.MethodGet, path: "/git/trees/" + shaBase, status: http.StatusOK,
 		raw: `{"sha":"` + shaTree + `","tree":[` + strings.Repeat(" ", maxJSONBody) + `]}`})
-	_, err := h.p.ReadFile(ctx, shaBase, "apps/deploy.yaml")
+	_, err := h.p.ReadFile(ctx, shaBase, "apps/deploy.yaml", providers.MaxFileBytes)
 	if err == nil || providers.IsTooLarge(err) {
 		t.Fatalf("got %v", err)
 	}

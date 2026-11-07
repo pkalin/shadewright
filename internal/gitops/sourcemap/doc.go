@@ -42,15 +42,19 @@ limitations under the License.
 // unreachable API server or Git host, and for a Git read the host refuses for good ([RefusedError]).
 //
 // Git is read only through ReadFile and BranchHead, relying on the ReadFile contract: only regular files
-// are returned, symbolic links are never followed, and files over providers.MaxFileBytes are refused before
-// they are downloaded. Reads are bounded by [MaxDepth], [MaxFiles], [MaxReads] and [MaxFileBytes], whatever
-// cap the provider enforces itself, and in all by [MaxTotalBytes] read and [MaxDocuments] decoded. Documents
-// are decoded one at a time and only the declaration is kept. The scan stops at a second exact declaration
-// or at the first near match (another version, or no namespace). A [ReadCache], when the [Resolver] has one,
-// keeps reads at a full commit ID across mappings, keyed by the whole settings repository entry: files, files
-// too large and paths not in the commit's tree (providers.ErrPathNotInTree), never a plain not found or a
-// failed read. Branch heads and cluster objects are read every time, and cached reads count against
-// [MaxReads] like any other. Errors carry no provider text ([TransientError], [RefusedError]), since it may
+// are returned, symbolic links are never followed, and files over the read's limit are refused before they
+// are downloaded. Reads are bounded by [MaxDepth], [MaxFiles], [MaxReads] and [MaxFileBytes], whatever cap
+// the provider enforces itself, and in all by [MaxTotalBytes] and [MaxDocuments] decoded. Each read's limit
+// is what is left of [MaxTotalBytes], at most [MaxFileBytes], so the byte budget bounds the file contents
+// downloaded, cached and parsed; a file over that limit is neither downloaded nor cached. The tree listings a
+// provider reads to find a file are bounded per call by the provider and in number by [MaxReads], not by the
+// budget. Documents are decoded one at a time and only the declaration is kept. The scan stops at a second
+// exact declaration or at the first near match (another version, or no namespace). A [ReadCache], when the
+// [Resolver] has one, keeps reads at a full commit ID across mappings, keyed by the whole settings repository
+// entry: files, files over [MaxFileBytes] and paths not in the commit's tree (providers.ErrPathNotInTree),
+// never a file refused only for what is left of a budget, a plain not found or a failed read. A kept file over
+// what is left of the budget is refused as the provider would refuse it. Branch heads and cluster objects are
+// read every time, and cached reads count against [MaxReads] like any other. Errors carry no provider text ([TransientError], [RefusedError]), since it may
 // hold a repository URL with credentials.
 //
 // Everything read here is untrusted input: cluster objects, Flux status and Git contents. Paths are built

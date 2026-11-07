@@ -568,6 +568,49 @@ func TestLoadRefuses(t *testing.T) {
 	wantReason(t, err, semdiff.ErrTooLarge)
 }
 
+// limitRecorder is a GitProvider that records the limit of each ReadFile call and the bytes it returns.
+type limitRecorder struct {
+	providers.GitProvider
+	limits []int
+	served int
+}
+
+func (r *limitRecorder) ReadFile(ctx context.Context, commit, p string, limit int) (providers.File, error) {
+	r.limits = append(r.limits, limit)
+	f, err := r.GitProvider.ReadFile(ctx, commit, p, limit)
+	r.served += len(f.Data)
+	return f, err
+}
+
+// Load asks for at most what is left of MaxBuildBytes, so a directory of many files near MaxFileBytes is
+// refused without downloading past the budget (#298).
+func TestLoadDownloadsNothingPastTheBudget(t *testing.T) {
+	files := ordersRepo()
+	const size = semdiff.MaxFileBytes - 1024
+	const bigFiles = 2*semdiff.MaxBuildBytes/size + 1
+	names := make([]string, 0, 1+bigFiles)
+	names = append(names, "scaledobject.yaml")
+	for i := range bigFiles {
+		n := fmt.Sprintf("big%d.yaml", i)
+		names = append(names, n)
+		files["apps/orders/"+n] = []byte("# " + strings.Repeat("x", size-3) + "\n")
+	}
+	files[soKust] = kust(names...)
+	git := fake.NewGit("main", files)
+	rec := &limitRecorder{GitProvider: git}
+	_, err := semdiff.Load(context.Background(), rec, head(t, git), "apps/orders")
+	wantReason(t, err, semdiff.ErrTooLarge)
+	if !strings.Contains(err.Error(), "bytes") {
+		t.Fatalf("got %v, want the byte budget", err)
+	}
+	if rec.served > semdiff.MaxBuildBytes {
+		t.Errorf("downloaded %d bytes, over the budget of %d", rec.served, semdiff.MaxBuildBytes)
+	}
+	if last := rec.limits[len(rec.limits)-1]; last >= semdiff.MaxFileBytes || last >= size {
+		t.Errorf("last read asked with limit %d, want what is left of the budget, under %d", last, size)
+	}
+}
+
 func TestLoadHidesProviderErrors(t *testing.T) {
 	git := fake.NewGit("main", ordersRepo())
 	commit := head(t, git)

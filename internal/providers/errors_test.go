@@ -101,3 +101,15 @@ func TestIsObjectID(t *testing.T) {
 		}
 	}
 }
+
+// ReadLimit only ever narrows a read: out-of-range limits clamp to 0 and MaxFileBytes (#298).
+func TestReadLimit(t *testing.T) {
+	for in, want := range map[int]int{
+		-1: 0, 0: 0, 1: 1, providers.MaxFileBytes: providers.MaxFileBytes,
+		providers.MaxFileBytes + 1: providers.MaxFileBytes, 1 << 40: providers.MaxFileBytes,
+	} {
+		if got := providers.ReadLimit(in); got != want {
+			t.Errorf("ReadLimit(%d) = %d, want %d", in, got, want)
+		}
+	}
+}

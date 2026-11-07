@@ -331,7 +331,7 @@ func (r *RemediationRequestReconciler) renderWaitingStep(ctx context.Context, rr
 	// target branch head moved since the last render, so a quiet branch never reads it. It is not kept across
 	// reconciles: that would be state in memory that a restart loses, to save one read of a small file next to
 	// the build directory the render reads.
-	file, err := git.ReadFile(ctx, rr.Status.PullRequest.HeadSHA, string(src.Path))
+	file, err := git.ReadFile(ctx, rr.Status.PullRequest.HeadSHA, string(src.Path), providers.MaxFileBytes)
 	if err != nil {
 		return freshness.WrapProvider("read the file of the pull request", err)
 	}
@@ -472,7 +472,7 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 		return reconcile.Result{}, freshness.WrapProvider("read the head of the branch", err)
 	}
 
-	file, err := git.ReadFile(ctx, head, string(src.Path))
+	file, err := git.ReadFile(ctx, head, string(src.Path), providers.MaxFileBytes)
 	if err != nil {
 		return reconcile.Result{}, freshness.WrapProvider("read the file on the branch", err)
 	}
@@ -554,7 +554,7 @@ func (r *RemediationRequestReconciler) adoptChangeRequest(ctx context.Context, g
 	}
 	// The status lost the head Shadewright pushed, so the head is accepted only when the file on it holds the
 	// planned value.
-	file, err := git.ReadFile(ctx, cr.HeadSHA, string(rr.Status.Source.Path))
+	file, err := git.ReadFile(ctx, cr.HeadSHA, string(rr.Status.Source.Path), providers.MaxFileBytes)
 	if err != nil {
 		return freshness.WrapProvider("read the file of the pull request", err)
 	}

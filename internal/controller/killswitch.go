@@ -130,8 +130,8 @@ var _ providers.GitProvider = (*gatedGit)(nil)
 
 func (g *gatedGit) Capabilities() providers.GitCapabilities { return g.git.Capabilities() }
 
-func (g *gatedGit) ReadFile(ctx context.Context, commit, path string) (providers.File, error) {
-	return g.git.ReadFile(ctx, commit, path)
+func (g *gatedGit) ReadFile(ctx context.Context, commit, path string, limit int) (providers.File, error) {
+	return g.git.ReadFile(ctx, commit, path, limit)
 }
 
 func (g *gatedGit) BranchHead(ctx context.Context, branch string) (string, error) {

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1014,8 +1015,8 @@ func TestResolveNeverPicksAnotherDocument(t *testing.T) {
 // padReads is a GitProvider that returns every file padded past MaxFileBytes instead of ErrTooLarge.
 type padReads struct{ providers.GitProvider }
 
-func (p padReads) ReadFile(ctx context.Context, commit, path string) (providers.File, error) {
-	f, err := p.GitProvider.ReadFile(ctx, commit, path)
+func (p padReads) ReadFile(ctx context.Context, commit, path string, limit int) (providers.File, error) {
+	f, err := p.GitProvider.ReadFile(ctx, commit, path, limit)
 	if err == nil {
 		f.Data = append(f.Data, make([]byte, providers.MaxFileBytes)...)
 	}
@@ -1224,8 +1225,8 @@ type readCounter struct {
 	bytes int
 }
 
-func (c *readCounter) ReadFile(ctx context.Context, commit, path string) (providers.File, error) {
-	f, err := c.GitProvider.ReadFile(ctx, commit, path)
+func (c *readCounter) ReadFile(ctx context.Context, commit, path string, limit int) (providers.File, error) {
+	f, err := c.GitProvider.ReadFile(ctx, commit, path, limit)
 	if err == nil {
 		c.files[path]++
 		c.bytes += len(f.Data)
@@ -1326,11 +1327,11 @@ func TestResolveBoundsWhatItParses(t *testing.T) {
 					return c
 				}
 			}
-			// The provider returns a file before the mapping can count it, so the mapping may read one file past
-			// the budget, never more. A run through the cache reads from the provider only what it misses.
+			// The provider is asked for at most what is left of the budget, so the mapping downloads no file past
+			// it (#298). A run through the cache reads from the provider only what it misses.
 			checkBytes := func(c *readCounter) {
 				t.Helper()
-				if c.bytes > sourcemap.MaxTotalBytes+sourcemap.MaxFileBytes {
+				if c.bytes > sourcemap.MaxTotalBytes {
 					t.Errorf("read %d bytes, over the budget of %d", c.bytes, sourcemap.MaxTotalBytes)
 				}
 			}
@@ -1360,6 +1361,85 @@ func TestResolveBoundsWhatItParses(t *testing.T) {
 			}
 			for _, c := range counters {
 				checkBytes(c)
+			}
+		})
+	}
+}
+
+// A build of exactly MaxTotalBytes resolves, one byte more stops with InputTooLarge, and neither reads past
+// the budget from the provider, with a cold or a warm cache (#298).
+func TestResolveReadsExactlyTheByteBudget(t *testing.T) {
+	const fillers = 17 // together able to fill the budget, each under MaxFileBytes
+	// build lists the fillers, with the given sizes (nil: empty), and counts what each run reads.
+	build := func(sizes []int, counters *[]*readCounter) func(*fixture) {
+		return func(f *fixture) {
+			for i := range fillers {
+				p := fmt.Sprintf("apps/orders/fill%d.yaml", i)
+				f.files[ksFile] += fmt.Sprintf("  - fill%d.yaml\n", i)
+				f.files[p] = ""
+				if sizes != nil {
+					f.files[p] = "#" + strings.Repeat("x", sizes[i]-2) + "\n"
+				}
+			}
+			f.gitWrap = func(g providers.GitProvider) providers.GitProvider {
+				c := &readCounter{GitProvider: g, files: map[string]int{}}
+				*counters = append(*counters, c)
+				return c
+			}
+		}
+	}
+	run := func(t *testing.T, change func(*fixture)) sourcemap.Result {
+		t.Helper()
+		f := newFixture()
+		change(f)
+		res, _, err := f.run(t)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return res
+	}
+
+	// The rest of the build, fillers empty, gives what is left for them.
+	var counters []*readCounter
+	if res := run(t, build(nil, &counters)); res.Outcome != sourcemap.Resolved {
+		t.Fatalf("baseline = %s/%s (%s)", res.Outcome, res.Reason, res.Message)
+	}
+	room := sourcemap.MaxTotalBytes - counters[0].bytes
+	sizes := make([]int, fillers)
+	for i := range sizes {
+		sizes[i] = room / fillers
+	}
+	sizes[fillers-1] += room % fillers
+	if sizes[fillers-1] > sourcemap.MaxFileBytes {
+		t.Fatalf("filler of %d bytes is over MaxFileBytes", sizes[fillers-1])
+	}
+
+	for name, tc := range map[string]struct {
+		extra int
+		want  sourcemap.Reason
+		total int
+	}{
+		"exactly the budget": {0, sourcemap.ReasonResolved, sourcemap.MaxTotalBytes},
+		"one byte over":      {1, sourcemap.ReasonInputTooLarge, sourcemap.MaxTotalBytes - sizes[fillers-1]},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := slices.Clone(sizes)
+			s[fillers-1] += tc.extra
+			var counters []*readCounter
+			change := build(s, &counters)
+			res := run(t, change)
+			if res.Reason != tc.want {
+				t.Fatalf("result = %s/%s (%s), want %s", res.Outcome, res.Reason, res.Message, tc.want)
+			}
+			if counters[0].bytes != tc.total {
+				t.Errorf("read %d bytes, want %d", counters[0].bytes, tc.total)
+			}
+			counters = nil
+			sameWithCache(t, change, res)
+			for _, c := range counters {
+				if c.bytes > sourcemap.MaxTotalBytes {
+					t.Errorf("a cached run read %d bytes, over the budget of %d", c.bytes, sourcemap.MaxTotalBytes)
+				}
 			}
 		})
 	}

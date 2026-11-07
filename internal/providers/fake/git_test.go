@@ -64,14 +64,14 @@ func mustOpen(t *testing.T, g *fake.Git, head string) (string, providers.ChangeR
 func TestGitReadFile(t *testing.T) {
 	g, head := newRepo(t)
 	ctx := context.Background()
-	f, err := g.ReadFile(ctx, head, path)
+	f, err := g.ReadFile(ctx, head, path, providers.MaxFileBytes)
 	if err != nil || string(f.Data) != oldVal || f.Commit != head {
 		t.Fatalf("ReadFile = %+v, %v", f, err)
 	}
-	if _, err := g.ReadFile(ctx, head, "nope.yaml"); !providers.IsPathNotInTree(err) || !providers.IsNotFound(err) {
+	if _, err := g.ReadFile(ctx, head, "nope.yaml", providers.MaxFileBytes); !providers.IsPathNotInTree(err) || !providers.IsNotFound(err) {
 		t.Errorf("missing file: %v, want a path not in the tree", err)
 	}
-	if _, err := g.ReadFile(ctx, "deadbeef", path); !providers.IsNotFound(err) || providers.IsPathNotInTree(err) {
+	if _, err := g.ReadFile(ctx, "deadbeef", path, providers.MaxFileBytes); !providers.IsNotFound(err) || providers.IsPathNotInTree(err) {
 		t.Errorf("missing commit: %v, want a plain not found", err)
 	}
 	if _, err := g.BranchHead(ctx, "nope"); !providers.IsNotFound(err) {
@@ -89,12 +89,19 @@ func TestGitReadFileSizeLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f, err := g.ReadFile(ctx, head, "limit.yaml"); err != nil || len(f.Data) != providers.MaxFileBytes {
+	if f, err := g.ReadFile(ctx, head, "limit.yaml", providers.MaxFileBytes); err != nil || len(f.Data) != providers.MaxFileBytes {
 		t.Errorf("file at the limit: %d bytes, %v", len(f.Data), err)
 	}
-	f, err := g.ReadFile(ctx, head, "big.yaml")
+	f, err := g.ReadFile(ctx, head, "big.yaml", providers.MaxFileBytes)
 	if !providers.IsTooLarge(err) || f.Data != nil {
 		t.Errorf("file over the limit: %d bytes, %v; want ErrTooLarge and no data", len(f.Data), err)
+	}
+	// A caller's smaller limit is applied; a larger one is clamped to MaxFileBytes.
+	if _, err := g.ReadFile(ctx, head, "limit.yaml", providers.MaxFileBytes-1); !providers.IsTooLarge(err) {
+		t.Errorf("file over the caller's limit: %v, want ErrTooLarge", err)
+	}
+	if _, err := g.ReadFile(ctx, head, "big.yaml", 2*providers.MaxFileBytes); !providers.IsTooLarge(err) {
+		t.Errorf("file over MaxFileBytes with a larger limit: %v, want ErrTooLarge", err)
 	}
 }
 
@@ -130,11 +137,11 @@ func TestGitCommitNeedsExpectedHead(t *testing.T) {
 	if _, err := g.CommitFile(ctx, branch, c1, providers.FileChange{Path: "new.yaml"}); !providers.IsNotFound(err) {
 		t.Errorf("commit to a missing file: %v", err)
 	}
-	f, _ := g.ReadFile(ctx, c1, path)
+	f, _ := g.ReadFile(ctx, c1, path, providers.MaxFileBytes)
 	if string(f.Data) != newVal {
 		t.Errorf("content after commit = %q", f.Data)
 	}
-	old, _ := g.ReadFile(ctx, head, path)
+	old, _ := g.ReadFile(ctx, head, path, providers.MaxFileBytes)
 	if string(old.Data) != oldVal {
 		t.Errorf("old commit changed: %q", old.Data)
 	}
@@ -276,7 +283,7 @@ func TestGitCloseAndMerge(t *testing.T) {
 	if h, _ := g.BranchHead(ctx, base); h != mc {
 		t.Errorf("base head %s, want merge commit %s", h, mc)
 	}
-	f, _ := g.ReadFile(ctx, mc, path)
+	f, _ := g.ReadFile(ctx, mc, path, providers.MaxFileBytes)
 	if string(f.Data) != newVal {
 		t.Errorf("merged content %q", f.Data)
 	}
@@ -304,7 +311,7 @@ func TestGitFixtureIsCopied(t *testing.T) {
 	g := fake.NewGit(base, map[string][]byte{path: data})
 	head, _ := g.BranchHead(context.Background(), base)
 	data[0] = 'X'
-	f, _ := g.ReadFile(context.Background(), head, path)
+	f, _ := g.ReadFile(context.Background(), head, path, providers.MaxFileBytes)
 	if string(f.Data) != oldVal {
 		t.Errorf("changing the fixture changed the commit: %q", f.Data)
 	}
@@ -363,7 +370,7 @@ func TestGitMergeKeepsNewEmptyFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g.ReadFile(context.Background(), mc, "apps/demo/empty.yaml"); err != nil {
+	if _, err := g.ReadFile(context.Background(), mc, "apps/demo/empty.yaml", providers.MaxFileBytes); err != nil {
 		t.Errorf("empty file added on the head branch is missing after merge: %v", err)
 	}
 }
@@ -379,7 +386,7 @@ func TestGitMergeSameChangeAlreadyOnBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("identical change already on the base: %v", err)
 	}
-	f, _ := g.ReadFile(context.Background(), mc, path)
+	f, _ := g.ReadFile(context.Background(), mc, path, providers.MaxFileBytes)
 	if string(f.Data) != newVal {
 		t.Errorf("merged content %q", f.Data)
 	}

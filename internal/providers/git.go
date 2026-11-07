@@ -80,6 +80,13 @@ type ChangeRequest struct {
 // larger file is refused with ErrTooLarge before its content is downloaded.
 const MaxFileBytes = 1 << 20
 
+// ReadLimit returns the byte limit a GitProvider.ReadFile call applies for the limit it was given: limit
+// itself when it is between 0 and MaxFileBytes, 0 for a negative one and MaxFileBytes for a larger one. The
+// clamp only ever narrows a read, so a mistaken limit can refuse a file but never let a larger one through.
+func ReadLimit(limit int) int {
+	return min(max(limit, 0), MaxFileBytes)
+}
+
 // Lengths of a full Git object ID in lowercase hexadecimal.
 const (
 	SHA1HexLen   = 40
@@ -125,9 +132,12 @@ type GitProvider interface {
 	// never followed. Only when the implementation read the tree at that commit and the path is not a regular
 	// file in it is the error ErrPathNotInTree (which wraps ErrNotFound); a missing commit or a host that
 	// answers not found for another reason gives a plain ErrNotFound. ErrTooLarge when the file is larger than
-	// MaxFileBytes: implementations check the size the host reports before downloading the content, and stop
-	// reading a stream after MaxFileBytes+1 bytes, so a large file in the repository cannot exhaust memory.
-	ReadFile(ctx context.Context, commit, path string) (File, error)
+	// limit bytes, clamped by [ReadLimit] to between 0 and MaxFileBytes: implementations check the size the
+	// host reports before downloading the content, and stop reading a stream after limit+1 bytes, so a large
+	// file in the repository cannot exhaust memory and a caller with a byte budget downloads no file past it.
+	// Callers without a budget of their own pass MaxFileBytes. A limit of 0 still reads an empty file, and the
+	// not-found errors do not depend on the limit.
+	ReadFile(ctx context.Context, commit, path string, limit int) (File, error)
 
 	// BranchHead returns the commit at the head of a branch. ErrNotFound when the branch does not exist.
 	BranchHead(ctx context.Context, branch string) (string, error)

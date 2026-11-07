@@ -44,10 +44,13 @@ var systemTmpl = template.Must(template.New("system").Option("missingkey=error")
 // cannot be left out of the prompt while it is in the schema.
 var catalogDescriptions = map[remediationv1alpha1.ActionType]string{
 	remediationv1alpha1.ActionAdjustKedaMaxReplicas: "change maxReplicaCount of the KEDA ScaledObject that is the " +
-		"incident's subject, from previousValue to desiredValue (1 to 1000).",
+		"incident's subject, from previousValue to desiredValue (1 to 1000). previousValue is the maxReplicaCount " +
+		"the ScaledObject's spec holds now.",
 	remediationv1alpha1.ActionSetContainerMemoryLimit: "change the memory limit of one container of the Deployment " +
 		"or StatefulSet that is the incident's subject, from previous to desired (whole bytes, 1Mi to 1Ti, " +
-		"for example 256Mi to 512Mi).",
+		"for example 256Mi to 512Mi). previous is the limit the pod template sets now, written as in the " +
+		"manifest (for example 48Mi), from the context's \"pod template\" line: not a running pod's own limit, " +
+		"which may be an older value during a rollout, and not a byte count from a metric.",
 }
 
 type catalogEntry struct {

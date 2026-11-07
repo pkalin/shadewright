@@ -4,8 +4,8 @@ The evaluation harness checks what the analysis concludes for every lab scenario
 replays recorded replies, and on demand against the real model ([design 11.2](design/11-model.md#evaluation-gate),
 [ADR-0025](adr/0025-analysis-claims-units-and-evaluation-manifest.md) decision 3, [#78](https://github.com/pkalin/shadewright/issues/78)).
 
-<span class="sw-status sw-built">built</span> The harness, the recorded contexts of all eight fleet scenarios, the
-CI run on the fake model, the manual Evaluation workflow for the real model, the report and its evaluation manifest.
+<span class="sw-status sw-built">built</span> The harness, the recorded contexts of all eight fleet scenarios and of
+their variants, the CI run on the fake model, the manual Evaluation workflow for the real model, the report and its evaluation manifest.
 <span class="sw-status sw-planned">planned</span> Contexts and replies recorded from lab runs instead of written by
 hand, passing results stored in this repository, and the analyzer's run-time check that refuses automatic analysis
 without a passing result for its manifest digest. Until that check exists, a run with a real model in the lab is an
@@ -33,7 +33,9 @@ executor and no Git write, and nothing it computes authorizes anything (invarian
 **Outcome.** A `refusal` passes when the loop made no plan and ended with `NoProposal` or `MissingData`, the
 reasons a valid result gives when the model itself finds no catalog action. Any other end (a proposal, an
 `UnexpectedModel` reply, invalid output, a limit) fails it. A `pull-request` passes when the loop ended `Proposed`
-with a plan of the expected action type whose desired value lies inside the expected `bounds`. The request's
+with a plan of the expected action type whose desired value lies inside the expected `bounds`; a
+`SetContainerMemoryLimit` plan must also name a container of the workload's pod template, and its previous value must
+be the limit that template sets. The request's
 phase (`NeedsIntervention`) and the file `paths` are decided by the executor and its source mapping, so they are
 listed in the report as not scored.
 
@@ -105,7 +107,7 @@ Before the first run, the maintainer sets up:
 The identity of step 1 is in `shadewright-azure` (`foundation/evaluation.tf`): a user-assigned identity with the
 federated credential for the `evaluation` environment and the inference role on the Foundry resource.
 
-A run of the eight scenarios is eight analyses per repeat, each bounded by the loop's limits (at most 7 model
+A run of the eight scenarios and their variant is nine analyses per repeat, each bounded by the loop's limits (at most 7 model
 calls with 4 tool steps, 2048 output tokens per call, 500,000 tokens per analysis). The report is rewritten after every run, and `make eval-model` stops after 50 minutes (the `go test`
 timeout), before the job's own 60, so a long run that is cut off still leaves its report. The workflow cannot be tested on a fork or
 locally without such an identity; run it once by hand after setting it up.
@@ -122,6 +124,19 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 | `objects.yaml` | The objects the context builder and the read tools read: Deployments, StatefulSets, ReplicaSets, Pods, Events |
 | `metrics.yaml` | Optional. What the scenario's Prometheus holds: for every approved query template, the series it answers (labels and timed samples). Only `oom` and `statefulset-oom` have one |
 | `replies.yaml` | The model replies the fake model replays, in order, and their `source` |
+| `variants/<name>/` | Optional. Variants of the scenario, below |
+
+**Variants.** A variant is a state of a fleet scenario that the lab met and the scenario's own recording does not
+show. It is scored against the scenario's `expected.yaml` and `rubric.yaml`, unchanged, with the scenario's
+Incident, and is reported as `<scenario>/<name>`. Its directory holds `variant.yaml` (`about`: what it changes and
+why, required), its own `objects.yaml` and `replies.yaml`, and a `metrics.yaml` when its series differ (otherwise
+the scenario's are replayed). The evaluation manifest hashes its files with the scenario files. `oom/rollout` is the
+`oom` scenario during a rollout, as the lab met it on 2026-11-07
+([#494](https://github.com/pkalin/shadewright/issues/494)): the pod template sets 48Mi while the old ReplicaSet's
+pod still runs with 64Mi, and the reply takes the old pod's 64Mi as the previous value. The loop takes the previous
+value from the pod template instead
+([design 3.3](design/3-observation-and-deduplication.md#the-prompt-and-the-result)), so the plan goes from 48Mi
+and passes the outcome check ([Scoring](#scoring)).
 
 **Recorded metrics.** `metrics.yaml` is replayed through the `providers.MetricsSource` interface, the one the
 Prometheus adapter implements (`test/eval/metrics_test.go`). The harness refuses a recording that the adapter could

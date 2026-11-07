@@ -133,6 +133,7 @@ func (b *Builder) workloadLines(l *lines, t *target) {
 			o.Generation, o.Status.ObservedGeneration)
 		l.add("  replicas: desired %d, updated %d, ready %d, available %d, unavailable %d", desired(o.Spec.Replicas),
 			o.Status.UpdatedReplicas, o.Status.ReadyReplicas, o.Status.AvailableReplicas, o.Status.UnavailableReplicas)
+		b.templateLines(l, o.Spec.Template.Spec.Containers)
 		for _, c := range o.Status.Conditions {
 			b.conditionLine(l, string(c.Type), string(c.Status), c.Reason, c.Message, c.LastTransitionTime)
 		}
@@ -147,6 +148,7 @@ func (b *Builder) workloadLines(l *lines, t *target) {
 		l.add("  replicas: desired %d, current %d, updated %d, ready %d, available %d", desired(o.Spec.Replicas),
 			o.Status.CurrentReplicas, o.Status.UpdatedReplicas, o.Status.ReadyReplicas, o.Status.AvailableReplicas)
 		l.add("  current revision %s, update revision %s", l.data(b.value(o.Status.CurrentRevision)), l.data(b.value(o.Status.UpdateRevision)))
+		b.templateLines(l, o.Spec.Template.Spec.Containers)
 		for _, c := range o.Status.Conditions {
 			b.conditionLine(l, string(c.Type), string(c.Status), c.Reason, c.Message, c.LastTransitionTime)
 		}
@@ -162,6 +164,66 @@ func (b *Builder) workloadLines(l *lines, t *target) {
 	if t.outOfBounds {
 		l.add("  its labels or its selector are larger than the builder follows, or the selector is empty: pods not resolved")
 	}
+}
+
+// templateLines shows the memory limit of each container of a workload's pod template, labelled as the
+// template's: the workload's current spec, which new pods get and a change in Git edits. During a rollout a
+// running pod may still hold an older value, which its own container line shows (#494).
+func (b *Builder) templateLines(l *lines, containers []corev1.Container) {
+	for _, c := range containers {
+		l.add("  pod template (the workload's current spec): container %s, memory limit %s", l.data(b.value(c.Name)),
+			b.memoryLimit(l, c.Resources))
+	}
+}
+
+// memoryLimit renders the memory limit of resources as a quotable value, or "not set".
+func (b *Builder) memoryLimit(l *lines, r corev1.ResourceRequirements) string {
+	q, ok := r.Limits[corev1.ResourceMemory]
+	if !ok {
+		return "not set"
+	}
+	return l.data(b.value(q.String()))
+}
+
+// podResources returns the resources a pod's spec gives the container called name.
+func podResources(p *corev1.Pod, name string, init bool) (corev1.ResourceRequirements, bool) {
+	containers := p.Spec.Containers
+	if init {
+		containers = p.Spec.InitContainers
+	}
+	for _, c := range containers {
+		if c.Name == name {
+			return c.Resources, true
+		}
+	}
+	return corev1.ResourceRequirements{}, false
+}
+
+// templateOf returns the containers of the pod template of a Deployment or StatefulSet target that was
+// read with its UID, with their memory limits, or nil for any other target ([Context.Template]).
+func templateOf(t *target) []TemplateContainer {
+	if t.state != targetResolved {
+		return nil
+	}
+	var containers []corev1.Container
+	switch o := t.workload.(type) {
+	case *appsv1.Deployment:
+		containers = o.Spec.Template.Spec.Containers
+	case *appsv1.StatefulSet:
+		containers = o.Spec.Template.Spec.Containers
+	default:
+		return nil
+	}
+	out := make([]TemplateContainer, 0, len(containers))
+	for _, c := range containers {
+		tc := TemplateContainer{Name: c.Name}
+		if q, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
+			q = q.DeepCopy()
+			tc.MemoryLimit = &q
+		}
+		out = append(out, tc)
+	}
+	return out
 }
 
 func desired(r *int32) int32 {
@@ -196,12 +258,14 @@ func (b *Builder) podLines(l *lines, t *target) {
 			}
 		}
 		for _, cs := range allStatuses(p) {
-			b.containerLine(l, cs)
+			b.containerLine(l, p, cs)
 		}
 	}
 }
 
-func (b *Builder) containerLine(l *lines, cs containerStatus) {
+// containerLine describes one container of a running pod, with the memory limit of that pod's own spec,
+// labelled as the pod's: during a rollout it may differ from the pod template's.
+func (b *Builder) containerLine(l *lines, p *corev1.Pod, cs containerStatus) {
 	kind := "container"
 	if cs.init {
 		kind = "init container"
@@ -210,6 +274,9 @@ func (b *Builder) containerLine(l *lines, cs containerStatus) {
 	parts = append(parts, "now "+b.state(l, cs.State))
 	if cs.LastTerminationState.Terminated != nil {
 		parts = append(parts, "last "+b.state(l, cs.LastTerminationState))
+	}
+	if r, ok := podResources(p, cs.Name, cs.init); ok {
+		parts = append(parts, "this pod's memory limit "+b.memoryLimit(l, r))
 	}
 	l.add("  %s %s: %s", kind, l.data(b.value(cs.Name)), strings.Join(parts, "; "))
 }

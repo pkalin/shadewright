@@ -99,8 +99,8 @@ type ProposedAction struct {
 
 // KedaMaxReplicasChange are the parameters of AdjustKedaMaxReplicas.
 type KedaMaxReplicasChange struct {
-	// PreviousValue is the maxReplicaCount the plan was made against.
-	PreviousValue int32 `json:"previousValue" bound:"min=1,max=1000"`
+	// PreviousValue is the maxReplicaCount the plan was made against: the ScaledObject's spec as it is now.
+	PreviousValue int32 `json:"previousValue" bound:"min=1,max=1000" desc:"The maxReplicaCount the ScaledObject's spec holds now, which the change replaces; not the HPA's current or desired replica count."`
 	// DesiredValue is the new maxReplicaCount.
 	DesiredValue int32 `json:"desiredValue" bound:"min=1,max=1000"`
 }
@@ -110,8 +110,9 @@ type KedaMaxReplicasChange struct {
 type MemoryLimitChange struct {
 	// Container is the container name in the pod template.
 	Container string `json:"container" bound:"maxLen=63" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"`
-	// Previous is the limit the plan was made against.
-	Previous string `json:"previous" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti)?$"`
+	// Previous is the limit the plan was made against: the pod template's, as it is now. The loop replaces it
+	// with the value the context builder read from the template (#494).
+	Previous string `json:"previous" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti)?$" desc:"The memory limit the workload's pod template sets for the container now, written as in the manifest (for example 48Mi), as the context's pod template line shows it. Not a running pod's own limit, which may still be an older value during a rollout, and not a byte count from a metric."`
 	// Desired is the new limit.
 	Desired string `json:"desired" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti)?$"`
 }

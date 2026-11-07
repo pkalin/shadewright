@@ -22,8 +22,9 @@ limitations under the License.
 // The context has five sections, in this order, each with its own byte bound ([Limits]):
 //
 //   - summary: the Incident itself (subject, reason, symptom, counts and times);
-//   - object status and owners: the target workload's status and conditions, the owner chain and the status
-//     of each of its current pods;
+//   - object status and owners: the target workload's status and conditions, the memory limits of its pod
+//     template, the owner chain and the status of each of its current pods with that pod's own memory limits,
+//     each labelled as the template's or the pod's (during a rollout they differ);
 //   - log excerpt: at most two excerpts from a [providers.LogSource], of the containers that look most
 //     relevant (a terminated previous instance first, then a waiting or unready container);
 //   - metrics: the approved metric templates for the target's pods from a [providers.MetricsSource];

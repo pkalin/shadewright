@@ -1,0 +1,20 @@
+# Synthetic: a triage reply written by hand to the output schema for the variant's context, as the lab's
+# model answered on 2026-11-07 (#494): it took the old pod's 64Mi as the previous value. The loop takes the
+# previous value from the pod template (48Mi) instead, so the plan is 48Mi to 96Mi.
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2600, outputTokens: 320}
+    content: |
+      {"summary": "The web container of Deployment demo/web was OOMKilled (exit code 137) in the new pod and has restarted 3 times, while the old pod still runs with more memory. It needs more memory than the new limit. Raising the memory limit within the policy's bounds should stop the kills.",
+       "hypotheses": [{"description": "The rollout lowered the memory limit; the new pod's working set climbs to just under it after each start, then the container is killed."}],
+       "evidence": [{"source": "c1", "quote": "OOMKilled"},
+                    {"source": "c2", "quote": "OOMKilled"},
+                    {"source": "c4", "quote": "container_memory_working_set_bytes{container=web,pod=web-8d4c6b9f7-t5r9k} last 5.0135e+07"},
+                    {"source": "c4", "quote": "container_memory_limit_bytes{container=web,pod=web-6f7c9d8b5-m2x7q} 6.71089e+07"}],
+       "missingData": [],
+       "uncertainty": "The old pod ran under a higher limit without kills, so the needed limit is estimated from the new pod's peak, not measured.",
+       "proposal": {"action": {"type": "SetContainerMemoryLimit", "adjustKedaMaxReplicas": null,
+                               "setContainerMemoryLimit": {"container": "web", "previous": "64Mi", "desired": "96Mi"}},
+                    "expectedEffect": "The container stays under its limit and stops being OOMKilled.",
+                    "verificationChecks": []}}

@@ -1,0 +1,4 @@
+about: >-
+  A rollout in progress, as the lab met it on 2026-11-07 (#494): the Deployment's pod template went from 64Mi
+  back to 48Mi, the new pod is OOMKilled at 48Mi while the old ReplicaSet's pod still runs, ready, with 64Mi. The
+  previous value of a memory limit change is the template's 48Mi, not the old pod's 64Mi.

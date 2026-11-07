@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/incidentcontext"
@@ -43,8 +44,8 @@ func TestTriageProposes(t *testing.T) {
 		t.Fatalf("outcome = %+v, want a proposal", out)
 	}
 	p := out.Plan
-	if p.Action.Type != remediationv1alpha1.ActionSetContainerMemoryLimit || p.Action.SetContainerMemoryLimit.Container != "app" ||
-		p.Action.SetContainerMemoryLimit.Desired.String() != "512Mi" || p.PolicyRef != memoryPolicy {
+	if p.Action.Type != remediationv1alpha1.ActionSetContainerMemoryLimit || p.Action.SetContainerMemoryLimit.Container != testContainer ||
+		p.Action.SetContainerMemoryLimit.Desired.String() != desiredLimit || p.PolicyRef != memoryPolicy {
 		t.Errorf("plan = %+v", p)
 	}
 	if len(p.Checks) != 1 || p.Checks[0] != remediationv1alpha1.CheckNoNewOOMKills {
@@ -798,6 +799,56 @@ func TestToolResultEvidenceIsTheDataOnly(t *testing.T) {
 			msgs := f.escalation.reqs()[1].Messages
 			if content := msgs[len(msgs)-1].Content; !strings.Contains(content, tc.quote) {
 				t.Fatalf("the test quote %q is not in what the model saw: %q", tc.quote, content)
+			}
+		})
+	}
+}
+
+// The previous memory limit of a proposal is the pod template's, as the context builder read it, never the
+// model's (#494): during a rollout an old pod may still run with another limit, and a model may write the
+// value as a byte count. A container the template does not have, or sets no limit for, is handed off.
+func TestPreviousMemoryLimitComesFromThePodTemplate(t *testing.T) {
+	withPrevious := func(previous string) string {
+		return strings.Replace(validResult, `"previous":"256Mi"`, `"previous":"`+previous+`"`, 1)
+	}
+	limit := func(q string) *resource.Quantity { return new(resource.MustParse(q)) }
+	cases := map[string]struct {
+		reply    string
+		template []incidentcontext.TemplateContainer
+		reason   Reason
+	}{
+		"an old pod's limit during a rollout": {withPrevious("64Mi"),
+			[]incidentcontext.TemplateContainer{{Name: testContainer, MemoryLimit: limit("48Mi")}}, ReasonProposed},
+		"a byte count": {withPrevious("48012416"),
+			[]incidentcontext.TemplateContainer{{Name: testContainer, MemoryLimit: limit("48Mi")}}, ReasonProposed},
+		"the template's own value": {withPrevious("48Mi"),
+			[]incidentcontext.TemplateContainer{{Name: "sidecar"}, {Name: testContainer, MemoryLimit: limit("48Mi")}},
+			ReasonProposed},
+		"no limit in the template": {withPrevious("64Mi"),
+			[]incidentcontext.TemplateContainer{{Name: testContainer}}, ReasonPreviousValueUnknown},
+		"no such container in the template": {withPrevious("64Mi"),
+			[]incidentcontext.TemplateContainer{{Name: "sidecar", MemoryLimit: limit("48Mi")}},
+			ReasonPreviousValueUnknown},
+		"the template was not read": {withPrevious("64Mi"), nil, ReasonPreviousValueUnknown},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture()
+			f.builder.c.Template = c.template
+			f.triage.steps = []step{reply(c.reply)}
+			out := f.analyze(t, testLimits())
+			if out.Reason != c.reason {
+				t.Fatalf("reason %s, want %s", out.Reason, c.reason)
+			}
+			if c.reason != ReasonProposed {
+				if out.Plan != nil {
+					t.Errorf("a hand-off carries the plan %+v", out.Plan)
+				}
+				return
+			}
+			p := out.Plan.Action.SetContainerMemoryLimit
+			if p == nil || p.Previous.String() != "48Mi" || p.Desired.String() != desiredLimit || p.Container != testContainer {
+				t.Errorf("plan %+v: want app from 48Mi to 512Mi", p)
 			}
 		})
 	}

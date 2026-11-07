@@ -83,6 +83,10 @@ const (
 	// ReasonTargetNotSupported: the proposed action may not target the Incident's subject, or the subject has
 	// no namespace or UID.
 	ReasonTargetNotSupported Reason = "TargetNotSupported"
+	// ReasonPreviousValueUnknown: the proposal changes a value the analyzer takes from the subject's pod
+	// template, and the template it read has no such value: it was not read, has no container of that name, or
+	// sets no memory limit for it (#494).
+	ReasonPreviousValueUnknown Reason = "PreviousValueUnknown"
 	// ReasonNoPolicyForAction: no RemediationPolicy is configured for the proposed action type.
 	ReasonNoPolicyForAction Reason = "NoPolicyForAction"
 	// ReasonActionOutOfBounds: the proposed action failed the policy's catalog check (outside the catalog's
@@ -349,6 +353,7 @@ func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 		return r.handOff(ReasonDeadlineExceeded)
 	}
 	r.pods = c.Pods
+	r.template = c.Template
 	var shownContext string
 	shownContext, r.shown = contextMessage(c)
 	r.contextText = shownContext
@@ -480,6 +485,8 @@ type run struct {
 	limits      Limits
 	out         *Outcome
 	pods        []string
+	// template is the subject's pod template as the context builder read it ([incidentcontext.Context.Template]).
+	template    []incidentcontext.TemplateContainer
 	contextText string
 	// shown is each block and tool result as the model saw it, by ID, with its quotable parts.
 	shown map[string]shownBlock
@@ -960,7 +967,40 @@ func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, 
 			checks = append(checks, c)
 		}
 	}
-	return r.a.accept(r.inc, *r.out, ReasonProposed, Plan{Action: *action, Checks: checks})
+	planned, reason := r.previousFromTemplate(*action)
+	if reason != "" {
+		return r.handOff(reason)
+	}
+	return r.a.accept(r.inc, *r.out, ReasonProposed, Plan{Action: planned, Checks: checks})
+}
+
+// previousFromTemplate replaces the previous value the model wrote with the one the subject's pod template
+// holds, as the context builder read it from the API server (#494). That is the value the executor's
+// baseline check compares the request with (invariant 1: the check stays, and decides): during a rollout a
+// running pod may still hold an older limit, and a model may write the value as a byte count or copy it from
+// a metric. A memory limit change whose container the template does not have, or sets no limit for, cannot
+// name its previous value and is handed off. An action the subject's kind may not take is left as it is, for
+// accept to refuse. AdjustKedaMaxReplicas keeps the model's previousValue: the builder does not read
+// ScaledObjects, and the executor's check refuses a wrong one.
+func (r *run) previousFromTemplate(a remediationv1alpha1.Action) (remediationv1alpha1.Action, Reason) {
+	s := r.inc.Spec.Subject
+	if a.Type != remediationv1alpha1.ActionSetContainerMemoryLimit || a.SetContainerMemoryLimit == nil ||
+		!policy.ActionMayTarget(a.Type, s.APIVersion, s.Kind) {
+		return a, ""
+	}
+	for _, c := range r.template {
+		if c.Name != a.SetContainerMemoryLimit.Container {
+			continue
+		}
+		if c.MemoryLimit == nil {
+			return a, ReasonPreviousValueUnknown
+		}
+		p := *a.SetContainerMemoryLimit
+		p.Previous = c.MemoryLimit.DeepCopy()
+		a.SetContainerMemoryLimit = &p
+		return a, ""
+	}
+	return a, ReasonPreviousValueUnknown
 }
 
 // redact redacts model text for the logs, keeping whole occurrences of the Incident's name: the name was read

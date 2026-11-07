@@ -193,7 +193,8 @@ var refusalReasons = []analysis.Reason{analysis.ReasonNoProposal, analysis.Reaso
 // resultReasons are the ends of an analysis whose last reply was a valid result the loop accepted, so its
 // text is the diagnosis: the result's own ends, and the checks of its proposal after decoding.
 var resultReasons = []analysis.Reason{analysis.ReasonProposed, analysis.ReasonNoProposal, analysis.ReasonMissingData,
-	analysis.ReasonNoEvidence, analysis.ReasonTargetNotSupported, analysis.ReasonNoPolicyForAction}
+	analysis.ReasonNoEvidence, analysis.ReasonTargetNotSupported, analysis.ReasonNoPolicyForAction,
+	analysis.ReasonPreviousValueUnknown}
 
 // scoreOutcome compares the loop's outcome with expected.yaml's.
 func scoreOutcome(scn *scenario, out analysis.Outcome) outcomeScore {

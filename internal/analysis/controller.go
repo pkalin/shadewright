@@ -632,6 +632,7 @@ var outcomeMessages = map[Reason]string{
 	ReasonMissingData:             "The analysis made no proposal and named missing data; handed off to a person",
 	ReasonNoEvidence:              "The proposal quoted no evidence found in the context or tool results; handed off to a person",
 	ReasonTargetNotSupported:      "The proposed action cannot target the incident's subject; handed off to a person",
+	ReasonPreviousValueUnknown:    "The previous value could not be taken from the subject's pod template (not read, no such container, or no memory limit set); handed off to a person",
 	ReasonNoPolicyForAction:       "No RemediationPolicy is configured for the proposed action; handed off to a person",
 	ReasonActionOutOfBounds:       "The proposed action is outside the catalog's bounds; handed off to a person",
 	ReasonInvalidOutput:           "The model's output did not match the result schema; handed off to a person",

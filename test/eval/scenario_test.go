@@ -210,6 +210,11 @@ func loadScenarios(scheme *runtime.Scheme) ([]*scenario, error) {
 			return nil, fmt.Errorf("scenario %s: %w", e.Name(), err)
 		}
 		out = append(out, s)
+		variants, err := loadVariants(scheme, filepath.Join(scenariosDir, e.Name()), s)
+		if err != nil {
+			return nil, fmt.Errorf("scenario %s: %w", e.Name(), err)
+		}
+		out = append(out, variants...)
 	}
 	if len(out) == 0 {
 		return nil, errors.New("no scenarios found")
@@ -265,10 +270,81 @@ func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error
 	if err := s.loadMetrics(dir); err != nil {
 		return nil, err
 	}
-	raw, err = os.ReadFile(filepath.Join(dir, "objects.yaml"))
+	if s.objects, err = readObjects(decoder, filepath.Join(dir, "objects.yaml")); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// variantsDir is the directory of a scenario that holds its variants, one directory each.
+const variantsDir = "variants"
+
+// variant is a variant.yaml: a state of a fleet scenario the lab met that its own recording does not show,
+// such as a rollout in progress. A variant is scored against the scenario's expected.yaml and rubric.yaml,
+// unchanged, with the scenario's Incident; its directory holds its own objects.yaml and replies.yaml, and a
+// metrics.yaml when its series differ from the scenario's.
+type variant struct {
+	// About says what the variant changes and why, in a sentence or two.
+	About string `json:"about"`
+}
+
+// loadVariants reads the variants of the scenario base loaded from dir, sorted by name. Each is named
+// <scenario>/<variant>.
+func loadVariants(scheme *runtime.Scheme, dir string, base *scenario) ([]*scenario, error) {
+	entries, err := os.ReadDir(filepath.Join(dir, variantsDir))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading the variants: %w", err)
+	}
+	var out []*scenario
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		v, err := loadVariant(scheme, filepath.Join(dir, variantsDir, e.Name()), base)
+		if err != nil {
+			return nil, fmt.Errorf("variant %s: %w", e.Name(), err)
+		}
+		v.name = base.name + "/" + e.Name()
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+// loadVariant loads the variant in dir over a copy of base.
+func loadVariant(scheme *runtime.Scheme, dir string, base *scenario) (*scenario, error) {
+	var v variant
+	if err := readStrict(filepath.Join(dir, "variant.yaml"), &v); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(v.About) == "" {
+		return nil, errors.New("variant.yaml: about is required")
+	}
+	s := &scenario{expected: base.expected, rubric: base.rubric, incident: base.incident.DeepCopy(),
+		metrics: base.metrics}
+	if err := readStrict(filepath.Join(dir, "replies.yaml"), &s.recording); err != nil {
+		return nil, err
+	}
+	if err := s.loadMetrics(dir); err != nil {
+		return nil, err
+	}
+	var err error
+	if s.objects, err = readObjects(serializer.NewCodecFactory(scheme).UniversalDeserializer(),
+		filepath.Join(dir, "objects.yaml")); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// readObjects decodes the cluster objects of an objects.yaml.
+func readObjects(decoder runtime.Decoder, path string) ([]client.Object, error) {
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+	var objects []client.Object
 	// The same splitter as the source mapper (internal/gitops/sourcemap): any valid document separator.
 	docs := utilyaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(raw)))
 	for i := 0; ; i++ {
@@ -290,9 +366,9 @@ func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error
 		if !ok {
 			return nil, fmt.Errorf("objects.yaml document %d is a %T", i, obj)
 		}
-		s.objects = append(s.objects, co)
+		objects = append(objects, co)
 	}
-	return s, nil
+	return objects, nil
 }
 
 // loadMetrics reads the scenario's metrics.yaml, if it has one, and checks it against the approved templates

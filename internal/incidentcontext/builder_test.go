@@ -23,7 +23,10 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -650,6 +653,71 @@ func TestLaterOccurrenceCarriesNothingOfThePreviousOne(t *testing.T) {
 		}
 		if strings.Contains(got.Blocks[i].Text, later.Spec.PreviousIncident) {
 			t.Errorf("block %s names the previous Incident", got.Blocks[i].Section)
+		}
+	}
+}
+
+// limits returns resources with a memory limit q, or none when q is empty.
+func limits(q string) corev1.ResourceRequirements {
+	if q == "" {
+		return corev1.ResourceRequirements{}
+	}
+	return corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse(q)}}
+}
+
+// During a rollout the pod template and a running pod hold different memory limits: the status block labels
+// each, and the context carries the template's for the analysis loop, which takes a proposal's previous
+// value from it (#494).
+func TestTemplateAndRunningPodLimitsAreLabelled(t *testing.T) {
+	d := deployment()
+	d.Spec.Template.Spec.Containers = []corev1.Container{{Name: appName, Resources: limits("48Mi")}, {Name: "sidecar"}}
+	rs := replicaSet("web-abc", "uid-rs-abc", d, longAgo)
+	ref := controllerRef(kindReplicaSet, rs.Name, rs.UID)
+	old := crashing(pod(crashPod, rs.Labels, longAgo, ref), "exited")
+	old.Spec.Containers = []corev1.Container{{Name: appName, Resources: limits("64Mi")}}
+	c := build(t, newBuilder(t, reader(t, d, rs, old), sources{}, nil), incident(deploymentRef()))
+
+	want := []TemplateContainer{{Name: appName, MemoryLimit: new(resource.MustParse("48Mi"))}, {Name: "sidecar"}}
+	if len(c.Template) != len(want) {
+		t.Fatalf("template %+v", c.Template)
+	}
+	for i, w := range want {
+		got := c.Template[i]
+		if got.Name != w.Name || (got.MemoryLimit == nil) != (w.MemoryLimit == nil) ||
+			(w.MemoryLimit != nil && got.MemoryLimit.Cmp(*w.MemoryLimit) != 0) {
+			t.Errorf("template container %d: %+v, want %+v", i, got, w)
+		}
+	}
+	text := one(t, c, SectionStatus).Text
+	for _, line := range []string{
+		"  pod template (the workload's current spec): container app, memory limit 48Mi\n",
+		"  pod template (the workload's current spec): container sidecar, memory limit not set\n",
+		"; this pod's memory limit 64Mi\n",
+	} {
+		if !strings.Contains(text, line) {
+			t.Errorf("the status block lacks %q:\n%s", line, text)
+		}
+	}
+
+	// A StatefulSet's template is carried too; a ReplicaSet, a pod or a target that is gone has none.
+	s := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: testNS, UID: dbUID, CreationTimestamp: longAgo},
+		Spec: appsv1.StatefulSetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{appName: "db"}},
+			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
+				{Name: "db", Resources: limits("1Gi")}}}}},
+	}
+	sRef := remediationv1alpha1.ObjectRef{APIVersion: apiApps, Kind: kindStatefulSet, Namespace: testNS, Name: "db", UID: dbUID}
+	c = build(t, newBuilder(t, reader(t, s), sources{}, nil), incident(sRef))
+	if len(c.Template) != 1 || c.Template[0].MemoryLimit == nil || c.Template[0].MemoryLimit.String() != "1Gi" {
+		t.Errorf("StatefulSet template %+v", c.Template)
+	}
+	rsRef := remediationv1alpha1.ObjectRef{APIVersion: apiApps, Kind: kindReplicaSet, Namespace: testNS, Name: rs.Name,
+		UID: remediationv1alpha1.UID(rs.UID)}
+	gone := deploymentRef()
+	gone.UID = "uid-recreated"
+	for name, subject := range map[string]remediationv1alpha1.ObjectRef{"ReplicaSet": rsRef, "gone": gone} {
+		if c := build(t, newBuilder(t, reader(t, d, rs, old), sources{}, nil), incident(subject)); c.Template != nil {
+			t.Errorf("%s: template %+v", name, c.Template)
 		}
 	}
 }

@@ -5,8 +5,8 @@ replays recorded replies, and on demand against the real model ([design 11.2](de
 [ADR-0025](adr/0025-analysis-claims-units-and-evaluation-manifest.md) decision 3, [#78](https://github.com/pkalin/shadewright/issues/78)).
 
 <span class="sw-status sw-built">built</span> The harness, the recorded contexts of all eight fleet scenarios, the
-CI run on the fake model, the manual Evaluation workflow for the real model, the report and its evaluation manifest.
-<span class="sw-status sw-planned">planned</span> Contexts and replies recorded from lab runs instead of written by
+CI run on the fake model, `make eval-model` for the real model by hand, the report and its evaluation manifest.
+<span class="sw-status sw-planned">planned</span> The Evaluation workflow for the real model, in its own pull request. Contexts and replies recorded from lab runs instead of written by
 hand, passing results stored in this repository, and the analyzer's run-time check that refuses automatic analysis
 without a passing result for its manifest digest. Until that check exists, a run with a real model in the lab is an
 evaluation run, not production use.
@@ -56,28 +56,22 @@ In CI the `test` job runs `make test` with `EVAL_REPORT_DIR` set, so the evaluat
 adds the Markdown report to the job summary (also when a test failed). The evaluation runs once.
 Evaluation-only changes run there too: everything under `test/` is in the `go` group of `hack/ci-changed.sh`.
 
-### The real model: the Evaluation workflow
+### The real model
 
-`.github/workflows/evaluation.yml` runs `make eval-model` by hand only (`workflow_dispatch`, inputs `repeats` and
-`min_pass_rate`). It never runs on pull requests, pushes or a schedule, and it is not part of `ci.yml`. The job has
-`contents: read` and `id-token: write` and nothing else. It signs in to Azure with OIDC and no secret: it asks
-GitHub for an ID token for the audience `api://AzureADTokenExchange`, writes it to a file, and the analyzer's own
-workload identity token source exchanges it for an Entra ID token for Cognitive Services, as in the cluster. The
-report is the job summary and the artifact `evaluation-report` (90 days).
+`make eval-model` runs the scenarios against the Foundry deployments the environment names, through the analyzer's
+own model factory (endpoint allow-list, workload identity token source, Foundry adapter). It costs money, so it
+runs by hand only, never in `ci.yml`. <span class="sw-status sw-planned">planned</span> The Evaluation workflow,
+in its own pull request: a `workflow_dispatch` workflow with an OIDC sign-in and no secret that runs the same
+target and publishes the report as the job summary and an artifact.
 
-Before the first run, the maintainer sets up:
-
-1. **An identity.** An app registration or user-assigned managed identity with a federated credential whose
-   subject is `repo:pkalin/shadewright:environment:evaluation` and audience `api://AzureADTokenExchange`, and the
-   role **Cognitive Services OpenAI User** on the Foundry resource only. Not the analyzer's lab identity: a
-   separate one, so the lab cluster's credential never leaves it.
-2. **The environment `evaluation`** in the repository settings, with a required reviewer if a run should wait for
-   approval before it spends money, and these variables (not secrets: none of them is a credential):
+By hand, sign in with a workload identity the analyzer's token source understands (`AZURE_CLIENT_ID`,
+`AZURE_TENANT_ID`, `AZURE_FEDERATED_TOKEN_FILE`). Use a separate app registration or user-assigned managed
+identity with the role **Cognitive Services OpenAI User** on the Foundry resource only, not the analyzer's lab
+identity. Then set:
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
-| `EVAL_AZURE_CLIENT_ID` | yes | Client ID of the identity above |
-| `EVAL_AZURE_TENANT_ID` | yes | Its tenant ID |
+| `EVAL_MODEL` | yes | `foundry` (set by `make eval-model`) |
 | `EVAL_ENDPOINT` | yes | HTTPS base URL of the Foundry endpoint, as in `spec.analysis.models` |
 | `EVAL_ENDPOINT_SUFFIXES` | yes | Host suffix allow-list, as the analyzer's `--model-endpoint-suffixes` (for example `.services.ai.azure.com`) |
 | `EVAL_TRIAGE_DEPLOYMENT` | yes | Name of the triage deployment |
@@ -85,13 +79,13 @@ Before the first run, the maintainer sets up:
 | `EVAL_ESCALATION_DEPLOYMENT` | no | Name of the escalation deployment; without it an escalation is handed off |
 | `EVAL_ESCALATION_MODEL` | with the above | Model ID and version of the escalation replies, as `--escalation-model` |
 | `EVAL_API_VERSION` | no | Inference API version, `v1` by default |
+| `EVAL_REPEATS`, `EVAL_MIN_PASS_RATE` | no | Runs of each scenario (1 to 5, default 1) and the share of runs that must pass (0 to 1, default 1) |
 | `EVAL_PRICE_INPUT_PER_MTOK`, `EVAL_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_PRICE_OUTPUT_PER_MTOK` | no | USD per million tokens of the deployment, for the cost estimate: all three or none. Nothing is built in; take them from the Azure price list for the region |
 
 A run of the eight scenarios is eight analyses per repeat, each bounded by the loop's limits (at most 7 model
-calls with 4 tool steps, 2048 output tokens per call, 500,000 tokens per analysis). The report is rewritten after every run, and `make eval-model` stops after 50 minutes (the `go test`
-timeout), before the job's own 60, so a long run that is cut off still leaves its report. The job's timeout also
-keeps it inside the lifetime of the access token it exchanged once. The workflow cannot be tested on a fork or
-locally without such an identity; run it once by hand after setting it up.
+calls with 4 tool steps, 2048 output tokens per call, 500,000 tokens per analysis). The report is rewritten after
+every run, and `make eval-model` stops after 50 minutes (the `go test`
+timeout), so a long run that is cut off still leaves its report.
 
 ## The scenario files
 

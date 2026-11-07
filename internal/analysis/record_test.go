@@ -333,6 +333,7 @@ func TestStoreRecordSkippedNearTheClaimsEnd(t *testing.T) {
 
 // The record counter takes only its closed set of results and is documented.
 func TestAnalysisRecordsMetric(t *testing.T) {
+	initRecordMetrics(analysisRecords)
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(analysisRecords)
 	want := map[string]metricguard.Labels{"shadewright_analysis_records_total": {"result": recordResults}}
@@ -449,5 +450,131 @@ func TestConcludeRecordAndOutcomeAgreeOnARecoveredRequest(t *testing.T) {
 	}
 	if len(live.Status.RemediationRequests) != 1 || rec.Request != string(live.Status.RemediationRequests[0]) {
 		t.Fatalf("record request = %q, Incident requests = %v", rec.Request, live.Status.RemediationRequests)
+	}
+}
+
+// A claim lost after the record was stored and before the outcome write leaves the record in the
+// create-only store; the log line of the dropped outcome names it, so it can be found (#454).
+func TestControllerNamesTheRecordOfADroppedOutcome(t *testing.T) {
+	ns := namespace(t)
+	setSettings(t, 10)
+	inc := dueIncident(t, ns, nil)
+	f := newFixture()
+	f.triage.steps = []step{reply(noProposal)}
+	c, _ := newController(t, ns, f)
+	store := &fake.Store{}
+	successor := metav1.NewTime(time.Now().Add(time.Minute).Truncate(time.Second))
+	store.After = func(string) error {
+		live := liveIncident(t, inc)
+		live.Status.LastAnalysisTime = &successor
+		return env.admin.Status().Update(context.Background(), live)
+	}
+	c.Store = store
+	ctx, last := logged(t)
+	if _, err := c.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(inc)}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	recs := store.Records()
+	if len(recs) != 1 {
+		t.Fatalf("%d records, want the one stored before the claim was lost", len(recs))
+	}
+	line := last("Dropped the outcome of an analysis whose claim was lost")
+	for id := range recs {
+		if !strings.Contains(line, `"record"="`+id+`"`) {
+			t.Errorf("the dropped outcome's line does not name record %s: %q", id, line)
+		}
+	}
+}
+
+// countingReader counts the live reads of Incidents and fails those for which fail(n) holds (n from 1) with a
+// transient error.
+type countingReader struct {
+	client.Reader
+	fail  func(n int) bool
+	reads int
+}
+
+func (r *countingReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*remediationv1alpha1.Incident); ok {
+		r.reads++
+		if r.fail(r.reads) {
+			return apierrors.NewServiceUnavailable("the API server is restarting")
+		}
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+// A failed live read before the outcome write sends nothing, so the next try does not first look for an
+// outcome that could not have been written: one read for the failed try, one for the write (#454).
+func TestFinishTakesAFailedReadForNoWrite(t *testing.T) {
+	c, inc := claimedIncident(t)
+	r := &countingReader{Reader: c.Reader, fail: func(n int) bool { return n == 1 }}
+	c.Reader = r
+	if err := c.finish(t.Context(), inc, Outcome{Reason: ReasonNoProposal}, "", "", ""); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+	if r.reads != 2 {
+		t.Errorf("%d live reads of the Incident, want 2", r.reads)
+	}
+}
+
+// Without a store the time budget's error does not name a record write (#454).
+func TestCheckTimeBudgetNamesTheRecordWriteOnlyWithAStore(t *testing.T) {
+	a, err := New(func() Config { f := newFixture(); f.cfg.Timeout = MaxTimeout; return f.cfg }())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &Controller{Analyzer: a, Reader: kfake.NewClientBuilder().Build(), ClaimTimeout: MaxTimeout}
+	if err := c.CheckTimeBudget(); err == nil || strings.Contains(err.Error(), "record") {
+		t.Errorf("without a store: %v, want an error that names no record write", err)
+	}
+	c.Store = &fake.Store{}
+	if err := c.CheckTimeBudget(); err == nil || !strings.Contains(err.Error(), "the record write ("+storeTimeout.String()+")") {
+		t.Errorf("with a store: %v, want an error that names the record write", err)
+	}
+}
+
+// initRecordMetrics starts every series at zero; SetupWithManager calls it only with a store, so "no store" (no
+// series) and "nothing written" (zeros) differ (#454).
+func TestRecordMetricsStartOnlyWithAStore(t *testing.T) {
+	v := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "records_total"}, []string{recordResultLabel})
+	initRecordMetrics(v)
+	if n := testutil.CollectAndCount(v); n != len(recordResults) {
+		t.Errorf("%d series with a store, want %d", n, len(recordResults))
+	}
+}
+
+// appliedEOFStatus applies the first status update and then answers with a closed connection.
+type appliedEOFStatus struct {
+	client.SubResourceWriter
+	tries *int
+}
+
+func (s appliedEOFStatus) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	*s.tries++
+	if err := s.SubResourceWriter.Update(ctx, obj, opts...); err != nil || *s.tries > 1 {
+		return err
+	}
+	return fmt.Errorf("updating Incident status: %w", io.EOF)
+}
+
+type appliedEOFClient struct {
+	client.Client
+	tries int
+}
+
+func (c *appliedEOFClient) Status() client.SubResourceWriter {
+	return appliedEOFStatus{SubResourceWriter: c.Client.Status(), tries: &c.tries}
+}
+
+// An outcome write that was applied though its answer was lost, followed by a failed look for it, is looked
+// for again, not taken for a lost claim (#454 review).
+func TestFinishLooksAgainAfterAFailedLook(t *testing.T) {
+	c, inc := claimedIncident(t)
+	c.Client = &appliedEOFClient{Client: c.Client}
+	// Read 1 is the recheck before the write; read 2, the first look for the applied outcome, fails.
+	c.Reader = &countingReader{Reader: c.Reader, fail: func(n int) bool { return n == 2 }}
+	if err := c.finish(t.Context(), inc, Outcome{Reason: ReasonNoProposal}, "", "", ""); err != nil {
+		t.Fatalf("finish took an applied outcome for a lost claim: %v", err)
 	}
 }

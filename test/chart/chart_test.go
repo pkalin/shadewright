@@ -866,6 +866,16 @@ func TestAnalyzerAnalysisFollowsValues(t *testing.T) {
 	}
 }
 
+// A record store set to null, which Helm takes as "remove the default", renders with no store, as the
+// helper that checks it does (#454).
+func TestChartRendersANullRecordStore(t *testing.T) {
+	args := analyzerArgs(t, render(t, false, analyzerClientID, labSuffix, triageMini,
+		"analyzer.analysis.recordStore=null"))
+	if slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "--analysis-store-") }) {
+		t.Errorf("args %v hold a record store, want none", args)
+	}
+}
+
 func TestChartRefusesBadAnalysisValues(t *testing.T) {
 	for name, set := range map[string][]string{
 		"triage model without identity":  {triageMini, labSuffix},

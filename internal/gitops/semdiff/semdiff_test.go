@@ -528,6 +528,106 @@ func TestCheckBoundsTheBuild(t *testing.T) {
 	}
 }
 
+// The budgets are literals here, not the constants, so the tests pin the bounds a 128 MiB executor can
+// render (design 8.2.2, #482): 4 MiB of build input and 1,024 objects.
+const (
+	buildBudget  = 4 << 20
+	objectBudget = 1024
+)
+
+// budgetRepo is ordersRepo with filler ConfigMaps (comment padded, at most 1 MiB each) so that one visit of
+// apps/orders counts exactly total bytes: the kustomization file and every file it lists.
+func budgetRepo(t *testing.T, total int) map[string][]byte {
+	t.Helper()
+	files := ordersRepo()
+	const fillers = 5
+	names := make([]string, 0, 1+fillers)
+	names = append(names, "scaledobject.yaml")
+	for i := range fillers {
+		names = append(names, fmt.Sprintf("fill%d.yaml", i))
+	}
+	files[soKust] = kust(names...)
+	left := total - len(files[soKust]) - len(files[soFile])
+	for i := range fillers {
+		cm := fmt.Sprintf("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: fill%d\n  namespace: orders\n", i)
+		size := left / (fillers - i)
+		if size > semdiff.MaxFileBytes || size < len(cm)+3 {
+			t.Fatalf("filler of %d bytes does not fit", size)
+		}
+		files[fmt.Sprintf("apps/orders/fill%d.yaml", i)] = []byte("# " + strings.Repeat("x", size-len(cm)-3) + "\n" + cm)
+		left -= size
+	}
+	return files
+}
+
+func TestCheckBuildByteBudget(t *testing.T) {
+	// desired 15 keeps the patched file as long as the original; 100 makes it one byte longer, so a tree at
+	// exactly the budget is over it once patched.
+	cases := map[string]struct {
+		total   int
+		desired int32
+		want    *semdiff.Error
+	}{
+		"exactly the budget":              {buildBudget, 15, nil},
+		"one byte over":                   {buildBudget + 1, 15, semdiff.ErrTooLarge},
+		"one byte over once patched":      {buildBudget, 100, semdiff.ErrTooLarge},
+		"exactly the budget once patched": {buildBudget - 1, 100, nil},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			files := budgetRepo(t, c.total)
+			_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", c.desired))
+			if c.want == nil {
+				if err != nil {
+					t.Fatalf("Check: %v", err)
+				}
+				return
+			}
+			wantReason(t, err, c.want)
+			if !strings.Contains(err.Error(), fmt.Sprintf("more than %d bytes", buildBudget)) {
+				t.Fatalf("got %v, want the build byte budget named", err)
+			}
+		})
+	}
+}
+
+// configMapsYAML returns n small ConfigMaps in one file.
+func configMapsYAML(n int) []byte {
+	var b strings.Builder
+	for i := range n {
+		fmt.Fprintf(&b, "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm%d\n  namespace: orders\n", i)
+	}
+	return []byte(b.String())
+}
+
+func TestCheckObjectBudget(t *testing.T) {
+	cases := map[string]struct {
+		objects int
+		want    *semdiff.Error
+	}{
+		"exactly the budget": {objectBudget, nil},
+		"one object over":    {objectBudget + 1, semdiff.ErrTooLarge},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			files := ordersRepo()
+			files[soKust] = kust("scaledobject.yaml", "cms.yaml")
+			files["apps/orders/cms.yaml"] = configMapsYAML(c.objects - 2) // the file holds a Service and the ScaledObject
+			res, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
+			if c.want == nil {
+				if err != nil || res.Objects != c.objects {
+					t.Fatalf("got %+v, %v, want %d objects", res, err, c.objects)
+				}
+				return
+			}
+			wantReason(t, err, c.want)
+			if !strings.Contains(err.Error(), fmt.Sprintf("more than %d objects", objectBudget)) {
+				t.Fatalf("got %v, want the object budget named", err)
+			}
+		})
+	}
+}
+
 func TestLoadReadsTheBuild(t *testing.T) {
 	files := overlayPatch()
 	git := fake.NewGit("main", files)

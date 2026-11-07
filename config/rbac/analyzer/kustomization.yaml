@@ -3,5 +3,8 @@ resources:
 - role.yaml
 # The catalogue of reads in watched namespaces; bound per namespace in config/watch, never cluster-wide.
 - watch/role.yaml
+# The KEDA module's reads, bound per namespace in config/watch like the watch role (on by default, as the chart's
+# analyzer.modules.keda.enabled). The other modules' roles are off by default: config/modules.
+- modules/keda
 - role_binding.yaml
 - leader_election.yaml

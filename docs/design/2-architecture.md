@@ -80,11 +80,11 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 
 **What it may read.**
 
-- Events (`events.k8s.io/v1`), pods and HorizontalPodAutoscalers (`autoscaling`, for the KEDA module's symptom source, 2.5.3) (`get`, `list`, `watch`), pod logs (`get` on `pods/log`, for the pod logs source of the context builder, 2.3.2), and workloads (ReplicaSets, Deployments and StatefulSets) and KEDA `ScaledObject`s (`get` only), only in the namespaces it is started with (`--watch-namespaces`). The analyzer reads `ScaledObject`s only while the KEDA module is active; the grant itself does not depend on it.
+- Events (`events.k8s.io/v1`), pods and HorizontalPodAutoscalers (`autoscaling`, for the KEDA module's symptom source, 2.5.3) (`get`, `list`, `watch`), pod logs (`get` on `pods/log`, for the pod logs source of the context builder, 2.3.2), and workloads (ReplicaSets, Deployments and StatefulSets) and KEDA `ScaledObject`s (`get` here; `list` and `watch` too through the KEDA module role, 2.2.2), only in the namespaces it is started with (`--watch-namespaces`). The analyzer reads `ScaledObject`s only while the KEDA module is active; the grant itself does not depend on it.
 - That is a ClusterRole that is only a catalogue of verbs, bound by one RoleBinding per watched namespace and never cluster-wide.
 - Its cache is restricted to the same list for those kinds, and to the operator namespace for Incidents and requests.
 - The cache drops managed fields before it stores an object.
-- Cluster-wide it may read the cluster-scoped `RemediationSettings`, and `list` Nodes for platform detection, with no `get` or `watch`, so it starts no informer on them. The discovery API needs no grant.
+- Cluster-wide it may read the cluster-scoped `RemediationSettings`, and `list` Nodes for platform detection, with no `get` or `watch`, so it starts no informer on them. The discovery API needs no grant. With the chart value `analyzer.modules.kyverno.clusterWide.enabled` (off by default) it may also read Kyverno's cluster-scoped kinds (below).
 
 **What it may write.** All of this is in the operator namespace (a Role), except the settings status.
 
@@ -97,13 +97,16 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 
 **How the collector reads.**
 
-- It uses list and watch only on events and pods.
+- It uses list and watch only on events, pods, HPAs and the add-on kinds of its module symptom sources (2.5.1).
 - It reads a pod's owners with a `get`, one object at a time. It starts no informer for workloads, which it could not: the role grants no `list` or `watch` on them.
+- It watches an add-on's kind only while a module that reads it is active, the chart rendered its grant (`--module-grants`), the API server serves it and the analyzer may list it. The check is one metadata-only list of at most one object in each watched namespace, or cluster-wide for a cluster-scoped kind, every 30 seconds, and only while the kind is not watched: at most one list per watched namespace and kind per 30 seconds, and none while the watch runs. Otherwise it starts no informer and reports the kind: the condition `SymptomSourcesNotWatched` of the settings status, a log line and the gauge `shadewright_analyzer_symptom_source_watched` at `0`.
+- Each such watch has an informer cache of its own, never the manager's: a controller waits for every informer of its cache to sync, so one that cannot sync there would hold up the built-in watches and, after the sync timeout, stop the analyzer. While a watch runs its own errors decide. Every list and watch request of the watch counts, including the ones its informer retries without reporting them (a 429, or a refusal streamed after the watch started). A refused list or watch (a grant removed, or `list` granted without `watch`), a kind no longer served, a cache that does not sync, or a controller that stops on its own ends the watch: the kind is reported as not granted or not served when the check finds it so, otherwise as `Failed`, and the watch is started again only after a backoff (one minute, doubled after each failure in a row, at most 30 minutes). Errors the informer retries itself (the API server unavailable, a 429) are reported as `Failed` once three checks in a row found no request succeeding since, while the watch keeps running. The check looks the kind up with a discovery request of its own, with the lookup deadline, never through the manager's RESTMapper, so a stalled add-on group holds up no other source and no stop.
+- A kind whose optional grant the chart leaves out on purpose (`analyzer.modules.kyverno.clusterWide.enabled` off, the least-privilege setup) is not checked, not watched and not reported, and the gauge has no series for it. Without `--module-grants` (the kustomize manifests, where any of `config/modules` may be added) every kind is checked.
 
 **Watched namespaces.** They are a deployer setting (`demo` is the lab default).
 
 - The RoleBindings are built from `config/watch` (separately from `config/default`, in namespaces that must already exist) and must match `--watch-namespaces`. `test/rbac` checks that they do.
-- The Helm chart's RBAC is written by hand in `dist/chart/templates/rbac`, with the RoleBindings rendered from `analyzer.watchNamespaces`. `test/chart` keeps it equal to `config/`: any extra or missing verb, resource or subject fails. The value-dependent grants are `get` on `pods/log`, rendered only while `analyzer.podLogs.enabled` is true, and `get` on KEDA `scaledobjects`, rendered only while `analyzer.modules.keda.enabled` is true (both default to true, equal to `config/`).
+- The Helm chart's RBAC is written by hand in `dist/chart/templates/rbac`, with the RoleBindings rendered from `analyzer.watchNamespaces`. `test/chart` keeps it equal to `config/`: any extra or missing verb, resource or subject fails. The value-dependent grants are `get` on `pods/log`, rendered only while `analyzer.podLogs.enabled` is true, and one read-only ClusterRole per module under `analyzer.modules` (below). `test/chart` compares each with every toggle on against `config/` plus `config/modules/<name>`.
 - An empty `--watch-namespaces` watches no namespace, never all of them. The cache's default is then the operator namespace alone (an empty default would mean every namespace to controller-runtime), no collector is started, and the settings status carries the condition `NoWatchedNamespaces` True. This is the chart's default.
 - With no chart values (the default): the analyzer reads no namespaced object outside the operator namespace, has no Git identity, and writes only in the operator namespace (its Leases, the budget ConfigMap, Events) plus the settings status once a settings object exists. It still lists Nodes and reads discovery and the settings cluster-wide. The executor has no Azure workload identity, so it cannot reach Key Vault to sign for the GitHub App. (`config/manager/manager.yaml` gives the executor workload identity otherwise.)
 - The gauge `shadewright_analyzer_watched_namespaces` reports the count, so an alert on 0 catches a forgotten list.
@@ -118,12 +121,23 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 - The chart defaults it to the UID of the `kube-system` namespace, read by Helm with `lookup` at install time (the installer's permission, not the analyzer's). An explicit `clusterId` wins.
 - GitOps tools and client-side renders (`helm template`, helm diff, Argo CD, Flux with a dry-run) ask no cluster, and an installer without `get` on the `kube-system` namespace cannot read it. Each of those must set `clusterId` explicitly.
 
-**What it cannot read today.**
+**Reads of the add-ons' own kinds** ([#409](https://github.com/pkalin/shadewright/issues/409)). Each module's reads are a ClusterRole of their own, made from the markers of `internal/analyzer/modulerbac/<name>` (`config/rbac/analyzer/modules/<name>`), with `list` and `watch` only, for the sources' informers, and `get` on `scaledobjects` alone, where the owner a KEDA HPA names is read by name. The chart renders each only while its value is on, so an add-on that is not deployed gets no grant, and passes the list of rendered roles to the analyzer (`--module-grants`, 2.2.2); the value grants reads only, and whether a module runs is still `spec.modules` and detection.
 
-- Kyverno kinds: reading them (`get`, `list`, `watch` on `kyverno.io` `clusterpolicies` and `policies`, and on `wgpolicyk8s.io` `policyreports` and `clusterpolicyreports`) is granted only with the wiring of symptom sources (planned, 2.5).
-- Flux kinds, KEDA `scaledjobs`, and `list` or `watch` on `scaledobjects`: granted with the wiring of their symptom sources (planned, 2.5.1).
+| Chart value | Default | Role, binding | Kinds |
+|---|---|---|---|
+| `analyzer.modules.keda.enabled` | `true` | `analyzer-watch-keda`, a RoleBinding per watched namespace | `keda.sh` `scaledobjects`, `scaledjobs` |
+| `analyzer.modules.flux.enabled` | `false` | `analyzer-watch-flux`, a RoleBinding per watched namespace | `kustomizations`, `helmreleases`, `gitrepositories` |
+| `analyzer.modules.kyverno.enabled` | `false` | `analyzer-watch-kyverno`, a RoleBinding per watched namespace | `kyverno.io` `policies`, `wgpolicyk8s.io` `policyreports` |
+| `analyzer.modules.kyverno.clusterWide.enabled` | `false` | `analyzer-kyverno-cluster`, a ClusterRoleBinding | `kyverno.io` `clusterpolicies`, `wgpolicyk8s.io` `clusterpolicyreports` |
+
+- KEDA is on by default because the HPA source already read `scaledobjects` (`get`, to verify the subject): off, a ceiling would be an Incident about the HPA instead of the ScaledObject. `config/default` and `config/watch` include it.
+- Flux and Kyverno are off by default (least privilege): no module used those reads before. With kustomize, add `config/modules/<name>`, whose RoleBindings name the lab's `demo` namespace.
+- The Kyverno cluster-wide role is the one read of an add-on's kinds outside the watched namespaces; a ClusterPolicyReport names resources of every namespace, so it is a value of its own.
+
+**What it cannot read.**
+
 - Secrets Store CSI driver kinds (`secrets-store.csi.x-k8s.io` `secretproviderclasses` and `secretproviderclasspodstatuses`): that module needs none. It watches no kind and reads only the kubelet's events (2.5).
-- The cloudflared module's symptom source reads Pods, which the analyzer already reads in the watched namespaces, so it needs no new grant.
+- The cloudflared module's symptom source reads Pods, which the analyzer already reads in the watched namespaces, and the workloads it already reads by name, so it needs no grant and no chart value. It is wired (2.5.1).
 
 ### 2.2.3. Executor permissions
 
@@ -287,7 +301,8 @@ Detection runs in the analyzer (`internal/analyzer/detection`), in the leader on
 
 - when the analyzer becomes leader;
 - when the spec changes (a new generation; its own status writes do not wake it);
-- every 10 minutes while the object exists, so a node pool or an add-on installed later is found within that time.
+- every 10 minutes while the object exists, so a node pool or an add-on installed later is found within that time;
+- when the watch state of a symptom source kind of an active module changes (#409), so the condition `SymptomSourcesNotWatched` (5.4) follows it. Such a run only reports: it writes the status like any other, and needs no other grant (ADR-0024, amended 2026-11-07).
 
 A failed run is retried with the controller's backoff. Followers keep generic only, and run no collector either.
 
@@ -298,6 +313,7 @@ A failed run is retried with the controller's backoff. Followers keep generic on
 - The write is an update read fresh and retried on a conflict, and only when something changed. The read and the write, retries included, have a 30 s deadline of their own. A run that reaches it fails and is retried.
 - No field of the status is read for this or anything else (ADR-0024).
 - Each write also sets the condition `NoWatchedNamespaces` from the count of `--watch-namespaces` the binary was started with (not from detection; 5.4).
+- Each write also sets the condition `SymptomSourcesNotWatched` from the collector's report of the symptom source kinds it does not watch, while it watches namespaces (not from detection; 5.4).
 
 **What can go wrong.**
 
@@ -382,11 +398,20 @@ Later candidates: External Secrets Operator, Reloader, cert-manager, Trivy Opera
 - `New` refuses a source with an invalid group version, kind, resource or controller, or without a function, a subject owner with an invalid group version, kind or resource or of the watched kind itself, and a kind watched twice, by one module or by two on either axis.
 - It keeps a copy of each module's hooks as validated, and lookups return that copy.
 
-**Wiring** <span class="sw-status sw-built">built</span> for the HPA, <span class="sw-status sw-planned">planned</span> for the other kinds. The collector (3.1) watches the kinds whose sources are wired (`collector.SourceKinds`, for now `autoscaling/v2` `HorizontalPodAutoscaler`) in the watched namespaces, and on each object runs the source an active module declares for that kind, so a source runs only while its module is enabled and detected. Each symptom becomes an observation for the Incident controller (3.1). The Flux, Kyverno, cloudflared, `ScaledObject` and `ScaledJob` sources go through the same evaluator once their kinds are wired (planned), each with its read-only grant ([#380](https://github.com/pkalin/shadewright/issues/380), P2).
+**Wiring** <span class="sw-status sw-built">built</span>. The collector (3.1) watches the kinds of `collector.SourceKinds` in the watched namespaces: `autoscaling/v2` `HorizontalPodAutoscaler` and core `Pod` always, and the add-ons' kinds below only once served and granted (2.2.2), and on each object runs the source an active module declares for that kind, so a source runs only while its module is enabled and detected. Each symptom becomes an observation for the Incident controller (3.1). The subject of each source is the object an action would patch where one exists, else the object whose state fails:
+
+| Source | Subject | Fingerprint hashes |
+|---|---|---|
+| KEDA `HorizontalPodAutoscaler` | the `ScaledObject`, once verified (`AdjustKedaMaxReplicas` patches it) | its UID, the reason, the fixed summary |
+| cloudflared `Pod` | the pod's verified workload (its Deployment or StatefulSet), else the pod | the workload's UID (or the pod's), the reason, the fixed summary |
+| KEDA `ScaledObject`, `ScaledJob`; Flux `Kustomization`, `HelmRelease`, `GitRepository`; Kyverno `Policy`, `PolicyReport` | the object itself (the one an action would patch, a `ScaledObject`, or the one whose condition fails) | its UID, the reason, the fixed summary |
+| Kyverno `ClusterPolicy`, `ClusterPolicyReport` | the object itself, cluster-scoped (no namespace) | its UID, the reason, the fixed summary |
+
+A state of every kind but the HPA is emitted only once the collector has seen it last 2 minutes (3.1). A report gives at most one symptom per reason (its first failing result), so one report is at most one Incident per reason. A cluster-scoped object's observation is charged to no namespace (its source is empty), since only a cluster-wide grant can write it. An HPA whose `ScaledObject` the analyzer may not read (`analyzer.modules.keda.enabled` false) is an Incident about the HPA itself, and the ScaledObject kind is reported as not granted.
 
 ### 2.5.2. Flux
 
-**What it does.** The module (`internal/modules/flux`) is built. It contributes once the collector wires its kinds (planned, 2.5.1). It is detected by `kustomize.toolkit.fluxcd.io/v1`, `helm.toolkit.fluxcd.io/v2` or `source.toolkit.fluxcd.io/v1` (Flux 2.3 and later; beta versions are not read). It watches `Kustomization`, `HelmRelease` and `GitRepository` and reports at most one symptom per object.
+**What it does.** The module (`internal/modules/flux`) is built. Its symptom sources are wired (2.5.1), once `analyzer.modules.flux.enabled` (off by default) grants the reads (2.2.2). It is detected by `kustomize.toolkit.fluxcd.io/v1`, `helm.toolkit.fluxcd.io/v2` or `source.toolkit.fluxcd.io/v1` (Flux 2.3 and later; beta versions are not read). It watches `Kustomization`, `HelmRelease` and `GitRepository` and reports at most one symptom per object.
 
 **Which condition is reported.**
 
@@ -408,13 +433,13 @@ When the Kustomization or HelmRelease comparison differs, the summary says the c
 **Limits.**
 
 - The module has no actions and no tools, and reads objects only. A fix is a pull request to the manifest, values or Kustomization (section 7), never a change to a Flux object.
-- The read-only access to these kinds comes with the wiring. Flux objects usually live in `flux-system`, which then has to be among the analyzer's watched namespaces.
+- The read-only access to these kinds is the chart value `analyzer.modules.flux.enabled` (off by default, 2.2.2). Flux objects usually live in `flux-system`, which then has to be among the analyzer's watched namespaces.
 
 **Revisions and redaction.** A revision evidence value is kept unredacted only when the whole value is a Flux revision: an optional reference name, `@`, `sha1:` and exactly 40 lower-case hex digits (`redact.IsFluxRevision`). The evaluator applies this (`modules.BoundValue`, 2.5.1). Inside any other text, such as a condition message, the commit hash is redacted like any long hex run, so `sha1:` written in front of a secret keeps nothing.
 
 ### 2.5.3. KEDA
 
-**What it does.** The module (`internal/modules/keda`) is built and in the analyzer's registry. Its HPA source is consumed: a replica ceiling becomes an Incident about the `ScaledObject` (below). Its `ScaledObject` and `ScaledJob` sources are not consumed yet (planned, 2.5.1). It is detected by `keda.sh/v1alpha1`, the only group version of `ScaledObject`, `ScaledJob` and `TriggerAuthentication` in KEDA 2.x.
+**What it does.** The module (`internal/modules/keda`) is built and in the analyzer's registry. Its HPA source is consumed: a replica ceiling becomes an Incident about the `ScaledObject` (below). Its `ScaledObject` and `ScaledJob` sources are consumed too, about the object itself (2.5.1). It is detected by `keda.sh/v1alpha1`, the only group version of `ScaledObject`, `ScaledJob` and `TriggerAuthentication` in KEDA 2.x.
 
 It watches `ScaledObject`, `ScaledJob` and the `HorizontalPodAutoscaler` (`autoscaling/v2`) that KEDA creates for each `ScaledObject`, and reports at most one symptom per object. Conditions and reasons were read from KEDA v2.21.0 (the release the lab installs) and Kubernetes v1.37.2.
 
@@ -463,13 +488,13 @@ Its evidence is the `ScaledObject`'s name, `spec.maxReplicas`, `status.currentRe
 - The module contributes the verification check `KedaReady`: the `ScaledObject` is `Ready=True`, not paused (partial pauses and the pause annotations included), not being deleted, not on fallback, and `HPAActive` is not `False`. It is a pure function over the object. It offers no tools.
 - The action `AdjustKedaMaxReplicas` is allowed only while the cluster admin enables the `keda` integration in `RemediationSettings` `spec.modules.integrations`. The policy check refuses it otherwise (`Denied`, `ModuleNotEnabled`), reading the spec only, never the status. Disabling the module after approval supersedes the plan.
 - The function, KEDA's API version, condition names and pause annotations live in `internal/kedaready`, which imports only the standard library. The policy check and the module share one definition without the policy depending on the module registry or on the module.
-- Consuming the HPA source needs `get`, `list`, `watch` on `horizontalpodautoscalers` and `get` on `scaledobjects` (to verify the subject) in the watched namespaces, granted by the analyzer watch role (2.2.2). The analyzer reads nothing of `keda.sh` while the module is not active, though the grant does not depend on it. Consuming the `ScaledObject` and `ScaledJob` sources needs `list` and `watch` on `scaledobjects` and `get`, `list`, `watch` on `scaledjobs`, which come with their wiring.
+- Consuming the HPA source needs `get`, `list`, `watch` on `horizontalpodautoscalers` (the watch role) and `get` on `scaledobjects` (to verify the subject) in the watched namespaces. The `ScaledObject` and `ScaledJob` sources need `list` and `watch` on both (`get` on `scaledobjects` is only for the owner read above). All of `keda.sh` comes from the role `analyzer-watch-keda`, rendered while `analyzer.modules.keda.enabled` is true (the default, 2.2.2). The analyzer reads nothing of `keda.sh` while the module is not active, though the grant does not depend on it.
 
 **Known limit.** The registry allows one symptom source per kind, so this module's `HorizontalPodAutoscaler` source is the only one. A later core-workloads HPA rule must share it (move into it or be split out of it) rather than add a second source.
 
 ### 2.5.4. Kyverno
 
-**What it does.** The module (`internal/modules/kyverno`) is built and in the analyzer's list of modules. Its admission rule and symptom sources contribute once the analyzer runs diagnosis rules and wires symptom sources (planned). It was read at Kyverno tag v1.19.2.
+**What it does.** The module (`internal/modules/kyverno`) is built and in the analyzer's list of modules. Its symptom sources are wired (2.5.1), once its chart values grant the reads (`analyzer.modules.kyverno.enabled` for `Policy` and `PolicyReport`, `analyzer.modules.kyverno.clusterWide.enabled` for `ClusterPolicy` and `ClusterPolicyReport`, both off by default, 2.2.2). Its admission rule contributes once the analyzer runs diagnosis rules (planned). It was read at Kyverno tag v1.19.2.
 
 **Detection.** By `kyverno.io/v1` only.
 
@@ -549,7 +574,7 @@ When a note fits more than one Key Vault reason, the first of identity, access d
 
 ### 2.5.6. cloudflared
 
-**What it does.** The module (`internal/modules/cloudflared`) is built and in the analyzer's list of modules. Its symptom source contributes once the analyzer wires symptom sources (planned). Values were read from cloudflared 2026.10.7, Cloudflare's `helm-charts` (tags `cloudflare-tunnel-remote-0.1.2` and `cloudflare-tunnel-0.3.2`), Kubernetes v1.37.2 and containerd v2.4.2.
+**What it does.** The module (`internal/modules/cloudflared`) is built and in the analyzer's list of modules. Its symptom source is wired <span class="sw-status sw-built">built</span>: a `TunnelDown` that lasts 2 minutes becomes an Incident about the pod's verified workload (2.5.1). Values were read from cloudflared 2026.10.7, Cloudflare's `helm-charts` (tags `cloudflare-tunnel-remote-0.1.2` and `cloudflare-tunnel-0.3.2`), Kubernetes v1.37.2 and containerd v2.4.2.
 
 **Detection.** cloudflared has no CRD and no API group, so the module declares the core group version `v1`, the one of the Pods it reads ([ADR-0018](../adr/0018-three-axes-of-pluggability.md), amendment of 2026-11-04).
 
@@ -585,14 +610,11 @@ The symptom is about the first such container. The Warning events that explain a
 
 The command, args and env (which hold the tunnel token, `--token` or `TUNNEL_TOKEN`), annotations and every message are never read. That covers waiting, termination and condition messages: a termination message can hold the tail of the log.
 
-**Known limits.** The wiring of symptom sources (planned) has to settle these.
+**Known limits.**
 
-- Start-up: a running container is not ready until its first readiness probe passes, so every rollout gives `TunnelDown` for a few seconds.
-    - A symptom source is a pure function of one object and has no clock, so it cannot wait for a grace period.
-    - The 45 s debounce of 3.2 does not absorb this: it waits until observations stop, so a single one still becomes due.
-    - The wiring has to, for example by reporting the symptom only when the same pod still shows it some time later.
-- Duplicates: a crash-looping cloudflared container gives both `TunnelDown` and the collector's own termination observation (reason `Error`, 3.1). They have different reasons, so they are two fingerprints and two Incidents. The wiring has to join or drop one.
-- A cloudflared container with no probe on `/ready` stays ready while it has no connection and is not seen, since the analyzer reads no logs (no grant on `pods/log`, and logs are free text).
+- Start-up: a running container is not ready until its first readiness probe passes, so every rollout gives `TunnelDown` for a few seconds. A symptom source is a pure function of one object and has no clock, so the wiring settles it: the collector emits a state only once it has seen it last 2 minutes (3.1), so a rollout opens nothing.
+- Duplicates: a crash-looping cloudflared container gives both `TunnelDown` and the collector's own termination observation (reason `Error`, 3.1). They have different reasons, so they are two fingerprints and two Incidents, both about the same workload. They are not joined yet.
+- A cloudflared container with no probe on `/ready` stays ready while it has no connection and is not seen, since the cloudflared source reads no logs (it reads the pod's status only, and logs are free text).
 - The kubelet's probe failure events name no image, so no event rule can tell a cloudflared pod from another. They are collected as for every pod.
 - Images and labels are untrusted. Whoever can create a pod in a watched namespace can make it look like cloudflared. A false match only adds a symptom about that pod.
 

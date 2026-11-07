@@ -65,6 +65,8 @@ spec:
         {{- /* Always rendered: an empty value watches no namespace (never all of them), and says so in the Pod spec. */}}
         - --watch-namespaces={{ join "," (.Values.analyzer.watchNamespaces | default list) }}
         - --cluster-id={{ include "shadewright.clusterId" $ }}
+        {{- /* Always rendered: the module grants of analyzer.modules, so the analyzer does not report a kind left out on purpose. */}}
+        - --module-grants={{ include "shadewright.analyzerModuleGrants" $ }}
         {{- with .Values.analyzer.maxIncidents }}
         - --max-incidents={{ . }}
         {{- end }}

@@ -1,0 +1,8 @@
+# Synthetic: two quotes, both refused, each classified. The loop must refuse it (NoEvidence) and classify each quote.
+scenario: oom
+classes: [outside-data, wrong-block]
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2000, outputTokens: 200}
+    content: '{"summary": "Synthetic reply for the quote corpus.", "hypotheses": [], "evidence": [{"source": "c1", "quote": "reason: OOMKilled (Warning)"}, {"source": "c2", "quote": "Container web terminated with exit code 137"}], "missingData": [], "uncertainty": "", "proposal": {"action": {"type": "SetContainerMemoryLimit", "adjustKedaMaxReplicas": null, "setContainerMemoryLimit": {"container": "web", "previous": "48Mi", "desired": "64Mi"}}, "expectedEffect": "The container stays under its limit and stops being OOMKilled.", "verificationChecks": []}}'

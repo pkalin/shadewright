@@ -129,6 +129,7 @@ All `NeedsIntervention`, on `PolicyAllowed`. The mapping reads plain kustomize m
 | `FileNotReadable` | A file the build needs is missing, over 1 MiB or not valid YAML | Fix the file |
 | `TooManyFiles` | The build is deeper than 8 kustomization directories (5 listed directories below a path without a kustomization file), lists more than 256 files, needs more than 512 reads and listings, or lists a directory of more than 1000 entries | Simplify the layout |
 | `InputTooLarge` | The build reads more than 16 MiB in all, directory listings counted at 128 bytes per entry (exactly 16 MiB is accepted; a file past the budget is refused before it is downloaded, even when it is also over 1 MiB) or holds more than 4096 YAML documents | Split the Kustomization or remove what it does not need |
+| `TooLarge` | The build is over the render check's input limits: more than 4 MiB counted with repetition, 256 directory visits or 256 files. Checked once the mapping resolved, so no plan or approval is asked for a change that can never render | See [A build over the budget](#a-build-over-the-budget) |
 | `DeclarationNotFound` | No document declares the object (for example a generator or patch produces it) | Declare it in a plain manifest |
 | `AmbiguousDeclaration` | More than one document could declare it | Keep exactly one |
 
@@ -213,7 +214,7 @@ Before committing, and again when the target branch moves while the pull request
 | `UnsupportedKustomization` | A kustomization file uses generators, Helm charts, plugins, replacements or anything outside the allow-list |
 | `InvalidReference` | A kustomization refers to a URL, remote base, absolute path or a path leaving the repository, or a path without a kustomization file holds a manifest or base whose name is not a plain path segment |
 | `FileMissing` | The build needs a file that is missing, a listed directory has no kustomization file or more than one, or the path is not a directory (a path without a kustomization file is rendered from the one Flux would generate) |
-| `TooLarge` | A limit was hit: file size, number of files or reads, depth, or directory visits |
+| `TooLarge` | A limit was hit: file size, number of files or reads, depth, directory visits, the build budget of 4 MiB (counted with repetition, the tree after the change included) or 1,024 rendered objects. The input limits are checked at the policy check already; see [A build over the budget](#a-build-over-the-budget) for what the request shows |
 | `InvalidYAML` | A kustomization file does not parse or has a duplicate key |
 | `RenderFailed` | Kustomize cannot build the path, before or after the change |
 | `FileNotInBuild` | The changed file is not a resource of the build |
@@ -229,6 +230,23 @@ Before committing, and again when the target branch moves while the pull request
 | `SchemaInvalid` | The changed object fails the basic schema checks |
 
 Fix for all: make the build plain, so the one value is declared once and nothing overrides it, then apply a new request.
+
+### A build over the budget
+
+The render runs in the executor, inside its 128 Mi memory limit, so the build of one Flux Kustomization path may hold at most 4 MiB of input and 1,024 objects ([design 8.2.2](design/8-gitops-on-github.md#822-steps-4-and-5-the-semantic-diff-check)). Input counts with repetition: every path to a directory adds its kustomization file and the files it lists, so a 1 MiB base under four overlays counts 4 MiB. The limits are fixed in the code; nothing in the settings raises them.
+
+What the request shows (no Event is recorded for either case):
+
+- **At the policy check**, for a build over the input limits (bytes, directory visits, files): phase `NeedsIntervention`, condition `PolicyAllowed` with status `Unknown`, reason `TooLarge` and the message "The build is over a limit of the render check (at most 4194304 bytes of input counted with repetition, 256 directory visits, 256 files of at most 1048576 bytes); no plan was made". No plan digest, branch or pull request is made, and no approval is asked for.
+- **At the render**, for a build over 1,024 objects, a change that takes the tree over the byte budget (a value written with one more digit in a build at the budget), or a pull request that was waiting when you upgraded (see [upgrade](upgrade-uninstall.md#upgrade)): condition `PullRequestOpened` (before a pull request) or `Approved` (after) with status `False`, reason `TooLarge` and the message "The rendered change is not exactly the planned one (TooLarge)", followed by "; nothing was committed" or "; the pull request was closed". The executor logs `Stopped RemediationRequest` with `reason` `TooLarge`.
+
+The render message does not name the limit, since the render check's own text may name files of the repository; the reason and this page say which limits apply. To bring the target's build under them:
+
+- Split the path. Give the target's application its own directory and its own Flux `Kustomization` (its own `spec.path`), instead of one path that builds every application of the cluster. The check renders only the path that delivers the target.
+- Cut repetition. A large base reached through many overlays counts once per overlay; move what only one overlay needs out of the shared base, or give each environment its own Kustomization.
+- Move bulk data out of the build. Large ConfigMaps or CRD bundles that rarely change can live under a separate Kustomization the target's path does not include.
+
+Then apply a new request; the refused one stays `NeedsIntervention`.
 
 The patcher reasons named inside a `PatchRefused` message are `PreviousValueDiffers` (the file no longer holds the planned baseline), `FieldMissing` (object, field or container absent), `AmbiguousContainer` (two containers with the name), `TargetNotFound`, `AmbiguousTarget`, `Unsupported` (YAML the in-place edit does not handle), `InvalidInput`, `InvalidYAML` (does not parse, duplicate key or too large) and `VerificationFailed` (the patched file differs from the original in more than the one value).
 
@@ -253,3 +271,9 @@ The analyzer records Incidents only for symptoms in the namespaces it watches. T
 - `kubectl get remediationsettings default -o jsonpath='{.status.conditions[?(@.type=="NoWatchedNamespaces")]}'` shows `True` with reason `NoNamespacesWatched`. The condition appears only once a `RemediationSettings` object exists, and the chart creates none by default (`settings.create: false`).
 
 To watch namespaces, upgrade with the list (`--set 'analyzer.watchNamespaces={team-a,team-b}'`); each one must exist and gets a read-only RoleBinding. With the kustomize install, set `--watch-namespaces` and add the RoleBindings as `config/watch` does. If the list is set and still nothing appears, the namespace may lack its RoleBinding (the analyzer's reads are refused there) or have no symptom the collector knows.
+
+For the symptoms of a module (KEDA, Flux, Kyverno), the analyzer must also be allowed to read the add-on's kinds:
+
+- `kubectl get remediationsettings default -o jsonpath='{.status.conditions[?(@.type=="SymptomSourcesNotWatched")]}'` shows `True` with reason `SourcesNotWatched` and names each kind with `NotGranted` (turn on the module's value under `analyzer.modules` in the chart), `NotServed` (the add-on's CRD is not installed) or `Failed` (the check or the watch failed, for example `list` is granted but not `watch`; the analyzer's log has the error, and a failed watch is started again after a backoff of one minute, doubled after each failure in a row up to 30 minutes). `Unknown` with reason `SourcesNotChecked` means a kind has not been checked yet: it changes within 30 seconds.
+- The gauge `shadewright_analyzer_symptom_source_watched` is `0` for that kind, and the analyzer logs `Not watching a symptom source kind` once per change (`Watch of a symptom source kind failed` for each failed watch).
+- With the Kyverno module enabled and `analyzer.modules.kyverno.clusterWide.enabled` off (the least-privilege default), `ClusterPolicy` and `ClusterPolicyReport` are left out on purpose: they are not named in the condition, the gauge has no series for them, and the log says `the chart leaves its optional grant out` once. Turn the value on to read them. The chart tells the analyzer which grants it rendered (`--module-grants`); a kustomize install passes no such flag, so there every module kind is checked and one without its role is reported as `NotGranted`.

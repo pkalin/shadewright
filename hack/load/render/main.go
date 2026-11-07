@@ -18,11 +18,14 @@ limitations under the License.
 // repository its limits allow, and prints the time and the memory it took. hack/load/measure.sh runs it in a
 // container with the executor's memory limit, so the process peak is the cgroup's. Test tooling only.
 //
-// Shapes (n MiB of ConfigMaps; with n = 15 both sit at the 16 MiB build budget, counted with repetition, and just under
-// the 4,096 object cap):
-//   - flat:    n files of about 1 MiB (256 ConfigMaps of 4 KiB each) listed by one kustomization, plus the Deployment.
-//   - diamond: one base of about 1 MiB (256 ConfigMaps) reached through n overlays with a name prefix, plus
+// Shapes (n MiB of ConfigMaps; with n = 4, the default, both sit just under the 4 MiB build budget, counted with
+// repetition, and at most at the 1,024 object cap; a larger n is refused):
+//   - flat:    n files of about 1 MiB (255 ConfigMaps of 4 KiB each) listed by one kustomization, plus the Deployment.
+//   - diamond: one base of about 1 MiB (255 ConfigMaps) reached through n overlays with a name prefix, plus
 //     the Deployment.
+//   - tiny:    n files of about 1 MiB of ConfigMaps of about 78 bytes each (about 13,400 per file), plus the
+//     Deployment: far over the object cap, which is checked after kustomize has built them, so it measures the
+//     render the byte budget still lets through.
 package main
 
 import (
@@ -46,6 +49,7 @@ import (
 const (
 	webName      = "web"
 	shapeDiamond = "diamond"
+	shapeTiny    = "tiny"
 )
 
 const deployment = `apiVersion: apps/v1
@@ -74,14 +78,14 @@ spec:
 `
 
 func main() {
-	shape, n := "flat", 15
+	shape, n := "flat", 4
 	if len(os.Args) > 1 {
 		shape = os.Args[1]
 	}
 	if len(os.Args) > 2 {
 		var err error
 		if n, err = strconv.Atoi(os.Args[2]); err != nil || n < 1 {
-			fmt.Fprintln(os.Stderr, "usage: render flat|diamond [MiB of ConfigMaps, default 15]")
+			fmt.Fprintln(os.Stderr, "usage: render flat|diamond|tiny [MiB of ConfigMaps, default 4]")
 			os.Exit(2)
 		}
 	}
@@ -177,6 +181,18 @@ func configMaps(prefix string, n int) []byte {
 	return []byte(b.String())
 }
 
+// tinyConfigMaps returns ConfigMaps of about 78 bytes each (about 13,400 per MiB), at most size bytes in all.
+func tinyConfigMaps(prefix string, size int) []byte {
+	var b strings.Builder
+	for i := 0; ; i++ {
+		d := fmt.Sprintf("---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: %s-%d\n  namespace: web\n", prefix, i)
+		if b.Len()+len(d) > size {
+			return []byte(b.String())
+		}
+		b.WriteString(d)
+	}
+}
+
 func kust(extra string, resources ...string) []byte {
 	var b strings.Builder
 	b.WriteString("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n" + extra + "resources:\n")
@@ -186,8 +202,8 @@ func kust(extra string, resources ...string) []byte {
 	return []byte(b.String())
 }
 
-// build makes the repository: n MiB of ConfigMaps (256 of 4 KiB per MiB) in the given shape. With 15 (the
-// default) both shapes sit at the 16 MiB build budget and just under the 4,096 object cap.
+// build makes the repository: n MiB of ConfigMaps (255 of 4 KiB per MiB, or tiny ones) in the given shape.
+// With 4 (the default) flat and diamond sit just under the 4 MiB build budget and the 1,024 object cap.
 func build(shape string, n int) (map[string][]byte, string) {
 	files := map[string][]byte{}
 	switch shape {
@@ -202,6 +218,15 @@ func build(shape string, n int) (map[string][]byte, string) {
 			files["apps/"+d+"/kustomization.yaml"] = kust(fmt.Sprintf("namePrefix: %s-\n", d), "../base")
 		}
 		files["apps/kustomization.yaml"] = kust("", overlays...)
+	case shapeTiny:
+		res := append(make([]string, 0, n+1), "deployment.yaml")
+		files["apps/deployment.yaml"] = []byte(deployment)
+		for i := range n {
+			f := fmt.Sprintf("cm%d.yaml", i)
+			res = append(res, f)
+			files["apps/"+f] = tinyConfigMaps(fmt.Sprintf("c%d", i), 1<<20-1024)
+		}
+		files["apps/kustomization.yaml"] = kust("", res...)
 	default:
 		res := append(make([]string, 0, n+1), "deployment.yaml")
 		files["apps/deployment.yaml"] = []byte(deployment)

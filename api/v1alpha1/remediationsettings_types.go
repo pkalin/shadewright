@@ -391,14 +391,18 @@ type RemediationSettingsStatus struct {
 	// last run could not list the nodes or read the discovery API, so the report is from the last run that
 	// succeeded, or shows only generic active when none has; and NoWatchedNamespaces: True when it was
 	// started with no namespace to watch (the chart's default), so it reads no events or pods and records no
-	// Incident.
+	// Incident; and SymptomSourcesNotWatched: True when an active module declares a symptom source for a kind
+	// the collector does not watch (not served, not granted, or the check or the watch failed), Unknown while
+	// such a kind has not been checked yet, set only while it watches namespaces. A kind whose optional grant
+	// the chart leaves out on purpose (the Kyverno cluster-wide kinds) is not reported.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// platform is the platform the analyzer detected and the one it uses. The analyzer writes it at start, when
-	// spec changes and every 10 minutes (ADR-0024), with the only write it has outside the operator namespace.
+	// spec changes, every 10 minutes, and when the watch state of a symptom source kind changes (ADR-0024),
+	// with the only write it has outside the operator namespace.
 	// Status is a report, never an input: no component reads any field of it to decide anything.
 	// +optional
 	Platform *PlatformStatus `json:"platform,omitempty"`

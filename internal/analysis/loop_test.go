@@ -373,7 +373,7 @@ func TestBoundCallRefusesUnofferedToolWithoutNamingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &run{a: a, parent: t.Context(), ctx: t.Context(), inc: incident(), shown: map[string][]string{}}
+	r := &run{a: a, parent: t.Context(), ctx: t.Context(), inc: incident(), shown: map[string]shownBlock{}}
 	content, quotable, err := r.boundCall(t.Context(), trace.SpanFromContext(t.Context()),
 		toolCall("1", tools.NameGetDeliveryStatus, `{"kind":"Kustomization","namespace":"shop","name":"apps"}`),
 		map[string]bool{tools.NameListEvents: true})
@@ -562,7 +562,7 @@ func TestFixedContextLinesAreNotEvidence(t *testing.T) {
 		"metrics fixed line":   {"c4", fixedMetric},
 		"metrics across fixed": {"c4", "7\n" + fixedMetric},
 		"across two values":    {"c1", "Deployment shop/web"},
-		"code text and value":  {"c2", "pod web-1: container app"},
+		"code text and value":  {"c2", labelAndValue},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture()

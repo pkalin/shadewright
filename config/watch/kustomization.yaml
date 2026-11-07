@@ -3,5 +3,9 @@
 # Built on its own, not from config/default: that one sets every namespace to shadewright-system, and these
 # bindings must stay in the watched namespaces. Names are final (prefix applied), so keep them in step with
 # config/default. The namespaces must exist before this is applied. test/rbac checks the list against the flag.
+# The KEDA module's reads (analyzer-watch-keda, in config/default) are on by default, as the chart's
+# analyzer.modules.keda.enabled is, and bound here the same way; the other modules' reads are off by default and
+# live only in config/modules.
 resources:
 - role_binding_demo.yaml
+- role_binding_keda_demo.yaml

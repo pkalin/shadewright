@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,15 +29,19 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/modules"
@@ -75,6 +80,17 @@ const (
 	// ReasonNoNamespacesWatched and ReasonNamespacesWatched are its reasons.
 	ReasonNoNamespacesWatched = "NoNamespacesWatched"
 	ReasonNamespacesWatched   = "NamespacesWatched"
+	// ConditionSymptomSourcesNotWatched is True when an active module declares a symptom source for a kind the
+	// analyzer does not watch: the kind is not served, the analyzer may not list it (the chart's value of the
+	// module under analyzer.modules is off), or the check failed (#409). Its message names the kinds and the
+	// state only, fixed text from the compiled-in kinds: no error from the cluster is written to status.
+	ConditionSymptomSourcesNotWatched = "SymptomSourcesNotWatched"
+	// ReasonSourcesNotWatched and ReasonAllSourcesWatched are its reasons.
+	ReasonSourcesNotWatched = "SourcesNotWatched"
+	ReasonAllSourcesWatched = "AllSourcesWatched"
+	// ReasonSourcesNotChecked is the reason of SymptomSourcesNotWatched Unknown: a kind of an active module has
+	// not been checked yet (its module just became active, or its first watch has not synced).
+	ReasonSourcesNotChecked = "SourcesNotChecked"
 	// FieldOwner is the field manager of the status writes.
 	FieldOwner = "shadewright-detection"
 )
@@ -96,6 +112,22 @@ type Config struct {
 	// WatchedNamespaces is how many namespaces the analyzer watches (--watch-namespaces). Zero sets the
 	// condition NoWatchedNamespaces True. It is reported only and decides nothing here.
 	WatchedNamespaces int
+	// SourcesNotWatched, when set, returns the symptom source kinds of active modules that the collector does
+	// not watch (collector.Collector.SourcesNotWatched), and whether every such kind has been checked: the
+	// condition SymptomSourcesNotWatched is Unknown until then, unless a kind is known not to be watched. Nil
+	// removes the condition (no collector runs). It is reported only and decides nothing here.
+	SourcesNotWatched func() ([]NotWatched, bool)
+	// Recheck, when set, starts a run each time it receives, so a change of SourcesNotWatched is reported
+	// without waiting for Interval.
+	Recheck <-chan struct{}
+}
+
+// NotWatched is one symptom source kind that is not watched, and why (collector.WatchState).
+type NotWatched struct {
+	// Group, Version and Kind name the kind, from the compiled-in list collector.SourceKinds.
+	Group, Version, Kind string
+	// State is NotServed, NotGranted or Failed.
+	State string
 }
 
 // Detector detects the platform and the integrations, keeps the active modules and reports them in
@@ -161,12 +193,33 @@ func (d *Detector) SetupWithManager(mgr ctrl.Manager) error {
 			predicate.GenerationChangedPredicate{},
 			predicate.NewPredicateFuncs(func(o client.Object) bool { return o.GetName() == remediationv1alpha1.SettingsName }),
 		)).
+		WatchesRawSource(d.rechecks()).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(d)
 	if err != nil {
 		return fmt.Errorf("setting up platform detection: %w", err)
 	}
 	return nil
+}
+
+// rechecks is a source that enqueues the settings each time Recheck receives.
+func (d *Detector) rechecks() source.Source {
+	return source.Func(func(ctx context.Context, q workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
+		if d.cfg.Recheck == nil {
+			return nil
+		}
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-d.cfg.Recheck:
+					q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Name: remediationv1alpha1.SettingsName}})
+				}
+			}
+		}()
+		return nil
+	})
 }
 
 // Reconcile runs detection and reports it (see the package documentation).
@@ -227,6 +280,13 @@ func (d *Detector) refresh(ctx context.Context, det modules.Detection, o outcome
 		sel = d.cfg.Registry.Select(enabledOf(s.Spec.Modules), det)
 		d.store(sel)
 		want := statusFor(s, sel, o, d.cfg.WatchedNamespaces)
+		if d.cfg.SourcesNotWatched != nil {
+			kinds, complete := d.cfg.SourcesNotWatched()
+			meta.SetStatusCondition(&want.Conditions, sourcesCondition(kinds, complete, s.Generation))
+		} else {
+			// No collector runs: a report of an earlier process would be stale.
+			meta.RemoveStatusCondition(&want.Conditions, ConditionSymptomSourcesNotWatched)
+		}
 		if equality.Semantic.DeepEqual(s.Status, want) {
 			return nil
 		}
@@ -312,6 +372,34 @@ func statusFor(s remediationv1alpha1.RemediationSettings, sel modules.Selection,
 	}
 	meta.SetStatusCondition(&st.Conditions, ns)
 	return st
+}
+
+// sourcesCondition is the condition SymptomSourcesNotWatched for the kinds that are not watched: True when there
+// is one, else Unknown while a kind has not been checked yet (complete false), else False.
+func sourcesCondition(kinds []NotWatched, complete bool, generation int64) metav1.Condition {
+	c := metav1.Condition{
+		Type:               ConditionSymptomSourcesNotWatched,
+		Status:             metav1.ConditionFalse,
+		Reason:             ReasonAllSourcesWatched,
+		Message:            "Every symptom source kind of the active modules is watched",
+		ObservedGeneration: generation,
+	}
+	if len(kinds) == 0 {
+		if !complete {
+			c.Status, c.Reason = metav1.ConditionUnknown, ReasonSourcesNotChecked
+			c.Message = "Not every symptom source kind of the active modules has been checked yet"
+		}
+		return c
+	}
+	parts := make([]string, 0, len(kinds))
+	for _, k := range kinds {
+		parts = append(parts, fmt.Sprintf("%s/%s %s (%s)", k.Group, k.Version, k.Kind, k.State))
+	}
+	c.Status, c.Reason = metav1.ConditionTrue, ReasonSourcesNotWatched
+	c.Message = "Symptom source kinds of active modules not watched, so they open no Incident: " +
+		strings.Join(parts, ", ") + ". NotGranted: turn on the module's value under analyzer.modules in the " +
+		"chart; NotServed: the add-on's CRD is not installed"
+	return c
 }
 
 // detect lists the nodes and reads discovery, each with its deadline.

@@ -30,7 +30,7 @@ The analyzer exposes tools to the model through its own adapters.
 
 ## 4.1. `query_metrics`
 
-<span class="sw-status sw-built">built</span> The Prometheus adapter is `internal/providers/metrics/prometheus`. The analyzer creates it from `--prometheus-url` and gives it to the context builder, which is not called yet ([#371](https://github.com/pkalin/shadewright/issues/371)).
+<span class="sw-status sw-built">built</span> The Prometheus adapter is `internal/providers/metrics/prometheus`. The analyzer creates it from `--prometheus-url` and gives it to the context builder ([#371](https://github.com/pkalin/shadewright/issues/371)), which the analysis loop calls (3.3), and to `query_metrics`. The evaluation harness replays recorded series through the same `MetricsSource` interface, checked against these templates ([#472](https://github.com/pkalin/shadewright/issues/472), [Evaluate the model](../evaluation.md#the-scenario-files)). No template reads HPA or external metrics (KEDA's backlog against its target), so the context of a `ScaledObject` Incident has none.
 
 ### Query templates and parameters
 

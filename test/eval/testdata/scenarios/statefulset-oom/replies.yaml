@@ -5,11 +5,13 @@ replies:
     usage: {inputTokens: 2500, outputTokens: 320}
     content: |
       {"summary": "Pod cache-1 of StatefulSet demo/cache, on the new revision, is OOMKilled and has restarted 2 times, while cache-0 on the old revision runs without restarts: the new template's memory limit is too low. Raising the cache container's limit within the policy's bounds should stop the kills.",
-       "hypotheses": [{"description": "The rollout lowered the memory limit to 48Mi, below the working set."}],
+       "hypotheses": [{"description": "The rollout set a 48Mi memory limit, and cache-1's memory working set climbs to just under it before each kill."}],
        "evidence": [{"source": "c1", "quote": "OOMKilled"},
-                    {"source": "c2", "quote": "cache-7d9f4b8c6"}],
+                    {"source": "c2", "quote": "cache-7d9f4b8c6"},
+                    {"source": "c4", "quote": "container_memory_working_set_bytes{container=cache,pod=cache-1} last 5.01187e+07"},
+                    {"source": "c4", "quote": "container_memory_limit_bytes{container=cache,pod=cache-1} 5.03316e+07"}],
        "missingData": [],
-       "uncertainty": "Without memory metrics the needed headroom is estimated, not measured.",
+       "uncertainty": "cache-1's working set peaks at 5.01187e+07 bytes against a 5.03316e+07 byte limit, while cache-0 without a limit holds about 4.2e+07, so the needed headroom is estimated from those values.",
        "proposal": {"action": {"type": "SetContainerMemoryLimit", "adjustKedaMaxReplicas": null,
                                "setContainerMemoryLimit": {"container": "cache", "previous": "48Mi", "desired": "64Mi"}},
                     "expectedEffect": "cache-1 stays under its limit and becomes ready.",

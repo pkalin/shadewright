@@ -7,4 +7,6 @@ facts:
     # The status block shows both pods, their restarts and the StatefulSet's revisions; the pod names are scored.
     all: ["cache-1", "cache-0"]
   - fact: the memory working set of cache-1 from Prometheus (container_memory_working_set_bytes) near the 48Mi limit
-    unscored: the recorded context has no metrics source (MetricsSource is not wired into the analyzer yet)
+    # metrics.yaml records the working set and the limit of both pods; the metrics block shows them.
+    all: ["limit"]
+    any: ["working set", "working_set"]

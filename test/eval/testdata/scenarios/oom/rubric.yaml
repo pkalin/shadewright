@@ -7,4 +7,6 @@ facts:
     # The context builder's status block shows the restart count, so it is scored already.
     all: ["restart"]
   - fact: the memory working set from Prometheus (container_memory_working_set_bytes) near the 48Mi limit
-    unscored: the recorded context has no metrics source (MetricsSource is not wired into the analyzer yet)
+    # metrics.yaml records the working set and the limit; the context builder's metrics block shows both.
+    all: ["limit"]
+    any: ["working set", "working_set"]

@@ -24,8 +24,16 @@ limitations under the License.
 //   - diamond: one base of about 1 MiB (255 ConfigMaps) reached through n overlays with a name prefix, plus
 //     the Deployment.
 //   - tiny:    n files of about 1 MiB of ConfigMaps of about 78 bytes each (about 13,400 per file), plus the
-//     Deployment: far over the object cap, which is checked after kustomize has built them, so it measures the
-//     render the byte budget still lets through.
+//     Deployment: far over the document bound (semdiff.MaxBuildDocuments), so refused before the render.
+//   - docs:    n ConfigMaps of about 78 bytes each in files of 1,000, plus the Deployment (n+1 documents); with
+//     n = 4095 the build is at the document bound, over the object cap, which is checked
+//     after kustomize has built them, so it measures the largest render the document bound lets through.
+//   - patches: 1,023 ConfigMaps of about 78 bytes, plus the Deployment, and n strategic merge patches of them
+//     (one label each, files of 1,000): with n = 3072 the build is at the document bound with the most objects
+//     the render accepts, every one patched three times.
+//   - heavy:   as docs, each ConfigMap padded so that the build is just under the 4 MiB byte budget: both
+//     input bounds at once. Files hold as many as fit in 1 MiB, and a ConfigMap is at most about 1 MiB, so
+//     with n below 4 the build stays under the byte budget.
 package main
 
 import (
@@ -50,6 +58,9 @@ const (
 	webName      = "web"
 	shapeDiamond = "diamond"
 	shapeTiny    = "tiny"
+	shapeDocs    = "docs"
+	shapeHeavy   = "heavy"
+	shapePatches = "patches"
 )
 
 const deployment = `apiVersion: apps/v1
@@ -85,7 +96,8 @@ func main() {
 	if len(os.Args) > 2 {
 		var err error
 		if n, err = strconv.Atoi(os.Args[2]); err != nil || n < 1 {
-			fmt.Fprintln(os.Stderr, "usage: render flat|diamond|tiny [MiB of ConfigMaps, default 4]")
+			fmt.Fprintln(os.Stderr,
+				"usage: render flat|diamond|tiny|docs|heavy|patches [MiB or number of ConfigMaps, default 4]")
 			os.Exit(2)
 		}
 	}
@@ -193,6 +205,19 @@ func tinyConfigMaps(prefix string, size int) []byte {
 	}
 }
 
+// paddedConfigMaps returns n ConfigMaps, numbered from first, of about size bytes each (at least about 78).
+func paddedConfigMaps(first, n, size int) []byte {
+	var b strings.Builder
+	for i := first; i < first+n; i++ {
+		d := fmt.Sprintf("---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: d-%d\n  namespace: web\n", i)
+		b.WriteString(d)
+		if extra := size - len(d) - len("data:\n  p: \n"); extra > 0 {
+			fmt.Fprintf(&b, "data:\n  p: %s\n", strings.Repeat("x", extra))
+		}
+	}
+	return []byte(b.String())
+}
+
 func kust(extra string, resources ...string) []byte {
 	var b strings.Builder
 	b.WriteString("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n" + extra + "resources:\n")
@@ -218,6 +243,38 @@ func build(shape string, n int) (map[string][]byte, string) {
 			files["apps/"+d+"/kustomization.yaml"] = kust(fmt.Sprintf("namePrefix: %s-\n", d), "../base")
 		}
 		files["apps/kustomization.yaml"] = kust("", overlays...)
+	case shapeDocs, shapeHeavy:
+		files["apps/deployment.yaml"] = []byte(deployment)
+		pad, per := 0, 1000
+		if shape == shapeHeavy {
+			// One padded ConfigMap must fit in a file, so with a small n the build stays under the byte budget.
+			pad = min((semdiff.MaxBuildBytes-8192-len(deployment))/n, semdiff.MaxFileBytes-1024)
+			per = max(1, min(per, (semdiff.MaxFileBytes-1024)/max(pad, 128)))
+		}
+		// Files of at most per ConfigMaps each, so that each stays under the 1 MiB file limit.
+		res := []string{"deployment.yaml"}
+		for i := 0; i*per < n; i++ {
+			f := fmt.Sprintf("cm%d.yaml", i)
+			res = append(res, f)
+			files["apps/"+f] = paddedConfigMaps(i*per, min(n-i*per, per), pad)
+		}
+		files["apps/kustomization.yaml"] = kust("", res...)
+	case shapePatches:
+		files["apps/deployment.yaml"] = []byte(deployment)
+		files["apps/cm.yaml"] = paddedConfigMaps(0, 1023, 0)
+		var k strings.Builder
+		k.WriteString("patches:\n")
+		for i := 0; i*1000 < n; i++ {
+			var p strings.Builder
+			for j := i * 1000; j < min(n, (i+1)*1000); j++ {
+				fmt.Fprintf(&p, "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: d-%d\n  namespace: web\n"+
+					"  labels:\n    p%d: \"x\"\n", j%1023, j)
+			}
+			f := fmt.Sprintf("p%d.yaml", i)
+			files["apps/"+f] = []byte(p.String())
+			fmt.Fprintf(&k, "  - path: %s\n", f)
+		}
+		files["apps/kustomization.yaml"] = kust(k.String(), "deployment.yaml", "cm.yaml")
 	case shapeTiny:
 		res := append(make([]string, 0, n+1), "deployment.yaml")
 		files["apps/deployment.yaml"] = []byte(deployment)

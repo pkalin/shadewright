@@ -50,6 +50,8 @@ const (
 	otherVersion  = "another version"
 	jobCreate     = "KEDAJobCreateFailed"
 	scalingTarget = "ErrorScalingTarget"
+	// currentMetricValue is the milli quantity hpaCeiling reports as its current External metric value.
+	currentMetricValue = "212500m"
 )
 
 // fixture reads a recorded object from testdata as encoding/json decodes it.
@@ -162,7 +164,7 @@ func TestRecordedObjects(t *testing.T) {
 				{Field: fieldMaxReplicas, Value: "20"},
 				{Field: fieldCurrentReplicas, Value: "20"},
 				{Field: condField(conditionScalingLimited, keyReason), Value: hpaTooManyReplicas},
-				{Field: "status.currentMetrics.0.external.current.averageValue", Value: "212500m"},
+				{Field: "status.currentMetrics.0.external.current.averageValue", Value: currentMetricValue},
 				{Field: "spec.metrics.0.external.target.averageValue", Value: "50"},
 			},
 			// ScalingLimited's lastTransitionTime in the fixture.
@@ -384,7 +386,7 @@ func TestHPAMetrics(t *testing.T) {
 		cpu, external("s1-kafka", "target", "value", "100"), external("s0-rabbitmq-orders", "target", "averageValue", "50"),
 	}
 	obj[keyStatus].(map[string]any)["currentMetrics"] = []any{
-		cpu, external("s0-rabbitmq-orders", "current", "averageValue", "212500m"),
+		cpu, external("s0-rabbitmq-orders", "current", "averageValue", currentMetricValue),
 		external("s1-kafka", "current", "value", "900"), external("s2-third", "current", "value", "1"),
 	}
 	got := source(t, KindHPA).Symptoms(obj)
@@ -392,7 +394,7 @@ func TestHPAMetrics(t *testing.T) {
 		t.Fatalf("got %#v", got)
 	}
 	want := []modules.Evidence{
-		{Field: "status.currentMetrics.1.external.current.averageValue", Value: "212500m"},
+		{Field: "status.currentMetrics.1.external.current.averageValue", Value: currentMetricValue},
 		{Field: "spec.metrics.2.external.target.averageValue", Value: "50"},
 		{Field: "status.currentMetrics.2.external.current.value", Value: "900"},
 		{Field: "spec.metrics.1.external.target.value", Value: "100"},
@@ -679,4 +681,23 @@ func TestModuleRegistersAndIsDetected(t *testing.T) {
 func TestNoVendorImports(t *testing.T) {
 	importguard.DirectImportsOnlyStandardOrModule(t, ".")
 	importguard.NoForbiddenDeps(t, ".", ".")
+}
+
+// TestMetricValueSurvivesEvaluation: the evaluator bounds evidence with modules.BoundValue, which must keep a
+// milli quantity such as the current metric value "212500m" instead of reading it as minutes (#479).
+func TestMetricValueSurvivesEvaluation(t *testing.T) {
+	got := modules.EvaluateSource(source(t, KindHPA), fixture(t, hpaCeiling))
+	if len(got) != 1 {
+		t.Fatalf("got %#v", got)
+	}
+	want := modules.Evidence{Field: "status.currentMetrics.0.external.current.averageValue", Value: currentMetricValue}
+	for _, e := range got[0].Evidence {
+		if e.Field == want.Field {
+			if e != want {
+				t.Errorf("evidence %#v, want %#v", e, want)
+			}
+			return
+		}
+	}
+	t.Errorf("no %s in %#v", want.Field, got[0].Evidence)
 }

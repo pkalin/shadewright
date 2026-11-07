@@ -628,6 +628,222 @@ func TestCheckObjectBudget(t *testing.T) {
 	}
 }
 
+// atBudget names the case of a build exactly at a budget.
+const atBudget = "exactly the budget"
+
+// documentBudget is semdiff.MaxBuildDocuments as a literal, so the test pins the bound (design 8.2.2, #488).
+const documentBudget = 4096
+
+// emptyDocs returns a file of n empty YAML documents: each counts against the document budget, and kustomize
+// skips them, so a build at the budget renders at once. The blank lines keep the separators apart, as kustomize
+// reads "---\n---\n" as a single one.
+func emptyDocs(n int) []byte { return []byte(strings.Repeat("---\n\n", n)) }
+
+// docsRepo is ordersRepo with an extra resource file of empty documents, so that one visit of apps/orders
+// holds total documents: the two of scaledobject.yaml and the extra ones.
+func docsRepo(total int) map[string][]byte {
+	files := ordersRepo()
+	files[soKust] = kust("scaledobject.yaml", "empty.yaml")
+	files["apps/orders/empty.yaml"] = emptyDocs(total - 2)
+	return files
+}
+
+func wantDocumentBudget(t *testing.T, err error) {
+	t.Helper()
+	wantReason(t, err, semdiff.ErrTooLarge)
+	if !strings.Contains(err.Error(), fmt.Sprintf("more than %d YAML documents", documentBudget)) {
+		t.Fatalf("got %v, want the document budget named", err)
+	}
+}
+
+func TestCheckDocumentBudget(t *testing.T) {
+	cases := map[string]struct {
+		files   map[string][]byte
+		patched func([]byte) []byte
+		over    bool
+	}{
+		atBudget:            {files: docsRepo(documentBudget)},
+		"one document over": {files: docsRepo(documentBudget + 1), over: true},
+		"one document over once patched": {files: docsRepo(documentBudget),
+			patched: func(b []byte) []byte { return append(b, "---\n"...) }, over: true},
+		// kustomize builds a base once per overlay that reaches it, so its documents count once per visit.
+		"through two overlays": {files: func() map[string][]byte {
+			f := docsRepo(documentBudget/2 + 1)
+			f["apps/a/kustomization.yaml"] = []byte("namePrefix: a-\nresources: [../orders]\n")
+			f["apps/b/kustomization.yaml"] = []byte("namePrefix: b-\nresources: [../orders]\n")
+			f["apps/kustomization.yaml"] = kust("a", "b")
+			return f
+		}(), over: true},
+		// A List counts as its items, which kustomize reads as objects.
+		"a List of tiny objects": {files: func() map[string][]byte {
+			f := docsRepo(4)
+			var b strings.Builder
+			b.WriteString("apiVersion: v1\nkind: List\nitems:\n")
+			for i := range documentBudget - 1 {
+				fmt.Fprintf(&b, "  - {apiVersion: v1, kind: ConfigMap, metadata: {name: c%d, namespace: orders}}\n", i)
+			}
+			f["apps/orders/empty.yaml"] = []byte(b.String())
+			return f
+		}(), over: true},
+		// An inline patch is read like a patch file.
+		"inline patches": {files: func() map[string][]byte {
+			f := docsRepo(documentBudget)
+			f[soKust] = fmt.Appendf(nil, "resources: [scaledobject.yaml, empty.yaml]\npatches:\n  - patch: %q\n",
+				"---\napiVersion: v1\nkind: Service\nmetadata: {name: orders-worker, namespace: orders}\n")
+			return f
+		}(), over: true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := "apps/orders"
+			if _, ok := c.files["apps/kustomization.yaml"]; ok {
+				path = "apps"
+			}
+			in := soInput(t, c.files, path, 15)
+			if c.patched != nil {
+				in.Patched = c.patched(in.Patched)
+			}
+			res, err := semdiff.Check(context.Background(), in)
+			if !c.over {
+				if err != nil || res.Objects != 2 {
+					t.Fatalf("got %+v, %v, want the build accepted", res, err)
+				}
+				return
+			}
+			wantDocumentBudget(t, err)
+		})
+	}
+}
+
+// copyOps returns a JSON patch that adds a value to the orders-worker Service and copies it n times, each copy
+// doubling it: 17 copies of a few bytes rendered 10 MB, 25 would reach a gigabyte (#488).
+func copyOps(n int) string {
+	var b strings.Builder
+	b.WriteString("- op: add\n  path: /spec/payload\n  value: {a: x, b: y}\n")
+	for i := range n {
+		fmt.Fprintf(&b, "- op: copy\n  from: /spec/payload\n  path: /spec/payload/n%d\n", i)
+	}
+	return b.String()
+}
+
+const serviceTarget = "target: {kind: Service, name: orders-worker}"
+
+// A JSON patch copy operation is refused before the render in every form kustomize reads a patch in, since
+// copies amplify the output past every bound checked before it.
+func TestCheckRefusesJSONPatchCopy(t *testing.T) {
+	jsonCopy := `[{"op": "add", "path": "/spec/payload", "value": {"a": "x"}},` +
+		`{"\u006fp": "c\u006fpy", "from": "/spec/payload", "path": "/spec/payload/n"}]`
+	withPatch := func(entry string, extra map[string]string) func(map[string][]byte) {
+		return func(f map[string][]byte) {
+			f[soKust] = []byte("resources: [scaledobject.yaml]\npatches:\n  - " + entry + "\n")
+			for p, d := range extra {
+				f[p] = []byte(d)
+			}
+		}
+	}
+	cases := map[string]func(map[string][]byte){
+		"an inline YAML patch":          withPatch(fmt.Sprintf("%s\n    patch: %q", serviceTarget, copyOps(17)), nil),
+		"an inline JSON patch, escaped": withPatch(fmt.Sprintf("%s\n    patch: %q", serviceTarget, jsonCopy), nil),
+		"a quoted op": withPatch(fmt.Sprintf("%s\n    patch: %q", serviceTarget,
+			"- {op: add, path: /spec/p, value: 1}\n- {'op': \"copy\", from: /spec/p, path: /spec/q}\n"), nil),
+		"a YAML patch file": withPatch(serviceTarget+"\n    path: copy.yaml",
+			map[string]string{"apps/orders/copy.yaml": copyOps(3)}),
+		"a JSON patch file": withPatch(serviceTarget+"\n    path: copy.json",
+			map[string]string{"apps/orders/copy.json": jsonCopy}),
+		"a patch file after other documents": withPatch(serviceTarget+"\n    path: copy.yaml",
+			map[string]string{"apps/orders/copy.yaml": "---\n# none\n---\n" + copyOps(1)}),
+		"a patch in a component": func(f map[string][]byte) {
+			f[soKust] = []byte("resources: [scaledobject.yaml]\ncomponents: [../c]\n")
+			f["apps/c/kustomization.yaml"] = fmt.Appendf(nil, "apiVersion: kustomize.config.k8s.io/v1alpha1\n"+
+				"kind: Component\npatches:\n  - %s\n    patch: %q\n", serviceTarget, copyOps(1))
+		},
+	}
+	for name, edit := range cases {
+		t.Run(name, func(t *testing.T) {
+			files := ordersRepo()
+			edit(files)
+			_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
+			wantReason(t, err, semdiff.ErrUnsupportedKustomization)
+			if !strings.Contains(err.Error(), "copy operations") {
+				t.Fatalf("got %v, want copy operations named", err)
+			}
+		})
+	}
+	// Other JSON patch operations, and "copy" under a key other than op, still build.
+	t.Run("add and move", func(t *testing.T) {
+		files := ordersRepo()
+		withPatch(fmt.Sprintf("%s\n    patch: %q", serviceTarget,
+			"- {op: add, path: /spec/p, value: {mode: copy}}\n- {op: move, from: /spec/p, path: /spec/q}\n"), nil)(files)
+		res, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
+		if err != nil || res.Objects != 2 {
+			t.Fatalf("got %+v, %v, want the build accepted", res, err)
+		}
+	})
+}
+
+// Anchors, aliases and merge keys are refused in every file the build reads, before kustomize expands them:
+// an anchor that contains itself made it recurse until the Go stack overflowed, which ends the process, and
+// aliases can turn a few bytes into many objects (#488, #492).
+func TestCheckRefusesAnchors(t *testing.T) {
+	cases := map[string]func(map[string][]byte){
+		"an anchor that contains itself": func(f map[string][]byte) {
+			f[soKust] = kust("scaledobject.yaml", "loop.yaml")
+			f["apps/orders/loop.yaml"] = []byte("apiVersion: v1\nkind: ConfigMap\nmetadata: {name: loop, namespace: orders}\n" +
+				"data: &d {x: *d}\n")
+		},
+		"alias keys": func(f map[string][]byte) {
+			f[soKust] = kust("scaledobject.yaml", "list.yaml")
+			f["apps/orders/list.yaml"] = []byte("x: &kind a\ny: &items b\n*kind : List\n*items :\n" +
+				"- {apiVersion: v1, kind: ConfigMap, metadata: {name: c, namespace: orders}}\n")
+		},
+		"a kustomization file": func(f map[string][]byte) {
+			f[soKust] = []byte("r: &r scaledobject.yaml\nresources: [*r]\n")
+		},
+		"a kustomization file past the document budget": func(f map[string][]byte) {
+			f[soKust] = append(append(kust("scaledobject.yaml"), emptyDocs(documentBudget+1)...),
+				"x: &x 1\ny: *x\n"...)
+		},
+		"an inline patch": func(f map[string][]byte) {
+			f[soKust] = fmt.Appendf(nil, "resources: [scaledobject.yaml]\npatches:\n  - patch: %q\n",
+				"apiVersion: v1\nkind: Service\nmetadata: &m {name: orders-worker, namespace: orders}\n")
+		},
+	}
+	for name, edit := range cases {
+		t.Run(name, func(t *testing.T) {
+			files := ordersRepo()
+			edit(files)
+			_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
+			if strings.HasSuffix(name, "past the document budget") {
+				wantReason(t, err, semdiff.ErrTooLarge)
+				return
+			}
+			wantReason(t, err, semdiff.ErrInvalidYAML)
+			if !strings.Contains(err.Error(), "anchors") {
+				t.Fatalf("got %v, want anchors named", err)
+			}
+		})
+	}
+}
+
+func TestLoadDocumentBudget(t *testing.T) {
+	for name, c := range map[string]struct {
+		total int
+		over  bool
+	}{atBudget: {documentBudget, false}, "one document over": {documentBudget + 1, true}} {
+		t.Run(name, func(t *testing.T) {
+			git := fake.NewGit("main", docsRepo(c.total))
+			_, err := semdiff.Load(context.Background(), git, head(t, git), "apps/orders")
+			if !c.over {
+				if err != nil {
+					t.Fatalf("Load: %v", err)
+				}
+				return
+			}
+			wantDocumentBudget(t, err)
+		})
+	}
+}
+
 func TestLoadReadsTheBuild(t *testing.T) {
 	files := overlayPatch()
 	git := fake.NewGit("main", files)

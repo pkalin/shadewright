@@ -748,7 +748,8 @@ func (tr *stateTracker) len() int {
 
 // SymptomText is what an observation of a symptom carries as its symptom: the module's fixed summary, then
 // its evidence, already redacted and bounded by the module evaluator, as "field=value" pairs. The whole is
-// normalized and redacted again, and cut to the Incident schema's 1024 bytes, by fingerprint.Normalize.
+// normalized and redacted again, and cut to the Incident schema's 1024 bytes, by fingerprint.Symptom, which
+// keeps a milli quantity after its field ("averageValue=6500m"). The fingerprint hashes the summary only.
 func SymptomText(s modules.Symptom) string {
 	var b strings.Builder
 	b.WriteString(s.Summary)
@@ -764,5 +765,5 @@ func SymptomText(s modules.Symptom) string {
 			b.WriteString(e.Value)
 		}
 	}
-	return fingerprint.Normalize(fingerprint.Observation{Note: b.String()})
+	return fingerprint.Symptom(fingerprint.Observation{Note: b.String()})
 }

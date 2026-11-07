@@ -690,8 +690,8 @@ func (r *RemediationRequestReconciler) buildTooLarge(ctx context.Context,
 // buildTooLargeMessage is the status message of a request whose build is over a limit of the render check's input
 // (semdiff reason TooLarge), when the policy check finds it. It is fixed text, never content from Git.
 var buildTooLargeMessage = fmt.Sprintf("The build is over a limit of the render check (at most %d bytes of input "+
-	"counted with repetition, %d directory visits, %d files of at most %d bytes); no plan was made",
-	semdiff.MaxBuildBytes, semdiff.MaxVisits, semdiff.MaxFiles, semdiff.MaxFileBytes)
+	"and %d YAML documents counted with repetition, %d directory visits, %d files of at most %d bytes); no plan was made",
+	semdiff.MaxBuildBytes, semdiff.MaxBuildDocuments, semdiff.MaxVisits, semdiff.MaxFiles, semdiff.MaxFileBytes)
 
 // unchanged reads the target again and returns nil when it is still live, with the UID and resourceVersion of
 // live, the object the check read first. Otherwise it returns an error, so the check starts over on the next

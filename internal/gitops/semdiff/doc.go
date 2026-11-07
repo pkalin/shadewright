@@ -28,9 +28,9 @@ limitations under the License.
 // kustomization file, it lists the path as the source mapping does (internal/gitops/repopath.Generate) and
 // adds the kustomization Flux would generate, resources only, to the files, so [Check] renders what Flux
 // renders; what Flux's default exclusions match is skipped, as there. It is bounded by [MaxReads], [MaxFiles],
-// [MaxFileBytes], [MaxDepth], [MaxVisits] and [MaxBuildBytes]; [Check] applies the same walk and limits to
-// the files it is given, and caps a render at [MaxObjects]. Visits and build bytes count with repetition, so
-// a diamond of overlays over a large base is refused before kustomize builds it once per path. A
+// [MaxFileBytes], [MaxDepth], [MaxVisits], [MaxBuildBytes] and [MaxBuildDocuments]; [Check] applies the same
+// walk and limits to the files it is given, and caps a render at [MaxObjects]. Visits, build bytes and
+// documents count with repetition, so a diamond of overlays over a large base is refused before kustomize builds it once per path. A
 // .sourceignore file in any directory of the build, or above one, is refused as in the source mapping,
 // since Flux would filter the files by it. Path rules are shared with the source mapping
 // (internal/gitops/repopath).
@@ -40,9 +40,11 @@ limitations under the License.
 //
 // Rendering is locked down. Every kustomization file is checked against an allow-list before kustomize
 // sees it: plain resources, components, patches (inline or from a local file) and the built-in name,
-// namespace, label, annotation, image and replica transformers. Generators, Helm charts, plugins, KRM
-// functions, OpenAPI schemas and every other field are refused, and so is every reference kustomize could
-// read as remote (a URL, an SCP-style Git address, a github.com path) or that leaves the repository.
+// namespace, label, annotation, image and replica transformers. A JSON patch copy operation is refused in
+// every patch, since each copy can double a value past the limits checked before the render. Generators, Helm
+// charts, plugins, KRM functions, OpenAPI schemas and every other field are refused, and so is every reference
+// kustomize could read as remote (a URL, an SCP-style Git address, a github.com path) or that leaves the
+// repository.
 // kustomize runs with built-in plugins only and Helm off, on a file system that holds only the build's files,
 // so it cannot execute anything, fetch a remote base or read a file from disk.
 //

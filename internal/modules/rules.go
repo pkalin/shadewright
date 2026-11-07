@@ -138,7 +138,7 @@ type Evidence struct {
 	// Field says where the value was read, written by the rule (^[A-Za-z0-9./_-]{1,128}$).
 	Field string
 	// Value is the value read, as the rule found it. It is untrusted. The evaluator redacts it with
-	// fingerprint.Normalize ([BoundValue]), which by itself caps a value at 1024 bytes, and then cuts it to
+	// fingerprint.Value ([BoundValue]), which by itself caps a value at 1024 bytes, and then cuts it to
 	// [MaxEvidenceValueLength] bytes. The one exception is a value that is a whole Flux revision
 	// (redact.IsFluxRevision), which holds only a reference name and a commit and is kept as it is.
 	Value string
@@ -281,16 +281,17 @@ func finding(module, rule string, subject ObjectRef, s Symptom) (Finding, bool) 
 	return Finding{Module: module, Rule: rule, Subject: subject, Symptom: s}, true
 }
 
-// BoundValue redacts and normalizes untrusted text as the collector does for a symptom
-// (fingerprint.Normalize: secrets redacted first, then UIDs, digests, times, IPs and durations replaced by
-// placeholders) and cuts it to [MaxEvidenceValueLength] bytes, redacting again after the cut. The one
-// exception is a value that is, as a whole, a Flux revision ([redact.IsFluxRevision]): it holds only a
-// reference name and a commit and is kept as it is. A revision inside other text is redacted like the rest.
+// BoundValue redacts and normalizes untrusted text as the collector does for a symptom (fingerprint.Value:
+// secrets redacted first, then UIDs, digests, times, IPs and durations replaced by placeholders, but a value
+// that is a milli quantity such as "6500m" kept) and cuts it to [MaxEvidenceValueLength] bytes, redacting
+// again after the cut. The one exception is a value that is, as a whole, a Flux revision
+// ([redact.IsFluxRevision]): it holds only a reference name and a commit and is kept as it is. A revision
+// inside other text is redacted like the rest.
 func BoundValue(s string) string {
 	if redact.IsFluxRevision(s) {
 		return s
 	}
-	s = fingerprint.Normalize(fingerprint.Observation{Note: s})
+	s = fingerprint.Value(s)
 	if len(s) <= MaxEvidenceValueLength {
 		return s
 	}

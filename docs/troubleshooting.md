@@ -129,7 +129,7 @@ All `NeedsIntervention`, on `PolicyAllowed`. The mapping reads plain kustomize m
 | `FileNotReadable` | A file the build needs is missing, over 1 MiB or not valid YAML | Fix the file |
 | `TooManyFiles` | The build is deeper than 8 kustomization directories (5 listed directories below a path without a kustomization file), lists more than 256 files, needs more than 512 reads and listings, or lists a directory of more than 1000 entries | Simplify the layout |
 | `InputTooLarge` | The build reads more than 16 MiB in all, directory listings counted at 128 bytes per entry (exactly 16 MiB is accepted; a file past the budget is refused before it is downloaded, even when it is also over 1 MiB) or holds more than 4096 YAML documents | Split the Kustomization or remove what it does not need |
-| `TooLarge` | The build is over the render check's input limits: more than 4 MiB counted with repetition, 256 directory visits or 256 files. Checked once the mapping resolved, so no plan or approval is asked for a change that can never render | See [A build over the budget](#a-build-over-the-budget) |
+| `TooLarge` | The build is over the render check's input limits: more than 4 MiB or 4,096 YAML documents counted with repetition, 256 directory visits or 256 files. Checked once the mapping resolved, so no plan or approval is asked for a change that can never render | See [A build over the budget](#a-build-over-the-budget) |
 | `DeclarationNotFound` | No document declares the object (for example a generator or patch produces it) | Declare it in a plain manifest |
 | `AmbiguousDeclaration` | More than one document could declare it | Keep exactly one |
 
@@ -211,11 +211,11 @@ Before committing, and again when the target branch moves while the pull request
 | Reason | Cause |
 | --- | --- |
 | `InvalidInput` | The target, action, paths or file set are not usable |
-| `UnsupportedKustomization` | A kustomization file uses generators, Helm charts, plugins, replacements or anything outside the allow-list |
+| `UnsupportedKustomization` | A kustomization file uses generators, Helm charts, plugins, replacements or anything outside the allow-list, or a patch holds a JSON patch `copy` operation (each copy can double a value; write the value out, or use `add`) |
 | `InvalidReference` | A kustomization refers to a URL, remote base, absolute path or a path leaving the repository, or a path without a kustomization file holds a manifest or base whose name is not a plain path segment |
 | `FileMissing` | The build needs a file that is missing, a listed directory has no kustomization file or more than one, or the path is not a directory (a path without a kustomization file is rendered from the one Flux would generate) |
-| `TooLarge` | A limit was hit: file size, number of files or reads, depth, directory visits, the build budget of 4 MiB (counted with repetition, the tree after the change included) or 1,024 rendered objects. The input limits are checked at the policy check already; see [A build over the budget](#a-build-over-the-budget) for what the request shows |
-| `InvalidYAML` | A kustomization file does not parse or has a duplicate key |
+| `TooLarge` | A limit was hit: file size, number of files or reads, depth, directory visits, the build budget of 4 MiB or 4,096 YAML documents (counted with repetition, the tree after the change included; a List counts 1 plus its items) or 1,024 rendered objects. The input limits are checked at the policy check already; see [A build over the budget](#a-build-over-the-budget) for what the request shows |
+| `InvalidYAML` | A kustomization file does not parse or has a duplicate key, or a file of the build is not UTF-8, does not parse, or uses YAML anchors, aliases or merge keys; see [YAML the render check refuses](#yaml-the-render-check-refuses) |
 | `RenderFailed` | Kustomize cannot build the path, before or after the change |
 | `FileNotInBuild` | The changed file is not a resource of the build |
 | `TargetNotFound` | The rendered output does not hold the target |
@@ -233,12 +233,12 @@ Fix for all: make the build plain, so the one value is declared once and nothing
 
 ### A build over the budget
 
-The render runs in the executor, inside its 128 Mi memory limit, so the build of one Flux Kustomization path may hold at most 4 MiB of input and 1,024 objects ([design 8.2.2](design/8-gitops-on-github.md#822-steps-4-and-5-the-semantic-diff-check)). Input counts with repetition: every path to a directory adds its kustomization file and the files it lists, so a 1 MiB base under four overlays counts 4 MiB. The limits are fixed in the code; nothing in the settings raises them.
+The render runs in the executor, inside its 128 Mi memory limit, so the build of one Flux Kustomization path may hold at most 4 MiB of input and 1,024 objects ([design 8.2.2](design/8-gitops-on-github.md#822-steps-4-and-5-the-semantic-diff-check)). Input counts with repetition: every path to a directory adds its kustomization file and the files it lists, so a 1 MiB base under four overlays counts 4 MiB. The YAML documents of the resource and patch files (and inline patches) count the same way, at most 4,096, so that many small objects are refused before kustomize builds them; the 1,024 objects are counted on the render's output. The limits are fixed in the code; nothing in the settings raises them.
 
 What the request shows (no Event is recorded for either case):
 
-- **At the policy check**, for a build over the input limits (bytes, directory visits, files): phase `NeedsIntervention`, condition `PolicyAllowed` with status `Unknown`, reason `TooLarge` and the message "The build is over a limit of the render check (at most 4194304 bytes of input counted with repetition, 256 directory visits, 256 files of at most 1048576 bytes); no plan was made". No plan digest, branch or pull request is made, and no approval is asked for.
-- **At the render**, for a build over 1,024 objects, a change that takes the tree over the byte budget (a value written with one more digit in a build at the budget), or a pull request that was waiting when you upgraded (see [upgrade](upgrade-uninstall.md#upgrade)): condition `PullRequestOpened` (before a pull request) or `Approved` (after) with status `False`, reason `TooLarge` and the message "The rendered change is not exactly the planned one (TooLarge)", followed by "; nothing was committed" or "; the pull request was closed". The executor logs `Stopped RemediationRequest` with `reason` `TooLarge`.
+- **At the policy check**, for a build over the input limits (bytes, YAML documents, directory visits, files): phase `NeedsIntervention`, condition `PolicyAllowed` with status `Unknown`, reason `TooLarge` and the message "The build is over a limit of the render check (at most 4194304 bytes of input and 4096 YAML documents counted with repetition, 256 directory visits, 256 files of at most 1048576 bytes); no plan was made". No plan digest, branch or pull request is made, and no approval is asked for.
+- **At the render**, for a build over 1,024 objects, a change that takes the tree over the byte or document budget (a value written with one more digit in a build at the budget), or a pull request that was waiting when you upgraded (see [upgrade](upgrade-uninstall.md#upgrade)): condition `PullRequestOpened` (before a pull request) or `Approved` (after) with status `False`, reason `TooLarge` and the message "The rendered change is not exactly the planned one (TooLarge)", followed by "; nothing was committed" or "; the pull request was closed". The executor logs `Stopped RemediationRequest` with `reason` `TooLarge`.
 
 The render message does not name the limit, since the render check's own text may name files of the repository; the reason and this page say which limits apply. To bring the target's build under them:
 
@@ -247,6 +247,29 @@ The render message does not name the limit, since the render check's own text ma
 - Move bulk data out of the build. Large ConfigMaps or CRD bundles that rarely change can live under a separate Kustomization the target's path does not include.
 
 Then apply a new request; the refused one stays `NeedsIntervention`.
+
+### YAML the render check refuses
+
+Every file the render check reads (kustomization files, the resource and patch files they list, and inline patches) must be UTF-8 YAML without anchors (`&name`), aliases (`*name`) or merge keys (`<<: *name`, or a key with the `!!merge` tag; `<<` as a plain value is accepted). Kustomize expands these before it counts or builds anything, so a few bytes can become thousands of objects or crash the executor; the check refuses them with `InvalidYAML` instead (#488, #492). The request shows only the reason, not the file; look for these constructs in the files of the target's build.
+
+To fix a file, write out what the anchor stood for:
+
+```yaml
+# Refused
+defaults: &limits {cpu: 500m, memory: 256Mi}
+resources:
+  limits: *limits
+  requests:
+    <<: *limits
+    cpu: 100m
+
+# Accepted
+resources:
+  limits: {cpu: 500m, memory: 256Mi}
+  requests: {cpu: 100m, memory: 256Mi}
+```
+
+For values shared by many objects, use a Kustomize patch or a component instead of an anchor. Save a file in UTF-16 or UTF-32 as UTF-8 (a UTF-8 byte order mark is accepted). Then apply a new request.
 
 The patcher reasons named inside a `PatchRefused` message are `PreviousValueDiffers` (the file no longer holds the planned baseline), `FieldMissing` (object, field or container absent), `AmbiguousContainer` (two containers with the name), `TargetNotFound`, `AmbiguousTarget`, `Unsupported` (YAML the in-place edit does not handle), `InvalidInput`, `InvalidYAML` (does not parse, duplicate key or too large) and `VerificationFailed` (the patched file differs from the original in more than the one value).
 

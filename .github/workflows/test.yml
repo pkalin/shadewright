@@ -37,14 +37,20 @@ jobs:
           path: bin/k8s
           key: envtest-${{ runner.os }}-${{ hashFiles('go.mod') }}
 
+      # EVAL_REPORT_DIR makes the evaluation inside make test (test/eval, on the fake model) write its report,
+      # so the run is not repeated for the summary.
       - name: Running Tests
+        env:
+          EVAL_REPORT_DIR: ${{ runner.temp }}/eval
         run: |
           go mod tidy
           make test
 
-      # make test has already run the evaluation on the fake model (test/eval); this run writes its report into
-      # the job summary (format: docs/evaluation.md). The real model is the manual Evaluation workflow.
+      # The evaluation on the fake model ran inside make test; its report goes into the job summary (format:
+      # docs/evaluation.md), also when the tests failed. The real model is the manual Evaluation workflow.
       - name: Evaluation report (fake model)
+        if: always()
         run: |
-          make eval EVAL_REPORT_DIR="${RUNNER_TEMP}/eval"
-          cat "${RUNNER_TEMP}/eval/report.md" >> "${GITHUB_STEP_SUMMARY}"
+          if [ -f "${RUNNER_TEMP}/eval/report.md" ]; then
+            cat "${RUNNER_TEMP}/eval/report.md" >> "${GITHUB_STEP_SUMMARY}"
+          fi

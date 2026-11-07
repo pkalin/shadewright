@@ -164,12 +164,13 @@ why, required), its own `objects.yaml` and `replies.yaml`, and a `metrics.yaml` 
 policies differ (otherwise the scenario's are used). The evaluation manifest hashes its files with the scenario files. `oom/rollout` is the
 `oom` scenario during a rollout, as the lab met it on 2026-11-07
 ([#494](https://github.com/pkalin/shadewright/issues/494)): the pod template sets 48Mi while the old ReplicaSet's
-pod still runs with 64Mi, and the reply takes the old pod's 64Mi as the previous value. The loop takes the previous
+pod still runs with 64Mi, and the reply takes a value from a running pod (the new pod's working set, copied from
+the metrics) as the previous value, as the lab's model took the old pod's 64Mi. The loop takes the previous
 value from the pod template instead
 ([design 3.3](design/3-observation-and-deduplication.md#the-prompt-and-the-result)), so the plan goes from 48Mi
 and passes the outcome check ([Scoring](#scoring)). The lab's model asked for 96Mi, which `demo-memory` refuses from
-48Mi. The block shows 64Mi to 72Mi from 48Mi; the reply asks for 72Mi, a little above the 64Mi the old pod runs
-under without kills, and its summary names that evidence, not the policy's maximum, as what sets the size
+48Mi. The block shows 64Mi to 72Mi from 48Mi; the reply asks for 64Mi, the smallest change the evidence supports
+(the old pod runs under 64Mi without kills), and its summary names that evidence as what sets the size
 ([ADR-0026](adr/0026-the-analyzer-shows-the-model-the-policy-bounds.md)).
 
 **Recorded metrics.** `metrics.yaml` is replayed through the `providers.MetricsSource` interface, the one the

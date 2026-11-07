@@ -1166,8 +1166,9 @@ func pullRequestBody(rr *remediationv1alpha1.RemediationRequest, incident string
 		rr.Namespace, rr.Name, rr.UID, rr.Spec.IncidentRef.Name, rr.Status.PolicyRevision, rr.Status.PlanDigest)
 	if size := stepSize(rr); size != "" {
 		fmt.Fprintf(&b, "**Size:** %s, within policy `%s`. The policy bounds the step; it does not say the step is "+
-			"the right size. The diagnosis names the evidence that sets the size (ADR-0026): check it before approving.\n\n",
-			size, rr.Spec.PolicyRef)
+			"the right size. The diagnosis, with the model's unverified reason for the size, is in the analysis record "+
+			"and the analyzer's log for this request's name, not in this pull request (ADR-0026): check it before "+
+			"approving.\n\n", size, rr.Spec.PolicyRef)
 	}
 	fmt.Fprintf(&b, "**Expected effect:** once merged and delivered, %s is `%s`.\n\n", what, desired)
 	b.WriteString("**Risk:** the change is bounded by the policy's limits and touches one field. " +

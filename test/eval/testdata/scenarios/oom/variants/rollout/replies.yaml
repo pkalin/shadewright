@@ -1,16 +1,16 @@
-# Synthetic: a triage reply written by hand to the output schema for the variant's context, as the lab's
-# model answered on 2026-11-07 (#494): it took the old pod's 64Mi as the previous value. The loop takes the
-# previous value from the pod template (48Mi) instead. The lab's model asked for 96Mi, which demo-memory
-# refuses from 48Mi (at most +50%, #493). The context now shows the policy's 64Mi to 72Mi from 48Mi. Believing
-# the previous value is 64Mi, the model cannot ask for 64Mi (no change), so it asks for one step above the 64Mi
-# the old pod runs under without kills, and its summary names that evidence as what sets the size (ADR-0026),
-# not the policy's maximum. The plan is 48Mi to 72Mi.
+# Synthetic: a triage reply written by hand to the output schema for the variant's context, after the lab's
+# model on 2026-11-07 (#494), which took a value from a running pod, not the pod template, as the previous
+# value. Here the reply copies the new pod's working set from the metrics (50135000 bytes) as previous; the
+# loop takes the previous value from the pod template (48Mi) instead. The lab's model asked for 96Mi, which
+# demo-memory refuses from 48Mi (at most +50%, #493). The context shows 64Mi to 72Mi from 48Mi; this reply asks
+# for 64Mi, the smallest change the evidence supports (ADR-0026): the old pod runs under 64Mi without kills.
+# The plan is 48Mi to 64Mi.
 source: synthetic
 replies:
   - model: eval-fake-1
     usage: {inputTokens: 2600, outputTokens: 320}
     content: |
-      {"summary": "The web container of Deployment demo/web was OOMKilled (exit code 137) in the new pod and has restarted 3 times, while the old pod still runs with more memory. It needs more memory than the new limit. The old pod runs under a 64Mi limit without kills, which sets the size: a limit a little above 64Mi, 72Mi, leaves headroom over what the old pod needs and should stop the kills.",
+      {"summary": "The web container of Deployment demo/web was OOMKilled (exit code 137) in the new pod and has restarted 3 times, while the old pod still runs with more memory. It needs more memory than the new limit. The old pod runs under a 64Mi limit without kills, which sets the size: 64Mi, the limit that pod already runs under and the smallest value within the policy's bounds, should stop the kills.",
        "hypotheses": [{"description": "The rollout lowered the memory limit; the new pod's working set climbs to just under it after each start, then the container is killed."}],
        "evidence": [{"source": "c1", "quote": "OOMKilled"},
                     {"source": "c2", "quote": "OOMKilled"},
@@ -19,6 +19,6 @@ replies:
        "missingData": [],
        "uncertainty": "The old pod ran under a higher limit without kills, so the needed limit is estimated from the new pod's peak, not measured.",
        "proposal": {"action": {"type": "SetContainerMemoryLimit", "adjustKedaMaxReplicas": null,
-                               "setContainerMemoryLimit": {"container": "web", "previous": "64Mi", "desired": "72Mi"}},
+                               "setContainerMemoryLimit": {"container": "web", "previous": "50135000", "desired": "64Mi"}},
                     "expectedEffect": "The container stays under its limit and stops being OOMKilled.",
                     "verificationChecks": []}}

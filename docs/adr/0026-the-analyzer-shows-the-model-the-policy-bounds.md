@@ -1,6 +1,6 @@
 # ADR-0026: The analyzer shows the model the policy bounds
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-11-07
 
 ## Context
@@ -21,16 +21,19 @@ The context builder adds a policy bounds block to every analysis with `--action-
 
 This is not the loop ADR-0023 rejected. The model cannot probe: it gets one fixed view before it answers and learns nothing from a proposal. The bounds are not secret either: they are in the GitOps repository and the cluster, and the security of a change comes from the policy check and the person who merges the pull request, not from the model not knowing the limits.
 
-The analyzer can read the named policies (their bounds, targets, repository name and allowed paths: configuration, nothing secret). A compromised analyzer learns the bounds and still cannot pass the policy check.
+The analyzer can read the named policies (their bounds, targets, repository name and allowed paths: configuration, nothing secret). A compromised analyzer learns the bounds but cannot bypass the policy check; it could already create requests within the bounds, and a person still merges.
 
-Risk: the model aims at the maximum. In the evaluation a reply was written to ask for 72Mi as the most the block shows. Mitigations:
+Injection gets easier to land. Injected text that steers the model toward a larger change now gets a proposal at the exact maximum step the block shows, which passes the policy and is marked "within policy" in the pull request; before, a steered value was mostly a guess outside the bounds, and Denied. Within the bounds, the person approving is now the only check on the size of the step.
+
+Risk: the model aims at the maximum. In the evaluation a reply was first written to ask for 72Mi, the most the block shows from 48Mi; it now asks for 64Mi, the smallest change its evidence supports. Mitigations:
 
 1. A prompt rule: the bounds are limits, not a target; propose the smallest change the evidence supports and say in the summary which evidence sets the size.
-2. The pull request body shows the size of the step (an increase of N% of the previous value) beside "within policy", with a note that the policy bounds the step but does not say it is the right size, and that the diagnosis names the evidence for the size. The executor has only the request's typed fields, so the body shows the size, not the model's own words; carrying the model's size evidence into the body would need a field on the request and is not decided here.
+2. The pull request body shows the size of the step (an increase of N% of the previous value) beside "within policy", with a note that the policy bounds the step but does not say it is the right size, and where the diagnosis is: the analysis record and the analyzer's log, by the request's name. The size rationale there is unverified model text. The executor has only the request's typed fields, so the body shows the size, never the model's words; carrying the rationale into the body would need a field on the request and is not decided here.
 3. The evaluation scores oversized proposals ([#505](https://github.com/pkalin/shadewright/issues/505), planned).
 
 ## Alternatives considered
 
+- Deterministic sizing, the strongest alternative: code derives the desired value from the metrics (for a memory limit, the peak working set plus headroom, clamped to the policy's range), and the model picks only the action and the container. The model then cannot steer the size at all. Deferred to [#508](https://github.com/pkalin/shadewright/issues/508): it needs a sizing rule per action and metrics the analyzer may not have.
 - A preflight in the analyzer: run the policy check before creating the request and hand off when it would Deny, without showing the bounds. It needs the same read, the model still guesses, and it is a second decision point to keep in step with the executor.
 - Both the bounds and the preflight: the preflight adds the second decision point for little, since the executor decides anyway.
 - Nothing: every guess outside the bounds goes to a person, as in the lab run.

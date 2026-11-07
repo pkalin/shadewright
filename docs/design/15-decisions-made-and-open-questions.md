@@ -22,6 +22,9 @@ Decided on 2026-11-01:
 | Scenario switch (2026-11-03) | Flux on each cluster tracks its own `cluster/<cluster>` branch; the scenario harness moves it forward with one scenario or reset commit at a time and never writes `main`; the agent's pull requests target that branch, under rulesets that mirror `main`'s protections for them; scenarios run on Kind and the lab ([ADR-0022](../adr/0022-scenario-switch-and-clusters.md)) |
 | YAML patching (2026-11-04) | One scalar replaced in place with `go.yaml.in/yaml/v3`, then a semantic check that only that value changed ([ADR-0020](../adr/0020-yaml-patching.md)) |
 | Calling the model (2026-11-03) | Prompts as code, context first with one structured call, escalation on deterministic signals with bounded tools, an evaluation gate keyed on model and prompt that the analyzer enforces at run time; a durable daily count of analyses that fails closed ([ADR-0023](../adr/0023-how-the-analyzer-calls-the-model.md)) |
+| Amending ADRs (2026-11-02) | Accepted ADRs are amended with dated entries instead of being rewritten ([ADR-0021](../adr/0021-amending-accepted-adrs.md)) |
+| Analysis claims (2026-11-05) | Analysis claims, units and the evaluation manifest ([ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md)) |
+| Policy bounds for the model (2026-11-07, proposed) | The context shows the model the bounds of the policy that decides its proposal, once and before it answers; no feedback after a denial, no clamping, the policy decides ([ADR-0026](../adr/0026-the-analyzer-shows-the-model-the-policy-bounds.md)) |
 
 
 Packaging, in detail:

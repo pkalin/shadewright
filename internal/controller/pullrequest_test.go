@@ -2247,7 +2247,8 @@ var _ = Describe("Pull request body", func() {
 		body := pullRequestBody(rr, "")
 		Expect(body).To(ContainSubstring("**Size:** an increase of 34% of the previous value, within policy `" +
 			string(rr.Spec.PolicyRef) + "`."))
-		Expect(body).To(ContainSubstring("The diagnosis names the evidence that sets the size (ADR-0026)"))
+		Expect(body).To(ContainSubstring("The diagnosis, with the model's unverified reason for the size, is in the " +
+			"analysis record and the analyzer's log for this request's name, not in this pull request"))
 		m.Previous, m.Desired = resource.MustParse("100Mi"), resource.MustParse("80Mi")
 		Expect(pullRequestBody(rr, "")).To(ContainSubstring("**Size:** a decrease of 20% of the previous value"))
 		k := remediationv1alpha1.AdjustKedaMaxReplicas{PreviousValue: 2, DesiredValue: 3}

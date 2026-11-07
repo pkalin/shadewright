@@ -28,5 +28,6 @@
 | [0024](0024-analyzer-writes-detection-to-settings-status.md) | The analyzer writes platform and integration detection to the RemediationSettings status | Accepted, amended |
 | [0025](0025-analysis-claims-units-and-evaluation-manifest.md) | Analysis claims, units and the evaluation manifest | Accepted, amended |
 | [0026](0026-the-analyzer-shows-the-model-the-policy-bounds.md) | The analyzer shows the model the policy bounds | Proposed |
+| [0027](0027-default-models-for-triage-and-escalation.md) | Default models for triage and escalation | Proposed |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

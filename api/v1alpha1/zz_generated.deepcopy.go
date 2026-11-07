@@ -298,6 +298,10 @@ func (in *IncidentStatus) DeepCopyInto(out *IncidentStatus) {
 		in, out := &in.OccurrencesDroppedThrough, &out.OccurrencesDroppedThrough
 		*out = (*in).DeepCopy()
 	}
+	if in.ResolvedTime != nil {
+		in, out := &in.ResolvedTime, &out.ResolvedTime
+		*out = (*in).DeepCopy()
+	}
 	if in.LastAnalysisTime != nil {
 		in, out := &in.LastAnalysisTime, &out.LastAnalysisTime
 		*out = (*in).DeepCopy()

@@ -64,6 +64,9 @@ const (
 	// ReasonEscalated: the last analysis handed the incident to a person; leaving phase Escalated is later
 	// work.
 	ReasonEscalated = "Escalated"
+	// ReasonResolved: the incident is Resolved and is never analyzed again (design 3.2, #251). A symptom seen
+	// again moves it to Escalated within RecurrenceWindow of resolvedTime, or opens its next occurrence after.
+	ReasonResolved = "Resolved"
 	// ReasonNoNewData: nothing was seen since the last analysis.
 	ReasonNoNewData = "NoNewData"
 	// ReasonCoolingDown: the incident has data the last analysis did not see, but the cooldown since that
@@ -93,8 +96,8 @@ const (
 	// ReasonSettingsIncomplete: the RemediationSettings object sets no spec.analysis.maxAnalysesPerDay (an
 	// object the API server's defaults did not fill in), so the budget is unknown.
 	ReasonSettingsIncomplete = "SettingsIncomplete"
-	// ReasonForeignFingerprint: the Incident's name belongs to another fingerprint, so this controller does
-	// not analyze it.
+	// ReasonForeignFingerprint: the Incident's name is not the one derived from its own fingerprint and
+	// occurrence number (remediationv1alpha1.IncidentName), so this controller does not analyze it.
 	ReasonForeignFingerprint = "ForeignFingerprint"
 )
 
@@ -191,6 +194,8 @@ func Due(inc *remediationv1alpha1.Incident, m Memory, now time.Time, s TriggerSe
 		return false, ReasonProposed
 	case remediationv1alpha1.IncidentEscalated:
 		return false, ReasonEscalated
+	case remediationv1alpha1.IncidentResolved:
+		return false, ReasonResolved
 	case remediationv1alpha1.IncidentAnalyzing:
 		if st.LastAnalysisTime == nil {
 			return false, ReasonAnalysisStartUnknown
@@ -298,7 +303,7 @@ func unsettledSince(inc *remediationv1alpha1.Incident, m Memory, s TriggerSettin
 // controller forgets when it first saw it waiting.
 func waitsForData(reason string) bool {
 	switch reason {
-	case ReasonNotObserved, ReasonProposed, ReasonEscalated, ReasonAnalyzing, ReasonAnalysisStartUnknown,
+	case ReasonNotObserved, ReasonProposed, ReasonEscalated, ReasonResolved, ReasonAnalyzing, ReasonAnalysisStartUnknown,
 		ReasonNotRecent, ReasonNoNewData, ReasonCoolingDown, ReasonForeignFingerprint:
 		return true
 	}

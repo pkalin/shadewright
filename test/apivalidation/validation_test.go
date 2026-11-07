@@ -322,6 +322,65 @@ var _ = Describe("Incident", func() {
 		expectRefused(inc, "spec.fingerprint")
 	})
 
+	// A later occurrence (design 3.2, #251) records its number and the Incident before it, of the same
+	// fingerprint, always together.
+	occurrence := func(n int32, previous string) *v1alpha1.Incident {
+		inc := fx.Incident("default", unique("inc"))
+		inc.Spec.OccurrenceNumber = n
+		inc.Spec.PreviousIncident = previous
+		return inc
+	}
+	previousOf := func(inc *v1alpha1.Incident, n int32) string {
+		return v1alpha1.IncidentName(inc.Spec.Fingerprint, n)
+	}
+
+	It("accepts a later occurrence linked to its fingerprint", func() {
+		inc := occurrence(2, "")
+		inc.Spec.PreviousIncident = previousOf(inc, 1)
+		expectAccepted(inc)
+		inc = occurrence(7, "")
+		inc.Spec.PreviousIncident = previousOf(inc, 6)
+		expectAccepted(inc)
+	})
+
+	DescribeTable("refuses an occurrence out of its rules",
+		func(change func(*v1alpha1.Incident), msg string) {
+			inc := fx.Incident("default", unique("inc"))
+			change(inc)
+			expectRefused(inc, msg)
+		},
+		Entry("a number without the previous Incident", func(inc *v1alpha1.Incident) { inc.Spec.OccurrenceNumber = 2 },
+			"set together"),
+		Entry("a previous Incident without a number", func(inc *v1alpha1.Incident) {
+			inc.Spec.PreviousIncident = previousOf(inc, 1)
+		}, "set together"),
+		Entry("occurrence 1", func(inc *v1alpha1.Incident) {
+			inc.Spec.OccurrenceNumber, inc.Spec.PreviousIncident = 1, previousOf(inc, 1)
+		}, "spec.occurrenceNumber"),
+		Entry("an occurrence above six digits", func(inc *v1alpha1.Incident) {
+			inc.Spec.OccurrenceNumber, inc.Spec.PreviousIncident = 1000000, previousOf(inc, 999999)
+		}, "spec.occurrenceNumber"),
+		Entry("a previous Incident of another fingerprint", func(inc *v1alpha1.Incident) {
+			inc.Spec.OccurrenceNumber = 2
+			inc.Spec.PreviousIncident = v1alpha1.IncidentName("sha256:"+strings.Repeat("b", 64), 1)
+		}, "same fingerprint"),
+		Entry("a previous Incident with a leading zero", func(inc *v1alpha1.Incident) {
+			inc.Spec.OccurrenceNumber, inc.Spec.PreviousIncident = 3, previousOf(inc, 1)+"-02"
+		}, "spec.previousIncident"),
+		Entry("a previous Incident that is not an Incident name", func(inc *v1alpha1.Incident) {
+			inc.Spec.OccurrenceNumber, inc.Spec.PreviousIncident = 2, "orders-scaling"
+		}, "spec.previousIncident"),
+	)
+
+	It("refuses adding an occurrence number later", func() {
+		inc := fx.Incident("default", unique("inc"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		inc.Spec.OccurrenceNumber, inc.Spec.PreviousIncident = 2, previousOf(inc, 1)
+		err := k8sClient.Update(ctx, inc)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("spec is immutable"))
+	})
+
 	// updateStatus creates the fixture, sets its status with change and returns the status update's error.
 	updateStatus := func(change func(*v1alpha1.IncidentStatus)) error {
 		inc := fx.Incident("default", unique("inc"))

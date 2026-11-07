@@ -24,10 +24,13 @@ import (
 // IncidentSpec identifies a group of similar symptoms (design section 3.2). It is immutable: a different
 // fingerprint is a different incident.
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable; a different symptom is a new Incident"
+// +kubebuilder:validation:XValidation:rule="has(self.occurrenceNumber) == has(self.previousIncident)",message="occurrenceNumber and previousIncident are set together"
+// +kubebuilder:validation:XValidation:rule="!has(self.previousIncident) || self.previousIncident.startsWith('incident-' + self.fingerprint.substring(7))",message="previousIncident must be an Incident of the same fingerprint"
 type IncidentSpec struct {
 	// fingerprint is the hash of cluster, namespace, owner, reason, action, type, reporting controller and
 	// normalized symptom.
 	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
 	// +required
 	Fingerprint string `json:"fingerprint"`
 
@@ -56,6 +59,22 @@ type IncidentSpec struct {
 	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	Symptom string `json:"symptom,omitempty"`
+
+	// occurrenceNumber is which Incident of the fingerprint this is: absent for the first, n >= 2 for the
+	// Incident the analyzer opened when the symptom was seen again more than 24 hours after the previous one was
+	// resolved (design 3.2). The name carries it as the suffix "-<n>".
+	// +kubebuilder:validation:Minimum=2
+	// +kubebuilder:validation:Maximum=999999
+	// +optional
+	OccurrenceNumber int32 `json:"occurrenceNumber,omitempty"`
+
+	// previousIncident is the name of the Incident of the same fingerprint before this one, occurrence n-1,
+	// set together with occurrenceNumber. It is a link for people only: the analysis never reads it, so no
+	// earlier outcome or policy decision reaches the model (invariant 1).
+	// +kubebuilder:validation:MaxLength=80
+	// +kubebuilder:validation:Pattern=`^incident-[0-9a-f]{64}(-([2-9]|[1-9][0-9]{1,5}))?$`
+	// +optional
+	PreviousIncident string `json:"previousIncident,omitempty"`
 }
 
 // IncidentPhase summarizes an incident.
@@ -151,6 +170,12 @@ type IncidentStatus struct {
 	// one twice.
 	// +optional
 	OccurrencesDroppedThrough *metav1.Time `json:"occurrencesDroppedThrough,omitempty"`
+
+	// resolvedTime is when the Incident moved to phase Resolved, written in the same status update (design
+	// 3.2). A symptom seen again within 24 hours of it, or with it missing, moves the Incident to Escalated
+	// without an analysis; seen again later, it opens the next occurrence of the fingerprint as a new Incident.
+	// +optional
+	ResolvedTime *metav1.Time `json:"resolvedTime,omitempty"`
 
 	// lastAnalysisTime is when the analyzer last ran; it drives the cooldown.
 	// +optional

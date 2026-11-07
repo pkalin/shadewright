@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
@@ -1168,23 +1167,20 @@ func keptRequestName(rr *remediationv1alpha1.RemediationRequest) string {
 	return rr.Namespace + "/" + rr.Name
 }
 
-// collectorIncidentName matches the name the collector gives an Incident: "incident-" and the 64 lower-case hex
-// digits of its fingerprint (incidents.Name, which the executor does not import: it is analyzer code).
-var collectorIncidentName = regexp.MustCompile(`^incident-[0-9a-f]{64}$`)
-
 // verifiedIncidentName returns the name of the request's Incident when the body may show it unredacted, and ""
 // otherwise. spec.incidentRef is written by whoever created the request, so the name alone proves nothing: a
 // hex secret could be written as "incident-<secret>". The name is kept only when the executor reads an
 // Incident of that name in the request's namespace from the API server (never the cache, so get is enough),
-// its UID is the one in incidentRef, and the name is the one the collector derives from the Incident's
-// fingerprint. Any failure to read it, including a missing permission or a read slower than
+// its UID is the one in incidentRef, and the name is the one the analyzer derives from the Incident's
+// fingerprint and occurrence number (remediationv1alpha1.IncidentName: "incident-<64 hex>", with "-<n>" for
+// occurrence n >= 2; any other suffix is refused before the read). Any failure to read it, including a missing permission or a read slower than
 // IncidentReadTimeout, gives "" and so a redacted name: the body is only less readable, never blocked. The
 // read has a deadline of its own, shorter than the step's, so a stalled API server leaves the step the time to
 // open the pull request; a cancelled step still cancels the read, and the open then fails as it would have.
 func (r *RemediationRequestReconciler) verifiedIncidentName(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) string {
 	ref := rr.Spec.IncidentRef
-	if !collectorIncidentName.MatchString(ref.Name) {
+	if _, _, ok := remediationv1alpha1.ParseIncidentName(ref.Name); !ok {
 		return ""
 	}
 	readCtx, cancel := context.WithTimeout(ctx, incidentReadTimeout(ctx, r.IncidentReadTimeout))
@@ -1203,8 +1199,7 @@ func (r *RemediationRequestReconciler) verifiedIncidentName(ctx context.Context,
 		}
 		return ""
 	}
-	if ref.UID == "" || types.UID(ref.UID) != inc.UID ||
-		"incident-"+strings.TrimPrefix(inc.Spec.Fingerprint, "sha256:") != inc.Name {
+	if ref.UID == "" || types.UID(ref.UID) != inc.UID || !inc.HasDerivedName() {
 		return ""
 	}
 	return inc.Name

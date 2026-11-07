@@ -24,6 +24,8 @@ kubectl -n shadewright-system get incident <name> -o yaml
 | --- | --- |
 | `spec.subject`, `spec.reason`, `spec.type` | What the symptom is about. Immutable: a different symptom is a new Incident |
 | `spec.symptom` | The normalized, redacted description (at most 1024 characters), with names, UIDs, IPs and times replaced by placeholders |
+| `spec.occurrenceNumber`, `spec.previousIncident` | Set on a later occurrence only: the symptom came back more than 24 hours after the previous Incident of the same fingerprint was resolved, so it is a new Incident named `incident-<64 hex>-<n>`, linked to the one before. The analysis reads neither |
+| `status.resolvedTime`, condition `Recurred` | When the Incident was resolved (<span class="sw-status sw-planned">planned</span>: nothing writes it yet), and why a recurrence within 24 hours of it moved the Incident to `Escalated` (`RecurredWithinWindow`, or `ResolvedTimeUnknown` without a `resolvedTime`) |
 | `status.firstSeen`, `status.lastSeen`, `status.count` | How long and how often. The count saturates at 1,000,000 |
 | `status.phase` | Today always `Open`. `Analyzing`, `Proposed`, `Escalated` and `Resolved` exist in the API but nothing sets them yet (<span class="sw-status sw-planned">planned</span>) |
 | `status.conditions`, type `AnalysisDue` | Whether the Incident is due for analysis, and why or why not (`FirstAnalysis`, `Debouncing`, `CoolingDown`, `AnalysisDisabled`, `DailyBudgetReached`, ...). The reasons are listed in [troubleshooting](../troubleshooting.md#not-request-reasons) |

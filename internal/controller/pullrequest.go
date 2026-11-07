@@ -968,6 +968,13 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
 		return reconcile.Result{}, nil
 	}
+	if markDeleting(rr) {
+		// Before the close below: the limits read this request, and count it against the cap, until the
+		// finalizer is gone (breakercounts.go).
+		if err := r.Status().Update(ctx, rr); err != nil {
+			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+		}
+	}
 	if r.OpenRepository != nil && rr.Status.PlanRepository != nil &&
 		(closeOnDelete(rr.Status.Phase) || ptr.Deref(rr.Status.HoldsTarget, false)) {
 		cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
@@ -984,6 +991,11 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		default:
 			return r.waitOrFail(ctx, rr, err)
 		}
+	}
+	// The outcomes this request's success cleared are read again before the finalizer goes; until they all are,
+	// the finalizer stays and the deletion is retried.
+	if err := r.restoreCleared(ctx, rr); err != nil {
+		return reconcile.Result{}, err
 	}
 	base := rr.DeepCopy()
 	controllerutil.RemoveFinalizer(rr, FinalizerName)

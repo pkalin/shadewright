@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -118,7 +119,8 @@ func selectableFields(rr *remediationv1alpha1.RemediationRequest) fields.Set {
 		return strconv.FormatBool(*b)
 	}
 	return fields.Set{phaseField: string(rr.Status.Phase), probeField: strconv.FormatBool(rr.Status.BreakerProbe),
-		lockField: optional(rr.Status.HoldsTarget), countsField: optional(rr.Status.BreakerCounts)}
+		lockField: optional(rr.Status.HoldsTarget), countsField: optional(rr.Status.BreakerCounts),
+		clearedField: rr.Status.BreakerClearedBy}
 }
 
 // read returns the names of all requests the reader returned, and whether a list needed more than one page.
@@ -251,9 +253,10 @@ func TestLimitsReadInBoundedPages(t *testing.T) {
 }
 
 // TestLimitsCountDeletingRequests checks which requests being deleted with the finalizer still count against
-// the cap: one in a phase before the merge, and one that ended and still holds the lock, whose pull request may
-// still be open; one that ended and released the lock (its pull request known merged or closed) is not counted,
-// whether or not the breaker still reads it (#293, #390).
+// the cap: those whose finalizer may write to Git (a phase before the merge, NeedsIntervention, Expired, or any
+// that holds the lock), the ended ones once the finalizer marked them (markDeleting, before its close); one that
+// ended in another phase and released the lock, whose deletion writes nothing to Git, is not counted, whether or
+// not the breaker still reads it (#293, #390).
 func TestLimitsCountDeletingRequests(t *testing.T) {
 	for _, tc := range []struct {
 		phase   remediationv1alpha1.RemediationPhase
@@ -263,9 +266,11 @@ func TestLimitsCountDeletingRequests(t *testing.T) {
 		{remediationv1alpha1.PhasePRCreated, true, true},
 		{remediationv1alpha1.PhaseExpired, true, true},
 		{remediationv1alpha1.PhaseNeedsIntervention, true, true},
-		{remediationv1alpha1.PhaseExpired, false, false},
-		{remediationv1alpha1.PhaseNeedsIntervention, false, false},
+		{remediationv1alpha1.PhaseExpired, false, true},
+		{remediationv1alpha1.PhaseNeedsIntervention, false, true},
+		{remediationv1alpha1.PhaseSucceeded, true, true},
 		{remediationv1alpha1.PhaseSucceeded, false, false},
+		{remediationv1alpha1.PhaseFailed, false, false},
 		{remediationv1alpha1.PhaseDenied, false, false},
 		{remediationv1alpha1.PhaseCancelled, false, false},
 		{remediationv1alpha1.PhaseSuperseded, false, false},
@@ -275,6 +280,8 @@ func TestLimitsCountDeletingRequests(t *testing.T) {
 			deleting.Finalizers = []string{FinalizerName}
 			deleting.Status.HoldsTarget = new(tc.holds)
 			classifyBreaker(deleting)
+			// The finalizer's first write, before it closes anything.
+			markDeleting(deleting)
 			r, base, rr, _ := limitsWorld(t, 1, deleting)
 			if err := base.Delete(context.Background(), deleting); err != nil {
 				t.Fatal(err)
@@ -409,10 +416,42 @@ func TestRefusalsWriteHoldsTargetFalse(t *testing.T) {
 	}
 }
 
+// TestUnreadPhasesMakeNoGitWriteOnDelete checks the guarantee of the cap for requests being deleted: every one
+// whose finalizer may write to Git (finalize closes for closeOnDelete or a held lock) counts against the cap
+// (active) and, once the finalizer made its first write (markDeleting, before the close), is in a list the
+// limits read, whatever status.breakerCounts said before; every other one that ended makes no Git write on
+// delete. A request the limits do not read therefore never closes a pull request past the cap.
+func TestUnreadPhasesMakeNoGitWriteOnDelete(t *testing.T) {
+	sels := limitsSelectors()
+	now := metav1.Now()
+	for _, p := range endedPhases {
+		for _, holds := range []*bool{nil, new(false), new(true)} {
+			for _, counts := range []*bool{nil, new(false), new(true)} {
+				o := otherRequest("deleting", "uid-elsewhere", p, time.Hour)
+				o.Finalizers = []string{FinalizerName}
+				o.DeletionTimestamp = &now
+				o.Status.HoldsTarget = holds
+				o.Status.BreakerCounts = counts
+				writes := closeOnDelete(p) || ptr.Deref(holds, false)
+				markDeleting(o)
+				read := slices.ContainsFunc(sels, func(s fields.Selector) bool { return s.Matches(selectableFields(o)) })
+				switch {
+				case writes && (!active(o) || !read):
+					t.Errorf("phase %s, holdsTarget %v, breakerCounts %v: its finalizer may close a pull request, "+
+						"but active = %v and read = %v", p, holds, counts, active(o), read)
+				case !closeOnDelete(p) && !holdsLock(o) && active(o):
+					t.Errorf("phase %s, holdsTarget %v: counted against the cap, but its deletion writes nothing to Git",
+						p, holds)
+				}
+			}
+		}
+	}
+}
+
 // TestDeletingRequestsCountedAreRead checks that every request being deleted that active counts is in one of the
 // lists the limits read whatever its status.breakerCounts: one that has not ended is in the first, one that
-// ended and holds the lock is in the lock's list. So whether the breaker still reads a request never changes the
-// cap.
+// ended and holds the lock is in the lock's list, one that ended in NeedsIntervention or Expired is in the
+// breaker's once its finalizer marked it. So whether the breaker still needs a request never changes the cap.
 func TestDeletingRequestsCountedAreRead(t *testing.T) {
 	sels := limitsSelectors()
 	now := metav1.Now()
@@ -425,12 +464,12 @@ func TestDeletingRequestsCountedAreRead(t *testing.T) {
 			o.DeletionTimestamp = &now
 			o.Status.HoldsTarget = holds
 			o.Status.BreakerCounts = new(false)
+			markDeleting(o)
 			if !active(o) {
 				continue
 			}
-			if !sels[0].Matches(selectableFields(o)) && !sels[1].Matches(selectableFields(o)) {
-				t.Errorf("phase %q, holdsTarget %v: counted against the cap but read by neither the first nor the lock's list",
-					p, holds)
+			if !slices.ContainsFunc(sels, func(s fields.Selector) bool { return s.Matches(selectableFields(o)) }) {
+				t.Errorf("phase %q, holdsTarget %v: counted against the cap but read by none of the lists", p, holds)
 			}
 		}
 	}

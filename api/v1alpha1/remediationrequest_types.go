@@ -312,17 +312,25 @@ type RemediationRequestStatus struct {
 	// +optional
 	HoldsTarget *bool `json:"holdsTarget,omitempty"`
 
-	// breakerCounts is true while the circuit breaker may still need the request's outcome: it is set in the
-	// status write that ends the request as a success (Merged or a later phase), a failure (Failed,
-	// NeedsIntervention), or, for a probe (breakerProbe), in any other way; a request that ends otherwise gets
-	// false. The executor sets it to false only on proof that the outcome no longer matters: a newer success is
-	// recorded, or more failures than the breaker's threshold are recorded after it. Unset on a request that has
-	// not ended, and on one that ended before the field existed; the executor then derives it once from the
-	// request's status, and reads such a request meanwhile (fail closed).
-	// It is a selectable field (field selector status.breakerCounts), so the breaker reads only the outcomes that
-	// still count.
+	// breakerCounts says whether the executor's limits still read the request for the circuit breaker. It is
+	// set in the status write that ends the request: true for a success (Merged or a later phase), a failure
+	// (Failed, NeedsIntervention) or a probe (breakerProbe) that ended in any other way, false for any other
+	// end. The executor sets it to false only when a newer request in Succeeded is recorded (breakerClearedBy
+	// names it), and back to true when that request is deleted, or when a request whose deletion may still close
+	// a pull request (NeedsIntervention, Expired) is being deleted. It is unset while the request has not ended
+	// and on one that ended before the field existed; an unset request is read (fail closed), and the executor
+	// sets the field once on an ended one from its status. It is a selectable field (field selector
+	// status.breakerCounts), so the breaker reads only the outcomes that still count.
 	// +optional
 	BreakerCounts *bool `json:"breakerCounts,omitempty"`
+
+	// breakerClearedBy is the name of the request in Succeeded whose success made the executor set breakerCounts
+	// to false on this one, written in the same status write. When that request is deleted, its finalizer sets
+	// breakerCounts back to true on every request that names it, before the finalizer is removed. It is a
+	// selectable field (field selector status.breakerClearedBy).
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	BreakerClearedBy string `json:"breakerClearedBy,omitempty"`
 
 	// effectiveApprovalRequired is what policy decided, which may be stricter than spec.approvalRequired.
 	// +optional
@@ -382,6 +390,7 @@ type RemediationRequestStatus struct {
 // +kubebuilder:selectablefield:JSONPath=`.status.breakerProbe`
 // +kubebuilder:selectablefield:JSONPath=`.status.holdsTarget`
 // +kubebuilder:selectablefield:JSONPath=`.status.breakerCounts`
+// +kubebuilder:selectablefield:JSONPath=`.status.breakerClearedBy`
 
 // RemediationRequest is one proposed fix: a typed action on one object, carried out as a GitOps pull request
 // after deterministic policy allows it.

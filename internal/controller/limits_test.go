@@ -422,7 +422,7 @@ func TestBackfillLock(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, c2, _, _ := limitsWorld(t, 20, c.rr)
-			if err := r.backfillLock(context.Background(), c.rr); err != nil {
+			if err := r.backfill(context.Background(), c.rr); err != nil {
 				t.Fatal(err)
 			}
 			got := &remediationv1alpha1.RemediationRequest{}

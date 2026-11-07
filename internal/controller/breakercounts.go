@@ -17,13 +17,18 @@ limitations under the License.
 package controller
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -31,29 +36,45 @@ import (
 )
 
 // The breaker's watermark (design section 10.7, #390). The circuit breaker needs, of all the requests that ended,
-// only the latest success, the failures after it and the probes that ended without a success. Each request
-// carries status.breakerCounts, a selectable field, so the breaker lists only status.breakerCounts!=false and
-// its reads stay bounded however long the history grows:
+// only the latest success and what came after it. Each request carries status.breakerCounts, a selectable
+// field, so the breaker lists only status.breakerCounts!=false and its reads do not grow with the history
+// before the latest final success:
 //
 //   - the status write that ends a request sets it (setPhase, classifyBreaker): true for a success, a failure
 //     or a probe that ended any other way, false for any other end;
-//   - a request that ended before the field existed gets it once from its status (backfillBreaker);
-//   - after a check of the limits read the requests, the executor sets it to false on the requests whose outcome
-//     the breaker no longer needs, judged from that same read (staleOutcomes, clearBreakerCounts).
+//   - a request that ended before the field existed gets it once from its status (backfill);
+//   - after a check of the limits, the executor sets it to false on the outcomes that ended before the latest
+//     request in Succeeded it read, and names that request in status.breakerClearedBy in the same write
+//     (staleOutcomes, clearStale). Only Succeeded is final: Merged, WaitingForDelivery and Verifying may still
+//     turn into Failed (#92), so they count as successes for the decision but clear nothing;
+//   - when the request in Succeeded is deleted, its finalizer sets breakerCounts back to true on every request
+//     that names it before the finalizer is removed (restoreCleared), so the outcomes it hid come back;
+//   - a request being deleted whose finalizer may still close a pull request (NeedsIntervention, Expired) gets
+//     true before that close (markDeleting), so the limits read it and count it against the cap until its
+//     finalizer is gone.
 //
 // A request without the field is read (a missing field is not false), so a request not yet classified is
-// never left out (fail closed). The proof that an outcome no longer matters uses the same order as the breaker
-// (lastPhaseTransitionTime, as written by the leader that ended each request) and only outcomes that this read
-// showed, so clearing never changes a decision the breaker makes from the same requests, whatever the clocks of
-// the leaders that wrote them: the cleared request is one the breaker would skip or whose time does not change
-// its result. The writes are idempotent (only true is set to false), carry the resourceVersion that was read (a
-// request that changed meanwhile is left as it is and judged again at the next check) and may fail or be cut
-// short at any point: what is not cleared is only read once more.
+// never left out (fail closed). Clearing uses the breaker's own order (lastPhaseTransitionTime, as written by
+// the leader that ended each request) and only requests this read showed: an outcome before the latest success
+// is one the breaker skips (the failures in a row are counted after the latest success, an older success is not
+// the latest, a probe that ended before a success opens nothing again), so clearing never changes a decision
+// made from the same requests, whatever the clocks of the leaders. The writes carry the resourceVersion that was
+// read (a request that changed meanwhile is left as it is and judged again at the next check) and may fail or
+// be cut short at any point: what is not cleared is only read once more.
+//
+// clearMu orders the clearing and the restore of one executor: the clearer checks, under it, that the success
+// it clears by still exists and is not being deleted, and the finalizer restores under it, so a clearing cannot
+// name a success whose finalizer already restored. A clearing by a former leader that still runs while the new
+// one deletes that success is not covered: leader election stops the former leader's process.
 
-// breakerClearsPerCheck is the most requests one check of the limits clears, so that the first checks after an
-// upgrade, when every older outcome was just marked, do not spend long on writes; the rest are cleared by the
-// next checks.
-const breakerClearsPerCheck = limitsPageSize
+// breakerClearsPerCheck is the most requests one clearing sets to false. The first checks after the upgrade
+// may find the whole older history before the latest final success; a hundred merge patches take about a
+// second on a local API server, so the clearing stays short and the rest is left to the next checks, which
+// read it once more meanwhile.
+const breakerClearsPerCheck = 100
+
+// backfillRetryDelay is how long a request whose backfill write conflicted waits before it is reconciled again.
+const backfillRetryDelay = time.Second
 
 // countsForBreaker reports whether the breaker may need the outcome of a request that ended: a success or a
 // failure it counts (breakerOutcome), or a probe that ended in any other way, which opens the breaker again
@@ -63,114 +84,109 @@ func countsForBreaker(rr *remediationv1alpha1.RemediationRequest) bool {
 }
 
 // classifyBreaker sets status.breakerCounts in the status about to be written, from the request's phase: on a
-// request that ended, whether the breaker may need its outcome. A request that has not ended is left as it is
-// (unset on a new request, so the breaker's list reads it).
+// request that ended, whether the breaker may need its outcome, and no clearing success (it ended now, after
+// any success that cleared it before). A request that has not ended is left as it is (unset on a new request,
+// so the breaker's list reads it).
 func classifyBreaker(rr *remediationv1alpha1.RemediationRequest) {
 	if ended(rr.Status.Phase) {
 		rr.Status.BreakerCounts = new(countsForBreaker(rr))
+		rr.Status.BreakerClearedBy = ""
 	}
 }
 
-// backfillBreaker writes status.breakerCounts once on a request that ended before the field existed, from its
-// status (classifyBreaker), so the breaker's list (status.breakerCounts!=false) stops reading one it never
-// needs, and the clearing after the next checks can judge the others.
-func (r *RemediationRequestReconciler) backfillBreaker(ctx context.Context,
-	rr *remediationv1alpha1.RemediationRequest) error {
-	if rr.Status.BreakerCounts != nil || !ended(rr.Status.Phase) {
+// backfill writes, in one status write, the fields a request decided before they existed lacks:
+// status.holdsTarget from derivedHold (so the requests of an older release keep the lock their status gives
+// them; one refused then gets false, so the lock's list stops reading it), and on a request that ended,
+// status.breakerCounts from classifyBreaker (so the breaker's list stops reading one it never needs).
+func (r *RemediationRequestReconciler) backfill(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	changed := false
+	if rr.Status.HoldsTarget == nil && (rr.Status.PlanDigest != "" || ended(rr.Status.Phase)) {
+		rr.Status.HoldsTarget = new(derivedHold(rr))
+		changed = true
+	}
+	if rr.Status.BreakerCounts == nil && ended(rr.Status.Phase) {
+		classifyBreaker(rr)
+		changed = true
+	}
+	if !changed {
 		return nil
 	}
-	classifyBreaker(rr)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
 	return nil
 }
 
-// staleOutcomes returns the requests among seen (one read of the limits) whose status.breakerCounts is true
-// although the breaker no longer needs them, judged from seen alone with the breaker's own order
-// (lastPhaseTransitionTime):
-//
-//   - a success older than the latest success (strictly): only the latest success bounds the failures in a row;
-//   - a failure before the latest success (strictly): the failures in a row are counted after it;
-//   - a failure with more than threshold failures after it, when it is not among the first threshold failures
-//     after the latest success: the breaker stays tripped by the newer ones, the latest failure is a newer one,
-//     and the trip (the threshold-th failure in a row) is among the first ones, which are kept;
-//   - a probe that ended without a success or a failure, when any outcome or such a probe's end came after it
-//     (strictly): the breaker opens again from the latest failure or probe end only, and a newer success leaves
-//     no failure in a row before the probe.
-//
-// A request without lastPhaseTransitionTime cannot be ordered and is never returned, nor is anything else
-// (fail closed). The latest success, the first threshold failures after it, the threshold+1 latest failures and
-// the latest probe end are never returned, so once cleared the breaker reads at most 2*threshold+3 ended
-// requests (more only on equal times) besides those not classified yet.
-func staleOutcomes(seen map[types.UID]limitsEntry, threshold int) []limitsEntry {
-	var lastSuccess, lastEvent time.Time
-	var failures []time.Time
+// clearing is what one check of the limits found to clear: the requests whose outcome the breaker no longer
+// needs, oldest first, and the request in Succeeded that proves it.
+type clearing struct {
+	by    string
+	byUID types.UID
+	stale []limitsEntry
+}
+
+// staleOutcomes finds, among seen (one read of the limits), the latest request in Succeeded that is not being
+// deleted, and the requests with status.breakerCounts true that ended strictly before it with an outcome the
+// breaker reads (a success, a failure, or a probe that ended without either), oldest first. A request without
+// lastPhaseTransitionTime cannot be ordered and is never returned; nor is one being deleted (it may be read to
+// count it against the cap, markDeleting). Without a request in Succeeded nothing is returned, so a long row of
+// failures and probes stays read (fail closed).
+func staleOutcomes(seen map[types.UID]limitsEntry) clearing {
+	var c clearing
+	var last limitsEntry
 	for _, e := range seen {
-		switch {
-		case e.outcome == outcomeSuccess:
-			lastSuccess = latest(lastSuccess, e.at)
-		case e.outcome == outcomeFailure:
-			failures = append(failures, e.at)
-		case !e.neutralProbe():
+		if !e.final || e.deleting || e.at.IsZero() {
 			continue
 		}
-		lastEvent = latest(lastEvent, e.at)
+		if c.by == "" || e.at.After(last.at) || (e.at.Equal(last.at) && e.name < last.name) {
+			last, c.by, c.byUID = e, e.name, e.uid
+		}
 	}
-	var stale []limitsEntry
+	if c.by == "" {
+		return c
+	}
 	for _, e := range seen {
-		if !e.counts || e.at.IsZero() {
-			continue
-		}
-		switch {
-		case e.outcome == outcomeSuccess:
-			if e.at.Before(lastSuccess) {
-				stale = append(stale, e)
-			}
-		case e.outcome == outcomeFailure:
-			if e.at.Before(lastSuccess) || failureSuperseded(e.at, lastSuccess, failures, threshold) {
-				stale = append(stale, e)
-			}
-		case e.neutralProbe():
-			if e.at.Before(lastEvent) {
-				stale = append(stale, e)
-			}
+		if e.counts && !e.deleting && !e.at.IsZero() && e.at.Before(last.at) &&
+			(e.outcome != outcomeNone || e.neutralProbe()) {
+			c.stale = append(c.stale, e)
 		}
 	}
-	return stale
+	slices.SortFunc(c.stale, func(a, b limitsEntry) int {
+		return cmp.Or(a.at.Compare(b.at), cmp.Compare(a.name, b.name))
+	})
+	return c
 }
 
-// failureSuperseded reports whether a failure at at, not before lastSuccess, has more than threshold failures
-// after it and at least threshold failures of the same row (not before lastSuccess) before it.
-func failureSuperseded(at, lastSuccess time.Time, failures []time.Time, threshold int) bool {
-	newer, olderInRow := 0, 0
-	for _, t := range failures {
-		switch {
-		case t.After(at):
-			newer++
-		case t.Before(at) && !t.Before(lastSuccess):
-			olderInRow++
-		}
+// clearStale sets status.breakerCounts to false and status.breakerClearedBy to the clearing success on at most
+// breakerClearsPerCheck of c.stale in namespace, oldest first, each with the resourceVersion that was read (a
+// merge patch with it, so a request that changed since is left as it is). It runs after the decision of the
+// check that found them, outside the admission lock, and only one clearing runs at a time (another check finds
+// the rest later). Under clearMu it first checks that the success still exists, with the same UID, in
+// Succeeded and not being deleted, so its finalizer, which restores under the same mutex, finds every request
+// that names it. It never fails the caller: a request that is gone or changed is skipped; any other error stops
+// the clearing, and the requests not cleared are read again at the next check. An error that will not go away
+// by itself (Forbidden, Invalid and the like) is logged as an error and counted in
+// shadewright_circuit_breaker_clear_errors_total; a transient one is logged at info level.
+func (r *RemediationRequestReconciler) clearStale(ctx context.Context, namespace string, c clearing) {
+	if len(c.stale) == 0 || !r.clearMu.TryLock() {
+		return
 	}
-	return newer > threshold && olderInRow >= threshold
-}
-
-// latest returns the later of a and b.
-func latest(a, b time.Time) time.Time {
-	if b.After(a) {
-		return b
-	}
-	return a
-}
-
-// clearBreakerCounts sets status.breakerCounts to false on at most breakerClearsPerCheck of stale, the requests
-// staleOutcomes found in namespace, each with the resourceVersion that was read (a merge patch with that
-// resourceVersion, so one that changed since is left as it is). It never fails the caller: a request that is
-// gone or changed is skipped, and any other error stops the clearing and is logged, so those requests are
-// read once more and judged again at the next check.
-func (r *RemediationRequestReconciler) clearBreakerCounts(ctx context.Context, namespace string, stale []limitsEntry) {
+	defer r.clearMu.Unlock()
+	ctx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
+	defer cancel()
 	log := logf.FromContext(ctx)
-	for i, e := range stale {
+	by := &remediationv1alpha1.RemediationRequest{}
+	switch err := r.reader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: c.by}, by); {
+	case apierrors.IsNotFound(err):
+		return
+	case err != nil:
+		clearFailed(ctx, err, c.by)
+		return
+	}
+	if by.UID != c.byUID || !by.DeletionTimestamp.IsZero() || by.Status.Phase != remediationv1alpha1.PhaseSucceeded {
+		return
+	}
+	for i, e := range c.stale {
 		if i == breakerClearsPerCheck {
 			return
 		}
@@ -178,13 +194,101 @@ func (r *RemediationRequestReconciler) clearBreakerCounts(ctx context.Context, n
 			ResourceVersion: e.resourceVersion}}
 		base := rr.DeepCopy()
 		rr.Status.BreakerCounts = new(false)
+		rr.Status.BreakerClearedBy = c.by
 		err := r.Status().Patch(ctx, rr, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 		switch {
 		case err == nil, apierrors.IsNotFound(err), apierrors.IsConflict(err):
+		case ctx.Err() != nil:
+			log.Info("Stopped marking the outcomes the circuit breaker no longer needs", "reason", ctx.Err().Error())
+			return
 		default:
-			log.Info("Failed to mark a RemediationRequest whose outcome the circuit breaker no longer needs",
-				"remediationRequest", client.ObjectKey{Namespace: namespace, Name: e.name}, "error", err.Error())
+			clearFailed(ctx, err, e.name)
 			return
 		}
 	}
+}
+
+// permanentClearError reports whether a write of the watermark failed in a way that will not go away by itself:
+// the executor may not write (a role changed), or the API server refuses the object or the request.
+func permanentClearError(err error) bool {
+	return apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || apierrors.IsInvalid(err) ||
+		apierrors.IsBadRequest(err) || apierrors.IsMethodNotSupported(err) || apierrors.IsNotAcceptable(err) ||
+		apierrors.IsUnsupportedMediaType(err)
+}
+
+// clearFailed logs a failed read or write of the clearing, as an error and counted when it is permanent.
+func clearFailed(ctx context.Context, err error, name string) {
+	log := logf.FromContext(ctx).WithValues("remediationRequest", name)
+	if permanentClearError(err) {
+		breakerClearErrors.Inc()
+		log.Error(err, "Failed to mark the outcomes the circuit breaker no longer needs; they stay read")
+		return
+	}
+	log.Info("Failed to mark the outcomes the circuit breaker no longer needs; they stay read", "error", err.Error())
+}
+
+// markDeleting sets status.breakerCounts true, in the status about to be written, on a request being deleted
+// that ended in a phase whose deletion may close a pull request (closeOnDelete: NeedsIntervention, Expired), so
+// the limits read it, and count it against the cap (active), until its finalizer is gone. It reports whether it
+// changed the status.
+func markDeleting(rr *remediationv1alpha1.RemediationRequest) bool {
+	if !ended(rr.Status.Phase) || !closeOnDelete(rr.Status.Phase) || ptr.Deref(rr.Status.BreakerCounts, false) {
+		return false
+	}
+	rr.Status.BreakerCounts = new(true)
+	rr.Status.BreakerClearedBy = ""
+	return true
+}
+
+// clearedField is the field selector of status.breakerClearedBy.
+const clearedField = "status.breakerClearedBy"
+
+// restoreCleared sets status.breakerCounts back to true, and removes status.breakerClearedBy, on every request
+// in rr's namespace that names rr as the success that cleared it, read from the API server in pages. The
+// finalizer calls it before it removes itself, under clearMu, so no clearing names rr after the list. Each
+// write is a merge patch with the resourceVersion of the list; any error but a request that is gone is
+// returned, and the finalizer stays until a retry restores them all (fail closed). Without an API server reader
+// it fails.
+func (r *RemediationRequestReconciler) restoreCleared(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	if r.APIReader == nil {
+		return errors.New("cannot restore the outcomes cleared by this request: no API server reader")
+	}
+	r.clearMu.Lock()
+	defer r.clearMu.Unlock()
+	parent := ctx
+	ctx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
+	defer cancel()
+	err := r.restoreClearedIn(ctx, rr)
+	return boundErr(parent, ctx, "restore of the circuit breaker's outcomes", err)
+}
+
+// restoreClearedIn is restoreCleared within ctx.
+func (r *RemediationRequestReconciler) restoreClearedIn(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	type cleared struct{ name, resourceVersion string }
+	var found []cleared
+	if err := r.listPages(ctx, rr.Namespace, fields.OneTermEqualSelector(clearedField, rr.Name),
+		func(o *remediationv1alpha1.RemediationRequest) {
+			found = append(found, cleared{o.Name, o.ResourceVersion})
+		}); err != nil {
+		return err
+	}
+	for _, f := range found {
+		o := &remediationv1alpha1.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: rr.Namespace, Name: f.name,
+			ResourceVersion: f.resourceVersion}}
+		o.Status.BreakerCounts = new(false)
+		o.Status.BreakerClearedBy = rr.Name
+		base := o.DeepCopy()
+		o.Status.BreakerCounts = new(true)
+		o.Status.BreakerClearedBy = ""
+		err := r.Status().Patch(ctx, o, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("restore the circuit breaker's outcome on RemediationRequest %s/%s: %w", rr.Namespace,
+				f.name, err)
+		}
+	}
+	if len(found) > 0 {
+		logf.FromContext(ctx).Info("Restored the outcomes the circuit breaker reads again after a success is deleted",
+			"remediationRequest", client.ObjectKeyFromObject(rr), "restored", len(found))
+	}
+	return nil
 }

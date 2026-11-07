@@ -36,6 +36,7 @@ nav = [
       { "Read an Incident" = "how-to/read-an-incident.md" },
       { "Check status with kubectl" = "how-to/check-status.md" },
       { "Find why a request was refused" = "how-to/find-why-refused.md" },
+      { "Clear Resolved Incidents at the cap" = "how-to/clear-resolved-incidents.md" },
     ] },
     { "Troubleshooting" = "troubleshooting.md" },
     { "FAQ" = "faq.md" },

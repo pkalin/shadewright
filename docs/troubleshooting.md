@@ -233,13 +233,7 @@ An Incident that never gets analyzed shows why in its `AnalysisDue` condition. I
 
 Symptoms: `shadewright_incident_observations_refused_total` rises, a Warning event with reason `IncidentCapReached` on the analyzer's Pod, and a new problem produces no Incident. The cap is `--max-incidents` (500) and counts every Incident, `Resolved` ones included. Watch the gauge `shadewright_incidents` by `phase` (built); an alert at 80% of the cap (400 Incidents in total) is planned, not shipped.
 
-Clean-up is manual: the analyzer has no `delete` on Incidents and does not delete resolved ones (automatic deletion would need a grant and its own ADR). Do it as an admin of the operator namespace.
-
-1. **Pick.** Today (built) nothing sets `Resolved`, so pick by age and by `status.lastSeen`: Incidents not seen for a long time. Once the lifecycle is built (planned, [#251](https://github.com/pkalin/shadewright/issues/251)), `Resolved` marks the safe ones: `kubectl -n shadewright-system get incidents -o json | jq -r '.items[] | select(.status.phase=="Resolved") | .metadata.name'`.
-2. **Skip the ones an active request names.** List the Incidents that RemediationRequests point at, and keep every one named by a request that has not reached a final phase: `kubectl -n shadewright-system get remediationrequests -o json | jq -r '.items[] | [.spec.incidentRef.name, .status.phase] | @tsv'`.
-3. **Keep the evidence.** Export what you will delete first, and keep it with your incident records: `kubectl -n shadewright-system get incident <name> -o yaml > <name>.yaml`. An Incident holds the redacted symptom, counters and times, not logs; the analysis records are kept apart.
-4. **Delete.** `kubectl -n shadewright-system delete incident <name>`. A fingerprint that comes back creates a new Incident.
-5. **Restart and check.** The analyzer counts Incidents only when it starts: `kubectl -n shadewright-system rollout restart deploy/shadewright-analyzer`. Check that `shadewright_incidents` fell and that `shadewright_incident_observations_refused_total` stopped rising.
+Clean-up is manual: the analyzer has no `delete` on Incidents. Follow [Clear Resolved Incidents at the cap](how-to/clear-resolved-incidents.md).
 
 If the cap fills again at once, the namespaces are producing many fingerprints: see [Limit the namespaces it watches](how-to/limit-watched-namespaces.md).
 

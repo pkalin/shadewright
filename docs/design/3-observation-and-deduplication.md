@@ -304,14 +304,14 @@ Without `--triage-model` the analyzer does not start the loop, so nothing adds t
 
 ### Incident lifecycle
 
-Decided on 2026-11-05 ([#251](https://github.com/pkalin/shadewright/issues/251)); what is built and what is planned is marked in each row. <span class="sw-status sw-built">built</span> Today the controller creates an Incident with the phase `Open` (a status with no phase gets `Open` on its first write), and the trigger reads the phase as described above. <span class="sw-status sw-built">built</span> The analysis controller (`internal/analysis`, [#76](https://github.com/pkalin/shadewright/issues/76)) writes `Analyzing`, `Proposed` and `Escalated` when the analyzer runs with `--triage-model` (off by default). <span class="sw-status sw-planned">planned</span> Every other transition: nothing writes `Resolved` and nothing moves an Incident on from `Proposed` or `Escalated` (#251).
+Decided on 2026-11-05 and 2026-11-07 ([#251](https://github.com/pkalin/shadewright/issues/251)); what is built and what is planned is marked in each row. <span class="sw-status sw-built">built</span> Today the controller creates an Incident with the phase `Open` (a status with no phase gets `Open` on its first write), and the trigger reads the phase as described above. <span class="sw-status sw-built">built</span> The analysis controller (`internal/analysis`, [#76](https://github.com/pkalin/shadewright/issues/76)) writes `Analyzing`, `Proposed` and `Escalated` when the analyzer runs with `--triage-model` (off by default). <span class="sw-status sw-planned">planned</span> Every other transition: nothing writes `Resolved` and nothing moves an Incident on from `Proposed` or `Escalated` (#251).
 
 **Rules.** <span class="sw-status sw-planned">planned</span>
 
 - The analyzer is the only component that moves an Incident between phases. It already owns the Incident's status; the operator's request controller never writes it (it reads a request's phase), no delete grant is added and invariant 6 is unchanged.
 - `Open`, `Proposed` and `Escalated` move to `Resolved` when the symptom has not been seen for 1 hour and no request that names the Incident (`incidentRef`) is still active. A request that reached `Succeeded` (merged and verified) resolves the Incident at once. Active means a request phase before a final one; the final phases are `Succeeded`, `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded` and `NeedsIntervention`.
 - A request that ends in any other final phase moves the Incident to `Escalated`, never `Resolved`: a person decides. That is `Denied`, `Expired`, `Failed`, `Cancelled` and `NeedsIntervention`, which includes a pull request rejected or closed without a merge (`NeedsIntervention`, reason `ChangeRequestClosed`, [section 6](6-reconciliation.md)). `Superseded` leaves the Incident to the newer request that names it, or `Escalated` when there is none.
-- A symptom seen again on a `Resolved` Incident reopens it: `Open`, a new analysis round, counters kept, the round counted. The new analysis gets only the symptoms and context, never the denial reason or any earlier policy outcome, so the model cannot search for what the policy allows (invariant 1: model output is never authorization).
+- A `Resolved` Incident is never analyzed again. A symptom seen again within 24 hours of resolution (a fix that keeps coming undone) starts no analysis: the same Incident moves to `Escalated` for a person. A symptom seen again more than 24 hours after resolution creates a new Incident, named by the fingerprint plus an occurrence number (`<prefix>-<fp>-<n>`), linked to the previous one (its name and the occurrence count are recorded). The new Incident is analyzed from its symptoms and context only, never the denial reason or any earlier outcome or policy decision, so the model cannot search for what the policy allows (invariant 1: model output is never authorization). The 24 hour window is a constant for now; making it a setting is a later choice.
 
 | From phase | Event | To phase | Written by | State |
 | --- | --- | --- | --- | --- |
@@ -329,7 +329,8 @@ Decided on 2026-11-05 ([#251](https://github.com/pkalin/shadewright/issues/251))
 | `Proposed` | symptom not seen for 1 h and no active request (symptoms gone before merge, or fixed by a person without the pull request) | `Resolved` | analyzer | Planned |
 | `Escalated` | symptom not seen for 1 h and no active request (a person fixed it, or it went away) | `Resolved` | analyzer | Planned |
 | `Escalated` | a person's fix does not hold: the symptom stays or returns | stays `Escalated` | none | Planned |
-| `Resolved` | symptom seen again (recurrence after success, or after a person's fix) | `Open`, new round | analyzer | Planned |
+| `Resolved` | symptom seen again within 24 h of resolution (recurrence after success, or after a person's fix) | `Escalated` (the same Incident, no analysis) | analyzer | Planned |
+| `Resolved` | symptom seen again more than 24 h after resolution | stays `Resolved`; a new Incident (occurrence number + 1, linked to the previous one) starts at `Open` and is analyzed with no earlier outcome | analyzer | Planned |
 
 A person fixing the cause by hand needs no step of its own: the symptom stops, and after an hour with no active request the analyzer resolves the Incident. A request still active when the symptom stops (a pull request waiting for review) keeps the Incident out of `Resolved` until the request ends; if it then merges and verifies, the request `Succeeded` resolves the Incident at once.
 
@@ -345,13 +346,16 @@ stateDiagram-v2
     Proposed --> Escalated: request ended without success
     Proposed --> Resolved: symptom gone 1 h, no active request
     Escalated --> Resolved: symptom gone 1 h, no active request
-    Resolved --> Open: symptom seen again, new round
+    Resolved --> Escalated: seen again within 24 h, no analysis
+    Resolved --> [*]: seen again after 24 h, new Incident starts at Open
     class Analyzing,Proposed,Escalated,Resolved planned
 ```
 
-The arrow into `Open` from the start always runs. The arrows into and out of `Analyzing` run when the analyzer is started with `--triage-model` (off by default); every other arrow is planned (#251).
+The arrow into `Open` from the start always runs (it is also how a new occurrence of a resolved fingerprint begins). The arrows into and out of `Analyzing` run when the analyzer is started with `--triage-model` (off by default); every other arrow is planned (#251).
 
-**Cap.** <span class="sw-status sw-built">built</span> (the count); the rest <span class="sw-status sw-planned">planned</span>. The cap of 500 keeps counting every Incident, `Resolved` ones included, so the number of Incident objects stays bounded ([ADR-0007](../adr/0007-incident-state-in-crds.md)). `Resolved` only marks the Incidents that are safe to delete. They are not deleted automatically: that needs a delete grant for the analyzer, a change of invariant 6, and is a separate ADR task. Clean-up is manual, see [the cap is reached](../troubleshooting.md#the-incident-cap-is-reached). Built today: the cap counts every Incident, once, when the analyzer starts, so a restart follows the deletions.
+**Names and deduplication of occurrences.** <span class="sw-status sw-planned">planned</span> The Incident name stays deterministic, so invariant 5 holds: it is derived from the fingerprint and the occurrence number, a create that races with another replica or a restart finds `AlreadyExists` and adopts the existing object, and no second Incident appears. Incidents that exist today are occurrence 1, so no object is renamed. Deduplication lists Incidents by a fingerprint label and takes the one that is not `Resolved`; when all of them are `Resolved`, the 24 hour rule above decides between `Escalated` and a new occurrence.
+
+**Cap.** <span class="sw-status sw-built">built</span> (the count); the rest <span class="sw-status sw-planned">planned</span>. The cap of 500 keeps counting every Incident, `Resolved` ones included, so the number of Incident objects stays bounded ([ADR-0007](../adr/0007-incident-state-in-crds.md)). `Resolved` only marks the Incidents that are safe to delete. They are not deleted automatically: that needs a delete grant for the analyzer, a change of invariant 6, and is a separate ADR task. Clean-up is manual, see [Clear Resolved Incidents at the cap](../how-to/clear-resolved-incidents.md). Automatic retention with an archive is <span class="sw-status sw-planned">planned</span> ([#458](https://github.com/pkalin/shadewright/issues/458)). A metric of Incidents per phase is built (`shadewright_incidents`); an alert at 80% of the cap is <span class="sw-status sw-planned">planned</span>. Built today: the cap counts every Incident, once, when the analyzer starts, so a restart follows the deletions.
 
 ## 3.3. Analysis
 

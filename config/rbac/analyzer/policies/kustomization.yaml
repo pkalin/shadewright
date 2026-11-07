@@ -1,0 +1,4 @@
+# Generated role.yaml from internal/analyzer/policyrbac (make manifests): get on every RemediationPolicy. Never
+# installed as is: config/analysis-policies restricts it to the configured policy names.
+resources:
+- role.yaml

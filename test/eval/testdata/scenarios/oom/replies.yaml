@@ -4,7 +4,7 @@ replies:
   - model: eval-fake-1
     usage: {inputTokens: 2300, outputTokens: 310}
     content: |
-      {"summary": "The web container of Deployment demo/web was OOMKilled (exit code 137) and has restarted 3 times: it needs more memory than its limit. Raising the memory limit within the policy's bounds should stop the kills.",
+      {"summary": "The web container of Deployment demo/web was OOMKilled (exit code 137) and has restarted 3 times: it needs more memory than its limit. The working set peaks at 5.0135e+07 bytes, just under the 48Mi limit, which sets the size: 64Mi, the smallest value within the policy's bounds, leaves headroom above that peak and should stop the kills.",
        "hypotheses": [{"description": "The memory working set climbs to just under the 48Mi limit after each start, then the container is killed."}],
        "evidence": [{"source": "c1", "quote": "OOMKilled"},
                     {"source": "c2", "quote": "OOMKilled"},

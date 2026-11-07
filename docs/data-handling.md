@@ -13,6 +13,7 @@ What Shadewright stores, what it sends where, what it publishes and how long eac
 | Events (`events.k8s.io`) and Pods | Reason, type, reporting controller, note text, object names and owners, container termination state, in the **watched namespaces only** | Analyzer |
 | Deployments, ReplicaSets, StatefulSets | Owner references and metadata (`get`) | Analyzer |
 | Nodes | `list`, for platform detection | Analyzer |
+| RemediationPolicies named in `--action-policies` (only with the analysis on) | Their bounds, targets and approval, for the policy bounds block of the context (`get` by name, `resourceNames`; no `list` or `watch`; #493) | Analyzer |
 | Prometheus (only with `--prometheus-url`; read by the context builder and the read tools when the analysis runs, #76) | The results of the approved query templates ([design, section 4](design/4-tools.md#4-tools)), only for the **watched namespaces**: Prometheus applies no authorization, so the adapter refuses any other namespace before a request | Analyzer |
 | Flux `Kustomization` and `GitRepository`, the target workload or `ScaledObject`, policy and settings | Status and spec, for source mapping and the freshness check | Executor |
 | The Git repository | The files of the build for the target's Kustomization (up to 256 files, 1 MiB each), through the GitHub API | Executor |
@@ -44,7 +45,7 @@ Anything in the cluster is readable by whoever has `get` on it, so treat the Inc
 What one analysis sends, per call:
 
 - **The system part**, the same for every incident: the role and rules, the action catalog and the output JSON schema, all from code (`internal/analysis/prompts/`). No cluster data.
-- **The context**, one user message of delimited blocks tagged with their provenance: the incident summary (subject kind, namespace and name, reason, counts and times), the object status and owners, a log excerpt of the attributed pods (only with `--pod-logs`), selected metrics (only with `--prometheus-url`), and a Git section that says it is not available. Every block is redacted by `internal/redact` (built-in rules and operator patterns) and bounded in size before the model sees it; the prompt says the text is data, not instructions.
+- **The context**, one user message of delimited blocks tagged with their provenance: the incident summary (subject kind, namespace and name, reason, counts and times), the object status and owners, a log excerpt of the attributed pods (only with `--pod-logs`), selected metrics (only with `--prometheus-url`), a Git section that says it is not available, and a policy bounds block (only with `--action-policies`): operator configuration, the bounds of the RemediationPolicy that would decide a proposal, rendered from its typed fields, shown as data and never quotable as evidence (#493). Every block is redacted by `internal/redact` (built-in rules and operator patterns) and bounded in size before the model sees it; the prompt says the text is data, not instructions.
 - **On escalation only** (with `--escalation-model`): the read tool definitions, and each tool's redacted, bounded answer, at most `maxToolSteps` calls, each bound to the namespace of the incident's subject.
 - The deployment name, `maxOutputTokens` and the response schema.
 

@@ -32,7 +32,7 @@ The executor runs steps 1 to 7; step 8 is planned (section 6). Every Git write n
 3. Apply the typed change to the allowed file, checking the previous value. Patch YAML in place, preserving comments and formatting.
 4. Render the final manifests and compute the semantic diff, including indirect changes through values (8.2.2).
 5. Validate YAML, schemas, safety rules and cost or capacity bounds.
-6. Commit and open a PR with the evidence, scope, expected effect, risk and rollback plan.
+6. Commit and open a PR with the evidence, scope, the size of the step beside the policy (ADR-0026), expected effect, risk and rollback plan.
 7. Bind the PR to the request UID and plan digest. Any new push to the branch invalidates the plan.
 8. After merge, follow delivery and the success criteria instead of stopping at "merged".
 

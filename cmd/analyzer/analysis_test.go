@@ -20,11 +20,15 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -63,8 +67,11 @@ func testDeps(t *testing.T) analysisDeps {
 		redactor: r, log: logr.Discard()}
 }
 
+// operatorNamespace is the namespace the analyzer creates requests in.
+const operatorNamespace = "shadewright-system"
+
 func validFlags() analysisFlags {
-	return analysisFlags{namespace: "shadewright-system", watched: []string{"shop"},
+	return analysisFlags{namespace: operatorNamespace, watched: []string{"shop"},
 		triageModel:      "gpt-4.1-mini-2025-04-14",
 		endpointSuffixes: ".lab.services.ai.azure.com", actionPolicies: "SetContainerMemoryLimit=memory",
 		claimTimeout: incidents.DefaultAnalysisTimeout}
@@ -200,5 +207,71 @@ func TestAnalysisStoreFlags(t *testing.T) {
 	c, err = buildAnalysis(f, d, ok)
 	if err != nil || c.Store == nil || got != (azureblob.Config{Account: storeAccount, Container: storeContainer}) {
 		t.Fatalf("with the store flags: config %+v, error %v; want a store", got, err)
+	}
+}
+
+// The context builder reads the policies the analysis puts in its requests, by name through the API reader,
+// for the operator namespace (#493); with no policy or no model it reads none.
+func TestContextPoliciesFollowTheFlags(t *testing.T) {
+	r := testDeps(t).apiReader
+	var cfg incidentcontext.Config
+	if err := contextPolicies(validFlags(), r, operatorNamespace, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PolicyReader != r || cfg.RequestNamespace != operatorNamespace ||
+		cfg.Policies[remediationv1alpha1.ActionSetContainerMemoryLimit] != "memory" || len(cfg.Policies) != 1 {
+		t.Errorf("config %+v", cfg)
+	}
+	for name, mutate := range map[string]func(*analysisFlags){
+		"no policy": func(f *analysisFlags) { f.actionPolicies = "" },
+		"no model":  func(f *analysisFlags) { f.triageModel = "" },
+	} {
+		f := validFlags()
+		mutate(&f)
+		var cfg incidentcontext.Config
+		err := contextPolicies(f, r, operatorNamespace, &cfg)
+		if err != nil || cfg.PolicyReader != nil || cfg.Policies != nil {
+			t.Errorf("%s: config %+v, error %v", name, cfg, err)
+		}
+	}
+	f := validFlags()
+	f.actionPolicies = "Exec=all"
+	if err := contextPolicies(f, r, operatorNamespace, &cfg); err == nil {
+		t.Error("an invalid --action-policies was accepted")
+	}
+}
+
+// forbidOne answers Forbidden for the policy named forbidden, as the API server does for a name the role's
+// resourceNames leave out, and NotFound for every other.
+type forbidOne struct {
+	client.Reader
+	forbidden string
+}
+
+func (f forbidOne) Get(_ context.Context, key client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+	gr := schema.GroupResource{Group: remediationv1alpha1.GroupVersion.Group, Resource: "remediationpolicies"}
+	if key.Name == f.forbidden {
+		return apierrors.NewForbidden(gr, key.Name, errors.New("not in resourceNames"))
+	}
+	return apierrors.NewNotFound(gr, key.Name)
+}
+
+// A role that does not name every --action-policies policy stops the start; a policy that does not exist
+// yet, or no policy reader at all, does not.
+func TestCheckPolicyReadsRefusesARoleWithoutTheName(t *testing.T) {
+	cfg := incidentcontext.Config{PolicyReader: forbidOne{forbidden: "keda"},
+		Policies: map[remediationv1alpha1.ActionType]remediationv1alpha1.Name{
+			remediationv1alpha1.ActionSetContainerMemoryLimit: "memory",
+			remediationv1alpha1.ActionAdjustKedaMaxReplicas:   "keda",
+		}}
+	if err := checkPolicyReads(cfg); err == nil || !strings.Contains(err.Error(), `"keda"`) {
+		t.Errorf("a forbidden policy read: %v", err)
+	}
+	cfg.PolicyReader = forbidOne{forbidden: "other"}
+	if err := checkPolicyReads(cfg); err != nil {
+		t.Errorf("missing policies: %v", err)
+	}
+	if err := checkPolicyReads(incidentcontext.Config{}); err != nil {
+		t.Errorf("no policy reader: %v", err)
 	}
 }

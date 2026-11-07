@@ -15,18 +15,23 @@ evaluation run, not production use.
 
 For each scenario in `test/eval/testdata/scenarios/`, the harness:
 
-1. Loads the recorded Incident and the cluster objects into a fake API server, and the scenario's recorded metrics,
-   if it has any, into a replayed metrics source.
+1. Loads the recorded Incident, the cluster objects and the scenario's RemediationPolicies (`policy.yaml`) into a fake
+   API server, with a `RemediationSettings` that enables the KEDA module, and the scenario's recorded metrics, if it
+   has any, into a replayed metrics source.
 2. Builds the context with the real context builder (`internal/incidentcontext`, default limits, the lab's watched
    namespace `demo`, the built-in redaction rules) and runs the real analysis loop (`internal/analysis`) with the
    real read tools. A scenario with recorded metrics gives the builder and the `query_metrics` tool the same
    `MetricsSource` (below); one without them has no metrics source, so its metrics section says "not available: no
-   metrics source is configured", as an analyzer without `--prometheus-url`. No scenario has a log source. In CI the model is a fake that answers with the scenario's recorded replies, in order; on
+   metrics source is configured", as an analyzer without `--prometheus-url`. No scenario has a log source. The
+   builder reads the policies by name as the analyzer does (`demo-memory` for `SetContainerMemoryLimit`, `demo-keda`
+   for `AdjustKedaMaxReplicas`), so the context holds the policy bounds block
+   ([design 3.3](design/3-observation-and-deduplication.md#the-context-builder)). In CI the model is a fake that answers with the scenario's recorded replies, in order; on
    demand it is the Foundry deployment the run names.
 3. Scores the outcome and the diagnosis against the scenario's `expected.yaml`.
 
-The harness only reads the outcome the loop returned and the reply it accepted. It runs no policy decision, no
-executor and no Git write, and nothing it computes authorizes anything (invariant 1).
+The harness only reads the outcome the loop returned and the reply it accepted. It runs no executor and no Git
+write, and nothing it computes authorizes anything (invariant 1): it runs the policy's preflight checks only to score
+a plan (below).
 
 ## Scoring
 
@@ -35,7 +40,11 @@ reasons a valid result gives when the model itself finds no catalog action. Any 
 `UnexpectedModel` reply, invalid output, a limit) fails it. A `pull-request` passes when the loop ended `Proposed`
 with a plan of the expected action type whose desired value lies inside the expected `bounds`; a
 `SetContainerMemoryLimit` plan must also name a container of the workload's pod template, and its previous value must
-be the limit that template sets. The request's
+be the limit that template sets. The plan must also pass the scenario's policy: the executor's checks that need no
+Git (`policy.Preflight`: request and target namespace, labels, module, the policy's entry, `min`, `max` and the
+step limits), on a request of the plan for the Incident's subject ([#493](https://github.com/pkalin/shadewright/issues/493)).
+So in `oom`, under `demo-memory` (64Mi to 128Mi, at most +50%), 48Mi to 96Mi fails with `IncreaseTooLarge` although
+96Mi is inside the expected bounds, as the lab's policy Denied it, and 48Mi to 72Mi passes. The request's
 phase (`NeedsIntervention`) and the file `paths` are decided by the executor and its source mapping, so they are
 listed in the report as not scored.
 
@@ -144,20 +153,25 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 | `incident.yaml` | The Incident as the analyzer would have it; its reason and subject must match `expected.yaml` |
 | `objects.yaml` | The objects the context builder and the read tools read: Deployments, StatefulSets, ReplicaSets, Pods, Events |
 | `metrics.yaml` | Optional. What the scenario's Prometheus holds: for every approved query template, the series it answers (labels and timed samples). Only `oom` and `statefulset-oom` have one (and the `oom/rollout` variant, below) |
+| `policy.yaml` | The RemediationPolicies of the scenario's cluster (#493): the lab's `demo-memory`, its spec copied from the fleet repository (the file names the commit), and a synthetic `demo-keda` (the lab has no KEDA policy yet). The context shows their bounds and a plan they refuse fails |
 | `replies.yaml` | The model replies the fake model replays, in order, and their `source` |
 | `variants/<name>/` | Optional. Variants of the scenario, below |
 
 **Variants.** A variant is a state of a fleet scenario that the lab met and the scenario's own recording does not
 show. It is scored against the scenario's `expected.yaml` and `rubric.yaml`, unchanged, with the scenario's
 Incident, and is reported as `<scenario>/<name>`. Its directory holds `variant.yaml` (`about`: what it changes and
-why, required), its own `objects.yaml` and `replies.yaml`, and a `metrics.yaml` when its series differ (otherwise
-the scenario's are replayed). The evaluation manifest hashes its files with the scenario files. `oom/rollout` is the
+why, required), its own `objects.yaml` and `replies.yaml`, and a `metrics.yaml` or `policy.yaml` when its series or
+policies differ (otherwise the scenario's are used). The evaluation manifest hashes its files with the scenario files. `oom/rollout` is the
 `oom` scenario during a rollout, as the lab met it on 2026-11-07
 ([#494](https://github.com/pkalin/shadewright/issues/494)): the pod template sets 48Mi while the old ReplicaSet's
-pod still runs with 64Mi, and the reply takes the old pod's 64Mi as the previous value. The loop takes the previous
+pod still runs with 64Mi, and the reply takes a value from a running pod (the new pod's working set, copied from
+the metrics) as the previous value, as the lab's model took the old pod's 64Mi. The loop takes the previous
 value from the pod template instead
 ([design 3.3](design/3-observation-and-deduplication.md#the-prompt-and-the-result)), so the plan goes from 48Mi
-and passes the outcome check ([Scoring](#scoring)).
+and passes the outcome check ([Scoring](#scoring)). The lab's model asked for 96Mi, which `demo-memory` refuses from
+48Mi. The block shows 64Mi to 72Mi from 48Mi; the reply asks for 64Mi, the smallest change the evidence supports
+(the old pod runs under 64Mi without kills), and its summary names that evidence as what sets the size
+([ADR-0026](adr/0026-the-analyzer-shows-the-model-the-policy-bounds.md)).
 
 **Recorded metrics.** `metrics.yaml` is replayed through the `providers.MetricsSource` interface, the one the
 Prometheus adapter implements (`test/eval/metrics_test.go`). The harness refuses a recording that the adapter could
@@ -242,9 +256,9 @@ and `digest` is the SHA-256 of its JSON without the digest, so a change to any f
 | `promptVersion` | `analysis.PromptVersion()`: the prompt templates, the generated schema and the catalog |
 | `toolDefinitions` | Hash of the tool definitions offered on escalation, `query_metrics` included; a scenario without `metrics.yaml` is offered them without it |
 | `outputSchema` | Hash of the generated output schema and the action catalog |
-| `contextBuilder` | `source` (hash of the Go sources of `internal/incidentcontext`, which has no version of its own), `limits` (the byte bounds), `sources` (what the context reads in the run: `pods`, `objects`, `recorded metrics`) |
+| `contextBuilder` | `source` (hash of the Go sources of `internal/incidentcontext`, which has no version of its own), `limits` (the byte bounds), `sources` (what the context reads in the run: `pods`, `objects`, `recorded metrics`, `policies`) |
 | `runLimits` | The loop limits of the run: `maxToolSteps` and `maxOutputTokens` |
-| `scenarios` | Hash of every scenario's `incident.yaml`, `objects.yaml`, `metrics.yaml` and `replies.yaml`, and of every file of its variants (what the model is shown) |
+| `scenarios` | Hash of every scenario's `incident.yaml`, `objects.yaml`, `metrics.yaml`, `replies.yaml` and `policy.yaml`, and of every file of its variants (what the model is shown) |
 | `redaction` | `builtInRules` (hash of the Go sources of `internal/redact`), `operatorPatterns` (their number: 0, nothing configures them yet) |
 | `rubric` | `fleetRepository`, `fleetCommit`, and `files` (hash of every `expected.yaml` and `rubric.yaml`) |
 | `forcedEscalation` | `true` when the run forced every analysis to the escalation model (`EVAL_FORCE_ESCALATION`); left out otherwise |

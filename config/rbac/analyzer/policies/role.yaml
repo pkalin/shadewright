@@ -1,0 +1,12 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: analyzer-policy-reader
+rules:
+- apiGroups:
+  - remediation.shadewright.io
+  resources:
+  - remediationpolicies
+  verbs:
+  - get

@@ -512,42 +512,20 @@ func scaledObjectState(obj map[string]any) (Reason, string) {
 
 // checkPolicyAction checks that the policy allows the action type and that the change is within its bounds.
 func checkPolicyAction(in DecisionInput) (Reason, string) {
-	a, p := in.Request.Spec.Action, in.Policy
-	var entries []v1alpha1.PolicyAction
-	for _, pa := range p.Spec.Actions {
-		if pa.Type == a.Type {
-			entries = append(entries, pa)
-		}
+	a := in.Request.Spec.Action
+	pa, r, msg := policyEntry(in.Policy, a.Type)
+	if r != "" {
+		return r, msg
 	}
-	switch len(entries) {
-	case 0:
-		return ReasonActionNotAllowed, fmt.Sprintf("Policy %q does not allow action %s", p.Name, a.Type)
-	case 1:
-	default:
-		return ReasonPolicyInvalid, fmt.Sprintf("Policy %q lists action %s more than once", p.Name, a.Type)
-	}
-	pa := entries[0]
 	switch a.Type {
 	case v1alpha1.ActionAdjustKedaMaxReplicas:
 		b := pa.AdjustKedaMaxReplicas
-		if b == nil {
-			return ReasonPolicyInvalid, fmt.Sprintf("Policy %q has no bounds for %s", p.Name, a.Type)
-		}
-		if !validKedaBounds(b) {
-			return ReasonPolicyInvalid, fmt.Sprintf("Policy %q has bounds for %s outside the schema's limits", p.Name, a.Type)
-		}
 		prev, desired := a.AdjustKedaMaxReplicas.PreviousValue, a.AdjustKedaMaxReplicas.DesiredValue
 		return checkBounds(int64(prev), int64(desired),
 			cmp.Compare(desired, max(b.Min, 1)), cmp.Compare(desired, b.Max),
 			b.MaxIncreasePercent, b.MaxDecreasePercent)
 	case v1alpha1.ActionSetContainerMemoryLimit:
 		b := pa.SetContainerMemoryLimit
-		if b == nil {
-			return ReasonPolicyInvalid, fmt.Sprintf("Policy %q has no bounds for %s", p.Name, a.Type)
-		}
-		if !validMemoryBounds(b) {
-			return ReasonPolicyInvalid, fmt.Sprintf("Policy %q has bounds for %s outside the schema's limits", p.Name, a.Type)
-		}
 		params := a.SetContainerMemoryLimit
 		// checkAction has made sure both values are whole bytes between 1Mi and 1Ti, so they fit in an int64.
 		previous, desired := params.Previous.DeepCopy(), params.Desired.DeepCopy()
@@ -557,6 +535,45 @@ func checkPolicyAction(in DecisionInput) (Reason, string) {
 	}
 	// Unreachable: checkAction refuses every type not handled above.
 	return ReasonActionUnknown, fmt.Sprintf("Action type %q is not in the action catalog", a.Type)
+}
+
+// policyEntry returns the policy's one entry for action type t, with its bounds present and within the
+// schema's limits, or the reason it cannot be used: the policy does not list t, lists it more than once, or
+// its bounds are missing or invalid. Both the decision and [BoundsFor] read the bounds through it.
+func policyEntry(p *v1alpha1.RemediationPolicy, t v1alpha1.ActionType) (v1alpha1.PolicyAction, Reason, string) {
+	var entries []v1alpha1.PolicyAction
+	for _, pa := range p.Spec.Actions {
+		if pa.Type == t {
+			entries = append(entries, pa)
+		}
+	}
+	switch len(entries) {
+	case 0:
+		return v1alpha1.PolicyAction{}, ReasonActionNotAllowed, fmt.Sprintf("Policy %q does not allow action %s", p.Name, t)
+	case 1:
+	default:
+		return v1alpha1.PolicyAction{}, ReasonPolicyInvalid, fmt.Sprintf("Policy %q lists action %s more than once", p.Name, t)
+	}
+	pa := entries[0]
+	var present, valid bool
+	switch t {
+	case v1alpha1.ActionAdjustKedaMaxReplicas:
+		present = pa.AdjustKedaMaxReplicas != nil
+		valid = present && validKedaBounds(pa.AdjustKedaMaxReplicas)
+	case v1alpha1.ActionSetContainerMemoryLimit:
+		present = pa.SetContainerMemoryLimit != nil
+		valid = present && validMemoryBounds(pa.SetContainerMemoryLimit)
+	default:
+		return v1alpha1.PolicyAction{}, ReasonActionUnknown, fmt.Sprintf("Action type %q is not in the action catalog", t)
+	}
+	if !present {
+		return v1alpha1.PolicyAction{}, ReasonPolicyInvalid, fmt.Sprintf("Policy %q has no bounds for %s", p.Name, t)
+	}
+	if !valid {
+		return v1alpha1.PolicyAction{}, ReasonPolicyInvalid,
+			fmt.Sprintf("Policy %q has bounds for %s outside the schema's limits", p.Name, t)
+	}
+	return pa, "", ""
 }
 
 // checkBounds checks a change from previous to desired. cmpMin and cmpMax compare desired with the policy's

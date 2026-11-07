@@ -97,8 +97,12 @@ func newLazyHarnessWith(t *testing.T, gvk schema.GroupVersionKind, sel modules.S
 	}
 	c.now = func() time.Time { return h.clock }
 	r := &sourceReconciler{c: c, reader: h.api, api: h.api, gvk: gvk}
-	h.l = &lazySource{r: r, api: h.api, mapper: h.mapper, log: logr.New(h.log), wake: make(chan struct{}, 1),
-		start: func(ctx context.Context, _ *sourceReconciler, errs *watchErrors) (<-chan error, <-chan struct{}) {
+	h.l = &lazySource{r: r, api: h.api, log: logr.New(h.log), wake: make(chan struct{}, 1),
+		discover: func(_ context.Context, gvk schema.GroupVersionKind) (*meta.RESTMapping, error) {
+			return h.mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		},
+		start: func(ctx context.Context, _ *sourceReconciler, _ *meta.RESTMapping, errs *watchErrors) (<-chan error,
+			<-chan struct{}) {
 			h.starts.Add(1)
 			run := &fakeRun{ctx: ctx, done: make(chan error, 1), synced: make(chan struct{}), errs: errs}
 			h.runs = append(h.runs, run)

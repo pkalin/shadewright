@@ -156,7 +156,7 @@ func TestUnsyncedWatchIsNotWatched(t *testing.T) {
 
 // TestPersistentWatchErrorIsReported (#409 review): errors the reflector retries (the API server unavailable)
 // are reported once failedAfterChecks checks in a row saw one; the watch keeps running and is reported as
-// watched again at the first check without one.
+// watched again at the first check after a request of the watch succeeded.
 func TestPersistentWatchErrorIsReported(t *testing.T) {
 	h := watching(t)
 	for i := 1; i <= failedAfterChecks; i++ {
@@ -173,9 +173,10 @@ func TestPersistentWatchErrorIsReported(t *testing.T) {
 	if h.stops.Load() != 0 {
 		t.Error("an error the reflector retries stopped the watch")
 	}
+	h.run().errs.ok()
 	h.step()
 	if s := h.state(); s != WatchWatched {
-		t.Errorf("state %s after a check without an error, want Watched", s)
+		t.Errorf("state %s after a request succeeded, want Watched", s)
 	}
 }
 

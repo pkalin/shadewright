@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -136,11 +137,19 @@ func (c *Collector) setupSources(mgr ctrl.Manager) error {
 			log := mgr.GetLogger().WithName("collector").WithValues("controller", r.name())
 			// The reader is the watch's own cache, set by startController.
 			r.reader = nil
-			restCfg := mgr.GetConfig()
+			restCfg, httpClient := mgr.GetConfig(), mgr.GetHTTPClient()
 			if c.lazyConfig != nil {
 				restCfg = c.lazyConfig
+				var err error
+				if httpClient, err = rest.HTTPClientFor(restCfg); err != nil {
+					return fmt.Errorf("setting up the %s collector: %w", gvk.Kind, err)
+				}
 			}
-			err := mgr.Add(&lazySource{r: r, api: mgr.GetAPIReader(), mapper: mgr.GetRESTMapper(), log: log,
+			discover, err := discoverMapping(restCfg, httpClient)
+			if err != nil {
+				return fmt.Errorf("setting up the %s collector: %w", gvk.Kind, err)
+			}
+			err = mgr.Add(&lazySource{r: r, api: mgr.GetAPIReader(), discover: discover, log: log,
 				start: startController(restCfg, c.lazyCacheOptions(mgr), log), wake: make(chan struct{}, 1)})
 			if err != nil {
 				return fmt.Errorf("setting up the %s collector: %w", gvk.Kind, err)
@@ -160,9 +169,9 @@ func (c *Collector) setupSources(mgr ctrl.Manager) error {
 	return nil
 }
 
-// lazyCacheOptions returns the options of the cache of a lazy watch: the manager's client, scheme and mapper,
+// lazyCacheOptions returns the options of the cache of a lazy watch: the manager's client and scheme,
 // the watched namespaces (a cluster-scoped kind is read cluster-wide) and no managed fields, as the manager's
-// cache (analyzer.CacheOptions).
+// cache (analyzer.CacheOptions). startController sets the mapper.
 func (c *Collector) lazyCacheOptions(mgr ctrl.Manager) func() cache.Options {
 	return func() cache.Options {
 		namespaces := make(map[string]cache.Config, len(c.cfg.Namespaces))
@@ -170,7 +179,7 @@ func (c *Collector) lazyCacheOptions(mgr ctrl.Manager) func() cache.Options {
 			namespaces[ns] = cache.Config{}
 		}
 		o := cache.Options{
-			Scheme: mgr.GetScheme(), Mapper: mgr.GetRESTMapper(),
+			Scheme:            mgr.GetScheme(),
 			DefaultNamespaces: namespaces, DefaultTransform: cache.TransformStripManagedFields(),
 		}
 		if c.lazyConfig == nil {

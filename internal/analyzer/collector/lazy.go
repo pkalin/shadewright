@@ -17,11 +17,15 @@ limitations under the License.
 package collector
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
 	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -191,15 +196,62 @@ func kindKV(gvk schema.GroupVersionKind, module string) []any {
 	return []any{"group", gvk.Group, "version", gvk.Version, "kind", gvk.Kind, "module", module}
 }
 
-// watchStarter starts the watch of a kind. done receives the controller's result when it stops (nil when ctx
-// ended, else why it stopped on its own, such as a cache that did not sync), synced is closed once the watch's
-// cache has synced, and errs receives the errors of the watch's reflector. It is replaced in tests.
-type watchStarter func(ctx context.Context, r *sourceReconciler, errs *watchErrors) (done <-chan error,
-	synced <-chan struct{})
+// watchStarter starts the watch of a kind, with the mapping the check found. done receives the controller's
+// result when it stops (nil when ctx ended, else why it stopped on its own, such as a cache that did not sync),
+// synced is closed once the watch's cache has synced, and errs receives the errors of the watch's lists and
+// watches. It is replaced in tests.
+type watchStarter func(ctx context.Context, r *sourceReconciler, mapping *meta.RESTMapping, errs *watchErrors) (
+	done <-chan error, synced <-chan struct{})
 
-// watchErrors collects the errors of a running watch's reflector, which retries them itself: the lazySource
-// reads them at each check. A refusal (Forbidden, Unauthorized) or a kind no longer served stops the watch at
-// once; another error is reported once it lasts failedAfterChecks checks. It is safe for concurrent use.
+// mappingFunc finds the REST mapping of a kind with one discovery request, cut short when ctx ends. A kind the
+// API server does not serve is a [meta.NoKindMatchError].
+type mappingFunc func(ctx context.Context, gvk schema.GroupVersionKind) (*meta.RESTMapping, error)
+
+// discoverMapping is the [mappingFunc] of the binary. It asks the API server for the resources of the kind's
+// group version only, with ctx, and shares no lock or cache with the manager's RESTMapper: a discovery request
+// for an add-on group that stalls never holds up the lookups of other sources, or a stop.
+func discoverMapping(cfg *rest.Config, httpClient *http.Client) (mappingFunc, error) {
+	dc, err := discovery.NewDiscoveryClientForConfigAndClient(cfg, httpClient)
+	if err != nil {
+		return nil, fmt.Errorf("creating the discovery client of the symptom source kinds: %w", err)
+	}
+	rc := dc.RESTClient()
+	return func(ctx context.Context, gvk schema.GroupVersionKind) (*meta.RESTMapping, error) {
+		path := []string{"/apis", gvk.Group, gvk.Version}
+		if gvk.Group == "" {
+			path = []string{"/api", gvk.Version}
+		}
+		notServed := &meta.NoKindMatchError{GroupKind: gvk.GroupKind(), SearchedVersions: []string{gvk.Version}}
+		raw, err := rc.Get().AbsPath(path...).Do(ctx).Raw()
+		if apierrors.IsNotFound(err) {
+			return nil, notServed
+		}
+		if err != nil {
+			return nil, fmt.Errorf("discovering %s: %w", gvk.GroupVersion(), err)
+		}
+		var list metav1.APIResourceList
+		if err := json.Unmarshal(raw, &list); err != nil {
+			return nil, fmt.Errorf("decoding the resources of %s: %w", gvk.GroupVersion(), err)
+		}
+		for _, res := range list.APIResources {
+			if res.Kind != gvk.Kind || strings.Contains(res.Name, "/") {
+				continue
+			}
+			scope := meta.RESTScopeRoot
+			if res.Namespaced {
+				scope = meta.RESTScopeNamespace
+			}
+			return &meta.RESTMapping{Resource: gvk.GroupVersion().WithResource(res.Name), GroupVersionKind: gvk,
+				Scope: scope}, nil
+		}
+		return nil, notServed
+	}, nil
+}
+
+// watchErrors collects the errors of a running watch's lists and watches, which its reflector retries itself:
+// the lazySource reads them at each check. A refusal (Forbidden, Unauthorized) or a kind no longer served stops
+// the watch at once. Another error is kept until a list or watch request of the watch succeeds again, and
+// reported once it lasts failedAfterChecks checks. It is safe for concurrent use.
 type watchErrors struct {
 	mu        sync.Mutex
 	fatal     error
@@ -230,12 +282,135 @@ func (w *watchErrors) report(err error) {
 	}
 }
 
-// take returns the first refusal, and the last other error since the previous take.
+// ok records a list or watch request of the watch that succeeded: the last other error is over.
+func (w *watchErrors) ok() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.transient = nil
+}
+
+// take returns the first refusal, and the last other error unless a request succeeded since.
 func (w *watchErrors) take() (fatal, transient error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	fatal, transient, w.transient = w.fatal, w.transient, nil
-	return fatal, transient
+	return w.fatal, w.transient
+}
+
+// maxErrorEvent bounds the bytes of a watch's ERROR event that are kept to decode it (a Status is small).
+const maxErrorEvent = 64 << 10
+
+// errorEventPrefix starts the line of an ERROR event in a JSON watch stream, one event per line.
+var errorEventPrefix = []byte(`{"type":"ERROR"`)
+
+// watchTransport passes the outcome of each list and watch request of a lazy watch to its watchErrors. The
+// reflector retries some failures of a watch without calling its watch error handler (a 429, a connection
+// refused, an ERROR event such as a refusal streamed after the watch started): a watch that sees only those
+// would deliver nothing and still be reported as watched.
+type watchTransport struct {
+	base http.RoundTripper
+	errs *watchErrors
+}
+
+// RoundTrip implements [http.RoundTripper].
+func (t *watchTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	watch := req.URL.Query().Get("watch") == "true"
+	switch {
+	case err != nil:
+		if watch {
+			t.errs.report(fmt.Errorf("watch request: %w", err))
+		}
+	case resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices:
+		if watch {
+			t.errs.report(responseError(resp))
+		}
+	default:
+		t.errs.ok()
+		if watch && strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json") {
+			resp.Body = &watchBody{ReadCloser: resp.Body, errs: t.errs}
+		}
+	}
+	return resp, err
+}
+
+// responseError returns the error of a refused request: the Status in its body, or one from its status code.
+// The body is read up to maxErrorEvent bytes and left for the caller to read again.
+func responseError(resp *http.Response) error {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorEvent))
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(body), resp.Body), resp.Body}
+	var st metav1.Status
+	if err == nil && json.Unmarshal(body, &st) == nil && st.Kind == "Status" && int(st.Code) == resp.StatusCode {
+		return &apierrors.StatusError{ErrStatus: st}
+	}
+	return apierrors.NewGenericServerResponse(resp.StatusCode, resp.Request.Method, schema.GroupResource{}, "", "",
+		0, false)
+}
+
+// watchBody reports the ERROR events of a JSON watch stream as they are read. Only the start of each line is
+// kept, and all of an ERROR event's line up to maxErrorEvent bytes.
+type watchBody struct {
+	io.ReadCloser
+	errs *watchErrors
+	line []byte // the start of the current line, while it may be an ERROR event
+	skip bool   // the current line is not an ERROR event
+	over bool   // the current line is longer than maxErrorEvent
+}
+
+// Read implements [io.Reader].
+func (b *watchBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	for left := p[:n]; len(left) > 0; {
+		i := bytes.IndexByte(left, '\n')
+		if i < 0 {
+			b.add(left)
+			break
+		}
+		b.add(left[:i])
+		b.event()
+		left = left[i+1:]
+	}
+	if err != nil {
+		// The stream ended: a last event may have no newline.
+		b.event()
+	}
+	return n, err
+}
+
+// add appends a part of the current line.
+func (b *watchBody) add(part []byte) {
+	if b.skip {
+		return
+	}
+	if room := maxErrorEvent - len(b.line); len(part) > room {
+		part, b.over = part[:room], true
+	}
+	b.line = append(b.line, part...)
+	if t := bytes.TrimLeft(b.line, " \t\r"); len(t) >= len(errorEventPrefix) && !bytes.HasPrefix(t, errorEventPrefix) {
+		b.skip, b.line = true, b.line[:0]
+	}
+}
+
+// event ends the current line, and reports it when it is an ERROR event.
+func (b *watchBody) event() {
+	line, over := bytes.TrimLeft(b.line, " \t\r"), b.over
+	b.line, b.skip, b.over = b.line[:0], false, false
+	switch {
+	case !bytes.HasPrefix(line, errorEventPrefix):
+	case over:
+		b.errs.report(fmt.Errorf("watch error event longer than %d bytes", maxErrorEvent))
+	default:
+		var ev struct {
+			Object metav1.Status `json:"object"`
+		}
+		if err := json.Unmarshal(line, &ev); err != nil {
+			b.errs.report(fmt.Errorf("decoding a watch error event: %w", err))
+			return
+		}
+		b.errs.report(&apierrors.StatusError{ErrStatus: ev.Object})
+	}
 }
 
 // lazySource watches one kind of [SourceKinds] that is not built in. Every SelectionPoll it checks whether an
@@ -249,12 +424,12 @@ func (w *watchErrors) take() (fatal, transient error) {
 // a watch that failed is started again only after a backoff. A watch is stopped, and its cache with it, when
 // the module is no longer active.
 type lazySource struct {
-	r      *sourceReconciler
-	api    client.Reader
-	mapper meta.RESTMapper
-	log    logr.Logger
-	start  watchStarter
-	wake   chan struct{}
+	r        *sourceReconciler
+	api      client.Reader
+	discover mappingFunc
+	log      logr.Logger
+	start    watchStarter
+	wake     chan struct{}
 
 	running  *runningWatch
 	failures int       // watches in a row that failed, for the backoff
@@ -308,6 +483,8 @@ func (l *lazySource) step(ctx context.Context) {
 		if running, cause = l.check(module, false); running {
 			return
 		}
+		// No controller runs any more: say so before the check below, which may take up to the lookup deadline.
+		l.r.c.setWatch(l.log, module, gvk, WatchFailed, nil)
 	} else if l.r.c.now().Before(l.retryAt) {
 		// A watch failed: the kind stays reported as failed until the backoff ends.
 		return
@@ -316,7 +493,7 @@ func (l *lazySource) step(ctx context.Context) {
 		l.r.c.setWatch(l.log, module, gvk, s, nil)
 		return
 	}
-	state, err := l.probe(ctx)
+	state, mapping, err := l.probe(ctx)
 	if ctx.Err() != nil {
 		// The process is stopping or lost leadership: the check was cut short, there is nothing to report.
 		return
@@ -330,15 +507,15 @@ func (l *lazySource) step(ctx context.Context) {
 		// the check and the watch's first list): back off instead of starting it again at every check.
 		l.fail(module, cause)
 	default:
-		l.begin(ctx, module)
+		l.begin(ctx, module, mapping)
 	}
 }
 
 // begin starts the watch.
-func (l *lazySource) begin(ctx context.Context, module string) {
+func (l *lazySource) begin(ctx context.Context, module string, mapping *meta.RESTMapping) {
 	cctx, cancel := context.WithCancel(ctx)
 	errs := &watchErrors{wake: l.wake}
-	done, synced := l.start(cctx, l.r, errs)
+	done, synced := l.start(cctx, l.r, mapping, errs)
 	l.running = &runningWatch{cancel: cancel, done: done, synced: synced, errs: errs}
 	l.erring = 0
 	// A controller that could not be built stopped at once, and a cache may have synced already.
@@ -439,16 +616,18 @@ func (l *lazySource) granted() (WatchState, bool) {
 }
 
 // probe reports whether the kind is served and may be listed in each watched namespace, or cluster-wide for a
-// cluster-scoped kind. Each list asks for the metadata of at most one object. The error is returned for
-// WatchFailed only.
-func (l *lazySource) probe(ctx context.Context) (WatchState, error) {
+// cluster-scoped kind, with the kind's mapping when it is. The discovery request and each list have the lookup
+// deadline; each list asks for the metadata of at most one object. The error is returned for WatchFailed only.
+func (l *lazySource) probe(ctx context.Context) (WatchState, *meta.RESTMapping, error) {
 	gvk := l.r.gvk
-	mapping, err := l.mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	dctx, cancel := context.WithTimeout(ctx, l.r.c.cfg.LookupTimeout)
+	mapping, err := l.discover(dctx, gvk)
+	cancel()
 	if err != nil {
 		if meta.IsNoMatchError(err) {
-			return WatchNotServed, nil
+			return WatchNotServed, nil, nil
 		}
-		return WatchFailed, fmt.Errorf("mapping %s: %w", gvk, err)
+		return WatchFailed, nil, fmt.Errorf("mapping %s: %w", gvk, err)
 	}
 	namespaces := l.r.c.cfg.Namespaces
 	if mapping.Scope.Name() == meta.RESTScopeNameRoot {
@@ -456,7 +635,7 @@ func (l *lazySource) probe(ctx context.Context) (WatchState, error) {
 	}
 	if len(namespaces) == 0 {
 		// No namespace to check the grant in: never watch unchecked (setupSources refuses this anyway).
-		return WatchNotGranted, nil
+		return WatchNotGranted, nil, nil
 	}
 	for _, ns := range namespaces {
 		list := &metav1.PartialObjectMetadataList{}
@@ -467,24 +646,27 @@ func (l *lazySource) probe(ctx context.Context) (WatchState, error) {
 		switch {
 		case err == nil:
 		case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
-			return WatchNotGranted, nil
+			return WatchNotGranted, nil, nil
 		case apierrors.IsNotFound(err) || meta.IsNoMatchError(err):
-			return WatchNotServed, nil
+			return WatchNotServed, nil, nil
 		default:
-			return WatchFailed, fmt.Errorf("listing %s: %w", gvk, err)
+			return WatchFailed, nil, fmt.Errorf("listing %s: %w", gvk, err)
 		}
 	}
-	return WatchWatched, nil
+	return WatchWatched, mapping, nil
 }
 
 // startController is the [watchStarter] of the binary: an unmanaged controller with the kind's predicate, on a
 // cache of its own (newCache, from cfg and opts), run until ctx ends. The manager's cache never holds the kind:
 // a source.Kind waits for every informer of its cache to sync, so an informer that cannot sync there would hold
-// up, and after the sync timeout stop, the controllers of the built-in kinds and with them the manager. Its
-// informer's first list passes every object an active source shows a symptom on, so no activation source is
-// needed: the watch runs only while a module is active.
+// up, and after the sync timeout stop, the controllers of the built-in kinds and with them the manager. The
+// cache maps the kind with the mapping the check found, not with the manager's RESTMapper, so it sends no
+// discovery request that could hold up other sources. Its HTTP client passes the outcome of every list and
+// watch request to errs (watchTransport). Its informer's first list passes every object an active source shows
+// a symptom on, so no activation source is needed: the watch runs only while a module is active.
 func startController(cfg *rest.Config, opts func() cache.Options, log logr.Logger) watchStarter {
-	return func(ctx context.Context, r *sourceReconciler, errs *watchErrors) (<-chan error, <-chan struct{}) {
+	return func(ctx context.Context, r *sourceReconciler, mapping *meta.RESTMapping, errs *watchErrors) (
+		<-chan error, <-chan struct{}) {
 		done := make(chan error, 1)
 		synced := make(chan struct{})
 		o := opts()
@@ -492,7 +674,26 @@ func startController(cfg *rest.Config, opts func() cache.Options, log logr.Logge
 			toolscache.DefaultWatchErrorHandler(ctx, rf, err)
 			errs.report(err)
 		}
-		c, err := cache.New(cfg, o)
+		mapper := meta.NewDefaultRESTMapper(nil)
+		mapper.AddSpecific(mapping.GroupVersionKind, mapping.Resource,
+			mapping.GroupVersionKind.GroupVersion().WithResource(strings.ToLower(mapping.GroupVersionKind.Kind)),
+			mapping.Scope)
+		o.Mapper = mapper
+		var err error
+		if o.HTTPClient == nil {
+			o.HTTPClient, err = rest.HTTPClientFor(cfg)
+		}
+		var c cache.Cache
+		if err == nil {
+			hc := *o.HTTPClient
+			base := hc.Transport
+			if base == nil {
+				base = http.DefaultTransport
+			}
+			hc.Transport = &watchTransport{base: base, errs: errs}
+			o.HTTPClient = &hc
+			c, err = cache.New(cfg, o)
+		}
 		var ctl controller.Controller
 		// The reconciler reads the objects from this cache.
 		rr := *r

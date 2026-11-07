@@ -184,7 +184,8 @@ func (p *Provider) lookup(ctx context.Context, op, commit, path string) (string,
 
 // ReadFile returns a regular file at a commit. The size GitHub reports in the tree entry is checked against
 // the limit (clamped by providers.ReadLimit) before the content is downloaded, at most limit+1 bytes are read
-// (two for a limit of 0), and the content must match its Git object ID.
+// (two for a limit of 0), and the content must match its Git object ID: a body longer than the limit the tree
+// entry fits is refused as content that does not match, not as ErrTooLarge.
 func (p *Provider) ReadFile(ctx context.Context, commit, path string, limit int) (providers.File, error) {
 	if !validSHA(commit) {
 		return providers.File{}, errors.New(opReadFile + ": commit is not a full SHA")
@@ -208,8 +209,9 @@ func (p *Provider) ReadFile(ctx context.Context, commit, path string, limit int)
 		// length checked below.
 		accept: "application/vnd.github.raw+json", limit: int64(max(limit, 1)),
 	})
+	// The tree entry said the file fits the limit, so a longer body is not the blob it names.
 	if errors.Is(err, errBodyTooLarge) || (err == nil && r.ok() && len(r.body) > limit) {
-		return providers.File{}, fmt.Errorf("%s: %w", opReadFile, providers.ErrTooLarge)
+		return providers.File{}, errors.New(opReadFile + ": content does not match its Git object ID")
 	}
 	if err != nil {
 		return providers.File{}, err

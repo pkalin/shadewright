@@ -416,14 +416,14 @@ func TestReadFileLimitBeforeDownload(t *testing.T) {
 // A stream larger than the caller's limit is cut after about limit+1 bytes, not MaxFileBytes+1 (#298).
 func TestReadFileStopsReadingStreamAtLimit(t *testing.T) {
 	const limit = 100
-	// The tree claims 12 bytes, the stream is larger than the limit.
+	// The tree claims 12 bytes, the stream is larger than the limit: it is not the blob the tree names.
 	big := &countingReader{left: 4 * providers.MaxFileBytes}
 	h := newHarness(t, readSteps()...)
 	h.s.steps = append(h.s.steps, get("/git/blobs/"+shaDeploy, ""))
 	h.p.client.Transport = bodyOverride{h.s, big}
 	_, err := h.p.ReadFile(ctx, shaBase, deployPath, limit)
-	if !providers.IsTooLarge(err) {
-		t.Fatalf("got %v", err)
+	if err == nil || providers.IsTooLarge(err) || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("got %v, want an integrity error: the tree entry said the file fits", err)
 	}
 	if big.read > limit+1+32<<10 {
 		t.Errorf("read %d bytes, want at most about limit+1", big.read)
@@ -437,8 +437,8 @@ func TestReadFileStopsReadingLargeStream(t *testing.T) {
 	h.s.steps = append(h.s.steps, get("/git/blobs/"+shaDeploy, ""))
 	h.p.client.Transport = bodyOverride{h.s, big}
 	_, err := h.p.ReadFile(ctx, shaBase, "apps/deploy.yaml", providers.MaxFileBytes)
-	if !providers.IsTooLarge(err) {
-		t.Fatalf("got %v", err)
+	if err == nil || providers.IsTooLarge(err) || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("got %v, want an integrity error: the tree entry said the file fits", err)
 	}
 	if big.read > providers.MaxFileBytes+1+32<<10 {
 		t.Errorf("read %d bytes, want at most about MaxFileBytes+1", big.read)

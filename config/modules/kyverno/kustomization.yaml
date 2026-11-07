@@ -1,0 +1,7 @@
+# The analyzer's reads of the kyverno module's kinds (#409): the ClusterRole analyzer-watch-kyverno, bound in each
+# watched namespace like config/watch binds analyzer-watch-role. The chart renders it only while
+# analyzer.modules.kyverno.enabled is true. Names get the prefix of config/default here.
+namePrefix: shadewright-
+resources:
+- ../../rbac/analyzer/modules/kyverno
+- role_binding_demo.yaml

@@ -31,11 +31,10 @@ Status: draft for the MVP.
 - The generic and AKS platforms, and the EKS and GKE platforms (detection only).
 - The cloudflared, Flux, KEDA, Kyverno and Secrets Store CSI driver integrations.
 - Platform and integration detection. The analyzer runs it and reports it in the settings status (5.4).
-- The symptom source evaluator, with the KEDA HPA source: a replica ceiling becomes an Incident about the `ScaledObject` (3.1, 2.5.3).
+- The symptom source evaluator, with the KEDA HPA source: a replica ceiling becomes an Incident about the `ScaledObject` (3.1, 2.5.3). The cloudflared Pod source: a tunnel replica not ready for 2 minutes becomes an Incident about its Deployment (2.5.6). The KEDA `ScaledObject` and `ScaledJob`, Flux and Kyverno sources, about the object itself, once the chart grants their reads (`analyzer.modules`, 2.2.2, 2.5.1).
 **Built, but feeding nothing yet**
 
 - The diagnosis rules.
-- The cloudflared, Flux and Kyverno symptom sources, and KEDA's `ScaledObject` and `ScaledJob` sources.
 
 **Not built yet**
 

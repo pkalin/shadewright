@@ -520,3 +520,12 @@ func TestLostAnswerOfAnOpeningWriteIsNotCountedTwice(t *testing.T) {
 		t.Fatal("the batch is still pending after the retry")
 	}
 }
+
+// TestCollectorSettlesLikeTheGate keeps the collector's wait before it emits a symptom state of a module source
+// (collector.SettleAfter) equal to the gate's RecurAfter: the collector applies the gate's rule itself to a state
+// it emits once while it lasts (#409).
+func TestCollectorSettlesLikeTheGate(t *testing.T) {
+	if collector.SettleAfter != RecurAfter {
+		t.Errorf("collector.SettleAfter %v, RecurAfter %v", collector.SettleAfter, RecurAfter)
+	}
+}

@@ -138,25 +138,60 @@ func setup(ctx context.Context) error {
 	return bindWatchRole(ctx, otherNS)
 }
 
-// bindWatchRole creates the analyzer's watch ClusterRole and binds it in one namespace with a RoleBinding,
-// as config/watch does for each namespace in --watch-namespaces.
+// bindWatchRole creates the analyzer's watch ClusterRole and the KEDA module's read ClusterRole, and binds both
+// in one namespace with a RoleBinding each, as config/watch does for each namespace in --watch-namespaces (the
+// chart's default, analyzer.modules.keda.enabled true). The other modules' roles are off by default and not
+// bound here.
 func bindWatchRole(ctx context.Context, ns string) error {
-	f, err := os.Open(filepath.Join("..", "..", "config", "rbac", analyzer, "watch", "role.yaml"))
+	for _, path := range []string{watchRolePath, moduleRolePath("keda")} {
+		r, err := readClusterRole(path)
+		if err != nil {
+			return err
+		}
+		if err := admin.Create(ctx, r); err != nil {
+			return err
+		}
+		if err := bindIn(ctx, r.Name, analyzer, ns); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// watchRolePath is the generated watch ClusterRole.
+var watchRolePath = filepath.Join("..", "..", "config", "rbac", analyzer, "watch", "role.yaml")
+
+// moduleRolePath is the generated ClusterRole of one module's reads (config/rbac/analyzer/modules).
+func moduleRolePath(name string) string {
+	return filepath.Join("..", "..", "config", "rbac", analyzer, "modules", name, "role.yaml")
+}
+
+// readClusterRole decodes the one ClusterRole of a generated file.
+func readClusterRole(path string) (*rbacv1.ClusterRole, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = f.Close() }()
 	var r rbacv1.ClusterRole
 	if err := utilyaml.NewYAMLOrJSONDecoder(f, 4096).Decode(&r); err != nil {
-		return err
+		return nil, err
 	}
-	if err := admin.Create(ctx, &r); err != nil {
-		return err
+	return &r, nil
+}
+
+// bindIn binds a ClusterRole to a ServiceAccount of the operator namespace with a RoleBinding in ns, or with a
+// ClusterRoleBinding when ns is "".
+func bindIn(ctx context.Context, role, sa, ns string) error {
+	ref := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindCR, Name: role}
+	subjects := []rbacv1.Subject{{Kind: "ServiceAccount", Name: sa, Namespace: operatorNS}}
+	if ns == "" {
+		return admin.Create(ctx, &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: role + "-" + sa}, RoleRef: ref, Subjects: subjects,
+		})
 	}
 	return admin.Create(ctx, &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: "analyzer-watch", Namespace: ns},
-		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindCR, Name: r.Name},
-		Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: analyzer, Namespace: operatorNS}},
+		ObjectMeta: metav1.ObjectMeta{Name: role + "-" + sa, Namespace: ns}, RoleRef: ref, Subjects: subjects,
 	})
 }
 
@@ -316,14 +351,26 @@ func TestPermissionBoundary(t *testing.T) {
 		{"analyzer", "delete", "autoscaling", "horizontalpodautoscalers", "", otherNS, false},
 		{"analyzer", "list", "autoscaling", "horizontalpodautoscalers", "", unwatched, false},
 		{"analyzer", "list", "autoscaling", "horizontalpodautoscalers", "", "", false},
+		// The KEDA module's reads (#409, analyzer-watch-keda, on by default): ScaledObjects and ScaledJobs, read
+		// only, in the watched namespaces. TriggerAuthentications are never read.
 		{"analyzer", "get", "keda.sh", "scaledobjects", "", otherNS, true},
-		{"analyzer", "list", "keda.sh", "scaledobjects", "", otherNS, false},
-		{"analyzer", "watch", "keda.sh", "scaledobjects", "", otherNS, false},
+		{"analyzer", "list", "keda.sh", "scaledobjects", "", otherNS, true},
+		{"analyzer", "watch", "keda.sh", "scaledobjects", "", otherNS, true},
 		{"analyzer", "update", "keda.sh", "scaledobjects", "", otherNS, false},
 		{"analyzer", "patch", "keda.sh", "scaledobjects", "", otherNS, false},
 		{"analyzer", "get", "keda.sh", "scaledobjects", "", unwatched, false},
+		{"analyzer", "list", "keda.sh", "scaledobjects", "", "", false},
 		{"analyzer", "get", "keda.sh", "scaledjobs", "", otherNS, false},
+		{"analyzer", "list", "keda.sh", "scaledjobs", "", otherNS, true},
+		{"analyzer", "watch", "keda.sh", "scaledjobs", "", otherNS, true},
+		{"analyzer", "update", "keda.sh", "scaledjobs", "", otherNS, false},
+		{"analyzer", "list", "keda.sh", "scaledjobs", "", unwatched, false},
 		{"analyzer", "get", "keda.sh", "triggerauthentications", "", otherNS, false},
+		// The other modules' reads are off by default (their roles are not bound here).
+		{"analyzer", "list", "kustomize.toolkit.fluxcd.io", "kustomizations", "", otherNS, false},
+		{"analyzer", "list", "kyverno.io", "policies", "", otherNS, false},
+		{"analyzer", "list", "kyverno.io", "clusterpolicies", "", "", false},
+		{"analyzer", "list", "wgpolicyk8s.io", "clusterpolicyreports", "", "", false},
 		{"analyzer", "list", "events.k8s.io", "events", "", unwatched, false},
 		{"analyzer", "get", "", "pods", "", unwatched, false},
 		{"analyzer", "get", "apps", "replicasets", "", unwatched, false},
@@ -470,8 +517,20 @@ func TestPodLogsOnlyInWatchedNamespaces(t *testing.T) {
 // TestWatchRoleIsReadOnly checks that every rule of the analyzer's watch role, which the module symptom sources
 // widened (#380), only reads: get, list or watch, on named groups and resources, never secrets.
 func TestWatchRoleIsReadOnly(t *testing.T) {
-	path := filepath.Join("..", "..", "config", "rbac", analyzer, "watch", "role.yaml")
 	read := []string{"get", "list", "watch"}
+	paths := make([]string, 0, 5)
+	paths = append(paths, watchRolePath)
+	for _, m := range []string{"keda", "flux", "kyverno", "kyverno-cluster"} {
+		paths = append(paths, moduleRolePath(m))
+	}
+	for _, path := range paths {
+		t.Run(filepath.Base(filepath.Dir(path)), func(t *testing.T) { checkReadOnlyRole(t, path, read) })
+	}
+}
+
+// checkReadOnlyRole checks that the one role of a generated file grants only the read verbs on named resources.
+func checkReadOnlyRole(t *testing.T, path string, read []string) {
+	t.Helper()
 	roles := 0
 	for _, u := range decodeAll(t, path) {
 		rules, _, ok := policyRules(t, path, u)
@@ -930,7 +989,9 @@ func TestWatchBindingsMatchTheFlag(t *testing.T) {
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(kd[0], &kz); err != nil {
 		t.Fatal(err)
 	}
-	var got []string
+	// The watch role and the KEDA module's reads, which are on by default, are bound in each namespace.
+	watchRoles := []string{"shadewright-analyzer-watch-role", "shadewright-analyzer-watch-keda"}
+	got := map[string][]string{}
 	for _, res := range kz.Resources {
 		for _, doc := range decodeAll(t, filepath.Join(root, "watch", res)) {
 			var b rbacv1.RoleBinding
@@ -941,18 +1002,20 @@ func TestWatchBindingsMatchTheFlag(t *testing.T) {
 				t.Errorf("%s: %s, want only RoleBindings", res, b.Kind)
 				continue
 			}
-			if b.RoleRef.Kind != kindCR || b.RoleRef.Name != "shadewright-analyzer-watch-role" {
-				t.Errorf("%s: roleRef %s/%s, want ClusterRole/shadewright-analyzer-watch-role", res, b.RoleRef.Kind, b.RoleRef.Name)
+			if b.RoleRef.Kind != kindCR || !slices.Contains(watchRoles, b.RoleRef.Name) {
+				t.Errorf("%s: roleRef %s/%s, want a ClusterRole of %v", res, b.RoleRef.Kind, b.RoleRef.Name, watchRoles)
 			}
 			if len(b.Subjects) != 1 || b.Subjects[0].Name != "shadewright-analyzer" || b.Subjects[0].Namespace != operatorNS {
 				t.Errorf("%s: subjects %v, want the ServiceAccount shadewright-analyzer in %s", res, b.Subjects, operatorNS)
 			}
-			got = append(got, b.Namespace)
+			got[b.RoleRef.Name] = append(got[b.RoleRef.Name], b.Namespace)
 		}
 	}
-	slices.Sort(got)
-	if !slices.Equal(got, want) {
-		t.Errorf("config/watch binds %v, --watch-namespaces is %v", got, want)
+	for _, role := range watchRoles {
+		slices.Sort(got[role])
+		if !slices.Equal(got[role], want) {
+			t.Errorf("config/watch binds %s in %v, --watch-namespaces is %v", role, got[role], want)
+		}
 	}
 }
 
@@ -996,4 +1059,95 @@ func decodeAll(t *testing.T, path string) []map[string]any {
 		}
 	}
 	return out
+}
+
+// TestModuleRolesGrantOnlyWhenBound checks each module's read role with a ServiceAccount of its own (#409): with
+// the role not bound (its chart value off) every read of the module's kinds is refused; once bound (on) the
+// reads are allowed, in the watched namespace only, and writes stay refused. The Kyverno cluster-wide role is
+// bound with a ClusterRoleBinding, the namespaced ones with a RoleBinding, as the chart and config/modules do.
+func TestModuleRolesGrantOnlyWhenBound(t *testing.T) {
+	ctx := context.Background()
+	// get is granted only where an object is read by name: the ScaledObject a KEDA HPA names as its owner. The
+	// sources' informers need list and watch.
+	type kind struct {
+		group, resource string
+		get             bool
+	}
+	for _, tc := range []struct {
+		dir     string
+		cluster bool
+		kinds   []kind
+	}{
+		{"keda", false, []kind{{"keda.sh", "scaledobjects", true}, {"keda.sh", "scaledjobs", false}}},
+		{"flux", false, []kind{
+			{"kustomize.toolkit.fluxcd.io", "kustomizations", false},
+			{"helm.toolkit.fluxcd.io", "helmreleases", false},
+			{"source.toolkit.fluxcd.io", "gitrepositories", false},
+		}},
+		{"kyverno", false, []kind{{"kyverno.io", "policies", false}, {"wgpolicyk8s.io", "policyreports", false}}},
+		{"kyverno-cluster", true, []kind{{"kyverno.io", "clusterpolicies", false},
+			{"wgpolicyk8s.io", "clusterpolicyreports", false}}},
+	} {
+		t.Run(tc.dir, func(t *testing.T) {
+			sa := "module-" + tc.dir
+			account := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: sa, Namespace: operatorNS}}
+			if err := admin.Create(ctx, account); err != nil {
+				t.Fatalf("create ServiceAccount: %v", err)
+			}
+			ns := otherNS
+			if tc.cluster {
+				ns = ""
+			}
+			for _, k := range tc.kinds {
+				for _, verb := range []string{"get", "list", "watch"} {
+					if can(t, sa, verb, k.group, k.resource, "", ns) {
+						t.Errorf("unbound: %s %s/%s allowed, want refused", verb, k.group, k.resource)
+					}
+				}
+			}
+			r, err := readClusterRole(moduleRolePath(tc.dir))
+			if err != nil {
+				t.Fatalf("read role: %v", err)
+			}
+			r.Name = "test-" + r.Name // the role of the default setup may exist already
+			if err := admin.Create(ctx, r); err != nil {
+				t.Fatalf("create role: %v", err)
+			}
+			if err := bindIn(ctx, r.Name, sa, ns); err != nil {
+				t.Fatalf("bind role: %v", err)
+			}
+			for _, k := range tc.kinds {
+				for _, verb := range []string{"list", "watch"} {
+					if !eventuallyCan(t, sa, verb, k.group, k.resource, ns) {
+						t.Errorf("bound: %s %s/%s refused, want allowed", verb, k.group, k.resource)
+					}
+				}
+				if got := can(t, sa, "get", k.group, k.resource, "", ns); got != k.get {
+					t.Errorf("bound: get %s/%s allowed %v, want %v", k.group, k.resource, got, k.get)
+				}
+				for _, verb := range []string{"create", "update", "patch", "delete"} {
+					if can(t, sa, verb, k.group, k.resource, "", ns) {
+						t.Errorf("bound: %s %s/%s allowed, want refused", verb, k.group, k.resource)
+					}
+				}
+				if !tc.cluster {
+					if can(t, sa, "list", k.group, k.resource, "", unwatched) || can(t, sa, "list", k.group, k.resource, "", "") {
+						t.Errorf("bound: list %s/%s allowed outside %s", k.group, k.resource, otherNS)
+					}
+				}
+			}
+		})
+	}
+}
+
+// eventuallyCan waits a moment for a new binding to reach the authorizer's informers.
+func eventuallyCan(t *testing.T, id, verb, apiGroup, resource, namespace string) bool {
+	t.Helper()
+	for range 50 {
+		if can(t, id, verb, apiGroup, resource, "", namespace) {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
 }

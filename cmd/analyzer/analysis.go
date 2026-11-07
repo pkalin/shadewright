@@ -148,8 +148,8 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 		return nil, err
 	}
 	// The read tools of an escalation, on the same sources and redactor as the context builder, bound to the
-	// watched namespaces. get_delivery_status has no delivery system (the analyzer has no grant on Flux
-	// objects), and the loop does not offer it.
+	// watched namespaces. get_delivery_status has no delivery system (the analyzer may read Flux objects
+	// only for the Flux module's symptom sources, behind a chart value), and the loop does not offer it.
 	set, err := tools.New(tools.Config{Pods: d.cache, Events: d.cache, Objects: d.apiReader, Logs: d.sources.Logs,
 		Metrics: d.sources.Metrics, Redactor: d.redactor, Namespaces: f.watched})
 	if err != nil {

@@ -202,6 +202,25 @@ func containerStatus(statuses []any, name string) map[string]any {
 // manifests (pod=cloudflared, app.kubernetes.io/name=cloudflare-tunnel) or app.kubernetes.io/name=cloudflared.
 // Labels alone are never enough. Both inputs are untrusted.
 func IsCloudflared(image string, labels map[string]any) bool {
+	return isCloudflared(image, func(key string) string { v, _ := labels[key].(string); return v })
+}
+
+// podMayShow is the source's PodFilter: only a pod with a cloudflared container among the first maxContainers
+// (IsCloudflared) can show a symptom, so any other pod is not converted for podSymptoms.
+func podMayShow(labels map[string]string, images []string) bool {
+	for i, image := range images {
+		if i == maxContainers {
+			break
+		}
+		if isCloudflared(image, func(key string) string { return labels[key] }) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCloudflared is IsCloudflared with the pod's labels read through label.
+func isCloudflared(image string, label func(key string) string) bool {
 	repo, ok := repository(image)
 	if !ok {
 		return false
@@ -214,7 +233,7 @@ func IsCloudflared(image string, labels map[string]any) bool {
 			return true
 		}
 	}
-	return (repo == copyRepository || strings.HasSuffix(repo, copySuffix)) && hasCloudflaredLabel(labels)
+	return (repo == copyRepository || strings.HasSuffix(repo, copySuffix)) && hasCloudflaredLabel(label)
 }
 
 // repository returns an image reference without its digest and tag, and false for an empty or too long one.
@@ -231,9 +250,9 @@ func repository(image string) (string, bool) {
 }
 
 // hasCloudflaredLabel reports whether the labels hold one of labelValues.
-func hasCloudflaredLabel(labels map[string]any) bool {
+func hasCloudflaredLabel(label func(key string) string) bool {
 	for key, values := range labelValues {
-		if v, _ := labels[key].(string); slices.Contains(values, v) {
+		if slices.Contains(values, label(key)) {
 			return true
 		}
 	}

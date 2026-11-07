@@ -17,7 +17,7 @@ on:
         type: string
         default: all
       executor_digest:
-        description: Digest of the executor image to install by (a release tag run, verified by chart.yml); empty uses the v0.1.0 image.
+        description: Digest of the executor image to install by (a release tag run, verified by chart.yml); empty builds the images from the checkout.
         type: string
         default: ""
       analyzer_digest:
@@ -131,7 +131,8 @@ jobs:
         with:
           version: ${{ env.HELM_VERSION }}
 
-      # Pull requests and main use the v0.1.0 image digests; a release tag installs by the digests chart.yml
+      # Pull requests and main build the images from the checkout (the chart's flags need the same commit's
+      # binaries) and run the appVersion tag; a release tag installs by the digests chart.yml
       # resolved and verified, the same pair its publish job writes into the chart.
       - name: Install the chart on Kind and check the permissions
         env:

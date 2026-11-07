@@ -1,0 +1,7 @@
+# The analyzer's cluster-wide read of Kyverno's cluster-scoped kinds (#409): the ClusterRole
+# analyzer-kyverno-cluster and its ClusterRoleBinding. The chart renders it only while
+# analyzer.modules.kyverno.clusterWide.enabled is true (off by default). Names get the prefix of config/default.
+namePrefix: shadewright-
+resources:
+- ../../rbac/analyzer/modules/kyverno-cluster
+- cluster_role_binding.yaml

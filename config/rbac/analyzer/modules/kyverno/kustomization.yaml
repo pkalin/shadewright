@@ -1,0 +1,3 @@
+# Generated role.yaml from internal/analyzer/modulerbac (make manifests). Installed only through config/modules/kyverno.
+resources:
+- role.yaml

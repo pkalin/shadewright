@@ -28,9 +28,9 @@ limitations under the License.
 // kustomization file, it lists the path as the source mapping does (internal/gitops/repopath.Generate) and
 // adds the kustomization Flux would generate, resources only, to the files, so [Check] renders what Flux
 // renders; what Flux's default exclusions match is skipped, as there. It is bounded by [MaxReads], [MaxFiles],
-// [MaxFileBytes], [MaxDepth], [MaxVisits] and [MaxBuildBytes]; [Check] applies the same walk and limits to
-// the files it is given, and caps a render at [MaxObjects]. Visits and build bytes count with repetition, so
-// a diamond of overlays over a large base is refused before kustomize builds it once per path. A
+// [MaxFileBytes], [MaxDepth], [MaxVisits], [MaxBuildBytes] and [MaxBuildDocuments]; [Check] applies the same
+// walk and limits to the files it is given, and caps a render at [MaxObjects]. Visits, build bytes and
+// documents count with repetition, so a diamond of overlays over a large base is refused before kustomize builds it once per path. A
 // .sourceignore file in any directory of the build, or above one, is refused as in the source mapping,
 // since Flux would filter the files by it. Path rules are shared with the source mapping
 // (internal/gitops/repopath).

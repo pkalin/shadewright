@@ -55,6 +55,15 @@ const (
 	// MaxObjects is the most objects one render may return, the 1,000 objects of the supported repository
 	// (design 8.2) rounded up.
 	MaxObjects = 1024
+	// MaxBuildDocuments bounds the objects kustomize reads before it renders, with repetition like
+	// MaxBuildBytes: every visit of a directory adds the YAML documents of the resource and patch files it lists
+	// and of its inline patches, a List counted as its items ([documents]). The byte budget alone lets 4 MiB of
+	// tiny objects through, about 54,000, which kustomize cannot build in 128 MiB; MaxObjects is checked only on
+	// the render's output. The count is an upper bound of the objects the render returns (generators are
+	// refused, so only overlays reaching a base more than once multiply objects, and each visit counts), and
+	// patches and empty documents count too, so it is set above MaxObjects: the render's own check still
+	// refuses a build of 1,025 to 4,096 objects, after kustomize built them (design 8.2.2, #488).
+	MaxBuildDocuments = 4096
 )
 
 const (
@@ -110,6 +119,9 @@ type walker struct {
 	ignoreChecked map[string]bool
 	visits        int
 	buildBytes    int
+	buildDocs     int
+	// docs caches the documents of each file read ([documents]).
+	docs map[string]int
 	// generate, when set, lists directories so that root, the path rendered, may have no kustomization file:
 	// the walk then generates the one Flux would (Load only; Check finds it in the files it is given).
 	generate repopath.Lister
@@ -126,12 +138,15 @@ type dirKind struct{ dir, kind string }
 type refs struct {
 	dirs, components, files []string
 	bytes                   int
+	// docs is what one visit adds to the documents of the build: those of its files and inline patches.
+	docs int
 }
 
 func newWalker(read reader) *walker {
 	w := &walker{
 		read: read, files: map[string][]byte{}, resources: map[string]bool{},
 		parsed: map[dirKind]*refs{}, ignoreChecked: map[string]bool{}, dirResources: map[string]bool{},
+		docs: map[string]int{},
 	}
 	w.isDir = func(p string) bool { return w.dirResources[p] }
 	return w
@@ -158,11 +173,23 @@ func (w *walker) walk(ctx context.Context, dir, want string, depth int) error {
 				return err
 			}
 			r.bytes += len(w.files[f])
+			d, ok := w.docs[f]
+			if !ok {
+				var err error
+				if d, err = documents(w.files[f]); err != nil {
+					return refuse(ReasonInvalidYAML, f+" holds a YAML anchor that contains itself")
+				}
+				w.docs[f] = d
+			}
+			r.docs = min(r.docs+d, MaxBuildDocuments+1)
 		}
 		w.parsed[key] = r
 	}
 	if w.buildBytes += r.bytes; w.buildBytes > MaxBuildBytes {
 		return refuse(ReasonTooLarge, fmt.Sprintf("the build processes more than %d bytes", MaxBuildBytes))
+	}
+	if w.buildDocs += r.docs; w.buildDocs > MaxBuildDocuments {
+		return refuse(ReasonTooLarge, fmt.Sprintf("the build reads more than %d YAML documents", MaxBuildDocuments))
 	}
 	// A directory below dir adds one level per directory passed, as in the source mapping, so a base found
 	// deep below a path without a kustomization file is bounded like a chain of kustomizations.
@@ -410,42 +437,52 @@ func collectRefs(name, dir string, k map[string]any, resources map[string]bool, 
 	if r.components, err = list(keyComponents); err != nil {
 		return nil, err
 	}
-	patches, err := patchFiles(name, dir, k[keyPatches], bad)
+	patches, inline, err := patchFiles(name, dir, k[keyPatches], bad)
 	if err != nil {
 		return nil, err
 	}
 	r.files = append(r.files, patches...)
+	r.docs = inline
 	return r, nil
 }
 
-// patchFiles validates the patches list and returns the local files it reads.
-func patchFiles(name, dir string, raw any, bad error) ([]string, error) {
+// patchFiles validates the patches list and returns the local files it reads, and the documents of its inline
+// patches ([documents]), which kustomize reads like a patch file.
+func patchFiles(name, dir string, raw any, bad error) ([]string, int, error) {
 	if raw == nil {
-		return nil, nil
+		return nil, 0, nil
 	}
 	items, ok := raw.([]any)
 	if !ok {
-		return nil, refuse(ReasonUnsupportedKustomization, "patches in "+name+" is not a list")
+		return nil, 0, refuse(ReasonUnsupportedKustomization, "patches in "+name+" is not a list")
 	}
 	var files []string
+	docs := 0
 	for _, it := range items {
 		m, ok := it.(map[string]any)
 		if !ok {
-			return nil, refuse(ReasonUnsupportedKustomization, "a patch in "+name+" is not a map")
+			return nil, 0, refuse(ReasonUnsupportedKustomization, "a patch in "+name+" is not a map")
 		}
 		for key := range m {
 			if !patchKeys[key] {
-				return nil, refuse(ReasonUnsupportedKustomization, "a patch in "+name+" uses an unsupported field")
+				return nil, 0, refuse(ReasonUnsupportedKustomization, "a patch in "+name+" uses an unsupported field")
 			}
 		}
 		if raw, ok := m["path"]; ok {
 			s, isString := raw.(string)
 			p, valid := repopath.Join(dir, s)
 			if !isString || !valid {
-				return nil, bad
+				return nil, 0, bad
 			}
 			files = append(files, p)
 		}
+		if s, ok := m["patch"].(string); ok {
+			d, err := documents([]byte(s))
+			if err != nil {
+				return nil, 0, refuse(ReasonInvalidYAML, "an inline patch in "+name+" holds a YAML anchor that contains itself")
+			}
+			docs = min(docs+d, MaxBuildDocuments+1)
+		}
 	}
-	return files, nil
+	return files, docs, nil
 }

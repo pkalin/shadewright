@@ -204,8 +204,11 @@ if [ "${RENDER}" = 1 ]; then
   mkdir -p "${WORK}/render"
   CGO_ENABLED=0 GOOS=linux GOARCH="$(go env GOARCH)" go build -o "${WORK}/render/render" ./hack/load/render
   # At the build budget (4), just over it (5, refused before the render), the old 16 MiB budget (15, refused),
-  # and 4 MiB of tiny objects: the object cap is checked after kustomize built them (design 8.2.2).
-  for args in "flat 4" "diamond 4" "flat 5" "diamond 5" "flat 15" "diamond 15" "tiny 1" "tiny 4"; do
+  # 1 and 4 MiB of tiny objects (refused before the render by the document bound), and the document bound of
+  # 4,096: tiny objects (docs), padded to the byte budget too (heavy), mostly patches (patches), and one
+  # document over it (docs 4096, refused before the render) (design 8.2.2, #488).
+  for args in "flat 4" "diamond 4" "flat 5" "diamond 5" "flat 15" "diamond 15" "tiny 1" "tiny 4" \
+    "docs 4095" "heavy 4095" "patches 3072" "docs 4096"; do
     out="$(docker run --rm --memory=128m --memory-swap=128m -v "${WORK}/render:/r:ro" "${ALPINE}" \
       sh -c "/r/render ${args}; echo exit=\$?" 2>&1 | tail -2 | tr '\n' ' ')"
     echo "${args}: ${out}"

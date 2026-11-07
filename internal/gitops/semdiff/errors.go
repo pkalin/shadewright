@@ -31,9 +31,11 @@ const (
 	// or a directory has no kustomization file or more than one.
 	ReasonFileMissing Reason = "FileMissing"
 	// ReasonTooLarge means the build is over a limit: file size, number of files or reads, nesting depth, the
-	// number of directory visits, the build bytes ([MaxBuildBytes]) or the rendered objects ([MaxObjects]).
+	// number of directory visits, the build bytes ([MaxBuildBytes]), the YAML documents read before the render
+	// ([MaxBuildDocuments]) or the rendered objects ([MaxObjects]).
 	ReasonTooLarge Reason = "TooLarge"
-	// ReasonInvalidYAML means a kustomization file does not parse or has a duplicate key.
+	// ReasonInvalidYAML means a kustomization file does not parse or has a duplicate key, or a file of the
+	// build holds a YAML anchor that contains itself, which kustomize cannot build without crashing.
 	ReasonInvalidYAML Reason = "InvalidYAML"
 	// ReasonRenderFailed means kustomize could not build the path, before or after the change.
 	ReasonRenderFailed Reason = "RenderFailed"

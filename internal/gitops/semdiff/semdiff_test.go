@@ -628,6 +628,122 @@ func TestCheckObjectBudget(t *testing.T) {
 	}
 }
 
+// atBudget names the case of a build exactly at a budget.
+const atBudget = "exactly the budget"
+
+// documentBudget is semdiff.MaxBuildDocuments as a literal, so the test pins the bound (design 8.2.2, #488).
+const documentBudget = 4096
+
+// emptyDocs returns a file of n empty YAML documents: each counts against the document budget, and kustomize
+// skips them, so a build at the budget renders at once.
+func emptyDocs(n int) []byte { return []byte(strings.Repeat("---\n", n)) }
+
+// docsRepo is ordersRepo with an extra resource file of empty documents, so that one visit of apps/orders
+// holds total documents: the two of scaledobject.yaml and the extra ones.
+func docsRepo(total int) map[string][]byte {
+	files := ordersRepo()
+	files[soKust] = kust("scaledobject.yaml", "empty.yaml")
+	files["apps/orders/empty.yaml"] = emptyDocs(total - 2)
+	return files
+}
+
+func wantDocumentBudget(t *testing.T, err error) {
+	t.Helper()
+	wantReason(t, err, semdiff.ErrTooLarge)
+	if !strings.Contains(err.Error(), fmt.Sprintf("more than %d YAML documents", documentBudget)) {
+		t.Fatalf("got %v, want the document budget named", err)
+	}
+}
+
+func TestCheckDocumentBudget(t *testing.T) {
+	cases := map[string]struct {
+		files   map[string][]byte
+		patched func([]byte) []byte
+		over    bool
+	}{
+		atBudget:            {files: docsRepo(documentBudget)},
+		"one document over": {files: docsRepo(documentBudget + 1), over: true},
+		"one document over once patched": {files: docsRepo(documentBudget),
+			patched: func(b []byte) []byte { return append(b, "---\n"...) }, over: true},
+		// kustomize builds a base once per overlay that reaches it, so its documents count once per visit.
+		"through two overlays": {files: func() map[string][]byte {
+			f := docsRepo(documentBudget/2 + 1)
+			f["apps/a/kustomization.yaml"] = []byte("namePrefix: a-\nresources: [../orders]\n")
+			f["apps/b/kustomization.yaml"] = []byte("namePrefix: b-\nresources: [../orders]\n")
+			f["apps/kustomization.yaml"] = kust("a", "b")
+			return f
+		}(), over: true},
+		// A List counts as its items, which kustomize reads as objects.
+		"a List of tiny objects": {files: func() map[string][]byte {
+			f := docsRepo(4)
+			var b strings.Builder
+			b.WriteString("apiVersion: v1\nkind: List\nitems:\n")
+			for i := range documentBudget - 1 {
+				fmt.Fprintf(&b, "  - {apiVersion: v1, kind: ConfigMap, metadata: {name: c%d, namespace: orders}}\n", i)
+			}
+			f["apps/orders/empty.yaml"] = []byte(b.String())
+			return f
+		}(), over: true},
+		// An inline patch is read like a patch file.
+		"inline patches": {files: func() map[string][]byte {
+			f := docsRepo(documentBudget)
+			f[soKust] = fmt.Appendf(nil, "resources: [scaledobject.yaml, empty.yaml]\npatches:\n  - patch: %q\n",
+				"---\napiVersion: v1\nkind: Service\nmetadata: {name: orders-worker, namespace: orders}\n")
+			return f
+		}(), over: true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := "apps/orders"
+			if _, ok := c.files["apps/kustomization.yaml"]; ok {
+				path = "apps"
+			}
+			in := soInput(t, c.files, path, 15)
+			if c.patched != nil {
+				in.Patched = c.patched(in.Patched)
+			}
+			res, err := semdiff.Check(context.Background(), in)
+			if !c.over {
+				if err != nil || res.Objects != 2 {
+					t.Fatalf("got %+v, %v, want the build accepted", res, err)
+				}
+				return
+			}
+			wantDocumentBudget(t, err)
+		})
+	}
+}
+
+// kustomize recurses without end on an anchor that contains itself and the Go stack overflow ends the process,
+// so the walk refuses it before the render.
+func TestCheckRefusesAnAnchorThatContainsItself(t *testing.T) {
+	files := ordersRepo()
+	files[soKust] = kust("scaledobject.yaml", "loop.yaml")
+	files["apps/orders/loop.yaml"] = []byte("apiVersion: v1\nkind: ConfigMap\nmetadata: {name: loop, namespace: orders}\n" +
+		"data: &d {x: *d}\n")
+	_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
+	wantReason(t, err, semdiff.ErrInvalidYAML)
+}
+
+func TestLoadDocumentBudget(t *testing.T) {
+	for name, c := range map[string]struct {
+		total int
+		over  bool
+	}{atBudget: {documentBudget, false}, "one document over": {documentBudget + 1, true}} {
+		t.Run(name, func(t *testing.T) {
+			git := fake.NewGit("main", docsRepo(c.total))
+			_, err := semdiff.Load(context.Background(), git, head(t, git), "apps/orders")
+			if !c.over {
+				if err != nil {
+					t.Fatalf("Load: %v", err)
+				}
+				return
+			}
+			wantDocumentBudget(t, err)
+		})
+	}
+}
+
 func TestLoadReadsTheBuild(t *testing.T) {
 	files := overlayPatch()
 	git := fake.NewGit("main", files)

@@ -161,6 +161,10 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	last := t.last
 	t.mu.Unlock()
 	res.Outcome = scoreOutcome(s, out)
+	for _, q := range out.QuoteFailures {
+		res.QuoteFailures = append(res.QuoteFailures, quoteFailure{Source: q.Source, Block: q.Block, Class: string(q.Class),
+			QuoteBytes: q.QuoteBytes, BlockBytes: q.BlockBytes, MatchedBytes: q.MatchedBytes})
+	}
 	if !slices.Contains(resultReasons, out.Reason) {
 		// The loop did not accept a result (a refused model, invalid output, a limit): nothing to score.
 		last = ""

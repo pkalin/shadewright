@@ -118,9 +118,37 @@ fix any rubric the harness then refuses.
 | `scenarios[].tokens` | `input`, `cachedInput`, `output` as the replies reported them; `charged`, what the loop counted against its bounds (a call with unknown usage at its upper bound); `usageUnknownCalls` |
 | `scenarios[].outcome` | `pass`, `expected` (refusal or pull-request), `reason`, `action` (the planned action type), `detail` (why it failed), `notScored` |
 | `scenarios[].diagnosis` | `pass`, `facts[]` (`fact`, `pass`, `missing` terms), `unscored[]` (`fact`, `why`), `detail` |
+| `scenarios[].quoteFailures` | Only for a run that ended `NoEvidence`: one entry per quote of the refused result, in order, with `source` (the cited ID), `block` (the cited block's context section or tool name), `class` (below), `quoteBytes`, `blockBytes` and, for `partial`, `matchedBytes`. No text of the quote or the block |
 | `totals` | `runs`, `passed`, `passRate`, `pass` (whether the threshold was reached), `tokens` (summed), `costUSD` (only with prices) |
 
 The report holds no prompt, no model text, no token and no endpoint.
+
+### Why a quote was refused
+
+A proposal needs a quote copied exactly from within one data value of the block it cites
+([design 3.3](design/3-observation-and-deduplication.md#the-prompt-and-the-result)). When none of its quotes passes,
+the loop ends `NoEvidence` and the report gives each quote the first class that fits, in this order
+(`internal/analysis/quotes.go`, [#474](https://github.com/pkalin/shadewright/issues/474)). The class only diagnoses
+the prompt and the check; nothing reads it to decide, and the check itself stays exact.
+
+| Class | The quote |
+| --- | --- |
+| `too-short` | is under 8 bytes, spaces trimmed |
+| `unknown-source` | cites an ID the model was not shown |
+| `unquotable-source` | cites a block with nothing quotable: not available, a refused or failed tool call, a tool answer not about the subject |
+| `wrong-block` | is found verbatim within a data value of another block |
+| `outside-data` | is found verbatim in the cited block, but takes in a label or a line code wrote, or spans two values |
+| `unescaped` | is found once its angle brackets are escaped as the block shows them |
+| `joined-lines` | is found once the block's line breaks (and the indentation after them) become one space or nothing |
+| `whitespace` | is found once every run of white space, in the quote and the block, becomes one space |
+| `case` | is found with white space collapsed and case ignored |
+| `partial` | starts with at least 8 bytes, and half the quote, found in the block, then differs (`matchedBytes`) |
+| `not-found` | none of the above: a paraphrase |
+
+The Markdown report lists them in a table after the runs. `test/eval/testdata/quotes/` holds one recorded reply
+per class (all but `unescaped`, which no scenario's context can produce; the analysis package's tests cover it),
+replayed over a scenario's real context by `TestQuoteFailureCorpus`, which also checks that the report holds no
+quote.
 
 ### The evaluation manifest
 

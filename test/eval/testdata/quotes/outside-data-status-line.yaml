@@ -1,0 +1,8 @@
+# Synthetic: a status line that spans code text and two values. The loop must refuse it (NoEvidence) and classify each quote.
+scenario: oom
+classes: [outside-data]
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2000, outputTokens: 200}
+    content: '{"summary": "Synthetic reply for the quote corpus.", "hypotheses": [], "evidence": [{"source": "c2", "quote": "last terminated, reason OOMKilled, exit code 137"}], "missingData": [], "uncertainty": "", "proposal": {"action": {"type": "SetContainerMemoryLimit", "adjustKedaMaxReplicas": null, "setContainerMemoryLimit": {"container": "web", "previous": "48Mi", "desired": "64Mi"}}, "expectedEffect": "The container stays under its limit and stops being OOMKilled.", "verificationChecks": []}}'

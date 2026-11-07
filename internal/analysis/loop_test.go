@@ -373,7 +373,7 @@ func TestBoundCallRefusesUnofferedToolWithoutNamingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &run{a: a, parent: t.Context(), ctx: t.Context(), inc: incident(), shown: map[string][]string{}}
+	r := &run{a: a, parent: t.Context(), ctx: t.Context(), inc: incident(), shown: map[string]shownBlock{}}
 	content, quotable, err := r.boundCall(t.Context(), trace.SpanFromContext(t.Context()),
 		toolCall("1", tools.NameGetDeliveryStatus, `{"kind":"Kustomization","namespace":"shop","name":"apps"}`),
 		map[string]bool{tools.NameListEvents: true})

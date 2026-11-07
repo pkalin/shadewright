@@ -61,8 +61,21 @@ type scenarioResult struct {
 	Tokens    tokens         `json:"tokens"`
 	Outcome   outcomeScore   `json:"outcome"`
 	Diagnosis diagnosisScore `json:"diagnosis"`
+	// QuoteFailures says, for a run that ended NoEvidence, how each quote differs from the block it cites
+	// (#474): a class and lengths, never the quote or the block.
+	QuoteFailures []quoteFailure `json:"quoteFailures,omitempty"`
 	// Error is set when the scenario could not run; it then fails.
 	Error string `json:"error,omitempty"`
+}
+
+// quoteFailure is one quote the evidence check refused ([analysis.QuoteFailure]).
+type quoteFailure struct {
+	Source       string `json:"source"`
+	Block        string `json:"block,omitempty"`
+	Class        string `json:"class"`
+	QuoteBytes   int    `json:"quoteBytes"`
+	BlockBytes   int    `json:"blockBytes"`
+	MatchedBytes int    `json:"matchedBytes,omitempty"`
 }
 
 // tokens are the token counts of a run.
@@ -389,7 +402,25 @@ func (r *report) markdown() string {
 		fmt.Fprintf(&b, "| %s | %d | %s | %s | %s | %d+%d | %d |\n", s.Name, s.Repeat, res, cell(outcome), cell(diag),
 			s.Calls, s.ToolCalls, s.Tokens.Charged)
 	}
+	r.quoteFailuresMarkdown(&b)
 	return b.String()
+}
+
+// quoteFailuresMarkdown lists the quotes of the runs that ended NoEvidence, one row each, when there are any.
+func (r *report) quoteFailuresMarkdown(b *strings.Builder) {
+	header := false
+	for _, s := range r.Scenarios {
+		for _, q := range s.QuoteFailures {
+			if !header {
+				b.WriteString("\n## Quotes refused as evidence\n\n")
+				b.WriteString("| Scenario | Run | Source | Block | Class | Quote bytes | Block bytes | Matched bytes |\n")
+				b.WriteString("|---|---|---|---|---|---|---|---|\n")
+				header = true
+			}
+			fmt.Fprintf(b, "| %s | %d | %s | %s | %s | %d | %d | %d |\n", s.Name, s.Repeat, cell(q.Source), cell(q.Block),
+				cell(q.Class), q.QuoteBytes, q.BlockBytes, q.MatchedBytes)
+		}
+	}
 }
 
 // cell keeps a table cell on one line and its pipes literal.

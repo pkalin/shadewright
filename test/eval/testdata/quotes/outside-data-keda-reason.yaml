@@ -1,0 +1,8 @@
+# Synthetic: the summary's reason line with its label. The loop must refuse it (NoEvidence) and classify each quote.
+scenario: keda-at-ceiling
+classes: [outside-data]
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2000, outputTokens: 200}
+    content: '{"summary": "Synthetic reply for the quote corpus.", "hypotheses": [], "evidence": [{"source": "c1", "quote": "reason: ReplicaCeiling (Warning)"}], "missingData": [], "uncertainty": "", "proposal": {"action": {"type": "AdjustKedaMaxReplicas", "setContainerMemoryLimit": null, "adjustKedaMaxReplicas": {"previousValue": 2, "desiredValue": 3}}, "expectedEffect": "The HPA scales to 3 replicas and is no longer limited.", "verificationChecks": []}}'

@@ -1,0 +1,8 @@
+# Synthetic: a quote under 8 bytes. The loop must refuse it (NoEvidence) and classify each quote.
+scenario: oom
+classes: [too-short]
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2000, outputTokens: 200}
+    content: '{"summary": "Synthetic reply for the quote corpus.", "hypotheses": [], "evidence": [{"source": "c2", "quote": "OOM"}], "missingData": [], "uncertainty": "", "proposal": {"action": {"type": "SetContainerMemoryLimit", "adjustKedaMaxReplicas": null, "setContainerMemoryLimit": {"container": "web", "previous": "48Mi", "desired": "64Mi"}}, "expectedEffect": "The container stays under its limit and stops being OOMKilled.", "verificationChecks": []}}'

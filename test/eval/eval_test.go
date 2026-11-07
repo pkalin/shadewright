@@ -55,6 +55,8 @@ const (
 	envPriceIn   = "EVAL_PRICE_INPUT_PER_MTOK"
 	envPriceHit  = "EVAL_PRICE_CACHED_INPUT_PER_MTOK"
 	envPriceOut  = "EVAL_PRICE_OUTPUT_PER_MTOK"
+	envEscPrices = "EVAL_ESCALATION_PRICE_"
+	envForceEsc  = "EVAL_FORCE_ESCALATION" // "1" sends every run to the escalation model
 )
 
 // Bounds of a real-model run.
@@ -66,8 +68,13 @@ const (
 // fakeModelName is the model the recorded replies name.
 const fakeModelName = "eval-fake-1"
 
-// replaySource replays each scenario's recorded replies, in order, for both roles.
-type replaySource struct{}
+// replaySource replays each scenario's recorded replies, in order, for both roles. force sends every run to
+// the escalation model (tests only: the recordings are triage replies).
+type replaySource struct {
+	force bool
+}
+
+func (r replaySource) forcesEscalation() bool { return r.force }
 
 func (replaySource) factory(s *scenario) (analysis.ModelFactory, func() error, error) {
 	if len(s.recording.Replies) == 0 {
@@ -111,6 +118,7 @@ type foundrySource struct {
 	factoryFn             analysis.ModelFactory
 	triage, escalation    *remediationv1alpha1.ModelDeployment
 	triageModel, escModel string
+	force                 bool
 }
 
 func newFoundrySource() (*foundrySource, error) {
@@ -142,8 +150,28 @@ func newFoundrySource() (*foundrySource, error) {
 		}
 		src.escalation = deployment(endpoint, dep, api)
 	}
+	if src.force, err = envForceEscalation(src.escalation != nil); err != nil {
+		return nil, err
+	}
 	return src, nil
 }
+
+// envForceEscalation reads EVAL_FORCE_ESCALATION: 1 forces every run to the escalation model, which must
+// then be configured; unset does not.
+func envForceEscalation(escalationConfigured bool) (bool, error) {
+	switch os.Getenv(envForceEsc) {
+	case "":
+		return false, nil
+	case "1":
+		if !escalationConfigured {
+			return false, fmt.Errorf("%s needs %s and %s", envForceEsc, envEscDep, envEscMod)
+		}
+		return true, nil
+	}
+	return false, fmt.Errorf("%s must be 1 or unset", envForceEsc)
+}
+
+func (f *foundrySource) forcesEscalation() bool { return f.force }
 
 func (f *foundrySource) factory(*scenario) (analysis.ModelFactory, func() error, error) {
 	return f.factoryFn, nil, nil
@@ -301,9 +329,28 @@ func envFloat(name string, def, lo, hi float64) (float64, error) {
 	return f, nil
 }
 
-// envPrices reads the prices; none set means no cost estimate, and a partial set is an error.
+// envPrices reads the prices; none set means no cost estimate, and a partial set is an error. The escalation
+// deployment's own prices (EVAL_ESCALATION_PRICE_*) are optional and need the triage ones.
 func envPrices() (*prices, error) {
-	names := []string{envPriceIn, envPriceHit, envPriceOut}
+	p, err := envPriceSet([]string{envPriceIn, envPriceHit, envPriceOut})
+	if err != nil {
+		return nil, err
+	}
+	esc, err := envPriceSet([]string{envEscPrices + "INPUT_PER_MTOK", envEscPrices + "CACHED_INPUT_PER_MTOK",
+		envEscPrices + "OUTPUT_PER_MTOK"})
+	switch {
+	case err != nil:
+		return nil, err
+	case esc != nil && p == nil:
+		return nil, fmt.Errorf("the %s* prices need %s, %s and %s", envEscPrices, envPriceIn, envPriceHit, envPriceOut)
+	case p != nil:
+		p.Escalation = esc
+	}
+	return p, nil
+}
+
+// envPriceSet reads the input, cached input and output prices of one deployment from names.
+func envPriceSet(names []string) (*prices, error) {
 	var vals [3]float64
 	set := 0
 	for i, n := range names {

@@ -53,19 +53,25 @@ const (
 	evalMaxOutputTokens = 2048
 )
 
-// tally counts what the model calls of one scenario run returned. It is shared by the providers of both
-// roles.
+// tally counts what the model calls of one scenario run returned, per role.
 type tally struct {
-	mu           sync.Mutex
-	usage        providers.Usage
-	usageUnknown int
+	mu    sync.Mutex
+	usage map[analysis.Role]*roleUsage
 	// last is the content of the last reply that had any, the one the loop's outcome rests on.
 	last string
 }
 
-// recorded wraps a provider and counts its replies in a tally. It only reads what the provider returned.
+// roleUsage is what the calls of one role returned.
+type roleUsage struct {
+	usage        providers.Usage
+	usageUnknown int
+}
+
+// recorded wraps the provider of one role and counts its replies in a tally. It only reads what the provider
+// returned.
 type recorded struct {
 	inner providers.ModelProvider
+	role  analysis.Role
 	t     *tally
 }
 
@@ -73,16 +79,49 @@ func (r recorded) Complete(ctx context.Context, req providers.CompletionRequest)
 	c, err := r.inner.Complete(ctx, req)
 	r.t.mu.Lock()
 	defer r.t.mu.Unlock()
-	r.t.usage.InputTokens += c.Usage.InputTokens
-	r.t.usage.CachedInputTokens += c.Usage.CachedInputTokens
-	r.t.usage.OutputTokens += c.Usage.OutputTokens
+	if r.t.usage == nil {
+		r.t.usage = map[analysis.Role]*roleUsage{}
+	}
+	u := r.t.usage[r.role]
+	if u == nil {
+		u = &roleUsage{}
+		r.t.usage[r.role] = u
+	}
+	u.usage.InputTokens += c.Usage.InputTokens
+	u.usage.CachedInputTokens += c.Usage.CachedInputTokens
+	u.usage.OutputTokens += c.Usage.OutputTokens
 	if c.UsageUnknown {
-		r.t.usageUnknown++
+		u.usageUnknown++
 	}
 	if err == nil && c.Content != "" {
 		r.t.last = c.Content
 	}
 	return c, err
+}
+
+// forcedEscalationSource is the section a forced escalation marks as failed: no real section, so no block
+// of the context changes and the model sees exactly the context the builder built.
+const forcedEscalationSource incidentcontext.Section = "evaluation: forced escalation"
+
+// forcedEscalation wraps the context builder of an evaluation run with EVAL_FORCE_ESCALATION set: it marks
+// every context it returns with a failed source, the builder's own escalation signal (design 3.3), so the loop
+// calls the escalation model with the read tools exactly as on a real outage. It lives only in this test
+// package: the analyzer has no flag, setting or code path that reaches it, and the model's output never sets
+// it.
+type forcedEscalation struct {
+	inner analysis.ContextBuilder
+}
+
+func (f forcedEscalation) Build(ctx context.Context,
+	inc *remediationv1alpha1.Incident) (*incidentcontext.Context, error) {
+	c, err := f.inner.Build(ctx, inc)
+	if err != nil || c == nil {
+		return c, err
+	}
+	if !slices.Contains(c.FailedSources, forcedEscalationSource) {
+		c.FailedSources = append(c.FailedSources, forcedEscalationSource)
+	}
+	return c, nil
 }
 
 // modelSource gives the model factory of one scenario run and the models the replies must name.
@@ -94,6 +133,9 @@ type modelSource interface {
 	expectedModels() map[analysis.Role]string
 	// deployments are the triage and escalation deployments (escalation nil when not configured).
 	deployments() (triage, escalation *remediationv1alpha1.ModelDeployment)
+	// forcesEscalation says every run goes to the escalation model (EVAL_FORCE_ESCALATION, see
+	// forcedEscalation).
+	forcesEscalation() bool
 }
 
 // newClient is the fake API server of a run: it holds the recorded objects and nothing else.
@@ -136,16 +178,20 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	if err != nil {
 		return res, err
 	}
+	var cb analysis.ContextBuilder = builder
+	if models.forcesEscalation() {
+		cb = forcedEscalation{inner: builder}
+	}
 	t := &tally{}
 	a, err := analysis.New(analysis.Config{
-		Builder: builder, Tools: set, Policies: evalPolicies, ExpectedModels: models.expectedModels(),
+		Builder: cb, Tools: set, Policies: evalPolicies, ExpectedModels: models.expectedModels(),
 		Redactor: redactor, Now: now,
 		Models: func(role analysis.Role, d remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
 			p, err := factory(role, d)
 			if err != nil {
 				return nil, err
 			}
-			return recorded{inner: p, t: t}, nil
+			return recorded{inner: p, role: role, t: t}, nil
 		},
 		// The evaluation has no daily budget: every scenario run is one unit the run itself bounds.
 		Reserve: func(context.Context, time.Time) error { return nil },
@@ -167,8 +213,12 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	res.Reason, res.Escalated, res.Calls, res.ToolCalls = string(out.Reason), out.Escalated, out.Calls, out.ToolCalls
 	res.Models = out.Models
 	t.mu.Lock()
-	res.Tokens = tokens{Input: t.usage.InputTokens, CachedInput: t.usage.CachedInputTokens, Output: t.usage.OutputTokens,
-		Charged: out.Tokens, UsageUnknownCalls: t.usageUnknown}
+	res.Tokens = tokens{Charged: out.Tokens}
+	for role, u := range t.usage {
+		rt := roleTokens{Input: u.usage.InputTokens, CachedInput: u.usage.CachedInputTokens,
+			Output: u.usage.OutputTokens, UsageUnknownCalls: u.usageUnknown}
+		res.Tokens.addRole(string(role), rt)
+	}
 	last := t.last
 	t.mu.Unlock()
 	res.Outcome = scoreOutcome(s, out)

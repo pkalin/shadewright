@@ -8,5 +8,6 @@ facts:
     all: ["cache-1", "cache-0"]
   - fact: the memory working set of cache-1 from Prometheus (container_memory_working_set_bytes) near the 48Mi limit
     # metrics.yaml records the working set and the limit of both pods; the metrics block shows them.
-    all: ["limit"]
-    any: ["working set", "working_set"]
+    # Scored on the metric names, which only the metrics block carries: the summary and hypotheses may
+    # say "limit" and "working set" without any metric in the context.
+    all: ["container_memory_working_set_bytes", "container_memory_limit_bytes"]

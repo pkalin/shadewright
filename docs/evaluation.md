@@ -107,7 +107,7 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 Prometheus adapter implements (`test/eval/metrics_test.go`). The harness refuses a recording that the adapter could
 not have returned: every approved template listed once (with no series when the source has none), no unknown
 template, only the template's labels, plain-name label values, a pod label on every series of a pod template, and
-samples in time order. The replay answers like the adapter: it refuses a query with other parameters than the
+samples in time order. The replay checks what the scenarios exercise, not every check of the adapter (it skips the name format, lookback and future end checks): it refuses a query with other parameters than the
 template's, or pods for a template that takes none (and none for one that does); it returns only the pods (or the
 Deployment) asked for, in the recorded namespace; an instant query gets the latest sample at its end and a range
 query one point per step, each sample answering for 5 minutes, Prometheus's default lookback. The context builder

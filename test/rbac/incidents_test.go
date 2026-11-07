@@ -51,8 +51,10 @@ func TestIncidentControllerRunsWithTheAnalyzerRBAC(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	// The settings, the budget and an Incident never analyzed and last seen an hour ago, so the analysis
-	// trigger skips it (NotRecent) with a Normal event about the Incident.
+	// The settings, the budget and an Incident never analyzed and last seen half an hour ago, so the analysis
+	// trigger skips it (NotRecent) with a Normal event about the Incident, while the closure rules, which read
+	// the RemediationRequests from the cache and the API server on every pass, leave it Open (quiet for less
+	// than incidents.QuietBeforeResolved).
 	settings := &remediationv1alpha1.RemediationSettings{
 		ObjectMeta: metav1.ObjectMeta{Name: remediationv1alpha1.SettingsName},
 	}
@@ -78,11 +80,11 @@ func TestIncidentControllerRunsWithTheAnalyzerRBAC(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = admin.Delete(context.Background(), quiet) })
-	hourAgo := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
+	halfHourAgo := metav1.NewTime(time.Now().Add(-30 * time.Minute).Truncate(time.Second))
 	quiet.Status = remediationv1alpha1.IncidentStatus{
-		Phase: remediationv1alpha1.IncidentOpen, FirstSeen: &hourAgo, LastSeen: &hourAgo, Count: 1,
+		Phase: remediationv1alpha1.IncidentOpen, FirstSeen: &halfHourAgo, LastSeen: &halfHourAgo, Count: 1,
 		Occurrences: []remediationv1alpha1.OccurrenceRecord{
-			{ID: "event:0a1b2c3d-4e5f-4a6b-8c7d-000000000099", Total: 1, Began: &hourAgo},
+			{ID: "event:0a1b2c3d-4e5f-4a6b-8c7d-000000000099", Total: 1, Began: &halfHourAgo},
 		},
 	}
 	if err := admin.Status().Update(ctx, quiet); err != nil {

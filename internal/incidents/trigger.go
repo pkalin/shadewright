@@ -59,10 +59,11 @@ const (
 	// the analysis timeout nor the cooldown can be placed. It stays not due until the status is repaired, so
 	// that a status without the time never starts analyses faster than the cooldown.
 	ReasonAnalysisStartUnknown = "AnalysisStartUnknown"
-	// ReasonProposed: the last analysis made a proposal; leaving phase Proposed is later work.
+	// ReasonProposed: the last analysis made a proposal; the closure rules move the incident on once its request
+	// ends or it goes quiet ([Closure]).
 	ReasonProposed = "Proposed"
-	// ReasonEscalated: the last analysis handed the incident to a person; leaving phase Escalated is later
-	// work.
+	// ReasonEscalated: the last analysis, or a request that ended without success ([Closure]), handed the
+	// incident to a person; the closure rules resolve it once it goes quiet.
 	ReasonEscalated = "Escalated"
 	// ReasonResolved: the incident is Resolved and is never analyzed again (design 3.2, #251). A symptom seen
 	// again moves it to Escalated within RecurrenceWindow of resolvedTime, or opens its next occurrence after.

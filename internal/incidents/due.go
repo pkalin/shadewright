@@ -18,6 +18,7 @@ package incidents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -62,11 +63,17 @@ func (c *Controller) triggerLoop(ctx context.Context) {
 	}
 }
 
-// pass runs one [Controller.markDue] under PassTimeout.
+// pass runs the closure rules ([Controller.closeIncidents]), then one [Controller.markDue], under
+// PassTimeout. The closure rules go first and write at most closureWritesPerPass Incidents, so the marks
+// always get the rest of the pass; a failure of one does not stop the other.
 func (c *Controller) pass(ctx context.Context) error {
 	pctx, cancel := context.WithTimeout(ctx, c.cfg.PassTimeout)
 	defer cancel()
-	return c.markDue(pctx)
+	closeErr := c.closeIncidents(pctx)
+	if closeErr != nil && pctx.Err() != nil {
+		return closeErr
+	}
+	return errors.Join(closeErr, c.markDue(pctx))
 }
 
 // markDue decides, for every Incident in the namespace, whether it is due for analysis ([Due]) and sets its

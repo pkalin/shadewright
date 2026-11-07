@@ -232,6 +232,11 @@ type Controller struct {
 	memory map[types.UID]*trace
 	// lastEvent is when the last Warning event at the cap was written.
 	lastEvent time.Time
+	// capNear is whether the last trigger pass found the Incidents at or over capNearThreshold and reported
+	// it, and lastNearEvent when the last Warning event IncidentCapNear was written ([Controller.reportCap]).
+	// Only the trigger goroutine uses them.
+	capNear       bool
+	lastNearEvent time.Time
 }
 
 // holding is what one fingerprint's batches hold unwritten: n occurrences, and in how many of them each

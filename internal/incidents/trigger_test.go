@@ -1399,7 +1399,8 @@ func TestLastingStateIsNotSkippedWhenSettingsArriveLate(t *testing.T) {
 	lasting := incidentStatus(time.Hour, time.Hour, 0)
 	lasting.Occurrences[0].ID = conditionID
 	createIncident(t, ns, 1, lasting)
-	createIncident(t, ns, 2, incidentStatus(time.Hour, time.Hour, 0))
+	// Seen less than QuietBeforeResolved ago, so the closure rules leave it Open.
+	createIncident(t, ns, 2, incidentStatus(50*time.Minute, time.Hour, 0))
 	start(t, ns, triggerConfig)
 	eventually(t, ns, 1, dueIs(false, ReasonSettingsNotFound))
 	createSettings(t, 10)

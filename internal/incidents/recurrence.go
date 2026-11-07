@@ -38,14 +38,15 @@ import (
 const RecurrenceWindow = 24 * time.Hour
 
 // ConditionRecurred is the Incident condition the controller sets when a symptom of a Resolved Incident was
-// seen again after resolvedTime and within the RecurrenceWindow, or when resolvedTime is missing, and so moved
-// it to Escalated.
+// seen again after the resolution ([resolvedBefore]) and within the RecurrenceWindow, or when resolvedTime is
+// missing, and so moved it to Escalated.
 const ConditionRecurred = "Recurred"
 
 // Reasons of the Recurred condition, always with status True.
 const (
-	// ReasonRecurredWithinWindow: the symptom was seen again after resolvedTime, within the RecurrenceWindow,
-	// or later while observations of the Resolved Incident were still unwritten (fail closed).
+	// ReasonRecurredWithinWindow: the symptom was seen again after the resolution ([resolvedBefore]), within the
+	// RecurrenceWindow, or later while observations of the Resolved Incident were still unwritten (fail
+	// closed).
 	ReasonRecurredWithinWindow = "RecurredWithinWindow"
 	// ReasonResolvedTimeUnknown: the Incident was Resolved without a resolvedTime, so the RecurrenceWindow
 	// cannot be placed and the recurrence is escalated (fail closed).
@@ -58,16 +59,17 @@ type recurrence int
 const (
 	// notResolved: the Incident is not Resolved; the observations are counted as usual.
 	notResolved recurrence = iota
-	// beforeResolution: the Incident is Resolved and every observation was seen no later than resolvedTime,
-	// so none is a recurrence: they are counted and the phase stays Resolved.
+	// beforeResolution: the Incident is Resolved and every observation was seen before the resolution
+	// ([resolvedBefore]), so none is a recurrence: they are counted and the phase stays Resolved.
 	beforeResolution
-	// escalate: seen again after resolvedTime, or resolvedTime or the time seen is unknown.
+	// escalate: seen again after the resolution ([resolvedBefore]), or resolvedTime or the time seen is unknown.
 	escalate
 )
 
 // onResolved decides what observations last seen at seen do to an Incident whose status is st. A missing
 // resolvedTime, or a seen time that is unknown, counts as a recurrence within the window: it is escalated,
-// never analyzed. The controller sends an observation more than the window after resolvedTime to the next
+// never analyzed. An observation seen after [resolvedBefore] is a recurrence even when it is older than
+// resolvedTime. The controller sends an observation more than the window after resolvedTime to the next
 // occurrence before it is written ([Controller.rolls]); one that still reaches a Resolved Incident (seen
 // while observations of it were unwritten) is escalated too.
 func onResolved(st *remediationv1alpha1.IncidentStatus, seen time.Time) recurrence {
@@ -77,17 +79,31 @@ func onResolved(st *remediationv1alpha1.IncidentStatus, seen time.Time) recurren
 	if st.ResolvedTime == nil || st.ResolvedTime.IsZero() || seen.IsZero() {
 		return escalate
 	}
-	if !seen.After(st.ResolvedTime.Time) {
+	if !seen.After(resolvedBefore(st)) {
 		return beforeResolution
 	}
 	return escalate
+}
+
+// resolvedBefore returns the newest time an observation may have been seen and still count as from before
+// the resolution of a Resolved Incident with a resolvedTime. A resolution by the quiet rule (Lifecycle
+// SymptomQuiet) says nothing was seen for QuietBeforeResolved before resolvedTime, so an observation seen in
+// that hour contradicts it: one the closure rules could not see (consumed, or moving between the held and the
+// in flight batches, while they decided) is a recurrence, never counted as from before. This holds by
+// construction, whatever the closure rules' snapshot of the unwritten observations missed. Any other
+// resolution (a request that Succeeded, or another writer) counts up to resolvedTime.
+func resolvedBefore(st *remediationv1alpha1.IncidentStatus) time.Time {
+	if cond := meta.FindStatusCondition(st.Conditions, ConditionLifecycle); cond != nil && cond.Reason == ReasonSymptomQuiet {
+		return st.ResolvedTime.Add(-QuietBeforeResolved)
+	}
+	return st.ResolvedTime.Time
 }
 
 // escalateRecurrence moves a Resolved Incident whose symptom came back to Escalated, with the condition
 // Recurred saying why. The message holds nothing from the cluster.
 func escalateRecurrence(inc *remediationv1alpha1.Incident, now time.Time) {
 	reason, msg := ReasonRecurredWithinWindow,
-		"The symptom was seen again after resolvedTime and within 24 hours of it; a person decides, no analysis runs"
+		"The symptom was seen again after the resolution and within 24 hours of resolvedTime; a person decides, no analysis runs"
 	if inc.Status.ResolvedTime == nil || inc.Status.ResolvedTime.IsZero() {
 		reason, msg = ReasonResolvedTimeUnknown,
 			"The symptom was seen again and resolvedTime is missing, so it counts as within 24 hours; a person decides, no analysis runs"

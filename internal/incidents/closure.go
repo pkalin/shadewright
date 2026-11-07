@@ -68,6 +68,10 @@ const (
 	// within RecurrenceWindow of resolvedTime, so it is Open again, with no resolvedTime, and is analyzed as
 	// usual ([reopens]). It is the one Lifecycle reason the observation writer sets.
 	ReasonReopened = "Reopened"
+	// ReasonRequestActive: the Incident was Resolved while a request naming it was active (one created after
+	// the closure rules listed the requests), so it moved back to Proposed, with no resolvedTime, and the
+	// request decides it as usual.
+	ReasonRequestActive = "RequestActive"
 )
 
 // lifecycleFieldOwner is the field manager of the closure rules' status writes, so the managed fields tell
@@ -100,6 +104,7 @@ var lifecycleMessages = map[string]string{
 	ReasonRequestNeedsIntervention: "The newest request naming the Incident needs intervention; a person decides",
 	ReasonRequestSuperseded:        "The newest request naming the Incident was superseded and no newer one names it; a person decides",
 	ReasonReopened:                 "The symptom came back within 24 hours of a quiet resolution before any analysis; the Incident is Open again",
+	ReasonRequestActive:            "A request naming the Incident is active; it is Proposed again until the request ends",
 }
 
 // finalRequest reports whether a request phase is final for the closure rules (design 3.2): Succeeded, one
@@ -139,8 +144,11 @@ func lifecycleReason(inc *remediationv1alpha1.Incident) string {
 // incidentRef names this Incident, by name and UID, count. held is the newest observation of the Incident the
 // controller holds unwritten, or zero. Closure reads only its arguments.
 //
-//   - Only an Incident whose name is derived from its spec, with an observation, in phase Open, Proposed or
-//     Escalated is decided. Analyzing, Resolved and no phase stay.
+//   - Only an Incident whose name is derived from its spec, with an observation, in phase Open, Proposed,
+//     Escalated or Resolved is decided. Analyzing and no phase stay.
+//   - A Resolved Incident moves only when an active request names it: back to Proposed (ReasonRequestActive).
+//     Such a request was created after the closure rules listed the requests and resolved it (a listing is
+//     no lock), so the next pass undoes that resolution from what the API server holds, also after a restart.
 //   - Any active request naming it keeps it where it is ([finalRequest]).
 //   - In phase Proposed (or Escalated by a Superseded request, [decidedByRequest]), the newest request naming
 //     the Incident (by creation time; at the same time a Superseded one is the older, then by name) decides:
@@ -158,7 +166,8 @@ func Closure(inc *remediationv1alpha1.Incident, requests []remediationv1alpha1.R
 		return "", "", false
 	}
 	switch st.Phase {
-	case remediationv1alpha1.IncidentOpen, remediationv1alpha1.IncidentProposed, remediationv1alpha1.IncidentEscalated:
+	case remediationv1alpha1.IncidentOpen, remediationv1alpha1.IncidentProposed, remediationv1alpha1.IncidentEscalated,
+		remediationv1alpha1.IncidentResolved:
 	default:
 		return "", "", false
 	}
@@ -175,6 +184,12 @@ func Closure(inc *remediationv1alpha1.Incident, requests []remediationv1alpha1.R
 		if newest == nil || newer(rr, newest) {
 			newest = rr
 		}
+	}
+	if st.Phase == remediationv1alpha1.IncidentResolved {
+		if active {
+			return remediationv1alpha1.IncidentProposed, ReasonRequestActive, true
+		}
+		return "", "", false
 	}
 	if active {
 		return "", "", false
@@ -232,14 +247,17 @@ func quietSince(inc *remediationv1alpha1.Incident, held time.Time) time.Time {
 }
 
 // applyClosure moves the Incident to phase with the Lifecycle condition saying why, at now. Resolved sets
-// resolvedTime in the same update. The condition is removed first, so its lastTransitionTime is always that
-// of this move ([quietSince] reads it).
+// resolvedTime in the same update; a move out of Resolved clears it. The condition is removed first, so its
+// lastTransitionTime is always that of this move ([quietSince] reads it).
 func applyClosure(inc *remediationv1alpha1.Incident, phase remediationv1alpha1.IncidentPhase, reason string, now time.Time) {
 	at := metav1.NewTime(now.UTC().Truncate(time.Second))
-	inc.Status.Phase = phase
-	if phase == remediationv1alpha1.IncidentResolved {
+	switch {
+	case phase == remediationv1alpha1.IncidentResolved:
 		inc.Status.ResolvedTime = &at
+	case inc.Status.Phase == remediationv1alpha1.IncidentResolved:
+		inc.Status.ResolvedTime = nil
 	}
+	inc.Status.Phase = phase
 	meta.RemoveStatusCondition(&inc.Status.Conditions, ConditionLifecycle)
 	meta.SetStatusCondition(&inc.Status.Conditions, metav1.Condition{
 		Type: ConditionLifecycle, Status: metav1.ConditionTrue, Reason: reason, Message: lifecycleMessages[reason],
@@ -262,7 +280,6 @@ func reopens(st *remediationv1alpha1.IncidentStatus) bool {
 // any Incident never analyzed.
 func reopen(inc *remediationv1alpha1.Incident, now time.Time) {
 	applyClosure(inc, remediationv1alpha1.IncidentOpen, ReasonReopened, now)
-	inc.Status.ResolvedTime = nil
 }
 
 // closeIncidents applies the closure rules ([Closure]) to every Incident in the namespace, once per trigger
@@ -286,7 +303,10 @@ func (c *Controller) closeIncidents(ctx context.Context) error {
 	if err := c.cache.List(ctx, &cached, client.InNamespace(c.cfg.Namespace)); err != nil {
 		return fmt.Errorf("listing the RemediationRequests for the closure rules: %w", err)
 	}
-	now := c.cfg.Now()
+	// The decision uses the time the move records (resolvedTime and lastTransitionTime are whole seconds), so
+	// every observation the quiet rule counted was seen no later than resolvedTime minus QuietBeforeResolved,
+	// which is what [onResolved] relies on.
+	now := c.cfg.Now().UTC().Truncate(time.Second)
 	listed := make(map[string]struct{}, len(list.Items))
 	var first, last []string
 	for i := range list.Items {
@@ -376,12 +396,14 @@ func (c *Controller) closeOne(ctx context.Context, name string, now time.Time) (
 }
 
 // unwrittenSince returns the newest observation of the Incident of fp that is not in its status yet: held in a
-// pending or failed batch, or in a write in flight. The closure rules read it, so an observation being written
-// keeps the Incident from going quiet.
+// pending or failed batch, or in a write in flight, read under one lock so a batch moving between them is
+// seen in one or the other. The closure rules read it, so an observation being written keeps the Incident
+// from going quiet. A snapshot can still miss an observation consumed after it; [onResolved] makes such an
+// observation a recurrence, never one from before the resolution.
 func (c *Controller) unwrittenSince(fp string) time.Time {
-	t := c.heldSince(fp)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	t := c.heldLocked(fp)
 	if f := c.inflight[fp]; f != nil {
 		t = latest(t, f.last)
 	}

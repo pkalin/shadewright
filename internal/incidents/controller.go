@@ -1142,7 +1142,8 @@ type writeResult struct {
 // A Resolved Incident is never analyzed again (design 3.2, #251): when the Incident read is Resolved and the
 // batches hold something new, [onResolved] decides from their newest observation whether they predate the
 // resolution (counted, still Resolved) or are a recurrence, which the same status update moves to Escalated
-// ([escalateRecurrence]).
+// ([escalateRecurrence]), or back to Open when [reopens] allows it and the observation is within
+// RecurrenceWindow of resolvedTime.
 func (c *Controller) write(ctx context.Context, name string, create bool, batches []*batch) (writeResult, error) {
 	spec := batches[0].spec
 	n := occurrenceOf(name)
@@ -1207,7 +1208,9 @@ func (c *Controller) write(ctx context.Context, name string, create bool, batche
 			res.dropped = append(res.dropped, merge(&res.inc.Status, b)...)
 		}
 		if resolved == escalate {
-			if reopens(&res.inc.Status) {
+			// Reopen only within the window: seen later (held while the Incident was Resolved, so it was not
+			// sent to the next occurrence), it is escalated as any recurrence that reaches a Resolved Incident.
+			if reopens(&res.inc.Status) && !seen.IsZero() && seen.Sub(res.inc.Status.ResolvedTime.Time) <= RecurrenceWindow {
 				reopen(res.inc, c.cfg.Now())
 			} else {
 				escalateRecurrence(res.inc, c.cfg.Now())

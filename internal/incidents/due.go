@@ -401,6 +401,11 @@ func (c *Controller) rememberWaiting(uid types.UID, reason string, now time.Time
 func (c *Controller) heldSince(fp string) time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.heldLocked(fp)
+}
+
+// heldLocked is [Controller.heldSince] for a caller that holds mu.
+func (c *Controller) heldLocked(fp string) time.Time {
 	var t time.Time
 	for _, b := range []*batch{c.pending[fp], c.failed[fp]} {
 		if b != nil {

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -748,4 +749,136 @@ func (c *cancelled) Get(ctx context.Context, key client.ObjectKey, obj client.Ob
 		return err
 	}
 	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+// Review of #466: unwrittenSince reads the held and the in flight batches under one lock, so a batch that
+// moves between them (a failed flush putting it back) is never missed by both reads.
+func TestUnwrittenSinceSeesABatchMovingBetweenHeldAndInFlight(t *testing.T) {
+	c, _ := closureController(t, closureIncident(remediationv1alpha1.IncidentOpen, 2*time.Hour))
+	fingerprint := fp(1)
+	c.inflight[fingerprint] = &flight{n: 1, last: triggerNow}
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Go(func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			c.mu.Lock()
+			delete(c.inflight, fingerprint)
+			c.pending[fingerprint] = &batch{last: triggerNow}
+			c.mu.Unlock()
+			c.mu.Lock()
+			delete(c.pending, fingerprint)
+			c.inflight[fingerprint] = &flight{n: 1, last: triggerNow}
+			c.mu.Unlock()
+		}
+	})
+	defer func() { close(stop); wg.Wait() }()
+	for i := range 100000 {
+		if c.unwrittenSince(fingerprint).IsZero() {
+			t.Fatalf("unwrittenSince returned zero at iteration %d although an observation was always held or in flight", i)
+		}
+	}
+}
+
+// Review of #466: an observation consumed after the closure rules decided, before their write, is seen within
+// the quiet hour before resolvedTime, so it contradicts the quiet resolution: a recurrence (here a reopen,
+// never analyzed), not an observation from before the resolution.
+func TestObservationAfterTheClosureDecisionIsARecurrence(t *testing.T) {
+	c, cl := closureController(t, closureIncident(remediationv1alpha1.IncidentOpen, 2*time.Hour))
+	w := &countingClient{Client: cl}
+	w.before = func(_ context.Context, _ *remediationv1alpha1.Incident) {
+		w.before = nil
+		c.consume(t.Context(), seenAt(99, triggerNow))
+	}
+	c.client = w
+	if err := c.closeIncidents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := getIncident(t, cl); got.Status.Phase != remediationv1alpha1.IncidentResolved {
+		t.Fatalf("phase %s after the closure pass, want Resolved", got.Status.Phase)
+	}
+	c.flush(t.Context(), fp(1))
+	got := getIncident(t, cl)
+	if got.Status.Phase != remediationv1alpha1.IncidentOpen || lifecycleReason(got) != ReasonReopened {
+		t.Fatalf("observation seen at the resolution: phase %s, Lifecycle %q, want Open, Reopened",
+			got.Status.Phase, lifecycleReason(got))
+	}
+}
+
+// Review of #466: only an observation seen more than QuietBeforeResolved before a quiet resolvedTime counts as
+// from before it; a request's success counts up to resolvedTime.
+func TestBeforeAQuietResolutionMeansBeforeTheQuietHour(t *testing.T) {
+	resolvedAt := triggerNow.Add(-10 * time.Minute)
+	tests := []struct {
+		name   string
+		reason string
+		seen   time.Time
+		phase  remediationv1alpha1.IncidentPhase
+	}{
+		{"quiet, seen in the quiet hour", ReasonSymptomQuiet, resolvedAt.Add(-30 * time.Minute), remediationv1alpha1.IncidentOpen},
+		{"quiet, seen before the quiet hour", ReasonSymptomQuiet, resolvedAt.Add(-QuietBeforeResolved - time.Second), remediationv1alpha1.IncidentResolved},
+		{"success, seen before resolvedTime", ReasonRequestSucceeded, resolvedAt.Add(-30 * time.Minute), remediationv1alpha1.IncidentResolved},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inc := closureIncident(remediationv1alpha1.IncidentOpen, 3*time.Hour)
+			applyClosure(inc, remediationv1alpha1.IncidentResolved, tt.reason, resolvedAt)
+			c, cl := closureController(t, inc)
+			c.consume(t.Context(), seenAt(9, tt.seen))
+			c.flush(t.Context(), fp(1))
+			if got := getIncident(t, cl); got.Status.Phase != tt.phase {
+				t.Fatalf("phase %s, want %s", got.Status.Phase, tt.phase)
+			}
+		})
+	}
+}
+
+// Review of #466: a request created after the closure rules listed the requests does not stop the resolve
+// (the listing is no lock); the next pass, from what the API server holds, moves the Incident back to
+// Proposed with no resolvedTime.
+func TestActiveRequestCreatedAfterTheListingUndoesTheResolve(t *testing.T) {
+	c, cl := closureController(t, closureIncident(remediationv1alpha1.IncidentProposed, 2*time.Hour))
+	w := &countingClient{Client: cl}
+	w.before = func(ctx context.Context, _ *remediationv1alpha1.Incident) {
+		w.before = nil
+		rr := request("replacement", time.Minute, remediationv1alpha1.PhaseAwaitingApproval)
+		if err := cl.Create(ctx, &rr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.client = w
+	if err := c.closeIncidents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := getIncident(t, cl); got.Status.Phase != remediationv1alpha1.IncidentResolved {
+		t.Fatalf("phase %s after the racing pass, want Resolved", got.Status.Phase)
+	}
+	if err := c.closeIncidents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	got := getIncident(t, cl)
+	if got.Status.Phase != remediationv1alpha1.IncidentProposed || got.Status.ResolvedTime != nil ||
+		lifecycleReason(got) != ReasonRequestActive {
+		t.Fatalf("active request names the Incident: phase %s, resolvedTime %v, Lifecycle %q, want Proposed, none, %s",
+			got.Status.Phase, got.Status.ResolvedTime, lifecycleReason(got), ReasonRequestActive)
+	}
+}
+
+// Review of #466: an observation that reaches a quietly Resolved Incident never analyzed more than
+// RecurrenceWindow after resolvedTime (held with older ones, so it was not sent to the next occurrence) is
+// escalated as any such recurrence, never reopened.
+func TestReopenOnlyWithinTheWindow(t *testing.T) {
+	inc := closureIncident(remediationv1alpha1.IncidentOpen, 50*time.Hour)
+	applyClosure(inc, remediationv1alpha1.IncidentResolved, ReasonSymptomQuiet, triggerNow.Add(-25*time.Hour))
+	c, cl := closureController(t, inc)
+	c.consume(t.Context(), seenAt(98, triggerNow.Add(-26*time.Hour)))
+	c.consume(t.Context(), seenAt(99, triggerNow))
+	c.flush(t.Context(), fp(1))
+	if got := getIncident(t, cl); got.Status.Phase != remediationv1alpha1.IncidentEscalated {
+		t.Fatalf("recurrence 25 h after a quiet resolution: phase %s, want Escalated", got.Status.Phase)
+	}
 }

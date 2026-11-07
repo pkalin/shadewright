@@ -21,13 +21,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analysis"
 	"github.com/pkalin/shadewright/internal/analyzer"
 	"github.com/pkalin/shadewright/internal/analyzer/models"
@@ -102,7 +105,8 @@ type analysisDeps struct {
 // contextPolicies configures the context builder's policy bounds section (#493): the policies of
 // --action-policies, read by name through reader (the API reader: the analyzer may get those policies, not
 // list or watch them), for requests in the operator namespace. With no policy configured, or no model
-// (--triage-model empty: nothing is proposed), it returns no reader and the section is "not available".
+// (--triage-model empty: nothing is proposed), it returns no reader and the section is "not available". It
+// refuses a policy the analyzer may not get (checkPolicyReads).
 func contextPolicies(f analysisFlags, reader client.Reader, namespace string, cfg *incidentcontext.Config) error {
 	if f.triageModel == "" {
 		return nil
@@ -115,6 +119,38 @@ func contextPolicies(f analysisFlags, reader client.Reader, namespace string, cf
 		return nil
 	}
 	cfg.Policies, cfg.PolicyReader, cfg.RequestNamespace = policies, reader, namespace
+	return checkPolicyReads(*cfg)
+}
+
+// policyCheckTimeout bounds the start's check of the policy reads.
+const policyCheckTimeout = 30 * time.Second
+
+// checkPolicyReads gets each policy cfg names once, before anything starts. A Forbidden answer means the
+// analyzer's policy reader role does not name that policy: the chart renders it from the same values as the
+// flag, but config/analysis-policies lists the names by hand, so a mismatch stops the start here instead of
+// leaving every policy bounds block unread. A policy that does not exist yet is fine (the block says so), and
+// any other error is left to the block, which reports it as a failed source.
+func checkPolicyReads(cfg incidentcontext.Config) error {
+	if cfg.PolicyReader == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), policyCheckTimeout)
+	defer cancel()
+	names := make([]string, 0, len(cfg.Policies))
+	for _, n := range cfg.Policies {
+		if !slices.Contains(names, string(n)) {
+			names = append(names, string(n))
+		}
+	}
+	slices.Sort(names)
+	for _, n := range names {
+		err := cfg.PolicyReader.Get(ctx, client.ObjectKey{Name: n}, &remediationv1alpha1.RemediationPolicy{})
+		if apierrors.IsForbidden(err) {
+			return fmt.Errorf("the analyzer may not get RemediationPolicy %q named in --action-policies: the "+
+				"analyzer-policy-reader ClusterRole must list every policy of the flag in resourceNames "+
+				"(chart value analyzer.analysis.actionPolicies, or config/analysis-policies)", n)
+		}
+	}
 	return nil
 }
 

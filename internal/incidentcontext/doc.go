@@ -33,10 +33,12 @@ limitations under the License.
 //     RemediationPolicy configured for it (Config.Policies), read by name and checked against the subject by
 //     the policy package's own checks ([policy.BoundsFor]), so what the model is shown is what the executor's
 //     policy step reads; or why any proposal would be Denied. It is operator configuration, not cluster
-//     evidence: written from typed fields only (names, quantities, numbers), with no quotable values, and a
-//     failed read is labelled but is no escalation signal. For a memory limit it also gives, per container
-//     of the pod template, the desired values the policy allows from its current limit
-//     ([policy.AllowedMemory]). The policy still decides (invariant 1).
+//     evidence: written from typed fields only (names, quantities, numbers), with no quotable values. Bounds
+//     are shown only for a subject the builder resolved (or of a kind it does not read, said in the block).
+//     A failed read (not NotFound) is logged, labelled and a failed source (an escalation signal); a missing
+//     policy or settings object is said as the Denied it leads to. For a memory limit it also gives, per
+//     container of the pod template, the desired values the policy allows from its current limit
+//     ([policy.AllowedMemory]), or that the container has no limit. The policy still decides (invariant 1).
 //
 // Each section is one or more [Block]s, tagged with a [Provenance] for the delimited blocks of ADR-0023
 // decision 3. The text of a block is cluster data, untrusted (invariant 4): the caller puts it inside a

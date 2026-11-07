@@ -78,10 +78,13 @@ func BoundsFor(p *v1alpha1.RemediationPolicy, settings *v1alpha1.RemediationSett
 	t.Object = nil
 	policy := p
 	var b Bounds
+	// With the labels unknown the selector is left out of checkTarget, but it must still parse: an invalid one
+	// refuses every request, at the step where the decision checks it (after the target's namespace).
+	var selReason Reason
+	var selMsg string
 	if !s.LabelsKnown && p.Spec.Targets.ObjectSelector != nil {
-		// The selector must still parse: an invalid one refuses every request.
 		if r, msg := CheckObjectSelector(p, nil); r == ReasonPolicyInvalid {
-			return Bounds{}, r, msg
+			selReason, selMsg = r, msg
 		}
 		policy = p.DeepCopy()
 		policy.Spec.Targets.ObjectSelector = nil
@@ -99,6 +102,9 @@ func BoundsFor(p *v1alpha1.RemediationPolicy, settings *v1alpha1.RemediationSett
 	}
 	if r, msg := checkTarget(in); r != "" {
 		return Bounds{}, r, msg
+	}
+	if selReason != "" {
+		return Bounds{}, selReason, selMsg
 	}
 	pa, r, msg := policyEntry(p, s.Action)
 	if r != "" {

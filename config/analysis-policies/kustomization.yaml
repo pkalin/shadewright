@@ -1,8 +1,10 @@
 # The analyzer's read of the RemediationPolicies its requests name (#493): the ClusterRole analyzer-policy-reader,
 # restricted to those names, and its ClusterRoleBinding. It goes with an analyzer that runs the analysis with
-# --action-policies; set resourceNames below to the policy names of that flag, one each. The chart renders it
-# only with analyzer.analysis.triageModel and at least one analyzer.analysis.actionPolicies name, with exactly
-# those names. Names get the prefix of config/default.
+# --action-policies. resourceNames below MUST list every policy name of that flag, one each: demo-memory is the
+# lab's (shadewright-fleet). Kustomize cannot read the flag, so keep the two in step by hand; an analyzer whose
+# flag names a policy this list leaves out refuses to start ("may not get RemediationPolicy"). The chart
+# renders the same role from analyzer.analysis.actionPolicies, the values the flag comes from, only with
+# analyzer.analysis.triageModel and at least one name. Names get the prefix of config/default.
 namePrefix: shadewright-
 resources:
 - ../rbac/analyzer/policies

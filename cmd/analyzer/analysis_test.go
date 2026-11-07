@@ -20,11 +20,15 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -234,5 +238,40 @@ func TestContextPoliciesFollowTheFlags(t *testing.T) {
 	f.actionPolicies = "Exec=all"
 	if err := contextPolicies(f, r, operatorNamespace, &cfg); err == nil {
 		t.Error("an invalid --action-policies was accepted")
+	}
+}
+
+// forbidOne answers Forbidden for the policy named forbidden, as the API server does for a name the role's
+// resourceNames leave out, and NotFound for every other.
+type forbidOne struct {
+	client.Reader
+	forbidden string
+}
+
+func (f forbidOne) Get(_ context.Context, key client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+	gr := schema.GroupResource{Group: remediationv1alpha1.GroupVersion.Group, Resource: "remediationpolicies"}
+	if key.Name == f.forbidden {
+		return apierrors.NewForbidden(gr, key.Name, errors.New("not in resourceNames"))
+	}
+	return apierrors.NewNotFound(gr, key.Name)
+}
+
+// A role that does not name every --action-policies policy stops the start; a policy that does not exist
+// yet, or no policy reader at all, does not.
+func TestCheckPolicyReadsRefusesARoleWithoutTheName(t *testing.T) {
+	cfg := incidentcontext.Config{PolicyReader: forbidOne{forbidden: "keda"},
+		Policies: map[remediationv1alpha1.ActionType]remediationv1alpha1.Name{
+			remediationv1alpha1.ActionSetContainerMemoryLimit: "memory",
+			remediationv1alpha1.ActionAdjustKedaMaxReplicas:   "keda",
+		}}
+	if err := checkPolicyReads(cfg); err == nil || !strings.Contains(err.Error(), `"keda"`) {
+		t.Errorf("a forbidden policy read: %v", err)
+	}
+	cfg.PolicyReader = forbidOne{forbidden: "other"}
+	if err := checkPolicyReads(cfg); err != nil {
+		t.Errorf("missing policies: %v", err)
+	}
+	if err := checkPolicyReads(incidentcontext.Config{}); err != nil {
+		t.Errorf("no policy reader: %v", err)
 	}
 }

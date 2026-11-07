@@ -18,11 +18,14 @@ package incidentcontext
 
 import (
 	"context"
-	"errors"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -111,32 +114,40 @@ func TestPolicyBlockShowsTheBoundsThatDecide(t *testing.T) {
 	}
 }
 
-// A policy that does not cover the subject, a missing policy, a missing configuration and a failed read are
-// each said, so that the model can hand off; none is an escalation signal.
+// A policy that does not cover the subject, a missing policy, missing settings and a failed read are each
+// said, so that the model can hand off. A missing object is what the executor decides on (Denied), so it is
+// no escalation signal; a failed read is, like any other configured source that failed.
 func TestPolicyBlockSaysWhyNothingPasses(t *testing.T) {
 	other := labPolicy()
 	other.Spec.Targets.Namespaces = []remediationv1alpha1.Name{otherNS}
 	cases := map[string]struct {
-		objs   []client.Object
-		mutate func(*Config)
-		want   string
-		label  bool
+		objs     []client.Object
+		mutate   func(*Config)
+		want     string
+		label    bool
+		escalate bool
 	}{
 		"not covered": {[]client.Object{other, settingsObject()}, nil,
-			"policy demo-memory does not allow this action on this subject, so a proposal would be Denied (TargetNamespaceNotAllowed)", false},
+			"policy demo-memory does not allow this action on this subject, so a proposal would be Denied (TargetNamespaceNotAllowed)", false, false},
 		"missing": {[]client.Object{settingsObject()}, nil,
-			"policy demo-memory does not exist, so a proposal would be Denied (PolicyNotFound)", false},
-		"no settings": {[]client.Object{labPolicy()}, nil, "the RemediationSettings could not be read", true},
+			"policy demo-memory does not exist, so a proposal would be Denied (PolicyNotFound)", false, false},
+		"no settings": {[]client.Object{labPolicy()}, nil,
+			"policy demo-memory; the RemediationSettings default does not exist, so a proposal would be Denied (SettingsNotFound).", false, false},
 		"not configured": {[]client.Object{labPolicy(), settingsObject()}, func(c *Config) { c.Policies = nil },
-			"SetContainerMemoryLimit: no policy is configured for this action, so it is never proposed.", false},
+			"SetContainerMemoryLimit: no policy is configured for this action, so it is never proposed.", false, false},
 		"read failed": {nil, func(c *Config) { c.PolicyReader = failingGets{} },
-			"SetContainerMemoryLimit: policy demo-memory could not be read.", true},
+			"SetContainerMemoryLimit: policy demo-memory could not be read.", true, true},
+		"settings read failed": {[]client.Object{labPolicy()}, nil,
+			"the RemediationSettings could not be read, so its bounds are not shown", true, true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			r := reader(t, append(oomObjects(), tc.objs...)...)
 			mutate := func(c *Config) {
 				withPolicies(r)(c)
+				if name == "settings read failed" {
+					c.PolicyReader = failingGets{Reader: r, only: remediationv1alpha1.SettingsName}
+				}
 				if tc.mutate != nil {
 					tc.mutate(c)
 				}
@@ -146,18 +157,126 @@ func TestPolicyBlockSaysWhyNothingPasses(t *testing.T) {
 			if !strings.Contains(blk.Text, tc.want) || hasLabel(blk, LabelIncomplete) != tc.label {
 				t.Errorf("block %+v, want %q (label %t)", blk, tc.want, tc.label)
 			}
-			if strings.Contains(blk.Text, "desired memory limit") || c.Escalate() {
-				t.Errorf("bounds shown or escalated: %+v", blk)
+			if strings.Contains(blk.Text, "desired memory limit") {
+				t.Errorf("bounds shown: %+v", blk)
+			}
+			if c.Escalate() != tc.escalate || slices.Contains(c.FailedSources, SectionPolicy) != tc.escalate {
+				t.Errorf("escalate %t, failed sources %v, want %t", c.Escalate(), c.FailedSources, tc.escalate)
 			}
 		})
 	}
 }
 
-// failingGets fails every get.
-type failingGets struct{ client.Reader }
+// failingGets fails every get, or only the get of the object named only, with a server timeout.
+type failingGets struct {
+	client.Reader
+	only string
+}
 
-func (failingGets) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
-	return errors.New("connection refused")
+func (f failingGets) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if f.only != "" && key.Name != f.only {
+		return f.Reader.Get(ctx, key, obj, opts...)
+	}
+	return apierrors.NewTimeoutError("secret-looking server text", 1)
+}
+
+// A failed read is logged with the object's name and the API reason, never the error text.
+func TestPolicyBlockLogsFailedReads(t *testing.T) {
+	r := reader(t, oomObjects()...)
+	b := newBuilder(t, r, sources{}, func(c *Config) { withPolicies(r)(c); c.PolicyReader = failingGets{} })
+	var logged []string
+	ctx := logr.NewContext(context.Background(), funcr.New(func(prefix, args string) {
+		logged = append(logged, args)
+	}, funcr.Options{}))
+	if _, err := b.Build(ctx, incident(deploymentRef())); err != nil {
+		t.Fatal(err)
+	}
+	all := strings.Join(logged, "\n")
+	if !strings.Contains(all, "Failed to read RemediationPolicy") || !strings.Contains(all, `"remediationPolicy"="demo-memory"`) ||
+		!strings.Contains(all, `"reason"="Timeout"`) || strings.Contains(all, "secret-looking") {
+		t.Errorf("log:\n%s", all)
+	}
+}
+
+// Bounds are shown only for a subject the builder resolved; for one that is gone, unread or unwatched the
+// block says why, and for a kind the builder does not read it shows the bounds and says the subject was not
+// checked.
+func TestPolicyBlockNeedsAResolvedSubject(t *testing.T) {
+	cases := map[string]struct {
+		objs  []client.Object
+		ref   remediationv1alpha1.ObjectRef
+		read  client.Reader
+		want  string
+		label bool
+	}{
+		"gone": {nil, deploymentRef(), nil, "No policy bounds are shown: the subject no longer exists", false},
+		"other UID": {oomObjects(), func() remediationv1alpha1.ObjectRef {
+			r := deploymentRef()
+			r.UID = "uid-other"
+			return r
+		}(), nil, "No policy bounds are shown: the subject no longer exists", false},
+		"unread": {oomObjects(), deploymentRef(), failingGets{only: webName},
+			"No policy bounds are shown: the subject could not be read.", true},
+		"unwatched": {nil, func() remediationv1alpha1.ObjectRef {
+			r := deploymentRef()
+			r.Namespace = otherNS
+			return r
+		}(), nil, "No policy bounds are shown: the subject is in a namespace the analyzer does not watch.", false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := reader(t, append(tc.objs, labPolicy(), settingsObject())...)
+			c := build(t, newBuilder(t, r, sources{}, func(c *Config) {
+				withPolicies(r)(c)
+				if tc.read != nil {
+					f := tc.read.(failingGets)
+					f.Reader = r
+					c.Objects = f
+				}
+			}), incident(tc.ref))
+			blk := one(t, c, SectionPolicy)
+			if !strings.Contains(blk.Text, tc.want) || strings.Contains(blk.Text, "desired memory limit") ||
+				hasLabel(blk, LabelIncomplete) != tc.label {
+				t.Errorf("block %+v, want %q", blk, tc.want)
+			}
+		})
+	}
+
+	so := remediationv1alpha1.ObjectRef{APIVersion: "keda.sh/v1alpha1", Kind: "ScaledObject", Namespace: testNS,
+		Name: appName, UID: "uid-so"}
+	kp := labPolicy()
+	kp.Name = "demo-keda"
+	kp.Spec.Actions = []remediationv1alpha1.PolicyAction{{Type: remediationv1alpha1.ActionAdjustKedaMaxReplicas,
+		AdjustKedaMaxReplicas: &remediationv1alpha1.KedaMaxReplicasBounds{Min: 1, Max: 3, MaxIncreasePercent: 50}}}
+	st := settingsObject()
+	st.Spec.Modules = &remediationv1alpha1.Modules{Integrations: []remediationv1alpha1.ModuleName{"keda"}}
+	r := reader(t, kp, st)
+	c := build(t, newBuilder(t, r, sources{}, func(c *Config) {
+		withPolicies(r)(c)
+		c.Policies = map[remediationv1alpha1.ActionType]remediationv1alpha1.Name{
+			remediationv1alpha1.ActionAdjustKedaMaxReplicas: "demo-keda"}
+	}), incident(so))
+	blk := one(t, c, SectionPolicy)
+	for _, want := range []string{"desired maxReplicaCount from 1 to 3",
+		"this subject's kind is not read by the context builder, so whether it still exists is not checked here"} {
+		if !strings.Contains(blk.Text, want) {
+			t.Errorf("ScaledObject block lacks %q:\n%s", want, blk.Text)
+		}
+	}
+}
+
+// A container without a memory limit is named, with why no range is shown for it.
+func TestPolicyBlockSaysWhenAContainerHasNoLimit(t *testing.T) {
+	d := deployment()
+	d.Spec.Template.Spec.Containers = []corev1.Container{{Name: appName, Resources: limits("48Mi")}, {Name: "helper"}}
+	objs := oomObjects()
+	objs[0] = d
+	r := reader(t, append(objs, labPolicy(), settingsObject())...)
+	c := build(t, newBuilder(t, r, sources{}, withPolicies(r)), incident(deploymentRef()))
+	blk := one(t, c, SectionPolicy)
+	if !strings.Contains(blk.Text, "container helper: the pod template sets no memory limit, so no proposal can replace it") {
+		t.Errorf("block:\n%s", blk.Text)
+	}
 }
 
 // Without a policy reader the section is "not available"; a subject no action can change says so; a

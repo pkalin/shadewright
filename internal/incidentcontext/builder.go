@@ -230,7 +230,11 @@ func (b *Builder) Build(ctx context.Context, inc *remediationv1alpha1.Incident) 
 		Section: SectionGit, Provenance: ProvenanceGit, Availability: NotAvailable,
 		Text: "not available: no Git source is configured\n",
 	})
-	c.Blocks = append(c.Blocks, b.policyBlock(ctx, inc, &t))
+	policyBlk, failed := b.policyBlock(ctx, inc, &t)
+	if failed {
+		c.failed(SectionPolicy)
+	}
+	c.Blocks = append(c.Blocks, policyBlk)
 	if err := abandoned(ctx); err != nil {
 		return nil, err
 	}

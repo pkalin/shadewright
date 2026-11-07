@@ -110,12 +110,40 @@ func TestBoundsForUnknownLabels(t *testing.T) {
 		t.Fatal("BoundsFor modified the policy")
 	}
 	in.Policy.Spec.Targets.ObjectSelector = &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
-		{Key: teamLabel, Operator: "Bogus"}}}
+		{Key: teamLabel, Operator: bogusOperator}}}
 	if _, reason, _ := policy.BoundsFor(in.Policy, in.Settings, s); reason != policy.ReasonPolicyInvalid {
 		t.Errorf("invalid selector: reason %q", reason)
 	}
 	if _, reason, _ := policy.BoundsFor(nil, in.Settings, s); reason != policy.ReasonIncompleteInput {
 		t.Errorf("no policy: reason %q", reason)
+	}
+}
+
+// TestBoundsForInvalidSelectorInDecisionOrder checks that, with the labels unknown, an invalid objectSelector
+// is reported at the step where Preflight reports it: a check that comes first gives its own reason.
+func TestBoundsForInvalidSelectorInDecisionOrder(t *testing.T) {
+	cases := map[string]func(*policy.DecisionInput){
+		"request namespace": func(in *policy.DecisionInput) { in.Request.Namespace = otherNamespace },
+		"module disabled":   func(in *policy.DecisionInput) { in.Settings.Spec.Modules = nil },
+		"target namespace": func(in *policy.DecisionInput) {
+			in.Policy.Spec.Targets.Namespaces = []v1alpha1.Name{otherNamespace}
+		},
+		"selector only": func(*policy.DecisionInput) {},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := kedaInput()
+			in.Policy.Spec.Targets.ObjectSelector = &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+				{Key: teamLabel, Operator: bogusOperator}}}
+			mutate(&in)
+			pre, _ := policy.Preflight(in)
+			s := scopeOf(in)
+			s.LabelsKnown, s.Target.Labels = false, nil
+			_, reason, msg := policy.BoundsFor(in.Policy, in.Settings, s)
+			if pre.Reason == "" || reason != pre.Reason || msg != pre.Message {
+				t.Errorf("BoundsFor %q (%s), Preflight %q (%s)", reason, msg, pre.Reason, pre.Message)
+			}
+		})
 	}
 }
 

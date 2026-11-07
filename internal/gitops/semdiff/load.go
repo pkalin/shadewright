@@ -24,7 +24,9 @@ import (
 )
 
 // Load reads from git, at commit, every file the kustomization in dir builds from: the kustomization files
-// and the resource and patch files they list, following nested directories and components. The result is
+// and the resource and patch files they list, following nested directories and components. When dir has no
+// kustomization file, the result holds the one Flux would generate for it at dir/kustomization.yaml, built from
+// listings that count against MaxReads and MaxBuildBytes like reads. The result is
 // the Files of an [Input]. dir is the Kustomization's spec.path, relative to the repository root.
 //
 // It refuses with an [*Error] what [Check] would refuse in the tree itself (a field outside the allow-list,
@@ -61,6 +63,30 @@ func Load(ctx context.Context, git providers.GitProvider, commit, dir string) (m
 		downloaded += len(f.Data)
 		return f.Data, true, nil
 	})
+	// A listing counts as a read, and sourcemap.ListEntryBytes per entry against MaxBuildBytes, as in the
+	// source mapping.
+	w.root = root
+	w.generate = func(ctx context.Context, d string) ([]providers.DirEntry, error) {
+		if reads++; reads > MaxReads {
+			return nil, refuse(ReasonTooLarge, fmt.Sprintf("the build needs more than %d file reads", MaxReads))
+		}
+		entries, err := git.ListDir(ctx, commit, d)
+		switch {
+		case providers.IsNotFound(err):
+			return nil, refuse(ReasonFileMissing, "directory "+d+" has no kustomization file and is not a directory in the tree")
+		case providers.IsTooLarge(err), err == nil && len(entries) > providers.MaxDirEntries:
+			return nil, refuse(ReasonTooLarge, fmt.Sprintf("directory %s holds more than %d entries", d, providers.MaxDirEntries))
+		case err != nil:
+			retry, _ := providers.RetryAfter(err)
+			return nil, &sourcemap.TransientError{Op: "list " + d, RetryAfter: retry}
+		}
+		cost := len(entries) * sourcemap.ListEntryBytes
+		if cost > MaxBuildBytes-downloaded {
+			return nil, refuse(ReasonTooLarge, fmt.Sprintf("the build processes more than %d bytes", MaxBuildBytes))
+		}
+		downloaded += cost
+		return entries, nil
+	}
 	if err := w.walk(ctx, root, kindKustomization, 0); err != nil {
 		return nil, err
 	}

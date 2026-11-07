@@ -134,6 +134,10 @@ func (g *gatedGit) ReadFile(ctx context.Context, commit, path string, limit int)
 	return g.git.ReadFile(ctx, commit, path, limit)
 }
 
+func (g *gatedGit) ListDir(ctx context.Context, commit, path string) ([]providers.DirEntry, error) {
+	return g.git.ListDir(ctx, commit, path)
+}
+
 func (g *gatedGit) BranchHead(ctx context.Context, branch string) (string, error) {
 	return g.git.BranchHead(ctx, branch)
 }

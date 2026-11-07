@@ -91,7 +91,7 @@ The executor maps the live object to its file through Flux labels, the `Kustomiz
 | `SourceNotFound` | The `GitRepository` does not exist | Restore it |
 | `SourceNotBranch` | The `GitRepository` does not track only `spec.ref.branch` (no ref, or a tag, semver, name or commit is set) | Track a branch |
 | `SourceIncludes` | The `GitRepository` has `spec.include` | Remove the include |
-| `SourceOptions` | The `GitRepository` is suspended or sets `ignore`, `recurseSubmodules` or `sparseCheckout`, or a `.sourceignore` file is on the searched paths | Remove the option or file |
+| `SourceOptions` | The `GitRepository` is suspended or sets `ignore`, `recurseSubmodules` or `sparseCheckout`, or a `.sourceignore` file is on the searched paths, or a path without a kustomization file holds a name Flux leaves out of its artifact by default (`.git*`, `.github`, `.circleci`, `cloudbuild.yaml`, `appveyor.yml`, `.sops.yaml`, `.flux.yaml` and other CI files) | Remove the option or file |
 | `SourceNotReady` | The `GitRepository` is not `Ready` for its current generation | Fix the source (URL, credentials) and wait |
 | `RevisionMismatch` | The Kustomization has not applied the revision its source last fetched, or that revision is not from the tracked branch | Wait for Flux to catch up, then apply a new request |
 
@@ -116,12 +116,12 @@ All `NeedsIntervention`, on `PolicyAllowed`. The mapping reads plain kustomize m
 
 | Reason | Cause | Fix |
 | --- | --- | --- |
-| `InvalidPath` | `spec.path`, or a path in a kustomization file, is not a plain relative path inside the repository | Use a relative path |
-| `NoKustomizationFile` | A directory has no kustomization file (Flux would generate one) | Add a `kustomization.yaml` listing the resources |
+| `InvalidPath` | `spec.path`, a path in a kustomization file, or a name listed in a path without a kustomization file, is not a plain relative path inside the repository (a hidden file such as `.gitkeep` in such a path counts) | Use a relative path; move hidden files out of a path Flux generates a kustomization for, or add a `kustomization.yaml` |
+| `NoKustomizationFile` | A directory that a kustomization file lists as a resource has no kustomization file (kustomize would fail too), or the Kustomization's `spec.path` is not a directory at the branch head. A path without a kustomization file is searched as Flux builds it (#122) | Add a `kustomization.yaml` to the listed directory, or correct `spec.path` |
 | `UnsupportedKustomization` | A kustomization file uses more than plain `resources`: patches, generators, components, transformers, prefixes, a namespace or remote resources | Flatten the layout |
 | `FileNotReadable` | A file the build needs is missing, over 1 MiB or not valid YAML | Fix the file |
-| `TooManyFiles` | The build is deeper than 8 directories, lists more than 256 files or needs more than 512 reads | Simplify the layout |
-| `InputTooLarge` | The build reads more than 16 MiB in all (exactly 16 MiB is accepted; a file past the budget is refused before it is downloaded, even when it is also over 1 MiB) or holds more than 4096 YAML documents | Split the Kustomization or remove what it does not need |
+| `TooManyFiles` | The build is deeper than 8 kustomization directories (5 listed directories below a path without a kustomization file), lists more than 256 files, needs more than 512 reads and listings, or lists a directory of more than 1000 entries | Simplify the layout |
+| `InputTooLarge` | The build reads more than 16 MiB in all, directory listings counted at 128 bytes per entry (exactly 16 MiB is accepted; a file past the budget is refused before it is downloaded, even when it is also over 1 MiB) or holds more than 4096 YAML documents | Split the Kustomization or remove what it does not need |
 | `DeclarationNotFound` | No document declares the object (for example a generator or patch produces it) | Declare it in a plain manifest |
 | `AmbiguousDeclaration` | More than one document could declare it | Keep exactly one |
 
@@ -204,8 +204,8 @@ Before committing, and again when the target branch moves while the pull request
 | --- | --- |
 | `InvalidInput` | The target, action, paths or file set are not usable |
 | `UnsupportedKustomization` | A kustomization file uses generators, Helm charts, plugins, replacements or anything outside the allow-list |
-| `InvalidReference` | A kustomization refers to a URL, remote base, absolute path or a path leaving the repository |
-| `FileMissing` | The build needs a file that is missing, or a directory has no kustomization file or more than one |
+| `InvalidReference` | A kustomization refers to a URL, remote base, absolute path or a path leaving the repository, or a path without a kustomization file lists a name that is not a plain path segment |
+| `FileMissing` | The build needs a file that is missing, a listed directory has no kustomization file or more than one, or the path is not a directory (a path without a kustomization file is rendered from the one Flux would generate) |
 | `TooLarge` | A limit was hit: file size, number of files or reads, depth, or directory visits |
 | `InvalidYAML` | A kustomization file does not parse or has a duplicate key |
 | `RenderFailed` | Kustomize cannot build the path, before or after the change |
@@ -218,7 +218,7 @@ Before committing, and again when the target branch moves while the pull request
 | `PreviousValueDiffers` | The rendered target before the change does not hold the previous value: something else sets the field |
 | `DesiredValueMissing` | The rendered target after the change lacks the desired value, for example an overlay overrides it |
 | `FieldNotFound` | The rendered target does not set the field |
-| `SourceIgnored` | A `.sourceignore` applies to a directory of the build |
+| `SourceIgnored` | A `.sourceignore` applies to a directory of the build, or a path without a kustomization file holds a name Flux leaves out of its artifact by default |
 | `SchemaInvalid` | The changed object fails the basic schema checks |
 
 Fix for all: make the build plain, so the one value is declared once and nothing overrides it, then apply a new request.

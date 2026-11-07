@@ -37,6 +37,7 @@ import (
 const (
 	opBranchHead   = "GitHub branch head"
 	opReadFile     = "GitHub read file"
+	opListDir      = "GitHub list directory"
 	opCreateBranch = "GitHub create branch"
 	opCommitFile   = "GitHub commit file"
 	opOpenCR       = "GitHub open pull request"
@@ -49,6 +50,10 @@ const (
 	modeFile       = "100644"
 	modeExecutable = "100755"
 	modeTree       = "040000"
+	modeSymlink    = "120000"
+	typeBlob       = "blob"
+	typeTree       = "tree"
+	typeCommit     = "commit"
 	stateOpen      = "open"
 	stateClosed    = "closed"
 )
@@ -148,38 +153,115 @@ func (p *Provider) tree(ctx context.Context, op, sha string) (treeJSON, error) {
 // failure to read a tree (including a 404 or 422 for the commit) is returned as it is.
 func (p *Provider) lookup(ctx context.Context, op, commit, path string) (string, treeEntry, error) {
 	segs := strings.Split(path, "/")
-	t, err := p.tree(ctx, op, commit)
+	root, t, err := p.descend(ctx, op, commit, segs[:len(segs)-1])
 	if err != nil {
 		return "", treeEntry{}, err
 	}
+	e, err := entry(op, t, segs[len(segs)-1])
+	if err != nil {
+		return "", treeEntry{}, err
+	}
+	// Only regular files: never a directory, a submodule (type commit) or a symbolic link (120000).
+	if !isRegularFile(e) {
+		return "", treeEntry{}, fmt.Errorf("%s: not a regular file: %w", op, providers.ErrPathNotInTree)
+	}
+	return root, e, nil
+}
+
+// descend reads the root tree at commit, then one tree per segment of dirs, and returns the root tree's SHA and
+// the last tree read. ErrPathNotInTree when a segment is missing or not a directory; any other failure to read
+// a tree is returned as it is.
+func (p *Provider) descend(ctx context.Context, op, commit string, dirs []string) (string, treeJSON, error) {
+	t, err := p.tree(ctx, op, commit)
+	if err != nil {
+		return "", treeJSON{}, err
+	}
 	root := t.SHA
-	for i, seg := range segs {
-		idx := slices.IndexFunc(t.Tree, func(e treeEntry) bool { return e.Path == seg })
-		if idx < 0 {
-			if t.Truncated {
-				return "", treeEntry{}, errors.New(op + ": directory listing is truncated")
-			}
-			return "", treeEntry{}, fmt.Errorf("%s: file %w", op, providers.ErrPathNotInTree)
+	for _, seg := range dirs {
+		e, err := entry(op, t, seg)
+		if err != nil {
+			return "", treeJSON{}, err
 		}
-		e := t.Tree[idx]
-		if !validSHA(e.SHA) {
-			return "", treeEntry{}, errors.New(op + ": GitHub returned an unexpected tree entry")
-		}
-		if i == len(segs)-1 {
-			// Only regular files: never a directory, a submodule (type commit) or a symbolic link (120000).
-			if e.Type != "blob" || (e.Mode != modeFile && e.Mode != modeExecutable) {
-				return "", treeEntry{}, fmt.Errorf("%s: not a regular file: %w", op, providers.ErrPathNotInTree)
-			}
-			return root, e, nil
-		}
-		if e.Type != "tree" || e.Mode != modeTree {
-			return "", treeEntry{}, fmt.Errorf("%s: file %w", op, providers.ErrPathNotInTree)
+		if e.Type != typeTree || e.Mode != modeTree {
+			return "", treeJSON{}, fmt.Errorf("%s: file %w", op, providers.ErrPathNotInTree)
 		}
 		if t, err = p.tree(ctx, op, e.SHA); err != nil {
-			return "", treeEntry{}, err
+			return "", treeJSON{}, err
 		}
 	}
-	return "", treeEntry{}, fmt.Errorf("%s: file %w", op, providers.ErrPathNotInTree)
+	return root, t, nil
+}
+
+// entry returns the entry of t named seg: ErrPathNotInTree when there is none, an error when t is truncated
+// and so may hold it, or when the entry's SHA is not valid.
+func entry(op string, t treeJSON, seg string) (treeEntry, error) {
+	idx := slices.IndexFunc(t.Tree, func(e treeEntry) bool { return e.Path == seg })
+	if idx < 0 {
+		if t.Truncated {
+			return treeEntry{}, errors.New(op + ": directory listing is truncated")
+		}
+		return treeEntry{}, fmt.Errorf("%s: file %w", op, providers.ErrPathNotInTree)
+	}
+	e := t.Tree[idx]
+	if !validSHA(e.SHA) {
+		return treeEntry{}, errors.New(op + ": GitHub returned an unexpected tree entry")
+	}
+	return e, nil
+}
+
+// isRegularFile reports whether e is a regular file, executable or not.
+func isRegularFile(e treeEntry) bool {
+	return e.Type == typeBlob && (e.Mode == modeFile || e.Mode == modeExecutable)
+}
+
+// ListDir lists one directory at a commit through the Git Trees API, not recursively: one tree request per
+// directory segment, as for ReadFile. Each answer is bounded by the JSON body limit, and a directory of more
+// than providers.MaxDirEntries entries is refused with ErrTooLarge. Symbolic links (mode 120000) and
+// submodules (type commit) are skipped. Any other entry that is neither a regular file nor a directory, or
+// whose name is not one valid path segment, is an error rather than skipped, since GitHub does not return one.
+func (p *Provider) ListDir(ctx context.Context, commit, path string) ([]providers.DirEntry, error) {
+	if !validSHA(commit) {
+		return nil, errors.New(opListDir + ": commit is not a full SHA")
+	}
+	var dirs []string
+	if path != "." {
+		if !validPath(path) {
+			return nil, errors.New(opListDir + ": path is invalid")
+		}
+		dirs = strings.Split(path, "/")
+	}
+	ctx, cancel := p.withTimeout(ctx)
+	defer cancel()
+	_, t, err := p.descend(ctx, opListDir, commit, dirs)
+	if err != nil {
+		return nil, err
+	}
+	if len(t.Tree) > providers.MaxDirEntries {
+		return nil, fmt.Errorf("%s: %w", opListDir, providers.ErrTooLarge)
+	}
+	if t.Truncated {
+		return nil, errors.New(opListDir + ": directory listing is truncated")
+	}
+	out := make([]providers.DirEntry, 0, len(t.Tree))
+	for _, e := range t.Tree {
+		var typ providers.DirEntryType
+		switch {
+		case e.Type == typeCommit || (e.Type == typeBlob && e.Mode == modeSymlink):
+			continue
+		case isRegularFile(e):
+			typ = providers.DirEntryFile
+		case e.Type == typeTree && e.Mode == modeTree:
+			typ = providers.DirEntryDir
+		default:
+			return nil, errors.New(opListDir + ": GitHub returned an unexpected tree entry")
+		}
+		if !validPath(e.Path) || strings.Contains(e.Path, "/") {
+			return nil, errors.New(opListDir + ": GitHub returned an unexpected tree entry")
+		}
+		out = append(out, providers.DirEntry{Name: e.Path, Type: typ})
+	}
+	slices.SortFunc(out, func(a, b providers.DirEntry) int { return strings.Compare(a.Name, b.Name) })
+	return out, nil
 }
 
 // ReadFile returns a regular file at a commit. The size GitHub reports in the tree entry is checked against
@@ -412,7 +494,7 @@ func (p *Provider) CommitFile(
 	tree, err := p.post(ctx, "/git/trees", struct {
 		BaseTree string     `json:"base_tree"`
 		Tree     []treeItem `json:"tree"`
-	}{root, []treeItem{{Path: change.Path, Mode: entry.Mode, Type: "blob", SHA: blob}}})
+	}{root, []treeItem{{Path: change.Path, Mode: entry.Mode, Type: typeBlob, SHA: blob}}})
 	if err != nil {
 		return "", err
 	}

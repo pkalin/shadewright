@@ -483,6 +483,131 @@ func TestReadFileChecksContentHash(t *testing.T) {
 	}
 }
 
+// The root holds a symbolic link (link.yaml) and a submodule (vendor): both are skipped, never followed (#122).
+func TestListDir(t *testing.T) {
+	h := newHarness(t, get("/git/trees/"+shaBase, "tree_root.json"))
+	got, err := h.p.ListDir(ctx, shaBase, ".")
+	want := []providers.DirEntry{{Name: "README.md", Type: providers.DirEntryFile}, {Name: "apps", Type: providers.DirEntryDir}}
+	if err != nil || !slices.Equal(got, want) {
+		t.Fatalf("ListDir(.) = %v, %v, want %v", got, err, want)
+	}
+
+	h = newHarness(t, readSteps()...)
+	got, err = h.p.ListDir(ctx, shaBase, "apps")
+	want = []providers.DirEntry{{Name: "big.yaml", Type: providers.DirEntryFile},
+		{Name: "deploy.yaml", Type: providers.DirEntryFile}, {Name: "run.sh", Type: providers.DirEntryFile}}
+	if err != nil || !slices.Equal(got, want) {
+		t.Fatalf("ListDir(apps) = %v, %v, want %v", got, err, want)
+	}
+}
+
+// A path that is not a directory in the tree is ErrPathNotInTree, as for ReadFile; a missing commit or a
+// failing host is a plain not found, which a cache must not keep.
+func TestListDirNotADirectory(t *testing.T) {
+	for _, path := range []string{"README.md", "link.yaml", "vendor", "missing", deployPath, "vendor/x"} {
+		t.Run(path, func(t *testing.T) {
+			steps := []step{get("/git/trees/"+shaBase, "tree_root.json")}
+			if strings.HasPrefix(path, "apps/") {
+				steps = readSteps()
+			}
+			h := newHarness(t, steps...)
+			_, err := h.p.ListDir(ctx, shaBase, path)
+			if !providers.IsPathNotInTree(err) {
+				t.Fatalf("ListDir(%s) = %v, want a path not in the tree", path, err)
+			}
+			assertSafe(t, err)
+		})
+	}
+	h := newHarness(t, status(http.MethodGet, "/git/trees/"+shaOld, http.StatusNotFound, fxForbidden))
+	if _, err := h.p.ListDir(ctx, shaOld, "apps"); !providers.IsNotFound(err) || providers.IsPathNotInTree(err) {
+		t.Fatalf("missing commit: %v, want a plain not found", err)
+	}
+}
+
+// treeBody returns a tree answer holding the given entries.
+func treeBody(entries ...string) string {
+	return `{"sha":"` + shaApps + `","tree":[` + strings.Join(entries, ",") + `],"truncated":false}`
+}
+
+func blobEntry(name string) string {
+	return `{"path":"` + name + `","mode":"100644","type":"blob","sha":"` + shaDeploy + `","size":1}`
+}
+
+func TestListDirBounds(t *testing.T) {
+	wide := make([]string, providers.MaxDirEntries+1)
+	for i := range wide {
+		wide[i] = blobEntry(fmt.Sprintf("f%d.yaml", i))
+	}
+	tree := func(body string) step { s := get("/git/trees/"+shaApps, ""); s.raw = body; return s }
+	root := get("/git/trees/"+shaBase, "tree_root.json")
+
+	h := newHarness(t, root, tree(treeBody(wide...)))
+	if _, err := h.p.ListDir(ctx, shaBase, "apps"); !providers.IsTooLarge(err) {
+		t.Errorf("ListDir of %d entries = %v, want ErrTooLarge", len(wide), err)
+	}
+	h = newHarness(t, root, tree(treeBody(wide[:providers.MaxDirEntries]...)))
+	if got, err := h.p.ListDir(ctx, shaBase, "apps"); err != nil || len(got) != providers.MaxDirEntries {
+		t.Errorf("ListDir of MaxDirEntries entries = %d entries, %v", len(got), err)
+	}
+
+	truncated := `{"sha":"` + shaApps + `","tree":[` + blobEntry("a.yaml") + `],"truncated":true}`
+	h = newHarness(t, root, tree(truncated))
+	if _, err := h.p.ListDir(ctx, shaBase, "apps"); err == nil || providers.IsNotFound(err) || providers.IsTooLarge(err) {
+		t.Errorf("truncated listing = %v, want an error that is neither not found nor too large", err)
+	}
+
+	for name, e := range map[string]string{
+		"slash":        blobEntry("a/b.yaml"),
+		"dot dot":      blobEntry(".."),
+		"unknown type": `{"path":"x","mode":"100644","type":"tag","sha":"` + shaDeploy + `"}`,
+		"tree mode":    `{"path":"x","mode":"100644","type":"tree","sha":"` + shaDeploy + `"}`,
+	} {
+		h = newHarness(t, root, tree(treeBody(blobEntry("a.yaml"), e)))
+		if _, err := h.p.ListDir(ctx, shaBase, "apps"); err == nil {
+			t.Errorf("%s: an unexpected tree entry was listed", name)
+		}
+	}
+
+	// An answer over the JSON bound is refused without reading it all.
+	big := &countingReader{left: 4 * maxJSONBody}
+	h = newHarness(t, root, get("/git/trees/"+shaApps, ""))
+	h.p.client.Transport = treeOverride{h.s, big}
+	if _, err := h.p.ListDir(ctx, shaBase, "apps"); err == nil {
+		t.Error("an answer over the JSON bound was accepted")
+	}
+	if big.read > maxJSONBody+1+32<<10 {
+		t.Errorf("read %d bytes, want at most about the JSON bound", big.read)
+	}
+}
+
+// treeOverride replaces the body of the apps tree answer.
+type treeOverride struct {
+	rt   http.RoundTripper
+	body io.Reader
+}
+
+func (o treeOverride) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := o.rt.RoundTrip(req)
+	if err == nil && strings.HasSuffix(req.URL.Path, "/git/trees/"+shaApps) {
+		resp.Body = io.NopCloser(o.body)
+	}
+	return resp, err
+}
+
+func TestListDirRefusesBadInput(t *testing.T) {
+	h := newHarness(t)
+	for _, path := range []string{"", "/apps", "apps/", "apps//x", "../apps", "./apps", ".git", "a\x00b"} {
+		if _, err := h.p.ListDir(ctx, shaBase, path); err == nil {
+			t.Errorf("ListDir(%q) was allowed", path)
+		}
+	}
+	for _, sha := range []string{"", target, "HEAD", shaBase[:39]} {
+		if _, err := h.p.ListDir(ctx, sha, "."); err == nil {
+			t.Errorf("ListDir at %q was allowed", sha)
+		}
+	}
+}
+
 func TestReadFileRefusesBadInput(t *testing.T) {
 	h := newHarness(t)
 	for _, path := range []string{"", "/apps/x", "apps/", "apps//x", "../x", "apps/../x", "./x", ".git/config",

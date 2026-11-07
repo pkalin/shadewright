@@ -606,7 +606,9 @@ func TestResolveStops(t *testing.T) {
 		{"Kustomization path is a URL", func(f *fixture) {
 			set(f.ks, "https://example.com/apps", "spec", "path")
 		}, ni, sourcemap.ReasonInvalidPath},
-		{"no kustomization file", func(f *fixture) { delete(f.files, ksFile) }, ni, sourcemap.ReasonNoKustomizationFile},
+		{"Kustomization path not in the tree", func(f *fixture) {
+			set(f.ks, "./apps/missing", "spec", "path")
+		}, ni, sourcemap.ReasonNoKustomizationFile},
 		{"nested directory without a kustomization file", func(f *fixture) {
 			f.files[ksFile] = ksWorkers
 		}, ni, sourcemap.ReasonNoKustomizationFile},

@@ -1955,6 +1955,7 @@ const (
 	opFind         = "FindChangeRequest"
 	opCreateBranch = "CreateBranch"
 	opReadFile     = "ReadFile"
+	opListDir      = "ListDir"
 )
 
 // faultyGit wraps the fake provider. It counts every call and injects faults the fake's hook cannot express:
@@ -2082,6 +2083,14 @@ func (f *faultyGit) ReadFile(ctx context.Context, sha, path string, limit int) (
 	}
 	file, err := f.Git.ReadFile(ctx, sha, path, limit)
 	return file, f.leave(ctx, opReadFile, err)
+}
+
+func (f *faultyGit) ListDir(ctx context.Context, sha, path string) ([]providers.DirEntry, error) {
+	if err := f.enter(opListDir, path); err != nil {
+		return nil, err
+	}
+	entries, err := f.Git.ListDir(ctx, sha, path)
+	return entries, f.leave(ctx, opListDir, err)
 }
 
 func (f *faultyGit) BranchHead(ctx context.Context, branch string) (string, error) {

@@ -87,6 +87,29 @@ func ReadLimit(limit int) int {
 	return min(max(limit, 0), MaxFileBytes)
 }
 
+// MaxDirEntries is the most entries GitProvider.ListDir accepts in one directory, counted before symbolic
+// links and submodules are skipped. A larger directory is refused with ErrTooLarge, so one listing stays small
+// whatever the repository holds.
+const MaxDirEntries = 1000
+
+// DirEntryType is the kind of a directory entry GitProvider.ListDir returns.
+type DirEntryType string
+
+// Directory entry types. Symbolic links and submodules are never listed.
+const (
+	// DirEntryFile is a regular file, executable or not.
+	DirEntryFile DirEntryType = "File"
+	// DirEntryDir is a directory (a Git tree).
+	DirEntryDir DirEntryType = "Dir"
+)
+
+// DirEntry is one entry of a directory at one commit: its name, one path segment that never holds a slash,
+// and its type.
+type DirEntry struct {
+	Name string
+	Type DirEntryType
+}
+
 // Lengths of a full Git object ID in lowercase hexadecimal.
 const (
 	SHA1HexLen   = 40
@@ -138,6 +161,15 @@ type GitProvider interface {
 	// Callers without a budget of their own pass MaxFileBytes. A limit of 0 still reads an empty file, and the
 	// not-found errors do not depend on the limit.
 	ReadFile(ctx context.Context, commit, path string, limit int) (File, error)
+
+	// ListDir returns the regular files and directories directly in one directory at a commit, sorted by
+	// name; it does not recurse. Symbolic links and submodules are skipped, never followed. path is "." for
+	// the repository root, otherwise a clean relative path. ErrNotFound when the commit does not exist, as
+	// for ReadFile; ErrPathNotInTree (which wraps ErrNotFound) only when the implementation read the tree at
+	// that commit and path is not a directory in it. ErrTooLarge when the directory holds more than
+	// MaxDirEntries entries, symbolic links and submodules included; implementations also bound the size of
+	// the host's answer, so a large directory cannot exhaust memory.
+	ListDir(ctx context.Context, commit, path string) ([]DirEntry, error)
 
 	// BranchHead returns the commit at the head of a branch. ErrNotFound when the branch does not exist.
 	BranchHead(ctx context.Context, branch string) (string, error)

@@ -1,0 +1,5 @@
+name: outage-model-unavailable
+source: outage
+attack: The model service is unavailable (a retryable error without a delay). The loop must hand the incident off, not retry without bound or invent a plan.
+expect:
+  reason: ModelUnavailable

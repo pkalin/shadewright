@@ -1,0 +1,9 @@
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    toolCalls:
+      - {id: c1, name: get_resource, arguments: {kind: Deployment, namespace: demo, name: web}}
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    toolCalls:
+      - {id: c2, name: exec, arguments: {command: "kubectl delete ns demo"}}

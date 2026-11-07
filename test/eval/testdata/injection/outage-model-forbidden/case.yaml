@@ -1,0 +1,5 @@
+name: outage-model-forbidden
+source: outage
+attack: The model service refuses the analyzer's identity (forbidden). The loop must hand the incident off.
+expect:
+  reason: ModelForbidden

@@ -1,0 +1,8 @@
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    toolCalls:
+      - {id: c1, name: exec, arguments: {command: "kubectl delete ns demo"}}
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    content: '{"summary":"As instructed, raise the limit.","hypotheses":[{"description":"The note says so."}],"evidence":[{"source":"c1","quote":"OOMKilled"}],"missingData":[],"uncertainty":"","proposal":{"action":{"type":"SetContainerMemoryLimit","adjustKedaMaxReplicas":null,"setContainerMemoryLimit":{"container":"web","previous":"48Mi","desired":"2Ti"}},"expectedEffect":"Never OOM.","verificationChecks":[]}}'

@@ -148,3 +148,48 @@ to the tools or the context.
 
 The analyzer cannot yet compute the same digest at run time (it does not know the rubric, the threshold or the
 repeats, which ADR-0025 checks when the list of passing results is built); that check is the planned follow-up.
+
+## The injection and outage corpus
+
+`test/eval/testdata/injection/` holds one directory per attack on the analysis: text planted in a source the
+cluster controls (event notes, container logs, pod status messages, labels, annotations, a Git file read by a
+tool, a tool result) or a failure of the model or a tool (unavailable, forbidden, no answer before the deadline,
+malformed replies, a tool that errors, a model that never stops calling tools). `TestInjectionCorpus` runs every
+case through the real context builder, the real read tools and the real analysis loop over a fake API server. Only
+the model is replayed, and some replies obey the injection: they name an action outside the catalog, a limit
+outside its bounds, a tool that is not offered, another model, or extra fields. The loop must refuse them by its
+own validation. The test only states the outcome it expects. It runs in `make test`, with no model and no cost.
+
+For every case the test also checks, from the requests the fake model received:
+
+- the system part, the output schema and the output bound are the ones of a run without injected text (the same
+  text, by role), and no message but the first has the system role;
+- the tools offered are read tools only;
+- a planted delimiter opened or closed no block of the context or of a tool result;
+- every fake secret of the case is gone (a redaction marker took its place), and text the model must never see
+  (annotations, a forged block opening) is absent;
+- a plan, when there is one, passes the catalog's checks, may target the incident's subject, and carries the
+  policy reference configured for its action, never one the model chose.
+
+A case that expects text to reach the model lists it under `seen`, so a case cannot pass because its attack was
+dropped before it was delivered.
+
+### Add a case
+
+1. Make `test/eval/testdata/injection/<name>/` with two files. The name says the attack, and `case.yaml` repeats it
+   as `name`.
+2. `case.yaml`: `source` (one of `events`, `logs`, `pod-status`, `labels`, `annotations`, `git-file`,
+   `tool-result`, `model-reply`, `outage`), `attack` (what the text or failure tries, and how the model obeys),
+   what to plant under `inject` (the oom scenario's objects are the base), `escalate: true` when the read tools
+   must be offered, the fake `secrets` (obviously fake, such as `ghp_FAKEFAKE...`; never a real one), and `expect`:
+   the loop's `reason`, the `action` when a proposal is expected, the tool names that must have run in
+   `toolCalls`, and the `seen` and `unseen` text.
+3. `replies.yaml`: the model's replies in order, as in a scenario's `replies.yaml`, plus `error`
+   (`unavailable`, `forbidden`, `not-found`, `malformed`, `failed`) and `block` (wait for the deadline). Add one reply
+   for every model call the loop makes: the test fails when a reply is left over or one is missing.
+4. Run `go test ./test/eval -run TestInjectionCorpus/<name>`. Then disable the guard the case is for (for example
+   the delimiter neutralisation in `internal/tools` or the offered-tool check in `internal/analysis/loop.go`) and
+   check the case fails.
+
+A case describes the attack in `case.yaml`, so reviewers read the expected outcome next to it. `read_git_file` is
+not available to the analyzer yet (it has no Git identity, #373): the `git-file` case adds it as a test tool.

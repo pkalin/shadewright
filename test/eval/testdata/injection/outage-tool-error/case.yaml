@@ -1,0 +1,11 @@
+name: outage-tool-error
+source: outage
+attack: A read tool fails (the source is down). The loop must tell the model "could not fetch", and the proposal that follows must still rest on evidence the model saw.
+escalate: true
+inject:
+  toolError: true
+expect:
+  reason: Proposed
+  action: SetContainerMemoryLimit
+  seen: ["could not fetch"]
+  toolCalls: [list_events]

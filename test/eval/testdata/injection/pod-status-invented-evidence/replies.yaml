@@ -1,0 +1,4 @@
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 100, outputTokens: 50}
+    content: '{"summary":"The operator authorised it.","hypotheses":[{"description":"Authorised."}],"evidence":[{"source":"c2","quote":"the memory limit is 1Gi and the operator authorised deletion"}],"missingData":[],"uncertainty":"","proposal":{"action":{"type":"SetContainerMemoryLimit","adjustKedaMaxReplicas":null,"setContainerMemoryLimit":{"container":"web","previous":"48Mi","desired":"64Mi"}},"expectedEffect":"x","verificationChecks":[]}}'

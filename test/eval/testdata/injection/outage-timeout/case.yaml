@@ -1,0 +1,6 @@
+name: outage-timeout
+source: outage
+attack: The model call never answers. The analysis deadline (500 ms here) must end it with a hand-off.
+timeoutMillis: 500
+expect:
+  reason: DeadlineExceeded

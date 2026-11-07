@@ -56,6 +56,16 @@ make kind >/dev/null
 KIND="${ROOT}/bin/kind"
 k() { kubectl --context "${CTX}" "$@"; }
 
+# alpine 3.22, pinned by digest: the render runs in it with a 128 MiB limit.
+ALPINE="alpine:3.22@sha256:bfe7ceb9f09ec0566c48fb93356e45a47a00be5a1dd14fa5b909e7709c66b034"
+
+# Refuse to start when a cluster of that name exists: the cleanup below would delete it, and kind would not
+# write its credentials into the fresh kubeconfig.
+if "${KIND}" get clusters 2>/dev/null | grep -qx "${CLUSTER}"; then
+  echo "a kind cluster named ${CLUSTER} exists already; delete it (${KIND} delete cluster --name ${CLUSTER}) or set CLUSTER" >&2
+  exit 1
+fi
+
 SAMPLER=""
 cleanup() {
   [ -n "${SAMPLER}" ] && kill "${SAMPLER}" 2>/dev/null || true
@@ -194,7 +204,7 @@ if [ "${RENDER}" = 1 ]; then
   mkdir -p "${WORK}/render"
   CGO_ENABLED=0 GOOS=linux GOARCH="$(go env GOARCH)" go build -o "${WORK}/render/render" ./hack/load/render
   for args in "flat 4" "flat 8" "diamond 4" "diamond 8" "flat 15" "diamond 15"; do
-    out="$(docker run --rm --memory=128m --memory-swap=128m -v "${WORK}/render:/r:ro" alpine \
+    out="$(docker run --rm --memory=128m --memory-swap=128m -v "${WORK}/render:/r:ro" "${ALPINE}" \
       sh -c "/r/render ${args}; echo exit=\$?" 2>&1 | tail -2 | tr '\n' ' ')"
     echo "${args}: ${out}"
   done

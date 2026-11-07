@@ -30,8 +30,8 @@ const (
 	// ReasonFileMissing means the build needs a file that is not in the given set or not in the repository,
 	// or a directory has no kustomization file or more than one.
 	ReasonFileMissing Reason = "FileMissing"
-	// ReasonTooLarge means the build is over a limit: file size, number of files or reads, nesting depth, or
-	// the number of directory visits.
+	// ReasonTooLarge means the build is over a limit: file size, number of files or reads, nesting depth, the
+	// number of directory visits, the build bytes ([MaxBuildBytes]) or the rendered objects ([MaxObjects]).
 	ReasonTooLarge Reason = "TooLarge"
 	// ReasonInvalidYAML means a kustomization file does not parse or has a duplicate key.
 	ReasonInvalidYAML Reason = "InvalidYAML"

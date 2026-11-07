@@ -48,10 +48,13 @@ const (
 	// MaxBuildBytes bounds the input kustomize processes, with repetition: every visit of a directory adds
 	// the size of its kustomization file and of the resource and patch files it lists. A large base reached
 	// through many overlays is rendered once per path, so this bounds the work and memory of a render. It is
-	// the mapping's read budget, so one literal sets both.
-	MaxBuildBytes = sourcemap.MaxTotalBytes
-	// MaxObjects is the most objects one render may return.
-	MaxObjects = 4096
+	// its own budget, smaller than the mapping's read budget (sourcemap.MaxTotalBytes): a render holds about
+	// 13 MiB per MiB of input, so 4 MiB is what fits in the executor's 128 MiB memory limit with room for the
+	// rest of the process (design 8.2.2, #482). A larger build is refused, not killed.
+	MaxBuildBytes = 4 << 20
+	// MaxObjects is the most objects one render may return, the 1,000 objects of the supported repository
+	// (design 8.2) rounded up.
+	MaxObjects = 1024
 )
 
 const (

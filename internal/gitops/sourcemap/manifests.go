@@ -58,8 +58,8 @@ const (
 	// MaxTotalBytes is how many bytes one mapping reads in all, kustomization and .sourceignore lookups and
 	// cached reads included, so that many files near MaxFileBytes cannot add up without bound. Each read asks
 	// the provider for at most what is left of it, so the budget bounds what is downloaded, cached and parsed,
-	// and a build of exactly MaxTotalBytes resolves. The semantic diff takes its render budget from it
-	// (semdiff.MaxBuildBytes).
+	// and a build of exactly MaxTotalBytes resolves. The semantic diff has its own, smaller render budget
+	// (semdiff.MaxBuildBytes), since a render holds far more memory per byte than a read.
 	MaxTotalBytes = 16 << 20
 	// MaxDocuments is how many YAML documents one mapping decodes in all manifest files, and [ReadField] in
 	// its one file, ones holding only comments or blank lines included, so that a file of many small

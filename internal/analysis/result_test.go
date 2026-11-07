@@ -213,3 +213,26 @@ func TestPromptVersionCoversTheGeneratedParts(t *testing.T) {
 		t.Error("the system prompt does not hold the generated schema")
 	}
 }
+
+// The prompt and the schema say which value a previous field holds: the workload's spec as it is now,
+// in canonical form, not a running pod's or a metric's (#494).
+func TestPreviousFieldsAreDescribed(t *testing.T) {
+	schema := string(ResponseSchema())
+	prompt := systemPrompt(false, 0)
+	for _, want := range []string{
+		"The memory limit the workload's pod template sets for the container now, in Kubernetes' canonical form (for example 48Mi or 50M)",
+		"The maxReplicaCount the ScaledObject's spec holds now",
+	} {
+		if !strings.Contains(schema, want) {
+			t.Errorf("the schema lacks %q", want)
+		}
+	}
+	for _, want := range []string{
+		"previous is the limit the pod template sets now, in Kubernetes' canonical form (for example 48Mi or 50M)",
+		"previousValue is the maxReplicaCount the ScaledObject's spec holds now",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the prompt lacks %q", want)
+		}
+	}
+}

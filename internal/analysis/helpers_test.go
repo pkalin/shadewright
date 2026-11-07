@@ -24,6 +24,8 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -186,9 +188,16 @@ func testContext() incidentcontext.Context {
 			{Section: incidentcontext.SectionStatus, Provenance: incidentcontext.ProvenanceObjectStatus,
 				Availability: incidentcontext.Available, Text: statusText, Values: []string{statusValue}},
 		},
-		Pods: []string{"web-1"},
+		Pods:     []string{"web-1"},
+		Template: []incidentcontext.TemplateContainer{{Name: testContainer, MemoryLimit: new(resource.MustParse("256Mi"))}},
 	}
 }
+
+// testContainer is the container validResult proposes a change for, and desiredLimit its new limit.
+const (
+	testContainer = "app"
+	desiredLimit  = "512Mi"
+)
 
 // memoryPolicy is the policy configured for SetContainerMemoryLimit.
 const memoryPolicy = "memory"

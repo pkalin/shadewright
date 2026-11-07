@@ -20,15 +20,20 @@ limitations under the License.
 //
 // The model's structured output ([Result]) is the only way a proposal is made: there is no proposal tool.
 // Its JSON schema is generated from the Go types and the API's enums ([ResponseSchema]), so an action
-// outside the closed catalog cannot be expressed, and [DecodeResult] checks the same bounds in Go, then the
-// policy's catalog check (invariant 2); an action that fails it is handed off (ActionOutOfBounds) with no
+// outside the closed catalog cannot be expressed, and the loop's decoder checks the same bounds in Go; the
+// policy's catalog check (invariant 2) follows on the plan with the pod template's previous value, and an
+// action that fails it is handed off (ActionOutOfBounds) with no
 // retry and no feedback, so the model cannot search for what the policy allows. A proposal needs at least
 // one quote found verbatim within one data value of the context block or tool result it cites: only a value
 // from a source in an available block ([incidentcontext.Block.Data], [tools.Result.Data]), never text code
 // wrote around the values, never a block that is not available or could not be fetched, a header, labels, fixed
 // lines or boilerplate; and only a successful tool answer about the Incident's subject or one of its
 // attributed pods, never one about another object or none. The target is always the Incident's subject and
-// the RemediationPolicy the one configured for the action type, never chosen by the model. The [Controller], not the model, creates the
+// the RemediationPolicy the one configured for the action type, never chosen by the model. The previous value
+// of a memory limit change is the subject's pod template's, as the context builder read it, never the
+// model's ([incidentcontext.Context.Template], #494), and the catalog check runs on the plan with it; without
+// one, or when the template already holds the desired value or its value reverses the direction of the change,
+// the proposal is handed off (PreviousValueUnknown, NoChange, DirectionReversed). The [Controller], not the model, creates the
 // RemediationRequest, in the operator namespace with approvalRequired true; the executor's policy check
 // decides it (invariant 1). The result has no confidence field, and a reply that adds one is invalid.
 //

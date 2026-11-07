@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/incidentcontext"
@@ -43,8 +44,8 @@ func TestTriageProposes(t *testing.T) {
 		t.Fatalf("outcome = %+v, want a proposal", out)
 	}
 	p := out.Plan
-	if p.Action.Type != remediationv1alpha1.ActionSetContainerMemoryLimit || p.Action.SetContainerMemoryLimit.Container != "app" ||
-		p.Action.SetContainerMemoryLimit.Desired.String() != "512Mi" || p.PolicyRef != memoryPolicy {
+	if p.Action.Type != remediationv1alpha1.ActionSetContainerMemoryLimit || p.Action.SetContainerMemoryLimit.Container != testContainer ||
+		p.Action.SetContainerMemoryLimit.Desired.String() != desiredLimit || p.PolicyRef != memoryPolicy {
 		t.Errorf("plan = %+v", p)
 	}
 	if len(p.Checks) != 1 || p.Checks[0] != remediationv1alpha1.CheckNoNewOOMKills {
@@ -630,10 +631,10 @@ func TestOutOfCatalogProposalIsRefused(t *testing.T) {
 // corrective message naming the rule and no escalation, so the model cannot search for what the policy
 // allows (decided 2026-11-05).
 func TestOutOfBoundsActionIsHandedOffWithoutRetry(t *testing.T) {
-	unchanged := strings.Replace(validResult, `"desired":"512Mi"`, `"desired":"256Mi"`, 1)
+	tooLarge := strings.Replace(validResult, `"desired":"512Mi"`, `"desired":"2Ti"`, 1)
 	t.Run("triage", func(t *testing.T) {
 		f := newFixture()
-		f.triage.steps = []step{reply(unchanged), reply(validResult)}
+		f.triage.steps = []step{reply(tooLarge), reply(validResult)}
 		f.escalation.steps = []step{reply(validResult)}
 		out := f.analyze(t, testLimits())
 		if out.Reason != ReasonActionOutOfBounds || out.Plan != nil || out.Escalated ||
@@ -645,7 +646,7 @@ func TestOutOfBoundsActionIsHandedOffWithoutRetry(t *testing.T) {
 	t.Run("escalation", func(t *testing.T) {
 		f := newFixture()
 		f.builder.c.Truncated = true
-		f.escalation.steps = []step{reply(unchanged), reply(validResult)}
+		f.escalation.steps = []step{reply(tooLarge), reply(validResult)}
 		out := f.analyze(t, testLimits())
 		if out.Reason != ReasonActionOutOfBounds || out.Plan != nil || f.escalation.calls() != 1 {
 			t.Errorf("reason %s, calls %d: want ActionOutOfBounds after one call", out.Reason, f.escalation.calls())
@@ -800,5 +801,100 @@ func TestToolResultEvidenceIsTheDataOnly(t *testing.T) {
 				t.Fatalf("the test quote %q is not in what the model saw: %q", tc.quote, content)
 			}
 		})
+	}
+}
+
+// The previous memory limit of a proposal is the pod template's, as the context builder read it, never the
+// model's (#494): during a rollout an old pod may still run with another limit, and a model may write the
+// value as a byte count. A container the template does not have, or sets no limit for, is handed off.
+func TestPreviousMemoryLimitComesFromThePodTemplate(t *testing.T) {
+	const templateLimit = "48Mi"
+	change := func(previous, desired string) string {
+		return strings.Replace(validResult, `"previous":"256Mi","desired":"512Mi"`,
+			`"previous":"`+previous+`","desired":"`+desired+`"`, 1)
+	}
+	limit := func(q string) *resource.Quantity { return new(resource.MustParse(q)) }
+	app := func(q string) []incidentcontext.TemplateContainer {
+		return []incidentcontext.TemplateContainer{{Name: testContainer, MemoryLimit: limit(q)}}
+	}
+	cases := map[string]struct {
+		reply    string
+		template []incidentcontext.TemplateContainer
+		reason   Reason
+		// previous and desired are the plan's, for a proposal.
+		previous, desired string
+	}{
+		"an old pod's limit during a rollout": {change("64Mi", desiredLimit), app(templateLimit), ReasonProposed, templateLimit, desiredLimit},
+		"a byte count":                        {change("48012416", desiredLimit), app(templateLimit), ReasonProposed, templateLimit, desiredLimit},
+		"the template's own value": {change(templateLimit, desiredLimit),
+			[]incidentcontext.TemplateContainer{{Name: "sidecar"}, {Name: testContainer, MemoryLimit: limit(templateLimit)}},
+			ReasonProposed, templateLimit, desiredLimit},
+		// A reply whose two values are equal states no direction, so the template's value never picks one.
+		"an old pod's limit as both values":   {change(desiredLimit, desiredLimit), app(templateLimit), ReasonDirectionReversed, "", ""},
+		"a restore to an old pod's limit":     {change("64Mi", "64Mi"), app(templateLimit), ReasonDirectionReversed, "", ""},
+		"a decimal template limit":            {change("50M", desiredLimit), app("50M"), ReasonProposed, "50M", desiredLimit},
+		"the template's value as desired":     {change("64Mi", templateLimit), app(templateLimit), ReasonNoChange, "", ""},
+		"an increase that becomes a decrease": {change("64Mi", "128Mi"), app("256Mi"), ReasonDirectionReversed, "", ""},
+		"a decrease that becomes an increase": {change("256Mi", "128Mi"), app("64Mi"), ReasonDirectionReversed, "", ""},
+		"out of bounds once substituted":      {change("64Mi", "2Mi"), app("2Ti"), ReasonActionOutOfBounds, "", ""},
+		"no limit in the template": {change("64Mi", desiredLimit),
+			[]incidentcontext.TemplateContainer{{Name: testContainer}}, ReasonPreviousValueUnknown, "", ""},
+		"no such container in the template": {change("64Mi", desiredLimit),
+			[]incidentcontext.TemplateContainer{{Name: "sidecar", MemoryLimit: limit(templateLimit)}},
+			ReasonPreviousValueUnknown, "", ""},
+		"the template was not read": {change("64Mi", desiredLimit), nil, ReasonPreviousValueUnknown, "", ""},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture()
+			f.builder.c.Template = c.template
+			f.triage.steps = []step{reply(c.reply)}
+			out := f.analyze(t, testLimits())
+			if out.Reason != c.reason {
+				t.Fatalf("reason %s, want %s", out.Reason, c.reason)
+			}
+			if c.reason != ReasonProposed {
+				if out.Plan != nil {
+					t.Errorf("a hand-off carries the plan %+v", out.Plan)
+				}
+				if f.triage.calls() != 1 {
+					t.Errorf("%d triage calls: a hand-off is never retried", f.triage.calls())
+				}
+				return
+			}
+			p := out.Plan.Action.SetContainerMemoryLimit
+			if p == nil || p.Previous.String() != c.previous || p.Desired.String() != c.desired || p.Container != testContainer {
+				t.Errorf("plan %+v: want %s from %s to %s", p, testContainer, c.previous, c.desired)
+			}
+		})
+	}
+}
+
+// A subject without a namespace or UID cannot be targeted: the proposal is refused as such, whatever the
+// template holds, as on every other path.
+func TestPreviousFromTemplateLeavesAnUntargetableSubjectToTheTargetCheck(t *testing.T) {
+	for name, clear := range map[string]func(*remediationv1alpha1.ObjectRef){
+		"no UID":       func(s *remediationv1alpha1.ObjectRef) { s.UID = "" },
+		"no namespace": func(s *remediationv1alpha1.ObjectRef) { s.Namespace = "" },
+	} {
+		// A model's previous value out of the bounds is never checked: the target check comes first.
+		const inBounds, outOfBounds = "128Mi", "2Ti"
+		for _, previous := range []string{inBounds, outOfBounds} {
+			t.Run(name+" previous "+previous, func(t *testing.T) {
+				f := newFixture()
+				f.builder.c.Template = nil
+				f.triage.steps = []step{reply(strings.Replace(validResult, `"previous":"256Mi"`, `"previous":"`+previous+`"`, 1))}
+				a, err := New(f.cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				inc := incident()
+				clear(&inc.Spec.Subject)
+				out, err := a.Analyze(t.Context(), inc, testLimits())
+				if err != nil || out.Reason != ReasonTargetNotSupported {
+					t.Errorf("reason %s (%v), want TargetNotSupported", out.Reason, err)
+				}
+			})
+		}
 	}
 }

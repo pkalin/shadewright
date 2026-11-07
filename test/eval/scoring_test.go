@@ -25,6 +25,7 @@ import (
 	"sync"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -341,7 +342,8 @@ func TestManifestDigestCoversRunLimitsAndScenarioFiles(t *testing.T) {
 			t.Errorf("%s: digest unchanged (%v)", name, err)
 		}
 	}
-	for _, file := range []string{"incident.yaml", "objects.yaml", metricsFile, "replies.yaml"} {
+	for _, file := range []string{"incident.yaml", "objects.yaml", metricsFile, "replies.yaml",
+		filepath.Join(variantsDir, "rollout", "objects.yaml"), filepath.Join(variantsDir, "rollout", "variant.yaml")} {
 		dir := t.TempDir()
 		if err := os.CopyFS(dir, os.DirFS(scenariosDir)); err != nil {
 			t.Fatal(err)
@@ -523,5 +525,65 @@ func TestObjectsSplitOnAnySeparator(t *testing.T) {
 	}
 	if len(got.objects) != len(s.objects) {
 		t.Errorf("%d objects with the changed separators, %d with the original", len(got.objects), len(s.objects))
+	}
+}
+
+// A variant is scored against its scenario's expected.yaml, rubric and Incident, with its own objects and
+// replies, and says what it changes.
+func TestVariantsShareTheScenarioRubric(t *testing.T) {
+	scheme, err := newScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, err := loadScenarios(scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var base, rollout *scenario
+	for _, s := range all {
+		switch s.name {
+		case scnOOM:
+			base = s
+		case scnOOM + "/rollout":
+			rollout = s
+		}
+	}
+	if base == nil || rollout == nil {
+		t.Fatal("the oom scenario or its rollout variant was not loaded")
+	}
+	if rollout.expected.Name != scnOOM || len(rollout.rubric.Facts) != len(base.rubric.Facts) ||
+		rollout.incident.UID != base.incident.UID || len(rollout.objects) == len(base.objects) {
+		t.Errorf("the variant does not share the scenario's rubric and Incident with its own objects")
+	}
+	dir := t.TempDir()
+	if err := os.CopyFS(dir, os.DirFS(filepath.Join(scenariosDir, scnOOM))); err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G703 -- a file of the test's own temp directory
+	if err := os.WriteFile(filepath.Join(dir, variantsDir, "rollout", "variant.yaml"), []byte("about: \"\"\n"),
+		0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadVariants(scheme, dir, base); err == nil {
+		t.Error("a variant that does not say what it changes was loaded")
+	}
+}
+
+// A memory plan for a container whose template sets no memory limit fails: the loop takes the previous value
+// from the template (#494), so no previous value fits it.
+func TestMemoryPlanForAContainerWithoutALimitFails(t *testing.T) {
+	const webName = "web"
+	_, s := mustScenario(t, scnOOM)
+	for _, o := range s.objects {
+		if d, ok := o.(*appsv1.Deployment); ok && d.Name == webName {
+			d.Spec.Template.Spec.Containers[0].Resources.Limits = nil
+		}
+	}
+	plan := &analysis.Plan{Action: remediationv1alpha1.Action{Type: remediationv1alpha1.ActionSetContainerMemoryLimit,
+		SetContainerMemoryLimit: &remediationv1alpha1.SetContainerMemoryLimit{Container: webName,
+			Previous: resource.MustParse("48Mi"), Desired: resource.MustParse("64Mi")}}}
+	ok, d := scoreProposal(s, analysis.Outcome{Reason: analysis.ReasonProposed, Plan: plan})
+	if ok || !strings.Contains(d, "sets no memory limit") {
+		t.Errorf("pass %t, detail %q: want a failure for a container without a limit", ok, d)
 	}
 }

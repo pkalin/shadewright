@@ -40,8 +40,8 @@ import (
 const MaxResultBytes = 64 << 10
 
 // Result is the structured output of a model call (design 3.3, ADR-0023 decision 5): the only way a proposal
-// is made. Its JSON schema is generated from these types ([ResponseSchema]), and [DecodeResult] enforces the
-// same bounds in Go. It has no confidence field: a model's self-reported confidence is never read, and a
+// is made. Its JSON schema is generated from these types ([ResponseSchema]), and the loop's decoder
+// (decodeResult, and [DecodeResult] with the catalog check) enforces the same bounds in Go. It has no confidence field: a model's self-reported confidence is never read, and a
 // result that carries one is refused as not matching the schema.
 type Result struct {
 	// Summary is a short diagnosis.
@@ -99,8 +99,8 @@ type ProposedAction struct {
 
 // KedaMaxReplicasChange are the parameters of AdjustKedaMaxReplicas.
 type KedaMaxReplicasChange struct {
-	// PreviousValue is the maxReplicaCount the plan was made against.
-	PreviousValue int32 `json:"previousValue" bound:"min=1,max=1000"`
+	// PreviousValue is the maxReplicaCount the plan was made against: the ScaledObject's spec as it is now.
+	PreviousValue int32 `json:"previousValue" bound:"min=1,max=1000" desc:"The maxReplicaCount the ScaledObject's spec holds now, which the change replaces; not the HPA's current or desired replica count."`
 	// DesiredValue is the new maxReplicaCount.
 	DesiredValue int32 `json:"desiredValue" bound:"min=1,max=1000"`
 }
@@ -110,8 +110,10 @@ type KedaMaxReplicasChange struct {
 type MemoryLimitChange struct {
 	// Container is the container name in the pod template.
 	Container string `json:"container" bound:"maxLen=63" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"`
-	// Previous is the limit the plan was made against.
-	Previous string `json:"previous" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti)?$"`
+	// Previous is the limit the plan was made against: the pod template's, as it is now. The loop replaces it
+	// with the value the context builder read from the template (#494), so its pattern also takes the decimal
+	// suffixes a template may use (50M); desired keeps the binary ones.
+	Previous string `json:"previous" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti|k|M|G|T)?$" desc:"The memory limit the workload's pod template sets for the container now, in Kubernetes' canonical form (for example 48Mi or 50M), as the context's pod template line shows it. Not a running pod's own limit, which may still be an older value during a rollout, and not a byte count from a metric."`
 	// Desired is the new limit.
 	Desired string `json:"desired" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti)?$"`
 }
@@ -198,7 +200,7 @@ func jsonName(f reflect.StructField) string {
 // schemaOf builds the JSON schema of t for a strict structured output: every object lists all its
 // properties as required and allows no others, and an optional member is a union with null. It uses only
 // keywords strict modes accept (type, enum, pattern, minimum, maximum, maxItems, anyOf, description); lengths
-// are enforced in Go by [DecodeResult]. A field's desc tag, a constant of this file, becomes its description.
+// are enforced in Go by decodeResult. A field's desc tag, a constant of this file, becomes its description.
 func schemaOf(t reflect.Type, b bounds) map[string]any {
 	switch t.Kind() {
 	case reflect.Pointer:
@@ -262,9 +264,9 @@ func ResponseSchema() json.RawMessage { return bytes.Clone(responseSchema()) }
 var (
 	errInvalid = &decodeError{code: "schema", msg: "the reply does not match the result schema"}
 	errAction  = &decodeError{code: "action", msg: "the proposed action does not match its type"}
-	// errOutOfBounds is an action the policy's catalog check refuses. It is never retried and never named to
-	// the model, so the model cannot search for what the policy allows: the analysis ends with
-	// ReasonActionOutOfBounds.
+	// errOutOfBounds is an action the policy's catalog check refuses, an error of [DecodeResult] only: the
+	// loop runs that check itself in finish, after taking the previous value from the pod template, and ends
+	// with ReasonActionOutOfBounds, never retried and never named to the model.
 	errOutOfBounds = errors.New("the proposed action is outside the catalog's bounds")
 )
 
@@ -282,6 +284,20 @@ func (e *decodeError) Error() string { return e.msg }
 // With a proposal it also returns the action converted to the API's type, the one a request carries; nil
 // without one.
 func DecodeResult(content string) (*Result, *remediationv1alpha1.Action, error) {
+	r, action, err := decodeResult(content)
+	if err != nil || action == nil {
+		return r, action, err
+	}
+	if reason, _ := policy.CheckAction(*action); reason != "" {
+		return nil, nil, errOutOfBounds
+	}
+	return r, action, nil
+}
+
+// decodeResult is [DecodeResult] without the policy's catalog check, which the analysis loop runs once it has
+// taken the previous value from the subject's pod template (#494): a model's previous value is not checked,
+// since it is replaced.
+func decodeResult(content string) (*Result, *remediationv1alpha1.Action, error) {
 	if len(content) > MaxResultBytes {
 		return nil, nil, errInvalid
 	}
@@ -400,8 +416,8 @@ func valid(v reflect.Value, b bounds) bool {
 	}
 }
 
-// toAPI converts the proposed action into the API's Action and runs the policy's catalog check on it. Only
-// the member of the type may be set.
+// toAPI converts the proposed action into the API's Action. Only the member of the type may be set. The
+// policy's catalog check is the caller's.
 func (a ProposedAction) toAPI() (remediationv1alpha1.Action, error) {
 	out := remediationv1alpha1.Action{Type: a.Type}
 	switch a.Type {
@@ -424,9 +440,6 @@ func (a ProposedAction) toAPI() (remediationv1alpha1.Action, error) {
 		out.SetContainerMemoryLimit = &remediationv1alpha1.SetContainerMemoryLimit{Container: p.Container, Previous: prev, Desired: desired}
 	default:
 		return out, errAction
-	}
-	if reason, _ := policy.CheckAction(out); reason != "" {
-		return out, errOutOfBounds
 	}
 	return out, nil
 }

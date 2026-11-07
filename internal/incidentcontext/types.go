@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // Default bounds, decided on 2026-11-05 (#70). They are the values of [DefaultLimits]; making them settings
@@ -223,6 +225,20 @@ type Context struct {
 	// in the subject's namespace. The analysis loop labels a tool answer about any other pod as outside the
 	// attribution.
 	Pods []string
+	// Template is the containers of the subject's pod template, in its order, when the subject is a Deployment
+	// or StatefulSet the builder read with its UID; nil otherwise. It is the workload's current spec, the
+	// value a change in Git replaces and the executor compares the request's previous value with, so the
+	// analysis loop takes a proposal's previous memory limit from it, never from the model (#494). During a
+	// rollout the running pods may still hold an older value.
+	Template []TemplateContainer
+}
+
+// TemplateContainer is one container of the subject's pod template, as the API server returned it.
+type TemplateContainer struct {
+	// Name is the container's name.
+	Name string
+	// MemoryLimit is the memory limit the template sets for the container; nil when it sets none.
+	MemoryLimit *resource.Quantity
 }
 
 // Size is the number of bytes [Limits.Total] bounds: the text of every block.

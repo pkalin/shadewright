@@ -83,6 +83,17 @@ const (
 	// ReasonTargetNotSupported: the proposed action may not target the Incident's subject, or the subject has
 	// no namespace or UID.
 	ReasonTargetNotSupported Reason = "TargetNotSupported"
+	// ReasonPreviousValueUnknown: the proposal changes a value the analyzer takes from the subject's pod
+	// template, and the template it read has no such value: it was not read, has no container of that name, or
+	// sets no memory limit for it (#494).
+	ReasonPreviousValueUnknown Reason = "PreviousValueUnknown"
+	// ReasonNoChange: the desired value of the proposal is the one the subject's pod template already holds
+	// (#494).
+	ReasonNoChange Reason = "NoChange"
+	// ReasonDirectionReversed: taking the previous value from the subject's pod template turns the proposed
+	// change from an increase into a decrease, or back, or the model's previous and desired values are equal
+	// and state no direction: the model reasoned about another change (#494).
+	ReasonDirectionReversed Reason = "DirectionReversed"
 	// ReasonNoPolicyForAction: no RemediationPolicy is configured for the proposed action type.
 	ReasonNoPolicyForAction Reason = "NoPolicyForAction"
 	// ReasonActionOutOfBounds: the proposed action failed the policy's catalog check (outside the catalog's
@@ -349,6 +360,7 @@ func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 		return r.handOff(ReasonDeadlineExceeded)
 	}
 	r.pods = c.Pods
+	r.template = c.Template
 	var shownContext string
 	shownContext, r.shown = contextMessage(c)
 	r.contextText = shownContext
@@ -480,6 +492,8 @@ type run struct {
 	limits      Limits
 	out         *Outcome
 	pods        []string
+	// template is the subject's pod template as the context builder read it ([incidentcontext.Context.Template]).
+	template    []incidentcontext.TemplateContainer
 	contextText string
 	// shown is each block and tool result as the model saw it, by ID, with its quotable parts.
 	shown map[string]shownBlock
@@ -542,12 +556,9 @@ func (r *run) triage(model providers.ModelProvider) (*Result, *remediationv1alph
 			code = retryToolCall
 			continue
 		}
-		res, action, err := DecodeResult(c.Content)
+		res, action, err := decodeResult(c.Content)
 		if err == nil {
 			return res, action, "", nil
-		}
-		if errors.Is(err, errOutOfBounds) {
-			return nil, nil, ReasonActionOutOfBounds, nil
 		}
 		code = errInvalid.code
 		if de, ok := errors.AsType[*decodeError](err); ok {
@@ -590,10 +601,7 @@ func (r *run) escalate(model providers.ModelProvider) (*Result, *remediationv1al
 			return nil, nil, reason, err
 		}
 		if len(c.ToolCalls) == 0 {
-			res, action, err := DecodeResult(c.Content)
-			if errors.Is(err, errOutOfBounds) {
-				return nil, nil, ReasonActionOutOfBounds, nil
-			}
+			res, action, err := decodeResult(c.Content)
 			if err != nil {
 				return nil, nil, ReasonInvalidOutput, nil
 			}
@@ -938,7 +946,7 @@ func estimateInput(req providers.CompletionRequest) int64 {
 
 // finish turns a valid result into the outcome: a hand-off without a proposal, or a plan once the proposal
 // has evidence found in the blocks the model saw, may target the subject and has a policy configured. action
-// is the proposal's action as [DecodeResult] converted and checked it, nil without a proposal.
+// is the proposal's action as decodeResult converted it, before the catalog check, nil without a proposal.
 func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, error) {
 	r.out.Summary, r.out.MissingData = r.redact(res.Summary), nil
 	for _, m := range res.MissingData {
@@ -950,6 +958,15 @@ func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, 
 		}
 		return r.handOff(ReasonNoProposal)
 	}
+	// The catalog check runs on the plan as it will be proposed, after the previous value was taken from the
+	// pod template, and before the evidence check, so the model learns nothing of the bounds from the order.
+	planned, reason := r.previousFromTemplate(*action)
+	if reason != "" {
+		return r.handOff(reason)
+	}
+	if reason, _ := policy.CheckAction(planned); reason != "" {
+		return r.handOff(ReasonActionOutOfBounds)
+	}
 	if !r.evidenced(res.Evidence) {
 		r.out.QuoteFailures = r.quoteFailures(res.Evidence)
 		return r.handOff(ReasonNoEvidence)
@@ -960,7 +977,47 @@ func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, 
 			checks = append(checks, c)
 		}
 	}
-	return r.a.accept(r.inc, *r.out, ReasonProposed, Plan{Action: *action, Checks: checks})
+	return r.a.accept(r.inc, *r.out, ReasonProposed, Plan{Action: planned, Checks: checks})
+}
+
+// previousFromTemplate replaces the previous value the model wrote with the one the subject's pod template
+// holds, as the context builder read it from the API server (#494). That is the value the executor's
+// baseline check compares the request with (invariant 1: the check stays, and decides): during a rollout a
+// running pod may still hold an older limit, and a model may write the value as a byte count or copy it from
+// a metric. It hands off a memory limit change whose container the template does not have or sets no limit
+// for (PreviousValueUnknown), whose desired value the template already holds (NoChange), and one that the
+// template's value turns from an increase into a decrease or back (DirectionReversed): the model reasoned
+// about another change than the one that would be proposed, or a model's previous value equal to its desired
+// value, which states no direction: a reply that sees no change never becomes one. A memory limit change that
+// may not target the subject (another kind, or a subject without a namespace or UID) ends TargetNotSupported
+// before the catalog check, so a model's previous value is never checked against the bounds. AdjustKedaMaxReplicas keeps the model's
+// previousValue: the builder does not read ScaledObjects, and the executor's check refuses a wrong one.
+func (r *run) previousFromTemplate(a remediationv1alpha1.Action) (remediationv1alpha1.Action, Reason) {
+	s := r.inc.Spec.Subject
+	if a.Type != remediationv1alpha1.ActionSetContainerMemoryLimit || a.SetContainerMemoryLimit == nil {
+		return a, ""
+	}
+	if s.Namespace == "" || s.UID == "" || !policy.ActionMayTarget(a.Type, s.APIVersion, s.Kind) {
+		return a, ReasonTargetNotSupported
+	}
+	i := slices.IndexFunc(r.template, func(c incidentcontext.TemplateContainer) bool {
+		return c.Name == a.SetContainerMemoryLimit.Container
+	})
+	if i < 0 || r.template[i].MemoryLimit == nil {
+		return a, ReasonPreviousValueUnknown
+	}
+	p := *a.SetContainerMemoryLimit
+	current := r.template[i].MemoryLimit.DeepCopy()
+	planned := p.Desired.Cmp(current)
+	if planned == 0 {
+		return a, ReasonNoChange
+	}
+	if claimed := p.Desired.Cmp(p.Previous); claimed != planned {
+		return a, ReasonDirectionReversed
+	}
+	p.Previous = current
+	a.SetContainerMemoryLimit = &p
+	return a, ""
 }
 
 // redact redacts model text for the logs, keeping whole occurrences of the Incident's name: the name was read

@@ -200,6 +200,34 @@ func TestClosure(t *testing.T) {
 		{name: "resolved stays", inc: func() *remediationv1alpha1.Incident {
 			return closureIncident(remediationv1alpha1.IncidentResolved, quiet)
 		}},
+		{name: "resolved, a request denied after resolvedTime escalates", inc: resolvedQuietly,
+			requests: []remediationv1alpha1.RemediationRequest{request("a", 5*time.Minute, remediationv1alpha1.PhaseDenied)},
+			phase:    escalated, reason: ReasonRequestDenied},
+		{name: "resolved, a request created at resolvedTime counts", inc: resolvedQuietly,
+			requests: []remediationv1alpha1.RemediationRequest{request("a", resolvedAgo, remediationv1alpha1.PhaseFailed)},
+			phase:    escalated, reason: ReasonRequestFailed},
+		{name: "resolved, superseded after resolvedTime with no newer request escalates", inc: resolvedQuietly,
+			requests: []remediationv1alpha1.RemediationRequest{request("a", 5*time.Minute, remediationv1alpha1.PhaseSuperseded)},
+			phase:    escalated, reason: ReasonRequestSuperseded},
+		{name: "resolved, superseded follows the newer request that succeeded", inc: resolvedQuietly,
+			requests: []remediationv1alpha1.RemediationRequest{
+				request("a", 5*time.Minute, remediationv1alpha1.PhaseSuperseded),
+				request("b", 4*time.Minute, remediationv1alpha1.PhaseSucceeded),
+			}},
+		{name: "resolved, a request that succeeded after resolvedTime leaves it resolved", inc: resolvedQuietly,
+			requests: []remediationv1alpha1.RemediationRequest{request("a", 5*time.Minute, remediationv1alpha1.PhaseSucceeded)}},
+		{name: "resolved, a request merged after resolvedTime moves nothing", inc: resolvedQuietly,
+			requests: []remediationv1alpha1.RemediationRequest{request("a", 5*time.Minute, remediationv1alpha1.PhaseMerged)}},
+		{name: "resolved, a request denied before resolvedTime moves nothing", inc: resolvedQuietly,
+			requests: []remediationv1alpha1.RemediationRequest{request("a", resolvedAgo+time.Minute, remediationv1alpha1.PhaseDenied)}},
+		{name: "resolved, a newer request ended before resolvedTime moves nothing", inc: resolvedQuietly,
+			requests: []remediationv1alpha1.RemediationRequest{
+				request("a", 2*time.Hour, remediationv1alpha1.PhaseSuperseded),
+				request("b", time.Hour, remediationv1alpha1.PhaseCancelled),
+			}},
+		{name: "resolved with no resolvedTime, a denied request moves nothing", inc: func() *remediationv1alpha1.Incident {
+			return closureIncident(remediationv1alpha1.IncidentResolved, quiet)
+		}, requests: []remediationv1alpha1.RemediationRequest{request("a", time.Minute, remediationv1alpha1.PhaseDenied)}},
 		{name: "a foreign name is never closed", inc: func() *remediationv1alpha1.Incident {
 			inc := closureIncident(remediationv1alpha1.IncidentOpen, quiet)
 			inc.Name = Name(fp(2))
@@ -218,6 +246,17 @@ func TestClosure(t *testing.T) {
 			}
 		})
 	}
+}
+
+// resolvedAgo is how long before triggerNow the Incident of resolvedQuietly was resolved.
+const resolvedAgo = 10 * time.Minute
+
+// resolvedQuietly returns an Incident resolved by the quiet rule resolvedAgo before triggerNow, with its
+// resolvedTime.
+func resolvedQuietly() *remediationv1alpha1.Incident {
+	inc := closureIncident(remediationv1alpha1.IncidentProposed, 2*time.Hour)
+	applyClosure(inc, remediationv1alpha1.IncidentResolved, ReasonSymptomQuiet, triggerNow.Add(-resolvedAgo))
+	return inc
 }
 
 // closureController is a controller on a fake API server holding inc and requests, loaded.
@@ -383,7 +422,7 @@ func TestRestartAfterALostAnswerDoesNotMoveTwice(t *testing.T) {
 // A restart before the write was sent: nothing landed, and the restarted controller makes the move once.
 func TestRestartBeforeTheWriteMovesOnce(t *testing.T) {
 	c, cl := closureController(t, closureIncident(remediationv1alpha1.IncidentProposed, time.Minute),
-		request("a", 10*time.Minute, remediationv1alpha1.PhaseFailed))
+		request("a", resolvedAgo, remediationv1alpha1.PhaseFailed))
 	c.client = &countingClient{Client: cl, instead: func(context.Context) error {
 		return apierrors.NewServiceUnavailable("unavailable")
 	}}
@@ -880,5 +919,66 @@ func TestReopenOnlyWithinTheWindow(t *testing.T) {
 	c.flush(t.Context(), fp(1))
 	if got := getIncident(t, cl); got.Status.Phase != remediationv1alpha1.IncidentEscalated {
 		t.Fatalf("recurrence 25 h after a quiet resolution: phase %s, want Escalated", got.Status.Phase)
+	}
+}
+
+// #476: a request created after the closure rules listed the requests, and denied before the next pass,
+// still decides the Incident the quiet rule resolved meanwhile: the next pass, also after a restart, moves it
+// to Escalated.
+func TestRequestEndedBeforeTheNextPassEscalatesTheResolve(t *testing.T) {
+	c, cl := closureController(t, closureIncident(remediationv1alpha1.IncidentProposed, 2*time.Hour))
+	w := &countingClient{Client: cl}
+	rr := request("replacement", 0, remediationv1alpha1.PhaseAwaitingApproval)
+	w.before = func(ctx context.Context, _ *remediationv1alpha1.Incident) {
+		w.before = nil
+		if err := cl.Create(ctx, &rr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.client = w
+	if err := c.closeIncidents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := getIncident(t, cl); got.Status.Phase != remediationv1alpha1.IncidentResolved {
+		t.Fatalf("racing closure: phase %s, want Resolved", got.Status.Phase)
+	}
+	rr.Status.Phase = remediationv1alpha1.PhaseDenied
+	if err := cl.Status().Update(t.Context(), &rr); err != nil {
+		t.Fatal(err)
+	}
+	c = loaded(t, cl)
+	for range 2 {
+		if err := c.closeIncidents(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := getIncident(t, cl)
+	if got.Status.Phase != remediationv1alpha1.IncidentEscalated || got.Status.ResolvedTime != nil ||
+		lifecycleReason(got) != ReasonRequestDenied {
+		t.Fatalf("replacement denied before the next pass: phase %s, resolvedTime %v, Lifecycle %q; want Escalated, none, %s",
+			got.Status.Phase, got.Status.ResolvedTime, lifecycleReason(got), ReasonRequestDenied)
+	}
+}
+
+// #476: a request that ended before the Incident was resolved neither reopens nor escalates it, whatever
+// its phase.
+func TestRequestEndedBeforeResolvedTimeKeepsTheResolve(t *testing.T) {
+	for _, phase := range []remediationv1alpha1.RemediationPhase{
+		remediationv1alpha1.PhaseDenied, remediationv1alpha1.PhaseSuperseded, remediationv1alpha1.PhaseSucceeded,
+		remediationv1alpha1.PhaseNeedsIntervention, remediationv1alpha1.PhaseMerged,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			inc := resolvedQuietly()
+			c, cl := closureController(t, inc, request("a", resolvedAgo+time.Minute, phase))
+			if err := c.closeIncidents(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			got := getIncident(t, cl)
+			if got.Status.Phase != remediationv1alpha1.IncidentResolved || got.Status.ResolvedTime == nil ||
+				lifecycleReason(got) != ReasonSymptomQuiet {
+				t.Fatalf("request %s before resolvedTime: phase %s, resolvedTime %v, Lifecycle %q; want Resolved as it was",
+					phase, got.Status.Phase, got.Status.ResolvedTime, lifecycleReason(got))
+			}
+		})
 	}
 }

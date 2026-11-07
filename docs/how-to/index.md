@@ -14,6 +14,7 @@ One task each. They assume Shadewright is installed ([get started](../getting-st
 - [Read an Incident](read-an-incident.md)
 - [Check status with kubectl](check-status.md)
 - [Find why a request was refused](find-why-refused.md)
+- [Clear Resolved Incidents at the cap](clear-resolved-incidents.md)
 
 !!! note "Not yet run"
     The commands in these guides were not run against a live cluster for this documentation (no kind cluster was available locally). Each guide says which parts come from existing, run material and which are not yet run. Each command carries the same note in its guide.

@@ -206,8 +206,9 @@ func (c *Controller) now() time.Time {
 }
 
 // claimable reports whether the trigger marked inc due in a phase an analysis may start from: Open (or none)
-// or Analyzing taken as lost (reason AnalysisTimedOut). Never Resolved: reopening a Resolved Incident is a
-// later part of #251, and until it is built a Resolved Incident is not analyzed again. A mark written for
+// or Analyzing taken as lost (reason AnalysisTimedOut). Never Resolved: a Resolved Incident is never
+// analyzed again; a symptom seen again moves it to Escalated, or opens its next occurrence as a new Incident
+// with nothing of this one's outcome (design 3.2, #251). A mark written for
 // another generation of the Incident is no mark, as the trigger takes it (#430): it fails closed, and the
 // trigger writes it again for the current generation if the Incident is still due.
 func claimable(inc *remediationv1alpha1.Incident) bool {

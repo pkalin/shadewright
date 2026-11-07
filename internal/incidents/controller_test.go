@@ -123,10 +123,17 @@ type countingClient struct {
 	instead func(ctx context.Context) error
 	// mark, when it returns an error, answers a write of the analysis trigger with it without sending it.
 	mark func(obj client.Object) error
+	// create, when it returns an error, answers a create with it without sending it.
+	create func(obj client.Object) error
 }
 
 func (c *countingClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
 	c.creates.Add(1)
+	if c.create != nil {
+		if err := c.create(obj); err != nil {
+			return err
+		}
+	}
 	return c.Client.Create(ctx, obj, opts...)
 }
 

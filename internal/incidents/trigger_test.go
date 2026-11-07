@@ -160,13 +160,15 @@ func TestDue(t *testing.T) {
 			reason: ReasonAnalysisStartUnknown,
 		},
 		{
-			name: "resolved behaves like open: seen again past the cooldown",
+			// A Resolved Incident is never analyzed again (#251): a recurrence escalates it or opens the next
+			// occurrence, both in the controller's write, never through the trigger.
+			name: "resolved is never due, even seen again past the cooldown",
 			status: func() remediationv1alpha1.IncidentStatus {
 				st := incidentStatus(2*time.Minute, time.Hour, 20*time.Minute)
 				st.Phase = remediationv1alpha1.IncidentResolved
 				return st
 			},
-			due: true, reason: ReasonCooldownExpired,
+			reason: ReasonResolved,
 		},
 		{
 			name: "a timed-out analysis still needs the budget",
@@ -195,6 +197,18 @@ func TestDue(t *testing.T) {
 				return st
 			},
 			reason: ReasonEscalated,
+		},
+		{
+			name: "escalated by a recurrence after resolution: its own reason, not the analysis's",
+			status: func() remediationv1alpha1.IncidentStatus {
+				st := incidentStatus(2*time.Minute, 2*time.Minute, time.Hour)
+				st.Phase = remediationv1alpha1.IncidentEscalated
+				meta.SetStatusCondition(&st.Conditions, metav1.Condition{
+					Type: ConditionRecurred, Status: metav1.ConditionTrue, Reason: ReasonRecurredWithinWindow, Message: "x",
+				})
+				return st
+			},
+			reason: ReasonRecurred,
 		},
 		{
 			name:   "not recent: never analyzed and last seen longer ago than the window",

@@ -91,6 +91,7 @@ func (c *Controller) markDue(ctx context.Context) error {
 		}
 		return fmt.Errorf("listing the Incidents: %w", err)
 	}
+	c.noteStates(list.Items)
 	now := c.cfg.Now()
 	s := TriggerSettings{Debounce: c.cfg.Debounce, SettleLimit: c.cfg.SettleLimit, Cooldown: c.cfg.Cooldown,
 		AnalysisTimeout: c.cfg.AnalysisTimeout, RecentWindow: c.cfg.RecentWindow}
@@ -111,7 +112,7 @@ func (c *Controller) markDue(ctx context.Context) error {
 		wasDue := meta.IsStatusConditionTrue(inc.Status.Conditions, ConditionAnalysisDue)
 		var decide func(*remediationv1alpha1.Incident) (bool, string)
 		switch {
-		case inc.Name != Name(inc.Spec.Fingerprint):
+		case !inc.HasDerivedName():
 			// Not an Incident this controller writes (another fingerprint holds the name): only a mark that says
 			// due is taken back.
 			if !wasDue {
@@ -247,7 +248,7 @@ func (c *Controller) watch(items []remediationv1alpha1.Incident, now time.Time, 
 	listed := make(map[types.UID]struct{}, len(items))
 	for i := range items {
 		inc := &items[i]
-		if inc.Name != Name(inc.Spec.Fingerprint) {
+		if !inc.HasDerivedName() {
 			continue
 		}
 		listed[inc.UID] = struct{}{}
@@ -508,13 +509,15 @@ func runEnded(inc *remediationv1alpha1.Incident, now time.Time, timeout time.Dur
 }
 
 // outcomeReason returns the not-due reason of an incident whose last run wrote its outcome (phase Proposed or
-// Escalated), as [Due] gives it, and whether there is one.
+// Escalated), or that is Resolved, as [Due] gives it, and whether there is one.
 func outcomeReason(inc *remediationv1alpha1.Incident) (string, bool) {
 	switch inc.Status.Phase {
 	case remediationv1alpha1.IncidentProposed:
 		return ReasonProposed, true
 	case remediationv1alpha1.IncidentEscalated:
-		return ReasonEscalated, true
+		return escalatedReason(inc), true
+	case remediationv1alpha1.IncidentResolved:
+		return ReasonResolved, true
 	}
 	return "", false
 }
@@ -537,6 +540,8 @@ var dueMessages = map[string]string{
 	ReasonAnalysisStartUnknown: "The incident is in phase Analyzing without a lastAnalysisTime, so the cooldown cannot be placed",
 	ReasonProposed:             "The last analysis made a proposal",
 	ReasonEscalated:            "The last analysis handed the incident to a person",
+	ReasonResolved:             "The incident is Resolved and is never analyzed again",
+	ReasonRecurred:             "The symptom came back after the incident was resolved; a person decides, no analysis runs",
 	ReasonNoNewData:            "Nothing was observed since the last analysis",
 	ReasonCoolingDown:          "The cooldown since the last analysis has not passed",
 	ReasonDebouncing:           "Waiting for the incident to settle, at most the settle limit after its first unsettled observation",

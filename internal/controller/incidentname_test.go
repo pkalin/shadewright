@@ -53,6 +53,10 @@ func TestVerifiedIncidentName(t *testing.T) {
 			Spec:       remediationv1alpha1.IncidentSpec{Fingerprint: "sha256:" + fingerprintHex},
 		}
 	}
+	occurrence := func(inc *remediationv1alpha1.Incident, n int32) *remediationv1alpha1.Incident {
+		inc.Spec.OccurrenceNumber = n
+		return inc
+	}
 	request := func(name string, ref remediationv1alpha1.UID) *remediationv1alpha1.RemediationRequest {
 		rr := &remediationv1alpha1.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "rr"}}
 		rr.Spec.IncidentRef = remediationv1alpha1.IncidentRef{Name: name, UID: ref}
@@ -74,6 +78,22 @@ func TestVerifiedIncidentName(t *testing.T) {
 		{"not the collector's form", []client.Object{incident(ns, "orders-scaling", hex)}, request("orders-scaling", uid), ""},
 		{"40 hex digits", []client.Object{incident(ns, "incident-"+hex[:40], hex[:40])},
 			request("incident-"+hex[:40], uid), ""},
+		// A later occurrence (#251): the suffix must be the occurrence number its own spec records.
+		{"occurrence 2", []client.Object{occurrence(incident(ns, name+"-2", hex), 2)}, request(name+"-2", uid), name + "-2"},
+		{"occurrence 999999", []client.Object{occurrence(incident(ns, name+"-999999", hex), 999999)},
+			request(name+"-999999", uid), name + "-999999"},
+		{"suffix not its occurrence number", []client.Object{occurrence(incident(ns, name+"-3", hex), 2)},
+			request(name+"-3", uid), ""},
+		{"suffix without an occurrence number", []client.Object{incident(ns, name+"-2", hex)}, request(name+"-2", uid), ""},
+		{"occurrence number without a suffix", []client.Object{occurrence(incident(ns, name, hex), 2)}, request(name, uid), ""},
+		{"suffix 0", []client.Object{incident(ns, name+"-0", hex)}, request(name+"-0", uid), ""},
+		{"suffix 1", []client.Object{incident(ns, name+"-1", hex)}, request(name+"-1", uid), ""},
+		{"leading zero", []client.Object{occurrence(incident(ns, name+"-02", hex), 2)}, request(name+"-02", uid), ""},
+		{"not digits", []client.Object{incident(ns, name+"-ab", hex)}, request(name+"-ab", uid), ""},
+		{"negative", []client.Object{incident(ns, name+"--2", hex)}, request(name+"--2", uid), ""},
+		{"over-long suffix", []client.Object{occurrence(incident(ns, name+"-1000000", hex), 1000000)},
+			request(name+"-1000000", uid), ""},
+		{"two suffixes", []client.Object{incident(ns, name+"-2-3", hex)}, request(name+"-2-3", uid), ""},
 	} {
 		t.Run(tc.desc, func(t *testing.T) {
 			c := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(tc.objects...).Build()
@@ -129,8 +149,8 @@ func TestVerifiedIncidentName(t *testing.T) {
 	if step.Err() != nil {
 		t.Errorf("the read's deadline ended the step's context: %v", step.Err())
 	}
-	if len(lines) != 1 || !strings.Contains(lines[0], `"reason"="Timeout"`) {
-		t.Errorf("stalled read: logged %q, want one line with reason Timeout", lines)
+	if len(lines) != 1 || !strings.Contains(lines[0], `"reason"="Timeout"`) || !strings.Contains(lines[0], `"error"=`) {
+		t.Errorf("stalled read: logged %q, want one error line with reason Timeout", lines)
 	}
 
 	// An API error that comes as the read's deadline passes keeps its own reason: only a timeout is logged as one.
@@ -147,8 +167,9 @@ func TestVerifiedIncidentName(t *testing.T) {
 	if got := r.verifiedIncidentName(logged(&lines), request(name, uid)); got != "" {
 		t.Errorf("late forbidden read: got %q, want \"\"", got)
 	}
-	if len(lines) != 1 || !strings.Contains(lines[0], `"reason"="Forbidden"`) {
-		t.Errorf("late forbidden read: logged %q, want one line with reason Forbidden", lines)
+	if len(lines) != 1 || !strings.Contains(lines[0], `"reason"="Forbidden"`) || !strings.Contains(lines[0], `"error"=`) ||
+		strings.Contains(lines[0], name) {
+		t.Errorf("late forbidden read: logged %q, want one error line with reason Forbidden and no name", lines)
 	}
 
 	// A short step caps the read at half the time the step has left, whatever IncidentReadTimeout says, so a

@@ -42,7 +42,10 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
 	"github.com/pkalin/shadewright/internal/modules"
+	"github.com/pkalin/shadewright/internal/modules/cloudflared"
+	"github.com/pkalin/shadewright/internal/modules/flux"
 	"github.com/pkalin/shadewright/internal/modules/keda"
+	"github.com/pkalin/shadewright/internal/modules/kyverno"
 )
 
 const (
@@ -780,12 +783,17 @@ func TestSymptomTextIsRedactedAndBounded(t *testing.T) {
 // TestSourceKindsAreGranted keeps SourceKinds and the subject owners of the compiled-in sources for those kinds
 // within the watch role's markers: a kind added here needs its grant in doc.go.
 func TestSourceKindsAreGranted(t *testing.T) {
-	granted := map[string]bool{"autoscaling/horizontalpodautoscalers": true}
+	granted := map[string]bool{"autoscaling/horizontalpodautoscalers": true, "/pods": true}
 	ownerGranted := map[string]bool{"keda.sh/scaledobjects": true}
 	if len(SourceKinds) != len(granted) {
 		t.Fatalf("SourceKinds has %d kinds, the watch role grants %d", len(SourceKinds), len(granted))
 	}
-	for _, src := range keda.Module().Hooks().Symptoms {
+	var sources []modules.SymptomSource
+	for _, m := range []modules.Integration{cloudflared.Module(), flux.Module(), keda.Module(), kyverno.Module()} {
+		sources = append(sources, m.Hooks().Symptoms...)
+	}
+	watched := 0
+	for _, src := range sources {
 		for _, k := range SourceKinds {
 			if src.Group != k.Group || src.Kind != k.Kind {
 				continue
@@ -796,6 +804,10 @@ func TestSourceKindsAreGranted(t *testing.T) {
 			if src.Subject.IsSet() && !ownerGranted[src.Subject.Group+"/"+src.Subject.Resource] {
 				t.Errorf("owner %s/%s is read without a grant", src.Subject.Group, src.Subject.Resource)
 			}
+			watched++
 		}
+	}
+	if watched != len(SourceKinds) {
+		t.Errorf("%d of the %d kinds in SourceKinds have a compiled-in source", watched, len(SourceKinds))
 	}
 }

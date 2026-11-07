@@ -121,9 +121,9 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 **What it cannot read today.**
 
 - Kyverno kinds: reading them (`get`, `list`, `watch` on `kyverno.io` `clusterpolicies` and `policies`, and on `wgpolicyk8s.io` `policyreports` and `clusterpolicyreports`) is granted only with the wiring of symptom sources (planned, 2.5).
-- Flux kinds, KEDA `scaledjobs`, and `list` or `watch` on `scaledobjects`: granted with the wiring of their symptom sources (planned, 2.5.1).
+- Flux kinds, KEDA `scaledjobs`, and `list` or `watch` on `scaledobjects`: to be granted with the wiring of their symptom sources (planned, 2.5.1), after the policy review ([#409](https://github.com/pkalin/shadewright/issues/409)). The wiring then has to watch a kind only once the cluster serves it and the grant is present, since an informer on a kind that is not installed never syncs.
 - Secrets Store CSI driver kinds (`secrets-store.csi.x-k8s.io` `secretproviderclasses` and `secretproviderclasspodstatuses`): that module needs none. It watches no kind and reads only the kubelet's events (2.5).
-- The cloudflared module's symptom source reads Pods, which the analyzer already reads in the watched namespaces, so it needs no new grant.
+- The cloudflared module's symptom source reads Pods, which the analyzer already reads in the watched namespaces, and the workloads it already reads by name, so it needs no new grant. It is wired (2.5.1).
 
 ### 2.2.3. Executor permissions
 
@@ -382,7 +382,14 @@ Later candidates: External Secrets Operator, Reloader, cert-manager, Trivy Opera
 - `New` refuses a source with an invalid group version, kind, resource or controller, or without a function, a subject owner with an invalid group version, kind or resource or of the watched kind itself, and a kind watched twice, by one module or by two on either axis.
 - It keeps a copy of each module's hooks as validated, and lookups return that copy.
 
-**Wiring** <span class="sw-status sw-built">built</span> for the HPA, <span class="sw-status sw-planned">planned</span> for the other kinds. The collector (3.1) watches the kinds whose sources are wired (`collector.SourceKinds`, for now `autoscaling/v2` `HorizontalPodAutoscaler`) in the watched namespaces, and on each object runs the source an active module declares for that kind, so a source runs only while its module is enabled and detected. Each symptom becomes an observation for the Incident controller (3.1). The Flux, Kyverno, cloudflared, `ScaledObject` and `ScaledJob` sources go through the same evaluator once their kinds are wired (planned), each with its read-only grant ([#380](https://github.com/pkalin/shadewright/issues/380), P2).
+**Wiring** <span class="sw-status sw-built">built</span> for the HPA and Pod sources, <span class="sw-status sw-planned">planned</span> for the other kinds. The collector (3.1) watches the kinds whose sources are wired (`collector.SourceKinds`: `autoscaling/v2` `HorizontalPodAutoscaler` and core `Pod`) in the watched namespaces, and on each object runs the source an active module declares for that kind, so a source runs only while its module is enabled and detected. Each symptom becomes an observation for the Incident controller (3.1). The subject of each source is the object an action would patch where one exists, else the object whose state fails:
+
+| Source | Subject | Fingerprint hashes |
+|---|---|---|
+| KEDA `HorizontalPodAutoscaler` | the `ScaledObject`, once verified (`AdjustKedaMaxReplicas` patches it) | its UID, the reason, the fixed summary |
+| cloudflared `Pod` | the pod's verified workload (its Deployment or StatefulSet), else the pod | the workload's UID (or the pod's), the reason, the fixed summary |
+
+A state of the Pod source is emitted only once the collector has seen it last 2 minutes (3.1). The Flux (`Kustomization`, `HelmRelease`, `GitRepository`), Kyverno (`Policy`, `PolicyReport`) and KEDA `ScaledObject` and `ScaledJob` sources are not wired: the watch role grants no `list` or `watch` on their kinds, and adding it needs the policy review (2.2.2, [#409](https://github.com/pkalin/shadewright/issues/409)). Each would be about the object itself, which is also the object an action would patch (a `ScaledObject`) or the one whose condition fails. `ClusterPolicy` and `ClusterPolicyReport` are cluster-scoped, and the watch role is bound per watched namespace only, so their sources need a cluster-wide read the analyzer does not have.
 
 ### 2.5.2. Flux
 
@@ -549,7 +556,7 @@ When a note fits more than one Key Vault reason, the first of identity, access d
 
 ### 2.5.6. cloudflared
 
-**What it does.** The module (`internal/modules/cloudflared`) is built and in the analyzer's list of modules. Its symptom source contributes once the analyzer wires symptom sources (planned). Values were read from cloudflared 2026.10.7, Cloudflare's `helm-charts` (tags `cloudflare-tunnel-remote-0.1.2` and `cloudflare-tunnel-0.3.2`), Kubernetes v1.37.2 and containerd v2.4.2.
+**What it does.** The module (`internal/modules/cloudflared`) is built and in the analyzer's list of modules. Its symptom source is wired <span class="sw-status sw-built">built</span>: a `TunnelDown` that lasts 2 minutes becomes an Incident about the pod's verified workload (2.5.1). Values were read from cloudflared 2026.10.7, Cloudflare's `helm-charts` (tags `cloudflare-tunnel-remote-0.1.2` and `cloudflare-tunnel-0.3.2`), Kubernetes v1.37.2 and containerd v2.4.2.
 
 **Detection.** cloudflared has no CRD and no API group, so the module declares the core group version `v1`, the one of the Pods it reads ([ADR-0018](../adr/0018-three-axes-of-pluggability.md), amendment of 2026-11-04).
 
@@ -585,13 +592,10 @@ The symptom is about the first such container. The Warning events that explain a
 
 The command, args and env (which hold the tunnel token, `--token` or `TUNNEL_TOKEN`), annotations and every message are never read. That covers waiting, termination and condition messages: a termination message can hold the tail of the log.
 
-**Known limits.** The wiring of symptom sources (planned) has to settle these.
+**Known limits.**
 
-- Start-up: a running container is not ready until its first readiness probe passes, so every rollout gives `TunnelDown` for a few seconds.
-    - A symptom source is a pure function of one object and has no clock, so it cannot wait for a grace period.
-    - The 45 s debounce of 3.2 does not absorb this: it waits until observations stop, so a single one still becomes due.
-    - The wiring has to, for example by reporting the symptom only when the same pod still shows it some time later.
-- Duplicates: a crash-looping cloudflared container gives both `TunnelDown` and the collector's own termination observation (reason `Error`, 3.1). They have different reasons, so they are two fingerprints and two Incidents. The wiring has to join or drop one.
+- Start-up: a running container is not ready until its first readiness probe passes, so every rollout gives `TunnelDown` for a few seconds. A symptom source is a pure function of one object and has no clock, so the wiring settles it: the collector emits a state only once it has seen it last 2 minutes (3.1), so a rollout opens nothing.
+- Duplicates: a crash-looping cloudflared container gives both `TunnelDown` and the collector's own termination observation (reason `Error`, 3.1). They have different reasons, so they are two fingerprints and two Incidents, both about the same workload. They are not joined yet.
 - A cloudflared container with no probe on `/ready` stays ready while it has no connection and is not seen, since the analyzer reads no logs (no grant on `pods/log`, and logs are free text).
 - The kubelet's probe failure events name no image, so no event rule can tell a cloudflared pod from another. They are collected as for every pod.
 - Images and labels are untrusted. Whoever can create a pod in a watched namespace can make it look like cloudflared. A false match only adds a symptom about that pod.

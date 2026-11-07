@@ -60,23 +60,27 @@ limitations under the License.
 // logs; it is here because this package's markers make the one watch role.
 //
 // Module symptom sources (sources.go, design 2.5.1 and 3.1): when it is given the active modules
-// (Config.Modules), the collector also watches each kind in SourceKinds (for now autoscaling/v2
-// HorizontalPodAutoscalers) and runs on each object the symptom source that an active module declares for the
-// kind, through modules.EvaluateSource, which drops a symptom ValidSymptom refuses and redacts and bounds
-// every evidence value. The watches of SourceKinds run whenever Config.Modules is set, so the cache holds the
-// HPAs of the watched namespaces even while no module uses them; a module that is not enabled and detected has
-// no active source, so its source does not run and its owner kind is not read: no request reaches keda.sh
-// while the KEDA module is not active. Only creates and updates the active source shows a symptom on, before
-// or after the change, are reconciled; when a module becomes active for a kind (checked every
-// Config.SelectionPoll), the cached objects its source shows a symptom on are enqueued. A symptom is about the
-// owner kind the source declares (the ScaledObject of a KEDA HPA) once that owner is verified: the object's
-// controller reference names it, a get with a deadline finds it with the referenced UID, and the module's
-// Claims accepts it (KEDA's status.hpaName); while Claims says the claim is pending, nothing is recorded and
-// the owner is read again with a bounded backoff; otherwise the symptom is about the object itself. Each
-// symptom state is one occurrence ("condition:"), identified by the object, its kind, the reason, when the
-// state began as reported and, for a state the collector saw end and come back with the same start, when it
-// came back, so a lasting state counts once and a state that comes back counts again; the fingerprint hashes
-// the module's fixed summary, not the evidence, whose values change while the state lasts.
+// (Config.Modules), the collector also watches each kind in SourceKinds (autoscaling/v2
+// HorizontalPodAutoscalers and core Pods) and runs on each object the symptom source that an active module
+// declares for the kind, through modules.EvaluateSource, which drops a symptom ValidSymptom refuses and redacts
+// and bounds every evidence value. The watches of SourceKinds run whenever Config.Modules is set, so the cache
+// holds the HPAs of the watched namespaces even while no module uses them (Pods it holds anyway, read as typed
+// objects from the pod collector's informer); a module that is not enabled and detected has no active source,
+// so its source does not run and its owner kind is not read: no request reaches keda.sh while the KEDA module
+// is not active. Only creates and updates the active source shows a symptom on, before or after the change,
+// are reconciled; when a module becomes active for a kind (checked every Config.SelectionPoll), the cached
+// objects its source shows a symptom on are enqueued. A symptom is about the owner kind the source declares
+// (the ScaledObject of a KEDA HPA) once that owner is verified: the object's controller reference names it, a
+// get with a deadline finds it with the referenced UID, and the module's Claims accepts it (KEDA's
+// status.hpaName); while Claims says the claim is pending, nothing is recorded and the owner is read again
+// with a bounded backoff; otherwise the symptom is about the object itself. A Pod's symptom is about its
+// verified workload, as for the collector's container terminations. Each symptom state is one occurrence
+// ("condition:"), identified by the object, its kind, the reason, when the state began as reported and, for a
+// state the collector saw end and come back with the same start, when it came back, so a lasting state counts
+// once and a state that comes back counts again; the fingerprint hashes the module's fixed summary, not the
+// evidence, whose values change while the state lasts. A state of any kind but the HPA is emitted only once
+// the collector has seen it last SettleAfter (2 minutes, the sightings gate's rule), so one that ends sooner,
+// such as a cloudflared replica not ready for the seconds of a rollout, opens nothing.
 //
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch

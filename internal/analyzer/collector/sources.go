@@ -30,8 +30,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -54,10 +56,28 @@ import (
 // SourceKinds are the kinds whose module symptom sources the collector evaluates: the kinds it watches when
 // [Config.Modules] is set, and that the watch role grants (the markers in doc.go). A source of an active module
 // for a kind not listed here is not evaluated. Each needs get, list and watch in the watched namespaces, and its
-// subject owner kind, when it declares one, get there.
-var SourceKinds = []schema.GroupVersionKind{
-	{Group: "autoscaling", Version: "v2", Kind: "HorizontalPodAutoscaler"},
-}
+// subject owner kind, when it declares one, get there. Both are built in, so every cluster serves them. The
+// sources of the add-ons' own kinds (KEDA ScaledObject and ScaledJob, Flux, Kyverno) are not listed: the watch
+// role does not grant list or watch on them.
+var SourceKinds = []schema.GroupVersionKind{sourceHPA, sourcePod}
+
+// The kinds of SourceKinds.
+var (
+	sourceHPA = schema.GroupVersionKind{Group: "autoscaling", Version: "v2", Kind: "HorizontalPodAutoscaler"}
+	sourcePod = schema.GroupVersionKind{Version: apiCore, Kind: kindPod}
+)
+
+// SettleAfter is how long the collector itself must see a symptom state, from its first reconcile that showed
+// it, before it emits the state, for every kind but the HPA. It is the Incident controller's RecurAfter (a test
+// keeps them equal): a symptom state is emitted once while it lasts, so it would never be seen a second time
+// by the sightings gate of package incidents. The collector applies the gate's rule itself, and a state
+// that ends within it (a cloudflared replica not ready for the seconds of a rollout) opens nothing. The state
+// is then emitted as immediate.
+const SettleAfter = 2 * time.Minute
+
+// immediateKind reports whether the symptom states of the kind are emitted at their first reconcile: the HPA
+// only, whose ceiling the HPA controller reports once its own computation has settled (#380).
+func immediateKind(gvk schema.GroupVersionKind) bool { return gvk == sourceHPA }
 
 // occurrenceCondition is the prefix of the occurrence ID of a symptom read from an object's status.
 const occurrenceCondition = "condition:"
@@ -83,20 +103,19 @@ type sourceReconciler struct {
 
 // setupSources registers one watch per kind in SourceKinds. The objects are read from the manager's cache
 // (mgr.GetCache(); mgr.GetClient() would read unstructured objects from the API server), from the informer the
-// watch starts. The watch passes on only what an active source shows a symptom on, before or after the change
-// (predicate); a second source enqueues the objects with a symptom when a module becomes active for the kind,
-// since the predicate let none of them through before (activations).
+// watch starts. Pods are read as typed objects, from the informer the pod collector already runs, so the cache
+// holds them once. The watch passes on only what an active source shows a symptom on, before or after the
+// change (predicate); a second source enqueues the objects with a symptom when a module becomes active for the
+// kind, since the predicate let none of them through before (activations).
 func (c *Collector) setupSources(mgr ctrl.Manager) error {
 	if c.cfg.Modules == nil {
 		return nil
 	}
 	for _, gvk := range SourceKinds {
-		u := &unstructured.Unstructured{}
-		u.SetGroupVersionKind(gvk)
 		r := &sourceReconciler{c: c, reader: mgr.GetCache(), api: mgr.GetAPIReader(), gvk: gvk}
 		err := ctrl.NewControllerManagedBy(mgr).
-			Named("collector-"+strings.ToLower(gvk.Kind)).
-			For(u, builder.WithPredicates(r.predicate())).
+			Named(r.name()).
+			For(r.newObject(), builder.WithPredicates(r.predicate())).
 			WatchesRawSource(r.activations(mgr.GetCache(), c.cfg.SelectionPoll)).
 			WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 			Complete(r)
@@ -105,6 +124,52 @@ func (c *Collector) setupSources(mgr ctrl.Manager) error {
 		}
 	}
 	return nil
+}
+
+// name is the controller's name.
+func (r *sourceReconciler) name() string {
+	return "collector-" + strings.ToLower(r.gvk.Kind)
+}
+
+// newObject returns an empty object of the kind: a typed Pod, else an unstructured object.
+func (r *sourceReconciler) newObject() client.Object {
+	if r.gvk == sourcePod {
+		return &corev1.Pod{}
+	}
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(r.gvk)
+	return u
+}
+
+// newList returns an empty list of the kind.
+func (r *sourceReconciler) newList() client.ObjectList {
+	if r.gvk == sourcePod {
+		return &corev1.PodList{}
+	}
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(r.gvk.GroupVersion().WithKind(r.gvk.Kind + "List"))
+	return list
+}
+
+// content returns the object as decoded from JSON, with apiVersion and kind set, as a source reads it. A
+// typed Pod is converted into a new map, so a source never sees the cache's object; an unstructured object is
+// returned as it is (sources only read it).
+func (r *sourceReconciler) content(o client.Object) (map[string]any, bool) {
+	switch v := o.(type) {
+	case *unstructured.Unstructured:
+		return v.Object, v.GroupVersionKind() == r.gvk
+	case *corev1.Pod:
+		if r.gvk != sourcePod {
+			return nil, false
+		}
+		m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(v)
+		if err != nil {
+			return nil, false
+		}
+		m["apiVersion"], m["kind"] = r.gvk.GroupVersion().String(), r.gvk.Kind
+		return m, true
+	}
+	return nil, false
 }
 
 // active returns the source an active module declares for the kind, with the module's name, if any.
@@ -116,14 +181,15 @@ func (r *sourceReconciler) active() (string, modules.SymptomSource, bool) {
 	return module, src, true
 }
 
-// shows reports whether the active source, if any, finds a symptom on o.
+// shows reports whether the active source, if any, finds a symptom on o. With no active source the object
+// is not read at all, so a Pod is not converted.
 func (r *sourceReconciler) shows(o client.Object) bool {
-	u, ok := o.(*unstructured.Unstructured)
+	_, src, ok := r.active()
 	if !ok {
 		return false
 	}
-	_, src, ok := r.active()
-	return ok && len(modules.EvaluateSource(src, u.Object)) > 0
+	content, ok := r.content(o)
+	return ok && len(modules.EvaluateSource(src, content)) > 0
 }
 
 // predicate lets a create or an update through only when the active source shows a symptom on the object,
@@ -172,19 +238,22 @@ func (r *sourceReconciler) enqueueActivated(ctx context.Context, lister client.R
 	if !ok || wasActive {
 		return ok
 	}
-	list := &unstructured.UnstructuredList{}
-	list.SetGroupVersionKind(r.gvk.GroupVersion().WithKind(r.gvk.Kind + "List"))
+	list := r.newList()
 	if err := lister.List(ctx, list); err != nil {
 		logf.FromContext(ctx).Error(err, "Failed to list the objects of a kind whose module became active",
 			"kind", r.gvk.Kind)
 		return false
 	}
-	for i := range list.Items {
-		o := &list.Items[i]
-		if len(modules.EvaluateSource(src, o.Object)) > 0 {
+	_ = meta.EachListItem(list, func(item runtime.Object) error {
+		o, ok := item.(client.Object)
+		if !ok {
+			return nil
+		}
+		if content, ok := r.content(o); ok && len(modules.EvaluateSource(src, content)) > 0 {
 			q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: o.GetNamespace(), Name: o.GetName()}})
 		}
-	}
+		return nil
+	})
 	return true
 }
 
@@ -206,8 +275,9 @@ func conditionOccurrence(uid types.UID, gvk schema.GroupVersionKind, reason stri
 }
 
 // Reconcile runs the active module's symptom source on the object and emits one observation per symptom state
-// not handled before. With no active module watching the kind (the module is not enabled, not detected or not
-// compiled in), it reads nothing, its owner kind included, and emits nothing.
+// not handled before, once it has lasted [SettleAfter] for a kind that is not immediate. With no active module
+// watching the kind (the module is not enabled, not detected or not compiled in), it reads nothing, its owner
+// kind included, and emits nothing.
 func (r *sourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	start := r.c.started()
 	module, src, ok := r.active()
@@ -216,8 +286,7 @@ func (r *sourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 	key := sourceKey{gvk: r.gvk, NamespacedName: req.NamespacedName}
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(r.gvk)
+	obj := r.newObject()
 	if err := r.reader.Get(ctx, req.NamespacedName, obj); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.c.conditions.forget(key)
@@ -225,19 +294,26 @@ func (r *sourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		return ctrl.Result{}, err
 	}
-	// The cache keeps apiVersion and kind; set them anyway, a source checks them.
-	obj.SetGroupVersionKind(r.gvk)
+	if u, ok := obj.(*unstructured.Unstructured); ok {
+		// The cache keeps apiVersion and kind; set them anyway, a source checks them.
+		u.SetGroupVersionKind(r.gvk)
+	}
+	content, ok := r.content(obj)
+	if !ok {
+		return ctrl.Result{}, nil
+	}
 	symptoms := map[string]modules.Symptom{}
 	current := map[string]time.Time{}
-	for _, s := range modules.EvaluateSource(src, obj.Object) {
+	for _, s := range modules.EvaluateSource(src, content) {
 		if _, seen := symptoms[s.Reason]; seen {
 			continue
 		}
 		symptoms[s.Reason], current[s.Reason] = s, s.Since
 	}
-	pending := r.c.conditions.observe(key, obj.GetUID(), current, r.c.now(), start)
+	now := r.c.now()
+	pending, settle := r.settled(r.c.conditions.observe(key, obj.GetUID(), current, now, start), now)
 	if len(pending) == 0 {
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: settle}, nil
 	}
 	subject, owner, wait, err := r.subject(ctx, obj, src.Subject)
 	if err != nil {
@@ -268,18 +344,19 @@ func (r *sourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			Reason:              s.Reason,
 			Type:                corev1.EventTypeWarning,
 			ReportingController: src.ReportingController,
-			// The fixed summary only: evidence (replica counts, metric values) changes while the state lasts and
-			// must not split the Incident.
+			// The fixed summary only: evidence (replica counts, metric values, condition messages) changes while
+			// the state lasts and must not split the Incident.
 			Note:          s.Summary,
 			RegardingKind: r.gvk.Kind,
 			RegardingName: obj.GetName(),
 		}
 		obs := r.c.observation(fo, subject, obj.GetNamespace(), p.began)
-		obs.Symptom = symptomText(s)
+		obs.Symptom = SymptomText(s)
 		obs.Occurrence = conditionOccurrence(obj.GetUID(), r.gvk, p.reason, p.since, p.episode)
 		obs.Began, obs.Total, obs.MayRepeat = p.began, 1, p.mayRepeat
 		// A symptom state is already settled and lasting, with its own start: it opens its Incident at once
-		// (#267), where a one-off event waits to be seen again.
+		// (#267), where a one-off event waits to be seen again. For a kind that is not immediate the collector
+		// has seen it last SettleAfter, the gate's rule, before it got here.
 		obs.Immediate = true
 		if !p.mayRepeat {
 			obs.Count = 1
@@ -293,7 +370,29 @@ func (r *sourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		r.c.conditions.commit(key, obj.GetUID(), p)
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: settle}, nil
+}
+
+// settled returns the pending states the collector may emit now, and how long until the next of the others
+// has lasted SettleAfter (zero when there is none). Every state of an immediate kind may be emitted at once. A
+// wait is never longer than SettleAfter, also when the clock went back.
+func (r *sourceReconciler) settled(pending []pendingState, now time.Time) ([]pendingState, time.Duration) {
+	if immediateKind(r.gvk) {
+		return pending, 0
+	}
+	var ready []pendingState
+	var wait time.Duration
+	for _, p := range pending {
+		left := min(SettleAfter-now.Sub(p.firstSeen), SettleAfter)
+		if left <= 0 {
+			ready = append(ready, p)
+			continue
+		}
+		if wait == 0 || left < wait {
+			wait = left
+		}
+	}
+	return ready, wait
 }
 
 // claimBackoff is the wait before the n-th read again (from 1) of an owner whose claim is pending.
@@ -305,15 +404,28 @@ func claimBackoff(n int) time.Duration {
 	return min(d, claimRetryMax)
 }
 
-// subject returns the object the symptoms are about, and the UID hashed as its owner: the declared owner kind
-// when the object's controller reference names one that exists in the object's namespace with the referenced
-// UID and claims the object, else the object itself with no owner. wait is true when that owner exists with
-// the referenced UID but its claim is pending: the caller retries instead of settling on the object itself.
-// Only the declared kind is read, once, with the lookup deadline. The ownerResolver of events and pods is not
-// used: it verifies apps/v1 owners by their label selectors and caches what it found, while this check is a
-// claim in the owner's status, which must be read again while it is pending.
-func (r *sourceReconciler) subject(ctx context.Context, obj *unstructured.Unstructured, want modules.SubjectOwner) (
+// subject returns the object the symptoms are about, and the UID hashed as its owner. A Pod's subject is its
+// verified workload, as for the collector's other pod observations (ownerResolver.podSubject), else the Pod.
+// For any other kind it is the declared owner kind when the object's controller reference names one that
+// exists in the object's namespace with the referenced UID and claims the object, else the object itself with
+// no owner. wait is true when that owner exists with the referenced UID but its claim is pending: the caller
+// retries instead of settling on the object itself. Only the declared kind is read, once, with the lookup
+// deadline. The ownerResolver is not used for those: it verifies apps/v1 owners by their label selectors and
+// caches what it found, while this check is a claim in the owner's status, which must be read again while it
+// is pending. A subject outside the Incident schema comes back as the zero ObjectRef, which the caller drops.
+func (r *sourceReconciler) subject(ctx context.Context, o client.Object, want modules.SubjectOwner) (
 	ref remediationv1alpha1.ObjectRef, owner string, wait bool, err error) {
+	if pod, ok := o.(*corev1.Pod); ok {
+		ref, owner, ok, err := r.c.owners.podSubject(ctx, pod)
+		if err != nil || !ok {
+			return remediationv1alpha1.ObjectRef{}, "", false, err
+		}
+		return ref, owner, false, nil
+	}
+	obj, ok := o.(*unstructured.Unstructured)
+	if !ok {
+		return remediationv1alpha1.ObjectRef{}, "", false, nil
+	}
 	self := remediationv1alpha1.ObjectRef{
 		APIVersion: r.gvk.GroupVersion().String(), Kind: r.gvk.Kind,
 		Namespace: obj.GetNamespace(), Name: obj.GetName(), UID: remediationv1alpha1.UID(obj.GetUID()),
@@ -380,6 +492,9 @@ type symptomState struct {
 	episode time.Time // zero for a state first seen as it is; else when the tracker saw it come back
 	ended   bool      // a reconcile saw the object without this symptom since
 	handled bool
+	// firstSeen is the collector's clock at the first reconcile that showed this state (or this episode of it),
+	// for SettleAfter. It is not kept once the state is handled.
+	firstSeen time.Time
 }
 
 // objectStates is what the tracker knows of one object.
@@ -399,6 +514,7 @@ type pendingState struct {
 	since, episode time.Time // as in symptomState: they make the occurrence ID
 	began          time.Time // when it began, never later than the clock; zero when unknown
 	mayRepeat      bool
+	firstSeen      time.Time // as in symptomState
 }
 
 // stateTracker remembers the handled symptom states of objects read by module symptom sources, for at most a
@@ -458,9 +574,9 @@ func (tr *stateTracker) observe(key sourceKey, uid types.UID, current map[string
 		st, had := s.states[reason]
 		switch {
 		case !had || !st.since.Equal(since):
-			st = symptomState{since: since}
+			st = symptomState{since: since, firstSeen: now}
 		case st.ended:
-			st = symptomState{since: since, episode: now}
+			st = symptomState{since: since, episode: now, firstSeen: now}
 		}
 		s.states[reason] = st
 		if st.handled {
@@ -476,6 +592,7 @@ func (tr *stateTracker) observe(key sourceKey, uid types.UID, current map[string
 		mayRepeat := began.Before(start) || (!s.repeatThrough.IsZero() && !began.After(s.repeatThrough))
 		out = append(out, pendingState{
 			reason: reason, since: since, episode: st.episode, began: began, mayRepeat: mayRepeat,
+			firstSeen: st.firstSeen,
 		})
 	}
 	tr.seen.put(key, s)
@@ -533,10 +650,10 @@ func (tr *stateTracker) len() int {
 	return tr.seen.len()
 }
 
-// symptomText is what an observation of a symptom carries as its symptom: the module's fixed summary, then
+// SymptomText is what an observation of a symptom carries as its symptom: the module's fixed summary, then
 // its evidence, already redacted and bounded by the module evaluator, as "field=value" pairs. The whole is
 // normalized and redacted again, and cut to the Incident schema's 1024 bytes, by fingerprint.Normalize.
-func symptomText(s modules.Symptom) string {
+func SymptomText(s modules.Symptom) string {
 	var b strings.Builder
 	b.WriteString(s.Summary)
 	if len(s.Evidence) > 0 {

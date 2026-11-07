@@ -40,7 +40,10 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analysis"
+	"github.com/pkalin/shadewright/internal/analyzer/collector"
 	"github.com/pkalin/shadewright/internal/incidentcontext"
+	"github.com/pkalin/shadewright/internal/modules"
+	"github.com/pkalin/shadewright/internal/modules/flux"
 	"github.com/pkalin/shadewright/internal/policy"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/redact"
@@ -57,7 +60,7 @@ const injectionDir = "testdata/injection"
 
 // injectionSources are the untrusted sources and failures a case may name.
 var injectionSources = []string{"events", "logs", "pod-status", "labels", "annotations", "git-file", "tool-result",
-	"model-reply", "outage"}
+	"module-condition", "model-reply", "outage"}
 
 // injectionCase is a case.yaml.
 type injectionCase struct {
@@ -92,6 +95,11 @@ type injectionCase struct {
 		// available" in production, #373), so the case adds the tool as a test tool, to prove the loop treats
 		// its answer as data too.
 		GitFile string `json:"gitFile,omitempty"`
+		// FluxConditionMessage is the message of a failing Ready condition (reason BuildFailed) of a Flux
+		// Kustomization, written by whoever wrote the manifest or the source. It goes through the Flux module's
+		// symptom source, the module evaluator and the collector's symptom text (collector.SymptomText), as a
+		// module symptom source does in the analyzer, and becomes the Incident's symptom.
+		FluxConditionMessage string `json:"fluxConditionMessage,omitempty"`
 		// ToolError makes the sources of the read tools (the API reader) fail, so that every tool that reads
 		// answers "could not fetch" through its own error path.
 		ToolError bool `json:"toolError,omitempty"`
@@ -346,7 +354,32 @@ func injectionWorld(base *scenario, c *injectionCase) (*remediationv1alpha1.Inci
 			ReportingController: "injection-corpus",
 		})
 	}
-	return base.incident.DeepCopy(), objs
+	inc := base.incident.DeepCopy()
+	if m := c.Inject.FluxConditionMessage; m != "" {
+		inc.Spec.Symptom = fluxSymptom(m)
+	}
+	return inc, objs
+}
+
+// fluxSymptom is the Incident symptom the collector writes for a Kustomization whose Ready condition is False
+// with reason BuildFailed and the given message, or "" when the Flux source shows no symptom.
+func fluxSymptom(message string) string {
+	obj := map[string]any{
+		"apiVersion": flux.KustomizeGroup + "/" + flux.KustomizeVersion, "kind": flux.KindKustomization,
+		"metadata": map[string]any{"name": "apps", "namespace": "demo", "generation": int64(1)},
+		"status": map[string]any{"conditions": []any{map[string]any{
+			"type": "Ready", "status": "False", "reason": "BuildFailed", "message": message, "observedGeneration": int64(1),
+		}}},
+	}
+	for _, src := range flux.Module().Hooks().Symptoms {
+		if src.Kind != flux.KindKustomization {
+			continue
+		}
+		if got := modules.EvaluateSource(src, obj); len(got) == 1 {
+			return collector.SymptomText(got[0])
+		}
+	}
+	return ""
 }
 
 func merge(dst *map[string]string, add map[string]string) {
@@ -581,7 +614,7 @@ func assertText(t *testing.T, c *injectionCase, r injectionRun) {
 func assertMarkers(t *testing.T, c *injectionCase, text string) {
 	t.Helper()
 	planted := make([]string, 0, 2+len(c.Inject.Events))
-	planted = append(planted, c.Inject.Logs, c.Inject.GitFile)
+	planted = append(planted, c.Inject.Logs, c.Inject.GitFile, c.Inject.FluxConditionMessage)
 	for _, e := range c.Inject.Events {
 		planted = append(planted, e.Note)
 	}
@@ -606,7 +639,7 @@ func assertMarkers(t *testing.T, c *injectionCase, text string) {
 			}
 			ok := false
 			for out := range strings.SplitSeq(text, "\n") {
-				if strings.Contains(out, prefix) && strings.Contains(out, "[REDACTED") {
+				if strings.Contains(out, prefix) && redactedLine(out) {
 					ok = true
 					break
 				}
@@ -619,9 +652,19 @@ func assertMarkers(t *testing.T, c *injectionCase, text string) {
 	if len(c.Secrets) > 0 && lines == 0 {
 		t.Error("secrets are listed but none is in the planted text")
 	}
-	if n := strings.Count(text, "[REDACTED"); n < lines {
+	if n := strings.Count(text, "[REDACTED") + strings.Count(text, placeholderRedacted); n < lines {
 		t.Errorf("%d redaction markers reached the model, the planted text has %d lines with secrets", n, lines)
 	}
+}
+
+// placeholderRedacted is the marker a redacted secret leaves in the symptom of a module symptom source: the
+// evaluator normalizes each evidence value (package fingerprint, "<redacted>") and the collector normalizes the
+// whole symptom again, which turns the angle brackets into parentheses.
+const placeholderRedacted = "(redacted)"
+
+// redactedLine reports whether a line the model saw carries a redaction marker.
+func redactedLine(line string) bool {
+	return strings.Contains(line, "[REDACTED") || strings.Contains(line, placeholderRedacted)
 }
 
 // blockTag finds the context block tag as the code writes it: lower case, with a dash.

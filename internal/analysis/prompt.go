@@ -48,8 +48,8 @@ var catalogDescriptions = map[remediationv1alpha1.ActionType]string{
 		"the ScaledObject's spec holds now.",
 	remediationv1alpha1.ActionSetContainerMemoryLimit: "change the memory limit of one container of the Deployment " +
 		"or StatefulSet that is the incident's subject, from previous to desired (whole bytes, 1Mi to 1Ti, " +
-		"for example 256Mi to 512Mi). previous is the limit the pod template sets now, written as in the " +
-		"manifest (for example 48Mi or 50M), from the context's \"pod template\" line: not a running pod's own limit, " +
+		"for example 256Mi to 512Mi). previous is the limit the pod template sets now, in Kubernetes' " +
+		"canonical form (for example 48Mi or 50M), from the context's \"pod template\" line: not a running pod's own limit, " +
 		"which may be an older value during a rollout, and not a byte count from a metric.",
 }
 

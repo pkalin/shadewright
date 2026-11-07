@@ -91,7 +91,8 @@ const (
 	// (#494).
 	ReasonNoChange Reason = "NoChange"
 	// ReasonDirectionReversed: taking the previous value from the subject's pod template turns the proposed
-	// change from an increase into a decrease, or back: the model reasoned about another change (#494).
+	// change from an increase into a decrease, or back, or the model's previous and desired values are equal
+	// and state no direction: the model reasoned about another change (#494).
 	ReasonDirectionReversed Reason = "DirectionReversed"
 	// ReasonNoPolicyForAction: no RemediationPolicy is configured for the proposed action type.
 	ReasonNoPolicyForAction Reason = "NoPolicyForAction"
@@ -986,15 +987,18 @@ func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, 
 // a metric. It hands off a memory limit change whose container the template does not have or sets no limit
 // for (PreviousValueUnknown), whose desired value the template already holds (NoChange), and one that the
 // template's value turns from an increase into a decrease or back (DirectionReversed): the model reasoned
-// about another change than the one that would be proposed. A model's previous value equal to its desired
-// value states no direction. An action that may not target the subject (another kind, or a subject without
-// a namespace or UID) is left as it is, for accept to refuse. AdjustKedaMaxReplicas keeps the model's
+// about another change than the one that would be proposed, or a model's previous value equal to its desired
+// value, which states no direction: a reply that sees no change never becomes one. A memory limit change that
+// may not target the subject (another kind, or a subject without a namespace or UID) ends TargetNotSupported
+// before the catalog check, so a model's previous value is never checked against the bounds. AdjustKedaMaxReplicas keeps the model's
 // previousValue: the builder does not read ScaledObjects, and the executor's check refuses a wrong one.
 func (r *run) previousFromTemplate(a remediationv1alpha1.Action) (remediationv1alpha1.Action, Reason) {
 	s := r.inc.Spec.Subject
-	if a.Type != remediationv1alpha1.ActionSetContainerMemoryLimit || a.SetContainerMemoryLimit == nil ||
-		s.Namespace == "" || s.UID == "" || !policy.ActionMayTarget(a.Type, s.APIVersion, s.Kind) {
+	if a.Type != remediationv1alpha1.ActionSetContainerMemoryLimit || a.SetContainerMemoryLimit == nil {
 		return a, ""
+	}
+	if s.Namespace == "" || s.UID == "" || !policy.ActionMayTarget(a.Type, s.APIVersion, s.Kind) {
+		return a, ReasonTargetNotSupported
 	}
 	i := slices.IndexFunc(r.template, func(c incidentcontext.TemplateContainer) bool {
 		return c.Name == a.SetContainerMemoryLimit.Container
@@ -1008,7 +1012,7 @@ func (r *run) previousFromTemplate(a remediationv1alpha1.Action) (remediationv1a
 	if planned == 0 {
 		return a, ReasonNoChange
 	}
-	if claimed := p.Desired.Cmp(p.Previous); claimed != 0 && claimed != planned {
+	if claimed := p.Desired.Cmp(p.Previous); claimed != planned {
 		return a, ReasonDirectionReversed
 	}
 	p.Previous = current

@@ -829,9 +829,9 @@ func TestPreviousMemoryLimitComesFromThePodTemplate(t *testing.T) {
 		"the template's own value": {change(templateLimit, desiredLimit),
 			[]incidentcontext.TemplateContainer{{Name: "sidecar"}, {Name: testContainer, MemoryLimit: limit(templateLimit)}},
 			ReasonProposed, templateLimit, desiredLimit},
-		// The catalog check runs after the substitution: an old pod's limit as both values is no no-op.
-		"an old pod's limit as both values":   {change(desiredLimit, desiredLimit), app(templateLimit), ReasonProposed, templateLimit, desiredLimit},
-		"a restore to an old pod's limit":     {change("64Mi", "64Mi"), app(templateLimit), ReasonProposed, templateLimit, "64Mi"},
+		// A reply whose two values are equal states no direction, so the template's value never picks one.
+		"an old pod's limit as both values":   {change(desiredLimit, desiredLimit), app(templateLimit), ReasonDirectionReversed, "", ""},
+		"a restore to an old pod's limit":     {change("64Mi", "64Mi"), app(templateLimit), ReasonDirectionReversed, "", ""},
 		"a decimal template limit":            {change("50M", desiredLimit), app("50M"), ReasonProposed, "50M", desiredLimit},
 		"the template's value as desired":     {change("64Mi", templateLimit), app(templateLimit), ReasonNoChange, "", ""},
 		"an increase that becomes a decrease": {change("64Mi", "128Mi"), app("256Mi"), ReasonDirectionReversed, "", ""},
@@ -877,20 +877,24 @@ func TestPreviousFromTemplateLeavesAnUntargetableSubjectToTheTargetCheck(t *test
 		"no UID":       func(s *remediationv1alpha1.ObjectRef) { s.UID = "" },
 		"no namespace": func(s *remediationv1alpha1.ObjectRef) { s.Namespace = "" },
 	} {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture()
-			f.builder.c.Template = nil
-			f.triage.steps = []step{reply(validResult)}
-			a, err := New(f.cfg)
-			if err != nil {
-				t.Fatal(err)
-			}
-			inc := incident()
-			clear(&inc.Spec.Subject)
-			out, err := a.Analyze(t.Context(), inc, testLimits())
-			if err != nil || out.Reason != ReasonTargetNotSupported {
-				t.Errorf("reason %s (%v), want TargetNotSupported", out.Reason, err)
-			}
-		})
+		// A model's previous value out of the bounds is never checked: the target check comes first.
+		const inBounds, outOfBounds = "128Mi", "2Ti"
+		for _, previous := range []string{inBounds, outOfBounds} {
+			t.Run(name+" previous "+previous, func(t *testing.T) {
+				f := newFixture()
+				f.builder.c.Template = nil
+				f.triage.steps = []step{reply(strings.Replace(validResult, `"previous":"256Mi"`, `"previous":"`+previous+`"`, 1))}
+				a, err := New(f.cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				inc := incident()
+				clear(&inc.Spec.Subject)
+				out, err := a.Analyze(t.Context(), inc, testLimits())
+				if err != nil || out.Reason != ReasonTargetNotSupported {
+					t.Errorf("reason %s (%v), want TargetNotSupported", out.Reason, err)
+				}
+			})
+		}
 	}
 }

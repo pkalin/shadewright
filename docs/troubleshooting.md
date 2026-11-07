@@ -283,7 +283,7 @@ An analysis that ends without a request shows why in the reason of its `Analyzed
 | --- | --- | --- |
 | `PreviousValueUnknown` | The pod template the analyzer read has no container of the proposed name, sets no memory limit for it, or could not be read | The action changes an existing limit: set one in Git first, or handle the incident by hand |
 | `NoChange` | The proposed limit is the one the pod template already sets; during a rollout, older pods may still run with another | Let the rollout finish, then check whether the symptom remains |
-| `DirectionReversed` | Measured from the pod template's limit, the proposed change goes the other way than the model reasoned (an increase becomes a decrease, or back), usually because older pods of a rollout hold another limit | Read the template's limit and decide by hand, or wait for the rollout and the next analysis |
+| `DirectionReversed` | Measured from the pod template's limit, the proposed change goes the other way than the model reasoned (an increase becomes a decrease, or back), or the model wrote the same previous and desired value, usually because older pods of a rollout hold another limit | Read the template's limit and decide by hand, or wait for the rollout and the next analysis |
 
 ## The Incident cap is reached
 

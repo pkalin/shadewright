@@ -215,12 +215,12 @@ func TestPromptVersionCoversTheGeneratedParts(t *testing.T) {
 }
 
 // The prompt and the schema say which value a previous field holds: the workload's spec as it is now,
-// written as in the manifest, not a running pod's or a metric's (#494).
+// in canonical form, not a running pod's or a metric's (#494).
 func TestPreviousFieldsAreDescribed(t *testing.T) {
 	schema := string(ResponseSchema())
 	prompt := systemPrompt(false, 0)
 	for _, want := range []string{
-		"The memory limit the workload's pod template sets for the container now, written as in the manifest (for example 48Mi or 50M)",
+		"The memory limit the workload's pod template sets for the container now, in Kubernetes' canonical form (for example 48Mi or 50M)",
 		"The maxReplicaCount the ScaledObject's spec holds now",
 	} {
 		if !strings.Contains(schema, want) {
@@ -228,7 +228,7 @@ func TestPreviousFieldsAreDescribed(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"previous is the limit the pod template sets now, written as in the manifest (for example 48Mi or 50M)",
+		"previous is the limit the pod template sets now, in Kubernetes' canonical form (for example 48Mi or 50M)",
 		"previousValue is the maxReplicaCount the ScaledObject's spec holds now",
 	} {
 		if !strings.Contains(prompt, want) {

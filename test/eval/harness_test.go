@@ -194,7 +194,7 @@ var refusalReasons = []analysis.Reason{analysis.ReasonNoProposal, analysis.Reaso
 // text is the diagnosis: the result's own ends, and the checks of its proposal after decoding.
 var resultReasons = []analysis.Reason{analysis.ReasonProposed, analysis.ReasonNoProposal, analysis.ReasonMissingData,
 	analysis.ReasonNoEvidence, analysis.ReasonTargetNotSupported, analysis.ReasonNoPolicyForAction,
-	analysis.ReasonPreviousValueUnknown}
+	analysis.ReasonPreviousValueUnknown, analysis.ReasonNoChange, analysis.ReasonDirectionReversed}
 
 // scoreOutcome compares the loop's outcome with expected.yaml's.
 func scoreOutcome(scn *scenario, out analysis.Outcome) outcomeScore {
@@ -297,7 +297,14 @@ func checkMemoryTarget(scn *scenario, p *remediationv1alpha1.SetContainerMemoryL
 		if c.Name != p.Container {
 			continue
 		}
-		if cur := c.Resources.Limits.Memory(); !cur.IsZero() && cur.Cmp(p.Previous) != 0 {
+		// The loop takes the previous value from the pod template the context builder read (#494), so this
+		// checks that substitution end to end, against the recorded objects: it fails when the plan carries
+		// any other value, the model's included (the oom/rollout variant without the substitution).
+		cur, ok := c.Resources.Limits[corev1.ResourceMemory]
+		if !ok {
+			return fmt.Sprintf("the container sets no memory limit, the loop proposed previous %s", p.Previous.String())
+		}
+		if cur.Cmp(p.Previous) != 0 {
 			return fmt.Sprintf("previous %s is not the container's current limit %s", p.Previous.String(), cur.String())
 		}
 		return ""

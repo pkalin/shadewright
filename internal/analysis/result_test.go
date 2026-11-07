@@ -220,7 +220,7 @@ func TestPreviousFieldsAreDescribed(t *testing.T) {
 	schema := string(ResponseSchema())
 	prompt := systemPrompt(false, 0)
 	for _, want := range []string{
-		"The memory limit the workload's pod template sets for the container now, written as in the manifest (for example 48Mi)",
+		"The memory limit the workload's pod template sets for the container now, written as in the manifest (for example 48Mi or 50M)",
 		"The maxReplicaCount the ScaledObject's spec holds now",
 	} {
 		if !strings.Contains(schema, want) {
@@ -228,7 +228,7 @@ func TestPreviousFieldsAreDescribed(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"previous is the limit the pod template sets now, written as in the manifest (for example 48Mi)",
+		"previous is the limit the pod template sets now, written as in the manifest (for example 48Mi or 50M)",
 		"previousValue is the maxReplicaCount the ScaledObject's spec holds now",
 	} {
 		if !strings.Contains(prompt, want) {

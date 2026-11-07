@@ -30,8 +30,9 @@ limitations under the License.
 // attributed pods, never one about another object or none. The target is always the Incident's subject and
 // the RemediationPolicy the one configured for the action type, never chosen by the model. The previous value
 // of a memory limit change is the subject's pod template's, as the context builder read it, never the
-// model's ([incidentcontext.Context.Template], #494); without one the proposal is handed off
-// (PreviousValueUnknown). The [Controller], not the model, creates the
+// model's ([incidentcontext.Context.Template], #494), and the catalog check runs on the plan with it; without
+// one, or when the template already holds the desired value or its value reverses the direction of the change,
+// the proposal is handed off (PreviousValueUnknown, NoChange, DirectionReversed). The [Controller], not the model, creates the
 // RemediationRequest, in the operator namespace with approvalRequired true; the executor's policy check
 // decides it (invariant 1). The result has no confidence field, and a reply that adds one is invalid.
 //

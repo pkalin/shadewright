@@ -111,8 +111,9 @@ type MemoryLimitChange struct {
 	// Container is the container name in the pod template.
 	Container string `json:"container" bound:"maxLen=63" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"`
 	// Previous is the limit the plan was made against: the pod template's, as it is now. The loop replaces it
-	// with the value the context builder read from the template (#494).
-	Previous string `json:"previous" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti)?$" desc:"The memory limit the workload's pod template sets for the container now, written as in the manifest (for example 48Mi), as the context's pod template line shows it. Not a running pod's own limit, which may still be an older value during a rollout, and not a byte count from a metric."`
+	// with the value the context builder read from the template (#494), so its pattern also takes the decimal
+	// suffixes a template may use (50M); desired keeps the binary ones.
+	Previous string `json:"previous" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti|k|M|G|T)?$" desc:"The memory limit the workload's pod template sets for the container now, written as in the manifest (for example 48Mi or 50M), as the context's pod template line shows it. Not a running pod's own limit, which may still be an older value during a rollout, and not a byte count from a metric."`
 	// Desired is the new limit.
 	Desired string `json:"desired" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti)?$"`
 }
@@ -283,6 +284,20 @@ func (e *decodeError) Error() string { return e.msg }
 // With a proposal it also returns the action converted to the API's type, the one a request carries; nil
 // without one.
 func DecodeResult(content string) (*Result, *remediationv1alpha1.Action, error) {
+	r, action, err := decodeResult(content)
+	if err != nil || action == nil {
+		return r, action, err
+	}
+	if reason, _ := policy.CheckAction(*action); reason != "" {
+		return nil, nil, errOutOfBounds
+	}
+	return r, action, nil
+}
+
+// decodeResult is [DecodeResult] without the policy's catalog check, which the analysis loop runs once it has
+// taken the previous value from the subject's pod template (#494): a model's previous value is not checked,
+// since it is replaced.
+func decodeResult(content string) (*Result, *remediationv1alpha1.Action, error) {
 	if len(content) > MaxResultBytes {
 		return nil, nil, errInvalid
 	}
@@ -401,8 +416,8 @@ func valid(v reflect.Value, b bounds) bool {
 	}
 }
 
-// toAPI converts the proposed action into the API's Action and runs the policy's catalog check on it. Only
-// the member of the type may be set.
+// toAPI converts the proposed action into the API's Action. Only the member of the type may be set. The
+// policy's catalog check is the caller's.
 func (a ProposedAction) toAPI() (remediationv1alpha1.Action, error) {
 	out := remediationv1alpha1.Action{Type: a.Type}
 	switch a.Type {
@@ -425,9 +440,6 @@ func (a ProposedAction) toAPI() (remediationv1alpha1.Action, error) {
 		out.SetContainerMemoryLimit = &remediationv1alpha1.SetContainerMemoryLimit{Container: p.Container, Previous: prev, Desired: desired}
 	default:
 		return out, errAction
-	}
-	if reason, _ := policy.CheckAction(out); reason != "" {
-		return out, errOutOfBounds
 	}
 	return out, nil
 }

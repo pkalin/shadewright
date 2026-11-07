@@ -25,6 +25,7 @@ import (
 	"sync"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -565,5 +566,23 @@ func TestVariantsShareTheScenarioRubric(t *testing.T) {
 	}
 	if _, err := loadVariants(scheme, dir, base); err == nil {
 		t.Error("a variant that does not say what it changes was loaded")
+	}
+}
+
+// A memory plan for a container whose template sets no memory limit fails: the loop takes the previous value
+// from the template (#494), so no previous value fits it.
+func TestMemoryPlanForAContainerWithoutALimitFails(t *testing.T) {
+	_, s := mustScenario(t, scnOOM)
+	for _, o := range s.objects {
+		if d, ok := o.(*appsv1.Deployment); ok && d.Name == "web" {
+			d.Spec.Template.Spec.Containers[0].Resources.Limits = nil
+		}
+	}
+	plan := &analysis.Plan{Action: remediationv1alpha1.Action{Type: remediationv1alpha1.ActionSetContainerMemoryLimit,
+		SetContainerMemoryLimit: &remediationv1alpha1.SetContainerMemoryLimit{Container: "web",
+			Previous: resource.MustParse("48Mi"), Desired: resource.MustParse("64Mi")}}}
+	ok, d := scoreProposal(s, analysis.Outcome{Reason: analysis.ReasonProposed, Plan: plan})
+	if ok || !strings.Contains(d, "sets no memory limit") {
+		t.Errorf("pass %t, detail %q: want a failure for a container without a limit", ok, d)
 	}
 }

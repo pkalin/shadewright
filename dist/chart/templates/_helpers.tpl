@@ -131,12 +131,27 @@ imagePullSecrets:
 {{- end }}
 
 {{/*
+The analyzer's module grants that the chart renders (templates/rbac/analyzer-module-roles.yaml), comma-separated,
+as --module-grants takes them: the analyzer watches only the module kinds of these grants, and leaves the optional
+kyverno-cluster out without reporting it as missing when it is not listed.
+*/}}
+{{- define "shadewright.analyzerModuleGrants" -}}
+{{- $m := .Values.analyzer.modules -}}
+{{- $g := list -}}
+{{- if $m.keda.enabled }}{{ $g = append $g "keda" }}{{ end -}}
+{{- if $m.flux.enabled }}{{ $g = append $g "flux" }}{{ end -}}
+{{- if $m.kyverno.enabled }}{{ $g = append $g "kyverno" }}{{ end -}}
+{{- if $m.kyverno.clusterWide.enabled }}{{ $g = append $g "kyverno-cluster" }}{{ end -}}
+{{- join "," $g -}}
+{{- end }}
+
+{{/*
 Flags the chart renders itself in the Deployments. extraArgs may not name them, so a free list cannot turn off
 leader election, the metrics authentication or the watched namespaces. Keep in step with the args in
 templates/workloads. "namespace" is not an arg of the chart but the Pods get it from POD_NAMESPACE.
 */}}
 {{- define "shadewright.reservedFlags" -}}
-leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies analysis-store-account analysis-store-container
+leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies analysis-store-account analysis-store-container module-grants
 {{- end }}
 
 {{/*

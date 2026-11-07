@@ -115,6 +115,9 @@ type injectionCase struct {
 		Seen []string `json:"seen,omitempty"`
 		// Unseen is text that must not reach the model.
 		Unseen []string `json:"unseen,omitempty"`
+		// InBlock is text that must reach the model inside a context block, and never outside one: the planted
+		// text is fenced as data (threat model G4.12).
+		InBlock []string `json:"inBlock,omitempty"`
 		// ToolCalls are the tool names the read tools must have run, in order; empty means none.
 		ToolCalls []string `json:"toolCalls,omitempty"`
 	} `json:"expect"`
@@ -520,6 +523,7 @@ func TestInjectionCorpus(t *testing.T) {
 			assertInstructionsUnchanged(t, r, baseTriage, baseEscalation, schema)
 			assertText(t, c, r)
 			assertDelimiters(t, r)
+			assertInBlock(t, c, r)
 		})
 	}
 }
@@ -690,6 +694,49 @@ func assertDelimiters(t *testing.T, r injectionRun) {
 	}
 }
 
+// assertInBlock checks that each text of the case's InBlock reached the model inside a context block of a user
+// message, and in no line outside one.
+func assertInBlock(t *testing.T, c *injectionCase, r injectionRun) {
+	t.Helper()
+	for _, s := range c.Expect.InBlock {
+		inside := 0
+		for i, req := range r.requests {
+			for j, m := range req.Messages[1:] {
+				if m.Role != providers.RoleUser {
+					continue
+				}
+				in, out := blockPlacement(m.Content, s)
+				inside += in
+				if out > 0 {
+					t.Errorf("request %d message %d: %q outside a context block", i, j, s)
+				}
+			}
+		}
+		if inside == 0 {
+			t.Errorf("%q never reached the model inside a context block", s)
+		}
+	}
+}
+
+// blockPlacement counts the lines of content holding s inside a context block and outside one, with the block
+// structure assertBlocks checks.
+func blockPlacement(content, s string) (inside, outside int) {
+	open := false
+	for line := range strings.SplitSeq(content, "\n") {
+		switch {
+		case strings.HasPrefix(line, "<context-block "):
+			open = true
+		case line == "</context-block>":
+			open = false
+		case strings.Contains(line, s) && open:
+			inside++
+		case strings.Contains(line, s):
+			outside++
+		}
+	}
+	return inside, outside
+}
+
 func assertBlocks(t *testing.T, where, content string) {
 	t.Helper()
 	open, blocks, tagLines := false, 0, 0
@@ -718,5 +765,14 @@ func assertBlocks(t *testing.T, where, content string) {
 	}
 	if n := len(blockTag.FindAllString(content, -1)); n != tagLines {
 		t.Errorf("%s: %d mentions of the tag, %d tag lines: planted text holds a tag", where, n, tagLines)
+	}
+}
+
+// TestBlockPlacement checks the check of InBlock: text inside a context block counts as inside, the same text
+// after the block closes or before it opens as outside.
+func TestBlockPlacement(t *testing.T) {
+	content := "symptom: planted\n<context-block id=\"c1\" kind=\"incident\">\nplanted\n</context-block>\nplanted"
+	if in, out := blockPlacement(content, "planted"); in != 1 || out != 2 {
+		t.Errorf("blockPlacement = %d inside, %d outside, want 1, 2", in, out)
 	}
 }

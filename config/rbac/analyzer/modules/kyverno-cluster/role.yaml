@@ -9,7 +9,6 @@ rules:
   resources:
   - clusterpolicies
   verbs:
-  - get
   - list
   - watch
 - apiGroups:
@@ -17,6 +16,5 @@ rules:
   resources:
   - clusterpolicyreports
   verbs:
-  - get
   - list
   - watch

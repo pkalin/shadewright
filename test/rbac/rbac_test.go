@@ -360,6 +360,7 @@ func TestPermissionBoundary(t *testing.T) {
 		{"analyzer", "patch", "keda.sh", "scaledobjects", "", otherNS, false},
 		{"analyzer", "get", "keda.sh", "scaledobjects", "", unwatched, false},
 		{"analyzer", "list", "keda.sh", "scaledobjects", "", "", false},
+		{"analyzer", "get", "keda.sh", "scaledjobs", "", otherNS, false},
 		{"analyzer", "list", "keda.sh", "scaledjobs", "", otherNS, true},
 		{"analyzer", "watch", "keda.sh", "scaledjobs", "", otherNS, true},
 		{"analyzer", "update", "keda.sh", "scaledjobs", "", otherNS, false},
@@ -1066,20 +1067,26 @@ func decodeAll(t *testing.T, path string) []map[string]any {
 // bound with a ClusterRoleBinding, the namespaced ones with a RoleBinding, as the chart and config/modules do.
 func TestModuleRolesGrantOnlyWhenBound(t *testing.T) {
 	ctx := context.Background()
-	type kind struct{ group, resource string }
+	// get is granted only where an object is read by name: the ScaledObject a KEDA HPA names as its owner. The
+	// sources' informers need list and watch.
+	type kind struct {
+		group, resource string
+		get             bool
+	}
 	for _, tc := range []struct {
 		dir     string
 		cluster bool
 		kinds   []kind
 	}{
-		{"keda", false, []kind{{"keda.sh", "scaledobjects"}, {"keda.sh", "scaledjobs"}}},
+		{"keda", false, []kind{{"keda.sh", "scaledobjects", true}, {"keda.sh", "scaledjobs", false}}},
 		{"flux", false, []kind{
-			{"kustomize.toolkit.fluxcd.io", "kustomizations"},
-			{"helm.toolkit.fluxcd.io", "helmreleases"},
-			{"source.toolkit.fluxcd.io", "gitrepositories"},
+			{"kustomize.toolkit.fluxcd.io", "kustomizations", false},
+			{"helm.toolkit.fluxcd.io", "helmreleases", false},
+			{"source.toolkit.fluxcd.io", "gitrepositories", false},
 		}},
-		{"kyverno", false, []kind{{"kyverno.io", "policies"}, {"wgpolicyk8s.io", "policyreports"}}},
-		{"kyverno-cluster", true, []kind{{"kyverno.io", "clusterpolicies"}, {"wgpolicyk8s.io", "clusterpolicyreports"}}},
+		{"kyverno", false, []kind{{"kyverno.io", "policies", false}, {"wgpolicyk8s.io", "policyreports", false}}},
+		{"kyverno-cluster", true, []kind{{"kyverno.io", "clusterpolicies", false},
+			{"wgpolicyk8s.io", "clusterpolicyreports", false}}},
 	} {
 		t.Run(tc.dir, func(t *testing.T) {
 			sa := "module-" + tc.dir
@@ -1110,10 +1117,13 @@ func TestModuleRolesGrantOnlyWhenBound(t *testing.T) {
 				t.Fatalf("bind role: %v", err)
 			}
 			for _, k := range tc.kinds {
-				for _, verb := range []string{"get", "list", "watch"} {
+				for _, verb := range []string{"list", "watch"} {
 					if !eventuallyCan(t, sa, verb, k.group, k.resource, ns) {
 						t.Errorf("bound: %s %s/%s refused, want allowed", verb, k.group, k.resource)
 					}
+				}
+				if got := can(t, sa, "get", k.group, k.resource, "", ns); got != k.get {
+					t.Errorf("bound: get %s/%s allowed %v, want %v", k.group, k.resource, got, k.get)
 				}
 				for _, verb := range []string{"create", "update", "patch", "delete"} {
 					if can(t, sa, verb, k.group, k.resource, "", ns) {

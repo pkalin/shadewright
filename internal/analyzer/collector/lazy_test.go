@@ -20,13 +20,16 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -42,45 +45,137 @@ var (
 	gvkClusterPolicy = schema.GroupVersionKind{Group: kyverno.PolicyGroup, Version: kyverno.PolicyVersion, Kind: kyverno.KindClusterPolicy}
 )
 
-// lazyHarness drives one lazySource step by step, with a fake API reader and RESTMapper and a starter that
-// only counts.
+// lazyHarness drives one lazySource step by step, with a fake API reader and RESTMapper, a clock of its own
+// and a starter whose runs the test controls (fakeRun).
 type lazyHarness struct {
 	t       *testing.T
 	l       *lazySource
 	api     *objectReader
 	mapper  *meta.DefaultRESTMapper
 	sel     modules.Selection
+	clock   time.Time
+	log     *recordingSink
+	runs    []*fakeRun
+	noSync  bool  // runs do not sync until the test says so
+	buildEr error // runs stop at once with this error, as a controller that cannot be built
 	starts  atomic.Int32
 	changes atomic.Int32
 	stops   atomic.Int32
 }
 
+// fakeRun is one watch the harness started.
+type fakeRun struct {
+	ctx    context.Context
+	done   chan error
+	synced chan struct{}
+	errs   *watchErrors
+	once   sync.Once
+}
+
+// finish ends the run with err (once): the controller stopped.
+func (r *fakeRun) finish(err error) {
+	r.once.Do(func() { r.done <- err; close(r.done) })
+}
+
 func newLazyHarness(t *testing.T, gvk schema.GroupVersionKind, sel modules.Selection) *lazyHarness {
 	t.Helper()
-	h := &lazyHarness{t: t, api: newObjectReader(), mapper: meta.NewDefaultRESTMapper(nil), sel: sel}
+	return newLazyHarnessWith(t, gvk, sel, nil)
+}
+
+// newLazyHarnessWith is newLazyHarness with the module grants the chart rendered (nil: not known).
+func newLazyHarnessWith(t *testing.T, gvk schema.GroupVersionKind, sel modules.Selection, grants []string) *lazyHarness {
+	t.Helper()
+	h := &lazyHarness{t: t, api: newObjectReader(), mapper: meta.NewDefaultRESTMapper(nil), sel: sel,
+		clock: time.Unix(1_800_000_000, 0), log: &recordingSink{}}
 	c, err := New(Config{
-		ClusterID: testCluster, Namespaces: []string{testNS, otherNS},
+		ClusterID: testCluster, Namespaces: []string{testNS, otherNS}, Grants: grants,
 		Modules:      func() modules.Selection { return h.sel },
 		WatchChanged: func() { h.changes.Add(1) },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.now = func() time.Time { return h.clock }
 	r := &sourceReconciler{c: c, reader: h.api, api: h.api, gvk: gvk}
-	h.l = &lazySource{r: r, api: h.api, mapper: h.mapper, log: logr.Discard(),
-		start: func(ctx context.Context, _ *sourceReconciler) <-chan error {
+	h.l = &lazySource{r: r, api: h.api, mapper: h.mapper, log: logr.New(h.log), wake: make(chan struct{}, 1),
+		start: func(ctx context.Context, _ *sourceReconciler, errs *watchErrors) (<-chan error, <-chan struct{}) {
 			h.starts.Add(1)
-			done := make(chan error, 1)
+			run := &fakeRun{ctx: ctx, done: make(chan error, 1), synced: make(chan struct{}), errs: errs}
+			h.runs = append(h.runs, run)
+			if h.buildEr != nil {
+				run.finish(h.buildEr)
+				return run.done, run.synced
+			}
+			if !h.noSync {
+				close(run.synced)
+			}
 			go func() {
 				<-ctx.Done()
 				h.stops.Add(1)
-				done <- nil
-				close(done)
+				run.finish(nil)
 			}()
-			return done
+			return run.done, run.synced
 		}}
-	t.Cleanup(func() { h.l.stop(context.Background()); setWatchedGauge(gvk, WatchInactive) })
+	t.Cleanup(func() { h.l.stop(); setWatchedGauge(gvk, WatchInactive) })
 	return h
+}
+
+// run returns the last run started.
+func (h *lazyHarness) run() *fakeRun {
+	h.t.Helper()
+	if len(h.runs) == 0 {
+		h.t.Fatal("no watch was started")
+	}
+	return h.runs[len(h.runs)-1]
+}
+
+// othersChecked records every other kind of SourceKinds as watched, so SourcesNotWatched's completeness is
+// that of the harness's kind alone.
+func (h *lazyHarness) othersChecked() {
+	c := h.l.r.c
+	c.watchMu.Lock()
+	defer c.watchMu.Unlock()
+	for _, gvk := range SourceKinds {
+		if gvk != h.l.r.gvk {
+			c.watches[gvk] = WatchWatched
+		}
+	}
+}
+
+// state returns the kind's recorded watch state.
+func (h *lazyHarness) state() WatchState {
+	c := h.l.r.c
+	c.watchMu.Lock()
+	defer c.watchMu.Unlock()
+	return c.watches[h.l.r.gvk]
+}
+
+// recordingSink records the messages logged.
+type recordingSink struct {
+	mu     sync.Mutex
+	infos  []string
+	errors []string
+}
+
+func (s *recordingSink) Init(logr.RuntimeInfo) {}
+func (s *recordingSink) Enabled(int) bool      { return true }
+func (s *recordingSink) Info(_ int, msg string, _ ...any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.infos = append(s.infos, msg)
+}
+func (s *recordingSink) Error(_ error, msg string, _ ...any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.errors = append(s.errors, msg)
+}
+func (s *recordingSink) WithValues(...any) logr.LogSink { return s }
+func (s *recordingSink) WithName(string) logr.LogSink   { return s }
+
+func (s *recordingSink) messages() (infos, errs []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.infos), slices.Clone(s.errors)
 }
 
 func (h *lazyHarness) serve(scope meta.RESTScope) { h.mapper.Add(h.l.r.gvk, scope) }
@@ -99,7 +194,8 @@ func (h *lazyHarness) hasSeries() bool {
 
 func (h *lazyHarness) notWatched() []WatchState {
 	var out []WatchState
-	for _, w := range h.l.r.c.SourcesNotWatched() {
+	kinds, _ := h.l.r.c.SourcesNotWatched()
+	for _, w := range kinds {
 		if w.Kind == h.l.r.gvk {
 			out = append(out, w.State)
 		}
@@ -117,8 +213,10 @@ func kyvernoActive(t *testing.T) modules.Selection {
 		r.Detect(nil, []string{kyverno.PolicyGroup + "/" + kyverno.PolicyVersion}))
 }
 
-func forbidden(group, resource string) error {
-	return apierrors.NewForbidden(schema.GroupResource{Group: group, Resource: resource}, "", errors.New("no grant"))
+// forbidden is the refusal of Kyverno Policies.
+func forbidden() error {
+	return apierrors.NewForbidden(schema.GroupResource{Group: kyverno.PolicyGroup, Resource: "policies"}, "",
+		errors.New("no grant"))
 }
 
 // TestModuleEnabledWithoutGrantIsReported is the acceptance test of the conditional grants (#409): Kyverno is
@@ -128,7 +226,7 @@ func forbidden(group, resource string) error {
 func TestModuleEnabledWithoutGrantIsReported(t *testing.T) {
 	h := newLazyHarness(t, gvkPolicy, kyvernoActive(t))
 	h.serve(meta.RESTScopeNamespace)
-	h.api.fail[kyverno.PolicyGroup] = forbidden(kyverno.PolicyGroup, "policies")
+	h.api.fail[kyverno.PolicyGroup] = forbidden()
 	h.step()
 	h.step()
 	if got := h.notWatched(); !slices.Equal(got, []WatchState{WatchNotGranted}) {
@@ -162,8 +260,10 @@ func TestModuleEnabledWithoutGrantIsReported(t *testing.T) {
 		t.Errorf("%d watches started, want 1", n)
 	}
 
-	// The grant is taken away again: the watch stops and the kind is reported.
-	h.api.fail[kyverno.PolicyGroup] = forbidden(kyverno.PolicyGroup, "policies")
+	// The grant is taken away again: the watch's list and watch are refused, so it stops and the kind is
+	// reported.
+	h.api.fail[kyverno.PolicyGroup] = forbidden()
+	h.run().errs.report(forbidden())
 	h.step()
 	if n := h.stops.Load(); n != 1 {
 		t.Errorf("%d watches stopped after the grant was removed, want 1", n)
@@ -191,7 +291,7 @@ func TestKindNotServedIsReported(t *testing.T) {
 func TestDisabledModuleProbesNothing(t *testing.T) {
 	h := newLazyHarness(t, gvkPolicy, modules.Selection{})
 	h.serve(meta.RESTScopeNamespace)
-	h.api.fail[kyverno.PolicyGroup] = forbidden(kyverno.PolicyGroup, "policies")
+	h.api.fail[kyverno.PolicyGroup] = forbidden()
 	h.step()
 	if got := h.notWatched(); len(got) != 0 {
 		t.Errorf("SourcesNotWatched = %v with the module disabled, want none", got)
@@ -205,7 +305,8 @@ func TestDisabledModuleProbesNothing(t *testing.T) {
 }
 
 // TestTransientFailureKeepsTheWatch: a check that fails for another reason than a missing grant or kind
-// (the API server is unavailable) does not stop a watch that runs; before one runs, it is reported as failed.
+// (the API server is unavailable) is reported as failed before a watch runs. Once a watch runs nothing is
+// listed any more (#409 review): the watch's own errors decide, so a failing check cannot stop it.
 func TestTransientFailureKeepsTheWatch(t *testing.T) {
 	h := newLazyHarness(t, gvkPolicy, kyvernoActive(t))
 	h.serve(meta.RESTScopeNamespace)
@@ -216,10 +317,18 @@ func TestTransientFailureKeepsTheWatch(t *testing.T) {
 	}
 	delete(h.api.fail, kyverno.PolicyGroup)
 	h.step()
+	reads := h.api.reads(kyverno.PolicyGroup)
 	h.api.fail[kyverno.PolicyGroup] = apierrors.NewServiceUnavailable("try later")
+	h.step()
 	h.step()
 	if h.starts.Load() != 1 || h.stops.Load() != 0 {
 		t.Errorf("starts %d, stops %d, want the watch kept", h.starts.Load(), h.stops.Load())
+	}
+	if n := h.api.reads(kyverno.PolicyGroup) - reads; n != 0 {
+		t.Errorf("%d lists while the watch runs, want none", n)
+	}
+	if s := h.state(); s != WatchWatched {
+		t.Errorf("state %s, want Watched", s)
 	}
 }
 
@@ -239,15 +348,20 @@ func TestModuleDisabledStopsTheWatch(t *testing.T) {
 	}
 }
 
-// recordingLister records the namespace of each list.
+// recordingLister records the namespace of each list, and refuses a list that is not of metadata only with a
+// limit of one.
 type recordingLister struct {
 	*objectReader
 	namespaces []string
+	t          *testing.T
 }
 
 func (r *recordingLister) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	o := (&client.ListOptions{}).ApplyOptions(opts)
 	r.namespaces = append(r.namespaces, o.Namespace)
+	if _, ok := list.(*metav1.PartialObjectMetadataList); !ok || o.Limit != 1 {
+		r.t.Errorf("listed %T with limit %d, want metadata only with limit 1", list, o.Limit)
+	}
 	return r.objectReader.List(ctx, list, opts...)
 }
 
@@ -265,7 +379,7 @@ func TestClusterScopedKindIsCheckedClusterWide(t *testing.T) {
 		t.Run(tc.gvk.Kind, func(t *testing.T) {
 			h := newLazyHarness(t, tc.gvk, kyvernoActive(t))
 			h.serve(tc.scope)
-			rec := &recordingLister{objectReader: h.api}
+			rec := &recordingLister{objectReader: h.api, t: t}
 			h.l.api = rec
 			h.step()
 			if !slices.Equal(rec.namespaces, tc.want) {
@@ -279,17 +393,11 @@ func TestClusterScopedKindIsCheckedClusterWide(t *testing.T) {
 }
 
 // TestWatchThatCannotStartIsReported: a controller that cannot be built is reported as failed, not watched,
-// and is tried again at the next check.
+// and is tried again only after the backoff.
 func TestWatchThatCannotStartIsReported(t *testing.T) {
 	h := newLazyHarness(t, gvkPolicy, kyvernoActive(t))
 	h.serve(meta.RESTScopeNamespace)
-	h.l.start = func(context.Context, *sourceReconciler) <-chan error {
-		h.starts.Add(1)
-		done := make(chan error, 1)
-		done <- errors.New("cannot build")
-		close(done)
-		return done
-	}
+	h.buildEr = errors.New("cannot build")
 	h.step()
 	if got := h.notWatched(); !slices.Equal(got, []WatchState{WatchFailed}) {
 		t.Errorf("SourcesNotWatched = %v, want [Failed]", got)
@@ -298,8 +406,13 @@ func TestWatchThatCannotStartIsReported(t *testing.T) {
 		t.Error("a watch that did not start is kept as running")
 	}
 	h.step()
+	if n := h.starts.Load(); n != 1 {
+		t.Errorf("%d starts before the backoff ended, want 1", n)
+	}
+	h.clock = h.clock.Add(watchBackoff(h.l.r.c.cfg.SelectionPoll, 1))
+	h.step()
 	if n := h.starts.Load(); n != 2 {
-		t.Errorf("%d starts, want 2 (tried again)", n)
+		t.Errorf("%d starts, want 2 (tried again after the backoff)", n)
 	}
 }
 

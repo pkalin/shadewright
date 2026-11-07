@@ -19,7 +19,8 @@ limitations under the License.
 // value analyzer.modules.kyverno.clusterWide.enabled, off by default). It is the analyzer's one cluster-wide
 // read of an add-on's kinds besides the settings and the Node list: a ClusterPolicyReport names resources in
 // every namespace, watched or not.
+// Only list and watch, for the informers of the sources: nothing reads these kinds by name.
 //
-// +kubebuilder:rbac:groups=kyverno.io,resources=clusterpolicies,verbs=get;list;watch
-// +kubebuilder:rbac:groups=wgpolicyk8s.io,resources=clusterpolicyreports,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kyverno.io,resources=clusterpolicies,verbs=list;watch
+// +kubebuilder:rbac:groups=wgpolicyk8s.io,resources=clusterpolicyreports,verbs=list;watch
 package kyvernocluster

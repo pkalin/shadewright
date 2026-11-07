@@ -525,17 +525,19 @@ func TestStatusReportsNoWatchedNamespaces(t *testing.T) {
 	}
 }
 
-// TestSourcesNotWatchedIsReported checks the condition SymptomSourcesNotWatched (#409): True with the kinds
-// and their states while the collector reports kinds it does not watch, False once it watches them all, and
-// absent when no collector runs. The message is built from the kinds only.
+// TestSourcesNotWatchedIsReported checks the condition SymptomSourcesNotWatched (#409): Unknown before every
+// kind of an active module has been checked, True with the kinds and their states while the collector reports
+// kinds it does not watch (also while others are not checked yet), False once it watches them all, and absent
+// when no collector runs. The message is built from the kinds only.
 func TestSourcesNotWatchedIsReported(t *testing.T) {
 	ctx := t.Context()
 	s := aksSettings()
 	c := clientfake.NewClientBuilder().WithScheme(fakeScheme(t)).WithObjects(s, aksNode("n0")).
 		WithStatusSubresource(s).Build()
 	var missing []NotWatched
+	complete := false
 	d, err := New(Config{Registry: registry(t), GroupVersions: noGroups,
-		SourcesNotWatched: func() []NotWatched { return missing }})
+		SourcesNotWatched: func() ([]NotWatched, bool) { return missing, complete }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,13 +553,16 @@ func TestSourcesNotWatchedIsReported(t *testing.T) {
 		}
 		return meta.FindStatusCondition(cur.Status.Conditions, ConditionSymptomSourcesNotWatched)
 	}
+	if got := cond(); got == nil || got.Status != metav1.ConditionUnknown || got.Reason != ReasonSourcesNotChecked {
+		t.Fatalf("condition %+v before the first check, want Unknown", got)
+	}
 	missing = []NotWatched{{Group: "kyverno.io", Version: "v1", Kind: "ClusterPolicy", State: "NotGranted"}}
 	got := cond()
 	if got == nil || got.Status != metav1.ConditionTrue || got.Reason != ReasonSourcesNotWatched ||
 		!strings.Contains(got.Message, "kyverno.io/v1 ClusterPolicy (NotGranted)") {
 		t.Fatalf("condition %+v, want True naming kyverno.io/v1 ClusterPolicy (NotGranted)", got)
 	}
-	missing = nil
+	missing, complete = nil, true
 	if got := cond(); got == nil || got.Status != metav1.ConditionFalse || got.Reason != ReasonAllSourcesWatched {
 		t.Fatalf("condition %+v, want False once every kind is watched", got)
 	}

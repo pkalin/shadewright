@@ -21,6 +21,7 @@ package main
 import (
 	"flag"
 	"os"
+	"strings"
 
 	"go.opentelemetry.io/otel/trace"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -95,6 +96,14 @@ func main() {
 		"The cluster label value of this cluster's series, for a Prometheus shared by several clusters; empty "+
 			"for a Prometheus of this cluster alone. Checked at startup and every 10 minutes: while no series "+
 			"carries it, metrics are unavailable (analyses that query them escalate) and the analyzer logs an error.")
+	// Nil while the flag is not given (an install without the chart): every module kind is then checked.
+	var moduleGrants []string
+	flag.Func("module-grants",
+		"Comma-separated module grants the install rendered ("+strings.Join(collector.ModuleGrants, ", ")+
+			"; the chart passes those of its analyzer.modules values). A module kind whose grant is not listed "+
+			"is not watched: reported as not granted, or, for the optional kyverno-cluster, left out without a "+
+			"report. Not set: every module kind is checked and watched once the analyzer may list it.",
+		func(v string) error { moduleGrants = parseList(v); return nil })
 	var af analysisFlags
 	af.bind(flag.CommandLine)
 	flag.Parse()
@@ -176,7 +185,7 @@ func main() {
 	var det *detection.Detector
 	recheck := make(chan struct{}, 1)
 	col, err := collector.New(collector.Config{
-		ClusterID: clusterID, Handled: inc.Handled, Namespaces: watched,
+		ClusterID: clusterID, Handled: inc.Handled, Namespaces: watched, Grants: moduleGrants,
 		Modules:      func() modules.Selection { return det.Selection() },
 		WatchChanged: notify(recheck),
 	})
@@ -295,6 +304,18 @@ func main() {
 	}
 }
 
+// parseList splits a comma-separated flag value, dropping blanks: never nil, so a flag given empty is told
+// apart from one not given.
+func parseList(v string) []string {
+	out := []string{}
+	for g := range strings.SplitSeq(v, ",") {
+		if g = strings.TrimSpace(g); g != "" {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
 // notify returns a function that leaves a notice on ch without blocking; one notice pending is enough.
 func notify(ch chan<- struct{}) func() {
 	return func() {
@@ -306,15 +327,15 @@ func notify(ch chan<- struct{}) func() {
 }
 
 // notWatched adapts the collector's report of the symptom source kinds it does not watch for detection.
-func notWatched(col *collector.Collector) func() []detection.NotWatched {
-	return func() []detection.NotWatched {
-		kinds := col.SourcesNotWatched()
+func notWatched(col *collector.Collector) func() ([]detection.NotWatched, bool) {
+	return func() ([]detection.NotWatched, bool) {
+		kinds, complete := col.SourcesNotWatched()
 		out := make([]detection.NotWatched, 0, len(kinds))
 		for _, w := range kinds {
 			out = append(out, detection.NotWatched{
 				Group: w.Kind.Group, Version: w.Kind.Version, Kind: w.Kind.Kind, State: string(w.State),
 			})
 		}
-		return out
+		return out, complete
 	}
 }

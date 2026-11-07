@@ -3,24 +3,28 @@ The analyzer's reads of an add-on's own kinds, for the symptom sources of its in
 ClusterRole per module, rendered only while its value under analyzer.modules is true, so an add-on that is not
 deployed gets no grant. Each is bound like the watch role: one RoleBinding per watched namespace, never
 cluster-wide. Kyverno's cluster-scoped kinds are the one exception, a ClusterRoleBinding behind a value of its
-own. Without a role the analyzer does not watch those kinds and reports them as not watched. Keep each rule
-equal to config/rbac/analyzer/modules (test/chart checks it).
+own. The roles grant list and watch, for the informers; get only on scaledobjects (the owner a KEDA HPA names).
+The analyzer gets the list of rendered grants (--module-grants, shadewright.analyzerModuleGrants): without a role
+it does not watch those kinds and reports them as not watched, except the optional cluster-wide Kyverno kinds.
+Keep each rule equal to config/rbac/analyzer/modules (test/chart checks it).
 */ -}}
 {{- $roles := list }}
+{{- $listWatch := list "list" "watch" }}
 {{- if .Values.analyzer.modules.keda.enabled }}
 {{- $roles = append $roles (dict "suffix" "analyzer-watch-keda" "rules" (list
-  (dict "group" "keda.sh" "resources" (list "scaledjobs" "scaledobjects")))) }}
+  (dict "group" "keda.sh" "resources" (list "scaledjobs") "verbs" $listWatch)
+  (dict "group" "keda.sh" "resources" (list "scaledobjects") "verbs" (list "get" "list" "watch")))) }}
 {{- end }}
 {{- if .Values.analyzer.modules.flux.enabled }}
 {{- $roles = append $roles (dict "suffix" "analyzer-watch-flux" "rules" (list
-  (dict "group" "helm.toolkit.fluxcd.io" "resources" (list "helmreleases"))
-  (dict "group" "kustomize.toolkit.fluxcd.io" "resources" (list "kustomizations"))
-  (dict "group" "source.toolkit.fluxcd.io" "resources" (list "gitrepositories")))) }}
+  (dict "group" "helm.toolkit.fluxcd.io" "resources" (list "helmreleases") "verbs" $listWatch)
+  (dict "group" "kustomize.toolkit.fluxcd.io" "resources" (list "kustomizations") "verbs" $listWatch)
+  (dict "group" "source.toolkit.fluxcd.io" "resources" (list "gitrepositories") "verbs" $listWatch))) }}
 {{- end }}
 {{- if .Values.analyzer.modules.kyverno.enabled }}
 {{- $roles = append $roles (dict "suffix" "analyzer-watch-kyverno" "rules" (list
-  (dict "group" "kyverno.io" "resources" (list "policies"))
-  (dict "group" "wgpolicyk8s.io" "resources" (list "policyreports")))) }}
+  (dict "group" "kyverno.io" "resources" (list "policies") "verbs" $listWatch)
+  (dict "group" "wgpolicyk8s.io" "resources" (list "policyreports") "verbs" $listWatch))) }}
 {{- end }}
 {{- range $role := $roles }}
 ---
@@ -39,9 +43,9 @@ rules:
   - {{ $r }}
   {{- end }}
   verbs:
-  - get
-  - list
-  - watch
+  {{- range $v := $rule.verbs }}
+  - {{ $v }}
+  {{- end }}
 {{- end }}
 {{- range $ns := ($.Values.analyzer.watchNamespaces | default list) }}
 ---
@@ -76,7 +80,6 @@ rules:
   resources:
   - clusterpolicies
   verbs:
-  - get
   - list
   - watch
 - apiGroups:
@@ -84,7 +87,6 @@ rules:
   resources:
   - clusterpolicyreports
   verbs:
-  - get
   - list
   - watch
 ---

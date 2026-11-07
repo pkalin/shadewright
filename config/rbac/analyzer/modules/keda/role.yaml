@@ -8,6 +8,12 @@ rules:
   - keda.sh
   resources:
   - scaledjobs
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - keda.sh
+  resources:
   - scaledobjects
   verbs:
   - get

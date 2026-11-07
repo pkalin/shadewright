@@ -193,7 +193,8 @@ normalized twice, which turns angle brackets into parentheses), and a forged blo
    what to plant under `inject` (the oom scenario's objects are the base), `escalate: true` when the read tools
    must be offered, the fake `secrets` (obviously fake, such as `ghp_FAKEFAKE...`; never a real one), and `expect`:
    the loop's `reason`, the `action` when a proposal is expected, the tool names that must have run in
-   `toolCalls`, and the `seen` and `unseen` text.
+   `toolCalls`, the `seen` and `unseen` text, and the `inBlock` text that must reach the model inside a context
+   block and in no line outside one.
 3. `replies.yaml`: the model's replies in order, as in a scenario's `replies.yaml`, plus `error`
    (`unavailable`, `forbidden`, `not-found`, `malformed`, `failed`) and `block` (wait for the deadline). Add one reply
    for every model call the loop makes: the test fails when a reply is left over or one is missing.

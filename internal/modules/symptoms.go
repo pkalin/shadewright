@@ -37,7 +37,8 @@ var (
 
 // Validate reports why a symptom source cannot be used: no version, a version listed twice, a group version
 // that is not valid (an empty Group is the core group), a kind or resource outside the schema, a reporting
-// controller that is not a component name, no Symptoms function, or a subject owner that is set (any field)
+// controller that is not a component name, no Symptoms function, a PodFilter on a source of another kind than
+// core Pods, or a subject owner that is set (any field)
 // with an invalid group version, kind or resource, or that names the watched kind itself.
 func (s SymptomSource) Validate() error {
 	if len(s.Versions) == 0 {
@@ -66,6 +67,9 @@ func (s SymptomSource) Validate() error {
 	}
 	if s.Symptoms == nil {
 		return fmt.Errorf("symptom source %s %q has no Symptoms function", s.Group, s.Kind)
+	}
+	if s.PodFilter != nil && (s.Group != "" || s.Kind != "Pod") {
+		return fmt.Errorf("symptom source %s %q: a PodFilter is for a source of core Pods only", s.Group, s.Kind)
 	}
 	return s.Subject.validate(s.Group, s.Kind)
 }
@@ -165,6 +169,21 @@ func EvaluateSource(src SymptomSource, obj map[string]any) []Symptom {
 		out = append(out, sym)
 	}
 	return out
+}
+
+// MayShowPod runs a Pod source's PodFilter on a pod's labels and container images: false only when the filter
+// says Symptoms finds nothing on the pod. A source without a filter, or whose filter panics (a bug in the
+// module), may show a symptom on any pod, so the pod is evaluated.
+func MayShowPod(src SymptomSource, labels map[string]string, images []string) (may bool) {
+	if src.PodFilter == nil {
+		return true
+	}
+	defer func() {
+		if recover() != nil {
+			may = true
+		}
+	}()
+	return src.PodFilter(labels, images)
 }
 
 // safeSource calls a source's Symptoms and treats a panic as no symptom, so a module bug cannot stop the

@@ -23,11 +23,17 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/pkalin/shadewright/internal/modules"
+	"github.com/pkalin/shadewright/internal/modules/cloudflared"
+	"github.com/pkalin/shadewright/internal/modules/flux"
+	"github.com/pkalin/shadewright/internal/modules/keda"
+	"github.com/pkalin/shadewright/internal/modules/kyverno"
 	"github.com/pkalin/shadewright/internal/testutil/metricguard"
 )
 
 // TestSymptomSourceWatchedIsBounded checks that the gauge's labels take their values from SourceKinds only
-// (kinds that are not built in) and that it is documented.
+// (kinds that are not built in), the owner counter's from the owner kinds the modules declare, and that both
+// are documented.
 func TestSymptomSourceWatchedIsBounded(t *testing.T) {
 	var groups, kinds []string
 	for _, gvk := range SourceKinds {
@@ -42,7 +48,23 @@ func TestSymptomSourceWatchedIsBounded(t *testing.T) {
 			setWatchedGauge(gvk, WatchInactive)
 		}
 	})
-	want := map[string]metricguard.Labels{"shadewright_analyzer_symptom_source_watched": {"group": groups, "kind": kinds}}
+	// The owner kinds the compiled-in modules declare, the only values of the owner counter's labels.
+	var ownerGroups, ownerKinds []string
+	for _, m := range []modules.Integration{cloudflared.Module(), flux.Module(), keda.Module(), kyverno.Module()} {
+		for _, src := range m.Hooks().Symptoms {
+			if src.Subject.IsSet() {
+				ownerGroups, ownerKinds = append(ownerGroups, src.Subject.Group), append(ownerKinds, src.Subject.Kind)
+				subjectOwnerForbidden.WithLabelValues(src.Subject.Group, src.Subject.Kind).Add(0)
+			}
+		}
+	}
+	byKind := func(groups, kinds []string) metricguard.Labels {
+		return metricguard.Labels{kindLabels[0]: groups, kindLabels[1]: kinds}
+	}
+	want := map[string]metricguard.Labels{
+		"shadewright_analyzer_symptom_source_watched":        byKind(groups, kinds),
+		"shadewright_analyzer_subject_owner_forbidden_total": byKind(ownerGroups, ownerKinds),
+	}
 	// Registered by package analyzer, which the envtest harness imports; checked there.
 	all := map[string]metricguard.Labels{"shadewright_analyzer_watched_namespaces": {}}
 	maps.Copy(all, want)

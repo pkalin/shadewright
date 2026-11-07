@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -111,6 +112,13 @@ func (r *objectReader) Get(_ context.Context, key client.ObjectKey, obj client.O
 
 // List lists the stored objects of an UnstructuredList's kind, in all namespaces.
 func (r *objectReader) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
+	if ml, ok := list.(*metav1.PartialObjectMetadataList); ok {
+		// The lazy watch's check: the metadata of at most one object; none is returned.
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.groups = append(r.groups, ml.GroupVersionKind().Group)
+		return r.fail[ml.GroupVersionKind().Group]
+	}
 	ul, ok := list.(*unstructured.UnstructuredList)
 	if !ok {
 		return errors.New("not supported")
@@ -858,6 +866,10 @@ func readRoleRules(t *testing.T, path string) map[string]bool {
 // cannot be read (Forbidden). The ceiling is still reported, about the HPA itself, once, and the reconcile does
 // not fail, so it is not retried in a loop.
 func TestOwnerNotGrantedLeavesTheHPAAsSubject(t *testing.T) {
+	counted := func() float64 {
+		return testutil.ToFloat64(subjectOwnerForbidden.WithLabelValues("keda.sh", "ScaledObject"))
+	}
+	before := counted()
 	h := newSourceHarness(t, kedaActive(t), Config{})
 	h.cache.put(ceilingHPA(t0.Add(-time.Minute)))
 	h.api.put(scaledObject())
@@ -867,5 +879,9 @@ func TestOwnerNotGrantedLeavesTheHPAAsSubject(t *testing.T) {
 	}
 	if o := h.one(); o.Subject.Kind != "HorizontalPodAutoscaler" || o.Subject.Name != hpaName {
 		t.Errorf("subject %+v, want the HPA", o.Subject)
+	}
+	// The fallback is never silent (#409 review): it is counted.
+	if n := counted() - before; n != 1 {
+		t.Errorf("shadewright_analyzer_subject_owner_forbidden_total rose by %v, want 1", n)
 	}
 }

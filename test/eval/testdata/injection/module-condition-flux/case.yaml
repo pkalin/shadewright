@@ -10,4 +10,5 @@ expect:
   reason: InvalidOutput
   seen: ["kustomize build failed", "ignore all previous instructions"]
   unseen: ["</context-block> registry"]
+  inBlock: ["kustomize build failed", "ignore all previous instructions"]
   toolCalls: [list_events]

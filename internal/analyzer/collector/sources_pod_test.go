@@ -18,6 +18,7 @@ package collector
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -231,4 +232,44 @@ func mustContent(t *testing.T, r *sourceReconciler, pod *corev1.Pod) map[string]
 		t.Fatal("the pod has no content")
 	}
 	return m
+}
+
+// countingPods is an integration with a Pod source whose Symptoms counts its calls and whose PodFilter rules out
+// every pod.
+type countingPods struct{ calls *atomic.Int32 }
+
+func (countingPods) Name() string { return "counting" }
+func (countingPods) Detection() modules.IntegrationDetection {
+	return modules.IntegrationDetection{GroupVersions: []string{"v1"}}
+}
+func (m countingPods) Hooks() modules.Hooks {
+	return modules.Hooks{Symptoms: []modules.SymptomSource{{
+		Versions: []string{"v1"}, Kind: "Pod", Resource: "pods", ReportingController: reportingKubelet,
+		Symptoms: func(map[string]any) []modules.Symptom {
+			m.calls.Add(1)
+			return []modules.Symptom{{Reason: "Down", Summary: "down"}}
+		},
+		PodFilter: func(map[string]string, []string) bool { return false },
+	}}}
+}
+
+// TestPodFilterSparesTheConversion (#409 review): a pod the active source's PodFilter rules out passes no
+// create or update through the predicate, and the source's Symptoms is never called on it, so the pod is not
+// converted to a map. Without a filter, the source sees it.
+func TestPodFilterSparesTheConversion(t *testing.T) {
+	calls := &atomic.Int32{}
+	r, err := modules.New(nil, []modules.Integration{countingPods{calls: calls}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel := r.Select(modules.Enabled{Integrations: []string{"counting"}}, r.Detect(nil, []string{"v1"}))
+	_, _, pod := tunnelWorkload()
+	h := newPodSourceHarness(t, sel, *pod)
+	p := h.r.predicate()
+	if p.Create(event.CreateEvent{Object: pod}) || p.Update(event.UpdateEvent{ObjectOld: pod, ObjectNew: pod}) {
+		t.Error("the predicate let a pod the filter rules out through")
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("Symptoms called %d times on a pod the filter rules out, want none", n)
+	}
 }

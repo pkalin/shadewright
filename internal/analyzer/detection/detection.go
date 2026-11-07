@@ -88,6 +88,9 @@ const (
 	// ReasonSourcesNotWatched and ReasonAllSourcesWatched are its reasons.
 	ReasonSourcesNotWatched = "SourcesNotWatched"
 	ReasonAllSourcesWatched = "AllSourcesWatched"
+	// ReasonSourcesNotChecked is the reason of SymptomSourcesNotWatched Unknown: a kind of an active module has
+	// not been checked yet (its module just became active, or its first watch has not synced).
+	ReasonSourcesNotChecked = "SourcesNotChecked"
 	// FieldOwner is the field manager of the status writes.
 	FieldOwner = "shadewright-detection"
 )
@@ -110,9 +113,10 @@ type Config struct {
 	// condition NoWatchedNamespaces True. It is reported only and decides nothing here.
 	WatchedNamespaces int
 	// SourcesNotWatched, when set, returns the symptom source kinds of active modules that the collector does
-	// not watch (collector.Collector.SourcesNotWatched), reported in the condition SymptomSourcesNotWatched.
-	// Nil removes the condition (no collector runs). It is reported only and decides nothing here.
-	SourcesNotWatched func() []NotWatched
+	// not watch (collector.Collector.SourcesNotWatched), and whether every such kind has been checked: the
+	// condition SymptomSourcesNotWatched is Unknown until then, unless a kind is known not to be watched. Nil
+	// removes the condition (no collector runs). It is reported only and decides nothing here.
+	SourcesNotWatched func() ([]NotWatched, bool)
 	// Recheck, when set, starts a run each time it receives, so a change of SourcesNotWatched is reported
 	// without waiting for Interval.
 	Recheck <-chan struct{}
@@ -277,7 +281,8 @@ func (d *Detector) refresh(ctx context.Context, det modules.Detection, o outcome
 		d.store(sel)
 		want := statusFor(s, sel, o, d.cfg.WatchedNamespaces)
 		if d.cfg.SourcesNotWatched != nil {
-			meta.SetStatusCondition(&want.Conditions, sourcesCondition(d.cfg.SourcesNotWatched(), s.Generation))
+			kinds, complete := d.cfg.SourcesNotWatched()
+			meta.SetStatusCondition(&want.Conditions, sourcesCondition(kinds, complete, s.Generation))
 		} else {
 			// No collector runs: a report of an earlier process would be stale.
 			meta.RemoveStatusCondition(&want.Conditions, ConditionSymptomSourcesNotWatched)
@@ -369,8 +374,9 @@ func statusFor(s remediationv1alpha1.RemediationSettings, sel modules.Selection,
 	return st
 }
 
-// sourcesCondition is the condition SymptomSourcesNotWatched for the kinds that are not watched.
-func sourcesCondition(kinds []NotWatched, generation int64) metav1.Condition {
+// sourcesCondition is the condition SymptomSourcesNotWatched for the kinds that are not watched: True when there
+// is one, else Unknown while a kind has not been checked yet (complete false), else False.
+func sourcesCondition(kinds []NotWatched, complete bool, generation int64) metav1.Condition {
 	c := metav1.Condition{
 		Type:               ConditionSymptomSourcesNotWatched,
 		Status:             metav1.ConditionFalse,
@@ -379,6 +385,10 @@ func sourcesCondition(kinds []NotWatched, generation int64) metav1.Condition {
 		ObservedGeneration: generation,
 	}
 	if len(kinds) == 0 {
+		if !complete {
+			c.Status, c.Reason = metav1.ConditionUnknown, ReasonSourcesNotChecked
+			c.Message = "Not every symptom source kind of the active modules has been checked yet"
+		}
 		return c
 	}
 	parts := make([]string, 0, len(kinds))

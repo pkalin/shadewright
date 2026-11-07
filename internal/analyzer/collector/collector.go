@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -197,6 +198,11 @@ type Config struct {
 	// Namespaces are the watched namespaces (--watch-namespaces), where the collector checks that it may list
 	// a namespaced kind of [SourceKinds] that is not built in before it watches it. Required with Modules.
 	Namespaces []string
+	// Grants are the module grants the chart rendered (--module-grants, [ModuleGrants]). A kind of
+	// [SourceKinds] that is not built in, whose grant is not listed, is not checked or watched: it is reported
+	// as NotGranted, or, for an optional grant (kyverno-cluster), as Omitted, which is not reported as missing.
+	// Nil means not known (an install without the flag): every such kind is checked.
+	Grants []string
 	// WatchChanged, when set, is called after the watch state of such a kind changed
 	// ([Collector.SourcesNotWatched]), so detection reports it without waiting for its next run. It must not
 	// block.
@@ -224,6 +230,8 @@ type Collector struct {
 	// watches is the watch state of each kind of SourceKinds that is not built in (lazy.go).
 	watchMu sync.Mutex
 	watches map[schema.GroupVersionKind]WatchState
+	// lazyConfig, when set (tests only), is the config of the lazy watches' caches instead of the manager's.
+	lazyConfig *rest.Config
 }
 
 // New validates cfg, applies defaults and returns a collector. Call [Collector.SetupWithManager] to start
@@ -243,6 +251,11 @@ func New(cfg Config) (*Collector, error) {
 	setDefault(&cfg.SelectionPoll, DefaultSelectionPoll)
 	if cfg.Now == nil {
 		cfg.Now = time.Now
+	}
+	for _, g := range cfg.Grants {
+		if !slices.Contains(ModuleGrants, g) {
+			return nil, fmt.Errorf("collector: unknown module grant %q, want one of %v", g, ModuleGrants)
+		}
 	}
 	return &Collector{
 		cfg:    cfg,

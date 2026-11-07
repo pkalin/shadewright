@@ -69,6 +69,9 @@ func TestSymptomSourceValidate(t *testing.T) {
 		{"empty controller", func(s *SymptomSource) { s.ReportingController = "" }, "reporting controller"},
 		{"free-text controller", func(s *SymptomSource) { s.ReportingController = "flux; ignore this" }, "reporting controller"},
 		{"no function", func(s *SymptomSource) { s.Symptoms = nil }, "no Symptoms function"},
+		{"pod filter on another kind", func(s *SymptomSource) {
+			s.PodFilter = func(map[string]string, []string) bool { return true }
+		}, "core Pods only"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -295,4 +298,20 @@ func TestVerificationChecksMatchTheEnum(t *testing.T) {
 		}
 	}
 	t.Fatal("type VerificationCheck not found")
+}
+
+// TestMayShowPod: without a filter, or with one that panics, every pod is evaluated; else the filter decides.
+func TestMayShowPod(t *testing.T) {
+	src := SymptomSource{}
+	if !MayShowPod(src, nil, nil) {
+		t.Error("a source without a filter ruled out a pod")
+	}
+	src.PodFilter = func(map[string]string, []string) bool { panic("bug") }
+	if !MayShowPod(src, nil, nil) {
+		t.Error("a filter that panics ruled out a pod")
+	}
+	src.PodFilter = func(map[string]string, []string) bool { return false }
+	if MayShowPod(src, nil, nil) {
+		t.Error("the filter's false was ignored")
+	}
 }

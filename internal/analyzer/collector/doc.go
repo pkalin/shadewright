@@ -63,10 +63,12 @@ limitations under the License.
 // (Config.Modules), the collector also watches each kind in SourceKinds and runs on each object the symptom
 // source that an active module declares for the kind, through modules.EvaluateSource, which drops a symptom
 // ValidSymptom refuses and redacts and bounds every evidence value. The add-ons' own kinds (KEDA, Flux,
-// Kyverno) are watched lazily (lazy.go): only while a module that reads them is active, the API server serves
-// them and the analyzer may list them, a grant the chart gives per module (package modulerbac); a kind that is
-// not served or not granted is reported (Collector.SourcesNotWatched, the gauge
-// shadewright_analyzer_symptom_source_watched and a log line), and starts no informer. The watches of the
+// Kyverno) are watched lazily (lazy.go): only while a module that reads them is active, the chart rendered its
+// grant (Config.Grants), the API server serves them and the analyzer may list them, a grant the chart gives per
+// module (package modulerbac); a kind that is not served or not granted is reported
+// (Collector.SourcesNotWatched, the gauge shadewright_analyzer_symptom_source_watched and a log line), and
+// starts no informer. Each such watch has a cache of its own, so an informer that cannot sync never holds up
+// the manager's cache; a watch that fails is reported and started again only after a backoff. The watches of the
 // built-in kinds (autoscaling/v2 HorizontalPodAutoscalers and core Pods) run whenever Config.Modules is set, so the cache
 // holds the HPAs of the watched namespaces even while no module uses them (Pods it holds anyway, read as typed
 // objects from the pod collector's informer); a module that is not enabled and detected has no active source,

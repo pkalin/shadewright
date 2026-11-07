@@ -41,6 +41,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -55,9 +56,9 @@ import (
 )
 
 // SourceKinds are the kinds whose module symptom sources the collector evaluates when [Config.Modules] is set.
-// A source of an active module for a kind not listed here is not evaluated. Each needs get, list and watch in
-// the watched namespaces (cluster-wide for a cluster-scoped kind), and its subject owner kind, when it declares
-// one, get there. The HPA and the Pod are built in: the watch role grants them (the markers in doc.go) and
+// A source of an active module for a kind not listed here is not evaluated. Each needs list and watch in the
+// watched namespaces (cluster-wide for a cluster-scoped kind), read by an informer, and its subject owner kind,
+// when it declares one, get there. The HPA and the Pod are built in: the watch role grants them (the markers in doc.go) and
 // their watches are set up with the manager. The add-ons' own kinds are granted by a role per module
 // (package modulerbac), bound only when the chart's value of the module is on, so they are watched lazily
 // (lazy.go): once a module that declares a source for the kind is active, the kind is served and the
@@ -133,8 +134,14 @@ func (c *Collector) setupSources(mgr ctrl.Manager) error {
 		r := &sourceReconciler{c: c, reader: mgr.GetCache(), api: mgr.GetAPIReader(), gvk: gvk}
 		if !builtinKind(gvk) {
 			log := mgr.GetLogger().WithName("collector").WithValues("controller", r.name())
-			err := mgr.Add(&lazySource{r: r, api: mgr.GetAPIReader(), mapper: mgr.GetRESTMapper(),
-				cache: mgr.GetCache(), log: log, start: startController(mgr.GetCache(), log)})
+			// The reader is the watch's own cache, set by startController.
+			r.reader = nil
+			restCfg := mgr.GetConfig()
+			if c.lazyConfig != nil {
+				restCfg = c.lazyConfig
+			}
+			err := mgr.Add(&lazySource{r: r, api: mgr.GetAPIReader(), mapper: mgr.GetRESTMapper(), log: log,
+				start: startController(restCfg, c.lazyCacheOptions(mgr), log), wake: make(chan struct{}, 1)})
 			if err != nil {
 				return fmt.Errorf("setting up the %s collector: %w", gvk.Kind, err)
 			}
@@ -151,6 +158,27 @@ func (c *Collector) setupSources(mgr ctrl.Manager) error {
 		}
 	}
 	return nil
+}
+
+// lazyCacheOptions returns the options of the cache of a lazy watch: the manager's client, scheme and mapper,
+// the watched namespaces (a cluster-scoped kind is read cluster-wide) and no managed fields, as the manager's
+// cache (analyzer.CacheOptions).
+func (c *Collector) lazyCacheOptions(mgr ctrl.Manager) func() cache.Options {
+	return func() cache.Options {
+		namespaces := make(map[string]cache.Config, len(c.cfg.Namespaces))
+		for _, ns := range c.cfg.Namespaces {
+			namespaces[ns] = cache.Config{}
+		}
+		o := cache.Options{
+			Scheme: mgr.GetScheme(), Mapper: mgr.GetRESTMapper(),
+			DefaultNamespaces: namespaces, DefaultTransform: cache.TransformStripManagedFields(),
+		}
+		if c.lazyConfig == nil {
+			// The manager's connections; a test's config of its own gets a client from that config.
+			o.HTTPClient = mgr.GetHTTPClient()
+		}
+		return o
+	}
 }
 
 // name is the controller's name.
@@ -201,18 +229,26 @@ func (r *sourceReconciler) content(o client.Object) (map[string]any, bool) {
 
 // active returns the source an active module declares for the kind, with the module's name, if any.
 func (r *sourceReconciler) active() (string, modules.SymptomSource, bool) {
-	module, src, ok := r.c.cfg.Modules().SourceFor(r.gvk.Group, r.gvk.Kind)
-	if !ok || !slices.Contains(src.Versions, r.gvk.Version) {
+	return sourceIn(r.c.cfg.Modules(), r.gvk)
+}
+
+// sourceIn returns the source an active module of sel declares for the kind, with the module's name, if any.
+func sourceIn(sel modules.Selection, gvk schema.GroupVersionKind) (string, modules.SymptomSource, bool) {
+	module, src, ok := sel.SourceFor(gvk.Group, gvk.Kind)
+	if !ok || !slices.Contains(src.Versions, gvk.Version) {
 		return "", modules.SymptomSource{}, false
 	}
 	return module, src, true
 }
 
 // shows reports whether the active source, if any, finds a symptom on o. With no active source the object
-// is not read at all, so a Pod is not converted.
+// is not read at all, and a Pod its source's PodFilter rules out is not converted.
 func (r *sourceReconciler) shows(o client.Object) bool {
 	_, src, ok := r.active()
 	if !ok {
+		return false
+	}
+	if pod, isPod := o.(*corev1.Pod); isPod && src.PodFilter != nil && !modules.MayShowPod(src, pod.Labels, podImages(pod)) {
 		return false
 	}
 	content, ok := r.content(o)
@@ -283,6 +319,19 @@ func (r *sourceReconciler) enqueueActivated(ctx context.Context, lister client.R
 	})
 	return true
 }
+
+// podImages returns the images of a pod's containers, at most maxPodFilterImages.
+func podImages(pod *corev1.Pod) []string {
+	n := min(len(pod.Spec.Containers), maxPodFilterImages)
+	images := make([]string, 0, n)
+	for _, c := range pod.Spec.Containers[:n] {
+		images = append(images, c.Image)
+	}
+	return images
+}
+
+// maxPodFilterImages bounds the container images handed to a PodFilter: more than any module reads.
+const maxPodFilterImages = 64
 
 // conditionOccurrence identifies one state of one object across collectors: the object's UID, its kind, the
 // symptom's reason, when the state began as the object reports it (Unix seconds, 0 when unknown; not clamped
@@ -478,7 +527,11 @@ func (r *sourceReconciler) subject(ctx context.Context, o client.Object, want mo
 	if apierrors.IsForbidden(err) {
 		// The owner kind is not granted (its module's value is off in the chart, analyzer.modules): it cannot
 		// be verified, so the object itself is the subject, as for an owner that does not exist. Retrying
-		// would not help; the lazy watch of that kind reports the missing grant.
+		// would not help; it is logged and counted, so the fallback is never silent.
+		subjectOwnerForbidden.WithLabelValues(want.Group, want.Kind).Inc()
+		logf.FromContext(ctx).Info("Not allowed to read the declared owner, used the object as the subject",
+			"kind", r.gvk.Kind, "namespace", obj.GetNamespace(), "name", obj.GetName(),
+			"ownerGroup", want.Group, "ownerKind", want.Kind)
 		return self, "", false, nil
 	}
 	if err != nil {

@@ -470,8 +470,10 @@ func TestNetworkPoliciesServicesAndCRDsEqualKustomize(t *testing.T) {
 }
 
 // normalizedPod reduces a Deployment to its Pod spec minus what differs on purpose: the image and its pull
-// policy (the manifests use a placeholder, the chart a digest), the cluster ID (a value), the metrics port (the
-// chart makes it optional), the order of the args, and the defaulted automountServiceAccountToken.
+// policy (the manifests use a placeholder, the chart a digest), the cluster ID (a value), the module grants (the
+// chart knows which module roles it rendered; a kustomize install may add any of config/modules, so the
+// manifests leave --module-grants out and the analyzer checks every module kind), the metrics port (the chart
+// makes it optional), the order of the args, and the defaulted automountServiceAccountToken.
 func normalizedPod(d *appsv1.Deployment) corev1.PodSpec {
 	spec := *d.Spec.Template.Spec.DeepCopy()
 	if spec.AutomountServiceAccountToken == nil {
@@ -489,6 +491,7 @@ func normalizedPod(d *appsv1.Deployment) corev1.PodSpec {
 				c.Args[j] = "--cluster-id=x" // a value of the install
 			}
 		}
+		c.Args = slices.DeleteFunc(c.Args, func(a string) bool { return strings.HasPrefix(a, "--module-grants=") })
 		slices.Sort(c.Args)
 		c.Ports = slices.DeleteFunc(c.Ports, func(p corev1.ContainerPort) bool { return p.Name == "metrics" })
 		if len(c.VolumeMounts) == 0 {
@@ -562,13 +565,16 @@ func TestWatchNamespacesGetOneBindingEach(t *testing.T) {
 
 // allToggles turns on every optional part of the chart: the settings object, both identities (different IDs),
 // two watched namespaces and the helper roles.
+// kyvernoOn is the value that renders the Kyverno module's namespaced grant.
+const kyvernoOn = "analyzer.modules.kyverno.enabled=true"
+
 var allToggles = []string{
 	"settings.create=true",
 	"settings.spec.paused=false",
 	"analyzer.identity.azure.clientId=11111111-1111-1111-1111-111111111111",
 	"analyzer.watchNamespaces={demo,team-b}",
 	"analyzer.modules.flux.enabled=true",
-	"analyzer.modules.kyverno.enabled=true",
+	kyvernoOn,
 	"analyzer.modules.kyverno.clusterWide.enabled=true",
 }
 
@@ -696,7 +702,7 @@ func TestChartRefusesWeakenedValues(t *testing.T) {
 	// Every flag the chart renders itself, for both components.
 	for _, flag := range []string{
 		"leader-elect", "health-probe-bind-address", "metrics-bind-address", "metrics-secure", "namespace",
-		"watch-namespaces", "cluster-id", "max-incidents",
+		"watch-namespaces", "cluster-id", "max-incidents", "module-grants",
 	} {
 		for _, comp := range components {
 			cases["extra arg "+flag+" ("+comp+")"] = refusal{fmt.Sprintf("%s.extraArgs={--%s=x}", comp, flag), "--" + flag}
@@ -945,16 +951,16 @@ var moduleRoles = []struct {
 	clusterWide      bool
 }{
 	{"analyzer.modules.keda.enabled", "shadewright-analyzer-watch-keda", "",
-		[]string{"keda.sh/scaledjobs:get,list,watch", "keda.sh/scaledobjects:get,list,watch"}, false},
+		[]string{"keda.sh/scaledjobs:list,watch", "keda.sh/scaledobjects:get,list,watch"}, false},
 	{"analyzer.modules.flux.enabled", "shadewright-analyzer-watch-flux", "config/modules/flux",
-		[]string{"helm.toolkit.fluxcd.io/helmreleases:get,list,watch",
-			"kustomize.toolkit.fluxcd.io/kustomizations:get,list,watch",
-			"source.toolkit.fluxcd.io/gitrepositories:get,list,watch"}, false},
+		[]string{"helm.toolkit.fluxcd.io/helmreleases:list,watch",
+			"kustomize.toolkit.fluxcd.io/kustomizations:list,watch",
+			"source.toolkit.fluxcd.io/gitrepositories:list,watch"}, false},
 	{"analyzer.modules.kyverno.enabled", "shadewright-analyzer-watch-kyverno", "config/modules/kyverno",
-		[]string{"kyverno.io/policies:get,list,watch", "wgpolicyk8s.io/policyreports:get,list,watch"}, false},
+		[]string{"kyverno.io/policies:list,watch", "wgpolicyk8s.io/policyreports:list,watch"}, false},
 	{"analyzer.modules.kyverno.clusterWide.enabled", "shadewright-analyzer-kyverno-cluster",
 		"config/modules/kyverno-cluster",
-		[]string{"kyverno.io/clusterpolicies:get,list,watch", "wgpolicyk8s.io/clusterpolicyreports:get,list,watch"}, true},
+		[]string{"kyverno.io/clusterpolicies:list,watch", "wgpolicyk8s.io/clusterpolicyreports:list,watch"}, true},
 }
 
 // ruleLines is each rule of a rendered ClusterRole as group/resource:verbs, one line per resource, sorted.
@@ -976,6 +982,33 @@ func ruleLines(t *testing.T, u *unstructured.Unstructured) []string {
 	return out
 }
 
+// TestModuleGrantsFlagFollowsTheValues (#409 review): the analyzer is told which module roles the chart rendered,
+// always, so a kind whose role is left out on purpose (Kyverno's cluster-wide one, off by default) is not
+// reported as missing.
+func TestModuleGrantsFlagFollowsTheValues(t *testing.T) {
+	for _, tc := range []struct {
+		set  []string
+		want string
+	}{
+		{nil, "--module-grants=keda"},
+		{[]string{"analyzer.modules.keda.enabled=false"}, "--module-grants="},
+		{[]string{kyvernoOn}, "--module-grants=keda,kyverno"},
+		{[]string{"analyzer.modules.flux.enabled=true", kyvernoOn,
+			"analyzer.modules.kyverno.clusterWide.enabled=true"}, "--module-grants=keda,flux,kyverno,kyverno-cluster"},
+	} {
+		args := analyzerArgs(t, render(t, false, tc.set...))
+		var got []string
+		for _, a := range args {
+			if strings.HasPrefix(a, "--module-grants") {
+				got = append(got, a)
+			}
+		}
+		if !slices.Equal(got, []string{tc.want}) {
+			t.Errorf("%v: args %v, want %s once", tc.set, got, tc.want)
+		}
+	}
+}
+
 // TestModuleGrantsFollowTheirValues checks each module's read grant: rendered with exactly its rules and bound
 // in each watched namespace (Kyverno's cluster-scoped kinds by a ClusterRoleBinding) only while its value is
 // true, and gone, binding included, while it is false. KEDA is on by default, the others off. The watch role
@@ -983,7 +1016,7 @@ func ruleLines(t *testing.T, u *unstructured.Unstructured) []string {
 func TestModuleGrantsFollowTheirValues(t *testing.T) {
 	ns := "analyzer.watchNamespaces={demo,team-b}"
 	off := render(t, false, ns, "analyzer.modules.keda.enabled=false")
-	on := render(t, false, ns, "analyzer.modules.flux.enabled=true", "analyzer.modules.kyverno.enabled=true",
+	on := render(t, false, ns, "analyzer.modules.flux.enabled=true", kyvernoOn,
 		"analyzer.modules.kyverno.clusterWide.enabled=true")
 	defaults := render(t, false, ns)
 	for _, m := range moduleRoles {

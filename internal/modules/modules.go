@@ -123,6 +123,11 @@ type SymptomSource struct {
 	// unstructured object). Everything in it is untrusted. Symptoms only reads obj, never changes it, and
 	// does no I/O.
 	Symptoms func(obj map[string]any) []Symptom
+	// PodFilter, when set on a source of core Pods, is a cheap check on a pod's labels and container images
+	// (spec.containers, in order) that the evaluator runs before it converts the pod for Symptoms: false means
+	// Symptoms finds nothing on the pod, so it is not called. It must never return false for a pod Symptoms
+	// finds a symptom on. Both inputs are untrusted. PodFilter only reads them and does no I/O.
+	PodFilter func(labels map[string]string, images []string) bool
 	// Subject, when set (any field), is the kind of controller owner the symptoms are about instead of the
 	// watched object itself, for example the ScaledObject that owns an HPA. The evaluator in the analyzer
 	// verifies the owner before it uses it (design 3.1); an owner it cannot verify leaves the watched object

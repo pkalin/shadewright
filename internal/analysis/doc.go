@@ -79,4 +79,9 @@ limitations under the License.
 // (Config.ExpectedModels, ADR-0023 decision 8), and a role without one is not configured. The analyzer binary
 // starts the controller only with its --triage-model flag, with the Foundry adapter behind a host allow-list
 // ([ErrEndpointNotAllowed]).
+//
+// With a tracer provider (Config.TracerProvider, #90) each analysis is one OpenTelemetry trace: a root span
+// with the outcome, and spans for the context, the budget reservation, the triage and escalation phases, each
+// model call and each tool call. Spans carry IDs, counts, fixed result labels and the configured model and
+// deployment names only, never text from the cluster, a tool or the model, nor an error's text (invariant 4).
 package analysis

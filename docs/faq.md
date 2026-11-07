@@ -25,7 +25,7 @@ The operator is two small Deployments. Nothing calls a model unless the analyzer
 
 ## What data leaves the cluster?
 
-Today, only calls to GitHub (reads of files and branch heads in the repositories configured in `RemediationSettings`, up to 16, and the branch, commit and pull request it writes there), to Azure Key Vault (a digest to sign) and to Microsoft Entra ID (the workload identity token). Nothing is sent to a model yet, and there is no telemetry. Details, redaction and retention: [data handling](data-handling.md).
+Today, only calls to GitHub (reads of files and branch heads in the repositories configured in `RemediationSettings`, up to 16, and the branch, commit and pull request it writes there), to Azure Key Vault (a digest to sign) and to Microsoft Entra ID (the workload identity token). Nothing is sent to a model yet, and there is no telemetry; only if you turn on analysis traces does the analyzer send spans, with no cluster or model text, to an OpenTelemetry collector you name ([traces](reference/traces.md)). Details, redaction and retention: [data handling](data-handling.md).
 
 ## Which platforms work?
 

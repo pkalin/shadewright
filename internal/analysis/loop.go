@@ -25,6 +25,9 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -201,12 +204,17 @@ type Config struct {
 	// Outcome.MissingData): pass the one the context builder uses. Nil means the built-in rules of package
 	// redact.
 	Redactor *redact.Redactor
+	// TracerProvider makes the spans of each analysis (#90): one trace per analysis, with a span per phase,
+	// model call and tool call. The spans carry IDs, counts, fixed result labels and the configured model and
+	// deployment names only, never text from the cluster, a tool or the model. Nil means no tracing.
+	TracerProvider trace.TracerProvider
 }
 
 // Analyzer runs the bounded analysis of one Incident at a time per call. It is safe for concurrent use when
 // its dependencies are.
 type Analyzer struct {
-	cfg Config
+	cfg    Config
+	tracer trace.Tracer
 }
 
 // New checks the configuration.
@@ -229,7 +237,11 @@ func New(cfg Config) (*Analyzer, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Analyzer{cfg: cfg}, nil
+	tp := cfg.TracerProvider
+	if tp == nil {
+		tp = noop.NewTracerProvider()
+	}
+	return &Analyzer{cfg: cfg, tracer: tp.Tracer(TracerName)}, nil
 }
 
 // Timeout returns the deadline of one analysis.
@@ -297,8 +309,16 @@ type Outcome struct {
 // Analyze runs the analysis of inc with the limits of the settings: runbooks first, then (with a triage
 // model configured) the context, one unit of the daily budget, the triage call with one retry after invalid
 // output, and escalation on the deterministic signals only. It returns an error only when ctx is done (a
-// shutdown or a lost leadership): every other end is an Outcome, a hand-off unless it carries a Plan.
+// shutdown or a lost leadership): every other end is an Outcome, a hand-off unless it carries a Plan. The
+// analysis is one trace, whose root span ends with the outcome.
 func (a *Analyzer) Analyze(ctx context.Context, inc *remediationv1alpha1.Incident, limits Limits) (Outcome, error) {
+	ctx, span := a.tracer.Start(ctx, spanAnalysis, trace.WithAttributes(incidentAttrs(inc)...))
+	out, err := a.analyze(ctx, inc, limits)
+	endAnalysis(span, out, err)
+	return out, err
+}
+
+func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Incident, limits Limits) (Outcome, error) {
 	out := Outcome{PromptVersion: PromptVersion()}
 	for _, rb := range a.cfg.Runbooks {
 		if p, ok := rb.Match(inc); ok {
@@ -317,7 +337,7 @@ func (a *Analyzer) Analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 	r := &run{a: a, parent: ctx, ctx: actx, inc: inc, limits: limits, out: &out, spent: map[string]int64{},
 		maxCalls: 3 + max(limits.MaxToolSteps, 0)}
 
-	c, err := a.cfg.Builder.Build(actx, inc)
+	c, err := r.build()
 	if err != nil {
 		if ctx.Err() != nil {
 			return out, fmt.Errorf("analysis: %w", ctx.Err())
@@ -343,7 +363,7 @@ func (a *Analyzer) Analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 		return r.handOff(factoryFailure(err))
 	}
 
-	if err := a.cfg.Reserve(actx, a.cfg.Now()); err != nil {
+	if err := r.reserve(); err != nil {
 		if ctx.Err() != nil {
 			return out, fmt.Errorf("analysis: %w", ctx.Err())
 		}
@@ -357,7 +377,7 @@ func (a *Analyzer) Analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 	var action *remediationv1alpha1.Action
 	var reason Reason
 	if role == RoleTriage {
-		res, action, reason, err = r.triage(model)
+		res, action, reason, err = r.tracedTriage(model)
 		if err != nil {
 			return out, err
 		}
@@ -375,7 +395,7 @@ func (a *Analyzer) Analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 			return r.handOff(factoryFailure(err))
 		}
 	}
-	res, action, reason, err = r.escalate(model)
+	res, action, reason, err = r.tracedEscalate(model)
 	if err != nil {
 		return out, err
 	}
@@ -383,6 +403,69 @@ func (a *Analyzer) Analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 		return r.handOff(reason)
 	}
 	return r.finish(res, action)
+}
+
+// build runs the context builder in its span.
+func (r *run) build() (*incidentcontext.Context, error) {
+	ctx, span := r.a.tracer.Start(r.ctx, spanContext)
+	defer span.End()
+	c, err := r.a.cfg.Builder.Build(ctx, r.inc)
+	if err != nil {
+		if r.parent.Err() != nil {
+			setCanceled(span)
+			return nil, err
+		}
+		span.SetAttributes(attrResult.String(resultFailed))
+		span.SetStatus(codes.Error, "the context could not be built")
+		return nil, err
+	}
+	span.SetAttributes(attrResult.String(resultOK), attrBlocks.Int(len(c.Blocks)), attrContextBytes.Int(c.Size()),
+		attrTruncated.Bool(c.Truncated), attrFailedSources.Int(len(c.FailedSources)), attrPods.Int(len(c.Pods)))
+	return c, nil
+}
+
+// reserve takes the unit of the daily budget in its span.
+func (r *run) reserve() error {
+	ctx, span := r.a.tracer.Start(r.ctx, spanReserve)
+	defer span.End()
+	err := r.a.cfg.Reserve(ctx, r.a.cfg.Now())
+	switch {
+	case err == nil:
+		span.SetAttributes(attrResult.String(resultOK))
+	case r.parent.Err() != nil:
+		setCanceled(span)
+	case errors.Is(err, incidents.ErrBudgetSpent):
+		span.SetAttributes(attrResult.String(resultSpent))
+	default:
+		span.SetAttributes(attrResult.String(resultUnavailable))
+		span.SetStatus(codes.Error, "the budget could not be reserved")
+	}
+	return err
+}
+
+// phase starts the span of a phase and makes it the parent of the spans that follow, until the returned
+// function ends it; callers defer it. r.ctx keeps its deadline and cancellation: only the span it carries
+// changes.
+func (r *run) phase(name string) func() {
+	prev := r.ctx
+	ctx, span := r.a.tracer.Start(r.ctx, name)
+	r.ctx = ctx
+	return func() {
+		span.End()
+		r.ctx = prev
+	}
+}
+
+// tracedTriage runs triage in the span of its phase.
+func (r *run) tracedTriage(model providers.ModelProvider) (*Result, *remediationv1alpha1.Action, Reason, error) {
+	defer r.phase(spanTriage)()
+	return r.triage(model)
+}
+
+// tracedEscalate runs escalate in the span of its phase.
+func (r *run) tracedEscalate(model providers.ModelProvider) (*Result, *remediationv1alpha1.Action, Reason, error) {
+	defer r.phase(spanEscalation)()
+	return r.escalate(model)
 }
 
 // run is the state of one analysis.
@@ -559,11 +642,7 @@ var namespaceFree = []string{tools.NameReadGitFile, tools.NameGetRecentChanges}
 // refusedResult renders a refusal. It names the tool only when the escalation offered it: a tool never
 // offered is never described to the model, not even by its name.
 func refusedResult(name string, offered map[string]bool, text string) string {
-	tool := "unknown"
-	if offered[name] {
-		tool = name
-	}
-	return tools.Result{Tool: tool, Status: tools.StatusRefused, Text: text}.Content()
+	return tools.Result{Tool: toolLabel(name, offered), Status: tools.StatusRefused, Text: text}.Content()
 }
 
 // callTool runs one tool call bound to the Incident's namespace. A call that names another namespace, or a
@@ -576,10 +655,15 @@ func (r *run) callTool(call providers.ToolCall, offered map[string]bool) (string
 	r.tools++
 	r.out.ToolCalls++
 	id := fmt.Sprintf("t%d", r.tools)
-	content, quotable, err := r.boundCall(call, offered)
+	ctx, span := r.a.tracer.Start(r.ctx, spanToolCall,
+		trace.WithAttributes(attrTool.String(toolLabel(call.Name, offered))))
+	defer span.End()
+	content, quotable, err := r.boundCall(ctx, span, call, offered)
 	if err != nil {
+		setCanceled(span)
 		return "", err
 	}
+	span.SetAttributes(attrQuotable.Bool(len(quotable) > 0))
 	if len(quotable) > 0 {
 		r.shown[id] = quotable
 	}
@@ -587,36 +671,45 @@ func (r *run) callTool(call providers.ToolCall, offered map[string]bool) (string
 }
 
 // boundCall runs one call within the bounds of the escalation. It returns the result as the model sees it,
-// and the parts of it a quote may cite as evidence ([tools.Result.Data]; none when none may).
-func (r *run) boundCall(call providers.ToolCall, offered map[string]bool) (string, []string, error) {
+// and the parts of it a quote may cite as evidence ([tools.Result.Data]; none when none may). It records the
+// fixed status of the result on span, never its text or the call's arguments.
+func (r *run) boundCall(ctx context.Context, span trace.Span, call providers.ToolCall,
+	offered map[string]bool) (string, []string, error) {
+	refused := func(text string) (string, []string, error) {
+		span.SetAttributes(attrResult.String(resultRefused), attrToolStatus.String(string(tools.StatusRefused)))
+		return refusedResult(call.Name, offered, text), nil, nil
+	}
 	// Defence in depth: the adapter already refuses a reply that names a tool the request did not offer.
 	if !offered[call.Name] {
-		return refusedResult(call.Name, offered, "refused: this tool is not offered\n"), nil, nil
+		return refused("refused: this tool is not offered\n")
 	}
 	// Fail closed: arguments that are too large or not one JSON object are refused here, and every tool but the
 	// Git tools, which name no namespace, must name the subject's.
 	var args map[string]json.RawMessage
 	if len(call.Arguments) > tools.MaxArgumentBytes || json.Unmarshal(call.Arguments, &args) != nil || args == nil {
-		return refusedResult(call.Name, offered, "refused: the arguments do not match the schema\n"), nil, nil
+		return refused("refused: the arguments do not match the schema\n")
 	}
 	if !slices.Contains(namespaceFree, call.Name) {
 		var ns string
 		raw, ok := args["namespace"]
 		if !ok || json.Unmarshal(raw, &ns) != nil || ns == "" || ns != r.inc.Spec.Subject.Namespace {
-			return refusedResult(call.Name, offered,
-				"refused: the analysis reads only the namespace of the incident's subject\n"), nil, nil
+			return refused("refused: the analysis reads only the namespace of the incident's subject\n")
 		}
 	}
-	res, err := r.a.cfg.Tools.Call(r.ctx, call)
+	res, err := r.a.cfg.Tools.Call(ctx, call)
 	if err != nil {
 		if r.parent.Err() != nil {
 			return "", nil, fmt.Errorf("analysis: %w", r.parent.Err())
 		}
 		// The analysis deadline passed during the call: the next model call stops the loop.
+		span.SetAttributes(attrResult.String(resultFailed), attrToolStatus.String(string(tools.StatusCouldNotFetch)))
+		span.SetStatus(codes.Error, "the tool call failed")
 		return refusedResult(call.Name, offered, "could not fetch\n"), nil, nil
 	}
+	span.SetAttributes(attrResult.String(resultOK), attrToolStatus.String(toolStatusLabel(res.Status)))
 	var quotable []string
 	if r.outsideAttribution(call.Name, args) {
+		span.SetAttributes(attrOutside.Bool(true))
 		res.Labels = append(res.Labels, tools.LabelOutsideAttribution)
 	} else if res.Status == tools.StatusOK && r.aboutSubject(call.Name, args) {
 		quotable = res.Data()
@@ -720,53 +813,109 @@ func (r *run) call(model providers.ModelProvider, role Role, d *remediationv1alp
 			return providers.Completion{}, ReasonModelUnavailable, nil
 		}
 		r.out.Calls++
-		c, err := model.Complete(r.ctx, req)
-		// Fail closed: a call that failed, or whose usage is unknown, is charged its upper bound. Whether and
-		// how much the service billed it cannot be told (a timeout may come after the reply was generated), so
-		// the analysis and deployment bounds count the most it could have cost. A malformed reply was billed
-		// and reports its usage, which is charged as reported.
-		charge := upper
-		if (err == nil || providers.IsMalformedOutput(err)) && !c.UsageUnknown {
-			charge = c.Usage.InputTokens + c.Usage.OutputTokens
+		a := r.attempt(model, role, d, req, upper, key, attempt)
+		if !a.again {
+			return a.c, a.reason, a.err
 		}
-		r.out.Tokens += charge
-		r.spent[key] += charge
-		if c.Model != "" && !slices.Contains(r.out.Models, c.Model) {
-			r.out.Models = append(r.out.Models, c.Model)
-		}
-		// ADR-0023 decision 8: only the model configured for the role may answer. The adapter checks the name's
-		// form, so it is safe to log; a reply that names no model cannot be placed and is refused too.
-		if want := r.a.cfg.ExpectedModels[role]; r.parent.Err() == nil && (err == nil || c.Model != "") && c.Model != want {
-			log.FromContext(r.parent).Info("Refused a model reply from another model than the configured one",
-				"role", role, "deployment", d.Deployment, "expected", want, "got", c.Model)
-			return providers.Completion{}, ReasonUnexpectedModel, nil
-		}
-		switch {
-		case err == nil:
-			return c, "", nil
-		case r.parent.Err() != nil:
-			return providers.Completion{}, "", fmt.Errorf("analysis: %w", r.parent.Err())
-		case r.ctx.Err() != nil:
-			return providers.Completion{}, ReasonDeadlineExceeded, nil
-		case providers.IsMalformedOutput(err):
-			return providers.Completion{}, ReasonInvalidOutput, nil
-		case providers.IsNotFound(err):
-			return providers.Completion{}, ReasonModelNotFound, nil
-		case providers.IsForbidden(err):
-			return providers.Completion{}, ReasonModelForbidden, nil
-		case providers.IsRetryable(err):
-			wait, ok := providers.RetryAfter(err)
-			if attempt > 0 || !ok || wait > maxRetryWait {
-				return providers.Completion{}, ReasonModelUnavailable, nil
-			}
-			select {
-			case <-time.After(wait):
-			case <-r.ctx.Done():
-			}
-		default:
-			return providers.Completion{}, ReasonModelError, nil
+		select {
+		case <-time.After(a.wait):
+		case <-r.ctx.Done():
 		}
 	}
+}
+
+// attemptResult is the end of one model call: a reply, a hand-off reason or an error as [run.call] returns
+// them, or again with the delay to wait out before the call is made once more.
+type attemptResult struct {
+	c      providers.Completion
+	reason Reason
+	err    error
+	again  bool
+	wait   time.Duration
+}
+
+// attempt makes one model call, charges it and classifies its end, in its own span. The span records the role,
+// the deployment, the model the reply named, the usage and the fixed result label, never the request or the
+// reply.
+func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1alpha1.ModelDeployment,
+	req providers.CompletionRequest, upper int64, key string, attempt int) (res attemptResult) {
+	ctx, span := r.a.tracer.Start(r.ctx, spanModelCall, trace.WithAttributes(
+		attrOperation.String("chat"), attrRole.String(string(role)), attrDeployment.String(d.Deployment),
+		attrAttempt.Int(attempt+1), attrMaxOutputTokens.Int(req.MaxOutputTokens)))
+	defer func() { endModelCall(span, res) }()
+	c, err := model.Complete(ctx, req)
+	// Fail closed: a call that failed, or whose usage is unknown, is charged its upper bound. Whether and
+	// how much the service billed it cannot be told (a timeout may come after the reply was generated), so
+	// the analysis and deployment bounds count the most it could have cost. A malformed reply was billed
+	// and reports its usage, which is charged as reported.
+	charge := upper
+	billed := (err == nil || providers.IsMalformedOutput(err)) && !c.UsageUnknown
+	if billed {
+		charge = c.Usage.InputTokens + c.Usage.OutputTokens
+		span.SetAttributes(attrInputTokens.Int64(c.Usage.InputTokens), attrOutputTokens.Int64(c.Usage.OutputTokens))
+	}
+	span.SetAttributes(attrCharged.Int64(charge), attrUsageUnknown.Bool(c.UsageUnknown))
+	r.out.Tokens += charge
+	r.spent[key] += charge
+	if c.Model != "" {
+		// The adapter checks the name's form, so it is safe to record, as it is to log below.
+		span.SetAttributes(attrResponseModel.String(c.Model))
+		if !slices.Contains(r.out.Models, c.Model) {
+			r.out.Models = append(r.out.Models, c.Model)
+		}
+	}
+	// ADR-0023 decision 8: only the model configured for the role may answer. The adapter checks the name's
+	// form, so it is safe to log; a reply that names no model cannot be placed and is refused too.
+	if want := r.a.cfg.ExpectedModels[role]; r.parent.Err() == nil && (err == nil || c.Model != "") && c.Model != want {
+		log.FromContext(r.parent).Info("Refused a model reply from another model than the configured one",
+			"role", role, "deployment", d.Deployment, "expected", want, "got", c.Model)
+		return attemptResult{reason: ReasonUnexpectedModel}
+	}
+	switch {
+	case err == nil:
+		span.SetAttributes(attrRequestedTools.Int(len(c.ToolCalls)))
+		return attemptResult{c: c}
+	case r.parent.Err() != nil:
+		return attemptResult{err: fmt.Errorf("analysis: %w", r.parent.Err())}
+	case r.ctx.Err() != nil:
+		return attemptResult{reason: ReasonDeadlineExceeded}
+	case providers.IsMalformedOutput(err):
+		return attemptResult{reason: ReasonInvalidOutput}
+	case providers.IsNotFound(err):
+		return attemptResult{reason: ReasonModelNotFound}
+	case providers.IsForbidden(err):
+		return attemptResult{reason: ReasonModelForbidden}
+	case providers.IsRetryable(err):
+		wait, ok := providers.RetryAfter(err)
+		if attempt > 0 || !ok || wait > maxRetryWait {
+			return attemptResult{reason: ReasonModelUnavailable}
+		}
+		return attemptResult{again: true, wait: wait}
+	default:
+		return attemptResult{reason: ReasonModelError}
+	}
+}
+
+// resultRetry is the result label of a model call whose retryable error is waited out and the call made again.
+const resultRetry = "retry"
+
+// endModelCall records the fixed result label of a model call and ends its span. A call that did not return a
+// usable reply gets the error status with a fixed description, never the error's text.
+func endModelCall(span trace.Span, a attemptResult) {
+	label := resultOK
+	switch {
+	case a.err != nil:
+		label = resultCanceled
+	case a.again:
+		label = resultRetry
+	case a.reason != "":
+		label = string(a.reason)
+	}
+	span.SetAttributes(attrResult.String(label))
+	if label != resultOK {
+		span.SetStatus(codes.Error, "the model call returned no usable reply")
+	}
+	span.End()
 }
 
 // estimateInput is a conservative estimate of a request's input tokens: one token per two bytes of

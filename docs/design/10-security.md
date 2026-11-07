@@ -68,7 +68,7 @@ An additional namespace-scoped policy is needed for anything else that must reac
 The two egress policies do not open these by default.
 
 - **Metrics source.** The Prometheus HTTP API on port 9090 (the lab's in-cluster Prometheus, [ADR-0017](../adr/0017-prometheus-in-the-lab.md), behind the `MetricsSource` interface).
-- **Trace exporter.** OpenTelemetry (see the observability row of the stack table). When tracing is enabled it needs a rule to the collector's port, for example OTLP on 4317 or 4318. Until then it is not allowed and a call to it is dropped.
+- **Trace exporter.** OpenTelemetry, off by default; the analyzer exports over OTLP gRPC only ([traces reference](../reference/traces.md)). When tracing is enabled it needs a rule to the collector's port, OTLP gRPC on 4317 by default: the chart's `networkPolicy.analyzer.traceCollector` adds it, off by default like the Prometheus rule. Without it a call to the collector is dropped, and the analysis goes on: the exporter is asynchronous and bounded.
 
 The chart has a rule for Prometheus, off by default because the analyzer sends Prometheus nothing unless `--prometheus-url` is set: with `--prometheus-cluster` too it probes it at startup and every 10 minutes, and it queries it when the analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76), started with `--triage-model`) calls the context builder or a read tool. `networkPolicy.analyzer.prometheus.enabled` adds to `allow-analyzer-egress` (never to the executor's policy) a rule to the Pods you name in one namespace on one port.
 
@@ -313,7 +313,7 @@ Each identity also has its own leader election Lease, which only it can renew.
 
 | Topic | Detail |
 | --- | --- |
-| Egress ports | DNS 53 to kube-dns in `kube-system`; TCP 443 and 6443 to any address |
+| Egress ports | DNS 53 to kube-dns in `kube-system`; TCP 443 and 6443 to any address; for the analyzer only and only when enabled, the Prometheus rule (`networkPolicy.analyzer.prometheus`) and the trace collector rule (`networkPolicy.analyzer.traceCollector`) |
 | Metrics ingress | Port 8443, only from namespaces labeled `metrics: enabled` |
 | Probe port | 8081, from the node, not blocked by NetworkPolicy |
 | Prometheus port | 9090, off by default (`networkPolicy.analyzer.prometheus.enabled`) |

@@ -26,6 +26,8 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/incidents"
@@ -372,7 +374,7 @@ func TestBoundCallRefusesUnofferedToolWithoutNamingIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &run{a: a, parent: t.Context(), ctx: t.Context(), inc: incident(), shown: map[string][]string{}}
-	content, quotable, err := r.boundCall(
+	content, quotable, err := r.boundCall(t.Context(), trace.SpanFromContext(t.Context()),
 		toolCall("1", tools.NameGetDeliveryStatus, `{"kind":"Kustomization","namespace":"shop","name":"apps"}`),
 		map[string]bool{tools.NameListEvents: true})
 	if err != nil || quotable != nil || len(f.tools.seen()) != 0 {

@@ -57,6 +57,7 @@ nav = [
     { "Compatibility" = "reference/compatibility.md" },
     { "API" = "reference/api.md" },
     { "Metrics" = "reference/metrics.md" },
+    { "Traces" = "reference/traces.md" },
   ] },
   { "Design and decisions" = [
     { "Design and decisions" = "design-and-decisions.md" },

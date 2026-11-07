@@ -134,7 +134,8 @@ func (s *sightings) hold(h *sighting, o collector.Observation) {
 		return
 	}
 	if len(h.held) > 0 {
-		// The same fingerprint hashes the same normalized symptom: keep one copy of it.
+		// Occurrences of one fingerprint hash the same normalized text, but the symptom they show can differ
+		// (a metric value kept for reading, #479): keep the first one's, as the Incident's spec.symptom does.
 		o.Symptom = h.held[0].Symptom
 	}
 	h.held = append(h.held, o)

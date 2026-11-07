@@ -1,0 +1,105 @@
+{{- /*
+The analyzer's reads of an add-on's own kinds, for the symptom sources of its integration module (#409): one
+ClusterRole per module, rendered only while its value under analyzer.modules is true, so an add-on that is not
+deployed gets no grant. Each is bound like the watch role: one RoleBinding per watched namespace, never
+cluster-wide. Kyverno's cluster-scoped kinds are the one exception, a ClusterRoleBinding behind a value of its
+own. Without a role the analyzer does not watch those kinds and reports them as not watched. Keep each rule
+equal to config/rbac/analyzer/modules (test/chart checks it).
+*/ -}}
+{{- $roles := list }}
+{{- if .Values.analyzer.modules.keda.enabled }}
+{{- $roles = append $roles (dict "suffix" "analyzer-watch-keda" "rules" (list
+  (dict "group" "keda.sh" "resources" (list "scaledjobs" "scaledobjects")))) }}
+{{- end }}
+{{- if .Values.analyzer.modules.flux.enabled }}
+{{- $roles = append $roles (dict "suffix" "analyzer-watch-flux" "rules" (list
+  (dict "group" "helm.toolkit.fluxcd.io" "resources" (list "helmreleases"))
+  (dict "group" "kustomize.toolkit.fluxcd.io" "resources" (list "kustomizations"))
+  (dict "group" "source.toolkit.fluxcd.io" "resources" (list "gitrepositories")))) }}
+{{- end }}
+{{- if .Values.analyzer.modules.kyverno.enabled }}
+{{- $roles = append $roles (dict "suffix" "analyzer-watch-kyverno" "rules" (list
+  (dict "group" "kyverno.io" "resources" (list "policies"))
+  (dict "group" "wgpolicyk8s.io" "resources" (list "policyreports")))) }}
+{{- end }}
+{{- range $role := $roles }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" $role.suffix "context" $) }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "" "context" $) | nindent 4 }}
+rules:
+{{- range $rule := $role.rules }}
+- apiGroups:
+  - {{ $rule.group }}
+  resources:
+  {{- range $r := $rule.resources }}
+  - {{ $r }}
+  {{- end }}
+  verbs:
+  - get
+  - list
+  - watch
+{{- end }}
+{{- range $ns := ($.Values.analyzer.watchNamespaces | default list) }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" $role.suffix "context" $) }}
+  namespace: {{ $ns | quote }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "analyzer" "context" $) | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "shadewright.resourceName" (dict "suffix" $role.suffix "context" $) }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer" "context" $) }}
+  namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}
+{{- if .Values.analyzer.modules.kyverno.clusterWide.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer-kyverno-cluster" "context" $) }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "" "context" $) | nindent 4 }}
+rules:
+- apiGroups:
+  - kyverno.io
+  resources:
+  - clusterpolicies
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - wgpolicyk8s.io
+  resources:
+  - clusterpolicyreports
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer-kyverno-cluster" "context" $) }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "analyzer" "context" $) | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer-kyverno-cluster" "context" $) }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}

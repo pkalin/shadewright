@@ -34,10 +34,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/modules"
@@ -520,5 +522,74 @@ func TestStatusReportsNoWatchedNamespaces(t *testing.T) {
 				t.Errorf("NoWatchedNamespaces = %+v, want %s with reason %s", cond, tc.want, tc.reason)
 			}
 		})
+	}
+}
+
+// TestSourcesNotWatchedIsReported checks the condition SymptomSourcesNotWatched (#409): True with the kinds
+// and their states while the collector reports kinds it does not watch, False once it watches them all, and
+// absent when no collector runs. The message is built from the kinds only.
+func TestSourcesNotWatchedIsReported(t *testing.T) {
+	ctx := t.Context()
+	s := aksSettings()
+	c := clientfake.NewClientBuilder().WithScheme(fakeScheme(t)).WithObjects(s, aksNode("n0")).
+		WithStatusSubresource(s).Build()
+	var missing []NotWatched
+	d, err := New(Config{Registry: registry(t), GroupVersions: noGroups,
+		SourcesNotWatched: func() []NotWatched { return missing }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.reader, d.writer = c, c
+	cond := func() *metav1.Condition {
+		t.Helper()
+		if _, err := d.Reconcile(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+		var cur remediationv1alpha1.RemediationSettings
+		if err := c.Get(ctx, request.NamespacedName, &cur); err != nil {
+			t.Fatal(err)
+		}
+		return meta.FindStatusCondition(cur.Status.Conditions, ConditionSymptomSourcesNotWatched)
+	}
+	missing = []NotWatched{{Group: "kyverno.io", Version: "v1", Kind: "ClusterPolicy", State: "NotGranted"}}
+	got := cond()
+	if got == nil || got.Status != metav1.ConditionTrue || got.Reason != ReasonSourcesNotWatched ||
+		!strings.Contains(got.Message, "kyverno.io/v1 ClusterPolicy (NotGranted)") {
+		t.Fatalf("condition %+v, want True naming kyverno.io/v1 ClusterPolicy (NotGranted)", got)
+	}
+	missing = nil
+	if got := cond(); got == nil || got.Status != metav1.ConditionFalse || got.Reason != ReasonAllSourcesWatched {
+		t.Fatalf("condition %+v, want False once every kind is watched", got)
+	}
+
+	plain := newDetector(t, c, noGroups)
+	if _, err := plain.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	var cur remediationv1alpha1.RemediationSettings
+	if err := c.Get(ctx, request.NamespacedName, &cur); err != nil {
+		t.Fatal(err)
+	}
+	if got := meta.FindStatusCondition(cur.Status.Conditions, ConditionSymptomSourcesNotWatched); got != nil {
+		t.Errorf("condition %+v from a detector without a collector, want none", got)
+	}
+}
+
+// TestRecheckEnqueuesTheSettings: a notice on Recheck starts a run for the settings.
+func TestRecheckEnqueuesTheSettings(t *testing.T) {
+	ch := make(chan struct{}, 1)
+	d, err := New(Config{Registry: registry(t), GroupVersions: noGroups, Recheck: ch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
+	defer q.ShutDown()
+	if err := d.rechecks().Start(t.Context(), q); err != nil {
+		t.Fatal(err)
+	}
+	ch <- struct{}{}
+	got, _ := q.Get()
+	if got != request {
+		t.Errorf("enqueued %v, want %v", got, request)
 	}
 }

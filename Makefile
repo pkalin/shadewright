@@ -59,6 +59,10 @@ manifests: controller-gen ## Generate WebhookConfiguration, the executor and ana
 	"$(CONTROLLER_GEN)" rbac:roleName=executor-role paths="./internal/controller/..." output:rbac:artifacts:config=config/rbac/executor
 	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-role paths="./internal/analyzer" output:rbac:artifacts:config=config/rbac/analyzer
 	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-watch-role paths="./internal/analyzer/collector/..." output:rbac:artifacts:config=config/rbac/analyzer/watch
+	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-watch-keda paths="./internal/analyzer/modulerbac/keda" output:rbac:artifacts:config=config/rbac/analyzer/modules/keda
+	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-watch-flux paths="./internal/analyzer/modulerbac/flux" output:rbac:artifacts:config=config/rbac/analyzer/modules/flux
+	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-watch-kyverno paths="./internal/analyzer/modulerbac/kyverno" output:rbac:artifacts:config=config/rbac/analyzer/modules/kyverno
+	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-kyverno-cluster paths="./internal/analyzer/modulerbac/kyvernocluster" output:rbac:artifacts:config=config/rbac/analyzer/modules/kyverno-cluster
 	$(MAKE) chart-crds
 
 .PHONY: chart-crds

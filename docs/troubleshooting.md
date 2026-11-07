@@ -253,3 +253,8 @@ The analyzer records Incidents only for symptoms in the namespaces it watches. T
 - `kubectl get remediationsettings default -o jsonpath='{.status.conditions[?(@.type=="NoWatchedNamespaces")]}'` shows `True` with reason `NoNamespacesWatched`. The condition appears only once a `RemediationSettings` object exists, and the chart creates none by default (`settings.create: false`).
 
 To watch namespaces, upgrade with the list (`--set 'analyzer.watchNamespaces={team-a,team-b}'`); each one must exist and gets a read-only RoleBinding. With the kustomize install, set `--watch-namespaces` and add the RoleBindings as `config/watch` does. If the list is set and still nothing appears, the namespace may lack its RoleBinding (the analyzer's reads are refused there) or have no symptom the collector knows.
+
+For the symptoms of a module (KEDA, Flux, Kyverno), the analyzer must also be allowed to read the add-on's kinds:
+
+- `kubectl get remediationsettings default -o jsonpath='{.status.conditions[?(@.type=="SymptomSourcesNotWatched")]}'` shows `True` with reason `SourcesNotWatched` and names each kind with `NotGranted` (turn on the module's value under `analyzer.modules` in the chart), `NotServed` (the add-on's CRD is not installed) or `Failed` (the check failed; it is tried again every 30 seconds, and the analyzer's log has the error).
+- The gauge `shadewright_analyzer_symptom_source_watched` is `0` for that kind, and the analyzer logs `Not watching a symptom source kind` once per change.

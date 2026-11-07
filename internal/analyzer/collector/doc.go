@@ -60,10 +60,14 @@ limitations under the License.
 // logs; it is here because this package's markers make the one watch role.
 //
 // Module symptom sources (sources.go, design 2.5.1 and 3.1): when it is given the active modules
-// (Config.Modules), the collector also watches each kind in SourceKinds (autoscaling/v2
-// HorizontalPodAutoscalers and core Pods) and runs on each object the symptom source that an active module
-// declares for the kind, through modules.EvaluateSource, which drops a symptom ValidSymptom refuses and redacts
-// and bounds every evidence value. The watches of SourceKinds run whenever Config.Modules is set, so the cache
+// (Config.Modules), the collector also watches each kind in SourceKinds and runs on each object the symptom
+// source that an active module declares for the kind, through modules.EvaluateSource, which drops a symptom
+// ValidSymptom refuses and redacts and bounds every evidence value. The add-ons' own kinds (KEDA, Flux,
+// Kyverno) are watched lazily (lazy.go): only while a module that reads them is active, the API server serves
+// them and the analyzer may list them, a grant the chart gives per module (package modulerbac); a kind that is
+// not served or not granted is reported (Collector.SourcesNotWatched, the gauge
+// shadewright_analyzer_symptom_source_watched and a log line), and starts no informer. The watches of the
+// built-in kinds (autoscaling/v2 HorizontalPodAutoscalers and core Pods) run whenever Config.Modules is set, so the cache
 // holds the HPAs of the watched namespaces even while no module uses them (Pods it holds anyway, read as typed
 // objects from the pod collector's informer); a module that is not enabled and detected has no active source,
 // so its source does not run and its owner kind is not read: no request reaches keda.sh while the KEDA module
@@ -87,5 +91,4 @@ limitations under the License.
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups=apps,resources=replicasets;deployments;statefulsets,verbs=get
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch
-// +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects,verbs=get
 package collector

@@ -19,6 +19,10 @@ package collector
 import (
 	"context"
 	"errors"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +30,7 @@ import (
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/yaml"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
@@ -65,7 +71,7 @@ var (
 )
 
 // objectReader is a client.Reader over unstructured objects, keyed by kind, namespace and name. It records
-// the group of every read and can fail reads of one group.
+// the group of every read (get or list) and can fail reads of one group.
 type objectReader struct {
 	mu      sync.Mutex
 	objects map[string]map[string]any
@@ -112,6 +118,7 @@ func (r *objectReader) List(_ context.Context, list client.ObjectList, _ ...clie
 	gvk := ul.GroupVersionKind()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.groups = append(r.groups, gvk.Group)
 	if err := r.fail[gvk.Group]; err != nil {
 		return err
 	}
@@ -781,12 +788,23 @@ func TestSymptomTextIsRedactedAndBounded(t *testing.T) {
 }
 
 // TestSourceKindsAreGranted keeps SourceKinds and the subject owners of the compiled-in sources for those kinds
-// within the watch role's markers: a kind added here needs its grant in doc.go.
+// within the generated roles: a built-in kind needs list and watch in the watch role (the markers in doc.go),
+// any other kind in a module role (package modulerbac), and every kind needs a compiled-in source.
 func TestSourceKindsAreGranted(t *testing.T) {
-	granted := map[string]bool{"autoscaling/horizontalpodautoscalers": true, "/pods": true}
-	ownerGranted := map[string]bool{"keda.sh/scaledobjects": true}
-	if len(SourceKinds) != len(granted) {
-		t.Fatalf("SourceKinds has %d kinds, the watch role grants %d", len(SourceKinds), len(granted))
+	builtin := readRoleRules(t, filepath.Join("..", "..", "..", "config", "rbac", "analyzer", "watch", "role.yaml"))
+	module := map[string]bool{}
+	for _, m := range []string{"keda", "flux", "kyverno", "kyverno-cluster"} {
+		maps.Copy(module, readRoleRules(t, filepath.Join("..", "..", "..", "config", "rbac", "analyzer", "modules", m, "role.yaml")))
+	}
+	granted := func(gvk schema.GroupVersionKind, res string) bool {
+		if builtinKind(gvk) {
+			return builtin[gvk.Group+"/"+res+"/list"] && builtin[gvk.Group+"/"+res+"/watch"]
+		}
+		return module[gvk.Group+"/"+res+"/list"] && module[gvk.Group+"/"+res+"/watch"] &&
+			!builtin[gvk.Group+"/"+res+"/list"]
+	}
+	ownerGranted := func(group, res string) bool {
+		return builtin[group+"/"+res+"/get"] || module[group+"/"+res+"/get"]
 	}
 	var sources []modules.SymptomSource
 	for _, m := range []modules.Integration{cloudflared.Module(), flux.Module(), keda.Module(), kyverno.Module()} {
@@ -795,13 +813,13 @@ func TestSourceKindsAreGranted(t *testing.T) {
 	watched := 0
 	for _, src := range sources {
 		for _, k := range SourceKinds {
-			if src.Group != k.Group || src.Kind != k.Kind {
+			if src.Group != k.Group || src.Kind != k.Kind || !slices.Contains(src.Versions, k.Version) {
 				continue
 			}
-			if !granted[src.Group+"/"+src.Resource] {
-				t.Errorf("%s/%s is watched without a grant", src.Group, src.Resource)
+			if !granted(k, src.Resource) {
+				t.Errorf("%s/%s is watched without its grant", src.Group, src.Resource)
 			}
-			if src.Subject.IsSet() && !ownerGranted[src.Subject.Group+"/"+src.Subject.Resource] {
+			if src.Subject.IsSet() && !ownerGranted(src.Subject.Group, src.Subject.Resource) {
 				t.Errorf("owner %s/%s is read without a grant", src.Subject.Group, src.Subject.Resource)
 			}
 			watched++
@@ -809,5 +827,45 @@ func TestSourceKindsAreGranted(t *testing.T) {
 	}
 	if watched != len(SourceKinds) {
 		t.Errorf("%d of the %d kinds in SourceKinds have a compiled-in source", watched, len(SourceKinds))
+	}
+}
+
+// readRoleRules returns group/resource/verb of every rule of the one ClusterRole of a generated file.
+func readRoleRules(t *testing.T, path string) map[string]bool {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var role rbacv1.ClusterRole
+	if err := yaml.Unmarshal(data, &role); err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	out := map[string]bool{}
+	for _, r := range role.Rules {
+		for _, g := range r.APIGroups {
+			for _, res := range r.Resources {
+				for _, v := range r.Verbs {
+					out[g+"/"+res+"/"+v] = true
+				}
+			}
+		}
+	}
+	return out
+}
+
+// TestOwnerNotGrantedLeavesTheHPAAsSubject: with the KEDA module's value off in the chart, the ScaledObject
+// cannot be read (Forbidden). The ceiling is still reported, about the HPA itself, once, and the reconcile does
+// not fail, so it is not retried in a loop.
+func TestOwnerNotGrantedLeavesTheHPAAsSubject(t *testing.T) {
+	h := newSourceHarness(t, kedaActive(t), Config{})
+	h.cache.put(ceilingHPA(t0.Add(-time.Minute)))
+	h.api.put(scaledObject())
+	h.api.fail["keda.sh"] = apierrors.NewForbidden(schema.GroupResource{Group: "keda.sh", Resource: "scaledobjects"}, soName, errors.New("no grant"))
+	if _, err := h.reconcile(); err != nil {
+		t.Fatalf("reconcile: %v, want the HPA as the subject", err)
+	}
+	if o := h.one(); o.Subject.Kind != "HorizontalPodAutoscaler" || o.Subject.Name != hpaName {
+		t.Errorf("subject %+v, want the HPA", o.Subject)
 	}
 }

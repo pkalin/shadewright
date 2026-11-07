@@ -27,6 +27,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -75,8 +76,10 @@ type Observation struct {
 	Subject remediationv1alpha1.ObjectRef
 	// Source is the namespace the observation came from: the event's own namespace, the pod's for a
 	// container termination read from pod status, or the watched object's for a module symptom source. It is
-	// the namespace RBAC grants the creation of the event (or the write of the object) in, so it is never
-	// empty, unlike Subject's namespace for a cluster-scoped subject (a Node).
+	// the namespace RBAC grants the creation of the event (or the write of the object) in, so it is not empty
+	// for a cluster-scoped subject (a Node) named by an event. It is empty only for a cluster-scoped watched
+	// object (a Kyverno ClusterPolicy or ClusterPolicyReport), which only a cluster-wide grant can write: its
+	// observations share one empty-named share of the Incident controller's caps.
 	Source string
 	// Reason, Type and ReportingController are the event's; or OOMKilled (or the termination reason),
 	// Warning and kubelet for a container termination read from pod status; or the symptom's reason, Warning
@@ -188,8 +191,16 @@ type Config struct {
 	// MaxObjects bounds the number of objects whose handled symptom states are remembered.
 	MaxObjects int
 	// SelectionPoll is how often the collector checks whether a module became active for a kind in
-	// [SourceKinds], to evaluate then the objects of that kind it filtered out while none was.
+	// [SourceKinds], to evaluate then the objects of that kind it filtered out while none was, and, for a kind
+	// that is not built in, whether it is served and may be listed (lazy.go).
 	SelectionPoll time.Duration
+	// Namespaces are the watched namespaces (--watch-namespaces), where the collector checks that it may list
+	// a namespaced kind of [SourceKinds] that is not built in before it watches it. Required with Modules.
+	Namespaces []string
+	// WatchChanged, when set, is called after the watch state of such a kind changed
+	// ([Collector.SourcesNotWatched]), so detection reports it without waiting for its next run. It must not
+	// block.
+	WatchChanged func()
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
 }
@@ -209,6 +220,10 @@ type Collector struct {
 	// conditions remembers the handled symptom states of objects read by module symptom sources, keyed by
 	// kind and name.
 	conditions *stateTracker
+
+	// watches is the watch state of each kind of SourceKinds that is not built in (lazy.go).
+	watchMu sync.Mutex
+	watches map[schema.GroupVersionKind]WatchState
 }
 
 // New validates cfg, applies defaults and returns a collector. Call [Collector.SetupWithManager] to start
@@ -238,6 +253,7 @@ func New(cfg Config) (*Collector, error) {
 		// A tracker of its own, keyed by kind and name, so a pod and a watched object of the same name, or two
 		// watched kinds, keep apart.
 		conditions: newStateTracker(cfg.MaxObjects),
+		watches:    map[schema.GroupVersionKind]WatchState{},
 	}, nil
 }
 

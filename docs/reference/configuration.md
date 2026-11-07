@@ -38,9 +38,15 @@ analyzer:
   watchNamespaces: [<namespace to watch>]
   podLogs:
     enabled: true   # false: --pod-logs=false and no pods/log rule
-  modules:
+  modules:         # read grants of the add-ons' kinds; spec.modules still decides what runs
     keda:
-      enabled: true   # false: no scaledobjects rule (KEDA not installed)
+      enabled: true   # false: no keda.sh role (KEDA not installed)
+    flux:
+      enabled: false  # true: get, list, watch Flux kinds in the watched namespaces
+    kyverno:
+      enabled: false  # true: Kyverno policies and policy reports in the watched namespaces
+      clusterWide:
+        enabled: false  # true: ClusterPolicies and ClusterPolicyReports, cluster-wide
   prometheus:
     url: ""         # --prometheus-url, when set
     cluster: ""     # --prometheus-cluster, when set
@@ -151,7 +157,9 @@ The permissions, as installed:
 
 | Identity | Scope | Grants |
 | --- | --- | --- |
-| Analyzer, each watched namespace | RoleBinding to `analyzer-watch-role` | `get`, `list`, `watch` Pods, `events.k8s.io` Events and `autoscaling` HorizontalPodAutoscalers; `get` on `pods/log` (the pod logs source, `--pod-logs`); `get` Deployments, ReplicaSets, StatefulSets and KEDA `scaledobjects` (read only while the `keda` integration is active) |
+| Analyzer, each watched namespace | RoleBinding to `analyzer-watch-role` | `get`, `list`, `watch` Pods, `events.k8s.io` Events and `autoscaling` HorizontalPodAutoscalers; `get` on `pods/log` (the pod logs source, `--pod-logs`); `get` Deployments, ReplicaSets, StatefulSets |
+| Analyzer, each watched namespace, per chart value | RoleBinding to `analyzer-watch-keda` (`analyzer.modules.keda.enabled`, on by default), `analyzer-watch-flux` (`.flux.enabled`, off) and `analyzer-watch-kyverno` (`.kyverno.enabled`, off) | `get`, `list`, `watch` only: KEDA `scaledobjects` and `scaledjobs`; Flux `kustomizations`, `helmreleases` and `gitrepositories`; Kyverno `policies` and `wgpolicyk8s.io` `policyreports`. Read only while the module is active; an active module without its role is reported in the settings condition `SymptomSourcesNotWatched` |
+| Analyzer, cluster, per chart value | `analyzer-kyverno-cluster` ClusterRole and ClusterRoleBinding (`analyzer.modules.kyverno.clusterWide.enabled`, off) | `get`, `list`, `watch` Kyverno `clusterpolicies` and `wgpolicyk8s.io` `clusterpolicyreports` |
 | Analyzer, cluster | `analyzer-role` ClusterRole | `list` Nodes; `get`, `list`, `watch` `remediationsettings`; `update` `remediationsettings/status` |
 | Analyzer, operator namespace | `analyzer-role` Role | `get`, `update` the ConfigMap `shadewright-analysis-budget` only (no create); `create`, `get`, `list`, `watch` Incidents and RemediationRequests; `update` `incidents/status`; its own Lease, and `create`, `patch` on core Events (leader election) |
 | Executor, cluster | `executor-role` ClusterRole | `get` only: Deployments, StatefulSets, KEDA `scaledobjects`, Flux `kustomizations` and `gitrepositories`, `remediationpolicies`, `remediationsettings` |

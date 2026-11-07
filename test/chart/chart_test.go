@@ -350,6 +350,15 @@ func renderArgs(t *testing.T, args []string) rendered {
 	return r
 }
 
+// addKustomize builds one more kustomize directory into r.kustomize.
+func addKustomize(t *testing.T, r *rendered, dir string) {
+	t.Helper()
+	root := repoRoot(t)
+	for _, u := range objects(t, run(t, root, tool(t, "KUSTOMIZE", "kustomize"), "build", dir)) {
+		r.kustomize[key(u)] = u
+	}
+}
+
 func rbacOnly(in map[string]*unstructured.Unstructured, dropHelpers bool) map[string]*unstructured.Unstructured {
 	out := map[string]*unstructured.Unstructured{}
 	for k, u := range in {
@@ -558,6 +567,9 @@ var allToggles = []string{
 	"settings.spec.paused=false",
 	"analyzer.identity.azure.clientId=11111111-1111-1111-1111-111111111111",
 	"analyzer.watchNamespaces={demo,team-b}",
+	"analyzer.modules.flux.enabled=true",
+	"analyzer.modules.kyverno.enabled=true",
+	"analyzer.modules.kyverno.clusterWide.enabled=true",
 }
 
 func TestRBACEqualsKustomizeWithEveryToggleOn(t *testing.T) {
@@ -567,15 +579,29 @@ func TestRBACEqualsKustomizeWithEveryToggleOn(t *testing.T) {
 	}
 	// config/watch binds one namespace (demo). The chart binds each listed namespace the same way: check that
 	// team-b has the same binding as demo, then compare the rest.
-	demo := r.chart["RoleBinding/demo/shadewright-analyzer-watch"]
-	teamB := r.chart["RoleBinding/team-b/shadewright-analyzer-watch"]
-	if demo == nil || teamB == nil {
-		t.Fatal("watch RoleBindings for demo and team-b not rendered")
+	// The module grants that are off by default are installed by config/modules.
+	for _, m := range moduleRoles {
+		if m.dir != "" {
+			addKustomize(t, &r, m.dir)
+		}
 	}
-	if strings.Join(describe(t, demo), "\n") != strings.Join(describe(t, teamB), "\n") {
-		t.Errorf("team-b binding differs from demo: %v vs %v", describe(t, teamB), describe(t, demo))
+	names := []string{"shadewright-analyzer-watch"}
+	for _, m := range moduleRoles {
+		if !m.clusterWide {
+			names = append(names, m.role)
+		}
 	}
-	delete(r.chart, "RoleBinding/team-b/shadewright-analyzer-watch")
+	for _, name := range names {
+		demo := r.chart["RoleBinding/demo/"+name]
+		teamB := r.chart["RoleBinding/team-b/"+name]
+		if demo == nil || teamB == nil {
+			t.Fatalf("RoleBindings %s for demo and team-b not rendered", name)
+		}
+		if strings.Join(describe(t, demo), "\n") != strings.Join(describe(t, teamB), "\n") {
+			t.Errorf("team-b binding differs from demo: %v vs %v", describe(t, teamB), describe(t, demo))
+		}
+		delete(r.chart, "RoleBinding/team-b/"+name)
+	}
 
 	want := rbacOnly(r.kustomize, false)
 	if len(want) < 15 {
@@ -910,34 +936,86 @@ func TestChartRefusesBadAnalysisValues(t *testing.T) {
 	}
 }
 
-func watchRoleHasScaledObjects(t *testing.T, r rendered) bool {
+// moduleRoles are the ClusterRoles of the analyzer's reads of an add-on's kinds (#409), by the value that renders
+// each, with the rules config/rbac/analyzer/modules generates, and the config/modules directory that installs
+// it when it is off by default ("" for KEDA, which config/default and config/watch install).
+var moduleRoles = []struct {
+	value, role, dir string
+	rules            []string
+	clusterWide      bool
+}{
+	{"analyzer.modules.keda.enabled", "shadewright-analyzer-watch-keda", "",
+		[]string{"keda.sh/scaledjobs:get,list,watch", "keda.sh/scaledobjects:get,list,watch"}, false},
+	{"analyzer.modules.flux.enabled", "shadewright-analyzer-watch-flux", "config/modules/flux",
+		[]string{"helm.toolkit.fluxcd.io/helmreleases:get,list,watch",
+			"kustomize.toolkit.fluxcd.io/kustomizations:get,list,watch",
+			"source.toolkit.fluxcd.io/gitrepositories:get,list,watch"}, false},
+	{"analyzer.modules.kyverno.enabled", "shadewright-analyzer-watch-kyverno", "config/modules/kyverno",
+		[]string{"kyverno.io/policies:get,list,watch", "wgpolicyk8s.io/policyreports:get,list,watch"}, false},
+	{"analyzer.modules.kyverno.clusterWide.enabled", "shadewright-analyzer-kyverno-cluster",
+		"config/modules/kyverno-cluster",
+		[]string{"kyverno.io/clusterpolicies:get,list,watch", "wgpolicyk8s.io/clusterpolicyreports:get,list,watch"}, true},
+}
+
+// ruleLines is each rule of a rendered ClusterRole as group/resource:verbs, one line per resource, sorted.
+func ruleLines(t *testing.T, u *unstructured.Unstructured) []string {
 	t.Helper()
-	u := r.chart["ClusterRole//shadewright-analyzer-watch-role"]
-	if u == nil {
-		t.Fatal("no analyzer watch ClusterRole rendered")
-	}
 	var cr rbacv1.ClusterRole
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &cr); err != nil {
 		t.Fatal(err)
 	}
+	var out []string
 	for _, rule := range cr.Rules {
-		if slices.Contains(rule.Resources, "scaledobjects") {
-			if !slices.Equal(rule.Verbs, []string{"get"}) {
-				t.Errorf("scaledobjects verbs = %v, want only get", rule.Verbs)
+		for _, g := range rule.APIGroups {
+			for _, res := range rule.Resources {
+				out = append(out, g+"/"+res+":"+strings.Join(rule.Verbs, ","))
 			}
-			return true
 		}
 	}
-	return false
+	slices.Sort(out)
+	return out
 }
 
-// TestKedaGrantFollowsTheModuleValue checks the scaledobjects rule: on by default (equal to config/), gone
-// with analyzer.modules.keda.enabled=false.
-func TestKedaGrantFollowsTheModuleValue(t *testing.T) {
-	if !watchRoleHasScaledObjects(t, render(t, false)) {
-		t.Error("default values: the watch role has no scaledobjects rule")
+// TestModuleGrantsFollowTheirValues checks each module's read grant: rendered with exactly its rules and bound
+// in each watched namespace (Kyverno's cluster-scoped kinds by a ClusterRoleBinding) only while its value is
+// true, and gone, binding included, while it is false. KEDA is on by default, the others off. The watch role
+// itself names no add-on kind.
+func TestModuleGrantsFollowTheirValues(t *testing.T) {
+	ns := "analyzer.watchNamespaces={demo,team-b}"
+	off := render(t, false, ns, "analyzer.modules.keda.enabled=false")
+	on := render(t, false, ns, "analyzer.modules.flux.enabled=true", "analyzer.modules.kyverno.enabled=true",
+		"analyzer.modules.kyverno.clusterWide.enabled=true")
+	defaults := render(t, false, ns)
+	for _, m := range moduleRoles {
+		t.Run(m.value, func(t *testing.T) {
+			roleKey := "ClusterRole//" + m.role
+			bindings := []string{"RoleBinding/demo/" + m.role, "RoleBinding/team-b/" + m.role}
+			if m.clusterWide {
+				bindings = []string{"ClusterRoleBinding//" + m.role}
+			}
+			if _, ok := defaults.chart[roleKey]; ok != (m.dir == "") {
+				t.Errorf("default values render %s: %v, want %v", m.role, ok, m.dir == "")
+			}
+			for _, k := range append([]string{roleKey}, bindings...) {
+				if _, ok := on.chart[k]; !ok {
+					t.Errorf("%s=true does not render %s", m.value, k)
+				}
+				if _, ok := off.chart[k]; ok {
+					t.Errorf("%s=false still renders %s", m.value, k)
+				}
+			}
+			if u := on.chart[roleKey]; u != nil && !slices.Equal(ruleLines(t, u), m.rules) {
+				t.Errorf("%s rules %v, want %v", m.role, ruleLines(t, u), m.rules)
+			}
+		})
 	}
-	if watchRoleHasScaledObjects(t, render(t, false, "analyzer.modules.keda.enabled=false")) {
-		t.Error("analyzer.modules.keda.enabled=false still renders the scaledobjects rule")
+	for _, line := range ruleLines(t, on.chart["ClusterRole//shadewright-analyzer-watch-role"]) {
+		for _, m := range moduleRoles {
+			for _, r := range m.rules {
+				if res, _, _ := strings.Cut(r, ":"); strings.HasPrefix(line, res+":") {
+					t.Errorf("the watch role grants %s, which belongs to %s", line, m.role)
+				}
+			}
+		}
 	}
 }

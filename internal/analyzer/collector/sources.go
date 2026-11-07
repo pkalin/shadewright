@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -53,15 +54,28 @@ import (
 	"github.com/pkalin/shadewright/internal/modules"
 )
 
-// SourceKinds are the kinds whose module symptom sources the collector evaluates: the kinds it watches when
-// [Config.Modules] is set, and that the watch role grants (the markers in doc.go). A source of an active module
-// for a kind not listed here is not evaluated. Each needs get, list and watch in the watched namespaces, and its
-// subject owner kind, when it declares one, get there. Both are built in, so every cluster serves them. The
-// sources of the add-ons' own kinds (KEDA ScaledObject and ScaledJob, Flux, Kyverno) are not listed: the watch
-// role does not grant list or watch on them.
-var SourceKinds = []schema.GroupVersionKind{sourceHPA, sourcePod}
+// SourceKinds are the kinds whose module symptom sources the collector evaluates when [Config.Modules] is set.
+// A source of an active module for a kind not listed here is not evaluated. Each needs get, list and watch in
+// the watched namespaces (cluster-wide for a cluster-scoped kind), and its subject owner kind, when it declares
+// one, get there. The HPA and the Pod are built in: the watch role grants them (the markers in doc.go) and
+// their watches are set up with the manager. The add-ons' own kinds are granted by a role per module
+// (package modulerbac), bound only when the chart's value of the module is on, so they are watched lazily
+// (lazy.go): once a module that declares a source for the kind is active, the kind is served and the
+// analyzer may list it.
+var SourceKinds = []schema.GroupVersionKind{
+	sourceHPA, sourcePod,
+	{Group: "keda.sh", Version: "v1alpha1", Kind: "ScaledObject"},
+	{Group: "keda.sh", Version: "v1alpha1", Kind: "ScaledJob"},
+	{Group: "kustomize.toolkit.fluxcd.io", Version: "v1", Kind: "Kustomization"},
+	{Group: "helm.toolkit.fluxcd.io", Version: "v2", Kind: "HelmRelease"},
+	{Group: "source.toolkit.fluxcd.io", Version: "v1", Kind: "GitRepository"},
+	{Group: "kyverno.io", Version: "v1", Kind: "Policy"},
+	{Group: "wgpolicyk8s.io", Version: "v1alpha2", Kind: "PolicyReport"},
+	{Group: "kyverno.io", Version: "v1", Kind: "ClusterPolicy"},
+	{Group: "wgpolicyk8s.io", Version: "v1alpha2", Kind: "ClusterPolicyReport"},
+}
 
-// The kinds of SourceKinds.
+// The built-in kinds of SourceKinds.
 var (
 	sourceHPA = schema.GroupVersionKind{Group: "autoscaling", Version: "v2", Kind: "HorizontalPodAutoscaler"}
 	sourcePod = schema.GroupVersionKind{Version: apiCore, Kind: kindPod}
@@ -101,18 +115,31 @@ type sourceReconciler struct {
 	gvk    schema.GroupVersionKind
 }
 
-// setupSources registers one watch per kind in SourceKinds. The objects are read from the manager's cache
-// (mgr.GetCache(); mgr.GetClient() would read unstructured objects from the API server), from the informer the
-// watch starts. Pods are read as typed objects, from the informer the pod collector already runs, so the cache
-// holds them once. The watch passes on only what an active source shows a symptom on, before or after the
-// change (predicate); a second source enqueues the objects with a symptom when a module becomes active for the
-// kind, since the predicate let none of them through before (activations).
+// setupSources registers one watch per built-in kind in SourceKinds, and a lazySource for each other kind,
+// which starts its watch only once the kind is served and granted (lazy.go). The objects are read from the
+// manager's cache (mgr.GetCache(); mgr.GetClient() would read unstructured objects from the API server), from
+// the informer the watch starts. Pods are read as typed objects, from the informer the pod collector already
+// runs, so the cache holds them once. The watch passes on only what an active source shows a symptom on, before
+// or after the change (predicate); for a built-in kind a second source enqueues the objects with a symptom when
+// a module becomes active for the kind, since the predicate let none of them through before (activations).
 func (c *Collector) setupSources(mgr ctrl.Manager) error {
 	if c.cfg.Modules == nil {
 		return nil
 	}
+	if len(c.cfg.Namespaces) == 0 {
+		return errors.New("collector: the watched namespaces are required with modules")
+	}
 	for _, gvk := range SourceKinds {
 		r := &sourceReconciler{c: c, reader: mgr.GetCache(), api: mgr.GetAPIReader(), gvk: gvk}
+		if !builtinKind(gvk) {
+			log := mgr.GetLogger().WithName("collector").WithValues("controller", r.name())
+			err := mgr.Add(&lazySource{r: r, api: mgr.GetAPIReader(), mapper: mgr.GetRESTMapper(),
+				cache: mgr.GetCache(), log: log, start: startController(mgr.GetCache(), log)})
+			if err != nil {
+				return fmt.Errorf("setting up the %s collector: %w", gvk.Kind, err)
+			}
+			continue
+		}
 		err := ctrl.NewControllerManagedBy(mgr).
 			Named(r.name()).
 			For(r.newObject(), builder.WithPredicates(r.predicate())).
@@ -412,7 +439,8 @@ func claimBackoff(n int) time.Duration {
 // retries instead of settling on the object itself. Only the declared kind is read, once, with the lookup
 // deadline. The ownerResolver is not used for those: it verifies apps/v1 owners by their label selectors and
 // caches what it found, while this check is a claim in the owner's status, which must be read again while it
-// is pending. A subject outside the Incident schema comes back as the zero ObjectRef, which the caller drops.
+// is pending. An owner the analyzer may not read (Forbidden) leaves the object itself as the subject. A subject
+// outside the Incident schema comes back as the zero ObjectRef, which the caller drops.
 func (r *sourceReconciler) subject(ctx context.Context, o client.Object, want modules.SubjectOwner) (
 	ref remediationv1alpha1.ObjectRef, owner string, wait bool, err error) {
 	if pod, ok := o.(*corev1.Pod); ok {
@@ -445,6 +473,12 @@ func (r *sourceReconciler) subject(ctx context.Context, o client.Object, want mo
 	err = r.api.Get(lctx, client.ObjectKey{Namespace: obj.GetNamespace(), Name: cref.Name}, ownerObj)
 	cancel()
 	if apierrors.IsNotFound(err) {
+		return self, "", false, nil
+	}
+	if apierrors.IsForbidden(err) {
+		// The owner kind is not granted (its module's value is off in the chart, analyzer.modules): it cannot
+		// be verified, so the object itself is the subject, as for an owner that does not exist. Retrying
+		// would not help; the lazy watch of that kind reports the missing grant.
 		return self, "", false, nil
 	}
 	if err != nil {

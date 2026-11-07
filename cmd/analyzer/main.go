@@ -168,21 +168,33 @@ func main() {
 		setupLog.Error(err, "Failed to build the module registry")
 		os.Exit(1)
 	}
-	det, err := detection.New(detection.Config{
+	// The collector evaluates the symptom sources of the modules detection makes active (#380): their kinds
+	// (collector.SourceKinds) are watched, and a source runs only while its module is enabled and detected.
+	// An add-on's own kinds are watched only once served and granted (the chart's analyzer.modules values,
+	// #409); the kinds it does not watch are reported by detection in RemediationSettings status, which a
+	// change of their state brings forward (recheck). det is set below, before the manager starts.
+	var det *detection.Detector
+	recheck := make(chan struct{}, 1)
+	col, err := collector.New(collector.Config{
+		ClusterID: clusterID, Handled: inc.Handled, Namespaces: watched,
+		Modules:      func() modules.Selection { return det.Selection() },
+		WatchChanged: notify(recheck),
+	})
+	if err != nil {
+		setupLog.Error(err, "Failed to create the collector")
+		os.Exit(1)
+	}
+	detCfg := detection.Config{
 		Registry:          registry,
 		GroupVersions:     detection.DiscoveryGroupVersions(mgr.GetConfig()),
 		WatchedNamespaces: len(watched),
-	})
+	}
+	if len(watched) > 0 {
+		detCfg.SourcesNotWatched, detCfg.Recheck = notWatched(col), recheck
+	}
+	det, err = detection.New(detCfg)
 	if err != nil {
 		setupLog.Error(err, "Failed to create platform detection")
-		os.Exit(1)
-	}
-
-	// The collector evaluates the symptom sources of the modules detection makes active (#380): their kinds
-	// (collector.SourceKinds) are watched, and a source runs only while its module is enabled and detected.
-	col, err := collector.New(collector.Config{ClusterID: clusterID, Handled: inc.Handled, Modules: det.Selection})
-	if err != nil {
-		setupLog.Error(err, "Failed to create the collector")
 		os.Exit(1)
 	}
 	// With no watched namespace the collector is not set up, so no informer on events or pods is started: the
@@ -280,5 +292,29 @@ func main() {
 	if err != nil {
 		setupLog.Error(err, "Failed to run analyzer")
 		os.Exit(1)
+	}
+}
+
+// notify returns a function that leaves a notice on ch without blocking; one notice pending is enough.
+func notify(ch chan<- struct{}) func() {
+	return func() {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// notWatched adapts the collector's report of the symptom source kinds it does not watch for detection.
+func notWatched(col *collector.Collector) func() []detection.NotWatched {
+	return func() []detection.NotWatched {
+		kinds := col.SourcesNotWatched()
+		out := make([]detection.NotWatched, 0, len(kinds))
+		for _, w := range kinds {
+			out = append(out, detection.NotWatched{
+				Group: w.Kind.Group, Version: w.Kind.Version, Kind: w.Kind.Kind, State: string(w.State),
+			})
+		}
+		return out
 	}
 }

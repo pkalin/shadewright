@@ -47,6 +47,12 @@ const (
 	ReasonRolloutProgressing = "RolloutProgressing"
 	// ReasonRolloutStuck: the rollout has not completed within the deadline. Shadewright reports it only.
 	ReasonRolloutStuck = "RolloutStuck"
+	// ReasonDeliveryNotObserved: the GitOps controller was not seen applying the merge commit within the window
+	// after the merge, so the rollout was not checked (False). Shadewright reports it once and stops.
+	ReasonDeliveryNotObserved = "DeliveryNotObserved"
+	// ReasonKindNotChecked: the target is not a Deployment or StatefulSet, whose rollout the check covers
+	// (Unknown).
+	ReasonKindNotChecked = "KindNotChecked"
 )
 
 // Deadline bounds.

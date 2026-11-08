@@ -347,19 +347,80 @@ func TestRolloutWaitsForDelivery(t *testing.T) {
 	}
 }
 
-// Past the delivery window nothing is read and nothing is reported.
-func TestRolloutStopsAfterDeliveryWindow(t *testing.T) {
+// A delivery not seen applied within the window is reported once, naming the Kustomization and the merge
+// commit, and the check stops.
+func TestRolloutDeliveryNotObservedIsReported(t *testing.T) {
 	w := newRolloutWorld(t, stuckStatefulSet())
-	w.reader.ks = kustomizationApplied(t, w.merge)
+	w.reader.ks = kustomizationApplied(t, strings.Repeat("e", 40)) // never the merge commit
 	w.now = w.merged.Add(deliveryWindow + time.Second)
-	reads := 0
-	w.reader.fail = func(client.Object) error { reads++; return nil }
 	res, err := w.reconcile(t, t.Context())
 	if err != nil || res.RequeueAfter != 0 {
 		t.Fatalf("Reconcile = %+v, %v; want done", res, err)
 	}
-	if reads != 0 {
-		t.Fatalf("%d reads after the delivery window", reads)
+	rr := w.request(t)
+	c := meta.FindStatusCondition(rr.Status.Conditions, rollout.ConditionRolledOut)
+	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != rollout.ReasonDeliveryNotObserved ||
+		!strings.Contains(c.Message, "flux-system/apps") || !strings.Contains(c.Message, w.merge) {
+		t.Fatalf("RolledOut = %+v, want False/DeliveryNotObserved naming the Kustomization and the merge commit", c)
+	}
+	if rr.Status.PullRequest.AppliedObservedAt != nil {
+		t.Fatal("an applied time was recorded")
+	}
+	ev := w.events()
+	if len(ev) != 1 || !strings.HasPrefix(ev[0], "Warning DeliveryNotObserved ") {
+		t.Fatalf("Events = %v, want one Warning DeliveryNotObserved", ev)
+	}
+	// Stopped: no more reads, no second Event.
+	reads := 0
+	w.reader.fail = func(client.Object) error { reads++; return nil }
+	w.now = w.now.Add(time.Hour)
+	if res, err := w.reconcile(t, t.Context()); err != nil || res.RequeueAfter != 0 {
+		t.Fatalf("Reconcile = %+v, %v; want done", res, err)
+	}
+	if reads != 0 || len(w.events()) != 0 {
+		t.Fatalf("%d reads and more Events after the report", reads)
+	}
+}
+
+// A target gone at the end of the window is reported too, not retried without end.
+func TestRolloutDeliveryNotObservedTargetGone(t *testing.T) {
+	w := newRolloutWorld(t, stuckStatefulSet())
+	if err := w.c.Delete(t.Context(), stuckStatefulSet()); err != nil {
+		t.Fatal(err)
+	}
+	w.now = w.merged.Add(deliveryWindow + time.Second)
+	if res, err := w.reconcile(t, t.Context()); err != nil || res.RequeueAfter != 0 {
+		t.Fatalf("Reconcile = %+v, %v; want done", res, err)
+	}
+	c := meta.FindStatusCondition(w.request(t).Status.Conditions, rollout.ConditionRolledOut)
+	if c == nil || c.Reason != rollout.ReasonDeliveryNotObserved || !strings.Contains(c.Message, "gone") {
+		t.Fatalf("RolledOut = %+v, want DeliveryNotObserved for a gone target", c)
+	}
+}
+
+// A target kind the check does not cover is said once, as Unknown, with no Event and no read.
+func TestRolloutKindNotChecked(t *testing.T) {
+	w := newRolloutWorld(t, stuckStatefulSet())
+	rr := w.request(t)
+	rr.Spec.TargetRef = remediationv1alpha1.ObjectRef{APIVersion: kedaAPIVersion, Kind: kindScaledObject,
+		Namespace: rolloutNamespace, Name: rolloutName}
+	if err := w.c.Update(t.Context(), rr); err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	w.reader.fail = func(client.Object) error { reads++; return nil }
+	for range 2 {
+		if res, err := w.reconcile(t, t.Context()); err != nil || res.RequeueAfter != 0 {
+			t.Fatalf("Reconcile = %+v, %v; want done", res, err)
+		}
+	}
+	c := meta.FindStatusCondition(w.request(t).Status.Conditions, rollout.ConditionRolledOut)
+	if c == nil || c.Status != metav1.ConditionUnknown || c.Reason != rollout.ReasonKindNotChecked ||
+		!strings.Contains(c.Message, kindScaledObject) {
+		t.Fatalf("RolledOut = %+v, want Unknown/KindNotChecked", c)
+	}
+	if reads != 0 || len(w.events()) != 0 {
+		t.Fatalf("%d reads, Events %v; want none", reads, w.events())
 	}
 }
 

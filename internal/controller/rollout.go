@@ -26,7 +26,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -52,14 +54,15 @@ import (
 // and the check waits.
 //
 // A read that fails, a delivery not yet seen applied and a cancelled reconcile are never a verdict: the request
-// keeps its status and is looked at again. The check is bounded in time, so a request whose delivery is never
-// seen, or whose rollout never completes, stops being read.
+// keeps its status and is looked at again. The check is bounded in time: a delivery not seen within the window
+// is reported (DeliveryNotObserved) and a rollout that never completes stops being read. A target that is not a
+// Deployment or StatefulSet gets RolledOut Unknown (KindNotChecked) once, and nothing is read.
 
 // Timing of the check after the merge.
 const (
 	// deliveryWindow is how long after the merge (the request's move to Merged) the executor waits for the
-	// delivery to be seen applied. Past it nothing more is read and nothing is reported (the phases of #94 will
-	// report a delivery that never came).
+	// delivery to be seen applied. Past it RolledOut is set False with reason DeliveryNotObserved, one Event is
+	// recorded and nothing more is read.
 	deliveryWindow = time.Hour
 	// stuckWatch is how long after the deadline the executor keeps reading a rollout it reported stuck, so a
 	// rollout a person unblocks turns RolledOut True.
@@ -76,6 +79,9 @@ type DeliveryVerifier interface {
 	Verify(ctx context.Context, unit providers.DeliveryUnit, mergeCommit, branch string) (
 		providers.DeliveryOutcome, providers.DeliveryStatus, error)
 }
+
+// errTargetGone means the target the request names is gone or was replaced (another UID).
+var errTargetGone = errors.New("the target is gone or was replaced")
 
 // errNoAncestry means the Git provider of the plan's repository cannot say whether one commit is in the history
 // of another.
@@ -121,12 +127,19 @@ func rolloutTarget(ref remediationv1alpha1.ObjectRef) client.Object {
 func (r *RemediationRequestReconciler) afterMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if r.Delivery == nil || rr.Status.Phase != remediationv1alpha1.PhaseMerged || rr.Status.Source == nil ||
-		rr.Status.PullRequest == nil || rr.Status.PullRequest.MergeCommitSHA == "" ||
-		rolloutTarget(rr.Spec.TargetRef) == nil ||
-		meta.IsStatusConditionTrue(rr.Status.Conditions, rollout.ConditionRolledOut) {
+		rr.Status.PullRequest == nil || rr.Status.PullRequest.MergeCommitSHA == "" || rolloutReported(rr) {
 		return reconcile.Result{}, nil
 	}
 	now := r.now()
+	if rolloutTarget(rr.Spec.TargetRef) == nil {
+		// Said once, so a person does not wait for a report that never comes.
+		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+			Type: rollout.ConditionRolledOut, Status: metav1.ConditionUnknown, Reason: rollout.ReasonKindNotChecked,
+			ObservedGeneration: rr.Generation, LastTransitionTime: metav1.NewTime(now),
+			Message: fmt.Sprintf("The rollout check covers Deployments and StatefulSets only; a %s is not checked",
+				rr.Spec.TargetRef.Kind)})
+		return reconcile.Result{}, r.writeIf(ctx, rr, true)
+	}
 	deadline := rollout.ClampDeadline(r.RolloutDeadline)
 
 	stepCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
@@ -183,9 +196,12 @@ func (r *RemediationRequestReconciler) afterMerge(ctx context.Context, rr *remed
 func (r *RemediationRequestReconciler) observeDelivery(ctx, stepCtx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, now time.Time) (bool, time.Duration, error) {
 	merged := rr.Status.LastPhaseTransitionTime
-	if merged == nil || now.After(merged.Add(deliveryWindow)) {
-		// Merged before the check existed, or the delivery was not seen within the window: nothing to report.
+	if merged == nil {
+		// No time of the merge (a request written before the field existed): no window to measure.
 		return false, 0, nil
+	}
+	if now.After(merged.Add(deliveryWindow)) {
+		return false, 0, r.deliveryNotObserved(ctx, stepCtx, rr, now)
 	}
 	applied, err := r.delivered(stepCtx, rr)
 	if err = boundErr(ctx, stepCtx, "delivery check", err); err != nil {
@@ -200,6 +216,60 @@ func (r *RemediationRequestReconciler) observeDelivery(ctx, stepCtx context.Cont
 	logf.FromContext(ctx).Info("Observed the merge commit of RemediationRequest applied",
 		"remediationRequest", client.ObjectKeyFromObject(rr), "appliedObservedAt", now.Truncate(time.Second))
 	return true, 0, nil
+}
+
+// rolloutReported reports whether the check after the merge has ended: RolledOut is True, or says the
+// delivery was not observed or the kind is not checked.
+func rolloutReported(rr *remediationv1alpha1.RemediationRequest) bool {
+	c := meta.FindStatusCondition(rr.Status.Conditions, rollout.ConditionRolledOut)
+	return c != nil && (c.Status == metav1.ConditionTrue || c.Reason == rollout.ReasonDeliveryNotObserved ||
+		c.Reason == rollout.ReasonKindNotChecked)
+}
+
+// deliveryNotObserved ends the check of a request whose delivery was not seen applied within the window: it sets
+// RolledOut False with reason DeliveryNotObserved, naming the Kustomization (from the target's labels, read
+// again now) and the merge commit, and records one Warning Event. A failed read of the target is returned and
+// retried; nothing is reported then.
+func (r *RemediationRequestReconciler) deliveryNotObserved(ctx, stepCtx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, now time.Time) error {
+	target := rolloutTarget(rr.Spec.TargetRef)
+	err := boundErr(ctx, stepCtx, "delivery check", r.readTarget(stepCtx, rr.Spec.TargetRef, target))
+	unit := "no Flux Kustomization (the target has no valid Kustomization labels)"
+	switch {
+	case errors.Is(err, errTargetGone) && ctx.Err() == nil:
+		// Permanent: reported without the Kustomization, never retried without end.
+		unit = "no Flux Kustomization (the target is gone or was replaced)"
+	case err != nil:
+		return err
+	}
+	if name, namespace, ok := kustomizationOf(target); ok && err == nil {
+		unit = "the Flux Kustomization " + namespace + "/" + name
+	}
+	message := fmt.Sprintf("The rollout was not checked: %s was not seen applying merge commit %s, or a later "+
+		"commit of branch %s that holds it, within %s of the merge. Check the GitOps controller",
+		unit, rr.Status.PullRequest.MergeCommitSHA, rr.Status.Source.TargetBranch, deliveryWindow)
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type: rollout.ConditionRolledOut, Status: metav1.ConditionFalse, Reason: rollout.ReasonDeliveryNotObserved,
+		ObservedGeneration: rr.Generation, LastTransitionTime: metav1.NewTime(now), Message: message})
+	if err := r.writeIf(ctx, rr, true); err != nil {
+		return err
+	}
+	if r.Recorder != nil {
+		r.Recorder.Event(rr, corev1.EventTypeWarning, rollout.ReasonDeliveryNotObserved, message)
+	}
+	logf.FromContext(ctx).Info("Reported the delivery of RemediationRequest not observed",
+		"remediationRequest", client.ObjectKeyFromObject(rr))
+	return nil
+}
+
+// kustomizationOf returns the Kustomization the target's Flux labels name, when both are valid object names.
+func kustomizationOf(target client.Object) (name, namespace string, ok bool) {
+	labels := target.GetLabels()
+	name, namespace = labels[sourcemap.LabelKustomizationName], labels[sourcemap.LabelKustomizationNamespace]
+	if len(validation.IsDNS1123Subdomain(name)) > 0 || len(validation.IsDNS1123Label(namespace)) > 0 {
+		return "", "", false
+	}
+	return name, namespace, true
 }
 
 // report writes the RolledOut condition when its status or reason changes, or the status when the applied time
@@ -253,9 +323,8 @@ func (r *RemediationRequestReconciler) delivered(ctx context.Context, rr *remedi
 	if err := r.readTarget(ctx, ref, target); err != nil {
 		return false, err
 	}
-	labels := target.GetLabels()
-	name, namespace := labels[sourcemap.LabelKustomizationName], labels[sourcemap.LabelKustomizationNamespace]
-	if name == "" || namespace == "" {
+	name, namespace, ok := kustomizationOf(target)
+	if !ok {
 		return false, nil
 	}
 	verifier, err := r.Delivery(planAncestry{r: r, rr: rr})
@@ -277,11 +346,11 @@ func (r *RemediationRequestReconciler) readTarget(ctx context.Context, ref remed
 	err := r.reader().Get(ctx, types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}, obj)
 	switch {
 	case apierrors.IsNotFound(err):
-		return fmt.Errorf("get %s %s/%s: the target is gone", ref.Kind, ref.Namespace, ref.Name)
+		return fmt.Errorf("get %s %s/%s: %w", ref.Kind, ref.Namespace, ref.Name, errTargetGone)
 	case err != nil:
 		return fmt.Errorf("get %s %s/%s: %w", ref.Kind, ref.Namespace, ref.Name, err)
 	case ref.UID != "" && string(obj.GetUID()) != string(ref.UID):
-		return fmt.Errorf("get %s %s/%s: the target was replaced (another UID)", ref.Kind, ref.Namespace, ref.Name)
+		return fmt.Errorf("get %s %s/%s: %w (another UID)", ref.Kind, ref.Namespace, ref.Name, errTargetGone)
 	}
 	return nil
 }

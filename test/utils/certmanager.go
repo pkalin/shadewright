@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -80,33 +81,84 @@ func pinImages(manifest string, version string, digests map[string]string) (stri
 	return manifest, nil
 }
 
+// Download retries: the release CDN answered 503 and 504 for about two hours on 2026-11-08 (#543).
+const (
+	downloadAttempts   = 5
+	downloadAttemptMax = time.Minute
+	downloadRetryDelay = 10 * time.Second
+)
+
 // fetchCertManagerManifest downloads the pinned release manifest, verifies its checksum and returns it with the
 // images pinned by digest. Nothing is returned for a manifest that fails verification.
 func fetchCertManagerManifest() (string, error) {
 	url := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	data, err := download(ctx, http.DefaultClient, url, certmanagerMaxBytes, downloadAttempts, downloadRetryDelay)
 	if err != nil {
 		return "", err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("downloading %s: %w", url, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("downloading %s: unexpected status %s", url, resp.Status)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, certmanagerMaxBytes+1))
-	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", url, err)
-	}
-	if len(data) > certmanagerMaxBytes {
-		return "", fmt.Errorf("%s is larger than %d bytes", url, certmanagerMaxBytes)
 	}
 	if err := verifySHA256(data, certmanagerSHA256); err != nil {
 		return "", fmt.Errorf("%s: %w", url, err)
 	}
 	return pinImages(string(data), certmanagerVersion, certmanagerImageDigests)
+}
+
+// errPermanent marks a download failure that a retry cannot fix.
+type errPermanent struct{ err error }
+
+func (e errPermanent) Error() string { return e.err.Error() }
+func (e errPermanent) Unwrap() error { return e.err }
+
+// download fetches url, at most maxBytes, trying up to attempts times. A network error or a 5xx answer is
+// retried after delay; any other status, an oversized body or the end of ctx stops at once.
+func download(ctx context.Context, client *http.Client, url string, maxBytes, attempts int,
+	delay time.Duration) ([]byte, error) {
+	var err error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		var data []byte
+		data, err = downloadOnce(ctx, client, url, maxBytes)
+		if err == nil {
+			return data, nil
+		}
+		var permanent errPermanent
+		if errors.As(err, &permanent) || attempt == attempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("%w (after %d attempts, last: %w)", ctx.Err(), attempt, err)
+		case <-time.After(delay):
+		}
+	}
+	return nil, err
+}
+
+func downloadOnce(ctx context.Context, client *http.Client, url string, maxBytes int) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, downloadAttemptMax)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, errPermanent{err}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("downloading %s: %w", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		err := fmt.Errorf("downloading %s: unexpected status %s", url, resp.Status)
+		if resp.StatusCode >= http.StatusInternalServerError {
+			return nil, err
+		}
+		return nil, errPermanent{err}
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", url, err)
+	}
+	if len(data) > maxBytes {
+		return nil, errPermanent{fmt.Errorf("%s is larger than %d bytes", url, maxBytes)}
+	}
+	return data, nil
 }

@@ -117,6 +117,11 @@ What happens to requests that are waiting for a person when you upgrade:
 
 Symptoms of integration modules (KEDA ceilings, trigger errors and readiness; Flux and Kyverno conditions, cloudflared Pods) open Incidents from v0.3.0 on, and only for the modules that `spec.modules.integrations` of the `RemediationSettings` lists ([#380](https://github.com/pkalin/shadewright/issues/380)). An upgrade from v0.2.0 turns none on: list the modules you want, for example `kubectl patch remediationsettings default --type merge -p '{"spec":{"modules":{"integrations":["keda"]}}}'`, and change the same in the manifests you keep in Git. The release candidates v0.3.0-rc.1 to rc.4 ran the KEDA HPA source for a detected KEDA without that entry; from rc.5 on, a KEDA that is detected but not listed opens no Incident (see [No Incident appears](troubleshooting.md#no-incident-appears)).
 
+### Known issues in v0.3.0
+
+- **One root cause opens several Incidents** ([#432](https://github.com/pkalin/shadewright/issues/432), planned for v0.4.0). One OOM can open an Incident each for `OOMKilled`, the failing readiness probe and `BackOff`; each is analyzed and may propose a request for the same container. Only one of them holds the target (`maxConcurrentRemediations`); the others end `NeedsIntervention` (`KustomizationNotReady`) when the target is freed, instead of `Superseded`. Each counts against `spec.analysis.maxAnalysesPerDay`, so set it with about three analyses per OOM in mind.
+- **Commits pushed by someone else to a `shadewright/<name>` branch before the pull request is opened are not checked** ([#524](https://github.com/pkalin/shadewright/issues/524), planned for v0.3.1). The executor checks the target file on the branch, not that the branch holds nothing else, so such commits end up in the App's pull request without passing the policy or the render check. Until the fix, add a ruleset on the GitOps repository that lets only the GitHub App create and push `shadewright/*` branches, and review every file a pull request changes.
+
 What is not touched by an upgrade: the budget ConfigMap `shadewright-analysis-budget` (it ships without `data`, so applying the manifests does not reset the day's count) and existing Incidents. A downgrade is not tested; the CRDs of the older release may not accept objects the newer one wrote.
 
 !!! note "Flux delivers the install"

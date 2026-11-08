@@ -142,7 +142,7 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 ### 2.2.3. Executor permissions
 
 - It reads (`get` only) policies and settings, always from the API server, never through a cache.
-- It reads (`get` only) the Incident a request names, in the operator namespace and from the API server, to check the name the pull request body shows. The verifier's read of Incidents is planned.
+- It reads (`get` only) the Incident a request names, in the operator namespace and from the API server, to check the name the pull request body shows (<span class="sw-status sw-planned">planned</span> and to read its `Analyzed` condition and handled-hint ID, to learn that a reviewer hint was refused, [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)). The verifier's read of Incidents is planned.
 - It reads (`get` only, no list or watch) the target kinds (Deployments, StatefulSets, KEDA ScaledObjects) and the Flux Kustomizations and GitRepositories that deliver them, for source mapping.
 - It reads requests, writes their status and patches them to add or remove its finalizer, in the operator namespace only (a Role). Its cache watches requests only there.
 - It records the kill switch's Events about a request (5.4) as core Events in the operator namespace, with the `create` and `patch` on core Events that its leader election Role already holds. The spec of a request is immutable (CEL), so the patch cannot change what was decided.

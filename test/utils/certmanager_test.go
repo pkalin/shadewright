@@ -98,7 +98,7 @@ func TestDownloadRetriesServerErrors(t *testing.T) {
 
 func TestDownloadGivesUpAfterTheLastAttempt(t *testing.T) {
 	srv, calls := failingServer(t, 10, http.StatusGatewayTimeout, "manifest")
-	if _, err := download(context.Background(), srv.Client(), srv.URL, 1024, 3, time.Minute, time.Millisecond); err == nil ||
+	if _, err := download(t.Context(), srv.Client(), srv.URL, 1024, 3, time.Minute, time.Millisecond); err == nil ||
 		!strings.Contains(err.Error(), "504") || !strings.Contains(err.Error(), "after 3 attempts") {
 		t.Fatalf("err = %v, want the last 504", err)
 	}
@@ -109,14 +109,16 @@ func TestDownloadGivesUpAfterTheLastAttempt(t *testing.T) {
 
 func TestDownloadDoesNotRetryPermanentFailures(t *testing.T) {
 	notFound, calls := failingServer(t, 10, http.StatusNotFound, "")
-	if _, err := download(context.Background(), notFound.Client(), notFound.URL, 1024, 5, time.Minute, time.Millisecond); err == nil {
+	_, err := download(t.Context(), notFound.Client(), notFound.URL, 1024, 5, time.Minute, time.Millisecond)
+	if err == nil {
 		t.Fatal("a 404 was accepted")
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("requests after a 404 = %d, want 1", got)
 	}
 	big, bigCalls := failingServer(t, 0, http.StatusOK, strings.Repeat("x", 2048))
-	if _, err := download(context.Background(), big.Client(), big.URL, 1024, 5, time.Minute, time.Millisecond); err == nil {
+	_, err = download(t.Context(), big.Client(), big.URL, 1024, 5, time.Minute, time.Millisecond)
+	if err == nil {
 		t.Fatal("an oversized body was accepted")
 	}
 	if got := bigCalls.Load(); got != 1 {

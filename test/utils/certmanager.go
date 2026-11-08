@@ -124,8 +124,7 @@ func download(ctx context.Context, client *http.Client, url string, maxBytes, at
 		if err == nil {
 			return data, nil
 		}
-		var permanent errPermanent
-		if errors.As(err, &permanent) {
+		if _, permanent := errors.AsType[errPermanent](err); permanent {
 			return nil, err
 		}
 		if attempt == attempts {

@@ -92,9 +92,11 @@ const (
 // images pinned by digest. Nothing is returned for a manifest that fails verification.
 func fetchCertManagerManifest() (string, error) {
 	url := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(),
+		downloadAttempts*downloadAttemptMax+(downloadAttempts-1)*downloadRetryDelay)
 	defer cancel()
-	data, err := download(ctx, http.DefaultClient, url, certmanagerMaxBytes, downloadAttempts, downloadRetryDelay)
+	data, err := download(ctx, http.DefaultClient, url, certmanagerMaxBytes, downloadAttempts, downloadAttemptMax,
+		downloadRetryDelay)
 	if err != nil {
 		return "", err
 	}
@@ -110,20 +112,24 @@ type errPermanent struct{ err error }
 func (e errPermanent) Error() string { return e.err.Error() }
 func (e errPermanent) Unwrap() error { return e.err }
 
-// download fetches url, at most maxBytes, trying up to attempts times. A network error or a 5xx answer is
-// retried after delay; any other status, an oversized body or the end of ctx stops at once.
+// download fetches url, at most maxBytes, trying up to attempts times, each bounded by attemptMax. A network
+// error, a timed-out attempt or a 5xx answer is retried after delay; any other status, an oversized body or
+// the end of ctx stops at once.
 func download(ctx context.Context, client *http.Client, url string, maxBytes, attempts int,
-	delay time.Duration) ([]byte, error) {
+	attemptMax, delay time.Duration) ([]byte, error) {
 	var err error
 	for attempt := 1; attempt <= attempts; attempt++ {
 		var data []byte
-		data, err = downloadOnce(ctx, client, url, maxBytes)
+		data, err = downloadOnce(ctx, client, url, maxBytes, attemptMax)
 		if err == nil {
 			return data, nil
 		}
 		var permanent errPermanent
-		if errors.As(err, &permanent) || attempt == attempts {
-			break
+		if errors.As(err, &permanent) {
+			return nil, err
+		}
+		if attempt == attempts {
+			return nil, fmt.Errorf("after %d attempts: %w", attempts, err)
 		}
 		select {
 		case <-ctx.Done():
@@ -134,8 +140,9 @@ func download(ctx context.Context, client *http.Client, url string, maxBytes, at
 	return nil, err
 }
 
-func downloadOnce(ctx context.Context, client *http.Client, url string, maxBytes int) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, downloadAttemptMax)
+func downloadOnce(ctx context.Context, client *http.Client, url string, maxBytes int,
+	attemptMax time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, attemptMax)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

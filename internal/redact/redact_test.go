@@ -676,13 +676,16 @@ func FuzzString(f *testing.F) {
 	})
 }
 
-// A double-quoted block value whose backslash escapes the line break has its closing quote past the block's
-// end: the whole block is redacted instead of slicing past it, which panicked (#523).
+// A double-quoted value whose backslash escapes the line break goes on to its closing quote on a later line:
+// all of it is redacted, where slicing past the block's end panicked and the continuation leaked (#523).
 func TestQuotedBlockValueEscapingTheLineBreak(t *testing.T) {
 	for _, in := range []string{
 		"password:\n  \"a\\\nx\"",
 		"password:\n  \"hunter2hunter2\\\nnext: \"x\"",
 		"kind: Policy\nspec:\n  password:\n    \"hunter2hunter2\\\n  message: \"y\"\n",
+		// The escaped line break continues the value, so its next line is part of the secret.
+		"password:\n  \"first\\\nhunter2hunter2\"",
+		"credentials:\n  user: \"first\\\r\n    hunter2hunter2: tail\"",
 	} {
 		out := String(in)
 		if strings.Contains(out, "hunter2") {

@@ -9,7 +9,7 @@ The executor must create branches, commits and PRs, and enable auto-merge, in on
 
 ## Decision
 
-- A GitHub App installed on `shadewright-fleet` only, with `contents: write`, `pull_requests: write`, `issues: write` (notifications, added by [ADR-0014](0014-notifications-github-issues-first.md)) and `metadata: read`, never on a ruleset bypass list.
+- A GitHub App installed on `shadewright-fleet` only, with `contents: write`, `pull_requests: write`, `issues: write` (notifications, added by [ADR-0014](0014-notifications-github-issues-first.md)) and `metadata: read`, never on a ruleset bypass list. [ADR-0028](0028-reviewer-hints-through-the-pull-request.md) adds `checks: write` for the required review check, planned until it ships.
 - The App's private key is imported into Azure Key Vault as a **non-exportable RSA key**. The executor, through workload identity, may only use the key's `sign` operation. It signs the App JWT (RS256) in Key Vault and exchanges it for a one-hour installation token scoped to the one repository.
 - The analyzer has no access to the key or the token.
 
@@ -32,3 +32,4 @@ The executor must create branches, commits and PRs, and enable auto-merge, in on
 - 2026-11-02: the key does exist as a file briefly at setup; the consequence now says so. Key Vault audit logging is not enabled in the lab yet; the consequence now says so and links the issue.
 - 2026-11-03: the audit events are routed since [shadewright-azure#7](https://github.com/pkalin/shadewright-azure/pull/7); the consequence now says where they go.
 - 2026-11-03: the audit operation is named `KeySign`, not `Sign`, as Key Vault logs key operations in `Key<action>` form ([Azure Key Vault logging](https://learn.microsoft.com/azure/key-vault/general/logging)); the consequence now names it correctly ([#169](https://github.com/pkalin/shadewright/pull/169)).
+- 2026-11-08: `checks: write` planned as a fifth permission, decided by [ADR-0028](0028-reviewer-hints-through-the-pull-request.md) (the required check run `shadewright/review`); the executor requests it and the App must be registered with it only once that feature ships (#539).

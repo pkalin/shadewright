@@ -185,6 +185,7 @@ sequenceDiagram
 - It is never on a ruleset bypass list.
 - It has only `contents: write`, `pull_requests: write`, `issues: write` (for notifications, ADR-0014) and `metadata: read`, on one repository.
 - It cannot approve its own PRs.
+- <span class="sw-status sw-planned">planned</span> Reviewer hints ([ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)) need no new permission: reading and posting comments and dismissing reviews are `pull_requests: write` and `issues: write`, reading a commenter's permission is `metadata: read`, and the update of the branch is one fast-forward commit under `contents: write`, with the old head as the expected parent. The executor dismisses approvals of earlier heads itself, so it does not depend on the stale-approval rule above (which stays as a second line).
 
 **Scenario clusters.** On the clusters that run scenarios, the protected branch Flux tracks, and that the agent's PRs target, is `cluster/<cluster>`, not `main` ([ADR-0022](../adr/0022-scenario-switch-and-clusters.md)).
 

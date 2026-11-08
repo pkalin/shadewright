@@ -376,6 +376,16 @@ A change request is closed only when it is the pull request of the request's bra
 
 So someone else's pull request on the same branch name, or a recorded number that is not the branch's own, is never closed. The cleanup of a stale plan then ends `NeedsIntervention`, `ForeignChangeRequest`.
 
+### 6.5.4. Reviewer hints and the handoff
+
+<span class="sw-status sw-planned">planned</span> ([ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)). Today a plan that goes stale ends `Superseded` and its pull request is closed (6.6.1). A reviewer's hint does the opposite: it never closes the pull request and never opens another.
+
+- **Seeing the hint.** On the poll of a request in `PRCreated` or `AwaitingApproval` the executor lists new comments (conditional on the `ETag`), and for a comment that starts with the command and has a human author asks the code host whether the author may write. It stores the redacted, bounded hint in `status.hints`, pinned by comment ID, digest and `updated_at`; an edit later changes nothing.
+- **The replacement.** The analyzer analyzes again with the hint fenced, and creates a new request with `spec.replaces` naming the request and the hint. Each plan stays its own request with its own immutable plan. The request name also derives from `spec.replaces`, so a retried create finds the same request, and a plan equal to the old one creates nothing. The replacement goes through the policy and freshness checks as any request; a refusal, a failed analysis or a spent budget leaves the old pull request untouched.
+- **The handoff.** The replacement takes over `status.pullRequest` (number, URL, branch) and the target lock from the superseded request; the handoff is recorded in both statuses, and the lock is never free in between (`checkHeld` treats a recorded successor as a held lock). The branch keeps its name, recorded in `status.pullRequest.branch`, and the body's marker is rewritten.
+- **The commit.** One new commit on the existing branch: no force-push, no rebase, no new base. Its net change against the base is exactly the new plan (if the path differs, the old path is restored to base content). The ref moves by a fast-forward with the old head as the expected parent; a push or a merge in the meantime fails it and aborts the handoff, and a merged pull request wins. Before it, the render check (6.5.2) and the branch rule (#524) must pass; otherwise nothing is written.
+- **After it.** The recorded head moves in the same status write as the handoff (so it is not `HeadMoved`); approvals given on earlier heads are dismissed by the executor; title and body are rewritten; the executor replies in the pull request to the hint's author with the old and the new plan, or with why nothing changed. Replies are redacted and fail closed.
+
 ## 6.6. Required mechanisms
 
 - Leader election, bounded concurrency, a lock per target object.

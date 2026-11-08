@@ -1,5 +1,78 @@
 # Changelog
 
+## [0.3.0](https://github.com/pkalin/shadewright/compare/v0.2.0...v0.3.0) (2026-11-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **api:** the RemediationRequest CRD declares status.phase, status.holdsTarget and status.breakerProbe as selectable fields and the executor lists with them, so Kubernetes 1.32 or later is required (chart kubeVersion >=1.32.0-0).
+* **chart:** an install that removes or empties executor.resources.limits.memory or analyzer.resources.limits.memory is refused by the schema. Set a memory limit instead (the default is 128Mi).
+
+### Features
+
+* **analyzer:** add the evaluation harness for the lab scenarios ([#461](https://github.com/pkalin/shadewright/issues/461)) ([f317f3f](https://github.com/pkalin/shadewright/commit/f317f3f871f849bc9470d27a3166cca1ba798713))
+* **analyzer:** add the read-only tools for the model ([#414](https://github.com/pkalin/shadewright/issues/414)) ([9853b59](https://github.com/pkalin/shadewright/commit/9853b592ed26e363a6475ff7a34c6cecdc2e6740))
+* **analyzer:** build the bounded, redacted incident context ([#395](https://github.com/pkalin/shadewright/issues/395)) ([8d097ae](https://github.com/pkalin/shadewright/commit/8d097aea46f68327421ed585c789e2943cb24d8e))
+* **analyzer:** consume the KEDA HPA symptom source as Incident inputs ([#408](https://github.com/pkalin/shadewright/issues/408)) ([08488ce](https://github.com/pkalin/shadewright/commit/08488ce17bb420c55b875a670671ed0ff6397cee))
+* **analyzer:** infer a missing Secret or ConfigMap from pod status and Events ([#381](https://github.com/pkalin/shadewright/issues/381)) ([71d5d17](https://github.com/pkalin/shadewright/commit/71d5d1798a2169c85117dc2ed09d29643009e85f))
+* **analyzer:** log the missing data a hand-off names ([#426](https://github.com/pkalin/shadewright/issues/426)) ([0827e53](https://github.com/pkalin/shadewright/commit/0827e53e9c223bfbc0c8ef5622d46851c9935cdf))
+* **analyzer:** open a new Incident when a resolved one recurs ([#468](https://github.com/pkalin/shadewright/issues/468)) ([bc59326](https://github.com/pkalin/shadewright/commit/bc5932698d3c1d1c07a908cb5ba87dd2a03af26b))
+* **analyzer:** open Incidents from the Flux, Kyverno, cloudflared and KEDA symptom sources ([#478](https://github.com/pkalin/shadewright/issues/478)) ([1fc74a8](https://github.com/pkalin/shadewright/commit/1fc74a821b8eb38aa613fb9ddee962f1ac8debc8))
+* **analyzer:** open Incidents only for symptoms that recur or are immediate ([#417](https://github.com/pkalin/shadewright/issues/417)) ([017178a](https://github.com/pkalin/shadewright/commit/017178a66dfea4ed49c61dacd097da0882d44bc2))
+* **analyzer:** resolve and escalate Incidents from quiet time and request phases ([#477](https://github.com/pkalin/shadewright/issues/477)) ([b333017](https://github.com/pkalin/shadewright/commit/b33301732e277695333e589befc9556607f59009))
+* **analyzer:** run the bounded analysis loop with the model ([#415](https://github.com/pkalin/shadewright/issues/415)) ([f7d6dbd](https://github.com/pkalin/shadewright/commit/f7d6dbd2c69645835ad1a038a1d7fd9983f0bbac))
+* **analyzer:** show the model the policy bounds that decide its proposal ([#500](https://github.com/pkalin/shadewright/issues/500)) ([ef1b2f9](https://github.com/pkalin/shadewright/commit/ef1b2f9aa4803611a0a45433296a13024d75c0cc))
+* **analyzer:** skip a first analysis of an Incident not seen recently ([#428](https://github.com/pkalin/shadewright/issues/428)) ([e7ee7fa](https://github.com/pkalin/shadewright/commit/e7ee7fa75fa6a776224895d0a5fb6e429d321c89))
+* **analyzer:** start the analysis loop with the Foundry adapter behind --triage-model ([#421](https://github.com/pkalin/shadewright/issues/421)) ([90c7eaf](https://github.com/pkalin/shadewright/commit/90c7eaf37f1c4b1a8cb49c9194b28509d0b58998))
+* **analyzer:** trace each analysis with OpenTelemetry ([#467](https://github.com/pkalin/shadewright/issues/467)) ([b8dfed3](https://github.com/pkalin/shadewright/commit/b8dfed3b9f4febbbb02f68d20c4ee6b7b033f618))
+* **analyzer:** wire the Prometheus and pod log sources into the incident context ([#406](https://github.com/pkalin/shadewright/issues/406)) ([1f3a94c](https://github.com/pkalin/shadewright/commit/1f3a94c75cc88ee4790a49e75538513bccb14e70))
+* **analyzer:** write analysis records to Azure Blob Storage ([#451](https://github.com/pkalin/shadewright/issues/451)) ([7c3d6a4](https://github.com/pkalin/shadewright/commit/7c3d6a4a34e4f7c22d28b064733549ab150869e9))
+* **api:** add a read-only kubectl shadewright status plugin and printer columns ([#441](https://github.com/pkalin/shadewright/issues/441)) ([034ff3a](https://github.com/pkalin/shadewright/commit/034ff3a096d7ad1019e85fe9c62cc764c0cbf1b7))
+* **api:** list the requests for the executor limits with field selectors ([#377](https://github.com/pkalin/shadewright/issues/377)) ([406818a](https://github.com/pkalin/shadewright/commit/406818ae64e6fca381e07b3d46855d4063549940))
+* **chart:** add an optional TLS trust profile for the metrics endpoints ([#359](https://github.com/pkalin/shadewright/issues/359)) ([c767ab8](https://github.com/pkalin/shadewright/commit/c767ab81bd500ae9cad7fa8c7d1aa3fd5ffaabe0))
+* **chart:** one DNS egress profile for the workloads and the Helm test ([#355](https://github.com/pkalin/shadewright/issues/355)) ([fd6d141](https://github.com/pkalin/shadewright/commit/fd6d14182502c4ba89cdb4c7eff73779f1ba4c91)), closes [#340](https://github.com/pkalin/shadewright/issues/340)
+* **chart:** optional analyzer-only Prometheus egress rule and network policy docs ([#383](https://github.com/pkalin/shadewright/issues/383)) ([44c22e1](https://github.com/pkalin/shadewright/commit/44c22e1dd722c8ab1694fc3f184f714af4890728))
+* **chart:** set the analyzer's context sources from values and grant pods/log only when used ([#416](https://github.com/pkalin/shadewright/issues/416)) ([f818d34](https://github.com/pkalin/shadewright/commit/f818d34b35a081270d664ccc1f4c36beb02b3752))
+* **docs:** open diagrams in a zoomable overlay ([#405](https://github.com/pkalin/shadewright/issues/405)) ([cb29c46](https://github.com/pkalin/shadewright/commit/cb29c4654038bf4ae2c14e84b3e042eba16e974a))
+* **gitops:** list directories so source mapping works without a kustomization file ([#463](https://github.com/pkalin/shadewright/issues/463)) ([15cb4ad](https://github.com/pkalin/shadewright/commit/15cb4ad4eed4f8f6e958e1f9ebfc6e0ad46457f9)), closes [#122](https://github.com/pkalin/shadewright/issues/122)
+* **integrations:** add the Microsoft Foundry model provider ([#412](https://github.com/pkalin/shadewright/issues/412)) ([215e6b9](https://github.com/pkalin/shadewright/commit/215e6b9ef89114b48059809269c478c9ad31357d))
+* **integrations:** mark a Prometheus answer that carries warnings as partial ([#347](https://github.com/pkalin/shadewright/issues/347)) ([dfb3f63](https://github.com/pkalin/shadewright/commit/dfb3f632bebd741c77722c5671c0b7a080ed73c8))
+* **integrations:** select metrics of the target's own pods only ([#351](https://github.com/pkalin/shadewright/issues/351)) ([86a7edf](https://github.com/pkalin/shadewright/commit/86a7edf723da3d1f07de83db882a80150b77d093))
+* **integrations:** state the Prometheus source profile and count each measurement once ([#367](https://github.com/pkalin/shadewright/issues/367)) ([a33f229](https://github.com/pkalin/shadewright/commit/a33f22984f1892d8eff1ca267a140eaaddea9361))
+* **integrations:** tie each pod log excerpt to the instance it was read from ([#356](https://github.com/pkalin/shadewright/issues/356)) ([cd2e5d3](https://github.com/pkalin/shadewright/commit/cd2e5d3814513607c3f30bbc8c15fbb9c471514e))
+* **policy:** bound the circuit breaker's reads with a watermark on the requests ([#464](https://github.com/pkalin/shadewright/issues/464)) ([c6aacc2](https://github.com/pkalin/shadewright/commit/c6aacc2fe7a254cd8206d7fd8522600e8237894b))
+* **policy:** refuse requests on their own fields before reading Git ([#410](https://github.com/pkalin/shadewright/issues/410)) ([e97ab43](https://github.com/pkalin/shadewright/commit/e97ab4345dd0dcc535cb1c89e7c93fa0ad057738))
+* publish signed kubectl-shadewright binaries with each release ([#443](https://github.com/pkalin/shadewright/issues/443)) ([67ca4df](https://github.com/pkalin/shadewright/commit/67ca4df299c61a78c6e945d7493bda5b3a12ec6b))
+
+
+### Bug fixes
+
+* **analyzer:** ask for quotes copied from one value and classify refused quotes ([#487](https://github.com/pkalin/shadewright/issues/487)) ([50d2e52](https://github.com/pkalin/shadewright/commit/50d2e52bb568c18a530fa0d4fad92ee02c4e645c))
+* **analyzer:** ask the summary to name the subject and the observed values ([#519](https://github.com/pkalin/shadewright/issues/519)) ([0642d53](https://github.com/pkalin/shadewright/commit/0642d53d0e808e906bf32382d476c61fec69c92a))
+* **analyzer:** classify a reply racing the model deadline as a timeout ([#442](https://github.com/pkalin/shadewright/issues/442)) ([4539e6d](https://github.com/pkalin/shadewright/commit/4539e6d5430c47e9d9caac9b4c3f7f6c032df7dd))
+* **analyzer:** find a quiet spell that ends between two passes and claim only current-generation marks ([#448](https://github.com/pkalin/shadewright/issues/448)) ([561bce7](https://github.com/pkalin/shadewright/commit/561bce7ca49a743079c13b51846cd5934d8c0412))
+* **analyzer:** keep milli quantities in shown symptoms and evidence ([#491](https://github.com/pkalin/shadewright/issues/491)) ([db863ec](https://github.com/pkalin/shadewright/commit/db863ecc002feb5ef4daa1cbaf5f9cfdba345501))
+* **analyzer:** let a request that ended after a quiet resolve decide the Incident ([#485](https://github.com/pkalin/shadewright/issues/485)) ([feb32cf](https://github.com/pkalin/shadewright/commit/feb32cf40160fc2a95f5ddbfe3108de5671a9924))
+* **analyzer:** redact a quoted value continued past its block, and withhold a value when redaction panics ([#529](https://github.com/pkalin/shadewright/issues/529)) ([f0a5bda](https://github.com/pkalin/shadewright/commit/f0a5bda4e6b85a62e45c8c0fc71461dde987416a))
+* **analyzer:** start the settle limit after a quiet spell from the analyzer's own sight ([#445](https://github.com/pkalin/shadewright/issues/445)) ([5096771](https://github.com/pkalin/shadewright/commit/5096771279c8ae88af634bf1b79dad0cafe72a43))
+* **analyzer:** stop AnalysisDue saying Analyzing after the run ends ([#435](https://github.com/pkalin/shadewright/issues/435)) ([f3c91ee](https://github.com/pkalin/shadewright/commit/f3c91ee857132c7411163c1d3c17abd3451e8864))
+* **analyzer:** take the previous memory limit from the pod template ([#498](https://github.com/pkalin/shadewright/issues/498)) ([e5938cb](https://github.com/pkalin/shadewright/commit/e5938cbfda7f850d7e88e4f006c5f5f3252c9421))
+* **analyzer:** tidy the analysis record follow-ups of the second [#451](https://github.com/pkalin/shadewright/issues/451) review ([#457](https://github.com/pkalin/shadewright/issues/457)) ([1eaa826](https://github.com/pkalin/shadewright/commit/1eaa826f04881450e27ab03f68e9d1a7f69279d0))
+* **chart:** keep the analysis budget through a Helm uninstall ([#349](https://github.com/pkalin/shadewright/issues/349)) ([05f6c2b](https://github.com/pkalin/shadewright/commit/05f6c2b38838b67ddd71a93585fe1c6bcd2154b1)), closes [#335](https://github.com/pkalin/shadewright/issues/335)
+* **chart:** require a memory limit for both components in the values schema ([#346](https://github.com/pkalin/shadewright/issues/346)) ([8cb952b](https://github.com/pkalin/shadewright/commit/8cb952b489c750e485927dcd752e568870909e99))
+* **ci:** publish a release only once its assets are attached ([#455](https://github.com/pkalin/shadewright/issues/455)) ([6bac177](https://github.com/pkalin/shadewright/commit/6bac177648cd7b8154a111d815cf2413fe173123))
+* **deps:** bump github.com/google/cel-go to v0.30.0 for GO-2026-6094 ([#358](https://github.com/pkalin/shadewright/issues/358)) ([afca7d9](https://github.com/pkalin/shadewright/commit/afca7d9b65da1ae06c55cccc6635b7959f80a9f0))
+* **gitops:** bound source mapping downloads by the read budget ([#460](https://github.com/pkalin/shadewright/issues/460)) ([838053f](https://github.com/pkalin/shadewright/commit/838053f7217a0d9addd82725f9880e729b4a6591)), closes [#298](https://github.com/pkalin/shadewright/issues/298)
+* **gitops:** bound the build before the Kustomize render ([#496](https://github.com/pkalin/shadewright/issues/496)) ([8d8478d](https://github.com/pkalin/shadewright/commit/8d8478d193f9d10dfbbe9fe3fa7b2ad3037acff2))
+* **gitops:** check the kill switch before every write request and retry ([#357](https://github.com/pkalin/shadewright/issues/357)) ([824073e](https://github.com/pkalin/shadewright/commit/824073ea6d6489b4fe5a25b5044a84c9211d9b43))
+* **gitops:** classify an empty Key Vault answer after the try deadline as a timeout ([#450](https://github.com/pkalin/shadewright/issues/450)) ([abd09e5](https://github.com/pkalin/shadewright/commit/abd09e552b5980ec087794e9a9055e23a971851a))
+* **gitops:** fit the Kustomize build budget inside the executor's memory limit ([#490](https://github.com/pkalin/shadewright/issues/490)) ([78b6640](https://github.com/pkalin/shadewright/commit/78b66403fdf3116680f5d12db434ab678456936b))
+* **gitops:** keep the request name in the pull request body ([#436](https://github.com/pkalin/shadewright/issues/436)) ([134210c](https://github.com/pkalin/shadewright/commit/134210c658770f3121c0a6f4beb4f54a3251b449))
+* **gitops:** look at a waiting pull request every minute ([#444](https://github.com/pkalin/shadewright/issues/444)) ([6eecc37](https://github.com/pkalin/shadewright/commit/6eecc37b65782ea2ae0f307f2993e8e03b102bff))
+* give each Key Vault request attempt its own copy of the body ([#348](https://github.com/pkalin/shadewright/issues/348)) ([c8f3df4](https://github.com/pkalin/shadewright/commit/c8f3df45fc2be28da96fe21d5e9a84890e447f37))
+* **policy:** hold the target lock until the pull request is known closed ([#375](https://github.com/pkalin/shadewright/issues/375)) ([f1e6e4d](https://github.com/pkalin/shadewright/commit/f1e6e4dd0ce65695efb54274627e82f275566345))
+* **release:** publish a release only once its assets are attached ([6bac177](https://github.com/pkalin/shadewright/commit/6bac177648cd7b8154a111d815cf2413fe173123))
+
 ## [0.2.0](https://github.com/pkalin/shadewright/compare/v0.1.0...v0.2.0) (2026-11-04)
 
 

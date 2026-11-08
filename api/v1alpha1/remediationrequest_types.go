@@ -275,8 +275,8 @@ type PullRequestStatus struct {
 
 	// appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later
 	// commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a
-	// deadline measured from it (the rollout check, #532) cannot be pushed back. Not written yet: the delivery
-	// check after the merge is planned.
+	// deadline measured from it (the rollout check, condition RolledOut) cannot be pushed back. Written only for
+	// a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge.
 	// +optional
 	AppliedObservedAt *metav1.Time `json:"appliedObservedAt,omitempty"`
 }
@@ -388,7 +388,8 @@ type RemediationRequestStatus struct {
 	Deadline *metav1.Time `json:"deadline,omitempty"`
 
 	// conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
-	// Verified, PlanFresh, WritesPaused and Queued.
+	// Verified, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run
+	// the applied template; False with reason RolloutStuck when they did not within the deadline).
 	// +listType=map
 	// +listMapKey=type
 	// +optional

@@ -194,9 +194,7 @@ Stops before a pull request is recorded are on `PullRequestOpened`; after, on `A
 
 ## Rollout after the merge
 
-<span class="sw-status sw-planned">planned</span> The rule that decides it is built (`internal/verification/rollout`); the executor sets the condition once it can tell that Flux applied the merge commit (#92). Until then a request stays `Merged` while its pods may still run the old template, so check the rollout yourself as below.
-
-On `RolledOut`, after the merge commit is applied. Shadewright only reports: it never deletes or restarts a pod (invariant 2), and it reads only the target object with the `get` it already has, never the pods.
+<span class="sw-status sw-built">built</span> On `RolledOut`, for a Deployment or StatefulSet target, after the Flux Kustomization named by the target's labels reports the merge commit (or a later commit of the target branch that holds it) applied; that time is `status.pullRequest.appliedObservedAt`. The phase stays `Merged`. No `RolledOut` after a merge means the delivery was not seen applied: the target has no Kustomization labels, is installed by a HelmRelease, Flux has not applied the commit, or an hour passed since the merge; check your GitOps controller. Shadewright only reports: it never deletes or restarts a pod (invariant 2), and it reads only the target object and its Kustomization with the `get` it already has, never the pods. While writes are paused (`spec.paused`), a later applied commit is not checked against the merge commit on the Git host, so the check waits.
 
 | Reason | Status | Cause | Fix |
 | --- | --- | --- | --- |

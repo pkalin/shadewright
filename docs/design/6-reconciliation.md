@@ -1,6 +1,6 @@
 # 6. Reconciliation
 
-[![Shadewright executor: a RemediationRequest passes the policy's field checks, the source mapping, the full policy decision, the limits, the freshness check, the patcher with the semantic diff and the kill switch gate; the Key Vault signer lets the GitHub App open the pull request, the request waits in AwaitingApproval and stops in Merged when a person merges; refusals end in Denied, NeedsIntervention or Superseded; built up to Merged, with auto-merge, the delivery check and the verifier planned, drawn dashed.](../assets/diagrams/executor.svg)](../assets/diagrams/executor.svg "Open full size")
+[![Shadewright executor: a RemediationRequest passes the policy's field checks, the source mapping, the full policy decision, the limits, the freshness check, the patcher with the semantic diff and the kill switch gate; the Key Vault signer lets the GitHub App open the pull request, the request waits in AwaitingApproval and stops in Merged when a person merges, after which the rollout of a Deployment or StatefulSet is reported in RolledOut once Flux applied the merge commit; refusals end in Denied, NeedsIntervention or Superseded; built up to Merged and the rollout report, with auto-merge, the delivery phases and the verifier planned, drawn dashed.](../assets/diagrams/executor.svg)](../assets/diagrams/executor.svg "Open full size")
 
 [![RemediationRequest phases: Pending, PolicyChecked, PRCreated, AwaitingApproval or AutoMergeQueued, Merged, WaitingForDelivery, Verifying, Succeeded; only the steps up to Merged are built; any step can end in Denied, Failed, Expired, Cancelled, Superseded or NeedsIntervention.](../assets/diagrams/phases.svg)](../assets/diagrams/phases.svg "Open full size")
 
@@ -20,6 +20,7 @@ What happens next, step by step:
 - **Freshness before merge.** The executor re-checks the freshness of a decided request before merge every five minutes, and at once on any change to the request (once its pull request waits for review, only when no full recheck ran in the last five minutes). While a pull request waits for review, the executor only looks at the pull request in between, every `--pull-request-poll-interval` (one minute by default), so a merge or a close is seen within that interval (#434); a look writes nothing to Git, so every write still comes right after a freshness check. A stale plan becomes `Superseded`, or `NeedsIntervention` if its repository settings became unusable, without waiting for a write.
 - **Opening the pull request.** A fresh `PolicyChecked` request opens its pull request and moves to `PRCreated` and `AwaitingApproval` (6.5).
 - **Merge.** Observing a person's merge is built: the request then stops in `Merged` (step 5 of 6.5).
+- **Rollout after the merge.** Built (#532), reporting only: the phase stays `Merged`. The executor waits up to an hour after the merge for the Flux Kustomization that applies a Deployment or StatefulSet target to report the merge commit (or a later commit of the target branch that holds it) applied, records that time once in `status.pullRequest.appliedObservedAt`, then reads the target's rollout status and sets `RolledOut`: `True` when every pod runs the applied template, `False` with reason `RolloutStuck` and one core Event when it did not within 10 minutes of that time. It never acts on a pod (invariant 2) and uses only the `get` it already holds (invariant 6). A read that fails or a cancelled reconcile is never a verdict.
 - **Planned.** Enabling auto-merge, following delivery (`WaitingForDelivery`) and verification (`Verifying`, `Succeeded`) are designed but not built.
 
 ```mermaid
@@ -31,7 +32,7 @@ stateDiagram-v2
             PolicyChecked --> PRCreated: branch, commit, pull request
             PRCreated --> AwaitingApproval: review required
             PRCreated --> AutoMergeQueued: policy allows automation (planned)
-            AwaitingApproval --> Merged: a person merged it (observed, the request stops here today)
+            AwaitingApproval --> Merged: a person merged it (observed; the phase stays here today, RolledOut reports the rollout)
             PRCreated --> Merged: merged before the first review step (observed)
             PolicyChecked --> Merged: an existing merged pull request is adopted (observed)
             AutoMergeQueued --> Merged: checks pass (planned)

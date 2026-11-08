@@ -641,7 +641,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `headSHA` | string | Yes | headSHA is the commit Shadewright pushed. Any other head stops automation.<br>Pattern: `^[0-9a-f]{40}$` |
 | `renderedTargetHead` | string | No | renderedTargetHead is the head of the target branch at which the change in the pull request was last rendered and found to be exactly the planned one. While the pull request waits, the change is rendered again only when the target branch head is another commit; empty means not rendered since it was recorded.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
 | `mergeCommitSHA` | string | No | mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when Shadewright sees the merge of the pull request it pushed. Delivery is checked against it: the GitOps controller must report this commit, or a later commit of the target branch containing it, as applied. Empty until then, and when the host reported none. Once set it never changes.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
-| `appliedObservedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a deadline measured from it (the rollout check, #532) cannot be pushed back. Not written yet: the delivery check after the merge is planned. |
+| `appliedObservedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a deadline measured from it (the rollout check, condition RolledOut) cannot be pushed back. Written only for a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge. |
 
 ### RecordID
 
@@ -776,7 +776,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `policyUID` | [UID](#uid) | No | policyUID is the UID of the policy the decision used. It is part of the plan digest.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists.<br>Rule: appliedObservedAt needs mergeCommitSHA |
 | `deadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | deadline is when the current step gives up. |
-| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified, PlanFresh, WritesPaused and Queued.<br>List type: map<br>List key: `type` |
+| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run the applied template; False with reason RolloutStuck when they did not within the deadline).<br>List type: map<br>List key: `type` |
 
 ### RemediationSettingsSpec
 

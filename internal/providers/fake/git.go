@@ -309,6 +309,19 @@ func (g *Git) Push(branch, path string, content []byte) (string, error) {
 	return sha, nil
 }
 
+// SetBody replaces the description of change request n, as a person editing it would. Tests use it to remove
+// a marker.
+func (g *Git) SetBody(n int64, body string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	cr, err := g.get(n)
+	if err != nil {
+		return err
+	}
+	cr.Body = body
+	return nil
+}
+
 func (g *Git) syncHeads(branch, sha string) {
 	for _, cr := range g.crs {
 		if cr.HeadBranch == branch && cr.State == providers.ChangeRequestOpen {

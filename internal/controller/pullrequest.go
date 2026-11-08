@@ -105,6 +105,9 @@ const (
 	ReasonChangeRequestClosed = "ChangeRequestClosed"
 	// ReasonChangeRequestMerged: the pull request was merged.
 	ReasonChangeRequestMerged = "ChangeRequestMerged"
+	// ReasonMergedWithForeignChange: Shadewright's pull request failed a check before it was recorded (#524),
+	// and a person merged it before Shadewright could close it. The merged change holds something no check saw.
+	ReasonMergedWithForeignChange = "MergedWithForeignChange"
 	// ReasonPatchRefused: the typed patcher refused the file on the branch, or the target file at the head of
 	// the target branch while the pull request waits.
 	ReasonPatchRefused = "PatchRefused"
@@ -562,7 +565,7 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 	if cr.HeadSHA != head {
 		// The branch moved between the check and the open: someone else pushed, and the pull request now holds
 		// what no check saw. It is ours (it carries the marker), so it is closed and recorded (#524).
-		return reconcile.Result{}, r.refuseOpened(ctx, rr, cr, &renderRefusal{reason: ReasonBranchDiverged,
+		return reconcile.Result{}, r.refuseOpened(ctx, git, rr, cr, &renderRefusal{reason: ReasonBranchDiverged,
 			message: "The branch moved between its check and the opening of the pull request"})
 	}
 	return reconcile.Result{}, r.recordPullRequest(ctx, rr, cr)
@@ -602,41 +605,52 @@ func (r *RemediationRequestReconciler) checkPlanned(ctx context.Context, git pro
 	return nil, nil
 }
 
-// refuseOpened ends a request whose pull request is open, carries its marker and was not recorded, but whose
-// head did not pass the checks before recording (#524). It closes the pull request (closeChangeRequest: only
-// the branch's own, by its marker) and stops in NeedsIntervention with the refusal's reason, recording the
-// pull request in that status write, so neither a restart nor a person mistakes it for the planned change. A
-// close that fails for a reason worth a retry is returned for a retry, which finds the pull request and checks
-// it again; settings that cannot reach the repository any more stop the request with the pull request open.
-func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	cr providers.ChangeRequest, ref *renderRefusal) error {
+// refuseOpened ends a request whose pull request is open and carries its marker (Shadewright opened it) but was
+// not recorded, and whose head did not pass a check before recording, whatever the check (#524). It records the
+// pull request by the number the open or the look-up returned, closes it by that number, never by a new look-up
+// of the marker (which a person may have removed since), and stops in NeedsIntervention with the refusal's
+// reason in one status write. The pull request is recorded as closed only when the Git host confirmed the
+// close (CloseChangeRequest returns only then); a person's merge before it ends MergedWithForeignChange, a
+// person's close ChangeRequestClosed. Any other outcome, a pause or a host failure included, keeps it
+// recorded as open, so the request holds the lock on its target until a person closes it (checkHeld). It never stops with an open pull request unrecorded.
+func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest, ref *renderRefusal) error {
+	rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type:               remediationv1alpha1.ConditionPROpened,
+		Status:             metav1.ConditionTrue,
+		Reason:             ReasonPullRequestOpened,
+		Message:            fmt.Sprintf("Pull request #%d is open", cr.Number),
+		ObservedGeneration: rr.Generation,
+	})
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
-	err := r.closeChangeRequest(cleanCtx, rr)
-	err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
-	cancel()
-	record := func() {
-		rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}
-		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
-			Type:               remediationv1alpha1.ConditionPROpened,
-			Status:             metav1.ConditionTrue,
-			Reason:             ReasonPullRequestOpened,
-			Message:            fmt.Sprintf("Pull request #%d is open", cr.Number),
-			ObservedGeneration: rr.Generation,
-		})
+	defer cancel()
+	// A person may have merged or closed it since the open: that is looked at first, because closing a closed
+	// pull request succeeds and would hide who closed it. A look-up that fails, or finds another pull request,
+	// decides nothing; the close by number below still runs.
+	if found, err := git.FindChangeRequest(cleanCtx, freshness.BranchName(rr)); err == nil && found.Number == cr.Number {
+		switch found.State {
+		case providers.ChangeRequestMerged:
+			return r.mergedForeign(ctx, rr, ref)
+		case providers.ChangeRequestClosed:
+			markClosed(rr, ReasonChangeRequestClosed, "was closed without a merge")
+			return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestClosed,
+				"The pull request was closed without a merge; automation stopped")
+		}
 	}
+	err := git.CloseChangeRequest(cleanCtx, cr.Number)
+	err = boundErr(ctx, cleanCtx, "close the pull request", err)
 	outcome := "; the pull request was closed"
 	switch {
 	case err == nil:
-		record()
 		closedByUs(rr, "the branch does not hold exactly the planned change ("+ref.reason+")")
-	case errors.Is(err, freshness.ErrRepositoryUnusable), errors.Is(err, errTargetBranchChanged),
-		errors.Is(err, errRepositoryGone):
-		record()
-		outcome = "; the settings no longer reach its repository, so the pull request was not closed"
-	case errors.Is(err, errChangeRequestNotOurs):
-		outcome = "; the branch's pull request is not this request's own, so it was not closed"
+	case providers.IsConflict(err):
+		// Merged between the look-up and the close.
+		return r.mergedForeign(ctx, rr, ref)
 	default:
-		return err
+		logf.FromContext(ctx).Info("Could not close the pull request of RemediationRequest", "remediationRequest",
+			client.ObjectKeyFromObject(rr), "pullRequest", cr.Number, "error", err.Error())
+		outcome = "; closing the pull request failed, so it may still be open: close it by hand"
 	}
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ref.reason, ref.message+outcome)
 }
@@ -657,22 +671,23 @@ func (r *RemediationRequestReconciler) adoptChangeRequest(ctx context.Context, g
 			"The pull request was closed without merging; it is not reopened")
 	}
 	// The status lost the head Shadewright pushed, so the head is accepted only when the file on it holds the
-	// planned value.
+	// planned value. The pull request carries the marker and is open: a head that fails any check below is
+	// recorded and closed, never left open unrecorded (#524). A read that fails decides nothing and is retried.
 	file, err := git.ReadFile(ctx, cr.HeadSHA, string(rr.Status.Source.Path), providers.MaxFileBytes)
 	if err != nil {
 		return freshness.WrapProvider("read the file of the pull request", err)
 	}
 	if _, state, err := planned(file.Data, rr); err != nil || state != fileHoldsDesired {
-		return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonHeadMoved,
-			"The pull request's head does not hold the planned change")
+		return r.refuseOpened(ctx, git, rr, cr, &renderRefusal{reason: ReasonHeadMoved,
+			message: "The pull request's head does not hold the planned change"})
 	}
 	// The head is recorded only as checked here; a later push to the pull request is watchPullRequest's
-	// HeadMoved. A head that does not pass is closed and recorded, as after a push during the open (#524).
+	// HeadMoved.
 	switch ref, err := r.checkPlanned(ctx, git, rr, freshFile, cr.HeadSHA, file.Data); {
 	case err != nil:
 		return err
 	case ref != nil:
-		return r.refuseOpened(ctx, rr, cr, ref)
+		return r.refuseOpened(ctx, git, rr, cr, ref)
 	}
 	return r.recordPullRequest(ctx, rr, cr)
 }
@@ -702,6 +717,18 @@ func (r *RemediationRequestReconciler) requireOnTarget(ctx context.Context, git 
 	}
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonBranchDiverged,
 		"The branch holds commits that are not on the target branch; nothing was committed")
+}
+
+// mergedForeign ends a request whose recorded pull request a person merged although its head failed a check
+// before Shadewright could close it (#524): NeedsIntervention with MergedWithForeignChange and a message that
+// names the pull request, which is recorded as merged, so the lock on the target is released and the merged
+// change is reviewed by a person. Shadewright cannot stop a human merge; it reports it.
+func (r *RemediationRequestReconciler) mergedForeign(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	ref *renderRefusal) error {
+	markClosed(rr, ReasonChangeRequestMerged, "was merged although it failed a check")
+	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonMergedWithForeignChange,
+		fmt.Sprintf("Pull request #%d was merged before Shadewright could close it, although it failed a check (%s): "+
+			"%s. Review the merged change", rr.Status.PullRequest.Number, ref.reason, ref.message))
 }
 
 // recordPullRequest writes PRCreated with the pull request in one status write.

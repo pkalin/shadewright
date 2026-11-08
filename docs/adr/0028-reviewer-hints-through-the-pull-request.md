@@ -1,6 +1,6 @@
 # ADR-0028: Reviewer hints through the code host's pull request, the coordinator for other integrations, and the supersede handoff
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-08
 
 ## Context
@@ -313,4 +313,4 @@ Slack has no write permission on the repository, so the coordinator's ADR must d
 
 ## Amendments
 
-None yet. Planned, per [ADR-0021](0021-amending-accepted-adrs.md), on acceptance: [ADR-0006](0006-github-app-key-in-key-vault.md) and design 8.4 get a dated amendment for the App's fifth permission, `checks: write` (section 5), and the setup docs and the fleet README get the required check with its source.
+None yet. On acceptance (2026-11-08), [ADR-0006](0006-github-app-key-in-key-vault.md) got a dated amendment for the App's fifth permission, `checks: write` (section 5), planned until #539 ships; design 8.4 already lists it as planned. The setup docs and the fleet README get the required check with its source when the feature ships.

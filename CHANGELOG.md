@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/pkalin/shadewright/compare/v0.3.0...v0.3.1) (2026-11-08)
+
+
+### Bug fixes
+
+* **gitops:** open or adopt a pull request only when its branch holds nothing but the planned change ([#560](https://github.com/pkalin/shadewright/issues/560)) ([df2e203](https://github.com/pkalin/shadewright/commit/df2e203bca7df94c0a8182597b33cab06c8a5e4e)), closes [#524](https://github.com/pkalin/shadewright/issues/524)
+
 ## [0.3.0](https://github.com/pkalin/shadewright/compare/v0.2.0...v0.3.0) (2026-11-08)
 
 

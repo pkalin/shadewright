@@ -27,7 +27,7 @@ A red team of this design on 2026-11-08 raised four points, each answered below:
 
 ### 1. The split: the code host through the executor, everything else through the coordinator
 
-- **The code host where the pull request lives** (GitHub now, Azure DevOps planned, GitLab later) is read by the **executor**, through the `GitProvider` adapter, behind a narrow `FeedbackSource` interface (list new comments on a change request, return the author's identity and type, answer whether the author may write, post a reply, dismiss approvals). No new GitHub App and no new permission: the App already has `pull_requests: write` (comments and dismissing reviews) and `metadata: read`. Per [ADR-0013](0013-adapters-for-every-external-system.md) the core sees only neutral terms; the adapter names the product.
+- **The code host where the pull request lives** (GitHub now, Azure DevOps planned, GitLab later) is read by the **executor**, through the `GitProvider` adapter, behind a narrow `FeedbackSource` interface (list new comments on a change request, return the author's identity and type, answer whether the author may write, list reviews, post a reply, set a commit status). No new GitHub App and one new permission: the App already has `pull_requests: write` (comments, reading reviews) and `metadata: read`; the merge gate of section 5 adds `statuses: write`. Per [ADR-0013](0013-adapters-for-every-external-system.md) the core sees only neutral terms; the adapter names the product.
 - **Every other integration** (on-call tools, chat, inbound alerts and webhooks) **never goes through the executor.** It belongs to a future `shadewright-coordinator` with one credential per integration, introduced with the first of them, and **its design (identity, deployment, how its hints reach the request status) is a separate ADR written then.** This ADR does not decide it. It fixes only what that ADR must keep: the hint rules of section 2, and that a hint source never gives the analyzer, or anyone who can create a custom resource, a way to write a hint.
 
 Why the executor for the code host: the pull request is the executor's own object (it opened it, watches it, closes it), its identity and credentials are already there, and a second component with a second GitHub credential on the same repository would widen what a compromise reaches for no gain. Why not the coordinator for the code host too: see the alternatives.
@@ -36,63 +36,88 @@ Pull requests in the same repository are the only ones read: the ones the execut
 
 ### 2. Hint rules, for every source
 
-1. **Permission is checked in the source system, never from the comment.** The author is the identity the API returns for the comment (GitHub: `user.id`, `user.login`, `user.type`), not any name in the body. The executor then asks the source whether that identity may write to the repository (GitHub: `GET /repos/{owner}/{repo}/collaborators/{login}/permission`, `role_name` of `write`, `maintain` or `admin`; Azure DevOps: the Contribute right on the repository, planned). Anything else is refused. The check runs when the hint is accepted, not when the comment was written.
+1. **Permission is checked in the source system, never from the comment.** The author is the identity the API returns for the comment (GitHub: `user.id`, `user.login`, `user.type`), not any name in the body. The executor then asks the source whether that identity may write to the repository (GitHub: `GET /repos/{owner}/{repo}/collaborators/{login}/permission`, the normalized base `permission` field: `admin` or `write` (`maintain` and custom roles that include write are reported as `write`); `read` and `none` (which also cover `triage`) are refused. Azure DevOps: the Contribute right on the repository, planned). Anything else is refused. The check runs when the hint is accepted, not when the comment was written.
 2. **Bots and Apps are ignored** (`user.type` other than `User`). This includes the executor's own replies, so Shadewright cannot hint itself.
 3. **The command is read from the first line only**, `/shadewright reanalyze: <text>` at the start of the line. Quoted lines (`>`), code blocks and anything after a blank line are not commands. A comment that only quotes the command is not a hint.
-4. **Bounded:** at most 2 KiB of hint text, at most 3 accepted hints per supersede chain (section 4).
+4. **Bounded:** at most 2 KiB of hint text, at most 3 consumed hints per supersede chain (section 6).
 5. **Redacted before storage** with `internal/redact`, the same pass as every other text that reaches the model (invariant 4). A hint that fails redaction is refused, not stored in part.
-6. **Pinned** by comment ID, the SHA-256 of the stored text, and the comment's `updated_at`, in `RemediationRequest` `status.hints`. **Only the executor writes the status** (threat model G1.1): the analyzer can create requests and never write status, and there is no hint custom resource a person or a compromised pod could create. The analyzer reads the stored hint, never the comment.
+6. **Pinned** by comment ID, the SHA-256 of the stored text, and the comment's `updated_at`, in `RemediationRequest` `status.hints`, with a state: `Pending` (stored, not yet answered), `Reserved` (named by exactly one successor being admitted), `Consumed` (the replacement holds the pull request) or `Declined` (answered without a replacement, with the reason). **Each hint is consumed once:** a replacement that cites a hint that is not `Pending`, or is reserved for another successor, is refused (section 4). **Only the executor writes the status** (threat model G1.1): the analyzer can create requests and never write status, and there is no hint custom resource a person or a compromised pod could create. The analyzer reads the stored hint, never the comment.
 7. **Fenced in the prompt** as a reviewer-input block with provenance `reviewer-hint`, through the same delimiter handling as every context block. It is labelled the opinion of a person with write access: it may steer which action and which target the model considers, never the instructions, the tools or the catalog, and it is not evidence (a claim must still quote the context or a tool result, ADR-0025).
-8. **It costs what an analysis costs.** A hint-driven analysis reserves one unit of `maxAnalysesPerDay` like any other, and the 15 minute cooldown per Incident applies. A spent budget or a running cooldown is an answer to the reviewer (section 6), not a queue.
+8. **It costs what an analysis costs.** A hint-driven analysis reserves one unit of `maxAnalysesPerDay` like any other, and the 15 minute cooldown per Incident applies. A spent budget or a running cooldown is an answer to the reviewer (section 7), not a queue.
 
-The trust claim: **a hint author already has write access to the GitOps repository**, so a hint gives them no power they lack; they could edit the manifest themselves. Policy still decides every proposal, the catalog is closed, the plan is rendered and compared, and a person still merges. What the rules above guard against is not the author but **injected content the author quotes** (a log line pasted into the comment), and a forged or stale author claim.
+The trust claim, stated with its limit: **a hint author already has write access to the GitOps repository**, so a hint gives them no new power over the content: they could edit the manifest themselves, policy still decides every proposal, the catalog is closed, the plan is rendered and compared, and a person still merges. What a hint does change is the review: without more, one person could steer a change through a hint and then approve it alone, which a pull request the author cannot approve was meant to prevent. The merge gate of section 5 closes that: the author of a hint in a chain cannot be the approval that counts. The other rules guard against **injected content the author quotes** (a log line pasted into the comment) and against a forged or stale author claim.
 
-### 3. How a hint is seen
+### 3. How a hint is seen, and what starts the analysis
 
-No webhooks. The executor already re-reconciles every request with a recorded pull request every minute by default. On each such poll, for a request that is `PRCreated` or `AwaitingApproval`:
+No webhooks. The executor already re-reconciles every request with a recorded pull request every minute by default (`DefaultPullRequestPollInterval`, between 30 seconds and the freshness recheck interval). It reads hints only for a request in `AwaitingApproval` with a recorded, open pull request (`PRCreated` moves there on the next reconcile), which is also the phase a request must be in to be replaced (section 4), so the two agree. On each poll:
 
-- **One comments list** for the pull request, conditional on the `ETag` of the last answer (`If-None-Match`): an unchanged list is a `304`, which GitHub does not count against the rate limit. A changed list is read from the page after the last seen comment ID.
-- **One permission call per new comment** that has the command and a human author, and nothing for comments without the command, from bots, or already pinned.
+- **One comments query**: `GET /repos/{owner}/{repo}/issues/{number}/comments?since=<watermark>&per_page=100`, where the watermark is the latest `updated_at` the executor has fully handled, kept in request status (durable, so a restart does not re-read or skip), with the `ETag` of that query in `If-None-Match`. An unchanged answer is a `304`, which GitHub does not count against the rate limit. A changed answer is paginated within a bound (at most 5 pages per poll; the rest on the next poll, the watermark advancing only past comments fully handled) and deduplicated by comment ID against `status.hints`, so a comment returned again (edited, or on the watermark) is never handled twice.
+- **One permission call per new comment** that carries the command and has a human author, and none for other comments, bots, or IDs already pinned.
 
-So the steady cost is one conditional request per waiting pull request per minute, and a person's hint costs one list and one permission call. A hint is therefore seen within about the poll interval. Webhooks would make it instant, at the cost of an inbound endpoint and a secret; see the alternatives. The interval is the existing `--pull-request-poll-interval`; this ADR adds no setting.
+The steady cost is one conditional request per waiting pull request per minute; a hint costs one query (a few pages at most) and one permission call. A hint is seen within about the poll interval. Webhooks would make it instant, at the cost of an inbound endpoint and a secret; see the alternatives. The interval is the existing `--pull-request-poll-interval`; this ADR adds no setting.
+
+**What starts the analysis.** The analyzer already has `get`, `list` and `watch` on requests in the operator namespace. It watches `status.hints` of the requests it can read: a `Pending` hint is an analysis to run for the Incident the request names, with the hint in the context. Its only write is the one it already has, creating the replacement request. **How the executor learns the analysis was refused** (budget spent, cooldown, model error, no proposal): the analyzer already writes the outcome of every analysis to the `Analyzed` condition of the Incident (reasons such as `BudgetSpent`, `NoProposal`, `ModelUnavailable`; the cooldown gets its own reason, #537), and the executor already has `get` on the Incident a request names. It reads that condition for a `Pending` hint, marks the hint `Declined` with the reason and replies (section 7). A hint with neither a replacement nor an outcome within a bound set in #538 is `Declined` as "no answer". No new analyzer write and no new executor permission are needed.
 
 ### 4. One pull request for the whole conversation: the supersede handoff
 
-**A hint never closes the pull request and never opens another.** Each plan stays its own `RemediationRequest` with its own immutable plan, and the replacement request takes over the existing pull request and branch from the superseded one.
+**A hint never closes the pull request and never opens another.** Each plan stays its own `RemediationRequest` with its own immutable plan, and the replacement request takes over the existing pull request and branch from the superseded one (its predecessor).
 
-1. **Attempt identity.** The analyzer creates the replacement with a new field `spec.replaces`, naming the request and the pinned hint it answers (hint comment ID and digest), and `spec.chainRoot`, the UID of the first request in the supersede chain (copied from the replaced request's `chainRoot`, or its own UID when it has none), both immutable like the rest of the spec (CEL). The request name already derives from the Incident UID and the whole plan part of the spec, so adding `replaces` makes it also derive from the request replaced and the hint: a retried create finds the same request (invariant 5), and the same plan from the same hint is the same request. A new analysis that proposes the same plan as the request it would replace creates nothing: the outcome is "no change" and the reviewer is told (section 6). `createRequest` keeps its check that an existing request of that name holds the same plan.
-2. **Checks before any write.** The executor accepts the replacement only if `spec.replaces` names a request in the operator namespace for the same Incident and the same target, that is `AwaitingApproval` with a recorded, open pull request, whose status holds the pinned hint named (written by the executor, so it cannot be claimed by the analyzer), and whose chain has not used its 3 hints. The replacement goes through the full policy check as a new request, including the freshness check. If policy refuses it (Denied) the old pull request is untouched: **nothing closes and there is no gap.** The same holds if the analysis failed or was refused for budget.
-3. **The target lock moves, it is not released.** Today a request's lock is released only when its pull request is closed or merged. At the handoff the lock is transferred in one recorded step: the replacement's status takes `holdsTarget` and `status.pullRequest` (number, URL, branch) from the superseded one, and the superseded one's status records `handedOffTo` and releases its own claim. Both statuses record the handoff, so a restart at any point finds the pull request in one of three states (before: the old request holds it; between: both record the handoff and the lock is held, never free; after: the replacement holds it) and the `checkHeld` look-up never releases a lock whose pull request has a recorded successor. The branch stays `shadewright/<chainRoot>`: it derives from the spec, never from status, so a restart, or a restore that brings back the spec without the status, still finds the existing pull request (invariant 5, amended by this ADR). Before it acts on a replacement, the executor checks the chain link: the request named in `spec.replaces` exists, is the one being replaced (the hint it answers is pinned in that request's status), names the same Incident and target, and has the same `chainRoot` (or is the root). A link that fails any check is refused (`Denied`, `ChainLinkInvalid`) and takes over nothing (threat model H5). The statuses still record the handoff on both sides, for the audit story. The marker in the body is rewritten with the replacement's UID and plan digest.
-4. **One new commit on the existing branch.** No force-push, no rebase, no new branch. The commit makes the branch's net change against its base **exactly the new plan**: if the new plan touches another path, the same commit restores the old plan's path to its base content. The branch base stays where it was when the executor opened the pull request; `main` moving on is not followed. If `main` later conflicts, that is the existing conflict handling ([#95](https://github.com/pkalin/shadewright/issues/95)), not a rebase here.
-5. **A compare-and-swap ref update.** The branch ref moves by a fast-forward with the old head SHA as the expected parent. If anyone pushed to the branch, or the pull request was merged, in the meantime, the update fails and the handoff aborts. **A merged pull request wins:** the replacement ends without taking over (`Superseded` is not used, nothing was closed), the old request becomes `Merged` as it would anyway, and the reviewer is told the hint was not applied.
-6. **Before the update, a render check and the #524 rule.** The executor renders the new head as it does before opening a pull request (design 6.5.2) and checks that the branch differs from its base only at the plan's target path and that the net diff equals the plan ([#524](https://github.com/pkalin/shadewright/issues/524)). Anything else fails closed: no update, the old pull request stays as it is.
-7. **After the update.** The executor records the new head in the replacement's `status.pullRequest.headSHA` in the same status write as the handoff (so the moved head is not read as `HeadMoved`), **dismisses approvals given on earlier heads itself** (`PUT .../reviews/{id}/dismissals`, allowed by `pull_requests: write`) without relying on the repository's dismiss-stale-approvals setting, and rewrites the pull request title and body for the new plan. The pull request step then continues as for any request in `AwaitingApproval`.
+1. **Attempt identity.** The analyzer creates the replacement with two new spec fields, `spec.replaces`, naming the predecessor and the pinned hint it answers (hint comment ID and digest), and `spec.chainRoot`, the UID of the first request in the chain (copied from the predecessor's `chainRoot`, or the predecessor's own UID when it has none). Both are immutable like the rest of the spec. CEL admits `chainRoot` only together with `replaces`, and `replaces` only together with `chainRoot`. The request name already derives from the Incident UID and the whole plan part of the spec, so it now also derives from the predecessor and the hint: a retried create finds the same request (invariant 5), and the same plan from the same hint is the same request. A new analysis that proposes the same plan as the request it would replace creates nothing: the outcome is "no change" and the reviewer is told (section 7). `createRequest` keeps its check that an existing request of that name holds the same plan.
+2. **The chain link is checked first.** Before the executor computes a branch name for, or reads anything about, a request that carries `chainRoot`, it checks the link: the request named in `spec.replaces` exists in the operator namespace, names the same Incident and target, has the same `chainRoot` (or is the root, with that UID), is `AwaitingApproval` with a recorded, open pull request, and holds the named hint in state `Pending` in its status (written by the executor, so the analyzer cannot claim it). A link that fails any check is refused (`Denied`, `ChainLinkInvalid`) and takes nothing over (threat model H5). The branch is `shadewright/<chainRoot>`: it derives from the spec and never from status, so a lost status write is recovered by the same name (invariant 5, amended by this ADR). This is not a restore story: a restored custom resource gets a new UID, and a restore of requests is outside this ADR.
+3. **Admission is chain-aware.** The replacement goes through the full policy check as a new request, the freshness check included. Under `admitMu`, once the chain-link check has passed, the replacement's admission takes over the predecessor's target lock and concurrency slot instead of queueing behind them: the limits count the chain once, not twice. Nothing else is exempt, and the circuit breaker still applies. If policy refuses it (`Denied`), the analysis failed, or the budget was spent, the old pull request is untouched: **nothing closes and there is no gap.**
+4. **The handoff is a recoverable protocol.** The writes happen in this order, each one idempotent, and a restart at any point finds one of the states below.
+    1. The replacement's admission write sets `holdsTarget` and `status.handoff` (`from`, the hint, phase `Reserved`) in one status write.
+    2. One write on the predecessor sets its `status.handoff` (`to`, the head it expects, phase `Intent`) and the hint `Pending` to `Reserved`. This write is under optimistic concurrency, so only one successor can reserve a hint; a conflict, or a hint that is no longer `Pending`, ends the replacement `Cancelled` (`HandoffRefused`) and it releases only its own claim.
+    3. In Git: the render check and the branch rule (item 6), a read of the pull request (must be open), the compare-and-swap ref update (item 5), a second read of the pull request.
+    4. The replacement records the pull request (number, URL, branch, new head) and moves to `AwaitingApproval`.
+    5. The predecessor ends `Superseded` with reason `HandedOff`, `holdsTarget` false, the hint `Consumed`.
+    6. After that, idempotent and retried within bounds, each recorded when done: the pull request title and body for the new plan (with the replacement's marker), the status check of section 5, and the reply of section 7.
 
-If the pull request is closed by a person (not merged) while a hint is in flight, the hint is not applied and the existing rejection handling (`ChangeRequestClosed`) stands.
+    A restart finds: after 1, the replacement `Reserved` and the predecessor without intent: it repeats 2, or ends `Cancelled` if the predecessor left `AwaitingApproval`. After 2, both record the handoff and the branch head is the expected one: it continues at 3. Between the ref update and 4, the branch head is not the expected one: if it is a commit whose parent is the expected head and whose tree equals the replacement's rendered plan (recomputed, deterministic) the update happened, and it goes on at 4; anything else is a foreign push, the handoff is abandoned, the hint `Declined`, the replacement `Cancelled` (`HandoffAborted`), and the predecessor stays as it is (it then sees the moved head as today, `HeadMoved`, and keeps the lock). After 4, the replacement holds the pull request and the lock: it completes 5. After 5, only 6 is left.
+5. **A compare-and-swap ref update, and a read on both sides.** The branch ref moves by a fast-forward with the expected head as the parent. This catches a push, a force-push or a commit by anyone in the meantime. It does **not** catch a merge or a close: a squash or rebase merge does not move the head ref of the pull request, and neither does a close. So the executor reads the pull request state right before the update (merged or closed: no update, the hint is `Declined`) and right after it. If it is merged or closed after the update, **the replacement ends without taking over** (`Cancelled`, `HandoffAborted`), the predecessor ends as its own watch finds (`Merged`, or the rejection of a close), and the reply says the old plan was merged (or the pull request closed), read from the pull request's state and merge commit, not assumed. A merged pull request wins.
+6. **Before the update: a render check and the #524 rule.** The executor renders the new head as it does before opening a pull request (design 6.5.2) and checks that the branch differs from its base only at the plan's target path and that the net diff equals the plan ([#524](https://github.com/pkalin/shadewright/issues/524)). Anything else fails closed: no update, the old pull request stays as it is.
+7. **One new commit on the existing branch.** No force-push, no rebase, no new branch. The commit makes the branch's net change against its base **exactly the new plan**: if the new plan touches another path, the same commit restores the old plan's path to its base content. The branch base stays where it was when the executor opened the pull request; `main` moving on is not followed. If `main` later conflicts, that is the existing conflict handling ([#95](https://github.com/pkalin/shadewright/issues/95)), not a rebase here.
+8. **The predecessor's watch and the lock.** While its `status.handoff` is in phase `Intent`, the predecessor's watch of the pull request (`watchPullRequest`) treats a head that is not its own as expected, instead of `HeadMoved`, but only when that commit's parent is the head it recorded and the App made it; any other moved head is `HeadMoved` as today. `Superseded` with reason `HandedOff` is the one `Superseded` that does not mean the pull request is closed: `prMayBeOpen` treats it as possibly open, so no status rule releases a lock on its own account, and `checkHeld` does not look it up (it holds nothing after step 5; the replacement finds the pull request by the chain root branch and the recorded number, and accepts the predecessor's marker in the body until step 6 rewrites it). The lock is never free: the replacement holds it from step 1, and the predecessor lets go only at step 5. Design 6.6.1 and the troubleshooting phase table list `HandedOff`.
+9. **A person can always push.** Anyone with write access can push to the branch themselves, a force-push included, and Shadewright cannot prevent it. The #524 rule is what happens then: the request stops in `NeedsIntervention` (`HeadMoved`, or `BranchDiverged` when the file holds neither value), a handoff in flight is abandoned as above, and the pull request becomes a person's.
 
-### 5. A chain of hints
+If the pull request is closed by a person (not merged) while a hint is in flight, the hint is `Declined` and the existing rejection handling (`ChangeRequestClosed`) stands.
 
-The chain is the replacement lineage of one pull request. The executor copies the accepted hints into the replacement's status at the handoff and counts them there: **at most 3 per chain**, whoever wrote them. A fourth is refused with a reply. Together with the 15 minute cooldown and the daily budget this bounds the work one pull request can cause.
+### 5. The merge gate: a required status check
 
-### 6. The reply in the pull request
+Dismissing approvals is not the control. Branch protection can refuse a dismissal, and one made after the push leaves a window in which an old approval stands. The control is a required status check the executor sets itself:
+
+- **The check.** The executor sets the commit status `shadewright/review` (`POST /repos/{owner}/{repo}/statuses/{sha}`) on every head of a Shadewright pull request. It is `pending` on a new head (a status belongs to a commit, so a new head has none until it is set, and a required check without a status blocks the merge anyway) and `success` only when the latest head has an approving review (`state` `APPROVED` and `commit_id` equal to the head, from `GET .../pulls/{number}/reviews`) by someone who wrote no hint in the chain, compared by user ID. A review of an earlier head never counts. The check is also set on pull requests with no hint, where any approval of the head satisfies it, so a required check never hangs on them.
+- **A requirement on the repository.** The ruleset of the GitOps repository must list `shadewright/review` as a required check. This ADR states it as a requirement; the setup docs repeat it, and the maintainer changes the fleet ruleset. Shadewright cannot verify it (the App has no administration permission): without the rule the check only informs, and hints must not be turned on for that repository.
+- **A new permission.** The App needs `statuses: write`, a fifth permission beside the four of design 8.4. It is planned, amends invariant 6 and design 8.4 and 9, and is registered on the App by the maintainer.
+- **The default.** The person who steered the change through a hint cannot also be its only approver. When a hint author approves, the executor posts a comment in the pull request, once per review, saying the approval does not satisfy `shadewright/review` and why; another reviewer has to approve. There is no setting to turn this off.
+- The repository's own "dismiss stale approvals" rule stays on as a second line (design 8.4).
+
+### 6. A chain of hints
+
+The chain is the replacement lineage of one pull request. At step 5 of the handoff the executor carries the consumed hints (comment ID, digest, author ID) into the replacement's status, where the next handoff counts them: **at most 3 consumed hints per chain**, whoever wrote them, and a reserved hint counts too. The same list is the set of hint authors the merge gate excludes. A fourth hint is refused with a reply. Together with the 15 minute cooldown and the daily budget this bounds the work one pull request can cause.
+
+### 7. The reply in the pull request
 
 For every hint it handled, the executor replies **in the same pull request, to the hint's author** (it quotes the first line of the hint and links the comment), saying what happened:
 
-- **Applied:** the old and the new plan (action, target, value), the diff summary, the new head, and that earlier approvals were dismissed.
+- **Applied:** the old and the new plan (action, target, value), the diff summary, the new head, and that the merge gate needs a new approval by someone who wrote no hint.
 - **Not applied, and why:** the author lacks write permission; the chain or the budget is spent, or the cooldown runs; analysis failed or hit a limit; policy refused the new proposal; the new plan equals the old; the pull request was merged meanwhile; the pull request was closed.
 
 Replies are built from fixed templates and typed fields only (never model text beyond the redacted, already validated plan fields), are redacted like everything the executor writes to Git, and **fail closed**: a reply that cannot be built or posted is retried within bounds, then recorded in status, and never stops a handoff that already happened or applies one that did not. When the new analysis fails or policy refuses, **the pull request keeps the old plan untouched.** A refused author is told once per comment; the reply says no hint was stored.
 
-### 7. Answers to the red team of 2026-11-08
+### 8. Answers to the red team of 2026-11-08
 
-- **Author forgery.** The author comes from the API's comment object, never from the body or a mention; permission comes from a second call to the source system, at acceptance time; bots and Apps are ignored; the stored hint pins the author's numeric ID so a renamed login does not carry the permission over. Only the executor writes `status.hints`, so a custom resource cannot stand in for a comment (the `ReviewerHint` CRD alternative). Proved by tests: an author without write, a bot, a body that names someone else.
+- **Author forgery.** The author comes from the API's comment object, never from the body or a mention; permission comes from a second call to the source system, at acceptance time; bots and Apps are ignored; the stored hint pins the author's numeric ID so a renamed login does not carry the permission over. Only the executor writes `status.hints`, so a custom resource cannot stand in for a comment (the `ReviewerHint` CRD alternative). Proved by tests: an author without write, a bot, a body that names someone else. A forged author cannot be the approval either: the merge gate excludes every hint author.
 - **Prompt injection through the hint.** The hint is redacted, bounded, stored by the executor and fenced as untrusted reviewer input in the same block mechanism as logs and events; the analyzer's tools, catalog and instructions do not depend on it (the test of threat model G4.6 gets a hint case). A hint can at most shape a proposal, which policy, the render check and a person still decide. The injection corpus ([#79](https://github.com/pkalin/shadewright/issues/79)) gains hint cases before this is enabled.
-- **Edits after acceptance.** The analyzer reads the stored text, pinned by digest, not the comment, so an edit changes nothing already accepted; an edited comment (its `updated_at` differs from the pin) is ignored if it was accepted, and a deleted one does not remove the stored hint. To change a hint, post a new comment, which counts toward the 3. An edit before acceptance is simply the text the executor reads when it first sees the comment, with its `updated_at` pinned.
-- **Loops through supersede.** The chain cap of 3, the 15 minute cooldown, the daily analysis budget, ignoring bots (so the executor's replies and the pull request's own events cannot trigger it), the rule that an unchanged plan creates nothing, and the single pull request (no supersede that closes and opens another, so no chain of pull requests) all bound it. A hint is never produced by Shadewright's own output.
+- **Edits after acceptance.** The analyzer reads the stored text, pinned by digest, not the comment, so an edit changes nothing already accepted; an edited comment (its `updated_at` differs from the pin) is ignored if it was accepted, and a deleted one does not remove the stored hint. To change a hint, post a new comment, which counts toward the 3. A hint is consumed once, so a replay of the same hint creates no second replacement. An edit before acceptance is simply the text the executor reads when it first sees the comment, with its `updated_at` pinned.
+- **Loops through supersede.** The chain cap of 3, the 15 minute cooldown, the daily analysis budget, ignoring bots (so the executor's replies and the pull request's own events cannot trigger it), the rule that an unchanged plan creates nothing, and the single pull request (no supersede that closes and opens another, so no chain of pull requests) all bound it. A hint is never produced by Shadewright's own output, and a hint reserved or consumed cannot be cited again.
+- **One person steers and approves.** Added after the review of this ADR: the merge gate of section 5 (threat model H6).
 
-### 8. Amendment of invariant 6
+### 9. Amendments of invariants 5 and 6
 
-Invariant 6 in `AGENTS.md` is amended, marked by this ADR: the executor also **reads comments on the pull requests it opened, reads the commenter's permission in the code host, writes hints into the status of requests** (still the only component that writes request status), **posts replies and dismisses reviews on those pull requests** (within the App's existing permissions), and updates the branch of a pull request it opened by one fast-forward commit. The analyzer **reads** the hints in request status and writes nothing new. No new credential, no new cluster permission for either binary beyond reading what it needs to read, and still never one token for both.
+Invariant 5 in `AGENTS.md` is amended, planned, marked by this ADR: branch names derive from the UID of the first request of a supersede chain (`spec.chainRoot`, or the request's own UID), PR markers from the request UID and the plan digest. The built rule stays as it is until the implementation lands.
+
+Invariant 6 is amended, planned, marked by this ADR: the executor also **reads comments on the pull requests it opened, reads the commenter's permission and the reviews in the code host, writes hints into the status of requests** (still the only component that writes request status), **posts replies, sets the commit status `shadewright/review`** (new permission `statuses: write`) and updates the branch of a pull request it opened by one fast-forward commit. The analyzer **watches** the hints in request status and **reads** the `Analyzed` condition it already writes; it writes nothing new, and the executor learns a refusal from that existing condition. No new credential, no new cluster permission for either binary beyond reading what it needs to read, and still never one token for both.
 
 ## Overview and sequences
 
@@ -108,25 +133,28 @@ sequenceDiagram
     participant S as Request status
     participant A as Analyzer
     R->>G: Comment "/shadewright reanalyze: ..." on the pull request
-    E->>G: List comments (If-None-Match: ETag)
+    E->>G: List comments since the watermark (If-None-Match: ETag)
     G-->>E: New comment, author, type, updated_at
     E->>G: Permission of the author
-    G-->>E: role_name write or higher
+    G-->>E: Base permission write or admin
     E->>E: Redact, bound to 2 KiB, count against 3 per chain
-    E->>S: Pin hint (comment ID, digest, updated_at)
-    A->>S: Read the pinned hint
+    E->>S: Pin hint (Pending: comment ID, digest, updated_at)
+    A->>S: Watch status.hints, read the Pending hint
     A->>A: Analyze again, hint fenced, one analysis of the budget
-    A->>S: Create replacement request (spec.replaces)
-    E->>E: Policy check of the replacement
+    A->>S: Create replacement request (replaces, chainRoot)
+    E->>E: Chain link check, policy check, admission takes the lock
+    E->>S: 1 and 2: replacement Reserved, predecessor Intent, hint Reserved
     E->>E: Render check and branch rule (#524)
-    E->>S: Record handoff in both statuses, move the target lock
-    E->>G: Fast-forward the branch, old head as expected parent, one new commit
-    E->>G: Dismiss approvals given on earlier heads
-    E->>G: Rewrite title and body for the new plan
+    E->>G: Read the pull request: open
+    E->>G: Fast-forward the branch, expected head as parent, one new commit
+    E->>G: Read the pull request again: still open
+    E->>S: 4 and 5: replacement holds the pull request, predecessor Superseded (HandedOff), hint Consumed
+    E->>G: Status shadewright/review pending on the new head, rewrite title and body
     E->>G: Reply to the author: old plan, new plan, diff summary
+    Note over R,G: Success only when someone who wrote no hint approves the new head
 ```
 
-The handoff when the pull request is merged meanwhile: the merged pull request wins. *(planned)*
+The handoff when the pull request is merged or closed meanwhile: a merge does not move the branch ref, so the executor reads the pull request again after the update, and a merged pull request wins. *(planned)*
 
 ```mermaid
 sequenceDiagram
@@ -134,15 +162,15 @@ sequenceDiagram
     participant G as GitHub
     participant E as Executor
     participant S as Request status
-    E->>S: Replacement passed policy and the render check
-    R->>G: Merge the pull request
-    E->>S: Record handoff (old request keeps the lock until the update)
-    E->>G: Fast-forward the branch, old head as expected parent
-    G-->>E: Refused: pull request merged, head moved
-    E->>S: Abort the handoff, replacement ends without taking over
-    E->>G: Read the pull request: merged
-    E->>S: Old request is Merged, lock released as for any merge
-    E->>G: Reply to the author: not applied, merged meanwhile
+    E->>S: Replacement admitted, handoff intent recorded on both
+    E->>G: Read the pull request: open
+    E->>G: Fast-forward the branch, expected head as parent
+    G-->>E: Updated (a push instead would fail here)
+    R->>G: Squash merge the pull request (the ref does not move)
+    E->>G: Read the pull request again: merged
+    E->>S: Abort: replacement Cancelled (HandoffAborted), hint Declined
+    E->>S: Predecessor Merged, lock released as for any merge
+    E->>G: Reply to the author: not applied, the old plan was merged
 ```
 
 A refused hint, from a commenter without write permission. *(planned)*
@@ -157,7 +185,7 @@ sequenceDiagram
     E->>G: List comments (If-None-Match: ETag)
     G-->>E: New comment, author, type User
     E->>G: Permission of the author
-    G-->>E: role_name read or triage
+    G-->>E: Base permission read or none
     E->>E: Refuse: no hint stored, nothing sent to the analyzer
     E->>G: Reply to the author: no write access, not applied
     Note over E,S: Status holds no hint, the budget is untouched, the pull request keeps its plan
@@ -197,11 +225,11 @@ status:
     - source: github
       commentID: "3201234567"
       authorID: "1234567"
-      authorRole: write
+      authorPermission: write
       digest: sha256:9f2c...e41a
       updatedAt: "2026-11-08T10:12:03Z"
       text: "the leak is in the sidecar, not the app container"
-      state: Applied
+      state: Consumed
 ```
 
 What the model sees (after the usual escaping of angle brackets and delimiter look-alikes):
@@ -258,12 +286,12 @@ Slack has no write permission on the repository, so the coordinator's ADR must d
 
 ## Consequences
 
-- A reviewer works in one pull request, in one conversation: the hint, the reply and the new plan are together, and approvals given on an old plan do not carry over.
-- The executor gains work: reading comments, one fast-forward commit, dismissing reviews, replying. Its permissions do not widen beyond the App's existing ones, and the analyzer's do not widen at all (it reads a field of status). Invariant 6 text changes as in section 8.
-- Branch names derive from `spec.chainRoot` instead of the request's own UID (the same thing for a request that replaces nothing). Invariant 5 is amended by this ADR; a restart or a restore without status still finds the pull request, because the name comes from the spec. The audit story lives in the request statuses, the pull request itself (each plan a commit, the hints and the replies) and Events, and the lock check in `targetlock.go` must treat a recorded successor as proof that the lock is still held.
+- A reviewer works in one pull request, in one conversation: the hint, the reply and the new plan are together, and an approval of an old head never satisfies the merge gate.
+- The executor gains work: reading comments and reviews, one fast-forward commit, a commit status, replying. Its one new permission is `statuses: write` on the App, and the GitOps repository must require the check `shadewright/review`; the analyzer's permissions do not widen (it watches a field of status). Invariants 5 and 6 change as in section 9.
+- Branch names derive from `spec.chainRoot` instead of the request's own UID (the same thing for a request that replaces nothing), so a lost status write is recovered by the same name. Invariant 5 is amended by this ADR.
 - The pull request's history shows a plan, then a commit that changes it. Reviewers see what changed; `git log` of the branch is the audit trail. The cost is a branch with more than one commit; the squash merge hides it on `main`.
-- A repository that restricts who may push to `shadewright/*` branches (the #524 recommendation) keeps working: the App is the only pusher.
-- A hint arrives within about a minute, not instantly. The API cost is one conditional list per waiting pull request per minute.
+- A repository that restricts who may push to `shadewright/*` branches (the #524 recommendation) keeps working: the App is the only pusher. Without such a restriction a person with write access can push, force-push included, and the request stops as #524 says.
+- A hint arrives within about a minute, not instantly. The API cost is one conditional comments query per waiting pull request per minute, plus a bounded number of pages and one permission call when there are new comments.
 - The coordinator is named and bounded but not designed. The first non-code-host integration needs its own ADR, and a way for its hints to reach the status without the analyzer or any custom resource creator being able to forge one.
 - The implementation follows in the epic's tasks, each with its tests: permission refusal, edited and duplicate comments, the cap across a chain, injection cases, redaction before storage, and the concurrent merge. The threat model gets rows with them.
 
@@ -274,7 +302,8 @@ Slack has no write permission on the repository, so the coordinator's ADR must d
 - **A `ReviewerHint` custom resource.** A natural Kubernetes shape. Rejected: anyone who can create custom resources in the operator namespace, including a compromised analyzer, could forge a hint and bypass the code host's permission check. The status written only by the executor keeps the check in the one component that can make it.
 - **A coordinator for GitHub too.** One place for all integrations. Rejected: the pull request is the executor's own object, and a second component with a second GitHub credential on the same repository widens what a compromise reaches and needs a channel for the executor to hand the pull request over.
 - **Webhooks.** Instant. Rejected for now: an inbound endpoint with a shared secret, exposed from the cluster, to save about a minute. Polling already exists and costs one conditional request per pull request. Out of scope of the epic; it could be added behind `FeedbackSource` later.
-- **Rely on the repository's dismiss-stale-approvals setting.** Rejected: a repository without the setting would keep an approval for a plan the approver never saw. The executor dismisses them itself; the setting stays as a second line (design 8.4).
+- **Dismiss earlier approvals as the control.** Rejected: branch protection can refuse a dismissal, and one made after the push leaves a window. A required status check set on every head has no window and also keeps a hint author from being the approver (section 5). The repository's dismiss-stale setting stays as a second line (design 8.4).
+- **Rely on the repository's dismiss-stale-approvals setting alone.** Rejected: a repository without it would keep an approval for a plan the approver never saw.
 - **Rebase the branch on the moved `main`.** Rejected: it rewrites history and makes a conflict the executor's problem; the existing conflict handling stays.
 
 ## Amendments

@@ -21,6 +21,7 @@ kubectl -n shadewright-system logs deploy/shadewright-executor
 | `Denied` | Policy or settings do not allow the plan | No. Fix the cause and apply a request with a new name (the spec is immutable) |
 | `NeedsIntervention` | The executor cannot decide or continue safely; a person must look | No, same as above. Automation for that request has stopped |
 | `Superseded` | The plan went stale before merge and its pull request was closed | No. A new plan is a new request |
+| `Superseded` with reason `HandedOff` (planned, [ADR-0028](adr/0028-reviewer-hints-through-the-pull-request.md)) | A reviewer's hint produced a replacement request, which took over this request's pull request and branch; the pull request is not closed | No. Follow the replacement request, which holds the pull request and the target lock |
 | `Expired` | No pull request was opened within 30 minutes of the policy decision | No |
 | `Pending`, `PolicyChecked`, `PRCreated`, `AwaitingApproval` | Working or waiting for a person | Yes |
 | `Merged` | The pull request was merged. Delivery and verification are **planned** | Ends here |

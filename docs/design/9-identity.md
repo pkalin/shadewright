@@ -12,7 +12,7 @@ The rule for everything below: no PATs, no client secrets, no long-lived API key
 
 In the cluster its ServiceAccount is read-only ([2.2.2](2-architecture.md#222-analyzer-permissions), the full list in [Configuration](../reference/configuration.md)). Of the RemediationPolicies it may only `get` the ones `--action-policies` names, by `resourceNames` (no `list` or `watch`, no rule without a name), so the context can show the model the bounds of the policy that will decide its proposal (3.3, [#493](https://github.com/pkalin/shadewright/issues/493)). Reading a policy decides nothing: the executor reads it again and decides (invariant 1).
 
-<span class="sw-status sw-planned">planned</span> It also reads the reviewer hints the executor stored in request status ([ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)), never the pull request comment itself, and writes nothing new for them: it cannot write request status, so it cannot forge a hint.
+<span class="sw-status sw-planned">planned</span> It also watches the reviewer hints the executor stored in request status ([ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)), never the pull request comment itself, and writes nothing new for them (its replacement request is the create it already has): it cannot write request status, so it cannot forge a hint. The executor learns a refused analysis from the `Analyzed` condition of the Incident, which the analyzer already writes.
 
 **Why.** The analyzer talks to a model and writes records.
 
@@ -29,7 +29,7 @@ In the cluster its ServiceAccount is read-only ([2.2.2](2-architecture.md#222-an
 **The JWT and the token.**
 
 - The JWT is issued 60 seconds in the past and lives 10 minutes in total.
-- The token request names the one repository and the four permissions of section 8.4.
+- The token request names the one repository and the four permissions of section 8.4 (<span class="sw-status sw-planned">planned</span> a fifth, `statuses: write`, for the merge gate of reviewer hints, [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)).
 - The response is refused unless it lists exactly that repository.
 - The token is cached until 5 minutes before it expires, and concurrent callers share one refresh.
 - The token prints as a placeholder, never as its value (`internal/providers/github/auth`).

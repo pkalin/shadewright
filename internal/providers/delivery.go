@@ -19,6 +19,7 @@ package providers
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // DeliveryUnit names the object of a delivery system that applies a source path to the cluster, for
@@ -93,6 +94,36 @@ func (s DeliveryStatus) Outcome(commit string) (DeliveryOutcome, error) {
 		return DeliveryApplied, nil
 	}
 	return DeliveryPending, nil
+}
+
+// Verify is [DeliveryStatus.Outcome] for a target branch that moves on: a commit merged after commit and
+// applied over it carries commit too, so it counts as Applied when ancestry says commit is an ancestor of
+// the applied one. Equal commits need no call to ancestry. Ancestry is asked only when the unit is Ready,
+// Current, reports no failure and applied another commit. When ancestry fails, the outcome is Pending and
+// the error is returned with it, never Applied.
+func (s DeliveryStatus) Verify(ctx context.Context, commit string, ancestry AncestryChecker) (DeliveryOutcome, error) {
+	outcome, err := s.Outcome(commit)
+	if err != nil || outcome != DeliveryPending {
+		return outcome, err
+	}
+	if s.Failed || !s.Ready || !s.Current() || !IsObjectID(s.AppliedCommit) || ancestry == nil {
+		return DeliveryPending, nil
+	}
+	descends, err := ancestry.IsAncestor(ctx, commit, s.AppliedCommit)
+	if err != nil {
+		return DeliveryPending, fmt.Errorf("check that the applied commit descends from the merge commit: %w", err)
+	}
+	if descends {
+		return DeliveryApplied, nil
+	}
+	return DeliveryPending, nil
+}
+
+// AncestryChecker answers whether one commit is in the history of another. A Git host can implement it.
+type AncestryChecker interface {
+	// IsAncestor reports whether ancestor is commit itself or one of its ancestors. Both are full object IDs.
+	// ErrNotFound when the host does not know one of them.
+	IsAncestor(ctx context.Context, ancestor, commit string) (bool, error)
 }
 
 // DeliveryVerifier reports whether a delivery system has applied a revision.

@@ -627,3 +627,26 @@ func (g *Git) ChangeRequests() []providers.ChangeRequest {
 	}
 	return out
 }
+
+var _ providers.AncestryChecker = (*Git)(nil)
+
+// IsAncestor reports whether ancestor is commit or one of its ancestors. ErrNotFound when either commit is
+// unknown.
+func (g *Git) IsAncestor(ctx context.Context, ancestor, commit string) (bool, error) {
+	if err := g.before("IsAncestor"); err != nil {
+		return false, err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, c := range []string{ancestor, commit} {
+		if _, ok := g.commits[c]; !ok {
+			return false, fmt.Errorf("commit %q: %w", c, providers.ErrNotFound)
+		}
+	}
+	for c := commit; c != ""; c = g.commits[c].parent {
+		if c == ancestor {
+			return true, nil
+		}
+	}
+	return false, nil
+}

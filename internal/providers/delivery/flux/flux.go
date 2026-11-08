@@ -18,7 +18,9 @@ limitations under the License.
 // reads one Kustomization or HelmRelease with get, as an unstructured object, and reports its status through
 // internal/fluxstatus, the same reading the source mapping uses before a write: whether it is Ready for its
 // current generation, the generation it observed, the commit its applied and attempted revisions name, and
-// whether it reports a failure. [providers.DeliveryStatus.Outcome] then compares that with the merge commit.
+// whether it reports a failure. [Verifier.Verify] then compares that with the merge commit
+// ([providers.DeliveryStatus.Verify]): the merge commit itself, or a later commit of the target branch whose
+// history holds it, which the Git host's [providers.AncestryChecker] answers, since Flux objects cannot.
 //
 // Only a Kustomization whose source is a GitRepository names a commit: Flux writes its revisions as
 // <branch>@sha1:<commit>. A HelmRelease's revisions are chart versions, which name no commit, so its
@@ -65,17 +67,32 @@ var kinds = map[string]schema.GroupVersionKind{
 
 // Verifier reads Flux delivery units.
 type Verifier struct {
-	reader client.Reader
+	reader   client.Reader
+	ancestry providers.AncestryChecker
 }
 
 var _ providers.DeliveryVerifier = (*Verifier)(nil)
 
-// New returns a Verifier that reads with reader, for example the executor's API reader.
-func New(reader client.Reader) (*Verifier, error) {
-	if reader == nil {
-		return nil, fmt.Errorf("reader is required: %w", providers.ErrInvalidConfig)
+// New returns a Verifier that reads with reader, for example the executor's API reader, and asks ancestry,
+// the Git host of the repository the units deliver, whether an applied commit descends from the merge commit.
+func New(reader client.Reader, ancestry providers.AncestryChecker) (*Verifier, error) {
+	if reader == nil || ancestry == nil {
+		return nil, fmt.Errorf("reader and ancestry checker are required: %w", providers.ErrInvalidConfig)
 	}
-	return &Verifier{reader: reader}, nil
+	return &Verifier{reader: reader, ancestry: ancestry}, nil
+}
+
+// Verify reads the unit and says whether it delivered mergeCommit: the outcome, the status it was decided
+// on, and an error when the unit could not be read (no status, no outcome), the commit is not a full object
+// ID, or the ancestry check failed (Pending with the status).
+func (v *Verifier) Verify(ctx context.Context, unit providers.DeliveryUnit, mergeCommit string) (
+	providers.DeliveryOutcome, providers.DeliveryStatus, error) {
+	st, err := v.Status(ctx, unit)
+	if err != nil {
+		return "", providers.DeliveryStatus{}, err
+	}
+	outcome, err := st.Verify(ctx, mergeCommit, v.ancestry)
+	return outcome, st, err
 }
 
 // Status reads the unit and reports its status.

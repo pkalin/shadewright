@@ -40,6 +40,7 @@ const (
 	revNew = "1f3c5e7a9b2d4f6081a3c5e7f9b1d3f5a7c9e1b3"
 
 	kustomization = "Kustomization"
+	buildFailed   = "kustomization-build-failed.json"
 	helmRelease   = "HelmRelease"
 )
 
@@ -91,7 +92,7 @@ func unitOf(u *unstructured.Unstructured) providers.DeliveryUnit {
 
 func status(t *testing.T, u *unstructured.Unstructured) providers.DeliveryStatus {
 	t.Helper()
-	v, err := flux.New(&reader{obj: u})
+	v, err := flux.New(&reader{obj: u}, ancestry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +126,7 @@ func TestRecordedObjects(t *testing.T) {
 		// Pending: a new generation not observed yet, health checks of the new commit running.
 		{"kustomization-reconciling.json", providers.DeliveryPending, providers.DeliveryPending, false, 2, 1},
 		// Failed: the build of the new commit failed; the applied revision names it too, but it is not Ready.
-		{"kustomization-build-failed.json", providers.DeliveryPending, providers.DeliveryFailed, false, 3, 3},
+		{buildFailed, providers.DeliveryPending, providers.DeliveryFailed, false, 3, 3},
 		// Failed: the dry-run of the new commit failed; the old one stays applied, but the unit reports a
 		// failure, so it is not Applied either.
 		{"kustomization-invalid-manifest.json", providers.DeliveryPending, providers.DeliveryFailed, false, 1, 1},
@@ -219,7 +220,7 @@ func TestNeverAppliedOnBadInput(t *testing.T) {
 
 // TestHealthCheckCanceledIsNoFailure checks that a cancelled health check of the commit is still pending.
 func TestHealthCheckCanceledIsNoFailure(t *testing.T) {
-	u := recorded(t, "kustomization-build-failed.json")
+	u := recorded(t, buildFailed)
 	u.Object["status"].(map[string]any)["conditions"].([]any)[0].(map[string]any)["reason"] = "HealthCheckCanceled"
 	st := status(t, u)
 	if st.Failed {
@@ -242,7 +243,7 @@ func TestMessageIsBounded(t *testing.T) {
 
 func TestInvalidUnitIsNotRead(t *testing.T) {
 	r := &reader{obj: recorded(t, "kustomization-ready.json")}
-	v, err := flux.New(r)
+	v, err := flux.New(r, ancestry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +284,7 @@ func TestReadErrors(t *testing.T) {
 		{"deadline", context.DeadlineExceeded, context.DeadlineExceeded, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			v, err := flux.New(&reader{err: tc.err})
+			v, err := flux.New(&reader{err: tc.err}, ancestry{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -303,7 +304,7 @@ func TestReadErrors(t *testing.T) {
 
 func TestCancelledContext(t *testing.T) {
 	r := &reader{obj: recorded(t, "kustomization-ready.json")}
-	v, err := flux.New(r)
+	v, err := flux.New(r, ancestry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +329,7 @@ func (o *otherObject) Get(ctx context.Context, key client.ObjectKey, obj client.
 
 func TestAnotherObjectIsNotReported(t *testing.T) {
 	u := recorded(t, "kustomization-ready.json")
-	v, err := flux.New(&otherObject{reader{obj: u}})
+	v, err := flux.New(&otherObject{reader{obj: u}}, ancestry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,8 +340,100 @@ func TestAnotherObjectIsNotReported(t *testing.T) {
 }
 
 func TestNewNeedsAReader(t *testing.T) {
-	if _, err := flux.New(nil); !errors.Is(err, providers.ErrInvalidConfig) {
-		t.Errorf("New(nil) error = %v, want ErrInvalidConfig", err)
+	if _, err := flux.New(nil, ancestry{}); !errors.Is(err, providers.ErrInvalidConfig) {
+		t.Errorf("New(nil, ...) error = %v, want ErrInvalidConfig", err)
+	}
+	if _, err := flux.New(&reader{}, nil); !errors.Is(err, providers.ErrInvalidConfig) {
+		t.Errorf("New(..., nil) error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+// ancestry answers from a set of (ancestor, commit) pairs, or fails with err. It records the calls.
+type ancestry struct {
+	pairs map[[2]string]bool
+	err   error
+	calls *int
+}
+
+func (a ancestry) IsAncestor(_ context.Context, ancestor, commit string) (bool, error) {
+	if a.calls != nil {
+		*a.calls++
+	}
+	if a.err != nil {
+		return false, a.err
+	}
+	return ancestor == commit || a.pairs[[2]string{ancestor, commit}], nil
+}
+
+// TestVerifyLaterCommit checks a Kustomization that applied the old commit, Ready, against a merge commit
+// that is not the applied one: Applied only when the Git host says the applied commit descends from it.
+func TestVerifyLaterCommit(t *testing.T) {
+	merge := strings.Repeat("9", 40)
+	for _, tc := range []struct {
+		name  string
+		anc   ancestry
+		want  providers.DeliveryOutcome
+		error bool
+	}{
+		{"descendant applied", ancestry{pairs: map[[2]string]bool{{merge, revOld}: true}}, providers.DeliveryApplied, false},
+		{"unrelated commit applied", ancestry{}, providers.DeliveryPending, false},
+		{"ancestry unknown", ancestry{err: &providers.RetryableError{Err: errors.New("compare failed")}},
+			providers.DeliveryPending, true},
+		{"commit unknown to the host", ancestry{err: providers.ErrNotFound}, providers.DeliveryPending, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			tc.anc.calls = &calls
+			u := recorded(t, "kustomization-ready.json")
+			v, err := flux.New(&reader{obj: u}, tc.anc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, st, err := v.Verify(t.Context(), unitOf(u), merge)
+			if got != tc.want || (err != nil) != tc.error || calls != 1 {
+				t.Errorf("Verify = %s, %v after %d ancestry calls; want %s, error %v, one call", got, err, calls, tc.want, tc.error)
+			}
+			if st.AppliedCommit != revOld {
+				t.Errorf("status = %+v", st)
+			}
+		})
+	}
+}
+
+// TestVerifyAsksNoAncestryWhenNotNeeded checks the fast path (the merge commit itself applied) and the units
+// that cannot be Applied whatever the history says.
+func TestVerifyAsksNoAncestryWhenNotNeeded(t *testing.T) {
+	for _, tc := range []struct {
+		file, commit string
+		want         providers.DeliveryOutcome
+	}{
+		{"kustomization-ready.json", revOld, providers.DeliveryApplied},
+		{"kustomization-reconciling.json", revNew, providers.DeliveryPending},
+		{buildFailed, strings.Repeat("9", 40), providers.DeliveryPending},
+		{buildFailed, revNew, providers.DeliveryFailed},
+		{"helmrelease-upgrade-failed.json", revNew, providers.DeliveryPending},
+	} {
+		calls := 0
+		u := recorded(t, tc.file)
+		v, err := flux.New(&reader{obj: u}, ancestry{err: errors.New("must not be asked"), calls: &calls})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _, err := v.Verify(t.Context(), unitOf(u), tc.commit)
+		if got != tc.want || err != nil || calls != 0 {
+			t.Errorf("%s: Verify = %s, %v after %d ancestry calls; want %s and none", tc.file, got, err, calls, tc.want)
+		}
+	}
+}
+
+func TestVerifyReadError(t *testing.T) {
+	v, err := flux.New(&reader{err: apierrors.NewNotFound(schema.GroupResource{}, "x")}, ancestry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, st, err := v.Verify(t.Context(), providers.DeliveryUnit{Kind: kustomization, Namespace: "flux-system", Name: "apps"}, revOld)
+	if !errors.Is(err, providers.ErrNotFound) || got != "" || st != (providers.DeliveryStatus{}) {
+		t.Errorf("Verify = %q, %+v, %v", got, st, err)
 	}
 }
 

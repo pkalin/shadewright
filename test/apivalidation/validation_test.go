@@ -40,6 +40,9 @@ import (
 
 var seq int
 
+// testHeadSHA is the head commit of the pull request the status specs record.
+const testHeadSHA = "0123456789abcdef0123456789abcdef01234567"
+
 const githubURLMsg = "a GitHub repository URL must be https://github.com/<owner>/<repo> in lower case, without .git"
 
 // unique returns a fresh object name, so specs never collide.
@@ -118,7 +121,7 @@ var _ = Describe("RemediationRequest", func() {
 				Expect(k8sClient.Create(ctx, rr)).To(Succeed())
 				rr.Status.PullRequest = &v1alpha1.PullRequestStatus{
 					Number: 1, URL: "https://github.com/example/fleet/pull/1",
-					HeadSHA: "0123456789abcdef0123456789abcdef01234567",
+					HeadSHA: testHeadSHA,
 				}
 				field.set(rr.Status.PullRequest, sha)
 				err := k8sClient.Status().Update(ctx, rr)
@@ -140,6 +143,37 @@ var _ = Describe("RemediationRequest", func() {
 			Entry("a branch name", "refs/heads/main-0123456789abcdef012345678", false),
 		)
 	}
+
+	It("keeps mergeCommitSHA and appliedObservedAt once set", func() {
+		const merge = "89abcdef0123456789abcdef0123456789abcdef"
+		rr := fx.RemediationRequest("default", unique("rr"))
+		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+		rr.Status.PullRequest = &v1alpha1.PullRequestStatus{
+			Number: 1, URL: "https://github.com/example/fleet/pull/1",
+			HeadSHA: testHeadSHA,
+		}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		applied := metav1.NewTime(time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC))
+		rr.Status.PullRequest.MergeCommitSHA = merge
+		rr.Status.PullRequest.AppliedObservedAt = &applied
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the first write of both is allowed")
+
+		earlier := metav1.NewTime(applied.Add(-time.Hour))
+		for name, change := range map[string]func(*v1alpha1.PullRequestStatus){
+			"mergeCommitSHA changed":    func(p *v1alpha1.PullRequestStatus) { p.MergeCommitSHA = strings.Repeat("c", 40) },
+			"mergeCommitSHA removed":    func(p *v1alpha1.PullRequestStatus) { p.MergeCommitSHA = "" },
+			"appliedObservedAt moved":   func(p *v1alpha1.PullRequestStatus) { p.AppliedObservedAt = &earlier },
+			"appliedObservedAt removed": func(p *v1alpha1.PullRequestStatus) { p.AppliedObservedAt = nil },
+		} {
+			got := &v1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+			change(got.Status.PullRequest)
+			err := k8sClient.Status().Update(ctx, got)
+			Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+			Expect(err.Error()).To(ContainSubstring("is set once and never changed"), name)
+		}
+	})
 
 	It("accepts the fixture and fills in safe defaults", func() {
 		rr := fx.RemediationRequest("default", unique("rr"))

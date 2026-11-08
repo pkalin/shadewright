@@ -236,6 +236,8 @@ const (
 )
 
 // PullRequestStatus records the pull request that carries the plan.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.mergeCommitSHA) || (has(self.mergeCommitSHA) && self.mergeCommitSHA == oldSelf.mergeCommitSHA)",message="mergeCommitSHA is set once and never changed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.appliedObservedAt) || (has(self.appliedObservedAt) && self.appliedObservedAt == oldSelf.appliedObservedAt)",message="appliedObservedAt is set once and never changed"
 type PullRequestStatus struct {
 	// number of the pull request.
 	// +kubebuilder:validation:Minimum=1
@@ -270,6 +272,13 @@ type PullRequestStatus struct {
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
 	// +optional
 	MergeCommitSHA string `json:"mergeCommitSHA,omitempty"`
+
+	// appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later
+	// commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a
+	// deadline measured from it (the rollout check, #532) cannot be pushed back. Not written yet: the delivery
+	// check after the merge is planned.
+	// +optional
+	AppliedObservedAt *metav1.Time `json:"appliedObservedAt,omitempty"`
 }
 
 // PlanRepository identifies the repository a plan was made for: the URL and provider installation taken from

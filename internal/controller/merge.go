@@ -17,6 +17,10 @@ limitations under the License.
 package controller
 
 import (
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -31,4 +35,21 @@ func recordMerge(rr *remediationv1alpha1.RemediationRequest, cr providers.Change
 		return
 	}
 	rr.Status.PullRequest.MergeCommitSHA = cr.MergeCommit
+}
+
+// recordApplied writes the time the executor first saw the merge commit applied (status.pullRequest
+// .appliedObservedAt) and reports whether it changed the status. It writes only once, for a request with a
+// recorded merge commit; a time already recorded is kept, never moved, whatever now is. The time is cut to
+// whole seconds, as the API stores it, so the value read back is the one written.
+//
+// Planned use: the delivery check after the merge calls it when the outcome is first Applied, and the rollout
+// check of #532 measures its deadline from the time recorded. Nothing calls it yet.
+func recordApplied(rr *remediationv1alpha1.RemediationRequest, now time.Time) bool {
+	pr := rr.Status.PullRequest
+	if pr == nil || pr.MergeCommitSHA == "" || pr.AppliedObservedAt != nil || now.IsZero() {
+		return false
+	}
+	t := metav1.NewTime(now.Truncate(time.Second))
+	pr.AppliedObservedAt = &t
+	return true
 }

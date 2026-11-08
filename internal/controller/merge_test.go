@@ -19,6 +19,7 @@ package controller
 import (
 	"strings"
 	"testing"
+	"time"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -56,5 +57,34 @@ func TestRecordMerge(t *testing.T) {
 				t.Errorf("MergeCommitSHA = %q, want %q", got, tc.wantPR)
 			}
 		})
+	}
+}
+
+func TestRecordApplied(t *testing.T) {
+	merge := strings.Repeat("ab", 20)
+	first := time.Date(2026, 11, 8, 10, 0, 0, 500, time.UTC)
+	rr := &remediationv1alpha1.RemediationRequest{}
+	if recordApplied(rr, first) {
+		t.Fatal("recorded without a pull request")
+	}
+	rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: 1}
+	if recordApplied(rr, first) || rr.Status.PullRequest.AppliedObservedAt != nil {
+		t.Fatal("recorded without a merge commit")
+	}
+	rr.Status.PullRequest.MergeCommitSHA = merge
+	if recordApplied(rr, time.Time{}) || rr.Status.PullRequest.AppliedObservedAt != nil {
+		t.Fatal("recorded a zero time")
+	}
+	if !recordApplied(rr, first) {
+		t.Fatal("not recorded")
+	}
+	want := first.Truncate(time.Second)
+	if got := rr.Status.PullRequest.AppliedObservedAt; got == nil || !got.Time.Equal(want) {
+		t.Fatalf("AppliedObservedAt = %v, want %v", got, want)
+	}
+	for _, later := range []time.Time{first.Add(time.Hour), first.Add(-time.Hour)} {
+		if recordApplied(rr, later) || !rr.Status.PullRequest.AppliedObservedAt.Time.Equal(want) {
+			t.Errorf("recordApplied(%v) moved the time to %v", later, rr.Status.PullRequest.AppliedObservedAt)
+		}
 	}
 }

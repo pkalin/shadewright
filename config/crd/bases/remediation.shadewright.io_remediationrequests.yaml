@@ -469,6 +469,14 @@ spec:
               pullRequest:
                 description: pullRequest is set once the pull request exists.
                 properties:
+                  appliedObservedAt:
+                    description: |-
+                      appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later
+                      commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a
+                      deadline measured from it (the rollout check, #532) cannot be pushed back. Not written yet: the delivery
+                      check after the merge is planned.
+                    format: date-time
+                    type: string
                   headSHA:
                     description: headSHA is the commit Shadewright pushed. Any other
                       head stops automation.
@@ -507,6 +515,13 @@ spec:
                 - number
                 - url
                 type: object
+                x-kubernetes-validations:
+                - message: mergeCommitSHA is set once and never changed
+                  rule: '!has(oldSelf.mergeCommitSHA) || (has(self.mergeCommitSHA)
+                    && self.mergeCommitSHA == oldSelf.mergeCommitSHA)'
+                - message: appliedObservedAt is set once and never changed
+                  rule: '!has(oldSelf.appliedObservedAt) || (has(self.appliedObservedAt)
+                    && self.appliedObservedAt == oldSelf.appliedObservedAt)'
               source:
                 description: source is where the change is made, resolved by the controller
                   before the policy check.

@@ -43,7 +43,7 @@ Still open:
    - Replace the bytes of one scalar found with `go.yaml.in/yaml/v3`, then check that only that value changed.
    - A spike showed that `kyaml` reformats the file and changes aliased values.
    - Kept as an item so that the numbers do not change (row above).
-3. **Model choice.** Benchmark on the scenario set at stage 1: a small model for triage and a stronger one for escalation.
+3. **Model choice.** Benchmark on the scenario set at stage 1: a small model for triage and a stronger one for escalation. Proposed in [ADR-0027](../adr/0027-default-models-for-triage-and-escalation.md): triage `gpt-5.4-mini-2026-03-17` provisional, no escalation default, both settled by epic [#503](https://github.com/pkalin/shadewright/issues/503) before v0.4.0.
 4. **Teams.** Whether the maintainer's Microsoft account can receive Teams Workflows webhooks. If not, GitHub issues stay the only notifier for now.
 5. **Required checks in policy.** Whether a policy should name verification checks a request cannot drop, beyond the ones each action always runs.
 6. **Scenario switch.** Decided on 2026-11-03: [ADR-0022](../adr/0022-scenario-switch-and-clusters.md) is accepted (row above). Kept as an item so that the numbers below do not change.

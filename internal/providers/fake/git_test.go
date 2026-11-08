@@ -380,6 +380,38 @@ func TestGitCloseAndMerge(t *testing.T) {
 	}
 }
 
+func TestGitCheckMergedAndComment(t *testing.T) {
+	g, head := newRepo(t)
+	ctx := context.Background()
+	c, cr := mustOpen(t, g, head)
+	if err := g.CommentChangeRequest(ctx, cr.Number, "note"); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.Comments(cr.Number); len(got) != 1 || got[0] != "note" {
+		t.Errorf("comments = %v", got)
+	}
+	if _, err := g.Push(base, "other.yaml", []byte("a: 1\n")); err != nil {
+		t.Fatal(err)
+	}
+	mc, err := g.MergeWithCommit(cr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The head is now an ancestor of the target; judged against its own parent it is still the one change.
+	if got, err := g.CheckBranch(ctx, c, path); err != nil || got != providers.BranchAtTarget {
+		t.Errorf("CheckBranch() = %v, %v", got, err)
+	}
+	if got, parent, err := g.CheckMerged(ctx, c, mc, path); err != nil || got != providers.BranchOneChange || parent != head {
+		t.Errorf("CheckMerged() = %v, %q, %v, want the one change on %s", got, parent, err, head)
+	}
+	if got, _, err := g.CheckMerged(ctx, c, c, path); err != nil || got != providers.BranchForeign {
+		t.Errorf("CheckMerged() of the head itself = %v, %v", got, err)
+	}
+	if err := g.CommentChangeRequest(ctx, cr.Number, "late"); !providers.IsConflict(err) {
+		t.Errorf("comment on a merged change request: %v", err)
+	}
+}
+
 func TestGitMergeConflict(t *testing.T) {
 	g, head := newRepo(t)
 	_, cr := mustOpen(t, g, head)

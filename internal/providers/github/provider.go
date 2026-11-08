@@ -45,6 +45,7 @@ const (
 	opOpenCR       = "GitHub open pull request"
 	opFindCR       = "GitHub find pull request"
 	opCloseCR      = "GitHub close pull request"
+	opCommentCR    = "GitHub comment on pull request"
 	opAutoMerge    = "GitHub auto-merge"
 )
 
@@ -404,6 +405,11 @@ func (p *Provider) isOnTarget(ctx context.Context, op, commit string) (bool, err
 	if err != nil {
 		return false, err
 	}
+	return p.isAncestor(ctx, op, head, commit)
+}
+
+// isAncestor reports whether commit is head or an ancestor of it. An error means it could not be found out.
+func (p *Provider) isAncestor(ctx context.Context, op, head, commit string) (bool, error) {
 	if head == commit {
 		return true, nil
 	}
@@ -453,27 +459,14 @@ func (p *Provider) CheckBranch(ctx context.Context, commit, path string) (provid
 	case on:
 		return providers.BranchAtTarget, nil
 	}
-	r, err := p.do(ctx, call{op: opCheckBranch, method: http.MethodGet, path: "/git/commits/" + commit})
+	parents, err := p.parents(ctx, commit)
 	if err != nil {
 		return 0, err
 	}
-	if !r.ok() {
-		return 0, statusError(opCheckBranch, r.status)
-	}
-	var c commitJSON
-	if err := decode(opCheckBranch, r, &c); err != nil {
-		return 0, err
-	}
-	if c.SHA != commit {
-		return 0, errors.New(opCheckBranch + ": GitHub returned an unexpected commit")
-	}
-	if len(c.Parents) != 1 {
+	if len(parents) != 1 {
 		return providers.BranchForeign, nil
 	}
-	parent := c.Parents[0].SHA
-	if !validSHA(parent) {
-		return 0, errors.New(opCheckBranch + ": GitHub returned an unexpected commit")
-	}
+	parent := parents[0]
 	switch on, err := p.isOnTarget(ctx, opCheckBranch, parent); {
 	case err != nil:
 		return 0, err
@@ -481,6 +474,79 @@ func (p *Provider) CheckBranch(ctx context.Context, commit, path string) (provid
 		return providers.BranchForeign, nil
 	}
 	return p.changedOnly(ctx, commit, parent, strings.Split(path, "/"))
+}
+
+// parents reads the parents of commit, each a full SHA.
+func (p *Provider) parents(ctx context.Context, commit string) ([]string, error) {
+	r, err := p.do(ctx, call{op: opCheckBranch, method: http.MethodGet, path: "/git/commits/" + commit})
+	if err != nil {
+		return nil, err
+	}
+	if !r.ok() {
+		return nil, statusError(opCheckBranch, r.status)
+	}
+	var c commitJSON
+	if err := decode(opCheckBranch, r, &c); err != nil {
+		return nil, err
+	}
+	if c.SHA != commit {
+		return nil, errors.New(opCheckBranch + ": GitHub returned an unexpected commit")
+	}
+	out := make([]string, 0, len(c.Parents))
+	for _, pc := range c.Parents {
+		if !validSHA(pc.SHA) {
+			return nil, errors.New(opCheckBranch + ": GitHub returned an unexpected commit")
+		}
+		out = append(out, pc.SHA)
+	}
+	return out, nil
+}
+
+// CheckMerged reports what head carried over the target branch before mergeCommit merged it
+// (providers.GitProvider.CheckMerged): mergeCommit must be on the target branch and not head itself, head must
+// have one parent that is the first parent of mergeCommit or an ancestor of it, and the trees of head and that
+// parent are compared as CheckBranch compares them.
+func (p *Provider) CheckMerged(ctx context.Context, head, mergeCommit, path string) (providers.BranchState, string, error) {
+	switch {
+	case !validSHA(head) || !validSHA(mergeCommit):
+		return 0, "", errors.New(opCheckBranch + ": commit is not a full SHA")
+	case !validPath(path):
+		return 0, "", errors.New(opCheckBranch + ": path is invalid")
+	case head == mergeCommit:
+		// A head taken into the target branch as it is says nothing about what was on it before.
+		return providers.BranchForeign, "", nil
+	}
+	ctx, cancel := p.withTimeout(ctx)
+	defer cancel()
+	switch on, err := p.isOnTarget(ctx, opCheckBranch, mergeCommit); {
+	case err != nil:
+		return 0, "", err
+	case !on:
+		return providers.BranchForeign, "", nil
+	}
+	merged, err := p.parents(ctx, mergeCommit)
+	if err != nil {
+		return 0, "", err
+	}
+	parents, err := p.parents(ctx, head)
+	if err != nil {
+		return 0, "", err
+	}
+	if len(merged) == 0 || len(parents) != 1 {
+		return providers.BranchForeign, "", nil
+	}
+	parent := parents[0]
+	switch before, err := p.isAncestor(ctx, opCheckBranch, merged[0], parent); {
+	case err != nil:
+		return 0, "", err
+	case !before:
+		return providers.BranchForeign, "", nil
+	}
+	state, err := p.changedOnly(ctx, head, parent, strings.Split(path, "/"))
+	if err != nil || state != providers.BranchOneChange {
+		return state, "", err
+	}
+	return state, parent, nil
 }
 
 // changedOnly compares the trees of commit and parent along the path segs, from the root trees down.
@@ -1031,24 +1097,61 @@ func (p *Provider) FindChangeRequest(ctx context.Context, headBranch string) (pr
 }
 
 func (p *Provider) pull(ctx context.Context, number int64) (pullJSON, error) {
-	r, err := p.do(ctx, call{op: opCloseCR, method: http.MethodGet, path: "/pulls/" + strconv.FormatInt(number, 10)})
+	return p.pullFor(ctx, opCloseCR, number)
+}
+
+// pullFor reads pull request number for op and refuses one that is not ours.
+func (p *Provider) pullFor(ctx context.Context, op string, number int64) (pullJSON, error) {
+	r, err := p.do(ctx, call{op: op, method: http.MethodGet, path: "/pulls/" + strconv.FormatInt(number, 10)})
 	if err != nil {
 		return pullJSON{}, err
 	}
 	if !r.ok() {
-		return pullJSON{}, statusError(opCloseCR, r.status)
+		return pullJSON{}, statusError(op, r.status)
 	}
 	var pr pullJSON
-	if err := decode(opCloseCR, r, &pr); err != nil {
+	if err := decode(op, r, &pr); err != nil {
 		return pullJSON{}, err
 	}
 	if pr.Number != number {
-		return pullJSON{}, errors.New(opCloseCR + ": GitHub returned an unexpected pull request")
+		return pullJSON{}, errors.New(op + ": GitHub returned an unexpected pull request")
 	}
 	if !p.ours(pr) {
-		return pullJSON{}, errors.New(opCloseCR + ": not a Shadewright pull request to the target branch")
+		return pullJSON{}, errors.New(op + ": not a Shadewright pull request to the target branch")
 	}
 	return pr, nil
+}
+
+// CommentChangeRequest adds one comment to an open pull request from a shadewright/ branch to the target
+// branch. A closed or merged one is ErrConflict; other pull requests are refused. The comment is not retried
+// once GitHub may have taken it, so a lost answer leaves at most one comment.
+func (p *Provider) CommentChangeRequest(ctx context.Context, number int64, body string) error {
+	switch {
+	case number < 1:
+		return errors.New(opCommentCR + ": number must be positive")
+	case strings.TrimSpace(body) == "" || len(body) > maxMessageBytes || !utf8.ValidString(body):
+		return errors.New(opCommentCR + ": comment is empty, too long or not UTF-8")
+	}
+	ctx, cancel := p.withTimeout(ctx)
+	defer cancel()
+	pr, err := p.pullFor(ctx, opCommentCR, number)
+	if err != nil {
+		return err
+	}
+	if pr.MergedAt != nil || pr.State != stateOpen {
+		return fmt.Errorf("%s: pull request is not open: %w", opCommentCR, providers.ErrConflict)
+	}
+	r, err := p.do(ctx, call{
+		op: opCommentCR, method: http.MethodPost, path: "/issues/" + strconv.FormatInt(number, 10) + "/comments",
+		body: map[string]string{"body": body},
+	})
+	if err != nil {
+		return err
+	}
+	if r.status != http.StatusCreated {
+		return statusError(opCommentCR, r.status)
+	}
+	return nil
 }
 
 // closeState is nil for a closed pull request, ErrConflict for a merged one, and false for an open one.

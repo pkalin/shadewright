@@ -1065,6 +1065,92 @@ func TestCheckBranchRefusesBadInput(t *testing.T) {
 	}
 }
 
+func TestCheckMerged(t *testing.T) {
+	root, apps := mustRead(t, "tree_root.json"), mustRead(t, "tree_apps.json")
+	newRoot := strings.ReplaceAll(root, shaApps, shaNewTree)
+	newApps := strings.ReplaceAll(apps, shaDeploy, shaNewBlob)
+	// shaBase, the target head, merged shaCommit; its first parent is shaOld.
+	merge := func(parents ...string) step {
+		ps := make([]string, 0, len(parents))
+		for _, p := range parents {
+			ps = append(ps, `{"sha":"`+p+`"}`)
+		}
+		return raw("/git/commits/"+shaBase, `{"sha":"`+shaBase+`","parents":[`+strings.Join(ps, ",")+`]}`)
+	}
+	// trees compares shaCommit with its parent shaOld.
+	trees := func(appsA string) []step {
+		return []step{raw("/git/trees/"+shaCommit, newRoot), raw("/git/trees/"+shaOld, root),
+			raw("/git/trees/"+shaNewTree, appsA), raw("/git/trees/"+shaApps, apps)}
+	}
+	const elsewhere = "8888888888888888888888888888888888888888"
+	diverged := func(base, head string) step {
+		s := get("/compare/"+base+"..."+head, "compare_diverged.json")
+		s.query = perPageOne
+		return s
+	}
+	for name, c := range map[string]struct {
+		mergeCommit string
+		steps       []step
+		want        providers.BranchState
+		parent      string
+	}{
+		// A merge commit takes head into the target branch, so head is now an ancestor of it; judged against its
+		// own parent it is still the one change.
+		"merged with a merge commit": {shaBase, slices.Concat([]step{get(mainRef, "ref_main.json"),
+			merge(shaOld, shaCommit), raw("/git/commits/"+shaCommit, commitBody(shaOld))}, trees(newApps)),
+			providers.BranchOneChange, shaOld},
+		"squashed": {shaBase, slices.Concat([]step{get(mainRef, "ref_main.json"), merge(shaOld),
+			raw("/git/commits/"+shaCommit, commitBody(shaOld))}, trees(newApps)), providers.BranchOneChange, shaOld},
+		"another file beside it": {shaBase, slices.Concat([]step{get(mainRef, "ref_main.json"), merge(shaOld, shaCommit),
+			raw("/git/commits/"+shaCommit, commitBody(shaOld))}, trees(strings.ReplaceAll(newApps, shaRun, elsewhere))),
+			providers.BranchForeign, ""},
+		"head is the merge commit": {shaCommit, nil, providers.BranchForeign, ""},
+		"merge commit off the target": {shaOld, []step{get(mainRef, "ref_main.json"), diverged(shaBase, shaOld)},
+			providers.BranchForeign, ""},
+		"head with two parents": {shaBase, []step{get(mainRef, "ref_main.json"), merge(shaOld, shaCommit),
+			raw("/git/commits/"+shaCommit, commitBody(shaOld, elsewhere))}, providers.BranchForeign, ""},
+		"parent after the merge base": {shaBase, []step{get(mainRef, "ref_main.json"), merge(shaOld, shaCommit),
+			raw("/git/commits/"+shaCommit, commitBody(elsewhere)), diverged(shaOld, elsewhere)}, providers.BranchForeign, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, c.steps...)
+			got, parent, err := h.p.CheckMerged(ctx, shaCommit, c.mergeCommit, deployPath)
+			if err != nil || got != c.want || parent != c.parent {
+				t.Fatalf("CheckMerged() = %v, %q, %v, want %v, %q", got, parent, err, c.want, c.parent)
+			}
+		})
+	}
+}
+
+func TestCheckMergedFailsClosed(t *testing.T) {
+	for name, steps := range map[string][]step{
+		"forbidden": {status(http.MethodGet, mainRef, http.StatusForbidden, fxForbidden)},
+		"merge commit not found": {get(mainRef, "ref_main.json"),
+			status(http.MethodGet, "/git/commits/"+shaBase, http.StatusNotFound, "")},
+		"bad parent": {get(mainRef, "ref_main.json"),
+			raw("/git/commits/"+shaBase, `{"sha":"`+shaBase+`","parents":[{"sha":"main"}]}`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, steps...)
+			got, parent, err := h.p.CheckMerged(ctx, shaCommit, shaBase, deployPath)
+			if err == nil || got != 0 || parent != "" {
+				t.Fatalf("CheckMerged() = %v, %q, %v, want an error and no answer", got, parent, err)
+			}
+			assertSafe(t, err)
+		})
+	}
+	h := newHarness(t)
+	for name, c := range map[string]struct{ head, merge, path string }{
+		"short head":   {"1111", shaBase, deployPath},
+		"short merge":  {shaCommit, "", deployPath},
+		"dot dot path": {shaCommit, shaBase, "a/../b"},
+	} {
+		if _, _, err := h.p.CheckMerged(ctx, c.head, c.merge, c.path); err == nil {
+			t.Errorf("%s: allowed", name)
+		}
+	}
+}
+
 func TestCommitFileRefusesBadInput(t *testing.T) {
 	h := newHarness(t)
 	for name, c := range map[string]struct {
@@ -1290,6 +1376,56 @@ func TestCloseChangeRequestRefusesOthers(t *testing.T) {
 	}
 	if err := h.p.CloseChangeRequest(ctx, 0); err == nil {
 		t.Error("number 0 was allowed")
+	}
+}
+
+func TestCommentChangeRequest(t *testing.T) {
+	post := status(http.MethodPost, "/issues/12/comments", http.StatusCreated, "")
+	post.check = func(t *testing.T, b map[string]any) {
+		if b["body"] != "note" || len(b) != 1 {
+			t.Errorf("comment body = %v", b)
+		}
+	}
+	h := newHarness(t, get("/pulls/12", "pull_open.json"), post)
+	if err := h.p.CommentChangeRequest(ctx, 12, "note"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCommentChangeRequestRefuses(t *testing.T) {
+	for name, c := range map[string]struct {
+		number int64
+		steps  []step
+		class  func(error) bool
+	}{
+		"closed":  {12, []step{get("/pulls/12", "pull_closed.json")}, providers.IsConflict},
+		"merged":  {12, []step{get("/pulls/12", "pull_merged.json")}, providers.IsConflict},
+		"foreign": {13, []step{get("/pulls/13", "pull_foreign.json")}, nil},
+		"failed": {12, []step{get("/pulls/12", "pull_open.json"),
+			status(http.MethodPost, "/issues/12/comments", http.StatusForbidden, fxForbidden)}, providers.IsForbidden},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, c.steps...)
+			err := h.p.CommentChangeRequest(ctx, c.number, "note")
+			if err == nil || (c.class != nil && !c.class(err)) {
+				t.Fatalf("got %v", err)
+			}
+			assertSafe(t, err)
+		})
+	}
+	h := newHarness(t)
+	for name, c := range map[string]struct {
+		number int64
+		body   string
+	}{
+		"number 0":  {0, "note"},
+		"empty":     {12, " "},
+		"too long":  {12, strings.Repeat("x", 70000)},
+		"not UTF-8": {12, "\xff"},
+	} {
+		if err := h.p.CommentChangeRequest(ctx, c.number, c.body); err == nil {
+			t.Errorf("%s: allowed", name)
+		}
 	}
 }
 

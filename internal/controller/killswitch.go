@@ -116,10 +116,10 @@ func (r *RemediationRequestReconciler) GatedRepository(ctx context.Context, repo
 }
 
 // gatedGit is a GitProvider whose writes (CreateBranch, CommitFile, OpenChangeRequest, EnableAutoMerge,
-// CloseChangeRequest) call allow immediately before the wrapped provider, and return its error instead of
-// writing when it refuses; the wrapped provider gets allow as its write checkpoint too (gate). Reads pass
-// straight through, without a checkpoint. It implements every method itself rather than
-// embedding the interface, so a write method added to GitProvider cannot pass ungated: the build fails until it
+// CommentChangeRequest, CloseChangeRequest) call allow immediately before the wrapped provider, and return its
+// error instead of writing when it refuses; the wrapped provider gets allow as its write checkpoint too (gate).
+// Reads pass straight through, without a checkpoint. It implements every method itself rather than embedding the
+// interface, so a write method added to GitProvider cannot pass ungated: the build fails until it
 // is added here.
 type gatedGit struct {
 	git   providers.GitProvider
@@ -144,6 +144,10 @@ func (g *gatedGit) BranchHead(ctx context.Context, branch string) (string, error
 
 func (g *gatedGit) CheckBranch(ctx context.Context, commit, path string) (providers.BranchState, error) {
 	return g.git.CheckBranch(ctx, commit, path)
+}
+
+func (g *gatedGit) CheckMerged(ctx context.Context, head, mergeCommit, path string) (providers.BranchState, string, error) {
+	return g.git.CheckMerged(ctx, head, mergeCommit, path)
 }
 
 func (g *gatedGit) FindChangeRequest(ctx context.Context, headBranch string) (providers.ChangeRequest, error) {
@@ -191,6 +195,14 @@ func (g *gatedGit) EnableAutoMerge(ctx context.Context, number int64, expectedHe
 		return err
 	}
 	return g.git.EnableAutoMerge(ctx, number, expectedHeadSHA)
+}
+
+func (g *gatedGit) CommentChangeRequest(ctx context.Context, number int64, body string) error {
+	ctx, err := g.gate(ctx)
+	if err != nil {
+		return err
+	}
+	return g.git.CommentChangeRequest(ctx, number, body)
 }
 
 func (g *gatedGit) CloseChangeRequest(ctx context.Context, number int64) error {

@@ -725,7 +725,7 @@ func (r *RemediationRequestReconciler) requireOnTarget(ctx context.Context, git 
 // nothing and is returned for a retry.
 func (r *RemediationRequestReconciler) endMerged(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) error {
-	ref, err := r.checkMerged(ctx, git, rr, cr.HeadSHA)
+	ref, err := r.checkMerged(ctx, git, rr, cr)
 	switch {
 	case err != nil:
 		return err
@@ -736,17 +736,16 @@ func (r *RemediationRequestReconciler) endMerged(ctx context.Context, git provid
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged, "The pull request was merged")
 }
 
-// checkMerged checks the head of a merged pull request that was never recorded: the target file there holds
-// the planned value and is byte for byte the planned change of the target file at the commit the plan was
-// made at (status.source.baseCommit), and the head is one commit that changes only that file on top of a
-// commit of the target branch. The target branch has moved with the merge, so the file the freshness check
-// reads now cannot serve. A head the Git host shows on the target branch (a merge commit took it in) cannot
-// be told apart from one with a foreign commit, and fails. A head that fails is returned as a
+// checkMerged checks the head of a merged pull request (#524) against its own parent, the commit of the target
+// branch it was made on, not against the target branch now, which the merge moved: the head is one commit that
+// changes only the target file on top of a commit of the target branch from before the merge (CheckMerged), and
+// the target file there is byte for byte the planned change of the target file at that parent. A merge commit
+// that took the head into the target branch so does not change the answer. A head that fails is returned as a
 // [*renderRefusal]; a read that fails as an error.
 func (r *RemediationRequestReconciler) checkMerged(ctx context.Context, git providers.GitProvider,
-	rr *remediationv1alpha1.RemediationRequest, head string) (*renderRefusal, error) {
+	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) (*renderRefusal, error) {
 	path := string(rr.Status.Source.Path)
-	file, err := git.ReadFile(ctx, head, path, providers.MaxFileBytes)
+	file, err := git.ReadFile(ctx, cr.HeadSHA, path, providers.MaxFileBytes)
 	if err != nil {
 		return nil, freshness.WrapProvider("read the file of the pull request", err)
 	}
@@ -754,22 +753,22 @@ func (r *RemediationRequestReconciler) checkMerged(ctx context.Context, git prov
 		return &renderRefusal{reason: ReasonHeadMoved,
 			message: "The pull request's head does not hold the planned change"}, nil
 	}
-	switch bs, err := branchState(ctx, git, rr, head); {
+	diverged := &renderRefusal{reason: ReasonBranchDiverged,
+		message: "The pull request's head is not one commit that changes only the target file on top of the " +
+			"target branch as it was before the merge"}
+	if cr.MergeCommit == "" {
+		return diverged, nil
+	}
+	state, parent, err := git.CheckMerged(ctx, cr.HeadSHA, cr.MergeCommit, path)
+	switch {
 	case err != nil:
-		return nil, err
-	case bs != providers.BranchOneChange:
-		return &renderRefusal{reason: ReasonBranchDiverged,
-			message: "The pull request's head is not one commit that changes only the target file on top of " +
-				"the target branch"}, nil
+		return nil, freshness.WrapProvider("check what the merged pull request held", err)
+	case state != providers.BranchOneChange || parent == "":
+		return diverged, nil
 	}
-	base := rr.Status.Source.BaseCommit
-	if base == "" {
-		return &renderRefusal{reason: ReasonBranchDiverged,
-			message: "The plan records no commit to compare the merged file with"}, nil
-	}
-	from, err := git.ReadFile(ctx, base, path, providers.MaxFileBytes)
+	from, err := git.ReadFile(ctx, parent, path, providers.MaxFileBytes)
 	if err != nil {
-		return nil, freshness.WrapProvider("read the target file the plan was made at", err)
+		return nil, freshness.WrapProvider("read the target file the pull request was made on", err)
 	}
 	if want, state, err := planned(from.Data, rr); err != nil || state != fileHoldsPrevious || !bytes.Equal(want, file.Data) {
 		return &renderRefusal{reason: ReasonBranchDiverged,
@@ -803,7 +802,7 @@ func (r *RemediationRequestReconciler) mergedForeign(ctx context.Context, rr *re
 	ref *renderRefusal) error {
 	markClosed(rr, ReasonChangeRequestMerged, "was merged although it failed a check")
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonMergedWithForeignChange,
-		fmt.Sprintf("Pull request #%d was merged before Shadewright could close it, although it failed a check (%s): "+
+		fmt.Sprintf("Pull request #%d was merged although it failed a check (%s): "+
 			"%s. Review the merged change", rr.Status.PullRequest.Number, ref.reason, ref.message))
 }
 
@@ -955,8 +954,7 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		return freshness.WrapProvider("find the change request", err)
 	}
 	if cr.Number != rr.Status.PullRequest.Number || cr.HeadSHA != rr.Status.PullRequest.HeadSHA {
-		return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonHeadMoved,
-			"The pull request's head is not the commit Shadewright pushed; automation stopped")
+		return r.headMoved(ctx, git, rr, cr)
 	}
 	switch cr.State {
 	case providers.ChangeRequestMerged:
@@ -985,6 +983,84 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
 	return nil
+}
+
+// commentForeign is the one comment Shadewright posts on its pull request when someone else pushed to it.
+const commentForeign = "Someone else pushed to this branch, and it no longer holds only Shadewright's planned change. " +
+	"Shadewright has stopped: this pull request is now a person's to review or close."
+
+// headMoved ends a request whose recorded pull request no longer has the head Shadewright pushed (#524, ADR-0028).
+// When it is the same pull request and the new head may carry more than the planned change (CheckBranch is not
+// one change, or the target file differs from the recorded head's), it is foreign: merged already, the request
+// ends MergedWithForeignChange; open, Shadewright posts one comment that hands the pull request to a person and
+// stops with BranchDiverged, leaving it open, since a person may be working on it. Anything else, a clean move
+// to the same planned change included, stops with HeadMoved as before. A read that fails is returned for a
+// retry, as is a comment the kill switch held back; another failure to comment is logged and the request stops all the same.
+func (r *RemediationRequestReconciler) headMoved(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) error {
+	moved := func() error {
+		return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonHeadMoved,
+			"The pull request's head is not the commit Shadewright pushed; automation stopped")
+	}
+	if cr.Number != rr.Status.PullRequest.Number {
+		return moved()
+	}
+	switch cr.State {
+	case providers.ChangeRequestMerged:
+		ref, err := r.checkMerged(ctx, git, rr, cr)
+		switch {
+		case err != nil:
+			return err
+		case ref != nil:
+			return r.mergedForeign(ctx, rr, ref)
+		}
+		return moved()
+	case providers.ChangeRequestClosed:
+		return moved()
+	}
+	switch foreign, err := r.foreignHead(ctx, git, rr, cr.HeadSHA); {
+	case err != nil:
+		return err
+	case !foreign:
+		return moved()
+	}
+	outcome := "; a comment on the pull request hands it to a person"
+	if err := git.CommentChangeRequest(ctx, cr.Number, commentForeign); err != nil {
+		if errors.Is(err, freshness.ErrPaused) || errors.Is(err, freshness.ErrWriteBlocked) {
+			// The kill switch held the comment back: it is posted once writes go on.
+			return err
+		}
+		logf.FromContext(ctx).Info("Could not comment on the pull request of RemediationRequest", "remediationRequest",
+			client.ObjectKeyFromObject(rr), "pullRequest", cr.Number, "error", err.Error())
+		outcome = "; commenting on the pull request failed"
+	}
+	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonBranchDiverged,
+		"Someone else pushed to the pull request, and its branch no longer holds only the planned change; it is "+
+			"left open for a person to review or close"+outcome)
+}
+
+// foreignHead reports whether head, the new head of the recorded pull request, may carry more than the planned
+// change: it is not one commit that changes only the target file on top of the target branch, or the target
+// file on it is not byte for byte the file on the head Shadewright pushed and checked.
+func (r *RemediationRequestReconciler) foreignHead(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, head string) (bool, error) {
+	state, err := branchState(ctx, git, rr, head)
+	if err != nil {
+		return false, err
+	}
+	if state != providers.BranchOneChange {
+		return true, nil
+	}
+	path := string(rr.Status.Source.Path)
+	now, err := git.ReadFile(ctx, head, path, providers.MaxFileBytes)
+	if err != nil {
+		return false, freshness.WrapProvider("read the file of the pull request", err)
+	}
+	was, err := git.ReadFile(ctx, rr.Status.PullRequest.HeadSHA, path, providers.MaxFileBytes)
+	if err != nil {
+		return false, freshness.WrapProvider("read the file Shadewright pushed", err)
+	}
+	return !bytes.Equal(now.Data, was.Data), nil
 }
 
 // stop ends the request in phase with a condition that says why (PullRequestOpened, or Approved once a pull

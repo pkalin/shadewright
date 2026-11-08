@@ -399,7 +399,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(file.Data).To(Equal(manifest("384Mi")))
 	})
 
-	It("stops automation when someone else pushes to the branch", func() {
+	It("hands the pull request to a person when someone else pushes to the branch (#524)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		_, err := git.Push(freshness.BranchName(got), "README.yaml", []byte("a: 3\n"))
 		Expect(err).NotTo(HaveOccurred())
@@ -407,10 +407,48 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		got = fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 		cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
-		Expect(cond.Reason).To(Equal(ReasonHeadMoved))
+		Expect(cond.Reason).To(Equal(ReasonBranchDiverged))
 		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)).
 			To(BeTrue(), "the pull request is still open")
 		Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen), "the pull request is left for a person")
+		Expect(got.Status.HoldsTarget).To(Equal(new(true)), "an open pull request keeps the target")
+		comments := git.Comments(got.Status.PullRequest.Number)
+		Expect(comments).To(HaveLen(1))
+		Expect(comments[0]).To(ContainSubstring("no longer holds only"))
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(git.Comments(got.Status.PullRequest.Number)).To(HaveLen(1), "one comment only")
+	})
+
+	It("ends with MergedWithForeignChange when a pull request with a foreign push is merged (#524)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		_, err := git.Push(freshness.BranchName(got), "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = git.Merge(got.Status.PullRequest.Number)
+		Expect(err).NotTo(HaveOccurred())
+		_ = reconcileOnce()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(cond.Reason).To(Equal(ReasonMergedWithForeignChange))
+		Expect(cond.Message).To(HavePrefix(fmt.Sprintf("Pull request #%d was merged", got.Status.PullRequest.Number)))
+		Expect(got.Status.HoldsTarget).NotTo(Equal(new(true)), "a merged pull request releases the target")
+	})
+
+	It("stops with HeadMoved when the head moves to the same planned change (#524)", func() {
+		parent, err := git.BranchHead(ctx, mainBranch)
+		Expect(err).NotTo(HaveOccurred())
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		Expect(git.CreateBranch(ctx, "copy", parent)).To(Succeed())
+		same, err := git.CommitFile(ctx, "copy", parent, providers.FileChange{Path: sourcePath,
+			Content: manifest("384Mi"), Message: "the same change"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(git.ForcePush(freshness.BranchName(got), same)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+			To(Equal(ReasonHeadMoved))
+		Expect(git.Comments(got.Status.PullRequest.Number)).To(BeEmpty())
 	})
 
 	It("stops before the commit when the change renders into another object too", func() {
@@ -779,7 +817,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 	// mergedAfterLostOpen opens the pull request with its response lost, lets push run on the branch, and has a
 	// person merge it before the restart. It returns the request after the restart.
-	mergedAfterLostOpen := func(push func(branch string)) *remediationv1alpha1.RemediationRequest {
+	mergedAfterLostOpen := func(push func(branch string), merge ...func(int64) (string, error)) *remediationv1alpha1.RemediationRequest {
 		GinkgoHelper()
 		faulty = newFaultyGit(git)
 		for faulty.count(opCommit) == 0 {
@@ -789,7 +827,11 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(reconcileOnce()).NotTo(Succeed())
 		Expect(openRequests()).To(HaveLen(1))
 		push(freshness.BranchName(fetch()))
-		_, err := git.Merge(openRequests()[0].Number)
+		mergeWith := git.Merge
+		if len(merge) > 0 {
+			mergeWith = merge[0]
+		}
+		_, err := mergeWith(openRequests()[0].Number)
 		Expect(err).NotTo(HaveOccurred())
 		_ = reconcileOnce()
 		return fetch()
@@ -797,6 +839,13 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 	It("records a merged pull request found after a lost open as Merged when it held the planned change (#524)", func() {
 		got := mergedAfterLostOpen(func(string) {})
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+	})
+
+	It("records a clean pull request merged with a merge commit after a lost open as Merged (#524)", func() {
+		// The merge commit takes the head into the target branch, so the head is an ancestor of the target now; it
+		// is judged against its own parent, not the current target.
+		got := mergedAfterLostOpen(func(string) {}, git.MergeWithCommit)
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
 	})
 
@@ -2371,6 +2420,8 @@ const (
 	opCreateBranch = "CreateBranch"
 	opReadFile     = "ReadFile"
 	opListDir      = "ListDir"
+	opCheckMerged  = "CheckMerged"
+	opComment      = "CommentChangeRequest"
 	opCheckBranch  = "CheckBranch"
 )
 
@@ -2567,6 +2618,21 @@ func (f *faultyGit) CloseChangeRequest(ctx context.Context, n int64) error {
 		return err
 	}
 	return f.leave(ctx, opClose, f.Git.CloseChangeRequest(ctx, n))
+}
+
+func (f *faultyGit) CheckMerged(ctx context.Context, head, merge, path string) (providers.BranchState, string, error) {
+	if err := f.enter(opCheckMerged, head); err != nil {
+		return 0, "", err
+	}
+	state, parent, err := f.Git.CheckMerged(ctx, head, merge, path)
+	return state, parent, f.leave(ctx, opCheckMerged, err)
+}
+
+func (f *faultyGit) CommentChangeRequest(ctx context.Context, n int64, body string) error {
+	if err := f.enter(opComment, ""); err != nil {
+		return err
+	}
+	return f.leave(ctx, opComment, f.Git.CommentChangeRequest(ctx, n, body))
 }
 
 // retryable reports whether err is one the reconciler hands back for a retry: a Git host failure worth

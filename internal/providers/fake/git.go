@@ -35,6 +35,8 @@ var _ providers.GitProvider = (*Git)(nil)
 
 type commit struct {
 	parent string
+	// merged is the second parent of a merge commit (MergeWithCommit), empty otherwise.
+	merged string
 	files  map[string][]byte
 }
 
@@ -50,6 +52,7 @@ type Git struct {
 	branches map[string]string
 	crs      []*providers.ChangeRequest
 	auto     map[int64]bool
+	comments map[int64][]string
 }
 
 // NewGit returns a repository whose branch base, its target branch, has one commit holding files.
@@ -61,6 +64,7 @@ func NewGit(base string, files map[string][]byte) *Git {
 		commits:  map[string]commit{},
 		branches: map[string]string{},
 		auto:     map[int64]bool{},
+		comments: map[int64][]string{},
 	}
 	own := make(map[string][]byte, len(files))
 	for p, data := range files {
@@ -252,17 +256,107 @@ func (g *Git) CommitFile(ctx context.Context, branch, expectedHead string, ch pr
 }
 
 // onTarget reports whether sha is the head of the target branch or an ancestor of it. g.mu must be held.
-func (g *Git) onTarget(sha string) bool {
-	for at := g.branches[g.target]; at != ""; at = g.commits[at].parent {
+func (g *Git) onTarget(sha string) bool { return g.ancestor(g.branches[g.target], sha) }
+
+// ancestor reports whether sha is of or an ancestor of it, through both parents of a merge commit. g.mu must
+// be held.
+func (g *Git) ancestor(of, sha string) bool {
+	todo, seen := []string{of}, map[string]bool{}
+	for len(todo) > 0 {
+		at := todo[len(todo)-1]
+		todo = todo[:len(todo)-1]
+		if at == "" || seen[at] {
+			continue
+		}
 		if at == sha {
 			return true
 		}
+		seen[at] = true
+		todo = append(todo, g.commits[at].parent, g.commits[at].merged)
 	}
 	return false
 }
 
-// CheckBranch reports what a commit carries over the target branch (providers.GitProvider.CheckBranch). The
-// fake's commits have one parent at most, so it never holds a merge.
+// onlyFile reports whether commit c changes at most the file at path against the commit parent, which holds
+// that file too. g.mu must be held.
+func (g *Git) onlyFile(c commit, parent, path string) bool {
+	old := g.commits[parent].files
+	if _, ok := c.files[path]; !ok || len(old) != len(c.files) {
+		return false
+	}
+	for p, data := range c.files {
+		o, ok := old[p]
+		if !ok || (p != path && !bytes.Equal(o, data)) {
+			return false
+		}
+	}
+	return true
+}
+
+// CheckMerged reports what head carried over the target branch before mergeCommit merged it
+// (providers.GitProvider.CheckMerged).
+func (g *Git) CheckMerged(ctx context.Context, head, mergeCommit, path string) (providers.BranchState, string, error) {
+	if err := g.before("CheckMerged"); err != nil {
+		return 0, "", err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c, ok := g.commits[head]
+	m, okM := g.commits[mergeCommit]
+	if !ok || !okM {
+		return 0, "", fmt.Errorf("commit: %w", providers.ErrNotFound)
+	}
+	if mergeCommit == head || !g.onTarget(mergeCommit) || c.merged != "" || c.parent == "" ||
+		!g.ancestor(m.parent, c.parent) || !g.onlyFile(c, c.parent, path) {
+		return providers.BranchForeign, "", nil
+	}
+	return providers.BranchOneChange, c.parent, nil
+}
+
+// CommentChangeRequest adds a comment to an open change request.
+func (g *Git) CommentChangeRequest(ctx context.Context, n int64, body string) error {
+	if err := g.before("CommentChangeRequest"); err != nil {
+		return err
+	}
+	if err := providers.CheckWrite(ctx); err != nil {
+		return err
+	}
+	g.mu.Lock()
+	cr, err := g.get(n)
+	if err == nil && cr.State != providers.ChangeRequestOpen {
+		err = fmt.Errorf("change request %d is %s: %w", n, cr.State, providers.ErrConflict)
+	}
+	if err == nil {
+		g.comments[n] = append(g.comments[n], body)
+	}
+	g.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return g.after("CommentChangeRequest")
+}
+
+// Comments returns the comments of change request n, oldest first.
+func (g *Git) Comments(n int64) []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.comments[n])
+}
+
+// ForcePush points branch at sha as a force push by someone else would, and moves the head of its open
+// change requests. Tests use it to replace a branch's commits.
+func (g *Git) ForcePush(branch, sha string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.commits[sha]; !ok {
+		return fmt.Errorf("commit %q: %w", sha, providers.ErrNotFound)
+	}
+	g.branches[branch] = sha
+	g.syncHeads(branch, sha)
+	return nil
+}
+
+// CheckBranch reports what a commit carries over the target branch (providers.GitProvider.CheckBranch).
 func (g *Git) CheckBranch(ctx context.Context, sha, path string) (providers.BranchState, error) {
 	if err := g.before("CheckBranch"); err != nil {
 		return 0, err
@@ -276,18 +370,8 @@ func (g *Git) CheckBranch(ctx context.Context, sha, path string) (providers.Bran
 	if g.onTarget(sha) {
 		return providers.BranchAtTarget, nil
 	}
-	if c.parent == "" || !g.onTarget(c.parent) {
+	if c.parent == "" || c.merged != "" || !g.onTarget(c.parent) || !g.onlyFile(c, c.parent, path) {
 		return providers.BranchForeign, nil
-	}
-	parent := g.commits[c.parent].files
-	if _, ok := c.files[path]; !ok || len(parent) != len(c.files) {
-		return providers.BranchForeign, nil
-	}
-	for p, data := range c.files {
-		old, ok := parent[p]
-		if !ok || (p != path && !bytes.Equal(old, data)) {
-			return providers.BranchForeign, nil
-		}
 	}
 	return providers.BranchOneChange, nil
 }
@@ -460,7 +544,13 @@ func (g *Git) CloseChangeRequest(ctx context.Context, n int64) error {
 
 // Merge squash-merges an open change request into its base, as a reviewer would, and returns the merge
 // commit. It fails with ErrConflict when the file changes cannot be applied to the current base.
-func (g *Git) Merge(n int64) (string, error) {
+func (g *Git) Merge(n int64) (string, error) { return g.merge(n, false) }
+
+// MergeWithCommit merges change request n as Merge does, with a merge commit whose second parent is the
+// head, so the head becomes an ancestor of the target branch as a regular merge on a host makes it.
+func (g *Git) MergeWithCommit(n int64) (string, error) { return g.merge(n, true) }
+
+func (g *Git) merge(n int64, withCommit bool) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	cr, err := g.get(n)
@@ -490,6 +580,11 @@ func (g *Git) Merge(n int64) (string, error) {
 		next[p] = data
 	}
 	sha := g.store(baseSHA, next)
+	if withCommit {
+		c := g.commits[sha]
+		c.merged = g.branches[cr.HeadBranch]
+		g.commits[sha] = c
+	}
 	g.branches[cr.BaseBranch] = sha
 	g.syncHeads(cr.BaseBranch, sha)
 	cr.State = providers.ChangeRequestMerged

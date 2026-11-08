@@ -209,6 +209,19 @@ type GitProvider interface {
 	// and BranchForeign for anything else. It only reads. Errors are failures to find out, never an answer.
 	CheckBranch(ctx context.Context, commit, path string) (BranchState, error)
 
+	// CheckMerged reports what head, the head of a change request that mergeCommit merged into the target
+	// branch, carried over the target branch as it was before the merge: BranchOneChange with head's parent
+	// when head has exactly one parent, that parent is the first parent of mergeCommit or an ancestor of it,
+	// and the two trees differ at most in the content of the regular file at path (same mode); BranchForeign
+	// otherwise, also when mergeCommit is not on the target branch or is head itself. It judges head against
+	// its own parent, so a merge commit that took head into the target branch does not change the answer. It
+	// only reads. Errors are failures to find out, never an answer.
+	CheckMerged(ctx context.Context, head, mergeCommit, path string) (BranchState, string, error)
+
+	// CommentChangeRequest adds one comment with body to an open change request from a Shadewright branch of
+	// this repository to the target branch. Any other change request is refused. It is a write.
+	CommentChangeRequest(ctx context.Context, number int64, body string) error
+
 	// OpenChangeRequest opens a change request. When an open change request for the same head branch
 	// already exists, it returns that one unchanged.
 	OpenChangeRequest(ctx context.Context, req NewChangeRequest) (ChangeRequest, error)

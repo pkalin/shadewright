@@ -35,6 +35,8 @@ Match the adapter to the installed version.
 
 Check that the `Kustomization` (or `HelmRelease`) reports the merge commit as its last applied revision and is `Ready`. Then check workload health. `Ready` alone does not prove the incident is gone.
 
+Built, not wired into the executor yet: the executor records the merge commit in `status.pullRequest.mergeCommitSHA` when it sees the merge, and the Flux adapter of `DeliveryVerifier` (`internal/providers/delivery/flux`) reports whether a unit applied exactly that commit, is `Ready` and has observed its current generation. A `HelmRelease`'s revisions are chart versions, which name no commit, so the adapter never reports one as applied; the `Kustomization` that applies it does. The adapter, the source mapping's checks before a write and the Flux module's symptom rules read Flux status through one package, `internal/fluxstatus`.
+
 ### What Shadewright never does
 
 Shadewright never suspends a Kustomization, disables pruning or changes Flux config to push a fix through.
@@ -46,5 +48,5 @@ Shadewright never suspends a Kustomization, disables pruning or changes Flux con
 | KEDA module | `internal/modules/keda` is built; its HPA source is consumed (2.5.3), its `ScaledObject` and `ScaledJob` sources too, about the object itself (2.5.1) |
 | Cluster and downstream capacity checks | Planned |
 | Crossplane | Later |
-| Delivery and health check after merge | Planned |
+| Delivery and health check after merge | Planned; the merge commit in status and the Flux delivery adapter are built, not wired (#92) |
 | Readiness rule for `AdjustKedaMaxReplicas` | `KedaReady`, checked at the decision and before every write |

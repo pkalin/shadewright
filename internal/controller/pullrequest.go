@@ -988,6 +988,7 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	}
 	switch cr.State {
 	case providers.ChangeRequestMerged:
+		recordMerge(rr, cr)
 		return r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,
 			"The pull request was merged")
 	case providers.ChangeRequestClosed:

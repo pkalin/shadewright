@@ -261,6 +261,15 @@ type PullRequestStatus struct {
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
 	// +optional
 	RenderedTargetHead string `json:"renderedTargetHead,omitempty"`
+
+	// mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when
+	// Shadewright sees the merge of the pull request it pushed. Delivery is checked against it: the GitOps
+	// controller must report exactly this commit as applied. Empty until then, and when the host reported none.
+	// +kubebuilder:validation:MinLength=40
+	// +kubebuilder:validation:MaxLength=40
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	// +optional
+	MergeCommitSHA string `json:"mergeCommitSHA,omitempty"`
 }
 
 // PlanRepository identifies the repository a plan was made for: the URL and provider installation taken from

@@ -631,6 +631,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `url` | string | Yes | url of the pull request.<br>Maximum length: 2048<br>Pattern: `^https://` |
 | `headSHA` | string | Yes | headSHA is the commit Shadewright pushed. Any other head stops automation.<br>Pattern: `^[0-9a-f]{40}$` |
 | `renderedTargetHead` | string | No | renderedTargetHead is the head of the target branch at which the change in the pull request was last rendered and found to be exactly the planned one. While the pull request waits, the change is rendered again only when the target branch head is another commit; empty means not rendered since it was recorded.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
+| `mergeCommitSHA` | string | No | mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when Shadewright sees the merge of the pull request it pushed. Delivery is checked against it: the GitOps controller must report exactly this commit as applied. Empty until then, and when the host reported none.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
 
 ### RecordID
 

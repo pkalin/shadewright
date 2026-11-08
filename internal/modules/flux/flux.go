@@ -16,24 +16,27 @@ limitations under the License.
 
 package flux
 
-import "github.com/pkalin/shadewright/internal/modules"
+import (
+	"github.com/pkalin/shadewright/internal/fluxstatus"
+	"github.com/pkalin/shadewright/internal/modules"
+)
 
 // Name is the module's name in RemediationSettings and its status.
 const Name = "flux"
 
-// API groups, versions and kinds the module reads.
+// API groups, versions and kinds the module reads, as internal/fluxstatus defines them.
 const (
-	KustomizeGroup = "kustomize.toolkit.fluxcd.io"
-	HelmGroup      = "helm.toolkit.fluxcd.io"
-	SourceGroup    = "source.toolkit.fluxcd.io"
+	KustomizeGroup = fluxstatus.KustomizeGroup
+	HelmGroup      = fluxstatus.HelmGroup
+	SourceGroup    = fluxstatus.SourceGroup
 
-	KustomizeVersion = "v1"
-	HelmVersion      = "v2"
-	SourceVersion    = "v1"
+	KustomizeVersion = fluxstatus.KustomizeVersion
+	HelmVersion      = fluxstatus.HelmVersion
+	SourceVersion    = fluxstatus.SourceVersion
 
-	KindKustomization = "Kustomization"
-	KindHelmRelease   = "HelmRelease"
-	KindGitRepository = "GitRepository"
+	KindKustomization = fluxstatus.KindKustomization
+	KindHelmRelease   = fluxstatus.KindHelmRelease
+	KindGitRepository = fluxstatus.KindGitRepository
 )
 
 // module is the Flux integration. It has no state.

@@ -163,6 +163,13 @@ spec:
                   approvalRequired asks for human review. false is a request for automation that policy may refuse;
                   it never lowers policy or repository rules.
                 type: boolean
+              chainRoot:
+                description: |-
+                  chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or
+                  its own UID when it has none. Set together with replaces. The branch of the pull request derives from it
+                  (planned), so every request of a chain works on the same branch and pull request.
+                pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                type: string
               incidentRef:
                 description: incidentRef is the incident this plan answers.
                 properties:
@@ -193,6 +200,53 @@ spec:
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
+              replaces:
+                description: |-
+                  replaces names the request this one replaces and the reviewer hint of that request it answers
+                  (ADR-0028 section 4). Set only by the analyzer on a replacement, together with chainRoot. It is part of
+                  the plan, so it is part of the request's name: the same plan answering another hint is another request.
+                  Planned: the executor does not act on it yet.
+                properties:
+                  hint:
+                    description: hint is the pinned hint of the replaced request that
+                      this plan answers.
+                    properties:
+                      commentID:
+                        description: commentID is the comment's ID in the source.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      digest:
+                        description: digest is the SHA-256 of the stored, redacted
+                          hint text.
+                        pattern: ^sha256:[0-9a-f]{64}$
+                        type: string
+                      source:
+                        description: source is the system the comment is in.
+                        enum:
+                        - GitHub
+                        type: string
+                    required:
+                    - commentID
+                    - digest
+                    - source
+                    type: object
+                  name:
+                    description: name of the replaced request, in the same namespace.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  uid:
+                    description: uid of the replaced request, so a request recreated
+                      under the same name is never taken for it.
+                    pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                    type: string
+                required:
+                - hint
+                - name
+                - uid
+                type: object
               targetRef:
                 description: targetRef is the live object the change is about.
                 properties:
@@ -294,6 +348,8 @@ spec:
                 or StatefulSet
               rule: self.action.type != 'SetContainerMemoryLimit' || (self.targetRef.apiVersion
                 == 'apps/v1' && self.targetRef.kind in ['Deployment', 'StatefulSet'])
+            - message: replaces and chainRoot are set together or not at all
+              rule: has(self.replaces) == has(self.chainRoot)
           status:
             description: status is the progress, written by the controller.
             properties:
@@ -394,6 +450,191 @@ spec:
                 description: effectiveApprovalRequired is what policy decided, which
                   may be stricter than spec.approvalRequired.
                 type: boolean
+              handoff:
+                description: |-
+                  handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over;
+                  on that predecessor, its replacement. Once written it is never removed, and its from, to and hint never
+                  change. Planned: nothing writes it yet.
+                properties:
+                  expectedHead:
+                    description: |-
+                      expectedHead is the head of the branch the predecessor recorded when it took the intent: the
+                      replacement's commit must have it as its parent.
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  from:
+                    description: from is the predecessor, set on the replacement.
+                      It equals spec.replaces.name.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  hint:
+                    description: hint is the hint the handoff answers.
+                    properties:
+                      commentID:
+                        description: commentID is the comment's ID in the source.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      digest:
+                        description: digest is the SHA-256 of the stored, redacted
+                          hint text.
+                        pattern: ^sha256:[0-9a-f]{64}$
+                        type: string
+                      source:
+                        description: source is the system the comment is in.
+                        enum:
+                        - GitHub
+                        type: string
+                    required:
+                    - commentID
+                    - digest
+                    - source
+                    type: object
+                  phase:
+                    description: phase is how far the handoff has come.
+                    enum:
+                    - Reserved
+                    - Intent
+                    - Done
+                    - Aborted
+                    type: string
+                  to:
+                    description: to is the replacement, set on the predecessor.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - hint
+                - phase
+                type: object
+                x-kubernetes-validations:
+                - message: exactly one of from and to is set
+                  rule: has(self.from) != has(self.to)
+                - message: the replacement's handoff is Reserved, Done or Aborted
+                  rule: '!has(self.from) || self.phase in [''Reserved'', ''Done'',
+                    ''Aborted'']'
+                - message: the predecessor's handoff is Intent, Done or Aborted, with
+                    expectedHead
+                  rule: '!has(self.to) || (self.phase in [''Intent'', ''Done'', ''Aborted'']
+                    && has(self.expectedHead))'
+                - message: expectedHead is recorded on the predecessor only
+                  rule: '!has(self.from) || !has(self.expectedHead)'
+                - message: a handoff moves only from Reserved or Intent to Done or
+                    Aborted
+                  rule: oldSelf.phase == self.phase || (oldSelf.phase in ['Reserved',
+                    'Intent'] && self.phase in ['Done', 'Aborted'])
+              hints:
+                description: |-
+                  hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a
+                  replacement carried over from its chain, at most MaxHints (ADR-0028). Only the executor writes them; a
+                  stored hint keeps its pin, moves only forward in its state and is never removed. Planned: nothing
+                  writes them yet.
+                items:
+                  description: |-
+                    Hint is one reviewer hint the executor accepted from a comment on the request's pull request (ADR-0028
+                    section 2): its author had write access when it was accepted, its text is redacted and bounded, and it is
+                    pinned by comment ID, digest and the comment's updatedAt. Only the executor writes it; the analyzer reads
+                    the stored text, never the comment.
+                  properties:
+                    acceptedAt:
+                      description: acceptedAt is when the executor accepted the hint.
+                      format: date-time
+                      type: string
+                    author:
+                      description: author wrote the comment.
+                      properties:
+                        id:
+                          description: id is the author's numeric user ID in the source.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        login:
+                          description: login is the author's login when the hint was
+                            accepted, for the reader only.
+                          maxLength: 100
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                          type: string
+                      required:
+                      - id
+                      - login
+                      type: object
+                    commentID:
+                      description: commentID is the comment's ID in the source.
+                      format: int64
+                      minimum: 1
+                      type: integer
+                    digest:
+                      description: digest is the SHA-256 of text.
+                      pattern: ^sha256:[0-9a-f]{64}$
+                      type: string
+                    reason:
+                      description: reason says why a Declined hint was declined, for
+                        example BudgetSpent or NoProposal.
+                      maxLength: 64
+                      minLength: 1
+                      pattern: ^[A-Z][A-Za-z0-9]*$
+                      type: string
+                    source:
+                      description: source is the system the comment is in.
+                      enum:
+                      - GitHub
+                      type: string
+                    state:
+                      description: state says what became of the hint.
+                      enum:
+                      - Pending
+                      - Reserved
+                      - Consumed
+                      - Declined
+                      type: string
+                    text:
+                      description: |-
+                        text is the hint after redaction, at most 2048 bytes. It is untrusted input: the analysis fences it as
+                        a reviewer's opinion, never as instructions or evidence.
+                      maxLength: 2048
+                      minLength: 1
+                      type: string
+                    updatedAt:
+                      description: |-
+                        updatedAt is the comment's updated time when the hint was accepted. A comment whose updated time
+                        differs later was edited after acceptance, and the edit is ignored.
+                      format: date-time
+                      type: string
+                  required:
+                  - acceptedAt
+                  - author
+                  - commentID
+                  - digest
+                  - source
+                  - state
+                  - text
+                  - updatedAt
+                  type: object
+                  x-kubernetes-validations:
+                  - message: text must be at most 2048 bytes
+                    rule: size(bytes(self.text)) <= 2048
+                  - message: a Declined hint needs a reason
+                    rule: self.state != 'Declined' || has(self.reason)
+                  - message: 'a stored hint is pinned: only its state and reason change'
+                    rule: self.source == oldSelf.source && self.commentID == oldSelf.commentID
+                      && self.digest == oldSelf.digest && self.text == oldSelf.text
+                      && self.author == oldSelf.author && self.updatedAt == oldSelf.updatedAt
+                      && self.acceptedAt == oldSelf.acceptedAt
+                  - message: a hint moves only from Pending to Reserved or Declined,
+                      and from Reserved to Consumed or Declined
+                    rule: oldSelf.state == self.state || (oldSelf.state == 'Pending'
+                      && self.state in ['Reserved', 'Declined']) || (oldSelf.state
+                      == 'Reserved' && self.state in ['Consumed', 'Declined'])
+                maxItems: 3
+                type: array
+                x-kubernetes-list-map-keys:
+                - source
+                - commentID
+                x-kubernetes-list-type: map
               holdsTarget:
                 description: |-
                   holdsTarget is true while the request holds the executor's lock on its target: it is set in the status
@@ -590,6 +831,24 @@ spec:
           rule: '!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.appliedObservedAt)
             || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt)
             && self.status.pullRequest.appliedObservedAt == oldSelf.status.pullRequest.appliedObservedAt)'
+        - message: 'status.hints: a stored hint is never removed'
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.hints) || (has(self.status)
+            && has(self.status.hints) && oldSelf.status.hints.all(o, self.status.hints.exists(h,
+            h.source == o.source && h.commentID == o.commentID)))'
+        - message: 'status.handoff is set once: it is never removed and its from,
+            to and hint never change'
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.handoff) || (has(self.status)
+            && has(self.status.handoff) && self.status.handoff.hint == oldSelf.status.handoff.hint
+            && (has(self.status.handoff.from) ? (has(oldSelf.status.handoff.from)
+            && self.status.handoff.from == oldSelf.status.handoff.from) : !has(oldSelf.status.handoff.from))
+            && (has(self.status.handoff.to) ? (has(oldSelf.status.handoff.to) && self.status.handoff.to
+            == oldSelf.status.handoff.to) : !has(oldSelf.status.handoff.to)))'
+        - message: status.handoff.from and its hint must match spec.replaces
+          rule: '!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from)
+            || (has(self.spec.replaces) && self.status.handoff.from == self.spec.replaces.name
+            && self.status.handoff.hint.source == self.spec.replaces.hint.source &&
+            self.status.handoff.hint.commentID == self.spec.replaces.hint.commentID
+            && self.status.handoff.hint.digest == self.spec.replaces.hint.digest)'
     selectableFields:
     - jsonPath: .status.phase
     - jsonPath: .status.breakerProbe

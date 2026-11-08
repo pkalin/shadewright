@@ -130,6 +130,7 @@ type Verification struct {
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable; a changed plan is a new RemediationRequest"
 // +kubebuilder:validation:XValidation:rule="self.action.type != 'AdjustKedaMaxReplicas' || (self.targetRef.apiVersion.startsWith('keda.sh/') && self.targetRef.kind == 'ScaledObject')",message="AdjustKedaMaxReplicas can only target a keda.sh ScaledObject"
 // +kubebuilder:validation:XValidation:rule="self.action.type != 'SetContainerMemoryLimit' || (self.targetRef.apiVersion == 'apps/v1' && self.targetRef.kind in ['Deployment', 'StatefulSet'])",message="SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet"
+// +kubebuilder:validation:XValidation:rule="has(self.replaces) == has(self.chainRoot)",message="replaces and chainRoot are set together or not at all"
 type RemediationRequestSpec struct {
 	// incidentRef is the incident this plan answers.
 	// +required
@@ -164,6 +165,19 @@ type RemediationRequestSpec struct {
 	// +kubebuilder:default={}
 	// +optional
 	Verification Verification `json:"verification,omitzero"`
+
+	// replaces names the request this one replaces and the reviewer hint of that request it answers
+	// (ADR-0028 section 4). Set only by the analyzer on a replacement, together with chainRoot. It is part of
+	// the plan, so it is part of the request's name: the same plan answering another hint is another request.
+	// Planned: the executor does not act on it yet.
+	// +optional
+	Replaces *RequestReplacement `json:"replaces,omitempty"`
+
+	// chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or
+	// its own UID when it has none. Set together with replaces. The branch of the pull request derives from it
+	// (planned), so every request of a chain works on the same branch and pull request.
+	// +optional
+	ChainRoot UID `json:"chainRoot,omitempty"`
 }
 
 // RemediationPhase summarizes where a request is. Conditions carry the reasons.
@@ -199,7 +213,9 @@ const (
 	// PhaseCancelled means the request was cancelled before the change was merged. Terminal.
 	PhaseCancelled RemediationPhase = "Cancelled"
 	// PhaseSuperseded means a plan input changed, or the ScaledObject is no longer ready, or the module that
-	// contributes the action was disabled, so the pull request is closed and a new request is needed. Terminal.
+	// contributes the action was disabled, so the pull request is closed and a new request is needed. With
+	// reason HandedOff (planned, ADR-0028) a replacement took over the pull request instead, which stays open.
+	// Terminal.
 	PhaseSuperseded RemediationPhase = "Superseded"
 	// PhaseNeedsIntervention means the controller cannot continue on its own, for example because the target
 	// is not declared in a plain manifest; a human must act.
@@ -387,6 +403,23 @@ type RemediationRequestStatus struct {
 	// +optional
 	Deadline *metav1.Time `json:"deadline,omitempty"`
 
+	// hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a
+	// replacement carried over from its chain, at most MaxHints (ADR-0028). Only the executor writes them; a
+	// stored hint keeps its pin, moves only forward in its state and is never removed. Planned: nothing
+	// writes them yet.
+	// +listType=map
+	// +listMapKey=source
+	// +listMapKey=commentID
+	// +kubebuilder:validation:MaxItems=3
+	// +optional
+	Hints []Hint `json:"hints,omitempty"`
+
+	// handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over;
+	// on that predecessor, its replacement. Once written it is never removed, and its from, to and hint never
+	// change. Planned: nothing writes it yet.
+	// +optional
+	Handoff *Handoff `json:"handoff,omitempty"`
+
 	// conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
 	// Verified, PlanFresh, WritesPaused and Queued.
 	// +listType=map
@@ -413,6 +446,11 @@ type RemediationRequestStatus struct {
 // pullRequest (or the whole status) and writing it again cannot change a recorded value.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.mergeCommitSHA) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.mergeCommitSHA) && self.status.pullRequest.mergeCommitSHA == oldSelf.status.pullRequest.mergeCommitSHA)",message="status.pullRequest.mergeCommitSHA is set once and never changed"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.appliedObservedAt) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt) && self.status.pullRequest.appliedObservedAt == oldSelf.status.pullRequest.appliedObservedAt)",message="status.pullRequest.appliedObservedAt is set once and never changed"
+// The hints and the handoff follow the same pattern: a hint once stored is never removed (its pin and state
+// rules live on the hint), and the handoff once written is never removed nor pointed elsewhere.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.hints) || (has(self.status) && has(self.status.hints) && oldSelf.status.hints.all(o, self.status.hints.exists(h, h.source == o.source && h.commentID == o.commentID)))",message="status.hints: a stored hint is never removed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.handoff) || (has(self.status) && has(self.status.handoff) && self.status.handoff.hint == oldSelf.status.handoff.hint && (has(self.status.handoff.from) ? (has(oldSelf.status.handoff.from) && self.status.handoff.from == oldSelf.status.handoff.from) : !has(oldSelf.status.handoff.from)) && (has(self.status.handoff.to) ? (has(oldSelf.status.handoff.to) && self.status.handoff.to == oldSelf.status.handoff.to) : !has(oldSelf.status.handoff.to)))",message="status.handoff is set once: it is never removed and its from, to and hint never change"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from) || (has(self.spec.replaces) && self.status.handoff.from == self.spec.replaces.name && self.status.handoff.hint.source == self.spec.replaces.hint.source && self.status.handoff.hint.commentID == self.spec.replaces.hint.commentID && self.status.handoff.hint.digest == self.spec.replaces.hint.digest)",message="status.handoff.from and its hint must match spec.replaces"
 
 // RemediationRequest is one proposed fix: a typed action on one object, carried out as a GitOps pull request
 // after deterministic policy allows it.

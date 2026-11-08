@@ -655,6 +655,7 @@ func FuzzString(f *testing.F) {
 		"", "\x00", "\xff\xfe", "::", ":::::::::", "-----BEGIN PRIVATE KEY-----", "a@b.c", "password=",
 		"eyJ.eyJ.", "postgres://:@", "authorization: ", "?sig=&key=", "1.1.1.1.1.1", "[REDACTED:ip]",
 		"password: |\n", "a:\n password: >-\n  x\n password: |\n   y", "Authorization: \"\\", "1:2:3:4:5:6:7:8:",
+		"password:\n  \"a\\\nx\"",
 	} {
 		f.Add(s)
 	}
@@ -673,6 +674,24 @@ func FuzzString(f *testing.F) {
 			t.Fatalf("second pass grew from %d to %d bytes", len(out), len(twice))
 		}
 	})
+}
+
+// A double-quoted value whose backslash escapes the line break goes on to its closing quote on a later line:
+// all of it is redacted, where slicing past the block's end panicked and the continuation leaked (#523).
+func TestQuotedBlockValueEscapingTheLineBreak(t *testing.T) {
+	for _, in := range []string{
+		"password:\n  \"a\\\nx\"",
+		"password:\n  \"hunter2hunter2\\\nnext: \"x\"",
+		"kind: Policy\nspec:\n  password:\n    \"hunter2hunter2\\\n  message: \"y\"\n",
+		// The escaped line break continues the value, so its next line is part of the secret.
+		"password:\n  \"first\\\nhunter2hunter2\"",
+		"credentials:\n  user: \"first\\\r\n    hunter2hunter2: tail\"",
+	} {
+		out := String(in)
+		if strings.Contains(out, "hunter2") {
+			t.Errorf("String(%q) = %q, the value is still there", in, out)
+		}
+	}
 }
 
 // A Flux revision is kept only when it is the whole value (IsFluxRevision); inside text, the commit hash is

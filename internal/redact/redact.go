@@ -852,10 +852,16 @@ func nextLineBlock(s string, pos, keyCol int, bare bool, add func(start, end int
 }
 
 // scalarValue returns the part of the scalar block value s[start:end] to redact: the text between the
-// quotes of a quoted scalar that is the whole value, so it keeps its quotes, otherwise all of it.
+// quotes of a quoted scalar that is the whole value, so it keeps its quotes, otherwise all of it. A quoted
+// scalar that a backslash continues past the block's end (an escaped line break, #523) is redacted up to its
+// closing quote, continuation lines included.
 func scalarValue(s string, start, end int) (int, int) {
 	if start < end && (s[start] == '"' || s[start] == '\'') {
-		if qe := quotedEnd(s, start); qe > 0 && strings.TrimRight(s[qe:end], " \t") == "" {
+		qe := quotedEnd(s, start)
+		if qe > end {
+			return start + 1, qe - 1
+		}
+		if qe > 0 && strings.TrimRight(s[qe:end], " \t") == "" {
 			return start + 1, qe - 1
 		}
 	}
@@ -975,7 +981,8 @@ func mixesLettersAndDigits(s string) bool {
 }
 
 // quotedEnd returns the index just past the closing quote of the quoted value starting at pos, honouring
-// backslash escapes in double quotes and doubled quotes in single quotes, or -1 if the line ends first.
+// backslash escapes in double quotes and doubled quotes in single quotes, or -1 if the line ends first. A
+// backslash before a line break ("\n" or "\r\n") escapes it, as in YAML, so the value goes on past that line.
 func quotedEnd(s string, pos int) int {
 	q := s[pos]
 	for i := pos + 1; i < len(s); i++ {
@@ -984,6 +991,9 @@ func quotedEnd(s string, pos int) int {
 			return -1
 		case q == '"' && c == '\\':
 			i++
+			if i+1 < len(s) && s[i] == '\r' && s[i+1] == '\n' {
+				i++
+			}
 		case c == q:
 			if q == '\'' && i+1 < len(s) && s[i+1] == '\'' {
 				i++

@@ -286,8 +286,23 @@ func finding(module, rule string, subject ObjectRef, s Symptom) (Finding, bool) 
 // that is a milli quantity such as "6500m" kept) and cuts it to [MaxEvidenceValueLength] bytes, redacting
 // again after the cut. The one exception is a value that is, as a whole, a Flux revision
 // ([redact.IsFluxRevision]): it holds only a reference name and a commit and is kept as it is. A revision
-// inside other text is redacted like the rest.
-func BoundValue(s string) string {
+// inside other text is redacted like the rest. If redaction panics, the whole value is withheld as
+// "[REDACTED]": BoundValue runs in informer predicates and rule evaluation, outside any recover, so a
+// redactor bug must neither stop the analyzer nor let the value through (#523).
+func BoundValue(s string) (out string) {
+	defer func() {
+		if recover() != nil {
+			out = "[REDACTED]"
+		}
+	}()
+	return boundWithoutRecover(s)
+}
+
+// boundWithoutRecover is [BoundValue] without the recover; a variable so a test can make it panic.
+var boundWithoutRecover = boundValue
+
+// boundValue is [BoundValue] without the recover.
+func boundValue(s string) string {
 	if redact.IsFluxRevision(s) {
 		return s
 	}

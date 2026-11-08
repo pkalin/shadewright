@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 620" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Shadewright reviewer hints</title>
+  <desc id="d">Planned. A reviewer with write access comments on the pull request at the code host. The executor, through its GitProvider adapter and a narrow FeedbackSource interface, reads the comment, checks the author's permission in the code host, redacts and bounds the text and pins it into the status of the RemediationRequest, which only the executor writes. The analyzer reads the pinned hint, analyzes again with the hint as a fenced reviewer-input section, and proposes a new RemediationRequest that names the one it replaces. The executor takes the existing pull request and branch over to the new request, adds one commit to the same branch, creates the required check run shadewright/review, which only an approval of the latest head from someone who wrote no hint can satisfy, and replies in the same pull request. Integrations other than the code host (on-call tools, chat, inbound alerts) belong to a future shadewright-coordinator with one credential per integration; how its hints reach the status is decided in its own ADR. A hint never authorizes anything: the policy still decides. Nothing in this picture is built yet.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .keyp{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6;stroke-dasharray:6 4}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .pl{fill:#1d1b2b;stroke:#5a5478;stroke-width:1.2;stroke-dasharray:5 4}
+      .ple{fill:#16222a;stroke:#2f5d63;stroke-width:1.2;stroke-dasharray:5 4}
+      .pn{fill:#8a85a8;font-size:10px;font-weight:600;letter-spacing:.06em}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .id{fill:none;stroke:#7c24fc;stroke-opacity:.55;stroke-dasharray:5 5;stroke-width:1.2}
+      .idt{fill:#a879ff;font-size:11.5px;font-weight:600;letter-spacing:.06em}
+      .fp{stroke:#a879ff;stroke-width:1.8;fill:none;stroke-dasharray:7 5}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .no{fill:#ff8fa3;font-size:11.5px;font-weight:600}
+    </style>
+  </defs>
+
+  <rect width="1120" height="620" rx="18" fill="#0e0e16"/>
+
+  <!-- lanes -->
+  <rect class="lane" x="24" y="24" width="200" height="572" rx="14"/>
+  <text class="lanet" x="44" y="54">OUTSIDE</text>
+  <rect class="lane" x="244" y="24" width="852" height="572" rx="14"/>
+  <text class="lanet" x="264" y="54">SHADEWRIGHT</text>
+
+  <!-- identities -->
+  <rect class="id" x="264" y="74" width="812" height="190" rx="12"/>
+  <text class="idt" x="1056" y="94" text-anchor="end">EXECUTOR IDENTITY · the Git App, plus checks: write</text>
+  <rect class="id" x="264" y="410" width="260" height="170" rx="12"/>
+  <text class="idt" x="504" y="430" text-anchor="end">COORDINATOR · planned</text>
+  <rect class="id" x="776" y="410" width="300" height="170" rx="12"/>
+  <text class="idt" x="1056" y="430" text-anchor="end">ANALYZER IDENTITY · read-only + model</text>
+
+  <!-- outside -->
+  <rect class="ext" x="44" y="110" width="160" height="84" rx="10"/>
+  <text class="h" x="58" y="136">Code host</text>
+  <text class="s" x="58" y="156">pull request comments</text>
+  <text class="s" x="58" y="174">GitHub · Azure DevOps</text>
+
+  <rect class="ple" x="44" y="446" width="160" height="84" rx="10"/>
+  <text class="pn" x="192" y="462" text-anchor="end">planned</text>
+  <text class="h" x="58" y="486">Other systems</text>
+  <text class="s" x="58" y="506">on-call · chat · alerts</text>
+
+  <rect class="ple" x="44" y="270" width="160" height="96" rx="10"/>
+  <text class="pn" x="192" y="286" text-anchor="end">planned</text>
+  <text class="h" x="58" y="306">Merge gate</text>
+  <text class="s" x="58" y="326">required check</text>
+  <text class="s" x="58" y="342">shadewright/review</text>
+  <text class="s" x="58" y="358">no hint author counts</text>
+
+  <!-- executor row -->
+  <rect class="pl" x="284" y="110" width="220" height="84" rx="10"/>
+  <text class="pn" x="492" y="126" text-anchor="end">planned</text>
+  <text class="h" x="298" y="146">GitProvider adapter</text>
+  <text class="s" x="298" y="166">FeedbackSource: comments,</text>
+  <text class="s" x="298" y="182">permission, reply</text>
+
+  <rect class="pl" x="540" y="110" width="220" height="84" rx="10"/>
+  <text class="pn" x="748" y="126" text-anchor="end">planned</text>
+  <text class="h" x="554" y="146">Hint intake</text>
+  <text class="s" x="554" y="166">permission · redact · bound</text>
+  <text class="s" x="554" y="182">pin by ID, digest, time</text>
+
+  <rect class="pl" x="796" y="110" width="260" height="84" rx="10"/>
+  <text class="pn" x="1044" y="126" text-anchor="end">planned</text>
+  <text class="h" x="810" y="146">Handoff</text>
+  <text class="s" x="810" y="166">same pull request and branch,</text>
+  <text class="s" x="810" y="182">one new commit, reply</text>
+
+  <!-- request row -->
+  <rect class="keyp" x="540" y="300" width="220" height="72" rx="12"/>
+  <text class="h" x="556" y="328">RemediationRequest</text>
+  <text class="s" x="556" y="348">status.hints, written only</text>
+  <text class="s" x="556" y="364">by the executor</text>
+
+  <rect class="keyp" x="796" y="300" width="260" height="72" rx="12"/>
+  <text class="h" x="812" y="328">Replacement request</text>
+  <text class="s" x="812" y="348">its own immutable plan,</text>
+  <text class="s" x="812" y="364">names the request it replaces</text>
+
+  <!-- coordinator -->
+  <rect class="pl" x="284" y="452" width="220" height="72" rx="10"/>
+  <text class="pn" x="492" y="468" text-anchor="end">planned</text>
+  <text class="h" x="298" y="490">shadewright-coordinator</text>
+  <text class="s" x="298" y="510">one credential per integration</text>
+
+  <!-- analyzer -->
+  <rect class="pl" x="796" y="452" width="260" height="72" rx="10"/>
+  <text class="pn" x="1044" y="468" text-anchor="end">planned</text>
+  <text class="h" x="810" y="490">Analyzer</text>
+  <text class="s" x="810" y="510">hint fenced; tools, catalog same</text>
+
+  <!-- flows -->
+  <path class="fp" d="M204 138H278" marker-end="url(#a)"/>
+  <text class="lbl" x="212" y="130">comment</text>
+  <path class="fp" d="M284 170H210" marker-end="url(#a)"/>
+  <text class="lbl" x="226" y="188">reply</text>
+  <path class="fp" d="M504 152H534" marker-end="url(#a)"/>
+  <path class="fp" d="M650 194V294" marker-end="url(#a)"/>
+  <text class="lbl" x="660" y="250">pinned hint</text>
+  <path class="fp" d="M650 372V488H790" marker-end="url(#a)"/>
+  <text class="lbl" x="660" y="470">reads the hint</text>
+  <path class="fp" d="M926 452V378" marker-end="url(#a)"/>
+  <text class="lbl" x="936" y="396">proposes</text>
+  <path class="fp" d="M926 300V200" marker-end="url(#a)"/>
+  <text class="lbl" x="936" y="250">replaces</text>
+  <path class="fp" d="M850 194V218H394V200" marker-end="url(#a)"/>
+  <text class="lbl" x="400" y="236">one commit, reply</text>
+  <path class="fp" d="M330 194V320H210" marker-end="url(#a)"/>
+  <text class="lbl" x="214" y="302">check run</text>
+  <path class="fp" d="M204 488H278" marker-end="url(#a)"/>
+  <path class="fp" d="M394 452V336H534" marker-end="url(#a)"/>
+  <text class="lbl" x="300" y="380">route: its own ADR</text>
+
+  <!-- legend -->
+  <rect class="ext" x="44" y="546" width="30" height="16" rx="4"/>
+  <text class="lbl" x="84" y="559">exists</text>
+  <rect class="pl" x="124" y="546" width="30" height="16" rx="4"/>
+  <text class="lbl" x="162" y="559">planned</text>
+
+  <!-- rule -->
+  <text class="no" x="540" y="570">a hint never authorizes: the policy still decides</text>
+</svg>

@@ -112,6 +112,7 @@ nav = [
       { "0025 Claims, units, manifest" = "adr/0025-analysis-claims-units-and-evaluation-manifest.md" },
       { "0026 Policy bounds for the model" = "adr/0026-the-analyzer-shows-the-model-the-policy-bounds.md" },
       { "0027 Default models" = "adr/0027-default-models-for-triage-and-escalation.md" },
+      { "0028 Reviewer hints" = "adr/0028-reviewer-hints-through-the-pull-request.md" },
       { "Template" = "adr/template.md" },
     ] },
   ] },

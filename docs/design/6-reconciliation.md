@@ -195,7 +195,7 @@ Each reconcile does these steps:
 5. Does one idempotent step, or records why it is waiting.
 6. Updates status and requeues with a deadline.
 
-Never assume exactly-once execution. A PR can be created while the status write that records its number fails. The branch name `shadewright/<request-uid>` and a marker in the PR body (request UID and plan digest) let the controller find the existing operation after a restart.
+Never assume exactly-once execution. A PR can be created while the status write that records its number fails. The branch name `shadewright/<request-uid>` and a marker in the PR body (request UID and plan digest) let the controller find the existing operation after a restart. <span class="sw-status sw-planned">planned</span> ([ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)) For a replacement request the branch name derives from `spec.chainRoot`, the UID of the first request of the supersede chain, and never from status, so a lost status write is recovered by the same name; the marker still holds the request's own UID and plan digest.
 
 ## 6.5. The pull request step
 
@@ -376,6 +376,17 @@ A change request is closed only when it is the pull request of the request's bra
 
 So someone else's pull request on the same branch name, or a recorded number that is not the branch's own, is never closed. The cleanup of a stale plan then ends `NeedsIntervention`, `ForeignChangeRequest`.
 
+### 6.5.4. Reviewer hints and the handoff
+
+<span class="sw-status sw-planned">planned</span> ([ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)). Today a plan that goes stale ends `Superseded` and its pull request is closed (6.6.1). A reviewer's hint does the opposite: it never closes the pull request and never opens another.
+
+- **Seeing the hint.** On the poll of a request in `AwaitingApproval` with a recorded, open pull request, the executor queries the comments `since` its durable watermark (with the `ETag` of that query, paginated within a bound, deduplicated by comment ID), and for a comment with the command and a human author asks the code host for the author's base permission. It stores the redacted, bounded hint in `status.hints`, `Pending`, pinned by comment ID, digest and `updated_at`; an edit later changes nothing. A hint is consumed once.
+- **The analysis.** The analyzer watches `status.hints`, analyzes again with the hint fenced, and creates a replacement with `spec.replaces` and `spec.chainRoot` (CEL: one only with the other). A refusal (budget, cooldown, model error) is read by the executor from the Incident's `Analyzed` condition, which the analyzer already writes, and answered in the pull request.
+- **The chain link is checked at admission.** Before a branch name is computed for a request with `chainRoot`, at the policy check, the executor checks that the request named in `spec.replaces` is for the same Incident and target, has the same chain root, is `AwaitingApproval` with an open pull request and holds the named hint `Pending`. Otherwise the replacement is `Denied` (`ChainLinkInvalid`). It is not repeated: the predecessor changes during the handoff, so later reconciles accept the replacement only through the `status.handoff` the executor wrote (`Reserved` or `Done`, `from` equal to `spec.replaces`). Admission then takes the predecessor's lock and concurrency slot under `admitMu`; nothing else is exempt and the circuit breaker applies.
+- **The handoff** is written in this order: the replacement reserves (`holdsTarget`, `status.handoff`); the predecessor records its intent and the hint becomes `Reserved` in one write; the update of the branch; the replacement records the pull request and moves on; the predecessor ends `Superseded` with reason `HandedOff` (its hint `Consumed`, its `holdsTarget` false); then the title and body, the check run and the reply. A restart at any point resumes from what each status and the branch head show, as ADR-0028 section 4 lists. While its intent is recorded, the predecessor's `watchPullRequest` accepts a head whose parent is the head it recorded and that the App made, instead of `HeadMoved`. `prMayBeOpen` treats `Superseded` with `HandedOff` as possibly open, and `checkHeld` does not look it up.
+- **The commit.** One new commit on the existing branch: no force-push, no rebase, no new base. Its net change against the base is exactly the new plan (if the path differs, the old path is restored to base content). The ref moves by a fast-forward with the expected head as the parent; that catches a push by anyone. It does not catch a squash merge or a close, which leave the head ref alone, so the pull request is read right before the update and again right after. A close ends the replacement without taking over (`Cancelled`, `HandoffAborted`). For a merge the merged head decides: the old head means the predecessor is `Merged` and the replacement is `Cancelled`; the new commit means the replacement owns the merge and ends `Merged`. The reply says which plan reached the base. Every write of this section checks the kill switch right before it; while paused the handoff waits. Before the update, the render check (6.5.2) and the branch rule (#524) must pass. A person can still push to the branch (a force-push included); the request then stops as #524 says.
+- **After it.** The executor creates the check run `shadewright/review` to `in_progress` on the new head and to `completed` with `success` only when the latest head has an approval by someone who wrote no hint in the chain (8.4); it rewrites the title and body, and replies in the pull request to the hint's author with the old and the new plan, or with why nothing changed. Replies are redacted and fail closed.
+
 ## 6.6. Required mechanisms
 
 - Leader election, bounded concurrency, a lock per target object.
@@ -434,6 +445,8 @@ The mapping also reads the Flux Kustomization and GitRepository again after scan
 - Otherwise the result describes a delivery or a tree that has gone, and the check is retried.
 
 #### A stale plan
+
+<span class="sw-status sw-planned">planned</span> The one `Superseded` that does not close the change request is reason `HandedOff` (6.5.4): the pull request lives on under the replacement request.
 
 A stale plan becomes `Superseded` and its change request is closed (once, idempotently), never a rebuilt branch.
 

@@ -491,7 +491,8 @@ spec:
                     description: |-
                       mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when
                       Shadewright sees the merge of the pull request it pushed. Delivery is checked against it: the GitOps
-                      controller must report exactly this commit as applied. Empty until then, and when the host reported none.
+                      controller must report this commit, or a later commit of the target branch containing it, as applied.
+                      Empty until then, and when the host reported none. Once set it never changes.
                     maxLength: 40
                     minLength: 40
                     pattern: ^[0-9a-f]{40}$
@@ -521,12 +522,8 @@ spec:
                 - url
                 type: object
                 x-kubernetes-validations:
-                - message: mergeCommitSHA is set once and never changed
-                  rule: '!has(oldSelf.mergeCommitSHA) || (has(self.mergeCommitSHA)
-                    && self.mergeCommitSHA == oldSelf.mergeCommitSHA)'
-                - message: appliedObservedAt is set once and never changed
-                  rule: '!has(oldSelf.appliedObservedAt) || (has(self.appliedObservedAt)
-                    && self.appliedObservedAt == oldSelf.appliedObservedAt)'
+                - message: appliedObservedAt needs mergeCommitSHA
+                  rule: '!has(self.appliedObservedAt) || has(self.mergeCommitSHA)'
               source:
                 description: source is where the change is made, resolved by the controller
                   before the policy check.
@@ -584,6 +581,15 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: status.pullRequest.mergeCommitSHA is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.mergeCommitSHA)
+            || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.mergeCommitSHA)
+            && self.status.pullRequest.mergeCommitSHA == oldSelf.status.pullRequest.mergeCommitSHA)'
+        - message: status.pullRequest.appliedObservedAt is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.appliedObservedAt)
+            || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt)
+            && self.status.pullRequest.appliedObservedAt == oldSelf.status.pullRequest.appliedObservedAt)'
     selectableFields:
     - jsonPath: .status.phase
     - jsonPath: .status.breakerProbe

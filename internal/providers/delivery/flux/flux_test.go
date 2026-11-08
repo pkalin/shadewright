@@ -41,6 +41,8 @@ const (
 
 	kustomization = "Kustomization"
 	buildFailed   = "kustomization-build-failed.json"
+	readyFile     = "kustomization-ready.json"
+	mainBranch    = "main"
 	helmRelease   = "HelmRelease"
 )
 
@@ -103,9 +105,12 @@ func status(t *testing.T, u *unstructured.Unstructured) providers.DeliveryStatus
 	return st
 }
 
-func outcome(t *testing.T, st providers.DeliveryStatus, commit string) providers.DeliveryOutcome {
+// kind is the branch the recorded objects other than buildFailed track.
+const kind = "cluster/kind"
+
+func outcome(t *testing.T, st providers.DeliveryStatus, commit, branch string) providers.DeliveryOutcome {
 	t.Helper()
-	got, err := st.Outcome(commit)
+	got, err := st.Outcome(commit, branch)
 	if err != nil {
 		t.Fatalf("Outcome(%s): %v", commit, err)
 	}
@@ -116,26 +121,26 @@ func outcome(t *testing.T, st providers.DeliveryStatus, commit string) providers
 // failed.
 func TestRecordedObjects(t *testing.T) {
 	for _, tc := range []struct {
-		file                string
+		file, branch        string
 		forOld, forNew      providers.DeliveryOutcome
 		ready               bool
 		generation, observe int64
 	}{
 		// Applied: Ready for generation 1, last applied revision is the old commit.
-		{"kustomization-ready.json", providers.DeliveryApplied, providers.DeliveryPending, true, 1, 1},
+		{readyFile, kind, providers.DeliveryApplied, providers.DeliveryPending, true, 1, 1},
 		// Pending: a new generation not observed yet, health checks of the new commit running.
-		{"kustomization-reconciling.json", providers.DeliveryPending, providers.DeliveryPending, false, 2, 1},
+		{"kustomization-reconciling.json", kind, providers.DeliveryPending, providers.DeliveryPending, false, 2, 1},
 		// Failed: the build of the new commit failed; the applied revision names it too, but it is not Ready.
-		{buildFailed, providers.DeliveryPending, providers.DeliveryFailed, false, 3, 3},
+		{buildFailed, mainBranch, providers.DeliveryPending, providers.DeliveryFailed, false, 3, 3},
 		// Failed: the dry-run of the new commit failed; the old one stays applied, but the unit reports a
 		// failure, so it is not Applied either.
-		{"kustomization-invalid-manifest.json", providers.DeliveryPending, providers.DeliveryFailed, false, 1, 1},
+		{"kustomization-invalid-manifest.json", kind, providers.DeliveryPending, providers.DeliveryFailed, false, 1, 1},
 		// Failed: stalled on the new commit.
-		{"kustomization-stalled.json", providers.DeliveryPending, providers.DeliveryFailed, false, 4, 3},
+		{"kustomization-stalled.json", kind, providers.DeliveryPending, providers.DeliveryFailed, false, 4, 3},
 		// Failed, but on the old commit: the dependency is missing.
-		{"kustomization-dependency-missing.json", providers.DeliveryFailed, providers.DeliveryPending, false, 1, 1},
+		{"kustomization-dependency-missing.json", kind, providers.DeliveryFailed, providers.DeliveryPending, false, 1, 1},
 		// A HelmRelease's revisions are chart versions: no commit is ever Applied or Failed.
-		{"helmrelease-upgrade-failed.json", providers.DeliveryPending, providers.DeliveryPending, false, 5, 5},
+		{"helmrelease-upgrade-failed.json", kind, providers.DeliveryPending, providers.DeliveryPending, false, 5, 5},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			st := status(t, recorded(t, tc.file))
@@ -143,10 +148,10 @@ func TestRecordedObjects(t *testing.T) {
 				t.Errorf("Ready, Generation, ObservedGeneration = %v, %d, %d; want %v, %d, %d",
 					st.Ready, st.Generation, st.ObservedGeneration, tc.ready, tc.generation, tc.observe)
 			}
-			if got := outcome(t, st, revOld); got != tc.forOld {
+			if got := outcome(t, st, revOld, tc.branch); got != tc.forOld {
 				t.Errorf("outcome for the old commit = %s, want %s", got, tc.forOld)
 			}
-			if got := outcome(t, st, revNew); got != tc.forNew {
+			if got := outcome(t, st, revNew, tc.branch); got != tc.forNew {
 				t.Errorf("outcome for the new commit = %s, want %s", got, tc.forNew)
 			}
 		})
@@ -156,7 +161,8 @@ func TestRecordedObjects(t *testing.T) {
 func TestStatusFields(t *testing.T) {
 	st := status(t, recorded(t, "kustomization-invalid-manifest.json"))
 	want := providers.DeliveryStatus{
-		AppliedRevision: "cluster/kind@sha1:" + revOld, AppliedCommit: revOld, AttemptedCommit: revNew,
+		AppliedRevision: kind + "@sha1:" + revOld, AppliedCommit: revOld, AppliedRef: kind,
+		AttemptedCommit: revNew, AttemptedRef: kind,
 		Failed: true, Generation: 1, ObservedGeneration: 1,
 		Message: "Service/demo/web dry-run failed: failed to create typed patch object (demo/web; /v1, Kind=Service): " +
 			".spec.ports[0].port: expected numeric (int or float), got string",
@@ -209,9 +215,9 @@ func TestNeverAppliedOnBadInput(t *testing.T) {
 		{"no source", func(u *unstructured.Unstructured) { delete(u.Object["spec"].(map[string]any), "sourceRef") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			u := recorded(t, "kustomization-ready.json")
+			u := recorded(t, readyFile)
 			tc.mutate(u)
-			if got := outcome(t, status(t, u), revOld); got == providers.DeliveryApplied {
+			if got := outcome(t, status(t, u), revOld, kind); got == providers.DeliveryApplied {
 				t.Error("outcome = Applied")
 			}
 		})
@@ -226,13 +232,13 @@ func TestHealthCheckCanceledIsNoFailure(t *testing.T) {
 	if st.Failed {
 		t.Error("Failed = true")
 	}
-	if got := outcome(t, st, revNew); got != providers.DeliveryPending {
+	if got := outcome(t, st, revNew, mainBranch); got != providers.DeliveryPending {
 		t.Errorf("outcome = %s, want Pending", got)
 	}
 }
 
 func TestMessageIsBounded(t *testing.T) {
-	u := recorded(t, "kustomization-ready.json")
+	u := recorded(t, readyFile)
 	u.Object["status"].(map[string]any)["conditions"].([]any)[0].(map[string]any)["message"] =
 		strings.Repeat("é", flux.MaxMessageBytes) + "\xff"
 	msg := status(t, u).Message
@@ -242,7 +248,7 @@ func TestMessageIsBounded(t *testing.T) {
 }
 
 func TestInvalidUnitIsNotRead(t *testing.T) {
-	r := &reader{obj: recorded(t, "kustomization-ready.json")}
+	r := &reader{obj: recorded(t, readyFile)}
 	v, err := flux.New(r, ancestry{})
 	if err != nil {
 		t.Fatal(err)
@@ -303,7 +309,7 @@ func TestReadErrors(t *testing.T) {
 }
 
 func TestCancelledContext(t *testing.T) {
-	r := &reader{obj: recorded(t, "kustomization-ready.json")}
+	r := &reader{obj: recorded(t, readyFile)}
 	v, err := flux.New(r, ancestry{})
 	if err != nil {
 		t.Fatal(err)
@@ -328,7 +334,7 @@ func (o *otherObject) Get(ctx context.Context, key client.ObjectKey, obj client.
 }
 
 func TestAnotherObjectIsNotReported(t *testing.T) {
-	u := recorded(t, "kustomization-ready.json")
+	u := recorded(t, readyFile)
 	v, err := flux.New(&otherObject{reader{obj: u}}, ancestry{})
 	if err != nil {
 		t.Fatal(err)
@@ -384,12 +390,12 @@ func TestVerifyLaterCommit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
 			tc.anc.calls = &calls
-			u := recorded(t, "kustomization-ready.json")
+			u := recorded(t, readyFile)
 			v, err := flux.New(&reader{obj: u}, tc.anc)
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, st, err := v.Verify(t.Context(), unitOf(u), merge)
+			got, st, err := v.Verify(t.Context(), unitOf(u), merge, kind)
 			if got != tc.want || (err != nil) != tc.error || calls != 1 {
 				t.Errorf("Verify = %s, %v after %d ancestry calls; want %s, error %v, one call", got, err, calls, tc.want, tc.error)
 			}
@@ -404,14 +410,17 @@ func TestVerifyLaterCommit(t *testing.T) {
 // that cannot be Applied whatever the history says.
 func TestVerifyAsksNoAncestryWhenNotNeeded(t *testing.T) {
 	for _, tc := range []struct {
-		file, commit string
-		want         providers.DeliveryOutcome
+		file, commit, branch string
+		want                 providers.DeliveryOutcome
 	}{
-		{"kustomization-ready.json", revOld, providers.DeliveryApplied},
-		{"kustomization-reconciling.json", revNew, providers.DeliveryPending},
-		{buildFailed, strings.Repeat("9", 40), providers.DeliveryPending},
-		{buildFailed, revNew, providers.DeliveryFailed},
-		{"helmrelease-upgrade-failed.json", revNew, providers.DeliveryPending},
+		{readyFile, revOld, kind, providers.DeliveryApplied},
+		{readyFile, revOld, mainBranch, providers.DeliveryPending},
+		{readyFile, strings.Repeat("9", 40), mainBranch, providers.DeliveryPending},
+		{"kustomization-reconciling.json", revNew, kind, providers.DeliveryPending},
+		{buildFailed, revNew, mainBranch, providers.DeliveryFailed},
+		{buildFailed, revNew, kind, providers.DeliveryPending},
+		{buildFailed, strings.Repeat("9", 40), kind, providers.DeliveryPending},
+		{"helmrelease-upgrade-failed.json", revNew, mainBranch, providers.DeliveryPending},
 	} {
 		calls := 0
 		u := recorded(t, tc.file)
@@ -419,7 +428,7 @@ func TestVerifyAsksNoAncestryWhenNotNeeded(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, _, err := v.Verify(t.Context(), unitOf(u), tc.commit)
+		got, _, err := v.Verify(t.Context(), unitOf(u), tc.commit, tc.branch)
 		if got != tc.want || err != nil || calls != 0 {
 			t.Errorf("%s: Verify = %s, %v after %d ancestry calls; want %s and none", tc.file, got, err, calls, tc.want)
 		}
@@ -431,7 +440,8 @@ func TestVerifyReadError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, st, err := v.Verify(t.Context(), providers.DeliveryUnit{Kind: kustomization, Namespace: "flux-system", Name: "apps"}, revOld)
+	got, st, err := v.Verify(t.Context(), providers.DeliveryUnit{Kind: kustomization, Namespace: "flux-system", Name: "apps"},
+		revOld, mainBranch)
 	if !errors.Is(err, providers.ErrNotFound) || got != "" || st != (providers.DeliveryStatus{}) {
 		t.Errorf("Verify = %q, %+v, %v", got, st, err)
 	}
@@ -445,5 +455,46 @@ func TestHelmReleaseIsRead(t *testing.T) {
 	st := status(t, u)
 	if st.AppliedRevision != "" || st.Ready {
 		t.Errorf("status = %+v", st)
+	}
+}
+
+// TestVerifyCommitOnlyRevision checks Flux's sha1:<commit> revision, which names no branch: the commit is
+// still compared, exactly or through ancestry.
+func TestVerifyCommitOnlyRevision(t *testing.T) {
+	merge := strings.Repeat("9", 40)
+	for _, tc := range []struct {
+		name, commit string
+		anc          ancestry
+		want         providers.DeliveryOutcome
+	}{
+		{"the merge commit", revOld, ancestry{err: errors.New("must not be asked")}, providers.DeliveryApplied},
+		{"a later commit", merge, ancestry{pairs: map[[2]string]bool{{merge, revOld}: true}}, providers.DeliveryApplied},
+		{"an unrelated commit", merge, ancestry{}, providers.DeliveryPending},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := recorded(t, readyFile)
+			u.Object["status"].(map[string]any)["lastAppliedRevision"] = "sha1:" + revOld
+			v, err := flux.New(&reader{obj: u}, tc.anc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, st, err := v.Verify(t.Context(), unitOf(u), tc.commit, mainBranch)
+			if got != tc.want || err != nil || st.AppliedRef != "" || st.AppliedCommit != revOld {
+				t.Errorf("Verify = %s, %+v, %v; want %s", got, st, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestVerifyLaterFailure checks that a failing attempt of a later commit holding the merge commit is Failed.
+func TestVerifyLaterFailure(t *testing.T) {
+	merge := strings.Repeat("9", 40)
+	u := recorded(t, buildFailed)
+	v, err := flux.New(&reader{obj: u}, ancestry{pairs: map[[2]string]bool{{merge, revNew}: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := v.Verify(t.Context(), unitOf(u), merge, mainBranch); got != providers.DeliveryFailed || err != nil {
+		t.Errorf("Verify = %s, %v; want Failed", got, err)
 	}
 }

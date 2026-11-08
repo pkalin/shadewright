@@ -23,7 +23,8 @@ limitations under the License.
 // history holds it, which the Git host's [providers.AncestryChecker] answers, since Flux objects cannot.
 //
 // Only a Kustomization whose source is a GitRepository names a commit: Flux writes its revisions as
-// <branch>@sha1:<commit>. A HelmRelease's revisions are chart versions, which name no commit, so its
+// <branch>@sha1:<commit>, or sha1:<commit> alone for a source fetched at a commit. A revision of another
+// branch than the target is never Applied. A HelmRelease's revisions are chart versions, which name no commit, so its
 // AppliedCommit stays empty and its outcome is never Applied; the delivery of a commit to a HelmRelease is
 // shown by the Kustomization that applies it.
 //
@@ -82,16 +83,16 @@ func New(reader client.Reader, ancestry providers.AncestryChecker) (*Verifier, e
 	return &Verifier{reader: reader, ancestry: ancestry}, nil
 }
 
-// Verify reads the unit and says whether it delivered mergeCommit: the outcome, the status it was decided
-// on, and an error when the unit could not be read (no status, no outcome), the commit is not a full object
-// ID, or the ancestry check failed (Pending with the status).
-func (v *Verifier) Verify(ctx context.Context, unit providers.DeliveryUnit, mergeCommit string) (
+// Verify reads the unit and says whether it delivered mergeCommit, merged into branch: the outcome, the status
+// it was decided on, and an error when the unit could not be read (no status, no outcome), the commit or
+// branch is invalid, or the ancestry check failed (Pending with the status).
+func (v *Verifier) Verify(ctx context.Context, unit providers.DeliveryUnit, mergeCommit, branch string) (
 	providers.DeliveryOutcome, providers.DeliveryStatus, error) {
 	st, err := v.Status(ctx, unit)
 	if err != nil {
 		return "", providers.DeliveryStatus{}, err
 	}
-	outcome, err := st.Verify(ctx, mergeCommit, v.ancestry)
+	outcome, err := st.Verify(ctx, mergeCommit, branch, v.ancestry)
 	return outcome, st, err
 }
 
@@ -135,19 +136,20 @@ func statusOf(kind string, obj map[string]any) providers.DeliveryStatus {
 	reason, _ := cond["reason"].(string)
 	st.Failed = cond != nil && (typ != fluxstatus.ConditionReady || reason != fluxstatus.ReasonHealthCheckCanceled)
 	if kind == fluxstatus.KindKustomization && fluxstatus.SourceKind(obj) == fluxstatus.KindGitRepository {
-		st.AppliedCommit = commitOf(st.AppliedRevision)
-		st.AttemptedCommit = commitOf(fluxstatus.AttemptedRevision(status))
+		st.AppliedRef, st.AppliedCommit = commitOf(st.AppliedRevision)
+		st.AttemptedRef, st.AttemptedCommit = commitOf(fluxstatus.AttemptedRevision(status))
 	}
 	return st
 }
 
-// commitOf returns the commit ID a Git source revision names, or "".
-func commitOf(revision string) string {
-	_, commit, ok := fluxstatus.ParseRevision(revision)
+// commitOf returns the ref and commit ID a Git source revision names (<ref>@sha1:<commit>, or sha1:<commit>
+// with no ref), or two empty strings.
+func commitOf(revision string) (ref, commit string) {
+	ref, commit, ok := fluxstatus.ParseCommitRevision(revision)
 	if !ok {
-		return ""
+		return "", ""
 	}
-	return commit
+	return ref, commit
 }
 
 // bounded returns s as valid UTF-8 and at most MaxMessageBytes long, cut at a rune boundary.

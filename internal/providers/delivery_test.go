@@ -25,6 +25,11 @@ import (
 	"github.com/pkalin/shadewright/internal/providers/fake"
 )
 
+const (
+	mainBranch    = "main"
+	releaseBranch = "release"
+)
+
 func TestDeliveryOutcome(t *testing.T) {
 	merge := strings.Repeat("ab", 20)
 	other := strings.Repeat("cd", 20)
@@ -49,11 +54,16 @@ func TestDeliveryOutcome(t *testing.T) {
 		{"failure without an attempted commit", func(s *providers.DeliveryStatus) {
 			s.Failed, s.AttemptedCommit = true, ""
 		}, providers.DeliveryPending},
+		{"applied from the target branch", func(s *providers.DeliveryStatus) { s.AppliedRef = mainBranch }, providers.DeliveryApplied},
+		{"applied from another branch", func(s *providers.DeliveryStatus) { s.AppliedRef = releaseBranch }, providers.DeliveryPending},
+		{"failure on the commit from another branch", func(s *providers.DeliveryStatus) {
+			s.Failed, s.AttemptedRef = true, releaseBranch
+		}, providers.DeliveryPending},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := applied
 			tc.mutate(&s)
-			got, err := s.Outcome(merge)
+			got, err := s.Outcome(merge, mainBranch)
 			if err != nil || got != tc.want {
 				t.Errorf("Outcome = %q, %v; want %q", got, err, tc.want)
 			}
@@ -66,7 +76,7 @@ func TestDeliveryOutcome(t *testing.T) {
 func TestDeliveryOutcomeRefusesInvalidCommit(t *testing.T) {
 	for _, commit := range []string{"", "abc", strings.Repeat("A", 40), strings.Repeat("a", 39), strings.Repeat("a", 41)} {
 		s := providers.DeliveryStatus{AppliedCommit: commit, Ready: true, Generation: 1, ObservedGeneration: 1}
-		if got, err := s.Outcome(commit); !errors.Is(err, providers.ErrInvalidCommit) || got != "" {
+		if got, err := s.Outcome(commit, mainBranch); !errors.Is(err, providers.ErrInvalidCommit) || got != "" {
 			t.Errorf("Outcome(%q) = %q, %v; want ErrInvalidCommit", commit, got, err)
 		}
 	}
@@ -77,13 +87,13 @@ func TestDeliveryOutcomeRefusesInvalidCommit(t *testing.T) {
 // that commit is merge or a descendant of it.
 func TestDeliveryVerifyLaterCommits(t *testing.T) {
 	ctx := t.Context()
-	git := fake.NewGit("main", map[string][]byte{"a": []byte("0")})
-	base, _ := git.BranchHead(ctx, "main")
-	merge, err := git.Push("main", "a", []byte("1"))
+	git := fake.NewGit(mainBranch, map[string][]byte{"a": []byte("0")})
+	base, _ := git.BranchHead(ctx, mainBranch)
+	merge, err := git.Push(mainBranch, "a", []byte("1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	later, err := git.Push("main", "a", []byte("2"))
+	later, err := git.Push(mainBranch, "a", []byte("2"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +119,7 @@ func TestDeliveryVerifyLaterCommits(t *testing.T) {
 		{"a commit the host does not know", applied(strings.Repeat("e", 40)), providers.DeliveryPending},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, _ := tc.status.Verify(ctx, merge, git)
+			got, _ := tc.status.Verify(ctx, merge, mainBranch, git)
 			if got != tc.want {
 				t.Errorf("Verify = %s, want %s", got, tc.want)
 			}
@@ -123,7 +133,7 @@ func TestDeliveryVerifyLaterCommits(t *testing.T) {
 		}
 		return nil
 	})
-	if got, err := applied(later).Verify(ctx, merge, git); got != providers.DeliveryPending || !errors.Is(err, providers.ErrRetryable) {
+	if got, err := applied(later).Verify(ctx, merge, mainBranch, git); got != providers.DeliveryPending || !errors.Is(err, providers.ErrRetryable) {
 		t.Errorf("Verify with a failing ancestry check = %s, %v; want Pending and the error", got, err)
 	}
 	// The merge commit itself, and a unit that is not Ready, Current and free of failure, ask no ancestry.
@@ -131,17 +141,79 @@ func TestDeliveryVerifyLaterCommits(t *testing.T) {
 		applied(merge),
 		{AppliedCommit: later, Generation: 1, ObservedGeneration: 1},
 		{AppliedCommit: later, Ready: true, Generation: 2, ObservedGeneration: 1},
-		{AppliedCommit: later, AttemptedCommit: other, Failed: true, Ready: true, Generation: 1, ObservedGeneration: 1},
+		{AppliedCommit: later, AttemptedCommit: other, AttemptedRef: releaseBranch, Failed: true, Generation: 1, ObservedGeneration: 1},
 		{AppliedCommit: "", Ready: true, Generation: 1, ObservedGeneration: 1},
 	} {
-		if _, err := s.Verify(ctx, merge, git); err != nil {
+		if _, err := s.Verify(ctx, merge, mainBranch, git); err != nil {
 			t.Errorf("Verify(%+v) asked for ancestry: %v", s, err)
 		}
 	}
-	if got, err := applied(later).Verify(ctx, merge, nil); got != providers.DeliveryPending || err != nil {
+	if got, err := applied(later).Verify(ctx, merge, mainBranch, nil); got != providers.DeliveryPending || err != nil {
 		t.Errorf("Verify without an ancestry checker = %s, %v; want Pending", got, err)
 	}
-	if _, err := applied(later).Verify(ctx, "main", git); !errors.Is(err, providers.ErrInvalidCommit) {
+	if _, err := applied(later).Verify(ctx, mainBranch, mainBranch, git); !errors.Is(err, providers.ErrInvalidCommit) {
 		t.Errorf("Verify of a branch name: %v, want ErrInvalidCommit", err)
+	}
+}
+
+func TestDeliveryOutcomeNeedsABranch(t *testing.T) {
+	s := providers.DeliveryStatus{AppliedCommit: strings.Repeat("a", 40), Ready: true, Generation: 1, ObservedGeneration: 1}
+	if got, err := s.Outcome(strings.Repeat("a", 40), ""); !errors.Is(err, providers.ErrInvalidBranch) || got != "" {
+		t.Errorf("Outcome without a branch = %q, %v; want ErrInvalidBranch", got, err)
+	}
+}
+
+// TestDeliveryVerifyLaterFailure checks that a failing attempt of a later commit of the branch, which carries
+// the merged change, is Failed, and only then.
+func TestDeliveryVerifyLaterFailure(t *testing.T) {
+	ctx := t.Context()
+	git := fake.NewGit(mainBranch, map[string][]byte{"a": []byte("0")})
+	base, _ := git.BranchHead(ctx, mainBranch)
+	merge, _ := git.Push(mainBranch, "a", []byte("1"))
+	later, _ := git.Push(mainBranch, "a", []byte("2"))
+	failing := func(c, ref string) providers.DeliveryStatus {
+		return providers.DeliveryStatus{AppliedCommit: base, AppliedRef: mainBranch, AttemptedCommit: c, AttemptedRef: ref,
+			Failed: true, Generation: 1, ObservedGeneration: 1}
+	}
+	for _, tc := range []struct {
+		name   string
+		status providers.DeliveryStatus
+		want   providers.DeliveryOutcome
+	}{
+		{"the merge commit fails", failing(merge, mainBranch), providers.DeliveryFailed},
+		{"a later commit fails", failing(later, mainBranch), providers.DeliveryFailed},
+		{"a later commit named by commit only fails", failing(later, ""), providers.DeliveryFailed},
+		{"the commit before the merge fails", failing(base, mainBranch), providers.DeliveryPending},
+		{"a later commit of another branch fails", failing(later, releaseBranch), providers.DeliveryPending},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, err := tc.status.Verify(ctx, merge, mainBranch, git); got != tc.want || err != nil {
+				t.Errorf("Verify = %s, %v; want %s", got, err, tc.want)
+			}
+		})
+	}
+	git.SetFail(func(op string) error {
+		if op == "IsAncestor" {
+			return &providers.RetryableError{Err: errors.New("compare failed")}
+		}
+		return nil
+	})
+	if got, err := failing(later, mainBranch).Verify(ctx, merge, mainBranch, git); got != providers.DeliveryPending || err == nil {
+		t.Errorf("Verify with a failing ancestry check = %s, %v; want Pending and the error", got, err)
+	}
+}
+
+// TestDeliveryVerifyIncomparableCommit checks that an applied commit that cannot be compared with the merge
+// commit (SHA-256 against SHA-1) gives the permanent ErrInvalidCommit without asking the host, not an error
+// a caller would retry.
+func TestDeliveryVerifyIncomparableCommit(t *testing.T) {
+	git := fake.NewGit(mainBranch, map[string][]byte{"a": []byte("0")})
+	merge, _ := git.Push(mainBranch, "a", []byte("1"))
+	s := providers.DeliveryStatus{AppliedCommit: strings.Repeat("ab", 32), AppliedRef: mainBranch, Ready: true,
+		Generation: 1, ObservedGeneration: 1}
+	git.SetFail(func(op string) error { return errors.New("asked " + op) })
+	got, err := s.Verify(t.Context(), merge, mainBranch, git)
+	if got != providers.DeliveryPending || !errors.Is(err, providers.ErrInvalidCommit) || errors.Is(err, providers.ErrRetryable) {
+		t.Errorf("Verify = %s, %v; want Pending and a permanent ErrInvalidCommit", got, err)
 	}
 }

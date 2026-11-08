@@ -60,6 +60,11 @@ after deterministic policy allows it.
 - Kind: `RemediationRequest`
 - Scope: Namespaced
 
+Validation rules:
+
+- status.pullRequest.mergeCommitSHA is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.mergeCommitSHA) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.mergeCommitSHA) && self.status.pullRequest.mergeCommitSHA == oldSelf.status.pullRequest.mergeCommitSHA)`
+- status.pullRequest.appliedObservedAt is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.appliedObservedAt) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt) && self.status.pullRequest.appliedObservedAt == oldSelf.status.pullRequest.appliedObservedAt)`
+
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
@@ -625,8 +630,7 @@ PullRequestStatus records the pull request that carries the plan.
 
 Validation rules:
 
-- mergeCommitSHA is set once and never changed: `!has(oldSelf.mergeCommitSHA) || (has(self.mergeCommitSHA) && self.mergeCommitSHA == oldSelf.mergeCommitSHA)`
-- appliedObservedAt is set once and never changed: `!has(oldSelf.appliedObservedAt) || (has(self.appliedObservedAt) && self.appliedObservedAt == oldSelf.appliedObservedAt)`
+- appliedObservedAt needs mergeCommitSHA: `!has(self.appliedObservedAt) || has(self.mergeCommitSHA)`
 
 Used by: [RemediationRequestStatus](#remediationrequeststatus).
 
@@ -636,7 +640,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `url` | string | Yes | url of the pull request.<br>Maximum length: 2048<br>Pattern: `^https://` |
 | `headSHA` | string | Yes | headSHA is the commit Shadewright pushed. Any other head stops automation.<br>Pattern: `^[0-9a-f]{40}$` |
 | `renderedTargetHead` | string | No | renderedTargetHead is the head of the target branch at which the change in the pull request was last rendered and found to be exactly the planned one. While the pull request waits, the change is rendered again only when the target branch head is another commit; empty means not rendered since it was recorded.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
-| `mergeCommitSHA` | string | No | mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when Shadewright sees the merge of the pull request it pushed. Delivery is checked against it: the GitOps controller must report exactly this commit as applied. Empty until then, and when the host reported none.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
+| `mergeCommitSHA` | string | No | mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when Shadewright sees the merge of the pull request it pushed. Delivery is checked against it: the GitOps controller must report this commit, or a later commit of the target branch containing it, as applied. Empty until then, and when the host reported none. Once set it never changes.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
 | `appliedObservedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a deadline measured from it (the rollout check, #532) cannot be pushed back. Not written yet: the delivery check after the merge is planned. |
 
 ### RecordID
@@ -770,7 +774,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `planRepository` | [PlanRepository](#planrepository) | No | planRepository is the repository and installation the plan digest covers, set together with planDigest. |
 | `policyRevision` | string | No | policyRevision is the policy name and generation the decision used, as name/generation. The policy UID is recorded next to it, because a deleted and recreated policy can reach the same generation again.<br>Maximum length: 128 |
 | `policyUID` | [UID](#uid) | No | policyUID is the UID of the policy the decision used. It is part of the plan digest.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
-| `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists.<br>Rule: mergeCommitSHA is set once and never changed<br>Rule: appliedObservedAt is set once and never changed |
+| `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists.<br>Rule: appliedObservedAt needs mergeCommitSHA |
 | `deadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | deadline is when the current step gives up. |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified, PlanFresh, WritesPaused and Queued.<br>List type: map<br>List key: `type` |
 

@@ -101,3 +101,13 @@ func TestIsAncestorFailures(t *testing.T) {
 		}
 	}
 }
+
+// TestIsAncestorSHA256IsPermanent checks that an ID GitHub cannot compare fails with the permanent
+// ErrInvalidCommit, which a caller does not retry.
+func TestIsAncestorSHA256IsPermanent(t *testing.T) {
+	h := newHarness(t)
+	_, err := h.p.IsAncestor(ctx, shaBase, strings.Repeat("ab", 32))
+	if !errors.Is(err, providers.ErrInvalidCommit) || providers.IsRetryable(err) {
+		t.Errorf("IsAncestor of a SHA-256 ID: %v; want ErrInvalidCommit, not retryable", err)
+	}
+}

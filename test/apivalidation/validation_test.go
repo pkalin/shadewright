@@ -43,6 +43,9 @@ var seq int
 // testHeadSHA is the head commit of the pull request the status specs record.
 const testHeadSHA = "0123456789abcdef0123456789abcdef01234567"
 
+// testPRURL is the URL of the pull request the status specs record.
+const testPRURL = "https://github.com/example/fleet/pull/1"
+
 const githubURLMsg = "a GitHub repository URL must be https://github.com/<owner>/<repo> in lower case, without .git"
 
 // unique returns a fresh object name, so specs never collide.
@@ -120,7 +123,7 @@ var _ = Describe("RemediationRequest", func() {
 				rr := fx.RemediationRequest("default", unique("rr"))
 				Expect(k8sClient.Create(ctx, rr)).To(Succeed())
 				rr.Status.PullRequest = &v1alpha1.PullRequestStatus{
-					Number: 1, URL: "https://github.com/example/fleet/pull/1",
+					Number: 1, URL: testPRURL,
 					HeadSHA: testHeadSHA,
 				}
 				field.set(rr.Status.PullRequest, sha)
@@ -149,7 +152,7 @@ var _ = Describe("RemediationRequest", func() {
 		rr := fx.RemediationRequest("default", unique("rr"))
 		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
 		rr.Status.PullRequest = &v1alpha1.PullRequestStatus{
-			Number: 1, URL: "https://github.com/example/fleet/pull/1",
+			Number: 1, URL: testPRURL,
 			HeadSHA: testHeadSHA,
 		}
 		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
@@ -173,6 +176,54 @@ var _ = Describe("RemediationRequest", func() {
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
 			Expect(err.Error()).To(ContainSubstring("is set once and never changed"), name)
 		}
+	})
+	It("keeps mergeCommitSHA and appliedObservedAt when pullRequest or the whole status is dropped and written again", func() {
+		rr := fx.RemediationRequest("default", unique("rr"))
+		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+		applied := metav1.NewTime(time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC))
+		rr.Status.PullRequest = &v1alpha1.PullRequestStatus{
+			Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
+			MergeCommitSHA: "89abcdef0123456789abcdef0123456789abcdef", AppliedObservedAt: &applied,
+		}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+
+		later := metav1.NewTime(applied.Add(time.Hour))
+		for name, change := range map[string]func(*v1alpha1.RemediationRequest){
+			"pullRequest dropped": func(r *v1alpha1.RemediationRequest) { r.Status.PullRequest = nil },
+			"pullRequest written again with another merge commit": func(r *v1alpha1.RemediationRequest) {
+				r.Status.PullRequest = &v1alpha1.PullRequestStatus{
+					Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
+					MergeCommitSHA: strings.Repeat("c", 40), AppliedObservedAt: &applied,
+				}
+			},
+			"pullRequest written again with a later time": func(r *v1alpha1.RemediationRequest) {
+				r.Status.PullRequest = &v1alpha1.PullRequestStatus{
+					Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
+					MergeCommitSHA: r.Status.PullRequest.MergeCommitSHA, AppliedObservedAt: &later,
+				}
+			},
+			"status emptied": func(r *v1alpha1.RemediationRequest) { r.Status = v1alpha1.RemediationRequestStatus{} },
+		} {
+			got := &v1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+			change(got)
+			err := k8sClient.Status().Update(ctx, got)
+			Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+			Expect(err.Error()).To(ContainSubstring("is set once and never changed"), name)
+		}
+	})
+
+	It("refuses appliedObservedAt without mergeCommitSHA", func() {
+		rr := fx.RemediationRequest("default", unique("rr"))
+		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+		applied := metav1.NewTime(time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC))
+		rr.Status.PullRequest = &v1alpha1.PullRequestStatus{
+			Number: 1, URL: testPRURL, HeadSHA: testHeadSHA, AppliedObservedAt: &applied,
+		}
+		err := k8sClient.Status().Update(ctx, rr)
+		Expect(err).To(HaveOccurred(), "the API server accepted appliedObservedAt without mergeCommitSHA")
+		Expect(err.Error()).To(ContainSubstring("appliedObservedAt needs mergeCommitSHA"))
 	})
 
 	It("accepts the fixture and fills in safe defaults", func() {

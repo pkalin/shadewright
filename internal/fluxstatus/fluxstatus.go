@@ -85,7 +85,7 @@ func ObservedGeneration(obj map[string]any) (int64, bool) {
 
 // Ready reports whether the object's status describes its current generation (status.observedGeneration
 // equals metadata.generation, an absent generation counting as 0) and its first Ready condition says True
-// without naming another generation.
+// without naming another generation; an observedGeneration on it that is not an integer is not Ready.
 func Ready(obj map[string]any) bool {
 	generation, _ := Generation(obj)
 	observed, found := ObservedGeneration(obj)
@@ -96,8 +96,11 @@ func Ready(obj map[string]any) bool {
 	if cond == nil {
 		return false
 	}
-	if g, set := Integer(cond["observedGeneration"]); set && g != generation {
-		return false
+	// An observedGeneration that is present but not an integer cannot show the condition is current.
+	if v, present := cond["observedGeneration"]; present {
+		if g, ok := Integer(v); !ok || g != generation {
+			return false
+		}
 	}
 	return cond["status"] == statusTrue
 }
@@ -168,12 +171,31 @@ func ParseRevision(revision string) (ref, commit string, ok bool) {
 	if i <= 0 {
 		return "", "", false
 	}
-	algo, id, found := strings.Cut(revision[i+1:], ":")
-	sized := algo == "sha1" && len(id) == providers.SHA1HexLen || algo == "sha256" && len(id) == providers.SHA256HexLen
-	if !found || !sized || !providers.IsObjectID(id) {
+	id, ok := parseDigest(revision[i+1:])
+	if !ok {
 		return "", "", false
 	}
 	return revision[:i], id, true
+}
+
+// parseDigest returns the commit ID of sha1:<40 hex> or sha256:<64 hex>, lower case.
+func parseDigest(digest string) (string, bool) {
+	algo, id, found := strings.Cut(digest, ":")
+	sized := algo == "sha1" && len(id) == providers.SHA1HexLen || algo == "sha256" && len(id) == providers.SHA256HexLen
+	if !found || !sized || !providers.IsObjectID(id) {
+		return "", false
+	}
+	return id, true
+}
+
+// ParseCommitRevision is [ParseRevision] that also accepts a revision naming only the commit,
+// sha1:<40 hex> or sha256:<64 hex>, as Flux writes for a source fetched at a commit; its ref is empty.
+func ParseCommitRevision(revision string) (ref, commit string, ok bool) {
+	if !strings.Contains(revision, "@") {
+		commit, ok = parseDigest(revision)
+		return "", commit, ok
+	}
+	return ParseRevision(revision)
 }
 
 // RevisionOfBranch reports whether a revision of a Git source was fetched from branch (see [ParseRevision]).

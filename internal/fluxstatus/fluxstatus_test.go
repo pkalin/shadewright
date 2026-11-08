@@ -75,6 +75,9 @@ func TestReadyFailsClosed(t *testing.T) {
 		{"no observed generation", func(o map[string]any) { delete(o["status"].(map[string]any), "observedGeneration") }},
 		{"observed generation of another type", func(o map[string]any) { o["status"].(map[string]any)["observedGeneration"] = "1" }},
 		{"Ready about another generation", func(o map[string]any) { ready(o)["observedGeneration"] = float64(0) }},
+		{"Ready with a string generation", func(o map[string]any) { ready(o)["observedGeneration"] = "1" }},
+		{"Ready with a fractional generation", func(o map[string]any) { ready(o)["observedGeneration"] = 1.5 }},
+		{"Ready with a null generation", func(o map[string]any) { ready(o)["observedGeneration"] = nil }},
 		{"Ready False", func(o map[string]any) { ready(o)["status"] = "False" }},
 		{"Ready Unknown", func(o map[string]any) { ready(o)["status"] = "Unknown" }},
 		{"Ready true in lower case", func(o map[string]any) { ready(o)["status"] = "true" }},
@@ -181,5 +184,34 @@ func TestIntegerReadsBothDecodings(t *testing.T) {
 		if _, ok := fluxstatus.Integer(v); ok {
 			t.Errorf("Integer(%#v) ok", v)
 		}
+	}
+}
+
+func TestParseCommitRevision(t *testing.T) {
+	sha256 := strings.Repeat("0123456789abcdef", 4)
+	for _, tc := range []struct {
+		revision, ref, commit string
+		ok                    bool
+	}{
+		{"main@sha1:" + revOld, "main", revOld, true},
+		{"sha1:" + revOld, "", revOld, true},
+		{"sha256:" + sha256, "", sha256, true},
+		{"@sha1:" + revOld, "", "", false},
+		{"sha1:" + revOld[:12], "", "", false},
+		{"sha1:" + strings.ToUpper(revNew), "", "", false},
+		{"sha256:" + revOld, "", "", false},
+		{revOld, "", "", false},
+		{"main/" + revOld, "", "", false},
+		{"2.18.1", "", "", false},
+		{"", "", "", false},
+	} {
+		ref, commit, ok := fluxstatus.ParseCommitRevision(tc.revision)
+		if ref != tc.ref || commit != tc.commit || ok != tc.ok {
+			t.Errorf("ParseCommitRevision(%q) = %q, %q, %v; want %q, %q, %v", tc.revision, ref, commit, ok, tc.ref, tc.commit, tc.ok)
+		}
+	}
+	// The source mapping still needs a branch in the revision.
+	if fluxstatus.RevisionOfBranch("sha1:"+revOld, "") {
+		t.Error("RevisionOfBranch accepted a revision without a branch")
 	}
 }

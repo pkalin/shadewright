@@ -636,6 +636,9 @@ func (g *Git) IsAncestor(ctx context.Context, ancestor, commit string) (bool, er
 	if err := g.before("IsAncestor"); err != nil {
 		return false, err
 	}
+	if !providers.IsObjectID(ancestor) || !providers.IsObjectID(commit) {
+		return false, fmt.Errorf("commit is not a full object ID: %w", providers.ErrInvalidCommit)
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for _, c := range []string{ancestor, commit} {

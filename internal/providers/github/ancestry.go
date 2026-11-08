@@ -18,6 +18,7 @@ package github
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 
@@ -37,7 +38,8 @@ var _ providers.AncestryChecker = (*Provider)(nil)
 // one with commits or files to list, so it is false too, as for the base of a new branch.
 func (p *Provider) IsAncestor(ctx context.Context, ancestor, commit string) (bool, error) {
 	if !validSHA(ancestor) || !validSHA(commit) {
-		return false, errors.New(opIsAncestor + ": commit is not a full SHA")
+		// GitHub repositories use SHA-1: a SHA-256 or malformed ID can never be compared, on any retry.
+		return false, fmt.Errorf("%s: commit is not a full SHA-1: %w", opIsAncestor, providers.ErrInvalidCommit)
 	}
 	if ancestor == commit {
 		return true, nil

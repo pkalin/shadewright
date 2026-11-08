@@ -21,7 +21,9 @@ archive="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
 
-curl -fsSLo "${work}/${archive}" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${archive}"
+# Retries ride out short outages of the release CDN (503 and 504 on 2026-11-08, #543).
+curl -fsSL --proto '=https' --connect-timeout 20 --max-time 60 --retry 4 --retry-delay 10 \
+  -o "${work}/${archive}" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${archive}"
 echo "${TRIVY_SHA256}  ${work}/${archive}" | sha256sum --check --strict
 mkdir -p "${target}"
 tar -xzf "${work}/${archive}" -C "${target}" trivy

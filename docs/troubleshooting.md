@@ -192,6 +192,28 @@ Stops before a pull request is recorded are on `PullRequestOpened`; after, on `A
 | `WaitingForReview` | `Approved` is `False`: the pull request waits for a person. With `approval` not required it still waits, because auto-merge is not built | Review and merge it |
 | `PullRequestClosed` | Shadewright closed its pull request (stale plan or a change that no longer renders as planned); the message gives the number and why | See the freshness and render tables |
 
+## Rollout after the merge
+
+<span class="sw-status sw-planned">planned</span> The rule that decides it is built (`internal/verification/rollout`); the executor sets the condition once it can tell that Flux applied the merge commit (#92). Until then a request stays `Merged` while its pods may still run the old template, so check the rollout yourself as below.
+
+On `RolledOut`, after the merge commit is applied. Shadewright only reports: it never deletes or restarts a pod (invariant 2), and it reads only the target object with the `get` it already has, never the pods.
+
+| Reason | Status | Cause | Fix |
+| --- | --- | --- | --- |
+| `RolloutComplete` | `True` | Every pod runs the applied template and is ready | Nothing |
+| `RolloutProgressing` | `Unknown` | The rollout is under way and the deadline (10 minutes after the revision was applied) has not passed | Wait |
+| `RolloutStuck` | `False` | The rollout did not complete within the deadline. For a StatefulSet the message names the pods on the old revision, highest ordinal first, inferred from the StatefulSet status; for a Deployment it gives the counts. One Event is recorded | See below |
+
+**A StatefulSet stuck on the old revision.** A StatefulSet with the default `OrderedReady` policy does not replace a pod that is not Ready on the old revision, so a fix for a crashing pod (for example a larger memory limit) is applied to the template but never reaches the pod. Kubernetes documents this as [forced rollback](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/#forced-rollback). Check that the new template is the one you want, then delete the pod the message names first, yourself:
+
+```bash
+kubectl -n <namespace> get statefulset <name> -o jsonpath='{.status.currentRevision} {.status.updateRevision} {.status.updatedReplicas}/{.spec.replicas}{"\n"}'
+kubectl -n <namespace> get pods -L controller-revision-hash
+kubectl -n <namespace> delete pod <name>-<ordinal>
+```
+
+The pod is recreated from the new revision and the rollout continues. With `updateStrategy: OnDelete` every pod needs this step. **A Deployment stuck**: read `kubectl rollout status deployment/<name>` and the events of its new ReplicaSet (image pull, quota, a failing readiness probe).
+
 ## Freshness
 
 Before merge the executor rechecks every five minutes, and on any change to the request (once its pull request waits, only when none ran in the last five minutes), that the plan still matches the world. A stale plan ends `Superseded` with `PlanFresh=False`, and its pull request is closed (branch left in place). If the close cannot be done the phase is `NeedsIntervention` with `TargetBranchChanged`, `ForeignChangeRequest`, `RepositoryUnavailable`, `RepositoryUnusable`, `GitForbidden` or `GitRejected` as above.

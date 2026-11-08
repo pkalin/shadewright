@@ -57,6 +57,7 @@ status:
     url: https://github.com/example/fleet/pull/42
     headSHA: "89abcdef0123456789abcdef0123456789abcdef"
     renderedTargetHead: "fedcba9876543210fedcba9876543210fedcba98"
+    mergeCommitSHA: "0f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c"
   conditions:
     - type: PolicyAllowed
       status: "True"

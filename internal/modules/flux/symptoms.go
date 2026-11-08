@@ -19,6 +19,7 @@ package flux
 import (
 	"strings"
 
+	"github.com/pkalin/shadewright/internal/fluxstatus"
 	"github.com/pkalin/shadewright/internal/modules"
 )
 
@@ -32,11 +33,10 @@ const (
 	fieldArtifactRevision      = "status.artifact.revision"
 )
 
-// Condition types the rules read (fluxcd/pkg apis/meta v1.38.0, conditions.go: ReadyCondition,
-// StalledCondition).
+// Condition types the rules read (internal/fluxstatus).
 const (
-	conditionReady   = "Ready"
-	conditionStalled = "Stalled"
+	conditionReady   = fluxstatus.ConditionReady
+	conditionStalled = fluxstatus.ConditionStalled
 )
 
 // Reasons the rules write besides the Flux reasons in [reasons]. A condition whose reason the package does
@@ -46,10 +46,8 @@ const (
 	ReasonNotReady           = "NotReady"
 	ReasonDependencyNotReady = "DependencyNotReady"
 
-	// reasonHealthCheckCanceled is set on Ready=False only while a new reconciliation replaces the running
-	// one (kustomize-controller v1.10.1 internal/controller/kustomization_controller.go, helm-controller
-	// v1.7.1 internal/controller/helmrelease_controller.go). It is no failure and shows nothing.
-	reasonHealthCheckCanceled = "HealthCheckCanceled"
+	// reasonHealthCheckCanceled is no failure and shows nothing (fluxstatus.ReasonHealthCheckCanceled).
+	reasonHealthCheckCanceled = fluxstatus.ReasonHealthCheckCanceled
 )
 
 // helmDeployed is the status of a Helm release snapshot that is the one running (helm-controller v1.7.1
@@ -179,8 +177,8 @@ func kustomizationSymptoms(obj map[string]any) []modules.Symptom {
 }
 
 func kustomizationRevisions(status map[string]any) ([]modules.Evidence, bool) {
-	attempted, _ := status["lastAttemptedRevision"].(string)
-	applied, _ := status["lastAppliedRevision"].(string)
+	attempted := fluxstatus.AttemptedRevision(status)
+	applied := fluxstatus.AppliedRevision(status)
 	var out []modules.Evidence
 	if attempted != "" {
 		out = append(out, modules.Evidence{Field: fieldAttempted, Value: attempted})
@@ -205,7 +203,7 @@ func helmReleaseSymptoms(obj map[string]any) []modules.Symptom {
 // digest to the chart version, so versions are compared without what follows "+": a failure of the same
 // version from an OCI source shows no difference.
 func helmReleaseRevisions(status map[string]any) ([]modules.Evidence, bool) {
-	attempted, _ := status["lastAttemptedRevision"].(string)
+	attempted := fluxstatus.AttemptedRevision(status)
 	attemptedConfig, _ := status["lastAttemptedConfigDigest"].(string)
 	var out []modules.Evidence
 	if attempted != "" {
@@ -259,8 +257,7 @@ func withoutBuild(version string) string {
 // GitRepository does not say which revision it tried, so nothing is compared.
 func gitRepositorySymptoms(obj map[string]any) []modules.Symptom {
 	return symptoms(obj, SourceGroup+"/"+SourceVersion, KindGitRepository, func(status map[string]any) ([]modules.Evidence, bool) {
-		artifact, _ := status["artifact"].(map[string]any)
-		served, _ := artifact["revision"].(string)
+		served := fluxstatus.ArtifactRevision(status)
 		if served == "" {
 			return nil, false
 		}
@@ -279,14 +276,13 @@ func symptoms(obj map[string]any, apiVersion, kind string,
 	if k, _ := obj["kind"].(string); k != kind {
 		return nil
 	}
-	meta, _ := obj["metadata"].(map[string]any)
-	generation, hasGeneration := modules.JSONInteger(meta["generation"])
+	generation, hasGeneration := fluxstatus.Generation(obj)
 	spec, _ := obj["spec"].(map[string]any)
 	if suspended, _ := spec["suspend"].(bool); suspended {
 		return nil
 	}
-	status, _ := obj["status"].(map[string]any)
-	cond, typ := failing(status, generation, hasGeneration)
+	status := fluxstatus.Status(obj)
+	cond, typ := fluxstatus.Failing(status, generation, hasGeneration)
 	if cond == nil {
 		return nil
 	}
@@ -317,31 +313,4 @@ func symptoms(obj map[string]any, apiVersion, kind string,
 		s.Summary += differentSummary(kind, spec)
 	}
 	return []modules.Symptom{s}
-}
-
-// failing returns the condition to report and its type: Stalled=True first, then the first Ready=False, or
-// nil when neither is set. When the object has a generation, a condition whose observedGeneration is set and
-// differs from it describes an older spec and is skipped before choosing, so a stale Stalled=True never hides
-// a current Ready=False. Without a usable generation no condition is skipped for its generation.
-func failing(status map[string]any, generation int64, hasGeneration bool) (map[string]any, string) {
-	conds, _ := status["conditions"].([]any)
-	var ready map[string]any
-	for _, c := range conds {
-		cond, _ := c.(map[string]any)
-		if observed, set := modules.JSONInteger(cond["observedGeneration"]); hasGeneration && set && observed != generation {
-			continue
-		}
-		typ, _ := cond["type"].(string)
-		st, _ := cond["status"].(string)
-		switch {
-		case typ == conditionStalled && st == "True":
-			return cond, conditionStalled
-		case typ == conditionReady && st == "False" && ready == nil:
-			ready = cond
-		}
-	}
-	if ready == nil {
-		return nil, ""
-	}
-	return ready, conditionReady
 }

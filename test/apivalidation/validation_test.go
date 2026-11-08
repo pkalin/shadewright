@@ -40,6 +40,12 @@ import (
 
 var seq int
 
+// testHeadSHA is the head commit of the pull request the status specs record.
+const testHeadSHA = "0123456789abcdef0123456789abcdef01234567"
+
+// testPRURL is the URL of the pull request the status specs record.
+const testPRURL = "https://github.com/example/fleet/pull/1"
+
 const githubURLMsg = "a GitHub repository URL must be https://github.com/<owner>/<repo> in lower case, without .git"
 
 // unique returns a fresh object name, so specs never collide.
@@ -104,31 +110,121 @@ var _ = Describe("RemediationRequest", func() {
 		Entry("URL", "https://example.com/apps", false),
 	)
 
-	DescribeTable("checks status.pullRequest.renderedTargetHead",
-		func(head string, ok bool) {
-			rr := fx.RemediationRequest("default", unique("rr"))
-			Expect(k8sClient.Create(ctx, rr)).To(Succeed())
-			rr.Status.PullRequest = &v1alpha1.PullRequestStatus{
-				Number: 1, URL: "https://github.com/example/fleet/pull/1",
-				HeadSHA: "0123456789abcdef0123456789abcdef01234567", RenderedTargetHead: head,
-			}
-			err := k8sClient.Status().Update(ctx, rr)
-			if ok {
-				Expect(err).NotTo(HaveOccurred())
-				return
-			}
-			Expect(err).To(HaveOccurred(), "the API server accepted an invalid renderedTargetHead")
-			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
-			Expect(err.Error()).To(ContainSubstring("status.pullRequest.renderedTargetHead"))
-		},
-		Entry("not rendered yet", "", true),
-		Entry("a full commit SHA", "89abcdef0123456789abcdef0123456789abcdef", true),
-		Entry("an abbreviated SHA", "89abcdef", false),
-		Entry("one character short", "89abcdef0123456789abcdef0123456789abcde", false),
-		Entry("a SHA-256 object name", strings.Repeat("ab", 32), false),
-		Entry("upper case", "89ABCDEF0123456789ABCDEF0123456789ABCDEF", false),
-		Entry("a branch name", "refs/heads/main-0123456789abcdef012345678", false),
-	)
+	// Both commit fields of status.pullRequest take a full SHA-1 commit ID in lower case, or nothing.
+	for _, field := range []struct {
+		name string
+		set  func(*v1alpha1.PullRequestStatus, string)
+	}{
+		{"renderedTargetHead", func(p *v1alpha1.PullRequestStatus, v string) { p.RenderedTargetHead = v }},
+		{"mergeCommitSHA", func(p *v1alpha1.PullRequestStatus, v string) { p.MergeCommitSHA = v }},
+	} {
+		DescribeTable("checks status.pullRequest."+field.name,
+			func(sha string, ok bool) {
+				rr := fx.RemediationRequest("default", unique("rr"))
+				Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+				rr.Status.PullRequest = &v1alpha1.PullRequestStatus{
+					Number: 1, URL: testPRURL,
+					HeadSHA: testHeadSHA,
+				}
+				field.set(rr.Status.PullRequest, sha)
+				err := k8sClient.Status().Update(ctx, rr)
+				if ok {
+					Expect(err).NotTo(HaveOccurred())
+					return
+				}
+				Expect(err).To(HaveOccurred(), "the API server accepted an invalid "+field.name)
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+				Expect(err.Error()).To(ContainSubstring("status.pullRequest." + field.name))
+			},
+			Entry("empty", "", true),
+			Entry("a full commit SHA", "89abcdef0123456789abcdef0123456789abcdef", true),
+			Entry("an abbreviated SHA", "89abcdef", false),
+			Entry("one character short", "89abcdef0123456789abcdef0123456789abcde", false),
+			Entry("one character long", "89abcdef0123456789abcdef0123456789abcdef0", false),
+			Entry("a SHA-256 object name", strings.Repeat("ab", 32), false),
+			Entry("upper case", "89ABCDEF0123456789ABCDEF0123456789ABCDEF", false),
+			Entry("a branch name", "refs/heads/main-0123456789abcdef012345678", false),
+		)
+	}
+
+	It("keeps mergeCommitSHA and appliedObservedAt once set", func() {
+		const merge = "89abcdef0123456789abcdef0123456789abcdef"
+		rr := fx.RemediationRequest("default", unique("rr"))
+		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+		rr.Status.PullRequest = &v1alpha1.PullRequestStatus{
+			Number: 1, URL: testPRURL,
+			HeadSHA: testHeadSHA,
+		}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		applied := metav1.NewTime(time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC))
+		rr.Status.PullRequest.MergeCommitSHA = merge
+		rr.Status.PullRequest.AppliedObservedAt = &applied
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the first write of both is allowed")
+
+		earlier := metav1.NewTime(applied.Add(-time.Hour))
+		for name, change := range map[string]func(*v1alpha1.PullRequestStatus){
+			"mergeCommitSHA changed":    func(p *v1alpha1.PullRequestStatus) { p.MergeCommitSHA = strings.Repeat("c", 40) },
+			"mergeCommitSHA removed":    func(p *v1alpha1.PullRequestStatus) { p.MergeCommitSHA = "" },
+			"appliedObservedAt moved":   func(p *v1alpha1.PullRequestStatus) { p.AppliedObservedAt = &earlier },
+			"appliedObservedAt removed": func(p *v1alpha1.PullRequestStatus) { p.AppliedObservedAt = nil },
+		} {
+			got := &v1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+			change(got.Status.PullRequest)
+			err := k8sClient.Status().Update(ctx, got)
+			Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+			Expect(err.Error()).To(ContainSubstring("is set once and never changed"), name)
+		}
+	})
+	It("keeps mergeCommitSHA and appliedObservedAt when pullRequest or the whole status is dropped and written again", func() {
+		rr := fx.RemediationRequest("default", unique("rr"))
+		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+		applied := metav1.NewTime(time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC))
+		rr.Status.PullRequest = &v1alpha1.PullRequestStatus{
+			Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
+			MergeCommitSHA: "89abcdef0123456789abcdef0123456789abcdef", AppliedObservedAt: &applied,
+		}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+
+		later := metav1.NewTime(applied.Add(time.Hour))
+		for name, change := range map[string]func(*v1alpha1.RemediationRequest){
+			"pullRequest dropped": func(r *v1alpha1.RemediationRequest) { r.Status.PullRequest = nil },
+			"pullRequest written again with another merge commit": func(r *v1alpha1.RemediationRequest) {
+				r.Status.PullRequest = &v1alpha1.PullRequestStatus{
+					Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
+					MergeCommitSHA: strings.Repeat("c", 40), AppliedObservedAt: &applied,
+				}
+			},
+			"pullRequest written again with a later time": func(r *v1alpha1.RemediationRequest) {
+				r.Status.PullRequest = &v1alpha1.PullRequestStatus{
+					Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
+					MergeCommitSHA: r.Status.PullRequest.MergeCommitSHA, AppliedObservedAt: &later,
+				}
+			},
+			"status emptied": func(r *v1alpha1.RemediationRequest) { r.Status = v1alpha1.RemediationRequestStatus{} },
+		} {
+			got := &v1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+			change(got)
+			err := k8sClient.Status().Update(ctx, got)
+			Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+			Expect(err.Error()).To(ContainSubstring("is set once and never changed"), name)
+		}
+	})
+
+	It("refuses appliedObservedAt without mergeCommitSHA", func() {
+		rr := fx.RemediationRequest("default", unique("rr"))
+		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+		applied := metav1.NewTime(time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC))
+		rr.Status.PullRequest = &v1alpha1.PullRequestStatus{
+			Number: 1, URL: testPRURL, HeadSHA: testHeadSHA, AppliedObservedAt: &applied,
+		}
+		err := k8sClient.Status().Update(ctx, rr)
+		Expect(err).To(HaveOccurred(), "the API server accepted appliedObservedAt without mergeCommitSHA")
+		Expect(err.Error()).To(ContainSubstring("appliedObservedAt needs mergeCommitSHA"))
+	})
 
 	It("accepts the fixture and fills in safe defaults", func() {
 		rr := fx.RemediationRequest("default", unique("rr"))

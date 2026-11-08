@@ -236,6 +236,7 @@ const (
 )
 
 // PullRequestStatus records the pull request that carries the plan.
+// +kubebuilder:validation:XValidation:rule="!has(self.appliedObservedAt) || has(self.mergeCommitSHA)",message="appliedObservedAt needs mergeCommitSHA"
 type PullRequestStatus struct {
 	// number of the pull request.
 	// +kubebuilder:validation:Minimum=1
@@ -261,6 +262,23 @@ type PullRequestStatus struct {
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
 	// +optional
 	RenderedTargetHead string `json:"renderedTargetHead,omitempty"`
+
+	// mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when
+	// Shadewright sees the merge of the pull request it pushed. Delivery is checked against it: the GitOps
+	// controller must report this commit, or a later commit of the target branch containing it, as applied.
+	// Empty until then, and when the host reported none. Once set it never changes.
+	// +kubebuilder:validation:MinLength=40
+	// +kubebuilder:validation:MaxLength=40
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	// +optional
+	MergeCommitSHA string `json:"mergeCommitSHA,omitempty"`
+
+	// appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later
+	// commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a
+	// deadline measured from it (the rollout check, #532) cannot be pushed back. Not written yet: the delivery
+	// check after the merge is planned.
+	// +optional
+	AppliedObservedAt *metav1.Time `json:"appliedObservedAt,omitempty"`
 }
 
 // PlanRepository identifies the repository a plan was made for: the URL and provider installation taken from
@@ -391,6 +409,10 @@ type RemediationRequestStatus struct {
 // +kubebuilder:selectablefield:JSONPath=`.status.holdsTarget`
 // +kubebuilder:selectablefield:JSONPath=`.status.breakerCounts`
 // +kubebuilder:selectablefield:JSONPath=`.status.breakerClearedBy`
+// The set-once rules of status.pullRequest live on the object, not on pullRequest, so that removing
+// pullRequest (or the whole status) and writing it again cannot change a recorded value.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.mergeCommitSHA) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.mergeCommitSHA) && self.status.pullRequest.mergeCommitSHA == oldSelf.status.pullRequest.mergeCommitSHA)",message="status.pullRequest.mergeCommitSHA is set once and never changed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.appliedObservedAt) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt) && self.status.pullRequest.appliedObservedAt == oldSelf.status.pullRequest.appliedObservedAt)",message="status.pullRequest.appliedObservedAt is set once and never changed"
 
 // RemediationRequest is one proposed fix: a typed action on one object, carried out as a GitOps pull request
 // after deterministic policy allows it.

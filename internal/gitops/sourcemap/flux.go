@@ -17,13 +17,12 @@ package sourcemap
 
 import (
 	"fmt"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/fluxstatus"
 )
 
 // Labels Flux sets on the objects it applies.
@@ -37,15 +36,17 @@ const (
 )
 
 // kindKustomization is the kind of both a Flux Kustomization and a kustomization file.
-const kindKustomization = "Kustomization"
+const kindKustomization = fluxstatus.KindKustomization
 
 // The Flux API versions read. Flux objects are read as unstructured objects, so the module does not depend
 // on the Flux API packages; only the fields below are used.
 var (
 	// KustomizationGVK is the Flux Kustomization kind.
-	KustomizationGVK = schema.GroupVersionKind{Group: "kustomize.toolkit.fluxcd.io", Version: "v1", Kind: kindKustomization}
+	KustomizationGVK = schema.GroupVersionKind{
+		Group: fluxstatus.KustomizeGroup, Version: fluxstatus.KustomizeVersion, Kind: kindKustomization}
 	// GitRepositoryGVK is the Flux GitRepository kind.
-	GitRepositoryGVK = schema.GroupVersionKind{Group: "source.toolkit.fluxcd.io", Version: "v1", Kind: "GitRepository"}
+	GitRepositoryGVK = schema.GroupVersionKind{
+		Group: fluxstatus.SourceGroup, Version: fluxstatus.SourceVersion, Kind: fluxstatus.KindGitRepository}
 )
 
 // kustomizationTransforms are Kustomization spec fields that change what the build produces, so the
@@ -77,7 +78,7 @@ func checkKustomization(ks *unstructured.Unstructured, target schema.GroupVersio
 		r := needsIntervention(ReasonKustomizationSuspended, "%s is suspended", ref)
 		return "", "", "", &r
 	}
-	if !ready(ks) {
+	if !fluxstatus.Ready(ks.Object) {
 		r := needsIntervention(ReasonKustomizationNotReady, "%s is not Ready for its current generation", ref)
 		return "", "", "", &r
 	}
@@ -128,29 +129,6 @@ func checkKustomization(ks *unstructured.Unstructured, target schema.GroupVersio
 		path = ""
 	}
 	return srcNamespace, srcName, path, nil
-}
-
-// ready reports whether a Flux object's status describes its current generation and says Ready=True.
-func ready(ks *unstructured.Unstructured) bool {
-	observed, found, err := unstructured.NestedInt64(ks.Object, "status", "observedGeneration")
-	if err != nil || !found || observed != ks.GetGeneration() {
-		return false
-	}
-	conds, _, err := unstructured.NestedSlice(ks.Object, "status", "conditions")
-	if err != nil {
-		return false
-	}
-	for _, c := range conds {
-		m, ok := c.(map[string]any)
-		if !ok || m["type"] != "Ready" {
-			continue
-		}
-		if g, ok := m["observedGeneration"].(int64); ok && g != ks.GetGeneration() {
-			return false
-		}
-		return m["status"] == "True"
-	}
-	return false
 }
 
 // inInventory reports whether status.inventory lists the object with the target's group, kind and version.
@@ -211,14 +189,12 @@ func checkGitRepository(src *unstructured.Unstructured) (url, branch string, sto
 // branch: Flux writes it as <branch>@sha1:<commit> or <branch>@sha256:<commit>. Flux status records no
 // observed URL, so the generation is what ties the artifact to spec.url.
 func checkRevision(ks, src *unstructured.Unstructured, branch string) *Result {
-	if !ready(src) {
+	if !fluxstatus.Ready(src.Object) {
 		r := needsIntervention(ReasonSourceNotReady, "GitRepository %s/%s is not Ready for its current generation",
 			src.GetNamespace(), src.GetName())
 		return &r
 	}
-	applied, _, errA := unstructured.NestedString(ks.Object, "status", "lastAppliedRevision")
-	fetched, _, errF := unstructured.NestedString(src.Object, "status", "artifact", "revision")
-	if errA != nil || errF != nil || applied == "" || applied != fetched || !revisionOfBranch(fetched, branch) {
+	if !fluxstatus.AppliedFetched(ks.Object, src.Object, branch) {
 		r := needsIntervention(ReasonRevisionMismatch,
 			"Kustomization %s/%s has not applied the revision GitRepository %s/%s last fetched",
 			ks.GetNamespace(), ks.GetName(), src.GetNamespace(), src.GetName())
@@ -228,15 +204,9 @@ func checkRevision(ks, src *unstructured.Unstructured, branch string) *Result {
 }
 
 // revisionOfBranch reports whether a Flux artifact revision was fetched from branch: the revision is the
-// branch, "@", then the commit digest (sha1:<40 hex> or sha256:<64 hex>).
+// branch, "@", then the commit digest (sha1:<40 hex> or sha256:<64 hex>). See [fluxstatus.RevisionOfBranch].
 func revisionOfBranch(revision, branch string) bool {
-	i := strings.LastIndexByte(revision, '@')
-	if i <= 0 || revision[:i] != branch {
-		return false
-	}
-	algo, id, ok := strings.Cut(revision[i+1:], ":")
-	return ok && providers.IsObjectID(id) &&
-		(algo == "sha1" && len(id) == providers.SHA1HexLen || algo == "sha256" && len(id) == providers.SHA256HexLen)
+	return fluxstatus.RevisionOfBranch(revision, branch)
 }
 
 // field returns the value at a path of keys, without copying it.

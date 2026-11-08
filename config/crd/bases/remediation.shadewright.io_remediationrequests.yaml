@@ -469,9 +469,27 @@ spec:
               pullRequest:
                 description: pullRequest is set once the pull request exists.
                 properties:
+                  appliedObservedAt:
+                    description: |-
+                      appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later
+                      commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a
+                      deadline measured from it (the rollout check, #532) cannot be pushed back. Not written yet: the delivery
+                      check after the merge is planned.
+                    format: date-time
+                    type: string
                   headSHA:
                     description: headSHA is the commit Shadewright pushed. Any other
                       head stops automation.
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  mergeCommitSHA:
+                    description: |-
+                      mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when
+                      Shadewright sees the merge of the pull request it pushed. Delivery is checked against it: the GitOps
+                      controller must report this commit, or a later commit of the target branch containing it, as applied.
+                      Empty until then, and when the host reported none. Once set it never changes.
+                    maxLength: 40
+                    minLength: 40
                     pattern: ^[0-9a-f]{40}$
                     type: string
                   number:
@@ -498,6 +516,9 @@ spec:
                 - number
                 - url
                 type: object
+                x-kubernetes-validations:
+                - message: appliedObservedAt needs mergeCommitSHA
+                  rule: '!has(self.appliedObservedAt) || has(self.mergeCommitSHA)'
               source:
                 description: source is where the change is made, resolved by the controller
                   before the policy check.
@@ -555,6 +576,15 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: status.pullRequest.mergeCommitSHA is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.mergeCommitSHA)
+            || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.mergeCommitSHA)
+            && self.status.pullRequest.mergeCommitSHA == oldSelf.status.pullRequest.mergeCommitSHA)'
+        - message: status.pullRequest.appliedObservedAt is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.appliedObservedAt)
+            || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt)
+            && self.status.pullRequest.appliedObservedAt == oldSelf.status.pullRequest.appliedObservedAt)'
     selectableFields:
     - jsonPath: .status.phase
     - jsonPath: .status.breakerProbe

@@ -462,6 +462,17 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(planFresh()).To(BeNil(), "no stale condition is left on a merged request")
 	})
 
+	It("records the merge commit in the same write that ends the request in Merged", func() {
+		Expect(fetch().Status.PullRequest.MergeCommitSHA).To(BeEmpty())
+		sha, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha))
+	})
+
 	It("still ends a fresh request whose pull request a person closed in NeedsIntervention", func() {
 		Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
 		_, err := reconcileOnce()

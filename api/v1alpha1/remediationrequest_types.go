@@ -414,9 +414,9 @@ type RemediationRequestStatus struct {
 	// +optional
 	Hints []Hint `json:"hints,omitempty"`
 
-	// handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over;
-	// on that predecessor, its replacement. Once written it is never removed, and its from, to and hint never
-	// change. Planned: nothing writes it yet.
+	// handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over
+	// (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is
+	// written once and never removed; only its phase moves on. Planned: nothing writes it yet.
 	// +optional
 	Handoff *Handoff `json:"handoff,omitempty"`
 
@@ -446,11 +446,16 @@ type RemediationRequestStatus struct {
 // pullRequest (or the whole status) and writing it again cannot change a recorded value.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.mergeCommitSHA) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.mergeCommitSHA) && self.status.pullRequest.mergeCommitSHA == oldSelf.status.pullRequest.mergeCommitSHA)",message="status.pullRequest.mergeCommitSHA is set once and never changed"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.appliedObservedAt) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt) && self.status.pullRequest.appliedObservedAt == oldSelf.status.pullRequest.appliedObservedAt)",message="status.pullRequest.appliedObservedAt is set once and never changed"
-// The hints and the handoff follow the same pattern: a hint once stored is never removed (its pin and state
-// rules live on the hint), and the handoff once written is never removed nor pointed elsewhere.
+// The hints and the handoff follow the same pattern: a hint once stored is never removed, and neither side of
+// the handoff is (their pin and phase rules live on their types). A side written for the first time starts in
+// its first phase.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.hints) || (has(self.status) && has(self.status.hints) && oldSelf.status.hints.all(o, self.status.hints.exists(h, h.source == o.source && h.commentID == o.commentID)))",message="status.hints: a stored hint is never removed"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.handoff) || (has(self.status) && has(self.status.handoff) && self.status.handoff.hint == oldSelf.status.handoff.hint && (has(self.status.handoff.from) ? (has(oldSelf.status.handoff.from) && self.status.handoff.from == oldSelf.status.handoff.from) : !has(oldSelf.status.handoff.from)) && (has(self.status.handoff.to) ? (has(oldSelf.status.handoff.to) && self.status.handoff.to == oldSelf.status.handoff.to) : !has(oldSelf.status.handoff.to)))",message="status.handoff is set once: it is never removed and its from, to and hint never change"
-// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from) || (has(self.spec.replaces) && self.status.handoff.from == self.spec.replaces.name && self.status.handoff.hint.source == self.spec.replaces.hint.source && self.status.handoff.hint.commentID == self.spec.replaces.hint.commentID && self.status.handoff.hint.digest == self.spec.replaces.hint.digest)",message="status.handoff.from and its hint must match spec.replaces"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.handoff) || !has(oldSelf.status.handoff.from) || (has(self.status) && has(self.status.handoff) && has(self.status.handoff.from))",message="status.handoff.from is never removed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.handoff) || !has(oldSelf.status.handoff.to) || (has(self.status) && has(self.status.handoff) && has(self.status.handoff.to))",message="status.handoff.to is never removed"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from) || self.status.handoff.from.phase == 'Reserved' || (has(oldSelf.status) && has(oldSelf.status.handoff) && has(oldSelf.status.handoff.from))",message="status.handoff.from starts in Reserved"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to) || self.status.handoff.to.phase == 'Intent' || (has(oldSelf.status) && has(oldSelf.status.handoff) && has(oldSelf.status.handoff.to))",message="status.handoff.to starts in Intent"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from) || (has(self.spec.replaces) && self.status.handoff.from.name == self.spec.replaces.name && self.status.handoff.from.uid == self.spec.replaces.uid && self.status.handoff.from.hint.source == self.spec.replaces.hint.source && self.status.handoff.from.hint.commentID == self.spec.replaces.hint.commentID && self.status.handoff.from.hint.digest == self.spec.replaces.hint.digest)",message="status.handoff.from must match spec.replaces"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to) || (has(self.status.hints) && self.status.hints.exists(h, h.source == self.status.handoff.to.hint.source && h.commentID == self.status.handoff.to.hint.commentID && h.digest == self.status.handoff.to.hint.digest && h.state != 'Pending' && (self.status.handoff.to.phase != 'Intent' || h.state == 'Reserved')))",message="status.handoff.to must name a hint in status.hints that is no longer Pending, and Reserved while the intent stands"
 
 // RemediationRequest is one proposed fix: a typed action on one object, carried out as a GitOps pull request
 // after deterministic policy allows it.

@@ -447,80 +447,143 @@ spec:
                 type: boolean
               handoff:
                 description: |-
-                  handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over;
-                  on that predecessor, its replacement. Once written it is never removed, and its from, to and hint never
-                  change. Planned: nothing writes it yet.
+                  handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over
+                  (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is
+                  written once and never removed; only its phase moves on. Planned: nothing writes it yet.
                 properties:
-                  expectedHead:
-                    description: |-
-                      expectedHead is the head of the branch the predecessor recorded when it took the intent: the
-                      replacement's commit must have it as its parent.
-                    pattern: ^[0-9a-f]{40}$
-                    type: string
                   from:
-                    description: from is the predecessor, set on the replacement.
-                      It equals spec.replaces.name.
-                    maxLength: 63
-                    minLength: 1
-                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                    type: string
-                  hint:
-                    description: hint is the hint the handoff answers.
+                    description: from is the incoming side, set on a replacement.
                     properties:
-                      commentID:
-                        description: commentID is the comment's ID in the source.
-                        format: int64
-                        minimum: 1
-                        type: integer
-                      digest:
-                        description: digest is the SHA-256 of the stored, redacted
-                          hint text.
-                        pattern: ^sha256:[0-9a-f]{64}$
+                      hint:
+                        description: hint is the predecessor's hint the replacement
+                          answers.
+                        properties:
+                          commentID:
+                            description: commentID is the comment's ID in the source.
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          digest:
+                            description: digest is the SHA-256 of the stored, redacted
+                              hint text.
+                            pattern: ^sha256:[0-9a-f]{64}$
+                            type: string
+                          source:
+                            description: source is the system the comment is in.
+                            enum:
+                            - GitHub
+                            type: string
+                        required:
+                        - commentID
+                        - digest
+                        - source
+                        type: object
+                      name:
+                        description: name of the predecessor.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
-                      source:
-                        description: source is the system the comment is in.
+                      phase:
+                        description: phase is how far this side has come.
                         enum:
-                        - GitHub
+                        - Reserved
+                        - Intent
+                        - Done
+                        - Aborted
+                        type: string
+                      uid:
+                        description: uid of the predecessor.
+                        pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
                         type: string
                     required:
-                    - commentID
-                    - digest
-                    - source
+                    - hint
+                    - name
+                    - phase
+                    - uid
                     type: object
-                  phase:
-                    description: phase is how far the handoff has come.
-                    enum:
-                    - Reserved
-                    - Intent
-                    - Done
-                    - Aborted
-                    type: string
+                    x-kubernetes-validations:
+                    - message: an incoming handoff is Reserved, Done or Aborted
+                      rule: self.phase in ['Reserved', 'Done', 'Aborted']
+                    - message: 'an incoming handoff is pinned: only its phase changes'
+                      rule: self.name == oldSelf.name && self.uid == oldSelf.uid &&
+                        self.hint == oldSelf.hint
+                    - message: an incoming handoff moves only from Reserved to Done
+                        or Aborted
+                      rule: oldSelf.phase == self.phase || (oldSelf.phase == 'Reserved'
+                        && self.phase in ['Done', 'Aborted'])
                   to:
-                    description: to is the replacement, set on the predecessor.
-                    maxLength: 63
-                    minLength: 1
-                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                    type: string
-                required:
-                - hint
-                - phase
+                    description: to is the outgoing side, set on a predecessor.
+                    properties:
+                      expectedHead:
+                        description: |-
+                          expectedHead is the head of the branch when the intent was recorded: the replacement's commit must have
+                          it as its parent.
+                        pattern: ^[0-9a-f]{40}$
+                        type: string
+                      hint:
+                        description: hint is this request's hint the replacement answers.
+                        properties:
+                          commentID:
+                            description: commentID is the comment's ID in the source.
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          digest:
+                            description: digest is the SHA-256 of the stored, redacted
+                              hint text.
+                            pattern: ^sha256:[0-9a-f]{64}$
+                            type: string
+                          source:
+                            description: source is the system the comment is in.
+                            enum:
+                            - GitHub
+                            type: string
+                        required:
+                        - commentID
+                        - digest
+                        - source
+                        type: object
+                      name:
+                        description: name of the replacement.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      phase:
+                        description: phase is how far this side has come.
+                        enum:
+                        - Reserved
+                        - Intent
+                        - Done
+                        - Aborted
+                        type: string
+                      uid:
+                        description: uid of the replacement, so a request recreated
+                          under the same name is never taken for it.
+                        pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                        type: string
+                    required:
+                    - expectedHead
+                    - hint
+                    - name
+                    - phase
+                    - uid
+                    type: object
+                    x-kubernetes-validations:
+                    - message: an outgoing handoff is Intent, Done or Aborted
+                      rule: self.phase in ['Intent', 'Done', 'Aborted']
+                    - message: 'an outgoing handoff is pinned: only its phase changes'
+                      rule: self.name == oldSelf.name && self.uid == oldSelf.uid &&
+                        self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead
+                    - message: an outgoing handoff moves only from Intent to Done
+                        or Aborted
+                      rule: oldSelf.phase == self.phase || (oldSelf.phase == 'Intent'
+                        && self.phase in ['Done', 'Aborted'])
                 type: object
                 x-kubernetes-validations:
-                - message: exactly one of from and to is set
-                  rule: has(self.from) != has(self.to)
-                - message: the replacement's handoff is Reserved, Done or Aborted
-                  rule: '!has(self.from) || self.phase in [''Reserved'', ''Done'',
-                    ''Aborted'']'
-                - message: the predecessor's handoff is Intent, Done or Aborted, with
-                    expectedHead
-                  rule: '!has(self.to) || (self.phase in [''Intent'', ''Done'', ''Aborted'']
-                    && has(self.expectedHead))'
-                - message: expectedHead is recorded on the predecessor only
-                  rule: '!has(self.from) || !has(self.expectedHead)'
-                - message: a handoff moves only from Reserved or Intent to Done or
-                    Aborted
-                  rule: oldSelf.phase == self.phase || (oldSelf.phase in ['Reserved',
-                    'Intent'] && self.phase in ['Done', 'Aborted'])
+                - message: a handoff has from, to or both
+                  rule: has(self.from) || has(self.to)
               hints:
                 description: |-
                   hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a
@@ -619,6 +682,10 @@ spec:
                       && self.digest == oldSelf.digest && self.text == oldSelf.text
                       && self.author == oldSelf.author && self.updatedAt == oldSelf.updatedAt
                       && self.acceptedAt == oldSelf.acceptedAt
+                  - message: the reason of a Consumed or Declined hint never changes
+                    rule: '!(oldSelf.state in [''Consumed'', ''Declined'']) || (has(self.reason)
+                      == has(oldSelf.reason) && (!has(self.reason) || self.reason
+                      == oldSelf.reason))'
                   - message: a hint moves only from Pending to Reserved or Declined,
                       and from Reserved to Consumed or Declined
                     rule: oldSelf.state == self.state || (oldSelf.state == 'Pending'
@@ -830,20 +897,34 @@ spec:
           rule: '!has(oldSelf.status) || !has(oldSelf.status.hints) || (has(self.status)
             && has(self.status.hints) && oldSelf.status.hints.all(o, self.status.hints.exists(h,
             h.source == o.source && h.commentID == o.commentID)))'
-        - message: 'status.handoff is set once: it is never removed and its from,
-            to and hint never change'
-          rule: '!has(oldSelf.status) || !has(oldSelf.status.handoff) || (has(self.status)
-            && has(self.status.handoff) && self.status.handoff.hint == oldSelf.status.handoff.hint
-            && (has(self.status.handoff.from) ? (has(oldSelf.status.handoff.from)
-            && self.status.handoff.from == oldSelf.status.handoff.from) : !has(oldSelf.status.handoff.from))
-            && (has(self.status.handoff.to) ? (has(oldSelf.status.handoff.to) && self.status.handoff.to
-            == oldSelf.status.handoff.to) : !has(oldSelf.status.handoff.to)))'
-        - message: status.handoff.from and its hint must match spec.replaces
+        - message: status.handoff.from is never removed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.handoff) || !has(oldSelf.status.handoff.from)
+            || (has(self.status) && has(self.status.handoff) && has(self.status.handoff.from))'
+        - message: status.handoff.to is never removed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.handoff) || !has(oldSelf.status.handoff.to)
+            || (has(self.status) && has(self.status.handoff) && has(self.status.handoff.to))'
+        - message: status.handoff.from starts in Reserved
           rule: '!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from)
-            || (has(self.spec.replaces) && self.status.handoff.from == self.spec.replaces.name
-            && self.status.handoff.hint.source == self.spec.replaces.hint.source &&
-            self.status.handoff.hint.commentID == self.spec.replaces.hint.commentID
-            && self.status.handoff.hint.digest == self.spec.replaces.hint.digest)'
+            || self.status.handoff.from.phase == ''Reserved'' || (has(oldSelf.status)
+            && has(oldSelf.status.handoff) && has(oldSelf.status.handoff.from))'
+        - message: status.handoff.to starts in Intent
+          rule: '!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to)
+            || self.status.handoff.to.phase == ''Intent'' || (has(oldSelf.status)
+            && has(oldSelf.status.handoff) && has(oldSelf.status.handoff.to))'
+        - message: status.handoff.from must match spec.replaces
+          rule: '!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from)
+            || (has(self.spec.replaces) && self.status.handoff.from.name == self.spec.replaces.name
+            && self.status.handoff.from.uid == self.spec.replaces.uid && self.status.handoff.from.hint.source
+            == self.spec.replaces.hint.source && self.status.handoff.from.hint.commentID
+            == self.spec.replaces.hint.commentID && self.status.handoff.from.hint.digest
+            == self.spec.replaces.hint.digest)'
+        - message: status.handoff.to must name a hint in status.hints that is no longer
+            Pending, and Reserved while the intent stands
+          rule: '!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to)
+            || (has(self.status.hints) && self.status.hints.exists(h, h.source ==
+            self.status.handoff.to.hint.source && h.commentID == self.status.handoff.to.hint.commentID
+            && h.digest == self.status.handoff.to.hint.digest && h.state != ''Pending''
+            && (self.status.handoff.to.phase != ''Intent'' || h.state == ''Reserved'')))'
     selectableFields:
     - jsonPath: .status.phase
     - jsonPath: .status.breakerProbe

@@ -112,6 +112,7 @@ type HintAuthor struct {
 // +kubebuilder:validation:XValidation:rule="size(bytes(self.text)) <= 2048",message="text must be at most 2048 bytes"
 // +kubebuilder:validation:XValidation:rule="self.state != 'Declined' || has(self.reason)",message="a Declined hint needs a reason"
 // +kubebuilder:validation:XValidation:rule="self.source == oldSelf.source && self.commentID == oldSelf.commentID && self.digest == oldSelf.digest && self.text == oldSelf.text && self.author == oldSelf.author && self.updatedAt == oldSelf.updatedAt && self.acceptedAt == oldSelf.acceptedAt",message="a stored hint is pinned: only its state and reason change"
+// +kubebuilder:validation:XValidation:rule="!(oldSelf.state in ['Consumed', 'Declined']) || (has(self.reason) == has(oldSelf.reason) && (!has(self.reason) || self.reason == oldSelf.reason))",message="the reason of a Consumed or Declined hint never changes"
 // +kubebuilder:validation:XValidation:rule="oldSelf.state == self.state || (oldSelf.state == 'Pending' && self.state in ['Reserved', 'Declined']) || (oldSelf.state == 'Reserved' && self.state in ['Consumed', 'Declined'])",message="a hint moves only from Pending to Reserved or Declined, and from Reserved to Consumed or Declined"
 type Hint struct {
 	// source is the system the comment is in.
@@ -175,9 +176,10 @@ type RequestReplacement struct {
 	Hint HintRef `json:"hint"`
 }
 
-// HandoffPhase is how far a handoff has come. On the replacement: Reserved (it took the target lock and named
-// its predecessor), then Done (it holds the pull request) or Aborted. On the predecessor: Intent (it expects its
-// replacement's commit on top of expectedHead), then Done (it ended Superseded with HandedOff) or Aborted.
+// HandoffPhase is how far one side of a handoff has come. Incoming, on the replacement: Reserved (it took the
+// target lock and named its predecessor), then Done (it holds the pull request) or Aborted. Outgoing, on the
+// predecessor: Intent (it expects its replacement's commit on top of expectedHead), then Done (it ended
+// Superseded with HandedOff) or Aborted. Each side starts in its first phase and moves only once.
 // +kubebuilder:validation:Enum=Reserved;Intent;Done;Aborted
 type HandoffPhase string
 
@@ -189,37 +191,72 @@ const (
 	HandoffAborted  HandoffPhase = "Aborted"
 )
 
-// Handoff records the supersede handoff on both requests (ADR-0028 section 4), written in this order: the
-// replacement's admission sets from, the hint and phase Reserved; then one write on the predecessor sets to,
-// expectedHead, phase Intent and its hint Reserved; after the branch update the replacement records the pull
-// request and moves to Done, then the predecessor ends Superseded with HandedOff and moves to Done. A restart
-// resumes from what both records and the branch head show. Exactly one of from and to is set, and neither they
-// nor the hint change once written.
-// +kubebuilder:validation:XValidation:rule="has(self.from) != has(self.to)",message="exactly one of from and to is set"
-// +kubebuilder:validation:XValidation:rule="!has(self.from) || self.phase in ['Reserved', 'Done', 'Aborted']",message="the replacement's handoff is Reserved, Done or Aborted"
-// +kubebuilder:validation:XValidation:rule="!has(self.to) || (self.phase in ['Intent', 'Done', 'Aborted'] && has(self.expectedHead))",message="the predecessor's handoff is Intent, Done or Aborted, with expectedHead"
-// +kubebuilder:validation:XValidation:rule="!has(self.from) || !has(self.expectedHead)",message="expectedHead is recorded on the predecessor only"
-// +kubebuilder:validation:XValidation:rule="oldSelf.phase == self.phase || (oldSelf.phase in ['Reserved', 'Intent'] && self.phase in ['Done', 'Aborted'])",message="a handoff moves only from Reserved or Intent to Done or Aborted"
-type Handoff struct {
-	// from is the predecessor, set on the replacement. It equals spec.replaces.name.
-	// +optional
-	From Name `json:"from,omitempty"`
+// IncomingHandoff is the replacement's side of a handoff: the predecessor it takes over and the hint it
+// answers, equal to spec.replaces. Only its phase changes once written.
+// +kubebuilder:validation:XValidation:rule="self.phase in ['Reserved', 'Done', 'Aborted']",message="an incoming handoff is Reserved, Done or Aborted"
+// +kubebuilder:validation:XValidation:rule="self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint",message="an incoming handoff is pinned: only its phase changes"
+// +kubebuilder:validation:XValidation:rule="oldSelf.phase == self.phase || (oldSelf.phase == 'Reserved' && self.phase in ['Done', 'Aborted'])",message="an incoming handoff moves only from Reserved to Done or Aborted"
+type IncomingHandoff struct {
+	// name of the predecessor.
+	// +required
+	Name Name `json:"name"`
 
-	// to is the replacement, set on the predecessor.
-	// +optional
-	To Name `json:"to,omitempty"`
+	// uid of the predecessor.
+	// +required
+	UID UID `json:"uid"`
 
-	// hint is the hint the handoff answers.
+	// hint is the predecessor's hint the replacement answers.
 	// +required
 	Hint HintRef `json:"hint"`
 
-	// expectedHead is the head of the branch the predecessor recorded when it took the intent: the
-	// replacement's commit must have it as its parent.
-	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
-	// +optional
-	ExpectedHead string `json:"expectedHead,omitempty"`
-
-	// phase is how far the handoff has come.
+	// phase is how far this side has come.
 	// +required
 	Phase HandoffPhase `json:"phase"`
+}
+
+// OutgoingHandoff is the predecessor's side of a handoff: the replacement that takes it over, the hint of this
+// request it answers (which must be in status.hints, Reserved while the intent stands) and the branch head the
+// replacement's commit must have as its parent. Only its phase changes once written.
+// +kubebuilder:validation:XValidation:rule="self.phase in ['Intent', 'Done', 'Aborted']",message="an outgoing handoff is Intent, Done or Aborted"
+// +kubebuilder:validation:XValidation:rule="self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead",message="an outgoing handoff is pinned: only its phase changes"
+// +kubebuilder:validation:XValidation:rule="oldSelf.phase == self.phase || (oldSelf.phase == 'Intent' && self.phase in ['Done', 'Aborted'])",message="an outgoing handoff moves only from Intent to Done or Aborted"
+type OutgoingHandoff struct {
+	// name of the replacement.
+	// +required
+	Name Name `json:"name"`
+
+	// uid of the replacement, so a request recreated under the same name is never taken for it.
+	// +required
+	UID UID `json:"uid"`
+
+	// hint is this request's hint the replacement answers.
+	// +required
+	Hint HintRef `json:"hint"`
+
+	// expectedHead is the head of the branch when the intent was recorded: the replacement's commit must have
+	// it as its parent.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	// +required
+	ExpectedHead string `json:"expectedHead"`
+
+	// phase is how far this side has come.
+	// +required
+	Phase HandoffPhase `json:"phase"`
+}
+
+// Handoff records the supersede handoff (ADR-0028 section 4), written in this order: the replacement's
+// admission sets from (phase Reserved); one write on the predecessor sets to (phase Intent) and its hint
+// Reserved; after the branch update the replacement's from moves to Done, then the predecessor ends Superseded
+// with HandedOff, its to Done and its hint Consumed. A request in the middle of a chain has both: from for the
+// handoff that gave it the pull request, to for the one that passes it on. Each side is written once, starts
+// in its first phase and is never removed; only its phase moves on.
+// +kubebuilder:validation:XValidation:rule="has(self.from) || has(self.to)",message="a handoff has from, to or both"
+type Handoff struct {
+	// from is the incoming side, set on a replacement.
+	// +optional
+	From *IncomingHandoff `json:"from,omitempty"`
+
+	// to is the outgoing side, set on a predecessor.
+	// +optional
+	To *OutgoingHandoff `json:"to,omitempty"`
 }

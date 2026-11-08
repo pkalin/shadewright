@@ -137,6 +137,24 @@ func TestEvaluateSourceRedactsAndBounds(t *testing.T) {
 	}
 }
 
+// Evidence that made the redactor panic (#523) crashed the analyzer: EvaluateSource runs in informer
+// predicates, where no recover catches it. The symptom is kept and the value withheld.
+func TestEvaluateSourceRedactsAQuotedValueEscapingTheLineBreak(t *testing.T) {
+	src := validSource()
+	src.Symptoms = func(map[string]any) []Symptom {
+		return []Symptom{{Reason: "ReportFailed", Summary: fixedSummary, Evidence: []Evidence{
+			{Field: "status.message", Value: "password:\n  \"hunter2hunter2\\\nnext: \"x\""},
+		}}}
+	}
+	got := EvaluateSource(src, map[string]any{})
+	if len(got) != 1 || len(got[0].Evidence) != 1 {
+		t.Fatalf("EvaluateSource = %+v, want the symptom with its evidence", got)
+	}
+	if v := got[0].Evidence[0].Value; strings.Contains(v, "hunter2") {
+		t.Errorf("the value reached the evidence: %q", v)
+	}
+}
+
 func TestEvaluateSourceSurvivesAPanic(t *testing.T) {
 	src := validSource()
 	src.Symptoms = func(map[string]any) []Symptom { panic("module bug") }

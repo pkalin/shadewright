@@ -163,7 +163,7 @@ func EvaluateSource(src SymptomSource, obj map[string]any) []Symptom {
 		}
 		ev := make([]Evidence, 0, len(sym.Evidence))
 		for _, e := range sym.Evidence {
-			ev = append(ev, Evidence{Field: e.Field, Value: BoundValue(e.Value)})
+			ev = append(ev, Evidence{Field: e.Field, Value: safeBoundValue(e.Value)})
 		}
 		sym.Evidence = ev
 		out = append(out, sym)
@@ -184,6 +184,18 @@ func MayShowPod(src SymptomSource, labels map[string]string, images []string) (m
 		}
 	}()
 	return src.PodFilter(labels, images)
+}
+
+// safeBoundValue is [BoundValue] that withholds the whole value when redaction panics, so a redactor bug
+// neither stops the analyzer (EvaluateSource runs in informer predicates, outside any recover) nor lets the
+// value through unredacted (#523).
+func safeBoundValue(s string) (out string) {
+	defer func() {
+		if recover() != nil {
+			out = "[REDACTED]"
+		}
+	}()
+	return BoundValue(s)
 }
 
 // safeSource calls a source's Symptoms and treats a panic as no symptom, so a module bug cannot stop the

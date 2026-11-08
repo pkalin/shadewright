@@ -852,10 +852,11 @@ func nextLineBlock(s string, pos, keyCol int, bare bool, add func(start, end int
 }
 
 // scalarValue returns the part of the scalar block value s[start:end] to redact: the text between the
-// quotes of a quoted scalar that is the whole value, so it keeps its quotes, otherwise all of it.
+// quotes of a quoted scalar that is the whole value, so it keeps its quotes, otherwise all of it. A closing
+// quote past end (a backslash escaping the line break, #523) is not the value's own, so all of it is redacted.
 func scalarValue(s string, start, end int) (int, int) {
 	if start < end && (s[start] == '"' || s[start] == '\'') {
-		if qe := quotedEnd(s, start); qe > 0 && strings.TrimRight(s[qe:end], " \t") == "" {
+		if qe := quotedEnd(s, start); qe > 0 && qe <= end && strings.TrimRight(s[qe:end], " \t") == "" {
 			return start + 1, qe - 1
 		}
 	}

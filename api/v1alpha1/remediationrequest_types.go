@@ -281,6 +281,32 @@ type PullRequestStatus struct {
 	AppliedObservedAt *metav1.Time `json:"appliedObservedAt,omitempty"`
 }
 
+// RolloutStatus is what the check after the merge records about the target's rollout. Only the executor writes
+// it; each field is set once.
+type RolloutStatus struct {
+	// waitStartedAt is when the executor started waiting for the delivery of a merged request that has no
+	// lastPhaseTransitionTime; the delivery window is then measured from it instead of from the merge.
+	// +optional
+	WaitStartedAt *metav1.Time `json:"waitStartedAt,omitempty"`
+
+	// targetGeneration is the target's metadata.generation first read after the merge commit was seen applied.
+	// The template revision is recorded once the target's controller has observed it.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	TargetGeneration int64 `json:"targetGeneration,omitempty"`
+
+	// templateRevision is the template revision the check judges: a StatefulSet's status.updateRevision or a
+	// Deployment's deployment.kubernetes.io/revision annotation, read once the controller observed
+	// targetGeneration. A newer revision ends the check with RolledOut Unknown, reason RolloutSuperseded.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	TemplateRevision string `json:"templateRevision,omitempty"`
+
+	// ended is true once the check gave its final verdict in RolledOut; nothing is read for it after that.
+	// +optional
+	Ended bool `json:"ended,omitempty"`
+}
+
 // PlanRepository identifies the repository a plan was made for: the URL and provider installation taken from
 // RemediationSettings when planDigest was fixed. Cleanup of a superseded plan touches only this repository, so a
 // settings entry that now points elsewhere can never get an unrelated pull request closed.
@@ -383,13 +409,18 @@ type RemediationRequestStatus struct {
 	// +optional
 	PullRequest *PullRequestStatus `json:"pullRequest,omitempty"`
 
+	// rollout is what the check after the merge keeps between reconciles (the RolledOut condition).
+	// +optional
+	Rollout *RolloutStatus `json:"rollout,omitempty"`
+
 	// deadline is when the current step gives up.
 	// +optional
 	Deadline *metav1.Time `json:"deadline,omitempty"`
 
 	// conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
 	// Verified, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run
-	// the applied template; False with reason RolloutStuck when they did not within the deadline).
+	// the applied template; False with reason RolloutStuck or DeliveryNotObserved, Unknown while in progress and
+	// with reason KindNotChecked, RolloutSuperseded or RolloutNotDetermined when the check ends without a verdict).
 	// +listType=map
 	// +listMapKey=type
 	// +optional

@@ -323,7 +323,8 @@ spec:
                 description: |-
                   conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
                   Verified, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run
-                  the applied template; False with reason RolloutStuck when they did not within the deadline).
+                  the applied template; False with reason RolloutStuck or DeliveryNotObserved, Unknown while in progress and
+                  with reason KindNotChecked, RolloutSuperseded or RolloutNotDetermined when the check ends without a verdict).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -520,6 +521,35 @@ spec:
                 x-kubernetes-validations:
                 - message: appliedObservedAt needs mergeCommitSHA
                   rule: '!has(self.appliedObservedAt) || has(self.mergeCommitSHA)'
+              rollout:
+                description: rollout is what the check after the merge keeps between
+                  reconciles (the RolledOut condition).
+                properties:
+                  ended:
+                    description: ended is true once the check gave its final verdict
+                      in RolledOut; nothing is read for it after that.
+                    type: boolean
+                  targetGeneration:
+                    description: |-
+                      targetGeneration is the target's metadata.generation first read after the merge commit was seen applied.
+                      The template revision is recorded once the target's controller has observed it.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  templateRevision:
+                    description: |-
+                      templateRevision is the template revision the check judges: a StatefulSet's status.updateRevision or a
+                      Deployment's deployment.kubernetes.io/revision annotation, read once the controller observed
+                      targetGeneration. A newer revision ends the check with RolledOut Unknown, reason RolloutSuperseded.
+                    maxLength: 253
+                    type: string
+                  waitStartedAt:
+                    description: |-
+                      waitStartedAt is when the executor started waiting for the delivery of a merged request that has no
+                      lastPhaseTransitionTime; the delivery window is then measured from it instead of from the merge.
+                    format: date-time
+                    type: string
+                type: object
               source:
                 description: source is where the change is made, resolved by the controller
                   before the policy check.

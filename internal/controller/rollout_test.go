@@ -130,6 +130,7 @@ type rolloutWorld struct {
 	now    time.Time
 	merged time.Time
 	merge  string
+	base   string // the commit before the merge
 	r      *RemediationRequestReconciler
 	key    client.ObjectKey
 }
@@ -139,6 +140,10 @@ type rolloutWorld struct {
 func newRolloutWorld(t *testing.T, ss *appsv1.StatefulSet) *rolloutWorld {
 	t.Helper()
 	git := fakegit.NewGit(mainBranch, map[string][]byte{"apps/cache.yaml": []byte("old")})
+	base, err := git.BranchHead(t.Context(), mainBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
 	merge, err := git.Push(mainBranch, "apps/cache.yaml", []byte("new"))
 	if err != nil {
 		t.Fatal(err)
@@ -162,7 +167,7 @@ func newRolloutWorld(t *testing.T, ss *appsv1.StatefulSet) *rolloutWorld {
 	c := clientfake.NewClientBuilder().WithScheme(deadlineScheme(t)).WithObjects(settings, rr, ss).
 		WithStatusSubresource(&remediationv1alpha1.RemediationRequest{}).Build()
 	w := &rolloutWorld{c: c, reader: &rolloutReader{Reader: c}, git: git, rec: record.NewFakeRecorder(10),
-		now: merged.Add(time.Minute), merged: merged, merge: merge, key: client.ObjectKeyFromObject(rr)}
+		now: merged.Add(time.Minute), merged: merged, merge: merge, base: base, key: client.ObjectKeyFromObject(rr)}
 	w.r = &RemediationRequestReconciler{Client: c, Scheme: c.Scheme(), APIReader: w.reader, Recorder: w.rec,
 		Now: func() time.Time { return w.now },
 		OpenRepository: func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
@@ -351,7 +356,7 @@ func TestRolloutWaitsForDelivery(t *testing.T) {
 // commit, and the check stops.
 func TestRolloutDeliveryNotObservedIsReported(t *testing.T) {
 	w := newRolloutWorld(t, stuckStatefulSet())
-	w.reader.ks = kustomizationApplied(t, strings.Repeat("e", 40)) // never the merge commit
+	w.reader.ks = kustomizationApplied(t, w.base) // the commit before the merge, never the merge commit
 	w.now = w.merged.Add(deliveryWindow + time.Second)
 	res, err := w.reconcile(t, t.Context())
 	if err != nil || res.RequeueAfter != 0 {
@@ -498,5 +503,188 @@ func TestRolloutCancelledWritesNothing(t *testing.T) {
 	if rr.Status.PullRequest.AppliedObservedAt != nil ||
 		meta.FindStatusCondition(rr.Status.Conditions, rollout.ConditionRolledOut) != nil {
 		t.Fatalf("a cancelled reconcile wrote %+v", rr.Status)
+	}
+}
+
+// mutate changes the request's status as a previous reconcile would have written it.
+func (w *rolloutWorld) mutate(t *testing.T, edit func(*remediationv1alpha1.RemediationRequest)) {
+	t.Helper()
+	rr := w.request(t)
+	edit(rr)
+	if err := w.c.Status().Update(t.Context(), rr); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// appliedLongAgo is a request whose delivery was seen at applied, with RolledOut still in progress.
+func (w *rolloutWorld) appliedLongAgo(t *testing.T, applied time.Time) {
+	t.Helper()
+	w.mutate(t, func(rr *remediationv1alpha1.RemediationRequest) {
+		rr.Status.PullRequest.AppliedObservedAt = new(metav1.NewTime(applied))
+		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: rollout.ConditionRolledOut,
+			Status: metav1.ConditionUnknown, Reason: rollout.ReasonRolloutProgressing, Message: "in progress"})
+	})
+}
+
+func rolledOut(t *testing.T, w *rolloutWorld) *metav1.Condition {
+	t.Helper()
+	return meta.FindStatusCondition(w.request(t).Status.Conditions, rollout.ConditionRolledOut)
+}
+
+// Review of #532, point 1: a reconcile after the end of the check (a restart, a late wake-up) still ends with a
+// verdict, never with Progressing left behind.
+func TestRolloutLateReconcileEndsWithAVerdict(t *testing.T) {
+	applied := time.Date(2026, 11, 8, 10, 36, 0, 0, time.UTC)
+	end := applied.Add(rollout.DefaultDeadline + stuckWatch)
+	t.Run("stuck", func(t *testing.T) {
+		w := newRolloutWorld(t, stuckStatefulSet())
+		w.appliedLongAgo(t, applied)
+		w.now = end.Add(time.Hour)
+		if res, err := w.reconcile(t, t.Context()); err != nil || res.RequeueAfter != 0 {
+			t.Fatalf("Reconcile = %+v, %v; want done", res, err)
+		}
+		if c := rolledOut(t, w); c == nil || c.Reason != rollout.ReasonRolloutStuck {
+			t.Fatalf("RolledOut = %+v, want RolloutStuck", c)
+		}
+		if ev := w.events(); len(ev) != 1 {
+			t.Fatalf("Events = %v, want one", ev)
+		}
+		// Ended: nothing more is read.
+		reads := 0
+		w.reader.fail = func(client.Object) error { reads++; return nil }
+		if _, err := w.reconcile(t, t.Context()); err != nil || reads != 0 {
+			t.Fatalf("after the end: err %v, %d reads", err, reads)
+		}
+	})
+	t.Run("target gone", func(t *testing.T) {
+		w := newRolloutWorld(t, stuckStatefulSet())
+		w.appliedLongAgo(t, applied)
+		if err := w.c.Delete(t.Context(), stuckStatefulSet()); err != nil {
+			t.Fatal(err)
+		}
+		w.now = end.Add(time.Minute)
+		if _, err := w.reconcile(t, t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if c := rolledOut(t, w); c == nil || c.Status != metav1.ConditionUnknown || c.Reason != rollout.ReasonRolloutNotDetermined {
+			t.Fatalf("RolledOut = %+v, want Unknown/RolloutNotDetermined", c)
+		}
+		if ev := w.events(); len(ev) != 1 {
+			t.Fatalf("Events = %v, want one", ev)
+		}
+	})
+	t.Run("reads failing", func(t *testing.T) {
+		w := newRolloutWorld(t, stuckStatefulSet())
+		w.appliedLongAgo(t, applied)
+		w.reader.fail = func(obj client.Object) error {
+			if _, ok := obj.(*appsv1.StatefulSet); ok {
+				return errors.New("read failed")
+			}
+			return nil
+		}
+		w.now = end.Add(time.Minute)
+		if _, err := w.reconcile(t, t.Context()); err == nil {
+			t.Fatal("a failed read within the grace period was not retried")
+		}
+		if c := rolledOut(t, w); c.Reason != rollout.ReasonRolloutProgressing {
+			t.Fatalf("RolledOut = %+v before the grace ended", c)
+		}
+		w.now = end.Add(finalGrace + time.Second)
+		if res, err := w.reconcile(t, t.Context()); err != nil || res.RequeueAfter != 0 {
+			t.Fatalf("Reconcile = %+v, %v; want done", res, err)
+		}
+		if c := rolledOut(t, w); c.Reason != rollout.ReasonRolloutNotDetermined {
+			t.Fatalf("RolledOut = %+v, want RolloutNotDetermined", c)
+		}
+	})
+}
+
+// Point 2: a delivery applied in time but first read after the window counts.
+func TestRolloutDeliveryReadAfterTheWindowCounts(t *testing.T) {
+	w := newRolloutWorld(t, completeStatefulSet())
+	w.reader.ks = kustomizationApplied(t, w.merge)
+	w.now = w.merged.Add(deliveryWindow + time.Minute)
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if c := rolledOut(t, w); c == nil || c.Status != metav1.ConditionTrue {
+		t.Fatalf("RolledOut = %+v, want True", c)
+	}
+}
+
+// Point 3: while writes are paused the Git host is not asked, so the window does not end in DeliveryNotObserved.
+func TestRolloutPausedDoesNotEndTheWindow(t *testing.T) {
+	w := newRolloutWorld(t, completeStatefulSet())
+	later, err := w.git.Push(mainBranch, "apps/other.yaml", []byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.reader.ks = kustomizationApplied(t, later)
+	settings := &remediationv1alpha1.RemediationSettings{}
+	if err := w.c.Get(t.Context(), client.ObjectKey{Name: remediationv1alpha1.SettingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings.Spec.Paused = new(true)
+	if err := w.c.Update(t.Context(), settings); err != nil {
+		t.Fatal(err)
+	}
+	w.now = w.merged.Add(deliveryWindow + time.Hour)
+	res, err := w.reconcile(t, t.Context())
+	if err != nil || res.RequeueAfter <= 0 {
+		t.Fatalf("Reconcile = %+v, %v; want a wait", res, err)
+	}
+	if c := rolledOut(t, w); c != nil {
+		t.Fatalf("RolledOut = %+v while paused, want none", c)
+	}
+	settings.Spec.Paused = new(false)
+	if err := w.c.Update(t.Context(), settings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if c := rolledOut(t, w); c == nil || c.Status != metav1.ConditionTrue {
+		t.Fatalf("RolledOut = %+v after the pause, want True", c)
+	}
+}
+
+// Point 6: the revision applied with the merge commit is recorded and judged; a newer one ends the check as
+// superseded, never Stuck.
+func TestRolloutNewerRevisionSupersedes(t *testing.T) {
+	w := newRolloutWorld(t, stuckStatefulSet())
+	w.reader.ks = kustomizationApplied(t, w.merge)
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := w.request(t).Status.Rollout; got == nil || got.TemplateRevision != revisionNew || got.TargetGeneration != 3 {
+		t.Fatalf("status.rollout = %+v, want revision %s at generation 3", got, revisionNew)
+	}
+	next := stuckStatefulSet()
+	next.Status.UpdateRevision = "cache-8e1f"
+	w.setTarget(t, next)
+	w.now = w.now.Add(rollout.DefaultDeadline + time.Minute)
+	if res, err := w.reconcile(t, t.Context()); err != nil || res.RequeueAfter != 0 {
+		t.Fatalf("Reconcile = %+v, %v; want done", res, err)
+	}
+	if c := rolledOut(t, w); c == nil || c.Status != metav1.ConditionUnknown || c.Reason != rollout.ReasonRolloutSuperseded {
+		t.Fatalf("RolledOut = %+v, want Unknown/RolloutSuperseded", c)
+	}
+}
+
+// Point 8: without lastPhaseTransitionTime the check still runs, its window measured from a recorded start.
+func TestRolloutWithoutTransitionTime(t *testing.T) {
+	w := newRolloutWorld(t, completeStatefulSet())
+	w.mutate(t, func(rr *remediationv1alpha1.RemediationRequest) { rr.Status.LastPhaseTransitionTime = nil })
+	_, _ = w.reconcile(t, t.Context()) // no Kustomization yet: the read fails, the start is recorded first
+	rr := w.request(t)
+	if rr.Status.Rollout == nil || rr.Status.Rollout.WaitStartedAt == nil {
+		t.Fatalf("status.rollout = %+v, want waitStartedAt", rr.Status.Rollout)
+	}
+	w.reader.ks = kustomizationApplied(t, w.merge)
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if c := rolledOut(t, w); c == nil || c.Status != metav1.ConditionTrue {
+		t.Fatalf("RolledOut = %+v, want True", c)
 	}
 }

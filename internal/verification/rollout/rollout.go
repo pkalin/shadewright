@@ -53,6 +53,12 @@ const (
 	// ReasonKindNotChecked: the target is not a Deployment or StatefulSet, whose rollout the check covers
 	// (Unknown).
 	ReasonKindNotChecked = "KindNotChecked"
+	// ReasonRolloutSuperseded: the target moved on to a newer template revision than the one applied with the
+	// merge commit, so this rollout is not judged any more (Unknown).
+	ReasonRolloutSuperseded = "RolloutSuperseded"
+	// ReasonRolloutNotDetermined: the check ended without a verdict, for example the target could not be read
+	// until the end of the check or is gone (Unknown).
+	ReasonRolloutNotDetermined = "RolloutNotDetermined"
 )
 
 // Deadline bounds.
@@ -77,7 +83,36 @@ const (
 	Complete
 	// Stuck: not complete when the deadline passed.
 	Stuck
+	// Superseded: the target runs a newer template revision than the one recorded; this rollout is not judged.
+	Superseded
 )
+
+// DeploymentRevisionAnnotation is the annotation the Deployment controller sets to the revision of the current
+// template; it changes only when the template does.
+const DeploymentRevisionAnnotation = "deployment.kubernetes.io/revision"
+
+// Revision returns the template revision target's controller rolls out, once it observed at least generation:
+// a StatefulSet's status.updateRevision, or a Deployment's revision annotation. ok is false before that, or when
+// the object names none.
+func Revision(target client.Object, generation int64) (rev string, ok bool) {
+	switch t := target.(type) {
+	case *appsv1.Deployment:
+		if t != nil && t.Status.ObservedGeneration >= generation {
+			rev = t.Annotations[DeploymentRevisionAnnotation]
+		}
+	case *appsv1.StatefulSet:
+		if t != nil && t.Status.ObservedGeneration >= generation {
+			rev = t.Status.UpdateRevision
+		}
+	}
+	return rev, rev != ""
+}
+
+// currentRevision is the revision target names now, whatever generation its controller observed.
+func currentRevision(target client.Object) string {
+	rev, _ := Revision(target, 0)
+	return rev
+}
 
 // Result is what Evaluate found.
 type Result struct {
@@ -93,7 +128,7 @@ type Result struct {
 
 // Condition returns the RolledOut condition for the result, for a request at generation.
 func (r Result) Condition(generation int64, now time.Time) metav1.Condition {
-	status := metav1.ConditionUnknown
+	status := metav1.ConditionUnknown // Progressing, Superseded
 	switch r.State {
 	case Complete:
 		status = metav1.ConditionTrue
@@ -128,10 +163,11 @@ func ClampDeadline(d time.Duration) time.Duration {
 }
 
 // Evaluate judges the rollout of target, an *appsv1.Deployment or *appsv1.StatefulSet read after the merged
-// revision was applied at appliedAt. A rollout that has not completed by appliedAt plus the clamped deadline is
-// Stuck. The object's own status is the only input; it is the API server's, but its names still go into the
-// message only as object names the API server validated.
-func Evaluate(target client.Object, appliedAt, now time.Time, deadline time.Duration) (Result, error) {
+// revision was applied at appliedAt. revision is the template revision recorded for that rollout ([Revision]),
+// or empty while none is recorded; a target that names another revision is Superseded. A rollout that has not
+// completed by appliedAt plus the clamped deadline is Stuck. The object's own status is the only input; it is
+// the API server's, but its names still go into the message only as object names the API server validated.
+func Evaluate(target client.Object, revision string, appliedAt, now time.Time, deadline time.Duration) (Result, error) {
 	if appliedAt.IsZero() {
 		return Result{}, fmt.Errorf("%w: no applied time", ErrNotEvaluable)
 	}
@@ -153,6 +189,11 @@ func Evaluate(target client.Object, appliedAt, now time.Time, deadline time.Dura
 		done, detail, old = statefulSet(t)
 	default:
 		return Result{}, fmt.Errorf("%w: unsupported kind %T", ErrNotEvaluable, target)
+	}
+	if cur := currentRevision(target); revision != "" && cur != "" && cur != revision {
+		return Result{State: Superseded, Reason: ReasonRolloutSuperseded, Message: fmt.Sprintf("The target moved "+
+			"on to template revision %q after revision %q, applied with the merge commit; this rollout is not "+
+			"judged any more", cur, revision)}, nil
 	}
 	if done {
 		return Result{State: Complete, Reason: ReasonRolloutComplete,
@@ -195,56 +236,87 @@ func deployment(d *appsv1.Deployment) (bool, string) {
 	return true, ""
 }
 
-// statefulSet follows kubectl rollout status for a StatefulSet and infers the pods on the old revision.
+// statefulSet follows kubectl rollout status for a StatefulSet: every pod is ready, and the pods the update
+// strategy replaces run the update revision. It infers the pods on the old revision from the counts.
 func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 	want := replicas(ss.Spec.Replicas)
 	s := ss.Status
 	if s.ObservedGeneration < ss.Generation {
 		return false, "the StatefulSet controller has not observed the new template yet", nil
 	}
+	var start int32
+	if ss.Spec.Ordinals != nil {
+		start = max(ss.Spec.Ordinals.Start, 0)
+	}
 	var partition int32
-	rolling := ss.Spec.UpdateStrategy.Type != appsv1.OnDeleteStatefulSetStrategyType
-	if rolling && ss.Spec.UpdateStrategy.RollingUpdate != nil && ss.Spec.UpdateStrategy.RollingUpdate.Partition != nil {
+	onDelete := ss.Spec.UpdateStrategy.Type == appsv1.OnDeleteStatefulSetStrategyType
+	if !onDelete && ss.Spec.UpdateStrategy.RollingUpdate != nil && ss.Spec.UpdateStrategy.RollingUpdate.Partition != nil {
 		partition = min(max(*ss.Spec.UpdateStrategy.RollingUpdate.Partition, 0), want)
 	}
 	updated := min(max(s.UpdatedReplicas, 0), want)
-	if partition > 0 {
-		// Pods below the partition stay on the old revision on purpose; only those above it must be updated.
-		if updated >= want-partition {
+	ready := min(max(s.ReadyReplicas, 0), want)
+	allReady := ready >= want
+	switch {
+	case onDelete:
+		// The current revision is promoted only by a rolling update, so it stays behind after pods were
+		// replaced by hand; the counts decide.
+		if updated >= want && allReady {
 			return true, "", nil
 		}
-	} else if s.UpdateRevision == s.CurrentRevision && updated >= want && s.ReadyReplicas >= want {
-		return true, "", nil
+	case partition > 0:
+		// Pods below the partition stay on the old revision on purpose; only those above it must be updated.
+		if updated >= want-partition && allReady {
+			return true, "", nil
+		}
+	default:
+		if s.UpdateRevision == s.CurrentRevision && updated >= want && allReady {
+			return true, "", nil
+		}
 	}
 
-	if !rolling {
-		return false, fmt.Sprintf("%d of %d pods run update revision %q; the update strategy is OnDelete, so the "+
-			"StatefulSet controller replaces a pod only after it is deleted. Shadewright does not delete pods: "+
-			"check the new template, then delete the pods on the old revision yourself",
-			updated, want, s.UpdateRevision), nil
+	notReady := fmt.Sprintf("%d of %d pods are not Ready, %d of %d run update revision %q", want-ready, want,
+		updated, want, s.UpdateRevision)
+	if onDelete {
+		return false, notReady + "; the update strategy is OnDelete, so the StatefulSet controller replaces a pod " +
+			"only after it is deleted. Shadewright does not delete pods: check the new template, then delete the " +
+			"pods on the old revision yourself, never a Ready one first", nil
 	}
 	// A rolling update replaces pods from the highest ordinal down to the partition, so the pods not yet
-	// updated are the ordinals from want-1-updated down to the partition. The highest of them is the one
-	// the controller waits for.
+	// updated are the ordinal indexes from want-1-updated down to the partition.
 	var old []string
 	total := 0
 	for i := want - 1 - updated; i >= partition; i-- {
 		total++
 		if len(old) < maxNamedPods {
-			old = append(old, fmt.Sprintf("%s-%d", ss.Name, i))
+			old = append(old, fmt.Sprintf("%s-%d", ss.Name, start+i))
 		}
 	}
-	if len(old) == 0 {
-		return false, fmt.Sprintf("%d of %d pods are ready (current revision %q, update revision %q)",
-			max(s.ReadyReplicas, 0), want, s.CurrentRevision, s.UpdateRevision), old
+	msg := notReady
+	if len(old) > 0 {
+		names := strings.Join(old, ", ")
+		if total > len(old) {
+			names += fmt.Sprintf(" and %d more", total-len(old))
+		}
+		msg += fmt.Sprintf("; pods on the old revision %q (inferred by ordinal from the StatefulSet status): %s",
+			s.CurrentRevision, names)
 	}
-	names := strings.Join(old, ", ")
-	if total > len(old) {
-		names += fmt.Sprintf(" and %d more", total-len(old))
+	if ready >= want {
+		return false, msg, old
 	}
-	return false, fmt.Sprintf("pods on the old revision %q (by ordinal, from the StatefulSet status): %s. "+
-		"The StatefulSet controller does not replace a pod that is not Ready on the old revision (a broken "+
-		"rollout needs a manual step, see the Kubernetes StatefulSet docs on forced rollback). Shadewright does "+
-		"not delete pods: check that the new template is correct, then delete %s yourself so it is recreated "+
-		"from update revision %q", s.CurrentRevision, names, old[0], s.UpdateRevision), old
+	msg += ". The StatefulSet controller does not replace a pod that is not Ready on the old revision (a broken " +
+		"rollout needs a manual step, see the Kubernetes StatefulSet docs on forced rollback). Shadewright does " +
+		"not delete pods"
+	if updated > 0 {
+		msg += fmt.Sprintf(". If a pod on update revision %q is not Ready, the new template fails and deleting pods "+
+			"does not help: fix the template", s.UpdateRevision)
+	}
+	if ready == 0 && partition == 0 && len(old) > 0 {
+		// Every pod is not Ready, so the lowest ordinal is certainly a pod that is not Ready on the old revision.
+		blocker := fmt.Sprintf("%s-%d", ss.Name, start)
+		return false, msg + fmt.Sprintf(". Check that the new template is correct, then delete %s yourself so it "+
+			"is recreated from update revision %q", blocker, s.UpdateRevision), old
+	}
+	return false, msg + fmt.Sprintf(". Find the pod that is not Ready (kubectl get pods -L "+
+		"controller-revision-hash); if it runs the old revision %q, check that the new template is correct and "+
+		"delete that pod yourself, never a Ready one", s.CurrentRevision), old
 }

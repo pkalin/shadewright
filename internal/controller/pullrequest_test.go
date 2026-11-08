@@ -528,6 +528,116 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(openRequests()).To(BeEmpty())
 	})
 
+	// stoppedDiverged asserts that the request stopped in NeedsIntervention with BranchDiverged, without a
+	// recorded pull request, and that the branch is still at head.
+	stoppedDiverged := func(head string) *remediationv1alpha1.RemediationRequest {
+		GinkgoHelper()
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal(ReasonBranchDiverged))
+		Expect(got.Status.PullRequest).To(BeNil(), "no pull request is recorded")
+		now, err := git.BranchHead(ctx, freshness.BranchName(got))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(now).To(Equal(head), "nothing is pushed to the branch")
+		return got
+	}
+
+	It("does not commit on a branch that carries someone else's commit (#524)", func() {
+		faulty = newFaultyGit(git)
+		for faulty.count(opCreateBranch) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		branch := freshness.BranchName(fetch())
+		// Someone pushes to the branch before Shadewright commits; the target file still holds the previous
+		// value, so the file alone does not tell.
+		foreign, err := git.Push(branch, "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reconcileOnce()).To(Succeed())
+		got := stoppedDiverged(foreign)
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Message).
+			To(HaveSuffix("nothing was committed"))
+		Expect(faulty.count(opCommit)).To(BeZero())
+		Expect(faulty.count(opOpen)).To(BeZero())
+		Expect(openRequests()).To(BeEmpty())
+	})
+
+	It("does not open a pull request for a branch that carries someone else's commit after its own (#524)", func() {
+		faulty = newFaultyGit(git)
+		for faulty.count(opCommit) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		branch := freshness.BranchName(fetch())
+		// Someone pushes on top of Shadewright's commit before the pull request is opened; the target file
+		// still holds the planned value.
+		foreign, err := git.Push(branch, "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reconcileOnce()).To(Succeed())
+		stoppedDiverged(foreign)
+		Expect(faulty.count(opOpen)).To(BeZero())
+		Expect(openRequests()).To(BeEmpty())
+	})
+
+	It("does not open a pull request for a branch whose planned value someone else committed (#524)", func() {
+		faulty = newFaultyGit(git)
+		for faulty.count(opCreateBranch) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		branch := freshness.BranchName(fetch())
+		// Someone else commits another file and then the planned value: the branch looks done.
+		_, err := git.Push(branch, "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		foreign, err := git.Push(branch, sourcePath, manifest("384Mi"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reconcileOnce()).To(Succeed())
+		stoppedDiverged(foreign)
+		Expect(faulty.count(opCommit)).To(BeZero())
+		Expect(faulty.count(opOpen)).To(BeZero())
+		Expect(openRequests()).To(BeEmpty())
+	})
+
+	It("does not record a pull request whose branch got someone else's commit before the status write (#524)", func() {
+		failStatus := true
+		r := reconciler()
+		r.Client = &statusFailer{Client: k8sClient, fail: func() bool { return failStatus && len(git.ChangeRequests()) > 0 }}
+		for range 10 {
+			_, _ = r.Reconcile(ctx, key())
+			if len(openRequests()) == 1 {
+				break
+			}
+		}
+		Expect(openRequests()).To(HaveLen(1))
+		Expect(fetch().Status.PullRequest).To(BeNil())
+		foreign, err := git.Push(freshness.BranchName(fetch()), "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		failStatus = false
+		Expect(reconcileOnce()).To(Succeed())
+		stoppedDiverged(foreign)
+		crs := openRequests()
+		Expect(crs).To(HaveLen(1))
+		Expect(crs[0].State).To(Equal(providers.ChangeRequestOpen), "the pull request is left for a person")
+	})
+
+	It("retries, without stopping, when what the branch holds cannot be read (#524)", func() {
+		faulty = newFaultyGit(git)
+		for faulty.count(opCommit) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		faulty.failOn(opCheckBranch, &providers.RetryableError{Err: errors.New("server error")})
+		err := reconcileOnce()
+		Expect(err).To(HaveOccurred())
+		Expect(retryable(err)).To(BeTrue())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed read decides nothing")
+		Expect(faulty.count(opOpen)).To(BeZero())
+
+		faulty.failOn("", nil)
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(openRequests()).To(HaveLen(1))
+	})
+
 	It("leaves a pull request without its marker alone", func() {
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
 		base, err := git.BranchHead(ctx, mainBranch)
@@ -1447,6 +1557,20 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			stoppedWaiting(ReasonPatchRefused)
 		})
 
+		It("closes a waiting pull request whose recorded head carries someone else's commit (#524)", func() {
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			// A release before #524 recorded the head of a branch someone else had pushed to before the open.
+			foreign, err := git.Push(freshness.BranchName(got), "README.yaml", []byte("a: 3\n"))
+			Expect(err).NotTo(HaveOccurred())
+			got.Status.PullRequest.HeadSHA = foreign
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+			// An unrelated merge moves the target branch, so the change is rendered again.
+			_, err = git.Push(mainBranch, "apps/other.yaml", []byte("a: 1\n"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reconcileOnce()).To(Succeed())
+			stoppedWaiting(ReasonBranchDiverged)
+		})
+
 		It("leaves a refused waiting pull request open, and says so, when the settings no longer reach its repository", func() {
 			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 			addOverlay()
@@ -2028,6 +2152,7 @@ const (
 	opCreateBranch = "CreateBranch"
 	opReadFile     = "ReadFile"
 	opListDir      = "ListDir"
+	opCheckBranch  = "CheckBranch"
 )
 
 // faultyGit wraps the fake provider. It counts every call and injects faults the fake's hook cannot express:
@@ -2171,6 +2296,14 @@ func (f *faultyGit) BranchHead(ctx context.Context, branch string) (string, erro
 	}
 	sha, err := f.Git.BranchHead(ctx, branch)
 	return sha, f.leave(ctx, opBranchHead, err)
+}
+
+func (f *faultyGit) CheckBranch(ctx context.Context, sha, path string) (providers.BranchState, error) {
+	if err := f.enter(opCheckBranch, sha); err != nil {
+		return 0, err
+	}
+	state, err := f.Git.CheckBranch(ctx, sha, path)
+	return state, f.leave(ctx, opCheckBranch, err)
 }
 
 func (f *faultyGit) CreateBranch(ctx context.Context, branch, from string) error {

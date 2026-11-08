@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -163,6 +164,39 @@ func TestGitCreateBranchIdempotent(t *testing.T) {
 	}
 }
 
+func TestGitCheckBranch(t *testing.T) {
+	g, head := newRepo(t)
+	ctx := context.Background()
+	check := func(name, sha string, want providers.BranchState) {
+		t.Helper()
+		if got, err := g.CheckBranch(ctx, sha, path); err != nil || got != want {
+			t.Errorf("%s: CheckBranch() = %v, %v, want %v", name, got, err, want)
+		}
+	}
+	if err := g.CreateBranch(ctx, branch, head); err != nil {
+		t.Fatal(err)
+	}
+	check("the target head", head, providers.BranchAtTarget)
+	moved, _ := g.Push(base, "other.yaml", []byte("a: 1\n"))
+	check("an ancestor of the target head", head, providers.BranchAtTarget)
+	check("the moved target head", moved, providers.BranchAtTarget)
+	own, err := g.CommitFile(ctx, branch, head, providers.FileChange{Path: path, Content: []byte(newVal)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("the one change", own, providers.BranchOneChange)
+	after, _ := g.Push(branch, "other.yaml", []byte("a: 2\n"))
+	check("a commit on top of it", after, providers.BranchForeign)
+	if err := g.CreateBranch(ctx, branch+"-2", head); err != nil {
+		t.Fatal(err)
+	}
+	other, _ := g.Push(branch+"-2", "other.yaml", []byte("a: 2\n"))
+	check("another file", other, providers.BranchForeign)
+	if _, err := g.CheckBranch(ctx, strings.Repeat("0", 40), path); !providers.IsNotFound(err) {
+		t.Errorf("unknown commit: %v", err)
+	}
+}
+
 func TestGitCommitNeedsExpectedHead(t *testing.T) {
 	g, head := newRepo(t)
 	ctx := context.Background()
@@ -177,7 +211,15 @@ func TestGitCommitNeedsExpectedHead(t *testing.T) {
 	if _, err := g.CommitFile(ctx, branch, head, ch); !providers.IsConflict(err) {
 		t.Errorf("commit on a stale head: %v", err)
 	}
-	if _, err := g.CommitFile(ctx, branch, c1, providers.FileChange{Path: "new.yaml"}); !providers.IsNotFound(err) {
+	// The branch carries a commit of its own now; a second one on top of it is refused, not a conflict.
+	if _, err := g.CommitFile(ctx, branch, c1, ch); err == nil || providers.IsConflict(err) {
+		t.Errorf("commit on a head off the target branch: %v", err)
+	}
+	other := branch + "-2"
+	if err := g.CreateBranch(ctx, other, head); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.CommitFile(ctx, other, head, providers.FileChange{Path: "new.yaml"}); !providers.IsNotFound(err) {
 		t.Errorf("commit to a missing file: %v", err)
 	}
 	f, _ := g.ReadFile(ctx, c1, path, providers.MaxFileBytes)

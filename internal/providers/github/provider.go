@@ -41,6 +41,7 @@ const (
 	opListDir      = "GitHub list directory"
 	opCreateBranch = "GitHub create branch"
 	opCommitFile   = "GitHub commit file"
+	opCheckBranch  = "GitHub check branch"
 	opOpenCR       = "GitHub open pull request"
 	opFindCR       = "GitHub find pull request"
 	opCloseCR      = "GitHub close pull request"
@@ -386,12 +387,25 @@ type compareJSON struct {
 
 // onTarget checks that commit is the head of the target branch or an ancestor of it.
 func (p *Provider) onTarget(ctx context.Context, op, commit string) error {
-	head, err := p.ref(ctx, op, p.target)
+	ok, err := p.isOnTarget(ctx, op, commit)
 	if err != nil {
 		return err
 	}
+	if !ok {
+		return errors.New(op + ": base commit is not on the target branch")
+	}
+	return nil
+}
+
+// isOnTarget reports whether commit is the head of the target branch or an ancestor of it. An error means it
+// could not be found out.
+func (p *Provider) isOnTarget(ctx context.Context, op, commit string) (bool, error) {
+	head, err := p.ref(ctx, op, p.target)
+	if err != nil {
+		return false, err
+	}
 	if head == commit {
-		return nil
+		return true, nil
 	}
 	r, err := p.do(ctx, call{
 		op: op, method: http.MethodGet, path: "/compare/" + head + "..." + commit,
@@ -399,22 +413,153 @@ func (p *Provider) onTarget(ctx context.Context, op, commit string) error {
 	})
 	if errors.Is(err, errBodyTooLarge) {
 		// Only a commit that is not behind the target has commits and files to list.
-		return errors.New(op + ": base commit is not on the target branch")
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !r.ok() {
-		return statusError(op, r.status)
+		return false, statusError(op, r.status)
 	}
 	var c compareJSON
 	if err := decode(op, r, &c); err != nil {
-		return err
+		return false, err
 	}
-	if c.Status != "behind" && c.Status != "identical" {
-		return errors.New(op + ": base commit is not on the target branch")
+	return c.Status == "behind" || c.Status == "identical", nil
+}
+
+type commitJSON struct {
+	SHA     string    `json:"sha"`
+	Parents []shaJSON `json:"parents"`
+}
+
+// CheckBranch reports what commit carries over the target branch (providers.GitProvider.CheckBranch): it reads
+// whether the commit is on the target branch, else its parents, whether its one parent is, and then the trees of
+// the two along path, one tree each per directory. Every entry beside the one on the way to the file must be
+// equal in name, mode, type and object ID, and the file must be a regular file of the same mode in both. A
+// truncated or oversized tree is an error, never a pass.
+func (p *Provider) CheckBranch(ctx context.Context, commit, path string) (providers.BranchState, error) {
+	switch {
+	case !validSHA(commit):
+		return 0, errors.New(opCheckBranch + ": commit is not a full SHA")
+	case !validPath(path):
+		return 0, errors.New(opCheckBranch + ": path is invalid")
 	}
-	return nil
+	ctx, cancel := p.withTimeout(ctx)
+	defer cancel()
+	switch on, err := p.isOnTarget(ctx, opCheckBranch, commit); {
+	case err != nil:
+		return 0, err
+	case on:
+		return providers.BranchAtTarget, nil
+	}
+	r, err := p.do(ctx, call{op: opCheckBranch, method: http.MethodGet, path: "/git/commits/" + commit})
+	if err != nil {
+		return 0, err
+	}
+	if !r.ok() {
+		return 0, statusError(opCheckBranch, r.status)
+	}
+	var c commitJSON
+	if err := decode(opCheckBranch, r, &c); err != nil {
+		return 0, err
+	}
+	if c.SHA != commit {
+		return 0, errors.New(opCheckBranch + ": GitHub returned an unexpected commit")
+	}
+	if len(c.Parents) != 1 {
+		return providers.BranchForeign, nil
+	}
+	parent := c.Parents[0].SHA
+	if !validSHA(parent) {
+		return 0, errors.New(opCheckBranch + ": GitHub returned an unexpected commit")
+	}
+	switch on, err := p.isOnTarget(ctx, opCheckBranch, parent); {
+	case err != nil:
+		return 0, err
+	case !on:
+		return providers.BranchForeign, nil
+	}
+	return p.changedOnly(ctx, commit, parent, strings.Split(path, "/"))
+}
+
+// changedOnly compares the trees of commit and parent along the path segs, from the root trees down.
+func (p *Provider) changedOnly(ctx context.Context, commit, parent string, segs []string) (providers.BranchState, error) {
+	shaA, shaB := commit, parent
+	for i, seg := range segs {
+		a, err := p.tree(ctx, opCheckBranch, shaA)
+		if err != nil {
+			return 0, err
+		}
+		b, err := p.tree(ctx, opCheckBranch, shaB)
+		if err != nil {
+			return 0, err
+		}
+		ea, eb, same, err := sameBeside(a, b, seg)
+		switch {
+		case err != nil:
+			return 0, err
+		case !same:
+			return providers.BranchForeign, nil
+		}
+		if i == len(segs)-1 {
+			if !isRegularFile(ea) || !isRegularFile(eb) || ea.Mode != eb.Mode {
+				return providers.BranchForeign, nil
+			}
+			return providers.BranchOneChange, nil
+		}
+		if ea.Type != typeTree || ea.Mode != modeTree || eb.Type != typeTree || eb.Mode != modeTree {
+			return providers.BranchForeign, nil
+		}
+		if ea.SHA == eb.SHA {
+			// The same directory below: the file is unchanged too.
+			return providers.BranchOneChange, nil
+		}
+		shaA, shaB = ea.SHA, eb.SHA
+	}
+	return providers.BranchForeign, nil
+}
+
+// sameBeside reports whether trees a and b hold the same entries beside the one named seg, which both must
+// hold, and returns those two entries. A truncated tree, an entry with an invalid object ID or a name listed
+// twice is an error.
+func sameBeside(a, b treeJSON, seg string) (treeEntry, treeEntry, bool, error) {
+	if a.Truncated || b.Truncated {
+		return treeEntry{}, treeEntry{}, false, errors.New(opCheckBranch + ": directory listing is truncated")
+	}
+	index := func(t treeJSON) (map[string]treeEntry, error) {
+		m := make(map[string]treeEntry, len(t.Tree))
+		for _, e := range t.Tree {
+			if _, dup := m[e.Path]; dup || !validSHA(e.SHA) {
+				return nil, errors.New(opCheckBranch + ": GitHub returned an unexpected tree entry")
+			}
+			m[e.Path] = e
+		}
+		return m, nil
+	}
+	ma, err := index(a)
+	if err != nil {
+		return treeEntry{}, treeEntry{}, false, err
+	}
+	mb, err := index(b)
+	if err != nil {
+		return treeEntry{}, treeEntry{}, false, err
+	}
+	ea, okA := ma[seg]
+	eb, okB := mb[seg]
+	if !okA || !okB || len(ma) != len(mb) {
+		return treeEntry{}, treeEntry{}, false, nil
+	}
+	for name, e := range ma {
+		if name == seg {
+			continue
+		}
+		o, ok := mb[name]
+		if !ok || o.Mode != e.Mode || o.Type != e.Type || o.SHA != e.SHA {
+			return treeEntry{}, treeEntry{}, false, nil
+		}
+	}
+	return ea, eb, true, nil
 }
 
 // CreateBranch creates shadewright/<name> at a commit of the target branch. A branch that already exists
@@ -516,7 +661,8 @@ func (p *Provider) post(ctx context.Context, path string, body any) (string, err
 }
 
 // CommitFile commits one change to an existing regular file on a shadewright/ branch whose head must be
-// expectedHead, and returns the new commit. The file keeps its mode. The branch moves with an atomic
+// expectedHead, and returns the new commit. expectedHead must be the head of the target branch or an ancestor
+// of it, so the commit is the branch's only one of its own. The file keeps its mode. The branch moves with an atomic
 // compare-and-swap on expectedHead (GraphQL updateRefs, no force); a head that moved in any direction is
 // ErrConflict and is never overwritten.
 func (p *Provider) CommitFile(
@@ -544,6 +690,11 @@ func (p *Provider) CommitFile(
 	}
 	if head != expectedHead {
 		return "", fmt.Errorf("%s: branch head moved: %w", opCommitFile, providers.ErrConflict)
+	}
+	// The branch carries no commit of its own yet: anything on it beside the target branch is someone else's,
+	// and a commit on top would put it in the pull request unchecked (#524).
+	if err := p.onTarget(ctx, opCommitFile, expectedHead); err != nil {
+		return "", err
 	}
 	root, entry, err := p.lookup(ctx, opCommitFile, expectedHead, change.Path)
 	if err != nil {

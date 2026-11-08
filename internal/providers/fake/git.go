@@ -45,17 +45,19 @@ type Git struct {
 	mu       sync.Mutex
 	caps     providers.GitCapabilities
 	url      string
+	target   string
 	commits  map[string]commit
 	branches map[string]string
 	crs      []*providers.ChangeRequest
 	auto     map[int64]bool
 }
 
-// NewGit returns a repository whose branch base has one commit holding files.
+// NewGit returns a repository whose branch base, its target branch, has one commit holding files.
 func NewGit(base string, files map[string][]byte) *Git {
 	g := &Git{
 		caps:     providers.GitCapabilities{AutoMerge: true, RequiredReviews: true},
 		url:      "https://git.example.test/owner/repo",
+		target:   base,
 		commits:  map[string]commit{},
 		branches: map[string]string{},
 		auto:     map[int64]bool{},
@@ -220,6 +222,10 @@ func (g *Git) CommitFile(ctx context.Context, branch, expectedHead string, ch pr
 		g.mu.Unlock()
 		return "", fmt.Errorf("branch %q is at %s, expected %s: %w", branch, cur, expectedHead, providers.ErrConflict)
 	}
+	if !g.onTarget(cur) {
+		g.mu.Unlock()
+		return "", fmt.Errorf("commit %s is not on the target branch", cur)
+	}
 	files := g.commits[cur].files
 	if _, ok := files[ch.Path]; !ok {
 		g.mu.Unlock()
@@ -243,6 +249,47 @@ func (g *Git) CommitFile(ctx context.Context, branch, expectedHead string, ch pr
 	g.syncHeads(branch, sha)
 	g.mu.Unlock()
 	return sha, g.after("CommitFile")
+}
+
+// onTarget reports whether sha is the head of the target branch or an ancestor of it. g.mu must be held.
+func (g *Git) onTarget(sha string) bool {
+	for at := g.branches[g.target]; at != ""; at = g.commits[at].parent {
+		if at == sha {
+			return true
+		}
+	}
+	return false
+}
+
+// CheckBranch reports what a commit carries over the target branch (providers.GitProvider.CheckBranch). The
+// fake's commits have one parent at most, so it never holds a merge.
+func (g *Git) CheckBranch(ctx context.Context, sha, path string) (providers.BranchState, error) {
+	if err := g.before("CheckBranch"); err != nil {
+		return 0, err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c, ok := g.commits[sha]
+	if !ok {
+		return 0, fmt.Errorf("commit %q: %w", sha, providers.ErrNotFound)
+	}
+	if g.onTarget(sha) {
+		return providers.BranchAtTarget, nil
+	}
+	if c.parent == "" || !g.onTarget(c.parent) {
+		return providers.BranchForeign, nil
+	}
+	parent := g.commits[c.parent].files
+	if _, ok := c.files[path]; !ok || len(parent) != len(c.files) {
+		return providers.BranchForeign, nil
+	}
+	for p, data := range c.files {
+		old, ok := parent[p]
+		if !ok || (p != path && !bytes.Equal(old, data)) {
+			return providers.BranchForeign, nil
+		}
+	}
+	return providers.BranchOneChange, nil
 }
 
 // Push moves a branch as someone else would, by committing a file change outside Shadewright. It returns

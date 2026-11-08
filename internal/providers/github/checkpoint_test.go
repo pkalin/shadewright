@@ -162,7 +162,7 @@ func TestCheckpointGatesEveryWriteMethod(t *testing.T) {
 	}{
 		{"CreateBranch", []step{get(mainRef, "ref_main.json")},
 			func(c context.Context, p *Provider) error { return p.CreateBranch(c, branch, shaBase) }},
-		{"CommitFile", append([]step{get(branchRef, "ref_branch.json")}, readSteps()...),
+		{"CommitFile", append(commitHead(), readSteps()...),
 			func(c context.Context, p *Provider) error {
 				_, err := p.CommitFile(c, branch, shaBase, change)
 				return err

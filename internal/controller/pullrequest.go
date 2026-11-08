@@ -92,7 +92,10 @@ const (
 	// ReasonHeadMoved: someone else pushed to the branch. Automation stops; the plan no longer describes the
 	// pull request.
 	ReasonHeadMoved = "HeadMoved"
-	// ReasonBranchDiverged: the branch holds neither the previous nor the planned value of the file.
+	// ReasonBranchDiverged: the branch holds neither the previous nor the planned value of the file, or holds
+	// more than Shadewright's one commit on top of the target branch: before the commit, commits that are not
+	// on the target branch; before the pull request is opened or recorded, or while it waits, anything beside
+	// the one commit that changes the target file.
 	ReasonBranchDiverged = "BranchDiverged"
 	// ReasonForeignChangeRequest: a pull request for the branch exists without this request's marker.
 	ReasonForeignChangeRequest = "ForeignChangeRequest"
@@ -349,6 +352,16 @@ func (r *RemediationRequestReconciler) renderWaitingStep(ctx context.Context, rr
 		return &renderRefusal{reason: ReasonTargetFileDiverged, message: "The target file changed on the target branch " +
 			"while the pull request waited, so the change was not rendered as it would merge"}
 	}
+	// The render below sees the target branch with the file replaced, which is what merging gives only for a
+	// head that is the one planned commit on top of the target branch (#524). A pull request recorded before
+	// that was checked at its opening is checked here too.
+	switch bs, err := branchState(ctx, git, rr, rr.Status.PullRequest.HeadSHA); {
+	case err != nil:
+		return err
+	case bs != providers.BranchOneChange:
+		return &renderRefusal{reason: ReasonBranchDiverged,
+			message: "The pull request's branch holds more than the planned change on top of the target branch"}
+	}
 	if err := r.checkRender(ctx, git, fresh.Head, file.Data, rr); err != nil {
 		return err
 	}
@@ -482,6 +495,14 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 	}
 	switch state {
 	case fileHoldsPrevious:
+		// The branch must carry nothing of its own yet: the render below sees the target branch, never what
+		// someone else pushed to the branch (#524). The head the freshness check read needs no further read; a
+		// branch cut at an earlier head must still be on the target branch.
+		if head != fresh.Head {
+			if err := r.requireBranch(ctx, git, rr, head, providers.BranchAtTarget); err != nil {
+				return reconcile.Result{}, err
+			}
+		}
 		// Steps 3 to 6: one commit that changes the one value, on top of the head just read. The change is
 		// rendered at the target branch head, which may have moved since the branch was cut. The target file
 		// there must be byte for byte the file the change was made from, so merging gives exactly changed: a
@@ -507,7 +528,12 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 		logf.FromContext(ctx).Info("Committed change for RemediationRequest", "remediationRequest", client.ObjectKeyFromObject(rr))
 		return reconcile.Result{RequeueAfter: stepDelay}, nil
 	case fileHoldsDesired:
-		// The commit is there (a restart after the commit, or a concurrent reconcile); open the pull request.
+		// The commit is there (a restart after the commit, or a concurrent reconcile); open the pull request,
+		// but only for a branch that is one commit with the planned change on top of the target branch. The
+		// open below records the head only if it is still the one checked here (HeadMoved otherwise).
+		if err := r.requireBranch(ctx, git, rr, head, providers.BranchOneChange); err != nil {
+			return reconcile.Result{}, err
+		}
 	default:
 		return reconcile.Result{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonBranchDiverged,
 			"The branch holds neither the previous nor the planned value of the file")
@@ -561,7 +587,42 @@ func (r *RemediationRequestReconciler) adoptChangeRequest(ctx context.Context, g
 		return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonHeadMoved,
 			"The pull request's head does not hold the planned change")
 	}
+	if err := r.requireBranch(ctx, git, rr, cr.HeadSHA, providers.BranchOneChange); err != nil {
+		return err
+	}
 	return r.recordPullRequest(ctx, rr, cr)
+}
+
+// branchState asks the Git host what the branch head carries over the target branch (#524). A failure to find
+// out is returned for a retry; it never counts as an answer.
+func branchState(ctx context.Context, git providers.GitProvider, rr *remediationv1alpha1.RemediationRequest,
+	head string) (providers.BranchState, error) {
+	state, err := git.CheckBranch(ctx, head, string(rr.Status.Source.Path))
+	if err != nil {
+		return 0, freshness.WrapProvider("check what the branch holds", err)
+	}
+	return state, nil
+}
+
+// requireBranch stops the request in NeedsIntervention (BranchDiverged) unless head carries exactly want over
+// the target branch: nothing of its own before the commit (BranchAtTarget), the one planned commit before a
+// pull request is opened or adopted (BranchOneChange). Any other answer, an unknown one included, stops it; a
+// pull request found open is left open. A failure to find out is returned for a retry.
+func (r *RemediationRequestReconciler) requireBranch(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, head string, want providers.BranchState) error {
+	state, err := branchState(ctx, git, rr, head)
+	if err != nil {
+		return err
+	}
+	if state == want {
+		return nil
+	}
+	msg := "The branch holds commits that are not on the target branch; nothing was committed"
+	if want == providers.BranchOneChange {
+		msg = "The branch holds more than the planned change on top of the target branch; no pull request was " +
+			"recorded, and one that is open is left open"
+	}
+	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonBranchDiverged, msg)
 }
 
 // recordPullRequest writes PRCreated with the pull request in one status write.

@@ -142,6 +142,10 @@ func (g *gatedGit) BranchHead(ctx context.Context, branch string) (string, error
 	return g.git.BranchHead(ctx, branch)
 }
 
+func (g *gatedGit) CheckBranch(ctx context.Context, commit, path string) (providers.BranchState, error) {
+	return g.git.CheckBranch(ctx, commit, path)
+}
+
 func (g *gatedGit) FindChangeRequest(ctx context.Context, headBranch string) (providers.ChangeRequest, error) {
 	return g.git.FindChangeRequest(ctx, headBranch)
 }

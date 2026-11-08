@@ -32,7 +32,8 @@ import (
 
 // gitReads are the GitProvider methods that write nothing to the host. Every other method is a write, and a
 // write method added to the interface is gated by this test's rule until it is listed here on purpose.
-var gitReads = map[string]bool{"Capabilities": true, "ReadFile": true, "ListDir": true, "BranchHead": true, opFind: true}
+var gitReads = map[string]bool{"Capabilities": true, "ReadFile": true, "ListDir": true, "BranchHead": true,
+	"CheckBranch": true, "CheckMerged": true, opFind: true}
 
 // TestGatedGitGatesEveryWrite calls every GitProvider method of a gated provider whose gate refuses, and checks
 // that each write asked the gate and never reached the host, and that no read asked it.
@@ -111,6 +112,18 @@ func (p *checkpointProbe) ListDir(ctx context.Context, _, _ string) ([]providers
 
 func (p *checkpointProbe) BranchHead(ctx context.Context, _ string) (string, error) {
 	return "", p.probe(ctx, "BranchHead")
+}
+
+func (p *checkpointProbe) CheckBranch(ctx context.Context, _, _ string) (providers.BranchState, error) {
+	return 0, p.probe(ctx, "CheckBranch")
+}
+
+func (p *checkpointProbe) CheckMerged(ctx context.Context, _, _, _ string) (providers.BranchState, string, error) {
+	return 0, "", p.probe(ctx, "CheckMerged")
+}
+
+func (p *checkpointProbe) CommentChangeRequest(ctx context.Context, _ int64, _, _ string) error {
+	return p.probe(ctx, "CommentChangeRequest")
 }
 
 func (p *checkpointProbe) FindChangeRequest(ctx context.Context, _ string) (providers.ChangeRequest, error) {

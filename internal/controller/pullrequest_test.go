@@ -399,7 +399,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(file.Data).To(Equal(manifest("384Mi")))
 	})
 
-	It("stops automation when someone else pushes to the branch", func() {
+	It("hands the pull request to a person when someone else pushes to the branch (#524)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		_, err := git.Push(freshness.BranchName(got), "README.yaml", []byte("a: 3\n"))
 		Expect(err).NotTo(HaveOccurred())
@@ -407,10 +407,65 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		got = fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 		cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
-		Expect(cond.Reason).To(Equal(ReasonHeadMoved))
+		Expect(cond.Reason).To(Equal(ReasonBranchDiverged))
 		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)).
 			To(BeTrue(), "the pull request is still open")
 		Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen), "the pull request is left for a person")
+		Expect(got.Status.HoldsTarget).To(Equal(new(true)), "an open pull request keeps the target")
+		comments := git.Comments(got.Status.PullRequest.Number)
+		Expect(comments).To(HaveLen(1))
+		Expect(comments[0]).To(ContainSubstring("no longer holds only"))
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(git.Comments(got.Status.PullRequest.Number)).To(HaveLen(1), "one comment only")
+	})
+
+	It("posts one comment when the status write after it is lost (#524)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		_, err := git.Push(freshness.BranchName(got), "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		failStatus := true
+		r := reconciler()
+		r.Client = &statusFailer{Client: k8sClient, fail: func() bool { return failStatus && len(git.Comments(n)) > 0 }}
+		_, _ = r.Reconcile(ctx, key())
+		Expect(git.Comments(n)).To(HaveLen(1))
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "the stop was lost")
+		failStatus = false
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(git.Comments(n)).To(HaveLen(1), "the comment is not posted again")
+	})
+
+	It("ends with MergedWithForeignChange when a pull request with a foreign push is merged (#524)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		_, err := git.Push(freshness.BranchName(got), "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = git.Merge(got.Status.PullRequest.Number)
+		Expect(err).NotTo(HaveOccurred())
+		_ = reconcileOnce()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(cond.Reason).To(Equal(ReasonMergedWithForeignChange))
+		Expect(cond.Message).To(HavePrefix(fmt.Sprintf("Pull request #%d was merged", got.Status.PullRequest.Number)))
+		Expect(got.Status.HoldsTarget).NotTo(Equal(new(true)), "a merged pull request releases the target")
+	})
+
+	It("stops with HeadMoved when the head moves to the same planned change (#524)", func() {
+		parent, err := git.BranchHead(ctx, mainBranch)
+		Expect(err).NotTo(HaveOccurred())
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		Expect(git.CreateBranch(ctx, "copy", parent)).To(Succeed())
+		same, err := git.CommitFile(ctx, "copy", parent, providers.FileChange{Path: sourcePath,
+			Content: manifest("384Mi"), Message: "the same change"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(git.ForcePush(freshness.BranchName(got), same)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+			To(Equal(ReasonHeadMoved))
+		Expect(git.Comments(got.Status.PullRequest.Number)).To(BeEmpty())
 	})
 
 	It("stops before the commit when the change renders into another object too", func() {
@@ -526,6 +581,396 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
 			To(Equal(ReasonBranchDiverged))
 		Expect(openRequests()).To(BeEmpty())
+	})
+
+	// stoppedDiverged asserts that the request stopped in NeedsIntervention with BranchDiverged, without a
+	// recorded pull request, and that the branch is still at head.
+	stoppedDiverged := func(head string) *remediationv1alpha1.RemediationRequest {
+		GinkgoHelper()
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal(ReasonBranchDiverged))
+		Expect(got.Status.PullRequest).To(BeNil(), "no pull request is recorded")
+		now, err := git.BranchHead(ctx, freshness.BranchName(got))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(now).To(Equal(head), "nothing is pushed to the branch")
+		return got
+	}
+
+	// closedWith asserts that the request stopped in NeedsIntervention with reason after Shadewright
+	// closed the branch's one pull request, which it recorded, and that the branch is still at head.
+	closedWith := func(head, reason string) {
+		GinkgoHelper()
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		crs := openRequests()
+		Expect(crs).To(HaveLen(1))
+		Expect(crs[0].State).To(Equal(providers.ChangeRequestClosed), "the pull request is closed")
+		Expect(got.Status.PullRequest).NotTo(BeNil(), "the pull request is recorded")
+		Expect(got.Status.PullRequest.Number).To(Equal(crs[0].Number))
+		cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal(reason))
+		Expect(cond.Message).To(HaveSuffix("the pull request was closed"))
+		opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(opened).NotTo(BeNil())
+		Expect(opened.Reason).To(Equal(ReasonPullRequestClosed))
+		Expect(got.Status.HoldsTarget).NotTo(Equal(new(true)), "a closed pull request releases the target")
+		now, err := git.BranchHead(ctx, freshness.BranchName(got))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(now).To(Equal(head), "nothing is pushed to the branch")
+	}
+
+	It("does not commit on a branch that carries someone else's commit (#524)", func() {
+		faulty = newFaultyGit(git)
+		for faulty.count(opCreateBranch) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		branch := freshness.BranchName(fetch())
+		// Someone pushes to the branch before Shadewright commits; the target file still holds the previous
+		// value, so the file alone does not tell.
+		foreign, err := git.Push(branch, "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reconcileOnce()).To(Succeed())
+		got := stoppedDiverged(foreign)
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Message).
+			To(HaveSuffix("nothing was committed"))
+		Expect(faulty.count(opCommit)).To(BeZero())
+		Expect(faulty.count(opOpen)).To(BeZero())
+		Expect(openRequests()).To(BeEmpty())
+	})
+
+	It("does not open a pull request for a branch that carries someone else's commit after its own (#524)", func() {
+		faulty = newFaultyGit(git)
+		for faulty.count(opCommit) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		branch := freshness.BranchName(fetch())
+		// Someone pushes on top of Shadewright's commit before the pull request is opened; the target file
+		// still holds the planned value.
+		foreign, err := git.Push(branch, "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reconcileOnce()).To(Succeed())
+		stoppedDiverged(foreign)
+		Expect(faulty.count(opOpen)).To(BeZero())
+		Expect(openRequests()).To(BeEmpty())
+	})
+
+	It("does not open a pull request for a branch whose planned value someone else committed (#524)", func() {
+		faulty = newFaultyGit(git)
+		for faulty.count(opCreateBranch) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		branch := freshness.BranchName(fetch())
+		// Someone else commits another file and then the planned value: the branch looks done.
+		_, err := git.Push(branch, "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		foreign, err := git.Push(branch, sourcePath, manifest("384Mi"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reconcileOnce()).To(Succeed())
+		stoppedDiverged(foreign)
+		Expect(faulty.count(opCommit)).To(BeZero())
+		Expect(faulty.count(opOpen)).To(BeZero())
+		Expect(openRequests()).To(BeEmpty())
+	})
+
+	It("does not record a pull request whose branch got someone else's commit before the status write (#524)", func() {
+		failStatus := true
+		r := reconciler()
+		r.Client = &statusFailer{Client: k8sClient, fail: func() bool { return failStatus && len(git.ChangeRequests()) > 0 }}
+		for range 10 {
+			_, _ = r.Reconcile(ctx, key())
+			if len(openRequests()) == 1 {
+				break
+			}
+		}
+		Expect(openRequests()).To(HaveLen(1))
+		Expect(fetch().Status.PullRequest).To(BeNil())
+		foreign, err := git.Push(freshness.BranchName(fetch()), "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		failStatus = false
+		Expect(reconcileOnce()).To(Succeed())
+		closedWith(foreign, ReasonBranchDiverged)
+	})
+
+	It("does not open a pull request for a branch whose one commit also edits another field of the file (#524)", func() {
+		faulty = newFaultyGit(git)
+		for faulty.count(opCreateBranch) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		branch := freshness.BranchName(fetch())
+		// One commit on the cut sets the planned limit and, in the same file, a memory request: the file holds
+		// the planned value and the commit changes only the target file, yet it is not the planned change.
+		edited := withMemoryRequest(manifest("384Mi"), "320Mi")
+		foreign, err := git.Push(branch, sourcePath, edited)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reconcileOnce()).To(Succeed())
+		stoppedDiverged(foreign)
+		Expect(faulty.count(opCommit)).To(BeZero())
+		Expect(faulty.count(opOpen)).To(BeZero())
+		Expect(openRequests()).To(BeEmpty())
+	})
+
+	It("closes and records a pull request whose branch moved between the check and the open (#524)", func() {
+		faulty = newFaultyGit(git)
+		for faulty.count(opCommit) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		branch := freshness.BranchName(fetch())
+		var foreign string
+		faulty.beforeOp(opOpen, func() {
+			defer GinkgoRecover()
+			var err error
+			foreign, err = git.Push(branch, "README.yaml", []byte("a: 3\n"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+		Expect(reconcileOnce()).To(Succeed())
+		closedWith(foreign, ReasonBranchDiverged)
+		// A restart opens nothing again.
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(faulty.count(opOpen)).To(Equal(1))
+		Expect(openRequests()).To(HaveLen(1))
+	})
+
+	It("closes and records a pull request found after a lost open whose branch now holds another value (#524)", func() {
+		faulty = newFaultyGit(git)
+		for faulty.count(opCommit) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		branch := freshness.BranchName(fetch())
+		// The open takes effect but its response is lost; before the restart someone pushes another value.
+		faulty.crashAfter(opOpen)
+		Expect(reconcileOnce()).NotTo(Succeed())
+		Expect(openRequests()).To(HaveLen(1))
+		foreign, err := git.Push(branch, sourcePath, manifest("1Gi"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reconcileOnce()).To(Succeed())
+		closedWith(foreign, ReasonHeadMoved)
+	})
+
+	It("records a refused pull request it could not close as open and keeps the target locked (#524)", func() {
+		faulty = newFaultyGit(git)
+		for faulty.count(opCommit) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		Expect(fetch().Status.HoldsTarget).To(Equal(new(true)))
+		branch := freshness.BranchName(fetch())
+		faulty.beforeOp(opOpen, func() {
+			defer GinkgoRecover()
+			_, err := git.Push(branch, "README.yaml", []byte("a: 3\n"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+		// A close that fails for a reason worth a retry, or one the kill switch holds back, decides nothing.
+		faulty.failOn(opClose, &providers.RetryableError{Err: errors.New("server error")})
+		err := reconcileOnce()
+		Expect(err).To(HaveOccurred())
+		Expect(retryable(err)).To(BeTrue())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed close is retried")
+		faulty.failOn(opClose, fmt.Errorf("close: %w", freshness.ErrPaused))
+		_ = reconcileOnce()
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a paused close waits")
+		Expect(meta.IsStatusConditionTrue(fetch().Status.Conditions, remediationv1alpha1.ConditionWritesPaused)).To(BeTrue())
+		Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+		// Only a final refusal stops the request.
+		faulty.failOn(opClose, fmt.Errorf("status 403: %w", providers.ErrForbidden))
+		Expect(reconcileOnce()).To(Succeed())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		crs := openRequests()
+		Expect(crs).To(HaveLen(1))
+		Expect(crs[0].State).To(Equal(providers.ChangeRequestOpen))
+		Expect(got.Status.PullRequest).NotTo(BeNil(), "an open pull request is never left unrecorded")
+		Expect(got.Status.PullRequest.Number).To(Equal(crs[0].Number))
+		opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(opened.Reason).To(Equal(ReasonPullRequestOpened), "not recorded as closed without a confirmed close")
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Message).
+			To(HaveSuffix("close it by hand"))
+		Expect(got.Status.HoldsTarget).To(Equal(new(true)), "the target stays locked while it may be open")
+	})
+
+	It("retries, without recording a merge, when closing the refused pull request is a conflict but it is open (#524)", func() {
+		faulty = newFaultyGit(git)
+		for faulty.count(opCommit) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		branch := freshness.BranchName(fetch())
+		var foreign string
+		faulty.beforeOp(opOpen, func() {
+			defer GinkgoRecover()
+			var err error
+			foreign, err = git.Push(branch, "README.yaml", []byte("a: 3\n"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+		// GitHub answers 409 for reasons other than a merge; the adapter maps it to ErrConflict.
+		faulty.failOn(opClose, fmt.Errorf("status 409: %w", providers.ErrConflict))
+		Expect(reconcileOnce()).NotTo(Succeed())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a conflict is not a merge")
+		Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+		faulty.failOn("", nil)
+		Expect(reconcileOnce()).To(Succeed())
+		closedWith(foreign, ReasonBranchDiverged)
+	})
+
+	// refusedAfterPerson drives to the commit, then lets someone push to the branch right before the open and a
+	// person act on the pull request right after it, before Shadewright's close. It returns the stopped request.
+	refusedAfterPerson := func(act func(n int64) error) *remediationv1alpha1.RemediationRequest {
+		GinkgoHelper()
+		faulty = newFaultyGit(git)
+		for faulty.count(opCommit) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		branch := freshness.BranchName(fetch())
+		faulty.beforeOp(opOpen, func() {
+			defer GinkgoRecover()
+			_, err := git.Push(branch, "README.yaml", []byte("a: 3\n"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+		git.SetAfter(func(op string) error {
+			if op == opOpen {
+				return act(1)
+			}
+			return nil
+		})
+		Expect(reconcileOnce()).To(Succeed())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(got.Status.PullRequest).NotTo(BeNil(), "the pull request is recorded")
+		Expect(got.Status.PullRequest.Number).To(Equal(int64(1)))
+		Expect(got.Status.HoldsTarget).NotTo(Equal(new(true)), "a pull request that is not open releases the target")
+		return got
+	}
+
+	It("ends with MergedWithForeignChange when a person merges the refused pull request before the close (#524)", func() {
+		got := refusedAfterPerson(func(n int64) error {
+			_, err := git.Merge(n)
+			return err
+		})
+		cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(cond.Reason).To(Equal(ReasonMergedWithForeignChange))
+		Expect(cond.Message).To(HavePrefix("Pull request #1 was merged"))
+		Expect(cond.Message).To(ContainSubstring(ReasonBranchDiverged))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
+			To(Equal(ReasonChangeRequestMerged))
+		Expect(faulty.count(opClose)).To(BeZero(), "a merged pull request is not closed")
+	})
+
+	It("ends as closed by a person when a person closes the refused pull request before the close (#524)", func() {
+		got := refusedAfterPerson(func(n int64) error { return git.CloseChangeRequest(ctx, n) })
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+			To(Equal(ReasonChangeRequestClosed))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
+			To(Equal(ReasonChangeRequestClosed))
+		Expect(faulty.count(opClose)).To(BeZero(), "Shadewright does not claim the close")
+		Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+	})
+
+	// mergedAfterLostOpen opens the pull request with its response lost, lets push run on the branch, and has a
+	// person merge it before the restart. It returns the request after the restart.
+	mergedAfterLostOpen := func(push func(branch string), merge ...func(int64) (string, error)) *remediationv1alpha1.RemediationRequest {
+		GinkgoHelper()
+		faulty = newFaultyGit(git)
+		for faulty.count(opCommit) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		faulty.crashAfter(opOpen)
+		Expect(reconcileOnce()).NotTo(Succeed())
+		Expect(openRequests()).To(HaveLen(1))
+		push(freshness.BranchName(fetch()))
+		mergeWith := git.Merge
+		if len(merge) > 0 {
+			mergeWith = merge[0]
+		}
+		_, err := mergeWith(openRequests()[0].Number)
+		Expect(err).NotTo(HaveOccurred())
+		_ = reconcileOnce()
+		return fetch()
+	}
+
+	It("records a merged pull request found after a lost open as Merged when it held the planned change (#524)", func() {
+		got := mergedAfterLostOpen(func(string) {})
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+	})
+
+	It("records a clean pull request merged with a merge commit after a lost open as Merged (#524)", func() {
+		// The merge commit takes the head into the target branch, so the head is an ancestor of the target now; it
+		// is judged against its own parent, not the current target.
+		got := mergedAfterLostOpen(func(string) {}, git.MergeWithCommit)
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+	})
+
+	It("retries the check of a merged pull request found after a lost open without closing it again (#524)", func() {
+		got := mergedAfterLostOpen(func(string) {
+			faulty.failOn(opCheckMerged, &providers.RetryableError{Err: errors.New("server error")})
+		})
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed read decides nothing")
+		err := reconcileOnce()
+		Expect(err).To(HaveOccurred())
+		Expect(retryable(err)).To(BeTrue(), "the read failure is the cause handed back")
+		Expect(faulty.count(opClose)).To(BeZero(), "a merged pull request is not closed again")
+		faulty.failOn("", nil)
+		_ = reconcileOnce()
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+	})
+
+	It("ends with MergedWithForeignChange when the merged pull request found after a lost open held more (#524)", func() {
+		got := mergedAfterLostOpen(func(branch string) {
+			_, err := git.Push(branch, "README.yaml", []byte("a: 3\n"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal(ReasonMergedWithForeignChange))
+		Expect(cond.Message).To(HavePrefix("Pull request #1 was merged"))
+		Expect(got.Status.PullRequest).NotTo(BeNil(), "the pull request is recorded")
+		Expect(got.Status.HoldsTarget).NotTo(Equal(new(true)), "a merged pull request releases the target")
+	})
+
+	It("closes the pull request it opened by its number when its marker is gone before the close (#524)", func() {
+		faulty = newFaultyGit(git)
+		for faulty.count(opCommit) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		branch := freshness.BranchName(fetch())
+		var foreign string
+		faulty.beforeOp(opOpen, func() {
+			defer GinkgoRecover()
+			var err error
+			foreign, err = git.Push(branch, "README.yaml", []byte("a: 3\n"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+		// Right after the open answered (with the marker), someone removes the marker from the description: a
+		// look-up by marker no longer finds it, so the close must go by the number the open returned.
+		git.SetAfter(func(op string) error {
+			if op == opOpen {
+				Expect(git.SetBody(1, "edited")).To(Succeed())
+			}
+			return nil
+		})
+		Expect(reconcileOnce()).To(Succeed())
+		closedWith(foreign, ReasonBranchDiverged)
+	})
+
+	It("retries, without stopping, when what the branch holds cannot be read (#524)", func() {
+		faulty = newFaultyGit(git)
+		for faulty.count(opCommit) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		faulty.failOn(opCheckBranch, &providers.RetryableError{Err: errors.New("server error")})
+		err := reconcileOnce()
+		Expect(err).To(HaveOccurred())
+		Expect(retryable(err)).To(BeTrue())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed read decides nothing")
+		Expect(faulty.count(opOpen)).To(BeZero())
+
+		faulty.failOn("", nil)
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(openRequests()).To(HaveLen(1))
 	})
 
 	It("leaves a pull request without its marker alone", func() {
@@ -1447,6 +1892,20 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			stoppedWaiting(ReasonPatchRefused)
 		})
 
+		It("closes a waiting pull request whose recorded head carries someone else's commit (#524)", func() {
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			// A release before #524 recorded the head of a branch someone else had pushed to before the open.
+			foreign, err := git.Push(freshness.BranchName(got), "README.yaml", []byte("a: 3\n"))
+			Expect(err).NotTo(HaveOccurred())
+			got.Status.PullRequest.HeadSHA = foreign
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+			// An unrelated merge moves the target branch, so the change is rendered again.
+			_, err = git.Push(mainBranch, "apps/other.yaml", []byte("a: 1\n"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reconcileOnce()).To(Succeed())
+			stoppedWaiting(ReasonBranchDiverged)
+		})
+
 		It("leaves a refused waiting pull request open, and says so, when the settings no longer reach its repository", func() {
 			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 			addOverlay()
@@ -2028,6 +2487,9 @@ const (
 	opCreateBranch = "CreateBranch"
 	opReadFile     = "ReadFile"
 	opListDir      = "ListDir"
+	opCheckMerged  = "CheckMerged"
+	opComment      = "CommentChangeRequest"
+	opCheckBranch  = "CheckBranch"
 )
 
 // faultyGit wraps the fake provider. It counts every call and injects faults the fake's hook cannot express:
@@ -2173,6 +2635,14 @@ func (f *faultyGit) BranchHead(ctx context.Context, branch string) (string, erro
 	return sha, f.leave(ctx, opBranchHead, err)
 }
 
+func (f *faultyGit) CheckBranch(ctx context.Context, sha, path string) (providers.BranchState, error) {
+	if err := f.enter(opCheckBranch, sha); err != nil {
+		return 0, err
+	}
+	state, err := f.Git.CheckBranch(ctx, sha, path)
+	return state, f.leave(ctx, opCheckBranch, err)
+}
+
 func (f *faultyGit) CreateBranch(ctx context.Context, branch, from string) error {
 	if err := f.enter(opCreateBranch, branch); err != nil {
 		return err
@@ -2215,6 +2685,21 @@ func (f *faultyGit) CloseChangeRequest(ctx context.Context, n int64) error {
 		return err
 	}
 	return f.leave(ctx, opClose, f.Git.CloseChangeRequest(ctx, n))
+}
+
+func (f *faultyGit) CheckMerged(ctx context.Context, head, merge, path string) (providers.BranchState, string, error) {
+	if err := f.enter(opCheckMerged, head); err != nil {
+		return 0, "", err
+	}
+	state, parent, err := f.Git.CheckMerged(ctx, head, merge, path)
+	return state, parent, f.leave(ctx, opCheckMerged, err)
+}
+
+func (f *faultyGit) CommentChangeRequest(ctx context.Context, n int64, marker, body string) error {
+	if err := f.enter(opComment, ""); err != nil {
+		return err
+	}
+	return f.leave(ctx, opComment, f.Git.CommentChangeRequest(ctx, n, marker, body))
 }
 
 // retryable reports whether err is one the reconciler hands back for a retry: a Git host failure worth

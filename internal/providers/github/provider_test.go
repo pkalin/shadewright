@@ -734,6 +734,12 @@ func TestCreateBranchRefusesOtherBranches(t *testing.T) {
 	}
 }
 
+// commitHead is what CommitFile reads before the file: the branch at shaBase, and the target branch at
+// shaBase, so the head the commit is made on is on the target branch.
+func commitHead() []step {
+	return []step{get(branchRef, "ref_branch.json"), get(mainRef, "ref_main.json")}
+}
+
 func commitSteps() []step {
 	blob := status(http.MethodPost, "/git/blobs", http.StatusCreated, "blob_created.json")
 	blob.check = func(t *testing.T, b map[string]any) {
@@ -756,7 +762,7 @@ func commitSteps() []step {
 			t.Errorf("commit body = %s", got)
 		}
 	}
-	return append(append([]step{get(branchRef, "ref_branch.json")}, readSteps()...), blob, tree, commit)
+	return append(append(commitHead(), readSteps()...), blob, tree, commit)
 }
 
 var change = providers.FileChange{Path: "apps/deploy.yaml", Content: []byte("replicas: 3\n"), Message: "fix: raise replicas"}
@@ -791,7 +797,7 @@ func TestCommitFile(t *testing.T) {
 }
 
 func TestCommitFileKeepsMode(t *testing.T) {
-	h := newHarness(t, append([]step{get(branchRef, "ref_branch.json")}, readSteps()...)...)
+	h := newHarness(t, append(commitHead(), readSteps()...)...)
 	h.s.steps = append(h.s.steps, status(http.MethodPost, "/git/blobs", http.StatusCreated, ""))
 	h.s.steps[len(h.s.steps)-1].raw = `{"sha":"` + blobSHA([]byte("#!/bin/sh\nexit 1\n")) + `"}`
 	tree := status(http.MethodPost, "/git/trees", http.StatusInternalServerError, "")
@@ -917,10 +923,231 @@ func TestCommitFileRefusesOtherRepository(t *testing.T) {
 }
 
 func TestCommitFileMissingFile(t *testing.T) {
-	h := newHarness(t, append([]step{get(branchRef, "ref_branch.json")}, readSteps()...)...)
+	h := newHarness(t, append(commitHead(), readSteps()...)...)
 	_, err := h.p.CommitFile(ctx, branch, shaBase, providers.FileChange{Path: "apps/new.yaml", Content: []byte("x"), Message: "m"})
 	if !providers.IsNotFound(err) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestCommitFileRefusesHeadOffTarget(t *testing.T) {
+	// The branch carries a commit someone else pushed (#524): nothing is written on top of it.
+	branchAtOld := step{method: http.MethodGet, path: branchRef, status: http.StatusOK,
+		raw: strings.ReplaceAll(mustRead(t, "ref_branch.json"), shaBase, shaOld)}
+	cmp := get("/compare/"+shaBase+"..."+shaOld, "compare_diverged.json")
+	cmp.query = perPageOne
+	h := newHarness(t, branchAtOld, get(mainRef, "ref_main.json"), cmp)
+	_, err := h.p.CommitFile(ctx, branch, shaOld, change)
+	if err == nil || providers.IsConflict(err) || providers.IsRetryable(err) {
+		t.Fatalf("got %v", err)
+	}
+	assertSafe(t, err)
+}
+
+// perPageOne is the query of the compare request that checks a commit is on the target branch.
+const perPageOne = "per_page=1"
+
+// raw is a step that answers GET path with 200 and body.
+func raw(path, body string) step {
+	return step{method: http.MethodGet, path: path, status: http.StatusOK, raw: body}
+}
+
+// commitBody is a Git commit of the REST API: shaCommit with parents.
+func commitBody(parents ...string) string {
+	ps := make([]string, 0, len(parents))
+	for _, p := range parents {
+		ps = append(ps, `{"sha":"`+p+`"}`)
+	}
+	return `{"sha":"` + shaCommit + `","tree":{"sha":"` + shaNewTree + `"},"parents":[` + strings.Join(ps, ",") + `]}`
+}
+
+func TestCheckBranch(t *testing.T) {
+	root, apps := mustRead(t, "tree_root.json"), mustRead(t, "tree_apps.json")
+	// The commit changes apps/deploy.yaml only: a new apps tree and a new blob.
+	newRoot := strings.ReplaceAll(root, shaApps, shaNewTree)
+	newApps := strings.ReplaceAll(apps, shaDeploy, shaNewBlob)
+	ahead := get("/compare/"+shaBase+"..."+shaCommit, "")
+	ahead.raw, ahead.query = `{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"commits":[],"files":[]}`, perPageOne
+	// head reads shaCommit, which is not on the target branch, and its one parent, the target head.
+	head := func(commit string) []step {
+		return []step{get(mainRef, "ref_main.json"), ahead, raw("/git/commits/"+shaCommit, commit), get(mainRef, "ref_main.json")}
+	}
+	trees := func(rootA, appsA string) []step {
+		return []step{raw("/git/trees/"+shaCommit, rootA), raw("/git/trees/"+shaBase, root),
+			raw("/git/trees/"+shaNewTree, appsA), raw("/git/trees/"+shaApps, apps)}
+	}
+	behind := get("/compare/"+shaBase+"..."+shaOld, "compare_behind.json")
+	behind.query = perPageOne
+	diverged := get("/compare/"+shaBase+"..."+shaOld, "compare_diverged.json")
+	diverged.query = perPageOne
+	for name, c := range map[string]struct {
+		commit string
+		steps  []step
+		want   providers.BranchState
+	}{
+		"the target head":         {shaBase, []step{get(mainRef, "ref_main.json")}, providers.BranchAtTarget},
+		"an ancestor of the head": {shaOld, []step{get(mainRef, "ref_main.json"), behind}, providers.BranchAtTarget},
+		"the one change":          {shaCommit, slices.Concat(head(commitBody(shaBase)), trees(newRoot, newApps)), providers.BranchOneChange},
+		"another file beside it": {shaCommit, slices.Concat(head(commitBody(shaBase)),
+			trees(newRoot, strings.ReplaceAll(newApps, shaRun, shaOld))), providers.BranchForeign},
+		"a file added beside it": {shaCommit, slices.Concat(head(commitBody(shaBase)), trees(newRoot, strings.Replace(newApps,
+			`"tree":[`, `"tree":[{"path":"new.yaml","mode":"100644","type":"blob","sha":"`+shaOld+`"},`, 1))),
+			providers.BranchForeign},
+		"another file at the root": {shaCommit, slices.Concat(head(commitBody(shaBase)),
+			trees(strings.ReplaceAll(newRoot, strings.Repeat("9", 40), shaOld), newApps)[:2]), providers.BranchForeign},
+		"the mode of the file": {shaCommit, slices.Concat(head(commitBody(shaBase)), trees(newRoot, strings.ReplaceAll(newApps,
+			`"mode":"100644","type":"blob","sha":"`+shaNewBlob, `"mode":"100755","type":"blob","sha":"`+shaNewBlob))),
+			providers.BranchForeign},
+		"a merge":                 {shaCommit, head(commitBody(shaBase, shaOld))[:3], providers.BranchForeign},
+		"a commit without parent": {shaCommit, head(commitBody())[:3], providers.BranchForeign},
+		"a parent off the target": {shaCommit, append(head(commitBody(shaOld)), diverged), providers.BranchForeign},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, c.steps...)
+			got, err := h.p.CheckBranch(ctx, c.commit, deployPath)
+			if err != nil || got != c.want {
+				t.Fatalf("CheckBranch() = %v, %v, want %v", got, err, c.want)
+			}
+		})
+	}
+}
+
+func TestCheckBranchFailsClosed(t *testing.T) {
+	root := mustRead(t, "tree_root.json")
+	newRoot := strings.ReplaceAll(root, shaApps, shaNewTree)
+	ahead := get("/compare/"+shaBase+"..."+shaCommit, "")
+	ahead.raw, ahead.query = `{"status":"ahead"}`, perPageOne
+	head := []step{get(mainRef, "ref_main.json"), ahead}
+	parent := []step{raw("/git/commits/"+shaCommit, commitBody(shaBase)), get(mainRef, "ref_main.json")}
+	for name, c := range map[string]struct {
+		steps []step
+		class func(error) bool
+	}{
+		"commit not found": {append(head, status(http.MethodGet, "/git/commits/"+shaCommit, http.StatusNotFound, "")),
+			providers.IsNotFound},
+		"another commit returned": {append(head, raw("/git/commits/"+shaCommit, strings.ReplaceAll(commitBody(shaBase),
+			`"sha":"`+shaCommit, `"sha":"`+shaOld))), nil},
+		"truncated tree": {slices.Concat(head, parent, []step{raw("/git/trees/"+shaCommit,
+			strings.ReplaceAll(newRoot, `"truncated":false`, `"truncated":true`)), raw("/git/trees/"+shaBase, root)}), nil},
+		"name listed twice": {slices.Concat(head, parent, []step{raw("/git/trees/"+shaCommit, newRoot),
+			raw("/git/trees/"+shaBase, strings.Replace(root, `"tree":[`,
+				`"tree":[{"path":"README.md","mode":"100644","type":"blob","sha":"`+shaOld+`"},`, 1))}), nil},
+		"forbidden": {[]step{status(http.MethodGet, mainRef, http.StatusForbidden, fxForbidden)}, providers.IsForbidden},
+		"apps tree missing": {slices.Concat(head, parent, []step{raw("/git/trees/"+shaCommit, newRoot),
+			raw("/git/trees/"+shaBase, root), status(http.MethodGet, "/git/trees/"+shaNewTree, http.StatusNotFound, ""),
+		}), providers.IsNotFound},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, c.steps...)
+			got, err := h.p.CheckBranch(ctx, shaCommit, deployPath)
+			if err == nil || got != 0 {
+				t.Fatalf("CheckBranch() = %v, %v, want an error and no answer", got, err)
+			}
+			if c.class != nil && !c.class(err) {
+				t.Fatalf("got %v", err)
+			}
+			assertSafe(t, err)
+		})
+	}
+}
+
+func TestCheckBranchRefusesBadInput(t *testing.T) {
+	h := newHarness(t)
+	for name, c := range map[string]struct{ commit, path string }{
+		"short commit": {"1111", deployPath},
+		"branch name":  {branch, deployPath},
+		"bad path":     {shaCommit, "a/../b"},
+		"empty path":   {shaCommit, ""},
+	} {
+		if _, err := h.p.CheckBranch(ctx, c.commit, c.path); err == nil {
+			t.Errorf("%s: allowed", name)
+		}
+	}
+}
+
+func TestCheckMerged(t *testing.T) {
+	root, apps := mustRead(t, "tree_root.json"), mustRead(t, "tree_apps.json")
+	newRoot := strings.ReplaceAll(root, shaApps, shaNewTree)
+	newApps := strings.ReplaceAll(apps, shaDeploy, shaNewBlob)
+	// shaBase, the target head, merged shaCommit; its first parent is shaOld.
+	merge := func(parents ...string) step {
+		ps := make([]string, 0, len(parents))
+		for _, p := range parents {
+			ps = append(ps, `{"sha":"`+p+`"}`)
+		}
+		return raw("/git/commits/"+shaBase, `{"sha":"`+shaBase+`","parents":[`+strings.Join(ps, ",")+`]}`)
+	}
+	// trees compares shaCommit with its parent shaOld.
+	trees := func(appsA string) []step {
+		return []step{raw("/git/trees/"+shaCommit, newRoot), raw("/git/trees/"+shaOld, root),
+			raw("/git/trees/"+shaNewTree, appsA), raw("/git/trees/"+shaApps, apps)}
+	}
+	const elsewhere = "8888888888888888888888888888888888888888"
+	diverged := func(base, head string) step {
+		s := get("/compare/"+base+"..."+head, "compare_diverged.json")
+		s.query = perPageOne
+		return s
+	}
+	for name, c := range map[string]struct {
+		mergeCommit string
+		steps       []step
+		want        providers.BranchState
+		parent      string
+	}{
+		// A merge commit takes head into the target branch, so head is now an ancestor of it; judged against its
+		// own parent it is still the one change.
+		"merged with a merge commit": {shaBase, slices.Concat([]step{get(mainRef, "ref_main.json"),
+			merge(shaOld, shaCommit), raw("/git/commits/"+shaCommit, commitBody(shaOld))}, trees(newApps)),
+			providers.BranchOneChange, shaOld},
+		"squashed": {shaBase, slices.Concat([]step{get(mainRef, "ref_main.json"), merge(shaOld),
+			raw("/git/commits/"+shaCommit, commitBody(shaOld))}, trees(newApps)), providers.BranchOneChange, shaOld},
+		"another file beside it": {shaBase, slices.Concat([]step{get(mainRef, "ref_main.json"), merge(shaOld, shaCommit),
+			raw("/git/commits/"+shaCommit, commitBody(shaOld))}, trees(strings.ReplaceAll(newApps, shaRun, elsewhere))),
+			providers.BranchForeign, ""},
+		"head is the merge commit": {shaCommit, nil, providers.BranchForeign, ""},
+		"merge commit off the target": {shaOld, []step{get(mainRef, "ref_main.json"), diverged(shaBase, shaOld)},
+			providers.BranchForeign, ""},
+		"head with two parents": {shaBase, []step{get(mainRef, "ref_main.json"), merge(shaOld, shaCommit),
+			raw("/git/commits/"+shaCommit, commitBody(shaOld, elsewhere))}, providers.BranchForeign, ""},
+		"parent after the merge base": {shaBase, []step{get(mainRef, "ref_main.json"), merge(shaOld, shaCommit),
+			raw("/git/commits/"+shaCommit, commitBody(elsewhere)), diverged(shaOld, elsewhere)}, providers.BranchForeign, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, c.steps...)
+			got, parent, err := h.p.CheckMerged(ctx, shaCommit, c.mergeCommit, deployPath)
+			if err != nil || got != c.want || parent != c.parent {
+				t.Fatalf("CheckMerged() = %v, %q, %v, want %v, %q", got, parent, err, c.want, c.parent)
+			}
+		})
+	}
+}
+
+func TestCheckMergedFailsClosed(t *testing.T) {
+	for name, steps := range map[string][]step{
+		"forbidden": {status(http.MethodGet, mainRef, http.StatusForbidden, fxForbidden)},
+		"merge commit not found": {get(mainRef, "ref_main.json"),
+			status(http.MethodGet, "/git/commits/"+shaBase, http.StatusNotFound, "")},
+		"bad parent": {get(mainRef, "ref_main.json"),
+			raw("/git/commits/"+shaBase, `{"sha":"`+shaBase+`","parents":[{"sha":"main"}]}`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, steps...)
+			got, parent, err := h.p.CheckMerged(ctx, shaCommit, shaBase, deployPath)
+			if err == nil || got != 0 || parent != "" {
+				t.Fatalf("CheckMerged() = %v, %q, %v, want an error and no answer", got, parent, err)
+			}
+			assertSafe(t, err)
+		})
+	}
+	h := newHarness(t)
+	for name, c := range map[string]struct{ head, merge, path string }{
+		"short head":   {"1111", shaBase, deployPath},
+		"short merge":  {shaCommit, "", deployPath},
+		"dot dot path": {shaCommit, shaBase, "a/../b"},
+	} {
+		if _, _, err := h.p.CheckMerged(ctx, c.head, c.merge, c.path); err == nil {
+			t.Errorf("%s: allowed", name)
+		}
 	}
 }
 
@@ -944,7 +1171,7 @@ func TestCommitFileRefusesBadInput(t *testing.T) {
 }
 
 func TestCommitFileChecksStoredBlob(t *testing.T) {
-	h := newHarness(t, append([]step{get(branchRef, "ref_branch.json")}, readSteps()...)...)
+	h := newHarness(t, append(commitHead(), readSteps()...)...)
 	h.s.steps = append(h.s.steps, status(http.MethodPost, "/git/blobs", http.StatusCreated, ""))
 	h.s.steps[len(h.s.steps)-1].raw = `{"sha":"` + shaDeploy + `"}`
 	if _, err := h.p.CommitFile(ctx, branch, shaBase, change); err == nil {
@@ -1152,6 +1379,87 @@ func TestCloseChangeRequestRefusesOthers(t *testing.T) {
 	}
 }
 
+// commentMarker is the marker of the comments in the tests of CommentChangeRequest.
+const commentMarker = "<!-- shadewright comment -->"
+
+// comments is the step that answers page of the comments of pull request 12 with bodies.
+func comments(page int, bodies ...string) step {
+	cs := make([]string, 0, len(bodies))
+	for _, b := range bodies {
+		cs = append(cs, `{"body":"`+b+`"}`)
+	}
+	st := raw("/issues/12/comments", "["+strings.Join(cs, ",")+"]")
+	st.query = "page=" + strconv.Itoa(page) + "&per_page=20"
+	return st
+}
+
+func TestCommentChangeRequest(t *testing.T) {
+	post := status(http.MethodPost, "/issues/12/comments", http.StatusCreated, "")
+	post.check = func(t *testing.T, b map[string]any) {
+		if b["body"] != "note "+commentMarker || len(b) != 1 {
+			t.Errorf("comment body = %v", b)
+		}
+	}
+	full := make([]string, 20)
+	for i := range full {
+		full[i] = "other"
+	}
+	for name, steps := range map[string][]step{
+		"no comments":    {get("/pulls/12", "pull_open.json"), comments(1), post},
+		"two pages":      {get("/pulls/12", "pull_open.json"), comments(1, full...), comments(2, "other"), post},
+		"marker present": {get("/pulls/12", "pull_open.json"), comments(1, "other", "x "+commentMarker)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, steps...)
+			if err := h.p.CommentChangeRequest(ctx, 12, commentMarker, "note "+commentMarker); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestCommentChangeRequestRefuses(t *testing.T) {
+	for name, c := range map[string]struct {
+		number int64
+		steps  []step
+		class  func(error) bool
+	}{
+		"closed":  {12, []step{get("/pulls/12", "pull_closed.json")}, providers.IsConflict},
+		"merged":  {12, []step{get("/pulls/12", "pull_merged.json")}, providers.IsConflict},
+		"foreign": {13, []step{get("/pulls/13", "pull_foreign.json")}, nil},
+		"comments unreadable": {12, []step{get("/pulls/12", "pull_open.json"),
+			status(http.MethodGet, "/issues/12/comments", http.StatusForbidden, fxForbidden)}, providers.IsForbidden},
+		"failed": {12, []step{get("/pulls/12", "pull_open.json"), comments(1),
+			status(http.MethodPost, "/issues/12/comments", http.StatusForbidden, fxForbidden)}, providers.IsForbidden},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, c.steps...)
+			err := h.p.CommentChangeRequest(ctx, c.number, commentMarker, "note "+commentMarker)
+			if err == nil || (c.class != nil && !c.class(err)) {
+				t.Fatalf("got %v", err)
+			}
+			assertSafe(t, err)
+		})
+	}
+	h := newHarness(t)
+	for name, c := range map[string]struct {
+		number       int64
+		marker, body string
+	}{
+		"number 0":            {0, commentMarker, commentMarker},
+		"empty":               {12, commentMarker, " "},
+		"too long":            {12, commentMarker, commentMarker + strings.Repeat("x", 70000)},
+		"not UTF-8":           {12, commentMarker, commentMarker + "\xff"},
+		"no marker":           {12, "", "note"},
+		"marker missing":      {12, commentMarker, "note"},
+		"marker on two lines": {12, "x\ny", "x\ny"},
+	} {
+		if err := h.p.CommentChangeRequest(ctx, c.number, c.marker, c.body); err == nil {
+			t.Errorf("%s: allowed", name)
+		}
+	}
+}
+
 func TestCloseChangeRequestNumberMismatch(t *testing.T) {
 	h := newHarness(t, get("/pulls/99", "pull_open.json"))
 	if err := h.p.CloseChangeRequest(ctx, 99); err == nil {
@@ -1314,7 +1622,7 @@ func TestForbiddenIsFinal(t *testing.T) {
 		}, providers.IsForbidden},
 		"create the branch": {[]step{get(mainRef, "ref_main.json"), forbidden(http.MethodPost, "/git/refs")},
 			createBranch, providers.IsForbidden},
-		"store the blob": {append(append([]step{get(branchRef, "ref_branch.json")}, readSteps()...),
+		"store the blob": {append(append(commitHead(), readSteps()...),
 			forbidden(http.MethodPost, "/git/blobs")), commitFile, providers.IsForbidden},
 		"move the branch": {append(commitSteps(), forbidden(http.MethodGet, "")), commitFile, providers.IsForbidden},
 		"list pull requests": {[]step{{method: http.MethodGet, path: pullsPath, query: pullsQuery + "open",
@@ -1334,7 +1642,7 @@ func TestUnresolvedValidationIsFinal(t *testing.T) {
 	refused := func(method, path, file string) step {
 		return status(method, path, http.StatusUnprocessableEntity, file)
 	}
-	assertFinal(t, finalCase{append(append([]step{get(branchRef, "ref_branch.json")}, readSteps()...),
+	assertFinal(t, finalCase{append(append(commitHead(), readSteps()...),
 		status(http.MethodPost, "/git/blobs", http.StatusCreated, "blob_created.json"),
 		status(http.MethodPost, "/git/trees", http.StatusCreated, "tree_created.json"),
 		refused(http.MethodPost, "/git/commits", "error_validation.json")), commitFile, providers.IsRejected})

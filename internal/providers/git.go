@@ -131,6 +131,23 @@ func IsObjectID(s string) bool {
 	return true
 }
 
+// MaxCommentMarkerBytes is the longest marker GitProvider.CommentChangeRequest accepts.
+const MaxCommentMarkerBytes = 256
+
+// BranchState is what the head of a Shadewright branch carries over the target branch ([GitProvider.CheckBranch]).
+// The zero value is no answer.
+type BranchState int
+
+const (
+	// BranchAtTarget: the commit is the head of the target branch or an ancestor of it; the branch carries
+	// nothing of its own yet.
+	BranchAtTarget BranchState = iota + 1
+	// BranchOneChange: one commit on top of a commit of the target branch that changes at most the one file.
+	BranchOneChange
+	// BranchForeign: anything else, such as a commit someone else pushed, a merge or a change to another path.
+	BranchForeign
+)
+
 // GitProvider is one repository on a Git host. An instance is bound to exactly one repository at
 // construction, so no method can reach another repository.
 //
@@ -183,8 +200,32 @@ type GitProvider interface {
 
 	// CommitFile commits one file change on a branch whose head must be expectedHead, and returns the new
 	// commit. ErrConflict when the head has moved; it never force-pushes. ErrNotFound when the file does not
-	// exist at expectedHead (only existing files are changed).
+	// exist at expectedHead (only existing files are changed). expectedHead must be the head of the target
+	// branch or an ancestor of it: a Shadewright branch carries at most one commit of its own, made on a commit
+	// of the target branch, so a branch that carries anything else is refused with an error and never extended.
 	CommitFile(ctx context.Context, branch, expectedHead string, change FileChange) (string, error)
+
+	// CheckBranch reports what commit, the head of a Shadewright branch, carries over the target branch, as
+	// seen in the trees: BranchAtTarget when it is the head of the target branch or an ancestor of it,
+	// BranchOneChange when it has exactly one parent, that parent is the head of the target branch or an
+	// ancestor of it, and the two trees differ at most in the content of the regular file at path (same mode),
+	// and BranchForeign for anything else. It only reads. Errors are failures to find out, never an answer.
+	CheckBranch(ctx context.Context, commit, path string) (BranchState, error)
+
+	// CheckMerged reports what head, the head of a change request that mergeCommit merged into the target
+	// branch, carried over the target branch as it was before the merge: BranchOneChange with head's parent
+	// when head has exactly one parent, that parent is the first parent of mergeCommit or an ancestor of it,
+	// and the two trees differ at most in the content of the regular file at path (same mode); BranchForeign
+	// otherwise, also when mergeCommit is not on the target branch or is head itself. It judges head against
+	// its own parent, so a merge commit that took head into the target branch does not change the answer. It
+	// only reads. Errors are failures to find out, never an answer.
+	CheckMerged(ctx context.Context, head, mergeCommit, path string) (BranchState, string, error)
+
+	// CommentChangeRequest adds one comment with body to an open change request from a Shadewright branch of
+	// this repository to the target branch, unless a comment that holds marker is there already, which
+	// succeeds, so a retry after a lost answer or a lost status write does not post it twice. body must hold
+	// marker, one line of at most MaxCommentMarkerBytes. Any other change request is refused. It is a write.
+	CommentChangeRequest(ctx context.Context, number int64, marker, body string) error
 
 	// OpenChangeRequest opens a change request. When an open change request for the same head branch
 	// already exists, it returns that one unchanged.

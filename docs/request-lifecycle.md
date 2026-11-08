@@ -63,9 +63,11 @@ Shadewright never approves its own pull request and does not check reviews itsel
 What happens depends on the cause. Only these cases close the pull request, and Shadewright never reopens one:
 
 - A stale plan (a changed policy, settings, target or source file) ends `Superseded` and the executor closes its pull request.
-- A render refusal while the pull request waits (`TargetFileDiverged`, `PatchRefused`, an unplanned difference in the rendered output) closes it and ends `NeedsIntervention`.
+- A render refusal while the pull request waits (`TargetFileDiverged`, `PatchRefused`, `BranchDiverged`, an unplanned difference in the rendered output) closes it and ends `NeedsIntervention`.
+- A branch that does not hold exactly the planned change when the pull request is opened or found before it was recorded (`BranchDiverged`, for example a push to the branch during the open) closes it and ends `NeedsIntervention`.
+- A push to a recorded pull request that leaves more than the planned change on the branch (`BranchDiverged`) ends `NeedsIntervention` with one comment on the pull request that hands it to a person; it stays open. Merged by then, the request ends `MergedWithForeignChange`.
 
-These stop the automation but leave the pull request open, so a person closes it (or merges it knowingly): `HeadMoved` (someone pushed to the branch), `ChangeRequestGone`, `ForeignChangeRequest`, `BranchDiverged`. The way back to the change is a new request. See [troubleshooting](troubleshooting.md#pull-request-step).
+These stop the automation but leave the pull request open, so a person closes it (or merges it knowingly): `HeadMoved` (the head moved to the same planned change), `ChangeRequestGone`, `ForeignChangeRequest`. The way back to the change is a new request. See [troubleshooting](troubleshooting.md#pull-request-step).
 
 ## Read it yourself
 

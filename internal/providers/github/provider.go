@@ -415,7 +415,7 @@ func (p *Provider) isAncestor(ctx context.Context, op, head, commit string) (boo
 	}
 	r, err := p.do(ctx, call{
 		op: op, method: http.MethodGet, path: "/compare/" + head + "..." + commit,
-		query: url.Values{"per_page": {"1"}},
+		query: url.Values{paramPerPage: {"1"}},
 	})
 	if errors.Is(err, errBodyTooLarge) {
 		// Only a commit that is not behind the target has commits and files to list.
@@ -966,7 +966,7 @@ func (p *Provider) toChangeRequest(op string, pr pullJSON) (providers.ChangeRequ
 func (p *Provider) pulls(ctx context.Context, op, branch, state string) ([]pullJSON, error) {
 	r, err := p.do(ctx, call{op: op, method: http.MethodGet, path: "/pulls", query: url.Values{
 		"head": {p.repo.Owner + ":" + branch}, "state": {state},
-		"sort": {"created"}, "direction": {"desc"}, "per_page": {"100"},
+		"sort": {"created"}, "direction": {"desc"}, paramPerPage: {"100"},
 	}})
 	if err != nil {
 		return nil, err
@@ -1122,15 +1122,28 @@ func (p *Provider) pullFor(ctx context.Context, op string, number int64) (pullJS
 	return pr, nil
 }
 
+// paramPerPage is the REST query parameter that sets the page size.
+const paramPerPage = "per_page"
+
+// Comment pages CommentChangeRequest reads for its marker: commentsPerPage comments of at most 64 KiB each fit
+// in maxJSONBody, and past maxCommentPages pages the comment is posted without looking further.
+const (
+	commentsPerPage = 20
+	maxCommentPages = 10
+)
+
 // CommentChangeRequest adds one comment to an open pull request from a shadewright/ branch to the target
-// branch. A closed or merged one is ErrConflict; other pull requests are refused. The comment is not retried
-// once GitHub may have taken it, so a lost answer leaves at most one comment.
-func (p *Provider) CommentChangeRequest(ctx context.Context, number int64, body string) error {
+// branch, unless one of its first maxCommentPages pages of comments holds marker already. A closed or merged
+// one is ErrConflict; other pull requests are refused.
+func (p *Provider) CommentChangeRequest(ctx context.Context, number int64, marker, body string) error {
 	switch {
 	case number < 1:
 		return errors.New(opCommentCR + ": number must be positive")
 	case strings.TrimSpace(body) == "" || len(body) > maxMessageBytes || !utf8.ValidString(body):
 		return errors.New(opCommentCR + ": comment is empty, too long or not UTF-8")
+	case strings.TrimSpace(marker) == "" || strings.ContainsAny(marker, "\r\n") ||
+		len(marker) > providers.MaxCommentMarkerBytes || !strings.Contains(body, marker):
+		return errors.New(opCommentCR + ": marker is invalid or not in the comment")
 	}
 	ctx, cancel := p.withTimeout(ctx)
 	defer cancel()
@@ -1140,6 +1153,12 @@ func (p *Provider) CommentChangeRequest(ctx context.Context, number int64, body 
 	}
 	if pr.MergedAt != nil || pr.State != stateOpen {
 		return fmt.Errorf("%s: pull request is not open: %w", opCommentCR, providers.ErrConflict)
+	}
+	switch found, err := p.hasComment(ctx, number, marker); {
+	case err != nil:
+		return err
+	case found:
+		return nil
 	}
 	r, err := p.do(ctx, call{
 		op: opCommentCR, method: http.MethodPost, path: "/issues/" + strconv.FormatInt(number, 10) + "/comments",
@@ -1152,6 +1171,37 @@ func (p *Provider) CommentChangeRequest(ctx context.Context, number int64, body 
 		return statusError(opCommentCR, r.status)
 	}
 	return nil
+}
+
+// hasComment reports whether a comment of pull request number holds marker, reading at most maxCommentPages
+// pages.
+func (p *Provider) hasComment(ctx context.Context, number int64, marker string) (bool, error) {
+	for page := 1; page <= maxCommentPages; page++ {
+		r, err := p.do(ctx, call{op: opCommentCR, method: http.MethodGet,
+			path:  "/issues/" + strconv.FormatInt(number, 10) + "/comments",
+			query: url.Values{paramPerPage: {strconv.Itoa(commentsPerPage)}, "page": {strconv.Itoa(page)}}})
+		if err != nil {
+			return false, err
+		}
+		if !r.ok() {
+			return false, statusError(opCommentCR, r.status)
+		}
+		var comments []struct {
+			Body string `json:"body"`
+		}
+		if err := decode(opCommentCR, r, &comments); err != nil {
+			return false, err
+		}
+		for _, c := range comments {
+			if strings.Contains(c.Body, marker) {
+				return true, nil
+			}
+		}
+		if len(comments) < commentsPerPage {
+			return false, nil
+		}
+	}
+	return false, nil
 }
 
 // closeState is nil for a closed pull request, ErrConflict for a merged one, and false for an open one.

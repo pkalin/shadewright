@@ -122,7 +122,7 @@ func (p *checkpointProbe) CheckMerged(ctx context.Context, _, _, _ string) (prov
 	return 0, "", p.probe(ctx, "CheckMerged")
 }
 
-func (p *checkpointProbe) CommentChangeRequest(ctx context.Context, _ int64, _ string) error {
+func (p *checkpointProbe) CommentChangeRequest(ctx context.Context, _ int64, _, _ string) error {
 	return p.probe(ctx, "CommentChangeRequest")
 }
 

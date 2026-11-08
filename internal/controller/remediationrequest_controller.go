@@ -1025,11 +1025,24 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnavailable
 		message = "The plan is stale and the repository it was made for is not configured any more; " +
 			"its change request, if any, was not closed"
-	case providers.IsConflict(err) && rr.Status.PullRequest == nil:
+	case isMergedUnrecorded(err):
 		// The branch's marked pull request was merged before any status recorded it (#524): it ends Merged or
 		// MergedWithForeignChange, not Superseded. The end is a final phase, as ErrSuperseded tells the caller.
+		// Nothing is closed; a read that fails in the check is retried, and the retry finds it merged again.
+		mu, _ := errors.AsType[*mergedUnrecordedError](err)
+		cleanCtx, cleanCancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
+		err = r.endMerged(cleanCtx, mu.git, rr, mu.cr)
+		err = boundErr(ctx, cleanCtx, "check of the merged change request", err)
+		cleanCancel()
+		if errors.Is(err, errStopped) {
+			return ErrSuperseded
+		}
+		return err
+	case providers.IsConflict(err) && rr.Status.PullRequest == nil:
+		// Merged between the look-up and the close: it is looked up again (mergedUnrecorded).
 		cleanCtx, cleanCancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 		err = r.mergedUnrecorded(cleanCtx, rr, closeErr)
+		err = boundErr(ctx, cleanCtx, "look-up of the merged change request", err)
 		cleanCancel()
 		if errors.Is(err, errStopped) {
 			return ErrSuperseded
@@ -1047,6 +1060,26 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 			"change request; it was not closed"
 	}
 	return r.endFreshness(ctx, rr, phase, reason, message)
+}
+
+// mergedUnrecordedError is closeChangeRequest's answer for a pull request of the request, found by its marker,
+// that was merged before any status recorded it: cr as the look-up returned it, in the repository git.
+type mergedUnrecordedError struct {
+	git providers.GitProvider
+	cr  providers.ChangeRequest
+}
+
+// Unwrap makes it a conflict for the callers that do not look for it, as closing a merged change request is.
+func (e *mergedUnrecordedError) Unwrap() error { return providers.ErrConflict }
+
+func (e *mergedUnrecordedError) Error() string {
+	return fmt.Sprintf("the change request #%d was merged before it was recorded", e.cr.Number)
+}
+
+// isMergedUnrecorded reports whether err is a [*mergedUnrecordedError].
+func isMergedUnrecorded(err error) bool {
+	_, ok := errors.AsType[*mergedUnrecordedError](err)
+	return ok
 }
 
 // staleClosed is the fixed text of PullRequestOpened for a pull request closed because its plan is stale.
@@ -1131,6 +1164,10 @@ func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, r
 			return nil
 		}
 		return errChangeRequestNotOurs
+	}
+	if recorded == nil && cr.State == providers.ChangeRequestMerged {
+		// Ours, merged before any status recorded it (#524): nothing to close; the caller checks the merge.
+		return &mergedUnrecordedError{git: git, cr: cr}
 	}
 	if err := git.CloseChangeRequest(ctx, cr.Number); err != nil {
 		return freshness.WrapProvider("close the change request", err)

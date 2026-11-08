@@ -197,12 +197,12 @@ func (g *gatedGit) EnableAutoMerge(ctx context.Context, number int64, expectedHe
 	return g.git.EnableAutoMerge(ctx, number, expectedHeadSHA)
 }
 
-func (g *gatedGit) CommentChangeRequest(ctx context.Context, number int64, body string) error {
+func (g *gatedGit) CommentChangeRequest(ctx context.Context, number int64, marker, body string) error {
 	ctx, err := g.gate(ctx)
 	if err != nil {
 		return err
 	}
-	return g.git.CommentChangeRequest(ctx, number, body)
+	return g.git.CommentChangeRequest(ctx, number, marker, body)
 }
 
 func (g *gatedGit) CloseChangeRequest(ctx context.Context, number int64) error {

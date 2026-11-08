@@ -419,6 +419,23 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(git.Comments(got.Status.PullRequest.Number)).To(HaveLen(1), "one comment only")
 	})
 
+	It("posts one comment when the status write after it is lost (#524)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		_, err := git.Push(freshness.BranchName(got), "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		failStatus := true
+		r := reconciler()
+		r.Client = &statusFailer{Client: k8sClient, fail: func() bool { return failStatus && len(git.Comments(n)) > 0 }}
+		_, _ = r.Reconcile(ctx, key())
+		Expect(git.Comments(n)).To(HaveLen(1))
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "the stop was lost")
+		failStatus = false
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(git.Comments(n)).To(HaveLen(1), "the comment is not posted again")
+	})
+
 	It("ends with MergedWithForeignChange when a pull request with a foreign push is merged (#524)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		_, err := git.Push(freshness.BranchName(got), "README.yaml", []byte("a: 3\n"))
@@ -746,7 +763,19 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			_, err := git.Push(branch, "README.yaml", []byte("a: 3\n"))
 			Expect(err).NotTo(HaveOccurred())
 		})
+		// A close that fails for a reason worth a retry, or one the kill switch holds back, decides nothing.
 		faulty.failOn(opClose, &providers.RetryableError{Err: errors.New("server error")})
+		err := reconcileOnce()
+		Expect(err).To(HaveOccurred())
+		Expect(retryable(err)).To(BeTrue())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed close is retried")
+		faulty.failOn(opClose, fmt.Errorf("close: %w", freshness.ErrPaused))
+		_ = reconcileOnce()
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a paused close waits")
+		Expect(meta.IsStatusConditionTrue(fetch().Status.Conditions, remediationv1alpha1.ConditionWritesPaused)).To(BeTrue())
+		Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+		// Only a final refusal stops the request.
+		faulty.failOn(opClose, fmt.Errorf("status 403: %w", providers.ErrForbidden))
 		Expect(reconcileOnce()).To(Succeed())
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
@@ -760,6 +789,30 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Message).
 			To(HaveSuffix("close it by hand"))
 		Expect(got.Status.HoldsTarget).To(Equal(new(true)), "the target stays locked while it may be open")
+	})
+
+	It("retries, without recording a merge, when closing the refused pull request is a conflict but it is open (#524)", func() {
+		faulty = newFaultyGit(git)
+		for faulty.count(opCommit) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		branch := freshness.BranchName(fetch())
+		var foreign string
+		faulty.beforeOp(opOpen, func() {
+			defer GinkgoRecover()
+			var err error
+			foreign, err = git.Push(branch, "README.yaml", []byte("a: 3\n"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+		// GitHub answers 409 for reasons other than a merge; the adapter maps it to ErrConflict.
+		faulty.failOn(opClose, fmt.Errorf("status 409: %w", providers.ErrConflict))
+		Expect(reconcileOnce()).NotTo(Succeed())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a conflict is not a merge")
+		Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+		faulty.failOn("", nil)
+		Expect(reconcileOnce()).To(Succeed())
+		closedWith(foreign, ReasonBranchDiverged)
 	})
 
 	// refusedAfterPerson drives to the commit, then lets someone push to the branch right before the open and a
@@ -847,6 +900,20 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		// is judged against its own parent, not the current target.
 		got := mergedAfterLostOpen(func(string) {}, git.MergeWithCommit)
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+	})
+
+	It("retries the check of a merged pull request found after a lost open without closing it again (#524)", func() {
+		got := mergedAfterLostOpen(func(string) {
+			faulty.failOn(opCheckMerged, &providers.RetryableError{Err: errors.New("server error")})
+		})
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed read decides nothing")
+		err := reconcileOnce()
+		Expect(err).To(HaveOccurred())
+		Expect(retryable(err)).To(BeTrue(), "the read failure is the cause handed back")
+		Expect(faulty.count(opClose)).To(BeZero(), "a merged pull request is not closed again")
+		faulty.failOn("", nil)
+		_ = reconcileOnce()
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
 	})
 
 	It("ends with MergedWithForeignChange when the merged pull request found after a lost open held more (#524)", func() {
@@ -2628,11 +2695,11 @@ func (f *faultyGit) CheckMerged(ctx context.Context, head, merge, path string) (
 	return state, parent, f.leave(ctx, opCheckMerged, err)
 }
 
-func (f *faultyGit) CommentChangeRequest(ctx context.Context, n int64, body string) error {
+func (f *faultyGit) CommentChangeRequest(ctx context.Context, n int64, marker, body string) error {
 	if err := f.enter(opComment, ""); err != nil {
 		return err
 	}
-	return f.leave(ctx, opComment, f.Git.CommentChangeRequest(ctx, n, body))
+	return f.leave(ctx, opComment, f.Git.CommentChangeRequest(ctx, n, marker, body))
 }
 
 // retryable reports whether err is one the reconciler hands back for a retry: a Git host failure worth

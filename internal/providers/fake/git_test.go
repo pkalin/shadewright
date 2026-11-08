@@ -384,10 +384,16 @@ func TestGitCheckMergedAndComment(t *testing.T) {
 	g, head := newRepo(t)
 	ctx := context.Background()
 	c, cr := mustOpen(t, g, head)
-	if err := g.CommentChangeRequest(ctx, cr.Number, "note"); err != nil {
+	if err := g.CommentChangeRequest(ctx, cr.Number, "<!-- m -->", "note <!-- m -->"); err != nil {
 		t.Fatal(err)
 	}
-	if got := g.Comments(cr.Number); len(got) != 1 || got[0] != "note" {
+	if err := g.CommentChangeRequest(ctx, cr.Number, "<!-- m -->", "again <!-- m -->"); err != nil {
+		t.Errorf("comment with a marker already there: %v", err)
+	}
+	if err := g.CommentChangeRequest(ctx, cr.Number, "<!-- m -->", "no marker"); err == nil {
+		t.Error("a body without its marker was allowed")
+	}
+	if got := g.Comments(cr.Number); len(got) != 1 || got[0] != "note <!-- m -->" {
 		t.Errorf("comments = %v", got)
 	}
 	if _, err := g.Push(base, "other.yaml", []byte("a: 1\n")); err != nil {
@@ -407,7 +413,7 @@ func TestGitCheckMergedAndComment(t *testing.T) {
 	if got, _, err := g.CheckMerged(ctx, c, c, path); err != nil || got != providers.BranchForeign {
 		t.Errorf("CheckMerged() of the head itself = %v, %v", got, err)
 	}
-	if err := g.CommentChangeRequest(ctx, cr.Number, "late"); !providers.IsConflict(err) {
+	if err := g.CommentChangeRequest(ctx, cr.Number, "<!-- n -->", "late <!-- n -->"); !providers.IsConflict(err) {
 		t.Errorf("comment on a merged change request: %v", err)
 	}
 }

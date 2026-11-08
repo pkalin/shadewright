@@ -313,11 +313,23 @@ func (g *Git) CheckMerged(ctx context.Context, head, mergeCommit, path string) (
 	return providers.BranchOneChange, c.parent, nil
 }
 
-// CommentChangeRequest adds a comment to an open change request.
-func (g *Git) CommentChangeRequest(ctx context.Context, n int64, body string) error {
+// CommentChangeRequest adds a comment to an open change request, unless one holds marker already.
+func (g *Git) CommentChangeRequest(ctx context.Context, n int64, marker, body string) error {
 	if err := g.before("CommentChangeRequest"); err != nil {
 		return err
 	}
+	if marker == "" || strings.ContainsAny(marker, "\r\n") || len(marker) > providers.MaxCommentMarkerBytes ||
+		!strings.Contains(body, marker) {
+		return errors.New("comment marker is invalid or not in the body")
+	}
+	g.mu.Lock()
+	for _, c := range g.comments[n] {
+		if strings.Contains(c, marker) {
+			g.mu.Unlock()
+			return nil
+		}
+	}
+	g.mu.Unlock()
 	if err := providers.CheckWrite(ctx); err != nil {
 		return err
 	}

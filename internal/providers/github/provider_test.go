@@ -1379,16 +1379,42 @@ func TestCloseChangeRequestRefusesOthers(t *testing.T) {
 	}
 }
 
+// commentMarker is the marker of the comments in the tests of CommentChangeRequest.
+const commentMarker = "<!-- shadewright comment -->"
+
+// comments is the step that answers page of the comments of pull request 12 with bodies.
+func comments(page int, bodies ...string) step {
+	cs := make([]string, 0, len(bodies))
+	for _, b := range bodies {
+		cs = append(cs, `{"body":"`+b+`"}`)
+	}
+	st := raw("/issues/12/comments", "["+strings.Join(cs, ",")+"]")
+	st.query = "page=" + strconv.Itoa(page) + "&per_page=20"
+	return st
+}
+
 func TestCommentChangeRequest(t *testing.T) {
 	post := status(http.MethodPost, "/issues/12/comments", http.StatusCreated, "")
 	post.check = func(t *testing.T, b map[string]any) {
-		if b["body"] != "note" || len(b) != 1 {
+		if b["body"] != "note "+commentMarker || len(b) != 1 {
 			t.Errorf("comment body = %v", b)
 		}
 	}
-	h := newHarness(t, get("/pulls/12", "pull_open.json"), post)
-	if err := h.p.CommentChangeRequest(ctx, 12, "note"); err != nil {
-		t.Fatal(err)
+	full := make([]string, 20)
+	for i := range full {
+		full[i] = "other"
+	}
+	for name, steps := range map[string][]step{
+		"no comments":    {get("/pulls/12", "pull_open.json"), comments(1), post},
+		"two pages":      {get("/pulls/12", "pull_open.json"), comments(1, full...), comments(2, "other"), post},
+		"marker present": {get("/pulls/12", "pull_open.json"), comments(1, "other", "x "+commentMarker)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, steps...)
+			if err := h.p.CommentChangeRequest(ctx, 12, commentMarker, "note "+commentMarker); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -1401,12 +1427,14 @@ func TestCommentChangeRequestRefuses(t *testing.T) {
 		"closed":  {12, []step{get("/pulls/12", "pull_closed.json")}, providers.IsConflict},
 		"merged":  {12, []step{get("/pulls/12", "pull_merged.json")}, providers.IsConflict},
 		"foreign": {13, []step{get("/pulls/13", "pull_foreign.json")}, nil},
-		"failed": {12, []step{get("/pulls/12", "pull_open.json"),
+		"comments unreadable": {12, []step{get("/pulls/12", "pull_open.json"),
+			status(http.MethodGet, "/issues/12/comments", http.StatusForbidden, fxForbidden)}, providers.IsForbidden},
+		"failed": {12, []step{get("/pulls/12", "pull_open.json"), comments(1),
 			status(http.MethodPost, "/issues/12/comments", http.StatusForbidden, fxForbidden)}, providers.IsForbidden},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, c.steps...)
-			err := h.p.CommentChangeRequest(ctx, c.number, "note")
+			err := h.p.CommentChangeRequest(ctx, c.number, commentMarker, "note "+commentMarker)
 			if err == nil || (c.class != nil && !c.class(err)) {
 				t.Fatalf("got %v", err)
 			}
@@ -1415,15 +1443,18 @@ func TestCommentChangeRequestRefuses(t *testing.T) {
 	}
 	h := newHarness(t)
 	for name, c := range map[string]struct {
-		number int64
-		body   string
+		number       int64
+		marker, body string
 	}{
-		"number 0":  {0, "note"},
-		"empty":     {12, " "},
-		"too long":  {12, strings.Repeat("x", 70000)},
-		"not UTF-8": {12, "\xff"},
+		"number 0":            {0, commentMarker, commentMarker},
+		"empty":               {12, commentMarker, " "},
+		"too long":            {12, commentMarker, commentMarker + strings.Repeat("x", 70000)},
+		"not UTF-8":           {12, commentMarker, commentMarker + "\xff"},
+		"no marker":           {12, "", "note"},
+		"marker missing":      {12, commentMarker, "note"},
+		"marker on two lines": {12, "x\ny", "x\ny"},
 	} {
-		if err := h.p.CommentChangeRequest(ctx, c.number, c.body); err == nil {
+		if err := h.p.CommentChangeRequest(ctx, c.number, c.marker, c.body); err == nil {
 			t.Errorf("%s: allowed", name)
 		}
 	}

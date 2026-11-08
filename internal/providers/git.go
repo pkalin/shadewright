@@ -131,6 +131,9 @@ func IsObjectID(s string) bool {
 	return true
 }
 
+// MaxCommentMarkerBytes is the longest marker GitProvider.CommentChangeRequest accepts.
+const MaxCommentMarkerBytes = 256
+
 // BranchState is what the head of a Shadewright branch carries over the target branch ([GitProvider.CheckBranch]).
 // The zero value is no answer.
 type BranchState int
@@ -219,8 +222,10 @@ type GitProvider interface {
 	CheckMerged(ctx context.Context, head, mergeCommit, path string) (BranchState, string, error)
 
 	// CommentChangeRequest adds one comment with body to an open change request from a Shadewright branch of
-	// this repository to the target branch. Any other change request is refused. It is a write.
-	CommentChangeRequest(ctx context.Context, number int64, body string) error
+	// this repository to the target branch, unless a comment that holds marker is there already, which
+	// succeeds, so a retry after a lost answer or a lost status write does not post it twice. body must hold
+	// marker, one line of at most MaxCommentMarkerBytes. Any other change request is refused. It is a write.
+	CommentChangeRequest(ctx context.Context, number int64, marker, body string) error
 
 	// OpenChangeRequest opens a change request. When an open change request for the same head branch
 	// already exists, it returns that one unchanged.

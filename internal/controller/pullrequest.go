@@ -610,11 +610,15 @@ func (r *RemediationRequestReconciler) checkPlanned(ctx context.Context, git pro
 // pull request by the number the open or the look-up returned, closes it by that number, never by a new look-up
 // of the marker (which a person may have removed since), and stops in NeedsIntervention with the refusal's
 // reason in one status write. The pull request is recorded as closed only when the Git host confirmed the
-// close (CloseChangeRequest returns only then); a person's merge before it ends MergedWithForeignChange, a
-// person's close ChangeRequestClosed. Any other outcome, a pause or a host failure included, keeps it
-// recorded as open, so the request holds the lock on its target until a person closes it (checkHeld). It never stops with an open pull request unrecorded.
+// close (CloseChangeRequest returns only then); a person's merge before it, seen in a look-up, ends
+// MergedWithForeignChange, a person's close ChangeRequestClosed. A close that fails for a reason worth a retry
+// (a host failure, the deadline, paused writes, a conflict the look-up does not explain) changes nothing and
+// is returned for a retry. Only a final refusal of the host stops the request with the pull request recorded as
+// open, so it holds the lock on its target until a person closes it (checkHeld). It never stops with an open
+// pull request unrecorded.
 func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest, ref *renderRefusal) error {
+	before := rr.Status.DeepCopy()
 	rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPROpened,
@@ -623,19 +627,31 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 		Message:            fmt.Sprintf("Pull request #%d is open", cr.Number),
 		ObservedGeneration: rr.Generation,
 	})
+	// retry hands err back with the status as it was: nothing is decided, and the next reconcile finds the
+	// pull request again by its branch and checks it again.
+	retry := func(err error) error {
+		rr.Status = *before
+		return err
+	}
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	defer cancel()
+	ended := func(found providers.ChangeRequest) (bool, error) {
+		switch found.State {
+		case providers.ChangeRequestMerged:
+			return true, r.mergedForeign(ctx, rr, ref)
+		case providers.ChangeRequestClosed:
+			markClosed(rr, ReasonChangeRequestClosed, "was closed without a merge")
+			return true, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestClosed,
+				"The pull request was closed without a merge; automation stopped")
+		}
+		return false, nil
+	}
 	// A person may have merged or closed it since the open: that is looked at first, because closing a closed
 	// pull request succeeds and would hide who closed it. A look-up that fails, or finds another pull request,
 	// decides nothing; the close by number below still runs.
 	if found, err := git.FindChangeRequest(cleanCtx, freshness.BranchName(rr)); err == nil && found.Number == cr.Number {
-		switch found.State {
-		case providers.ChangeRequestMerged:
-			return r.mergedForeign(ctx, rr, ref)
-		case providers.ChangeRequestClosed:
-			markClosed(rr, ReasonChangeRequestClosed, "was closed without a merge")
-			return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestClosed,
-				"The pull request was closed without a merge; automation stopped")
+		if ok, err := ended(found); ok {
+			return err
 		}
 	}
 	err := git.CloseChangeRequest(cleanCtx, cr.Number)
@@ -645,12 +661,23 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 	case err == nil:
 		closedByUs(rr, "the branch does not hold exactly the planned change ("+ref.reason+")")
 	case providers.IsConflict(err):
-		// Merged between the look-up and the close.
-		return r.mergedForeign(ctx, rr, ref)
+		// A merge between the look-up and the close is a conflict, but so is any other 409 of the host: only a
+		// look-up that shows the pull request merged (or closed) decides; anything else is retried.
+		found, findErr := git.FindChangeRequest(cleanCtx, freshness.BranchName(rr))
+		if findErr == nil && found.Number == cr.Number {
+			if ok, err := ended(found); ok {
+				return err
+			}
+		}
+		return retry(errors.Join(freshness.WrapProvider("close the pull request", err), findErr))
 	default:
+		if _, _, final := refusal(err); !final {
+			// A host failure, the deadline or paused writes: retried (a pause waits for the kill switch).
+			return retry(freshness.WrapProvider("close the pull request", err))
+		}
 		logf.FromContext(ctx).Info("Could not close the pull request of RemediationRequest", "remediationRequest",
 			client.ObjectKeyFromObject(rr), "pullRequest", cr.Number, "error", err.Error())
-		outcome = "; closing the pull request failed, so it may still be open: close it by hand"
+		outcome = "; the Git host refused to close the pull request, so it is still open: close it by hand"
 	}
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ref.reason, ref.message+outcome)
 }
@@ -779,16 +806,19 @@ func (r *RemediationRequestReconciler) checkMerged(ctx context.Context, git prov
 
 // mergedUnrecorded ends a request whose stale plan's cleanup found its change request merged (closing a merged
 // one is a conflict) before any status recorded it: the merge of its own pull request is what made the plan
-// stale. It looks the pull request up again and ends the request through endMerged. Anything else returns
-// closeErr unchanged.
+// stale. It looks the pull request up again and ends the request through endMerged. A look-up that fails is
+// returned with closeErr for a retry; one that finds no merged pull request of this request returns closeErr.
 func (r *RemediationRequestReconciler) mergedUnrecorded(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	closeErr error) error {
 	git, err := r.openPlanRepository(ctx, rr)
 	if err != nil {
-		return closeErr
+		return errors.Join(closeErr, err)
 	}
 	cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
-	if err != nil || !hasMarker(cr.Body, rr) || cr.State != providers.ChangeRequestMerged {
+	if err != nil {
+		return errors.Join(closeErr, freshness.WrapProvider("find the merged change request", err))
+	}
+	if !hasMarker(cr.Body, rr) || cr.State != providers.ChangeRequestMerged {
 		return closeErr
 	}
 	return r.endMerged(ctx, git, rr, cr)
@@ -989,13 +1019,20 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 const commentForeign = "Someone else pushed to this branch, and it no longer holds only Shadewright's planned change. " +
 	"Shadewright has stopped: this pull request is now a person's to review or close."
 
+// commentMarker is the hidden line that ties commentForeign to the request, so a retry after a lost status
+// write finds the comment instead of posting it again.
+func commentMarker(rr *remediationv1alpha1.RemediationRequest) string {
+	return fmt.Sprintf("<!-- shadewright comment=branch-diverged request-uid=%s -->", rr.UID)
+}
+
 // headMoved ends a request whose recorded pull request no longer has the head Shadewright pushed (#524, ADR-0028).
 // When it is the same pull request and the new head may carry more than the planned change (CheckBranch is not
 // one change, or the target file differs from the recorded head's), it is foreign: merged already, the request
 // ends MergedWithForeignChange; open, Shadewright posts one comment that hands the pull request to a person and
 // stops with BranchDiverged, leaving it open, since a person may be working on it. Anything else, a clean move
 // to the same planned change included, stops with HeadMoved as before. A read that fails is returned for a
-// retry, as is a comment the kill switch held back; another failure to comment is logged and the request stops all the same.
+// retry, as is a comment the kill switch held back; another failure to comment is logged and the request
+// stops all the same. A comment already there (its marker) is not posted again.
 func (r *RemediationRequestReconciler) headMoved(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) error {
 	moved := func() error {
@@ -1025,7 +1062,8 @@ func (r *RemediationRequestReconciler) headMoved(ctx context.Context, git provid
 		return moved()
 	}
 	outcome := "; a comment on the pull request hands it to a person"
-	if err := git.CommentChangeRequest(ctx, cr.Number, commentForeign); err != nil {
+	mark := commentMarker(rr)
+	if err := git.CommentChangeRequest(ctx, cr.Number, mark, commentForeign+"\n\n"+mark); err != nil {
 		if errors.Is(err, freshness.ErrPaused) || errors.Is(err, freshness.ErrWriteBlocked) {
 			// The kill switch held the comment back: it is posted once writes go on.
 			return err

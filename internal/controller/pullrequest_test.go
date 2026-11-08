@@ -777,6 +777,43 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
 	})
 
+	// mergedAfterLostOpen opens the pull request with its response lost, lets push run on the branch, and has a
+	// person merge it before the restart. It returns the request after the restart.
+	mergedAfterLostOpen := func(push func(branch string)) *remediationv1alpha1.RemediationRequest {
+		GinkgoHelper()
+		faulty = newFaultyGit(git)
+		for faulty.count(opCommit) == 0 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		faulty.crashAfter(opOpen)
+		Expect(reconcileOnce()).NotTo(Succeed())
+		Expect(openRequests()).To(HaveLen(1))
+		push(freshness.BranchName(fetch()))
+		_, err := git.Merge(openRequests()[0].Number)
+		Expect(err).NotTo(HaveOccurred())
+		_ = reconcileOnce()
+		return fetch()
+	}
+
+	It("records a merged pull request found after a lost open as Merged when it held the planned change (#524)", func() {
+		got := mergedAfterLostOpen(func(string) {})
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+	})
+
+	It("ends with MergedWithForeignChange when the merged pull request found after a lost open held more (#524)", func() {
+		got := mergedAfterLostOpen(func(branch string) {
+			_, err := git.Push(branch, "README.yaml", []byte("a: 3\n"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal(ReasonMergedWithForeignChange))
+		Expect(cond.Message).To(HavePrefix("Pull request #1 was merged"))
+		Expect(got.Status.PullRequest).NotTo(BeNil(), "the pull request is recorded")
+		Expect(got.Status.HoldsTarget).NotTo(Equal(new(true)), "a merged pull request releases the target")
+	})
+
 	It("closes the pull request it opened by its number when its marker is gone before the close (#524)", func() {
 		faulty = newFaultyGit(git)
 		for faulty.count(opCommit) == 0 {

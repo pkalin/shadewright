@@ -1025,6 +1025,16 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnavailable
 		message = "The plan is stale and the repository it was made for is not configured any more; " +
 			"its change request, if any, was not closed"
+	case providers.IsConflict(err) && rr.Status.PullRequest == nil:
+		// The branch's marked pull request was merged before any status recorded it (#524): it ends Merged or
+		// MergedWithForeignChange, not Superseded. The end is a final phase, as ErrSuperseded tells the caller.
+		cleanCtx, cleanCancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
+		err = r.mergedUnrecorded(cleanCtx, rr, closeErr)
+		cleanCancel()
+		if errors.Is(err, errStopped) {
+			return ErrSuperseded
+		}
+		return err
 	case err != nil:
 		refused, _, ok := refusal(err)
 		if !ok {

@@ -29,7 +29,7 @@ In the cluster its ServiceAccount is read-only ([2.2.2](2-architecture.md#222-an
 **The JWT and the token.**
 
 - The JWT is issued 60 seconds in the past and lives 10 minutes in total.
-- The token request names the one repository and the four permissions of section 8.4 (<span class="sw-status sw-planned">planned</span> a fifth, `statuses: write`, for the merge gate of reviewer hints, [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)).
+- The token request names the one repository and the four permissions of section 8.4 (<span class="sw-status sw-planned">planned</span> a fifth, `checks: write`, for the merge gate of reviewer hints, [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)).
 - The response is refused unless it lists exactly that repository.
 - The token is cached until 5 minutes before it expires, and concurrent callers share one refresh.
 - The token prints as a placeholder, never as its value (`internal/providers/github/auth`).

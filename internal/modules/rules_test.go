@@ -195,3 +195,13 @@ func TestFluxRevisionIsKeptOnlyWhole(t *testing.T) {
 		}
 	}
 }
+
+// A redactor panic withholds the value instead of stopping the analyzer, for rules and sources alike (#523).
+func TestBoundValueWithholdsAValueWhenRedactionPanics(t *testing.T) {
+	saved := boundWithoutRecover
+	t.Cleanup(func() { boundWithoutRecover = saved })
+	boundWithoutRecover = func(string) string { panic("redactor bug") }
+	if got := BoundValue("token abc"); got != "[REDACTED]" {
+		t.Errorf("BoundValue = %q, want [REDACTED]", got)
+	}
+}

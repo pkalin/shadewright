@@ -121,6 +121,9 @@ rbac:
 ## The executor reconciles RemediationRequests and is the only component that talks to Git. Its identity may
 ## only sign with the GitHub App key in Key Vault.
 executor:
+  # -- Number of Pods. 1 (the default) runs the one Pod. Above 1 the extra Pods are warm standbys: leader election keeps one of them active and the others idle, and when the leader's Pod fails a standby takes over after about one Lease duration (15 seconds by default). A standby costs an idle Pod and adds no throughput. Above 1 the chart also renders a PodDisruptionBudget (`minAvailable: 1`) and a preferred Pod anti-affinity by node, unless `affinity` sets `podAntiAffinity` itself.
+  # @section -- Executor
+  replicas: 1
   image:
     # -- Repository of the executor image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true.
     # @section -- Images
@@ -192,6 +195,9 @@ executor:
 
 ## The analyzer reads the cluster and writes Incidents and proposed RemediationRequests. It never acts on them.
 analyzer:
+  # -- Number of Pods. 1 (the default) runs the one Pod. Above 1 the extra Pods are warm standbys: leader election keeps one of them active and the others idle, and when the leader's Pod fails a standby takes over after about one Lease duration (15 seconds by default). A standby costs an idle Pod and adds no throughput. Above 1 the chart also renders a PodDisruptionBudget (`minAvailable: 1`) and a preferred Pod anti-affinity by node, unless `affinity` sets `podAntiAffinity` itself.
+  # @section -- Analyzer
+  replicas: 1
   image:
     # -- Repository of the analyzer image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true.
     # @section -- Images

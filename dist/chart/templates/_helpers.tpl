@@ -242,3 +242,20 @@ DNSCache). Port 53 over UDP and TCP in both.
 {{- fail (printf "networkPolicy.dns.mode %q is not kubeDns or resolverCIDRs" $dns.mode) }}
 {{- end }}
 {{- end }}
+
+{{/*
+Affinity of one component's Pod: the configured affinity, plus a preferred anti-affinity by node when the
+component runs standby replicas (replicas above 1) and the configured affinity sets no podAntiAffinity itself.
+Takes a dict with .component and .context. Renders nothing when the result is empty.
+*/}}
+{{- define "shadewright.affinity" -}}
+{{- $c := index .context.Values .component }}
+{{- $aff := deepCopy (default dict $c.affinity) }}
+{{- if and (gt (int $c.replicas) 1) (not $aff.podAntiAffinity) }}
+{{- $term := dict "weight" 100 "podAffinityTerm" (dict "topologyKey" "kubernetes.io/hostname" "labelSelector" (dict "matchLabels" (include "shadewright.selectorLabels" . | fromYaml))) }}
+{{- $_ := set $aff "podAntiAffinity" (dict "preferredDuringSchedulingIgnoredDuringExecution" (list $term)) }}
+{{- end }}
+{{- if $aff }}
+{{- toYaml $aff }}
+{{- end }}
+{{- end }}

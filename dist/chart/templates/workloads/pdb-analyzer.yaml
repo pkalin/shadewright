@@ -1,0 +1,14 @@
+{{- if gt (int .Values.analyzer.replicas) 1 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "analyzer" "context" $) | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "shadewright.selectorLabels" (dict "component" "analyzer" "context" $) | nindent 6 }}
+{{- end }}

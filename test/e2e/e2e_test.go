@@ -251,6 +251,19 @@ var _ = Describe("Manager", Ordered, func() {
 					g.Expect(err).NotTo(HaveOccurred())
 					g.Expect(output).To(Equal("1/1"))
 				}, 2*time.Minute, time.Second).Should(Succeed())
+				// The Pod found at the start of the suite was the leader and is gone: the specs that follow read
+				// controllerPodName, so point it at the one Pod left.
+				Eventually(func(g Gomega) {
+					cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=executor",
+						"-o", "go-template={{ range .items }}{{ if not .metadata.deletionTimestamp }}"+
+							"{{ .metadata.name }}{{ \"\\n\" }}{{ end }}{{ end }}",
+						"-n", namespace)
+					output, err := utils.Run(cmd)
+					g.Expect(err).NotTo(HaveOccurred())
+					podNames := utils.GetNonEmptyLines(output)
+					g.Expect(podNames).To(HaveLen(1), "expected 1 executor pod after scaling back")
+					controllerPodName = podNames[0]
+				}, 2*time.Minute, time.Second).Should(Succeed())
 			})
 
 			By("scaling the executor to two replicas and waiting for both to be Ready")

@@ -166,7 +166,7 @@ func TestListCommentsFlagsBotsAndApps(t *testing.T) {
 		t.Errorf("first item = %+v", first)
 	}
 	// A short page ends the sweep; the next asks for what changed since GitHub's clock at its start.
-	wantNext := providers.FeedbackCursor{Since: hostNow.Add(-clockMargin)}
+	wantNext := providers.FeedbackCursor{Since: hostNow.Add(-sinceMargin)}
 	if !got.Complete || got.Next != wantNext {
 		t.Errorf("complete %v, next %+v", got.Complete, got.Next)
 	}
@@ -207,7 +207,7 @@ func TestListCommentsPagingStopsAtTheBoundAndGoesOn(t *testing.T) {
 	if !slices.Equal(ids(got.Items), []int64{9000, 9001}) || !got.Complete {
 		t.Fatalf("items %v, complete %v", ids(got.Items), got.Complete)
 	}
-	if want := (providers.FeedbackCursor{Since: hostNow.Add(-clockMargin)}); got.Next != want {
+	if want := (providers.FeedbackCursor{Since: hostNow.Add(-sinceMargin)}); got.Next != want {
 		t.Errorf("next %+v, want %+v (the sweep's start, not this look's)", got.Next, want)
 	}
 }
@@ -541,7 +541,7 @@ func TestListReviews(t *testing.T) {
 		t.Errorf("bot review = %+v", bot)
 	}
 	// The next sweep keeps the reviews submitted since this one began.
-	if want := (providers.FeedbackCursor{Since: hostNow.Add(-clockMargin)}); got.Next != want {
+	if want := (providers.FeedbackCursor{Since: hostNow.Add(-sinceMargin)}); got.Next != want {
 		t.Errorf("next %+v, want %+v", got.Next, want)
 	}
 }
@@ -576,7 +576,7 @@ func TestListReviewsCursorMovesPastTheBound(t *testing.T) {
 		t.Fatalf("items %v, complete %v", ids(got.Items), got.Complete)
 	}
 	// At the end of the sweep, the next one starts on page 1 from the sweep's start.
-	if want := (providers.FeedbackCursor{Since: hostNow.Add(-clockMargin)}); got.Next != want {
+	if want := (providers.FeedbackCursor{Since: hostNow.Add(-sinceMargin)}); got.Next != want {
 		t.Errorf("next %+v, want %+v", got.Next, want)
 	}
 }
@@ -795,7 +795,7 @@ func TestListCommentsAsksConditionallyWhileNothingChanges(t *testing.T) {
 	if !slices.Equal(ids(news.Items), []int64{7}) || !news.Complete {
 		t.Fatalf("changed answer: items %v, complete %v", ids(news.Items), news.Complete)
 	}
-	if want := (providers.FeedbackCursor{Since: hostNow.Add(-clockMargin)}); news.Next != want {
+	if want := (providers.FeedbackCursor{Since: hostNow.Add(-sinceMargin)}); news.Next != want {
 		t.Fatalf("after items: next %+v, want %+v (since moved on, no tag: it was the tag of another query)",
 			news.Next, want)
 	}
@@ -897,5 +897,26 @@ func TestListCommentsRefusesACursorWithAMalformedTag(t *testing.T) {
 	h := newHarness(t)
 	if _, err := h.p.ListComments(ctx, prNumber, providers.FeedbackCursor{ETag: "abc\r\nX-Evil: 1"}); err == nil {
 		t.Fatal("a malformed tag was accepted")
+	}
+}
+
+// The next sweep starts a minute before the host's time when this one began, so a comment that shows up in the
+// list late, up to a minute after its creation, is still created after since and not taken for an edit
+// (EditedAfterSeen). One created a minute or more before is taken for one: the assumption, failing closed.
+func TestNextSinceLeavesAMinuteForLateComments(t *testing.T) {
+	got := next(providers.FeedbackCursor{Since: since}, lookResult{ended: true, started: hostNow}, false)
+	if want := hostNow.Add(-time.Minute); !got.Next.Since.Equal(want) {
+		t.Fatalf("next since %v, want %v", got.Next.Since, want)
+	}
+	for _, tc := range []struct {
+		created time.Time
+		read    bool // created at or before since: counts as read already
+	}{
+		{hostNow.Add(-59 * time.Second), false},
+		{hostNow.Add(-time.Minute), true},
+	} {
+		if read := !tc.created.After(got.Next.Since); read != tc.read {
+			t.Errorf("created %v: read %v, want %v", tc.created, read, tc.read)
+		}
 	}
 }

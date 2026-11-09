@@ -50,9 +50,15 @@ const (
 	feedbackPageLimit = feedbackPerPage * (400 << 10)
 )
 
-// clockMargin is subtracted from the host's time when a sweep of comments began, to make the next sweep's
-// since: GitHub's times are whole seconds.
-const clockMargin = time.Second
+// sinceMargin is subtracted from the host's time when a sweep of comments began, to make the next sweep's
+// since. GitHub's times are whole seconds, and nothing documents how soon a new comment appears in the list,
+// so a comment created just before a sweep began may be returned only by a later sweep. The executor refuses a
+// command whose comment was created at or before since as EditedAfterSeen, so the margin is an assumption: a
+// comment becomes visible in the list within sinceMargin of its creation time. When that fails, a new command
+// is refused as EditedAfterSeen and its author has to post it again: it fails closed, never accepting a
+// comment that was read as plain text. Re-reading the overlap is cheap, the cursor's seen list keeps it from
+// being judged twice.
+const sinceMargin = time.Minute
 
 // loginPattern bounds a login before it goes into a path. GitHub logins are shorter and use fewer characters;
 // this is the pattern of the API's HintAuthor.login.
@@ -305,7 +311,7 @@ func (p *Provider) look(ctx context.Context, op, path string, query url.Values, 
 }
 
 // next sets the outcome of a look as one step of a sweep. A sweep pages through one since; when it reaches
-// the end, the next sweep asks from the host's time when this one began, less clockMargin, so what changes
+// the end, the next sweep asks from the host's time when this one began, less sinceMargin, so what changes
 // during a sweep is read by the next one. Since never decreases; without a Date header from the host the
 // next sweep keeps the same since, so it reads again and never skips.
 //
@@ -337,7 +343,7 @@ func next(cur providers.FeedbackCursor, res lookResult, quiet bool) providers.Fe
 			}
 			return out
 		}
-		if s := start.Add(-clockMargin); !start.IsZero() && s.After(cur.Since) {
+		if s := start.Add(-sinceMargin); !start.IsZero() && s.After(cur.Since) {
 			out.Next.Since = s
 		}
 		return out

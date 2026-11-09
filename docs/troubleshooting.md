@@ -21,10 +21,10 @@ kubectl -n shadewright-system logs deploy/shadewright-executor
 | `Denied` | Policy or settings do not allow the plan | No. Fix the cause and apply a request with a new name (the spec is immutable) |
 | `NeedsIntervention` | The executor cannot decide or continue safely; a person must look | No, same as above. Automation for that request has stopped |
 | `Superseded` | The plan went stale before merge and its pull request was closed | No. A new plan is a new request |
-| `Superseded` with reason `HandedOff` (planned, [ADR-0028](adr/0028-reviewer-hints-through-the-pull-request.md)) | A reviewer's hint produced a replacement request, which took over this request's pull request and branch; the pull request is not closed | No. Follow the replacement request, which holds the pull request and the target lock |
-| `Denied` with reason `ChainLinkInvalid` (planned, [ADR-0028](adr/0028-reviewer-hints-through-the-pull-request.md)) | A replacement request names a request it does not replace: another Incident or target, another chain, a request not waiting for approval, or a hint that is not pending | No. Nothing was taken over and the old pull request is untouched; look at who created the request |
-| `Cancelled` with reason `HandoffRefused` (planned) | Another replacement reserved the same hint first, or the hint or the old request changed before the handoff began | No. The old pull request is untouched; post the hint again if it is still wanted |
-| `Cancelled` with reason `HandoffAborted` (planned) | The pull request was merged or closed, or someone pushed to the branch, while the handoff ran | No. If it was merged, the request that owns the merged plan is `Merged`; if someone pushed, the old request is `NeedsIntervention` and the pull request is a person's |
+| `Superseded` with reason `HandedOff` ([ADR-0028](adr/0028-reviewer-hints-through-the-pull-request.md)) | A reviewer's hint produced a replacement request, which took over this request's pull request and branch; the pull request is not closed | No. Follow the replacement request, which holds the pull request and the target lock |
+| `Denied` with reason `ChainLinkInvalid` ([ADR-0028](adr/0028-reviewer-hints-through-the-pull-request.md)) | A replacement request names a request it does not replace: another Incident or target, another chain, a request not waiting for approval, or a hint that is not pending | No. Nothing was taken over and the old pull request is untouched; look at who created the request |
+| `Cancelled` with reason `HandoffRefused` | Another replacement reserved the same hint first, or the hint or the old request changed before the handoff began | No. The old pull request is untouched; post the hint again if it is still wanted |
+| `Cancelled` with reason `HandoffAborted` | The pull request was merged or closed, or someone pushed to the branch, while the handoff ran, or the new plan changes another file than the pull request does | No. If it was merged, the request that owns the merged plan is `Merged`; if someone pushed, the old request is `NeedsIntervention` and the pull request is a person's |
 | `Expired` | No pull request was opened within 30 minutes of the policy decision | No |
 | `Pending`, `PolicyChecked`, `PRCreated`, `AwaitingApproval` | Working or waiting for a person | Yes |
 | `Merged` | The pull request was merged. Delivery and verification are **planned** | Ends here |
@@ -35,7 +35,7 @@ The reason is on one of these conditions:
 
 - `PolicyAllowed`: the policy check. `False` is `Denied`, `Unknown` is `NeedsIntervention` or a wait, `True` is allowed.
 - `PullRequestOpened`: a stop before a pull request is recorded, and the history of one that was closed.
-- `Approved`: a stop after a pull request is recorded; `WaitingForReview` while it waits.
+- `Approved`: a stop after a pull request is recorded; `WaitingForReview` while it waits, or `ReviewCheckRefused` while it waits on a check the Git host refused.
 - `PlanFresh`: `False` when the plan went stale (`Superseded`), `Unknown` while the Git host refuses a freshness check.
 - `Queued`: `True` while a limit holds a request back before its policy check (see [Limits](#limits)).
 
@@ -186,10 +186,11 @@ Stops before a pull request is recorded are on `PullRequestOpened`; after, on `A
 | `PullRequestDeadlineCleanupRefused` | Phase `Expired`: no pull request within 30 minutes of the decision, and the Git host refused to find or close one Shadewright may have opened on the branch. The request keeps the lock on its target until a look-up (every 10 minutes) finds none of its own open | Fix the permission the reason names, or close the pull request on the branch `shadewright/<request UID>` by hand; the next look-up then frees the target |
 | `TargetBranchChanged` | The repository entry of the plan now names another target branch | Restore the setting or apply a new request |
 | `RepositoryUnavailable` | The repository of the plan is no longer in the settings | Restore it. Any pull request is not closed |
-| `GitForbidden` | The Git host refused the App: a permission it lacks, an installation, or a ruleset. Not retried | Compare with the four permissions of [ADR-0006](adr/0006-github-app-key-in-key-vault.md) and the rulesets; apply a new request. While a pull request waits it is `PlanFresh` `Unknown` and Shadewright writes nothing but keeps watching, and clears it when the host answers again |
+| `GitForbidden` | The Git host refused the App: a permission it lacks, an installation, or a ruleset. Not retried | Compare with the five permissions of [ADR-0006](adr/0006-github-app-key-in-key-vault.md) and the rulesets; apply a new request. While a pull request waits it is `PlanFresh` `Unknown` and Shadewright writes nothing but keeps watching, and clears it when the host answers again |
 | `GitRejected` | The Git host refused the request as invalid and Git state does not explain it. Not retried | Read the executor log, fix, apply a new request |
 | `PullRequestOpened` | Progress, not a failure: the pull request is open on Shadewright's commit. Becomes the closed form below | None |
 | `WaitingForReview` | `Approved` is `False`: the pull request waits for a person. With `approval` not required it still waits, because auto-merge is not built | Review and merge it |
+| `ReviewCheckRefused` | `Approved` is `False`, with a Warning Event of the same reason: with reviewer hints on, the Git host refused for good to create or complete the check run `shadewright/review` on the pull request's head ([ADR-0028](adr/0028-reviewer-hints-through-the-pull-request.md) section 5), so a ruleset that requires it blocks the merge. Not an end: the request keeps waiting, and the check is not asked again on that head | Give the App `checks: write` ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)) and check the rulesets; a new head creates the check again, or a repository admin merges past it |
 | `PullRequestClosed` | Shadewright closed its pull request (stale plan or a change that no longer renders as planned); the message gives the number and why | See the freshness and render tables |
 
 ## Rollout after the merge

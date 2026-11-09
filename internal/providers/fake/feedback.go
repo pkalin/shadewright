@@ -36,6 +36,7 @@ const DefaultFeedbackPerLook = 150
 // feedbackStore holds the conversation comments of the fake's change requests and who may write.
 type feedbackStore struct {
 	comments map[int64][]providers.Feedback
+	reviews  map[int64][]providers.Feedback
 	writers  map[int64]bool
 	now      func() time.Time
 	perLook  int
@@ -166,12 +167,39 @@ func (g *Git) ListComments(ctx context.Context, n int64, cur providers.FeedbackC
 	return out, nil
 }
 
-// ListReviews returns no reviews: the fake keeps none.
+// AddReview adds a submitted review to change request n. Only ID, Author, ReviewState, CommitID and CreatedAt
+// matter.
+func (g *Git) AddReview(n int64, r providers.Feedback) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	r.Kind = providers.FeedbackReview
+	if r.UpdatedAt.IsZero() {
+		r.UpdatedAt = r.CreatedAt
+	}
+	if g.fb.reviews == nil {
+		g.fb.reviews = map[int64][]providers.Feedback{}
+	}
+	g.fb.reviews[n] = append(g.fb.reviews[n], r)
+}
+
+// ListReviews returns the reviews of change request n submitted at or after cur.Since, in the order they were
+// added, as one complete look.
 func (g *Git) ListReviews(ctx context.Context, n int64, cur providers.FeedbackCursor) (providers.FeedbackPage, error) {
 	if err := g.before("ListReviews"); err != nil {
 		return providers.FeedbackPage{}, err
 	}
-	return providers.FeedbackPage{Complete: true, Next: cur}, nil
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, err := g.get(n); err != nil {
+		return providers.FeedbackPage{}, fmt.Errorf("not a change request Shadewright opened: %w", err)
+	}
+	var items []providers.Feedback
+	for _, r := range g.fb.reviews[n] {
+		if !r.CreatedAt.Before(cur.Since) {
+			items = append(items, r)
+		}
+	}
+	return providers.FeedbackPage{Items: items, Complete: true, Next: cur}, nil
 }
 
 // CanWrite reports what SetWriter set for the author's ID. A Bot or App is refused without asking.

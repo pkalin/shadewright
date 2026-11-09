@@ -762,6 +762,13 @@ func (p *Provider) CommitFile(
 	if err := p.onTarget(ctx, opCommitFile, expectedHead); err != nil {
 		return "", err
 	}
+	return p.commitOnto(ctx, branch, expectedHead, change)
+}
+
+// commitOnto makes one commit on top of expectedHead with the content of the existing regular file at
+// change.Path replaced (same mode), and moves branch to it with updateRef. The caller has validated the input
+// and checked the branch head.
+func (p *Provider) commitOnto(ctx context.Context, branch, expectedHead string, change providers.FileChange) (string, error) {
 	root, entry, err := p.lookup(ctx, opCommitFile, expectedHead, change.Path)
 	if err != nil {
 		return "", err

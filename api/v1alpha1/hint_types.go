@@ -22,7 +22,7 @@ import (
 
 // Reviewer hints and the supersede handoff (ADR-0028). The executor writes status.hints, status.refusedHints
 // and status.commentCursor; the analyzer reads stored hints and writes spec.replaces, spec.chainRoot and the
-// Incident's status.handledHint. Planned: nothing writes status.handoff yet.
+// Incident's status.handledHint. The executor writes status.handoff on both requests of a handoff.
 
 // MaxHints is the most hints one supersede chain can consume, and so the most Consumed or Reserved entries of
 // a request's status.hints: the consumed hints of a chain are carried into the replacement's status (ADR-0028
@@ -164,8 +164,10 @@ type Hint struct {
 
 	// reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or
 	// NoProposal), NoAnswer when none came within the executor's bound, or the end of the request
-	// (PullRequestMerged, PullRequestClosed, RequestEnded). HintDeclineReasons lists them.
-	// +kubebuilder:validation:Enum=NoModelConfigured;BudgetSpent;BudgetUnavailable;NoProposal;MissingData;NoEvidence;TargetNotSupported;PreviousValueUnknown;NoChange;DirectionReversed;NoPolicyForAction;ActionOutOfBounds;InvalidOutput;EscalationNotConfigured;StepLimit;TokenLimit;DeadlineExceeded;ModelUnavailable;ModelNotFound;ModelForbidden;ModelError;UnexpectedModel;EndpointNotAllowed;PlanUnchanged;HintNotPending;RequestNotCreated;CoolingDown;NoAnswer;PullRequestMerged;PullRequestClosed;RequestEnded
+	// (PullRequestMerged, PullRequestClosed, RequestEnded), or the end of its replacement without the handoff:
+	// ReplacementDenied when the replacement was Denied, HandoffAborted when it ended otherwise.
+	// HintDeclineReasons lists them.
+	// +kubebuilder:validation:Enum=NoModelConfigured;BudgetSpent;BudgetUnavailable;NoProposal;MissingData;NoEvidence;TargetNotSupported;PreviousValueUnknown;NoChange;DirectionReversed;NoPolicyForAction;ActionOutOfBounds;InvalidOutput;EscalationNotConfigured;StepLimit;TokenLimit;DeadlineExceeded;ModelUnavailable;ModelNotFound;ModelForbidden;ModelError;UnexpectedModel;EndpointNotAllowed;PlanUnchanged;HintNotPending;RequestNotCreated;CoolingDown;NoAnswer;PullRequestMerged;PullRequestClosed;RequestEnded;ReplacementDenied;HandoffAborted
 	// +optional
 	Reason string `json:"reason,omitempty"`
 
@@ -190,7 +192,8 @@ var HintDeclineReasons = []string{"NoModelConfigured", "BudgetSpent", "BudgetUna
 	"NoPolicyForAction", "ActionOutOfBounds", "InvalidOutput", "EscalationNotConfigured", "StepLimit",
 	"TokenLimit", "DeadlineExceeded", "ModelUnavailable", "ModelNotFound", "ModelForbidden", "ModelError",
 	"UnexpectedModel", "EndpointNotAllowed", "PlanUnchanged", "HintNotPending", "RequestNotCreated",
-	"CoolingDown", "NoAnswer", "PullRequestMerged", "PullRequestClosed", "RequestEnded"}
+	"CoolingDown", "NoAnswer", "PullRequestMerged", "PullRequestClosed", "RequestEnded", "ReplacementDenied",
+	"HandoffAborted"}
 
 // RequestReplacement names the request a replacement takes over and the hint it answers (ADR-0028 section 4).
 type RequestReplacement struct {
@@ -210,7 +213,8 @@ type RequestReplacement struct {
 // HandoffPhase is how far one side of a handoff has come. Incoming, on the replacement: Reserved (it took the
 // target lock and named its predecessor), then Done (it holds the pull request) or Aborted. Outgoing, on the
 // predecessor: Intent (it expects its replacement's commit on top of expectedHead), then Done (it ended
-// Superseded with HandedOff) or Aborted. Each side starts in its first phase and moves only once.
+// Superseded with HandedOff) or Aborted. Each side starts in its first phase and moves only once; an outgoing
+// side that was Aborted may be replaced by the Intent of a later replacement for another hint.
 // +kubebuilder:validation:Enum=Reserved;Intent;Done;Aborted
 type HandoffPhase string
 
@@ -222,10 +226,58 @@ const (
 	HandoffAborted  HandoffPhase = "Aborted"
 )
 
+// HandoffStep is the record of a step after a handoff that the Git host either did or refused for good.
+// +kubebuilder:validation:Enum=Done;Refused
+type HandoffStep string
+
+// The records of a step after a handoff.
+const (
+	// HandoffStepDone: the Git host did the step.
+	HandoffStepDone HandoffStep = "Done"
+	// HandoffStepRefused: the Git host refused the step for good (a permission the App lacks, a rule, an invalid
+	// request); it is not asked again.
+	HandoffStepRefused HandoffStep = "Refused"
+)
+
+// ReviewCheckState is how far the check run shadewright/review of a head has come (ADR-0028 section 5).
+// InProgress: created, in progress, waiting for an approval of the head by someone who wrote no hint in the
+// chain. Passed: completed with conclusion success after such an approval. Refused: the Git host refused to
+// create or complete it for good, so the required check does not pass on this head and the pull request
+// cannot merge until a person acts.
+// +kubebuilder:validation:Enum=InProgress;Passed;Refused
+type ReviewCheckState string
+
+// The states of the check run shadewright/review.
+const (
+	ReviewCheckInProgress ReviewCheckState = "InProgress"
+	ReviewCheckPassed     ReviewCheckState = "Passed"
+	ReviewCheckRefused    ReviewCheckState = "Refused"
+)
+
+// ReviewCheck is the check run shadewright/review on one head of the pull request (ADR-0028 section 5),
+// pinned to that head: a state recorded for one head never counts for another. Every head the executor pushes
+// or adopts starts without one, and the executor creates the check in progress on it. On one head the state
+// moves only from InProgress to Passed or Refused.
+// +kubebuilder:validation:XValidation:rule="self.head != oldSelf.head || self.state == oldSelf.state || (oldSelf.state == 'InProgress' && self.state in ['Passed', 'Refused'])",message="on one head the check run moves only from InProgress to Passed or Refused"
+type ReviewCheck struct {
+	// head is the commit the check run is on, always the pull request's recorded head (headSHA).
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	// +required
+	Head string `json:"head"`
+
+	// state is how far the check run on head has come.
+	// +required
+	State ReviewCheckState `json:"state"`
+}
+
 // IncomingHandoff is the replacement's side of a handoff: the predecessor it takes over and the hint it
-// answers, equal to spec.replaces. Only its phase changes once written.
+// answers, equal to spec.replaces. Once written, only its phase and the record of the rewrite after it change.
+// The check run shadewright/review is not recorded here: it belongs to each head of the pull request, also
+// one no handoff pushed (PullRequestStatus.reviewCheck).
 // +kubebuilder:validation:XValidation:rule="self.phase in ['Reserved', 'Done', 'Aborted']",message="an incoming handoff is Reserved, Done or Aborted"
 // +kubebuilder:validation:XValidation:rule="self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint",message="an incoming handoff is pinned: only its phase changes"
+// +kubebuilder:validation:XValidation:rule="!has(self.pullRequestUpdate) || self.phase == 'Done'",message="the rewrite after a handoff is recorded only once it is Done"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.pullRequestUpdate) || (has(self.pullRequestUpdate) && self.pullRequestUpdate == oldSelf.pullRequestUpdate)",message="the record of the pull request's rewrite never changes once set"
 // +kubebuilder:validation:XValidation:rule="oldSelf.phase == self.phase || (oldSelf.phase == 'Reserved' && self.phase in ['Done', 'Aborted'])",message="an incoming handoff moves only from Reserved to Done or Aborted"
 type IncomingHandoff struct {
 	// name of the predecessor.
@@ -243,14 +295,21 @@ type IncomingHandoff struct {
 	// phase is how far this side has come.
 	// +required
 	Phase HandoffPhase `json:"phase"`
+
+	// pullRequestUpdate records the rewrite of the pull request's title and body for this request's plan, with
+	// its marker (ADR-0028 section 4, step 6): Done once the Git host did it, Refused when it refused it for
+	// good. Until it is Done the body carries the predecessor's marker, which this request accepts as its own.
+	// +optional
+	PullRequestUpdate HandoffStep `json:"pullRequestUpdate,omitempty"`
 }
 
 // OutgoingHandoff is the predecessor's side of a handoff: the replacement that takes it over, the hint of this
 // request it answers (which must be in status.hints, Reserved while the intent stands) and the branch head the
-// replacement's commit must have as its parent. Only its phase changes once written.
+// replacement's commit must have as its parent. Only its phase changes once written, except that an Aborted one is
+// replaced by the Intent of a later replacement, for another hint of this request.
 // +kubebuilder:validation:XValidation:rule="self.phase in ['Intent', 'Done', 'Aborted']",message="an outgoing handoff is Intent, Done or Aborted"
-// +kubebuilder:validation:XValidation:rule="self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead",message="an outgoing handoff is pinned: only its phase changes"
-// +kubebuilder:validation:XValidation:rule="oldSelf.phase == self.phase || (oldSelf.phase == 'Intent' && self.phase in ['Done', 'Aborted'])",message="an outgoing handoff moves only from Intent to Done or Aborted"
+// +kubebuilder:validation:XValidation:rule="(oldSelf.phase == 'Aborted' && self.phase == 'Intent') || (self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead)",message="an outgoing handoff is pinned: only its phase changes, or an Aborted one is replaced"
+// +kubebuilder:validation:XValidation:rule="oldSelf.phase == self.phase || (oldSelf.phase == 'Intent' && self.phase in ['Done', 'Aborted']) || (oldSelf.phase == 'Aborted' && self.phase == 'Intent' && self.uid != oldSelf.uid)",message="an outgoing handoff moves only from Intent to Done or Aborted, or from Aborted to the Intent of another replacement"
 type OutgoingHandoff struct {
 	// name of the replacement.
 	// +required
@@ -279,8 +338,10 @@ type OutgoingHandoff struct {
 // admission sets from (phase Reserved); one write on the predecessor sets to (phase Intent) and its hint
 // Reserved; after the branch update the replacement's from moves to Done, then the predecessor ends Superseded
 // with HandedOff, its to Done and its hint Consumed. A request in the middle of a chain has both: from for the
-// handoff that gave it the pull request, to for the one that passes it on. Each side is written once, starts
-// in its first phase and is never removed; only its phase moves on.
+// handoff that gave it the pull request, to for the one that passes it on. Each side starts in its first phase
+// and is never removed: from changes only its phase and, once Done, the record of the rewrite
+// (pullRequestUpdate); to changes only its phase, except that an Aborted one is replaced by the Intent of a
+// later replacement.
 // +kubebuilder:validation:XValidation:rule="has(self.from) || has(self.to)",message="a handoff has from, to or both"
 type Handoff struct {
 	// from is the incoming side, set on a replacement.

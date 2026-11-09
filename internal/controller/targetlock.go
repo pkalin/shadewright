@@ -93,14 +93,17 @@ var closedReasons = map[string]bool{
 
 // prMayBeOpen is the status rule of the lock: whether a pull request of the request may still be open. It is
 // known not to be only when the status says so: Merged and the phases after it mean the merge; Superseded is
-// written only after the close; and PullRequestOpened with reason PullRequestClosed, ChangeRequestClosed or
+// written only after the close, except Superseded after a handoff (handedOff), whose pull request its
+// replacement holds and which so may be open (ADR-0028 section 4 item 8: no status rule releases a lock on its
+// account; it released the lock in the status write that ended it); and PullRequestOpened with reason PullRequestClosed, ChangeRequestClosed or
 // ChangeRequestMerged (markClosed) means Shadewright closed it or saw it closed or merged. Without a recorded
 // pull request one may still exist, opened while the status write that would record it was lost, so that
 // counts as may be open too, until a look-up by the branch and marker says otherwise (checkHeld). Anything
 // else, a stop that left the pull request open (HeadMoved, a refused close), one the executor could not find
 // (ChangeRequestGone), Failed or an unknown phase included, may still be open (fail closed).
 func prMayBeOpen(rr *remediationv1alpha1.RemediationRequest) bool {
-	if slices.Contains(successPhases, rr.Status.Phase) || rr.Status.Phase == remediationv1alpha1.PhaseSuperseded {
+	if slices.Contains(successPhases, rr.Status.Phase) ||
+		(rr.Status.Phase == remediationv1alpha1.PhaseSuperseded && !handedOff(rr)) {
 		return false
 	}
 	if rr.Status.PullRequest == nil {

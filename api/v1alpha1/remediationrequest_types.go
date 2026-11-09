@@ -169,13 +169,13 @@ type RemediationRequestSpec struct {
 	// replaces names the request this one replaces and the reviewer hint of that request it answers
 	// (ADR-0028 section 4). Set only by the analyzer on a replacement, together with chainRoot. It is part of
 	// the plan, so it is part of the request's name: the same plan answering another hint is another request.
-	// Planned: the executor does not act on it yet.
+	// The executor checks the link once, at the policy check, and then takes the pull request over (the handoff).
 	// +optional
 	Replaces *RequestReplacement `json:"replaces,omitempty"`
 
 	// chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or
 	// its own UID when it has none. Set together with replaces. The branch of the pull request derives from it
-	// (planned), so every request of a chain works on the same branch and pull request.
+	// (shadewright/<chainRoot>), so every request of a chain works on the same branch and pull request.
 	// +optional
 	ChainRoot UID `json:"chainRoot,omitempty"`
 }
@@ -214,7 +214,7 @@ const (
 	PhaseCancelled RemediationPhase = "Cancelled"
 	// PhaseSuperseded means a plan input changed, or the ScaledObject is no longer ready, or the module that
 	// contributes the action was disabled, so the pull request is closed and a new request is needed. With
-	// reason HandedOff (planned, ADR-0028) a replacement took over the pull request instead, which stays open.
+	// reason HandedOff (ADR-0028) a replacement took over the pull request instead, which stays open.
 	// Terminal.
 	PhaseSuperseded RemediationPhase = "Superseded"
 	// PhaseNeedsIntervention means the controller cannot continue on its own, for example because the target
@@ -253,6 +253,7 @@ const (
 
 // PullRequestStatus records the pull request that carries the plan.
 // +kubebuilder:validation:XValidation:rule="!has(self.appliedObservedAt) || has(self.mergeCommitSHA)",message="appliedObservedAt needs mergeCommitSHA"
+// +kubebuilder:validation:XValidation:rule="!has(self.reviewCheck) || self.reviewCheck.head == self.headSHA",message="reviewCheck names the recorded head"
 type PullRequestStatus struct {
 	// number of the pull request.
 	// +kubebuilder:validation:Minimum=1
@@ -295,6 +296,14 @@ type PullRequestStatus struct {
 	// a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge.
 	// +optional
 	AppliedObservedAt *metav1.Time `json:"appliedObservedAt,omitempty"`
+
+	// reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge
+	// gate), written only with reviewer hints on: InProgress once the executor created it on that head, Passed
+	// once it completed it with success after an approval of that head by someone who wrote no hint in the
+	// chain, Refused when the Git host refused to create or complete it for good (condition Approved then says
+	// so). It always names headSHA: a new head starts without it, so a state never outlives its head.
+	// +optional
+	ReviewCheck *ReviewCheck `json:"reviewCheck,omitempty"`
 }
 
 // RolloutStatus is what the check after the merge records about the target's rollout. Only the executor writes
@@ -504,7 +513,7 @@ type RemediationRequestStatus struct {
 
 	// handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over
 	// (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is
-	// written once and never removed; only its phase moves on. Planned: nothing writes it yet.
+	// never removed; Handoff says what may change. Only the executor writes it.
 	// +optional
 	Handoff *Handoff `json:"handoff,omitempty"`
 

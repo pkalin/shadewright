@@ -153,13 +153,17 @@ type hintLook struct {
 
 // watchHints runs pollHints after each look at the pull request of a request that may still be reviewed, with
 // the reconcile's context (pollHints bounds its steps itself). A failure is logged and changes nothing: the
-// watch of the pull request goes on, and the next look tries again from the stored cursor.
+// watch of the pull request goes on, and the next look tries again from the stored cursor. It returns pollHints'
+// caughtUp, false on a failure.
 func (r *RemediationRequestReconciler) watchHints(ctx context.Context, look hintLook,
-	rr *remediationv1alpha1.RemediationRequest) {
-	if err := r.pollHints(ctx, look, rr); err != nil {
+	rr *remediationv1alpha1.RemediationRequest) bool {
+	caughtUp, err := r.pollHints(ctx, look, rr)
+	if err != nil {
 		logf.FromContext(ctx).Info("Could not handle the reviewer hints of RemediationRequest",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		return false
 	}
+	return caughtUp
 }
 
 // pollHints is one look at the comments of rr's pull request, when look has a provider and reviewer hints are
@@ -167,12 +171,14 @@ func (r *RemediationRequestReconciler) watchHints(ctx context.Context, look hint
 // is updated in place only when that write succeeded. ctx is the reconcile's context: the look and the rest
 // (the answers, the kill switch read and the status update) each get a deadline of their own
 // (WriteTimeout), so a look at the comments that keeps using up its deadline never keeps an overdue hint
-// Pending.
+// Pending. caughtUp is true only when the look read the comments to the end, judged every one and the status
+// holds what it judged: the merge gate decides only then (reviewCheck).
 func (r *RemediationRequestReconciler) pollHints(ctx context.Context, look hintLook,
-	rr *remediationv1alpha1.RemediationRequest) error {
+	rr *remediationv1alpha1.RemediationRequest) (caughtUp bool, err error) {
 	now := r.now()
 	upd := rr.DeepCopy()
 	var lookErr error
+	looked := false
 	if source, fs, ok := r.feedbackFor(look, rr); ok {
 		lookCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 		cur := cursorOf(upd.Status.CommentCursor)
@@ -180,27 +186,29 @@ func (r *RemediationRequestReconciler) pollHints(ctx context.Context, look hintL
 		if err != nil {
 			lookErr = fmt.Errorf("list the comments of the pull request: %w", err)
 		} else {
-			lookErr = r.lookComments(lookCtx, fs, upd, source, cur, page, now)
+			looked, lookErr = r.lookComments(lookCtx, fs, upd, source, cur, page, now)
 		}
 		cancel()
 	}
 	storeCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
 	r.answerHints(storeCtx, upd, now)
+	r.settleHandoff(storeCtx, upd)
+	looked = looked && lookErr == nil
 	if equality.Semantic.DeepEqual(rr.Status, upd.Status) {
-		return lookErr
+		return looked, lookErr
 	}
 	// The kill switch covers this status write too (ADR-0028 section 4): while writes are paused, nothing is
 	// stored, and the next look after the pause makes the same decisions.
 	if err := r.writeAllowed(storeCtx); err != nil {
-		return errors.Join(lookErr, fmt.Errorf("store reviewer hints: %w", err))
+		return false, errors.Join(lookErr, fmt.Errorf("store reviewer hints: %w", err))
 	}
 	if err := r.Status().Update(storeCtx, upd); err != nil {
-		return errors.Join(lookErr, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace,
+		return false, errors.Join(lookErr, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace,
 			rr.Name, err))
 	}
 	upd.DeepCopyInto(rr)
-	return lookErr
+	return looked, lookErr
 }
 
 // feedbackFor returns the source and the FeedbackSource to read rr's comments with: only when reviewer hints
@@ -225,9 +233,10 @@ func (r *RemediationRequestReconciler) feedbackFor(look hintLook, rr *remediatio
 // lookComments judges the comments of one look (takeComments) into upd's status and moves the cursor past the
 // comments it judged, in upd's status too: to page.Next when it judged them all, or just after the last one it
 // judged when it stopped (page.Resume), so every look makes progress, whatever the record of refusals keeps.
+// caughtUp is true when it judged every comment of a page that reached the end of what the host had.
 func (r *RemediationRequestReconciler) lookComments(ctx context.Context, fs providers.FeedbackSource,
 	upd *remediationv1alpha1.RemediationRequest, source remediationv1alpha1.HintSource,
-	cur providers.FeedbackCursor, page providers.FeedbackPage, now time.Time) error {
+	cur providers.FeedbackCursor, page providers.FeedbackPage, now time.Time) (caughtUp bool, err error) {
 	before := seenOf(upd.Status.CommentCursor)
 	var judged []remediationv1alpha1.SeenComment
 	n, err := r.takeComments(ctx, fs, upd, source, cur, page.Items, before, &judged, now)
@@ -238,7 +247,7 @@ func (r *RemediationRequestReconciler) lookComments(ctx context.Context, fs prov
 	case n > 0 && len(page.Resume) == len(page.Items):
 		next = cursorStatus(page.Resume[n-1])
 	default:
-		return err
+		return false, err
 	}
 	var since time.Time
 	if next.Since != nil {
@@ -258,7 +267,7 @@ func (r *RemediationRequestReconciler) lookComments(ctx context.Context, fs prov
 		next.EvictedAt, next.EvictedID = new(metav1.NewTime(at)), id
 	}
 	upd.Status.CommentCursor = next
-	return err
+	return err == nil && n == len(page.Items) && page.Complete, err
 }
 
 // seenSet is what a look knows was judged already: the seen comments of the cursor, and the watermark of the
@@ -514,6 +523,10 @@ func declineOnEnd(rr *remediationv1alpha1.RemediationRequest, phase remediationv
 			h.State, h.Reason = remediationv1alpha1.HintDeclined, reason
 		}
 	}
+	// A handoff whose intent still stands when the request ends for another reason did not happen: the
+	// request that ends here keeps what it ends with, and its replacement learns of it from this status
+	// (handoff.go). A handoff that happened set its intent Done before the end it caused.
+	abortIntent(rr, reason)
 }
 
 // parseHintCommand reads the command from the first line of body. isCommand is false when the first line does

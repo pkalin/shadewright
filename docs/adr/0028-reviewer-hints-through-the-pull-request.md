@@ -313,4 +313,4 @@ Slack has no write permission on the repository, so the coordinator's ADR must d
 
 ## Amendments
 
-None yet. On acceptance (2026-11-08), [ADR-0006](0006-github-app-key-in-key-vault.md) got a dated amendment for the App's fifth permission, `checks: write` (section 5), planned until #539 ships; design 8.4 already lists it as planned. The setup docs and the fleet README get the required check with its source when the feature ships.
+None yet. On acceptance (2026-11-08), [ADR-0006](0006-github-app-key-in-key-vault.md) got a dated amendment for the App's fifth permission, `checks: write` (section 5). Since #539 (2026-11-09) the executor requests it in every token, ADR-0006 and design 8.4 say so, and the check run is built on the heads a handoff pushed; on other heads it is still planned. The setup docs and the fleet README get the required check with its source when the feature ships.

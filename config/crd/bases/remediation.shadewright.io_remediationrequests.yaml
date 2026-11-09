@@ -162,7 +162,7 @@ spec:
                 description: |-
                   chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or
                   its own UID when it has none. Set together with replaces. The branch of the pull request derives from it
-                  (planned), so every request of a chain works on the same branch and pull request.
+                  (shadewright/<chainRoot>), so every request of a chain works on the same branch and pull request.
                 pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
                 type: string
               incidentRef:
@@ -200,7 +200,7 @@ spec:
                   replaces names the request this one replaces and the reviewer hint of that request it answers
                   (ADR-0028 section 4). Set only by the analyzer on a replacement, together with chainRoot. It is part of
                   the plan, so it is part of the request's name: the same plan answering another hint is another request.
-                  Planned: the executor does not act on it yet.
+                  The executor checks the link once, at the policy check, and then takes the pull request over (the handoff).
                 properties:
                   hint:
                     description: hint is the pinned hint of the replaced request that
@@ -544,7 +544,7 @@ spec:
                 description: |-
                   handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over
                   (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is
-                  written once and never removed; only its phase moves on. Planned: nothing writes it yet.
+                  never removed; Handoff says what may change. Only the executor writes it.
                 properties:
                   from:
                     description: from is the incoming side, set on a replacement.
@@ -587,6 +587,15 @@ spec:
                         - Done
                         - Aborted
                         type: string
+                      pullRequestUpdate:
+                        description: |-
+                          pullRequestUpdate records the rewrite of the pull request's title and body for this request's plan, with
+                          its marker (ADR-0028 section 4, step 6): Done once the Git host did it, Refused when it refused it for
+                          good. Until it is Done the body carries the predecessor's marker, which this request accepts as its own.
+                        enum:
+                        - Done
+                        - Refused
+                        type: string
                       uid:
                         description: uid of the predecessor.
                         pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
@@ -603,6 +612,13 @@ spec:
                     - message: 'an incoming handoff is pinned: only its phase changes'
                       rule: self.name == oldSelf.name && self.uid == oldSelf.uid &&
                         self.hint == oldSelf.hint
+                    - message: the rewrite after a handoff is recorded only once it
+                        is Done
+                      rule: '!has(self.pullRequestUpdate) || self.phase == ''Done'''
+                    - message: the record of the pull request's rewrite never changes
+                        once set
+                      rule: '!has(oldSelf.pullRequestUpdate) || (has(self.pullRequestUpdate)
+                        && self.pullRequestUpdate == oldSelf.pullRequestUpdate)'
                     - message: an incoming handoff moves only from Reserved to Done
                         or Aborted
                       rule: oldSelf.phase == self.phase || (oldSelf.phase == 'Reserved'
@@ -668,13 +684,16 @@ spec:
                     x-kubernetes-validations:
                     - message: an outgoing handoff is Intent, Done or Aborted
                       rule: self.phase in ['Intent', 'Done', 'Aborted']
-                    - message: 'an outgoing handoff is pinned: only its phase changes'
-                      rule: self.name == oldSelf.name && self.uid == oldSelf.uid &&
-                        self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead
+                    - message: 'an outgoing handoff is pinned: only its phase changes,
+                        or an Aborted one is replaced'
+                      rule: (oldSelf.phase == 'Aborted' && self.phase == 'Intent')
+                        || (self.name == oldSelf.name && self.uid == oldSelf.uid &&
+                        self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead)
                     - message: an outgoing handoff moves only from Intent to Done
-                        or Aborted
+                        or Aborted, or from Aborted to the Intent of another replacement
                       rule: oldSelf.phase == self.phase || (oldSelf.phase == 'Intent'
-                        && self.phase in ['Done', 'Aborted'])
+                        && self.phase in ['Done', 'Aborted']) || (oldSelf.phase ==
+                        'Aborted' && self.phase == 'Intent' && self.uid != oldSelf.uid)
                 type: object
                 x-kubernetes-validations:
                 - message: a handoff has from, to or both
@@ -744,7 +763,9 @@ spec:
                       description: |-
                         reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or
                         NoProposal), NoAnswer when none came within the executor's bound, or the end of the request
-                        (PullRequestMerged, PullRequestClosed, RequestEnded). HintDeclineReasons lists them.
+                        (PullRequestMerged, PullRequestClosed, RequestEnded), or the end of its replacement without the handoff:
+                        ReplacementDenied when the replacement was Denied, HandoffAborted when it ended otherwise.
+                        HintDeclineReasons lists them.
                       enum:
                       - NoModelConfigured
                       - BudgetSpent
@@ -777,6 +798,8 @@ spec:
                       - PullRequestMerged
                       - PullRequestClosed
                       - RequestEnded
+                      - ReplacementDenied
+                      - HandoffAborted
                       type: string
                     source:
                       description: source is the system the comment is in.
@@ -966,6 +989,36 @@ spec:
                     minLength: 40
                     pattern: ^[0-9a-f]{40}$
                     type: string
+                  reviewCheck:
+                    description: |-
+                      reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge
+                      gate), written only with reviewer hints on: InProgress once the executor created it on that head, Passed
+                      once it completed it with success after an approval of that head by someone who wrote no hint in the
+                      chain, Refused when the Git host refused to create or complete it for good (condition Approved then says
+                      so). It always names headSHA: a new head starts without it, so a state never outlives its head.
+                    properties:
+                      head:
+                        description: head is the commit the check run is on, always
+                          the pull request's recorded head (headSHA).
+                        pattern: ^[0-9a-f]{40}$
+                        type: string
+                      state:
+                        description: state is how far the check run on head has come.
+                        enum:
+                        - InProgress
+                        - Passed
+                        - Refused
+                        type: string
+                    required:
+                    - head
+                    - state
+                    type: object
+                    x-kubernetes-validations:
+                    - message: on one head the check run moves only from InProgress
+                        to Passed or Refused
+                      rule: self.head != oldSelf.head || self.state == oldSelf.state
+                        || (oldSelf.state == 'InProgress' && self.state in ['Passed',
+                        'Refused'])
                   url:
                     description: url of the pull request.
                     maxLength: 2048
@@ -979,6 +1032,8 @@ spec:
                 x-kubernetes-validations:
                 - message: appliedObservedAt needs mergeCommitSHA
                   rule: '!has(self.appliedObservedAt) || has(self.mergeCommitSHA)'
+                - message: reviewCheck names the recorded head
+                  rule: '!has(self.reviewCheck) || self.reviewCheck.head == self.headSHA'
               refusedHints:
                 description: |-
                   refusedHints are the newest comments with the command that the executor refused, at most

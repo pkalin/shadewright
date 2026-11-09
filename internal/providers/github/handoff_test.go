@@ -295,12 +295,14 @@ func TestUpdateChangeRequestRefuses(t *testing.T) {
 		number      int64
 		title, body string
 	}{
-		"number 0":     {0, newTitle, newBody},
-		"blank title":  {12, " ", newBody},
-		"invalid body": {12, newTitle, "\xff"},
+		"number 0":      {0, newTitle, newBody},
+		"blank title":   {12, " ", newBody},
+		"invalid body":  {12, newTitle, "\xff"},
+		"body too long": {12, newTitle, strings.Repeat("a", maxBodyRunes+1)},
 	} {
-		if err := h.p.UpdateChangeRequest(ctx, c.number, c.title, c.body); err == nil {
-			t.Errorf("%s was allowed", name)
+		// Final, never retried: the same request fails the same way (#590).
+		if err := h.p.UpdateChangeRequest(ctx, c.number, c.title, c.body); !providers.IsRejected(err) {
+			t.Errorf("%s: got %v, want a rejection", name, err)
 		}
 	}
 }

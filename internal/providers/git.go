@@ -301,7 +301,8 @@ type GitProvider interface {
 
 	// UpdateChangeRequest replaces the title and the body of an open change request from a Shadewright branch
 	// of this repository to the target branch. A closed or merged one is ErrConflict; any other change request
-	// is refused. Writing the same title and body again succeeds. It is a write.
+	// is refused. A title or body the host would refuse (over its limit, not UTF-8) is ErrRejected. Writing the
+	// same title and body again succeeds. It is a write.
 	UpdateChangeRequest(ctx context.Context, number int64, title, body string) error
 
 	// CreateCheckRun creates the check run run on commit head, a full object ID. Each call creates one, so

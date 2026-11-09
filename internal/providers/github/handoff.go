@@ -138,15 +138,17 @@ func (p *Provider) AppendCommit(
 }
 
 // UpdateChangeRequest replaces the title and body of an open pull request from a shadewright/ branch to the
-// target branch (providers.GitProvider.UpdateChangeRequest). The same title and body are not sent again.
+// target branch (providers.GitProvider.UpdateChangeRequest). The same title and body are not sent again. Input
+// GitHub would refuse (a body over its limit) is refused before any request with providers.ErrRejected, so the
+// caller records it as final instead of asking again on every look.
 func (p *Provider) UpdateChangeRequest(ctx context.Context, number int64, title, body string) error {
 	switch {
 	case number < 1:
-		return errors.New(opUpdateCR + ": number must be positive")
+		return fmt.Errorf("%s: number must be positive: %w", opUpdateCR, providers.ErrRejected)
 	case strings.TrimSpace(title) == "" || !utf8.ValidString(title) || utf8.RuneCountInString(title) > maxTitleRunes:
-		return errors.New(opUpdateCR + ": title is empty, too long or not UTF-8")
+		return fmt.Errorf("%s: title is empty, too long or not UTF-8: %w", opUpdateCR, providers.ErrRejected)
 	case !utf8.ValidString(body) || utf8.RuneCountInString(body) > maxBodyRunes:
-		return errors.New(opUpdateCR + ": body is too long or not UTF-8")
+		return fmt.Errorf("%s: body is too long or not UTF-8: %w", opUpdateCR, providers.ErrRejected)
 	}
 	ctx, cancel := p.withTimeout(ctx)
 	defer cancel()

@@ -18,11 +18,14 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -60,8 +63,9 @@ const (
 )
 
 const (
-	// maxReviewLooks bounds the looks at the reviews of one pull request per reconcile; a list longer than that
-	// leaves the check in progress until a later look reads it whole.
+	// maxReviewLooks bounds the looks at the reviews of one pull request per reconcile. Every gate reads the
+	// list from its start, so a list longer than that leaves the check in progress for good, which the gate says
+	// (errReviewsUnread, ReasonReviewListTooLong): a person decides the merge.
 	maxReviewLooks = 4
 	// reviewApproved is the state of an approving review.
 	reviewApproved = "APPROVED"
@@ -81,10 +85,10 @@ const ReasonReviewCheckRefused = "ReviewCheckRefused"
 
 // watchReviewCheck runs reviewCheck after a look at the pull request found it open with the recorded head;
 // caughtUp says whether that look read the comments to the end and stored them. A failure is logged and
-// changes nothing: the next look tries again.
+// changes nothing: the next look tries again. A cancelled reconcile is not logged.
 func (r *RemediationRequestReconciler) watchReviewCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	caughtUp bool) {
-	if err := r.reviewCheck(ctx, rr, caughtUp); err != nil {
+	if err := r.reviewCheck(ctx, rr, caughtUp); err != nil && ctx.Err() == nil {
 		logf.FromContext(ctx).Info("Could not update the review check of RemediationRequest",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
 	}
@@ -181,8 +185,9 @@ func (r *RemediationRequestReconciler) recordReviewCheck(ctx context.Context, rr
 // progress: it reads every review of the pull request and, when the latest review of a person who wrote no hint
 // in the chain (compared by user ID) approves the recorded head, completes the check run with success and
 // records it Passed. An approval of an earlier head never counts. An approval of the head by a hint author does
-// not count either, and gets a comment saying why, once per review (by its marker). A list it cannot read whole
-// leaves the check in progress.
+// not count either, and gets a comment saying why, once per review (by its marker); this process asks for it
+// once per review, not on every look, as each ask reads the comments for the marker. A list it cannot read
+// whole leaves the check in progress and returns errReviewsUnread, with a Warning Event once per head.
 func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest) error {
 	fs, ok := feedbackOf(git)
@@ -216,7 +221,8 @@ func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git provi
 		cur = page.Next
 	}
 	if !complete {
-		return nil
+		r.warnReviewsUnread(rr)
+		return fmt.Errorf("%w (%d looks): the check stays in progress", errReviewsUnread, maxReviewLooks)
 	}
 	authors := map[int64]bool{}
 	for _, h := range rr.Status.Hints {
@@ -237,8 +243,17 @@ func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git provi
 	}
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
 	for _, id := range steered {
+		if r.steeredAnswered(rr, id) {
+			continue
+		}
 		mark := fmt.Sprintf("<!-- shadewright review-gate review=%d -->", id)
-		if err := git.CommentChangeRequest(ctx, pr.Number, mark, hintApprovalComment+"\n\n"+mark); err != nil {
+		err := git.CommentChangeRequest(ctx, pr.Number, mark, hintApprovalComment+"\n\n"+mark)
+		switch {
+		case err == nil:
+			r.answerSteered(rr, id)
+		case ctx.Err() != nil:
+			return fmt.Errorf("comment on an approval that does not count cancelled: %w", ctx.Err())
+		default:
 			log.Info("Could not say why an approval does not count for RemediationRequest", "review", id,
 				"error", err.Error())
 		}
@@ -260,4 +275,61 @@ func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git provi
 		state = remediationv1alpha1.ReviewCheckRefused
 	}
 	return r.recordReviewCheck(ctx, rr, state)
+}
+
+// ReasonReviewListTooLong is the reason of the Warning Event when the reviews of a pull request were too many to
+// read in one look: the gate leaves the check run in progress, so the merge waits until a person acts.
+const ReasonReviewListTooLong = "ReviewListTooLong"
+
+// errReviewsUnread means the merge gate could not read every review of the pull request in one look.
+var errReviewsUnread = errors.New("the reviews of the pull request are too many to read in one look")
+
+// reviewsWarning is what reviewsWarned holds per request: the head the last ReviewListTooLong Event was for.
+type reviewsWarning struct {
+	uid  types.UID
+	head string
+}
+
+// warnReviewsUnread records a Warning Event on rr when the gate could not read every review of its pull request:
+// the check stays in progress, so a ruleset that requires it blocks the merge until a person acts. One Event per
+// head and request in this process; nothing is stored, so a restart may warn once more.
+func (r *RemediationRequestReconciler) warnReviewsUnread(rr *remediationv1alpha1.RemediationRequest) {
+	if r.Recorder == nil {
+		return
+	}
+	w := reviewsWarning{uid: rr.UID, head: rr.Status.PullRequest.HeadSHA}
+	if last, ok := r.reviewsWarned.Swap(client.ObjectKeyFromObject(rr), w); ok && last == w {
+		return
+	}
+	r.Recorder.Eventf(rr, corev1.EventTypeWarning, ReasonReviewListTooLong,
+		"The merge gate could not read every review of pull request #%d in one look, so the check "+
+			"shadewright/review stays in progress on this head; a person decides the merge",
+		rr.Status.PullRequest.Number)
+}
+
+// steeredReviews is what steeredCommented holds per request: the reviews of hint authors whose comment was
+// posted or found by this process.
+type steeredReviews struct {
+	uid types.UID
+	ids []int64
+}
+
+// steeredAnswered reports whether this process already posted, or found, the comment on review id of rr.
+func (r *RemediationRequestReconciler) steeredAnswered(rr *remediationv1alpha1.RemediationRequest, id int64) bool {
+	v, _ := r.steeredCommented.Load(client.ObjectKeyFromObject(rr))
+	s, ok := v.(steeredReviews)
+	return ok && s.uid == rr.UID && slices.Contains(s.ids, id)
+}
+
+// answerSteered remembers that the comment on review id of rr is on the pull request. Reconciles of one request
+// never overlap, so the read and the store below do not race.
+func (r *RemediationRequestReconciler) answerSteered(rr *remediationv1alpha1.RemediationRequest, id int64) {
+	key := client.ObjectKeyFromObject(rr)
+	s := steeredReviews{uid: rr.UID}
+	v, _ := r.steeredCommented.Load(key)
+	if old, ok := v.(steeredReviews); ok && old.uid == rr.UID {
+		s.ids = slices.Clone(old.ids)
+	}
+	s.ids = append(s.ids, id)
+	r.steeredCommented.Store(key, s)
 }

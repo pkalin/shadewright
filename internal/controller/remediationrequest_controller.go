@@ -161,13 +161,22 @@ type RemediationRequestReconciler struct {
 	// permissionWarned holds, per request name, the comment the last HintPermissionUnknown Event was recorded for
 	// (permissionWarning, hints.go), so each comment is warned about once. Memory only, dropped with checked.
 	permissionWarned sync.Map
+	// reviewsWarned holds, per request name, the head the last ReviewListTooLong Event was recorded for
+	// (warnReviewsUnread, reviewcheck.go), so each head is warned about once. Memory only, dropped with checked.
+	reviewsWarned sync.Map
+	// steeredCommented holds, per request name, the reviews of hint authors whose comment saying why they do not
+	// count is on the pull request (reviewGate), so it is asked for once per review, not on every look. Memory
+	// only, dropped with checked: after a restart the marker finds the comment already posted.
+	steeredCommented sync.Map
 }
 
-// forget drops what this process keeps in memory about a request: its last full recheck and its last
-// permission warning.
+// forget drops what this process keeps in memory about a request: its last full recheck, its last
+// permission and review list warnings and the comments of the merge gate it posted.
 func (r *RemediationRequestReconciler) forget(key types.NamespacedName) {
 	r.checked.Delete(key)
 	r.permissionWarned.Delete(key)
+	r.reviewsWarned.Delete(key)
+	r.steeredCommented.Delete(key)
 }
 
 // DefaultTargetStateTimeout is how long the policy check waits by default for KEDA to report on a

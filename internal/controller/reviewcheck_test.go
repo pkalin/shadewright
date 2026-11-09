@@ -38,6 +38,8 @@ import (
 const (
 	// opCreateCheckRun is the fake Git's name of CreateCheckRun, for SetFail.
 	opCreateCheckRun = "CreateCheckRun"
+	// opUpdateChangeRequest is the fake's name of UpdateChangeRequest, for SetFail.
+	opUpdateChangeRequest = "UpdateChangeRequest"
 	// oldName and newName name gateWorld's predecessor and replacement, and their commits.
 	oldName = "old"
 	newName = "new"

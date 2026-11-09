@@ -35,7 +35,7 @@ The reason is on one of these conditions:
 
 - `PolicyAllowed`: the policy check. `False` is `Denied`, `Unknown` is `NeedsIntervention` or a wait, `True` is allowed.
 - `PullRequestOpened`: a stop before a pull request is recorded, and the history of one that was closed.
-- `Approved`: a stop after a pull request is recorded; `WaitingForReview` while it waits, or `ReviewCheckRefused` or `ReviewListTooLong` while it waits on a check that does not pass on the current head (a later head sets it back to `WaitingForReview`).
+- `Approved`: a stop after a pull request is recorded; `WaitingForReview` while it waits, or `ReviewCheckRefused` or `ReviewListTooLong` while it waits on a check that does not pass on the current head (both are final for that head; a replacement after a handoff starts again at `WaitingForReview`).
 - `PlanFresh`: `False` when the plan went stale (`Superseded`), `Unknown` while the Git host refuses a freshness check.
 - `Queued`: `True` while a limit holds a request back before its policy check (see [Limits](#limits)).
 

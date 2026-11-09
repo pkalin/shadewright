@@ -1648,6 +1648,12 @@ func builtinRules() []rule {
 			`dop_v1_[a-f0-9]{64}`,                           // DigitalOcean
 			`hv[sb]\.[A-Za-z0-9_-]{20,}`,                    // HashiCorp Vault
 		}, "|") + `)`)},
+		// Microsoft Entra client secrets of the current format: three characters, a digit and "Q~" (mostly
+		// "8Q~"), then 31 to 34 characters, 40 in all, of letters, digits and "_~.-". Matched as a whole here,
+		// because "~" and "." cut it into parts the long-token rule may keep (#581). No word boundary before
+		// it: the three characters before the marker are taken, whatever is glued in front. The length keeps
+		// Windows short names ("APP8Q~1"), tilde version ranges and dotted names out.
+		{kind: KindToken, re: regexp.MustCompile(`[A-Za-z0-9_~.-]{3}[0-9]Q~[A-Za-z0-9_~.-]{31,34}`)},
 		// URLs with any userinfo part, such as postgres://user:pass@host/db, https://token:@host/repo or
 		// https://token@host/repo: a user name alone may be a token.
 		{kind: KindConnectionString, re: regexp.MustCompile(

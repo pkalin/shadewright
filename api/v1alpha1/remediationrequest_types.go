@@ -477,14 +477,28 @@ type RemediationRequestStatus struct {
 
 	// hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a
 	// replacement carried over from its chain, at most MaxHints (ADR-0028). Only the executor writes them; a
-	// stored hint keeps its pin, moves only forward in its state and is never removed. Planned: nothing
-	// writes them yet.
+	// stored hint keeps its pin, moves only forward in its state and is never removed. Planned: carrying them
+	// over to a replacement.
 	// +listType=map
 	// +listMapKey=source
 	// +listMapKey=commentID
 	// +kubebuilder:validation:MaxItems=3
 	// +optional
 	Hints []Hint `json:"hints,omitempty"`
+
+	// refusedHints are the newest comments with the command that the executor refused, at most
+	// MaxRefusedHints, oldest first; an older one is dropped. Only the executor writes them.
+	// +listType=map
+	// +listMapKey=source
+	// +listMapKey=commentID
+	// +kubebuilder:validation:MaxItems=10
+	// +optional
+	RefusedHints []RefusedHint `json:"refusedHints,omitempty"`
+
+	// commentCursor is where the executor's next look at the comments of the pull request starts (ADR-0028
+	// section 3). Only the executor writes it.
+	// +optional
+	CommentCursor *CommentCursor `json:"commentCursor,omitempty"`
 
 	// handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over
 	// (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is

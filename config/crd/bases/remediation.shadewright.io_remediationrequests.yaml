@@ -375,6 +375,43 @@ spec:
                   breaker finds a running probe, or one that ended without a success, by this field only; a request
                   without it is not a probe. It is a selectable field (field selector status.breakerProbe).
                 type: boolean
+              commentCursor:
+                description: |-
+                  commentCursor is where the executor's next look at the comments of the pull request starts (ADR-0028
+                  section 3). Only the executor writes it.
+                properties:
+                  afterID:
+                    description: 'afterID: the comments of the current sweep with
+                      an ID up to this one were returned already.'
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  etag:
+                    description: |-
+                      etag is the entity tag of the last answer to the first page of a sweep that held no comment, sent as
+                      If-None-Match, so an unchanged answer is "not modified" and costs no read.
+                    maxLength: 256
+                    pattern: ^(W/)?"[!#-~]*"$
+                    type: string
+                  page:
+                    description: page is the page the next look starts on; 0 starts
+                      a new sweep.
+                    format: int32
+                    maximum: 100000
+                    minimum: 0
+                    type: integer
+                  since:
+                    description: |-
+                      since is the oldest update time the current sweep of the comments asks for. Every comment created before
+                      it was returned by an earlier look.
+                    format: date-time
+                    type: string
+                  sweepStart:
+                    description: sweepStart is the code host's time when the current
+                      sweep began.
+                    format: date-time
+                    type: string
+                type: object
               conditions:
                 description: |-
                   conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
@@ -590,8 +627,8 @@ spec:
                 description: |-
                   hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a
                   replacement carried over from its chain, at most MaxHints (ADR-0028). Only the executor writes them; a
-                  stored hint keeps its pin, moves only forward in its state and is never removed. Planned: nothing
-                  writes them yet.
+                  stored hint keeps its pin, moves only forward in its state and is never removed. Planned: carrying them
+                  over to a replacement.
                 items:
                   description: |-
                     Hint is one reviewer hint the executor accepted from a comment on the request's pull request (ADR-0028
@@ -829,6 +866,74 @@ spec:
                 x-kubernetes-validations:
                 - message: appliedObservedAt needs mergeCommitSHA
                   rule: '!has(self.appliedObservedAt) || has(self.mergeCommitSHA)'
+              refusedHints:
+                description: |-
+                  refusedHints are the newest comments with the command that the executor refused, at most
+                  MaxRefusedHints, oldest first; an older one is dropped. Only the executor writes them.
+                items:
+                  description: |-
+                    RefusedHint records a comment that carried the command and was refused, so the refusal is made once and a
+                    reader sees why no hint was stored. It holds no text of the comment.
+                  properties:
+                    author:
+                      description: author wrote the comment, as the source's API reported
+                        it.
+                      properties:
+                        id:
+                          description: id is the author's numeric user ID in the source.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        login:
+                          description: login is the author's login when the hint was
+                            accepted, for the reader only.
+                          maxLength: 100
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                          type: string
+                      required:
+                      - id
+                      - login
+                      type: object
+                    commentID:
+                      description: commentID is the comment's ID in the source.
+                      format: int64
+                      minimum: 1
+                      type: integer
+                    reason:
+                      description: reason says why no hint was stored.
+                      enum:
+                      - NoWriteAccess
+                      - CapReached
+                      - TooLong
+                      - NotRedactable
+                      - Empty
+                      - EditedAfterAccept
+                      - EditedAfterSeen
+                      - PermissionNotChecked
+                      type: string
+                    refusedAt:
+                      description: refusedAt is when the executor refused it.
+                      format: date-time
+                      type: string
+                    source:
+                      description: source is the system the comment is in.
+                      enum:
+                      - GitHub
+                      type: string
+                  required:
+                  - author
+                  - commentID
+                  - reason
+                  - refusedAt
+                  - source
+                  type: object
+                maxItems: 10
+                type: array
+                x-kubernetes-list-map-keys:
+                - source
+                - commentID
+                x-kubernetes-list-type: map
               rollout:
                 description: rollout is what the check after the merge keeps between
                   reconciles (the RolledOut condition).

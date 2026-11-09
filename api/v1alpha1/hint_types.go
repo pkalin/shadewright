@@ -20,9 +20,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Reviewer hints and the supersede handoff (ADR-0028). The analyzer reads stored hints and writes spec.replaces,
-// spec.chainRoot and the Incident's status.handledHint; planned: nothing writes status.hints or status.handoff
-// yet.
+// Reviewer hints and the supersede handoff (ADR-0028). The executor writes status.hints, status.refusedHints
+// and status.commentCursor; the analyzer reads stored hints and writes spec.replaces, spec.chainRoot and the
+// Incident's status.handledHint. Planned: nothing writes status.handoff yet.
 
 // MaxHints is the most hints a request's status.hints holds, which is also the most hints one supersede chain
 // can consume: the consumed hints of a chain are carried into the replacement's status (ADR-0028 section 6).
@@ -261,4 +261,88 @@ type Handoff struct {
 	// to is the outgoing side, set on a predecessor.
 	// +optional
 	To *OutgoingHandoff `json:"to,omitempty"`
+}
+
+// MaxRefusedHints is the most refusals a request's status.refusedHints keeps; the oldest goes first.
+const MaxRefusedHints = 10
+
+// HintRefusal says why the executor stored no hint for a comment that carried the command (ADR-0028
+// section 2). NoWriteAccess: the code host says the author may not write to the repository, or does not know
+// the author. CapReached: the request holds MaxHints hints already, which count for its whole supersede chain.
+// TooLong: the hint is over MaxHintTextBytes after redaction, or the body was cut before the end of its first
+// line. NotRedactable: the redacted text still holds something the redactor would change. Empty: the command
+// has no text. EditedAfterAccept: the comment of a stored hint was edited; the stored hint stays as it was.
+// EditedAfterSeen: a comment the executor had read already was edited to carry the command.
+// PermissionNotChecked: the look held more new authors than the executor asks the code host about in one look.
+// +kubebuilder:validation:Enum=NoWriteAccess;CapReached;TooLong;NotRedactable;Empty;EditedAfterAccept;EditedAfterSeen;PermissionNotChecked
+type HintRefusal string
+
+// The refusals, one per value of the HintRefusal enum.
+const (
+	HintRefusalNoWriteAccess        HintRefusal = "NoWriteAccess"
+	HintRefusalCapReached           HintRefusal = "CapReached"
+	HintRefusalTooLong              HintRefusal = "TooLong"
+	HintRefusalNotRedactable        HintRefusal = "NotRedactable"
+	HintRefusalEmpty                HintRefusal = "Empty"
+	HintRefusalEditedAfterAccept    HintRefusal = "EditedAfterAccept"
+	HintRefusalEditedAfterSeen      HintRefusal = "EditedAfterSeen"
+	HintRefusalPermissionNotChecked HintRefusal = "PermissionNotChecked"
+)
+
+// RefusedHint records a comment that carried the command and was refused, so the refusal is made once and a
+// reader sees why no hint was stored. It holds no text of the comment.
+type RefusedHint struct {
+	// source is the system the comment is in.
+	// +required
+	Source HintSource `json:"source"`
+
+	// commentID is the comment's ID in the source.
+	// +kubebuilder:validation:Minimum=1
+	// +required
+	CommentID int64 `json:"commentID"`
+
+	// author wrote the comment, as the source's API reported it.
+	// +required
+	Author HintAuthor `json:"author"`
+
+	// reason says why no hint was stored.
+	// +required
+	Reason HintRefusal `json:"reason"`
+
+	// refusedAt is when the executor refused it.
+	// +required
+	RefusedAt metav1.Time `json:"refusedAt"`
+}
+
+// CommentCursor is where the executor's next look at the conversation comments of the request's pull request
+// starts (ADR-0028 section 3): the durable watermark, so a restart neither reads a comment again as new nor
+// skips one. It is written in the status update that stores what the look found, and only once every comment
+// of that look was handled. Its fields mean something only to the code host's adapter.
+type CommentCursor struct {
+	// since is the oldest update time the current sweep of the comments asks for. Every comment created before
+	// it was returned by an earlier look.
+	// +optional
+	Since *metav1.Time `json:"since,omitempty"`
+
+	// page is the page the next look starts on; 0 starts a new sweep.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100000
+	// +optional
+	Page int32 `json:"page,omitempty"`
+
+	// afterID: the comments of the current sweep with an ID up to this one were returned already.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	AfterID int64 `json:"afterID,omitempty"`
+
+	// sweepStart is the code host's time when the current sweep began.
+	// +optional
+	SweepStart *metav1.Time `json:"sweepStart,omitempty"`
+
+	// etag is the entity tag of the last answer to the first page of a sweep that held no comment, sent as
+	// If-None-Match, so an unchanged answer is "not modified" and costs no read.
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^(W/)?"[!#-~]*"$`
+	// +optional
+	ETag string `json:"etag,omitempty"`
 }

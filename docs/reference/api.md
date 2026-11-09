@@ -223,6 +223,24 @@ Used by: [Signer](#signer).
 | --- | --- | --- | --- |
 | `keyID` | string | Yes | keyID is the key identifier, with or without a version, for example https://&lt;vault>.vault.azure.net/keys/github-app. It follows the Key Vault naming rules, as the signer does: a vault name of 3 to 24 lower-case letters, digits and hyphens that starts with a letter, ends with a letter or digit and has no consecutive hyphens; a key name of 1 to 127 letters, digits and hyphens; an optional version of 32 lower-case hexadecimal digits.<br>Maximum length: 2048<br>Pattern: `^https://[a-z][a-z0-9-]{1,22}[a-z0-9]\.vault\.azure\.net/keys/[A-Za-z0-9-]{1,127}(/[0-9a-f]{32})?$`<br>Rule: the vault name must not contain consecutive hyphens (`!self.matches('^https://[a-z0-9-]*--')`) |
 
+### CommentCursor
+
+CommentCursor is where the executor's next look at the conversation comments of the request's pull request
+starts (ADR-0028 section 3): the durable watermark, so a restart neither reads a comment again as new nor
+skips one. It is written in the status update that stores what the look found, and only once every comment
+of that look was handled. Its fields mean something only to the code host's adapter.
+
+
+Used by: [RemediationRequestStatus](#remediationrequeststatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `since` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | since is the oldest update time the current sweep of the comments asks for. Every comment created before it was returned by an earlier look. |
+| `page` | integer | No | page is the page the next look starts on; 0 starts a new sweep.<br>Maximum: 100000<br>Minimum: 0 |
+| `afterID` | integer | No | afterID: the comments of the current sweep with an ID up to this one were returned already.<br>Minimum: 0 |
+| `sweepStart` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | sweepStart is the code host's time when the current sweep began. |
+| `etag` | string | No | etag is the entity tag of the last answer to the first page of a sweep that held no comment, sent as If-None-Match, so an unchanged answer is "not modified" and costs no read.<br>Maximum length: 256<br>Pattern: `^(W/)?"[!#-~]*"$` |
+
 ### GitBranch
 
 GitBranch is a branch name. Names that git or a shell could read as something else (a leading dash,
@@ -408,7 +426,7 @@ HintAuthor is the comment's author as the source's API reported it, never a name
 text. The merge gate compares authors by id, so a renamed login carries nothing over.
 
 
-Used by: [Hint](#hint).
+Used by: [Hint](#hint), [RefusedHint](#refusedhint).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -429,6 +447,33 @@ Used by: [IncidentStatus](#incidentstatus), [IncomingHandoff](#incominghandoff),
 | `commentID` | integer | Yes | commentID is the comment's ID in the source.<br>Minimum: 1 |
 | `digest` | string | Yes | digest is the SHA-256 of the stored, redacted hint text.<br>Pattern: `^sha256:[0-9a-f]{64}$` |
 
+### HintRefusal
+
+HintRefusal says why the executor stored no hint for a comment that carried the command (ADR-0028
+section 2). NoWriteAccess: the code host says the author may not write to the repository, or does not know
+the author. CapReached: the request holds MaxHints hints already, which count for its whole supersede chain.
+TooLong: the hint is over MaxHintTextBytes after redaction, or the body was cut before the end of its first
+line. NotRedactable: the redacted text still holds something the redactor would change. Empty: the command
+has no text. EditedAfterAccept: the comment of a stored hint was edited; the stored hint stays as it was.
+EditedAfterSeen: a comment the executor had read already was edited to carry the command.
+PermissionNotChecked: the look held more new authors than the executor asks the code host about in one look.
+
+- Underlying type: string
+- One of `NoWriteAccess`, `CapReached`, `TooLong`, `NotRedactable`, `Empty`, `EditedAfterAccept`, `EditedAfterSeen`, `PermissionNotChecked`
+
+Used by: [RefusedHint](#refusedhint).
+
+| Value | Description |
+| --- | --- |
+| `NoWriteAccess` |  |
+| `CapReached` |  |
+| `TooLong` |  |
+| `NotRedactable` |  |
+| `Empty` |  |
+| `EditedAfterAccept` |  |
+| `EditedAfterSeen` |  |
+| `PermissionNotChecked` |  |
+
 ### HintSource
 
 HintSource is the system a hint came from. GitHub is the only one; Azure DevOps is planned.
@@ -436,7 +481,7 @@ HintSource is the system a hint came from. GitHub is the only one; Azure DevOps 
 - Underlying type: string
 - One of `GitHub`
 
-Used by: [Hint](#hint), [HintRef](#hintref).
+Used by: [Hint](#hint), [HintRef](#hintref), [RefusedHint](#refusedhint).
 
 | Value | Description |
 | --- | --- |
@@ -845,6 +890,22 @@ a blob name of one path segment with nothing to escape.
 
 Used by: [IncidentStatus](#incidentstatus).
 
+### RefusedHint
+
+RefusedHint records a comment that carried the command and was refused, so the refusal is made once and a
+reader sees why no hint was stored. It holds no text of the comment.
+
+
+Used by: [RemediationRequestStatus](#remediationrequeststatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `source` | [HintSource](#hintsource) | Yes | source is the system the comment is in.<br>One of `GitHub` |
+| `commentID` | integer | Yes | commentID is the comment's ID in the source.<br>Minimum: 1 |
+| `author` | [HintAuthor](#hintauthor) | Yes | author wrote the comment, as the source's API reported it. |
+| `reason` | [HintRefusal](#hintrefusal) | Yes | reason says why no hint was stored.<br>One of `NoWriteAccess`, `CapReached`, `TooLong`, `NotRedactable`, `Empty`, `EditedAfterAccept`, `EditedAfterSeen`, `PermissionNotChecked` |
+| `refusedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | refusedAt is when the executor refused it. |
+
 ### RemediationMode
 
 RemediationMode says how a plan is carried out. GitOps is the only mode (ADR-0003).
@@ -970,7 +1031,9 @@ Used by: [RemediationRequest](#remediationrequest).
 | `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists.<br>Rule: appliedObservedAt needs mergeCommitSHA |
 | `rollout` | [RolloutStatus](#rolloutstatus) | No | rollout is what the check after the merge keeps between reconciles (the RolledOut condition). |
 | `deadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | deadline is when the current step gives up. |
-| `hints` | [Hint](#hint) array | No | hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a replacement carried over from its chain, at most MaxHints (ADR-0028). Only the executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed. Planned: nothing writes them yet.<br>Maximum items: 3<br>List type: map<br>List key: `source`<br>List key: `commentID`<br>Rule: text must be at most 2048 bytes<br>Rule: a Declined hint needs a reason<br>Rule: a stored hint is pinned: only its state and reason change<br>Rule: the reason of a Consumed or Declined hint never changes<br>Rule: a hint moves only from Pending to Reserved or Declined, and from Reserved to Consumed or Declined |
+| `hints` | [Hint](#hint) array | No | hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a replacement carried over from its chain, at most MaxHints (ADR-0028). Only the executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed. Planned: carrying them over to a replacement.<br>Maximum items: 3<br>List type: map<br>List key: `source`<br>List key: `commentID`<br>Rule: text must be at most 2048 bytes<br>Rule: a Declined hint needs a reason<br>Rule: a stored hint is pinned: only its state and reason change<br>Rule: the reason of a Consumed or Declined hint never changes<br>Rule: a hint moves only from Pending to Reserved or Declined, and from Reserved to Consumed or Declined |
+| `refusedHints` | [RefusedHint](#refusedhint) array | No | refusedHints are the newest comments with the command that the executor refused, at most MaxRefusedHints, oldest first; an older one is dropped. Only the executor writes them.<br>Maximum items: 10<br>List type: map<br>List key: `source`<br>List key: `commentID` |
+| `commentCursor` | [CommentCursor](#commentcursor) | No | commentCursor is where the executor's next look at the comments of the pull request starts (ADR-0028 section 3). Only the executor writes it. |
 | `handoff` | [Handoff](#handoff) | No | handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is written once and never removed; only its phase moves on. Planned: nothing writes it yet.<br>Rule: a handoff has from, to or both |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run the applied template; False with reason RolloutStuck or DeliveryNotObserved, Unknown while in progress and with reason KindNotChecked, RolloutSuperseded or RolloutNotDetermined when the check ends without a verdict).<br>List type: map<br>List key: `type` |
 

@@ -309,6 +309,92 @@ var _ = Describe("RemediationRequest status.hints", func() {
 	})
 })
 
+func testRefused(commentID int64) v1alpha1.RefusedHint {
+	return v1alpha1.RefusedHint{
+		Source: v1alpha1.HintSourceGitHub, CommentID: commentID, Author: v1alpha1.HintAuthor{ID: 42, Login: "octo-cat"},
+		Reason: v1alpha1.HintRefusalNoWriteAccess, RefusedAt: metav1.NewTime(time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)),
+	}
+}
+
+var _ = Describe("RemediationRequest status.refusedHints", func() {
+	It("accepts MaxRefusedHints refusals, each reason, and drops the oldest", func() {
+		rr := createdRequest(false)
+		reasons := []v1alpha1.HintRefusal{v1alpha1.HintRefusalNoWriteAccess, v1alpha1.HintRefusalCapReached,
+			v1alpha1.HintRefusalTooLong, v1alpha1.HintRefusalNotRedactable, v1alpha1.HintRefusalEmpty,
+			v1alpha1.HintRefusalEditedAfterAccept, v1alpha1.HintRefusalEditedAfterSeen,
+			v1alpha1.HintRefusalPermissionNotChecked}
+		for i := range v1alpha1.MaxRefusedHints {
+			r := testRefused(int64(i + 1))
+			r.Reason = reasons[i%len(reasons)]
+			rr.Status.RefusedHints = append(rr.Status.RefusedHints, r)
+		}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		got := reread(rr)
+		got.Status.RefusedHints = append(got.Status.RefusedHints[1:], testRefused(99))
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "a refusal is not pinned: the oldest goes")
+	})
+
+	It("refuses more than MaxRefusedHints", func() {
+		rr := createdRequest(false)
+		for i := range v1alpha1.MaxRefusedHints + 1 {
+			rr.Status.RefusedHints = append(rr.Status.RefusedHints, testRefused(int64(i+1)))
+		}
+		expectStatusRefused(rr, "status.refusedHints: Too many")
+	})
+
+	It("refuses two refusals of the same comment", func() {
+		rr := createdRequest(false)
+		rr.Status.RefusedHints = []v1alpha1.RefusedHint{testRefused(1), testRefused(1)}
+		expectStatusRefused(rr, "Duplicate value")
+	})
+
+	DescribeTable("refuses a refusal out of its rules",
+		func(change func(*v1alpha1.RefusedHint), msg string) {
+			rr := createdRequest(false)
+			r := testRefused(1)
+			change(&r)
+			rr.Status.RefusedHints = []v1alpha1.RefusedHint{r}
+			expectStatusRefused(rr, msg)
+		},
+		Entry("an unknown reason", func(r *v1alpha1.RefusedHint) { r.Reason = "Rude" }, "status.refusedHints[0].reason"),
+		Entry("an unknown source", func(r *v1alpha1.RefusedHint) { r.Source = "Slack" }, "status.refusedHints[0].source"),
+		Entry("comment ID 0", func(r *v1alpha1.RefusedHint) { r.CommentID = 0 }, "status.refusedHints[0].commentID"),
+		Entry("author ID 0", func(r *v1alpha1.RefusedHint) { r.Author.ID = 0 }, "status.refusedHints[0].author.id"),
+		Entry("a login with a space", func(r *v1alpha1.RefusedHint) { r.Author.Login = "octo cat" }, "status.refusedHints[0].author.login"),
+	)
+})
+
+var _ = Describe("RemediationRequest status.commentCursor", func() {
+	at := metav1.NewTime(time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC))
+	It("accepts a cursor at its bounds", func() {
+		for _, c := range []v1alpha1.CommentCursor{
+			{},
+			{Since: &at, ETag: `W/"` + strings.Repeat("a", 250) + `"`},
+			{Since: &at, Page: 100000, AfterID: 1 << 40, SweepStart: &at},
+			{ETag: `""`},
+		} {
+			rr := createdRequest(false)
+			rr.Status.CommentCursor = &c
+			Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "%+v", c)
+		}
+	})
+
+	DescribeTable("refuses a cursor out of its rules",
+		func(c v1alpha1.CommentCursor, msg string) {
+			rr := createdRequest(false)
+			rr.Status.CommentCursor = &c
+			expectStatusRefused(rr, msg)
+		},
+		Entry("a negative page", v1alpha1.CommentCursor{Page: -1}, "status.commentCursor.page"),
+		Entry("a page past the bound", v1alpha1.CommentCursor{Page: 100001}, "status.commentCursor.page"),
+		Entry("a negative afterID", v1alpha1.CommentCursor{AfterID: -1}, "status.commentCursor.afterID"),
+		Entry("an unquoted etag", v1alpha1.CommentCursor{ETag: "abc"}, "status.commentCursor.etag"),
+		Entry("an etag with a line break", v1alpha1.CommentCursor{ETag: "\"a\"\r\nX-Evil: 1"}, "status.commentCursor.etag"),
+		Entry("an etag with a blank", v1alpha1.CommentCursor{ETag: `"a b"`}, "status.commentCursor.etag"),
+		Entry("an etag over 256 bytes", v1alpha1.CommentCursor{ETag: `"` + strings.Repeat("a", 255) + `"`}, "status.commentCursor.etag"),
+	)
+})
+
 var _ = Describe("RemediationRequest status.handoff", func() {
 	const nextUID = "55555555-5555-4555-8555-555555555555"
 	incoming := func(phase v1alpha1.HandoffPhase) *v1alpha1.IncomingHandoff {

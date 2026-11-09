@@ -473,7 +473,7 @@ func TestNetworkPoliciesServicesAndCRDsEqualKustomize(t *testing.T) {
 // policy (the manifests use a placeholder, the chart a digest), the cluster ID (a value), the module grants (the
 // chart knows which module roles it rendered; a kustomize install may add any of config/modules, so the
 // manifests leave --module-grants out and the analyzer checks every module kind), the metrics port (the chart
-// makes it optional), the order of the args, and the defaulted automountServiceAccountToken.
+// makes it optional), GOMEMLIMIT (chart only), the order of the args, and the defaulted automountServiceAccountToken.
 func normalizedPod(d *appsv1.Deployment) corev1.PodSpec {
 	spec := *d.Spec.Template.Spec.DeepCopy()
 	if spec.AutomountServiceAccountToken == nil {
@@ -492,6 +492,8 @@ func normalizedPod(d *appsv1.Deployment) corev1.PodSpec {
 			}
 		}
 		c.Args = slices.DeleteFunc(c.Args, func(a string) bool { return strings.HasPrefix(a, "--module-grants=") })
+		// The chart sets GOMEMLIMIT from the memory limit (#601); the manifests do not.
+		c.Env = slices.DeleteFunc(c.Env, func(e corev1.EnvVar) bool { return e.Name == "GOMEMLIMIT" })
 		slices.Sort(c.Args)
 		c.Ports = slices.DeleteFunc(c.Ports, func(p corev1.ContainerPort) bool { return p.Name == "metrics" })
 		if len(c.VolumeMounts) == 0 {

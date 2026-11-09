@@ -145,6 +145,10 @@ executor:
     # -- Further ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `executor.identity.azure.clientId`.
     # @section -- Executor
     annotations: {}
+  # -- Go memory limit (`GOMEMLIMIT`) of the container, such as `100MiB`. Empty (the default) sets 90 percent of `resources.limits.memory`, so it follows that limit: the Go runtime then collects before the heap reaches the container's limit, and a large but bounded parse is not OOM-killed. Set it for a limit the chart cannot read (not an integer or a whole number with a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix, such as `1.5Gi`: the chart then refuses to render) or for another margin.
+  # @default -- 90 percent of `resources.limits.memory`
+  # @section -- Executor
+  goMemLimit: ""
   resources:
     limits:
       # -- CPU limit (optional; removing it with `null` lets the container use idle CPU).
@@ -281,6 +285,10 @@ analyzer:
     # -- Further ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `analyzer.identity.azure.clientId`.
     # @section -- Analyzer
     annotations: {}
+  # -- Go memory limit (`GOMEMLIMIT`) of the container, such as `100MiB`. Empty (the default) sets 90 percent of `resources.limits.memory`, so it follows that limit: the Go runtime then collects before the heap reaches the container's limit, and a large but bounded parse is not OOM-killed. Set it for a limit the chart cannot read (not an integer or a whole number with a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix, such as `1.5Gi`: the chart then refuses to render) or for another margin.
+  # @default -- 90 percent of `resources.limits.memory`
+  # @section -- Analyzer
+  goMemLimit: ""
   resources:
     limits:
       # -- CPU limit (optional; removing it with `null` lets the container use idle CPU).

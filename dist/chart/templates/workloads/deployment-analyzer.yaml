@@ -113,6 +113,8 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
+        - name: GOMEMLIMIT
+          value: {{ include "shadewright.goMemLimit" (dict "component" "analyzer" "context" $) | quote }}
         {{- with ($c.tracing | default dict).endpoint }}
         # The analysis traces (#90): OTLP over gRPC, off without an endpoint.
         - name: OTEL_TRACES_EXPORTER

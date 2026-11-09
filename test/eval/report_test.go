@@ -67,8 +67,8 @@ type scenarioResult struct {
 	// QuoteFailures says, for a run that ended NoEvidence, how each quote differs from the block it cites
 	// (#474): a class and lengths, never the quote or the block.
 	QuoteFailures []quoteFailure `json:"quoteFailures,omitempty"`
-	// Reply is the text of the result the loop accepted (#600), so a missed rubric fact can be traced to what
-	// the model wrote; nil when the run ended without an accepted result.
+	// Reply is the text of the last reply when it decoded as a result (#600), accepted or refused as NoEvidence,
+	// so a missed rubric fact or a failed quote can be traced to what the model wrote; nil otherwise.
 	Reply *replyText `json:"reply,omitempty"`
 	// Error is set when the scenario could not run; it then fails.
 	Error string `json:"error,omitempty"`
@@ -76,7 +76,7 @@ type scenarioResult struct {
 
 // The caps of the reply text in the report, in bytes of UTF-8 with the truncation mark included, and in items.
 // They are the result's own bounds (analysis.Result: summary 1024 bytes, a hypothesis or a quote 512, at most
-// 10 quotes; it allows 5 hypotheses), so a reply the loop accepted is kept whole today; they are here so that a
+// 10 quotes; it allows 5 hypotheses), so a decoded reply is kept whole today; they are here so that a
 // raised bound cannot grow the report unbounded: at most 1024 + 20 * 512 bytes of text per run.
 const (
 	replySummaryCap = 1024
@@ -87,7 +87,7 @@ const (
 // truncationMark ends a field the caps cut.
 const truncationMark = " [truncated]"
 
-// replyText is the diagnosis and the evidence of the result the loop accepted, redacted as the analyzer redacts
+// replyText is the diagnosis and the evidence of the last reply that decoded as a result, redacted as the analyzer redacts
 // the result's text (keeping the Incident's name) and capped (replySummaryCap and the others).
 type replyText struct {
 	Summary    string          `json:"summary"`

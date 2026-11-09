@@ -465,18 +465,54 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		Expect(asks()).To(Equal(3), "the refused comment was not asked about again")
 	})
 
-	It("asks about at most maxPermissionAsks authors in one look", func() {
-		spam := make([]int64, 0, maxPermissionAsks+2)
-		for i := range maxPermissionAsks + 2 {
-			spam = append(spam, comment(providers.AuthorPerson, 3000+int64(i), fmt.Sprintf("s%d", i),
+	It("asks about at most maxPermissionAsks authors in one look, and judges the rest on a later look", func() {
+		crowd := make([]int64, 0, maxPermissionAsks)
+		for i := range maxPermissionAsks {
+			crowd = append(crowd, comment(providers.AuthorPerson, 3000+int64(i), fmt.Sprintf("s%d", i),
 				"/shadewright reanalyze: x"))
 		}
+		late := byWriter("/shadewright reanalyze: after the crowd")
+		before := fetch().Status.CommentCursor
 		poll()
 		Expect(asks()).To(Equal(maxPermissionAsks))
-		Expect(fetch().Status.RefusedHints).To(HaveLen(remediationv1alpha1.MaxRefusedHints),
-			"only the newest refusals are kept")
-		Expect(refusals()).To(HaveKeyWithValue(spam[len(spam)-1], remediationv1alpha1.HintRefusalPermissionNotChecked))
-		Expect(fetch().Status.CommentCursor).NotTo(BeNil(), "the look is handled in full and the cursor moves on")
+		got := fetch()
+		Expect(got.Status.Hints).To(BeEmpty())
+		Expect(refusals()).To(HaveLen(maxPermissionAsks))
+		Expect(refusals()).NotTo(HaveKey(late), "a comment not judged is not refused")
+		Expect(refusals()).To(HaveKeyWithValue(crowd[0], remediationv1alpha1.HintRefusalNoWriteAccess))
+		Expect(got.Status.CommentCursor).To(Equal(before), "the cursor does not pass a comment not judged")
+
+		poll()
+		Expect(asks()).To(Equal(maxPermissionAsks+1), "only the author not asked yet is asked")
+		got = fetch()
+		Expect(got.Status.Hints).To(HaveLen(1))
+		Expect(got.Status.Hints[0].CommentID).To(Equal(late))
+		Expect(got.Status.CommentCursor).NotTo(BeNil(), "the look is handled in full and the cursor moves on")
+	})
+
+	It("declines a Pending hint when the pull request is merged", func() {
+		byWriter("/shadewright reanalyze: the sidecar")
+		poll()
+		Expect(fetch().Status.Hints).To(HaveLen(1))
+		_, err := git.Merge(number)
+		Expect(err).NotTo(HaveOccurred())
+		poll()
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(got.Status.Hints[0].State).To(Equal(remediationv1alpha1.HintDeclined))
+		Expect(got.Status.Hints[0].Reason).To(Equal(ReasonHintPullRequestMerged))
+	})
+
+	It("declines a Pending hint when the pull request is closed without a merge", func() {
+		byWriter("/shadewright reanalyze: the sidecar")
+		poll()
+		Expect(fetch().Status.Hints).To(HaveLen(1))
+		Expect(git.CloseChangeRequest(ctx, number)).To(Succeed())
+		poll()
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(got.Status.Hints[0].State).To(Equal(remediationv1alpha1.HintDeclined))
+		Expect(got.Status.Hints[0].Reason).To(Equal(ReasonHintPullRequestClosed))
 	})
 
 	It("reads only the request's own pull request, and goes on when the host refuses the read", func() {

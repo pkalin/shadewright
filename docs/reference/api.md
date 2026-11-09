@@ -456,10 +456,9 @@ TooLong: the hint is over MaxHintTextBytes after redaction, or the body was cut 
 line. NotRedactable: the redacted text still holds something the redactor would change. Empty: the command
 has no text. EditedAfterAccept: the comment of a stored hint was edited; the stored hint stays as it was.
 EditedAfterSeen: a comment the executor had read already was edited to carry the command.
-PermissionNotChecked: the look held more new authors than the executor asks the code host about in one look.
 
 - Underlying type: string
-- One of `NoWriteAccess`, `CapReached`, `TooLong`, `NotRedactable`, `Empty`, `EditedAfterAccept`, `EditedAfterSeen`, `PermissionNotChecked`
+- One of `NoWriteAccess`, `CapReached`, `TooLong`, `NotRedactable`, `Empty`, `EditedAfterAccept`, `EditedAfterSeen`
 
 Used by: [RefusedHint](#refusedhint).
 
@@ -472,7 +471,6 @@ Used by: [RefusedHint](#refusedhint).
 | `Empty` |  |
 | `EditedAfterAccept` |  |
 | `EditedAfterSeen` |  |
-| `PermissionNotChecked` |  |
 
 ### HintSource
 
@@ -903,7 +901,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `source` | [HintSource](#hintsource) | Yes | source is the system the comment is in.<br>One of `GitHub` |
 | `commentID` | integer | Yes | commentID is the comment's ID in the source.<br>Minimum: 1 |
 | `author` | [HintAuthor](#hintauthor) | Yes | author wrote the comment, as the source's API reported it. |
-| `reason` | [HintRefusal](#hintrefusal) | Yes | reason says why no hint was stored.<br>One of `NoWriteAccess`, `CapReached`, `TooLong`, `NotRedactable`, `Empty`, `EditedAfterAccept`, `EditedAfterSeen`, `PermissionNotChecked` |
+| `reason` | [HintRefusal](#hintrefusal) | Yes | reason says why no hint was stored.<br>One of `NoWriteAccess`, `CapReached`, `TooLong`, `NotRedactable`, `Empty`, `EditedAfterAccept`, `EditedAfterSeen` |
 | `refusedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | refusedAt is when the executor refused it. |
 
 ### RemediationMode

@@ -910,7 +910,6 @@ spec:
                       - Empty
                       - EditedAfterAccept
                       - EditedAfterSeen
-                      - PermissionNotChecked
                       type: string
                     refusedAt:
                       description: refusedAt is when the executor refused it.

@@ -321,8 +321,7 @@ var _ = Describe("RemediationRequest status.refusedHints", func() {
 		rr := createdRequest(false)
 		reasons := []v1alpha1.HintRefusal{v1alpha1.HintRefusalNoWriteAccess, v1alpha1.HintRefusalCapReached,
 			v1alpha1.HintRefusalTooLong, v1alpha1.HintRefusalNotRedactable, v1alpha1.HintRefusalEmpty,
-			v1alpha1.HintRefusalEditedAfterAccept, v1alpha1.HintRefusalEditedAfterSeen,
-			v1alpha1.HintRefusalPermissionNotChecked}
+			v1alpha1.HintRefusalEditedAfterAccept, v1alpha1.HintRefusalEditedAfterSeen}
 		for i := range v1alpha1.MaxRefusedHints {
 			r := testRefused(int64(i + 1))
 			r.Reason = reasons[i%len(reasons)]

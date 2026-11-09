@@ -868,12 +868,18 @@ func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr
 // found by checkHeld after the request stopped, merged), so the condition no longer says it is open: the
 // reason, the number and a fixed text that says why. The lock on the target reads these reasons (prMayBeOpen).
 // The caller writes it in the status write that ends the request. A request without a recorded pull request
-// is left alone: its PullRequestOpened never said one was open.
+// is left alone: its PullRequestOpened never said one was open. The Pending reviewer hints of the request are
+// declined in the same write (declinePendingHints).
 func markClosed(rr *remediationv1alpha1.RemediationRequest, reason, text string) {
 	pr := rr.Status.PullRequest
 	if pr == nil {
 		return
 	}
+	hintReason := ReasonHintPullRequestClosed
+	if reason == ReasonChangeRequestMerged {
+		hintReason = ReasonHintPullRequestMerged
+	}
+	declinePendingHints(rr, hintReason)
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPROpened,
 		Status:             metav1.ConditionTrue,
@@ -996,6 +1002,7 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	switch cr.State {
 	case providers.ChangeRequestMerged:
 		recordMerge(rr, cr)
+		declinePendingHints(rr, ReasonHintPullRequestMerged)
 		return r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,
 			"The pull request was merged")
 	case providers.ChangeRequestClosed:

@@ -273,20 +273,18 @@ const MaxRefusedHints = 10
 // line. NotRedactable: the redacted text still holds something the redactor would change. Empty: the command
 // has no text. EditedAfterAccept: the comment of a stored hint was edited; the stored hint stays as it was.
 // EditedAfterSeen: a comment the executor had read already was edited to carry the command.
-// PermissionNotChecked: the look held more new authors than the executor asks the code host about in one look.
-// +kubebuilder:validation:Enum=NoWriteAccess;CapReached;TooLong;NotRedactable;Empty;EditedAfterAccept;EditedAfterSeen;PermissionNotChecked
+// +kubebuilder:validation:Enum=NoWriteAccess;CapReached;TooLong;NotRedactable;Empty;EditedAfterAccept;EditedAfterSeen
 type HintRefusal string
 
 // The refusals, one per value of the HintRefusal enum.
 const (
-	HintRefusalNoWriteAccess        HintRefusal = "NoWriteAccess"
-	HintRefusalCapReached           HintRefusal = "CapReached"
-	HintRefusalTooLong              HintRefusal = "TooLong"
-	HintRefusalNotRedactable        HintRefusal = "NotRedactable"
-	HintRefusalEmpty                HintRefusal = "Empty"
-	HintRefusalEditedAfterAccept    HintRefusal = "EditedAfterAccept"
-	HintRefusalEditedAfterSeen      HintRefusal = "EditedAfterSeen"
-	HintRefusalPermissionNotChecked HintRefusal = "PermissionNotChecked"
+	HintRefusalNoWriteAccess     HintRefusal = "NoWriteAccess"
+	HintRefusalCapReached        HintRefusal = "CapReached"
+	HintRefusalTooLong           HintRefusal = "TooLong"
+	HintRefusalNotRedactable     HintRefusal = "NotRedactable"
+	HintRefusalEmpty             HintRefusal = "Empty"
+	HintRefusalEditedAfterAccept HintRefusal = "EditedAfterAccept"
+	HintRefusalEditedAfterSeen   HintRefusal = "EditedAfterSeen"
 )
 
 // RefusedHint records a comment that carried the command and was refused, so the refusal is made once and a

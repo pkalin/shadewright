@@ -576,6 +576,8 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		// Issue #525: windows of slash-separated parts, judged as base64 or as words.
 		"slash-split base64": "qC+kS6B8/",
 		"path words":         "AppData/",
+		"acronym parts":      "REST/",
+		"empty parts":        "aB3//",
 	} {
 		in := rep(unit, size/len(unit))
 		start := time.Now()
@@ -950,6 +952,30 @@ func TestSlashSplitBase64IsRedacted(t *testing.T) {
 		{"entra secret after az login", "az login --service-principal -u app -p " + entraSecret + " --tenant t",
 			keyParts(entraSecret), []string{"-p ", " --tenant t"}},
 	})
+	// A key whose shortest windows score as words but whose whole window scores as base64.
+	if in, out := "aws configure set aws_secret_access_key "+seededKey(68276), String("aws configure set aws_secret_access_key "+seededKey(68276)); out != "aws configure set aws_secret_access_key [REDACTED:token]" {
+		t.Errorf("String(%q) = %q, want the whole key redacted", in, out)
+	}
+	// Two keys with a path between them are redacted each on its own; the path stays.
+	const middle = "/api/v1/namespaces/orders/pods/orders-worker-7db6d8ff4d-x2x9q/"
+	bridged := 0
+	for seed := range uint64(seeds) {
+		a, b := seededKey(seed), seededKey(seed+seeds)
+		in := "GET https://example.com/" + a + middle + b + " 404"
+		out := String(in)
+		leaked := false
+		for _, p := range append(keyParts(a), keyParts(b)...) {
+			leaked = leaked || strings.Contains(out, p)
+		}
+		if leaked || !strings.Contains(out, middle) {
+			if bridged++; bridged <= 3 {
+				t.Errorf("seed %d: two keys around a path:\n in: %s\nout: %s", seed, in, out)
+			}
+		}
+	}
+	if bridged > 0 {
+		t.Errorf("%d of %d pairs of keys leaked or lost the path between them", bridged, seeds)
+	}
 }
 
 // seededName returns n characters of alphabet from a fixed seed: the random part of a generated name.
@@ -1011,6 +1037,8 @@ func TestSlashSplitRuleKeepsPaths(t *testing.T) {
 		"run /Program/Microsoft/WindowsApps/PythonSoftwareFoundation/python3",
 		"load /usr/lib/x86/libQt5Core/libGLESv2/libEGL",
 		"AKIAEXAMPLE/IAMRole/AdminAccess/S3Bucket",
+		"GET /services/REST/HTTP/HTTPS/SOAP/WSDL/SDLC/Service 404",
+		"GET /api/SOAP/WSDL/XML/JSON/REST/HTTP/HTTPS/FTP/SMTP/IMAP/LDAP/Gateway 502",
 		"GET /apis/apps/v1/namespaces/orders/deployments/orders-worker/scale 404",
 		"GET /api/v1/namespaces/kube-system/pods/coredns-7db6d8ff4d-x2x9q/log?container=coredns",
 		"/apis/remediation.shadewright.io/v1alpha1/namespaces/shadewright-system/remediationrequests",

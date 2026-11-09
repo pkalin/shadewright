@@ -916,15 +916,16 @@ func envValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 // minTokenLength is the shortest part of a run of base64 or hex characters that is taken for a random token.
 const minTokenLength = 24
 
-// longTokenSpan redacts a run of base64, base64url or hex characters when some part of it between slashes
+// longTokenSpans redacts a run of base64, base64url or hex characters when some part of it between slashes
 // looks random: a piece between hyphens of at least minTokenLength that mixes letters and digits, or a
 // hyphenated part of at least that length that mixes upper case, lower case and digits (base64url). A run
 // that no such part makes random may still hold standard base64 that its slashes cut short: then only the
-// slash-separated parts that read as base64 are redacted (base64Window). Paths and image names (short parts between slashes), long names made of words, Kubernetes names
-// and UUIDs (lower case, short pieces between hyphens) and the hex of an image digest ("sha256:...", which
-// identifies a build, not a credential, also with a suffix such as "-amd64") are kept; what follows the
-// digest's hex is judged on its own.
-func longTokenSpan(s string, m []int, _ int) (int, int, bool) {
+// slash-separated parts that read as base64 are redacted, each stretch on its own (base64Windows). Paths
+// and image names (short parts between slashes), long names made of words, Kubernetes names and UUIDs
+// (lower case, short pieces between hyphens) and the hex of an image digest ("sha256:...", which identifies
+// a build, not a credential, also with a suffix such as "-amd64") are kept; what follows the digest's hex is
+// judged on its own. It returns the end of the run.
+func longTokenSpans(s string, m []int, _ int, add func(start, end int)) int {
 	start, run := m[0], s[m[0]:m[1]]
 	if prefix := strings.ToLower(s[max(0, m[0]-7):m[0]]); prefix == "sha256:" || prefix == "sha512:" {
 		if digest, rest, _ := strings.Cut(run, "-"); isHex(digest) {
@@ -932,15 +933,14 @@ func longTokenSpan(s string, m []int, _ int) (int, int, bool) {
 		}
 	}
 	if randomRun(run) {
-		return start, m[1], true
+		add(start, m[1])
+		return m[1]
 	}
-	if a, b, ok := base64Window(run); ok {
-		return start + a, start + b, true
-	}
-	return 0, 0, false
+	base64Windows(run, func(a, b int) { add(start+a, start+b) })
+	return m[1]
 }
 
-// randomRun reports whether some part of run between slashes looks random, as described for longTokenSpan.
+// randomRun reports whether some part of run between slashes looks random, as described for longTokenSpans.
 func randomRun(run string) bool {
 	for part := range strings.SplitSeq(run, "/") {
 		if len(part) < minTokenLength {
@@ -959,14 +959,14 @@ func randomRun(run string) bool {
 }
 
 // minBase64Window is the number of characters, slashes and padding aside, from which slash-separated parts
-// are judged together as standard base64 (base64Window): less than the 40 of an AWS secret access key or
+// are judged together as standard base64 (base64Windows): less than the 40 of an AWS secret access key or
 // the 44 of an older Entra client secret, and enough for the score of a window to tell words from base64.
 const minBase64Window = 32
 
 // maxBase64Score is the highest score per pair of neighbouring characters (wordScore) at which a window
 // counts as base64. Random base64 scores about -0.47 and a window of 32 random characters scores above 0.15
-// a few times in 10,000; a 40-character key gives several windows, and none of 100,000 seeded slash-split
-// keys went unflagged. Path words score from about 0.2 (a Windows temp path ending in a random name) to 0.9
+// a few times in 10,000; a 40-character key gives several windows, and 5 of 100,000 seeded slash-split keys
+// scored above it in all of them (long runs of lower-case letters by chance). Path words score from about 0.2 (a Windows temp path ending in a random name) to 0.9
 // (TestSlashSplitRuleKeepsPaths).
 const maxBase64Score = 0.15
 
@@ -1016,25 +1016,35 @@ func wordClass(c byte) int {
 	return classOther
 }
 
-// windowPart is one slash-separated part of a run, with what base64Window adds up over a window of parts.
+// maxBase64Window is the most characters a window of base64Windows holds: more than the 44 of the longest
+// slash-split secret it is meant for, and a bound that keeps the number of windows per part constant.
+const maxBase64Window = 96
+
+// windowPart is one slash-separated part of a run, with what base64Windows adds up over a window of parts.
 type windowPart struct {
 	start, end   int     // byte range in the run, padding included
-	chars, pairs int     // characters, and pairs of neighbouring ones, padding excluded
+	chars, pairs int     // characters, padding excluded, and pairs of neighbouring ones that count as evidence
 	score        float64 // sum of wordScore over the pairs
-	upper, lower bool    // holds an upper-case or a lower-case letter
+	upper, lower bool    // holds an upper-case or a lower-case letter, as evidence
 	base64       bool    // may be part of standard base64: no "-" or "_", and "=" only as final padding
+	empty        bool    // no characters besides padding
 }
 
-// base64Window finds standard base64 cut short by slashes in a run that randomRun keeps (#525), such as an
-// AWS secret access key after a path or in a CLI flag. It judges every window of adjacent parts that holds
-// at least minBase64Window characters, apart from the parts around it, so path words next to a key cannot
-// dilute it: the window counts when it mixes cases, its parts average at least four characters, and its
-// pairs of neighbouring characters score at most maxBase64Score on average (wordScore). It returns the
-// range of the run from the first part of the first such window to the last part of the last one, without
-// any part at either end that reads as a word. Parts with "-" or "_" (Kubernetes names, UUIDs) are never
-// part of a window. Each window is built from the previous one by adding and removing parts, so the cost is
-// linear in the run.
-func base64Window(run string) (int, int, bool) {
+// base64Windows finds standard base64 cut short by slashes in a run that randomRun keeps (#525), such as an
+// AWS secret access key after a path or in a CLI flag, and calls add with each range of the run to redact.
+//
+// It judges every window of adjacent parts that holds from minBase64Window to maxBase64Window characters of
+// evidence, apart from the parts around it, so path words next to a key cannot dilute it: the window counts
+// when it mixes cases, its parts average at least four characters, and its pairs of neighbouring characters
+// score at most maxBase64Score on average (wordScore). Parts with "-" or "_" (Kubernetes names, UUIDs) never
+// join a window, and parts of upper-case letters only (acronyms such as "REST" or "HTTPS") join one without
+// counting as evidence either way.
+//
+// Of the parts that some window covers, path words (pathWord) are kept, and a part of the key outside every
+// window, next to one that is redacted, is taken in unless it is a path word. Each stretch of adjacent
+// redacted parts is one range, so two keys with a path between them give two ranges and the path stays.
+// Windows are bounded by maxBase64Window, so the cost is linear in the run.
+func base64Windows(run string, add func(start, end int)) {
 	var parts []windowPart
 	for pos := 0; pos <= len(run); {
 		end := pos + strings.IndexByte(run[pos:], '/')
@@ -1044,62 +1054,129 @@ func base64Window(run string) (int, int, bool) {
 		parts = append(parts, newWindowPart(run, pos, end))
 		pos = end + 1
 	}
-	first, last := -1, -1
+	covered := coveredParts(parts)
+	if covered == nil {
+		return
+	}
+	word := func(i int) bool { return parts[i].empty || pathWord(run[parts[i].start:parts[i].end]) }
+	redact := make([]bool, len(parts))
+	for i := range parts {
+		redact[i] = covered[i] && !word(i)
+	}
+	takeInKeyParts(parts, redact, word)
+	addStretches(parts, redact, add)
+}
+
+// coveredParts reports, for each part, whether a window that qualifies as base64 covers it (see
+// base64Windows), or returns nil when no window qualifies.
+func coveredParts(parts []windowPart) []bool {
+	// diff counts, as a difference array, the qualifying windows over each part.
+	var diff []int
+	for lo := range parts {
+		var w windowPart
+		var upper, lower bool
+		for j := lo; j < len(parts) && parts[j].base64; j++ {
+			p, n := parts[j], j-lo+1
+			w.chars, w.pairs, w.score = w.chars+p.chars, w.pairs+p.pairs, w.score+p.score
+			upper, lower = upper || p.upper, lower || p.lower
+			if w.chars > maxBase64Window || 4*n > maxBase64Window {
+				break
+			}
+			if w.chars >= minBase64Window && upper && lower && w.chars >= 4*n && w.score <= maxBase64Score*float64(w.pairs) {
+				if diff == nil {
+					diff = make([]int, len(parts)+1)
+				}
+				diff[lo]++
+				diff[j+1]--
+			}
+		}
+	}
+	if diff == nil {
+		return nil
+	}
+	covered := make([]bool, len(parts))
+	for i, n := 0, 0; i < len(parts); i++ {
+		n += diff[i]
+		covered[i] = n > 0
+	}
+	return covered
+}
+
+// takeInKeyParts marks as redacted the parts that belong to a key next to the redacted ones: one word alone
+// between redacted parts, and parts that are no path words (word) next to a redacted part, across empty
+// parts ("//").
+func takeInKeyParts(parts []windowPart, redact []bool, word func(int) bool) {
+	// One word between redacted parts is more likely a piece of the key than a path: two keys around a path
+	// leave at least two words between them.
+	for i := 1; i < len(parts); i++ {
+		if redact[i] || !redact[i-1] {
+			continue
+		}
+		j, words := i, 0
+		for ; j < len(parts) && !redact[j]; j++ {
+			words += b2i(!parts[j].empty)
+		}
+		if j < len(parts) && words <= 1 {
+			for k := i; k < j; k++ {
+				redact[k] = true
+			}
+		}
+		i = j
+	}
+	// Take in key parts next to a redacted part, across empty parts ("//").
+	for i := 1; i < len(parts); i++ {
+		if !redact[i] && parts[i].base64 && redact[i-1] && (parts[i].empty || !word(i)) {
+			redact[i] = true
+		}
+	}
+	for i := len(parts) - 2; i >= 0; i-- {
+		if !redact[i] && parts[i].base64 && redact[i+1] && (parts[i].empty || !word(i)) {
+			redact[i] = true
+		}
+	}
+}
+
+// addStretches calls add with the range of each stretch of adjacent redacted parts, without empty parts at
+// its ends, that holds at least minBase64Stretch characters.
+func addStretches(parts []windowPart, redact []bool, add func(start, end int)) {
 	for i := 0; i < len(parts); {
-		if !parts[i].base64 {
+		if !redact[i] || parts[i].empty {
 			i++
 			continue
 		}
-		k := i
-		for k < len(parts) && parts[k].base64 {
-			k++
-		}
-		var w windowPart
-		var upper, lower, n int
 		j := i
-		for lo := i; lo < k; lo++ {
-			for ; j < k && w.chars < minBase64Window; j++ {
-				w.chars, w.pairs, w.score = w.chars+parts[j].chars, w.pairs+parts[j].pairs, w.score+parts[j].score
-				upper, lower, n = upper+b2i(parts[j].upper), lower+b2i(parts[j].lower), n+1
-			}
-			if w.chars < minBase64Window {
-				break
-			}
-			if upper > 0 && lower > 0 && w.chars >= 4*n && w.score <= maxBase64Score*float64(w.pairs) {
-				if first < 0 {
-					first = lo
-				}
-				last = j - 1
-			}
-			p := parts[lo]
-			w.chars, w.pairs, w.score = w.chars-p.chars, w.pairs-p.pairs, w.score-p.score
-			upper, lower, n = upper-b2i(p.upper), lower-b2i(p.lower), n-1
+		for j+1 < len(parts) && redact[j+1] {
+			j++
 		}
-		i = k
+		next := j + 1
+		for parts[j].empty {
+			j--
+		}
+		chars := 0
+		for k := i; k <= j; k++ {
+			chars += parts[k].chars
+		}
+		// A short stretch among path words that a long window reached over is a word, not a key.
+		if chars >= minBase64Stretch {
+			add(parts[i].start, parts[j].end)
+		}
+		i = next
 	}
-	if first < 0 {
-		return 0, 0, false
-	}
-	// A short part of the key outside every window, next to it, is taken in; path words that a window
-	// reached into are left out.
-	for first > 0 && parts[first-1].base64 && !pathWord(run[parts[first-1].start:parts[first-1].end]) {
-		first--
-	}
-	for last < len(parts)-1 && parts[last+1].base64 && !pathWord(run[parts[last+1].start:parts[last+1].end]) {
-		last++
-	}
-	for first < last && (parts[first].chars == 0 || pathWord(run[parts[first].start:parts[first].end])) {
-		first++
-	}
-	for last > first && (parts[last].chars == 0 || pathWord(run[parts[last].start:parts[last].end])) {
-		last--
-	}
-	return parts[first].start, parts[last].end, true
 }
 
-// minPathWordScore is the score per pair (wordScore) from which a part of lower-case letters only reads as
-// a path word ("etc", "api", "credentials") in pathWord.
-const minPathWordScore = 0.4
+// minBase64Stretch is the fewest characters a stretch of adjacent parts that base64Windows redacts holds: a
+// key gives one long stretch, while a part that is no path word among words a window covers ("orders" in
+// "/namespaces/orders/pods/") gives a short one, which is kept.
+const minBase64Stretch = minBase64Window / 2
+
+// minPathWordScore is the score per pair (wordScore) from which a part of four or more lower-case letters
+// reads as a path word ("keys" 0.91, "download" 0.84, "credentials" 0.86) in pathWord, and
+// minShortPathWordScore the same for three letters ("etc", "app" 0.49, "api" 1.29), which have one
+// alternation of vowel and consonant at most. Random letters reach them less often, the longer they are.
+const (
+	minPathWordScore      = 0.8
+	minShortPathWordScore = 0.4
+)
 
 // pathWord reports whether part, next to or at the end of a base64 window, is a path word rather than a
 // piece of the key: at least three lower-case letters that read as a word (minPathWordScore), maybe
@@ -1126,16 +1203,23 @@ func pathWord(part string) bool {
 	for i := 1; i < letters; i++ {
 		score += wordScore[wordClass(part[i-1])][wordClass(part[i])]
 	}
+	if letters == 3 {
+		return score >= minShortPathWordScore*float64(letters-1)
+	}
 	return score >= minPathWordScore*float64(letters-1)
 }
 
-// newWindowPart returns the part run[start:end] for base64Window.
+// newWindowPart returns the part run[start:end] for base64Windows. A part of upper-case letters only is an
+// acronym as often as a piece of a key, so it counts as no evidence: its characters fill a window, but it
+// adds no pairs, no score and no case.
 func newWindowPart(run string, start, end int) windowPart {
 	p := windowPart{start: start, end: end, base64: true}
 	text := run[start:end]
 	if end == len(run) {
 		text = strings.TrimRight(text, "=")
 	}
+	p.empty = text == ""
+	acronym := !p.empty
 	for i := range len(text) {
 		c := text[i]
 		switch {
@@ -1146,11 +1230,16 @@ func newWindowPart(run string, start, end int) windowPart {
 		case c >= 'a' && c <= 'z':
 			p.lower = true
 		}
+		acronym = acronym && c >= 'A' && c <= 'Z'
 		if i > 0 {
 			p.score += wordScore[wordClass(text[i-1])][wordClass(c)]
 		}
 	}
 	p.chars = len(text)
+	if acronym {
+		p.upper, p.score = false, 0
+		return p
+	}
 	p.pairs = max(0, len(text)-1)
 	return p
 }
@@ -1525,8 +1614,8 @@ func builtinRules() []rule {
 		{kind: KindCredential, span: envValueSpan, re: regexp.MustCompile(
 			`(?im)^[ \t]*-[ \t]+name[ \t]*:[ \t]*["']?(` + bareKeyExpr + `)["']?[ \t]*\r?$`)},
 		// Long random tokens without a known prefix: a run of base64, base64url or hex characters (see
-		// longTokenSpan).
-		{kind: KindToken, span: longTokenSpan, re: regexp.MustCompile(`[A-Za-z0-9+/_-]{24,}=*`)},
+		// longTokenSpans).
+		{kind: KindToken, spans: longTokenSpans, re: regexp.MustCompile(`[A-Za-z0-9+/_-]{24,}=*`)},
 		// Email addresses.
 		{kind: KindEmail, re: regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b`)},
 		// IPv4 addresses.

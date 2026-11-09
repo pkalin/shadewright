@@ -753,3 +753,115 @@ func TestCanWriteRefusals(t *testing.T) {
 		assertSafe(t, err)
 	})
 }
+
+// etagged is s with GitHub's Date header and the entity tag tag.
+func etagged(s step, tag string) step {
+	s = dated(s)
+	s.header["ETag"] = tag
+	return s
+}
+
+func TestListCommentsAsksConditionallyWhileNothingChanges(t *testing.T) {
+	const tag = `W/"5f1c0a"`
+	notModified := commentsStep(1, "")
+	notModified.status, notModified.ifNoneMatch = http.StatusNotModified, tag
+	changed := etagged(commentsStep(1, commentPage(t, 1, 7, since.Add(time.Hour), "hello")), `"other"`)
+	changed.ifNoneMatch = tag
+	after := commentsStep(1, "[]")
+	after.query = "" // since moved on
+	h := newHarness(t, ownPR(), etagged(commentsStep(1, "[]"), tag), ownPR(), notModified, ownPR(), changed,
+		ownPR(), after)
+
+	quiet, err := h.p.ListComments(ctx, prNumber, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := providers.FeedbackCursor{Since: since, ETag: tag}
+	if !quiet.Complete || len(quiet.Items) != 0 || quiet.Next != want {
+		t.Fatalf("empty sweep: next %+v, complete %v; want since kept with the tag", quiet.Next, quiet.Complete)
+	}
+	same, err := h.p.ListComments(ctx, prNumber, quiet.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !same.Complete || len(same.Items) != 0 || same.Next != want {
+		t.Fatalf("304: next %+v, complete %v, items %d; want the cursor unchanged", same.Next, same.Complete,
+			len(same.Items))
+	}
+	news, err := h.p.ListComments(ctx, prNumber, same.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ids(news.Items), []int64{7}) || !news.Complete {
+		t.Fatalf("changed answer: items %v, complete %v", ids(news.Items), news.Complete)
+	}
+	if want := (providers.FeedbackCursor{Since: hostNow.Add(-clockMargin)}); news.Next != want {
+		t.Fatalf("after items: next %+v, want %+v (since moved on, no tag: it was the tag of another query)",
+			news.Next, want)
+	}
+	// The next sweep asks for another since without a condition (the step expects no If-None-Match).
+	if _, err := h.p.ListComments(ctx, prNumber, news.Next); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListCommentsKeepsNoMalformedOrForeignTag(t *testing.T) {
+	for name, tag := range map[string]string{
+		"unquoted":  "abc",
+		"too long":  `"` + strings.Repeat("a", providers.MaxETagBytes) + `"`,
+		"blank":     `"a b"`,
+		"quote":     `"a"b"`,
+		"no header": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, ownPR(), etagged(commentsStep(1, "[]"), tag))
+			got, err := h.p.ListComments(ctx, prNumber, start)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Next != start {
+				t.Errorf("next %+v, want %+v", got.Next, start)
+			}
+		})
+	}
+}
+
+func TestListCommentsKeepsNoTagOfASweepWithItemsOrSkips(t *testing.T) {
+	malformed := commentPage(t, 1, 3, since, "x")
+	malformed = strings.Replace(malformed, `"created_at":"2026-11-08T10:00:00Z"`, `"created_at":"never"`, 1)
+	for name, raw := range map[string]string{
+		"items":     commentPage(t, 1, 3, since, "x"),
+		"malformed": malformed,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, ownPR(), etagged(commentsStep(1, raw), `"t"`))
+			got, err := h.p.ListComments(ctx, prNumber, start)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Next.ETag != "" || !got.Next.Since.After(since) {
+				t.Errorf("next %+v; want since moved on and no tag", got.Next)
+			}
+		})
+	}
+}
+
+func TestListFeedbackSendsNoConditionOutsideTheFirstPageOfACommentSweep(t *testing.T) {
+	// A continuation of a sweep, and the reviews, never ask conditionally, whatever the cursor holds.
+	cont := providers.FeedbackCursor{Since: since, Page: 2, AfterID: 41, SweepStart: hostNow, ETag: `"t"`}
+	h := newHarness(t, ownPR(), commentsStep(2, commentPage(t, 2, 41, since, "x")),
+		ownPR(), reviewsStep(1, reviewPage(t, 1, 1)))
+	if _, err := h.p.ListComments(ctx, prNumber, cont); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.p.ListReviews(ctx, prNumber, providers.FeedbackCursor{ETag: `"t"`}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListCommentsRefusesACursorWithAMalformedTag(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.p.ListComments(ctx, prNumber, providers.FeedbackCursor{ETag: "abc\r\nX-Evil: 1"}); err == nil {
+		t.Fatal("a malformed tag was accepted")
+	}
+}

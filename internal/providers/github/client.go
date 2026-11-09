@@ -230,6 +230,9 @@ type call struct {
 	// and is called again from the start on each attempt. An error wrapping errStreamRefused is final and
 	// returned as is; a JSON syntax error is "not valid JSON"; any other error is a transport failure.
 	stream func(io.Reader) error
+	// ifNoneMatch, when set, is sent as If-None-Match, so an unchanged answer is a 304 (returned as a response
+	// with that status). It must be a valid entity tag (providers.ValidETag).
+	ifNoneMatch string
 }
 
 // errStreamRefused marks an error of a call's stream that refuses the content: final, never retried.
@@ -330,6 +333,9 @@ func (p *Provider) once(ctx context.Context, c call) (response, error) {
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("User-Agent", "shadewright")
+	if c.ifNoneMatch != "" {
+		req.Header.Set("If-None-Match", c.ifNoneMatch)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

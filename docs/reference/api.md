@@ -840,8 +840,9 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 
 RolloutStatus is what the check after the merge records about the target's rollout. Only the executor writes
 it; once status.rollout exists it is never removed, each field is set once and never changed (pausedSince is
-only set or cleared, never moved, and pausedSeconds never decreases), and ended never goes back to false (rules on the RemediationRequest, so that dropping rollout or the whole status and writing it
-again cannot reopen the check or move its window).
+only set or cleared, never moved, and pausedSeconds never decreases), and ended never goes back to false.
+These rules sit on the RemediationRequest, so that dropping rollout, or the whole status, and writing it again
+cannot reopen the check or move its window.
 
 The rollout judged is the one the applied commit produced: the executor reads the target right after the
 GitOps controller reports the commit applied and records, in the same status write as

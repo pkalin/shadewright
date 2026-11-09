@@ -20,7 +20,7 @@ A proposal reaches you as a pull request in your GitOps repository, made by the 
     - The new value is what you want, and sensible for the workload, not only inside the policy's bounds. The policy is a ceiling, not a recommendation.
     - Your required checks are green.
 4. Approve and merge it as your repository rules require (a required review, `CODEOWNERS`, checks). Shadewright does not approve or merge, and with auto-merge not built (<span class="sw-status sw-planned">planned</span>) a person always merges, whatever the policy's `approval` says.
-5. Within about a minute (the executor's `--pull-request-poll-interval`) the request moves to `Merged`. Delivery is then your GitOps controller's job. Tracking delivery and verifying the fix are <span class="sw-status sw-planned">planned</span>, so watch the rollout yourself.
+5. Within about a minute (the executor's `--pull-request-poll-interval`) the request moves to `Merged`. Delivery is then your GitOps controller's job. The executor follows it: the request's `RolledOut` condition says whether the change reached the pods, or why not (see [Rollout after the merge](../troubleshooting.md#rollout-after-the-merge)). Verifying that the fix worked is <span class="sw-status sw-planned">planned</span>, so check the symptom yourself.
 
 ## Do not push to the branch
 

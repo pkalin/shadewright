@@ -81,17 +81,17 @@ func undeliverableWatch(t *testing.T, streamError bool) {
 		return cache.Options{Scheme: runtime.NewScheme(), Mapper: h.mapper, HTTPClient: httpClient, DefaultNamespaces: map[string]cache.Config{testNS: {}}}
 	}, h.l.log)
 	h.step()
+	// Wait until the watch's own transport has recorded the outcome of the second watch, not only until the
+	// fake API server answered it (#563): the 429 is recorded after the answer returns, and the refusal only
+	// once the reflector reads the stream. The 429 also counts only after the informer's sync was seen, which
+	// WaitForCacheSync polls for. Checks run before either would see a healthy watch and pass by too soon.
 	deadline := time.Now().Add(10 * time.Second)
-	for {
-		h.step()
-		// The first watch synced and a second one was started; a refusal streamed on it may already be seen.
-		if s := h.state(); watches.Load() > 1 && (s == WatchWatched || s == WatchFailed) {
-			break
-		}
+	for watches.Load() < 2 || !undeliverableSeen(h) {
 		if time.Now().After(deadline) {
-			t.Fatal("the first watch did not sync")
+			t.Fatalf("the refusal of the second watch was not recorded, %d watches, state=%s", watches.Load(), h.state())
 		}
 		time.Sleep(10 * time.Millisecond)
+		h.step()
 	}
 	for range failedAfterChecks + 1 {
 		h.step()
@@ -99,6 +99,23 @@ func undeliverableWatch(t *testing.T, streamError bool) {
 	if h.state() != WatchFailed {
 		t.Fatalf("watch delivers no object events, every new watch is rejected, state=%s, want Failed", h.state())
 	}
+}
+
+// undeliverableSeen reports whether the lazy source of h already stopped its watch, or runs a synced watch whose
+// transport recorded an error of a request after the sync. It reads h's running watch, so it is called from the
+// goroutine that steps h.
+func undeliverableSeen(h *lazyHarness) bool {
+	w := h.l.running
+	if w == nil {
+		return h.state() == WatchFailed
+	}
+	select {
+	case <-w.synced:
+	default:
+		return false
+	}
+	fatal, transient := w.errs.take()
+	return fatal != nil || transient != nil
 }
 
 // reviewBlockedReader blocks its first List until release is closed or ctx ends.

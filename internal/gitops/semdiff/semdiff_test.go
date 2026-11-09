@@ -799,6 +799,11 @@ func TestCheckRefusesAnchors(t *testing.T) {
 		"a kustomization file": func(f map[string][]byte) {
 			f[soKust] = []byte("r: &r scaledobject.yaml\nresources: [*r]\n")
 		},
+		// kustomize's split drops the separator line, but the parser of the kustomization file reads it as the
+		// first document (#594).
+		"a kustomization file with aliases on a separator": func(f map[string][]byte) {
+			f[soKust] = []byte("# The orders app.\n--- {resources: [scaledobject.yaml], metadata: {annotations: &a {x: y}, labels: *a}}\n")
+		},
 		"a kustomization file past the document budget": func(f map[string][]byte) {
 			f[soKust] = append(append(kust("scaledobject.yaml"), emptyDocs(documentBudget+1)...),
 				"x: &x 1\ny: *x\n"...)
@@ -818,8 +823,8 @@ func TestCheckRefusesAnchors(t *testing.T) {
 				return
 			}
 			wantReason(t, err, semdiff.ErrInvalidYAML)
-			if !strings.Contains(err.Error(), "anchors") {
-				t.Fatalf("got %v, want anchors named", err)
+			if !strings.Contains(err.Error(), "anchors") && !strings.Contains(err.Error(), "separator") {
+				t.Fatalf("got %v, want anchors or the separator named", err)
 			}
 		})
 	}

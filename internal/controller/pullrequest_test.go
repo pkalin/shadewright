@@ -1884,9 +1884,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 		It("closes a waiting pull request whose target file the patcher now refuses, as PatchRefused", func() {
 			drive(remediationv1alpha1.PhaseAwaitingApproval)
-			// An anchor on the path: the freshness check still reads the previous limit, the patcher refuses.
+			// A flow mapping on the path: the freshness check still reads the previous limit, the patcher refuses.
+			// (An anchor no longer serves: the freshness check refuses it first since #594.)
 			_, err := git.Push(mainBranch, sourcePath, bytes.Replace(manifest("256Mi"),
-				[]byte("limits:\n"), []byte("limits: &l\n"), 1))
+				[]byte("limits:\n              memory: 256Mi\n"), []byte("limits: {memory: 256Mi}\n"), 1))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(reconcileOnce()).To(Succeed())
 			stoppedWaiting(ReasonPatchRefused)

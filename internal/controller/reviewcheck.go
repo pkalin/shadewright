@@ -53,6 +53,8 @@ import (
 //     does not read the list again on that head.
 //   - A final refusal (InProgress, Passed or Failed) is recorded as Refused, with condition Approved False and a
 //     Warning Event, both with reason ReviewCheckRefused, so a pull request the required check blocks says why.
+//   - Recording InProgress or Passed on a later head sets condition Approved back to WaitingForReview when it
+//     still carries one of those two reasons, which were about an earlier head. Only a merge sets Approved True.
 //
 // A restart between a write to the Git host and the status write creates the check again on the same head: a
 // check created in progress after one that passed makes the head wait again until the gate passes it again,
@@ -153,7 +155,8 @@ func (r *RemediationRequestReconciler) reviewCheck(ctx context.Context, rr *reme
 
 // recordReviewCheck records state for the recorded head in rr's status, through the kill switch; Refused and
 // Failed also set condition Approved False with their reason (reviewCheckWarning) and, once written, record a
-// Warning Event. rr is changed only when the write went through.
+// Warning Event; the other states set it back to WaitingForReview when it still has such a reason from an
+// earlier head. rr is changed only when the write went through.
 func (r *RemediationRequestReconciler) recordReviewCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	state remediationv1alpha1.ReviewCheckState) error {
 	if err := r.writeAllowed(ctx); err != nil {
@@ -163,7 +166,8 @@ func (r *RemediationRequestReconciler) recordReviewCheck(ctx context.Context, rr
 	head := upd.Status.PullRequest.HeadSHA
 	upd.Status.PullRequest.ReviewCheck = &remediationv1alpha1.ReviewCheck{Head: head, State: state}
 	reason, message := reviewCheckWarning(state)
-	if reason != "" {
+	switch {
+	case reason != "":
 		meta.SetStatusCondition(&upd.Status.Conditions, metav1.Condition{
 			Type:               remediationv1alpha1.ConditionApproved,
 			Status:             metav1.ConditionFalse,
@@ -171,6 +175,9 @@ func (r *RemediationRequestReconciler) recordReviewCheck(ctx context.Context, rr
 			Message:            message,
 			ObservedGeneration: upd.Generation,
 		})
+	case staleReviewCheckWarning(upd):
+		// The reason is about an earlier head: this one waits for review again (#606).
+		setWaitingForReview(upd)
 	}
 	if err := r.Status().Update(ctx, upd); err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
@@ -342,6 +349,14 @@ func reviewCheckWarning(state remediationv1alpha1.ReviewCheckState) (reason, mes
 			"check run shadewright/review failed on this head; a person decides the merge"
 	}
 	return "", ""
+}
+
+// staleReviewCheckWarning reports whether condition Approved of rr carries a reason of reviewCheckWarning. Called
+// when a state that needs none (InProgress, Passed) is recorded: the reason was set on an earlier head, as a
+// state on one head moves only from InProgress, so it no longer says why this head is blocked.
+func staleReviewCheckWarning(rr *remediationv1alpha1.RemediationRequest) bool {
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
+	return c != nil && (c.Reason == ReasonReviewCheckRefused || c.Reason == ReasonReviewListTooLong)
 }
 
 // steeredReviews is what steeredCommented holds per request: the reviews of hint authors whose comment was

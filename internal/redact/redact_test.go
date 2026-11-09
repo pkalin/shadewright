@@ -510,6 +510,28 @@ func TestGapRulesKeepUsefulText(t *testing.T) {
 	}
 }
 
+// A bare short key's value in flow form runs to the next flow delimiter, across a line break after the colon
+// too, and a blank in it refuses it whole: the linear scan of #526 must not cut it at the blank and redact
+// its first word.
+func TestFlowBareShortKeyValueStaysWhole(t *testing.T) {
+	for _, in := range []string{
+		"{auth:\n /etc/config missing}",
+		"{auth\n: https://example.com unavailable}",
+		"{pass:\n v1.2.3-rc1 verified}",
+		"{sig:\n 550e8400-e29b-41d4-a716-446655440000 invalid}",
+		"{auth:\n ghcr.io/example/app:v1 unavailable}",
+		"{auth:\n tok3n!value99 \t, x: 1}",
+	} {
+		want := in
+		if strings.Contains(in, "tok3n") {
+			want = "{auth:\n [credential] \t, x: 1}"
+		}
+		if out := String(in); out != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, out, want)
+		}
+	}
+}
+
 // skipLarge skips the timing tests on large inputs in short mode and under the race detector, whose
 // instrumentation makes these single-goroutine scans 10 to 20 times slower than the time limit assumes. make test
 // runs this package a second time without -race so that they still run.

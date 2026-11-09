@@ -1070,10 +1070,11 @@ const (
 	// boundaryLine: YAML block mappings. A plain value runs to the line end, plus continuation lines
 	// indented deeper than the key.
 	boundaryLine
-	// boundaryFlowWord: an unquoted value under a bare short key (bareShortColon) in a flow mapping. It ends
-	// at the first whitespace, ",", "}" or "]": a blank refuses such a value anyway, and a refused value does
-	// not move the rule past it, so reading on to the next flow delimiter would read the same tail again for
-	// every key on the line (#526).
+	// boundaryFlowWord: an unquoted value under a bare short key (bareShortColon) in a flow mapping. It is
+	// the value boundaryFlow gives when that holds no blank; otherwise it is cut just past the first text
+	// after a blank, which still holds the blank, so the value is refused all the same (looksLikeSecret). A
+	// refused value does not move the rule past it, so reading on to the next flow delimiter would read the
+	// same tail again for every key on the line (#526); this reads only the first word and the blanks after it.
 	boundaryFlowWord
 )
 
@@ -1109,6 +1110,13 @@ func valueSpan(s string, pos, boundary, keyCol int) (int, int) {
 	case boundaryFlowWord:
 		for end < len(s) && !isSpace(s[end]) && strings.IndexByte(",}]", s[end]) < 0 {
 			end++
+		}
+		next := end
+		for next < len(s) && isSpace(s[next]) && s[next] != '\r' && s[next] != '\n' {
+			next++
+		}
+		if next < len(s) && strings.IndexByte(",}]\r\n", s[next]) < 0 {
+			end = next + 1
 		}
 	case boundaryLine:
 		le := lineEnd(s, pos)
@@ -1156,7 +1164,8 @@ func isSpace(c byte) bool {
 // the block scalar rule, and a YAML comment over a block on the following lines to the next-line rule
 // (commentOverBlock). A bare short key followed by a colon counts only with a value that looks like a
 // secret (bareShortColon); a quoted value may hold blanks (looksLikeQuotedSecret), and in flow form an
-// unquoted one ends at the first blank (boundaryFlowWord). A refused value leaves prevEnd where it was.
+// unquoted one is read only up to the text after its first blank (boundaryFlowWord). A refused value
+// leaves prevEnd where it was.
 func keyValueSpan(boundary int) func(s string, m []int, prevEnd int) (int, int, bool) {
 	return func(s string, m []int, prevEnd int) (int, int, bool) {
 		if m[2] < prevEnd || keepReference(s, m) {

@@ -163,6 +163,22 @@ func TestOtherDocumentsUntouched(t *testing.T) {
 	}
 }
 
+// A .nan anywhere in the file, in the target document or another, does not fail the verification: NaN is not
+// equal to itself as a number, but the value is unchanged.
+func TestNaNKept(t *testing.T) {
+	dep := string(read(t, "deployment.yaml"))
+	for name, in := range map[string]string{
+		"another document":    dep + "---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: c, namespace: orders}\nx: .nan\n",
+		"the target document": dep + "x: [.NaN, {y: .nan}]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := SetContainerMemoryLimit([]byte(in), deployment, mem("web", "512Mi", "768Mi")); err != nil {
+				t.Errorf("got %v, want the file patched", err)
+			}
+		})
+	}
+}
+
 func TestRefusals(t *testing.T) {
 	dep := string(read(t, "deployment.yaml"))
 	sub := func(old, new string) string {

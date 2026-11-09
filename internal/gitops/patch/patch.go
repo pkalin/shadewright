@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -566,6 +567,10 @@ func equal(a, b any) bool {
 			}
 		}
 		return true
+	case float64:
+		// A .nan in the file decodes to NaN, which is not equal to itself as a number but is the same value.
+		y, ok := b.(float64)
+		return ok && (x == y || math.IsNaN(x) && math.IsNaN(y))
 	}
 	return reflect.DeepEqual(a, b)
 }

@@ -31,12 +31,15 @@ limitations under the License.
 //   - patches: 1,023 ConfigMaps of about 78 bytes, plus the Deployment, and n strategic merge patches of them
 //     (one label each, files of 1,000): with n = 3072 the build is at the document bound with the most objects
 //     the render accepts, every one patched three times.
-//   - annotations: as flat with 4 MiB, plus a common annotation sized so that the bound on what transformers
-//     add to the render (semdiff.MaxTransformBytes, 3 places per object) is at n percent of the budget: with n =
-//     100 the build is at all three byte budgets at once (#495).
-//   - images:  as flat with 4 MiB, plus a Pod of 1,000 containers whose image an images entry renames, sized so
-//     that the bound (2 places per container) is at n percent of the budget: the costliest place per byte
-//     measured (#495).
+//   - annotations: as flat with 4 MiB, plus a common annotation of one long value sized so that the bound on
+//     what patches and transformers add to the render (semdiff.MaxTransformBytes) is at n percent of the budget:
+//     with n = 100 the build is at every byte budget at once (#495). The size is n percent of the largest the
+//     walk accepts, found by semdiff.Load; CALIBRATE_SIZE=<size> sets it instead (to measure past the budget).
+//   - images:  the same with a Pod of 1,000 containers whose image an images entry renames: the costliest
+//     place per byte measured (#495).
+//   - dense, denseseq, denseannotations: the same with values of many YAML nodes, where memory follows nodes
+//     more than bytes: a patch with a target on every ConfigMap that adds one-character annotations (dense) or
+//     a list of numbers (denseseq), or a common annotation of one-character keys (denseannotations) (#495).
 //   - heavy:   as docs, each ConfigMap padded so that the build is just under the 4 MiB byte budget: both
 //     input bounds at once. Files hold as many as fit in 1 MiB, and a ConfigMap is at most about 1 MiB, so
 //     with n below 4 the build stays under the byte budget.
@@ -58,6 +61,7 @@ import (
 	"github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/patch"
 	"github.com/pkalin/shadewright/internal/gitops/semdiff"
+	"github.com/pkalin/shadewright/internal/providers/fake"
 )
 
 const (
@@ -69,6 +73,10 @@ const (
 	shapePatches = "patches"
 	shapeAnnot   = "annotations"
 	shapeImages  = "images"
+	// node-dense: many tiny entries or items (#495).
+	shapeDense      = "dense"
+	shapeDenseSeq   = "denseseq"
+	shapeDenseAnnot = "denseannotations"
 )
 
 const deployment = `apiVersion: apps/v1
@@ -105,12 +113,13 @@ func main() {
 		var err error
 		if n, err = strconv.Atoi(os.Args[2]); err != nil || n < 1 {
 			fmt.Fprintln(os.Stderr,
-				"usage: render flat|diamond|tiny|docs|heavy|patches|annotations|images "+
+				"usage: render flat|diamond|tiny|docs|heavy|patches|annotations|images|dense|denseseq|denseannotations "+
 					"[MiB, number of ConfigMaps or percent, default 4]")
 			os.Exit(2)
 		}
 	}
 	files, path := build(shape, n)
+	runtime.GC() // what fit left behind is not part of the check
 	var in int
 	for _, b := range files {
 		in += len(b)
@@ -227,6 +236,61 @@ func paddedConfigMaps(first, n, size int) []byte {
 	return []byte(b.String())
 }
 
+// entries returns the body of a flow mapping of n entries with one-character values.
+func entries(n int) string {
+	var b strings.Builder
+	for i := range n {
+		fmt.Fprintf(&b, "a%d: x, ", i)
+	}
+	return b.String() + "z: x"
+}
+
+// targetedPatch returns a patches list of one inline patch with a target that selects every ConfigMap.
+func targetedPatch(body string) string {
+	return "patches:\n  - target:\n      kind: ConfigMap\n    patch: '" + body + "'\n"
+}
+
+// fit returns the kustomization file kust makes for the size that is pct percent of the largest the walk
+// accepts (semdiff.Load, which checks semdiff.MaxTransformBytes without rendering): with 100 the build is at
+// the budget, with 101 just over it.
+func fit(files map[string][]byte, kust func(size int) []byte, pct int) []byte {
+	accepts := func(size int) bool {
+		files["apps/kustomization.yaml"] = kust(size)
+		git := fake.NewGit("main", files)
+		head, err := git.BranchHead(context.Background(), "main")
+		if err != nil {
+			panic(err)
+		}
+		_, err = semdiff.Load(context.Background(), git, head, "apps")
+		if err != nil && !errors.Is(err, semdiff.ErrTooLarge) {
+			fmt.Fprintln(os.Stderr, "fit:", err)
+			os.Exit(1)
+		}
+		return err == nil
+	}
+	if v := os.Getenv("CALIBRATE_SIZE"); v != "" {
+		n, _ := strconv.Atoi(v)
+		return kust(n)
+	}
+	lo, hi := 0, 1
+	for accepts(hi) {
+		lo, hi = hi, hi*2
+	}
+	for hi-lo > 1 {
+		if mid := (lo + hi) / 2; accepts(mid) {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	size := lo * pct / 100
+	if pct > 100 {
+		size = max(size, hi)
+	}
+	fmt.Fprintf(os.Stderr, "fit: largest accepted size %d, using %d\n", lo, size)
+	return kust(size)
+}
+
 func kust(extra string, resources ...string) []byte {
 	var b strings.Builder
 	b.WriteString("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n" + extra + "resources:\n")
@@ -284,7 +348,9 @@ func build(shape string, n int) (map[string][]byte, string) {
 			fmt.Fprintf(&k, "  - path: %s\n", f)
 		}
 		files["apps/kustomization.yaml"] = kust(k.String(), "deployment.yaml", "cm.yaml")
-	case shapeAnnot, shapeImages:
+	case shapeAnnot, shapeImages, shapeDense, shapeDenseSeq, shapeDenseAnnot:
+		// The build at the input budgets (4 x 255 ConfigMaps of 4 KiB and the Deployment, 1,021 documents),
+		// plus one transformer or targeted patch sized by fit.
 		res := append(make([]string, 0, 6), "deployment.yaml")
 		files["apps/deployment.yaml"] = []byte(deployment)
 		for i := range 4 {
@@ -292,12 +358,7 @@ func build(shape string, n int) (map[string][]byte, string) {
 			res = append(res, f)
 			files["apps/"+f] = configMaps(fmt.Sprintf("cm%d", i), 255)
 		}
-		budget := semdiff.MaxTransformBytes * n / 100
-		extra := ""
-		if shape == shapeAnnot {
-			// 4 x 255 ConfigMaps and the Deployment: 1,021 documents, 3 places each; the key "a" counts 1 byte.
-			extra = "commonAnnotations:\n  a: " + strings.Repeat("x", budget/(3*1021)-1) + "\n"
-		} else {
+		if shape == shapeImages {
 			var p strings.Builder
 			p.WriteString("apiVersion: v1\nkind: Pod\nmetadata:\n  name: p\n  namespace: web\nspec:\n  containers:\n")
 			for range 1000 {
@@ -305,10 +366,25 @@ func build(shape string, n int) (map[string][]byte, string) {
 			}
 			files["apps/pod.yaml"] = []byte(p.String())
 			res = append(res, "pod.yaml")
-			// 1,001 containers (the Deployment's too), 2 places each; the entry's keys and name count 12 bytes.
-			extra = "images:\n  - name: a\n    newName: " + strings.Repeat("x", budget/(2*1001)-12) + "\n"
 		}
-		files["apps/kustomization.yaml"] = kust(extra, res...)
+		extra := func(size int) string {
+			switch shape {
+			case shapeAnnot:
+				return "commonAnnotations:\n  a: " + strings.Repeat("x", size) + "\n"
+			case shapeImages:
+				return "images:\n  - name: a\n    newName: " + strings.Repeat("x", size) + "\n"
+			case shapeDenseAnnot:
+				return "commonAnnotations: {" + entries(size) + "}\n"
+			case shapeDense:
+				return targetedPatch("{apiVersion: v1, kind: ConfigMap, metadata: {name: any, annotations: {" +
+					entries(size) + "}}}")
+			default:
+				return targetedPatch("{apiVersion: v1, kind: ConfigMap, metadata: {name: any}, extra: [" +
+					strings.Repeat("1,", size) + "1]}")
+			}
+		}
+		k := fit(files, func(size int) []byte { return kust(extra(size), res...) }, n)
+		files["apps/kustomization.yaml"] = k
 	case shapeTiny:
 		res := append(make([]string, 0, n+1), "deployment.yaml")
 		files["apps/deployment.yaml"] = []byte(deployment)

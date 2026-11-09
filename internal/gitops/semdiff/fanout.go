@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"slices"
 	"strings"
 
 	yaml "go.yaml.in/yaml/v3"
@@ -27,26 +28,34 @@ import (
 	"github.com/pkalin/shadewright/internal/gitops/gityaml"
 )
 
-// MaxTransformBytes bounds what the patches and transformers of a build can add to its render (#495). A patch
-// with a target, commonLabels, labels, commonAnnotations, namespace, namePrefix, nameSuffix, images and replicas
-// copy one value into every place they reach, so the render grows with (bytes of the value) x (places), which
-// the input budgets ([MaxBuildBytes], [MaxBuildDocuments]) do not bound: 160 KB of input rendered about 100 MB
-// over 1,000 objects. The walk sums that product over every visit, with an upper bound of the places ([growth]),
-// and refuses a build over this budget with TooLarge before kustomize runs.
+// MaxTransformBytes bounds what the patches and transformers of a build can add to its render (#495), counted
+// as bytes plus [NodeBytes] for every YAML node. A patch with a target, commonLabels, labels, commonAnnotations,
+// namespace, namePrefix, nameSuffix, images and replicas copy one value into every place they reach, so the
+// render grows with (the value) x (places), which the input budgets ([MaxBuildBytes], [MaxBuildDocuments]) do
+// not bound: 160 KB of input rendered about 100 MB over 1,000 objects. The walk sums an upper bound of that
+// product per visit over the objects the visit builds ([visitGrowth]), and refuses a build over this budget with
+// TooLarge before kustomize runs. The bound only over-counts: where the walk cannot tell what a patch or a
+// transformer reaches, it counts every place it may reach.
 //
 // How it was chosen (measured 2026-11-09 with hack/load/render in a container limited to 128 MiB, Go 1.27.3,
-// arm64): a build at the input budgets (4 MiB, 1,021 objects) peaks at 69 to 75 MiB resident. Images are the
-// costliest place per byte (in the test process, one image name of 16 KiB in 1,000 containers peaked at 83 MiB of
-// Go heap, an annotation of the same size on 1,000 ConfigMaps at 41 MiB). The same build with an images entry
-// at a bound of 4 MiB peaks at 87 to 89 MiB, at 6 MiB at 104 MiB, at 8 MiB at 106 MiB; with an annotation at
-// 4 MiB at 79 to 81 MiB. 4 MiB keeps
-// about 40 MiB for the rest of the executor, as the input budgets do (design 8.2.2), below the GOMEMLIMIT of 90
-// percent of the limit. The supported repository (1,000 objects, design 8.2) with a few labels and annotations,
-// a namespace, a name prefix and a few image overrides is bounded at about 1 MiB.
+// arm64): memory follows nodes more than bytes. A node a patch or transformer adds held about 650 to 800 bytes
+// of Go heap in the render, a byte of a long scalar about 4 (an annotation) to 6 (an image name), hence
+// [NodeBytes]. The build at the input budgets (4 MiB, 1,021 objects) peaks at 45 MiB of Go heap (69 to 71 MiB
+// resident) alone; with one value at this budget, it peaks at 57 to 62 MiB (84 to 91 resident) for the byte-dense
+// cases (an annotation or an image name copied into every place) and at 60 to 68 MiB (85 to 97 resident) for
+// the node-dense ones (a targeted patch of one-character entries or of a list of numbers, a common annotation
+// of one-character keys), well under the GOMEMLIMIT of 115 MiB (90 percent of the limit). At 6 MiB a node-dense
+// case reached 81 MiB of heap and 105 MiB resident, too close. A build of about 1,000 objects with common
+// labels, a namespace, a name prefix and an image override is at about 87 percent of the budget; with a patch
+// on every Deployment too, about 800 objects fit.
 const MaxTransformBytes = 4 << 20
 
-// sat is the most a count of [growth] reaches: a saturated sum is over every budget, never wrapped. Two counts
-// of at most sat add up to less than the largest int.
+// NodeBytes is what one YAML node a patch or transformer adds counts for against [MaxTransformBytes]: the heap a
+// node holds in the render over that of a byte, rounded.
+const NodeBytes = 128
+
+// sat is the most a count reaches: a saturated sum is over every budget, never wrapped. Two counts of at most
+// sat add up to less than the largest int.
 const sat = 1 << 61
 
 func satAdd(a, b int) int { return min(a+b, sat) }
@@ -61,104 +70,150 @@ func satMul(a, b int) int {
 	return a * b
 }
 
-// shape is what a file adds to the places a transformer can reach: the items of the sequences under each
-// key of [shapeKeys] (an item of a sequence nested directly in a sequence counts for the key above both), the
-// items of every sequence, and the name reference places ([nameRefKeys]: each mapping value under such a key,
-// plus each item of a sequence there).
+// cost is what a value adds to the render: its bytes (as JSON, [jsonBytes]) and its YAML nodes.
+type cost struct{ bytes, nodes int }
+
+func (c cost) plus(o cost) cost { return cost{satAdd(c.bytes, o.bytes), satAdd(c.nodes, o.nodes)} }
+
+func (c cost) times(k int) cost { return cost{satMul(c.bytes, k), satMul(c.nodes, k)} }
+
+// total is the cost counted against MaxTransformBytes.
+func (c cost) total() int { return satAdd(c.bytes, satMul(c.nodes, NodeBytes)) }
+
+// shape is what a set of objects offers the transformers: places to write and references to rewrite.
 type shape struct {
-	items map[string]int
-	all   int
-	refs  int
+	// docs is an upper bound of the objects: the documents of the resource files; kinds counts them by kind
+	// ("" for none, and anyKind for those a patch may have changed).
+	docs  int
+	kinds map[string]int
+	// keys are the values under each key of [leafKeys]. items are the items of the sequences under each key
+	// of [shapeKeys] (an item of a sequence nested directly in a sequence counts for the key above both), and
+	// all those of every sequence.
+	keys, items map[string]int
+	all         int
+	// loose are the nodes that may sit under any key once patched: those a JSON patch writes to a path it
+	// does not spell plainly, and with a move operation every node of the objects. Each may be an item of a
+	// sequence under every key.
+	loose int
+	// scalars are the scalar values (not mapping keys), each of which may be a name reference; nodes are all
+	// the nodes; maxScalar is the bytes of the largest scalar.
+	scalars, nodes, maxScalar int
 }
 
 func (s *shape) add(o *shape, times int) {
-	if s.items == nil {
-		s.items = map[string]int{}
+	if times == 0 {
+		return
 	}
-	for k, n := range o.items {
-		s.items[k] = satAdd(s.items[k], satMul(n, times))
+	for _, m := range []*map[string]int{&s.kinds, &s.keys, &s.items} {
+		if *m == nil {
+			*m = map[string]int{}
+		}
+	}
+	s.docs = satAdd(s.docs, satMul(o.docs, times))
+	for _, m := range []struct{ to, from map[string]int }{{s.kinds, o.kinds}, {s.keys, o.keys}, {s.items, o.items}} {
+		for k, n := range m.from {
+			m.to[k] = satAdd(m.to[k], satMul(n, times))
+		}
 	}
 	s.all = satAdd(s.all, satMul(o.all, times))
-	s.refs = satAdd(s.refs, satMul(o.refs, times))
+	s.loose = satAdd(s.loose, satMul(o.loose, times))
+	s.scalars = satAdd(s.scalars, satMul(o.scalars, times))
+	s.nodes = satAdd(s.nodes, satMul(o.nodes, times))
+	s.maxScalar = max(s.maxScalar, o.maxScalar)
 }
 
-// coef holds, for one build, the value bytes a transformer copies per place, by kind of place: per object, per
-// item of a sequence under a key, per item of any sequence and per name reference.
+// coef holds what the transformers of a visit copy per place, by kind of place: per object, per item of a
+// sequence under a key, per value under a key, per loose node ([shape]), per object, item of any sequence or
+// loose node (all: the field specs of labels), and the bytes a name change adds to each scalar that may be a
+// reference to the renamed object.
 type coef struct {
-	objects int
-	items   map[string]int
-	all     int
-	refs    int
+	// objects is per object, by kind ([specKinds], "" for every other kind, and anyKind).
+	objects map[string]cost
+	// items is per item of a sequence under the key, leaves per value or item under the key.
+	items, leaves map[string]cost
+	loose, all    cost
+	refs          int
+}
+
+func newCoef() *coef {
+	return &coef{objects: map[string]cost{}, items: map[string]cost{}, leaves: map[string]cost{}}
 }
 
 func (c *coef) add(o *coef) {
-	if c.items == nil {
-		c.items = map[string]int{}
+	for k, n := range o.objects {
+		c.objects[k] = c.objects[k].plus(n)
 	}
-	c.objects = satAdd(c.objects, o.objects)
 	for k, n := range o.items {
-		c.items[k] = satAdd(c.items[k], n)
+		c.items[k] = c.items[k].plus(n)
 	}
-	c.all = satAdd(c.all, o.all)
+	for k, n := range o.leaves {
+		c.leaves[k] = c.leaves[k].plus(n)
+	}
+	c.loose = c.loose.plus(o.loose)
+	c.all = c.all.plus(o.all)
 	c.refs = satAdd(c.refs, o.refs)
 }
 
-// fieldPath is a field spec of a kustomize built-in transformer: the path it writes, and the kind it is limited
-// to ("" for every kind).
-type fieldPath struct{ path, kind string }
+// fieldPath is a field spec of a kustomize built-in transformer: the path it writes, the kind it is limited
+// to ("" for every kind), and whether it creates the path when missing.
+type fieldPath struct {
+	path, kind string
+	create     bool
+}
 
 // The field specs of the built-in transformers in kustomize v0.21.2 (api/internal/konfig/builtinpluginconsts),
 // which the renderer runs with no other configuration (configurations is refused): one per line, the path and
-// the kind it is limited to, if any. They are copied, since the package is internal; a kustomize upgrade must
-// check them again. AFFINITY stands for the four pod (anti-)affinity label selector paths ([affinityPaths]).
+// the kind it is limited to, if any; a leading + marks create: true. They are copied, since the package is
+// internal; a kustomize upgrade must check them again. AFFINITY stands for the four pod (anti-)affinity label
+// selector paths ([affinityPaths]).
 const (
 	// labelSpecs: commonLabels (commonlabels.go with metadatalabels.go) and the volume claim template labels,
 	// which labels with includeSelectors or includeTemplates also use.
-	labelSpecs = `metadata/labels
-spec/selector Service
-spec/selector ReplicationController
-spec/template/metadata/labels ReplicationController
-spec/selector/matchLabels Deployment
-spec/template/metadata/labels Deployment
+	labelSpecs = `+metadata/labels
++spec/selector Service
++spec/selector ReplicationController
++spec/template/metadata/labels ReplicationController
++spec/selector/matchLabels Deployment
++spec/template/metadata/labels Deployment
 AFFINITY Deployment
 spec/template/spec/topologySpreadConstraints/labelSelector/matchLabels Deployment
-spec/selector/matchLabels ReplicaSet
-spec/template/metadata/labels ReplicaSet
-spec/selector/matchLabels DaemonSet
-spec/template/metadata/labels DaemonSet
-spec/selector/matchLabels StatefulSet
-spec/template/metadata/labels StatefulSet
++spec/selector/matchLabels ReplicaSet
++spec/template/metadata/labels ReplicaSet
++spec/selector/matchLabels DaemonSet
++spec/template/metadata/labels DaemonSet
++spec/selector/matchLabels StatefulSet
++spec/template/metadata/labels StatefulSet
 AFFINITY StatefulSet
 spec/template/spec/topologySpreadConstraints/labelSelector/matchLabels StatefulSet
-spec/volumeClaimTemplates[]/metadata/labels StatefulSet
++spec/volumeClaimTemplates[]/metadata/labels StatefulSet
 spec/selector/matchLabels Job
-spec/template/metadata/labels Job
++spec/template/metadata/labels Job
 spec/jobTemplate/spec/selector/matchLabels CronJob
-spec/jobTemplate/metadata/labels CronJob
-spec/jobTemplate/spec/template/metadata/labels CronJob
++spec/jobTemplate/metadata/labels CronJob
++spec/jobTemplate/spec/template/metadata/labels CronJob
 spec/selector/matchLabels PodDisruptionBudget
 spec/podSelector/matchLabels NetworkPolicy
 spec/ingress/from/podSelector/matchLabels NetworkPolicy
 spec/egress/to/podSelector/matchLabels NetworkPolicy`
-	annotationSpecs = `metadata/annotations
-spec/template/metadata/annotations ReplicationController
-spec/template/metadata/annotations Deployment
-spec/template/metadata/annotations ReplicaSet
-spec/template/metadata/annotations DaemonSet
-spec/template/metadata/annotations StatefulSet
-spec/template/metadata/annotations Job
-spec/jobTemplate/metadata/annotations CronJob
-spec/jobTemplate/spec/template/metadata/annotations CronJob`
+	annotationSpecs = `+metadata/annotations
++spec/template/metadata/annotations ReplicationController
++spec/template/metadata/annotations Deployment
++spec/template/metadata/annotations ReplicaSet
++spec/template/metadata/annotations DaemonSet
++spec/template/metadata/annotations StatefulSet
++spec/template/metadata/annotations Job
++spec/jobTemplate/metadata/annotations CronJob
++spec/jobTemplate/spec/template/metadata/annotations CronJob`
 	// namespaceSpecs: metadata/namespace, which the namespace transformer sets on every object, and its field
 	// specs; the role binding subjects it also sets are counted by item ([transformCoef]).
-	namespaceSpecs = `metadata/namespace
-metadata/name Namespace
-spec/service/namespace APIService
+	namespaceSpecs = `+metadata/namespace
++metadata/name Namespace
++spec/service/namespace APIService
 spec/conversion/webhook/clientConfig/service/namespace CustomResourceDefinition`
-	replicaSpecs = `spec/replicas Deployment
-spec/replicas ReplicationController
-spec/replicas ReplicaSet
-spec/replicas StatefulSet`
+	replicaSpecs = `+spec/replicas Deployment
++spec/replicas ReplicationController
++spec/replicas ReplicaSet
++spec/replicas StatefulSet`
 )
 
 // affinityPaths are the pod affinity and anti-affinity label selectors that commonLabels writes in Deployments
@@ -180,68 +235,112 @@ func affinityPaths() []string {
 func parseSpecs(text string) []fieldPath {
 	var out []fieldPath
 	for line := range strings.SplitSeq(text, "\n") {
+		line, create := strings.CutPrefix(line, "+")
 		path, kind, _ := strings.Cut(line, " ")
 		if path == "AFFINITY" {
 			for _, p := range affinityPaths() {
-				out = append(out, fieldPath{p, kind})
+				out = append(out, fieldPath{p, kind, create})
 			}
 			continue
 		}
-		out = append(out, fieldPath{path, kind})
+		out = append(out, fieldPath{path, kind, create})
 	}
 	return out
 }
 
-var (
-	// nameRefKeys are the last keys of the name reference field specs (namereference.go, none of which
-	// creates a field): a name prefix or suffix reaches every reference to a renamed object, each a value
-	// under one of these keys or an item of a sequence there (resourceNames, subjects).
-	nameRefKeys = keySet("adminSecretName", "auth-secret", "auth-tls-secret", "claimName", "configMap",
-		"fastcgi-params-configmap", "ingressClassName", "name", "policyName", "priorityClassName", "resourceNames",
-		"secretName", "secretRef", "service", "serviceAccountName", "serviceName", "storageClassName", "subjects",
-		"userSecretName", "volumeName")
-)
+// pathBound is the upper bound of the places a set of field specs writes in one build, by the kind of spec.
+//
+// A field spec with create and no sequence on its path reaches one place per object of the kinds it applies
+// to (places, per kind; "" for the kinds no spec names), and may create every mapping on its path (createNodes:
+// a key and a value for each, specs sharing their prefixes). A sequence on its path makes kustomize visit every
+// item (fieldspec.Filter, also for a segment without "[]"), so each place then lies in a distinct item of the
+// innermost sequence, a sequence under one of the path's keys: one place per item of a sequence under each
+// key in items, with up to itemCreate nodes created in it. A "[]" segment is looked up, never created, so a
+// path with one has no place in an object without that sequence.
+//
+// A field spec without create writes only where its whole path exists, so each place is a mapping under its
+// last key, or an item of a sequence there: leaves holds, per last key, the most such specs one node can match
+// (specs of one kind with the same path).
+//
+// A loose node ([shape]) has one key above it, so it hosts at most loose places: the most specs of one kind
+// whose paths hold one key, counted per segment.
+type pathBound struct {
+	kinds             map[string]kindBound
+	items, leaves     map[string]int
+	itemCreate, loose int
+}
 
-func keySet(keys ...string) map[string]bool {
-	m := make(map[string]bool, len(keys))
-	for _, k := range keys {
-		m[k] = true
+type kindBound struct{ places, createNodes int }
+
+// specKinds are the kinds the field specs name; an object of another kind is counted as "".
+var specKinds = func() map[string]bool {
+	m := map[string]bool{}
+	for _, text := range []string{labelSpecs, annotationSpecs, namespaceSpecs, replicaSpecs} {
+		for _, p := range parseSpecs(text) {
+			if p.kind != "" {
+				m[p.kind] = true
+			}
+		}
 	}
 	return m
-}
+}()
 
-// pathBound is the upper bound of the places a set of field specs writes in one build, per byte of the value:
-// perObject places in every object, plus one place per item of a sequence under each key in items. A field
-// spec reaches one place per object unless a sequence lies on its path: kustomize then visits every item
-// (fieldspec.Filter, also for a segment without "[]"), so each place lies in a distinct item of the innermost
-// sequence on the path, a sequence under one of the path's keys. A "[]" segment is looked up, never created,
-// so a path with one has no place in an object without that sequence.
-type pathBound struct {
-	perObject int
-	items     map[string]int
-}
+// keyNamespace is the namespace field of a kustomization file and of an object.
+const keyNamespace = "namespace"
+
+// anyKind counts the objects whose kind a patch may change: they are counted as the costliest kind.
+const anyKind = "*"
 
 func boundOf(paths []fieldPath) pathBound {
-	b := pathBound{items: map[string]int{}}
-	perKind := map[string]int{}
-	kindless := 0
+	b := pathBound{kinds: map[string]kindBound{}, items: map[string]int{}, leaves: map[string]int{}}
+	byKind := map[string][]fieldPath{"": nil}
+	for k := range specKinds {
+		byKind[k] = nil
+	}
 	for _, p := range paths {
-		for seg := range strings.SplitSeq(p.path, "/") {
-			b.items[strings.TrimSuffix(seg, "[]")]++
-		}
-		if strings.Contains(p.path, "[]") {
+		byKind[p.kind] = append(byKind[p.kind], p)
+		if !p.create {
 			continue
 		}
-		if p.kind == "" {
-			kindless++
-		} else {
-			perKind[p.kind]++
+		segs := strings.Split(p.path, "/")
+		for _, seg := range segs {
+			b.items[strings.TrimSuffix(seg, "[]")]++
 		}
+		b.itemCreate = max(b.itemCreate, 2*len(segs))
 	}
 	// An object has one kind, so it matches the specs for every kind and those of its own kind at most.
-	b.perObject = kindless
-	for _, n := range perKind {
-		b.perObject = max(b.perObject, kindless+n)
+	for kind, own := range byKind {
+		specs := own
+		if kind != "" {
+			specs = append(append([]fieldPath{}, byKind[""]...), own...)
+		}
+		var kb kindBound
+		prefixes, keys, same := map[string]bool{}, map[string]int{}, map[string]int{}
+		for _, p := range specs {
+			for seg := range strings.SplitSeq(p.path, "/") {
+				keys[strings.TrimSuffix(seg, "[]")]++
+			}
+			if !p.create {
+				same[p.path]++
+				leaf := strings.TrimSuffix(p.path[strings.LastIndex(p.path, "/")+1:], "[]")
+				b.leaves[leaf] = max(b.leaves[leaf], same[p.path])
+				continue
+			}
+			if strings.Contains(p.path, "[]") {
+				continue
+			}
+			kb.places++
+			for i := range len(p.path) + 1 {
+				if i == len(p.path) || p.path[i] == '/' {
+					prefixes[p.path[:i]] = true
+				}
+			}
+		}
+		kb.createNodes = 2 * len(prefixes)
+		b.kinds[kind] = kb
+		for _, n := range keys {
+			b.loose = max(b.loose, n)
+		}
 	}
 	return b
 }
@@ -256,11 +355,18 @@ var (
 	// and volumes items by its field specs and again in every containers and initContainers item, anywhere, by
 	// its legacy filter; an image or reference field that is itself a sequence is visited item by item.
 	imageItems = map[string]int{"containers": 2, "initContainers": 2, "volumes": 1, "image": 2, "reference": 1}
-	// shapeKeys are the keys whose sequence items a file's shape counts.
+	// imageLoose is the most places of imageItems one loose node hosts, and imageCreate the nodes the image
+	// transformer may create in an item (image/reference: two keys and two values).
+	imageLoose, imageCreate = 2, 4
+	// shapeKeys are the keys whose sequence items a file's shape counts, and leafKeys those whose mappings it
+	// counts too.
 	shapeKeys = func() map[string]bool {
 		m := map[string]bool{"subjects": true}
 		for _, b := range []pathBound{labelBound, annotationBound, namespaceBound, replicaBound} {
 			for k := range b.items {
+				m[k] = true
+			}
+			for k := range b.leaves {
 				m[k] = true
 			}
 		}
@@ -269,16 +375,46 @@ var (
 		}
 		return m
 	}()
+	leafKeys = func() map[string]bool {
+		m := map[string]bool{}
+		for _, b := range []pathBound{labelBound, annotationBound, namespaceBound, replicaBound} {
+			for k := range b.leaves {
+				m[k] = true
+			}
+		}
+		return m
+	}()
 )
 
-func (c *coef) addPaths(v int, b pathBound) {
-	if c.items == nil {
-		c.items = map[string]int{}
+// perObject adds f(kind), the cost per object of each kind, to the coefficients, and to anyKind the most of
+// them.
+func (c *coef) perObject(f func(kind string) cost) {
+	var most cost
+	for _, k := range append(slices.Collect(maps.Keys(specKinds)), "") {
+		v := f(k)
+		c.objects[k] = c.objects[k].plus(v)
+		most = cost{max(most.bytes, v.bytes), max(most.nodes, v.nodes)}
 	}
-	c.objects = satAdd(c.objects, satMul(v, b.perObject))
+	c.objects[anyKind] = c.objects[anyKind].plus(most)
+}
+
+func (c *coef) addPaths(v cost, b pathBound) {
+	c.perObject(func(kind string) cost {
+		kb, ok := b.kinds[kind]
+		if !ok {
+			kb = b.kinds[""]
+		}
+		return v.times(kb.places).plus(cost{nodes: kb.createNodes})
+	})
+	item := v.plus(cost{nodes: b.itemCreate})
 	for k, n := range b.items {
-		c.items[k] = satAdd(c.items[k], satMul(v, n))
+		c.items[k] = c.items[k].plus(item.times(n))
 	}
+	// A spec without create adds the value to a mapping or item that exists: no node of the path.
+	for k, n := range b.leaves {
+		c.leaves[k] = c.leaves[k].plus(v.times(n))
+	}
+	c.loose = c.loose.plus(item.times(b.loose))
 }
 
 // jsonBytes is the most bytes s takes in the JSON the render marshals each object to: 6 for a byte that JSON
@@ -298,26 +434,27 @@ func jsonBytes(s string) int {
 	return n
 }
 
-// valueBytes is the size of a decoded kustomization value: [jsonBytes] of every string and key, and 8 for any
-// other scalar. The kustomization file is at most MaxFileBytes, so the walk is bounded.
-func valueBytes(v any) int {
+// valueCost is the cost of a decoded kustomization value: [jsonBytes] of every string and key, 8 bytes for any
+// other scalar, and a node for every key, value and item. The kustomization file is at most MaxFileBytes, so
+// the walk is bounded.
+func valueCost(v any) cost {
 	switch t := v.(type) {
 	case string:
-		return jsonBytes(t)
+		return cost{jsonBytes(t), 1}
 	case map[string]any:
-		n := 0
+		c := cost{nodes: 1}
 		for k, e := range t {
-			n = satAdd(n, satAdd(jsonBytes(k), valueBytes(e)))
+			c = c.plus(cost{jsonBytes(k), 1}).plus(valueCost(e))
 		}
-		return n
+		return c
 	case []any:
-		n := 0
+		c := cost{nodes: 1}
 		for _, e := range t {
-			n = satAdd(n, valueBytes(e))
+			c = c.plus(valueCost(e))
 		}
-		return n
+		return c
 	default:
-		return 8
+		return cost{8, 1}
 	}
 }
 
@@ -325,60 +462,101 @@ func valueBytes(v any) int {
 // Patches are counted by the walk ([walker.countShapes]). Fields kustomize would refuse are counted as they are,
 // so a malformed one is bounded too; the render then fails.
 func transformCoef(k map[string]any) *coef {
-	c := &coef{items: map[string]int{}}
+	c := newCoef()
 	if v, ok := k["commonLabels"]; ok {
-		c.addPaths(valueBytes(v), labelBound)
+		c.addPaths(valueCost(v), labelBound)
 	}
 	if v, ok := k["commonAnnotations"]; ok {
-		c.addPaths(valueBytes(v), annotationBound)
+		c.addPaths(valueCost(v), annotationBound)
 	}
 	if v, ok := k["labels"]; ok {
-		n := valueBytes(v)
-		c.addPaths(n, labelBound)
-		// Field specs of its own reach any key: one place per object each, or per item of any sequence.
-		fields := 0
-		if entries, ok := v.([]any); ok {
-			for _, e := range entries {
-				if m, ok := e.(map[string]any); ok {
-					if f, ok := m["fields"].([]any); ok {
-						fields += len(f)
-					} else if m["fields"] != nil {
-						fields++
-					}
-				}
+		// Each entry copies its pairs, with the commonLabels specs at most; a malformed entry or list counts
+		// as a whole.
+		entries, ok := v.([]any)
+		if !ok {
+			entries = []any{v}
+		}
+		for _, e := range entries {
+			m, ok := e.(map[string]any)
+			n := valueCost(e)
+			if ok {
+				n = valueCost(m["pairs"])
+			}
+			c.addPaths(n, labelBound)
+			// Field specs of its own reach any key: one place per object each, or per item of any sequence,
+			// and may create every mapping on their path.
+			fields, ok := m["fields"].([]any)
+			if !ok && m["fields"] != nil {
+				fields = []any{m["fields"]}
+			}
+			for _, f := range fields {
+				place := n.plus(cost{nodes: 2 * fieldSegments(f)})
+				c.all = c.all.plus(place)
 			}
 		}
-		c.objects = satAdd(c.objects, satMul(n, fields))
-		c.all = satAdd(c.all, satMul(n, fields))
 	}
-	if v, ok := k["namespace"]; ok {
-		n := valueBytes(v)
+	if v, ok := k[keyNamespace]; ok {
+		n := valueCost(v)
 		c.addPaths(n, namespaceBound)
-		c.items["subjects"] = satAdd(c.items["subjects"], n)
+		// The namespace field of each role binding subject: a key and a value, in an item under subjects, or
+		// in a loose node.
+		subject := n.plus(cost{nodes: 2})
+		c.items["subjects"] = c.items["subjects"].plus(subject)
+		c.loose = c.loose.plus(subject)
 	}
 	for _, key := range []string{"namePrefix", "nameSuffix"} {
 		if v, ok := k[key]; ok {
-			n := valueBytes(v)
-			c.objects = satAdd(c.objects, n) // metadata/name
+			n := valueCost(v).bytes
+			c.perObject(func(string) cost { return cost{bytes: n} }) // metadata/name
 			c.refs = satAdd(c.refs, n)
 		}
 	}
 	if v, ok := k["images"]; ok {
-		n := valueBytes(v)
+		place := cost{bytes: valueCost(v).bytes, nodes: imageCreate}
 		for key, times := range imageItems {
-			c.items[key] = satAdd(c.items[key], satMul(n, times))
+			c.items[key] = c.items[key].plus(place.times(times))
 		}
+		c.loose = c.loose.plus(place.times(imageLoose))
 	}
 	if v, ok := k["replicas"]; ok {
-		c.addPaths(valueBytes(v), replicaBound)
+		c.addPaths(cost{bytes: valueCost(v).bytes}, replicaBound)
 	}
 	return c
 }
 
-// shapeOf returns the shape of a file or inline patch that [documents] has accepted (UTF-8, parses, no
-// anchors, aliases or merge keys), decoding it part by part as [refuseCopy] does.
-func shapeOf(name string, data []byte) (*shape, error) {
-	s := &shape{items: map[string]int{}}
+// fieldSegments is the number of segments of the path of a labels field spec, or, for a malformed one, of
+// the longest path a kustomization file could hold.
+func fieldSegments(f any) int {
+	if m, ok := f.(map[string]any); ok {
+		if p, ok := m["path"].(string); ok {
+			return strings.Count(p, "/") + 1
+		}
+	}
+	return MaxFileBytes / 2
+}
+
+// scan is what the walk counts in a file or an inline patch: its shape as a resource or a patch (what it puts
+// into the objects), its bytes ([jsonBytes]) and nodes, the bytes of the largest scalar a patch may write as a
+// name or a namespace (rename), and whether a JSON patch moves a value or may change a kind.
+type scan struct {
+	shape shape
+	// bytes and nodes are those of the text, which a patch with a target adds to every object it selects.
+	bytes, nodes       int
+	rename             int
+	moves, kindChanges bool
+}
+
+func newScan() *scan {
+	return &scan{shape: shape{kinds: map[string]int{}, keys: map[string]int{}, items: map[string]int{}}}
+}
+
+// scanOf returns the scan of a file or inline patch that [documents] has accepted (UTF-8, parses, no
+// anchors, aliases or merge keys), decoding it part by part as [refuseCopy] does. objects is what documents
+// counted in it: each item of a List is an object of its own, of a kind the scan does not tell, so the objects
+// past the documents count as anyKind.
+func scanOf(name string, data []byte, objects int) (*scan, error) {
+	s := newScan()
+	s.bytes = jsonBytes(string(data))
 	for _, p := range gityaml.Parts(data) {
 		dec := yaml.NewDecoder(strings.NewReader(p.Text))
 		for {
@@ -390,57 +568,257 @@ func shapeOf(name string, data []byte) (*shape, error) {
 			if err != nil {
 				return nil, refuse(ReasonInvalidYAML, fmt.Sprintf("%s line %d: %v", name, p.Line, gityaml.ErrNotParse))
 			}
-			s.walk(&doc, "")
+			s.shape.docs++
+			s.shape.kinds[kindOf(&doc)]++
+			s.nodes = satAdd(s.nodes, nodesIn(&doc))
+			// A document that is a sequence is a JSON patch (kustomize reads it as one).
+			if len(doc.Content) == 1 && doc.Content[0].Kind == yaml.SequenceNode {
+				s.jsonPatch(doc.Content[0])
+			} else {
+				s.walk(&doc, "", false)
+			}
 		}
+	}
+	if extra := objects - s.shape.docs; extra > 0 {
+		s.shape.docs += extra
+		s.shape.kinds[anyKind] += extra
 	}
 	return s, nil
 }
 
-// walk counts n, the value under key ("" for none).
-func (s *shape) walk(n *yaml.Node, key string) {
+// kindOf is the kind of an object document, "" for none.
+func kindOf(doc *yaml.Node) string {
+	if len(doc.Content) == 1 && doc.Content[0].Kind == yaml.MappingNode {
+		m := doc.Content[0].Content
+		for i := 0; i+1 < len(m); i += 2 {
+			if m[i].Value == "kind" && m[i+1].Kind == yaml.ScalarNode {
+				return m[i+1].Value
+			}
+		}
+	}
+	return ""
+}
+
+// walk counts n, the value under key ("" for none); named is set below a JSON patch value written to a name or
+// a namespace, whose scalars may all become one.
+func (s *scan) walk(n *yaml.Node, key string, named bool) {
+	sh := &s.shape
+	sh.nodes++
+	if leafKeys[key] {
+		sh.keys[key]++
+	}
 	switch n.Kind {
 	case yaml.DocumentNode:
 		for _, c := range n.Content {
-			s.walk(c, "")
+			s.walk(c, "", named)
+		}
+	case yaml.ScalarNode:
+		sh.scalars++
+		b := jsonBytes(n.Value)
+		sh.maxScalar = max(sh.maxScalar, b)
+		if named || key == "name" || key == keyNamespace {
+			s.rename = max(s.rename, b)
 		}
 	case yaml.SequenceNode:
-		s.all += len(n.Content)
+		sh.all += len(n.Content)
 		if shapeKeys[key] {
-			s.items[key] += len(n.Content)
-		}
-		if nameRefKeys[key] {
-			s.refs += len(n.Content)
+			sh.items[key] += len(n.Content)
 		}
 		for _, c := range n.Content {
 			if c.Kind == yaml.SequenceNode {
-				s.walk(c, key)
+				s.walk(c, key, named)
 			} else {
-				s.walk(c, "")
+				s.walk(c, "", named)
 			}
 		}
 	case yaml.MappingNode:
 		for i := 0; i+1 < len(n.Content); i += 2 {
-			k := n.Content[i].Value
-			if nameRefKeys[k] {
-				s.refs++
-			}
-			s.walk(n.Content[i+1], k)
+			sh.nodes++ // the key
+			s.walk(n.Content[i+1], n.Content[i].Value, named)
 		}
 	}
 }
 
-// growth is the upper bound of the bytes the transformers add to the render, given the coefficients summed
-// over every visit, the shape of the input with repetition, the targeted patches (bytes and shape, with
-// repetition) and objects, the documents of the build, an upper bound of its objects. A targeted patch writes
-// its content into every object it may select, so its items and references count once per object too.
-func growth(c *coef, input *shape, patchBytes int, patches *shape, objects int) int {
-	in := &shape{items: maps.Clone(input.items)}
-	in.add(&shape{all: input.all, refs: input.refs}, 1)
-	in.add(patches, objects)
-	g := satAdd(satMul(patchBytes, objects), satMul(c.objects, objects))
-	for k, n := range c.items {
-		g = satAdd(g, satMul(n, in.items[k]))
+// nodesIn counts the nodes of n, mapping keys included.
+func nodesIn(n *yaml.Node) int {
+	c := 1
+	for i, e := range n.Content {
+		if n.Kind == yaml.MappingNode && i%2 == 0 {
+			c++
+			continue
+		}
+		c = satAdd(c, nodesIn(e))
 	}
-	g = satAdd(g, satMul(c.all, in.all))
-	return satAdd(g, satMul(c.refs, in.refs))
+	return c
+}
+
+// jsonPatch counts what the operations of a JSON patch put into an object: the value of each, under the key
+// its path ends in, or as an item of the sequence under the last key before a trailing run of indexes or "-"
+// (a mapping key that looks like an index counts as an item too, which can only over-count). A path that is
+// not a plain string or holds an escape puts its value anywhere: its nodes are loose ([shape]). A value
+// written to a path that ends in name or namespace may become a name, and one written to kind changes it; an
+// operation other than add, replace, remove or test (a move: copy is refused) may put any node of an object
+// anywhere.
+func (s *scan) jsonPatch(ops *yaml.Node) {
+	for _, op := range ops.Content {
+		if op.Kind != yaml.MappingNode {
+			continue
+		}
+		var path, value *yaml.Node
+		for i := 0; i+1 < len(op.Content); i += 2 {
+			switch v := op.Content[i+1]; op.Content[i].Value {
+			case "op":
+				if v.Kind != yaml.ScalarNode || v.Value != "add" && v.Value != "replace" && v.Value != "remove" &&
+					v.Value != "test" {
+					s.moves = true
+				}
+			case "path":
+				path = v
+			case "value":
+				value = v
+			}
+		}
+		if path == nil || path.Kind != yaml.ScalarNode || strings.Contains(path.Value, "~") {
+			s.kindChanges = true
+			if value != nil {
+				before := s.shape.nodes
+				s.walk(value, "", true)
+				s.shape.loose = satAdd(s.shape.loose, s.shape.nodes-before)
+			}
+			continue
+		}
+		segs := strings.Split(path.Value, "/")
+		item := false
+		for len(segs) > 1 && isIndex(segs[len(segs)-1]) {
+			segs, item = segs[:len(segs)-1], true
+		}
+		last := segs[len(segs)-1]
+		if last == "kind" && !item {
+			s.kindChanges = true
+		}
+		if value == nil {
+			continue
+		}
+		named := !item && (last == "name" || last == keyNamespace)
+		sh := &s.shape
+		switch {
+		case !item:
+			s.walk(value, last, named)
+		case value.Kind == yaml.SequenceNode:
+			// An item that is itself a sequence: its items count for the key above both.
+			sh.all++
+			if shapeKeys[last] {
+				sh.items[last]++
+			}
+			s.walk(value, last, named)
+		default:
+			sh.all++
+			if shapeKeys[last] {
+				sh.items[last]++
+			}
+			s.walk(value, "", named)
+		}
+	}
+}
+
+// isIndex says whether a JSON pointer segment can name a sequence item: digits, or "-" for the end.
+func isIndex(seg string) bool {
+	if seg == "-" {
+		return true
+	}
+	return seg != "" && strings.Trim(seg, "0123456789") == ""
+}
+
+// ops are the patches and transformers one visit applies to the objects it builds: those of its kustomization
+// file and of the components it lists.
+type ops struct {
+	coef coef
+	// untargeted is the shape of the patches without a target, which kustomize applies to the one object each
+	// names; targeted are the patches with a target, applied to every object it may select.
+	untargeted shape
+	targeted   []targetedPatch
+	// rename sums, per patch, the largest scalar it may write as a name or a namespace; moves is set when one
+	// of them is a JSON patch with an operation other than add, replace, remove or test, and kindChanges when
+	// one may change the kind of an object.
+	rename             int
+	moves, kindChanges bool
+}
+
+func newOps() *ops { return &ops{coef: *newCoef()} }
+
+// targetedPatch is a patch with a target: its shape, what it adds to each object it selects, and the kind its
+// target names when that is a plain name ("" when the target may select any kind: its fields are regular
+// expressions).
+type targetedPatch struct {
+	shape shape
+	cost  cost
+	kind  string
+}
+
+func (o *ops) add(p *ops) {
+	o.coef.add(&p.coef)
+	o.untargeted.add(&p.untargeted, 1)
+	o.targeted = append(o.targeted, p.targeted...)
+	o.rename = satAdd(o.rename, p.rename)
+	o.moves = o.moves || p.moves
+	o.kindChanges = o.kindChanges || p.kindChanges
+}
+
+// visitGrowth applies o to s, the shape of the objects a visit builds (its resources, its directories already
+// built, and its components' resources), and returns what it adds to the render; s becomes the shape of the
+// result. kustomize runs the patches of a kustomization before its transformers, and every component's after
+// the resources; the bound counts every patch before every transformer, so a node any patch adds is a place for
+// every transformer, and a scalar any of them adds may be a reference a name change rewrites.
+func visitGrowth(s *shape, o *ops) cost {
+	objects := s.docs
+	anyKinds := o.moves || o.kindChanges
+	// A target that names a kind selects the objects of that kind, unless a patch may change kinds.
+	selected := make([]int, len(o.targeted))
+	for i, t := range o.targeted {
+		selected[i] = objects
+		if t.kind != "" && !anyKinds {
+			selected[i] = min(objects, satAdd(s.kinds[t.kind], s.kinds[anyKind]))
+		}
+	}
+	var g cost
+	s.add(&o.untargeted, 1)
+	for i, t := range o.targeted {
+		g = g.plus(t.cost.times(selected[i]))
+		s.add(&t.shape, selected[i])
+	}
+	if o.moves {
+		s.loose = satAdd(s.loose, s.nodes)
+	}
+	if anyKinds {
+		s.kinds = map[string]int{anyKind: objects}
+	}
+	c := &o.coef
+	for k, n := range s.kinds {
+		if k != anyKind && !specKinds[k] {
+			k = ""
+		}
+		g = g.plus(c.objects[k].times(n))
+	}
+	for k, n := range c.items {
+		g = g.plus(n.times(s.items[k]))
+	}
+	for k, n := range c.leaves {
+		g = g.plus(n.times(satAdd(s.keys[k], s.items[k])))
+	}
+	g = g.plus(c.loose.times(s.loose))
+	// A labels field spec of its own reaches one place per object, or per item of any sequence or loose node,
+	// and the mappings it creates may sit under any key, where a later spec without create finds them.
+	fields := c.all.times(satAdd(objects, satAdd(s.all, s.loose)))
+	g = g.plus(fields)
+	s.loose = satAdd(s.loose, fields.nodes)
+	// A name changes by every prefix and suffix, and to any scalar a patch writes as a name; each reference
+	// to it, any scalar, grows by as much.
+	rename := satAdd(c.refs, o.rename)
+	if o.moves {
+		rename = satAdd(rename, s.maxScalar)
+	}
+	g.bytes = satAdd(g.bytes, satMul(rename, satAdd(s.scalars, g.nodes)))
+	s.scalars = satAdd(s.scalars, g.nodes)
+	s.nodes = satAdd(s.nodes, g.nodes)
+	return g
 }

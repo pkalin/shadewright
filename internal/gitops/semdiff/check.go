@@ -157,6 +157,18 @@ func plan(in Input) (sourcemap.Field, any, any, error) {
 
 // tree walks the build of dir in files and returns the files it reads.
 func tree(ctx context.Context, files map[string][]byte, dir string) (*walker, error) {
+	w, err := walkTree(ctx, files, dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := w.checkGrowth(); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+// walkTree is tree without the check of what patches and transformers add ([walker.checkGrowth]).
+func walkTree(ctx context.Context, files map[string][]byte, dir string) (*walker, error) {
 	w := newWalker(func(_ context.Context, p string) ([]byte, bool, error) {
 		data, ok := files[p]
 		return data, ok, nil
@@ -170,9 +182,6 @@ func tree(ctx context.Context, files map[string][]byte, dir string) (*walker, er
 		})
 	}
 	if err := w.walk(ctx, dir, kindKustomization, 0); err != nil {
-		return nil, err
-	}
-	if err := w.checkGrowth(); err != nil {
 		return nil, err
 	}
 	return w, nil

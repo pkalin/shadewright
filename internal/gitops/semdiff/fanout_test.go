@@ -39,8 +39,9 @@ func wantTransformBudget(t *testing.T, err error) {
 }
 
 // annotatedRepo is ordersRepo with 1,022 ConfigMaps and one common annotation whose key and value are v bytes,
-// so the build holds 1,024 objects (documents) and the annotation reaches at most 3 places in each (metadata,
-// and the two templates of a CronJob): its bound is 3 x v x 1,024.
+// so the build holds 1,024 objects (documents: a Service, a ScaledObject and the ConfigMaps), none of a kind
+// with a pod template, so the annotation reaches one place in each: v bytes and 3 nodes (the mapping, the key
+// and the value), plus 4 nodes for metadata/annotations, which it may create. Its bound is 1,024 x (v + 7 x 128).
 func annotatedRepo(v int) map[string][]byte {
 	files := ordersRepo()
 	files[soKust] = append([]byte("commonAnnotations:\n  a: "+strings.Repeat("x", v-1)+"\n"),
@@ -49,9 +50,9 @@ func annotatedRepo(v int) map[string][]byte {
 	return files
 }
 
-// annotationAtBudget is the largest annotation whose bound is within the budget: 3 x 1,365 x 1,024 =
-// 4,193,280 bytes; 1,366 bytes give 4,196,352, over 4 MiB.
-const annotationAtBudget = transformBudget / (3 * 1024)
+// annotationAtBudget is the largest annotation whose bound is within the budget: 1,024 x (3,200 + 896) =
+// 4,194,304, exactly 4 MiB.
+const annotationAtBudget = 3200
 
 // TestCheckTransformBudget reproduces #495: an annotation of 64 KiB on 1,024 objects adds 64 MiB to the rendered
 // objects (on 1,000 objects it measured a Go heap peak of 127 MiB, the executor's memory limit), from about
@@ -129,8 +130,10 @@ func TestCheckTransformBudgetPerKind(t *testing.T) {
 	cases := map[string]func(v string) string{
 		"commonLabels": func(v string) string { return "commonLabels:\n  a: " + v + "\n" },
 		"labels":       func(v string) string { return "labels:\n  - pairs:\n      a: " + v + "\n" },
+		// A field spec of its own may pass any sequence, so it counts a place in every item of every sequence:
+		// one through the Pod's 2,000 containers and env items would refuse even the small value.
 		"labels with fields": func(v string) string {
-			return "labels:\n  - pairs:\n      a: " + v + "\n    fields:\n      - path: spec/containers[]/env[]/x\n        create: true\n"
+			return "labels:\n  - pairs:\n      a: " + v + "\n    fields:\n      - path: metadata/x\n        create: true\n"
 		},
 		"commonAnnotations":     func(v string) string { return "commonAnnotations:\n  a: " + v + "\n" },
 		"namespace":             func(v string) string { return "namespace: n" + v + "\n" },
@@ -142,6 +145,10 @@ func TestCheckTransformBudgetPerKind(t *testing.T) {
 	}
 	for name, extra := range cases {
 		for _, over := range []bool{true, false} {
+			if name == "replicas" && over {
+				// replicas writes its count, never its name, and only in kinds this repository does not hold.
+				continue
+			}
 			t.Run(fmt.Sprintf("%s over=%v", name, over), func(t *testing.T) {
 				v := "y"
 				if over {
@@ -215,6 +222,66 @@ func TestCheckTransformBudgetCountsEveryVisit(t *testing.T) {
 			} else if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
+		})
+	}
+}
+
+// TestLoadTransformBudgetComponent puts the transformer in a component: it applies to the objects of the
+// kustomization that lists it, 1,022 ConfigMaps here, which its own directory does not hold.
+func TestLoadTransformBudgetComponent(t *testing.T) {
+	for name, c := range map[string]struct {
+		v    int
+		over bool
+	}{"small": {16, false}, "large": {16 << 10, true}} {
+		t.Run(name, func(t *testing.T) {
+			files := ordersRepo()
+			files[soKust] = []byte("resources: [scaledobject.yaml, cms.yaml]\ncomponents: [../comp]\n")
+			files["apps/orders/cms.yaml"] = configMapsYAML(1022)
+			files["apps/comp/kustomization.yaml"] = []byte("apiVersion: kustomize.config.k8s.io/v1alpha1\n" +
+				"kind: Component\ncommonAnnotations:\n  a: " + strings.Repeat("x", c.v) + "\n")
+			_, err := load(t, files, "apps/orders")
+			if c.over {
+				wantTransformBudget(t, err)
+			} else if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+		})
+	}
+}
+
+// denseEntries returns the body of a flow mapping of entries with one-character values ("a0: x, a1: x, ...")
+// of about size bytes: two YAML nodes for every 6 to 8 bytes.
+func denseEntries(size int) string {
+	var b strings.Builder
+	for i := 0; b.Len() < size; i++ {
+		fmt.Fprintf(&b, "a%d: x, ", i)
+	}
+	return b.String() + "z: x"
+}
+
+// TestLoadTransformBudgetCountsNodes reproduces the node-dense builds of the #495 review: within the byte bound
+// alone, each put about a million YAML nodes into the render (821 to 1,188 MiB of Go heap for the patches,
+// 418 MiB for the annotation, measured with hack/load/render). The render holds every node, whatever its bytes,
+// so they are refused before it.
+func TestLoadTransformBudgetCountsNodes(t *testing.T) {
+	patch := func(body string) string {
+		return "patches:\n  - target:\n      kind: ConfigMap\n    patch: '" + body + "'\n"
+	}
+	for name, extra := range map[string]string{
+		// About 3.5 KiB on each of 1,024 objects, under 4 MiB in all: about 1,000 nodes each.
+		"targeted patch of tiny entries": patch("{apiVersion: v1, kind: ConfigMap, metadata: {name: any, " +
+			"annotations: {" + denseEntries(3500) + "}}}"),
+		"targeted patch of a list of numbers": patch("{apiVersion: v1, kind: ConfigMap, metadata: {name: any}, " +
+			"extra: [" + strings.Repeat("1,", 1750) + "1]}"),
+		// About 1.3 KiB in each of 3 places of 1,024 objects, under 4 MiB in all: about 400 nodes per place.
+		"commonAnnotations of one-character keys": "commonAnnotations: {" + denseEntries(1300) + "}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			files := ordersRepo()
+			files[soKust] = append([]byte(extra), kust("scaledobject.yaml", "cms.yaml")...)
+			files["apps/orders/cms.yaml"] = configMapsYAML(1022)
+			_, err := load(t, files, "apps/orders")
+			wantTransformBudget(t, err)
 		})
 	}
 }

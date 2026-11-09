@@ -777,9 +777,9 @@ func (r *RemediationRequestReconciler) buildTooLarge(ctx context.Context,
 // (semdiff reason TooLarge), when the policy check finds it. It is fixed text, never content from Git.
 var buildTooLargeMessage = fmt.Sprintf("The build is over a limit of the render check (at most %d bytes of input "+
 	"and %d YAML documents counted with repetition, %d directory visits, %d files of at most %d bytes, %d bytes that "+
-	"patches and transformers can add to the render); no plan was made",
+	"patches and transformers can add to the render, counting %d for each YAML node); no plan was made",
 	semdiff.MaxBuildBytes, semdiff.MaxBuildDocuments, semdiff.MaxVisits, semdiff.MaxFiles, semdiff.MaxFileBytes,
-	semdiff.MaxTransformBytes)
+	semdiff.MaxTransformBytes, semdiff.NodeBytes)
 
 // unchanged reads the target again and returns nil when it is still live, with the UID and resourceVersion of
 // live, the object the check read first. Otherwise it returns an error, so the check starts over on the next

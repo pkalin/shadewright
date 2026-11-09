@@ -524,6 +524,26 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		Entry("after the write, the answer lost", true),
 	)
 
+	It("warns once per comment with an Event while the permission question keeps failing", func() {
+		recorder = record.NewFakeRecorder(10)
+		id := byWriter("/shadewright reanalyze: the sidecar")
+		git.SetFail(func(op string) error {
+			if op == "CanWrite" {
+				return &providers.RetryableError{Err: errors.New("GitHub author permission: status 502")}
+			}
+			return nil
+		})
+		r := reconciler()
+		for range 3 {
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		}
+		Expect(asks()).To(Equal(3), "every look asks again: the cursor stays at the comment")
+		Expect(recorder.Events).To(HaveLen(1))
+		Expect(<-recorder.Events).To(And(HavePrefix("Warning "+ReasonHintPermissionUnknown),
+			ContainSubstring(fmt.Sprintf("comment %d", id))))
+		Expect(fetch().Status.Hints).To(BeEmpty())
+	})
+
 	It("stores what came before a permission question that failed, and the rest on the next look", func() {
 		readOnly := comment(providers.AuthorPerson, readerID, "reader", "/shadewright reanalyze: me too")
 		id := byWriter("/shadewright reanalyze: the sidecar")

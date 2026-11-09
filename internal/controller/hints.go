@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -99,6 +100,10 @@ const (
 	// no replacement can take its pull request over.
 	ReasonHintRequestEnded = "RequestEnded"
 )
+
+// ReasonHintPermissionUnknown is the reason of the Warning Event about a request whose look at the comments
+// stops at a comment because the code host did not answer whether its author may write.
+const ReasonHintPermissionUnknown = "HintPermissionUnknown"
 
 // maxPermissionAsks is how many authors one look asks the code host about. Anyone who can comment on the
 // pull request can post the command, so a look full of them must not turn into a request per comment.
@@ -395,6 +400,9 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 			}
 			var err error
 			if may, err = fs.CanWrite(ctx, c.Author); err != nil {
+				if ctx.Err() == nil {
+					r.warnPermissionUnknown(upd, c.ID)
+				}
 				return i, fmt.Errorf("ask whether the author of comment %d may write: %w", c.ID, err)
 			}
 			asked[c.Author.ID] = may
@@ -437,6 +445,28 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 		log.Info("Accepted a reviewer hint for RemediationRequest", "comment", c.ID, "author", c.Author.ID)
 	}
 	return len(items), nil
+}
+
+// permissionWarning is the comment a Warning Event of ReasonHintPermissionUnknown was recorded for, per request.
+type permissionWarning struct {
+	uid     types.UID
+	comment int64
+}
+
+// warnPermissionUnknown records a Warning Event on rr when the look stops at comment because the code host did
+// not answer the permission question: stopping there is safe, but a question that keeps failing would hold
+// every later comment back without a trace. One Event per comment and request in this process; nothing is
+// stored, so a restart may warn once more.
+func (r *RemediationRequestReconciler) warnPermissionUnknown(rr *remediationv1alpha1.RemediationRequest, comment int64) {
+	if r.Recorder == nil {
+		return
+	}
+	w := permissionWarning{uid: rr.UID, comment: comment}
+	if last, ok := r.permissionWarned.Swap(client.ObjectKeyFromObject(rr), w); ok && last == w {
+		return
+	}
+	r.Recorder.Eventf(rr, corev1.EventTypeWarning, ReasonHintPermissionUnknown,
+		"Reviewer hints wait at comment %d: the code host did not answer whether its author may write", comment)
 }
 
 // chainHints counts the hints that count toward the cap of a supersede chain: Consumed and Reserved ones.

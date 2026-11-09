@@ -17,14 +17,27 @@ limitations under the License.
 package digest
 
 import (
+	"errors"
 	"reflect"
 	"regexp"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/testutil/deadline"
 )
+
+// mustCompute returns the digest of in and fails the test when Compute refuses it.
+func mustCompute(t *testing.T, in Input) string {
+	t.Helper()
+	d, err := Compute(in)
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	return d
+}
 
 // planDigestPattern is the schema pattern of status.planDigest.
 var planDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -88,11 +101,11 @@ func TestGolden(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			got := Compute(tc.in)
+			got := mustCompute(t, tc.in)
 			if got != tc.want {
 				t.Errorf("Compute() = %s, want %s", got, tc.want)
 			}
-			if again := Compute(tc.in); again != got {
+			if again := mustCompute(t, tc.in); again != got {
 				t.Errorf("Compute() is not deterministic: %s then %s", got, again)
 			}
 		})
@@ -101,7 +114,7 @@ func TestGolden(t *testing.T) {
 
 func TestMatchesPlanDigestPattern(t *testing.T) {
 	for _, in := range []Input{kedaInput(), memoryInput("1Mi", "1Ti"), {}} {
-		if got := Compute(in); !planDigestPattern.MatchString(got) {
+		if got := mustCompute(t, in); !planDigestPattern.MatchString(got) {
 			t.Errorf("Compute() = %q does not match %s", got, planDigestPattern)
 		}
 	}
@@ -169,10 +182,10 @@ func TestEveryFieldChangesDigest(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			before := Compute(tc.base())
+			before := mustCompute(t, tc.base())
 			in := tc.base()
 			tc.mutate(&in)
-			if after := Compute(in); after == before {
+			if after := mustCompute(t, in); after == before {
 				t.Errorf("changing %s left the digest at %s", name, before)
 			}
 		})
@@ -205,12 +218,12 @@ func TestEqualQuantitiesGiveSameDigest(t *testing.T) {
 		{"1G", "1000M", "1e9", "1000000000"},
 	}
 	for _, group := range groups {
-		want := Compute(memoryInput(group[0], "1Ti"))
+		want := mustCompute(t, memoryInput(group[0], "1Ti"))
 		for _, q := range group[1:] {
-			if got := Compute(memoryInput(q, "1Ti")); got != want {
+			if got := mustCompute(t, memoryInput(q, "1Ti")); got != want {
 				t.Errorf("previous %s gives %s, %s gives %s", q, got, group[0], want)
 			}
-			if got, w := Compute(memoryInput("1Mi", q)), Compute(memoryInput("1Mi", group[0])); got != w {
+			if got, w := mustCompute(t, memoryInput("1Mi", q)), mustCompute(t, memoryInput("1Mi", group[0])); got != w {
 				t.Errorf("desired %s gives %s, %s gives %s", q, got, group[0], w)
 			}
 		}
@@ -245,7 +258,24 @@ func TestNoFieldBoundaryCollision(t *testing.T) {
 	b := kedaInput()
 	b.Source.TargetBranch = "mainapps"
 	b.Source.Path = "/x.yaml"
-	if Compute(a) == Compute(b) {
+	if mustCompute(t, a) == mustCompute(t, b) {
 		t.Error("digests collide when bytes move between adjacent fields")
+	}
+}
+
+// TestRefusesUnboundedQuantities is part of #593: a request whose memory value has a huge decimal exponent is
+// refused, instead of being written as a plain decimal number of billions of digits.
+func TestRefusesUnboundedQuantities(t *testing.T) {
+	for name, in := range map[string]Input{
+		"previous": memoryInput("1e2147483647", "1Ti"),
+		"desired":  memoryInput("1Mi", "1e2147483647"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			deadline.Within(t, 5*time.Second, func(t *testing.T) {
+				if d, err := Compute(in); !errors.Is(err, ErrUnboundedQuantity) {
+					t.Fatalf("Compute = %q, %v, want %v", d, err, ErrUnboundedQuantity)
+				}
+			})
+		})
 	}
 }

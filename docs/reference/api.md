@@ -1216,15 +1216,17 @@ Used by: [CommentCursor](#commentcursor).
 ### SetContainerMemoryLimit
 
 SetContainerMemoryLimit changes resources.limits.memory of one container. previous must match the file in
-Git when the patch is applied, or the plan is stale. Both values are whole bytes between 1Mi and 1Ti.
+Git when the patch is applied, or the plan is stale. Both values are whole bytes between 1Mi and 1Ti. The
+rules compare a value only once its approximate float is at most 2e12: the quantity library would compute a
+huge decimal exponent digit by digit (#593).
 
 
 Validation rules:
 
-- desired must differ from previous: `quantity(string(self.desired)).compareTo(quantity(string(self.previous))) != 0`
-- previous and desired must be whole bytes: `quantity(string(self.previous)).isInteger() && quantity(string(self.desired)).isInteger()`
-- previous must be between 1Mi and 1Ti: `quantity(string(self.previous)).compareTo(quantity('1Mi')) >= 0 && quantity(string(self.previous)).compareTo(quantity('1Ti')) <= 0`
-- desired must be between 1Mi and 1Ti: `quantity(string(self.desired)).compareTo(quantity('1Mi')) >= 0 && quantity(string(self.desired)).compareTo(quantity('1Ti')) <= 0`
+- desired must differ from previous: `!(quantity(string(self.previous)).asApproximateFloat() <= 2e12 && quantity(string(self.desired)).asApproximateFloat() <= 2e12) || quantity(string(self.desired)).compareTo(quantity(string(self.previous))) != 0`
+- previous and desired must be whole bytes: `!(quantity(string(self.previous)).asApproximateFloat() <= 2e12 && quantity(string(self.desired)).asApproximateFloat() <= 2e12) || (quantity(string(self.previous)).isInteger() && quantity(string(self.desired)).isInteger())`
+- previous must be between 1Mi and 1Ti: `quantity(string(self.previous)).asApproximateFloat() <= 2e12 && quantity(string(self.previous)).compareTo(quantity('1Mi')) >= 0 && quantity(string(self.previous)).compareTo(quantity('1Ti')) <= 0`
+- desired must be between 1Mi and 1Ti: `quantity(string(self.desired)).asApproximateFloat() <= 2e12 && quantity(string(self.desired)).compareTo(quantity('1Mi')) >= 0 && quantity(string(self.desired)).compareTo(quantity('1Ti')) <= 0`
 
 Used by: [Action](#action).
 

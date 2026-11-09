@@ -34,9 +34,10 @@ import (
 const MaxLength = 40
 
 // Form is the strict form a quantity string must have before it is parsed: an optional sign, a decimal
-// number, and an optional binary or decimal SI suffix or a decimal exponent of at most two digits. It is the
-// pattern the CRD schema gives the RemediationRequest's memory values too.
-const Form = `^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([KMGTPE]i|[numkMGTPE]|[eE][+-]?[0-9]{1,2})?$`
+// number, and an optional binary or decimal SI suffix or a decimal exponent of at most two digits. The CRD
+// cannot carry it (controller-gen puts no pattern or length on a Quantity field, and matches() over an
+// unbounded string exceeds the CEL cost budget), so its rules guard their comparisons with a float bound.
+const Form = `^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([KMGTPE]i|[numkMGTPE]|[eE][+-]?[0-9]{1,2})?$`
 
 var form = regexp.MustCompile(Form)
 

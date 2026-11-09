@@ -236,7 +236,7 @@ func ComputeDigest(rr *v1alpha1.RemediationRequest, src *v1alpha1.ResolvedSource
 	if err != nil {
 		return "", err
 	}
-	return digest.Compute(in), nil
+	return digest.Compute(in)
 }
 
 // RepositoryOpener opens the Git repository a settings entry names. The provider it returns is not bound to

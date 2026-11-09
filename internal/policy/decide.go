@@ -72,6 +72,7 @@ import (
 	"github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/kedaready"
 	"github.com/pkalin/shadewright/internal/policy/pathmatch"
+	"github.com/pkalin/shadewright/internal/quantity"
 )
 
 // Outcome is the result of a policy decision.
@@ -404,9 +405,10 @@ func checkActionOf(a v1alpha1.Action) (Reason, string) {
 			return ReasonInvalidParameters, "container must be a DNS label"
 		}
 		if !validMemory(p.Previous) || !validMemory(p.Desired) {
-			return ReasonInvalidParameters, "previous and desired must be whole bytes between 1Mi and 1Ti"
+			return ReasonInvalidParameters, "previous and desired must be whole bytes between 1Mi and 1Ti, " +
+				"written as quantities of at most 40 characters with an exponent of at most two digits"
 		}
-		if cmpQuantity(p.Previous, p.Desired) == 0 {
+		if c, ok := quantity.Cmp(p.Previous, p.Desired); !ok || c == 0 {
 			return ReasonInvalidParameters, "desired must differ from previous"
 		}
 	}
@@ -527,10 +529,15 @@ func checkPolicyAction(in DecisionInput) (Reason, string) {
 	case v1alpha1.ActionSetContainerMemoryLimit:
 		b := pa.SetContainerMemoryLimit
 		params := a.SetContainerMemoryLimit
-		// checkAction has made sure both values are whole bytes between 1Mi and 1Ti, so they fit in an int64.
+		// checkAction has made sure both values are whole bytes between 1Mi and 1Ti, so they fit in an int64,
+		// and policyEntry the same of the bounds; a comparison that is refused anyway fails closed.
 		previous, desired := params.Previous.DeepCopy(), params.Desired.DeepCopy()
-		return checkBounds(previous.Value(), desired.Value(),
-			cmpQuantity(params.Desired, b.Min), cmpQuantity(params.Desired, b.Max),
+		toMin, okMin := quantity.Cmp(params.Desired, b.Min)
+		toMax, okMax := quantity.Cmp(params.Desired, b.Max)
+		if !okMin || !okMax {
+			return ReasonPolicyInvalid, "The memory values or the policy's bounds are not quantities in the bounded form"
+		}
+		return checkBounds(previous.Value(), desired.Value(), toMin, toMax,
 			b.MaxIncreasePercent, b.MaxDecreasePercent)
 	}
 	// Unreachable: checkAction refuses every type not handled above.
@@ -733,22 +740,19 @@ var (
 	maxMemory = resource.MustParse("1Ti")
 )
 
-// validMemory reports whether q is a whole number of bytes between 1Mi and 1Ti, compared by value.
+// validMemory reports whether q is a whole number of bytes between 1Mi and 1Ti, compared by value. A request
+// or policy is untrusted input (invariant 4): a quantity outside the bounded form (a huge decimal exponent,
+// #593) is refused before it is compared, never computed.
 func validMemory(q resource.Quantity) bool {
-	if cmpQuantity(q, minMemory) < 0 || cmpQuantity(q, maxMemory) > 0 {
+	lo, okLo := quantity.Cmp(q, minMemory)
+	hi, okHi := quantity.Cmp(q, maxMemory)
+	if !okLo || !okHi || lo < 0 || hi > 0 {
 		return false
 	}
 	// Value rounds up to a whole number, so it equals q only when q is whole.
 	c := q.DeepCopy()
-	return cmpQuantity(*resource.NewQuantity(c.Value(), resource.BinarySI), q) == 0
-}
-
-// cmpQuantity compares two quantities by value. Quantity.Cmp may cache a new representation in its receiver
-// and argument, and a copied Quantity shares its decimal with the original, so it compares deep copies and
-// never changes the input.
-func cmpQuantity(a, b resource.Quantity) int {
-	x, y := a.DeepCopy(), b.DeepCopy()
-	return x.Cmp(y)
+	whole, ok := quantity.Cmp(*resource.NewQuantity(c.Value(), resource.BinarySI), q)
+	return ok && whole == 0
 }
 
 // Limits of the policy bounds in the CRD schema (KedaMaxReplicasBounds, MemoryLimitBounds).
@@ -769,8 +773,11 @@ func validKedaBounds(b *v1alpha1.KedaMaxReplicasBounds) bool {
 // validMemoryBounds reports whether b is within the schema's limits: whole bytes, min at least 1Mi, max at
 // most 1Ti, min not greater than max.
 func validMemoryBounds(b *v1alpha1.MemoryLimitBounds) bool {
-	return validMemory(b.Min) && validMemory(b.Max) && cmpQuantity(b.Min, b.Max) <= 0 &&
-		validPercents(b.MaxIncreasePercent, b.MaxDecreasePercent)
+	if !validMemory(b.Min) || !validMemory(b.Max) {
+		return false
+	}
+	c, ok := quantity.Cmp(b.Min, b.Max)
+	return ok && c <= 0 && validPercents(b.MaxIncreasePercent, b.MaxDecreasePercent)
 }
 
 // validPercents reports whether maxIncreasePercent is 0 (unset) or 1 to 1000, and maxDecreasePercent is

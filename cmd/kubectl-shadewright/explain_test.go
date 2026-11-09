@@ -491,3 +491,21 @@ func slug(heading string) string {
 	}
 	return regexp.MustCompile(`[-\s]+`).ReplaceAllString(b.String(), "-")
 }
+
+// The stop is named by the newest False condition, not by a newer Unknown one that only says what the request
+// waited for (an ended request keeps Approved Unknown WaitingForReview).
+func TestStopReportPrefersFalseOverUnknown(t *testing.T) {
+	at := func(m int) metav1.Time { return metav1.NewTime(time.Date(2026, 11, 9, 12, m, 0, 0, time.UTC)) }
+	conds := []metav1.Condition{
+		{Type: "PlanFresh", Status: metav1.ConditionFalse, Reason: "TargetFileChanged", LastTransitionTime: at(1)},
+		{Type: "Approved", Status: metav1.ConditionUnknown, Reason: "WaitingForReview", LastTransitionTime: at(2)},
+		{Type: "PolicyAllowed", Status: metav1.ConditionTrue, Reason: "Allowed", LastTransitionTime: at(3)},
+	}
+	if got := stopReport(conds); got == nil || got.Condition != "PlanFresh" || got.Reason != "TargetFileChanged" {
+		t.Errorf("stopReport = %+v, want PlanFresh TargetFileChanged", got)
+	}
+	waiting := conds[1:]
+	if got := stopReport(waiting); got == nil || got.Condition != "Approved" {
+		t.Errorf("stopReport without a False condition = %+v, want Approved", got)
+	}
+}

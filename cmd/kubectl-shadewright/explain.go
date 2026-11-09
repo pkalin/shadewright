@@ -540,18 +540,30 @@ func timeline(conds []metav1.Condition) []TimelineEntry {
 // WritesPaused and Queued, which only hold a request back; when every condition is True (or none is left), the
 // most recent condition. It returns nil when the request has no conditions.
 func stopReport(conds []metav1.Condition) *StopReport {
-	var pick, latest *metav1.Condition
+	// The newest False condition names the stop; an Unknown one (a wait, such as Approved WaitingForReview) only
+	// when none is False, and the newest condition when none is either.
+	var falsePick, unknownPick, latest *metav1.Condition
+	newer := func(c, than *metav1.Condition) bool {
+		return than == nil || c.LastTransitionTime.After(than.LastTransitionTime.Time)
+	}
 	for i := range conds {
 		c := &conds[i]
 		if c.Type == remediationv1alpha1.ConditionWritesPaused || c.Type == remediationv1alpha1.ConditionQueued {
 			continue
 		}
-		if latest == nil || c.LastTransitionTime.After(latest.LastTransitionTime.Time) {
+		if newer(c, latest) {
 			latest = c
 		}
-		if c.Status != metav1.ConditionTrue && (pick == nil || c.LastTransitionTime.After(pick.LastTransitionTime.Time)) {
-			pick = c
+		switch {
+		case c.Status == metav1.ConditionFalse && newer(c, falsePick):
+			falsePick = c
+		case c.Status == metav1.ConditionUnknown && newer(c, unknownPick):
+			unknownPick = c
 		}
+	}
+	pick := falsePick
+	if pick == nil {
+		pick = unknownPick
 	}
 	if pick == nil {
 		pick = latest

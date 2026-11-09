@@ -60,7 +60,7 @@ type analysisFlags struct {
 func (f *analysisFlags) bind(fs *flag.FlagSet) {
 	fs.StringVar(&f.triageModel, "triage-model", "",
 		"The model ID and version the triage deployment of RemediationSettings serves, as its replies name it, "+
-			"such as gpt-4.1-mini-2025-04-14. A reply that names another model is refused (ADR-0023). Empty (the "+
+			"such as gpt-5.4-mini-2026-03-17. A reply that names another model is refused (ADR-0023). Empty (the "+
 			"default) starts no analysis: no model is called, no Azure token is requested, and the analyzer behaves "+
 			"as without a model. Set, the analyzer needs its Azure workload identity (AZURE_CLIENT_ID, "+
 			"AZURE_TENANT_ID, AZURE_FEDERATED_TOKEN_FILE) or it refuses to start.")

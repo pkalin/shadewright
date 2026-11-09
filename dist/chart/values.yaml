@@ -251,7 +251,7 @@ analyzer:
     # @section -- Analyzer
     endpoint: ""
   analysis:
-    # -- Model ID and version the triage deployment of `RemediationSettings` serves, as its replies name it, such as `gpt-4.1-mini-2025-04-14` (`--triage-model`). A reply naming another model is refused (ADR-0023). Empty (the default) passes no analysis flag: the analysis is off, no model is called and no Azure token is requested. Set, it needs `analyzer.identity.azure.clientId` and `analyzer.analysis.endpointSuffixes` (the chart refuses to render without them). Until the evaluation gate (#78) exists, turn it on only for an evaluation run in the lab.
+    # -- Model ID and version the triage deployment of `RemediationSettings` serves, as its replies name it, such as `gpt-5.4-mini-2026-03-17` (`--triage-model`). A reply naming another model is refused (ADR-0023). Empty (the default) passes no analysis flag: the analysis is off, no model is called and no Azure token is requested. Set, it needs `analyzer.identity.azure.clientId` and `analyzer.analysis.endpointSuffixes` (the chart refuses to render without them). Until the evaluation gate (#78) exists, turn it on only for an evaluation run in the lab.
     # @section -- Analyzer
     triageModel: ""
     # -- Model ID and version the escalation deployment serves (`--escalation-model`). Empty: escalation is off whatever `RemediationSettings` names, and an escalation signal hands the incident off. Used only with `triageModel`.

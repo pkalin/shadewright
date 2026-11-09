@@ -20,13 +20,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"regexp"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/quantity"
 )
 
 // keySpec is the spec field of every object.
@@ -136,8 +136,8 @@ func (f Field) Get(obj map[string]any) (any, bool) {
 func (f Field) Equals(a, b any) bool { return f.equal(a, b) }
 
 // Comparable reports whether Equals can read a value of this field. A Quantity field reads an integer
-// number, or a string in the bounded quantity form (maxQuantityLength, quantityForm); a string outside it
-// is refused, never parsed. Every value is comparable for any other field.
+// number, or a string in the bounded form of quantity.Parse; a string outside it is refused, never parsed.
+// Every value is comparable for any other field.
 func (f Field) Comparable(v any) bool {
 	if !f.Quantity {
 		return true
@@ -159,27 +159,14 @@ func (f Field) equal(a, b any) bool {
 	return errA == nil && errB == nil && bytes.Equal(ja, jb)
 }
 
-// maxQuantityLength bounds the text of a quantity string. The largest memory limit the API server keeps is
-// an int64 (19 digits), so 40 characters leave room for any form it writes.
-const maxQuantityLength = 40
-
-// quantityForm is the strict form a quantity string must have before it is parsed: an optional sign, a
-// decimal number, and an optional binary or decimal SI suffix or a decimal exponent of at most two digits.
-// Content of the GitOps repository is untrusted (invariant 4): resource.ParseQuantity accepts an exponent up
-// to the int32 range, and comparing such a value computes a power of ten of billions of digits, ignoring
-// every context and outgrowing the executor's memory limit (#593). Within these bounds a comparison works
-// on a few hundred digits.
-var quantityForm = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[KMGTPE]i|[numkMGTPE]|[eE][+-]?[0-9]{1,2})?$`)
-
-// toQuantity reads a value as a quantity: an integer number, or a string in quantityForm.
+// toQuantity reads a value as a quantity: an integer number, or a string in the bounded form of
+// quantity.Parse. Content of the GitOps repository and the live values Flux applied from it are untrusted
+// (invariant 4), and resource.Quantity has arbitrary precision: a string outside that form is refused, never
+// parsed, because comparing it can compute a power of ten of billions of digits (#593).
 func toQuantity(v any) (resource.Quantity, bool) {
 	switch x := v.(type) {
 	case string:
-		if len(x) > maxQuantityLength || !quantityForm.MatchString(x) {
-			return resource.Quantity{}, false
-		}
-		q, err := resource.ParseQuantity(x)
-		return q, err == nil
+		return quantity.Parse(x)
 	case int64:
 		return *resource.NewQuantity(x, resource.DecimalSI), true
 	case float64:

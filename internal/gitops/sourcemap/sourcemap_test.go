@@ -764,6 +764,38 @@ func TestResolveStops(t *testing.T) {
 	}
 }
 
+// TestResolveNamesTheUnreadableMemoryValue is part of #593: a memory value Shadewright does not read, in Git
+// or on the live object, is named as such, whatever its type, and never compared.
+func TestResolveNamesTheUnreadableMemoryValue(t *testing.T) {
+	const depPath = "apps/orders/deployment.yaml"
+	for name, tc := range map[string]struct {
+		change func(*fixture)
+		want   string
+	}{
+		"a boolean in Git": {func(f *fixture) {
+			f.files[depPath] = strings.Replace(deploymentYAML, "268435456", "true", 1)
+		}, "in " + depPath + " is not a value Shadewright reads: an integer, or a quantity string"},
+		"an unbounded exponent on the live object": {func(f *fixture) {
+			containers, _, _ := unstructured.NestedSlice(f.deployment.Object, "spec", "template", "spec", "containers")
+			containers[1] = map[string]any{"name": "web", "resources": map[string]any{"limits": map[string]any{"memory": "1e2147483647"}}}
+			set(f.deployment, containers, "spec", "template", "spec", "containers")
+		}, "of the live "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture()
+			f.targetDeployment()
+			tc.change(f)
+			res, _, err := f.run(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Reason != sourcemap.ReasonValueMismatch || !strings.Contains(res.Message, tc.want) {
+				t.Fatalf("result %s (%s), want %s naming %q", res.Reason, res.Message, sourcemap.ReasonValueMismatch, tc.want)
+			}
+		})
+	}
+}
+
 // TestResolveReturnsTransientErrors checks that failed reads come back as ErrTransient without the provider's
 // text, which may hold a repository URL with credentials.
 func TestResolveReturnsTransientErrors(t *testing.T) {

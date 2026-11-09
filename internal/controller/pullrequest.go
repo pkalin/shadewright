@@ -449,7 +449,18 @@ func (r *RemediationRequestReconciler) openPullRequest(ctx context.Context, rr *
 
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
-	res, err := r.pullRequestStep(stepCtx, rr, fresh)
+	var res reconcile.Result
+	var err error
+	if ho := rr.Status.Handoff; rr.Spec.Replaces != nil && ho != nil && ho.From != nil {
+		// A replacement takes its predecessor's pull request over instead of opening one (handoff.go).
+		res, err = r.handoffStep(stepCtx, rr, fresh)
+	} else if rr.Spec.Replaces != nil {
+		// Admitted without the handoff's record: never taken over (ADR-0028 section 4 item 2).
+		err = r.stop(stepCtx, rr, remediationv1alpha1.PhaseCancelled, remediationv1alpha1.ReasonHandoffRefused,
+			"The request was admitted without the record of its handoff; nothing was taken over")
+	} else {
+		res, err = r.pullRequestStep(stepCtx, rr, fresh)
+	}
 	err = boundErr(ctx, stepCtx, "pull request step", err)
 	switch {
 	case errors.Is(err, errStopped):
@@ -726,11 +737,25 @@ func (r *RemediationRequestReconciler) adoptChangeRequest(ctx context.Context, g
 	return r.recordPullRequest(ctx, rr, cr)
 }
 
-// branchState asks the Git host what the branch head carries over the target branch (#524). A failure to find
-// out is returned for a retry; it never counts as an answer.
+// branchState asks the Git host what the branch head carries over the target branch (#524). A branch handed
+// over in a supersede chain carries one commit per request of the chain (chainDepth, ADR-0028 section 4), each
+// of which may change only the target file. A failure to find out is returned for a retry; it never counts as
+// an answer.
 func branchState(ctx context.Context, git providers.GitProvider, rr *remediationv1alpha1.RemediationRequest,
 	head string) (providers.BranchState, error) {
-	state, err := git.CheckBranch(ctx, head, string(rr.Status.Source.Path))
+	return branchStateOf(ctx, git, string(rr.Status.Source.Path), head, chainDepth(rr))
+}
+
+// branchStateOf is branchState for a chain of commits commits at path.
+func branchStateOf(ctx context.Context, git providers.GitProvider, path, head string, commits int) (
+	providers.BranchState, error) {
+	var state providers.BranchState
+	var err error
+	if commits == 1 {
+		state, err = git.CheckBranch(ctx, head, path)
+	} else {
+		state, err = git.CheckChain(ctx, head, path, commits)
+	}
 	if err != nil {
 		return 0, freshness.WrapProvider("check what the branch holds", err)
 	}
@@ -1004,6 +1029,16 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		return hintLook{}, freshness.WrapProvider("find the change request", err)
 	}
 	if cr.Number != rr.Status.PullRequest.Number || cr.HeadSHA != rr.Status.PullRequest.HeadSHA {
+		if cr.Number == rr.Status.PullRequest.Number && intent(rr) != nil {
+			// The replacement's commit is expected while the intent stands (handoff.go): the replacement records
+			// what happens to the pull request from here, and this request waits for it.
+			switch ok, err := r.expectedHandoffHead(ctx, git, rr, cr.HeadSHA); {
+			case err != nil:
+				return hintLook{}, err
+			case ok:
+				return hintLook{}, nil
+			}
+		}
 		return hintLook{}, r.headMoved(ctx, git, rr, cr)
 	}
 	switch cr.State {
@@ -1015,6 +1050,10 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		return hintLook{}, errClosed
 	}
 	if rr.Status.Phase != remediationv1alpha1.PhasePRCreated {
+		if intent(rr) != nil {
+			// Handed over: new comments are the replacement's to read, from the cursor it carries over.
+			return hintLook{}, nil
+		}
 		// Open, with the head Shadewright pushed: reviewer hints are read next (AwaitingApproval only).
 		return hintLook{git: git, host: host}, nil
 	}
@@ -1464,11 +1503,20 @@ func marker(rr *remediationv1alpha1.RemediationRequest) string {
 	return fmt.Sprintf("<!-- shadewright request-uid=%s plan-digest=%s -->", rr.UID, rr.Status.PlanDigest)
 }
 
-// hasMarker reports whether body carries this request's marker on a line of its own.
+// hasMarker reports whether body carries this request's marker on a line of its own. A replacement that took
+// the pull request over (ADR-0028 section 4) also accepts its predecessor's marker, by the predecessor's UID,
+// until it has rewritten the body with its own (handoff step 6).
 func hasMarker(body string, rr *remediationv1alpha1.RemediationRequest) bool {
 	want := marker(rr)
+	var from string
+	if ho := rr.Status.Handoff; ho != nil && ho.From != nil && ho.From.Phase == remediationv1alpha1.HandoffDone &&
+		!ho.From.PullRequestUpdated {
+		from = fmt.Sprintf("<!-- shadewright request-uid=%s plan-digest=", ho.From.UID)
+	}
 	for line := range strings.Lines(body) {
-		if strings.TrimRight(line, "\r\n") == want {
+		line = strings.TrimRight(line, "\r\n")
+		if line == want || (from != "" && strings.HasPrefix(line, from) && strings.HasSuffix(line, " -->") &&
+			!strings.ContainsAny(line[len(from):len(line)-len(" -->")], " <>")) {
 			return true
 		}
 	}

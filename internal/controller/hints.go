@@ -187,6 +187,7 @@ func (r *RemediationRequestReconciler) pollHints(ctx context.Context, look hintL
 	storeCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
 	r.answerHints(storeCtx, upd, now)
+	r.settleHandoff(storeCtx, upd)
 	if equality.Semantic.DeepEqual(rr.Status, upd.Status) {
 		return lookErr
 	}
@@ -514,6 +515,10 @@ func declineOnEnd(rr *remediationv1alpha1.RemediationRequest, phase remediationv
 			h.State, h.Reason = remediationv1alpha1.HintDeclined, reason
 		}
 	}
+	// A handoff whose intent still stands when the request ends for another reason did not happen: the
+	// request that ends here keeps what it ends with, and its replacement learns of it from this status
+	// (handoff.go). A handoff that happened set its intent Done before the end it caused.
+	abortIntent(rr, reason)
 }
 
 // parseHintCommand reads the command from the first line of body. isCommand is false when the first line does

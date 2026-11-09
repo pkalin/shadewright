@@ -167,7 +167,7 @@ spec:
                 description: |-
                   chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or
                   its own UID when it has none. Set together with replaces. The branch of the pull request derives from it
-                  (planned), so every request of a chain works on the same branch and pull request.
+                  (shadewright/<chainRoot>), so every request of a chain works on the same branch and pull request.
                 pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
                 type: string
               incidentRef:
@@ -205,7 +205,7 @@ spec:
                   replaces names the request this one replaces and the reviewer hint of that request it answers
                   (ADR-0028 section 4). Set only by the analyzer on a replacement, together with chainRoot. It is part of
                   the plan, so it is part of the request's name: the same plan answering another hint is another request.
-                  Planned: the executor does not act on it yet.
+                  The executor checks the link once, at the policy check, and then takes the pull request over (the handoff).
                 properties:
                   hint:
                     description: hint is the pinned hint of the replaced request that
@@ -554,6 +554,11 @@ spec:
                   from:
                     description: from is the incoming side, set on a replacement.
                     properties:
+                      checkRunCreated:
+                        description: |-
+                          checkRunCreated is true once the check run shadewright/review was created, in progress, on the head this
+                          request recorded (ADR-0028 sections 4 and 5).
+                        type: boolean
                       hint:
                         description: hint is the predecessor's hint the replacement
                           answers.
@@ -592,6 +597,11 @@ spec:
                         - Done
                         - Aborted
                         type: string
+                      pullRequestUpdated:
+                        description: |-
+                          pullRequestUpdated is true once the title and the body of the pull request were rewritten for this
+                          request's plan, with its marker (ADR-0028 section 4, step 6).
+                        type: boolean
                       uid:
                         description: uid of the predecessor.
                         pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
@@ -608,6 +618,15 @@ spec:
                     - message: 'an incoming handoff is pinned: only its phase changes'
                       rule: self.name == oldSelf.name && self.uid == oldSelf.uid &&
                         self.hint == oldSelf.hint
+                    - message: the steps after a handoff are recorded only once it
+                        is Done
+                      rule: (!has(self.pullRequestUpdated) && !has(self.checkRunCreated))
+                        || self.phase == 'Done'
+                    - message: a recorded step after a handoff is never unset
+                      rule: (!has(oldSelf.pullRequestUpdated) || !oldSelf.pullRequestUpdated
+                        || (has(self.pullRequestUpdated) && self.pullRequestUpdated))
+                        && (!has(oldSelf.checkRunCreated) || !oldSelf.checkRunCreated
+                        || (has(self.checkRunCreated) && self.checkRunCreated))
                     - message: an incoming handoff moves only from Reserved to Done
                         or Aborted
                       rule: oldSelf.phase == self.phase || (oldSelf.phase == 'Reserved'
@@ -749,7 +768,9 @@ spec:
                       description: |-
                         reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or
                         NoProposal), NoAnswer when none came within the executor's bound, or the end of the request
-                        (PullRequestMerged, PullRequestClosed, RequestEnded). HintDeclineReasons lists them.
+                        (PullRequestMerged, PullRequestClosed, RequestEnded), or the end of its replacement without the handoff:
+                        ReplacementDenied when the replacement was Denied, HandoffAborted when it ended otherwise.
+                        HintDeclineReasons lists them.
                       enum:
                       - NoModelConfigured
                       - BudgetSpent
@@ -782,6 +803,8 @@ spec:
                       - PullRequestMerged
                       - PullRequestClosed
                       - RequestEnded
+                      - ReplacementDenied
+                      - HandoffAborted
                       type: string
                     source:
                       description: source is the system the comment is in.

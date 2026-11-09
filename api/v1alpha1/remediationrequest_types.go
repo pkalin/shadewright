@@ -169,13 +169,13 @@ type RemediationRequestSpec struct {
 	// replaces names the request this one replaces and the reviewer hint of that request it answers
 	// (ADR-0028 section 4). Set only by the analyzer on a replacement, together with chainRoot. It is part of
 	// the plan, so it is part of the request's name: the same plan answering another hint is another request.
-	// Planned: the executor does not act on it yet.
+	// The executor checks the link once, at the policy check, and then takes the pull request over (the handoff).
 	// +optional
 	Replaces *RequestReplacement `json:"replaces,omitempty"`
 
 	// chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or
 	// its own UID when it has none. Set together with replaces. The branch of the pull request derives from it
-	// (planned), so every request of a chain works on the same branch and pull request.
+	// (shadewright/<chainRoot>), so every request of a chain works on the same branch and pull request.
 	// +optional
 	ChainRoot UID `json:"chainRoot,omitempty"`
 }
@@ -214,7 +214,7 @@ const (
 	PhaseCancelled RemediationPhase = "Cancelled"
 	// PhaseSuperseded means a plan input changed, or the ScaledObject is no longer ready, or the module that
 	// contributes the action was disabled, so the pull request is closed and a new request is needed. With
-	// reason HandedOff (planned, ADR-0028) a replacement took over the pull request instead, which stays open.
+	// reason HandedOff (ADR-0028) a replacement took over the pull request instead, which stays open.
 	// Terminal.
 	PhaseSuperseded RemediationPhase = "Superseded"
 	// PhaseNeedsIntervention means the controller cannot continue on its own, for example because the target

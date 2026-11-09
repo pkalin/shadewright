@@ -379,7 +379,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `from` | [IncomingHandoff](#incominghandoff) | No | from is the incoming side, set on a replacement.<br>Rule: an incoming handoff is Reserved, Done or Aborted<br>Rule: an incoming handoff is pinned: only its phase changes<br>Rule: an incoming handoff moves only from Reserved to Done or Aborted |
+| `from` | [IncomingHandoff](#incominghandoff) | No | from is the incoming side, set on a replacement.<br>Rule: an incoming handoff is Reserved, Done or Aborted<br>Rule: an incoming handoff is pinned: only its phase changes<br>Rule: the steps after a handoff are recorded only once it is Done<br>Rule: a recorded step after a handoff is never unset<br>Rule: an incoming handoff moves only from Reserved to Done or Aborted |
 | `to` | [OutgoingHandoff](#outgoinghandoff) | No | to is the outgoing side, set on a predecessor.<br>Rule: an outgoing handoff is Intent, Done or Aborted<br>Rule: an outgoing handoff is pinned: only its phase changes<br>Rule: an outgoing handoff moves only from Intent to Done or Aborted |
 
 ### HandoffPhase
@@ -431,7 +431,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `updatedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | updatedAt is the comment's updated time when the hint was accepted. A comment whose updated time differs later was edited after acceptance, and the edit is ignored. |
 | `acceptedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | acceptedAt is when the executor accepted the hint. |
 | `state` | [HintState](#hintstate) | Yes | state says what became of the hint.<br>One of `Pending`, `Reserved`, `Consumed`, `Declined` |
-| `reason` | string | No | reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or NoProposal), NoAnswer when none came within the executor's bound, or the end of the request (PullRequestMerged, PullRequestClosed, RequestEnded). HintDeclineReasons lists them.<br>One of `NoModelConfigured`, `BudgetSpent`, `BudgetUnavailable`, `NoProposal`, `MissingData`, `NoEvidence`, `TargetNotSupported`, `PreviousValueUnknown`, `NoChange`, `DirectionReversed`, `NoPolicyForAction`, `ActionOutOfBounds`, `InvalidOutput`, `EscalationNotConfigured`, `StepLimit`, `TokenLimit`, `DeadlineExceeded`, `ModelUnavailable`, `ModelNotFound`, `ModelForbidden`, `ModelError`, `UnexpectedModel`, `EndpointNotAllowed`, `PlanUnchanged`, `HintNotPending`, `RequestNotCreated`, `CoolingDown`, `NoAnswer`, `PullRequestMerged`, `PullRequestClosed`, `RequestEnded` |
+| `reason` | string | No | reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or NoProposal), NoAnswer when none came within the executor's bound, or the end of the request (PullRequestMerged, PullRequestClosed, RequestEnded), or the end of its replacement without the handoff: ReplacementDenied when the replacement was Denied, HandoffAborted when it ended otherwise. HintDeclineReasons lists them.<br>One of `NoModelConfigured`, `BudgetSpent`, `BudgetUnavailable`, `NoProposal`, `MissingData`, `NoEvidence`, `TargetNotSupported`, `PreviousValueUnknown`, `NoChange`, `DirectionReversed`, `NoPolicyForAction`, `ActionOutOfBounds`, `InvalidOutput`, `EscalationNotConfigured`, `StepLimit`, `TokenLimit`, `DeadlineExceeded`, `ModelUnavailable`, `ModelNotFound`, `ModelForbidden`, `ModelError`, `UnexpectedModel`, `EndpointNotAllowed`, `PlanUnchanged`, `HintNotPending`, `RequestNotCreated`, `CoolingDown`, `NoAnswer`, `PullRequestMerged`, `PullRequestClosed`, `RequestEnded`, `ReplacementDenied`, `HandoffAborted` |
 | `editedAfterAccept` | boolean | No | editedAfterAccept is true once the executor saw the comment edited after it accepted the hint. The stored text stays as it was; the edit is recorded once, here, whatever the number of edits. |
 | `outcome` | string | No | outcome is the analysis's outcome that answered the hint with a replacement (Proposed or RunbookMatched), recorded when the executor first read it in the Incident. The hint is answered from then on, whatever the Incident handles later: it waits for the handoff, and the answer timeout no longer applies. Once set it never changes.<br>One of `Proposed`, `RunbookMatched` |
 
@@ -600,13 +600,15 @@ Used by: [Incident](#incident).
 ### IncomingHandoff
 
 IncomingHandoff is the replacement's side of a handoff: the predecessor it takes over and the hint it
-answers, equal to spec.replaces. Only its phase changes once written.
+answers, equal to spec.replaces. Once written, only its phase and the records of the steps after it change.
 
 
 Validation rules:
 
 - an incoming handoff is Reserved, Done or Aborted: `self.phase in ['Reserved', 'Done', 'Aborted']`
 - an incoming handoff is pinned: only its phase changes: `self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint`
+- the steps after a handoff are recorded only once it is Done: `(!has(self.pullRequestUpdated) && !has(self.checkRunCreated)) || self.phase == 'Done'`
+- a recorded step after a handoff is never unset: `(!has(oldSelf.pullRequestUpdated) || !oldSelf.pullRequestUpdated || (has(self.pullRequestUpdated) && self.pullRequestUpdated)) && (!has(oldSelf.checkRunCreated) || !oldSelf.checkRunCreated || (has(self.checkRunCreated) && self.checkRunCreated))`
 - an incoming handoff moves only from Reserved to Done or Aborted: `oldSelf.phase == self.phase || (oldSelf.phase == 'Reserved' && self.phase in ['Done', 'Aborted'])`
 
 Used by: [Handoff](#handoff).
@@ -617,6 +619,8 @@ Used by: [Handoff](#handoff).
 | `uid` | [UID](#uid) | Yes | uid of the predecessor.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `hint` | [HintRef](#hintref) | Yes | hint is the predecessor's hint the replacement answers. |
 | `phase` | [HandoffPhase](#handoffphase) | Yes | phase is how far this side has come.<br>One of `Reserved`, `Intent`, `Done`, `Aborted` |
+| `pullRequestUpdated` | boolean | No | pullRequestUpdated is true once the title and the body of the pull request were rewritten for this request's plan, with its marker (ADR-0028 section 4, step 6). |
+| `checkRunCreated` | boolean | No | checkRunCreated is true once the check run shadewright/review was created, in progress, on the head this request recorded (ADR-0028 sections 4 and 5). |
 
 ### IntegrationStatus
 
@@ -954,7 +958,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `Failed` | PhaseFailed means a step failed, for example verification did not pass before the timeout. Terminal. |
 | `Expired` | PhaseExpired means a step reached its deadline. Terminal. |
 | `Cancelled` | PhaseCancelled means the request was cancelled before the change was merged. Terminal. |
-| `Superseded` | PhaseSuperseded means a plan input changed, or the ScaledObject is no longer ready, or the module that contributes the action was disabled, so the pull request is closed and a new request is needed. With reason HandedOff (planned, ADR-0028) a replacement took over the pull request instead, which stays open. Terminal. |
+| `Superseded` | PhaseSuperseded means a plan input changed, or the ScaledObject is no longer ready, or the module that contributes the action was disabled, so the pull request is closed and a new request is needed. With reason HandedOff (ADR-0028) a replacement took over the pull request instead, which stays open. Terminal. |
 | `NeedsIntervention` | PhaseNeedsIntervention means the controller cannot continue on its own, for example because the target is not declared in a plain manifest; a human must act. |
 
 ### RemediationPolicySpec
@@ -1014,8 +1018,8 @@ Used by: [RemediationRequest](#remediationrequest).
 | `policyRef` | [Name](#name) | Yes | policyRef names the RemediationPolicy that must allow this plan.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 | `action` | [Action](#action) | Yes | action is the typed change.<br>Rule: adjustKedaMaxReplicas must be set if and only if type is AdjustKedaMaxReplicas<br>Rule: setContainerMemoryLimit must be set if and only if type is SetContainerMemoryLimit |
 | `verification` | [Verification](#verification) | No | verification says when the change counts as a success.<br>Default: `{}`<br>Rule: stableFor must be at least 1m<br>Rule: timeout must be at most 24h<br>Rule: timeout must be longer than stableFor |
-| `replaces` | [RequestReplacement](#requestreplacement) | No | replaces names the request this one replaces and the reviewer hint of that request it answers (ADR-0028 section 4). Set only by the analyzer on a replacement, together with chainRoot. It is part of the plan, so it is part of the request's name: the same plan answering another hint is another request. Planned: the executor does not act on it yet. |
-| `chainRoot` | [UID](#uid) | No | chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or its own UID when it has none. Set together with replaces. The branch of the pull request derives from it (planned), so every request of a chain works on the same branch and pull request.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `replaces` | [RequestReplacement](#requestreplacement) | No | replaces names the request this one replaces and the reviewer hint of that request it answers (ADR-0028 section 4). Set only by the analyzer on a replacement, together with chainRoot. It is part of the plan, so it is part of the request's name: the same plan answering another hint is another request. The executor checks the link once, at the policy check, and then takes the pull request over (the handoff). |
+| `chainRoot` | [UID](#uid) | No | chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or its own UID when it has none. Set together with replaces. The branch of the pull request derives from it (shadewright/&lt;chainRoot>), so every request of a chain works on the same branch and pull request.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 
 ### RemediationRequestStatus
 

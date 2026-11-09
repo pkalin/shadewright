@@ -138,8 +138,8 @@ type RemediationRequestReconciler struct {
 	PullRequestPollInterval time.Duration
 	// ReviewerHints turns on the reading of reviewer hints from the comments of a waiting pull request
 	// (hints.go, ADR-0028). It is off by default, and cmd/main.go does not turn it on yet: a stored hint makes
-	// the analyzer propose a replacement, which only the supersede handoff (#539) and the merge gate (ADR-0028
-	// section 5) may take over the pull request with.
+	// the analyzer propose a replacement, which takes the pull request over by the supersede handoff (handoff.go),
+	// and the merge gate (ADR-0028 section 5) that keeps a hint author from approving alone is not built yet.
 	ReviewerHints bool
 
 	// admitMu makes the check of the limits and the status write that lets a request through the policy check
@@ -324,6 +324,9 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 	if rr.Status.Phase != "" && rr.Status.Phase != remediationv1alpha1.PhasePending {
+		if err := r.afterHandoff(ctx, rr); err != nil {
+			return ctrl.Result{}, err
+		}
 		if !progresses(rr) {
 			r.forget(req.NamespacedName)
 			// Stopped: nothing is written to Git any more, but a lock still held waits for its pull request.
@@ -407,6 +410,8 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 		// The lock on the target is taken in the same status write (targetlock.go).
 		rr.Status.HoldsTarget = new(true)
+		// A replacement names the request it takes over in the same write (handoff step 1, handoff.go).
+		reserveOnAdmission(rr)
 	} else if rr.Status.HoldsTarget == nil {
 		// A refusal never takes the lock; false keeps it out of the limits' lock list (limitsSelectors).
 		rr.Status.HoldsTarget = new(false)
@@ -551,6 +556,13 @@ func needsIntervention(reason, message string) outcome {
 // Git, and policy.Decide decide on everything, the resolved source included.
 func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	outcome, error) {
+	// A replacement's chain link comes first, before anything else is read about it (ADR-0028 section 4 item 2).
+	switch why, err := r.chainLink(ctx, rr); {
+	case err != nil:
+		return outcome{}, err
+	case why != "":
+		return denied(remediationv1alpha1.ReasonChainLinkInvalid, why+"; nothing was taken over"), nil
+	}
 	pol := &remediationv1alpha1.RemediationPolicy{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: string(rr.Spec.PolicyRef)}, pol); {
 	case apierrors.IsNotFound(err):

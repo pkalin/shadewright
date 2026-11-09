@@ -287,6 +287,10 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 	var lastSuccess, lastFailure time.Time
 	var failures []time.Time
 	var probes []remediationv1alpha1.RemediationRequest
+	// A replacement takes over the target lock and the slot of the request it replaces (ADR-0028 section 4):
+	// that one counts for neither, so the chain counts once, not twice. Its link was checked before (chainLink);
+	// a link that does not hold is denied, which takes nothing.
+	predecessor := predecessorOf(rr)
 	for uid, e := range seen {
 		if uid == rr.UID {
 			continue
@@ -294,13 +298,13 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		if e.probe != nil {
 			probes = append(probes, *e.probe)
 		}
-		if e.active {
+		if e.active && uid != predecessor {
 			s.active++
 			if e.deleting && e.ended {
 				s.endedDeleting = append(s.endedDeleting, uid)
 			}
 		}
-		if e.target == rr.Spec.TargetRef.UID && e.lock {
+		if e.target == rr.Spec.TargetRef.UID && e.lock && uid != predecessor {
 			locked = true
 			lockMoving = lockMoving || e.active
 		}
@@ -316,6 +320,7 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 			}
 		}
 	}
+	s.active -= chainPairs(seen, rr.UID, predecessor)
 	// The failures in a row are those after the latest success; one at the very same time counts as a failure.
 	inRow := make([]time.Time, 0, len(failures))
 	for _, t := range failures {
@@ -373,6 +378,34 @@ type limitsEntry struct {
 	// deleting is a request being deleted; ended is a request in one of endedPhases.
 	deleting bool
 	ended    bool
+	// replaces is the UID of the request a replacement takes over (spec.replaces), empty for any other.
+	replaces types.UID
+}
+
+// predecessorOf returns the UID of the request rr replaces, empty when it replaces none.
+func predecessorOf(rr *remediationv1alpha1.RemediationRequest) types.UID {
+	if rr.Spec.Replaces == nil {
+		return ""
+	}
+	return types.UID(rr.Spec.Replaces.UID)
+}
+
+// chainPairs counts the active requests, other than self and predecessor, that an active replacement takes over:
+// a request and its replacement are one chain, counted once against the cap.
+func chainPairs(seen map[types.UID]limitsEntry, self, predecessor types.UID) int {
+	replaced := map[types.UID]bool{}
+	for _, e := range seen {
+		if e.active && e.replaces != "" {
+			replaced[e.replaces] = true
+		}
+	}
+	n := 0
+	for uid := range replaced {
+		if e, ok := seen[uid]; ok && e.active && uid != self && uid != predecessor {
+			n++
+		}
+	}
+	return n
 }
 
 // neutralProbe reports whether the entry is a probe that ended without a success or a failure.
@@ -425,6 +458,9 @@ func (r *RemediationRequestReconciler) readLimits(ctx context.Context, namespace
 				outcome: breakerOutcome(o), counts: ptr.Deref(o.Status.BreakerCounts, false), name: o.Name,
 				resourceVersion: o.ResourceVersion, uid: o.UID, deleting: !o.DeletionTimestamp.IsZero(),
 				ended: ended(o.Status.Phase)}
+			if o.Spec.Replaces != nil {
+				e.replaces = types.UID(o.Spec.Replaces.UID)
+			}
 			e.final = e.outcome == outcomeSuccess && o.Status.Phase == remediationv1alpha1.PhaseSucceeded
 			if o.Status.LastPhaseTransitionTime != nil {
 				e.at = o.Status.LastPhaseTransitionTime.Time

@@ -232,6 +232,38 @@ func (g *gatedGit) CloseChangeRequest(ctx context.Context, number int64) error {
 	return g.git.CloseChangeRequest(ctx, number)
 }
 
+func (g *gatedGit) CheckChain(ctx context.Context, commit, path string, commits int) (providers.BranchState, error) {
+	return g.git.CheckChain(ctx, commit, path, commits)
+}
+
+func (g *gatedGit) Parents(ctx context.Context, commit string) ([]string, error) {
+	return g.git.Parents(ctx, commit)
+}
+
+func (g *gatedGit) AppendCommit(ctx context.Context, branch, expectedHead string, change providers.FileChange) (string, error) {
+	ctx, err := g.gate(ctx)
+	if err != nil {
+		return "", err
+	}
+	return g.git.AppendCommit(ctx, branch, expectedHead, change)
+}
+
+func (g *gatedGit) UpdateChangeRequest(ctx context.Context, number int64, title, body string) error {
+	ctx, err := g.gate(ctx)
+	if err != nil {
+		return err
+	}
+	return g.git.UpdateChangeRequest(ctx, number, title, body)
+}
+
+func (g *gatedGit) CreateCheckRun(ctx context.Context, head string, run providers.CheckRun) error {
+	ctx, err := g.gate(ctx)
+	if err != nil {
+		return err
+	}
+	return g.git.CreateCheckRun(ctx, head, run)
+}
+
 // waitWhilePaused records that the kill switch holds the request back and checks again after
 // freshRecheckDelay. It sets WritesPaused True, and on the change also records an Event; the phase and the rest
 // of the status are kept, so the request goes on from where it stopped once the pause ends.

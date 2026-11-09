@@ -171,8 +171,14 @@ func provider(op string, err error) error {
 // WrapProvider is provider for callers outside the package.
 func WrapProvider(op string, err error) error { return provider(op, err) }
 
-// BranchName is the branch that carries the plan: shadewright/<request-uid> (design section 6).
+// BranchName is the branch that carries the plan: shadewright/<chain-root> (design section 6, ADR-0028 section
+// 4), where the chain root is spec.chainRoot, the UID of the first request of a supersede chain, or the
+// request's own UID when it has none. It derives from the spec, never from status, so a lost status write is
+// recovered by the same name.
 func BranchName(rr *v1alpha1.RemediationRequest) string {
+	if rr.Spec.ChainRoot != "" {
+		return "shadewright/" + string(rr.Spec.ChainRoot)
+	}
 	return "shadewright/" + string(rr.UID)
 }
 

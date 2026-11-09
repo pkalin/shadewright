@@ -1,0 +1,69 @@
+[
+ {
+  "id": 80001,
+  "node_id": "PRR_kwDO80001",
+  "user": {
+   "login": "reviewer-one",
+   "id": 1234567,
+   "type": "User",
+   "site_admin": false
+  },
+  "body": "/shadewright reanalyze: in a review body",
+  "state": "COMMENTED",
+  "html_url": "https://github.com/acme/fleet/pull/12#pullrequestreview-80001",
+  "pull_request_url": "https://api.github.com/repos/acme/fleet/pulls/12",
+  "author_association": "MEMBER",
+  "commit_id": "7777777777777777777777777777777777777777",
+  "submitted_at": "2026-11-08T09:00:00Z"
+ },
+ {
+  "id": 80002,
+  "node_id": "PRR_kwDO80002",
+  "user": {
+   "login": "reviewer-two",
+   "id": 7654321,
+   "type": "User",
+   "site_admin": false
+  },
+  "body": "",
+  "state": "APPROVED",
+  "html_url": "https://github.com/acme/fleet/pull/12#pullrequestreview-80002",
+  "pull_request_url": "https://api.github.com/repos/acme/fleet/pulls/12",
+  "author_association": "MEMBER",
+  "commit_id": "7777777777777777777777777777777777777777",
+  "submitted_at": "2026-11-08T11:00:00Z"
+ },
+ {
+  "id": 80003,
+  "node_id": "PRR_kwDO80003",
+  "user": {
+   "login": "reviewer-three",
+   "id": 3333333,
+   "type": "User",
+   "site_admin": false
+  },
+  "body": "draft",
+  "state": "PENDING",
+  "html_url": "https://github.com/acme/fleet/pull/12#pullrequestreview-80003",
+  "pull_request_url": "https://api.github.com/repos/acme/fleet/pulls/12",
+  "author_association": "MEMBER",
+  "commit_id": "7777777777777777777777777777777777777777"
+ },
+ {
+  "id": 80004,
+  "node_id": "PRR_kwDO80004",
+  "user": {
+   "login": "checks-app[bot]",
+   "id": 9900002,
+   "type": "Bot",
+   "site_admin": false
+  },
+  "body": "/shadewright reanalyze: from a bot review",
+  "state": "COMMENTED",
+  "html_url": "https://github.com/acme/fleet/pull/12#pullrequestreview-80004",
+  "pull_request_url": "https://api.github.com/repos/acme/fleet/pulls/12",
+  "author_association": "MEMBER",
+  "commit_id": null,
+  "submitted_at": "2026-11-08T11:30:00Z"
+ }
+]

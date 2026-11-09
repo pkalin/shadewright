@@ -1,0 +1,92 @@
+[
+ {
+  "url": "https://api.github.com/repos/acme/fleet/issues/comments/3201234567",
+  "html_url": "https://github.com/acme/fleet/pull/12#issuecomment-3201234567",
+  "issue_url": "https://api.github.com/repos/acme/fleet/issues/12",
+  "id": 3201234567,
+  "node_id": "IC_kwDO3201234567",
+  "user": {
+   "login": "reviewer-one",
+   "id": 1234567,
+   "type": "User",
+   "site_admin": false
+  },
+  "created_at": "2026-11-08T10:12:03Z",
+  "updated_at": "2026-11-08T10:12:03Z",
+  "author_association": "MEMBER",
+  "body": "/shadewright reanalyze: the leak is in the sidecar, not the app container",
+  "reactions": {
+   "total_count": 0
+  },
+  "performed_via_github_app": null
+ },
+ {
+  "url": "https://api.github.com/repos/acme/fleet/issues/comments/3201234600",
+  "html_url": "https://github.com/acme/fleet/pull/12#issuecomment-3201234600",
+  "issue_url": "https://api.github.com/repos/acme/fleet/issues/12",
+  "id": 3201234600,
+  "node_id": "IC_kwDO3201234600",
+  "user": {
+   "login": "shadewright-app[bot]",
+   "id": 9900001,
+   "type": "Bot",
+   "site_admin": false
+  },
+  "created_at": "2026-11-08T10:13:00Z",
+  "updated_at": "2026-11-08T10:13:00Z",
+  "author_association": "NONE",
+  "body": "/shadewright reanalyze: a bot says so",
+  "reactions": {
+   "total_count": 0
+  },
+  "performed_via_github_app": {
+   "id": 101,
+   "slug": "shadewright-app"
+  }
+ },
+ {
+  "url": "https://api.github.com/repos/acme/fleet/issues/comments/3201234700",
+  "html_url": "https://github.com/acme/fleet/pull/12#issuecomment-3201234700",
+  "issue_url": "https://api.github.com/repos/acme/fleet/issues/12",
+  "id": 3201234700,
+  "node_id": "IC_kwDO3201234700",
+  "user": {
+   "login": "reviewer-two",
+   "id": 7654321,
+   "type": "User",
+   "site_admin": false
+  },
+  "created_at": "2026-11-08T10:14:00Z",
+  "updated_at": "2026-11-08T10:20:00Z",
+  "author_association": "MEMBER",
+  "body": "/shadewright reanalyze: posted by an App for a user",
+  "reactions": {
+   "total_count": 0
+  },
+  "performed_via_github_app": {
+   "id": 202,
+   "slug": "some-integration"
+  }
+ },
+ {
+  "url": "https://api.github.com/repos/acme/fleet/issues/comments/3201234800",
+  "html_url": "https://github.com/acme/fleet/pull/12#issuecomment-3201234800",
+  "issue_url": "https://api.github.com/repos/acme/fleet/issues/12",
+  "id": 3201234800,
+  "node_id": "IC_kwDO3201234800",
+  "user": {
+   "login": "helper-org",
+   "id": 5550001,
+   "type": "Organization",
+   "site_admin": false
+  },
+  "created_at": "2026-11-08T10:15:00Z",
+  "updated_at": "2026-11-08T10:15:00Z",
+  "author_association": "NONE",
+  "body": "LGTM",
+  "reactions": {
+   "total_count": 0
+  },
+  "performed_via_github_app": null
+ }
+]

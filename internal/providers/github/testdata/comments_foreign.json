@@ -1,0 +1,23 @@
+[
+ {
+  "url": "https://api.github.com/repos/evil/fleet/issues/comments/3201234567",
+  "html_url": "https://github.com/evil/fleet/pull/12#issuecomment-3201234567",
+  "issue_url": "https://api.github.com/repos/evil/fleet/issues/12",
+  "id": 3201234567,
+  "node_id": "IC_kwDO3201234567",
+  "user": {
+   "login": "reviewer-one",
+   "id": 1234567,
+   "type": "User",
+   "site_admin": false
+  },
+  "created_at": "2026-11-08T10:12:03Z",
+  "updated_at": "2026-11-08T10:12:03Z",
+  "author_association": "MEMBER",
+  "body": "/shadewright reanalyze: LEAKED-BODY-MARKER",
+  "reactions": {
+   "total_count": 0
+  },
+  "performed_via_github_app": null
+ }
+]

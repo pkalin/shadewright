@@ -1,0 +1,10 @@
+{
+ "permission": "admin",
+ "role_name": "admin",
+ "user": {
+  "login": "reviewer-one",
+  "id": 9999999,
+  "type": "User",
+  "site_admin": false
+ }
+}

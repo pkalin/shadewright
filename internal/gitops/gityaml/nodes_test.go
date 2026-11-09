@@ -82,6 +82,8 @@ var nodeCases = []string{
 	"a\n...\n---\nb\n",
 	"\ufeffa: b\n",
 	"a: b\n\ufeffc: d\n",
+	"\ufeff--- a\n--- b\n",
+	"\ufeff---\n---\n",
 	"a:\tb\n",
 	"a: 'x y' \n",
 	"a: \"x\\\" y\"\n",

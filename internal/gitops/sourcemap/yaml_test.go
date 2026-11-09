@@ -19,7 +19,6 @@ package sourcemap_test
 import (
 	goruntime "runtime"
 	"runtime/debug"
-	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -241,7 +240,15 @@ func TestReadFieldPeakHeap(t *testing.T) {
 	const tail = "x]}\n"
 	file := func(n int) []byte { return []byte(scaledObjectYAML + "---\n" + head + strings.Repeat("x,", n) + tail) }
 	most := (providers.MaxFileBytes - len(file(0))) / 2
-	accepted := sort.Search(most, func(n int) bool { return gityaml.Nodes(file(n+1), gityaml.MaxNodes) > gityaml.MaxNodes })
+	// The most items the node count accepts.
+	accepted, over := 0, most
+	for accepted+1 < over {
+		if mid := (accepted + over) / 2; gityaml.Nodes(file(mid), gityaml.MaxNodes) <= gityaml.MaxNodes {
+			accepted = mid
+		} else {
+			over = mid
+		}
+	}
 	for _, c := range []struct {
 		name string
 		n    int

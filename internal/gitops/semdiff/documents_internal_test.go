@@ -196,7 +196,7 @@ func FuzzDocuments(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		got, err := documents("f.yaml", data)
 		if err != nil {
-			if !errors.Is(err, ErrInvalidYAML) && !(errors.Is(err, ErrTooLarge) && strings.Contains(err.Error(), "YAML nodes")) {
+			if !errors.Is(err, ErrInvalidYAML) && (!errors.Is(err, ErrTooLarge) || !strings.Contains(err.Error(), "YAML nodes")) {
 				t.Fatalf("documents(%q): %v, want only InvalidYAML or TooLarge for the nodes", data, err)
 			}
 			return

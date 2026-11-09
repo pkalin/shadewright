@@ -35,6 +35,9 @@ import (
 // executorMemory is the executor's memory limit in the chart.
 const executorMemory = 128 << 20
 
+// nodesCause is in the message of every refusal of a file of too many YAML nodes.
+const nodesCause = "YAML nodes"
+
 // budget is the most heap the patcher may hold at its peak for any input: a quarter of the executor's memory
 // limit, which leaves room under its GOMEMLIMIT (90 percent of the limit, about 115 MiB, #602) for the rest
 // of the process.
@@ -97,7 +100,7 @@ func peakHeap(f func()) uint64 {
 // An alias bomb in another document of the file is refused before any parser expands it: for its anchors, or
 // for its nodes when they are over the budget (#595, invariant 4).
 func TestAliasBombRefused(t *testing.T) {
-	for pad, want := range map[int]string{50000: "anchors", 100000: "YAML nodes"} {
+	for pad, want := range map[int]string{50000: "anchors", 100000: nodesCause} {
 		dep := string(read(t, "deployment.yaml"))
 		in := []byte(dep + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bomb\n  namespace: orders\ndata:\n" +
 			aliasBomb(pad))
@@ -157,12 +160,12 @@ func TestDenseFilePeakHeap(t *testing.T) {
 		open, item, last string
 		refused          string
 	}{
-		"flow pairs":         {"[", "x: ,", "x: ]\n", "YAML nodes"},
-		"flow mapping":       {"{", "a,", "a}\n", "YAML nodes"},
-		"flow list":          {"[", "x,", "x]\n", "YAML nodes"},
-		"block mapping":      {"", "a:\n", "", "YAML nodes"},
-		"block list":         {"", "-\n", "", "YAML nodes"},
-		"block list of list": {"", "- -\n", "", "YAML nodes"},
+		"flow pairs":         {"[", "x: ,", "x: ]\n", nodesCause},
+		"flow mapping":       {"{", "a,", "a}\n", nodesCause},
+		"flow list":          {"[", "x,", "x]\n", nodesCause},
+		"block mapping":      {"", "a:\n", "", nodesCause},
+		"block list":         {"", "-\n", "", nodesCause},
+		"block list of list": {"", "- -\n", "", nodesCause},
 		"one long scalar":    {"a: ", "x", "\n", ""},
 	}
 	for name, c := range cases {

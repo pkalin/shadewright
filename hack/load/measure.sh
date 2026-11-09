@@ -49,7 +49,7 @@ WORK="${WORK:-$(mktemp -d)}"
 NS=shadewright-system
 REL=shadewright
 CTX="kind-${CLUSTER}"
-export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.10}"
+export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.3}"
 export KUBECONFIG="${WORK}/kubeconfig"
 
 make kind >/dev/null

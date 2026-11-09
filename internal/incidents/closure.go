@@ -156,8 +156,9 @@ func lifecycleReason(inc *remediationv1alpha1.Incident) string {
 //   - In phase Proposed (or Escalated by a Superseded request, [decidedByRequest]), the newest request naming
 //     the Incident (by creation time; at the same time a Superseded one is the older, then by name) decides:
 //     Succeeded moves it to Resolved, any other final phase but Merged to Escalated. Superseded thus follows
-//     the newer request when there is one, and escalates when there is none. Merged moves nothing until the
-//     verifier is built (#92); the quiet rule then applies.
+//     the newer request when there is one, and escalates when there is none. A request Superseded because
+//     another one was merged ([mergedElsewhere], reason AnotherRequestMerged) is never the newest: the merged
+//     request decides. Merged moves nothing until the verifier is built (#92); the quiet rule then applies.
 //   - Otherwise an Incident quiet for QuietBeforeResolved moves to Resolved. It is quiet since the latest of lastSeen, held, lastAnalysisTime and the Lifecycle
 //     condition's lastTransitionTime, so an escalation stands for at least that long before the Incident can
 //     go on to Resolved. An Incident whose newest occurrence is a lasting symptom state ([lastingState]) is
@@ -183,6 +184,10 @@ func Closure(inc *remediationv1alpha1.Incident, requests []remediationv1alpha1.R
 		}
 		if !finalRequest(rr.Status.Phase) {
 			active = true
+		}
+		if mergedElsewhere(rr) {
+			// Ended because another request of the Incident was merged (#556): that request decides, never this one.
+			continue
 		}
 		if newest == nil || newer(rr, newest) {
 			newest = rr
@@ -218,6 +223,17 @@ func Closure(inc *remediationv1alpha1.Incident, requests []remediationv1alpha1.R
 		}
 	}
 	return closeQuiet(inc, held, now)
+}
+
+// mergedElsewhere reports whether rr ended Superseded because another request of the same Incident and target
+// was merged (PlanFresh False with reason AnotherRequestMerged, #556). Such a request opened no pull request and
+// says nothing about the Incident: the merged request does, so it is never the newest one that decides.
+func mergedElsewhere(rr *remediationv1alpha1.RemediationRequest) bool {
+	if rr.Status.Phase != remediationv1alpha1.PhaseSuperseded {
+		return false
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == remediationv1alpha1.ReasonAnotherRequestMerged
 }
 
 // closeQuiet is the quiet rule of [Closure], for an Incident no active request names.

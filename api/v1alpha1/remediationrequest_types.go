@@ -299,6 +299,13 @@ type PullRequestStatus struct {
 	// +optional
 	AppliedObservedAt *metav1.Time `json:"appliedObservedAt,omitempty"`
 
+	// mergedAt is when the executor first recorded the request Merged, set in the status write that sets the
+	// phase and never moved, unlike lastPhaseTransitionTime, which every later phase moves. A duplicate of the same
+	// Incident and target created before it ends Superseded (reason AnotherRequestMerged, #556). Empty on a
+	// request merged before the field existed.
+	// +optional
+	MergedAt *metav1.MicroTime `json:"mergedAt,omitempty"`
+
 	// reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge
 	// gate), written only with reviewer hints on: InProgress once the executor created it on that head, Passed
 	// once it completed it with success after an approval of that head by someone who wrote no hint in the

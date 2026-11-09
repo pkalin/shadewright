@@ -37,7 +37,7 @@ The reason is on one of these conditions:
 - `PolicyAllowed`: the policy check. `False` is `Denied`, `Unknown` is `NeedsIntervention` or a wait, `True` is allowed.
 - `PullRequestOpened`: a stop before a pull request is recorded, and the history of one that was closed.
 - `Approved`: a stop after a pull request is recorded; `WaitingForReview` while it waits, or `ReviewCheckRefused` or `ReviewListTooLong` while it waits on a check that does not pass on the current head (both are final for that head; a replacement after a handoff starts again at `WaitingForReview`).
-- `PlanFresh`: `False` when the plan went stale or another request of the same Incident was merged (`Superseded`), `Unknown` while the Git host refuses a freshness check.
+- `PlanFresh`: `False` when the plan went stale or another request of the same Incident was merged (`Superseded`), `Unknown` while the Git host refuses a freshness check, or while Flux is still reconciling the Kustomization (`KustomizationReconciling`, at most 10 minutes, then the plan is stale).
 - `Queued`: `True` while a limit holds a request back before its policy check (see [Limits](#limits)).
 
 Many reasons exist in more than one place with the same cause (the source mapping and the policy both check the repository); they are listed once.

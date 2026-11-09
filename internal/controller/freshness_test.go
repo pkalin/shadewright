@@ -265,6 +265,61 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(closes.Load()).To(Equal(int32(1)))
 	})
 
+	// fluxWaitCondition returns the PlanFresh condition of the request as stored.
+	fluxWaitCondition := func() *metav1.Condition {
+		return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+	}
+
+	// Flux reconciling the delivery stops the freshness check without a verdict; the retries are bounded by
+	// TargetStateTimeout also once the pull request is open, when no deadline bounds them (#556 review). Then
+	// the plan is taken as stale, as it was at once before #556.
+	It("bounds the retries while Flux reconciles, then supersedes", func() {
+		start := time.Now()
+		reconcileAt := func(now time.Time) (reconcile.Result, error) {
+			r := reconciler()
+			r.Now = func() time.Time { return now }
+			r.Source = sourceFunc(func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
+				return sourcemap.Result{Outcome: sourcemap.NeedsIntervention,
+					Reason: sourcemap.ReasonKustomizationReconciling, Message: ksNotReadyMessage}, nil
+			})
+			return r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		}
+		for _, after := range []time.Duration{0, time.Minute, DefaultTargetStateTimeout - time.Second} {
+			_, err := reconcileAt(start.Add(after))
+			Expect(err).To(MatchError(freshness.ErrReconciling))
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			c := fluxWaitCondition()
+			Expect(c).NotTo(BeNil())
+			Expect(c.Status).To(Equal(metav1.ConditionUnknown))
+			Expect(c.Reason).To(Equal(string(sourcemap.ReasonKustomizationReconciling)))
+			Expect(c.LastTransitionTime.Time).To(BeTemporally("~", start, time.Second))
+		}
+		Expect(closes.Load()).To(BeZero())
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+
+		_, err := reconcileAt(start.Add(DefaultTargetStateTimeout))
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+		Expect(fluxWaitCondition().Reason).To(Equal(freshness.ReasonSourceChanged))
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+	})
+
+	It("clears the wait for Flux once the freshness check passes", func() {
+		r := reconciler()
+		r.Source = sourceFunc(func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
+			return sourcemap.Result{Outcome: sourcemap.NeedsIntervention, Reason: sourcemap.ReasonKustomizationReconciling}, nil
+		})
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).To(MatchError(freshness.ErrReconciling))
+		Expect(fluxWaitCondition()).NotTo(BeNil())
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fluxWaitCondition()).To(BeNil())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+	})
+
 	It("supersedes when the policy is deleted", func() {
 		Expect(k8sClient.Delete(ctx, policy)).To(Succeed())
 		supersedes(freshness.ReasonPolicyChanged)

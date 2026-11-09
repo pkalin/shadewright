@@ -680,7 +680,11 @@ func TestMappingWhileFluxReconcilesIsRetried(t *testing.T) {
 	w.resolve = func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
 		return sourcemap.Result{Outcome: sourcemap.NeedsIntervention, Reason: sourcemap.ReasonKustomizationReconciling}, nil
 	}
-	wantRetry(t, w.fresh(t))
+	err := w.fresh(t)
+	wantRetry(t, err)
+	if !errors.Is(err, freshness.ErrReconciling) {
+		t.Fatalf("want ErrReconciling, so the caller can bound the retries: %v", err)
+	}
 }
 
 func TestNoResolverFailsClosed(t *testing.T) {

@@ -722,6 +722,10 @@ func (in *PullRequestStatus) DeepCopyInto(out *PullRequestStatus) {
 		in, out := &in.AppliedObservedAt, &out.AppliedObservedAt
 		*out = (*in).DeepCopy()
 	}
+	if in.MergedAt != nil {
+		in, out := &in.MergedAt, &out.MergedAt
+		*out = (*in).DeepCopy()
+	}
 	if in.ReviewCheck != nil {
 		in, out := &in.ReviewCheck, &out.ReviewCheck
 		*out = new(ReviewCheck)

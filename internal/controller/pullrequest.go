@@ -1311,13 +1311,14 @@ func refusedWhileWatching(reason string) string {
 		"watching the pull request"
 }
 
-// clearWaits removes, once the freshness check passes again, the PlanFresh condition refuseOrWait wrote and
-// the WritesPaused condition of the kill switch (the check has just read the settings without a pause), in one
-// status write.
+// clearWaits removes, once the freshness check passes again, the PlanFresh condition refuseOrWait or
+// reconcilingTooLong wrote and the WritesPaused condition of the kill switch (the check has just read the
+// settings without a pause), in one status write.
 func (r *RemediationRequestReconciler) clearWaits(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	changed := false
 	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh); c != nil &&
-		c.Status == metav1.ConditionUnknown && (c.Reason == ReasonGitForbidden || c.Reason == ReasonGitRejected) {
+		c.Status == metav1.ConditionUnknown && (c.Reason == ReasonGitForbidden || c.Reason == ReasonGitRejected ||
+		c.Reason == string(sourcemap.ReasonKustomizationReconciling)) {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
 		changed = true
 	}

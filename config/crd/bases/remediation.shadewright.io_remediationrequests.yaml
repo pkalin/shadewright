@@ -992,6 +992,14 @@ spec:
                     minLength: 40
                     pattern: ^[0-9a-f]{40}$
                     type: string
+                  mergedAt:
+                    description: |-
+                      mergedAt is when the executor first recorded the request Merged, set in the status write that sets the
+                      phase and never moved, unlike lastPhaseTransitionTime, which every later phase moves. A duplicate of the same
+                      Incident and target created before it ends Superseded (reason AnotherRequestMerged, #556). Empty on a
+                      request merged before the field existed.
+                    format: date-time
+                    type: string
                   number:
                     description: number of the pull request.
                     format: int64

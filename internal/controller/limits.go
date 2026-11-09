@@ -601,10 +601,11 @@ func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *re
 	return reconcile.Result{RequeueAfter: s.recheckDelay()}, nil
 }
 
-// setPhase sets the request's phase and, when it changes, lastPhaseTransitionTime to now and, when the request
-// ended, status.breakerCounts (classifyBreaker). That reads the plan digest and status.breakerProbe, so a caller
-// sets those first. A phase that ends the request also declines its Pending reviewer hints (declineOnEnd): every
-// path that ends a request comes through here.
+// setPhase sets the request's phase and, when it changes, lastPhaseTransitionTime to now (and, for Merged with a
+// recorded pull request, status.pullRequest.mergedAt once) and, when the request ended, status.breakerCounts
+// (classifyBreaker). That reads the plan digest and status.breakerProbe, so a caller sets those first. A phase
+// that ends the request also declines its Pending reviewer hints (declineOnEnd): every path that ends a request
+// comes through here.
 func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.RemediationRequest,
 	phase remediationv1alpha1.RemediationPhase) {
 	declineOnEnd(rr, phase)
@@ -614,6 +615,11 @@ func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.Remediat
 	rr.Status.Phase = phase
 	t := metav1.NewMicroTime(r.now())
 	rr.Status.LastPhaseTransitionTime = &t
+	if phase == remediationv1alpha1.PhaseMerged && rr.Status.PullRequest != nil && rr.Status.PullRequest.MergedAt == nil {
+		// The merge's own time, which no later phase moves: duplicates created before it end Superseded (#556).
+		merged := t
+		rr.Status.PullRequest.MergedAt = &merged
+	}
 	// The breaker's watermark is set in the same status write that ends the request (breakercounts.go).
 	classifyBreaker(rr)
 }

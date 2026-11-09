@@ -77,6 +77,11 @@ const readTimeout = 30 * time.Second
 // closed until an administrator fixes the settings, so retrying would never end.
 var ErrRepositoryUnusable = errors.New("the repository settings cannot be used to open it")
 
+// ErrReconciling means the source mapping stopped because Flux is still reconciling the Kustomization that
+// delivers the target, with no failure reported (sourcemap.Reason.Reconciling): the plan is neither fresh nor
+// known to be stale. The caller retries, and bounds how long (#556): a reconcile that never ends looks the same.
+var ErrReconciling = errors.New("the GitOps controller is still reconciling the delivery of the target")
+
 // ErrPaused means RemediationSettings pauses every write. The plan is not stale; the write waits.
 var ErrPaused = errors.New("remediation is paused")
 
@@ -569,9 +574,9 @@ func (c Checker) checkSource(ctx context.Context, rr *v1alpha1.RemediationReques
 	}
 	if res.Outcome != sourcemap.Resolved && res.Reason.Reconciling() {
 		// Flux is still reconciling the Kustomization (a revision merged meanwhile, #556): not fresh and not
-		// stale either, so the check is retried, and nothing is written to Git until one passes. Before the pull
-		// request is opened its deadline bounds the retries.
-		return sourcemap.Result{}, fmt.Errorf("resolve the source again: Flux is reconciling (%s)", res.Reason)
+		// stale either, so the check is retried, and nothing is written to Git until one passes. The caller
+		// bounds the retries (ErrReconciling).
+		return sourcemap.Result{}, fmt.Errorf("resolve the source again: %w (%s)", ErrReconciling, res.Reason)
 	}
 	if res.Outcome != sourcemap.Resolved {
 		// Denied, NeedsIntervention or anything unknown. Only the reason is reported: the message may hold

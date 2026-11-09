@@ -977,7 +977,8 @@ const (
 // host asked for is kept. Delivery after the merge is a later step (#94, #95). Unless the request ended or its
 // pull request is closed, the reviewer hints are handled next, within deadlines of their own (pollHints):
 // the comments only when the look found the pull request waiting for review, the answers of Pending hints and
-// their timeout always.
+// their timeout always. Then, on a pull request found open with the recorded head, the check run
+// shadewright/review (reviewCheck), whose gate decides only when the look at the comments caught up.
 func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) (prOutcome, error) {
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
@@ -990,14 +991,20 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	case errors.Is(err, errClosed):
 		return prClosed, nil
 	}
+	caughtUp := false
 	if ctx.Err() == nil {
 		// Deadlines of their own (pollHints): a slow check of the pull request does not leave them its remainder.
-		r.watchHints(ctx, look, rr)
+		caughtUp = r.watchHints(ctx, look, rr)
 	}
 	if err != nil {
 		logf.FromContext(ctx).V(1).Info("Could not check the pull request of RemediationRequest",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
 		return prUnchecked, err
+	}
+	if ctx.Err() == nil {
+		// Open with the recorded head: the check run on it, and the merge gate only after the comments of this
+		// look are stored (reviewcheck.go).
+		r.watchReviewCheck(ctx, rr, caughtUp)
 	}
 	return prOpen, nil
 }

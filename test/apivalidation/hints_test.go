@@ -712,6 +712,58 @@ var _ = Describe("RemediationRequest status.handoff", func() {
 	})
 })
 
+var _ = Describe("RemediationRequest status.pullRequest.reviewCheck", func() {
+	const newHead = "89abcdef0123456789abcdef0123456789abcdef"
+	// waiting creates a request whose pull request has head with the check in state on it.
+	waiting := func(head string, state v1alpha1.ReviewCheckState) *v1alpha1.RemediationRequest {
+		rr := createdRequest(false)
+		rr.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: head,
+			ReviewCheck: &v1alpha1.ReviewCheck{Head: head, State: state}}
+		ExpectWithOffset(1, k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		return rr
+	}
+
+	It("moves from InProgress to Passed or Refused on one head, and starts again on a new head", func() {
+		for _, end := range []v1alpha1.ReviewCheckState{v1alpha1.ReviewCheckPassed, v1alpha1.ReviewCheckRefused} {
+			rr := waiting(testHeadSHA, v1alpha1.ReviewCheckInProgress)
+			rr.Status.PullRequest.ReviewCheck.State = end
+			Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+			rr.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: newHead,
+				ReviewCheck: &v1alpha1.ReviewCheck{Head: newHead, State: v1alpha1.ReviewCheckInProgress}}
+			Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "a new head starts in progress")
+		}
+	})
+
+	It("refuses a state that names another head", func() {
+		rr := createdRequest(false)
+		rr.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: newHead,
+			ReviewCheck: &v1alpha1.ReviewCheck{Head: testHeadSHA, State: v1alpha1.ReviewCheckPassed}}
+		expectStatusRefused(rr, "reviewCheck names the recorded head")
+	})
+
+	It("refuses a head that is not a full SHA", func() {
+		rr := createdRequest(false)
+		rr.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
+			ReviewCheck: &v1alpha1.ReviewCheck{Head: "0123abc", State: v1alpha1.ReviewCheckInProgress}}
+		expectStatusRefused(rr, "status.pullRequest.reviewCheck.head")
+	})
+
+	It("never moves back on one head", func() {
+		for _, from := range []v1alpha1.ReviewCheckState{v1alpha1.ReviewCheckPassed, v1alpha1.ReviewCheckRefused} {
+			rr := waiting(testHeadSHA, from)
+			for _, to := range []v1alpha1.ReviewCheckState{v1alpha1.ReviewCheckInProgress, v1alpha1.ReviewCheckPassed,
+				v1alpha1.ReviewCheckRefused} {
+				if to == from {
+					continue
+				}
+				got := reread(rr)
+				got.Status.PullRequest.ReviewCheck.State = to
+				expectStatusRefused(got, "on one head the check run moves only from InProgress to Passed or Refused")
+			}
+		}
+	})
+})
+
 var _ = Describe("Incident status.handledHint", func() {
 	update := func(ref v1alpha1.HintRef) error {
 		inc := fx.Incident("default", unique("inc"))

@@ -1175,6 +1175,28 @@ func (r *RemediationRequestReconciler) endFreshness(ctx context.Context, rr *rem
 	return ErrSuperseded
 }
 
+// stillOwns reads rr again from the API server, not the cache, right before closeChangeRequest closes its pull
+// request: the copy the reconcile holds may predate a handoff (a predecessor suspended after its render check
+// that resumes after its replacement took the pull request over), and a close is the one write that cannot be
+// undone. A request handed over meanwhile, or with an intent that stands, never closes; a request gone or
+// recreated under its name returns errChangeRequestNotOurs too. A read that fails is returned for a retry.
+func (r *RemediationRequestReconciler) stillOwns(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	fresh := &remediationv1alpha1.RemediationRequest{}
+	switch err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), fresh); {
+	case apierrors.IsNotFound(err):
+		return errChangeRequestNotOurs
+	case err != nil:
+		return fmt.Errorf("get RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	switch {
+	case fresh.UID != rr.UID, handedOff(fresh):
+		return errChangeRequestNotOurs
+	case intent(fresh) != nil:
+		return errHandoffInFlight
+	}
+	return nil
+}
+
 // closeChangeRequest closes the request's change request, if it has one, in the repository the plan was made
 // for and nowhere else. A change request that is already closed, or that was never opened, is not an error; a
 // merged one is, because the change landed. It returns [errRepositoryGone] when that repository is not in the
@@ -1182,7 +1204,8 @@ func (r *RemediationRequestReconciler) endFreshness(ctx context.Context, rr *rem
 // when a recorded pull request is not the branch's own, and [freshness.ErrPaused] when the settings read now
 // pause writes. A request with an outgoing handoff that stands or is done never closes anything: the pull
 // request is, or may become, its replacement's ([errChangeRequestNotOurs] when handed over,
-// [errHandoffInFlight] while the intent stands).
+// [errHandoffInFlight] while the intent stands), judged on the copy it was given and, right before the close,
+// on a fresh read (stillOwns).
 func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	if r.OpenRepository == nil {
 		return errors.New("cannot close the change request: no Git provider")
@@ -1240,6 +1263,9 @@ func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, r
 	if recorded == nil && cr.State == providers.ChangeRequestMerged {
 		// Ours, merged before any status recorded it (#524): nothing to close; the caller checks the merge.
 		return &mergedUnrecordedError{git: git, cr: cr}
+	}
+	if err := r.stillOwns(ctx, rr); err != nil {
+		return err
 	}
 	if err := git.CloseChangeRequest(ctx, cr.Number); err != nil {
 		return freshness.WrapProvider("close the change request", err)

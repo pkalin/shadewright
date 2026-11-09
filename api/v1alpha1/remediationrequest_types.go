@@ -253,6 +253,7 @@ const (
 
 // PullRequestStatus records the pull request that carries the plan.
 // +kubebuilder:validation:XValidation:rule="!has(self.appliedObservedAt) || has(self.mergeCommitSHA)",message="appliedObservedAt needs mergeCommitSHA"
+// +kubebuilder:validation:XValidation:rule="!has(self.reviewCheck) || self.reviewCheck.head == self.headSHA",message="reviewCheck names the recorded head"
 type PullRequestStatus struct {
 	// number of the pull request.
 	// +kubebuilder:validation:Minimum=1
@@ -295,6 +296,14 @@ type PullRequestStatus struct {
 	// a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge.
 	// +optional
 	AppliedObservedAt *metav1.Time `json:"appliedObservedAt,omitempty"`
+
+	// reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge
+	// gate), written only with reviewer hints on: InProgress once the executor created it on that head, Passed
+	// once it completed it with success after an approval of that head by someone who wrote no hint in the
+	// chain, Refused when the Git host refused to create or complete it for good (condition Approved then says
+	// so). It always names headSHA: a new head starts without it, so a state never outlives its head.
+	// +optional
+	ReviewCheck *ReviewCheck `json:"reviewCheck,omitempty"`
 }
 
 // RolloutStatus is what the check after the merge records about the target's rollout. Only the executor writes
@@ -504,7 +513,7 @@ type RemediationRequestStatus struct {
 
 	// handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over
 	// (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is
-	// written once and never removed; only its phase moves on. Planned: nothing writes it yet.
+	// never removed; Handoff says what may change. Only the executor writes it.
 	// +optional
 	Handoff *Handoff `json:"handoff,omitempty"`
 

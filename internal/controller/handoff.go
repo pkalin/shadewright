@@ -70,20 +70,21 @@ import (
 //     commit before the freshness check, and goes on to the read after the update, so neither the freshness
 //     check nor the deadline takes its commit, or a merge of it, for a stale plan.
 //   - Step 4 (recordHandoff): the replacement records the pull request with the new head, the hints of the chain
-//     (each consumed one, the one it answers among them, and the predecessor's other Pending hints, which it
-//     answers anew since the cursor it carries is past their comments) and the predecessor's comment cursor, sets
+//     (each consumed one, the one it answers among them, the predecessor's other Pending hints, which it
+//     answers anew since the cursor it carries is past their comments, and its Declined ones, kept as they are
+//     so that their authors stay out of the approvers that count) and the predecessor's comment cursor, sets
 //     from Done and moves to PRCreated; a merge right after the update whose merged head is the new commit makes
 //     it Merged.
 //   - Step 5 (supersedePredecessor): the predecessor ends Superseded with reason HandedOff, its to Done, its hint
 //     Consumed and holdsTarget false. It is the one Superseded whose pull request may be open (prMayBeOpen).
 //   - Step 6 (followHandoff): while the pull request waits, its title and body are rewritten for the new plan
-//     with the replacement's marker, and the check run shadewright/review is created in progress on the new
-//     head, each recorded in status.handoff.from as Done (InProgress) or Refused; a refusal is never recorded as
-//     done, and a body the Git host did not rewrite keeps the predecessor's marker, which the replacement keeps
-//     accepting.
-//   - The merge gate (reviewGate, ADR-0028 section 5): while the request waits for review, the check run
-//     completes with success once the latest review of someone who wrote no hint in the chain approves the
-//     recorded head.
+//     with the replacement's marker, recorded in status.handoff.from as Done or Refused; a refusal is never
+//     recorded as done, and a body the Git host did not rewrite keeps the predecessor's marker, which the
+//     replacement keeps accepting.
+//   - The check run and the merge gate are not the handoff's: like on every head of a Shadewright pull request,
+//     the new head starts without status.pullRequest.reviewCheck, and the look at the pull request creates the
+//     check run on it (reviewcheck.go). The hints carried over (all of the chain, whatever became of them) keep
+//     their authors out of the approvers that count.
 //
 // Each step is one write, idempotent, and a restart finds where it stopped from the two statuses and the
 // branch. Every write, in Git and in status, passes the kill switch first (writeAllowed, gatedGit); while
@@ -104,15 +105,6 @@ const (
 	// ReasonHintHandoffAborted: the replacement that answered the hint ended without taking the pull request
 	// over.
 	ReasonHintHandoffAborted = "HandoffAborted"
-)
-
-// The check run created on the head a handoff pushed (ADR-0028 section 5), in progress until the merge gate
-// (reviewGate) completes it; until then it says why it waits.
-const (
-	checkRunTitle   = "Waiting for an approval of this head"
-	checkRunSummary = "Shadewright changed this pull request after a reviewer hint. The check completes once someone " +
-		"who wrote no hint in this pull request approves its latest head; an approval of an earlier head does not " +
-		"count."
 )
 
 // handedOff reports whether the request ended Superseded because a replacement took its pull request over.
@@ -566,9 +558,9 @@ func closedOrMerged(cr providers.ChangeRequest) string {
 	return "closed"
 }
 
-// recordHandoff is step 4: the replacement records the pull request with the new head, carries the consumed
-// hints of the chain and the predecessor's comment cursor, sets from Done and moves to PRCreated, or ends Merged
-// when the merge took the new commit.
+// recordHandoff is step 4: the replacement records the pull request with the new head, carries every hint of
+// the chain (the merge gate excludes all their authors) and the predecessor's comment cursor, sets from Done
+// and moves to PRCreated, or ends Merged when the merge took the new commit.
 func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pred *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest, newHead string) error {
 	if err := r.writeAllowed(ctx); err != nil {
@@ -589,6 +581,9 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 			// Another hint of the same pull request, accepted before the intent: the cursor carried over is past
 			// its comment, and the predecessor ends without answering it, so this request answers it, anew.
 			h.Reason, h.Outcome = "", ""
+		case h.State == remediationv1alpha1.HintDeclined:
+			// Kept as it is, answered: its author wrote a hint in this pull request all the same, so their
+			// approval never counts for the merge gate, whatever became of the hint.
 		default:
 			continue
 		}
@@ -635,22 +630,18 @@ func (r *RemediationRequestReconciler) endHandoff(ctx context.Context, rr *remed
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseCancelled, reason, message)
 }
 
-// followHandoff is step 6 of a replacement that took the pull request over, each part once and recorded: while
-// the pull request waits for review, its title and body are rewritten and the check run shadewright/review is
-// created in progress on the recorded head; once the request waits for review, the merge gate (reviewGate)
-// completes it. A final refusal of the Git host is recorded as Refused, never as done, so it is not asked again
-// on every look; a pull request closed or merged meanwhile leaves the step for the watch to decide. An error is
-// returned for a retry; rr is updated in place by every status write that went through. The caller has done
-// step 5 first.
+// followHandoff is step 6 of a replacement that took the pull request over, once and recorded: while the pull
+// request waits for review, its title and body are rewritten for this request's plan, with its marker. A final
+// refusal of the Git host is recorded as Refused, never as done, so it is not asked again on every look; a pull
+// request closed or merged meanwhile leaves the step for the watch to decide. An error is returned for a retry;
+// rr is updated in place by the status write when it went through. The check run shadewright/review is not
+// this step's: it is created on every head after the look at the comments (reviewCheck), so the merge gate
+// never decides before the hints of that look are stored. The caller has done step 5 first.
 func (r *RemediationRequestReconciler) followHandoff(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	from := rr.Status.Handoff.From
 	p := rr.Status.Phase
 	if (p != remediationv1alpha1.PhasePRCreated && p != remediationv1alpha1.PhaseAwaitingApproval) ||
-		rr.Status.PullRequest == nil {
-		return nil
-	}
-	gate := p == remediationv1alpha1.PhaseAwaitingApproval && from.CheckRun == remediationv1alpha1.ReviewCheckInProgress
-	if from.PullRequestUpdate != "" && from.CheckRun != "" && !gate {
+		rr.Status.PullRequest == nil || from.PullRequestUpdate != "" {
 		return nil
 	}
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
@@ -661,43 +652,16 @@ func (r *RemediationRequestReconciler) followHandoff(ctx context.Context, rr *re
 	}
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
 	pr := rr.Status.PullRequest
-	if from.PullRequestUpdate == "" {
-		err := git.UpdateChangeRequest(stepCtx, pr.Number, commitTitle(rr), pullRequestBody(rr, r.verifiedIncidentName(stepCtx, rr)))
-		step, err := stepOutcome(log, err, "rewrite the pull request")
-		switch {
-		case err != nil:
-			return freshness.WrapProvider("rewrite the pull request", err)
-		case step == "":
-			// Closed or merged meanwhile: the watch of the pull request decides; nothing is left to rewrite.
-			return nil
-		}
-		if err := r.recordStep(stepCtx, rr, func(f *remediationv1alpha1.IncomingHandoff) { f.PullRequestUpdate = step }); err != nil {
-			return err
-		}
+	err = git.UpdateChangeRequest(stepCtx, pr.Number, commitTitle(rr), pullRequestBody(rr, r.verifiedIncidentName(stepCtx, rr)))
+	step, err := stepOutcome(log, err, "rewrite the pull request")
+	switch {
+	case err != nil:
+		return freshness.WrapProvider("rewrite the pull request", err)
+	case step == "":
+		// Closed or merged meanwhile: the watch of the pull request decides; nothing is left to rewrite.
+		return nil
 	}
-	if rr.Status.Handoff.From.CheckRun == "" {
-		err := git.CreateCheckRun(stepCtx, pr.HeadSHA, providers.CheckRun{Name: providers.CheckRunName,
-			Status: providers.CheckRunInProgress, Title: checkRunTitle, Summary: checkRunSummary})
-		step, err := stepOutcome(log, err, "create the check run")
-		switch {
-		case err != nil:
-			return freshness.WrapProvider("create the check run", err)
-		case step == "":
-			return nil
-		}
-		state := remediationv1alpha1.ReviewCheckInProgress
-		if step == remediationv1alpha1.HandoffStepRefused {
-			state = remediationv1alpha1.ReviewCheckRefused
-		}
-		if err := r.recordStep(stepCtx, rr, func(f *remediationv1alpha1.IncomingHandoff) { f.CheckRun = state }); err != nil {
-			return err
-		}
-	}
-	if rr.Status.Phase == remediationv1alpha1.PhaseAwaitingApproval &&
-		rr.Status.Handoff.From.CheckRun == remediationv1alpha1.ReviewCheckInProgress {
-		return r.reviewGate(stepCtx, git, rr)
-	}
-	return nil
+	return r.recordStep(stepCtx, rr, func(f *remediationv1alpha1.IncomingHandoff) { f.PullRequestUpdate = step })
 }
 
 // stepOutcome maps the answer of a write after the handoff to its record: Done, Refused for a final refusal
@@ -715,111 +679,6 @@ func stepOutcome(log logr.Logger, err error, what string) (remediationv1alpha1.H
 		return remediationv1alpha1.HandoffStepRefused, nil
 	}
 	return "", err
-}
-
-// The merge gate (ADR-0028 section 5): the check run completes once someone who wrote no hint in the chain
-// approves the recorded head.
-const (
-	// maxReviewLooks bounds the looks at the reviews of one pull request per reconcile; a list longer than that
-	// leaves the check in progress until a later look reads it whole.
-	maxReviewLooks = 4
-	// reviewApproved is the state of an approving review.
-	reviewApproved = "APPROVED"
-	// checkRunPassedTitle and checkRunPassedSummary are the text of the completed check.
-	checkRunPassedTitle   = "Approved"
-	checkRunPassedSummary = "Someone who wrote no hint in this pull request approved its latest head."
-	// hintApprovalComment is posted once per approval of the head by a hint author.
-	hintApprovalComment = "This approval does not satisfy the check shadewright/review: its author wrote a " +
-		"reviewer hint in this pull request, and the person who steered a change through a hint cannot also be " +
-		"its only approver. Someone who wrote no hint here has to approve the latest head."
-)
-
-// reviewGate is the merge gate of a request waiting for review whose check run is in progress: it reads every
-// review of the pull request and, when the latest review of a person who wrote no hint in the chain (compared by
-// user ID) approves the recorded head, completes the check run with success and records it Passed. An approval
-// of an earlier head never counts. An approval of the head by a hint author does not count either, and gets a
-// comment saying why, once per review (by its marker). A list it cannot read whole leaves the check in progress.
-func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git providers.GitProvider,
-	rr *remediationv1alpha1.RemediationRequest) error {
-	fs, ok := feedbackOf(git)
-	if !ok {
-		return nil
-	}
-	pr := rr.Status.PullRequest
-	latest := map[int64]providers.Feedback{}
-	var order []int64
-	cur := providers.FeedbackCursor{}
-	complete := false
-	for range maxReviewLooks {
-		page, err := fs.ListReviews(ctx, pr.Number, cur)
-		if err != nil {
-			return freshness.WrapProvider("list the reviews of the pull request", err)
-		}
-		for _, it := range page.Items {
-			if it.Kind != providers.FeedbackReview || it.Author.Kind != providers.AuthorPerson {
-				continue
-			}
-			if _, seen := latest[it.Author.ID]; !seen {
-				order = append(order, it.Author.ID)
-			}
-			if prev, seen := latest[it.Author.ID]; !seen || !it.CreatedAt.Before(prev.CreatedAt) {
-				latest[it.Author.ID] = it
-			}
-		}
-		if complete = page.Complete; complete {
-			break
-		}
-		cur = page.Next
-	}
-	if !complete {
-		return nil
-	}
-	authors := map[int64]bool{}
-	for _, h := range rr.Status.Hints {
-		authors[h.Author.ID] = true
-	}
-	passed := false
-	var steered []int64
-	for _, id := range order {
-		rv := latest[id]
-		if rv.ReviewState != reviewApproved || rv.CommitID != pr.HeadSHA {
-			continue
-		}
-		if authors[id] {
-			steered = append(steered, rv.ID)
-			continue
-		}
-		passed = true
-	}
-	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
-	for _, id := range steered {
-		mark := fmt.Sprintf("<!-- shadewright review-gate review=%d -->", id)
-		if err := git.CommentChangeRequest(ctx, pr.Number, mark, hintApprovalComment+"\n\n"+mark); err != nil {
-			log.Info("Could not say why an approval does not count for RemediationRequest", "review", id,
-				"error", err.Error())
-		}
-	}
-	if !passed {
-		return nil
-	}
-	err := git.CreateCheckRun(ctx, pr.HeadSHA, providers.CheckRun{Name: providers.CheckRunName,
-		Status: providers.CheckRunSuccess, Title: checkRunPassedTitle, Summary: checkRunPassedSummary})
-	step, err := stepOutcome(log, err, "complete the check run")
-	switch {
-	case err != nil:
-		return freshness.WrapProvider("complete the check run", err)
-	case step == "":
-		return nil
-	}
-	state := remediationv1alpha1.ReviewCheckPassed
-	if step == remediationv1alpha1.HandoffStepRefused {
-		state = remediationv1alpha1.ReviewCheckRefused
-	}
-	if err := r.recordStep(ctx, rr, func(f *remediationv1alpha1.IncomingHandoff) { f.CheckRun = state }); err != nil {
-		return err
-	}
-	log.Info("Completed the review check of RemediationRequest", "pullRequest", pr.Number, "state", state)
-	return nil
 }
 
 // recordStep records a step after the handoff in rr's status, through the kill switch.
@@ -848,8 +707,8 @@ func reserveOnAdmission(rr *remediationv1alpha1.RemediationRequest) {
 
 // afterHandoff runs the steps after a handoff for a request that took a pull request over (Reconcile, any
 // phase): the predecessor ends HandedOff, returned as an error until it did so it is retried with backoff; the
-// pull request is rewritten and the check run created and completed while it waits, only logged on failure and
-// retried with the next look. A pause leaves both for later.
+// pull request is rewritten while it waits, only logged on failure and retried with the next look. A pause
+// leaves both for later. The check run is not done here but after the look at the comments (reviewCheck).
 func (r *RemediationRequestReconciler) afterHandoff(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	if !tookOver(rr) {
 		return nil

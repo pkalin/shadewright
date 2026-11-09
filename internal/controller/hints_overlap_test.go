@@ -49,7 +49,7 @@ func overlapSweep(t *testing.T, g *fakegit.Git, number int64, rr *remediationv1a
 	if !page.Complete {
 		t.Fatal("the look did not reach the end")
 	}
-	if err := (&RemediationRequestReconciler{}).lookComments(context.Background(), g, rr,
+	if _, err := (&RemediationRequestReconciler{}).lookComments(context.Background(), g, rr,
 		remediationv1alpha1.HintSourceGitHub, cur, page, now); err != nil {
 		t.Fatal(err)
 	}

@@ -367,8 +367,10 @@ Handoff records the supersede handoff (ADR-0028 section 4), written in this orde
 admission sets from (phase Reserved); one write on the predecessor sets to (phase Intent) and its hint
 Reserved; after the branch update the replacement's from moves to Done, then the predecessor ends Superseded
 with HandedOff, its to Done and its hint Consumed. A request in the middle of a chain has both: from for the
-handoff that gave it the pull request, to for the one that passes it on. Each side is written once, starts
-in its first phase and is never removed; only its phase moves on.
+handoff that gave it the pull request, to for the one that passes it on. Each side starts in its first phase
+and is never removed: from changes only its phase and, once Done, the record of the rewrite
+(pullRequestUpdate); to changes only its phase, except that an Aborted one is replaced by the Intent of a
+later replacement.
 
 
 Validation rules:
@@ -379,7 +381,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `from` | [IncomingHandoff](#incominghandoff) | No | from is the incoming side, set on a replacement.<br>Rule: an incoming handoff is Reserved, Done or Aborted<br>Rule: an incoming handoff is pinned: only its phase changes<br>Rule: the steps after a handoff are recorded only once it is Done<br>Rule: the record of the pull request's rewrite never changes once set<br>Rule: the check run moves only from InProgress to Passed or Refused<br>Rule: an incoming handoff moves only from Reserved to Done or Aborted |
+| `from` | [IncomingHandoff](#incominghandoff) | No | from is the incoming side, set on a replacement.<br>Rule: an incoming handoff is Reserved, Done or Aborted<br>Rule: an incoming handoff is pinned: only its phase changes<br>Rule: the rewrite after a handoff is recorded only once it is Done<br>Rule: the record of the pull request's rewrite never changes once set<br>Rule: an incoming handoff moves only from Reserved to Done or Aborted |
 | `to` | [OutgoingHandoff](#outgoinghandoff) | No | to is the outgoing side, set on a predecessor.<br>Rule: an outgoing handoff is Intent, Done or Aborted<br>Rule: an outgoing handoff is pinned: only its phase changes, or an Aborted one is replaced<br>Rule: an outgoing handoff moves only from Intent to Done or Aborted, or from Aborted to the Intent of another replacement |
 
 ### HandoffPhase
@@ -615,16 +617,17 @@ Used by: [Incident](#incident).
 ### IncomingHandoff
 
 IncomingHandoff is the replacement's side of a handoff: the predecessor it takes over and the hint it
-answers, equal to spec.replaces. Once written, only its phase and the records of the steps after it change.
+answers, equal to spec.replaces. Once written, only its phase and the record of the rewrite after it change.
+The check run shadewright/review is not recorded here: it belongs to each head of the pull request, also
+one no handoff pushed (PullRequestStatus.reviewCheck).
 
 
 Validation rules:
 
 - an incoming handoff is Reserved, Done or Aborted: `self.phase in ['Reserved', 'Done', 'Aborted']`
 - an incoming handoff is pinned: only its phase changes: `self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint`
-- the steps after a handoff are recorded only once it is Done: `(!has(self.pullRequestUpdate) && !has(self.checkRun)) || self.phase == 'Done'`
+- the rewrite after a handoff is recorded only once it is Done: `!has(self.pullRequestUpdate) || self.phase == 'Done'`
 - the record of the pull request's rewrite never changes once set: `!has(oldSelf.pullRequestUpdate) || (has(self.pullRequestUpdate) && self.pullRequestUpdate == oldSelf.pullRequestUpdate)`
-- the check run moves only from InProgress to Passed or Refused: `!has(oldSelf.checkRun) || (has(self.checkRun) && (self.checkRun == oldSelf.checkRun || (oldSelf.checkRun == 'InProgress' && self.checkRun in ['Passed', 'Refused'])))`
 - an incoming handoff moves only from Reserved to Done or Aborted: `oldSelf.phase == self.phase || (oldSelf.phase == 'Reserved' && self.phase in ['Done', 'Aborted'])`
 
 Used by: [Handoff](#handoff).
@@ -636,7 +639,6 @@ Used by: [Handoff](#handoff).
 | `hint` | [HintRef](#hintref) | Yes | hint is the predecessor's hint the replacement answers. |
 | `phase` | [HandoffPhase](#handoffphase) | Yes | phase is how far this side has come.<br>One of `Reserved`, `Intent`, `Done`, `Aborted` |
 | `pullRequestUpdate` | [HandoffStep](#handoffstep) | No | pullRequestUpdate records the rewrite of the pull request's title and body for this request's plan, with its marker (ADR-0028 section 4, step 6): Done once the Git host did it, Refused when it refused it for good. Until it is Done the body carries the predecessor's marker, which this request accepts as its own.<br>One of `Done`, `Refused` |
-| `checkRun` | [ReviewCheckState](#reviewcheckstate) | No | checkRun is the state of the check run shadewright/review on the head this request recorded (ADR-0028 sections 4 and 5, the merge gate): InProgress once created, Passed once completed with success after an approval of that head by someone who wrote no hint in the chain, Refused when the Git host refused to create or complete it for good.<br>One of `InProgress`, `Passed`, `Refused` |
 
 ### IntegrationStatus
 
@@ -898,6 +900,7 @@ PullRequestStatus records the pull request that carries the plan.
 Validation rules:
 
 - appliedObservedAt needs mergeCommitSHA: `!has(self.appliedObservedAt) || has(self.mergeCommitSHA)`
+- reviewCheck names the recorded head: `!has(self.reviewCheck) || self.reviewCheck.head == self.headSHA`
 
 Used by: [RemediationRequestStatus](#remediationrequeststatus).
 
@@ -909,6 +912,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `renderedTargetHead` | string | No | renderedTargetHead is the head of the target branch at which the change in the pull request was last rendered and found to be exactly the planned one. While the pull request waits, the change is rendered again only when the target branch head is another commit; empty means not rendered since it was recorded.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
 | `mergeCommitSHA` | string | No | mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when Shadewright sees the merge of the pull request it pushed. Delivery is checked against it: the GitOps controller must report this commit, or a later commit of the target branch containing it, as applied. Empty until then, and when the host reported none. Once set it never changes.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
 | `appliedObservedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a deadline measured from it (the rollout check, condition RolledOut) cannot be pushed back. Written only for a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge. |
+| `reviewCheck` | [ReviewCheck](#reviewcheck) | No | reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge gate), written only with reviewer hints on: InProgress once the executor created it on that head, Passed once it completed it with success after an approval of that head by someone who wrote no hint in the chain, Refused when the Git host refused to create or complete it for good (condition Approved then says so). It always names headSHA: a new head starts without it, so a state never outlives its head.<br>Rule: on one head the check run moves only from InProgress to Passed or Refused |
 
 ### RecordID
 
@@ -1060,13 +1064,13 @@ Used by: [RemediationRequest](#remediationrequest).
 | `planRepository` | [PlanRepository](#planrepository) | No | planRepository is the repository and installation the plan digest covers, set together with planDigest. |
 | `policyRevision` | string | No | policyRevision is the policy name and generation the decision used, as name/generation. The policy UID is recorded next to it, because a deleted and recreated policy can reach the same generation again.<br>Maximum length: 128 |
 | `policyUID` | [UID](#uid) | No | policyUID is the UID of the policy the decision used. It is part of the plan digest.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
-| `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists.<br>Rule: appliedObservedAt needs mergeCommitSHA |
+| `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists.<br>Rule: appliedObservedAt needs mergeCommitSHA<br>Rule: reviewCheck names the recorded head |
 | `rollout` | [RolloutStatus](#rolloutstatus) | No | rollout is what the check after the merge keeps between reconciles (the RolledOut condition). |
 | `deadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | deadline is when the current step gives up. |
 | `hints` | [Hint](#hint) array | No | hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all, and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed, so a Declined hint stays as the record of what was asked. Planned: carrying them over to a replacement.<br>Maximum items: 10<br>List type: map<br>List key: `source`<br>List key: `commentID`<br>Rule: status.hints: at most 3 hints are Consumed or Reserved (`self.filter(h, h.state in ['Consumed', 'Reserved']).size() <= 3`) |
 | `refusedHints` | [RefusedHint](#refusedhint) array | No | refusedHints are the newest comments with the command that the executor refused, at most MaxRefusedHints, oldest first; an older one is dropped. Only the executor writes them.<br>Maximum items: 10<br>List type: map<br>List key: `source`<br>List key: `commentID` |
 | `commentCursor` | [CommentCursor](#commentcursor) | No | commentCursor is where the executor's next look at the comments of the pull request starts (ADR-0028 section 3). Only the executor writes it.<br>Rule: etag is kept only on the first page of a new sweep<br>Rule: evictedAt and evictedID are set together |
-| `handoff` | [Handoff](#handoff) | No | handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is written once and never removed; only its phase moves on. Planned: nothing writes it yet.<br>Rule: a handoff has from, to or both |
+| `handoff` | [Handoff](#handoff) | No | handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is never removed; Handoff says what may change. Only the executor writes it.<br>Rule: a handoff has from, to or both |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run the applied template; False with reason RolloutStuck or DeliveryNotObserved, Unknown while in progress and with reason KindNotChecked, RolloutSuperseded or RolloutNotDetermined when the check ends without a verdict).<br>List type: map<br>List key: `type` |
 
 ### RemediationSettingsSpec
@@ -1130,6 +1134,25 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `buildPath` | [GitDirPath](#gitdirpath) | No | buildPath is the directory the Flux Kustomization builds (its spec.path, "." for the repository root). Before every commit the pull request step renders it with and without the change and refuses anything but the planned difference (design 8.2, steps 4 and 5). The policy check always sets it, and the plan digest covers it; a request without it is never committed.<br>Maximum length: 512<br>Minimum length: 1<br>Pattern: <code>^(\.&#124;&#91;A-Za-z0-9_]&#91;A-Za-z0-9_.-]*(/&#91;A-Za-z0-9_]&#91;A-Za-z0-9_.-]*)*)$</code> |
 | `baseCommit` | string | Yes | baseCommit is the full SHA of the target branch the change was made against. It is fixed when the branch is created; later merges to the target branch do not change it.<br>Pattern: `^[0-9a-f]{40}$` |
 
+### ReviewCheck
+
+ReviewCheck is the check run shadewright/review on one head of the pull request (ADR-0028 section 5),
+pinned to that head: a state recorded for one head never counts for another. Every head the executor pushes
+or adopts starts without one, and the executor creates the check in progress on it. On one head the state
+moves only from InProgress to Passed or Refused.
+
+
+Validation rules:
+
+- on one head the check run moves only from InProgress to Passed or Refused: `self.head != oldSelf.head || self.state == oldSelf.state || (oldSelf.state == 'InProgress' && self.state in ['Passed', 'Refused'])`
+
+Used by: [PullRequestStatus](#pullrequeststatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `head` | string | Yes | head is the commit the check run is on, always the pull request's recorded head (headSHA).<br>Pattern: `^[0-9a-f]{40}$` |
+| `state` | [ReviewCheckState](#reviewcheckstate) | Yes | state is how far the check run on head has come.<br>One of `InProgress`, `Passed`, `Refused` |
+
 ### ReviewCheckState
 
 ReviewCheckState is how far the check run shadewright/review of a head has come (ADR-0028 section 5).
@@ -1141,7 +1164,7 @@ cannot merge until a person acts.
 - Underlying type: string
 - One of `InProgress`, `Passed`, `Refused`
 
-Used by: [IncomingHandoff](#incominghandoff).
+Used by: [ReviewCheck](#reviewcheck).
 
 | Value | Description |
 | --- | --- |

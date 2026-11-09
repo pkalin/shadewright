@@ -335,7 +335,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		Expect(prMayBeOpen(p)).To(BeTrue(), "the one Superseded whose pull request may be open")
 		r = get(repl)
 		Expect(r.Status.Handoff.From.PullRequestUpdate).To(Equal(remediationv1alpha1.HandoffStepDone))
-		Expect(r.Status.Handoff.From.CheckRun).To(Equal(remediationv1alpha1.ReviewCheckInProgress))
+		Expect(r.Status.PullRequest.ReviewCheck).To(Equal(&remediationv1alpha1.ReviewCheck{Head: newHead, State: remediationv1alpha1.ReviewCheckInProgress}))
 		Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 		Expect(r.Status.HoldsTarget).To(Equal(new(true)))
 		crs := git.ChangeRequests()
@@ -579,7 +579,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 
 	It("keeps recognising the pull request when the Git host refuses its rewrite", func() {
 		git.SetFail(func(op string) error {
-			if op == "UpdateChangeRequest" || op == "CreateCheckRun" {
+			if op == "UpdateChangeRequest" || op == opCreateCheckRun {
 				return fmt.Errorf("status 403: %w", providers.ErrForbidden)
 			}
 			return nil
@@ -590,7 +590,8 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		git.SetFail(nil)
 		r := get(repl)
 		Expect(r.Status.Handoff.From.PullRequestUpdate).To(Equal(remediationv1alpha1.HandoffStepRefused))
-		Expect(r.Status.Handoff.From.CheckRun).To(Equal(remediationv1alpha1.ReviewCheckRefused))
+		Expect(r.Status.PullRequest.ReviewCheck.State).To(Equal(remediationv1alpha1.ReviewCheckRefused))
+		Expect(condition(r, remediationv1alpha1.ConditionApproved).Reason).To(Equal(ReasonReviewCheckRefused))
 		Expect(git.CheckRuns(r.Status.PullRequest.HeadSHA)).To(BeEmpty())
 		cr, err := reconciler().findOwnChangeRequest(ctx, r)
 		Expect(err).NotTo(HaveOccurred(), "the body still carries the predecessor's marker, which stays accepted")
@@ -800,9 +801,9 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 				return rr.Status.Phase == remediationv1alpha1.PhaseAwaitingApproval
 			})
 			newHead = get(repl).Status.PullRequest.HeadSHA
-			Expect(get(repl).Status.Handoff.From.CheckRun).To(Equal(remediationv1alpha1.ReviewCheckInProgress))
+			Expect(get(repl).Status.PullRequest.ReviewCheck.State).To(Equal(remediationv1alpha1.ReviewCheckInProgress))
 		}
-		gateState := func() remediationv1alpha1.ReviewCheckState { return get(repl).Status.Handoff.From.CheckRun }
+		gateState := func() remediationv1alpha1.ReviewCheckState { return get(repl).Status.PullRequest.ReviewCheck.State }
 
 		It("completes the check run once someone who wrote no hint approves the head", func() {
 			waiting()
@@ -855,7 +856,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 			waiting()
 			review(9001, otherID, "APPROVED", newHead)
 			git.SetFail(func(op string) error {
-				if op == "CreateCheckRun" {
+				if op == opCreateCheckRun {
 					return fmt.Errorf("status 403: %w", providers.ErrForbidden)
 				}
 				return nil

@@ -921,6 +921,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal(ReasonMergedWithForeignChange))
+		Expect(got.Status.PullRequest).NotTo(BeNil(), "the pull request is recorded")
 		Expect(got.Status.PullRequest.MergeCommitSHA).To(BeEmpty(), "a foreign change is not checked for delivery")
 	})
 

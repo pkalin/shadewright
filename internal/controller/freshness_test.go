@@ -473,6 +473,55 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha))
 	})
 
+	// forgetPullRequest stands for a request whose pull request open lost its status write (#524): no pull
+	// request is recorded, though the branch's pull request carries the request's marker.
+	forgetPullRequest := func(rr *remediationv1alpha1.RemediationRequest) {
+		rr.Status.Phase = remediationv1alpha1.PhasePolicyChecked
+		rr.Status.PullRequest = nil
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+	}
+	// unrecordedMerge marks a started cleanup of such a request and has a person merge its pull request.
+	unrecordedMerge := func() string {
+		markCleanup(forgetPullRequest)
+		sha, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		return sha
+	}
+
+	It("records the merge commit when a stale plan's cleanup finds its unrecorded pull request merged (#561)", func() {
+		sha := unrecordedMerge()
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(closes.Load()).To(BeZero(), "a merged pull request is not closed")
+		Expect(got.Status.PullRequest).NotTo(BeNil(), "the pull request is recorded")
+		Expect(got.Status.PullRequest.Number).To(Equal(cr.Number))
+		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha), "delivery is checked against this commit")
+	})
+
+	It("records the merge commit when the pull request merges between a stale plan's look-up and its close (#561)", func() {
+		markCleanup(forgetPullRequest)
+		var sha string
+		git.SetFail(func(op string) error {
+			if op != opClose {
+				return nil
+			}
+			// A person merges right before the close, which the host then refuses as a conflict.
+			var err error
+			sha, err = git.Merge(cr.Number)
+			Expect(err).NotTo(HaveOccurred())
+			return nil
+		})
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(sha).NotTo(BeEmpty(), "the close was tried")
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(got.Status.PullRequest).NotTo(BeNil(), "the pull request is recorded")
+		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha), "delivery is checked against this commit")
+	})
+
 	It("still ends a fresh request whose pull request a person closed in NeedsIntervention", func() {
 		Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
 		_, err := reconcileOnce()

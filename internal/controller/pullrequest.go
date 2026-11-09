@@ -795,7 +795,7 @@ func (r *RemediationRequestReconciler) endMerged(ctx context.Context, git provid
 		return r.mergedForeign(ctx, rr, ref)
 	}
 	markClosed(rr, ReasonChangeRequestMerged, "was merged")
-	recordMerge(rr, cr)
+	recordMerge(ctx, rr, cr)
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged, "The pull request was merged")
 }
 
@@ -1054,7 +1054,7 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	}
 	switch cr.State {
 	case providers.ChangeRequestMerged:
-		recordMerge(rr, cr)
+		recordMerge(ctx, rr, cr)
 		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,
 			"The pull request was merged")
 	case providers.ChangeRequestClosed:

@@ -9,7 +9,7 @@ metadata:
     {{- include "shadewright.labels" (dict "component" "executor" "context" $) | nindent 4 }}
     control-plane: executor
 spec:
-  replicas: 1
+  replicas: {{ $c.replicas }}
   selector:
     matchLabels:
       {{- include "shadewright.selectorLabels" (dict "component" "executor" "context" $) | nindent 6 }}
@@ -120,9 +120,9 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with $c.affinity }}
+      {{- with include "shadewright.affinity" (dict "component" "executor" "context" $) }}
       affinity:
-        {{- toYaml . | nindent 8 }}
+        {{- . | nindent 8 }}
       {{- end }}
       {{- with $c.topologySpreadConstraints }}
       topologySpreadConstraints:

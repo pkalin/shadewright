@@ -276,6 +276,33 @@ spec:
                 description: firstSeen is when the first observation arrived.
                 format: date-time
                 type: string
+              handledHint:
+                description: |-
+                  handledHint is the reviewer hint the analysis claimed by lastAnalysisTime answers (ADR-0028 section 3):
+                  written in the status update that takes the claim and kept with the outcome in the Analyzed condition, so
+                  a restarted analyzer does not run the same hint twice and the executor can match a refusal to the hint.
+                  Absent for an analysis without a hint. Planned: nothing writes it yet.
+                properties:
+                  commentID:
+                    description: commentID is the comment's ID in the source.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  digest:
+                    description: digest is the SHA-256 of the stored, redacted hint
+                      text.
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  source:
+                    description: source is the system the comment is in.
+                    enum:
+                    - GitHub
+                    type: string
+                required:
+                - commentID
+                - digest
+                - source
+                type: object
               lastAnalysisTime:
                 description: lastAnalysisTime is when the analyzer last ran; it drives
                   the cooldown.

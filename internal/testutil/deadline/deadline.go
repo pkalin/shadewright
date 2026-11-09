@@ -48,7 +48,7 @@ func Within(t *testing.T, limit time.Duration, fn func(t *testing.T)) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
-	// #nosec G204 -- the test binary itself, with a -test.run pattern built from the test's own name.
+	// #nosec G204 G702 -- the test binary itself, with a -test.run pattern built from the test's own name.
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run="+strings.Join(parts, "/"), "-test.count=1", "-test.v")
 	cmd.Env = append(os.Environ(), childEnv+"="+t.Name())
 	out, err := cmd.CombinedOutput()

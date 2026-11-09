@@ -1006,8 +1006,8 @@ func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, 
 // running pod may still hold an older limit, and a model may write the value as a byte count or copy it from
 // a metric. It hands off a memory limit change whose container the template does not have, or sets no limit
 // or one outside the bounded quantity form for (PreviousValueUnknown), whose desired value the template
-// already holds (NoChange), and one that the template's value turns from an increase into a decrease or back (DirectionReversed): the model reasoned
-// about another change than the one that would be proposed, or a model's previous value equal to its desired
+// already holds (NoChange), and one that the template's value turns from an increase into a decrease or back
+// (DirectionReversed): the model reasoned about another change than the one that would be proposed, or a model's previous value equal to its desired
 // value, which states no direction: a reply that sees no change never becomes one. A memory limit change that
 // may not target the subject (another kind, or a subject without a namespace or UID) ends TargetNotSupported
 // before the catalog check, so a model's previous value is never checked against the bounds. AdjustKedaMaxReplicas keeps the model's

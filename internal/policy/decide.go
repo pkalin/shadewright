@@ -405,8 +405,7 @@ func checkActionOf(a v1alpha1.Action) (Reason, string) {
 			return ReasonInvalidParameters, "container must be a DNS label"
 		}
 		if !validMemory(p.Previous) || !validMemory(p.Desired) {
-			return ReasonInvalidParameters, "previous and desired must be whole bytes between 1Mi and 1Ti, " +
-				"written as quantities of at most 40 characters with an exponent of at most two digits"
+			return ReasonInvalidParameters, "previous and desired must be whole bytes between 1Mi and 1Ti"
 		}
 		if c, ok := quantity.Cmp(p.Previous, p.Desired); !ok || c == 0 {
 			return ReasonInvalidParameters, "desired must differ from previous"

@@ -27,10 +27,11 @@ import (
 )
 
 const (
-	memoryKey = "memory"
-	mi256     = "256Mi"
-	gi1       = "1Gi"
-	e99       = "1e99"
+	memoryKey    = "memory"
+	mi256        = "256Mi"
+	gi1          = "1Gi"
+	e99          = "1e99"
+	hugeExponent = "1e2147483647"
 )
 
 var memoryField = sourcemap.Field{Steps: []sourcemap.Step{{Key: memoryKey}}, Quantity: true}
@@ -70,7 +71,7 @@ func TestFieldEqualsComparesQuantities(t *testing.T) {
 func TestFieldEqualsRefusesUnboundedQuantities(t *testing.T) {
 	defer debug.SetMemoryLimit(debug.SetMemoryLimit(128 << 20))
 	for _, v := range []string{
-		"1e2147483647",
+		hugeExponent,
 		"1E2147483647",
 		"1e-2147483647",
 		"1e100",
@@ -132,7 +133,7 @@ func TestFieldComparable(t *testing.T) {
 // accepts equals itself.
 func FuzzFieldEquals(f *testing.F) {
 	for _, s := range [][2]string{
-		{mi256, "268435456"}, {"1e3", "1k"}, {"1e2147483647", gi1}, {"1.5Gi", "-1"}, {".5", "500m"},
+		{mi256, "268435456"}, {"1e3", "1k"}, {hugeExponent, gi1}, {"1.5Gi", "-1"}, {".5", "500m"},
 		{e99, "1E-99"}, {"", "0"},
 	} {
 		f.Add(s[0], s[1])

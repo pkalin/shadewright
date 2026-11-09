@@ -777,7 +777,7 @@ func TestResolveNamesTheUnreadableMemoryValue(t *testing.T) {
 		}, "in " + depPath + " is not a value Shadewright reads: an integer, or a quantity string"},
 		"an unbounded exponent on the live object": {func(f *fixture) {
 			containers, _, _ := unstructured.NestedSlice(f.deployment.Object, "spec", "template", "spec", "containers")
-			containers[1] = map[string]any{"name": "web", "resources": map[string]any{"limits": map[string]any{"memory": "1e2147483647"}}}
+			containers[1] = map[string]any{"name": "web", "resources": map[string]any{"limits": map[string]any{"memory": hugeExponent}}}
 			set(f.deployment, containers, "spec", "template", "spec", "containers")
 		}, "of the live "},
 	} {

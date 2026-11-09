@@ -1008,10 +1008,10 @@ func TestSlashSplitRuleKeepsPaths(t *testing.T) {
 			return "/subscriptions/" + guid(s, hex) + "/resourceGroups/RG-Lab-WestEurope/providers/Microsoft.Compute"
 		},
 		"windows temp path": func(s uint64) string {
-			return "open /mnt/c/Users/JDoe1/AppData/Local/Temp/tmp" + seededName(s, 6, upperHex) + " failed"
+			return "open /mnt/c/Build/Agent1/AppData/Local/Temp/tmp" + seededName(s, 6, upperHex) + " failed"
 		},
 		"temp path with a file": func(s uint64) string {
-			return "C:/Users/JDoe1/AppData/Local/Temp/tmp" + seededName(s, 4, upperHex) + "/Setup/Install.log"
+			return "D:/Build/Agent1/AppData/Local/Temp/tmp" + seededName(s, 4, upperHex) + "/Setup/Install.log"
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1043,7 +1043,7 @@ func TestSlashSplitRuleKeepsPaths(t *testing.T) {
 		"GET /api/v1/namespaces/kube-system/pods/coredns-7db6d8ff4d-x2x9q/log?container=coredns",
 		"/apis/remediation.shadewright.io/v1alpha1/namespaces/shadewright-system/remediationrequests",
 		"open /var/lib/kubelet/pods/550e8400-e29b-41d4-a716-446655440000/volumes/kubernetes.io~secret/tls",
-		"open /Users/Example/Library/Application Support/Code/User/settings.json",
+		"open /Volumes/Data1/Library/Application Support/Code/User/settings.json",
 		"/home/User1/Documents/Project2/src/main/java/com/Example/MyHTTPClient2Test",
 		"stat /usr/local/go/src/runtime/internal/atomic/types.go",
 		"image ghcr.io/pkalin/shadewright-analyzer:v0.3.0-rc.2",

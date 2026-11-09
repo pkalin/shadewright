@@ -99,7 +99,7 @@ func CheckEndpoint(endpoint string, suffixes []string) error {
 var modelName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
 
 // ParseModelName checks the model ID a role's replies must name (--triage-model, --escalation-model), such
-// as gpt-4.1-mini-2025-04-14. Empty is allowed: the role is not configured.
+// as gpt-5.4-mini-2026-03-17. Empty is allowed: the role is not configured.
 func ParseModelName(name string) (string, error) {
 	if name != "" && !modelName.MatchString(name) {
 		return "", errors.New("a model name is 1 to 128 letters, digits, '.', '_', ':', '/' or '-', starting with a letter or digit")

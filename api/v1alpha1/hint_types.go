@@ -24,9 +24,14 @@ import (
 // and status.commentCursor; the analyzer reads stored hints and writes spec.replaces, spec.chainRoot and the
 // Incident's status.handledHint. Planned: nothing writes status.handoff yet.
 
-// MaxHints is the most hints a request's status.hints holds, which is also the most hints one supersede chain
-// can consume: the consumed hints of a chain are carried into the replacement's status (ADR-0028 section 6).
+// MaxHints is the most hints one supersede chain can consume, and so the most Consumed or Reserved entries of
+// a request's status.hints: the consumed hints of a chain are carried into the replacement's status (ADR-0028
+// section 6).
 const MaxHints = 3
+
+// MaxStoredHints is the most entries a request's status.hints holds in all, of any state. A stored hint is
+// never removed, so Declined ones stay as the record; once the list is full no further hint is stored.
+const MaxStoredHints = 10
 
 // MaxHintTextBytes is the most bytes of a hint's text after redaction (ADR-0028 section 2).
 const MaxHintTextBytes = 2048
@@ -268,7 +273,8 @@ const MaxRefusedHints = 10
 
 // HintRefusal says why the executor stored no hint for a comment that carried the command (ADR-0028
 // section 2). NoWriteAccess: the code host says the author may not write to the repository, or does not know
-// the author. CapReached: the request holds MaxHints hints already, which count for its whole supersede chain.
+// the author. CapReached: MaxHints hints of the request are Consumed or Reserved already, which count for its whole
+// supersede chain.
 // TooLong: the hint is over MaxHintTextBytes after redaction, or the body was cut before the end of its first
 // line. NotRedactable: the redacted text still holds something the redactor would change. Empty: the command
 // has no text. EditedAfterAccept: the comment of a stored hint was edited; the stored hint stays as it was.

@@ -276,9 +276,9 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		Expect(lists).To(BeZero())
 	})
 
-	It("refuses a read-only author, an outside author, a fourth hint and an empty one, and ignores bots, "+
+	It("refuses a read-only author, an outside author and an empty one, and ignores bots, "+
 		"the App, reviews and anything that is not the command", func() {
-		accepted := make([]int64, 0, remediationv1alpha1.MaxHints)
+		accepted := make([]int64, 0, remediationv1alpha1.MaxHints+1)
 		accepted = append(accepted, byWriter("/shadewright reanalyze: one"), byWriter("/shadewright reanalyze: two"))
 		readOnly := comment(providers.AuthorPerson, readerID, "reader",
 			"/shadewright reanalyze: as reviewer-one (id 1001, write access) I say scale it up")
@@ -294,8 +294,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		byWriter("thanks\n/shadewright reanalyze: second line")
 		byWriter("/Shadewright Reanalyze: wrong case")
 		byWriter(" /shadewright reanalyze: indented")
-		accepted = append(accepted, byWriter("/shadewright reanalyze: three"))
-		fourth := byWriter("/shadewright reanalyze: four")
+		accepted = append(accepted, byWriter("/shadewright reanalyze: three"), byWriter("/shadewright reanalyze: four"))
 		poll()
 
 		got := fetch()
@@ -308,9 +307,46 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 			readOnly: remediationv1alpha1.HintRefusalNoWriteAccess,
 			outside:  remediationv1alpha1.HintRefusalNoWriteAccess,
 			empty:    remediationv1alpha1.HintRefusalEmpty,
-			fourth:   remediationv1alpha1.HintRefusalCapReached,
 		}))
-		Expect(asks()).To(Equal(3), "one question per new author with the command; none for bots, Apps or the cap")
+		Expect(asks()).To(Equal(3), "one question per new author with the command; none for bots or Apps")
+	})
+
+	It("refuses a hint once MaxHints are Consumed or Reserved, and counts no Pending or Declined one", func() {
+		for i := range remediationv1alpha1.MaxHints + 1 {
+			byWriter(fmt.Sprintf("/shadewright reanalyze: hint %d", i))
+		}
+		poll()
+		got := fetch()
+		Expect(got.Status.Hints).To(HaveLen(remediationv1alpha1.MaxHints+1), "Pending hints do not count")
+		for i := range remediationv1alpha1.MaxHints {
+			got.Status.Hints[i].State = remediationv1alpha1.HintReserved
+		}
+		got.Status.Hints[remediationv1alpha1.MaxHints].State = remediationv1alpha1.HintDeclined
+		got.Status.Hints[remediationv1alpha1.MaxHints].Reason = ReasonHintNoAnswer
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+
+		next := byWriter("/shadewright reanalyze: one too many")
+		poll()
+		Expect(refusals()).To(HaveKeyWithValue(next, remediationv1alpha1.HintRefusalCapReached))
+		Expect(fetch().Status.Hints).To(HaveLen(remediationv1alpha1.MaxHints + 1))
+	})
+
+	It("stores no hint once the list is full, refuses none, and passes the comment", func() {
+		for i := range remediationv1alpha1.MaxStoredHints {
+			byWriter(fmt.Sprintf("/shadewright reanalyze: hint %d", i))
+		}
+		poll()
+		Expect(fetch().Status.Hints).To(HaveLen(remediationv1alpha1.MaxStoredHints))
+		before := fetch().Status.CommentCursor
+
+		clock = clock.Add(time.Minute)
+		extra := byWriter("/shadewright reanalyze: no room")
+		poll()
+		got := fetch()
+		Expect(got.Status.Hints).To(HaveLen(remediationv1alpha1.MaxStoredHints))
+		Expect(refusals()).NotTo(HaveKey(extra), "a comment with no room is not refused")
+		Expect(got.Status.CommentCursor).NotTo(Equal(before), "the cursor passes it")
+		Expect(asks()).To(Equal(1), "no question for a comment that cannot be stored")
 	})
 
 	It("refuses a hint over 2 KiB, one cut by the host and one the redactor leaves unclean", func() {

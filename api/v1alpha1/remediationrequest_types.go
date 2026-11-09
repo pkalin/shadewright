@@ -476,13 +476,15 @@ type RemediationRequestStatus struct {
 	Deadline *metav1.Time `json:"deadline,omitempty"`
 
 	// hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a
-	// replacement carried over from its chain, at most MaxHints (ADR-0028). Only the executor writes them; a
-	// stored hint keeps its pin, moves only forward in its state and is never removed. Planned: carrying them
-	// over to a replacement.
+	// replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all,
+	// and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the
+	// executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed,
+	// so a Declined hint stays as the record of what was asked. Planned: carrying them over to a replacement.
 	// +listType=map
 	// +listMapKey=source
 	// +listMapKey=commentID
-	// +kubebuilder:validation:MaxItems=3
+	// +kubebuilder:validation:MaxItems=10
+	// +kubebuilder:validation:XValidation:rule="self.filter(h, h.state in ['Consumed', 'Reserved']).size() <= 3",message="status.hints: at most 3 hints are Consumed or Reserved"
 	// +optional
 	Hints []Hint `json:"hints,omitempty"`
 

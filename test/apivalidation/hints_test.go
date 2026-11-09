@@ -156,10 +156,17 @@ var _ = Describe("RemediationRequest replaces and chainRoot", func() {
 })
 
 var _ = Describe("RemediationRequest status.hints", func() {
-	It("accepts MaxHints hints at their bounds", func() {
+	It("accepts MaxStoredHints hints at their bounds, MaxHints of them Consumed or Reserved", func() {
 		rr := createdRequest(false)
-		for i := range v1alpha1.MaxHints {
-			h := testHint(int64(i+1), v1alpha1.HintPending)
+		states := []v1alpha1.HintState{v1alpha1.HintConsumed, v1alpha1.HintConsumed, v1alpha1.HintReserved}
+		for i := range v1alpha1.MaxStoredHints {
+			state := v1alpha1.HintDeclined
+			if i < len(states) {
+				state = states[i]
+			} else if i%2 == 0 {
+				state = v1alpha1.HintPending
+			}
+			h := testHint(int64(i+1), state)
 			h.Text = strings.Repeat("a", v1alpha1.MaxHintTextBytes)
 			h.Author.Login = strings.Repeat("b", 100)
 			rr.Status.Hints = append(rr.Status.Hints, h)
@@ -167,12 +174,21 @@ var _ = Describe("RemediationRequest status.hints", func() {
 		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
 	})
 
-	It("refuses a fourth hint", func() {
+	It("refuses an eleventh hint", func() {
 		rr := createdRequest(false)
-		for i := range v1alpha1.MaxHints + 1 {
-			rr.Status.Hints = append(rr.Status.Hints, testHint(int64(i+1), v1alpha1.HintConsumed))
+		for i := range v1alpha1.MaxStoredHints + 1 {
+			rr.Status.Hints = append(rr.Status.Hints, testHint(int64(i+1), v1alpha1.HintPending))
 		}
 		expectStatusRefused(rr, "status.hints: Too many")
+	})
+
+	It("refuses a fourth Consumed or Reserved hint", func() {
+		rr := createdRequest(false)
+		for i := range v1alpha1.MaxHints {
+			rr.Status.Hints = append(rr.Status.Hints, testHint(int64(i+1), v1alpha1.HintConsumed))
+		}
+		rr.Status.Hints = append(rr.Status.Hints, testHint(int64(v1alpha1.MaxHints+1), v1alpha1.HintReserved))
+		expectStatusRefused(rr, "at most 3 hints are Consumed or Reserved")
 	})
 
 	It("refuses text over 2048 bytes in fewer characters", func() {

@@ -631,9 +631,10 @@ spec:
               hints:
                 description: |-
                   hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a
-                  replacement carried over from its chain, at most MaxHints (ADR-0028). Only the executor writes them; a
-                  stored hint keeps its pin, moves only forward in its state and is never removed. Planned: carrying them
-                  over to a replacement.
+                  replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all,
+                  and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the
+                  executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed,
+                  so a Declined hint stays as the record of what was asked. Planned: carrying them over to a replacement.
                 items:
                   description: |-
                     Hint is one reviewer hint the executor accepted from a comment on the request's pull request (ADR-0028
@@ -735,12 +736,16 @@ spec:
                     rule: oldSelf.state == self.state || (oldSelf.state == 'Pending'
                       && self.state in ['Reserved', 'Declined']) || (oldSelf.state
                       == 'Reserved' && self.state in ['Consumed', 'Declined'])
-                maxItems: 3
+                maxItems: 10
                 type: array
                 x-kubernetes-list-map-keys:
                 - source
                 - commentID
                 x-kubernetes-list-type: map
+                x-kubernetes-validations:
+                - message: 'status.hints: at most 3 hints are Consumed or Reserved'
+                  rule: self.filter(h, h.state in ['Consumed', 'Reserved']).size()
+                    <= 3
               holdsTarget:
                 description: |-
                   holdsTarget is true while the request holds the executor's lock on its target: it is set in the status

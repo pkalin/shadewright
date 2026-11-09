@@ -51,8 +51,11 @@ import (
 //     not handled again. A comment created before the cursor's since was read by an earlier look, so if it
 //     carries the command now it was edited to: refused (EditedAfterSeen).
 //   - The text is redacted (internal/redact) before anything is stored, refused when the redacted text is not
-//     clean (NotRedactable) or longer than MaxHintTextBytes (TooLong), and refused when the request holds
-//     MaxHints already (CapReached): the hints of the whole supersede chain are carried into it (#539).
+//     clean (NotRedactable) or longer than MaxHintTextBytes (TooLong), and refused when MaxHints of the
+//     request's hints are Consumed or Reserved (CapReached): the hints of the whole supersede chain are carried
+//     into it (#539). Pending and Declined hints do not count. When status.hints holds MaxStoredHints entries,
+//     a further command is not stored and not refused: it stays unjudged, the cursor passes it, and a log line
+//     counts it.
 //   - Only then is the code host asked whether the author may write, at most maxPermissionAsks authors per
 //     look; a refusal or an unknown author is NoWriteAccess. A failed question, or one beyond the bound, stops
 //     the look there: what was handled before it is stored, the cursor is not, and the next look reads the
@@ -197,6 +200,13 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(upd))
 	st := &upd.Status
 	asked := map[int64]bool{}
+	unstored := 0
+	defer func() {
+		if unstored > 0 {
+			log.Info("Did not store reviewer hints of RemediationRequest: its list of hints is full",
+				"comments", unstored, "maxStoredHints", remediationv1alpha1.MaxStoredHints)
+		}
+	}()
 	for _, c := range items {
 		if c.Kind != providers.FeedbackComment || c.Author.Kind != providers.AuthorPerson || c.ID < 1 ||
 			c.Author.ID < 1 || !hintLoginPattern.MatchString(c.Author.Login) {
@@ -227,8 +237,12 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 		case !cur.Since.IsZero() && c.CreatedAt.Before(cur.Since):
 			refuse(remediationv1alpha1.HintRefusalEditedAfterSeen)
 			continue
-		case len(st.Hints) >= remediationv1alpha1.MaxHints:
+		case chainHints(st.Hints) >= remediationv1alpha1.MaxHints:
 			refuse(remediationv1alpha1.HintRefusalCapReached)
+			continue
+		case len(st.Hints) >= remediationv1alpha1.MaxStoredHints:
+			// Nothing more can be stored; the comment stays unjudged and the cursor passes it (#542 replies).
+			unstored++
 			continue
 		}
 		stored := redact.String(text)
@@ -269,6 +283,17 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 		log.Info("Accepted a reviewer hint for RemediationRequest", "comment", c.ID, "author", c.Author.ID)
 	}
 	return true, nil
+}
+
+// chainHints counts the hints that count toward the cap of a supersede chain: Consumed and Reserved ones.
+func chainHints(hints []remediationv1alpha1.Hint) int {
+	n := 0
+	for _, h := range hints {
+		if h.State == remediationv1alpha1.HintConsumed || h.State == remediationv1alpha1.HintReserved {
+			n++
+		}
+	}
+	return n
 }
 
 // declinePendingHints declines the Pending hints of rr with reason (ReasonHintPullRequestMerged or

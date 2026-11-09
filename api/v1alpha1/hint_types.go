@@ -305,9 +305,9 @@ type IncomingHandoff struct {
 
 // OutgoingHandoff is the predecessor's side of a handoff: the replacement that takes it over, the hint of this
 // request it answers (which must be in status.hints, in the state its phase implies: Reserved while Intent,
-// Consumed once Done, Declined once Aborted) and the branch head the
-// replacement's commit must have as its parent. Only its phase changes once written, except that an Aborted one is
-// replaced by the Intent of a later replacement, for another hint of this request.
+// Consumed once Done, Declined once Aborted) and the branch head the replacement's commit must have as its
+// parent. Only its phase changes once written, except that an Aborted one is replaced by the Intent of a later
+// replacement, for another hint of this request.
 // +kubebuilder:validation:XValidation:rule="self.phase in ['Intent', 'Done', 'Aborted']",message="an outgoing handoff is Intent, Done or Aborted"
 // +kubebuilder:validation:XValidation:rule="(oldSelf.phase == 'Aborted' && self.phase == 'Intent') || (self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead)",message="an outgoing handoff is pinned: only its phase changes, or an Aborted one is replaced"
 // +kubebuilder:validation:XValidation:rule="oldSelf.phase == self.phase || (oldSelf.phase == 'Intent' && self.phase in ['Done', 'Aborted']) || (oldSelf.phase == 'Aborted' && self.phase == 'Intent' && self.uid != oldSelf.uid && (self.hint.source != oldSelf.hint.source || self.hint.commentID != oldSelf.hint.commentID))",message="an outgoing handoff moves only from Intent to Done or Aborted, or from Aborted to the Intent of another replacement for another hint"

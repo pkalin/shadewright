@@ -795,9 +795,9 @@ Used by: [IncidentStatus](#incidentstatus).
 
 OutgoingHandoff is the predecessor's side of a handoff: the replacement that takes it over, the hint of this
 request it answers (which must be in status.hints, in the state its phase implies: Reserved while Intent,
-Consumed once Done, Declined once Aborted) and the branch head the
-replacement's commit must have as its parent. Only its phase changes once written, except that an Aborted one is
-replaced by the Intent of a later replacement, for another hint of this request.
+Consumed once Done, Declined once Aborted) and the branch head the replacement's commit must have as its
+parent. Only its phase changes once written, except that an Aborted one is replaced by the Intent of a later
+replacement, for another hint of this request.
 
 
 Validation rules:

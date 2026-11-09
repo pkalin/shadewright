@@ -228,7 +228,31 @@ var _ = Describe("RemediationRequest status.hints", func() {
 		Entry("a reason that is not a CamelCase word", func(h *v1alpha1.Hint) {
 			h.State, h.Reason = v1alpha1.HintDeclined, "budget spent"
 		}, "status.hints[0].reason"),
+		Entry("a reason the code never writes", func(h *v1alpha1.Hint) {
+			h.State, h.Reason = v1alpha1.HintDeclined, "BecauseISaidSo"
+		}, "status.hints[0].reason"),
 	)
+
+	It("accepts every reason in HintDeclineReasons", func() {
+		for _, reason := range v1alpha1.HintDeclineReasons {
+			rr := createdRequest(false)
+			h := testHint(1, v1alpha1.HintDeclined)
+			h.Reason = reason
+			rr.Status.Hints = []v1alpha1.Hint{h}
+			Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), reason)
+		}
+	})
+
+	It("never unsets editedAfterAccept", func() {
+		rr := createdRequest(false)
+		h := testHint(1, v1alpha1.HintPending)
+		h.EditedAfterAccept = true
+		rr.Status.Hints = []v1alpha1.Hint{h}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		got := reread(rr)
+		got.Status.Hints[0].EditedAfterAccept = false
+		expectStatusRefused(got, "editedAfterAccept is never unset")
+	})
 
 	It("refuses two hints for the same comment", func() {
 		rr := createdRequest(false)
@@ -337,7 +361,7 @@ var _ = Describe("RemediationRequest status.refusedHints", func() {
 		rr := createdRequest(false)
 		reasons := []v1alpha1.HintRefusal{v1alpha1.HintRefusalCapReached,
 			v1alpha1.HintRefusalTooLong, v1alpha1.HintRefusalNotRedactable, v1alpha1.HintRefusalEmpty,
-			v1alpha1.HintRefusalEditedAfterAccept, v1alpha1.HintRefusalEditedAfterSeen}
+			v1alpha1.HintRefusalEditedAfterSeen}
 		for i := range v1alpha1.MaxRefusedHints {
 			r := testRefused(int64(i + 1))
 			r.Reason = reasons[i%len(reasons)]
@@ -409,8 +433,55 @@ var _ = Describe("RemediationRequest status.commentCursor", func() {
 		Entry("an etag with a line break", v1alpha1.CommentCursor{ETag: "\"a\"\r\nX-Evil: 1"}, "status.commentCursor.etag"),
 		Entry("an etag with a blank", v1alpha1.CommentCursor{ETag: `"a b"`}, "status.commentCursor.etag"),
 		Entry("an etag over 256 bytes", v1alpha1.CommentCursor{ETag: `"` + strings.Repeat("a", 255) + `"`}, "status.commentCursor.etag"),
+		Entry("an etag on a later page", v1alpha1.CommentCursor{ETag: `"t"`, Page: 2},
+			"etag is kept only on the first page of a new sweep"),
+		Entry("an etag after an ID", v1alpha1.CommentCursor{ETag: `"t"`, AfterID: 7},
+			"etag is kept only on the first page of a new sweep"),
+		Entry("too many seen comments", v1alpha1.CommentCursor{Seen: seenComments(v1alpha1.MaxSeenComments+1, at)},
+			"status.commentCursor.seen: Too many"),
+		Entry("a seen comment ID 0", v1alpha1.CommentCursor{Seen: []v1alpha1.SeenComment{{CommentID: 0, UpdatedAt: at}}},
+			"status.commentCursor.seen[0].commentID"),
 	)
+
+	It("accepts MaxSeenComments seen comments", func() {
+		rr := createdRequest(false)
+		rr.Status.CommentCursor = &v1alpha1.CommentCursor{Since: &at, Seen: seenComments(v1alpha1.MaxSeenComments, at)}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+	})
+
+	It("keeps the cursor once set, and never moves since back", func() {
+		rr := createdRequest(false)
+		later := metav1.NewTime(at.Add(time.Hour))
+		rr.Status.CommentCursor = &v1alpha1.CommentCursor{Since: &later}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+
+		gone := reread(rr)
+		gone.Status.CommentCursor = nil
+		expectStatusRefused(gone, "status.commentCursor is kept once set")
+
+		back := reread(rr)
+		back.Status.CommentCursor.Since = &at
+		expectStatusRefused(back, "status.commentCursor.since never decreases")
+
+		dropped := reread(rr)
+		dropped.Status.CommentCursor.Since = nil
+		expectStatusRefused(dropped, "status.commentCursor.since never decreases")
+
+		forward := reread(rr)
+		ahead := metav1.NewTime(at.Add(2 * time.Hour))
+		forward.Status.CommentCursor.Since = &ahead
+		Expect(k8sClient.Status().Update(ctx, forward)).To(Succeed())
+	})
 })
+
+// seenComments is n seen comments with IDs from 1.
+func seenComments(n int, at metav1.Time) []v1alpha1.SeenComment {
+	out := make([]v1alpha1.SeenComment, n)
+	for i := range out {
+		out[i] = v1alpha1.SeenComment{CommentID: int64(i + 1), UpdatedAt: at}
+	}
+	return out
+}
 
 var _ = Describe("RemediationRequest status.handoff", func() {
 	const nextUID = "55555555-5555-4555-8555-555555555555"

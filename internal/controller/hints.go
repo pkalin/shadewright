@@ -17,12 +17,14 @@ limitations under the License.
 package controller
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -46,9 +48,10 @@ import (
 //   - Only a person's comment counts: bots and Apps (the executor's own comments among them) are ignored.
 //   - The command is the first line only, starting exactly with hintCommand; its text is the rest of that
 //     line. Anything else is not a command and is ignored.
-//   - A comment already stored as a hint is never handled again; one edited since (another updated time) is
-//     recorded as refused (EditedAfterAccept) and the stored hint stays as it is. A command already recorded
-//     as refused is not judged again (the record spares a question; progress never depends on it).
+//   - A comment already stored as a hint is never handled again; the first edit seen (another updated time)
+//     sets the hint's editedAfterAccept, once, and the stored hint stays as it is. A command the cursor lists
+//     as seen with the same updated time was judged already with this text and is not judged again, so the
+//     overlap of two sweeps costs nothing; status.refusedHints is only a record, never the key.
 //   - When status.hints holds MaxStoredHints entries, a further command is not stored and not refused: it
 //     stays unjudged, the cursor passes it, and a log line counts it.
 //   - Then the code host is asked whether the author may write, at most maxPermissionAsks authors per look.
@@ -57,7 +60,7 @@ import (
 //     one beyond the bound, stops the look at that comment: the comments before it are judged and stored, and
 //     the cursor moves to just after the last of them (FeedbackPage.Resume), so every look makes progress.
 //   - A writer's command is refused when it has no text (Empty) or was cut by the host (TooLong), when the
-//     comment was created before the cursor's since, so it was read by an earlier look and edited later to
+//     comment was created at or before the cursor's since, so it was read by an earlier look and edited later to
 //     carry the command (EditedAfterSeen), and when MaxHints of the request's hints are Consumed or Reserved
 //     (CapReached): the hints of the whole supersede chain are carried into it (#539); Pending and Declined
 //     hints do not count. The text is redacted (internal/redact) before anything is stored, and refused when
@@ -107,9 +110,6 @@ const (
 	outcomeProposed           = "Proposed"
 	outcomeRunbookMatched     = "RunbookMatched"
 )
-
-// hintReasonPattern is the pattern of a Hint's reason; an outcome reason that does not match is not copied.
-var hintReasonPattern = regexp.MustCompile(`^[A-Z][A-Za-z0-9]{0,63}$`)
 
 // hintLoginPattern is the pattern of HintAuthor.login.
 var hintLoginPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
@@ -172,17 +172,7 @@ func (r *RemediationRequestReconciler) pollHints(ctx context.Context, git provid
 	if err != nil {
 		lookErr = fmt.Errorf("list the comments of the pull request: %w", err)
 	} else {
-		var n int
-		n, lookErr = r.takeComments(ctx, fs, upd, source, cur, page.Items, now)
-		switch {
-		case n == len(page.Items):
-			// Every comment of the look was judged: the cursor moves on in the same write.
-			upd.Status.CommentCursor = cursorStatus(page.Next)
-		case n > 0 && len(page.Resume) == len(page.Items):
-			// The look stopped: the cursor passes the comments it judged, so the next look starts after them
-			// and every look makes progress, whatever the record of refusals keeps.
-			upd.Status.CommentCursor = cursorStatus(page.Resume[n-1])
-		}
+		lookErr = r.lookComments(ctx, fs, upd, source, cur, page, now)
 	}
 	r.answerHints(ctx, upd, now)
 	if equality.Semantic.DeepEqual(rr.Status, upd.Status) {
@@ -201,13 +191,89 @@ func (r *RemediationRequestReconciler) pollHints(ctx context.Context, git provid
 	return lookErr
 }
 
+// lookComments judges the comments of one look (takeComments) into upd's status and moves the cursor past the
+// comments it judged, in upd's status too: to page.Next when it judged them all, or just after the last one it
+// judged when it stopped (page.Resume), so every look makes progress, whatever the record of refusals keeps.
+func (r *RemediationRequestReconciler) lookComments(ctx context.Context, fs providers.FeedbackSource,
+	upd *remediationv1alpha1.RemediationRequest, source remediationv1alpha1.HintSource,
+	cur providers.FeedbackCursor, page providers.FeedbackPage, now time.Time) error {
+	var before []remediationv1alpha1.SeenComment
+	if upd.Status.CommentCursor != nil {
+		before = upd.Status.CommentCursor.Seen
+	}
+	var judged []remediationv1alpha1.SeenComment
+	n, err := r.takeComments(ctx, fs, upd, source, cur, page.Items, before, &judged, now)
+	var next *remediationv1alpha1.CommentCursor
+	switch {
+	case n == len(page.Items):
+		next = cursorStatus(page.Next)
+	case n > 0 && len(page.Resume) == len(page.Items):
+		next = cursorStatus(page.Resume[n-1])
+	default:
+		return err
+	}
+	var since time.Time
+	if next.Since != nil {
+		since = next.Since.Time
+	}
+	next.Seen = mergeSeen(before, judged, since)
+	upd.Status.CommentCursor = next
+	return err
+}
+
+// wasSeen reports whether c is in seen with the same update time: judged already with this very text.
+func wasSeen(seen []remediationv1alpha1.SeenComment, c providers.Feedback) bool {
+	at := c.UpdatedAt.Truncate(time.Second)
+	for _, s := range seen {
+		if s.CommentID == c.ID && s.UpdatedAt.Time.Equal(at) {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeSeen returns the seen comments a later look may return again unchanged: those of old and judged updated at
+// or after since (an older one comes back only edited, with another update time), one per comment at its newest
+// update time, at most MaxSeenComments of the newest, in comment ID order. One that does not fit is judged
+// again if it comes back, which costs a question and records nothing twice.
+func mergeSeen(old, judged []remediationv1alpha1.SeenComment, since time.Time) []remediationv1alpha1.SeenComment {
+	newest := map[int64]metav1.Time{}
+	for _, s := range slices.Concat(old, judged) {
+		if s.UpdatedAt.Time.Before(since) {
+			continue
+		}
+		if t, ok := newest[s.CommentID]; !ok || s.UpdatedAt.After(t.Time) {
+			newest[s.CommentID] = s.UpdatedAt
+		}
+	}
+	out := make([]remediationv1alpha1.SeenComment, 0, len(newest))
+	for id, at := range newest {
+		out = append(out, remediationv1alpha1.SeenComment{CommentID: id, UpdatedAt: at})
+	}
+	// Newest first (then the higher ID) to cut to the bound, then in ID order for a stable status.
+	slices.SortFunc(out, func(a, b remediationv1alpha1.SeenComment) int {
+		if c := b.UpdatedAt.Compare(a.UpdatedAt.Time); c != 0 {
+			return c
+		}
+		return cmp.Compare(b.CommentID, a.CommentID)
+	})
+	out = out[:min(len(out), remediationv1alpha1.MaxSeenComments)]
+	slices.SortFunc(out, func(a, b remediationv1alpha1.SeenComment) int { return cmp.Compare(a.CommentID, b.CommentID) })
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // takeComments judges the comments of one look in order, into upd's status (see the top of this file), and
 // returns how many of them it judged: all of them, or fewer when it stopped at a comment whose author would be
 // one more than maxPermissionAsks to ask about (no error: a later look judges it) or at a permission question
-// that failed (its error). The comments before that one are judged.
+// that failed (its error). The comments before that one are judged. A command in seenBefore with the same update
+// time is not judged again; each command it reaches a verdict on is appended to judged.
 func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs providers.FeedbackSource,
 	upd *remediationv1alpha1.RemediationRequest, source remediationv1alpha1.HintSource,
-	cur providers.FeedbackCursor, items []providers.Feedback, now time.Time) (int, error) {
+	cur providers.FeedbackCursor, items []providers.Feedback, seenBefore []remediationv1alpha1.SeenComment,
+	judged *[]remediationv1alpha1.SeenComment, now time.Time) (int, error) {
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(upd))
 	st := &upd.Status
 	asked := map[int64]bool{}
@@ -234,21 +300,31 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 			}
 		}
 		if h := findHint(st.Hints, source, c.ID); h != nil {
-			if !c.UpdatedAt.Truncate(time.Second).Equal(h.UpdatedAt.Time) {
-				refuse(remediationv1alpha1.HintRefusalEditedAfterAccept)
+			if !h.EditedAfterAccept && !c.UpdatedAt.Truncate(time.Second).Equal(h.UpdatedAt.Time) {
+				// Recorded once, on the hint itself: further edits change nothing and take no record.
+				h.EditedAfterAccept = true
+				log.Info("Saw the comment of a stored reviewer hint edited for RemediationRequest; the hint stays",
+					"comment", c.ID)
 			}
 			continue
 		}
 		text, isCommand, why := parseHintCommand(c.Body, c.Truncated)
-		switch {
-		case !isCommand:
+		if !isCommand {
 			continue
-		case findRefused(st.RefusedHints, source, c.ID):
-			// Recorded already: the record spares a question; progress never depends on it (the cursor).
+		}
+		if wasSeen(seenBefore, c) {
+			// Judged already with this very text: the overlap of two sweeps returned it again.
 			continue
-		case len(st.Hints) >= remediationv1alpha1.MaxStoredHints:
+		}
+		// mark records the comment as judged with this text, once the look has a verdict on it.
+		mark := func() {
+			*judged = append(*judged, remediationv1alpha1.SeenComment{CommentID: c.ID,
+				UpdatedAt: metav1.NewTime(c.UpdatedAt.UTC().Truncate(time.Second))})
+		}
+		if len(st.Hints) >= remediationv1alpha1.MaxStoredHints {
 			// Nothing more can be stored; the comment stays unjudged and the cursor passes it (#542 replies).
 			unstored++
+			mark()
 			continue
 		}
 		// The author first: only a writer's command is judged further and recorded, so a person without write
@@ -266,6 +342,7 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 			}
 			asked[c.Author.ID] = may
 		}
+		mark()
 		if !may {
 			outsiders++
 			continue
@@ -274,7 +351,8 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 		case why != "":
 			refuse(why)
 			continue
-		case !cur.Since.IsZero() && c.CreatedAt.Before(cur.Since):
+		case !cur.Since.IsZero() && !c.CreatedAt.After(cur.Since):
+			// Created at or before since, so an earlier look returned it: it was edited to carry the command.
 			refuse(remediationv1alpha1.HintRefusalEditedAfterSeen)
 			continue
 		case chainHints(st.Hints) >= remediationv1alpha1.MaxHints:
@@ -475,9 +553,10 @@ func incidentAnswer(inc *remediationv1alpha1.Incident, h *remediationv1alpha1.Hi
 	switch {
 	case cond.Reason == outcomeProposed || cond.Reason == outcomeRunbookMatched:
 		return "", true
-	case hintReasonPattern.MatchString(cond.Reason):
+	case slices.Contains(remediationv1alpha1.HintDeclineReasons, cond.Reason):
 		return cond.Reason, true
 	}
+	// An outcome the API does not list (a newer analyzer): declined all the same, as no answer it can name.
 	return ReasonHintNoAnswer, true
 }
 

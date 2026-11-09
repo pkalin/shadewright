@@ -120,6 +120,7 @@ type HintAuthor struct {
 // +kubebuilder:validation:XValidation:rule="self.state != 'Declined' || has(self.reason)",message="a Declined hint needs a reason"
 // +kubebuilder:validation:XValidation:rule="self.source == oldSelf.source && self.commentID == oldSelf.commentID && self.digest == oldSelf.digest && self.text == oldSelf.text && self.author == oldSelf.author && self.updatedAt == oldSelf.updatedAt && self.acceptedAt == oldSelf.acceptedAt",message="a stored hint is pinned: only its state and reason change"
 // +kubebuilder:validation:XValidation:rule="!(oldSelf.state in ['Consumed', 'Declined']) || (has(self.reason) == has(oldSelf.reason) && (!has(self.reason) || self.reason == oldSelf.reason))",message="the reason of a Consumed or Declined hint never changes"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.editedAfterAccept) || !oldSelf.editedAfterAccept || (has(self.editedAfterAccept) && self.editedAfterAccept)",message="editedAfterAccept is never unset"
 // +kubebuilder:validation:XValidation:rule="oldSelf.state == self.state || (oldSelf.state == 'Pending' && self.state in ['Reserved', 'Declined']) || (oldSelf.state == 'Reserved' && self.state in ['Consumed', 'Declined'])",message="a hint moves only from Pending to Reserved or Declined, and from Reserved to Consumed or Declined"
 type Hint struct {
 	// source is the system the comment is in.
@@ -160,13 +161,27 @@ type Hint struct {
 	// +required
 	State HintState `json:"state"`
 
-	// reason says why a Declined hint was declined, for example BudgetSpent or NoProposal.
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=64
-	// +kubebuilder:validation:Pattern=`^[A-Z][A-Za-z0-9]*$`
+	// reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or
+	// NoProposal), NoAnswer when none came within the executor's bound, or the end of the request
+	// (PullRequestMerged, PullRequestClosed, RequestEnded). HintDeclineReasons lists them.
+	// +kubebuilder:validation:Enum=NoModelConfigured;BudgetSpent;BudgetUnavailable;NoProposal;MissingData;NoEvidence;TargetNotSupported;PreviousValueUnknown;NoChange;DirectionReversed;NoPolicyForAction;ActionOutOfBounds;InvalidOutput;EscalationNotConfigured;StepLimit;TokenLimit;DeadlineExceeded;ModelUnavailable;ModelNotFound;ModelForbidden;ModelError;UnexpectedModel;EndpointNotAllowed;PlanUnchanged;HintNotPending;RequestNotCreated;CoolingDown;NoAnswer;PullRequestMerged;PullRequestClosed;RequestEnded
 	// +optional
 	Reason string `json:"reason,omitempty"`
+
+	// editedAfterAccept is true once the executor saw the comment edited after it accepted the hint. The
+	// stored text stays as it was; the edit is recorded once, here, whatever the number of edits.
+	// +optional
+	EditedAfterAccept bool `json:"editedAfterAccept,omitempty"`
 }
+
+// HintDeclineReasons are the values of Hint.reason, the same as its enum: the analysis's outcomes that create
+// no replacement, and the executor's own.
+var HintDeclineReasons = []string{"NoModelConfigured", "BudgetSpent", "BudgetUnavailable", "NoProposal",
+	"MissingData", "NoEvidence", "TargetNotSupported", "PreviousValueUnknown", "NoChange", "DirectionReversed",
+	"NoPolicyForAction", "ActionOutOfBounds", "InvalidOutput", "EscalationNotConfigured", "StepLimit",
+	"TokenLimit", "DeadlineExceeded", "ModelUnavailable", "ModelNotFound", "ModelForbidden", "ModelError",
+	"UnexpectedModel", "EndpointNotAllowed", "PlanUnchanged", "HintNotPending", "RequestNotCreated",
+	"CoolingDown", "NoAnswer", "PullRequestMerged", "PullRequestClosed", "RequestEnded"}
 
 // RequestReplacement names the request a replacement takes over and the hint it answers (ADR-0028 section 4).
 type RequestReplacement struct {
@@ -276,19 +291,18 @@ const MaxRefusedHints = 10
 // CapReached: MaxHints hints of the request are Consumed or Reserved already, which count for its whole
 // supersede chain. TooLong: the hint is over MaxHintTextBytes after redaction, or the body was cut before the
 // end of its first line. NotRedactable: the redacted text still holds something the redactor would change.
-// Empty: the command has no text. EditedAfterAccept: the comment of a stored hint was edited; the stored hint
-// stays as it was. EditedAfterSeen: a comment the executor had read already was edited to carry the command.
-// +kubebuilder:validation:Enum=CapReached;TooLong;NotRedactable;Empty;EditedAfterAccept;EditedAfterSeen
+// Empty: the command has no text. EditedAfterSeen: a comment the executor had read already was edited to carry
+// the command. An edit of a stored hint's comment is recorded on the hint (editedAfterAccept), not here.
+// +kubebuilder:validation:Enum=CapReached;TooLong;NotRedactable;Empty;EditedAfterSeen
 type HintRefusal string
 
 // The refusals, one per value of the HintRefusal enum.
 const (
-	HintRefusalCapReached        HintRefusal = "CapReached"
-	HintRefusalTooLong           HintRefusal = "TooLong"
-	HintRefusalNotRedactable     HintRefusal = "NotRedactable"
-	HintRefusalEmpty             HintRefusal = "Empty"
-	HintRefusalEditedAfterAccept HintRefusal = "EditedAfterAccept"
-	HintRefusalEditedAfterSeen   HintRefusal = "EditedAfterSeen"
+	HintRefusalCapReached      HintRefusal = "CapReached"
+	HintRefusalTooLong         HintRefusal = "TooLong"
+	HintRefusalNotRedactable   HintRefusal = "NotRedactable"
+	HintRefusalEmpty           HintRefusal = "Empty"
+	HintRefusalEditedAfterSeen HintRefusal = "EditedAfterSeen"
 )
 
 // RefusedHint records a comment that carried the command and was refused, so the refusal is made once and a
@@ -318,11 +332,13 @@ type RefusedHint struct {
 
 // CommentCursor is where the executor's next look at the conversation comments of the request's pull request
 // starts (ADR-0028 section 3): the durable watermark, so a restart neither reads a comment again as new nor
-// skips one. It is written in the status update that stores what the look found, and only once every comment
-// of that look was handled. Its fields mean something only to the code host's adapter.
+// skips one. It is written in the status update that stores what the look found, just after the last comment
+// the look judged. Once set it is kept, and since never decreases (CEL on RemediationRequest). Its fields
+// other than seen mean something only to the code host's adapter.
+// +kubebuilder:validation:XValidation:rule="!has(self.etag) || ((!has(self.page) || self.page == 0) && (!has(self.afterID) || self.afterID == 0))",message="etag is kept only on the first page of a new sweep"
 type CommentCursor struct {
-	// since is the oldest update time the current sweep of the comments asks for. Every comment created before
-	// it was returned by an earlier look.
+	// since is the oldest update time the current sweep of the comments asks for. Every comment created at or
+	// before it was returned by an earlier look.
 	// +optional
 	Since *metav1.Time `json:"since,omitempty"`
 
@@ -347,4 +363,28 @@ type CommentCursor struct {
 	// +kubebuilder:validation:Pattern=`^(W/)?"[!#-~]*"$`
 	// +optional
 	ETag string `json:"etag,omitempty"`
+
+	// seen are the commands the executor judged whose update time is at or after since, so a look that returns
+	// them again unchanged (the overlap of two sweeps) does not judge them again: at most MaxSeenComments, the
+	// newest. A comment returned with another update time was edited and is judged again.
+	// +listType=map
+	// +listMapKey=commentID
+	// +kubebuilder:validation:MaxItems=50
+	// +optional
+	Seen []SeenComment `json:"seen,omitempty"`
+}
+
+// MaxSeenComments is the most entries status.commentCursor.seen keeps.
+const MaxSeenComments = 50
+
+// SeenComment is a comment the executor judged, with the update time it had then.
+type SeenComment struct {
+	// commentID is the comment's ID in the code host.
+	// +kubebuilder:validation:Minimum=1
+	// +required
+	CommentID int64 `json:"commentID"`
+
+	// updatedAt is the comment's update time when it was judged.
+	// +required
+	UpdatedAt metav1.Time `json:"updatedAt"`
 }

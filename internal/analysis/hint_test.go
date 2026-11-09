@@ -46,6 +46,23 @@ func TestOutcomesTheExecutorCopies(t *testing.T) {
 	}
 }
 
+// Every outcome without a replacement that the analysis records for a hint is a reason the API lets the
+// executor copy into the hint (Hint.reason is an enum); one missing would be declined as NoAnswer.
+func TestHintOutcomesAreHintDeclineReasons(t *testing.T) {
+	reasons := []Reason{ReasonNoModelConfigured, ReasonBudgetSpent, ReasonBudgetUnavailable, ReasonNoProposal,
+		ReasonMissingData, ReasonNoEvidence, ReasonTargetNotSupported, ReasonPreviousValueUnknown, ReasonNoChange,
+		ReasonDirectionReversed, ReasonNoPolicyForAction, ReasonActionOutOfBounds, ReasonInvalidOutput,
+		ReasonEscalationNotConfigured, ReasonStepLimit, ReasonTokenLimit, ReasonDeadlineExceeded,
+		ReasonModelUnavailable, ReasonModelNotFound, ReasonModelForbidden, ReasonModelError, ReasonUnexpectedModel,
+		ReasonEndpointNotAllowed, ReasonPlanUnchanged, ReasonHintNotPending, ReasonRequestNotCreated,
+		incidents.OutcomeHintCoolingDown, incidents.OutcomeHintBudgetSpent}
+	for _, o := range reasons {
+		if !slices.Contains(remediationv1alpha1.HintDeclineReasons, string(o)) {
+			t.Errorf("outcome %s is not in v1alpha1.HintDeclineReasons", o)
+		}
+	}
+}
+
 // timedOutMessage is the message of the trigger's AnalysisTimedOut mark in these tests.
 const timedOutMessage = "The run timed out"
 
@@ -565,7 +582,7 @@ func declineHint(ctx context.Context, t *testing.T, ns string, name remediationv
 		t.Error(err)
 		return
 	}
-	rr.Status.Hints[0].State, rr.Status.Hints[0].Reason = remediationv1alpha1.HintDeclined, "Withdrawn"
+	rr.Status.Hints[0].State, rr.Status.Hints[0].Reason = remediationv1alpha1.HintDeclined, "RequestEnded"
 	if err := env.admin.Status().Update(ctx, rr); err != nil {
 		t.Error(err)
 	}

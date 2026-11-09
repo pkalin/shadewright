@@ -71,6 +71,8 @@ Validation rules:
 - status.handoff.to starts in Intent: `!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to) || self.status.handoff.to.phase == 'Intent' || (has(oldSelf.status) && has(oldSelf.status.handoff) && has(oldSelf.status.handoff.to))`
 - status.handoff.from must match spec.replaces: `!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from) || (has(self.spec.replaces) && self.status.handoff.from.name == self.spec.replaces.name && self.status.handoff.from.uid == self.spec.replaces.uid && self.status.handoff.from.hint.source == self.spec.replaces.hint.source && self.status.handoff.from.hint.commentID == self.spec.replaces.hint.commentID && self.status.handoff.from.hint.digest == self.spec.replaces.hint.digest)`
 - status.handoff.to must name a hint in status.hints that is no longer Pending, and Reserved while the intent stands: `!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to) || (has(self.status.hints) && self.status.hints.exists(h, h.source == self.status.handoff.to.hint.source && h.commentID == self.status.handoff.to.hint.commentID && h.digest == self.status.handoff.to.hint.digest && h.state != 'Pending' && (self.status.handoff.to.phase != 'Intent' || h.state == 'Reserved')))`
+- status.commentCursor is kept once set: `!has(oldSelf.status) || !has(oldSelf.status.commentCursor) || (has(self.status) && has(self.status.commentCursor))`
+- status.commentCursor.since never decreases: `!has(oldSelf.status) || !has(oldSelf.status.commentCursor) || !has(oldSelf.status.commentCursor.since) || (has(self.status) && has(self.status.commentCursor) && has(self.status.commentCursor.since) && self.status.commentCursor.since >= oldSelf.status.commentCursor.since)`
 - status.rollout is kept once set: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || (has(self.status) && has(self.status.rollout))`
 - status.rollout.waitStartedAt is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.waitStartedAt) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.waitStartedAt) && self.status.rollout.waitStartedAt == oldSelf.status.rollout.waitStartedAt)`
 - status.rollout.appliedRevision is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.appliedRevision) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.appliedRevision) && self.status.rollout.appliedRevision == oldSelf.status.rollout.appliedRevision)`
@@ -227,19 +229,25 @@ Used by: [Signer](#signer).
 
 CommentCursor is where the executor's next look at the conversation comments of the request's pull request
 starts (ADR-0028 section 3): the durable watermark, so a restart neither reads a comment again as new nor
-skips one. It is written in the status update that stores what the look found, and only once every comment
-of that look was handled. Its fields mean something only to the code host's adapter.
+skips one. It is written in the status update that stores what the look found, just after the last comment
+the look judged. Once set it is kept, and since never decreases (CEL on RemediationRequest). Its fields
+other than seen mean something only to the code host's adapter.
 
+
+Validation rules:
+
+- etag is kept only on the first page of a new sweep: `!has(self.etag) || ((!has(self.page) || self.page == 0) && (!has(self.afterID) || self.afterID == 0))`
 
 Used by: [RemediationRequestStatus](#remediationrequeststatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `since` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | since is the oldest update time the current sweep of the comments asks for. Every comment created before it was returned by an earlier look. |
+| `since` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | since is the oldest update time the current sweep of the comments asks for. Every comment created at or before it was returned by an earlier look. |
 | `page` | integer | No | page is the page the next look starts on; 0 starts a new sweep.<br>Maximum: 100000<br>Minimum: 0 |
 | `afterID` | integer | No | afterID: the comments of the current sweep with an ID up to this one were returned already.<br>Minimum: 0 |
 | `sweepStart` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | sweepStart is the code host's time when the current sweep began. |
 | `etag` | string | No | etag is the entity tag of the last answer to the first page of a sweep that held no comment, sent as If-None-Match, so an unchanged answer is "not modified" and costs no read.<br>Maximum length: 256<br>Pattern: `^(W/)?"[!#-~]*"$` |
+| `seen` | [SeenComment](#seencomment) array | No | seen are the commands the executor judged whose update time is at or after since, so a look that returns them again unchanged (the overlap of two sweeps) does not judge them again: at most MaxSeenComments, the newest. A comment returned with another update time was edited and is judged again.<br>Maximum items: 50<br>List type: map<br>List key: `commentID` |
 
 ### GitBranch
 
@@ -404,6 +412,7 @@ Validation rules:
 - a Declined hint needs a reason: `self.state != 'Declined' || has(self.reason)`
 - a stored hint is pinned: only its state and reason change: `self.source == oldSelf.source && self.commentID == oldSelf.commentID && self.digest == oldSelf.digest && self.text == oldSelf.text && self.author == oldSelf.author && self.updatedAt == oldSelf.updatedAt && self.acceptedAt == oldSelf.acceptedAt`
 - the reason of a Consumed or Declined hint never changes: `!(oldSelf.state in ['Consumed', 'Declined']) || (has(self.reason) == has(oldSelf.reason) && (!has(self.reason) || self.reason == oldSelf.reason))`
+- editedAfterAccept is never unset: `!has(oldSelf.editedAfterAccept) || !oldSelf.editedAfterAccept || (has(self.editedAfterAccept) && self.editedAfterAccept)`
 - a hint moves only from Pending to Reserved or Declined, and from Reserved to Consumed or Declined: `oldSelf.state == self.state || (oldSelf.state == 'Pending' && self.state in ['Reserved', 'Declined']) || (oldSelf.state == 'Reserved' && self.state in ['Consumed', 'Declined'])`
 
 Used by: [RemediationRequestStatus](#remediationrequeststatus).
@@ -418,7 +427,8 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `updatedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | updatedAt is the comment's updated time when the hint was accepted. A comment whose updated time differs later was edited after acceptance, and the edit is ignored. |
 | `acceptedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | acceptedAt is when the executor accepted the hint. |
 | `state` | [HintState](#hintstate) | Yes | state says what became of the hint.<br>One of `Pending`, `Reserved`, `Consumed`, `Declined` |
-| `reason` | string | No | reason says why a Declined hint was declined, for example BudgetSpent or NoProposal.<br>Maximum length: 64<br>Minimum length: 1<br>Pattern: `^[A-Z][A-Za-z0-9]*$` |
+| `reason` | string | No | reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or NoProposal), NoAnswer when none came within the executor's bound, or the end of the request (PullRequestMerged, PullRequestClosed, RequestEnded). HintDeclineReasons lists them.<br>One of `NoModelConfigured`, `BudgetSpent`, `BudgetUnavailable`, `NoProposal`, `MissingData`, `NoEvidence`, `TargetNotSupported`, `PreviousValueUnknown`, `NoChange`, `DirectionReversed`, `NoPolicyForAction`, `ActionOutOfBounds`, `InvalidOutput`, `EscalationNotConfigured`, `StepLimit`, `TokenLimit`, `DeadlineExceeded`, `ModelUnavailable`, `ModelNotFound`, `ModelForbidden`, `ModelError`, `UnexpectedModel`, `EndpointNotAllowed`, `PlanUnchanged`, `HintNotPending`, `RequestNotCreated`, `CoolingDown`, `NoAnswer`, `PullRequestMerged`, `PullRequestClosed`, `RequestEnded` |
+| `editedAfterAccept` | boolean | No | editedAfterAccept is true once the executor saw the comment edited after it accepted the hint. The stored text stays as it was; the edit is recorded once, here, whatever the number of edits. |
 
 ### HintAuthor
 
@@ -454,11 +464,11 @@ section 2); a command of an author without write access is never recorded, so it
 CapReached: MaxHints hints of the request are Consumed or Reserved already, which count for its whole
 supersede chain. TooLong: the hint is over MaxHintTextBytes after redaction, or the body was cut before the
 end of its first line. NotRedactable: the redacted text still holds something the redactor would change.
-Empty: the command has no text. EditedAfterAccept: the comment of a stored hint was edited; the stored hint
-stays as it was. EditedAfterSeen: a comment the executor had read already was edited to carry the command.
+Empty: the command has no text. EditedAfterSeen: a comment the executor had read already was edited to carry
+the command. An edit of a stored hint's comment is recorded on the hint (editedAfterAccept), not here.
 
 - Underlying type: string
-- One of `CapReached`, `TooLong`, `NotRedactable`, `Empty`, `EditedAfterAccept`, `EditedAfterSeen`
+- One of `CapReached`, `TooLong`, `NotRedactable`, `Empty`, `EditedAfterSeen`
 
 Used by: [RefusedHint](#refusedhint).
 
@@ -468,7 +478,6 @@ Used by: [RefusedHint](#refusedhint).
 | `TooLong` |  |
 | `NotRedactable` |  |
 | `Empty` |  |
-| `EditedAfterAccept` |  |
 | `EditedAfterSeen` |  |
 
 ### HintSource
@@ -900,7 +909,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `source` | [HintSource](#hintsource) | Yes | source is the system the comment is in.<br>One of `GitHub` |
 | `commentID` | integer | Yes | commentID is the comment's ID in the source.<br>Minimum: 1 |
 | `author` | [HintAuthor](#hintauthor) | Yes | author wrote the comment, as the source's API reported it. |
-| `reason` | [HintRefusal](#hintrefusal) | Yes | reason says why no hint was stored.<br>One of `CapReached`, `TooLong`, `NotRedactable`, `Empty`, `EditedAfterAccept`, `EditedAfterSeen` |
+| `reason` | [HintRefusal](#hintrefusal) | Yes | reason says why no hint was stored.<br>One of `CapReached`, `TooLong`, `NotRedactable`, `Empty`, `EditedAfterSeen` |
 | `refusedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | refusedAt is when the executor refused it. |
 
 ### RemediationMode
@@ -1030,7 +1039,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `deadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | deadline is when the current step gives up. |
 | `hints` | [Hint](#hint) array | No | hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all, and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed, so a Declined hint stays as the record of what was asked. Planned: carrying them over to a replacement.<br>Maximum items: 10<br>List type: map<br>List key: `source`<br>List key: `commentID`<br>Rule: status.hints: at most 3 hints are Consumed or Reserved (`self.filter(h, h.state in ['Consumed', 'Reserved']).size() <= 3`) |
 | `refusedHints` | [RefusedHint](#refusedhint) array | No | refusedHints are the newest comments with the command that the executor refused, at most MaxRefusedHints, oldest first; an older one is dropped. Only the executor writes them.<br>Maximum items: 10<br>List type: map<br>List key: `source`<br>List key: `commentID` |
-| `commentCursor` | [CommentCursor](#commentcursor) | No | commentCursor is where the executor's next look at the comments of the pull request starts (ADR-0028 section 3). Only the executor writes it. |
+| `commentCursor` | [CommentCursor](#commentcursor) | No | commentCursor is where the executor's next look at the comments of the pull request starts (ADR-0028 section 3). Only the executor writes it.<br>Rule: etag is kept only on the first page of a new sweep |
 | `handoff` | [Handoff](#handoff) | No | handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is written once and never removed; only its phase moves on. Planned: nothing writes it yet.<br>Rule: a handoff has from, to or both |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run the applied template; False with reason RolloutStuck or DeliveryNotObserved, Unknown while in progress and with reason KindNotChecked, RolloutSuperseded or RolloutNotDetermined when the check ends without a verdict).<br>List type: map<br>List key: `type` |
 
@@ -1123,6 +1132,18 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `templateHash` | string | No | templateHash is the SHA-256 of the target's pod template at targetGeneration. When the target's controller first reports a generation past targetGeneration, the revision it names is recorded only if the template is still this one; otherwise the check ends with RolledOut Unknown, reason RolloutSuperseded.<br>Maximum length: 64<br>Minimum length: 64<br>Pattern: `^[0-9a-f]{64}$` |
 | `templateRevision` | string | No | templateRevision is the template revision the check judges: a StatefulSet's status.updateRevision or a Deployment's deployment.kubernetes.io/revision annotation, read once the controller observed targetGeneration and the target's current generation (a revision annotation can name a later generation before the status does), and, past targetGeneration, only while the template still matches templateHash. A newer revision ends the check with RolledOut Unknown, reason RolloutSuperseded.<br>Maximum length: 253 |
 | `ended` | boolean | No | ended is true once the check gave its final verdict in RolledOut; nothing is read for it after that. |
+
+### SeenComment
+
+SeenComment is a comment the executor judged, with the update time it had then.
+
+
+Used by: [CommentCursor](#commentcursor).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `commentID` | integer | Yes | commentID is the comment's ID in the code host.<br>Minimum: 1 |
+| `updatedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | updatedAt is the comment's update time when it was judged. |
 
 ### SetContainerMemoryLimit
 

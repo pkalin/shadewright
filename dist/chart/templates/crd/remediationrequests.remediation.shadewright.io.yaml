@@ -405,10 +405,38 @@ spec:
                     maximum: 100000
                     minimum: 0
                     type: integer
+                  seen:
+                    description: |-
+                      seen are the commands the executor judged whose update time is at or after since, so a look that returns
+                      them again unchanged (the overlap of two sweeps) does not judge them again: at most MaxSeenComments, the
+                      newest. A comment returned with another update time was edited and is judged again.
+                    items:
+                      description: SeenComment is a comment the executor judged, with
+                        the update time it had then.
+                      properties:
+                        commentID:
+                          description: commentID is the comment's ID in the code host.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        updatedAt:
+                          description: updatedAt is the comment's update time when
+                            it was judged.
+                          format: date-time
+                          type: string
+                      required:
+                      - commentID
+                      - updatedAt
+                      type: object
+                    maxItems: 50
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - commentID
+                    x-kubernetes-list-type: map
                   since:
                     description: |-
-                      since is the oldest update time the current sweep of the comments asks for. Every comment created before
-                      it was returned by an earlier look.
+                      since is the oldest update time the current sweep of the comments asks for. Every comment created at or
+                      before it was returned by an earlier look.
                     format: date-time
                     type: string
                   sweepStart:
@@ -417,6 +445,10 @@ spec:
                     format: date-time
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: etag is kept only on the first page of a new sweep
+                  rule: '!has(self.etag) || ((!has(self.page) || self.page == 0) &&
+                    (!has(self.afterID) || self.afterID == 0))'
               conditions:
                 description: |-
                   conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
@@ -674,12 +706,48 @@ spec:
                       description: digest is the SHA-256 of text.
                       pattern: ^sha256:[0-9a-f]{64}$
                       type: string
+                    editedAfterAccept:
+                      description: |-
+                        editedAfterAccept is true once the executor saw the comment edited after it accepted the hint. The
+                        stored text stays as it was; the edit is recorded once, here, whatever the number of edits.
+                      type: boolean
                     reason:
-                      description: reason says why a Declined hint was declined, for
-                        example BudgetSpent or NoProposal.
-                      maxLength: 64
-                      minLength: 1
-                      pattern: ^[A-Z][A-Za-z0-9]*$
+                      description: |-
+                        reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or
+                        NoProposal), NoAnswer when none came within the executor's bound, or the end of the request
+                        (PullRequestMerged, PullRequestClosed, RequestEnded). HintDeclineReasons lists them.
+                      enum:
+                      - NoModelConfigured
+                      - BudgetSpent
+                      - BudgetUnavailable
+                      - NoProposal
+                      - MissingData
+                      - NoEvidence
+                      - TargetNotSupported
+                      - PreviousValueUnknown
+                      - NoChange
+                      - DirectionReversed
+                      - NoPolicyForAction
+                      - ActionOutOfBounds
+                      - InvalidOutput
+                      - EscalationNotConfigured
+                      - StepLimit
+                      - TokenLimit
+                      - DeadlineExceeded
+                      - ModelUnavailable
+                      - ModelNotFound
+                      - ModelForbidden
+                      - ModelError
+                      - UnexpectedModel
+                      - EndpointNotAllowed
+                      - PlanUnchanged
+                      - HintNotPending
+                      - RequestNotCreated
+                      - CoolingDown
+                      - NoAnswer
+                      - PullRequestMerged
+                      - PullRequestClosed
+                      - RequestEnded
                       type: string
                     source:
                       description: source is the system the comment is in.
@@ -731,6 +799,9 @@ spec:
                     rule: '!(oldSelf.state in [''Consumed'', ''Declined'']) || (has(self.reason)
                       == has(oldSelf.reason) && (!has(self.reason) || self.reason
                       == oldSelf.reason))'
+                  - message: editedAfterAccept is never unset
+                    rule: '!has(oldSelf.editedAfterAccept) || !oldSelf.editedAfterAccept
+                      || (has(self.editedAfterAccept) && self.editedAfterAccept)'
                   - message: a hint moves only from Pending to Reserved or Declined,
                       and from Reserved to Consumed or Declined
                     rule: oldSelf.state == self.state || (oldSelf.state == 'Pending'
@@ -917,7 +988,6 @@ spec:
                       - TooLong
                       - NotRedactable
                       - Empty
-                      - EditedAfterAccept
                       - EditedAfterSeen
                       type: string
                     refusedAt:
@@ -1103,6 +1173,13 @@ spec:
             self.status.handoff.to.hint.source && h.commentID == self.status.handoff.to.hint.commentID
             && h.digest == self.status.handoff.to.hint.digest && h.state != ''Pending''
             && (self.status.handoff.to.phase != ''Intent'' || h.state == ''Reserved'')))'
+        - message: status.commentCursor is kept once set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.commentCursor) || (has(self.status)
+            && has(self.status.commentCursor))'
+        - message: status.commentCursor.since never decreases
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.commentCursor) || !has(oldSelf.status.commentCursor.since)
+            || (has(self.status) && has(self.status.commentCursor) && has(self.status.commentCursor.since)
+            && self.status.commentCursor.since >= oldSelf.status.commentCursor.since)'
         - message: status.rollout is kept once set
           rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || (has(self.status)
             && has(self.status.rollout))'

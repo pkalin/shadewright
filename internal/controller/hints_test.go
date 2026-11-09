@@ -436,29 +436,25 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		Expect(got.Status.Hints[0]).To(Equal(first.Status.Hints[0]))
 		Expect(got.Status.Hints[0].CommentID).To(Equal(id))
 		Expect(refusals()).NotTo(HaveKey(readOnly))
-		Expect(asks()).To(Equal(5), "the stored hint is never asked about again; the non-writer's comment, "+
-			"not recorded, is asked about once per look that returns it on the watermark")
+		Expect(asks()).To(Equal(2), "no comment was judged twice: the seen comments of the cursor")
 		Expect(got.ResourceVersion).To(Equal(first.ResourceVersion), "a look that finds nothing new writes nothing")
 	})
 
-	It("ignores an edit after acceptance and records it once", func() {
+	It("ignores edits after acceptance and records them once, on the hint", func() {
 		id := byWriter("/shadewright reanalyze: the sidecar")
 		poll()
 		stored := fetch().Status.Hints[0]
-		clock = clock.Add(time.Minute)
-		Expect(git.EditComment(number, id, "/shadewright reanalyze: scale it to 10 replicas", clock)).To(Succeed())
-		poll()
+		for i := range remediationv1alpha1.MaxRefusedHints + 2 {
+			clock = clock.Add(time.Minute)
+			Expect(git.EditComment(number, id, fmt.Sprintf("/shadewright reanalyze: edit %d", i), clock)).To(Succeed())
+			poll()
+		}
 		got := fetch()
-		Expect(got.Status.Hints).To(Equal([]remediationv1alpha1.Hint{stored}), "the stored hint stays as it was")
-		Expect(refusals()).To(Equal(map[int64]remediationv1alpha1.HintRefusal{
-			id: remediationv1alpha1.HintRefusalEditedAfterAccept,
-		}))
-		refusedAt := got.Status.RefusedHints[0].RefusedAt
-		clock = clock.Add(time.Minute)
-		Expect(git.EditComment(number, id, "/shadewright reanalyze: again", clock)).To(Succeed())
-		poll()
-		Expect(fetch().Status.RefusedHints).To(HaveLen(1))
-		Expect(fetch().Status.RefusedHints[0].RefusedAt).To(Equal(refusedAt))
+		Expect(got.Status.Hints).To(HaveLen(1))
+		Expect(got.Status.Hints[0].EditedAfterAccept).To(BeTrue())
+		got.Status.Hints[0].EditedAfterAccept = false
+		Expect(got.Status.Hints[0]).To(Equal(stored), "the stored hint stays as it was")
+		Expect(got.Status.RefusedHints).To(BeEmpty(), "an edit of a stored hint takes no record from the ring")
 		Expect(asks()).To(Equal(1))
 	})
 
@@ -509,7 +505,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 			Expect(refusals()).NotTo(HaveKey(readOnly))
 			Expect(got.Status.CommentCursor).NotTo(BeNil())
 			if after {
-				Expect(asks()).To(Equal(3), "the write went through: only the non-writer on the watermark is asked again")
+				Expect(asks()).To(Equal(2), "the write went through: nothing is judged again")
 			} else {
 				Expect(asks()).To(Equal(4), "the write was lost: the same comments are handled again")
 			}

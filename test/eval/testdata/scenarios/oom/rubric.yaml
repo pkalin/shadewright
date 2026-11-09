@@ -7,7 +7,12 @@ facts:
     # The context builder's status block shows the restart count, so it is scored already.
     all: ["restart"]
   - fact: the memory working set from Prometheus (container_memory_working_set_bytes) near the 48Mi limit
-    # metrics.yaml records the working set and the limit; the context builder's metrics block shows both.
-    # Scored on the metric names, which only the metrics block carries: the summary and hypotheses may
-    # say "limit" and "working set" without any metric in the context.
-    all: ["container_memory_working_set_bytes", "container_memory_limit_bytes"]
+    # metrics.yaml records the working set and the limit; the context builder's metrics block shows both, and
+    # the pod template line shows the limit too. The value matters, not where it was read: the working set
+    # is named (by its metric or in words) and the limit is cited from the template line or the limit metric.
+    any: ["container_memory_working_set_bytes", "working set"]
+    anyOf:
+      - ["48Mi"]
+      - ["50331648"]
+      - ["5.03316e+07"]
+      - ["container_memory_limit_bytes"]

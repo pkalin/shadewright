@@ -260,7 +260,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 		// The loop did not accept a result (a refused model, invalid output, a limit): nothing to score.
 		last = ""
 	}
-	res.Diagnosis = scoreDiagnosis(s.rubric, diagnosisText(last))
+	res.Diagnosis = scoreDiagnosis(s.rubric, diagnosisText(last), subjectText(s.incident))
 	if accepted, _, err := analysis.DecodeResult(last); err == nil && accepted != nil {
 		// Redacted as the analyzer redacts the result's text for its logs and record, keeping the Incident's name.
 		res.Reply = replyOf(accepted, func(t string) string { return redactor.StringKeeping(t, s.incident.Name) })
@@ -470,10 +470,18 @@ func diagnosisText(content string) string {
 	return strings.Join(parts, "\n")
 }
 
-// scoreDiagnosis scores each fact of the rubric against the diagnosis text.
-func scoreDiagnosis(r rubric, text string) diagnosisScore {
+// subjectText is the Incident's subject as the rubric's subject terms see it: "Kind namespace/name".
+func subjectText(inc *remediationv1alpha1.Incident) string {
+	sub := inc.Spec.Subject
+	return fmt.Sprintf("%s %s/%s", sub.Kind, sub.Namespace, sub.Name)
+}
+
+// scoreDiagnosis scores each fact of the rubric against the diagnosis text, and the subject terms against the
+// Incident's subject (subjectText).
+func scoreDiagnosis(r rubric, text, subject string) diagnosisScore {
 	s := diagnosisScore{Pass: true}
 	lower := strings.ToLower(text)
+	lowerSubject := strings.ToLower(subject)
 	for _, f := range r.Facts {
 		if f.Unscored != "" {
 			s.Unscored = append(s.Unscored, unscoredFact{Fact: f.Fact, Why: f.Unscored})
@@ -493,6 +501,20 @@ func scoreDiagnosis(r rubric, text string) diagnosisScore {
 			if !found {
 				fs.Pass, fs.Missing = false, append(fs.Missing, "one of: "+strings.Join(f.Any, " | "))
 			}
+		}
+		for _, term := range f.Subject {
+			if !strings.Contains(lowerSubject, strings.ToLower(term)) {
+				fs.Pass, fs.Missing = false, append(fs.Missing, "subject: "+term)
+			}
+		}
+		if len(f.AnyOf) > 0 && !slices.ContainsFunc(f.AnyOf, func(group []string) bool {
+			return !slices.ContainsFunc(group, func(term string) bool { return !strings.Contains(lower, strings.ToLower(term)) })
+		}) {
+			groups := make([]string, 0, len(f.AnyOf))
+			for _, g := range f.AnyOf {
+				groups = append(groups, strings.Join(g, " + "))
+			}
+			fs.Pass, fs.Missing = false, append(fs.Missing, "one source of: "+strings.Join(groups, " | "))
 		}
 		s.Facts = append(s.Facts, fs)
 		s.Pass = s.Pass && fs.Pass

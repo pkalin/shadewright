@@ -113,13 +113,20 @@ type rubric struct {
 	Facts []rubricFact `json:"facts"`
 }
 
-// rubricFact scores one fact. It passes when every term of All, and at least one of Any (when Any is set),
-// appears in the diagnosis text, compared without case.
+// rubricFact scores one fact. It passes when every term of All, at least one of Any (when Any is set), and
+// every term of at least one group of AnyOf (when AnyOf is set) appears in the diagnosis text, and every term
+// of Subject appears in the Incident's subject, compared without case.
 type rubricFact struct {
 	// Fact is the fact of expected.yaml, verbatim.
 	Fact string   `json:"fact"`
 	All  []string `json:"all,omitempty"`
 	Any  []string `json:"any,omitempty"`
+	// AnyOf lists the sources a value may be cited from, such as the pod template line or a metric: one group
+	// is enough, and a group needs all its terms. It scores the value, not where the model read it.
+	AnyOf [][]string `json:"anyOf,omitempty"`
+	// Subject lists terms of the Incident's subject ("Kind namespace/name"): the Incident holds them, so the
+	// reply is not asked to repeat them.
+	Subject []string `json:"subject,omitempty"`
 	// Unscored says why the fact is not scored: the recorded context cannot carry it yet.
 	Unscored string `json:"unscored,omitempty"`
 }
@@ -458,11 +465,16 @@ func (s *scenario) checkRubric() error {
 			return fmt.Errorf("rubric.yaml: fact %q is listed twice", f.Fact)
 		}
 		got = append(got, f.Fact)
-		scored := len(f.All) > 0 || len(f.Any) > 0
+		scored := len(f.All) > 0 || len(f.Any) > 0 || len(f.AnyOf) > 0 || len(f.Subject) > 0
 		if scored == (f.Unscored != "") {
-			return fmt.Errorf("rubric.yaml: fact %q needs terms (all or any) or a reason it is unscored, not both", f.Fact)
+			return fmt.Errorf("rubric.yaml: fact %q needs terms (all, any, anyOf or subject) or a reason "+
+				"it is unscored, not both", f.Fact)
 		}
-		if slices.ContainsFunc(slices.Concat(f.All, f.Any), func(t string) bool { return strings.TrimSpace(t) == "" }) {
+		if slices.ContainsFunc(f.AnyOf, func(g []string) bool { return len(g) == 0 }) {
+			return fmt.Errorf("rubric.yaml: fact %q has an empty anyOf group", f.Fact)
+		}
+		terms := slices.Concat(f.All, f.Any, f.Subject, slices.Concat(f.AnyOf...))
+		if slices.ContainsFunc(terms, func(t string) bool { return strings.TrimSpace(t) == "" }) {
 			return fmt.Errorf("rubric.yaml: fact %q has an empty term", f.Fact)
 		}
 	}

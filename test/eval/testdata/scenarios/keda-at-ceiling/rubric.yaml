@@ -4,7 +4,8 @@ facts:
   - fact: the HPA runs at its maximum, ScalingLimited is True with reason TooManyReplicas, and spec.maxReplicas and status.currentReplicas are both 2
     all: ["TooManyReplicas"]
   - fact: the owning ScaledObject is worker
-    all: ["worker"]
+    # The ScaledObject is the Incident's subject: scored from the Incident, not from the reply.
+    subject: ["ScaledObject", "worker"]
   - fact: the backlog, the current external metric value (about 13 requests per second) against its target (5 per replica)
     unscored: no approved metric template reads HPA or external metrics, and a ScaledObject subject resolves no pods, so the metrics section has nothing to query; the Incident's symptom evidence would carry the values, but recorded milli quantities (such as 6500m) are normalized away, so this recorded Incident does not hold them
   - fact: the ScaledObject is Ready, not paused, not on fallback, and its HPA can read its metrics

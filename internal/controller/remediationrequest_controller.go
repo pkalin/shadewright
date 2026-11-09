@@ -108,7 +108,8 @@ type RemediationRequestReconciler struct {
 	// stored in status.deadline. Zero means [DefaultPullRequestTimeout].
 	PullRequestTimeout time.Duration
 	// TargetStateTimeout is how long the policy check waits for a target whose state is not known yet (a
-	// ScaledObject KEDA has not reported on) before it ends the request in NeedsIntervention. Zero means
+	// ScaledObject KEDA has not reported on), or for Flux to finish reconciling the Kustomization that
+	// delivers it (#556), before it ends the request in NeedsIntervention. Zero means
 	// [DefaultTargetStateTimeout].
 	TargetStateTimeout time.Duration
 	// Delivery builds the delivery verifier of the check after the merge (rollout.go), given the Git host's
@@ -181,8 +182,9 @@ func (r *RemediationRequestReconciler) forget(key types.NamespacedName) {
 }
 
 // DefaultTargetStateTimeout is how long the policy check waits by default for KEDA to report on a
-// ScaledObject. KEDA reconciles a new or changed ScaledObject within seconds; ten minutes covers an operator
-// restart without leaving a request undecided for long.
+// ScaledObject, or for Flux to finish reconciling the delivery of the target. KEDA reconciles a new or changed
+// ScaledObject within seconds, and Flux applies a merged revision within its interval and health check
+// timeout (minutes); ten minutes covers an operator restart without leaving a request undecided for long.
 const DefaultTargetStateTimeout = 10 * time.Minute
 
 // Retry delays while the policy check waits for a target's state: the delay doubles with the time waited, from
@@ -505,9 +507,13 @@ type outcome struct {
 	planDigest     string
 	// deadline is the pull request step's deadline, started with an allowed decision unless writes are paused.
 	deadline *metav1.Time
-	// wait means the target's state is not known yet (policy.OutcomeWait): the request is decided again later,
-	// and only the PolicyAllowed condition (Unknown, reason and message) is written meanwhile.
+	// wait means the target's state is not known yet (policy.OutcomeWait), or Flux is still reconciling its
+	// delivery (sourcemap.Reason.Reconciling): the request is decided again later, and only the PolicyAllowed
+	// condition (Unknown, reason and message) is written meanwhile.
 	wait bool
+	// timeoutReason and timeoutMessage are the NeedsIntervention reason and message a wait ends with once it
+	// has lasted TargetStateTimeout (waitForTarget).
+	timeoutReason, timeoutMessage string
 }
 
 // waitForTarget handles a decision to wait for the target's state. The wait's clock is the PolicyAllowed
@@ -528,7 +534,12 @@ func (r *RemediationRequestReconciler) waitForTarget(rr *remediationv1alpha1.Rem
 		waited = max(r.now().Sub(c.LastTransitionTime.Time), 0)
 	}
 	if waited >= timeout {
-		return needsIntervention(string(policy.ReasonScaledObjectNotReady), messageTargetStateTimeout), 0
+		reason, message := out.timeoutReason, out.timeoutMessage
+		if reason == "" {
+			// Every wait names its end; one that does not still ends, as a person's case.
+			reason, message = string(sourcemap.ReasonInvalidInput), "The wait for the target's state has no end reason"
+		}
+		return needsIntervention(reason, message), 0
 	}
 	delay := min(max(waited, targetStateMinDelay), targetStateMaxDelay, timeout-waited)
 	return out, delay
@@ -690,8 +701,15 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 		}
 	case sourcemap.Denied:
 		return denied(string(res.Reason), res.Message), nil
+	case sourcemap.NeedsIntervention:
+		if res.Reason.Reconciling() {
+			// Flux is still applying a revision (a pull request just merged, #556): wait for it, bounded by
+			// TargetStateTimeout, rather than stop the request on a passing state.
+			return fluxWait(res), nil
+		}
+		return needsIntervention(string(res.Reason), res.Message), nil
 	default:
-		// NeedsIntervention, and anything unknown: a person must look. Never Denied, never retried.
+		// Anything unknown: a person must look. Never Denied, never retried.
 		return needsIntervention(string(res.Reason), res.Message), nil
 	}
 
@@ -734,6 +752,14 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 		}
 	}
 	return o, nil
+}
+
+// fluxWait is the outcome of a mapping that stopped because Flux is still reconciling the Kustomization: a
+// wait whose end, after TargetStateTimeout, is NeedsIntervention with KustomizationNotReady, as before #556.
+func fluxWait(res sourcemap.Result) outcome {
+	return outcome{wait: true, status: metav1.ConditionUnknown, reason: string(res.Reason), message: res.Message,
+		timeoutReason: string(sourcemap.ReasonKustomizationNotReady), timeoutMessage: res.Message +
+			"; Flux did not finish reconciling it within the time the policy check waits, a person must look"}
 }
 
 // buildTooLarge loads the build the plan names, at the commit the mapping read, with the render check's own
@@ -829,6 +855,7 @@ func decided(d policy.Decision, pol *remediationv1alpha1.RemediationPolicy) outc
 		o.phase, o.status = remediationv1alpha1.PhaseDenied, metav1.ConditionFalse
 	case policy.OutcomeWait:
 		o.wait = true
+		o.timeoutReason, o.timeoutMessage = string(policy.ReasonScaledObjectNotReady), messageTargetStateTimeout
 	default:
 		// NeedsIntervention, and anything unknown.
 		o.phase, o.status = remediationv1alpha1.PhaseNeedsIntervention, metav1.ConditionUnknown

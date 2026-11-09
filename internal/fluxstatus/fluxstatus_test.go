@@ -45,20 +45,68 @@ func fixture(t *testing.T, name string) map[string]any {
 	return obj
 }
 
+// TestReadyOnRecordedObjects checks Ready on the recorded objects, and that only the one still being reconciled
+// reads as Reconciling: a Ready one and every recorded failure do not (#556).
 func TestReadyOnRecordedObjects(t *testing.T) {
-	for name, want := range map[string]bool{
-		"kustomization-ready.json":              true,
-		"kustomization-reconciling.json":        false,
-		"kustomization-build-failed.json":       false,
-		"kustomization-stalled.json":            false,
-		"kustomization-invalid-manifest.json":   false,
-		"kustomization-dependency-missing.json": false,
-		"helmrelease-upgrade-failed.json":       false,
-		"gitrepository-auth-failed.json":        false,
+	for name, want := range map[string]struct{ ready, reconciling bool }{
+		"kustomization-ready.json":              {ready: true},
+		"kustomization-reconciling.json":        {reconciling: true},
+		"kustomization-build-failed.json":       {},
+		"kustomization-stalled.json":            {},
+		"kustomization-invalid-manifest.json":   {},
+		"kustomization-dependency-missing.json": {},
+		"helmrelease-upgrade-failed.json":       {},
+		"gitrepository-auth-failed.json":        {},
 	} {
-		if got := fluxstatus.Ready(fixture(t, name)); got != want {
-			t.Errorf("Ready(%s) = %v, want %v", name, got, want)
+		if got := fluxstatus.Ready(fixture(t, name)); got != want.ready {
+			t.Errorf("Ready(%s) = %v, want %v", name, got, want.ready)
 		}
+		if got := fluxstatus.Reconciling(fixture(t, name)); got != want.reconciling {
+			t.Errorf("Reconciling(%s) = %v, want %v", name, got, want.reconciling)
+		}
+	}
+}
+
+// TestReconcilingCases checks the cases the recorded objects do not show: a canceled health check and a
+// status about an older generation are a reconcile in progress, a current Ready=False or Stalled=True is not.
+func TestReconcilingCases(t *testing.T) {
+	const statusFalse, statusUnknown = "False", "Unknown"
+	ready := func(o map[string]any) map[string]any {
+		return o["status"].(map[string]any)["conditions"].([]any)[0].(map[string]any)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(map[string]any)
+		want   bool
+	}{
+		{"newer generation", func(o map[string]any) { o["metadata"].(map[string]any)["generation"] = float64(2) }, true},
+		{"Ready False about an older generation", func(o map[string]any) {
+			o["metadata"].(map[string]any)["generation"] = float64(2)
+			ready(o)["status"] = statusFalse
+			ready(o)["reason"] = "BuildFailed"
+		}, true},
+		{"health check canceled", func(o map[string]any) {
+			ready(o)["status"] = statusFalse
+			ready(o)["reason"] = fluxstatus.ReasonHealthCheckCanceled
+		}, true},
+		{"Ready Unknown", func(o map[string]any) { ready(o)["status"] = statusUnknown }, true},
+		{"Ready False", func(o map[string]any) {
+			ready(o)["status"] = statusFalse
+			ready(o)["reason"] = "ReconciliationFailed"
+		}, false},
+		{"Ready Unknown and Stalled", func(o map[string]any) {
+			ready(o)["status"] = statusUnknown
+			st := o["status"].(map[string]any)
+			st["conditions"] = append(st["conditions"].([]any), map[string]any{"type": "Stalled", "status": "True"})
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := fixture(t, "kustomization-ready.json")
+			tc.mutate(o)
+			if got := fluxstatus.Reconciling(o); got != tc.want {
+				t.Errorf("Reconciling = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

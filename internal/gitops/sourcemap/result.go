@@ -62,9 +62,15 @@ const (
 	// ReasonKustomizationSuspended means the Kustomization is suspended, so a merge would not be applied
 	// (NeedsIntervention).
 	ReasonKustomizationSuspended Reason = "KustomizationSuspended"
-	// ReasonKustomizationNotReady means the Kustomization is not Ready for its current generation
+	// ReasonKustomizationNotReady means the Kustomization is not Ready for its current generation and fails
 	// (NeedsIntervention).
 	ReasonKustomizationNotReady Reason = "KustomizationNotReady"
+	// ReasonKustomizationReconciling means the Kustomization is not Ready for its current generation because
+	// Flux is still reconciling it, for example applying a revision just merged, and reports no failure
+	// (fluxstatus.Reconciling). The outcome is NeedsIntervention, so a caller that does not know it fails
+	// closed; the policy check waits on it for a bounded time and then ends the request with
+	// ReasonKustomizationNotReady, and the freshness check retries it (#556).
+	ReasonKustomizationReconciling Reason = "KustomizationReconciling"
 	// ReasonNotInInventory means the Kustomization named by the labels does not list the object in
 	// status.inventory, so the labels cannot be trusted (Denied).
 	ReasonNotInInventory Reason = "NotInInventory"
@@ -149,6 +155,12 @@ const (
 	// ReasonPathNotAllowed means the file matches none of the policy's allowedPaths (Denied).
 	ReasonPathNotAllowed Reason = "PathNotAllowed"
 )
+
+// Reconciling reports whether the reason says the mapping stopped only because Flux is still reconciling the
+// Kustomization, with no failure reported: a wait, not a verdict (#556).
+func (r Reason) Reconciling() bool {
+	return r == ReasonKustomizationReconciling
+}
 
 // Result is the outcome of a mapping. Message explains it for humans; it may quote object names and file
 // paths, never file contents or URLs.

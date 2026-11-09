@@ -673,6 +673,16 @@ func TestResolverErrorIsNotFreshAndNotStale(t *testing.T) {
 	}
 }
 
+// A mapping that stops because Flux is still reconciling the delivery (a merge being applied) is retried, not
+// stale: the plan is neither fresh nor known to be out of date (#556).
+func TestMappingWhileFluxReconcilesIsRetried(t *testing.T) {
+	w := newWorld(t)
+	w.resolve = func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
+		return sourcemap.Result{Outcome: sourcemap.NeedsIntervention, Reason: sourcemap.ReasonKustomizationReconciling}, nil
+	}
+	wantRetry(t, w.fresh(t))
+}
+
 func TestNoResolverFailsClosed(t *testing.T) {
 	w := newWorld(t)
 	w.resolve = nil

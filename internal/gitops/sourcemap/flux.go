@@ -79,7 +79,13 @@ func checkKustomization(ks *unstructured.Unstructured, target schema.GroupVersio
 		return "", "", "", &r
 	}
 	if !fluxstatus.Ready(ks.Object) {
-		r := needsIntervention(ReasonKustomizationNotReady, "%s is not Ready for its current generation", ref)
+		// A reconcile in progress (a merged revision being applied) is told apart from a failure, so the
+		// caller can wait for it; both stop the mapping here.
+		reason := ReasonKustomizationNotReady
+		if fluxstatus.Reconciling(ks.Object) {
+			reason = ReasonKustomizationReconciling
+		}
+		r := needsIntervention(reason, "%s is not Ready for its current generation", ref)
 		return "", "", "", &r
 	}
 	// A Kustomization with spec.kubeConfig applies to another cluster. Its inventory does not say which

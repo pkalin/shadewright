@@ -163,6 +163,8 @@ Everything else keeps the lock (fail closed):
 - An expiry whose cleanup the Git host refused ends with its own reason, `PullRequestDeadlineCleanupRefused`, and keeps the lock.
 - Any other state keeps the lock: a pull request the executor could not find (`ChangeRequestGone`), `Failed` and an unknown phase included.
 
+A request that waits behind a holder of the same Incident whose pull request is then merged never takes the lock: it ends `Superseded` with reason `AnotherRequestMerged` ([6.6.3](6-reconciliation.md#663-duplicates-of-a-merged-request), #556).
+
 ### Stopped holders
 
 A stopped request that holds the lock is looked at every 10 minutes. Its pull request is found by its branch and marker (`AGENTS.md` invariant 5) and recorded when the status did not have it. The lock is released once the pull request is closed or merged, so a person who closes it frees the target without deleting the request. A look-up that fails keeps the lock.

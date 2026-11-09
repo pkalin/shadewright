@@ -105,6 +105,24 @@ func Ready(obj map[string]any) bool {
 	return cond["status"] == statusTrue
 }
 
+// Reconciling reports whether an object that is not [Ready] is still being reconciled rather than failing: no
+// current Stalled=True and no current Ready=False other than [ReasonHealthCheckCanceled] (see [Failing]). It
+// covers a Ready=Unknown while the controller works on a new revision, a status that does not describe the
+// current generation yet, and a status without a Ready condition yet. A Ready object is not reconciling. The
+// caller bounds how long it waits on this: a reconcile that never ends looks the same.
+func Reconciling(obj map[string]any) bool {
+	if Ready(obj) {
+		return false
+	}
+	generation, hasGeneration := Generation(obj)
+	cond, typ := Failing(Status(obj), generation, hasGeneration)
+	if cond == nil {
+		return true
+	}
+	reason, _ := cond["reason"].(string)
+	return typ == ConditionReady && reason == ReasonHealthCheckCanceled
+}
+
 // Stale reports whether a condition describes an older spec: the object has a generation and the condition
 // names another one in its observedGeneration. A condition without an observedGeneration is never stale.
 func Stale(cond map[string]any, generation int64, hasGeneration bool) bool {

@@ -567,6 +567,12 @@ func (c Checker) checkSource(ctx context.Context, rr *v1alpha1.RemediationReques
 		// The resolver sanitises its errors; the caller sees "not fresh" and retries.
 		return sourcemap.Result{}, fmt.Errorf("resolve the source again: %w", err)
 	}
+	if res.Outcome != sourcemap.Resolved && res.Reason.Reconciling() {
+		// Flux is still reconciling the Kustomization (a revision merged meanwhile, #556): not fresh and not
+		// stale either, so the check is retried, and nothing is written to Git until one passes. Before the pull
+		// request is opened its deadline bounds the retries.
+		return sourcemap.Result{}, fmt.Errorf("resolve the source again: Flux is reconciling (%s)", res.Reason)
+	}
 	if res.Outcome != sourcemap.Resolved {
 		// Denied, NeedsIntervention or anything unknown. Only the reason is reported: the message may hold
 		// paths or text from Git.

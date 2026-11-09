@@ -698,6 +698,15 @@ func (r *RemediationRequestReconciler) holdBack(ctx context.Context, rr *remedia
 			return res, false, true, clr, err
 		}
 	}
+	// The limits let the request through. A duplicate of a request of the same Incident and target merged
+	// meanwhile ends Superseded instead (duplicates.go, #556): a Queued one before it reads Git, and every one
+	// under the admission lock right before it would take the target lock.
+	if ended, err := r.endIfDuplicate(ctx, rr); ended || err != nil {
+		if ended {
+			r.forget(client.ObjectKeyFromObject(rr))
+		}
+		return reconcile.Result{}, false, true, clr, err
+	}
 	if queued && meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionQueued) != nil {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionQueued)
 		if err := r.Status().Update(ctx, rr); err != nil {

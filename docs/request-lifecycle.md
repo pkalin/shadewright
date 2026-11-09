@@ -11,10 +11,11 @@ Only the steps up to `Merged` are built. Delivery tracking and verification are 
 ```mermaid
 stateDiagram-v2
     [*] --> Pending
-    Pending --> Pending: queued by a limit, or KEDA has not reported yet
+    Pending --> Pending: queued by a limit, KEDA has not reported yet, or Flux is reconciling
     Pending --> PolicyChecked: policy allows, source found
     Pending --> Denied: policy refuses
     Pending --> NeedsIntervention: source unclear or ScaledObject not ready
+    Pending --> Superseded: another request of the Incident was merged
     PolicyChecked --> PRCreated: branch, commit, pull request
     PRCreated --> AwaitingApproval: review required
     AwaitingApproval --> Merged: a person merges it
@@ -40,14 +41,14 @@ stateDiagram-v2
 
 | Phase | What happened | What moves it on | You can |
 | --- | --- | --- | --- |
-| `Pending` | New, or held back (condition `Queued`: the concurrency limit, the circuit breaker, or another request that holds the lock on the same target until its pull request is known merged or closed, also after it stopped) | The policy check, rechecked every 30 seconds while queued | Wait, or read the reason in [troubleshooting](troubleshooting.md#limits) |
+| `Pending` | New, or held back (condition `Queued`: the concurrency limit, the circuit breaker, or another request that holds the lock on the same target until its pull request is known merged or closed, also after it stopped) | The policy check, rechecked every 30 seconds while queued. While Flux is still reconciling the Kustomization (`PolicyAllowed=Unknown`, reason `KustomizationReconciling`) it waits up to 10 minutes | Wait, or read the reason in [troubleshooting](troubleshooting.md#limits) |
 | `PolicyChecked` | Policy allowed it (`PolicyAllowed=True`, reason `WithinApprovedBounds`); the plan digest is fixed | The pull request step | Nothing. It expires after 30 minutes without a pull request |
 | `PRCreated` | The branch, commit and pull request exist | The executor records the review state | Open the pull request |
 | `AwaitingApproval` | `Approved=False`, reason `WaitingForReview` | A person merges the pull request, seen within about a minute (`--pull-request-poll-interval`) | [Approve](how-to/review-and-approve.md) or [reject](how-to/reject-a-proposal.md) |
 | `Merged` | The pull request was merged; `status.pullRequest.mergeCommitSHA` records the merge commit that delivery will be checked against (that commit or a later one of the target branch that holds it). The phase stays here today; `RolledOut` then reports whether the pods rolled out | Reads only: the Flux Kustomization and the target's rollout status (verification is planned) | Check your GitOps controller, then that the pods rolled out ([after the merge](#after-the-merge-did-it-reach-the-pods)) |
 | `Denied` | Policy or settings refuse the plan | Nothing, final | [Find the reason](how-to/find-why-refused.md), fix, apply a new request |
 | `NeedsIntervention` | The executor cannot continue safely alone: a pull request closed without a merge (`ChangeRequestClosed`), a moved head (`HeadMoved`), a render refusal, a ScaledObject that is not ready | Nothing, final | Read the reason, then apply a new request if the change is still wanted |
-| `Superseded` | A plan input changed before merge (policy, settings, target, file in Git). If a pull request was open, Shadewright closed it | Nothing, final | Apply a new request |
+| `Superseded` | A plan input changed before merge (policy, settings, target, file in Git). If a pull request was open, Shadewright closed it. Or, reason `AnotherRequestMerged`, another request of the same Incident and target was merged while this one waited, before it took the target lock or opened a pull request | Nothing, final | Apply a new request; for `AnotherRequestMerged`, nothing: the merged request is the fix |
 | `Expired` | No pull request opened within 30 minutes of the decision | Nothing, final | Find why the Git calls failed, apply a new request |
 
 The API also defines `AutoMergeQueued`, `WaitingForDelivery`, `Verifying`, `Succeeded`, `Failed` and `Cancelled`. Nothing sets them yet (planned). Auto-merge is not built: even with a policy that has `approval: Optional` and a request with `approvalRequired: false`, a person decides.

@@ -17,6 +17,7 @@ The API defines every phase below. The executor sets the first step: a `Pending`
 What happens next, step by step:
 
 - **Held back by a limit.** A request the policy allows stays `Pending` with the condition `Queued` while a limit of section 10.7 holds it back. It is checked again every 30 seconds, or every 10 minutes (and when the holder changes) behind a lock held by a request that stopped.
+- **A duplicate of a merged request.** An undecided request whose Incident and target already have a merged request ends `Superseded` (`AnotherRequestMerged`) before it takes the target lock (6.6.3).
 - **Freshness before merge.** The executor re-checks the freshness of a decided request before merge every five minutes, and at once on any change to the request (once its pull request waits for review, only when no full recheck ran in the last five minutes). While a pull request waits for review, the executor only looks at the pull request in between, every `--pull-request-poll-interval` (one minute by default), so a merge or a close is seen within that interval (#434); a look writes nothing to Git, so every write still comes right after a freshness check. A stale plan becomes `Superseded`, or `NeedsIntervention` if its repository settings became unusable, without waiting for a write.
 - **Opening the pull request.** A fresh `PolicyChecked` request opens its pull request and moves to `PRCreated` and `AwaitingApproval` (6.5).
 - **Merge.** Observing a person's merge is built: the request then stops in `Merged` (step 5 of 6.5).
@@ -42,7 +43,8 @@ stateDiagram-v2
     }
     Pending --> Denied: policy refuses
     Pending --> NeedsIntervention: source cannot be mapped, or the ScaledObject is not ready
-    Pending --> Pending: KEDA has not reported on the ScaledObject yet (waits up to 10 minutes)
+    Pending --> Pending: KEDA has not reported on the ScaledObject yet, or Flux is reconciling the Kustomization (waits up to 10 minutes)
+    Pending --> Superseded: another request of the same Incident and target was merged (6.6.3)
     Pending --> Pending: allowed, but a limit holds it back (Queued, checked again every 30 s, or 10 min behind a stopped holder)
     Verifying --> Succeeded: checks held for stableFor (planned)
     BeforeMerge --> Cancelled: cancelled before merge
@@ -119,6 +121,7 @@ All of them are listed in the [metrics reference](../reference/metrics.md).
 | `AdjustKedaMaxReplicas` on a `ScaledObject` that is definitely not ready (see "A `ScaledObject` that is not ready" below), checked after every check that denies | `NeedsIntervention` (`ScaledObjectNotReady`) | `Unknown` |
 | `AdjustKedaMaxReplicas` on a `ScaledObject` KEDA has not reported on yet (no status, no `Ready` condition, `Ready=Unknown` other than `PartialTriggerError`) | no phase: see "A `ScaledObject` KEDA has not reported on" below | `Unknown` (`ScaledObjectReadinessUnknown`) while it waits |
 | Source mapping needs a human (Helm, patches, missing target, unknown Flux shape), or the target got another UID while the mapping ran (`TargetChanged`) | `NeedsIntervention`, reason of the mapping | `Unknown` |
+| The Kustomization is not `Ready` for its current generation but reports no failure: Flux is still reconciling it, for example applying a pull request just merged (#556) | no phase: see "A Kustomization Flux is still reconciling" below | `Unknown` (`KustomizationReconciling`) while it waits |
 | The matching repository's settings cannot open a Git provider (see "Settings that cannot open a Git provider" below) | `NeedsIntervention`, `RepositoryUnusable` | `Unknown` |
 | The Git host refuses a read of the source mapping for good (the table in 6.5.1: a 403 without rate limit signals, a token the installation refuses, an unexplained 422) | `NeedsIntervention` (`GitForbidden`, `GitRejected`) | `Unknown` |
 | All checks pass | `PolicyChecked`, `WithinApprovedBounds` | `True` |
@@ -139,6 +142,12 @@ The result is `NeedsIntervention`, not `Denied`: the plan may be within every bo
 ### A `ScaledObject` KEDA has not reported on
 
 The request keeps no phase and is checked again after a delay that doubles with the time waited (15 s to 2 min). After 10 minutes (`TargetStateTimeout`) it becomes `NeedsIntervention` (`ScaledObjectNotReady`). The 10 minutes are counted since the condition last took this reason, and time spent `Queued` counts too (10.7).
+
+### A Kustomization Flux is still reconciling
+
+The source mapping tells a Kustomization that fails from one Flux is still working on (`fluxstatus.Reconciling`, #556). It fails when a current condition says so: `Stalled=True`, or `Ready=False` with a reason other than `HealthCheckCanceled` (which Flux sets only while a new reconcile replaces the running one). Anything else that is not `Ready` for the current generation is a reconcile in progress: `Ready=Unknown` while a revision is applied, a status about an older generation, no `Ready` condition yet.
+
+A failure ends the request `NeedsIntervention` (`KustomizationNotReady`) at once, as before. A reconcile in progress gives the reason `KustomizationReconciling`: the request keeps no phase, takes no lock and is checked again with the delays of the KEDA wait above (15 s to 2 min). After 10 minutes (`TargetStateTimeout`) of that reason it ends `NeedsIntervention` (`KustomizationNotReady`), with a message that says Flux did not finish (fail closed). The freshness check of a decided request (6.6.1) retries such a mapping instead of calling the plan stale. The `GitRepository` is not told apart: one that is not `Ready` still ends the request `SourceNotReady`.
 
 ### Settings that cannot open a Git provider
 
@@ -392,7 +401,7 @@ So someone else's pull request on the same branch name, or a recorded number tha
 
 ## 6.6. Required mechanisms
 
-- Leader election, bounded concurrency, a lock per target object.
+- Leader election, bounded concurrency, a lock per target object; a request of an Incident whose fix another request merged ends `Superseded` before it takes the lock (6.6.3).
 - Optimistic concurrency on Kubernetes objects and a base SHA check on every Git write.
 - Retries with exponential backoff, jitter and `Retry-After`, with a limit (the limit is planned).
 - Deadlines for policy, PR, delivery and verification, stored in status.
@@ -443,7 +452,7 @@ The mapping also reads the Flux Kustomization and GitRepository again after scan
 #### Fresh, stale or retried
 
 - A mapping error is "not fresh" and is retried, never stale.
-- A mapping that now denies or needs a person, or gives another source, is stale (`SourceChanged`), never fresh.
+- A mapping that now denies or needs a person, or gives another source, is stale (`SourceChanged`), never fresh. The exception is a Kustomization Flux is still reconciling (`KustomizationReconciling`, 6.2): not fresh, retried.
 - It is stale only once all of these hold: the mapping read the plan's repository and target branch; the head of that branch is still the commit it read (or the branch is still missing); the target and those Flux objects (a missing one still missing) are read again unchanged; and last the policy and settings it was given are unchanged.
 - Otherwise the result describes a delivery or a tree that has gone, and the check is retried.
 
@@ -469,6 +478,16 @@ The mapping keeps the files it reads at a commit, which never change, in a cache
 - **Key.** An entry is keyed by the whole settings entry (URL, installation, App and signing key), the full commit ID and the path, so no other entry or repository reads it.
 - **What is kept.** Only a file, a file too large and a path the adapter found absent from a tree it read at that commit (`providers.ErrPathNotInTree`), and in the same way a directory listing (`ListDir`), a directory over 1000 entries and a path that is not a directory: a tree at a commit ID never changes, so a listing is as safe to keep as a file, and a listing and a file read of one path have separate entries. A failed read is never kept, and neither is a plain not found. The GitHub adapter also gives a plain not found for a commit it does not have yet, any 404 or 410 and a token it cannot get, so an outage cannot hide a `.sourceignore` or a second kustomization file.
 - **Verdicts.** Every read and listing, cached or not, counts against the mapping's read bound and byte budget, so a hit or an eviction never changes a verdict.
+
+### 6.6.3. Duplicates of a merged request
+
+<span class="sw-status sw-built">built</span> (#556) The analyzer may propose more than one request for one Incident and target (#432). Only one holds the target lock at a time; the others wait, `Queued` with `TargetLocked`. Once the pull request of one of them is merged, the Incident has its fix, so each of the others ends `Superseded` with reason `AnotherRequestMerged` on `PlanFresh`, whose message names the merged request and its pull request. Before #556 they went on to the policy check as soon as the lock was released, met Flux applying the merged revision and ended `NeedsIntervention` (`KustomizationNotReady`), which asked a person to look at requests nobody needed (lab run of 2026-11-08).
+
+- **Which requests.** Only one that cannot have a pull request of its own: no phase or `Pending`, no recorded pull request, no lock (`status.holdsTarget`), and no supersede chain (`spec.replaces` or `status.handoff`, which ADR-0028's checks decide). A request with a pull request open or merged, or in a handoff, is never ended this way.
+- **Which merge.** A request with the same Incident UID and target UID, in `Merged` (or a later phase) with a recorded pull request, whose phase changed after the duplicate was created. A request proposed after the merge (the fix did not help) is decided as usual. The executor's time of the merge stands in for the Git host's, so a request created in the seconds between the merge and the executor seeing it counts as a duplicate too: it was proposed without the fix in view.
+- **When.** Each time the limits of 10.7 let an undecided request through, before anything is written to Git: for a `Queued` request before its policy check (so a duplicate waiting behind the lock reads no Git), and for every request under the admission lock right before an allowed decision takes the lock. The holder releases the lock in the status write that sets `Merged`, and every candidate the cache does not show ended is read again from the API server, so a check of the limits that found the lock free is always followed by a read that finds the merge. Two duplicates that run at once each write only their own status.
+- **What it writes.** The duplicate's own status: phase `Superseded`, `PlanFresh` `False`, `holdsTarget` false, `Queued` removed. Nothing is written to Git (invariant 3), and the executor uses only the reads and the status write it already has (invariant 6).
+- **Merged first.** The merge is the phase `Merged`, not the delivery: `status.pullRequest.appliedObservedAt` is recorded only for a Deployment or StatefulSet target, and the lock is released at the merge, so a check that waited for the delivery would let the duplicates through first. A merged change that Flux then fails to apply shows on the merged request (`RolledOut`), and the Incident is analyzed again if the symptom returns.
 
 ## 6.7. Finalizer and deletion
 

@@ -21,6 +21,7 @@ kubectl -n shadewright-system logs deploy/shadewright-executor
 | `Denied` | Policy or settings do not allow the plan | No. Fix the cause and apply a request with a new name (the spec is immutable) |
 | `NeedsIntervention` | The executor cannot decide or continue safely; a person must look | No, same as above. Automation for that request has stopped |
 | `Superseded` | The plan went stale before merge and its pull request was closed | No. A new plan is a new request |
+| `Superseded` with reason `AnotherRequestMerged` | Another request of the same Incident and target was merged after this one was created (the message names it and its pull request). This one had not taken the target lock and opened no pull request | No. The Incident has its fix in the merged request; nothing to do here |
 | `Superseded` with reason `HandedOff` ([ADR-0028](adr/0028-reviewer-hints-through-the-pull-request.md)) | A reviewer's hint produced a replacement request, which took over this request's pull request and branch; the pull request is not closed | No. Follow the replacement request, which holds the pull request and the target lock |
 | `Denied` with reason `ChainLinkInvalid` ([ADR-0028](adr/0028-reviewer-hints-through-the-pull-request.md)) | A replacement request names a request it does not replace: another Incident or target, another chain, a request not waiting for approval, or a hint that is not pending | No. Nothing was taken over and the old pull request is untouched; look at who created the request |
 | `Cancelled` with reason `HandoffRefused` | Another replacement reserved the same hint first, or the hint or the old request changed before the handoff began | No. The old pull request is untouched; post the hint again if it is still wanted |
@@ -36,7 +37,7 @@ The reason is on one of these conditions:
 - `PolicyAllowed`: the policy check. `False` is `Denied`, `Unknown` is `NeedsIntervention` or a wait, `True` is allowed.
 - `PullRequestOpened`: a stop before a pull request is recorded, and the history of one that was closed.
 - `Approved`: a stop after a pull request is recorded; `WaitingForReview` while it waits, or `ReviewCheckRefused` or `ReviewListTooLong` while it waits on a check that does not pass on the current head (both are final for that head; a replacement after a handoff starts again at `WaitingForReview`).
-- `PlanFresh`: `False` when the plan went stale (`Superseded`), `Unknown` while the Git host refuses a freshness check.
+- `PlanFresh`: `False` when the plan went stale or another request of the same Incident was merged (`Superseded`), `Unknown` while the Git host refuses a freshness check.
 - `Queued`: `True` while a limit holds a request back before its policy check (see [Limits](#limits)).
 
 Many reasons exist in more than one place with the same cause (the source mapping and the policy both check the repository); they are listed once.
@@ -93,7 +94,8 @@ The executor maps the live object to its file through Flux labels, the `Kustomiz
 | `InvalidFluxLabels` | The labels are not valid object names | Remove the false labels and let Flux reapply |
 | `KustomizationNotFound` | The labelled Kustomization does not exist (or Flux CRDs are not installed) | Restore it or reapply the object |
 | `KustomizationSuspended` | The Kustomization is suspended, so a merge would not be applied | Resume it |
-| `KustomizationNotReady` | The Kustomization is not `Ready` for its current generation (failing, or still reconciling) | Fix the Kustomization (`flux get kustomizations`), wait until it is ready, then apply a new request |
+| `KustomizationReconciling` | **A wait, not a stop.** The Kustomization is not `Ready` for its current generation but reports no failure: Flux is still reconciling it, for example applying a pull request just merged. The request keeps no phase, `PolicyAllowed` is `Unknown` with this reason, and it is checked again after 15 s to 2 min | Nothing. After 10 minutes it ends `NeedsIntervention` with `KustomizationNotReady` |
+| `KustomizationNotReady` | The Kustomization is not `Ready` for its current generation and fails (`Ready` `False` with a reason other than `HealthCheckCanceled`, or `Stalled`), or it was still reconciling after a 10 minute wait (`KustomizationReconciling`) | Fix the Kustomization (`flux get kustomizations`), wait until it is ready, then apply a new request |
 | `NotInInventory` | **Denied.** The Kustomization named by the labels does not list the object in `status.inventory`, so the labels cannot be trusted | Check which Kustomization really applies it. A copied label does not grant anything |
 | `KustomizationTransforms` | The Kustomization sets one of `patches`, `patchesStrategicMerge`, `patchesJson6902`, `images`, `components`, `namePrefix`, `nameSuffix`, `targetNamespace`, `postBuild`, so Git is not what is applied | Move the transforms into the manifests |
 | `RemoteCluster` | The Kustomization applies to another cluster (`spec.kubeConfig`) | Not supported |

@@ -121,6 +121,7 @@ type HintAuthor struct {
 // +kubebuilder:validation:XValidation:rule="self.source == oldSelf.source && self.commentID == oldSelf.commentID && self.digest == oldSelf.digest && self.text == oldSelf.text && self.author == oldSelf.author && self.updatedAt == oldSelf.updatedAt && self.acceptedAt == oldSelf.acceptedAt",message="a stored hint is pinned: only its state and reason change"
 // +kubebuilder:validation:XValidation:rule="!(oldSelf.state in ['Consumed', 'Declined']) || (has(self.reason) == has(oldSelf.reason) && (!has(self.reason) || self.reason == oldSelf.reason))",message="the reason of a Consumed or Declined hint never changes"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.editedAfterAccept) || !oldSelf.editedAfterAccept || (has(self.editedAfterAccept) && self.editedAfterAccept)",message="editedAfterAccept is never unset"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.outcome) || (has(self.outcome) && self.outcome == oldSelf.outcome)",message="the outcome of a hint never changes once set"
 // +kubebuilder:validation:XValidation:rule="oldSelf.state == self.state || (oldSelf.state == 'Pending' && self.state in ['Reserved', 'Declined']) || (oldSelf.state == 'Reserved' && self.state in ['Consumed', 'Declined'])",message="a hint moves only from Pending to Reserved or Declined, and from Reserved to Consumed or Declined"
 type Hint struct {
 	// source is the system the comment is in.
@@ -172,6 +173,14 @@ type Hint struct {
 	// stored text stays as it was; the edit is recorded once, here, whatever the number of edits.
 	// +optional
 	EditedAfterAccept bool `json:"editedAfterAccept,omitempty"`
+
+	// outcome is the analysis's outcome that answered the hint with a replacement (Proposed or RunbookMatched),
+	// recorded when the executor first read it in the Incident. The hint is answered from then on, whatever
+	// the Incident handles later: it waits for the handoff, and the answer timeout no longer applies. Once set
+	// it never changes.
+	// +kubebuilder:validation:Enum=Proposed;RunbookMatched
+	// +optional
+	Outcome string `json:"outcome,omitempty"`
 }
 
 // HintDeclineReasons are the values of Hint.reason, the same as its enum: the analysis's outcomes that create

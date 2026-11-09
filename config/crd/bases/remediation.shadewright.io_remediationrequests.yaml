@@ -725,6 +725,16 @@ spec:
                         editedAfterAccept is true once the executor saw the comment edited after it accepted the hint. The
                         stored text stays as it was; the edit is recorded once, here, whatever the number of edits.
                       type: boolean
+                    outcome:
+                      description: |-
+                        outcome is the analysis's outcome that answered the hint with a replacement (Proposed or RunbookMatched),
+                        recorded when the executor first read it in the Incident. The hint is answered from then on, whatever
+                        the Incident handles later: it waits for the handoff, and the answer timeout no longer applies. Once set
+                        it never changes.
+                      enum:
+                      - Proposed
+                      - RunbookMatched
+                      type: string
                     reason:
                       description: |-
                         reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or
@@ -816,6 +826,9 @@ spec:
                   - message: editedAfterAccept is never unset
                     rule: '!has(oldSelf.editedAfterAccept) || !oldSelf.editedAfterAccept
                       || (has(self.editedAfterAccept) && self.editedAfterAccept)'
+                  - message: the outcome of a hint never changes once set
+                    rule: '!has(oldSelf.outcome) || (has(self.outcome) && self.outcome
+                      == oldSelf.outcome)'
                   - message: a hint moves only from Pending to Reserved or Declined,
                       and from Reserved to Consumed or Declined
                     rule: oldSelf.state == self.state || (oldSelf.state == 'Pending'

@@ -254,6 +254,25 @@ var _ = Describe("RemediationRequest status.hints", func() {
 		expectStatusRefused(got, "editedAfterAccept is never unset")
 	})
 
+	It("never changes or unsets a hint's outcome, and accepts only a replacement's outcome", func() {
+		rr := createdRequest(false)
+		h := testHint(1, v1alpha1.HintPending)
+		h.Outcome = "NoProposal"
+		rr.Status.Hints = []v1alpha1.Hint{h}
+		expectStatusRefused(rr, "status.hints[0].outcome")
+
+		rr = createdRequest(false)
+		h.Outcome = "Proposed"
+		rr.Status.Hints = []v1alpha1.Hint{h}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		changed := reread(rr)
+		changed.Status.Hints[0].Outcome = "RunbookMatched"
+		expectStatusRefused(changed, "the outcome of a hint never changes once set")
+		unset := reread(rr)
+		unset.Status.Hints[0].Outcome = ""
+		expectStatusRefused(unset, "the outcome of a hint never changes once set")
+	})
+
 	It("refuses two hints for the same comment", func() {
 		rr := createdRequest(false)
 		rr.Status.Hints = []v1alpha1.Hint{testHint(1, v1alpha1.HintPending), testHint(1, v1alpha1.HintDeclined)}

@@ -416,6 +416,7 @@ Validation rules:
 - a stored hint is pinned: only its state and reason change: `self.source == oldSelf.source && self.commentID == oldSelf.commentID && self.digest == oldSelf.digest && self.text == oldSelf.text && self.author == oldSelf.author && self.updatedAt == oldSelf.updatedAt && self.acceptedAt == oldSelf.acceptedAt`
 - the reason of a Consumed or Declined hint never changes: `!(oldSelf.state in ['Consumed', 'Declined']) || (has(self.reason) == has(oldSelf.reason) && (!has(self.reason) || self.reason == oldSelf.reason))`
 - editedAfterAccept is never unset: `!has(oldSelf.editedAfterAccept) || !oldSelf.editedAfterAccept || (has(self.editedAfterAccept) && self.editedAfterAccept)`
+- the outcome of a hint never changes once set: `!has(oldSelf.outcome) || (has(self.outcome) && self.outcome == oldSelf.outcome)`
 - a hint moves only from Pending to Reserved or Declined, and from Reserved to Consumed or Declined: `oldSelf.state == self.state || (oldSelf.state == 'Pending' && self.state in ['Reserved', 'Declined']) || (oldSelf.state == 'Reserved' && self.state in ['Consumed', 'Declined'])`
 
 Used by: [RemediationRequestStatus](#remediationrequeststatus).
@@ -432,6 +433,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `state` | [HintState](#hintstate) | Yes | state says what became of the hint.<br>One of `Pending`, `Reserved`, `Consumed`, `Declined` |
 | `reason` | string | No | reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or NoProposal), NoAnswer when none came within the executor's bound, or the end of the request (PullRequestMerged, PullRequestClosed, RequestEnded). HintDeclineReasons lists them.<br>One of `NoModelConfigured`, `BudgetSpent`, `BudgetUnavailable`, `NoProposal`, `MissingData`, `NoEvidence`, `TargetNotSupported`, `PreviousValueUnknown`, `NoChange`, `DirectionReversed`, `NoPolicyForAction`, `ActionOutOfBounds`, `InvalidOutput`, `EscalationNotConfigured`, `StepLimit`, `TokenLimit`, `DeadlineExceeded`, `ModelUnavailable`, `ModelNotFound`, `ModelForbidden`, `ModelError`, `UnexpectedModel`, `EndpointNotAllowed`, `PlanUnchanged`, `HintNotPending`, `RequestNotCreated`, `CoolingDown`, `NoAnswer`, `PullRequestMerged`, `PullRequestClosed`, `RequestEnded` |
 | `editedAfterAccept` | boolean | No | editedAfterAccept is true once the executor saw the comment edited after it accepted the hint. The stored text stays as it was; the edit is recorded once, here, whatever the number of edits. |
+| `outcome` | string | No | outcome is the analysis's outcome that answered the hint with a replacement (Proposed or RunbookMatched), recorded when the executor first read it in the Incident. The hint is answered from then on, whatever the Incident handles later: it waits for the handoff, and the answer timeout no longer applies. Once set it never changes.<br>One of `Proposed`, `RunbookMatched` |
 
 ### HintAuthor
 

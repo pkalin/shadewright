@@ -24,6 +24,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -146,17 +148,48 @@ func seen(id int64, at time.Time) remediationv1alpha1.SeenComment {
 	return remediationv1alpha1.SeenComment{CommentID: id, UpdatedAt: metav1.NewTime(at)}
 }
 
-// An outcome the API does not list is declined as NoAnswer, so the reason enum never refuses the status write.
-func TestIncidentAnswerMapsAnUnlistedOutcomeToNoAnswer(t *testing.T) {
-	h := &remediationv1alpha1.Hint{Source: remediationv1alpha1.HintSourceGitHub, CommentID: 7,
-		Digest: "sha256:" + strings.Repeat("a", 64)}
-	for outcome, want := range map[string]string{"SomethingNew": ReasonHintNoAnswer, "NoProposal": "NoProposal"} {
-		inc := &remediationv1alpha1.Incident{}
+// answerFixture is a request with one Pending hint, accepted at at, and a reader that holds its Incident with
+// the Analyzed outcome given (none when outcome is empty).
+func answerFixture(t *testing.T, at time.Time, outcome string) (*RemediationRequestReconciler,
+	*remediationv1alpha1.RemediationRequest) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := remediationv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	const ns, uid = "shadewright-system", "33333333-3333-4333-8333-333333333333"
+	h := remediationv1alpha1.Hint{Source: remediationv1alpha1.HintSourceGitHub, CommentID: 7,
+		Digest: "sha256:" + strings.Repeat("a", 64), State: remediationv1alpha1.HintPending,
+		AcceptedAt: metav1.NewTime(at)}
+	inc := &remediationv1alpha1.Incident{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "inc", UID: uid}}
+	if outcome != "" {
+		inc.Status.Phase = remediationv1alpha1.IncidentProposed
 		inc.Status.HandledHint = &remediationv1alpha1.HintRef{Source: h.Source, CommentID: h.CommentID, Digest: h.Digest}
 		meta.SetStatusCondition(&inc.Status.Conditions, metav1.Condition{
 			Type: conditionIncidentAnalyzed, Status: metav1.ConditionTrue, Reason: outcome})
-		if got, ok := incidentAnswer(inc, h); !ok || got != want {
-			t.Errorf("outcome %s: got %q, %v; want %q", outcome, got, ok, want)
+	}
+	rr := &remediationv1alpha1.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "rr"}}
+	rr.Spec.IncidentRef = remediationv1alpha1.IncidentRef{Name: "inc", UID: uid}
+	rr.Status.Hints = []remediationv1alpha1.Hint{h}
+	reader := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(inc).Build()
+	return &RemediationRequestReconciler{APIReader: reader}, rr
+}
+
+// An outcome the API does not list is declined as NoAnswer, so the reason enum never refuses the status write;
+// a listed one with its own reason, and a replacement's outcome is stored on the hint.
+func TestAnswerHintsMapsTheIncidentsOutcome(t *testing.T) {
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	for outcome, want := range map[string]remediationv1alpha1.Hint{
+		"SomethingNew":   {State: remediationv1alpha1.HintDeclined, Reason: ReasonHintNoAnswer},
+		"NoProposal":     {State: remediationv1alpha1.HintDeclined, Reason: "NoProposal"},
+		outcomeProposed:  {State: remediationv1alpha1.HintPending, Outcome: outcomeProposed},
+		"RunbookMatched": {State: remediationv1alpha1.HintPending, Outcome: outcomeRunbookMatched},
+	} {
+		r, rr := answerFixture(t, now, outcome)
+		r.answerHints(context.Background(), rr, now)
+		if h := rr.Status.Hints[0]; h.State != want.State || h.Reason != want.Reason || h.Outcome != want.Outcome {
+			t.Errorf("outcome %s: got %s %q %q; want %s %q %q", outcome, h.State, h.Reason, h.Outcome,
+				want.State, want.Reason, want.Outcome)
 		}
 	}
 }

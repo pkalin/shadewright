@@ -689,6 +689,20 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 				"an outcome with a replacement is an answer: no timeout")
 		})
 
+		It("keeps a hint answered with a replacement answered after the Incident handles another one", func() {
+			answer(remediationv1alpha1.IncidentProposed, outcomeProposed, refOf(stored))
+			poll()
+			Expect(fetch().Status.Hints[0].State).To(Equal(remediationv1alpha1.HintPending))
+			other := refOf(stored)
+			other.CommentID++
+			answer(remediationv1alpha1.IncidentProposed, "NoProposal", other)
+			clock = clock.Add(2 * HintAnswerTimeout)
+			poll()
+			h := fetch().Status.Hints[0]
+			Expect(h.State).To(Equal(remediationv1alpha1.HintPending), "the answer was stored when it was seen")
+			Expect(h.Outcome).To(Equal(outcomeProposed))
+		})
+
 		It("declines a hint with no answer once HintAnswerTimeout has passed", func() {
 			clock = clock.Add(HintAnswerTimeout - time.Second)
 			poll()

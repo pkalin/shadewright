@@ -520,31 +520,38 @@ func findRefused(refused []remediationv1alpha1.RefusedHint, source remediationv1
 	return false
 }
 
-// answerHints declines the Pending hints of upd that have an answer (ADR-0028 section 3). It reads the
-// Incident the request names from the API server, once, and only when a hint is Pending. A hint the Incident's
+// answerHints answers the Pending hints of upd (ADR-0028 section 3). It reads the Incident the request names
+// from the API server, once, and only when a hint is Pending and not answered yet. A hint the Incident's
 // status.handledHint names, outside phase Analyzing, with the Analyzed condition True, is answered: an outcome
-// that created a replacement (Proposed, RunbookMatched) leaves it Pending for the handoff (#539); any other
-// declines it with that reason. A hint with no such answer HintAnswerTimeout after its acceptance is declined
-// with ReasonHintNoAnswer. An Incident that cannot be read, or has another UID, answers nothing; the timeout
-// still applies.
+// that created a replacement (Proposed, RunbookMatched) is stored on the hint (outcome), which stays Pending for
+// the handoff (#539) and is judged from that record from then on, whatever the Incident handles later; any
+// other declines it with that reason. A hint with no such answer HintAnswerTimeout after its acceptance is
+// declined with ReasonHintNoAnswer. An Incident that cannot be read, or has another UID, answers nothing; the
+// timeout still applies.
 func (r *RemediationRequestReconciler) answerHints(ctx context.Context, upd *remediationv1alpha1.RemediationRequest,
 	now time.Time) {
-	pending := false
-	for i := range upd.Status.Hints {
-		pending = pending || upd.Status.Hints[i].State == remediationv1alpha1.HintPending
+	open := func(h *remediationv1alpha1.Hint) bool {
+		return h.State == remediationv1alpha1.HintPending && h.Outcome == ""
 	}
-	if !pending {
+	if !slices.ContainsFunc(upd.Status.Hints, func(h remediationv1alpha1.Hint) bool { return open(&h) }) {
 		return
 	}
 	inc := r.hintIncident(ctx, upd)
 	for i := range upd.Status.Hints {
 		h := &upd.Status.Hints[i]
-		if h.State != remediationv1alpha1.HintPending {
+		if !open(h) {
 			continue
 		}
-		if reason, answered := incidentAnswer(inc, h); answered {
-			if reason != "" {
-				h.State, h.Reason = remediationv1alpha1.HintDeclined, reason
+		if outcome, answered := incidentAnswer(inc, h); answered {
+			switch {
+			case outcome == outcomeProposed || outcome == outcomeRunbookMatched:
+				h.Outcome = outcome
+			case slices.Contains(remediationv1alpha1.HintDeclineReasons, outcome):
+				h.State, h.Reason = remediationv1alpha1.HintDeclined, outcome
+			default:
+				// An outcome the API does not list (a newer analyzer): declined all the same, as no answer it
+				// can name.
+				h.State, h.Reason = remediationv1alpha1.HintDeclined, ReasonHintNoAnswer
 			}
 			continue
 		}
@@ -576,8 +583,8 @@ func (r *RemediationRequestReconciler) hintIncident(ctx context.Context,
 	return inc
 }
 
-// incidentAnswer reports whether inc holds the analysis's answer to h, and the reason to decline h with: empty
-// for an outcome that created a replacement.
+// incidentAnswer reports whether inc holds the analysis's answer to h, and that answer: the reason of its
+// Analyzed condition.
 func incidentAnswer(inc *remediationv1alpha1.Incident, h *remediationv1alpha1.Hint) (string, bool) {
 	if inc == nil || inc.Status.Phase == remediationv1alpha1.IncidentAnalyzing {
 		return "", false
@@ -590,14 +597,7 @@ func incidentAnswer(inc *remediationv1alpha1.Incident, h *remediationv1alpha1.Hi
 	if cond == nil || cond.Status != metav1.ConditionTrue {
 		return "", false
 	}
-	switch {
-	case cond.Reason == outcomeProposed || cond.Reason == outcomeRunbookMatched:
-		return "", true
-	case slices.Contains(remediationv1alpha1.HintDeclineReasons, cond.Reason):
-		return cond.Reason, true
-	}
-	// An outcome the API does not list (a newer analyzer): declined all the same, as no answer it can name.
-	return ReasonHintNoAnswer, true
+	return cond.Reason, true
 }
 
 // cursorOf converts the stored cursor; nil is the start.

@@ -139,42 +139,40 @@ func feedbackOf(git providers.GitProvider) (providers.FeedbackSource, bool) {
 	return nil, false
 }
 
-// watchHints runs pollHints for a request whose pull request was just seen open with Shadewright's head. A
+// hintLook is what watchStep found for the reviewer hints: the provider to read the comments with, set only
+// when the pull request was just seen open with Shadewright's head and the request waits for review.
+type hintLook struct {
+	git  providers.GitProvider
+	host remediationv1alpha1.GitProviderType
+}
+
+// watchHints runs pollHints after each look at the pull request of a request that may still be reviewed. A
 // failure is logged and changes nothing: the watch of the pull request goes on, and the next look tries again
 // from the stored cursor.
-func (r *RemediationRequestReconciler) watchHints(ctx context.Context, git providers.GitProvider,
-	host remediationv1alpha1.GitProviderType, rr *remediationv1alpha1.RemediationRequest) {
-	if err := r.pollHints(ctx, git, host, rr); err != nil {
+func (r *RemediationRequestReconciler) watchHints(ctx context.Context, look hintLook,
+	rr *remediationv1alpha1.RemediationRequest) {
+	if err := r.pollHints(ctx, look, rr); err != nil {
 		logf.FromContext(ctx).Info("Could not handle the reviewer hints of RemediationRequest",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
 	}
 }
 
-// pollHints is one look at the comments of rr's pull request, and the answers of its Pending hints, written in
-// one status update. rr is updated in place only when that write succeeded.
-func (r *RemediationRequestReconciler) pollHints(ctx context.Context, git providers.GitProvider,
-	host remediationv1alpha1.GitProviderType, rr *remediationv1alpha1.RemediationRequest) error {
-	if !r.ReviewerHints || rr.Status.Phase != remediationv1alpha1.PhaseAwaitingApproval ||
-		rr.Status.PullRequest == nil {
-		return nil
-	}
-	source, ok := hintSource(host)
-	if !ok {
-		return nil
-	}
-	fs, ok := feedbackOf(git)
-	if !ok {
-		return nil // a provider that reads no feedback has no hints
-	}
+// pollHints is one look at the comments of rr's pull request, when look has a provider and reviewer hints are
+// on, and the answers of its Pending hints (with their timeout) in any case, written in one status update. rr
+// is updated in place only when that write succeeded.
+func (r *RemediationRequestReconciler) pollHints(ctx context.Context, look hintLook,
+	rr *remediationv1alpha1.RemediationRequest) error {
 	now := r.now()
 	upd := rr.DeepCopy()
-	cur := cursorOf(upd.Status.CommentCursor)
 	var lookErr error
-	page, err := fs.ListComments(ctx, upd.Status.PullRequest.Number, cur)
-	if err != nil {
-		lookErr = fmt.Errorf("list the comments of the pull request: %w", err)
-	} else {
-		lookErr = r.lookComments(ctx, fs, upd, source, cur, page, now)
+	if source, fs, ok := r.feedbackFor(look, rr); ok {
+		cur := cursorOf(upd.Status.CommentCursor)
+		page, err := fs.ListComments(ctx, upd.Status.PullRequest.Number, cur)
+		if err != nil {
+			lookErr = fmt.Errorf("list the comments of the pull request: %w", err)
+		} else {
+			lookErr = r.lookComments(ctx, fs, upd, source, cur, page, now)
+		}
 	}
 	r.answerHints(ctx, upd, now)
 	if equality.Semantic.DeepEqual(rr.Status, upd.Status) {
@@ -191,6 +189,25 @@ func (r *RemediationRequestReconciler) pollHints(ctx context.Context, git provid
 	}
 	upd.DeepCopyInto(rr)
 	return lookErr
+}
+
+// feedbackFor returns the source and the FeedbackSource to read rr's comments with: only when reviewer hints
+// are on, look has a provider that reads feedback, and rr waits for review with a pull request.
+func (r *RemediationRequestReconciler) feedbackFor(look hintLook, rr *remediationv1alpha1.RemediationRequest) (
+	remediationv1alpha1.HintSource, providers.FeedbackSource, bool) {
+	if !r.ReviewerHints || look.git == nil || rr.Status.Phase != remediationv1alpha1.PhaseAwaitingApproval ||
+		rr.Status.PullRequest == nil {
+		return "", nil, false
+	}
+	source, ok := hintSource(look.host)
+	if !ok {
+		return "", nil, false
+	}
+	fs, ok := feedbackOf(look.git)
+	if !ok {
+		return "", nil, false // a provider that reads no feedback has no hints
+	}
+	return source, fs, true
 }
 
 // lookComments judges the comments of one look (takeComments) into upd's status and moves the cursor past the

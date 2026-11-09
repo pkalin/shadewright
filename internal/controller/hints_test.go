@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -108,6 +109,10 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		hook func(rr *remediationv1alpha1.RemediationRequest) (fail, after bool)
 		// hintsOff builds the reconciler without ReviewerHints.
 		hintsOff bool
+		// writeTimeout is the reconciler's WriteTimeout; zero is the default.
+		writeTimeout time.Duration
+		// recorder is the reconciler's Event recorder; nil records none.
+		recorder *record.FakeRecorder
 	)
 
 	reconciler := func() *RemediationRequestReconciler {
@@ -115,7 +120,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		if hook != nil {
 			c = &statusHook{Client: k8sClient, fail: hook}
 		}
-		return &RemediationRequestReconciler{
+		r := &RemediationRequestReconciler{
 			Client: c, APIReader: k8sClient, Scheme: k8sClient.Scheme(),
 			Source: sourceFunc(func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
 				res := resolved()
@@ -131,7 +136,12 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 			},
 			Now:           func() time.Time { return clock },
 			ReviewerHints: !hintsOff,
+			WriteTimeout:  writeTimeout,
 		}
+		if recorder != nil {
+			r.Recorder = recorder
+		}
+		return r
 	}
 	// poll runs one reconcile with a new reconciler, as after a restart.
 	poll := func() {
@@ -171,7 +181,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 	BeforeEach(func() {
 		seq++
 		clock = time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
-		hook, hintsOff = nil, false
+		hook, hintsOff, writeTimeout, recorder = nil, false, 0, nil
 		nextID.Store(5000)
 		err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fx.TargetNamespace}})
 		Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
@@ -561,6 +571,23 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		Expect(got.Status.CommentCursor).NotTo(BeNil(), "the look is handled in full and the cursor moves on")
 	})
 
+	It("gives the look at the comments its own deadline, apart from the check of the pull request", func() {
+		byWriter("/shadewright reanalyze: the sidecar")
+		writeTimeout = 2 * time.Second
+		git.SetFail(func(op string) error {
+			switch op {
+			case "FindChangeRequest":
+				time.Sleep(1400 * time.Millisecond)
+			case "ListComments":
+				time.Sleep(900 * time.Millisecond)
+			}
+			return nil
+		})
+		poll()
+		git.SetFail(nil)
+		Expect(fetch().Status.Hints).To(HaveLen(1), "the look did not run out of the check's time")
+	})
+
 	It("declines a Pending hint when the pull request is merged", func() {
 		byWriter("/shadewright reanalyze: the sidecar")
 		poll()
@@ -702,6 +729,27 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 			Expect(h.State).To(Equal(remediationv1alpha1.HintPending), "the answer was stored when it was seen")
 			Expect(h.Outcome).To(Equal(outcomeProposed))
 		})
+
+		DescribeTable("declines a hint with no answer once HintAnswerTimeout has passed, also when the comments "+
+			"are not read",
+			func(skip func()) {
+				skip()
+				clock = clock.Add(HintAnswerTimeout)
+				poll()
+				h := fetch().Status.Hints[0]
+				Expect(h.State).To(Equal(remediationv1alpha1.HintDeclined))
+				Expect(h.Reason).To(Equal(ReasonHintNoAnswer))
+			},
+			Entry("reviewer hints turned off", func() { hintsOff = true }),
+			Entry("the pull request cannot be read", func() {
+				git.SetFail(func(op string) error {
+					if op == "FindChangeRequest" {
+						return &providers.RetryableError{Err: errors.New("GitHub find pull request: status 502")}
+					}
+					return nil
+				})
+			}),
+		)
 
 		It("declines a hint with no answer once HintAnswerTimeout has passed", func() {
 			clock = clock.Add(HintAnswerTimeout - time.Second)

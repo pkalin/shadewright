@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analysis"
@@ -66,8 +67,74 @@ type scenarioResult struct {
 	// QuoteFailures says, for a run that ended NoEvidence, how each quote differs from the block it cites
 	// (#474): a class and lengths, never the quote or the block.
 	QuoteFailures []quoteFailure `json:"quoteFailures,omitempty"`
+	// Reply is the text of the last reply when it decoded as a result (#600), accepted or refused as NoEvidence,
+	// so a missed rubric fact or a failed quote can be traced to what the model wrote; nil otherwise.
+	Reply *replyText `json:"reply,omitempty"`
 	// Error is set when the scenario could not run; it then fails.
 	Error string `json:"error,omitempty"`
+}
+
+// The caps of the reply text in the report, in bytes of UTF-8 with the truncation mark included, and in items.
+// They are the result's own bounds (analysis.Result: summary 1024 bytes, a hypothesis or a quote 512, at most
+// 10 quotes; it allows 5 hypotheses), so a decoded reply is kept whole today; they are here so that a
+// raised bound cannot grow the report unbounded: at most 1024 + 20 * 512 bytes of text per run.
+const (
+	replySummaryCap = 1024
+	replyItemCap    = 512
+	replyMaxItems   = 10
+)
+
+// truncationMark ends a field the caps cut.
+const truncationMark = " [truncated]"
+
+// replyText is the diagnosis and the evidence of the last reply that decoded as a result, redacted as the
+// analyzer redacts the result's text (keeping the Incident's name) and capped (replySummaryCap and the others).
+type replyText struct {
+	Summary    string          `json:"summary"`
+	Hypotheses []string        `json:"hypotheses,omitempty"`
+	Evidence   []replyEvidence `json:"evidence,omitempty"`
+	// Truncated says a field was cut, or items left out, by the caps.
+	Truncated bool `json:"truncated,omitempty"`
+}
+
+// replyEvidence is one quote of the result and the ID of the block it cites.
+type replyEvidence struct {
+	Source string `json:"source"`
+	Quote  string `json:"quote"`
+}
+
+// replyOf keeps the text of res for the report, each field passed through redact, then capped.
+func replyOf(res *analysis.Result, redact func(string) string) *replyText {
+	r := &replyText{}
+	keep := func(s string, limit int) string {
+		s = redact(s)
+		if len(s) <= limit {
+			return s
+		}
+		r.Truncated = true
+		n := limit - len(truncationMark)
+		for n > 0 && !utf8.RuneStart(s[n]) { // never split a UTF-8 sequence
+			n--
+		}
+		return s[:n] + truncationMark
+	}
+	r.Summary = keep(res.Summary, replySummaryCap)
+	for i, h := range res.Hypotheses {
+		if i == replyMaxItems {
+			r.Truncated = true
+			break
+		}
+		r.Hypotheses = append(r.Hypotheses, keep(h.Description, replyItemCap))
+	}
+	for i, e := range res.Evidence {
+		if i == replyMaxItems {
+			r.Truncated = true
+			break
+		}
+		r.Evidence = append(r.Evidence,
+			replyEvidence{Source: keep(e.Source, replyItemCap), Quote: keep(e.Quote, replyItemCap)})
+	}
+	return r
 }
 
 // quoteFailure is one quote the evidence check refused ([analysis.QuoteFailure]).

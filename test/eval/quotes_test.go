@@ -39,7 +39,7 @@ type quoteCase struct {
 }
 
 // Every recorded reply of the quote corpus ends NoEvidence, and the report classifies each of its quotes
-// with the cited block and lengths, never the quote's text.
+// with the cited block and lengths, never the quote's text, which only the reply text holds.
 func TestQuoteFailureCorpus(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join(quotesDir, "*.yaml"))
 	if err != nil || len(files) == 0 {
@@ -70,8 +70,14 @@ func TestQuoteFailureCorpus(t *testing.T) {
 			if !slices.Equal(got, c.Classes) {
 				t.Errorf("classes %v, want %v", got, c.Classes)
 			}
-			// The report holds no quote: neither its JSON nor its Markdown.
-			r := &report{Scenarios: []scenarioResult{res}}
+			// The report holds the quotes only in the reply text (#600): neither the classification nor the
+			// Markdown carries one.
+			if res.Reply == nil || len(res.Reply.Evidence) == 0 {
+				t.Errorf("the refused result's reply text is not in the report: %+v", res.Reply)
+			}
+			withoutReply := res
+			withoutReply.Reply = nil
+			r := &report{Scenarios: []scenarioResult{withoutReply}}
 			raw, err := json.Marshal(r)
 			if err != nil {
 				t.Fatal(err)

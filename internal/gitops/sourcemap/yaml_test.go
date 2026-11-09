@@ -24,11 +24,11 @@ import (
 	"testing"
 	"time"
 
-	"sigs.k8s.io/yaml"
-
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/gitops/gityaml"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/testutil/deadline"
 )
 
 // executorMemory is the executor's memory limit in the chart.
@@ -37,14 +37,14 @@ const executorMemory = 128 << 20
 // anchors is in the message of every refusal of an anchor, alias or merge key.
 const anchors = "anchors"
 
-// aliasBomb returns the entries of a mapping, indented by two spaces, of about 200 KB: a list of 100,000 plain
-// items, then lists of aliases that expand to 710,000 more. The plain items keep the share of aliases under
-// what go.yaml.in/yaml/v2 refuses as excessive aliasing, so before #594 sigs.k8s.io/yaml decoded it and
-// allocated over 150 MiB.
-func aliasBomb() string {
+// aliasBomb returns the entries of a mapping, indented by two spaces: a list of pad plain items, then lists of
+// aliases that expand to 710,000 more. With 100,000 items (about 200 KB) the share of aliases stays under what
+// go.yaml.in/yaml/v2 refuses as excessive aliasing, so before #594 sigs.k8s.io/yaml decoded it and allocated
+// over 150 MiB; that many items are now over the node budget (#595), and 50,000 are under it.
+func aliasBomb(pad int) string {
 	const indent = "  "
 	var b strings.Builder
-	b.WriteString(indent + "pad: [" + strings.Repeat("x,", 100000) + "x]\n")
+	b.WriteString(indent + "pad: [" + strings.Repeat("x,", pad) + "x]\n")
 	b.WriteString(indent + "a0: &a0 [" + strings.Repeat("x,", 999) + "x]\n")
 	b.WriteString(indent + "a1: &a1 [" + strings.Repeat("*a0,", 9) + "*a0]\n")
 	b.WriteString(indent + "a2: &a2 [" + strings.Repeat("*a1,", 9) + "*a1]\n")
@@ -77,10 +77,10 @@ func TestResolveRefusesYAMLAliases(t *testing.T) {
 	}{
 		{"an alias bomb in a manifest", func(f *fixture) {
 			f.files[soFile] = scaledObjectYAML + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bomb\n" +
-				"  namespace: orders\ndata:\n" + aliasBomb()
+				"  namespace: orders\ndata:\n" + aliasBomb(50000)
 		}, soFile, anchors},
 		{"an alias bomb in a kustomization file", func(f *fixture) {
-			f.files[ksFile] = ksHead + ksResources + "metadata:\n" + aliasBomb()
+			f.files[ksFile] = ksHead + ksResources + "metadata:\n" + aliasBomb(50000)
 		}, ksFile, anchors},
 		{"an anchor in a kustomization file", func(f *fixture) {
 			f.files[ksFile] = ksHead + "resources: &r\n  - scaledobject.yaml\n  - ./deployment.yaml\n"
@@ -137,7 +137,7 @@ func TestReadFieldRefusesYAMLAliases(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := []byte(scaledObjectYAML + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bomb\ndata:\n" +
-		aliasBomb())
+		aliasBomb(50000))
 	var got any
 	n := allocated(func() { got, _, err = sourcemap.ReadField(data, target, field) })
 	// The first anchor is on line 28 of the file (scaledObjectYAML has 20 lines).
@@ -177,9 +177,59 @@ func peakHeap(f func()) uint64 {
 	return peak - min(base, peak)
 }
 
-// The check of each document builds a tree that is dropped before sigs.k8s.io/yaml decodes the document, so
-// checking a document of 1 MiB (a flow list of about 520,000 items, the most a file may hold) does not add
-// to the peak heap of its decode (#594).
+// A file of more than gityaml.MaxNodes YAML nodes is refused with InputTooLarge before any tree of it is built,
+// in kustomization files and manifests alike (#595): an alias bomb whose plain items are over the budget, and
+// a manifest of 1 MiB packed with flow pairs.
+func TestResolveRefusesDenseYAML(t *testing.T) {
+	const ksHead = "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n"
+	const ksResources = "resources:\n  - scaledobject.yaml\n  - ./deployment.yaml\n"
+	const nodes = "holds more than 131072 YAML nodes"
+	tests := []struct {
+		name   string
+		change func(f *fixture)
+		file   string
+	}{
+		{"an alias bomb in a manifest", func(f *fixture) {
+			f.files[soFile] = scaledObjectYAML + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bomb\n" +
+				"  namespace: orders\ndata:\n" + aliasBomb(100000)
+		}, soFile},
+		{"an alias bomb in a kustomization file", func(f *fixture) {
+			f.files[ksFile] = ksHead + ksResources + "metadata:\n" + aliasBomb(100000)
+		}, ksFile},
+		{"flow pairs in a manifest", func(f *fixture) {
+			head := scaledObjectYAML + "---\n["
+			f.files[soFile] = head + strings.Repeat("x: ,", (providers.MaxFileBytes-len(head)-5)/4) + "x: ]\n"
+		}, soFile},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture()
+			tc.change(f)
+			var (
+				res sourcemap.Result
+				err error
+			)
+			peak := peakHeap(func() { res, _, err = f.run(t) })
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if res.Outcome != sourcemap.NeedsIntervention || res.Reason != sourcemap.ReasonInputTooLarge {
+				t.Fatalf("result = %s/%s (%s), want NeedsIntervention/InputTooLarge", res.Outcome, res.Reason, res.Message)
+			}
+			if res.Message != tc.file+" "+nodes {
+				t.Fatalf("message %q, want %q", res.Message, tc.file+" "+nodes)
+			}
+			if peak > executorMemory/4 {
+				t.Errorf("the mapping held %d MiB at its peak, want at most %d MiB", peak>>20, executorMemory>>22)
+			}
+			sameWithCache(t, tc.change, res)
+		})
+	}
+}
+
+// ReadField refuses a document of 1 MiB packed with nodes before any tree of it is built, and reads the largest
+// document the node count accepts within a quarter of the executor's memory (#595). Before, the 1 MiB document
+// was decoded.
 func TestReadFieldPeakHeap(t *testing.T) {
 	target := newFixture().in.Target
 	field, err := sourcemap.FieldFor(v1alpha1.Action{Type: v1alpha1.ActionAdjustKedaMaxReplicas}, target)
@@ -188,26 +238,44 @@ func TestReadFieldPeakHeap(t *testing.T) {
 	}
 	const head = "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: big, namespace: orders}\ndata: {x: ["
 	const tail = "x]}\n"
-	n := (providers.MaxFileBytes - len(scaledObjectYAML) - len("---\n") - len(head) - len(tail)) / 2
-	doc := head + strings.Repeat("x,", n) + tail
-	data := []byte(scaledObjectYAML + "---\n" + doc)
-	if len(data) > providers.MaxFileBytes {
-		t.Fatalf("the file has %d bytes, over the limit of %d", len(data), providers.MaxFileBytes)
-	}
-	var got any
-	mapped := peakHeap(func() { got, _, err = sourcemap.ReadField(data, target, field) })
-	if err != nil || got == nil {
-		t.Fatalf("ReadField = %v, %v; want the value", got, err)
-	}
-	decoded := peakHeap(func() {
-		var m map[string]any
-		if err := yaml.UnmarshalStrict([]byte(doc), &m); err != nil {
-			t.Error(err)
+	file := func(n int) []byte { return []byte(scaledObjectYAML + "---\n" + head + strings.Repeat("x,", n) + tail) }
+	most := (providers.MaxFileBytes - len(file(0))) / 2
+	// The most items the node count accepts.
+	accepted, over := 0, most
+	for accepted+1 < over {
+		if mid := (accepted + over) / 2; gityaml.Nodes(file(mid), gityaml.MaxNodes) <= gityaml.MaxNodes {
+			accepted = mid
+		} else {
+			over = mid
 		}
-	})
-	t.Logf("peak heap: ReadField %d MiB, the decode alone %d MiB", mapped>>20, decoded>>20)
-	if mapped > decoded+executorMemory/8 || mapped >= executorMemory {
-		t.Errorf("ReadField held %d MiB at its peak, want at most the decode's %d MiB plus %d MiB, under the executor's %d MiB",
-			mapped>>20, decoded>>20, executorMemory>>23, executorMemory>>20)
+	}
+	for _, c := range []struct {
+		name string
+		n    int
+		want string
+	}{{"1 MiB", most, "holds more than 131072 YAML nodes"}, {"at the budget", accepted, ""}} {
+		t.Run(c.name, func(t *testing.T) {
+			deadline.Within(t, time.Minute, func(t *testing.T) {
+				data := file(c.n)
+				if len(data) > providers.MaxFileBytes {
+					t.Fatalf("the file has %d bytes, over the limit of %d", len(data), providers.MaxFileBytes)
+				}
+				var (
+					got any
+					err error
+				)
+				peak := peakHeap(func() { got, _, err = sourcemap.ReadField(data, target, field) })
+				t.Logf("%d bytes: peak heap %d MiB", len(data), peak>>20)
+				switch {
+				case c.want == "" && (err != nil || got == nil):
+					t.Errorf("ReadField = %v, %v; want the value", got, err)
+				case c.want != "" && (err == nil || err.Error() != c.want):
+					t.Errorf("ReadField = %v, %v; want %q", got, err, c.want)
+				}
+				if peak > executorMemory/4 {
+					t.Errorf("ReadField held %d MiB at its peak, want at most %d MiB", peak>>20, executorMemory>>22)
+				}
+			})
+		})
 	}
 }

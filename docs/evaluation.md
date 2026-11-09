@@ -205,14 +205,15 @@ fix any rubric the harness then refuses.
 | `schemaVersion` | 2; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too |
 | `mode` | `fake` (recorded replies) or `foundry` (the real model) |
 | `manifest` | The evaluation manifest, below |
-| `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis` and `error` (set when the run could not start; it fails) |
+| `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis`, `reply` and `error` (set when the run could not start; it fails) |
 | `scenarios[].tokens` | `input`, `cachedInput`, `output` as the replies reported them; `charged`, what the loop counted against its bounds (a call with unknown usage, or one that failed, at its upper bound); `usageUnknownCalls`, the calls without a usage to price: unknown usage, or a call that failed other than with a malformed reply; `byRole`, the same counts except `charged`, per role of the calls (`triage`, `escalation`; a role without a call is left out) |
 | `scenarios[].outcome` | `pass`, `expected` (refusal or pull-request), `reason`, `action` (the planned action type), `detail` (why it failed), `notScored` |
 | `scenarios[].diagnosis` | `pass`, `facts[]` (`fact`, `pass`, `missing` terms), `unscored[]` (`fact`, `why`), `detail` |
-| `scenarios[].quoteFailures` | Only for a run that ended `NoEvidence`: one entry per quote of the refused result, in order, with `source` (the cited ID), `block` (the cited block's context section or tool name), `class` (below), `quoteBytes`, `blockBytes` and, for `partial`, `matchedBytes`. No text of the quote or the block |
+| `scenarios[].quoteFailures` | Only for a run that ended `NoEvidence`: one entry per quote of the refused result, in order, with `source` (the cited ID), `block` (the cited block's context section or tool name), `class` (below), `quoteBytes`, `blockBytes` and, for `partial`, `matchedBytes`. No text of the block; the quote's own text, redacted, is in `reply` |
+| `scenarios[].reply` | Only for a run whose last reply decoded as a result, whether the loop then accepted it or refused it (`NoEvidence`) ([#600](https://github.com/pkalin/shadewright/issues/600)): the model's `summary`, `hypotheses` (their descriptions) and `evidence[]` (`source`, `quote`), so a missed fact can be traced to what the model wrote. Redacted as the analyzer redacts the result's text (built-in rules, the Incident's name kept) and capped: the summary at 1024 bytes, each hypothesis, source and quote at 512, at most 10 hypotheses and 10 quotes (the result's own bounds, so a decoded reply is kept whole today); a cut field ends with ` [truncated]` and `truncated` is then true. In `report.json` only, not in the Markdown |
 | `totals` | `runs`, `passed`, `passRate`, `pass` (whether the threshold was reached), `tokens` (summed, with `byRole`), `costUSD` and `costUSDByRole`, each role at its deployment's prices (only with prices), and `costIncomplete` when calls with unknown usage are left out of the estimate, which is then a lower bound (the Markdown summary says so; compare `charged`) |
 
-The report holds no prompt, no model text, no token and no endpoint.
+The report holds no prompt, no token and no endpoint, and no model text beyond the redacted, capped `reply`.
 
 ### Why a quote was refused
 

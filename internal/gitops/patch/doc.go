@@ -19,12 +19,21 @@ limitations under the License.
 // go.yaml.in/yaml/v3 only locates the target scalar; the patch replaces just that scalar's bytes, so comments,
 // key order, blank lines, quoting and every other document stay byte for byte. Before replacing, the current
 // value must equal the expected previous one (quantities compare as quantities, so 256Mi equals 268435456).
-// After replacing, both files are decoded again and must differ only in the target value; otherwise the
-// patch fails closed.
+// After replacing, the patched file is decoded and must differ from the decoded original only in the target
+// value; otherwise the patch fails closed.
 //
-// Anything the splice cannot do safely is refused with an [Error] and never guessed: an anchor, alias, merge
-// key or flow collection on the path, a tag on the value, a value that is not a plain, single-quoted or
-// double-quoted scalar, a duplicate key, an identity field (apiVersion, kind, metadata, name, namespace) of any
-// document that uses an anchor, alias, merge key or explicit tag, no or several matching objects or containers, and input over
-// [MaxBytes]. Errors never contain text from the document, which may be untrusted.
+// Before anything decodes it, the file passes the fail-closed check of internal/gitops/gityaml, as in the
+// source mapping and the semantic diff: input that is not UTF-8, YAML anchors, aliases and merge keys anywhere
+// in the file, text after "---" on a separator line other than a comment, a line break other than LF or CRLF,
+// YAML directives, more than sourcemap.MaxDocuments objects and more than [MaxNodes] YAML nodes (counted from
+// the bytes, before any tree is built) are refused with [ReasonInvalidYAML], so no decode expands an alias and
+// no tree holds more than MaxNodes nodes (#595). The file is then read one document at a time, keeping only
+// the node tree of the target document and the decoded values of the others; the verification reuses those
+// values instead of parsing the original again.
+//
+// Anything the splice cannot do safely is refused with an [Error] and never guessed: a flow collection on the
+// path, a tag on the value, a value that is not a plain, single-quoted or double-quoted scalar, a duplicate key,
+// an identity field (apiVersion, kind, metadata, name, namespace) of any document with an explicit tag, no or
+// several matching objects or containers, and input over [MaxBytes]. Errors never contain text from the
+// document, which may be untrusted.
 package patch

@@ -1648,6 +1648,18 @@ func builtinRules() []rule {
 			`dop_v1_[a-f0-9]{64}`,                           // DigitalOcean
 			`hv[sb]\.[A-Za-z0-9_-]{20,}`,                    // HashiCorp Vault
 		}, "|") + `)`)},
+		// Microsoft Entra client secrets of the current format: three characters, a digit and "Q~" (mostly
+		// "8Q~"), then 31 to 34 characters, 40 in all, of letters, digits and "_~.-". Matched as a whole here,
+		// because "~" and "." cut it into parts the long-token rule may keep (#581). No word boundary before
+		// it: the three characters before the marker are taken, whatever is glued in front. After the 31 to
+		// 34 characters, the match runs on to the end of the run of those characters, though not onto a last
+		// ".", so a secret glued to another is taken with it instead of leaving the other's tail, while a full
+		// stop after a secret stays. "~" may be percent-encoded ("%7E"), as a URL encoder writes it. The
+		// minimum length keeps Windows short names ("APP8Q~1"), tilde version ranges and
+		// dotted names out; a secret cut to 36 characters or fewer by truncation is not matched.
+		{kind: KindToken, re: regexp.MustCompile(
+			`[A-Za-z0-9_~.-]{3}[0-9]Q(?:~|%7[Ee])(?:[A-Za-z0-9_~.-]|%7[Ee]){31,34}` +
+				`(?:(?:[A-Za-z0-9_~.-]|%7[Ee])*(?:[A-Za-z0-9_~-]|%7[Ee]))?`)},
 		// URLs with any userinfo part, such as postgres://user:pass@host/db, https://token:@host/repo or
 		// https://token@host/repo: a user name alone may be a token.
 		{kind: KindConnectionString, re: regexp.MustCompile(

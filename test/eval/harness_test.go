@@ -261,6 +261,10 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 		last = ""
 	}
 	res.Diagnosis = scoreDiagnosis(s.rubric, diagnosisText(last))
+	if accepted, _, err := analysis.DecodeResult(last); err == nil && accepted != nil {
+		// Redacted as the analyzer redacts the result's text for its logs and record, keeping the Incident's name.
+		res.Reply = replyOf(accepted, func(t string) string { return redactor.StringKeeping(t, s.incident.Name) })
+	}
 	res.Pass = res.Outcome.Pass && res.Diagnosis.Pass
 	return res, nil
 }

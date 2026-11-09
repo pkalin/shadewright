@@ -163,6 +163,22 @@ func TestOtherDocumentsUntouched(t *testing.T) {
 	}
 }
 
+// A .nan anywhere in the file, in the target document or another, does not fail the verification: NaN is not
+// equal to itself as a number, but the value is unchanged.
+func TestNaNKept(t *testing.T) {
+	dep := string(read(t, "deployment.yaml"))
+	for name, in := range map[string]string{
+		"another document":    dep + "---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: c, namespace: orders}\nx: .nan\n",
+		"the target document": dep + "x: [.NaN, {y: .nan}]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := SetContainerMemoryLimit([]byte(in), deployment, mem("web", "512Mi", "768Mi")); err != nil {
+				t.Errorf("got %v, want the file patched", err)
+			}
+		})
+	}
+}
+
 func TestRefusals(t *testing.T) {
 	dep := string(read(t, "deployment.yaml"))
 	sub := func(old, new string) string {
@@ -189,11 +205,15 @@ func TestRefusals(t *testing.T) {
 		{"no namespace could match", sub("namespace: orders\n  labels", "labels"), ErrAmbiguousTarget},
 		{"another version could match", sub("apps/v1\n", "apps/v1beta1\n"), ErrAmbiguousTarget},
 		{"declared twice", dep + "---\n" + dep[strings.Index(dep, "apiVersion: apps/v1"):], ErrAmbiguousTarget},
-		{"anchor on the path", sub("          limits:\n", "          limits: &lim\n"), ErrUnsupported},
-		{"anchor on the value", sub(`"512Mi"`, `&m "512Mi"`), ErrUnsupported},
-		{"alias value", sub(`"512Mi" # raised`, `*req # raised`), ErrUnsupported},
-		{"anchored container", sub("- name: web", "- &c\n        name: web"), ErrUnsupported},
-		{"merge key on the path", sub("          limits:\n", "          limits:\n            <<: {cpu: 1}\n"), ErrUnsupported},
+		// Anchors, aliases and merge keys anywhere in the file are refused before anything decodes it (#595).
+		{"anchor on the path", sub("          limits:\n", "          limits: &lim\n"), ErrInvalidYAML},
+		{"anchor on the value", sub(`"512Mi"`, `&m "512Mi"`), ErrInvalidYAML},
+		{"alias value", sub("          requests:\n", "          requests: &req\n") + "---\nx: *req\n", ErrInvalidYAML},
+		{"anchored container", sub("- name: web", "- &c\n        name: web"), ErrInvalidYAML},
+		{"merge key on the path", sub("          limits:\n", "          limits:\n            <<: {cpu: 1}\n"), ErrInvalidYAML},
+		{"anchored sibling", sub("          requests:\n", "          requests: &req\n"), ErrInvalidYAML},
+		{"directive", "%YAML 1.1\n---\n" + dep, ErrInvalidYAML},
+		{"not UTF-8", sub("orders-worker:1.4.2", "orders-worker:\xff"), ErrInvalidYAML},
 		{"flow map on the path", sub(`          limits:
             memory: "512Mi" # raised from 384Mi on 2026-10-14
 `, `          limits: {memory: "512Mi"}
@@ -227,11 +247,13 @@ func TestErrorsHoldNoDocumentText(t *testing.T) {
 	}
 }
 
-func TestAnchoredSiblingsAreFine(t *testing.T) {
-	// The anchor on requests is not on the path to limits.memory, and the alias in the sidecar is untouched.
-	out, err := SetContainerMemoryLimit(read(t, "deployment.yaml"), deployment, mem("web", "512Mi", "768Mi"))
-	if err != nil || !strings.Contains(string(out), "requests: *req") {
-		t.Fatalf("got %v", err)
+// An anchor off the path to the value is refused too, as the source mapping refuses it, and the refusal
+// names its line (#595).
+func TestAnchoredSiblingRefused(t *testing.T) {
+	in := strings.Replace(string(read(t, "deployment.yaml")), "          requests:\n", "          requests: &req\n", 1)
+	_, err := SetContainerMemoryLimit([]byte(in), deployment, mem("web", "512Mi", "768Mi"))
+	if want := "patch: InvalidYAML: line 37: YAML anchors"; err == nil || !strings.HasPrefix(err.Error(), want) {
+		t.Fatalf("got %v, want an error starting with %q", err, want)
 	}
 }
 
@@ -247,7 +269,7 @@ func TestKedaRefusals(t *testing.T) {
 		{"field missing", strings.Replace(sc, "  maxReplicaCount: 10 # capped by the node pool size\n", "", 1), ErrFieldMissing},
 		{"quoted number", strings.Replace(sc, "maxReplicaCount: 10", `maxReplicaCount: "10"`, 1), ErrUnsupported},
 		{"hex number", strings.Replace(sc, "maxReplicaCount: 10", "maxReplicaCount: 0xA", 1), ErrUnsupported},
-		{"anchored value", strings.Replace(sc, "maxReplicaCount: 10", "maxReplicaCount: &n 10", 1), ErrUnsupported},
+		{"anchored value", strings.Replace(sc, "maxReplicaCount: 10", "maxReplicaCount: &n 10", 1), ErrInvalidYAML},
 		{"wrong object", strings.Replace(sc, "name: orders-worker\n  namespace: orders", "name: x\n  namespace: orders", 1), ErrTargetNotFound},
 	}
 	for _, c := range cases {
@@ -275,24 +297,29 @@ func TestInvalidInput(t *testing.T) {
 	}
 }
 
-// second returns a minimal second document that declares the same Deployment through an alias or a merge key.
+// A second document that declares the same Deployment through an alias, a merge key or an explicit tag is
+// refused: anchors, aliases and merge keys by the YAML check, tags by the identity check.
 func TestIdentityFromAliasOrMergeRefused(t *testing.T) {
 	dep := string(read(t, "deployment.yaml"))
-	docs := map[string]string{
-		"alias name":      "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: *n\n  namespace: orders\n",
-		"merge name":      "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  <<: {name: orders-worker}\n  namespace: orders\n",
-		"alias metadata":  "apiVersion: apps/v1\nkind: Deployment\nmetadata: *m\n",
-		"merge at root":   "<<: {kind: Deployment}\napiVersion: apps/v1\nmetadata:\n  name: orders-worker\n  namespace: orders\n",
-		"anchored kind":   "apiVersion: apps/v1\nkind: &k Deployment\nmetadata:\n  name: orders-worker\n  namespace: orders\n",
-		"binary name":     "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: !!binary b3JkZXJzLXdvcmtlcg==\n  namespace: orders\n",
-		"tagged str name": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: !!str orders-worker\n  namespace: orders\n",
-		"binary key":      "apiVersion: apps/v1\nkind: Deployment\n!!binary bWV0YWRhdGE=:\n  name: orders-worker\n  namespace: orders\n",
+	const anchors = "x: &n orders-worker\nmeta: &m {name: orders-worker, namespace: orders}\n---\n"
+	docs := map[string]struct {
+		doc  string
+		want error
+	}{
+		"alias name":      {anchors + "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: *n\n  namespace: orders\n", ErrInvalidYAML},
+		"merge name":      {"apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  <<: {name: orders-worker}\n  namespace: orders\n", ErrInvalidYAML},
+		"alias metadata":  {anchors + "apiVersion: apps/v1\nkind: Deployment\nmetadata: *m\n", ErrInvalidYAML},
+		"merge at root":   {"<<: {kind: Deployment}\napiVersion: apps/v1\nmetadata:\n  name: orders-worker\n  namespace: orders\n", ErrInvalidYAML},
+		"anchored kind":   {"apiVersion: apps/v1\nkind: &k Deployment\nmetadata:\n  name: orders-worker\n  namespace: orders\n", ErrInvalidYAML},
+		"binary name":     {"apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: !!binary b3JkZXJzLXdvcmtlcg==\n  namespace: orders\n", ErrUnsupported},
+		"tagged str name": {"apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: !!str orders-worker\n  namespace: orders\n", ErrUnsupported},
+		"binary key":      {"apiVersion: apps/v1\nkind: Deployment\n!!binary bWV0YWRhdGE=:\n  name: orders-worker\n  namespace: orders\n", ErrUnsupported},
 	}
-	for name, doc := range docs {
+	for name, c := range docs {
 		t.Run(name, func(t *testing.T) {
-			in := "x: &n orders-worker\nmeta: &m {name: orders-worker, namespace: orders}\n---\n" + doc + "---\n" + dep
-			if _, err := SetContainerMemoryLimit([]byte(in), deployment, mem("web", "512Mi", "768Mi")); !errors.Is(err, ErrUnsupported) {
-				t.Fatalf("got %v, want %v", err, ErrUnsupported)
+			in := c.doc + "---\n" + dep
+			if _, err := SetContainerMemoryLimit([]byte(in), deployment, mem("web", "512Mi", "768Mi")); !errors.Is(err, c.want) {
+				t.Fatalf("got %v, want %v", err, c.want)
 			}
 		})
 	}

@@ -329,6 +329,57 @@ func TestReviewGateFailsTheCheckOnAListTooLong(t *testing.T) {
 	}
 }
 
+// A check that failed or was refused on an earlier head leaves no stale reason on condition Approved once the
+// check runs on the new head (#606): it says the request waits for review again, and never True.
+func TestReviewCheckOnANewHeadClearsTheStaleReason(t *testing.T) {
+	for _, old := range []struct {
+		state  api.ReviewCheckState
+		reason string
+	}{{api.ReviewCheckFailed, ReasonReviewListTooLong}, {api.ReviewCheckRefused, ReasonReviewCheckRefused}} {
+		t.Run(old.reason, func(t *testing.T) {
+			r, g, _, rr, cr, head := tookOverWorld(t)
+			ctx := context.Background()
+			events := record.NewFakeRecorder(10)
+			r.Recorder = events
+			rr.Status.PullRequest.ReviewCheck = &api.ReviewCheck{Head: strings.Repeat("a", len(head)), State: old.state}
+			meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionApproved,
+				Status: metav1.ConditionFalse, Reason: old.reason, Message: "An earlier head"})
+			if err := r.Status().Update(ctx, rr); err != nil {
+				t.Fatal(err)
+			}
+			waits := func(step string) {
+				t.Helper()
+				c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionApproved)
+				if c == nil || c.Status != metav1.ConditionFalse || c.Reason != ReasonWaitingForReview {
+					t.Fatalf("Approved after %s on the new head: %+v", step, c)
+				}
+			}
+			r.watchReviewCheck(ctx, rr, false)
+			if got := rr.Status.PullRequest.ReviewCheck; got.State != api.ReviewCheckInProgress || got.Head != head {
+				t.Fatalf("review check %+v", got)
+			}
+			waits("InProgress")
+			approve(g, cr.Number, 90, 3003, head)
+			r.watchReviewCheck(ctx, rr, true)
+			if got := rr.Status.PullRequest.ReviewCheck; got.State != api.ReviewCheckPassed || got.Head != head {
+				t.Fatalf("review check %+v", got)
+			}
+			waits("Passed")
+			stored := &api.RemediationRequest{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(rr), stored); err != nil {
+				t.Fatal(err)
+			}
+			if c := meta.FindStatusCondition(stored.Status.Conditions, api.ConditionApproved); c == nil ||
+				c.Reason != ReasonWaitingForReview {
+				t.Fatalf("stored Approved: %+v", c)
+			}
+			if len(events.Events) != 0 {
+				t.Fatalf("a passing head recorded an Event: %s", <-events.Events)
+			}
+		})
+	}
+}
+
 // A hint author's comment the host refused for good is not asked again on every look.
 func TestReviewGateDoesNotAskAgainForARefusedComment(t *testing.T) {
 	for _, refused := range []error{providers.ErrForbidden, providers.ErrRejected} {

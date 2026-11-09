@@ -34,7 +34,8 @@ const (
 	ReasonUnsupported Reason = "Unsupported"
 	// ReasonInvalidInput means the target, action parameters or value are not usable.
 	ReasonInvalidInput Reason = "InvalidInput"
-	// ReasonInvalidYAML means the file does not parse, has a duplicate key or is over MaxBytes.
+	// ReasonInvalidYAML means the file does not parse, has a duplicate key, is over MaxBytes or MaxNodes, or
+	// fails the check of internal/gitops/gityaml (anchors, aliases, merge keys and the forms that hide them).
 	ReasonInvalidYAML Reason = "InvalidYAML"
 	// ReasonVerificationFailed means the patched file differs from the original in more than the target value.
 	ReasonVerificationFailed Reason = "VerificationFailed"

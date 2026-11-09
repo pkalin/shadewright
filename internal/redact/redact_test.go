@@ -1240,6 +1240,28 @@ func TestEntraClientSecretIsRedacted(t *testing.T) {
 	}
 }
 
+// Entra client secrets glued to each other, or with "~" percent-encoded under an unrelated key, leave no
+// fragment (#581): an earlier match never takes the start of the next secret and leaves its tail.
+func TestEntraClientSecretGluedOrEncoded(t *testing.T) {
+	fake40 := "Fak" + "8Q~" + strings.Repeat("a.", 16) + "ZZ" // #nosec G101 -- obviously fake test value
+	fake37 := "Fak" + "7Q~" + strings.Repeat("b.", 15) + "Z"  // #nosec G101 -- obviously fake test value
+	encoded := strings.Replace(fake40, "~", "%7E", 1)
+	for _, c := range []struct{ name, in, want string }{
+		{"an earlier marker glued to a secret", "pre" + "8Q~" + fake40 + " x", "[REDACTED:token] x"},
+		{"a 37-byte secret glued to a 40-byte one", fake37 + fake40 + " x", "[REDACTED:token] x"},
+		{"two 40-byte secrets glued", fake40 + fake40, "[REDACTED:token]"},
+		{"~ percent-encoded under an unrelated key", "x=" + encoded + "&scope=foo", "x=[REDACTED:token]&scope=foo"},
+		{"~ percent-encoded in lower case in the tail", "x=" + strings.ReplaceAll(fake40, "~", "%7e") + "&y=1",
+			"x=[REDACTED:token]&y=1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if out := String(c.in); out != c.want || strings.Contains(out, "ZZ") {
+				t.Errorf("String(%q) = %q, want %q", c.in, out, c.want)
+			}
+		})
+	}
+}
+
 // Dotted names, versions, home paths, tilde version ranges and Windows short names stay readable next to
 // the Entra client secret rule (#581).
 func TestEntraClientSecretRuleKeepsText(t *testing.T) {

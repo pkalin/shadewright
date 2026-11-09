@@ -22,7 +22,7 @@ Events, logs, annotations, tool descriptions and Git files may carry prompt inje
 
 **What it covers.**
 
-- Built-in rules for common token formats (current-format Microsoft Entra client secrets among them, matched whole although they hold `~` and `.`), and long random tokens without a known prefix.
+- Built-in rules for common token formats (current-format Microsoft Entra client secrets among them, matched whole although they hold `~` and `.`, also glued to each other or with `~` percent-encoded; one cut to 36 characters or fewer is not matched), and long random tokens without a known prefix.
 - JWTs, private keys, connection strings, and credentials in URLs (any userinfo).
 - `Authorization` values, and Basic and Bearer values that look like credentials.
 - Values of secret-named keys in env, JSON (also escaped inside a string) and YAML forms (all scalar values under a secret-named YAML key).

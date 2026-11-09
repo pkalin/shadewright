@@ -57,6 +57,8 @@ var (
 	ErrLineBreak = errors.New("a line ends in a line break other than LF or CRLF")
 	// ErrDirective is a YAML directive, a line that starts with "%".
 	ErrDirective = errors.New("YAML directives (lines starting with %) are not supported")
+	// ErrTooManyNodes is input of more than MaxNodes YAML nodes, as [Nodes] counts them.
+	ErrTooManyNodes = fmt.Errorf("holds more than %d YAML nodes", MaxNodes)
 )
 
 // Error is a refusal of [Objects]: its cause and the line of the file it is at, counted from 1, or 0 when it
@@ -120,6 +122,9 @@ func Parts(data []byte) []Part {
 //     parsers end a line at each of them, so the text after one on a separator line would be read unchecked;
 //   - a YAML directive (a line that starts with "%"): kustomize decodes the part before the first separator
 //     on its own, where a directive does not parse, while a parser of the whole file accepts it;
+//   - input of more than [MaxNodes] YAML nodes as [Nodes] counts them, before any part is decoded: a parser
+//     builds the whole tree of a document before anything looks at it, so a dense document of 1 MiB would
+//     take more heap than the executor has (#595);
 //   - a part that does not parse, which kustomize could not build either.
 //
 // Each part between separators is decoded as kustomize decodes it, and every document in it counts: 1 for a
@@ -132,6 +137,10 @@ func Objects(data []byte, limit int) (int, error) {
 	}
 	if err := checkLines(string(data)); err != nil {
 		return 0, err
+	}
+	// Before any part is decoded, so no tree of more than MaxNodes nodes is ever built (#595).
+	if Nodes(data, MaxNodes) > MaxNodes {
+		return 0, &Error{Err: ErrTooManyNodes}
 	}
 	n := 0
 	parts := Parts(data)

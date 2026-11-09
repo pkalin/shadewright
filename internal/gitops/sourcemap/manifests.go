@@ -123,9 +123,10 @@ func (w *walker) walk(ctx context.Context, dir string, depth int) (*Result, erro
 		return stop, err
 	}
 	// sigs.k8s.io/yaml replaces aliases by copies, so the file is checked first (#594). The check stops counting
-	// past MaxDocuments without reading the rest, so a file over it is refused too.
+	// past MaxDocuments without reading the rest, so a file over it is refused too, as is a file of more than
+	// gityaml.MaxNodes YAML nodes (#595).
 	if n, err := gityaml.Objects(file.Data, MaxDocuments); err != nil {
-		r := needsIntervention(ReasonFileNotReadable, "%s %v", file.Path, err)
+		r := needsIntervention(refusedReason(err), "%s %v", file.Path, err)
 		return &r, nil
 	} else if n > MaxDocuments {
 		r := needsIntervention(ReasonInputTooLarge, "%s holds more than %d YAML documents", file.Path, MaxDocuments)
@@ -425,7 +426,7 @@ func (w *walker) findDeclaration(ctx context.Context, id identity) (declaration,
 					"the build holds more than %d YAML documents", MaxDocuments)), nil
 			}
 			if refused, ok := errors.AsType[*gityaml.Error](err); ok {
-				return declaration{}, new(needsIntervention(ReasonFileNotReadable, "%s %v", p, refused)), nil
+				return declaration{}, new(needsIntervention(refusedReason(refused), "%s %v", p, refused)), nil
 			}
 			if err != nil {
 				r := needsIntervention(ReasonFileNotReadable, "%s is not valid YAML", p)
@@ -554,6 +555,15 @@ func (d *documents) read() ([]byte, int, error) {
 		}
 		buf.Write(line)
 	}
+}
+
+// refusedReason is the reason for a file [gityaml.Objects] refuses: InputTooLarge for one of too many YAML
+// nodes, as for too many documents, else FileNotReadable.
+func refusedReason(err error) Reason {
+	if errors.Is(err, gityaml.ErrTooManyNodes) {
+		return ReasonInputTooLarge
+	}
+	return ReasonFileNotReadable
 }
 
 // next returns the next document, nil for one that is empty or holds only comments, io.EOF after the last,

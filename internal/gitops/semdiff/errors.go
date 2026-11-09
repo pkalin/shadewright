@@ -33,7 +33,7 @@ const (
 	ReasonFileMissing Reason = "FileMissing"
 	// ReasonTooLarge means the build is over a limit: file size, number of files or reads, nesting depth, the
 	// number of directory visits, the build bytes ([MaxBuildBytes]), the YAML documents read before the render
-	// ([MaxBuildDocuments]) or the rendered objects ([MaxObjects]).
+	// ([MaxBuildDocuments]), the YAML nodes of one file (gityaml.MaxNodes) or the rendered objects ([MaxObjects]).
 	ReasonTooLarge Reason = "TooLarge"
 	// ReasonInvalidYAML means a kustomization file does not parse or has a duplicate key, or a file of the
 	// build is not UTF-8, does not parse, or uses YAML anchors, aliases or merge keys (a "<<" key, not a "<<" value), which kustomize would

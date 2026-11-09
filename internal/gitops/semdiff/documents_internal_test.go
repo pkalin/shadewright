@@ -123,7 +123,7 @@ func TestDocumentsRefuseWhatKustomizeExpands(t *testing.T) {
 		in   []byte
 		line string
 	}{
-		"alias keys, 1 MiB":   {[]byte(aliasKeyList(25000)), line1},
+		"alias keys":          {[]byte(aliasKeyList(5000)), line1},
 		"UTF-16, 5,000 items": {utf16LE("apiVersion: v1\nkind: List\nitems: " + cms(5000) + "\n"), ""},
 		"UTF-16 big endian":   {[]byte{0xFE, 0xFF, 0, 'a', 0, ':', 0, ' ', 0, '1', 0, '\n'}, ""},
 		"UTF-32":              {[]byte{0xFF, 0xFE, 0, 0, 'a', 0, 0, 0}, ""},
@@ -145,9 +145,6 @@ func TestDocumentsRefuseWhatKustomizeExpands(t *testing.T) {
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			if name == "alias keys, 1 MiB" && len(c.in) > 1<<20 {
-				t.Fatalf("the reproduction is %d bytes, over 1 MiB", len(c.in))
-			}
 			_, err := documents("f.yaml", c.in)
 			if !errors.Is(err, ErrInvalidYAML) {
 				t.Fatalf("documents: %v, want InvalidYAML", err)
@@ -159,11 +156,21 @@ func TestDocumentsRefuseWhatKustomizeExpands(t *testing.T) {
 	}
 }
 
+// A file of 1 MiB packed with nodes is refused with TooLarge before any tree of it is built (#595).
+func TestDocumentsRefuseTooManyNodes(t *testing.T) {
+	in := []byte("[" + strings.Repeat("x: ,", (1<<20-6)/4) + "x: ]\n")
+	_, err := documents("f.yaml", in)
+	if !errors.Is(err, ErrTooLarge) || !strings.Contains(err.Error(), "f.yaml holds more than 131072 YAML nodes") {
+		t.Fatalf("documents: %v, want TooLarge naming the file and its nodes", err)
+	}
+}
+
 func TestDocumentsStopAtTheBudget(t *testing.T) {
 	for name, in := range map[string]string{
 		"separators": strings.Repeat("\n---", 3*MaxBuildDocuments),
-		// Each costs kustomize a node, so 20,000 of them counted as none slipped past the budget.
-		"empty Lists": strings.Repeat("kind: List\nitems: []\n---\n", 20000),
+		// Each costs kustomize a node: counted as none, 20,000 of them slipped past the budget. 5,000 are over
+		// it and under the node budget (#595).
+		"empty Lists": strings.Repeat("kind: List\nitems: []\n---\n", 5000),
 		"a long List": "kind: List\nitems: " + cms(MaxBuildDocuments) + "\n",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -174,7 +181,8 @@ func TestDocumentsStopAtTheBudget(t *testing.T) {
 	}
 }
 
-// FuzzDocuments checks that documents never panics, refuses only with InvalidYAML, and never counts fewer
+// FuzzDocuments checks that documents never panics, refuses only with InvalidYAML or, for too many YAML nodes,
+// TooLarge, and never counts fewer
 // objects than kustomize reads from bytes it accepts. Every input reaches kustomize: anchors are refused, so
 // nothing accepted expands.
 func FuzzDocuments(f *testing.F) {
@@ -188,8 +196,8 @@ func FuzzDocuments(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		got, err := documents("f.yaml", data)
 		if err != nil {
-			if !errors.Is(err, ErrInvalidYAML) {
-				t.Fatalf("documents(%q): %v, want only InvalidYAML", data, err)
+			if !errors.Is(err, ErrInvalidYAML) && !(errors.Is(err, ErrTooLarge) && strings.Contains(err.Error(), "YAML nodes")) {
+				t.Fatalf("documents(%q): %v, want only InvalidYAML or TooLarge for the nodes", data, err)
 			}
 			return
 		}

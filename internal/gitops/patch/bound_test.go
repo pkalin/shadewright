@@ -25,19 +25,26 @@ import (
 	"testing"
 	"time"
 
-	yaml "go.yaml.in/yaml/v3"
+	"github.com/pkalin/shadewright/internal/gitops/gityaml"
+	"github.com/pkalin/shadewright/internal/testutil/deadline"
 )
 
 // executorMemory is the executor's memory limit in the chart.
 const executorMemory = 128 << 20
 
-// aliasBomb returns the entries of a mapping, indented by two spaces, of about 200 KB: a list of 100,000 plain
-// items, then lists of aliases that expand to 710,000 more. The plain items keep the share of aliases under
-// what go.yaml.in/yaml/v3 refuses as excessive aliasing, so before #595 the patcher decoded it.
-func aliasBomb() string {
+// budget is the most heap the patcher may hold at its peak for any input: a quarter of the executor's memory
+// limit, which leaves room under its GOMEMLIMIT (90 percent of the limit, about 115 MiB, #602) for the rest
+// of the process.
+const budget = executorMemory / 4
+
+// aliasBomb returns the entries of a mapping, indented by two spaces: a list of pad plain items, then lists of
+// aliases that expand to 710,000 more. With 100,000 items (about 200 KB) the share of aliases stays under what
+// go.yaml.in/yaml/v3 refuses as excessive aliasing, so before #595 the patcher decoded it; that many items are
+// now over the node budget, and 50,000 are under it.
+func aliasBomb(pad int) string {
 	const indent = "  "
 	var b strings.Builder
-	b.WriteString(indent + "pad: [" + strings.Repeat("x,", 100000) + "x]\n")
+	b.WriteString(indent + "pad: [" + strings.Repeat("x,", pad) + "x]\n")
 	b.WriteString(indent + "a0: &a0 [" + strings.Repeat("x,", 999) + "x]\n")
 	b.WriteString(indent + "a1: &a1 [" + strings.Repeat("*a0,", 9) + "*a0]\n")
 	b.WriteString(indent + "a2: &a2 [" + strings.Repeat("*a1,", 9) + "*a1]\n")
@@ -84,100 +91,128 @@ func peakHeap(f func()) uint64 {
 	return peak - min(base, peak)
 }
 
-// An alias bomb in another document of the file is refused before any parser expands it (#595, invariant 4).
+// An alias bomb in another document of the file is refused before any parser expands it: for its anchors, or
+// for its nodes when they are over the budget (#595, invariant 4).
 func TestAliasBombRefused(t *testing.T) {
-	dep := string(read(t, "deployment.yaml"))
-	in := []byte(dep + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bomb\n  namespace: orders\ndata:\n" +
-		aliasBomb())
-	var err error
-	n := allocated(func() { _, err = SetContainerMemoryLimit(in, deployment, mem("web", "512Mi", "768Mi")) })
-	if !errors.Is(err, ErrInvalidYAML) || !strings.Contains(err.Error(), "anchors") {
-		t.Errorf("got %v, want %v naming anchors", err, ErrInvalidYAML)
-	}
-	if n >= executorMemory/2 {
-		t.Errorf("the patcher allocated %d MiB, want less than half the executor's %d MiB", n>>20, executorMemory>>20)
+	for pad, want := range map[int]string{50000: "anchors", 100000: "YAML nodes"} {
+		dep := string(read(t, "deployment.yaml"))
+		in := []byte(dep + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bomb\n  namespace: orders\ndata:\n" +
+			aliasBomb(pad))
+		var err error
+		n := allocated(func() { _, err = SetContainerMemoryLimit(in, deployment, mem("web", "512Mi", "768Mi")) })
+		if !errors.Is(err, ErrInvalidYAML) || !strings.Contains(err.Error(), want) {
+			t.Errorf("%d items: got %v, want %v naming %q", pad, err, ErrInvalidYAML, want)
+		}
+		if n >= executorMemory/2 {
+			t.Errorf("%d items: the patcher allocated %d MiB, want less than half the executor's %d MiB", pad, n>>20,
+				executorMemory>>20)
+		}
 	}
 }
 
-// denseFile returns the Deployment of testdata and a ConfigMap holding a flow list of n plain items.
-func denseFile(t *testing.T, n int) []byte {
+// peakInChild runs the patcher on the file build returns, in a child process that is killed after a minute,
+// and fails when its peak heap is over budget, or when the file is not patched (refused empty) or not refused
+// with InvalidYAML naming refused.
+func peakInChild(t *testing.T, build func(t *testing.T) []byte, refused string) {
+	t.Helper()
+	deadline.Within(t, time.Minute, func(t *testing.T) {
+		in := build(t)
+		if len(in) > MaxBytes {
+			t.Fatalf("the file has %d bytes, over the limit of %d", len(in), MaxBytes)
+		}
+		var (
+			out []byte
+			err error
+		)
+		peak := peakHeap(func() { out, err = SetContainerMemoryLimit(in, deployment, mem("web", "512Mi", "768Mi")) })
+		t.Logf("%d bytes: peak heap %d MiB", len(in), peak>>20)
+		switch {
+		case refused == "" && (err != nil || len(out) != len(in)):
+			t.Errorf("got %v, want the file patched", err)
+		case refused != "" && (!errors.Is(err, ErrInvalidYAML) || !strings.Contains(err.Error(), refused)):
+			t.Errorf("got %v, want %v naming %q", err, ErrInvalidYAML, refused)
+		}
+		if peak > budget {
+			t.Errorf("the patcher held %d MiB at its peak, want at most %d MiB", peak>>20, budget>>20)
+		}
+	})
+}
+
+// withDense returns the Deployment of testdata, then a document of open, item repeated and last, of MaxBytes in
+// all.
+func withDense(t *testing.T, open, item, last string) []byte {
+	t.Helper()
+	head := string(read(t, "deployment.yaml")) + "---\n" + open
+	return []byte(head + strings.Repeat(item, (MaxBytes-len(head)-len(last))/len(item)) + last)
+}
+
+// A file of MaxBytes packed with nodes is refused before any tree of it is built, whatever form the nodes take
+// (#595). Before, the node budget was checked after the tree of a document was built: flow pairs peaked at
+// 135 MiB and a flow mapping of keys without values at 176 MiB.
+func TestDenseFilePeakHeap(t *testing.T) {
+	cases := map[string]struct {
+		open, item, last string
+		refused          string
+	}{
+		"flow pairs":         {"[", "x: ,", "x: ]\n", "YAML nodes"},
+		"flow mapping":       {"{", "a,", "a}\n", "YAML nodes"},
+		"flow list":          {"[", "x,", "x]\n", "YAML nodes"},
+		"block mapping":      {"", "a:\n", "", "YAML nodes"},
+		"block list":         {"", "-\n", "", "YAML nodes"},
+		"block list of list": {"", "- -\n", "", "YAML nodes"},
+		"one long scalar":    {"a: ", "x", "\n", ""},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			peakInChild(t, func(t *testing.T) []byte { return withDense(t, c.open, c.item, c.last) }, c.refused)
+		})
+	}
+}
+
+// listFile returns the Deployment of testdata and a ConfigMap holding a flow list of n+1 plain items.
+func listFile(t *testing.T, n int) []byte {
 	t.Helper()
 	return []byte(string(read(t, "deployment.yaml")) +
 		"---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: big, namespace: orders}\ndata: {x: [" +
 		strings.Repeat("x,", n) + "x]}\n")
 }
 
-// nodesOf returns the YAML nodes of data as the patcher counts them.
-func nodesOf(data []byte) int {
-	dec := yaml.NewDecoder(strings.NewReader(string(data)))
-	c := 0
-	for {
-		var n yaml.Node
-		if err := dec.Decode(&n); err != nil {
-			return c
-		}
-		c += countNodes(&n, MaxNodes*8)
-	}
-}
-
-// treeHeap returns the peak heap of decoding the last document of data into nodes.
-func treeHeap(t *testing.T, data []byte) uint64 {
+// keysFile returns the Deployment of testdata and a ConfigMap whose data holds n+1 flow mappings of eight keys
+// without values: each key and its empty value are two nodes for the two bytes the count reads, the most nodes
+// it accepts. The mappings are small because the decode compares every pair of keys of a mapping.
+func keysFile(t *testing.T, n int) []byte {
 	t.Helper()
-	return peakHeap(func() {
-		var n yaml.Node
-		if err := yaml.Unmarshal(data[strings.LastIndex(string(data), "---\n"):], &n); err != nil {
-			t.Error(err)
+	return []byte(string(read(t, "deployment.yaml")) +
+		"---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: big, namespace: orders}\ndata: {x: [" +
+		strings.Repeat("{a,b,c,d,e,f,g,h},", n) + "{a}]}\n")
+}
+
+// atBudget returns the most items of file that the node count accepts.
+func atBudget(t *testing.T, file func(*testing.T, int) []byte) int {
+	t.Helper()
+	lo, hi := 0, MaxNodes
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if gityaml.Nodes(file(t, mid), MaxNodes) <= MaxNodes {
+			lo = mid
+		} else {
+			hi = mid - 1
 		}
-	})
+	}
+	return lo
 }
 
-// The patcher reads a file one document at a time and holds one node tree at a time besides the target's
-// (#595): a file of exactly MaxNodes nodes is patched with a peak heap of about one tree of its dense document
-// plus a margin. Before, it held the trees of the original twice and of the patched file at once, plus their
-// decoded values.
+// The largest files the node count accepts are patched within the budget, and one item more is refused (#595).
 func TestNodeBudgetPeakHeap(t *testing.T) {
-	head := nodesOf(denseFile(t, 0))
-	in := denseFile(t, MaxNodes-head)
-	if n := nodesOf(in); n != MaxNodes {
-		t.Fatalf("the file has %d nodes, want %d", n, MaxNodes)
-	}
-	var (
-		out []byte
-		err error
-	)
-	patched := peakHeap(func() { out, err = SetContainerMemoryLimit(in, deployment, mem("web", "512Mi", "768Mi")) })
-	if err != nil || len(out) != len(in) {
-		t.Fatalf("got %v, want the file patched", err)
-	}
-	tree := treeHeap(t, in)
-	t.Logf("peak heap: the patcher %d MiB, the tree of the dense document %d MiB", patched>>20, tree>>20)
-	if patched > tree+executorMemory/8 {
-		t.Errorf("the patcher held %d MiB at its peak, want at most one tree's %d MiB plus %d MiB",
-			patched>>20, tree>>20, executorMemory>>23)
-	}
-	_, err = SetContainerMemoryLimit(denseFile(t, MaxNodes+1-head), deployment, mem("web", "512Mi", "768Mi"))
-	if !errors.Is(err, ErrInvalidYAML) || !strings.Contains(err.Error(), "YAML nodes") {
-		t.Errorf("one node over the budget: got %v, want %v naming the nodes", err, ErrInvalidYAML)
-	}
-}
-
-// A file of MaxBytes packed with nodes (a flow list of about 520,000 items) is refused for its nodes with a
-// peak heap of one tree of it, under the executor's memory limit (#595). Before, the patcher held about 260 MiB.
-func TestDenseFilePeakHeap(t *testing.T) {
-	in := denseFile(t, 0)
-	in = denseFile(t, (MaxBytes-len(in))/2)
-	if len(in) > MaxBytes {
-		t.Fatalf("the file has %d bytes, over the limit of %d", len(in), MaxBytes)
-	}
-	var err error
-	patched := peakHeap(func() { _, err = SetContainerMemoryLimit(in, deployment, mem("web", "512Mi", "768Mi")) })
-	if !errors.Is(err, ErrInvalidYAML) || !strings.Contains(err.Error(), "YAML nodes") {
-		t.Errorf("got %v, want %v naming the nodes", err, ErrInvalidYAML)
-	}
-	tree := treeHeap(t, in)
-	t.Logf("peak heap: the patcher %d MiB, the tree of the dense document %d MiB", patched>>20, tree>>20)
-	if patched > tree+executorMemory/8 || patched >= executorMemory {
-		t.Errorf("the patcher held %d MiB at its peak, want at most one tree's %d MiB plus %d MiB, under the executor's %d MiB",
-			patched>>20, tree>>20, executorMemory>>23, executorMemory>>20)
+	for name, file := range map[string]func(*testing.T, int) []byte{"flow list": listFile, "flow mapping": keysFile} {
+		t.Run(name+" at the budget", func(t *testing.T) {
+			peakInChild(t, func(t *testing.T) []byte { return file(t, atBudget(t, file)) }, "")
+		})
+		t.Run(name+" over the budget", func(t *testing.T) {
+			_, err := SetContainerMemoryLimit(file(t, atBudget(t, file)+1), deployment, mem("web", "512Mi", "768Mi"))
+			if !errors.Is(err, ErrInvalidYAML) || !strings.Contains(err.Error(), "the file holds more than 131072 YAML nodes") {
+				t.Errorf("got %v, want %v naming the nodes", err, ErrInvalidYAML)
+			}
+		})
 	}
 }

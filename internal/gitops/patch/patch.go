@@ -36,11 +36,10 @@ import (
 // MaxBytes is the largest input accepted, as for files read from Git.
 const MaxBytes = 1 << 20
 
-// MaxNodes is the most YAML nodes (scalars, collections and documents) a file may hold. The patcher reads a
-// file one document at a time and keeps at most the target document besides the one it reads, so the nodes it
-// holds at once stay under this bound: about 22 MiB of node trees. A file of MaxBytes packed with nodes holds
-// about 500,000, and their tree alone takes about 85 MiB of the executor's 128 MiB (#595).
-const MaxNodes = 1 << 17
+// MaxNodes is the most YAML nodes (scalars, collections and documents) a file may hold, as gityaml.Nodes
+// counts them from the bytes before anything parses the file (#595). The count errs high, so the trees the
+// patcher builds hold fewer nodes than this.
+const MaxNodes = gityaml.MaxNodes
 
 var wholeNumber = regexp.MustCompile(`^(0|[1-9][0-9]{0,9})$`)
 
@@ -120,8 +119,9 @@ func splice(data []byte, target v1alpha1.ObjectRef, field sourcemap.Field, previ
 }
 
 // check runs the fail-closed check every YAML file read from Git passes (internal/gitops/gityaml) before
-// anything decodes data, so anchors, aliases, merge keys and the forms that hide them are refused before a
-// decode could expand them (#595, invariant 4). The source mapping and the semantic diff refuse the same files.
+// anything decodes data, so a file of more than MaxNodes nodes is refused before any tree of it is built, and
+// anchors, aliases, merge keys and the forms that hide them before a decode could expand them (#595,
+// invariant 4). The source mapping and the semantic diff refuse the same files.
 func check(data []byte) error {
 	n, err := gityaml.Objects(data, sourcemap.MaxDocuments)
 	if err != nil {
@@ -138,11 +138,9 @@ func check(data []byte) error {
 	return nil
 }
 
-// documents reads a file one document at a time, so that only the node tree of the document read last is held,
-// and counts the nodes of the file against MaxNodes.
+// documents reads a file one document at a time, so that only the node tree of the document read last is held.
 type documents struct {
-	dec   *yaml.Decoder
-	nodes int
+	dec *yaml.Decoder
 }
 
 func newDocuments(data []byte) *documents {
@@ -150,8 +148,7 @@ func newDocuments(data []byte) *documents {
 }
 
 // next returns the next document as nodes and decoded, so invalid YAML and duplicate keys are refused before
-// anything is located, or io.EOF after the last one. It refuses the document that takes the file over
-// MaxNodes before decoding it.
+// anything is located, or io.EOF after the last one.
 func (d *documents) next() (*yaml.Node, any, error) {
 	var n yaml.Node
 	err := d.dec.Decode(&n)
@@ -161,26 +158,11 @@ func (d *documents) next() (*yaml.Node, any, error) {
 	if err != nil {
 		return nil, nil, refuse(ReasonInvalidYAML, "the file is not valid YAML")
 	}
-	if d.nodes += countNodes(&n, MaxNodes-d.nodes); d.nodes > MaxNodes {
-		return nil, nil, refuse(ReasonInvalidYAML, fmt.Sprintf("the file holds more than %d YAML nodes", MaxNodes))
-	}
 	var v any
 	if err := n.Decode(&v); err != nil {
 		return nil, nil, refuse(ReasonInvalidYAML, "the file is not valid YAML")
 	}
 	return &n, v, nil
-}
-
-// countNodes returns the nodes of the tree under n, n included; it stops counting once the count is over limit.
-func countNodes(n *yaml.Node, limit int) int {
-	c := 1
-	for _, ch := range n.Content {
-		if c > limit {
-			break
-		}
-		c += countNodes(ch, limit-c)
-	}
-	return c
 }
 
 // original is what findDocument keeps of the file to patch: the document that declares the target, and what
@@ -517,6 +499,10 @@ func tokenBounds(data []byte, n *yaml.Node) (int, int, error) {
 // document at a time, so it holds one node tree at a time (#595).
 func verify(before original, after []byte, field sourcemap.Field, desired string) error {
 	fail := refuse(ReasonVerificationFailed, "the patched file differs from the original in more than the target value")
+	// The patched file differs from the checked one in one value only, but nothing parses it unbounded.
+	if gityaml.Nodes(after, MaxNodes) > MaxNodes {
+		return fail
+	}
 	docs := newDocuments(after)
 	for i := 0; ; i++ {
 		na, a, err := docs.next()

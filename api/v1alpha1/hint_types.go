@@ -300,7 +300,8 @@ type IncomingHandoff struct {
 
 	// pullRequestUpdate records the rewrite of the pull request's title and body for this request's plan, with
 	// its marker (ADR-0028 section 4, step 6): Done once the Git host did it, Refused when it refused it for
-	// good. Until it is Done the body carries the predecessor's marker, which this request accepts as its own.
+	// good. Until it is Done the body carries the predecessor's marker, or after refused rewrites further up the
+	// chain an earlier request's, which this request accepts as its own while its chain reaches that request.
 	// +optional
 	PullRequestUpdate HandoffStep `json:"pullRequestUpdate,omitempty"`
 }

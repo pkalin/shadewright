@@ -1291,7 +1291,11 @@ func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, r
 	case err != nil:
 		return freshness.WrapProvider("find the change request", err)
 	}
-	if !hasMarker(cr.Body, rr) || (recorded != nil && cr.Number != recorded.Number) {
+	ours, err := r.ownsMarker(ctx, cr.Body, rr)
+	if err != nil {
+		return err
+	}
+	if !ours || (recorded != nil && cr.Number != recorded.Number) {
 		if recorded == nil {
 			// Someone else's pull request on our branch name, or one of another plan: never ours to close.
 			return nil

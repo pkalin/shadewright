@@ -271,6 +271,14 @@ type GitProvider interface {
 	// reads.
 	Parents(ctx context.Context, commit string) ([]string, error)
 
+	// CheckCommit reports what commit carries over its own parent, whatever the target branch holds:
+	// BranchOneChange with that parent when commit has exactly one parent and the two trees differ at most in
+	// the content of the regular file at path (same mode), BranchForeign otherwise. It never answers
+	// BranchAtTarget, so a commit that a merge took into the target branch is still judged (the supersede
+	// handoff of ADR-0028 section 4 recognising its own commit after a merge commit). It only reads. Errors are
+	// failures to find out, never an answer.
+	CheckCommit(ctx context.Context, commit, path string) (BranchState, string, error)
+
 	// CheckMerged reports what head, the head of a change request that mergeCommit merged into the target
 	// branch, carried over the target branch as it was before the merge: BranchOneChange with head's parent
 	// when head has exactly one parent, that parent is the first parent of mergeCommit or an ancestor of it,

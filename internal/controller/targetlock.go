@@ -224,7 +224,11 @@ func (r *RemediationRequestReconciler) findOwnChangeRequest(ctx context.Context,
 	case err != nil:
 		return nil, freshness.WrapProvider("find the change request", err)
 	}
-	if !hasMarker(cr.Body, rr) || (recorded != nil && cr.Number != recorded.Number) {
+	ours, err := r.ownsMarker(ctx, cr.Body, rr)
+	if err != nil {
+		return nil, err
+	}
+	if !ours || (recorded != nil && cr.Number != recorded.Number) {
 		if recorded == nil {
 			// Someone else's pull request on the branch name: none of this request's own was opened, as the
 			// close of closeChangeRequest also finds.

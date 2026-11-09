@@ -81,8 +81,8 @@ import (
 //     Consumed and holdsTarget false. It is the one Superseded whose pull request may be open (prMayBeOpen).
 //   - Step 6 (followHandoff): while the pull request waits, its title and body are rewritten for the new plan
 //     with the replacement's marker, recorded in status.handoff.from as Done or Refused; a refusal is never
-//     recorded as done, and a body the Git host did not rewrite keeps the predecessor's marker, which the
-//     replacement keeps accepting.
+//     recorded as done, and a body the Git host did not rewrite keeps the marker of a request further up the
+//     chain, which the replacement keeps accepting (ownsMarker, #591).
 //   - The check run and the merge gate are not the handoff's: like on every head of a Shadewright pull request,
 //     the new head starts without status.pullRequest.reviewCheck, and the look at the pull request creates the
 //     check run on it (reviewcheck.go). The hints carried over (all of the chain, whatever became of them) keep
@@ -494,6 +494,16 @@ func (r *RemediationRequestReconciler) isHandoffCommit(ctx context.Context, git 
 	switch bs, err := branchStateOf(ctx, git, path, head, min(chainDepth(pred)+1, providers.MaxChainCommits)); {
 	case err != nil:
 		return false, err
+	case bs == providers.BranchAtTarget:
+		// A merge took head into the target branch (a merge commit or a fast-forward, #591), so the chain can no
+		// longer be told apart from it. head is judged against its own parent instead, the head the predecessor
+		// recorded (checked above), whose chain was checked when it was recorded.
+		switch state, parent, err := git.CheckCommit(ctx, head, path); {
+		case err != nil:
+			return false, freshness.WrapProvider("check what the merged branch head holds", err)
+		case state != providers.BranchOneChange || parent != to.ExpectedHead:
+			return false, nil
+		}
 	case bs != providers.BranchOneChange:
 		return false, nil
 	}

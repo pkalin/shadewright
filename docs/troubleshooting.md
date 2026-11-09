@@ -35,7 +35,7 @@ The reason is on one of these conditions:
 
 - `PolicyAllowed`: the policy check. `False` is `Denied`, `Unknown` is `NeedsIntervention` or a wait, `True` is allowed.
 - `PullRequestOpened`: a stop before a pull request is recorded, and the history of one that was closed.
-- `Approved`: a stop after a pull request is recorded; `WaitingForReview` while it waits.
+- `Approved`: a stop after a pull request is recorded; `WaitingForReview` while it waits, or `ReviewCheckRefused` while it waits on a check the Git host refused.
 - `PlanFresh`: `False` when the plan went stale (`Superseded`), `Unknown` while the Git host refuses a freshness check.
 - `Queued`: `True` while a limit holds a request back before its policy check (see [Limits](#limits)).
 
@@ -190,6 +190,7 @@ Stops before a pull request is recorded are on `PullRequestOpened`; after, on `A
 | `GitRejected` | The Git host refused the request as invalid and Git state does not explain it. Not retried | Read the executor log, fix, apply a new request |
 | `PullRequestOpened` | Progress, not a failure: the pull request is open on Shadewright's commit. Becomes the closed form below | None |
 | `WaitingForReview` | `Approved` is `False`: the pull request waits for a person. With `approval` not required it still waits, because auto-merge is not built | Review and merge it |
+| `ReviewCheckRefused` | `Approved` is `False`, with a Warning Event of the same reason: with reviewer hints on, the Git host refused for good to create or complete the check run `shadewright/review` on the pull request's head ([ADR-0028](adr/0028-reviewer-hints-through-the-pull-request.md) section 5), so a ruleset that requires it blocks the merge. Not an end: the request keeps waiting, and the check is not asked again on that head | Give the App `checks: write` ([ADR-0006](adr/0006-github-app-key-in-key-vault.md)) and check the rulesets; a new head creates the check again, or a repository admin merges past it |
 | `PullRequestClosed` | Shadewright closed its pull request (stale plan or a change that no longer renders as planned); the message gives the number and why | See the freshness and render tables |
 
 ## Rollout after the merge

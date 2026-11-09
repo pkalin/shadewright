@@ -155,9 +155,11 @@ executor:
       # @section -- Executor
       cpu: 500m
       # -- Memory limit. Required by the schema (a `null` override is refused), so the container's memory is never
-      # unbounded.
+      # unbounded. 256Mi gives headroom for large real GitOps trees (#615); the Git input budgets (#495, #595, #482)
+      # stay the bound and were measured against 128Mi, and growth from crafted input multiplies, so the limit is not
+      # the defence (#614).
       # @section -- Executor
-      memory: 128Mi
+      memory: 256Mi
     requests:
       # -- CPU request.
       # @section -- Executor

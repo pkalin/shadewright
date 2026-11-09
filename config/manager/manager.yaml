@@ -101,7 +101,10 @@ spec:
         resources:
           limits:
             cpu: 500m
-            memory: 128Mi
+            # 256Mi: headroom for large real GitOps trees (#615). The Git input budgets (#495, #595, #482) stay the
+            # bound and were measured against 128Mi; growth from crafted input multiplies, so the limit is not the
+            # defence (#614).
+            memory: 256Mi
           requests:
             cpu: 10m
             memory: 64Mi

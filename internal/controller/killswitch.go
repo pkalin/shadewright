@@ -166,6 +166,13 @@ func (g *gatedGit) IsAncestor(ctx context.Context, ancestor, commit string) (boo
 
 var _ providers.AncestryChecker = (*gatedGit)(nil)
 
+// feedback returns the wrapped provider as a [providers.FeedbackSource] when it is one. Its methods only read,
+// so they pass straight through, without a checkpoint.
+func (g *gatedGit) feedback() (providers.FeedbackSource, bool) {
+	fs, ok := g.git.(providers.FeedbackSource)
+	return fs, ok
+}
+
 // gate calls allow before a write method and returns the context to call the wrapped provider with: it
 // carries allow as the write checkpoint ([providers.WithWriteCheckpoint]), so an adapter that makes several
 // requests in one method, or retries one, asks the gate again right before each of them. The adapter gets

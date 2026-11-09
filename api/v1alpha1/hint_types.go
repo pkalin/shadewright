@@ -20,13 +20,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Reviewer hints and the supersede handoff (ADR-0028). The analyzer reads stored hints and writes spec.replaces,
-// spec.chainRoot and the Incident's status.handledHint; planned: nothing writes status.hints or status.handoff
-// yet.
+// Reviewer hints and the supersede handoff (ADR-0028). The executor writes status.hints, status.refusedHints
+// and status.commentCursor; the analyzer reads stored hints and writes spec.replaces, spec.chainRoot and the
+// Incident's status.handledHint. Planned: nothing writes status.handoff yet.
 
-// MaxHints is the most hints a request's status.hints holds, which is also the most hints one supersede chain
-// can consume: the consumed hints of a chain are carried into the replacement's status (ADR-0028 section 6).
+// MaxHints is the most hints one supersede chain can consume, and so the most Consumed or Reserved entries of
+// a request's status.hints: the consumed hints of a chain are carried into the replacement's status (ADR-0028
+// section 6).
 const MaxHints = 3
+
+// MaxStoredHints is the most entries a request's status.hints holds in all, of any state. A stored hint is
+// never removed, so Declined ones stay as the record; once the list is full no further hint is stored.
+const MaxStoredHints = 10
 
 // MaxHintTextBytes is the most bytes of a hint's text after redaction (ADR-0028 section 2).
 const MaxHintTextBytes = 2048
@@ -115,6 +120,8 @@ type HintAuthor struct {
 // +kubebuilder:validation:XValidation:rule="self.state != 'Declined' || has(self.reason)",message="a Declined hint needs a reason"
 // +kubebuilder:validation:XValidation:rule="self.source == oldSelf.source && self.commentID == oldSelf.commentID && self.digest == oldSelf.digest && self.text == oldSelf.text && self.author == oldSelf.author && self.updatedAt == oldSelf.updatedAt && self.acceptedAt == oldSelf.acceptedAt",message="a stored hint is pinned: only its state and reason change"
 // +kubebuilder:validation:XValidation:rule="!(oldSelf.state in ['Consumed', 'Declined']) || (has(self.reason) == has(oldSelf.reason) && (!has(self.reason) || self.reason == oldSelf.reason))",message="the reason of a Consumed or Declined hint never changes"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.editedAfterAccept) || !oldSelf.editedAfterAccept || (has(self.editedAfterAccept) && self.editedAfterAccept)",message="editedAfterAccept is never unset"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.outcome) || (has(self.outcome) && self.outcome == oldSelf.outcome)",message="the outcome of a hint never changes once set"
 // +kubebuilder:validation:XValidation:rule="oldSelf.state == self.state || (oldSelf.state == 'Pending' && self.state in ['Reserved', 'Declined']) || (oldSelf.state == 'Reserved' && self.state in ['Consumed', 'Declined'])",message="a hint moves only from Pending to Reserved or Declined, and from Reserved to Consumed or Declined"
 type Hint struct {
 	// source is the system the comment is in.
@@ -155,13 +162,35 @@ type Hint struct {
 	// +required
 	State HintState `json:"state"`
 
-	// reason says why a Declined hint was declined, for example BudgetSpent or NoProposal.
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=64
-	// +kubebuilder:validation:Pattern=`^[A-Z][A-Za-z0-9]*$`
+	// reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or
+	// NoProposal), NoAnswer when none came within the executor's bound, or the end of the request
+	// (PullRequestMerged, PullRequestClosed, RequestEnded). HintDeclineReasons lists them.
+	// +kubebuilder:validation:Enum=NoModelConfigured;BudgetSpent;BudgetUnavailable;NoProposal;MissingData;NoEvidence;TargetNotSupported;PreviousValueUnknown;NoChange;DirectionReversed;NoPolicyForAction;ActionOutOfBounds;InvalidOutput;EscalationNotConfigured;StepLimit;TokenLimit;DeadlineExceeded;ModelUnavailable;ModelNotFound;ModelForbidden;ModelError;UnexpectedModel;EndpointNotAllowed;PlanUnchanged;HintNotPending;RequestNotCreated;CoolingDown;NoAnswer;PullRequestMerged;PullRequestClosed;RequestEnded
 	// +optional
 	Reason string `json:"reason,omitempty"`
+
+	// editedAfterAccept is true once the executor saw the comment edited after it accepted the hint. The
+	// stored text stays as it was; the edit is recorded once, here, whatever the number of edits.
+	// +optional
+	EditedAfterAccept bool `json:"editedAfterAccept,omitempty"`
+
+	// outcome is the analysis's outcome that answered the hint with a replacement (Proposed or RunbookMatched),
+	// recorded when the executor first read it in the Incident. The hint is answered from then on, whatever
+	// the Incident handles later: it waits for the handoff, and the answer timeout no longer applies. Once set
+	// it never changes.
+	// +kubebuilder:validation:Enum=Proposed;RunbookMatched
+	// +optional
+	Outcome string `json:"outcome,omitempty"`
 }
+
+// HintDeclineReasons are the values of Hint.reason, the same as its enum: the analysis's outcomes that create
+// no replacement, and the executor's own.
+var HintDeclineReasons = []string{"NoModelConfigured", "BudgetSpent", "BudgetUnavailable", "NoProposal",
+	"MissingData", "NoEvidence", "TargetNotSupported", "PreviousValueUnknown", "NoChange", "DirectionReversed",
+	"NoPolicyForAction", "ActionOutOfBounds", "InvalidOutput", "EscalationNotConfigured", "StepLimit",
+	"TokenLimit", "DeadlineExceeded", "ModelUnavailable", "ModelNotFound", "ModelForbidden", "ModelError",
+	"UnexpectedModel", "EndpointNotAllowed", "PlanUnchanged", "HintNotPending", "RequestNotCreated",
+	"CoolingDown", "NoAnswer", "PullRequestMerged", "PullRequestClosed", "RequestEnded"}
 
 // RequestReplacement names the request a replacement takes over and the hint it answers (ADR-0028 section 4).
 type RequestReplacement struct {
@@ -261,4 +290,130 @@ type Handoff struct {
 	// to is the outgoing side, set on a predecessor.
 	// +optional
 	To *OutgoingHandoff `json:"to,omitempty"`
+}
+
+// MaxRefusedHints is the most refusals a request's status.refusedHints keeps; the oldest goes first.
+const MaxRefusedHints = 10
+
+// HintRefusal says why the executor stored no hint for a writer's comment that carried the command (ADR-0028
+// section 2); a command of an author without write access is never recorded, so it cannot push a record out.
+// CapReached: MaxHints hints of the request are Consumed or Reserved already, which count for its whole
+// supersede chain. TooLong: the hint is over MaxHintTextBytes after redaction, or the body was cut before the
+// end of its first line. NotRedactable: the redacted text still holds something the redactor would change.
+// Empty: the command has no text. EditedAfterSeen: a comment the executor had read already was edited to carry
+// the command. An edit of a stored hint's comment is recorded on the hint (editedAfterAccept), not here.
+// +kubebuilder:validation:Enum=CapReached;TooLong;NotRedactable;Empty;EditedAfterSeen
+type HintRefusal string
+
+// The refusals, one per value of the HintRefusal enum.
+const (
+	HintRefusalCapReached      HintRefusal = "CapReached"
+	HintRefusalTooLong         HintRefusal = "TooLong"
+	HintRefusalNotRedactable   HintRefusal = "NotRedactable"
+	HintRefusalEmpty           HintRefusal = "Empty"
+	HintRefusalEditedAfterSeen HintRefusal = "EditedAfterSeen"
+)
+
+// RefusedHint records a comment that carried the command and was refused, so the refusal is made once and a
+// reader sees why no hint was stored. It holds no text of the comment.
+type RefusedHint struct {
+	// source is the system the comment is in.
+	// +required
+	Source HintSource `json:"source"`
+
+	// commentID is the comment's ID in the source.
+	// +kubebuilder:validation:Minimum=1
+	// +required
+	CommentID int64 `json:"commentID"`
+
+	// author wrote the comment, as the source's API reported it.
+	// +required
+	Author HintAuthor `json:"author"`
+
+	// reason says why no hint was stored.
+	// +required
+	Reason HintRefusal `json:"reason"`
+
+	// refusedAt is when the executor refused it.
+	// +required
+	RefusedAt metav1.Time `json:"refusedAt"`
+}
+
+// CommentCursor is where the executor's next look at the conversation comments of the request's pull request
+// starts (ADR-0028 section 3): the durable watermark, so a restart neither reads a comment again as new nor
+// skips one. It is written in the status update that stores what the look found, just after the last comment
+// the look judged. Once set it is kept, and since never decreases (CEL on RemediationRequest). Its fields
+// other than seen mean something only to the code host's adapter.
+// +kubebuilder:validation:XValidation:rule="!has(self.etag) || ((!has(self.page) || self.page == 0) && (!has(self.afterID) || self.afterID == 0))",message="etag is kept only on the first page of a new sweep"
+// +kubebuilder:validation:XValidation:rule="has(self.evictedAt) == (has(self.evictedID) && self.evictedID > 0)",message="evictedAt and evictedID are set together"
+type CommentCursor struct {
+	// since is the oldest update time the current sweep of the comments asks for. Every comment created at or
+	// before it was returned by an earlier look, so a command in one counts as an edit (EditedAfterSeen). That
+	// is an assumption about the code host: the GitHub adapter sets since a minute before the host's time when
+	// the previous sweep began, assuming a new comment shows up in the list within a minute. One that shows up
+	// later is refused as EditedAfterSeen and has to be posted again: it fails closed.
+	// +optional
+	Since *metav1.Time `json:"since,omitempty"`
+
+	// page is the page the next look starts on; 0 starts a new sweep.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100000
+	// +optional
+	Page int32 `json:"page,omitempty"`
+
+	// afterID: the comments of the current sweep with an ID up to this one were returned already.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	AfterID int64 `json:"afterID,omitempty"`
+
+	// sweepStart is the code host's time when the current sweep began.
+	// +optional
+	SweepStart *metav1.Time `json:"sweepStart,omitempty"`
+
+	// etag is the entity tag of the last answer to the first page of a sweep that held no comment, sent as
+	// If-None-Match, so an unchanged answer is "not modified" and costs no read.
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^(W/)?"[!#-~]*"$`
+	// +optional
+	ETag string `json:"etag,omitempty"`
+
+	// seen are the commands the executor judged whose update time is at or after since, so a look that returns
+	// them again unchanged (the overlap of two sweeps) does not judge them again: at most MaxSeenComments, the
+	// newest. A comment returned with another update time was edited and is judged again.
+	// +listType=map
+	// +listMapKey=commentID
+	// +kubebuilder:validation:MaxItems=50
+	// +optional
+	Seen []SeenComment `json:"seen,omitempty"`
+
+	// evictedAt is the newest update time of the commands pushed out of seen by its bound; with evictedID it is
+	// the watermark of those commands. A command with an ID up to evictedID and an update time up to evictedAt
+	// counts as judged, so an evicted one returned again unchanged is not judged again, while one edited after
+	// its judgement has a later update time and is. The watermark only grows, and is dropped once since passes
+	// evictedAt. A command edited during a sweep and passed by it may count as judged too when more than
+	// MaxSeenComments newer ones were judged first: it is then not judged, never accepted twice. Those newer
+	// ones include commands from authors without write access, so anyone who can comment can cause this on
+	// purpose; it fails closed (the edited command is missed, its author posts a new comment).
+	// +optional
+	EvictedAt *metav1.Time `json:"evictedAt,omitempty"`
+
+	// evictedID is the highest ID of the commands pushed out of seen; set together with evictedAt.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	EvictedID int64 `json:"evictedID,omitempty"`
+}
+
+// MaxSeenComments is the most entries status.commentCursor.seen keeps.
+const MaxSeenComments = 50
+
+// SeenComment is a comment the executor judged, with the update time it had then.
+type SeenComment struct {
+	// commentID is the comment's ID in the code host.
+	// +kubebuilder:validation:Minimum=1
+	// +required
+	CommentID int64 `json:"commentID"`
+
+	// updatedAt is the comment's update time when it was judged.
+	// +required
+	UpdatedAt metav1.Time `json:"updatedAt"`
 }

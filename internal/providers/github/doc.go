@@ -44,7 +44,8 @@ limitations under the License.
 //     carries each look on from the last; a look steps back when deletions moved its place, and every sweep
 //     of reviews starts on page 1, since a draft submitted late keeps its early place. A malformed item is skipped and counted; an item whose
 //     URLs name another repository, another pull request or an issue fails the whole look, without a retry.
-//     CanWrite reads the base permission of a person (admin,
+//     A sweep of comments that found nothing keeps its since and the ETag of that answer, and the next one
+//     asks with If-None-Match: a 304 returns nothing and the same cursor. CanWrite reads the base permission of a person (admin,
 //     maintain or write accepted; anything else and a 404 refused) and refuses an answer for another account
 //     ID; bots and Apps are refused without a request.
 //

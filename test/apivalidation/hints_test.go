@@ -156,10 +156,17 @@ var _ = Describe("RemediationRequest replaces and chainRoot", func() {
 })
 
 var _ = Describe("RemediationRequest status.hints", func() {
-	It("accepts MaxHints hints at their bounds", func() {
+	It("accepts MaxStoredHints hints at their bounds, MaxHints of them Consumed or Reserved", func() {
 		rr := createdRequest(false)
-		for i := range v1alpha1.MaxHints {
-			h := testHint(int64(i+1), v1alpha1.HintPending)
+		states := []v1alpha1.HintState{v1alpha1.HintConsumed, v1alpha1.HintConsumed, v1alpha1.HintReserved}
+		for i := range v1alpha1.MaxStoredHints {
+			state := v1alpha1.HintDeclined
+			if i < len(states) {
+				state = states[i]
+			} else if i%2 == 0 {
+				state = v1alpha1.HintPending
+			}
+			h := testHint(int64(i+1), state)
 			h.Text = strings.Repeat("a", v1alpha1.MaxHintTextBytes)
 			h.Author.Login = strings.Repeat("b", 100)
 			rr.Status.Hints = append(rr.Status.Hints, h)
@@ -167,12 +174,21 @@ var _ = Describe("RemediationRequest status.hints", func() {
 		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
 	})
 
-	It("refuses a fourth hint", func() {
+	It("refuses an eleventh hint", func() {
 		rr := createdRequest(false)
-		for i := range v1alpha1.MaxHints + 1 {
-			rr.Status.Hints = append(rr.Status.Hints, testHint(int64(i+1), v1alpha1.HintConsumed))
+		for i := range v1alpha1.MaxStoredHints + 1 {
+			rr.Status.Hints = append(rr.Status.Hints, testHint(int64(i+1), v1alpha1.HintPending))
 		}
 		expectStatusRefused(rr, "status.hints: Too many")
+	})
+
+	It("refuses a fourth Consumed or Reserved hint", func() {
+		rr := createdRequest(false)
+		for i := range v1alpha1.MaxHints {
+			rr.Status.Hints = append(rr.Status.Hints, testHint(int64(i+1), v1alpha1.HintConsumed))
+		}
+		rr.Status.Hints = append(rr.Status.Hints, testHint(int64(v1alpha1.MaxHints+1), v1alpha1.HintReserved))
+		expectStatusRefused(rr, "at most 3 hints are Consumed or Reserved")
 	})
 
 	It("refuses text over 2048 bytes in fewer characters", func() {
@@ -212,7 +228,50 @@ var _ = Describe("RemediationRequest status.hints", func() {
 		Entry("a reason that is not a CamelCase word", func(h *v1alpha1.Hint) {
 			h.State, h.Reason = v1alpha1.HintDeclined, "budget spent"
 		}, "status.hints[0].reason"),
+		Entry("a reason the code never writes", func(h *v1alpha1.Hint) {
+			h.State, h.Reason = v1alpha1.HintDeclined, "BecauseISaidSo"
+		}, "status.hints[0].reason"),
 	)
+
+	It("accepts every reason in HintDeclineReasons", func() {
+		for _, reason := range v1alpha1.HintDeclineReasons {
+			rr := createdRequest(false)
+			h := testHint(1, v1alpha1.HintDeclined)
+			h.Reason = reason
+			rr.Status.Hints = []v1alpha1.Hint{h}
+			Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), reason)
+		}
+	})
+
+	It("never unsets editedAfterAccept", func() {
+		rr := createdRequest(false)
+		h := testHint(1, v1alpha1.HintPending)
+		h.EditedAfterAccept = true
+		rr.Status.Hints = []v1alpha1.Hint{h}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		got := reread(rr)
+		got.Status.Hints[0].EditedAfterAccept = false
+		expectStatusRefused(got, "editedAfterAccept is never unset")
+	})
+
+	It("never changes or unsets a hint's outcome, and accepts only a replacement's outcome", func() {
+		rr := createdRequest(false)
+		h := testHint(1, v1alpha1.HintPending)
+		h.Outcome = "NoProposal"
+		rr.Status.Hints = []v1alpha1.Hint{h}
+		expectStatusRefused(rr, "status.hints[0].outcome")
+
+		rr = createdRequest(false)
+		h.Outcome = "Proposed"
+		rr.Status.Hints = []v1alpha1.Hint{h}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		changed := reread(rr)
+		changed.Status.Hints[0].Outcome = "RunbookMatched"
+		expectStatusRefused(changed, "the outcome of a hint never changes once set")
+		unset := reread(rr)
+		unset.Status.Hints[0].Outcome = ""
+		expectStatusRefused(unset, "the outcome of a hint never changes once set")
+	})
 
 	It("refuses two hints for the same comment", func() {
 		rr := createdRequest(false)
@@ -308,6 +367,152 @@ var _ = Describe("RemediationRequest status.hints", func() {
 		}
 	})
 })
+
+func testRefused(commentID int64) v1alpha1.RefusedHint {
+	return v1alpha1.RefusedHint{
+		Source: v1alpha1.HintSourceGitHub, CommentID: commentID, Author: v1alpha1.HintAuthor{ID: 42, Login: "octo-cat"},
+		Reason: v1alpha1.HintRefusalCapReached, RefusedAt: metav1.NewTime(time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)),
+	}
+}
+
+var _ = Describe("RemediationRequest status.refusedHints", func() {
+	It("accepts MaxRefusedHints refusals, each reason, and drops the oldest", func() {
+		rr := createdRequest(false)
+		reasons := []v1alpha1.HintRefusal{v1alpha1.HintRefusalCapReached,
+			v1alpha1.HintRefusalTooLong, v1alpha1.HintRefusalNotRedactable, v1alpha1.HintRefusalEmpty,
+			v1alpha1.HintRefusalEditedAfterSeen}
+		for i := range v1alpha1.MaxRefusedHints {
+			r := testRefused(int64(i + 1))
+			r.Reason = reasons[i%len(reasons)]
+			rr.Status.RefusedHints = append(rr.Status.RefusedHints, r)
+		}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		got := reread(rr)
+		got.Status.RefusedHints = append(got.Status.RefusedHints[1:], testRefused(99))
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "a refusal is not pinned: the oldest goes")
+	})
+
+	It("refuses more than MaxRefusedHints", func() {
+		rr := createdRequest(false)
+		for i := range v1alpha1.MaxRefusedHints + 1 {
+			rr.Status.RefusedHints = append(rr.Status.RefusedHints, testRefused(int64(i+1)))
+		}
+		expectStatusRefused(rr, "status.refusedHints: Too many")
+	})
+
+	It("refuses two refusals of the same comment", func() {
+		rr := createdRequest(false)
+		rr.Status.RefusedHints = []v1alpha1.RefusedHint{testRefused(1), testRefused(1)}
+		expectStatusRefused(rr, "Duplicate value")
+	})
+
+	DescribeTable("refuses a refusal out of its rules",
+		func(change func(*v1alpha1.RefusedHint), msg string) {
+			rr := createdRequest(false)
+			r := testRefused(1)
+			change(&r)
+			rr.Status.RefusedHints = []v1alpha1.RefusedHint{r}
+			expectStatusRefused(rr, msg)
+		},
+		Entry("an unknown reason", func(r *v1alpha1.RefusedHint) { r.Reason = "Rude" }, "status.refusedHints[0].reason"),
+		Entry("a non-writer's refusal, never recorded", func(r *v1alpha1.RefusedHint) { r.Reason = "NoWriteAccess" },
+			"status.refusedHints[0].reason"),
+		Entry("an unknown source", func(r *v1alpha1.RefusedHint) { r.Source = "Email" }, "status.refusedHints[0].source"),
+		Entry("comment ID 0", func(r *v1alpha1.RefusedHint) { r.CommentID = 0 }, "status.refusedHints[0].commentID"),
+		Entry("author ID 0", func(r *v1alpha1.RefusedHint) { r.Author.ID = 0 }, "status.refusedHints[0].author.id"),
+		Entry("a login with a space", func(r *v1alpha1.RefusedHint) { r.Author.Login = "octo cat" }, "status.refusedHints[0].author.login"),
+	)
+})
+
+var _ = Describe("RemediationRequest status.commentCursor", func() {
+	at := metav1.NewTime(time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC))
+	It("accepts a cursor at its bounds", func() {
+		for _, c := range []v1alpha1.CommentCursor{
+			{},
+			{Since: &at, ETag: `W/"` + strings.Repeat("a", 250) + `"`},
+			{Since: &at, Page: 100000, AfterID: 1 << 40, SweepStart: &at},
+			{ETag: `""`},
+		} {
+			rr := createdRequest(false)
+			rr.Status.CommentCursor = &c
+			Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "%+v", c)
+		}
+	})
+
+	DescribeTable("refuses a cursor out of its rules",
+		func(c v1alpha1.CommentCursor, msg string) {
+			rr := createdRequest(false)
+			rr.Status.CommentCursor = &c
+			expectStatusRefused(rr, msg)
+		},
+		Entry("a negative page", v1alpha1.CommentCursor{Page: -1}, "status.commentCursor.page"),
+		Entry("a page past the bound", v1alpha1.CommentCursor{Page: 100001}, "status.commentCursor.page"),
+		Entry("a negative afterID", v1alpha1.CommentCursor{AfterID: -1}, "status.commentCursor.afterID"),
+		Entry("an unquoted etag", v1alpha1.CommentCursor{ETag: "abc"}, "status.commentCursor.etag"),
+		Entry("an etag with a line break", v1alpha1.CommentCursor{ETag: "\"a\"\r\nX-Evil: 1"}, "status.commentCursor.etag"),
+		Entry("an etag with a blank", v1alpha1.CommentCursor{ETag: `"a b"`}, "status.commentCursor.etag"),
+		Entry("an etag over 256 bytes", v1alpha1.CommentCursor{ETag: `"` + strings.Repeat("a", 255) + `"`}, "status.commentCursor.etag"),
+		Entry("an etag on a later page", v1alpha1.CommentCursor{ETag: `"t"`, Page: 2},
+			"etag is kept only on the first page of a new sweep"),
+		Entry("an etag after an ID", v1alpha1.CommentCursor{ETag: `"t"`, AfterID: 7},
+			"etag is kept only on the first page of a new sweep"),
+		Entry("too many seen comments", v1alpha1.CommentCursor{Seen: seenComments(v1alpha1.MaxSeenComments+1, at)},
+			"status.commentCursor.seen: Too many"),
+		Entry("a seen comment ID 0", v1alpha1.CommentCursor{Seen: []v1alpha1.SeenComment{{CommentID: 0, UpdatedAt: at}}},
+			"status.commentCursor.seen[0].commentID"),
+		Entry("evictedAt without evictedID", v1alpha1.CommentCursor{EvictedAt: &at},
+			"evictedAt and evictedID are set together"),
+		Entry("evictedID without evictedAt", v1alpha1.CommentCursor{EvictedID: 7},
+			"evictedAt and evictedID are set together"),
+		Entry("a negative evictedID", v1alpha1.CommentCursor{EvictedAt: &at, EvictedID: -1},
+			"status.commentCursor.evictedID"),
+	)
+
+	It("accepts the watermark of evicted comments", func() {
+		rr := createdRequest(false)
+		rr.Status.CommentCursor = &v1alpha1.CommentCursor{Since: &at, EvictedAt: &at, EvictedID: 7}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+	})
+
+	It("accepts MaxSeenComments seen comments", func() {
+		rr := createdRequest(false)
+		rr.Status.CommentCursor = &v1alpha1.CommentCursor{Since: &at, Seen: seenComments(v1alpha1.MaxSeenComments, at)}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+	})
+
+	It("keeps the cursor once set, and never moves since back", func() {
+		rr := createdRequest(false)
+		later := metav1.NewTime(at.Add(time.Hour))
+		rr.Status.CommentCursor = &v1alpha1.CommentCursor{Since: &later}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+
+		gone := reread(rr)
+		gone.Status.CommentCursor = nil
+		expectStatusRefused(gone, "status.commentCursor is kept once set")
+
+		back := reread(rr)
+		back.Status.CommentCursor.Since = &at
+		expectStatusRefused(back, "status.commentCursor.since never decreases")
+
+		dropped := reread(rr)
+		dropped.Status.CommentCursor.Since = nil
+		expectStatusRefused(dropped, "status.commentCursor.since never decreases")
+
+		forward := reread(rr)
+		ahead := metav1.NewTime(at.Add(2 * time.Hour))
+		forward.Status.CommentCursor.Since = &ahead
+		Expect(k8sClient.Status().Update(ctx, forward)).To(Succeed())
+	})
+})
+
+// seenComments is n seen comments with IDs from 1.
+func seenComments(n int, at metav1.Time) []v1alpha1.SeenComment {
+	out := make([]v1alpha1.SeenComment, n)
+	for i := range out {
+		out[i] = v1alpha1.SeenComment{CommentID: int64(i + 1), UpdatedAt: at}
+	}
+	return out
+}
 
 var _ = Describe("RemediationRequest status.handoff", func() {
 	const nextUID = "55555555-5555-4555-8555-555555555555"
@@ -449,7 +654,7 @@ var _ = Describe("RemediationRequest status.handoff", func() {
 		a.Status.Handoff = &v1alpha1.Handoff{To: outgoing(v1alpha1.HandoffIntent, 1)}
 		Expect(k8sClient.Status().Update(ctx, a)).To(Succeed())
 		a.Status.Hints[0].State = v1alpha1.HintDeclined
-		a.Status.Hints[0].Reason = v1alpha1.ReasonHandoffAborted
+		a.Status.Hints[0].Reason = "RequestEnded" // the reason of a hint whose handoff aborted is #539's to choose
 		a.Status.Handoff.To.Phase = v1alpha1.HandoffAborted
 		Expect(k8sClient.Status().Update(ctx, a)).To(Succeed())
 		for _, phase := range []v1alpha1.HandoffPhase{v1alpha1.HandoffIntent, v1alpha1.HandoffDone} {

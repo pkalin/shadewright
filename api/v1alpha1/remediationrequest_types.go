@@ -476,15 +476,31 @@ type RemediationRequestStatus struct {
 	Deadline *metav1.Time `json:"deadline,omitempty"`
 
 	// hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a
-	// replacement carried over from its chain, at most MaxHints (ADR-0028). Only the executor writes them; a
-	// stored hint keeps its pin, moves only forward in its state and is never removed. Planned: nothing
-	// writes them yet.
+	// replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all,
+	// and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the
+	// executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed,
+	// so a Declined hint stays as the record of what was asked. Planned: carrying them over to a replacement.
 	// +listType=map
 	// +listMapKey=source
 	// +listMapKey=commentID
-	// +kubebuilder:validation:MaxItems=3
+	// +kubebuilder:validation:MaxItems=10
+	// +kubebuilder:validation:XValidation:rule="self.filter(h, h.state in ['Consumed', 'Reserved']).size() <= 3",message="status.hints: at most 3 hints are Consumed or Reserved"
 	// +optional
 	Hints []Hint `json:"hints,omitempty"`
+
+	// refusedHints are the newest comments with the command that the executor refused, at most
+	// MaxRefusedHints, oldest first; an older one is dropped. Only the executor writes them.
+	// +listType=map
+	// +listMapKey=source
+	// +listMapKey=commentID
+	// +kubebuilder:validation:MaxItems=10
+	// +optional
+	RefusedHints []RefusedHint `json:"refusedHints,omitempty"`
+
+	// commentCursor is where the executor's next look at the comments of the pull request starts (ADR-0028
+	// section 3). Only the executor writes it.
+	// +optional
+	CommentCursor *CommentCursor `json:"commentCursor,omitempty"`
 
 	// handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over
 	// (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is
@@ -530,6 +546,10 @@ type RemediationRequestStatus struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to) || self.status.handoff.to.phase == 'Intent' || (has(oldSelf.status) && has(oldSelf.status.handoff) && has(oldSelf.status.handoff.to))",message="status.handoff.to starts in Intent"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from) || (has(self.spec.replaces) && self.status.handoff.from.name == self.spec.replaces.name && self.status.handoff.from.uid == self.spec.replaces.uid && self.status.handoff.from.hint.source == self.spec.replaces.hint.source && self.status.handoff.from.hint.commentID == self.spec.replaces.hint.commentID && self.status.handoff.from.hint.digest == self.spec.replaces.hint.digest)",message="status.handoff.from must match spec.replaces"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to) || (has(self.status.hints) && self.status.hints.exists(h, h.source == self.status.handoff.to.hint.source && h.commentID == self.status.handoff.to.hint.commentID && h.digest == self.status.handoff.to.hint.digest && h.state != 'Pending' && (self.status.handoff.to.phase != 'Intent' || h.state == 'Reserved')))",message="status.handoff.to must name a hint in status.hints that is no longer Pending, and Reserved while the intent stands"
+// status.commentCursor, the watermark of the reviewer hints, is kept once set and its since never decreases, so
+// a comment read already cannot be read again as new (ADR-0028 section 3).
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.commentCursor) || (has(self.status) && has(self.status.commentCursor))",message="status.commentCursor is kept once set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.commentCursor) || !has(oldSelf.status.commentCursor.since) || (has(self.status) && has(self.status.commentCursor) && has(self.status.commentCursor.since) && self.status.commentCursor.since >= oldSelf.status.commentCursor.since)",message="status.commentCursor.since never decreases"
 // The same holds for status.rollout: once set it stays, each of its fields is set once, and ended never goes
 // back to false, so the delivery window cannot restart and a final verdict cannot reopen.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || (has(self.status) && has(self.status.rollout))",message="status.rollout is kept once set"

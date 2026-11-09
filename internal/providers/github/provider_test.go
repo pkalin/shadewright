@@ -82,6 +82,8 @@ type step struct {
 	file   string // fixture in testdata
 	raw    string // literal body, when file is empty
 	err    error  // a transport error instead of a response
+	// ifNoneMatch is the If-None-Match header the request must carry; empty means none.
+	ifNoneMatch string
 }
 
 // script is a RoundTripper that plays recorded exchanges in order. It fails the test on any request to
@@ -127,6 +129,9 @@ func (s *script) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	if st.query != "" && req.URL.RawQuery != st.query {
 		t.Errorf("request %d: query %q, want %q", s.n, req.URL.RawQuery, st.query)
+	}
+	if got := req.Header.Get("If-None-Match"); got != st.ifNoneMatch {
+		t.Errorf("request %d: If-None-Match %q, want %q", s.n, got, st.ifNoneMatch)
 	}
 	if st.check != nil {
 		var body map[string]any

@@ -166,7 +166,7 @@ func TestListCommentsFlagsBotsAndApps(t *testing.T) {
 		t.Errorf("first item = %+v", first)
 	}
 	// A short page ends the sweep; the next asks for what changed since GitHub's clock at its start.
-	wantNext := providers.FeedbackCursor{Since: hostNow.Add(-clockMargin)}
+	wantNext := providers.FeedbackCursor{Since: hostNow.Add(-sinceMargin)}
 	if !got.Complete || got.Next != wantNext {
 		t.Errorf("complete %v, next %+v", got.Complete, got.Next)
 	}
@@ -207,7 +207,7 @@ func TestListCommentsPagingStopsAtTheBoundAndGoesOn(t *testing.T) {
 	if !slices.Equal(ids(got.Items), []int64{9000, 9001}) || !got.Complete {
 		t.Fatalf("items %v, complete %v", ids(got.Items), got.Complete)
 	}
-	if want := (providers.FeedbackCursor{Since: hostNow.Add(-clockMargin)}); got.Next != want {
+	if want := (providers.FeedbackCursor{Since: hostNow.Add(-sinceMargin)}); got.Next != want {
 		t.Errorf("next %+v, want %+v (the sweep's start, not this look's)", got.Next, want)
 	}
 }
@@ -541,7 +541,7 @@ func TestListReviews(t *testing.T) {
 		t.Errorf("bot review = %+v", bot)
 	}
 	// The next sweep keeps the reviews submitted since this one began.
-	if want := (providers.FeedbackCursor{Since: hostNow.Add(-clockMargin)}); got.Next != want {
+	if want := (providers.FeedbackCursor{Since: hostNow.Add(-sinceMargin)}); got.Next != want {
 		t.Errorf("next %+v, want %+v", got.Next, want)
 	}
 }
@@ -576,7 +576,7 @@ func TestListReviewsCursorMovesPastTheBound(t *testing.T) {
 		t.Fatalf("items %v, complete %v", ids(got.Items), got.Complete)
 	}
 	// At the end of the sweep, the next one starts on page 1 from the sweep's start.
-	if want := (providers.FeedbackCursor{Since: hostNow.Add(-clockMargin)}); got.Next != want {
+	if want := (providers.FeedbackCursor{Since: hostNow.Add(-sinceMargin)}); got.Next != want {
 		t.Errorf("next %+v, want %+v", got.Next, want)
 	}
 }
@@ -752,4 +752,171 @@ func TestCanWriteRefusals(t *testing.T) {
 		}
 		assertSafe(t, err)
 	})
+}
+
+// etagged is s with GitHub's Date header and the entity tag tag.
+func etagged(s step, tag string) step {
+	s = dated(s)
+	s.header["ETag"] = tag
+	return s
+}
+
+func TestListCommentsAsksConditionallyWhileNothingChanges(t *testing.T) {
+	const tag = `W/"5f1c0a"`
+	notModified := commentsStep(1, "")
+	notModified.status, notModified.ifNoneMatch = http.StatusNotModified, tag
+	changed := etagged(commentsStep(1, commentPage(t, 1, 7, since.Add(time.Hour), "hello")), `"other"`)
+	changed.ifNoneMatch = tag
+	after := commentsStep(1, "[]")
+	after.query = "" // since moved on
+	h := newHarness(t, ownPR(), etagged(commentsStep(1, "[]"), tag), ownPR(), notModified, ownPR(), changed,
+		ownPR(), after)
+
+	quiet, err := h.p.ListComments(ctx, prNumber, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := providers.FeedbackCursor{Since: since, ETag: tag}
+	if !quiet.Complete || len(quiet.Items) != 0 || quiet.Next != want {
+		t.Fatalf("empty sweep: next %+v, complete %v; want since kept with the tag", quiet.Next, quiet.Complete)
+	}
+	same, err := h.p.ListComments(ctx, prNumber, quiet.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !same.Complete || len(same.Items) != 0 || same.Next != want {
+		t.Fatalf("304: next %+v, complete %v, items %d; want the cursor unchanged", same.Next, same.Complete,
+			len(same.Items))
+	}
+	news, err := h.p.ListComments(ctx, prNumber, same.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ids(news.Items), []int64{7}) || !news.Complete {
+		t.Fatalf("changed answer: items %v, complete %v", ids(news.Items), news.Complete)
+	}
+	if want := (providers.FeedbackCursor{Since: hostNow.Add(-sinceMargin)}); news.Next != want {
+		t.Fatalf("after items: next %+v, want %+v (since moved on, no tag: it was the tag of another query)",
+			news.Next, want)
+	}
+	// The next sweep asks for another since without a condition (the step expects no If-None-Match).
+	if _, err := h.p.ListComments(ctx, prNumber, news.Next); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListCommentsKeepsNoMalformedOrForeignTag(t *testing.T) {
+	for name, tag := range map[string]string{
+		"unquoted":  "abc",
+		"too long":  `"` + strings.Repeat("a", providers.MaxETagBytes) + `"`,
+		"blank":     `"a b"`,
+		"quote":     `"a"b"`,
+		"no header": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, ownPR(), etagged(commentsStep(1, "[]"), tag))
+			got, err := h.p.ListComments(ctx, prNumber, start)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Next != start {
+				t.Errorf("next %+v, want %+v", got.Next, start)
+			}
+		})
+	}
+}
+
+func TestListCommentsKeepsNoTagOfASweepWithItemsOrSkips(t *testing.T) {
+	malformed := commentPage(t, 1, 3, since, "x")
+	malformed = strings.Replace(malformed, `"created_at":"2026-11-08T10:00:00Z"`, `"created_at":"never"`, 1)
+	for name, raw := range map[string]string{
+		"items":     commentPage(t, 1, 3, since, "x"),
+		"malformed": malformed,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, ownPR(), etagged(commentsStep(1, raw), `"t"`))
+			got, err := h.p.ListComments(ctx, prNumber, start)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Next.ETag != "" || !got.Next.Since.After(since) {
+				t.Errorf("next %+v; want since moved on and no tag", got.Next)
+			}
+		})
+	}
+}
+
+func TestListCommentsResumesAfterEachItem(t *testing.T) {
+	full := commentPage(t, feedbackPerPage, 1, since, "x")
+	rest := commentPage(t, 2, feedbackPerPage+1, since, "y")
+	h := newHarness(t, ownPR(), dated(commentsStep(1, full)), commentsStep(2, rest))
+	got, err := h.p.ListComments(ctx, prNumber, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Resume) != len(got.Items) || len(got.Items) != feedbackPerPage+2 {
+		t.Fatalf("%d items, %d resume cursors; want %d of each", len(got.Items), len(got.Resume), feedbackPerPage+2)
+	}
+	for i, it := range got.Items {
+		page := 1
+		if i >= feedbackPerPage {
+			page = 2
+		}
+		want := providers.FeedbackCursor{Since: since, Page: page, AfterID: it.ID, SweepStart: hostNow}
+		if got.Resume[i] != want {
+			t.Fatalf("resume %d is %+v; want %+v", i, got.Resume[i], want)
+		}
+	}
+
+	// A look from the cursor after the last item of page 1 returns only the items after it.
+	h = newHarness(t, ownPR(), commentsStep(1, full), commentsStep(2, rest))
+	again, err := h.p.ListComments(ctx, prNumber, got.Resume[feedbackPerPage-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []int64{feedbackPerPage + 1, feedbackPerPage + 2}; !slices.Equal(ids(again.Items), want) {
+		t.Fatalf("items %v; want %v", ids(again.Items), want)
+	}
+}
+
+func TestListFeedbackSendsNoConditionOutsideTheFirstPageOfACommentSweep(t *testing.T) {
+	// A continuation of a sweep, and the reviews, never ask conditionally, whatever the cursor holds: not even
+	// page 1, when the continuation finds page 2 empty and steps back to it.
+	cont := providers.FeedbackCursor{Since: since, Page: 2, AfterID: 41, SweepStart: hostNow, ETag: `"t"`}
+	h := newHarness(t, ownPR(), commentsStep(2, "[]"), commentsStep(1, commentPage(t, 2, 40, since, "x")),
+		ownPR(), reviewsStep(1, reviewPage(t, 1, 1)))
+	if _, err := h.p.ListComments(ctx, prNumber, cont); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.p.ListReviews(ctx, prNumber, providers.FeedbackCursor{ETag: `"t"`}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListCommentsRefusesACursorWithAMalformedTag(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.p.ListComments(ctx, prNumber, providers.FeedbackCursor{ETag: "abc\r\nX-Evil: 1"}); err == nil {
+		t.Fatal("a malformed tag was accepted")
+	}
+}
+
+// The next sweep starts a minute before the host's time when this one began, so a comment that shows up in the
+// list late, up to a minute after its creation, is still created after since and not taken for an edit
+// (EditedAfterSeen). One created a minute or more before is taken for one: the assumption, failing closed.
+func TestNextSinceLeavesAMinuteForLateComments(t *testing.T) {
+	got := next(providers.FeedbackCursor{Since: since}, lookResult{ended: true, started: hostNow}, false)
+	if want := hostNow.Add(-time.Minute); !got.Next.Since.Equal(want) {
+		t.Fatalf("next since %v, want %v", got.Next.Since, want)
+	}
+	for _, tc := range []struct {
+		created time.Time
+		read    bool // created at or before since: counts as read already
+	}{
+		{hostNow.Add(-59 * time.Second), false},
+		{hostNow.Add(-time.Minute), true},
+	} {
+		if read := !tc.created.After(got.Next.Since); read != tc.read {
+			t.Errorf("created %v: read %v, want %v", tc.created, read, tc.read)
+		}
+	}
 }

@@ -136,6 +136,11 @@ type RemediationRequestReconciler struct {
 	// so a merge or a close is seen within it. Zero means [DefaultPullRequestPollInterval]; SetupWithManager
 	// refuses a value outside [MinPullRequestPollInterval, MaxPullRequestPollInterval].
 	PullRequestPollInterval time.Duration
+	// ReviewerHints turns on the reading of reviewer hints from the comments of a waiting pull request
+	// (hints.go, ADR-0028). It is off by default, and cmd/main.go does not turn it on yet: a stored hint makes
+	// the analyzer propose a replacement, which only the supersede handoff (#539) and the merge gate (ADR-0028
+	// section 5) may take over the pull request with.
+	ReviewerHints bool
 
 	// admitMu makes the check of the limits and the status write that lets a request through the policy check
 	// one step, so two workers can never both take the last slot or the same target.
@@ -151,6 +156,16 @@ type RemediationRequestReconciler struct {
 	// after a restart or a change of leader every request gets a full recheck first. Entries are dropped when the
 	// request ends, is being deleted or is gone.
 	checked sync.Map
+	// permissionWarned holds, per request name, the comment the last HintPermissionUnknown Event was recorded for
+	// (permissionWarning, hints.go), so each comment is warned about once. Memory only, dropped with checked.
+	permissionWarned sync.Map
+}
+
+// forget drops what this process keeps in memory about a request: its last full recheck and its last
+// permission warning.
+func (r *RemediationRequestReconciler) forget(key types.NamespacedName) {
+	r.checked.Delete(key)
+	r.permissionWarned.Delete(key)
 }
 
 // DefaultTargetStateTimeout is how long the policy check waits by default for KEDA to report on a
@@ -290,12 +305,12 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	rr := &remediationv1alpha1.RemediationRequest{}
 	if err := r.Get(ctx, req.NamespacedName, rr); err != nil {
 		if apierrors.IsNotFound(err) {
-			r.checked.Delete(req.NamespacedName)
+			r.forget(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !rr.DeletionTimestamp.IsZero() {
-		r.checked.Delete(req.NamespacedName)
+		r.forget(req.NamespacedName)
 		return r.finalize(ctx, rr)
 	}
 	if err := r.backfill(ctx, rr); err != nil {
@@ -310,7 +325,7 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	if rr.Status.Phase != "" && rr.Status.Phase != remediationv1alpha1.PhasePending {
 		if !progresses(rr) {
-			r.checked.Delete(req.NamespacedName)
+			r.forget(req.NamespacedName)
 			// Stopped: nothing is written to Git any more, but a lock still held waits for its pull request.
 			res, err := r.checkHeld(ctx, rr)
 			if err != nil || rr.Status.Phase != remediationv1alpha1.PhaseMerged {
@@ -324,7 +339,7 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 		res, err := r.recheck(ctx, rr)
 		if !progresses(rr) {
 			// The recheck ended the request (Merged, Superseded, NeedsIntervention, ...): it is never looked at again.
-			r.checked.Delete(req.NamespacedName)
+			r.forget(req.NamespacedName)
 		}
 		return res, err
 	}

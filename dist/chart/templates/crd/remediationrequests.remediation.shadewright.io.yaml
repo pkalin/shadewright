@@ -380,6 +380,99 @@ spec:
                   breaker finds a running probe, or one that ended without a success, by this field only; a request
                   without it is not a probe. It is a selectable field (field selector status.breakerProbe).
                 type: boolean
+              commentCursor:
+                description: |-
+                  commentCursor is where the executor's next look at the comments of the pull request starts (ADR-0028
+                  section 3). Only the executor writes it.
+                properties:
+                  afterID:
+                    description: 'afterID: the comments of the current sweep with
+                      an ID up to this one were returned already.'
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  etag:
+                    description: |-
+                      etag is the entity tag of the last answer to the first page of a sweep that held no comment, sent as
+                      If-None-Match, so an unchanged answer is "not modified" and costs no read.
+                    maxLength: 256
+                    pattern: ^(W/)?"[!#-~]*"$
+                    type: string
+                  evictedAt:
+                    description: |-
+                      evictedAt is the newest update time of the commands pushed out of seen by its bound; with evictedID it is
+                      the watermark of those commands. A command with an ID up to evictedID and an update time up to evictedAt
+                      counts as judged, so an evicted one returned again unchanged is not judged again, while one edited after
+                      its judgement has a later update time and is. The watermark only grows, and is dropped once since passes
+                      evictedAt. A command edited during a sweep and passed by it may count as judged too when more than
+                      MaxSeenComments newer ones were judged first: it is then not judged, never accepted twice. Those newer
+                      ones include commands from authors without write access, so anyone who can comment can cause this on
+                      purpose; it fails closed (the edited command is missed, its author posts a new comment).
+                    format: date-time
+                    type: string
+                  evictedID:
+                    description: evictedID is the highest ID of the commands pushed
+                      out of seen; set together with evictedAt.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  page:
+                    description: page is the page the next look starts on; 0 starts
+                      a new sweep.
+                    format: int32
+                    maximum: 100000
+                    minimum: 0
+                    type: integer
+                  seen:
+                    description: |-
+                      seen are the commands the executor judged whose update time is at or after since, so a look that returns
+                      them again unchanged (the overlap of two sweeps) does not judge them again: at most MaxSeenComments, the
+                      newest. A comment returned with another update time was edited and is judged again.
+                    items:
+                      description: SeenComment is a comment the executor judged, with
+                        the update time it had then.
+                      properties:
+                        commentID:
+                          description: commentID is the comment's ID in the code host.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        updatedAt:
+                          description: updatedAt is the comment's update time when
+                            it was judged.
+                          format: date-time
+                          type: string
+                      required:
+                      - commentID
+                      - updatedAt
+                      type: object
+                    maxItems: 50
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - commentID
+                    x-kubernetes-list-type: map
+                  since:
+                    description: |-
+                      since is the oldest update time the current sweep of the comments asks for. Every comment created at or
+                      before it was returned by an earlier look, so a command in one counts as an edit (EditedAfterSeen). That
+                      is an assumption about the code host: the GitHub adapter sets since a minute before the host's time when
+                      the previous sweep began, assuming a new comment shows up in the list within a minute. One that shows up
+                      later is refused as EditedAfterSeen and has to be posted again: it fails closed.
+                    format: date-time
+                    type: string
+                  sweepStart:
+                    description: sweepStart is the code host's time when the current
+                      sweep began.
+                    format: date-time
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: etag is kept only on the first page of a new sweep
+                  rule: '!has(self.etag) || ((!has(self.page) || self.page == 0) &&
+                    (!has(self.afterID) || self.afterID == 0))'
+                - message: evictedAt and evictedID are set together
+                  rule: has(self.evictedAt) == (has(self.evictedID) && self.evictedID
+                    > 0)
               conditions:
                 description: |-
                   conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
@@ -594,9 +687,10 @@ spec:
               hints:
                 description: |-
                   hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a
-                  replacement carried over from its chain, at most MaxHints (ADR-0028). Only the executor writes them; a
-                  stored hint keeps its pin, moves only forward in its state and is never removed. Planned: nothing
-                  writes them yet.
+                  replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all,
+                  and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the
+                  executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed,
+                  so a Declined hint stays as the record of what was asked. Planned: carrying them over to a replacement.
                 items:
                   description: |-
                     Hint is one reviewer hint the executor accepted from a comment on the request's pull request (ADR-0028
@@ -636,12 +730,58 @@ spec:
                       description: digest is the SHA-256 of text.
                       pattern: ^sha256:[0-9a-f]{64}$
                       type: string
+                    editedAfterAccept:
+                      description: |-
+                        editedAfterAccept is true once the executor saw the comment edited after it accepted the hint. The
+                        stored text stays as it was; the edit is recorded once, here, whatever the number of edits.
+                      type: boolean
+                    outcome:
+                      description: |-
+                        outcome is the analysis's outcome that answered the hint with a replacement (Proposed or RunbookMatched),
+                        recorded when the executor first read it in the Incident. The hint is answered from then on, whatever
+                        the Incident handles later: it waits for the handoff, and the answer timeout no longer applies. Once set
+                        it never changes.
+                      enum:
+                      - Proposed
+                      - RunbookMatched
+                      type: string
                     reason:
-                      description: reason says why a Declined hint was declined, for
-                        example BudgetSpent or NoProposal.
-                      maxLength: 64
-                      minLength: 1
-                      pattern: ^[A-Z][A-Za-z0-9]*$
+                      description: |-
+                        reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or
+                        NoProposal), NoAnswer when none came within the executor's bound, or the end of the request
+                        (PullRequestMerged, PullRequestClosed, RequestEnded). HintDeclineReasons lists them.
+                      enum:
+                      - NoModelConfigured
+                      - BudgetSpent
+                      - BudgetUnavailable
+                      - NoProposal
+                      - MissingData
+                      - NoEvidence
+                      - TargetNotSupported
+                      - PreviousValueUnknown
+                      - NoChange
+                      - DirectionReversed
+                      - NoPolicyForAction
+                      - ActionOutOfBounds
+                      - InvalidOutput
+                      - EscalationNotConfigured
+                      - StepLimit
+                      - TokenLimit
+                      - DeadlineExceeded
+                      - ModelUnavailable
+                      - ModelNotFound
+                      - ModelForbidden
+                      - ModelError
+                      - UnexpectedModel
+                      - EndpointNotAllowed
+                      - PlanUnchanged
+                      - HintNotPending
+                      - RequestNotCreated
+                      - CoolingDown
+                      - NoAnswer
+                      - PullRequestMerged
+                      - PullRequestClosed
+                      - RequestEnded
                       type: string
                     source:
                       description: source is the system the comment is in.
@@ -693,17 +833,27 @@ spec:
                     rule: '!(oldSelf.state in [''Consumed'', ''Declined'']) || (has(self.reason)
                       == has(oldSelf.reason) && (!has(self.reason) || self.reason
                       == oldSelf.reason))'
+                  - message: editedAfterAccept is never unset
+                    rule: '!has(oldSelf.editedAfterAccept) || !oldSelf.editedAfterAccept
+                      || (has(self.editedAfterAccept) && self.editedAfterAccept)'
+                  - message: the outcome of a hint never changes once set
+                    rule: '!has(oldSelf.outcome) || (has(self.outcome) && self.outcome
+                      == oldSelf.outcome)'
                   - message: a hint moves only from Pending to Reserved or Declined,
                       and from Reserved to Consumed or Declined
                     rule: oldSelf.state == self.state || (oldSelf.state == 'Pending'
                       && self.state in ['Reserved', 'Declined']) || (oldSelf.state
                       == 'Reserved' && self.state in ['Consumed', 'Declined'])
-                maxItems: 3
+                maxItems: 10
                 type: array
                 x-kubernetes-list-map-keys:
                 - source
                 - commentID
                 x-kubernetes-list-type: map
+                x-kubernetes-validations:
+                - message: 'status.hints: at most 3 hints are Consumed or Reserved'
+                  rule: self.filter(h, h.state in ['Consumed', 'Reserved']).size()
+                    <= 3
               holdsTarget:
                 description: |-
                   holdsTarget is true while the request holds the executor's lock on its target: it is set in the status
@@ -834,6 +984,71 @@ spec:
                 x-kubernetes-validations:
                 - message: appliedObservedAt needs mergeCommitSHA
                   rule: '!has(self.appliedObservedAt) || has(self.mergeCommitSHA)'
+              refusedHints:
+                description: |-
+                  refusedHints are the newest comments with the command that the executor refused, at most
+                  MaxRefusedHints, oldest first; an older one is dropped. Only the executor writes them.
+                items:
+                  description: |-
+                    RefusedHint records a comment that carried the command and was refused, so the refusal is made once and a
+                    reader sees why no hint was stored. It holds no text of the comment.
+                  properties:
+                    author:
+                      description: author wrote the comment, as the source's API reported
+                        it.
+                      properties:
+                        id:
+                          description: id is the author's numeric user ID in the source.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        login:
+                          description: login is the author's login when the hint was
+                            accepted, for the reader only.
+                          maxLength: 100
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                          type: string
+                      required:
+                      - id
+                      - login
+                      type: object
+                    commentID:
+                      description: commentID is the comment's ID in the source.
+                      format: int64
+                      minimum: 1
+                      type: integer
+                    reason:
+                      description: reason says why no hint was stored.
+                      enum:
+                      - CapReached
+                      - TooLong
+                      - NotRedactable
+                      - Empty
+                      - EditedAfterSeen
+                      type: string
+                    refusedAt:
+                      description: refusedAt is when the executor refused it.
+                      format: date-time
+                      type: string
+                    source:
+                      description: source is the system the comment is in.
+                      enum:
+                      - GitHub
+                      type: string
+                  required:
+                  - author
+                  - commentID
+                  - reason
+                  - refusedAt
+                  - source
+                  type: object
+                maxItems: 10
+                type: array
+                x-kubernetes-list-map-keys:
+                - source
+                - commentID
+                x-kubernetes-list-type: map
               rollout:
                 description: rollout is what the check after the merge keeps between
                   reconciles (the RolledOut condition).
@@ -995,6 +1210,13 @@ spec:
             self.status.handoff.to.hint.source && h.commentID == self.status.handoff.to.hint.commentID
             && h.digest == self.status.handoff.to.hint.digest && h.state != ''Pending''
             && (self.status.handoff.to.phase != ''Intent'' || h.state == ''Reserved'')))'
+        - message: status.commentCursor is kept once set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.commentCursor) || (has(self.status)
+            && has(self.status.commentCursor))'
+        - message: status.commentCursor.since never decreases
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.commentCursor) || !has(oldSelf.status.commentCursor.since)
+            || (has(self.status) && has(self.status.commentCursor) && has(self.status.commentCursor.since)
+            && self.status.commentCursor.since >= oldSelf.status.commentCursor.since)'
         - message: status.rollout is kept once set
           rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || (has(self.status)
             && has(self.status.rollout))'

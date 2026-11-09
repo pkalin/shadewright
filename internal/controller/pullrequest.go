@@ -162,31 +162,38 @@ func (r *RemediationRequestReconciler) now() time.Time {
 // or the same errors as closeChangeRequest.
 func (r *RemediationRequestReconciler) openPlanRepository(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	providers.GitProvider, error) {
+	git, _, err := r.openPlanRepositoryOf(ctx, rr)
+	return git, err
+}
+
+// openPlanRepositoryOf is openPlanRepository that also returns the type of the provider that hosts it.
+func (r *RemediationRequestReconciler) openPlanRepositoryOf(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) (providers.GitProvider, remediationv1alpha1.GitProviderType, error) {
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err):
-		return nil, errRepositoryGone
+		return nil, "", errRepositoryGone
 	case err != nil:
-		return nil, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
+		return nil, "", fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 	}
 	if freshness.Paused(settings) {
-		return nil, freshness.ErrPaused
+		return nil, "", freshness.ErrPaused
 	}
 	repo, ok := freshness.FindRepository(settings, rr.Status.PlanRepository)
 	if !ok {
-		return nil, errRepositoryGone
+		return nil, "", errRepositoryGone
 	}
 	if src := rr.Status.Source; src == nil || repo.TargetBranch != src.TargetBranch {
-		return nil, errTargetBranchChanged
+		return nil, "", errTargetBranchChanged
 	}
 	git, err := r.openRepository(ctx, repo)
 	if providers.IsInvalidConfig(err) {
-		return nil, freshness.ErrRepositoryUnusable
+		return nil, "", freshness.ErrRepositoryUnusable
 	}
 	if err != nil {
-		return nil, freshness.WrapProvider("open the repository", err)
+		return nil, "", freshness.WrapProvider("open the repository", err)
 	}
-	return git, nil
+	return git, repo.Provider, nil
 }
 
 // advance runs the pull request step for a fresh request in PolicyChecked, PRCreated or AwaitingApproval. It
@@ -861,7 +868,8 @@ func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr
 // found by checkHeld after the request stopped, merged), so the condition no longer says it is open: the
 // reason, the number and a fixed text that says why. The lock on the target reads these reasons (prMayBeOpen).
 // The caller writes it in the status write that ends the request. A request without a recorded pull request
-// is left alone: its PullRequestOpened never said one was open.
+// is left alone: its PullRequestOpened never said one was open. The phase that ends the request reads the reason
+// to decline its Pending reviewer hints with (declineOnEnd).
 func markClosed(rr *remediationv1alpha1.RemediationRequest, reason, text string) {
 	pr := rr.Status.PullRequest
 	if pr == nil {
@@ -941,19 +949,27 @@ const (
 // that is gone or a moved head too (NeedsIntervention); open with the head Shadewright pushed moves PRCreated
 // to AwaitingApproval. On an error the caller goes on to the freshness check, which owns the handling of
 // paused writes, changed settings and provider failures; the error is returned with prUnchecked, so a delay the
-// host asked for is kept. Delivery after the merge is a later step (#94, #95).
+// host asked for is kept. Delivery after the merge is a later step (#94, #95). Unless the request ended or its
+// pull request is closed, the reviewer hints are handled next, within deadlines of their own (pollHints):
+// the comments only when the look found the pull request waiting for review, the answers of Pending hints and
+// their timeout always.
 func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) (prOutcome, error) {
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
-	defer cancel()
-	err := r.watchStep(stepCtx, rr)
+	look, err := r.watchStep(stepCtx, rr)
 	err = boundErr(ctx, stepCtx, "pull request check", err)
+	cancel()
 	switch {
 	case errors.Is(err, errStopped):
 		return prStopped, nil
 	case errors.Is(err, errClosed):
 		return prClosed, nil
-	case err != nil:
+	}
+	if ctx.Err() == nil {
+		// Deadlines of their own (pollHints): a slow check of the pull request does not leave them its remainder.
+		r.watchHints(ctx, look, rr)
+	}
+	if err != nil {
 		logf.FromContext(ctx).V(1).Info("Could not check the pull request of RemediationRequest",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
 		return prUnchecked, err
@@ -970,32 +986,37 @@ func (r *RemediationRequestReconciler) rejected(ctx context.Context, rr *remedia
 		ReasonChangeRequestClosed, "The pull request was closed without a merge; automation stopped"))
 }
 
-func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	git, err := r.openPlanRepository(ctx, rr)
+// watchStep is the look of watchPullRequest. It returns the provider to read the reviewer hints with when it
+// found the pull request open with the head Shadewright pushed, after the request had reached
+// AwaitingApproval; otherwise the zero hintLook.
+func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	hintLook, error) {
+	git, host, err := r.openPlanRepositoryOf(ctx, rr)
 	if err != nil {
-		return err
+		return hintLook{}, err
 	}
 	cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
 	switch {
 	case errors.Is(err, providers.ErrNotFound):
-		return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone,
+		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone,
 			"The recorded pull request cannot be found any more; automation stopped")
 	case err != nil:
-		return freshness.WrapProvider("find the change request", err)
+		return hintLook{}, freshness.WrapProvider("find the change request", err)
 	}
 	if cr.Number != rr.Status.PullRequest.Number || cr.HeadSHA != rr.Status.PullRequest.HeadSHA {
-		return r.headMoved(ctx, git, rr, cr)
+		return hintLook{}, r.headMoved(ctx, git, rr, cr)
 	}
 	switch cr.State {
 	case providers.ChangeRequestMerged:
 		recordMerge(rr, cr)
-		return r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,
+		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,
 			"The pull request was merged")
 	case providers.ChangeRequestClosed:
-		return errClosed
+		return hintLook{}, errClosed
 	}
 	if rr.Status.Phase != remediationv1alpha1.PhasePRCreated {
-		return nil
+		// Open, with the head Shadewright pushed: reviewer hints are read next (AwaitingApproval only).
+		return hintLook{git: git, host: host}, nil
 	}
 	r.setPhase(rr, remediationv1alpha1.PhaseAwaitingApproval)
 	message := "The pull request waits for a human review"
@@ -1011,9 +1032,9 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		ObservedGeneration: rr.Generation,
 	})
 	if err := r.Status().Update(ctx, rr); err != nil {
-		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+		return hintLook{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
-	return nil
+	return hintLook{}, nil
 }
 
 // commentForeign is the one comment Shadewright posts on its pull request when someone else pushed to it.

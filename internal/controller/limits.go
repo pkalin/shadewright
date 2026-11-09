@@ -555,9 +555,11 @@ func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *re
 
 // setPhase sets the request's phase and, when it changes, lastPhaseTransitionTime to now and, when the request
 // ended, status.breakerCounts (classifyBreaker). That reads the plan digest and status.breakerProbe, so a caller
-// sets those first.
+// sets those first. A phase that ends the request also declines its Pending reviewer hints (declineOnEnd): every
+// path that ends a request comes through here.
 func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.RemediationRequest,
 	phase remediationv1alpha1.RemediationPhase) {
+	declineOnEnd(rr, phase)
 	if rr.Status.Phase == phase && rr.Status.LastPhaseTransitionTime != nil {
 		return
 	}

@@ -50,9 +50,15 @@ const (
 	feedbackPageLimit = feedbackPerPage * (400 << 10)
 )
 
-// clockMargin is subtracted from the host's time when a sweep of comments began, to make the next sweep's
-// since: GitHub's times are whole seconds.
-const clockMargin = time.Second
+// sinceMargin is subtracted from the host's time when a sweep of comments began, to make the next sweep's
+// since. GitHub's times are whole seconds, and nothing documents how soon a new comment appears in the list,
+// so a comment created just before a sweep began may be returned only by a later sweep. The executor refuses a
+// command whose comment was created at or before since as EditedAfterSeen, so the margin is an assumption: a
+// comment becomes visible in the list within sinceMargin of its creation time. When that fails, a new command
+// is refused as EditedAfterSeen and its author has to post it again: it fails closed, never accepting a
+// comment that was read as plain text. Re-reading the overlap is cheap, the cursor's seen list keeps it from
+// being judged twice.
+const sinceMargin = time.Minute
 
 // loginPattern bounds a login before it goes into a path. GitHub logins are shorter and use fewer characters;
 // this is the pattern of the API's HintAuthor.login.
@@ -211,6 +217,12 @@ type lookResult struct {
 	afterID  int64
 	// started is the host's time of the look's first response; zero when it sent none.
 	started time.Time
+	// notModified is true when the host answered the conditional first page with 304: nothing changed.
+	notModified bool
+	// etag is the entity tag of the first page of a new sweep, as the host sent it (unchecked).
+	etag string
+	// pages holds the page each item of page.Items was read from.
+	pages []int
 }
 
 // look reads up to providers.MaxFeedbackPages pages of path from cursor's page, each within its own deadline,
@@ -221,8 +233,11 @@ type lookResult struct {
 // it steps back a page at a time until a page starts at or below that ID (or page 1), and goes on from there.
 // A look whose page budget runs out while stepping back returns nothing and the page it got to, so the next
 // look steps on from there.
+//
+// The first page of a new sweep (cur.Page zero) is asked for with etag in If-None-Match when etag is set: a 304
+// ends the look with notModified and nothing read. That page's own entity tag is returned in etag.
 func (p *Provider) look(ctx context.Context, op, path string, query url.Values, cur providers.FeedbackCursor,
-	decode func(r io.Reader, budget int, afterID int64) (pageResult, error)) (lookResult, error) {
+	etag string, decode func(r io.Reader, budget int, afterID int64) (pageResult, error)) (lookResult, error) {
 	first := max(cur.Page, 1)
 	res := lookResult{lastPage: first, afterID: cur.AfterID}
 	budget := providers.MaxFeedbackBytes
@@ -232,8 +247,8 @@ func (p *Provider) look(ctx context.Context, op, path string, query url.Values, 
 		q := url.Values{paramPerPage: {strconv.Itoa(feedbackPerPage)}, "page": {strconv.Itoa(page)}}
 		maps.Copy(q, query)
 		var pr pageResult
-		pctx, cancel := p.withTimeout(ctx)
-		r, err := p.do(pctx, call{op: op, method: http.MethodGet, path: path, query: q, limit: feedbackPageLimit,
+		sweepFirst := cur.Page == 0 && page == 1
+		c := call{op: op, method: http.MethodGet, path: path, query: q, limit: feedbackPageLimit,
 			stream: func(body io.Reader) error {
 				var err error
 				pr, err = decode(body, budget, res.afterID)
@@ -241,13 +256,24 @@ func (p *Provider) look(ctx context.Context, op, path string, query url.Values, 
 					return fmt.Errorf("%s: GitHub returned %w", op, err)
 				}
 				return err
-			}})
+			}}
+		if sweepFirst && etag != "" {
+			c.ifNoneMatch = etag
+		}
+		pctx, cancel := p.withTimeout(ctx)
+		r, err := p.do(pctx, c)
 		cancel()
 		if err != nil {
 			return lookResult{}, err
 		}
+		if r.status == http.StatusNotModified && c.ifNoneMatch != "" {
+			return lookResult{notModified: true}, nil
+		}
 		if !r.ok() {
 			return lookResult{}, statusError(op, r.status)
+		}
+		if sweepFirst {
+			res.etag = r.header.Get("ETag")
 		}
 		if res.started.IsZero() {
 			if t, err := http.ParseTime(r.header.Get("Date")); err == nil {
@@ -269,6 +295,7 @@ func (p *Provider) look(ctx context.Context, op, path string, query url.Values, 
 			case !it.ignored:
 				budget -= len(it.fb.Body)
 				res.page.Items = append(res.page.Items, it.fb)
+				res.pages = append(res.pages, page)
 			}
 		}
 		if pr.stopped {
@@ -284,19 +311,39 @@ func (p *Provider) look(ctx context.Context, op, path string, query url.Values, 
 }
 
 // next sets the outcome of a look as one step of a sweep. A sweep pages through one since; when it reaches
-// the end, the next sweep asks from the host's time when this one began, less clockMargin, so what changes
+// the end, the next sweep asks from the host's time when this one began, less sinceMargin, so what changes
 // during a sweep is read by the next one. Since never decreases; without a Date header from the host the
 // next sweep keeps the same since, so it reads again and never skips.
-func next(cur providers.FeedbackCursor, res lookResult) providers.FeedbackPage {
+//
+// With quiet (comments), a sweep that found nothing on its one page keeps its since, and the next one asks
+// for the same page with that page's entity tag: while nothing changes, the host answers 304 (notModified),
+// which is not counted against its rate limit, and the cursor stays as it is.
+func next(cur providers.FeedbackCursor, res lookResult, quiet bool) providers.FeedbackPage {
+	if res.notModified {
+		return providers.FeedbackPage{Complete: true, Next: cur}
+	}
 	start := cur.SweepStart
 	if cur.Page == 0 {
 		start = res.started
 	}
 	out := res.page
+	// A caller that stops after an item goes on from that item's page, after its ID, in this sweep.
+	if len(res.pages) == len(out.Items) && len(out.Items) > 0 {
+		out.Resume = make([]providers.FeedbackCursor, len(out.Items))
+		for i, it := range out.Items {
+			out.Resume[i] = providers.FeedbackCursor{Since: cur.Since, Page: res.pages[i], AfterID: it.ID, SweepStart: start}
+		}
+	}
 	if res.ended {
 		out.Complete = true
 		out.Next = providers.FeedbackCursor{Since: cur.Since}
-		if s := start.Add(-clockMargin); !start.IsZero() && s.After(cur.Since) {
+		if quiet && cur.Page == 0 && res.lastPage == 1 && len(out.Items) == 0 && out.Skipped == 0 {
+			if providers.ValidETag(res.etag) {
+				out.Next.ETag = res.etag
+			}
+			return out
+		}
+		if s := start.Add(-sinceMargin); !start.IsZero() && s.After(cur.Since) {
 			out.Next.Since = s
 		}
 		return out
@@ -315,13 +362,15 @@ func (p *Provider) ownPull(ctx context.Context, op string, number int64) error {
 }
 
 func validCursor(c providers.FeedbackCursor) bool {
-	return c.Page >= 0 && c.AfterID >= 0
+	return c.Page >= 0 && c.AfterID >= 0 && (c.ETag == "" || providers.ValidETag(c.ETag))
 }
 
 // ListComments returns the conversation comments of pull request number, oldest first, within the bounds of
 // one look. A sweep asks GitHub for the comments updated since cursor.Since and pages through them across
-// looks (see look and next). A pull request that is not
-// Shadewright's is refused, and so is a look holding a comment of another repository, issue or pull request.
+// looks (see look and next). A new sweep whose cursor holds an entity tag asks conditionally, and an unchanged
+// answer returns no items, Complete, and the same cursor. A pull request that is not Shadewright's is refused,
+// and so is a look holding a comment of another repository, issue or pull request. Only conversation comments
+// are read (the issue comments of the pull request), never inline review comments.
 func (p *Provider) ListComments(ctx context.Context, number int64, cur providers.FeedbackCursor) (providers.FeedbackPage, error) {
 	if number < 1 || !validCursor(cur) {
 		return providers.FeedbackPage{}, errors.New(opListComments + ": number or cursor is invalid")
@@ -356,14 +405,14 @@ func (p *Provider) ListComments(ctx context.Context, number int64, cur providers
 	if !cur.Since.IsZero() {
 		query = url.Values{"since": {cur.Since.UTC().Format(time.RFC3339)}}
 	}
-	res, err := p.look(ctx, opListComments, "/issues/"+num+"/comments", query, cur,
+	res, err := p.look(ctx, opListComments, "/issues/"+num+"/comments", query, cur, cur.ETag,
 		func(r io.Reader, budget int, afterID int64) (pageResult, error) {
 			return decodePage(r, budget, afterID, conv)
 		})
 	if err != nil {
 		return providers.FeedbackPage{}, err
 	}
-	return next(cur, res), nil
+	return next(cur, res, true), nil
 }
 
 // ListReviews returns the bodies of the reviews of pull request number submitted since the sweep cursor
@@ -418,14 +467,14 @@ func (p *Provider) ListReviews(ctx context.Context, number int64, cur providers.
 		}
 		return it, true
 	}
-	res, err := p.look(ctx, opListReviews, "/pulls/"+num+"/reviews", nil, cur,
+	res, err := p.look(ctx, opListReviews, "/pulls/"+num+"/reviews", nil, cur, "",
 		func(r io.Reader, budget int, afterID int64) (pageResult, error) {
 			return decodePage(r, budget, afterID, conv)
 		})
 	if err != nil {
 		return providers.FeedbackPage{}, err
 	}
-	return next(cur, res), nil
+	return next(cur, res, false), nil
 }
 
 // writePermissions are the values of the base permission field that may write. GitHub reports maintain and

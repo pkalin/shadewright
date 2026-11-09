@@ -18,6 +18,7 @@ package providers
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -35,7 +36,27 @@ const (
 	// MaxFeedbackBytes is the most bytes of bodies, after the cut above, one look returns. It holds at least
 	// MaxFeedbackBytes/MaxFeedbackBodyBytes items, so every look that has items left returns some.
 	MaxFeedbackBytes = 256 << 10
+	// MaxETagBytes is the longest entity tag a cursor keeps; a longer one is not kept.
+	MaxETagBytes = 256
 )
+
+// ValidETag reports whether s is an entity tag a cursor may keep: at most MaxETagBytes, quoted printable ASCII
+// without a quote inside, optionally weak (W/). The empty string is not one.
+func ValidETag(s string) bool {
+	if len(s) > MaxETagBytes {
+		return false
+	}
+	s = strings.TrimPrefix(s, "W/")
+	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+		return false
+	}
+	for i := 1; i < len(s)-1; i++ {
+		if c := s[i]; c < '!' || c > '~' || c == '"' {
+			return false
+		}
+	}
+	return true
+}
 
 // AuthorKind says who wrote an item, as the host's API reported it, never as the text claims.
 type AuthorKind string
@@ -93,13 +114,21 @@ type Feedback struct {
 }
 
 // FeedbackCursor is where a look starts; the zero value starts from the beginning. The caller stores the Next
-// cursor of a look durably once it has handled every item of that look, and passes it to the next look of the
-// same list; its fields mean something only to the adapter that returned it. A cursor never goes back: Since
-// never decreases, nor AfterID within a sweep. Page may: when items were deleted, a look steps back to find
-// its place, and a look that spent its pages doing so returns no items and the page it reached.
+// cursor of a look durably once it has handled every item of that look (or Resume[i] of FeedbackPage once it
+// handled the items up to i and stopped), and passes it to the next look of the
+// same list; its fields mean something only to the adapter that returned it, except the promise of Since
+// below. A cursor never goes back: Since never decreases, nor AfterID within a sweep. Page may: when items
+// were deleted, a look steps back to find its place, and a look that spent its pages doing so returns no items
+// and the page it reached.
 type FeedbackCursor struct {
-	// Since is the oldest update time the current sweep of the list asks for; zero asks for everything.
+	// Since is the oldest update time the current sweep of the list asks for; zero asks for everything. Every
+	// comment created before Since was returned by an earlier look of the list, or skipped as malformed, so a
+	// comment returned again with an older creation time was edited after it was read.
 	Since time.Time
+	// ETag is the entity tag of the host's last answer to the first page of a sweep of comments that held no
+	// item, sent as a condition with the next one: an unchanged answer costs no read and returns nothing.
+	// ListComments only; at most MaxETagBytes of printable ASCII, quoted.
+	ETag string
 	// Page is the page the next look starts on; zero starts a new sweep on the first page.
 	Page int
 	// AfterID: the items of the current sweep with an ID up to this one were returned already.
@@ -120,6 +149,10 @@ type FeedbackPage struct {
 	Complete bool
 	// Next is the cursor of the next look.
 	Next FeedbackCursor
+	// Resume holds one cursor per item, or none: Resume[i] is the cursor of a look that goes on after Items[i],
+	// within the same sweep. A caller that handled the items up to i, and stopped there, stores Resume[i]
+	// instead of Next, so the next look returns the items after it and not those it handled.
+	Resume []FeedbackCursor
 }
 
 // FeedbackSource reads the feedback on a change request the executor opened, and asks the host whether an

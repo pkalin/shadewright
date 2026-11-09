@@ -39,6 +39,7 @@ The code lives in `internal/gitops/patch` (#55); the spike stays under `hack/` a
 - The patcher handles only scalar replacement. Adding a field that does not exist yet, or editing a list, would need a different technique. That fits the closed action catalog: every action changes an existing scalar, and ADR-0012 already requires the old value to be present. A future action that needs more must revisit this ADR.
 - Some valid files are refused (anchors, block scalars, tags on the target). They stop with `NeedsIntervention`, never with a wrong edit.
 - The semantic check decodes the file twice; the file is at most 1 MiB, so this is cheap.
+- 2026-11-09: a file of 1 MiB packed with nodes held about 260 MiB at the patcher's peak, past the executor's 128 MiB, since it kept the node trees of every document and parsed the original again to verify, and an alias bomb elsewhere in the file expanded on decode ([#595](https://github.com/pkalin/shadewright/issues/595)). The patcher now runs the YAML check of the source mapping and the semantic diff (`internal/gitops/gityaml`) first, so anchors, aliases and merge keys anywhere in the file are refused with `InvalidYAML` before step 2 sees them; it reads the file one document at a time, keeps only the target's node tree, refuses a file of more than 131,072 nodes (`MaxNodes`), and verifies against the decoded values it kept, so it holds about one node tree at a time. The decision is unchanged.
 
 ## Alternatives considered
 

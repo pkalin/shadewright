@@ -125,6 +125,9 @@ const (
 	// ReasonEndpointNotAllowed: the deployment's endpoint is outside the operator's allow-list of host
 	// suffixes (ErrEndpointNotAllowed), so nothing was sent to it and no token requested for it.
 	ReasonEndpointNotAllowed Reason = "EndpointNotAllowed"
+	// ReasonPlanUnchanged: an analysis with a reviewer hint proposed the plan of the request it would replace,
+	// so no replacement was created (ADR-0028 section 4).
+	ReasonPlanUnchanged Reason = "PlanUnchanged"
 )
 
 // ErrEndpointNotAllowed is what a [ModelFactory] returns, wrapped, for an endpoint outside the operator's
@@ -327,13 +330,22 @@ type Outcome struct {
 // shutdown or a lost leadership): every other end is an Outcome, a hand-off unless it carries a Plan. The
 // analysis is one trace, whose root span ends with the outcome.
 func (a *Analyzer) Analyze(ctx context.Context, inc *remediationv1alpha1.Incident, limits Limits) (Outcome, error) {
+	return a.AnalyzeWithHint(ctx, inc, limits, "")
+}
+
+// AnalyzeWithHint is [Analyzer.Analyze] with a reviewer hint (ADR-0028): hint is the hint's stored text, empty
+// for none. It is redacted again and shown to the model after the context, in a block of its own with
+// provenance reviewer-hint, fenced like every context block ([hintMessage]) and never quotable as evidence. The
+// system prompt, the tools and the catalog are the same with or without it.
+func (a *Analyzer) AnalyzeWithHint(ctx context.Context, inc *remediationv1alpha1.Incident, limits Limits,
+	hint string) (Outcome, error) {
 	ctx, span := a.tracer.Start(ctx, spanAnalysis, trace.WithAttributes(incidentAttrs(inc)...))
-	out, err := a.analyze(ctx, inc, limits)
+	out, err := a.analyze(ctx, inc, limits, hint)
 	endAnalysis(span, out, err)
 	return out, err
 }
 
-func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Incident, limits Limits) (Outcome, error) {
+func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Incident, limits Limits, hint string) (Outcome, error) {
 	out := Outcome{PromptVersion: PromptVersion()}
 	for _, rb := range a.cfg.Runbooks {
 		if p, ok := rb.Match(inc); ok {
@@ -363,6 +375,9 @@ func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 	r.template = c.Template
 	var shownContext string
 	shownContext, r.shown = contextMessage(c)
+	if hint != "" {
+		shownContext += hintMessage(r.redact(hint))
+	}
 	r.contextText = shownContext
 
 	// The first model call is known before the budget is touched: a unit is reserved only when a provider for

@@ -238,6 +238,10 @@ type Controller struct {
 	// an Incident deleted and created again under the same name starts with nothing. Only the trigger
 	// goroutine uses it.
 	memory map[types.UID]*trace
+	// hintRequests are the RemediationRequests the cache held when the current trigger pass began, for the
+	// reviewer hints of the Incidents it decides ([PendingHint]); nil when that listing failed. Only the
+	// trigger goroutine uses it.
+	hintRequests []remediationv1alpha1.RemediationRequest
 	// lastEvent is when the last Warning event at the cap was written.
 	lastEvent time.Time
 	// capNear is whether the last trigger pass found the Incidents at or over capNearThreshold and reported

@@ -103,6 +103,16 @@ func (c *Controller) markDue(ctx context.Context) error {
 		return fmt.Errorf("listing the Incidents: %w", err)
 	}
 	c.noteStates(list.Items)
+	// The requests whose reviewer hints make a Proposed Incident due (ADR-0028). A failed listing fails
+	// closed for the hints only: no hint makes an Incident due in this pass, and the error is returned.
+	var hintErr error
+	var requests remediationv1alpha1.RemediationRequestList
+	if err := c.cache.List(ctx, &requests, client.InNamespace(c.cfg.Namespace)); err != nil {
+		c.hintRequests = nil
+		hintErr = fmt.Errorf("listing the RemediationRequests for reviewer hints: %w", err)
+	} else {
+		c.hintRequests = requests.Items
+	}
 	now := c.cfg.Now()
 	s := TriggerSettings{Debounce: c.cfg.Debounce, SettleLimit: c.cfg.SettleLimit, Cooldown: c.cfg.Cooldown,
 		AnalysisTimeout: c.cfg.AnalysisTimeout, RecentWindow: c.cfg.RecentWindow}
@@ -194,6 +204,9 @@ func (c *Controller) markDue(ctx context.Context) error {
 	if readErr != nil {
 		errs = append([]error{readErr}, errs...)
 	}
+	if hintErr != nil {
+		errs = append([]error{hintErr}, errs...)
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("deciding which Incidents are due, %d errors, first: %w", len(errs), errs[0])
 	}
@@ -219,14 +232,21 @@ type trace struct {
 }
 
 // decider returns the decision of [Due] for one Incident, with what the controller knows of it ([Memory])
-// and the budget used so far in this pass (*used, read when called).
+// and the budget used so far in this pass (*used, read when called). Whether a reviewer hint waits for it
+// ([Memory].Hinted) is decided on the copy decided, from the requests of the pass, since an answered hint
+// depends on the Incident's own status.
 func (c *Controller) decider(inc *remediationv1alpha1.Incident, now time.Time, s TriggerSettings,
 	used *int) func(*remediationv1alpha1.Incident) (bool, string) {
 	m := Memory{Held: c.heldSince(inc.Spec.Fingerprint)}
 	if t := c.memory[inc.UID]; t != nil {
 		m.Waiting, m.WentQuiet, m.WatchedSince = t.waiting, t.quiet, t.watchedSince
 	}
-	return func(fresh *remediationv1alpha1.Incident) (bool, string) { return Due(fresh, m, now, s, *used) }
+	requests := c.hintRequests
+	return func(fresh *remediationv1alpha1.Incident) (bool, string) {
+		m := m
+		m.Hinted = PendingHint(fresh, requests) != nil
+		return Due(fresh, m, now, s, *used)
+	}
 }
 
 // account reports a NotRecent that setDue wrote, counts a unit of the budget in *used (when used is not nil)
@@ -442,7 +462,8 @@ func (c *Controller) reportNotRecent(inc *remediationv1alpha1.Incident) {
 // timeout.
 func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Incident, now time.Time, due bool, reason string,
 	decide func(*remediationv1alpha1.Incident) (bool, string), only string) (bool, string, bool, error) {
-	if conditionAgrees(cached, due, reason, runEnded(cached, now, c.cfg.AnalysisTimeout)) {
+	if ref, _ := HintAnswer(cached, c.hintRequests, due, reason); ref == nil &&
+		conditionAgrees(cached, due, reason, runEnded(cached, now, c.cfg.AnalysisTimeout)) {
 		return due, reason, false, nil
 	}
 	wrote := false
@@ -455,8 +476,15 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 		}
 		due, reason = decide(inc)
 		wrote = false
-		if (only != "" && reason != only) || conditionAgrees(inc, due, reason, runEnded(inc, now, c.cfg.AnalysisTimeout)) {
+		// A reviewer hint refused without an analysis is answered in the same update (ADR-0028 section 3),
+		// also when the condition already agrees: the answer is what the executor reads.
+		ref, outcome := HintAnswer(inc, c.hintRequests, due, reason)
+		if (only != "" && reason != only) ||
+			(ref == nil && conditionAgrees(inc, due, reason, runEnded(inc, now, c.cfg.AnalysisTimeout))) {
 			return nil
+		}
+		if ref != nil {
+			answerHint(inc, *ref, outcome, c.cfg.Now())
 		}
 		status := metav1.ConditionFalse
 		if due {
@@ -550,6 +578,7 @@ var dueMessages = map[string]string{
 	ReasonNewOccurrence:        "An occurrence began after the last analysis and the cooldown has passed",
 	ReasonCooldownExpired:      "The symptom recurred and the cooldown since the last analysis has passed",
 	ReasonAnalysisTimedOut:     "The last analysis did not finish within the analysis timeout and the cooldown has passed",
+	ReasonReviewerHint:         "A request naming the incident holds a reviewer hint no analysis has answered, and the cooldown has passed",
 	ReasonNotObserved:          "No observation is recorded yet",
 	ReasonNotRecent:            "The incident was never analyzed and was not seen within the recent window; a new observation makes it due again once it has settled",
 	ReasonAnalyzing:            "An analysis is running",

@@ -345,7 +345,7 @@ func checkRequestReuse(t *testing.T, c *Controller, ns string, got *remediationv
 	again := got.DeepCopy()
 	again.Status.LastAnalysisTime = &metav1.Time{Time: time.Now().Add(time.Hour)}
 	plan := Plan{Action: rr.Spec.Action, Checks: rr.Spec.Verification.Checks, PolicyRef: rr.Spec.PolicyRef}
-	if name, err := c.createRequest(t.Context(), again, plan); err != nil || name != got.Status.RemediationRequests[0] {
+	if name, err := c.createRequest(t.Context(), again, requestSpec(again, plan)); err != nil || name != got.Status.RemediationRequests[0] {
 		t.Errorf("the same plan again: %q, %v", name, err)
 	}
 	bigger := plan
@@ -360,7 +360,7 @@ func checkRequestReuse(t *testing.T, c *Controller, ns string, got *remediationv
 	if err := env.admin.Create(t.Context(), squat); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.createRequest(t.Context(), again, bigger); err == nil {
+	if _, err := c.createRequest(t.Context(), again, requestSpec(again, bigger)); err == nil {
 		t.Error("a request of the plan's name with another plan was accepted")
 	}
 	list := &remediationv1alpha1.RemediationRequestList{}

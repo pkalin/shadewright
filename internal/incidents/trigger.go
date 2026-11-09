@@ -32,7 +32,7 @@ import (
 // ([ReserveAnalysis]) before it calls the model.
 const ConditionAnalysisDue = "AnalysisDue"
 
-// Reasons of the AnalysisDue condition. The first four come with status True, the others with False.
+// Reasons of the AnalysisDue condition. The first five come with status True, the others with False.
 const (
 	// ReasonFirstAnalysis: the incident was never analyzed and has settled.
 	ReasonFirstAnalysis = "FirstAnalysis"
@@ -44,6 +44,9 @@ const (
 	// ReasonAnalysisTimedOut: the incident has been in phase Analyzing for longer than the analysis timeout
 	// and the cooldown since its last analysis began, so that analysis is taken as lost.
 	ReasonAnalysisTimedOut = "AnalysisTimedOut"
+	// ReasonReviewerHint: the incident is Proposed, a request naming it holds a reviewer hint no analysis has
+	// answered ([PendingHint]) and the cooldown since the last analysis has passed (ADR-0028).
+	ReasonReviewerHint = "ReviewerHint"
 
 	// ReasonNotObserved: the status records no observation yet.
 	ReasonNotObserved = "NotObserved"
@@ -156,6 +159,9 @@ type Memory struct {
 	// (zero when none did): a quiet spell since then would have set WentQuiet, so [unsettledSince] does not
 	// read one from the occurrence records.
 	WatchedSince time.Time
+	// Hinted: a request naming the incident holds a reviewer hint no analysis has answered ([PendingHint]),
+	// read from the requests the controller's cache holds.
+	Hinted bool
 }
 
 // Due decides whether an incident is due for analysis at now, and gives the reason (one of the Reason
@@ -167,7 +173,11 @@ type Memory struct {
 // passed), the cooldown has passed and the budget allows:
 //
 //   - nothing observed yet (no lastSeen): not due (NotObserved);
-//   - in phase Proposed or Escalated: not due (Proposed, Escalated);
+//   - in phase Proposed with a reviewer hint (m.Hinted): not due (CoolingDown) within the cooldown since
+//     lastAnalysisTime, else due (ReviewerHint), with the budget but without the debounce or the recent window,
+//     which are about the incident's own data; without a lastAnalysisTime not due (Proposed), since the
+//     cooldown cannot be placed (ADR-0028);
+//   - in phase Proposed (without a hint) or Escalated: not due (Proposed, Escalated);
 //   - in phase Analyzing: not due (Analyzing) until AnalysisTimeout after lastAnalysisTime, then not due
 //     (CoolingDown) until the cooldown has passed too, then due again (AnalysisTimedOut); without a
 //     lastAnalysisTime not due (AnalysisStartUnknown), since neither can be placed;
@@ -196,7 +206,13 @@ func Due(inc *remediationv1alpha1.Incident, m Memory, now time.Time, s TriggerSe
 	reason := ReasonFirstAnalysis
 	switch st.Phase {
 	case remediationv1alpha1.IncidentProposed:
-		return false, ReasonProposed
+		if !m.Hinted || st.LastAnalysisTime == nil {
+			return false, ReasonProposed
+		}
+		if now.Before(st.LastAnalysisTime.Add(s.Cooldown)) {
+			return false, ReasonCoolingDown
+		}
+		return budgetAllows(s, usedToday, ReasonReviewerHint)
 	case remediationv1alpha1.IncidentEscalated:
 		return false, escalatedReason(inc)
 	case remediationv1alpha1.IncidentResolved:
@@ -239,6 +255,12 @@ func Due(inc *remediationv1alpha1.Incident, m Memory, now time.Time, s TriggerSe
 			return false, ReasonDebouncing
 		}
 	}
+	return budgetAllows(s, usedToday, reason)
+}
+
+// budgetAllows is the last check of [Due]: due with reason unless the daily limit is 0 (AnalysisDisabled) or
+// usedToday reached it (DailyBudgetReached).
+func budgetAllows(s TriggerSettings, usedToday int, reason string) (bool, string) {
 	if s.MaxAnalysesPerDay <= 0 {
 		return false, ReasonAnalysisDisabled
 	}

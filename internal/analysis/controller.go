@@ -49,7 +49,7 @@ import (
 
 // ConditionAnalyzed is the Incident condition the analysis writes with the final phase: True, with the
 // outcome's [Reason] and a fixed message. Nothing from the model or the cluster goes into it.
-const ConditionAnalyzed = "Analyzed"
+const ConditionAnalyzed = incidents.ConditionAnalyzed
 
 // FieldOwner is the field manager of the analysis's writes.
 const FieldOwner = "shadewright-analysis"
@@ -205,8 +205,9 @@ func (c *Controller) now() time.Time {
 	return time.Now()
 }
 
-// claimable reports whether the trigger marked inc due in a phase an analysis may start from: Open (or none)
-// or Analyzing taken as lost (reason AnalysisTimedOut). Never Resolved: a Resolved Incident is never
+// claimable reports whether the trigger marked inc due in a phase an analysis may start from: Open (or none),
+// Analyzing taken as lost (reason AnalysisTimedOut), or Proposed with a reviewer hint (reason ReviewerHint,
+// ADR-0028; the claim also needs the hint, read live, [Controller.reviewerHint]). Never Resolved: a Resolved Incident is never
 // analyzed again; a symptom seen again moves it to Escalated, or opens its next occurrence as a new Incident
 // with nothing of this one's outcome (design 3.2, #251). A mark written for
 // another generation of the Incident is no mark, as the trigger takes it (#430): it fails closed, and the
@@ -221,6 +222,8 @@ func claimable(inc *remediationv1alpha1.Incident) bool {
 		return true
 	case remediationv1alpha1.IncidentAnalyzing:
 		return cond.Reason == incidents.ReasonAnalysisTimedOut
+	case remediationv1alpha1.IncidentProposed:
+		return cond.Reason == incidents.ReasonReviewerHint
 	}
 	return false
 }
@@ -245,11 +248,17 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	defer c.release()
 
-	unrecorded, err := c.unrecordedRequests(ctx, inc)
+	requests, err := c.incidentRequests(ctx, inc)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("listing the RemediationRequests of Incident %s: %w", inc.Name, err)
 	}
-	claimed, err := c.claim(ctx, inc, unrecorded)
+	hint := c.reviewerHint(inc, requests)
+	if hint == nil && inc.Status.Phase == remediationv1alpha1.IncidentProposed {
+		// The hint the trigger saw is answered or gone: nothing to claim. The trigger takes the mark back.
+		logger.Info("Did not claim a Proposed Incident without a pending reviewer hint", "incident", inc.Name)
+		return ctrl.Result{}, nil
+	}
+	claimed, err := c.claim(ctx, inc, c.unrecordedRequests(inc, requests), hint)
 	if err != nil {
 		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 			return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -257,7 +266,11 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("claiming Incident %s: %w", inc.Name, err)
 	}
 	limits := LimitsOf(settings)
-	out, err := c.Analyzer.Analyze(ctx, claimed, limits)
+	var hintText string
+	if hint != nil {
+		hintText = hint.Hint.Text
+	}
+	out, err := c.Analyzer.AnalyzeWithHint(ctx, claimed, limits, hintText)
 	if err != nil {
 		// A stop or a lost leadership: the Incident stays Analyzing and the trigger takes it as lost later.
 		return ctrl.Result{}, err
@@ -265,10 +278,16 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// The run's identity in the logs (ADR-0025 decision 1): a correlation key, never read to decide anything.
 	runID := claimed.Status.LastAnalysisTime.UTC().Format(time.RFC3339)
 	var created, attempted remediationv1alpha1.Name
+	if out.Plan != nil && hint != nil && samePlan(hint.Request.Spec, requestSpec(claimed, *out.Plan)) {
+		// A replacement with the plan of the request it replaces would change nothing: none is created, and
+		// the reviewer is told through the outcome (ADR-0028 section 4).
+		out.Reason, out.Plan = ReasonPlanUnchanged, nil
+	}
 	if out.Plan != nil {
+		spec := withReplacement(requestSpec(claimed, *out.Plan), hint)
 		// The name the create uses, kept for a create that fails after the server took it (finish).
-		attempted, _ = requestName(claimed, requestSpec(claimed, *out.Plan))
-		created, err = c.publish(ctx, claimed, *out.Plan)
+		attempted, _ = requestName(claimed, spec)
+		created, err = c.publish(ctx, claimed, spec)
 		switch {
 		case errors.Is(err, errClaimLost):
 			logger.Info("Dropped the result of an analysis whose claim was lost", append([]any{"incident", inc.Name,
@@ -400,7 +419,8 @@ func (c *Controller) recheck(ctx context.Context, claimed *remediationv1alpha1.I
 // publish creates the request of a plan within the claim: it rechecks the claim live just before the create
 // (retrying a transient read error, see recheckRetrying), then the create and its reuse check share one
 // timeout, cut to the time left on the claim, so the create cannot outlive it.
-func (c *Controller) publish(ctx context.Context, claimed *remediationv1alpha1.Incident, p Plan) (remediationv1alpha1.Name, error) {
+func (c *Controller) publish(ctx context.Context, claimed *remediationv1alpha1.Incident,
+	spec remediationv1alpha1.RemediationRequestSpec) (remediationv1alpha1.Name, error) {
 	if err := c.recheckRetrying(ctx, claimed); err != nil {
 		return "", err
 	}
@@ -409,7 +429,7 @@ func (c *Controller) publish(ctx context.Context, claimed *remediationv1alpha1.I
 		return "", err
 	}
 	defer cancel()
-	return c.createRequest(cctx, claimed, p)
+	return c.createRequest(cctx, claimed, spec)
 }
 
 // recheckBackoff bounds the wait between two live reads of the recheck before the create.
@@ -448,17 +468,13 @@ func (c *Controller) recheckRetrying(ctx context.Context, claimed *remediationv1
 	}
 }
 
-// unrecordedRequests lists, live, the requests labelled with inc's UID and returns at most one that inc's
-// status does not record yet: a request the run of inc's lastAnalysisTime created before its outcome write
-// was lost (ADR-0025 decision 6). Only a request created within that run's claim window (from lastAnalysisTime
-// to its expiry) counts, so a name the status dropped at its bound never comes back, and only one per run,
-// which creates at most one. The label and spec are set by whoever creates the request, so it must also have
-// the form an analysis gives it (isAnalysisRequest). Without a lastAnalysisTime nothing counts.
-func (c *Controller) unrecordedRequests(ctx context.Context, inc *remediationv1alpha1.Incident) ([]remediationv1alpha1.Name, error) {
+// incidentRequests lists, live, the requests labelled with inc's UID, at most maxListedRequests. Without a
+// lastAnalysisTime it lists nothing: such an Incident was never analyzed, so no request of it is unrecorded
+// and none holds a hint for it.
+func (c *Controller) incidentRequests(ctx context.Context, inc *remediationv1alpha1.Incident) ([]remediationv1alpha1.RemediationRequest, error) {
 	if inc.Status.LastAnalysisTime == nil {
 		return nil, nil
 	}
-	start, end := inc.Status.LastAnalysisTime.Time, c.expiry(inc)
 	list := &remediationv1alpha1.RemediationRequestList{}
 	if err := c.Reader.List(ctx, list, client.InNamespace(c.Namespace),
 		client.MatchingLabels{LabelIncidentUID: string(inc.UID)}, client.Limit(maxListedRequests)); err != nil {
@@ -468,9 +484,44 @@ func (c *Controller) unrecordedRequests(ctx context.Context, inc *remediationv1a
 		log.FromContext(ctx).Info("Listed only the first RemediationRequests labelled with an Incident's UID",
 			"incident", inc.Name, "limit", maxListedRequests)
 	}
+	return list.Items, nil
+}
+
+// reviewerHint returns the reviewer hint the analysis of inc answers ([incidents.PendingHint]), from requests
+// read live with the form an analysis gives a request of inc (isAnalysisRequest), or nil. Only an Incident in
+// phase Proposed, or Analyzing with its run taken as lost (which is then run again with the same hint), has
+// one: the executor stores hints only for a request in AwaitingApproval, which keeps its Incident Proposed.
+func (c *Controller) reviewerHint(inc *remediationv1alpha1.Incident,
+	requests []remediationv1alpha1.RemediationRequest) *incidents.ReviewerHint {
+	switch inc.Status.Phase {
+	case remediationv1alpha1.IncidentProposed, remediationv1alpha1.IncidentAnalyzing:
+	default:
+		return nil
+	}
+	own := make([]remediationv1alpha1.RemediationRequest, 0, len(requests))
+	for i := range requests {
+		if c.isAnalysisRequest(inc, &requests[i]) {
+			own = append(own, requests[i])
+		}
+	}
+	return incidents.PendingHint(inc, own)
+}
+
+// unrecordedRequests returns at most one of requests (inc's, listed live) that inc's status does not record
+// yet: a request the run of inc's lastAnalysisTime created before its outcome write was lost (ADR-0025
+// decision 6). Only a request created within that run's claim window (from lastAnalysisTime to its expiry)
+// counts, so a name the status dropped at its bound never comes back, and only one per run, which creates at
+// most one. The label and spec are set by whoever creates the request, so it must also have the form an
+// analysis gives it (isAnalysisRequest). Without a lastAnalysisTime nothing counts.
+func (c *Controller) unrecordedRequests(inc *remediationv1alpha1.Incident,
+	requests []remediationv1alpha1.RemediationRequest) []remediationv1alpha1.Name {
+	if inc.Status.LastAnalysisTime == nil {
+		return nil
+	}
+	start, end := inc.Status.LastAnalysisTime.Time, c.expiry(inc)
 	var found *remediationv1alpha1.RemediationRequest
-	for i := range list.Items {
-		rr := &list.Items[i]
+	for i := range requests {
+		rr := &requests[i]
 		created := rr.CreationTimestamp.Time
 		if created.Before(start) || !created.Before(end) ||
 			slices.Contains(inc.Status.RemediationRequests, remediationv1alpha1.Name(rr.Name)) ||
@@ -484,14 +535,16 @@ func (c *Controller) unrecordedRequests(ctx context.Context, inc *remediationv1a
 		}
 	}
 	if found == nil {
-		return nil, nil
+		return nil
 	}
-	return []remediationv1alpha1.Name{remediationv1alpha1.Name(found.Name)}, nil
+	return []remediationv1alpha1.Name{remediationv1alpha1.Name(found.Name)}
 }
 
 // isAnalysisRequest reports whether rr has the form the analysis gives a request of inc: its spec names inc
 // and its subject, GitOps mode, approval required, the policy configured for its action type, and the name
-// derived from inc's UID and that spec (requestName). It proves nothing about who created rr: whoever may
+// derived from inc's UID and that spec (requestName), spec.replaces and spec.chainRoot included (a
+// replacement's, ADR-0028; the link itself is checked by the executor at admission, never here). It proves
+// nothing about who created rr: whoever may
 // create RemediationRequests in the operator namespace can still forge one (threat model G5.6).
 func (c *Controller) isAnalysisRequest(inc *remediationv1alpha1.Incident, rr *remediationv1alpha1.RemediationRequest) bool {
 	s := rr.Spec
@@ -506,7 +559,9 @@ func (c *Controller) isAnalysisRequest(inc *remediationv1alpha1.Incident, rr *re
 	if ref, ok := c.Analyzer.cfg.Policies[s.Action.Type]; !ok || ref == "" || ref != s.PolicyRef {
 		return false
 	}
-	name, err := requestName(inc, requestSpec(inc, Plan{Action: s.Action, Checks: s.Verification.Checks, PolicyRef: s.PolicyRef}))
+	spec := requestSpec(inc, Plan{Action: s.Action, Checks: s.Verification.Checks, PolicyRef: s.PolicyRef})
+	spec.Replaces, spec.ChainRoot = s.Replaces, s.ChainRoot
+	name, err := requestName(inc, spec)
 	return err == nil && string(name) == rr.Name
 }
 
@@ -536,9 +591,12 @@ func (c *Controller) release() {
 
 // claim writes the phase Analyzing, lastAnalysisTime and AnalysisDue (not due, Analyzing) in one status
 // update with the resourceVersion read: the trigger then sees the analysis running, and a conflict means
-// another write came first, so the claim is not made. The same update records the requests in unrecorded.
+// another write came first, so the claim is not made. The same update records the requests in unrecorded,
+// and status.handledHint: the pin of the reviewer hint the run answers, or none (ADR-0028 section 3). The
+// hint is thus claimed with the run, so a restart finds the claim or the outcome with it and does not run it
+// twice ([incidents.PendingHint]).
 func (c *Controller) claim(ctx context.Context, inc *remediationv1alpha1.Incident,
-	unrecorded []remediationv1alpha1.Name) (*remediationv1alpha1.Incident, error) {
+	unrecorded []remediationv1alpha1.Name, hint *incidents.ReviewerHint) (*remediationv1alpha1.Incident, error) {
 	claimed := inc.DeepCopy()
 	for _, name := range unrecorded {
 		claimed.Status.RemediationRequests = appendBounded(claimed.Status.RemediationRequests, name, maxRecorded)
@@ -546,6 +604,11 @@ func (c *Controller) claim(ctx context.Context, inc *remediationv1alpha1.Inciden
 	now := metav1.NewTime(c.now().UTC().Truncate(time.Second))
 	claimed.Status.Phase = remediationv1alpha1.IncidentAnalyzing
 	claimed.Status.LastAnalysisTime = &now
+	claimed.Status.HandledHint = nil
+	if hint != nil {
+		ref := hint.Ref()
+		claimed.Status.HandledHint = &ref
+	}
 	meta.SetStatusCondition(&claimed.Status.Conditions, metav1.Condition{
 		Type: incidents.ConditionAnalysisDue, Status: metav1.ConditionFalse, Reason: incidents.ReasonAnalyzing,
 		Message: "An analysis is running", ObservedGeneration: claimed.Generation, LastTransitionTime: now,
@@ -567,6 +630,35 @@ func requestName(inc *remediationv1alpha1.Incident, spec remediationv1alpha1.Rem
 	return remediationv1alpha1.RequestName(spec)
 }
 
+// withReplacement returns spec as the replacement of the request that holds hint (ADR-0028 section 4):
+// spec.replaces names that request by name and UID and pins the hint, and spec.chainRoot is that request's
+// chain root, or its own UID when it has none. Both are part of the request's name, so each attempt (a plan
+// answering one hint of one predecessor) is a request of its own, even with the plan of an earlier request of
+// the chain, while a retry of the same attempt finds the request it made (invariant 5). Without a hint spec is
+// returned as it is.
+func withReplacement(spec remediationv1alpha1.RemediationRequestSpec, hint *incidents.ReviewerHint) remediationv1alpha1.RemediationRequestSpec {
+	if hint == nil {
+		return spec
+	}
+	pred := hint.Request
+	spec.Replaces = &remediationv1alpha1.RequestReplacement{
+		Name: remediationv1alpha1.Name(pred.Name), UID: remediationv1alpha1.UID(pred.UID), Hint: hint.Ref(),
+	}
+	spec.ChainRoot = pred.Spec.ChainRoot
+	if spec.ChainRoot == "" {
+		spec.ChainRoot = remediationv1alpha1.UID(pred.UID)
+	}
+	return spec
+}
+
+// samePlan reports whether spec holds the plan of the request whose spec is old: the same Incident, target,
+// policy, action and checks.
+func samePlan(old, spec remediationv1alpha1.RemediationRequestSpec) bool {
+	return old.IncidentRef == spec.IncidentRef && old.TargetRef == spec.TargetRef && old.PolicyRef == spec.PolicyRef &&
+		equality.Semantic.DeepEqual(old.Action, spec.Action) &&
+		equality.Semantic.DeepEqual(old.Verification.Checks, spec.Verification.Checks)
+}
+
 // requestSpec is the spec of the request of a plan: nothing in it comes from the model but the action and the
 // extra checks, which the loop validated.
 func requestSpec(inc *remediationv1alpha1.Incident, p Plan) remediationv1alpha1.RemediationRequestSpec {
@@ -582,12 +674,13 @@ func requestSpec(inc *remediationv1alpha1.Incident, p Plan) remediationv1alpha1.
 	}
 }
 
-// createRequest creates the RemediationRequest of a plan in the operator namespace: the Incident's subject as
-// the target, approval required, the configured policy. It is a proposal only (invariant 1); the executor's
-// policy check decides it. An existing request of the same name is accepted only when it holds the same plan
-// for this Incident.
-func (c *Controller) createRequest(ctx context.Context, inc *remediationv1alpha1.Incident, p Plan) (remediationv1alpha1.Name, error) {
-	spec := requestSpec(inc, p)
+// createRequest creates the RemediationRequest of spec (requestSpec, and withReplacement for a reviewer hint)
+// in the operator namespace: the Incident's subject as the target, approval required, the configured policy.
+// It is a proposal only (invariant 1); the executor's policy check decides it. An existing request of the same
+// name is accepted only when it holds the same plan for this Incident, replacing the same request for the same
+// hint.
+func (c *Controller) createRequest(ctx context.Context, inc *remediationv1alpha1.Incident,
+	spec remediationv1alpha1.RemediationRequestSpec) (remediationv1alpha1.Name, error) {
 	name, err := requestName(inc, spec)
 	if err != nil {
 		return "", err
@@ -610,7 +703,8 @@ func (c *Controller) createRequest(ctx context.Context, inc *remediationv1alpha1
 		if e.IncidentRef != spec.IncidentRef || e.TargetRef != spec.TargetRef || e.PolicyRef != spec.PolicyRef ||
 			e.Mode != spec.Mode || e.ApprovalRequired == nil || !*e.ApprovalRequired ||
 			!equality.Semantic.DeepEqual(e.Action, spec.Action) ||
-			!equality.Semantic.DeepEqual(e.Verification.Checks, spec.Verification.Checks) {
+			!equality.Semantic.DeepEqual(e.Verification.Checks, spec.Verification.Checks) ||
+			!equality.Semantic.DeepEqual(e.Replaces, spec.Replaces) || e.ChainRoot != spec.ChainRoot {
 			return "", errors.New("a RemediationRequest of that name holds another plan")
 		}
 		return name, nil
@@ -649,10 +743,14 @@ var outcomeMessages = map[Reason]string{
 	ReasonRequestNotCreated:       "The RemediationRequest of the proposal could not be created; handed off to a person",
 	ReasonUnexpectedModel:         "A reply came from another model than the one configured for the deployment; handed off to a person",
 	ReasonEndpointNotAllowed:      "The model endpoint is outside the analyzer's allow-list of host suffixes; nothing was sent; handed off to a person",
+	ReasonPlanUnchanged:           "The analysis with a reviewer hint proposed the plan of the request it would replace; no replacement was created",
 }
 
 // finish writes the outcome in one status update: Proposed with the request's name, or Escalated, and the
-// Analyzed condition. It rechecks the claim live and writes with the resourceVersion of that read, retrying
+// Analyzed condition. A run with a reviewer hint (status.handledHint) that created no request goes back to
+// Proposed instead of Escalated: the request the hint was given on still stands, its pull request untouched
+// (ADR-0028 section 4), and the closure rules decide the Incident by it as before. status.handledHint, written
+// by the claim, stays with the outcome, so the executor can match the outcome to the hint. It rechecks the claim live and writes with the resourceVersion of that read, retrying
 // on conflict with a new recheck, so a stale run never overwrites a newer one; it returns errClaimLost and
 // writes nothing once the run no longer owns the claim. It runs with its own timeout, cut to the time left on
 // the claim, after the analysis deadline and a stop too. recovered is the run's own request of a failed
@@ -685,6 +783,9 @@ func (c *Controller) finish(ctx context.Context, claimed *remediationv1alpha1.In
 			return err
 		}
 		inc.Status.Phase = remediationv1alpha1.IncidentEscalated
+		if inc.Status.HandledHint != nil {
+			inc.Status.Phase = remediationv1alpha1.IncidentProposed
+		}
 		if record != "" {
 			inc.Status.AnalysisRecords = appendBounded(inc.Status.AnalysisRecords, record,
 				remediationv1alpha1.MaxAnalysisRecords)

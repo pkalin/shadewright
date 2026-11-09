@@ -1591,6 +1591,8 @@ func (r *RemediationRequestReconciler) ownsMarker(ctx context.Context, body stri
 		pred := &remediationv1alpha1.RemediationRequest{}
 		err := r.Get(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}, pred)
 		if apierrors.IsNotFound(err) {
+			logf.FromContext(ctx).V(1).Info("Stopped at a missing request of the supersede chain",
+				"remediationRequest", client.ObjectKeyFromObject(rr), "missing", from.Name)
 			break
 		}
 		if err != nil {
@@ -1599,6 +1601,8 @@ func (r *RemediationRequestReconciler) ownsMarker(ctx context.Context, body stri
 		ho := pred.Status.Handoff
 		if pred.UID != types.UID(from.UID) || chainRootOf(pred) != root || ho == nil || ho.To == nil ||
 			ho.To.UID != remediationv1alpha1.UID(cur.UID) {
+			logf.FromContext(ctx).V(1).Info("Stopped at a request that does not link to the supersede chain",
+				"remediationRequest", client.ObjectKeyFromObject(rr), "link", from.Name)
 			break
 		}
 		uids = append(uids, pred.UID)

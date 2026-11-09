@@ -42,6 +42,7 @@ const (
 	opCreateBranch = "GitHub create branch"
 	opCommitFile   = "GitHub commit file"
 	opCheckBranch  = "GitHub check branch"
+	opCheckCommit  = "GitHub check commit"
 	opOpenCR       = "GitHub open pull request"
 	opFindCR       = "GitHub find pull request"
 	opCloseCR      = "GitHub close pull request"
@@ -554,9 +555,9 @@ func (p *Provider) CheckMerged(ctx context.Context, head, mergeCommit, path stri
 func (p *Provider) CheckCommit(ctx context.Context, commit, path string) (providers.BranchState, string, error) {
 	switch {
 	case !validSHA(commit):
-		return 0, "", errors.New(opCheckBranch + ": commit is not a full SHA")
+		return 0, "", errors.New(opCheckCommit + ": commit is not a full SHA")
 	case !validPath(path):
-		return 0, "", errors.New(opCheckBranch + ": path is invalid")
+		return 0, "", errors.New(opCheckCommit + ": path is invalid")
 	}
 	ctx, cancel := p.withTimeout(ctx)
 	defer cancel()

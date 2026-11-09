@@ -94,8 +94,9 @@ type Feedback struct {
 
 // FeedbackCursor is where a look starts; the zero value starts from the beginning. The caller stores the Next
 // cursor of a look durably once it has handled every item of that look, and passes it to the next look of the
-// same list; its fields mean something only to the adapter that returned it. A cursor only moves forward:
-// Since never decreases, and while items are left each look moves on by at least one.
+// same list; its fields mean something only to the adapter that returned it. A cursor never goes back: Since
+// never decreases, nor AfterID within a sweep. Page may: when items were deleted, a look steps back to find
+// its place, and a look that spent its pages doing so returns no items and the page it reached.
 type FeedbackCursor struct {
 	// Since is the oldest update time the current sweep of the list asks for; zero asks for everything.
 	Since time.Time
@@ -129,8 +130,8 @@ type FeedbackSource interface {
 	// ListComments returns the conversation comments of change request number that are new, or edited since
 	// the sweep cursor belongs to began, bounded as one look.
 	ListComments(ctx context.Context, number int64, cursor FeedbackCursor) (FeedbackPage, error)
-	// ListReviews returns the bodies of the submitted reviews of change request number after cursor, bounded
-	// as one look. Reviews without a body are returned too: their state counts.
+	// ListReviews returns the bodies of the reviews of change request number submitted since the sweep cursor
+	// belongs to began, bounded as one look. Reviews without a body are returned too: their state counts.
 	ListReviews(ctx context.Context, number int64, cursor FeedbackCursor) (FeedbackPage, error)
 	// CanWrite reports whether author may write to the repository, as the host says now. Only a Person can;
 	// a Bot or App is refused without asking the host. An author the host does not know, or one whose ID

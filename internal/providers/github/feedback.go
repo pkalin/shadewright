@@ -151,6 +151,8 @@ type pageResult struct {
 	n int
 	// stopped is true when the byte budget ended the page before its last element.
 	stopped bool
+	// minID is the smallest valid ID of the elements decoded, returned or not; zero when there is none.
+	minID int64
 }
 
 // decodePage reads a JSON array one element at a time. An element that is not a T is a malformed item; one
@@ -177,6 +179,9 @@ func decodePage[T any](r io.Reader, budget int, afterID int64, conv func(T) (ite
 			continue
 		}
 		it, own := conv(v)
+		if own && it.id >= 1 && (res.minID == 0 || it.id < res.minID) {
+			res.minID = it.id
+		}
 		switch {
 		case !own:
 			return res, errForeignItem
@@ -210,12 +215,20 @@ type lookResult struct {
 
 // look reads up to providers.MaxFeedbackPages pages of path from cursor's page, each within its own deadline,
 // so a slow page does not take the time of the pages before it. It returns the items after cursor.AfterID.
+//
+// Items are in ID order, so a look that goes on from a page checks its position first: when that page is
+// empty or starts above the last ID read, items were deleted and the unread ones moved to earlier pages, so
+// it steps back a page at a time until a page starts at or below that ID (or page 1), and goes on from there.
+// A look whose page budget runs out while stepping back returns nothing and the page it got to, so the next
+// look steps on from there.
 func (p *Provider) look(ctx context.Context, op, path string, query url.Values, cur providers.FeedbackCursor,
 	decode func(r io.Reader, budget int, afterID int64) (pageResult, error)) (lookResult, error) {
 	first := max(cur.Page, 1)
 	res := lookResult{lastPage: first, afterID: cur.AfterID}
 	budget := providers.MaxFeedbackBytes
-	for page := first; page < first+providers.MaxFeedbackPages; page++ {
+	locating := cur.AfterID > 0 && first > 1
+	page := first
+	for range providers.MaxFeedbackPages {
 		q := url.Values{paramPerPage: {strconv.Itoa(feedbackPerPage)}, "page": {strconv.Itoa(page)}}
 		maps.Copy(q, query)
 		var pr pageResult
@@ -236,11 +249,17 @@ func (p *Provider) look(ctx context.Context, op, path string, query url.Values, 
 		if !r.ok() {
 			return lookResult{}, statusError(op, r.status)
 		}
-		if page == first {
+		if res.started.IsZero() {
 			if t, err := http.ParseTime(r.header.Get("Date")); err == nil {
 				res.started = t
 			}
 		}
+		if locating && page > 1 && (pr.n == 0 || pr.minID > res.afterID) {
+			page--
+			res.lastPage = page
+			continue
+		}
+		locating = false
 		res.lastPage = page
 		for _, it := range pr.items {
 			res.afterID = max(res.afterID, it.id)
@@ -259,8 +278,31 @@ func (p *Provider) look(ctx context.Context, op, path string, query url.Values, 
 			res.ended = true
 			return res, nil
 		}
+		page++
 	}
 	return res, nil
+}
+
+// next sets the outcome of a look as one step of a sweep. A sweep pages through one since; when it reaches
+// the end, the next sweep asks from the host's time when this one began, less clockMargin, so what changes
+// during a sweep is read by the next one. Since never decreases; without a Date header from the host the
+// next sweep keeps the same since, so it reads again and never skips.
+func next(cur providers.FeedbackCursor, res lookResult) providers.FeedbackPage {
+	start := cur.SweepStart
+	if cur.Page == 0 {
+		start = res.started
+	}
+	out := res.page
+	if res.ended {
+		out.Complete = true
+		out.Next = providers.FeedbackCursor{Since: cur.Since}
+		if s := start.Add(-clockMargin); !start.IsZero() && s.After(cur.Since) {
+			out.Next.Since = s
+		}
+		return out
+	}
+	out.Next = providers.FeedbackCursor{Since: cur.Since, Page: res.lastPage, AfterID: res.afterID, SweepStart: start}
+	return out
 }
 
 // ownPull refuses a pull request that is not a Shadewright one to the target branch of this repository,
@@ -277,9 +319,8 @@ func validCursor(c providers.FeedbackCursor) bool {
 }
 
 // ListComments returns the conversation comments of pull request number, oldest first, within the bounds of
-// one look. A sweep asks for the comments updated since cursor.Since and pages through them across looks;
-// when it reaches the end, the next sweep asks for those updated since this one began (by GitHub's clock), so
-// an edit made during a sweep is read by the next one, and Since never decreases. A pull request that is not
+// one look. A sweep asks GitHub for the comments updated since cursor.Since and pages through them across
+// looks (see look and next). A pull request that is not
 // Shadewright's is refused, and so is a look holding a comment of another repository, issue or pull request.
 func (p *Provider) ListComments(ctx context.Context, number int64, cur providers.FeedbackCursor) (providers.FeedbackPage, error) {
 	if number < 1 || !validCursor(cur) {
@@ -322,29 +363,15 @@ func (p *Provider) ListComments(ctx context.Context, number int64, cur providers
 	if err != nil {
 		return providers.FeedbackPage{}, err
 	}
-	// Without a Date header the sweep has no start, and the next sweep keeps the same since: it reads again,
-	// never skips.
-	start := cur.SweepStart
-	if cur.Page == 0 {
-		start = res.started
-	}
-	out := res.page
-	if res.ended {
-		out.Complete = true
-		out.Next = providers.FeedbackCursor{Since: cur.Since}
-		if s := start.Add(-clockMargin); !start.IsZero() && s.After(cur.Since) {
-			out.Next.Since = s
-		}
-		return out, nil
-	}
-	out.Next = providers.FeedbackCursor{Since: cur.Since, Page: res.lastPage, AfterID: res.afterID, SweepStart: start}
-	return out, nil
+	return next(cur, res), nil
 }
 
-// ListReviews returns the bodies of the submitted reviews of pull request number after cursor, oldest first,
-// within the bounds of one look. GitHub lists reviews in the order they were created and has no since, so the
-// cursor is a page and the last review ID returned: each look goes on from there, and a look that reached the
-// end starts the next on that same page, to see the reviews added to it. A pull request that is not
+// ListReviews returns the bodies of the reviews of pull request number submitted since the sweep cursor
+// belongs to, oldest first, within the bounds of one look. GitHub lists reviews in the order they were started
+// and has no since: a draft submitted late keeps its early ID, before reviews submitted earlier. So each sweep
+// reads every page from the first and keeps the reviews submitted at or after cursor.Since, and the next sweep
+// asks from this one's start (see look and next): a review is read by the sweep running when it is submitted
+// or by the one after, wherever it sits. A long list takes several looks per sweep. A pull request that is not
 // Shadewright's is refused, and so is a look holding a review of another repository or pull request.
 func (p *Provider) ListReviews(ctx context.Context, number int64, cur providers.FeedbackCursor) (providers.FeedbackPage, error) {
 	if number < 1 || !validCursor(cur) {
@@ -362,8 +389,7 @@ func (p *Provider) ListReviews(ctx context.Context, number int64, cur providers.
 		}
 		it := item{id: rv.ID, malformed: true}
 		if rv.State == "PENDING" {
-			// A draft gets its ID when it is started, so a later submit could fall behind the cursor; only the
-			// App's own drafts are visible to it, and it writes none.
+			// Only the App's own drafts are visible to it, and it writes none.
 			it.malformed, it.ignored = false, true
 			return it, true
 		}
@@ -381,6 +407,10 @@ func (p *Provider) ListReviews(ctx context.Context, number int64, cur providers.
 			return it, true
 		}
 		it.malformed = false
+		if submitted.Before(cur.Since) {
+			it.ignored = true // returned by an earlier sweep
+			return it, true
+		}
 		it.fb = providers.Feedback{Kind: providers.FeedbackReview, ID: rv.ID, Author: a,
 			CreatedAt: submitted, UpdatedAt: submitted, ReviewState: rv.State, CommitID: commit}
 		if rv.Body != nil {
@@ -395,10 +425,7 @@ func (p *Provider) ListReviews(ctx context.Context, number int64, cur providers.
 	if err != nil {
 		return providers.FeedbackPage{}, err
 	}
-	out := res.page
-	out.Complete = res.ended
-	out.Next = providers.FeedbackCursor{Page: res.lastPage, AfterID: res.afterID}
-	return out, nil
+	return next(cur, res), nil
 }
 
 // writePermissions are the values of the base permission field that may write. GitHub reports maintain and

@@ -522,8 +522,8 @@ func TestListFeedbackValidatesInput(t *testing.T) {
 }
 
 func TestListReviews(t *testing.T) {
-	h := newHarness(t, ownPR(), step{method: http.MethodGet, path: reviewsPath, query: pageQuery(1),
-		status: http.StatusOK, file: "reviews.json"})
+	h := newHarness(t, ownPR(), dated(step{method: http.MethodGet, path: reviewsPath, query: pageQuery(1),
+		status: http.StatusOK, file: "reviews.json"}))
 	got, err := h.p.ListReviews(ctx, prNumber, providers.FeedbackCursor{})
 	if err != nil {
 		t.Fatal(err)
@@ -540,7 +540,8 @@ func TestListReviews(t *testing.T) {
 	if bot.Author.Kind != providers.AuthorBot || bot.CommitID != "" {
 		t.Errorf("bot review = %+v", bot)
 	}
-	if want := (providers.FeedbackCursor{Page: 1, AfterID: 80004}); got.Next != want {
+	// The next sweep keeps the reviews submitted since this one began.
+	if want := (providers.FeedbackCursor{Since: hostNow.Add(-clockMargin)}); got.Next != want {
 		t.Errorf("next %+v, want %+v", got.Next, want)
 	}
 }
@@ -548,7 +549,11 @@ func TestListReviews(t *testing.T) {
 func TestListReviewsCursorMovesPastTheBound(t *testing.T) {
 	steps := []step{ownPR()}
 	for page := 1; page <= providers.MaxFeedbackPages; page++ {
-		steps = append(steps, reviewsStep(page, reviewPage(t, feedbackPerPage, int64(page*1000))))
+		s := reviewsStep(page, reviewPage(t, feedbackPerPage, int64(page*1000)))
+		if page == 1 {
+			s = dated(s)
+		}
+		steps = append(steps, s)
 	}
 	h := newHarness(t, steps...)
 	got, err := h.p.ListReviews(ctx, prNumber, providers.FeedbackCursor{})
@@ -556,7 +561,7 @@ func TestListReviewsCursorMovesPastTheBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := providers.MaxFeedbackPages
-	want := providers.FeedbackCursor{Page: last, AfterID: int64(last*1000 + feedbackPerPage - 1)}
+	want := providers.FeedbackCursor{Page: last, AfterID: int64(last*1000 + feedbackPerPage - 1), SweepStart: hostNow}
 	if got.Complete || got.Next != want {
 		t.Fatalf("complete %v, next %+v, want %+v", got.Complete, got.Next, want)
 	}
@@ -570,8 +575,8 @@ func TestListReviewsCursorMovesPastTheBound(t *testing.T) {
 	if !slices.Equal(ids(got.Items), []int64{9000, 9001, 9002}) || !got.Complete {
 		t.Fatalf("items %v, complete %v", ids(got.Items), got.Complete)
 	}
-	// At the end, the next look reads that last page again, for reviews added to it.
-	if want := (providers.FeedbackCursor{Page: last + 1, AfterID: 9002}); got.Next != want {
+	// At the end of the sweep, the next one starts on page 1 from the sweep's start.
+	if want := (providers.FeedbackCursor{Since: hostNow.Add(-clockMargin)}); got.Next != want {
 		t.Errorf("next %+v, want %+v", got.Next, want)
 	}
 }
@@ -592,7 +597,7 @@ func TestListReviewsSkipsMalformedItems(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(ids(got.Items), []int64{4}) || got.Skipped != 3 || got.Next.AfterID != 4 {
+	if !slices.Equal(ids(got.Items), []int64{4}) || got.Skipped != 3 || !got.Complete {
 		t.Errorf("items %v, skipped %d, next %+v", ids(got.Items), got.Skipped, got.Next)
 	}
 }
@@ -602,6 +607,80 @@ func TestListReviewsRefusesAnotherRepository(t *testing.T) {
 		status: http.StatusOK, file: "reviews_foreign.json"})
 	_, err := h.p.ListReviews(ctx, prNumber, providers.FeedbackCursor{})
 	assertSafe(t, err)
+}
+
+// Regressions found by a second review: an unread comment moved to an earlier page by deletions, and a draft
+// review submitted after a later review.
+
+func TestListCommentsContinuationStepsBackAfterDeletions(t *testing.T) {
+	// 151 comments exist before the sweep; the first look reads IDs 1 to 150 and resumes on page 5.
+	steps := []step{ownPR()}
+	for page := 1; page <= providers.MaxFeedbackPages; page++ {
+		s := commentsStep(page, commentPage(t, feedbackPerPage, int64((page-1)*feedbackPerPage+1), since, "hint"))
+		if page == 1 {
+			s = dated(s)
+		}
+		steps = append(steps, s)
+	}
+	h := newHarness(t, steps...)
+	first, err := h.p.ListComments(ctx, prNumber, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// IDs 1 to 31 are deleted: 120 remain, so page 5 is empty and ID 151 is the last item of page 4.
+	h = newHarness(t, ownPR(), commentsStep(5, "[]"),
+		commentsStep(4, commentPage(t, feedbackPerPage, 122, since, "hint")),
+		commentsStep(5, "[]"))
+	second, err := h.p.ListComments(ctx, prNumber, first.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ids(second.Items), []int64{151}) || !second.Complete {
+		t.Fatalf("continuation items %v, complete %v; want [151], complete", ids(second.Items), second.Complete)
+	}
+}
+
+func TestListCommentsStepBackSpansLooks(t *testing.T) {
+	// The position moved back further than one look can step: the cursor walks back across looks, and never
+	// moves its since or its last ID.
+	cur := providers.FeedbackCursor{Since: since, Page: 9, AfterID: 270, SweepStart: hostNow}
+	steps := []step{ownPR()}
+	for page := 9; page > 9-providers.MaxFeedbackPages; page-- {
+		steps = append(steps, commentsStep(page, "[]"))
+	}
+	h := newHarness(t, steps...)
+	got, err := h.p.ListComments(ctx, prNumber, cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := providers.FeedbackCursor{Since: since, Page: 9 - providers.MaxFeedbackPages, AfterID: 270, SweepStart: hostNow}
+	if len(got.Items) != 0 || got.Complete || got.Next != want {
+		t.Fatalf("items %v, complete %v, next %+v; want %+v", ids(got.Items), got.Complete, got.Next, want)
+	}
+}
+
+func TestListReviewsDraftSubmittedLateIsRead(t *testing.T) {
+	// Reviewer A starts draft 1, reviewer B submits review 2, which is visible.
+	two := recorded(t, "reviews.json")
+	two["id"] = 2
+	two["html_url"] = "https://github.com/acme/fleet/pull/12#pullrequestreview-2"
+	h := newHarness(t, ownPR(), dated(reviewsStep(1, marshal(t, []any{two}))))
+	first, err := h.p.ListReviews(ctx, prNumber, providers.FeedbackCursor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A submits draft 1 after the first look: it keeps ID 1, before review 2.
+	one := maps.Clone(two)
+	one["id"], one["submitted_at"] = 1, hostNow.Add(time.Minute).Format(time.RFC3339)
+	one["html_url"] = "https://github.com/acme/fleet/pull/12#pullrequestreview-1"
+	h = newHarness(t, ownPR(), reviewsStep(1, marshal(t, []any{one, two})))
+	second, err := h.p.ListReviews(ctx, prNumber, first.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ids(second.Items), []int64{1}) {
+		t.Fatalf("items %v, cursor %+v; want [1]", ids(second.Items), second.Next)
+	}
 }
 
 func TestReadStreamRefusesATooLargePage(t *testing.T) {

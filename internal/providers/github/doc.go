@@ -40,8 +40,9 @@ limitations under the License.
 //     that the pull request is a Shadewright one to the target branch, then read at most
 //     providers.MaxFeedbackPages pages of 30, each within its own deadline, decoding one item at a time and
 //     stopping once providers.MaxFeedbackBytes of bodies are kept, each cut to providers.MaxFeedbackBodyBytes
-//     and marked when cut. A cursor (page, last ID, and for comments the since of the sweep, which never
-//     decreases) carries each look on from the last. A malformed item is skipped and counted; an item whose
+//     and marked when cut. A cursor (the since of a sweep, which never decreases, a page and the last ID)
+//     carries each look on from the last; a look steps back when deletions moved its place, and every sweep
+//     of reviews starts on page 1, since a draft submitted late keeps its early place. A malformed item is skipped and counted; an item whose
 //     URLs name another repository, another pull request or an issue fails the whole look, without a retry.
 //     CanWrite reads the base permission of a person (admin,
 //     maintain or write accepted; anything else and a 404 refused) and refuses an answer for another account

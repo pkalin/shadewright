@@ -89,8 +89,8 @@ type DeliveryVerifier interface {
 var errTargetGone = errors.New("the target is gone or was replaced")
 
 // errDeliveryMoved means the GitOps controller applied another commit between its answer and the read of the
-// target after it, so the target read may show what that commit produced: nothing is recorded, the delivery is
-// checked again at once.
+// target after it, or another Kustomization took the target over in between, so the target read may show what
+// that commit or that Kustomization produced: nothing is recorded, the delivery is checked again at once.
 var errDeliveryMoved = errors.New("the delivery moved to another commit while it was checked")
 
 // maxPaused bounds the paused time added to the delivery window, so a corrupt pausedSeconds cannot overflow it.
@@ -555,6 +555,11 @@ func (r *RemediationRequestReconciler) delivered(ctx context.Context, rr *remedi
 	after := rolloutTarget(ref)
 	if err := r.readTarget(ctx, ref, after); err != nil {
 		return delivery{target: target}, err
+	}
+	// Another Kustomization may have taken the target over in between: its template is not ours, whatever
+	// the Kustomization of the first read reports.
+	if n2, ns2, ok2 := kustomizationOf(after); !ok2 || n2 != name || ns2 != namespace {
+		return delivery{target: target}, errDeliveryMoved
 	}
 	again, status2, err := verifier.Verify(ctx, unit, rr.Status.PullRequest.MergeCommitSHA, string(rr.Status.Source.TargetBranch))
 	if err != nil {

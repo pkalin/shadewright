@@ -1036,3 +1036,40 @@ func TestRolloutResumeKeepsUnusedDeliveryWindow(t *testing.T) {
 		t.Fatalf("RolledOut = %+v once the window kept ended, want DeliveryNotObserved", c)
 	}
 }
+
+// Another Kustomization adopts the target between the two reads after the apply: the template it shows is not
+// ours, even though the Kustomization of the first read still reports the merge commit applied.
+func TestRolloutTargetAdoptedByAnotherKustomizationBeforeCapture(t *testing.T) {
+	w := newDeploymentWorld(t, cacheDeployment(3, 3, "cache:ours", "3", false))
+	w.reader.ks = kustomizationApplied(t, w.merge)
+	reads := 0
+	w.reader.fail = func(obj client.Object) error {
+		if _, ok := obj.(*appsv1.Deployment); ok {
+			reads++
+			if reads == 2 {
+				w.reader.fail = nil
+				// A different Git source applies a new template and changes the
+				// ownership labels. The original Kustomization is unchanged.
+				d := cacheDeployment(4, 4, "cache:unrelated", "4", true)
+				d.Labels["kustomize.toolkit.fluxcd.io/name"] = "other-apps"
+				live := &appsv1.Deployment{}
+				if err := w.c.Get(t.Context(), client.ObjectKeyFromObject(d), live); err != nil {
+					t.Fatal(err)
+				}
+				live.Labels = d.Labels
+				if err := w.c.Update(t.Context(), live); err != nil {
+					t.Fatal(err)
+				}
+				w.setDeployment(t, d)
+			}
+		}
+		return nil
+	}
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	rr := w.request(t)
+	if c := rolledOut(t, w); c != nil && c.Status == metav1.ConditionTrue {
+		t.Fatalf("later template reported successful: applied=%s generation=%d revision=%s ended=%v", rr.Status.Rollout.AppliedRevision, rr.Status.Rollout.TargetGeneration, rr.Status.Rollout.TemplateRevision, rr.Status.Rollout.Ended)
+	}
+}

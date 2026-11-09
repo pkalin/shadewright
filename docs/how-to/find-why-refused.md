@@ -8,6 +8,8 @@ A request that is refused or stops says why in its conditions. Background: [desi
 
 ## Steps
 
+With the [kubectl plugin](check-status.md#explain-one-request), `kubectl shadewright explain <name> -n shadewright-system` does steps 1 to 3 in one read-only command: the phase, the condition timeline, the condition that stopped the request and a link to its section of troubleshooting. Without it:
+
 1. Print the phase and every condition with its reason and message:
 
     ```bash

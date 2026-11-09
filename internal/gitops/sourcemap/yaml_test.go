@@ -18,11 +18,17 @@ package sourcemap_test
 
 import (
 	goruntime "runtime"
+	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"sigs.k8s.io/yaml"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/pkalin/shadewright/internal/providers"
 )
 
 // executorMemory is the executor's memory limit in the chart.
@@ -85,10 +91,16 @@ func TestResolveRefusesYAMLAliases(t *testing.T) {
 			f.files[soFile] = strings.Replace(scaledObjectYAML, "  name: orders-worker\n",
 				"  name: orders-worker\n  <<: {labels: {app: orders}}\n", 1)
 		}, soFile, anchors},
-		{"an alias in the second document of a manifest", func(f *fixture) {
+		// The line is the file's, past the empty document between the two separators (scaledObjectYAML has
+		// 20 lines and ends with one).
+		{"an alias after an empty document of a manifest", func(f *fixture) {
 			f.files[soFile] = scaledObjectYAML + "---\napiVersion: v1\nkind: ConfigMap\nmetadata: &m\n" +
 				"  name: c\n  namespace: orders\ndata:\n  copy: *m\n"
-		}, soFile, "document 3 line 4: YAML anchors"},
+		}, soFile, soFile + " line 24: YAML anchors"},
+		{"an alias after empty documents at the start of a manifest", func(f *fixture) {
+			f.files[soFile] = "---\n---\n# c\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: c\n" +
+				"  namespace: orders\n  labels: &l {a: b}\n---\n" + scaledObjectYAML
+		}, soFile, soFile + " line 10: YAML anchors"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -127,10 +139,74 @@ func TestReadFieldRefusesYAMLAliases(t *testing.T) {
 		aliasBomb("  "))
 	var got any
 	n := allocated(func() { got, _, err = sourcemap.ReadField(data, target, field) })
-	if err == nil || !strings.Contains(err.Error(), anchors) {
-		t.Fatalf("ReadField = %v, %v; want an error about anchors", got, err)
+	// The first anchor is on line 28 of the file (scaledObjectYAML has 20 lines).
+	if want := "line 28: YAML anchors"; err == nil || !strings.HasPrefix(err.Error(), want) {
+		t.Fatalf("ReadField = %v, %v; want an error starting with %q", got, err, want)
 	}
 	if n >= executorMemory/2 {
 		t.Errorf("ReadField allocated %d MiB, want less than half the executor's %d MiB", n>>20, executorMemory>>20)
+	}
+}
+
+// peakHeap returns the most heap f held at once, sampled every millisecond, over the heap before it. The
+// collector runs at GOGC 10 meanwhile, so the sample stays close to what f keeps alive.
+func peakHeap(f func()) uint64 {
+	defer debug.SetGCPercent(debug.SetGCPercent(10))
+	var m goruntime.MemStats
+	goruntime.GC()
+	goruntime.ReadMemStats(&m)
+	base := m.HeapAlloc
+	var (
+		stop atomic.Bool
+		peak uint64
+		done = make(chan struct{})
+	)
+	go func() {
+		defer close(done)
+		var s goruntime.MemStats
+		for !stop.Load() {
+			goruntime.ReadMemStats(&s)
+			peak = max(peak, s.HeapAlloc)
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	f()
+	stop.Store(true)
+	<-done
+	return peak - min(base, peak)
+}
+
+// The check of each document builds a tree that is dropped before sigs.k8s.io/yaml decodes the document, so
+// checking a document of 1 MiB (a flow list of about 520,000 items, the most a file may hold) does not add
+// to the peak heap of its decode (#594).
+func TestReadFieldPeakHeap(t *testing.T) {
+	target := newFixture().in.Target
+	field, err := sourcemap.FieldFor(v1alpha1.Action{Type: v1alpha1.ActionAdjustKedaMaxReplicas}, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const head = "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: big, namespace: orders}\ndata: {x: ["
+	const tail = "x]}\n"
+	n := (providers.MaxFileBytes - len(scaledObjectYAML) - len("---\n") - len(head) - len(tail)) / 2
+	doc := head + strings.Repeat("x,", n) + tail
+	data := []byte(scaledObjectYAML + "---\n" + doc)
+	if len(data) > providers.MaxFileBytes {
+		t.Fatalf("the file has %d bytes, over the limit of %d", len(data), providers.MaxFileBytes)
+	}
+	var got any
+	mapped := peakHeap(func() { got, _, err = sourcemap.ReadField(data, target, field) })
+	if err != nil || got == nil {
+		t.Fatalf("ReadField = %v, %v; want the value", got, err)
+	}
+	decoded := peakHeap(func() {
+		var m map[string]any
+		if err := yaml.UnmarshalStrict([]byte(doc), &m); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Logf("peak heap: ReadField %d MiB, the decode alone %d MiB", mapped>>20, decoded>>20)
+	if mapped > decoded+executorMemory/8 || mapped >= executorMemory {
+		t.Errorf("ReadField held %d MiB at its peak, want at most the decode's %d MiB plus %d MiB, under the executor's %d MiB",
+			mapped>>20, decoded>>20, executorMemory>>23, executorMemory>>20)
 	}
 }

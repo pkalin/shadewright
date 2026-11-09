@@ -516,6 +516,7 @@ func seenComments(n int, at metav1.Time) []v1alpha1.SeenComment {
 
 var _ = Describe("RemediationRequest status.handoff", func() {
 	const nextUID = "55555555-5555-4555-8555-555555555555"
+	const laterUID = "66666666-6666-4666-8666-666666666666"
 	incoming := func(phase v1alpha1.HandoffPhase) *v1alpha1.IncomingHandoff {
 		return &v1alpha1.IncomingHandoff{Name: testPredecessor, UID: testRootUID, Hint: testHintRef(), Phase: phase}
 	}
@@ -662,6 +663,54 @@ var _ = Describe("RemediationRequest status.handoff", func() {
 			got.Status.Handoff.To.Phase = phase
 			expectStatusRefused(got, "an outgoing handoff moves only from Intent to Done or Aborted")
 		}
+	})
+
+	It("accepts an Aborted intent replaced by the Intent of another replacement for another hint", func() {
+		a := createdRequest(false)
+		a.Status.Hints = []v1alpha1.Hint{testHint(1, v1alpha1.HintReserved), testHint(2, v1alpha1.HintPending)}
+		a.Status.Handoff = &v1alpha1.Handoff{To: outgoing(v1alpha1.HandoffIntent, 1)}
+		Expect(k8sClient.Status().Update(ctx, a)).To(Succeed())
+		a.Status.Hints[0].State, a.Status.Hints[0].Reason = v1alpha1.HintDeclined, v1alpha1.ReasonHandoffAborted
+		a.Status.Handoff.To.Phase = v1alpha1.HandoffAborted
+		Expect(k8sClient.Status().Update(ctx, a)).To(Succeed())
+		a.Status.Hints[1].State = v1alpha1.HintReserved
+		a.Status.Handoff.To = outgoing(v1alpha1.HandoffIntent, 2)
+		a.Status.Handoff.To.UID = laterUID
+		Expect(k8sClient.Status().Update(ctx, a)).To(Succeed())
+	})
+
+	// Each phase of the outgoing side is tied to the state of its hint (#592): Intent to Reserved, Done to
+	// Consumed, Aborted to Declined. Every pair below is reachable from Intent with the hint Reserved by moves
+	// that each rule of the hint and of the side allows on its own.
+	DescribeTable("refuses an outgoing side whose phase contradicts its hint",
+		func(phase v1alpha1.HandoffPhase, state v1alpha1.HintState) {
+			a := predecessor(v1alpha1.HintReserved)
+			a.Status.Handoff = &v1alpha1.Handoff{To: outgoing(v1alpha1.HandoffIntent, 1)}
+			Expect(k8sClient.Status().Update(ctx, a)).To(Succeed())
+			a.Status.Hints[0].State = state
+			if state == v1alpha1.HintDeclined {
+				a.Status.Hints[0].Reason = v1alpha1.ReasonHandoffAborted
+			}
+			a.Status.Handoff.To.Phase = phase
+			expectStatusRefused(a, "status.handoff.to must name a hint in status.hints")
+		},
+		Entry("Done with the hint Declined", v1alpha1.HandoffDone, v1alpha1.HintDeclined),
+		Entry("Done with the hint still Reserved", v1alpha1.HandoffDone, v1alpha1.HintReserved),
+		Entry("Aborted with the hint still Reserved", v1alpha1.HandoffAborted, v1alpha1.HintReserved),
+		Entry("Aborted with the hint Consumed", v1alpha1.HandoffAborted, v1alpha1.HintConsumed),
+	)
+
+	It("refuses an Aborted intent replaced by the Intent of another replacement for the same hint", func() {
+		a := predecessor(v1alpha1.HintReserved)
+		a.Status.Handoff = &v1alpha1.Handoff{To: outgoing(v1alpha1.HandoffIntent, 1)}
+		Expect(k8sClient.Status().Update(ctx, a)).To(Succeed())
+		a.Status.Hints[0].State, a.Status.Hints[0].Reason = v1alpha1.HintDeclined, v1alpha1.ReasonHandoffAborted
+		a.Status.Handoff.To.Phase = v1alpha1.HandoffAborted
+		Expect(k8sClient.Status().Update(ctx, a)).To(Succeed())
+		got := reread(a)
+		got.Status.Handoff.To.Phase = v1alpha1.HandoffIntent
+		got.Status.Handoff.To.UID = laterUID
+		expectStatusRefused(got, "or from Aborted to the Intent of another replacement for another hint")
 	})
 
 	It("keeps each side once written", func() {

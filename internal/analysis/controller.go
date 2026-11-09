@@ -258,6 +258,16 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		logger.Info("Did not claim a Proposed Incident without a pending reviewer hint", "incident", inc.Name)
 		return ctrl.Result{}, nil
 	}
+	if lostHintGone(inc, hint) {
+		if err := c.releaseLostHintRun(ctx, inc); err != nil {
+			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("releasing the lost hint run of Incident %s: %w", inc.Name, err)
+		}
+		logger.Info("Released a lost analysis whose reviewer hint is no longer pending", "incident", inc.Name)
+		return ctrl.Result{}, nil
+	}
 	claimed, err := c.claim(ctx, inc, c.unrecordedRequests(inc, requests), hint)
 	if err != nil {
 		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
@@ -489,7 +499,8 @@ func (c *Controller) incidentRequests(ctx context.Context, inc *remediationv1alp
 
 // reviewerHint returns the reviewer hint the analysis of inc answers ([incidents.PendingHint]), from requests
 // read live with the form an analysis gives a request of inc (isAnalysisRequest), or nil. Only an Incident in
-// phase Proposed, or Analyzing with its run taken as lost (which is then run again with the same hint), has
+// phase Proposed, or Analyzing with its run taken as lost (run again with the same hint only while that hint
+// is still the pending one, [lostHintGone]), has
 // one: the executor stores hints only for a request in AwaitingApproval, which keeps its Incident Proposed.
 func (c *Controller) reviewerHint(inc *remediationv1alpha1.Incident,
 	requests []remediationv1alpha1.RemediationRequest) *incidents.ReviewerHint {
@@ -505,6 +516,37 @@ func (c *Controller) reviewerHint(inc *remediationv1alpha1.Incident,
 		}
 	}
 	return incidents.PendingHint(inc, own)
+}
+
+// lostHintGone reports whether inc is a lost run of a reviewer hint (phase Analyzing, its claim taken as lost,
+// status.handledHint set) whose hint is no longer the pending one (hint, read live): it was answered, declined
+// or removed meanwhile. Such a run is not run again: a Proposed Incident is analyzed again only for a pending
+// hint (ADR-0028), so a rerun without it would be a model call nobody asked for, and could create a
+// replacement with no hint behind it.
+func lostHintGone(inc *remediationv1alpha1.Incident, hint *incidents.ReviewerHint) bool {
+	handled := inc.Status.HandledHint
+	if inc.Status.Phase != remediationv1alpha1.IncidentAnalyzing || handled == nil {
+		return false
+	}
+	return hint == nil || hint.Ref() != *handled
+}
+
+// releaseLostHintRun ends a lost hint run whose hint is gone ([lostHintGone]) without an analysis: no model
+// call, no unit of the budget, no request. It writes, with the resourceVersion read, the phase Proposed (the
+// request the hint was given on, or its successor, still decides the Incident through the closure rules),
+// keeps status.handledHint and lastAnalysisTime, and sets the Analyzed condition to HintNotPending, so the
+// executor does not wait on the hint.
+func (c *Controller) releaseLostHintRun(ctx context.Context, inc *remediationv1alpha1.Incident) error {
+	released := inc.DeepCopy()
+	now := metav1.NewTime(c.now().UTC().Truncate(time.Second))
+	released.Status.Phase = remediationv1alpha1.IncidentProposed
+	meta.SetStatusCondition(&released.Status.Conditions, metav1.Condition{
+		Type: ConditionAnalyzed, Status: metav1.ConditionTrue, Reason: string(ReasonHintNotPending),
+		Message: outcomeMessages[ReasonHintNotPending], ObservedGeneration: released.Generation, LastTransitionTime: now,
+	})
+	// The AnalysisDue mark is left to the trigger, which writes Proposed over it on its next pass; meanwhile a
+	// Proposed Incident marked AnalysisTimedOut is not claimable.
+	return c.Client.Status().Update(ctx, released, client.FieldOwner(FieldOwner))
 }
 
 // unrecordedRequests returns at most one of requests (inc's, listed live) that inc's status does not record
@@ -744,6 +786,7 @@ var outcomeMessages = map[Reason]string{
 	ReasonUnexpectedModel:         "A reply came from another model than the one configured for the deployment; handed off to a person",
 	ReasonEndpointNotAllowed:      "The model endpoint is outside the analyzer's allow-list of host suffixes; nothing was sent; handed off to a person",
 	ReasonPlanUnchanged:           "The analysis with a reviewer hint proposed the plan of the request it would replace; no replacement was created",
+	ReasonHintNotPending:          "A lost analysis of a reviewer hint was not run again: the hint is no longer pending",
 }
 
 // finish writes the outcome in one status update: Proposed with the request's name, or Escalated, and the

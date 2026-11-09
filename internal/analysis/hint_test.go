@@ -340,3 +340,80 @@ func TestTriggerBudgetAnswerIsTheAnalysisReason(t *testing.T) {
 		t.Errorf("trigger answer %q, analysis reason %q", incidents.OutcomeHintBudgetSpent, ReasonBudgetSpent)
 	}
 }
+
+// lostHintRun leaves inc as a run of hint h taken as lost: Analyzing since 20 minutes, handledHint h, marked
+// due again with AnalysisTimedOut.
+func lostHintRun(t *testing.T, inc *remediationv1alpha1.Incident, h remediationv1alpha1.HintRef) *remediationv1alpha1.Incident {
+	t.Helper()
+	live := liveIncident(t, inc)
+	old := metav1.NewTime(time.Now().Add(-20 * time.Minute).Truncate(time.Second))
+	live.Status.Phase = remediationv1alpha1.IncidentAnalyzing
+	live.Status.LastAnalysisTime = &old
+	live.Status.HandledHint = &h
+	meta.SetStatusCondition(&live.Status.Conditions, metav1.Condition{Type: incidents.ConditionAnalysisDue,
+		Status: metav1.ConditionTrue, Reason: incidents.ReasonAnalysisTimedOut, Message: "The run timed out",
+		ObservedGeneration: live.Generation})
+	if err := env.admin.Status().Update(t.Context(), live); err != nil {
+		t.Fatal(err)
+	}
+	return live
+}
+
+// A lost run of a hint that is no longer Pending is not run again (no model call, no unit, no request): it is
+// released to Proposed with the hint kept in handledHint and the Analyzed reason HintNotPending, so the executor
+// does not wait on it.
+func TestLostHintRunWithoutItsHintIsReleased(t *testing.T) {
+	ns := namespace(t)
+	setSettings(t, 10)
+	inc := dueIncident(t, ns, nil)
+	analyzeWith(t, ns, inc, validResult)
+	first := newest(t, inc)
+	h := awaitWithHint(t, ns, first, 401)
+	rr := getRequest(t, ns, first)
+	rr.Status.Hints[0].State, rr.Status.Hints[0].Reason = remediationv1alpha1.HintDeclined, "NoAnswer"
+	if err := env.admin.Status().Update(t.Context(), rr); err != nil {
+		t.Fatal(err)
+	}
+	live := lostHintRun(t, inc, h)
+
+	f := newFixture()
+	f.triage.steps = []step{reply(resultWith("768Mi"))}
+	c, _ := newController(t, ns, f)
+	reconcile(t, c, live)
+	if f.triage.calls() != 0 || f.reserved != 0 {
+		t.Errorf("the lost run was run again: %d calls, %d reservations", f.triage.calls(), f.reserved)
+	}
+	if n := len(requestsIn(t, ns)); n != 1 {
+		t.Errorf("%d requests, want the first only", n)
+	}
+	got := liveIncident(t, inc)
+	if got.Status.Phase != remediationv1alpha1.IncidentProposed || got.Status.HandledHint == nil ||
+		*got.Status.HandledHint != h || !got.Status.LastAnalysisTime.Equal(live.Status.LastAnalysisTime) {
+		t.Errorf("phase %s, handledHint %v, lastAnalysisTime %v; want Proposed, the hint, the lost run's time",
+			got.Status.Phase, got.Status.HandledHint, got.Status.LastAnalysisTime)
+	}
+	if cond := meta.FindStatusCondition(got.Status.Conditions, ConditionAnalyzed); cond == nil ||
+		cond.Reason != string(ReasonHintNotPending) {
+		t.Errorf("Analyzed %+v, want HintNotPending", cond)
+	}
+}
+
+// A lost run of a hint that is still Pending runs once more, with the hint, and creates its replacement.
+func TestLostHintRunWithItsHintRunsAgain(t *testing.T) {
+	ns := namespace(t)
+	setSettings(t, 10)
+	inc := dueIncident(t, ns, nil)
+	analyzeWith(t, ns, inc, validResult)
+	first := newest(t, inc)
+	h := awaitWithHint(t, ns, first, 501)
+	live := lostHintRun(t, inc, h)
+
+	f := analyzeWith(t, ns, live, resultWith("768Mi"))
+	if f.triage.calls() != 1 || !strings.Contains(f.triage.reqs()[0].Messages[1].Content, `provenance="reviewer-hint"`) {
+		t.Fatalf("%d calls; want one, with the hint", f.triage.calls())
+	}
+	replacement := getRequest(t, ns, newest(t, inc))
+	if replacement.Spec.Replaces == nil || replacement.Spec.Replaces.Hint != h {
+		t.Errorf("replacement replaces %+v, want the hint", replacement.Spec.Replaces)
+	}
+}

@@ -128,6 +128,9 @@ const (
 	// ReasonPlanUnchanged: an analysis with a reviewer hint proposed the plan of the request it would replace,
 	// so no replacement was created (ADR-0028 section 4).
 	ReasonPlanUnchanged Reason = "PlanUnchanged"
+	// ReasonHintNotPending: a lost analysis of a reviewer hint was released without running again, because its
+	// hint is no longer pending (ADR-0028).
+	ReasonHintNotPending Reason = "HintNotPending"
 )
 
 // ErrEndpointNotAllowed is what a [ModelFactory] returns, wrapped, for an endpoint outside the operator's

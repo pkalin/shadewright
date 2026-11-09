@@ -530,22 +530,40 @@ spec:
                 description: rollout is what the check after the merge keeps between
                   reconciles (the RolledOut condition).
                 properties:
+                  appliedRevision:
+                    description: |-
+                      appliedRevision is the commit the GitOps controller reported applied when the executor first saw the merge
+                      commit delivered: the merge commit, or a later commit of the target branch that holds it.
+                    maxLength: 40
+                    minLength: 40
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
                   ended:
                     description: ended is true once the check gave its final verdict
                       in RolledOut; nothing is read for it after that.
                     type: boolean
                   targetGeneration:
                     description: |-
-                      targetGeneration is the target's metadata.generation first read after the merge commit was seen applied.
-                      The template revision is recorded once the target's controller has observed it.
+                      targetGeneration is the target's metadata.generation read right after appliedRevision was seen applied:
+                      the generation the applied commit produced.
                     format: int64
                     minimum: 0
                     type: integer
+                  templateHash:
+                    description: |-
+                      templateHash is the SHA-256 of the target's pod template at targetGeneration. When the target's controller
+                      first reports a generation past targetGeneration, the revision it names is recorded only if the template
+                      is still this one; otherwise the check ends with RolledOut Unknown, reason RolloutSuperseded.
+                    maxLength: 64
+                    minLength: 64
+                    pattern: ^[0-9a-f]{64}$
+                    type: string
                   templateRevision:
                     description: |-
                       templateRevision is the template revision the check judges: a StatefulSet's status.updateRevision or a
                       Deployment's deployment.kubernetes.io/revision annotation, read once the controller observed
-                      targetGeneration. A newer revision ends the check with RolledOut Unknown, reason RolloutSuperseded.
+                      targetGeneration (and, past it, only while the template still matches templateHash). A newer revision
+                      ends the check with RolledOut Unknown, reason RolloutSuperseded.
                     maxLength: 253
                     type: string
                   waitStartedAt:
@@ -621,6 +639,33 @@ spec:
           rule: '!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.appliedObservedAt)
             || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt)
             && self.status.pullRequest.appliedObservedAt == oldSelf.status.pullRequest.appliedObservedAt)'
+        - message: status.rollout is kept once set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || (has(self.status)
+            && has(self.status.rollout))'
+        - message: status.rollout.waitStartedAt is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.waitStartedAt)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.waitStartedAt)
+            && self.status.rollout.waitStartedAt == oldSelf.status.rollout.waitStartedAt)'
+        - message: status.rollout.appliedRevision is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.appliedRevision)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.appliedRevision)
+            && self.status.rollout.appliedRevision == oldSelf.status.rollout.appliedRevision)'
+        - message: status.rollout.targetGeneration is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.targetGeneration)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.targetGeneration)
+            && self.status.rollout.targetGeneration == oldSelf.status.rollout.targetGeneration)'
+        - message: status.rollout.templateHash is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateHash)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateHash)
+            && self.status.rollout.templateHash == oldSelf.status.rollout.templateHash)'
+        - message: status.rollout.templateRevision is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateRevision)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateRevision)
+            && self.status.rollout.templateRevision == oldSelf.status.rollout.templateRevision)'
+        - message: status.rollout.ended never goes back to false
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.ended)
+            || !oldSelf.status.rollout.ended || (has(self.status) && has(self.status.rollout)
+            && has(self.status.rollout.ended) && self.status.rollout.ended)'
     selectableFields:
     - jsonPath: .status.phase
     - jsonPath: .status.breakerProbe

@@ -64,6 +64,13 @@ Validation rules:
 
 - status.pullRequest.mergeCommitSHA is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.mergeCommitSHA) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.mergeCommitSHA) && self.status.pullRequest.mergeCommitSHA == oldSelf.status.pullRequest.mergeCommitSHA)`
 - status.pullRequest.appliedObservedAt is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.appliedObservedAt) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt) && self.status.pullRequest.appliedObservedAt == oldSelf.status.pullRequest.appliedObservedAt)`
+- status.rollout is kept once set: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || (has(self.status) && has(self.status.rollout))`
+- status.rollout.waitStartedAt is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.waitStartedAt) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.waitStartedAt) && self.status.rollout.waitStartedAt == oldSelf.status.rollout.waitStartedAt)`
+- status.rollout.appliedRevision is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.appliedRevision) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.appliedRevision) && self.status.rollout.appliedRevision == oldSelf.status.rollout.appliedRevision)`
+- status.rollout.targetGeneration is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.targetGeneration) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.targetGeneration) && self.status.rollout.targetGeneration == oldSelf.status.rollout.targetGeneration)`
+- status.rollout.templateHash is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateHash) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateHash) && self.status.rollout.templateHash == oldSelf.status.rollout.templateHash)`
+- status.rollout.templateRevision is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateRevision) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateRevision) && self.status.rollout.templateRevision == oldSelf.status.rollout.templateRevision)`
+- status.rollout.ended never goes back to false: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.ended) || !oldSelf.status.rollout.ended || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.ended) && self.status.rollout.ended)`
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -830,7 +837,16 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 ### RolloutStatus
 
 RolloutStatus is what the check after the merge records about the target's rollout. Only the executor writes
-it; each field is set once.
+it; once status.rollout exists it is never removed, each field is set once and never changed, and ended never
+goes back to false (rules on the RemediationRequest, so that dropping rollout or the whole status and writing it
+again cannot reopen the check or move its window).
+
+The rollout judged is the one the applied commit produced: the executor reads the target right after the
+GitOps controller reports the commit applied and records, in the same status write as
+status.pullRequest.appliedObservedAt, the commit applied (appliedRevision), the target's generation
+(targetGeneration) and a hash of its pod template (templateHash). A later commit of the target branch that holds
+the merge commit counts as ours: the template it produced is judged. A change made outside Git (kubectl edit,
+another controller) is not told apart from a Git one when it lands before that read, so it is not covered.
 
 
 Used by: [RemediationRequestStatus](#remediationrequeststatus).
@@ -838,8 +854,10 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `waitStartedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | waitStartedAt is when the executor started waiting for the delivery of a merged request that has no lastPhaseTransitionTime; the delivery window is then measured from it instead of from the merge. |
-| `targetGeneration` | integer | No | targetGeneration is the target's metadata.generation first read after the merge commit was seen applied. The template revision is recorded once the target's controller has observed it.<br>Minimum: 0 |
-| `templateRevision` | string | No | templateRevision is the template revision the check judges: a StatefulSet's status.updateRevision or a Deployment's deployment.kubernetes.io/revision annotation, read once the controller observed targetGeneration. A newer revision ends the check with RolledOut Unknown, reason RolloutSuperseded.<br>Maximum length: 253 |
+| `appliedRevision` | string | No | appliedRevision is the commit the GitOps controller reported applied when the executor first saw the merge commit delivered: the merge commit, or a later commit of the target branch that holds it.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
+| `targetGeneration` | integer | No | targetGeneration is the target's metadata.generation read right after appliedRevision was seen applied: the generation the applied commit produced.<br>Minimum: 0 |
+| `templateHash` | string | No | templateHash is the SHA-256 of the target's pod template at targetGeneration. When the target's controller first reports a generation past targetGeneration, the revision it names is recorded only if the template is still this one; otherwise the check ends with RolledOut Unknown, reason RolloutSuperseded.<br>Maximum length: 64<br>Minimum length: 64<br>Pattern: `^[0-9a-f]{64}$` |
+| `templateRevision` | string | No | templateRevision is the template revision the check judges: a StatefulSet's status.updateRevision or a Deployment's deployment.kubernetes.io/revision annotation, read once the controller observed targetGeneration (and, past it, only while the template still matches templateHash). A newer revision ends the check with RolledOut Unknown, reason RolloutSuperseded.<br>Maximum length: 253 |
 | `ended` | boolean | No | ended is true once the check gave its final verdict in RolledOut; nothing is read for it after that. |
 
 ### SetContainerMemoryLimit

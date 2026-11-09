@@ -206,9 +206,12 @@ if [ "${RENDER}" = 1 ]; then
   # At the build budget (4), just over it (5, refused before the render), the old 16 MiB budget (15, refused),
   # 1 and 4 MiB of tiny objects (refused before the render by the document bound), and the document bound of
   # 4,096: tiny objects (docs), padded to the byte budget too (heavy), mostly patches (patches), and one
-  # document over it (docs 4096, refused before the render) (design 8.2.2, #488).
+  # document over it (docs 4096, refused before the render) (design 8.2.2, #488). The build budget with an
+  # annotation, an image override or a value of many small nodes at the transform budget (100 percent), and just
+  # over it (101, refused before the render) (#495).
   for args in "flat 4" "diamond 4" "flat 5" "diamond 5" "flat 15" "diamond 15" "tiny 1" "tiny 4" \
-    "docs 4095" "heavy 4095" "patches 3072" "docs 4096"; do
+    "docs 4095" "heavy 4095" "patches 3072" "docs 4096" "annotations 100" "annotations 101" "images 100" \
+    "images 101" "dense 100" "dense 101" "denseseq 100" "denseannotations 100"; do
     out="$(docker run --rm --memory=128m --memory-swap=128m -v "${WORK}/render:/r:ro" "${ALPINE}" \
       sh -c "/r/render ${args}; echo exit=\$?" 2>&1 | tail -2 | tr '\n' ' ')"
     echo "${args}: ${out}"

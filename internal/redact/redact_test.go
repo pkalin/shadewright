@@ -578,6 +578,9 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"path words":         "AppData/",
 		"acronym parts":      "REST/",
 		"empty parts":        "aB3//",
+		// Issue #581: Entra client secret markers without the length after them, and runs of its alphabet.
+		"entra markers":  "ab.8Q~x.",
+		"entra alphabet": "a.b~c_d-",
 	} {
 		in := rep(unit, size/len(unit))
 		start := time.Now()
@@ -688,7 +691,7 @@ func FuzzString(f *testing.F) {
 		"", "\x00", "\xff\xfe", "::", ":::::::::", "-----BEGIN PRIVATE KEY-----", "a@b.c", "password=",
 		"eyJ.eyJ.", "postgres://:@", "authorization: ", "?sig=&key=", "1.1.1.1.1.1", "[REDACTED:ip]",
 		"password: |\n", "a:\n password: >-\n  x\n password: |\n   y", "Authorization: \"\\", "1:2:3:4:5:6:7:8:",
-		"password:\n  \"a\\\nx\"",
+		"password:\n  \"a\\\nx\"", "-p ab.8Q~" + rep("x.", 17) + " t", "C:\\APP8Q~1\\a~b.c",
 	} {
 		f.Add(s)
 	}
@@ -1182,4 +1185,100 @@ func TestSlashSplitBase64KnownLeaks(t *testing.T) {
 		}
 	}
 	t.Skipf("known gaps of #525, follow-up to be filed: %d of %d cases leak", leaking, len(cases))
+}
+
+// entraAlphabet holds the characters of a current-format Microsoft Entra client secret.
+const entraAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_~.-"
+
+// seededEntraSecret returns a 40-character string of the current Entra client secret format from a fixed
+// seed: three characters, "8Q~", then 34 characters of entraAlphabet. Built at run time from a seed, so no
+// realistic secret is committed.
+func seededEntraSecret(seed uint64) string {
+	r := rand.New(rand.NewPCG(seed, 581)) // #nosec G404 -- test data from a fixed seed, not a secret
+	b := make([]byte, 40)
+	for i := range b {
+		b[i] = entraAlphabet[r.IntN(len(entraAlphabet))]
+	}
+	copy(b[3:], "8Q~")
+	return string(b)
+}
+
+// A current-format Entra client secret is redacted whole wherever it stands, also where no key name
+// precedes it (a CLI flag, prose, a JSON value under an unrelated key); its "~" and "." do not cut it into
+// parts the long-token rule keeps, and the text around it stays (#581).
+func TestEntraClientSecretIsRedacted(t *testing.T) {
+	contexts := []struct{ name, before, after string }{
+		{"az login flag", "az login --service-principal -u app -p ", " --tenant t"},
+		{"az set", "az webapp config appsettings set --settings X=1 --password ", "\nnext: field"},
+		{"prose", "rotated ", endText},
+		{"end of a sentence", "the new value is ", ". Done"},
+		{"json value", `{"value":"`, `","x":1}`},
+		{"single quotes", "--secret '", "' ok"},
+		{"line start", "", "\n"},
+	}
+	for _, c := range contexts {
+		t.Run(c.name, func(t *testing.T) {
+			leaks := 0
+			for seed := range uint64(seeds) {
+				k := seededEntraSecret(seed)
+				in := c.before + k + c.after
+				if out := String(in); out != c.before+"[REDACTED:token]"+c.after {
+					if leaks++; leaks <= 3 {
+						t.Errorf("seed %d: String(%q) = %q, want the secret redacted whole", seed, in, out)
+					}
+				}
+			}
+			if leaks > 0 {
+				t.Errorf("%d of %d secrets not redacted whole", leaks, seeds)
+			}
+		})
+	}
+	// An obviously fake secret glued to a word by a hyphen: the secret goes, the word stays.
+	const fake = "Fak8Q~" + "Not.A.Real~Secret_Just-A.Test~Valu" // #nosec G101 -- obviously fake test value
+	if in, out := "pre-"+fake+" x", String("pre-"+fake+" x"); out != "pre-[REDACTED:token] x" {
+		t.Errorf("String(%q) = %q, want only the secret redacted", in, out)
+	}
+}
+
+// Entra client secrets glued to each other, or with "~" percent-encoded under an unrelated key, leave no
+// fragment (#581): an earlier match never takes the start of the next secret and leaves its tail.
+func TestEntraClientSecretGluedOrEncoded(t *testing.T) {
+	fake40 := "Fak" + "8Q~" + strings.Repeat("a.", 16) + "ZZ" // #nosec G101 -- obviously fake test value
+	fake37 := "Fak" + "7Q~" + strings.Repeat("b.", 15) + "Z"  // #nosec G101 -- obviously fake test value
+	encoded := strings.Replace(fake40, "~", "%7E", 1)
+	for _, c := range []struct{ name, in, want string }{
+		{"an earlier marker glued to a secret", "pre" + "8Q~" + fake40 + " x", "[REDACTED:token] x"},
+		{"a 37-byte secret glued to a 40-byte one", fake37 + fake40 + " x", "[REDACTED:token] x"},
+		{"two 40-byte secrets glued", fake40 + fake40, "[REDACTED:token]"},
+		{"~ percent-encoded under an unrelated key", "x=" + encoded + "&scope=foo", "x=[REDACTED:token]&scope=foo"},
+		{"~ percent-encoded in lower case in the tail", "x=" + strings.ReplaceAll(fake40, "~", "%7e") + "&y=1",
+			"x=[REDACTED:token]&y=1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if out := String(c.in); out != c.want || strings.Contains(out, "ZZ") {
+				t.Errorf("String(%q) = %q, want %q", c.in, out, c.want)
+			}
+		})
+	}
+}
+
+// Dotted names, versions, home paths, tilde version ranges and Windows short names stay readable next to
+// the Entra client secret rule (#581).
+func TestEntraClientSecretRuleKeepsText(t *testing.T) {
+	for _, in := range []string{
+		"open ~/.kube/config: no such file",
+		"pip install requests~=2.31.0 failed",
+		`"lodash": "~4.17.21", "react": "~18.3.1"`,
+		"Back-off pulling image \"ghcr.io/example/orders:v1.2.3-rc.1\"",
+		"wrote report.2026-11-09.tar.gz to /var/lib/app/backup.8Q",
+		"dial tcp: lookup orders.default.svc.cluster.local: no such host",
+		`C:\PROGRA~1\APP8Q~1\bin\app.exe exited with code 1`,
+		"copied file~1.tmp and file~2.tmp to ~backup/2026.11.09",
+		"version 1.2.3-8Q~beta.1 rejected",
+		"pod orders-worker-7d9f8b6c5-x2x9q in namespace orders-8q",
+	} {
+		if out := String(in); out != in {
+			t.Errorf("changed useful text:\n in: %s\nout: %s", in, out)
+		}
+	}
 }

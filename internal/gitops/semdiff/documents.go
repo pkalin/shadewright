@@ -30,11 +30,15 @@ import (
 // an inline patch, at most MaxBuildDocuments+1 (the count stops there). name is the file, or what holds the
 // inline patch, for the refusal's detail. It refuses with InvalidYAML what [gityaml.Objects] refuses: input
 // that is not UTF-8, YAML anchors, aliases and merge keys, a separator line with more than a comment after
-// "---", and a part that does not parse.
+// "---", and a part that does not parse; and with TooLarge a file of more than gityaml.MaxNodes YAML nodes,
+// before any tree of it is built (#595).
 // Once the count is over MaxBuildDocuments the rest of the input is not read, nor checked: the caller must
 // refuse it.
 func documents(name string, data []byte) (int, error) {
 	n, err := gityaml.Objects(data, MaxBuildDocuments)
+	if errors.Is(err, gityaml.ErrTooManyNodes) {
+		return 0, refuse(ReasonTooLarge, name+" "+err.Error())
+	}
 	if err != nil {
 		return 0, refuse(ReasonInvalidYAML, name+" "+err.Error())
 	}

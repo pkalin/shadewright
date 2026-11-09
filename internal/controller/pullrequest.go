@@ -1065,6 +1065,16 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		return hintLook{git: git, host: host}, nil
 	}
 	r.setPhase(rr, remediationv1alpha1.PhaseAwaitingApproval)
+	setWaitingForReview(rr)
+	if err := r.Status().Update(ctx, rr); err != nil {
+		return hintLook{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	return hintLook{}, nil
+}
+
+// setWaitingForReview sets condition Approved False with reason WaitingForReview: the pull request waits for a
+// human review. Only a merge sets Approved True.
+func setWaitingForReview(rr *remediationv1alpha1.RemediationRequest) {
 	message := "The pull request waits for a human review"
 	if rr.Status.EffectiveApprovalRequired != nil && !*rr.Status.EffectiveApprovalRequired {
 		// Auto-merge is not built (#20, #98): a request policy would let merge by itself waits for a person too.
@@ -1077,10 +1087,6 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		Message:            message,
 		ObservedGeneration: rr.Generation,
 	})
-	if err := r.Status().Update(ctx, rr); err != nil {
-		return hintLook{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
-	}
-	return hintLook{}, nil
 }
 
 // commentForeign is the one comment Shadewright posts on its pull request when someone else pushed to it.

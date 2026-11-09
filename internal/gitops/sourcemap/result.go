@@ -130,7 +130,8 @@ const (
 	// and listings, or a directory over providers.MaxDirEntries entries (NeedsIntervention).
 	ReasonTooManyFiles Reason = "TooManyFiles"
 	// ReasonInputTooLarge means the build holds more than the mapping reads in all: more than MaxTotalBytes
-	// of files or MaxDocuments YAML documents (NeedsIntervention). A file over what is left of the byte budget
+	// of files or MaxDocuments YAML documents, or a file of more than gityaml.MaxNodes YAML nodes
+	// (NeedsIntervention). A file over what is left of the byte budget
 	// is refused before it is downloaded or cached, even when it is also over MaxFileBytes, so a cold and a
 	// warm cache give the same reason.
 	ReasonInputTooLarge Reason = "InputTooLarge"

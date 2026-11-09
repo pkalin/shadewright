@@ -88,6 +88,14 @@ type DeliveryVerifier interface {
 // errTargetGone means the target the request names is gone or was replaced (another UID).
 var errTargetGone = errors.New("the target is gone or was replaced")
 
+// errDeliveryMoved means the GitOps controller applied another commit between its answer and the read of the
+// target after it, so the target read may show what that commit produced: nothing is recorded, the delivery is
+// checked again at once.
+var errDeliveryMoved = errors.New("the delivery moved to another commit while it was checked")
+
+// maxPaused bounds the paused time added to the delivery window, so a corrupt pausedSeconds cannot overflow it.
+const maxPaused = 365 * 24 * time.Hour
+
 // errNoAncestry means the Git provider of the plan's repository cannot say whether one commit is in the history
 // of another.
 var errNoAncestry = errors.New("the Git provider cannot check commit ancestry")
@@ -162,15 +170,26 @@ func (r *RemediationRequestReconciler) afterMerge(ctx context.Context, rr *remed
 // and template hash of the target read right after, and returns that target. Otherwise it waits for the delivery
 // within the window after the merge and, past the window, ends the check: DeliveryNotObserved when the
 // delivery was checked and not seen (or the target is gone), RolloutNotDetermined when it could not be checked
-// until the end of the grace period. A window that ends while writes are paused waits for the pause to end: the
-// pause is read directly, whatever the delivery check needed, since the Git host is not asked while it lasts.
+// until the end of the grace period. The pause is read directly on every look: the time writes are paused does
+// not count against the window (status.rollout.pausedSince and pausedSeconds), and a window that ended before a
+// pause was seen waits for the pause to end, since the Git host is not asked while it lasts.
 func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, now time.Time) (reconcile.Result, client.Object, error) {
 	start, err := r.deliveryStart(ctx, rr, now)
 	if err != nil {
 		return reconcile.Result{}, nil, err
 	}
-	windowEnd := start.Add(deliveryWindow)
+	paused, pauseErr := r.writesPaused(stepCtx)
+	pauseErr = boundErr(ctx, stepCtx, "pause check", pauseErr)
+	if ctx.Err() != nil {
+		return reconcile.Result{}, nil, pauseErr
+	}
+	if pauseErr == nil && trackPause(rr, paused, now) {
+		if err := r.writeIf(ctx, rr, true); err != nil {
+			return reconcile.Result{}, nil, err
+		}
+	}
+	windowEnd := deliveryWindowEnd(rr, start, now)
 	d, err := r.delivered(stepCtx, rr)
 	err = boundErr(ctx, stepCtx, "delivery check", err)
 	if ctx.Err() != nil {
@@ -188,18 +207,20 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 			"appliedRevision", st.AppliedRevision, "targetGeneration", st.TargetGeneration)
 		return reconcile.Result{}, d.target, nil
 	}
+	switch {
+	case errors.Is(err, freshness.ErrPaused):
+		// The Git host is not asked while writes are paused; the pause does not count against the window.
+		return reconcile.Result{RequeueAfter: freshRecheckDelay}, nil, nil
+	case errors.Is(err, errDeliveryMoved):
+		return reconcile.Result{RequeueAfter: time.Second}, nil, nil
+	}
 	if now.Before(windowEnd) {
 		if err != nil {
 			return reconcile.Result{}, nil, err
 		}
 		return reconcile.Result{RequeueAfter: pollAfter(windowEnd.Sub(now))}, nil, nil
 	}
-	// The window ended: a pause holds it open, whether or not this check reached the Git host.
-	paused, pauseErr := r.writesPaused(stepCtx)
-	pauseErr = boundErr(ctx, stepCtx, "pause check", pauseErr)
-	if ctx.Err() != nil {
-		return reconcile.Result{}, nil, pauseErr
-	}
+	// The window ended before a pause was seen: the pause holds it open until it ends.
 	if pauseErr == nil && paused {
 		return reconcile.Result{RequeueAfter: freshRecheckDelay}, nil, nil
 	}
@@ -208,8 +229,6 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 		err = pauseErr
 	}
 	switch {
-	case errors.Is(err, freshness.ErrPaused):
-		return reconcile.Result{RequeueAfter: freshRecheckDelay}, nil, nil
 	case err == nil:
 		return reconcile.Result{}, nil, r.deliveryNotObserved(ctx, rr, now, d.target)
 	case errors.Is(err, errTargetGone):
@@ -223,6 +242,35 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 				"executor log has the error)", corev1.EventTypeWarning)
 	}
 	return reconcile.Result{}, nil, err
+}
+
+// trackPause records in rr when writes were first seen paused, and on the resume adds the paused time to
+// pausedSeconds. It reports whether it changed the status.
+func trackPause(rr *remediationv1alpha1.RemediationRequest, paused bool, now time.Time) bool {
+	st := rolloutStatus(rr)
+	switch {
+	case paused && st.PausedSince == nil:
+		st.PausedSince = new(metav1.NewTime(now.Truncate(time.Second)))
+		return true
+	case !paused && st.PausedSince != nil:
+		st.PausedSeconds += max(int64(now.Sub(st.PausedSince.Time)/time.Second), 0)
+		st.PausedSince = nil
+		return true
+	}
+	return false
+}
+
+// deliveryWindowEnd returns when the delivery window that started at start ends: an hour of time not paused,
+// so the paused seconds recorded and a pause still running extend it.
+func deliveryWindowEnd(rr *remediationv1alpha1.RemediationRequest, start, now time.Time) time.Time {
+	var paused time.Duration
+	if st := rr.Status.Rollout; st != nil {
+		paused = time.Duration(min(max(st.PausedSeconds, 0), int64(maxPaused/time.Second))) * time.Second
+		if st.PausedSince != nil && now.After(st.PausedSince.Time) {
+			paused += min(now.Sub(st.PausedSince.Time), maxPaused)
+		}
+	}
+	return start.Add(deliveryWindow + paused)
 }
 
 // writesPaused reads RemediationSettings and reports whether writes are paused (spec.paused). Missing settings
@@ -330,9 +378,10 @@ func (r *RemediationRequestReconciler) judgeRollout(ctx, stepCtx context.Context
 
 // recordRevision records, once, the template revision the target's controller rolls out for targetGeneration,
 // the generation the applied commit produced (recorded with the applied time). It waits until the controller
-// observed that generation. When the controller reports a later one first, that revision is ours only if the
-// target is at the generation observed and its template is still the one recorded (a scale keeps it); otherwise
-// replaced is true and no revision is recorded. changed reports whether it changed the status.
+// observed that generation and the target's own generation (a later generation's revision annotation can be
+// written before its status). When the controller reports a later one first, that revision is ours only if the
+// template is still the one recorded (a scale keeps it); otherwise replaced is true and no revision is recorded.
+// changed reports whether it changed the status.
 func recordRevision(rr *remediationv1alpha1.RemediationRequest, target client.Object) (changed, replaced bool) {
 	st := rolloutStatus(rr)
 	if st.TemplateRevision != "" {
@@ -342,14 +391,12 @@ func recordRevision(rr *remediationv1alpha1.RemediationRequest, target client.Ob
 	switch {
 	case observed < st.TargetGeneration:
 		return false, false
-	case observed > st.TargetGeneration:
-		if target.GetGeneration() != observed {
-			// Yet another generation waits to be observed; look again once it is.
-			return false, false
-		}
-		if st.TemplateHash == "" || rollout.TemplateHash(target) != st.TemplateHash {
-			return false, true
-		}
+	case target.GetGeneration() != observed:
+		// A later generation waits to be observed, and the Deployment controller may already have written its
+		// revision annotation: the revision named now may not be ours. Look again once it is observed.
+		return false, false
+	case observed > st.TargetGeneration && (st.TemplateHash == "" || rollout.TemplateHash(target) != st.TemplateHash):
+		return false, true
 	}
 	if rev, ok := rollout.Revision(target, st.TargetGeneration); ok && len(rev) <= 253 {
 		st.TemplateRevision = rev
@@ -502,10 +549,19 @@ func (r *RemediationRequestReconciler) delivered(ctx context.Context, rr *remedi
 		return delivery{target: target}, nil
 	}
 	// The first read may predate the apply Flux just reported: read the target again, so the generation
-	// recorded is the one the applied commit produced.
+	// recorded is the one the applied commit produced. Then ask Flux again: had it applied another commit in
+	// between, the target could show that commit's template, so nothing is recorded and the delivery is checked
+	// again.
 	after := rolloutTarget(ref)
 	if err := r.readTarget(ctx, ref, after); err != nil {
 		return delivery{target: target}, err
+	}
+	again, status2, err := verifier.Verify(ctx, unit, rr.Status.PullRequest.MergeCommitSHA, string(rr.Status.Source.TargetBranch))
+	if err != nil {
+		return delivery{target: target}, fmt.Errorf("verify the delivery of the merge commit again: %w", err)
+	}
+	if again != providers.DeliveryApplied || status2.AppliedCommit != status.AppliedCommit {
+		return delivery{target: target}, errDeliveryMoved
 	}
 	return delivery{applied: true, commit: status.AppliedCommit, target: after}, nil
 }

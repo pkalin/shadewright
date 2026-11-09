@@ -70,6 +70,8 @@ Validation rules:
 - status.rollout.targetGeneration is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.targetGeneration) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.targetGeneration) && self.status.rollout.targetGeneration == oldSelf.status.rollout.targetGeneration)`
 - status.rollout.templateHash is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateHash) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateHash) && self.status.rollout.templateHash == oldSelf.status.rollout.templateHash)`
 - status.rollout.templateRevision is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateRevision) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateRevision) && self.status.rollout.templateRevision == oldSelf.status.rollout.templateRevision)`
+- status.rollout.pausedSince is never moved while set: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSince) || !has(self.status) || !has(self.status.rollout) || !has(self.status.rollout.pausedSince) || self.status.rollout.pausedSince == oldSelf.status.rollout.pausedSince`
+- status.rollout.pausedSeconds never decreases: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSeconds) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.pausedSeconds) && self.status.rollout.pausedSeconds >= oldSelf.status.rollout.pausedSeconds)`
 - status.rollout.ended never goes back to false: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.ended) || !oldSelf.status.rollout.ended || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.ended) && self.status.rollout.ended)`
 
 | Field | Type | Required | Description |
@@ -837,8 +839,8 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 ### RolloutStatus
 
 RolloutStatus is what the check after the merge records about the target's rollout. Only the executor writes
-it; once status.rollout exists it is never removed, each field is set once and never changed, and ended never
-goes back to false (rules on the RemediationRequest, so that dropping rollout or the whole status and writing it
+it; once status.rollout exists it is never removed, each field is set once and never changed (pausedSince is
+only set or cleared, never moved, and pausedSeconds never decreases), and ended never goes back to false (rules on the RemediationRequest, so that dropping rollout or the whole status and writing it
 again cannot reopen the check or move its window).
 
 The rollout judged is the one the applied commit produced: the executor reads the target right after the
@@ -854,10 +856,12 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `waitStartedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | waitStartedAt is when the executor started waiting for the delivery of a merged request that has no lastPhaseTransitionTime; the delivery window is then measured from it instead of from the merge. |
+| `pausedSince` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | pausedSince is when the executor first saw writes paused (RemediationSettings spec.paused) while it waited for the delivery; cleared when it sees them resumed, the paused time then added to pausedSeconds. It is never moved while set. |
+| `pausedSeconds` | integer | No | pausedSeconds is how long, in seconds, writes were paused while the executor waited for the delivery; the delivery window is extended by it (and by the pause still running), so a pause never uses up the window. It never decreases.<br>Minimum: 0 |
 | `appliedRevision` | string | No | appliedRevision is the commit the GitOps controller reported applied when the executor first saw the merge commit delivered: the merge commit, or a later commit of the target branch that holds it.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
 | `targetGeneration` | integer | No | targetGeneration is the target's metadata.generation read right after appliedRevision was seen applied: the generation the applied commit produced.<br>Minimum: 0 |
 | `templateHash` | string | No | templateHash is the SHA-256 of the target's pod template at targetGeneration. When the target's controller first reports a generation past targetGeneration, the revision it names is recorded only if the template is still this one; otherwise the check ends with RolledOut Unknown, reason RolloutSuperseded.<br>Maximum length: 64<br>Minimum length: 64<br>Pattern: `^[0-9a-f]{64}$` |
-| `templateRevision` | string | No | templateRevision is the template revision the check judges: a StatefulSet's status.updateRevision or a Deployment's deployment.kubernetes.io/revision annotation, read once the controller observed targetGeneration (and, past it, only while the template still matches templateHash). A newer revision ends the check with RolledOut Unknown, reason RolloutSuperseded.<br>Maximum length: 253 |
+| `templateRevision` | string | No | templateRevision is the template revision the check judges: a StatefulSet's status.updateRevision or a Deployment's deployment.kubernetes.io/revision annotation, read once the controller observed targetGeneration and the target's current generation (a revision annotation can name a later generation before the status does), and, past targetGeneration, only while the template still matches templateHash. A newer revision ends the check with RolledOut Unknown, reason RolloutSuperseded.<br>Maximum length: 253 |
 | `ended` | boolean | No | ended is true once the check gave its final verdict in RolledOut; nothing is read for it after that. |
 
 ### SetContainerMemoryLimit

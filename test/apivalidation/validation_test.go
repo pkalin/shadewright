@@ -277,6 +277,39 @@ var _ = Describe("RemediationRequest", func() {
 		}
 	})
 
+	It("never moves status.rollout.pausedSince and never lowers pausedSeconds", func() {
+		rr := fx.RemediationRequest("default", unique("rr"))
+		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+		since := metav1.NewTime(time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC))
+		rr.Status.Rollout = &v1alpha1.RolloutStatus{PausedSince: &since}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "setting pausedSince is allowed")
+		rr.Status.Rollout.PausedSince, rr.Status.Rollout.PausedSeconds = nil, 600
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "clearing it and adding the paused time is allowed")
+		rr.Status.Rollout.PausedSince = &since
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "a second pause is allowed")
+
+		later := metav1.NewTime(since.Add(time.Hour))
+		for name, tc := range map[string]struct {
+			change func(*v1alpha1.RolloutStatus)
+			msg    string
+		}{
+			"pausedSince moved": {func(r *v1alpha1.RolloutStatus) { r.PausedSince = &later },
+				"status.rollout.pausedSince is never moved"},
+			"pausedSeconds lowered": {func(r *v1alpha1.RolloutStatus) { r.PausedSeconds = 60 },
+				"status.rollout.pausedSeconds never decreases"},
+			"pausedSeconds cleared": {func(r *v1alpha1.RolloutStatus) { r.PausedSeconds = 0 },
+				"status.rollout.pausedSeconds never decreases"},
+		} {
+			got := &v1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+			tc.change(got.Status.Rollout)
+			err := k8sClient.Status().Update(ctx, got)
+			Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+			Expect(err.Error()).To(ContainSubstring(tc.msg), name)
+		}
+	})
+
 	It("refuses appliedObservedAt without mergeCommitSHA", func() {
 		rr := fx.RemediationRequest("default", unique("rr"))
 		Expect(k8sClient.Create(ctx, rr)).To(Succeed())

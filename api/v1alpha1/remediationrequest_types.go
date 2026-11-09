@@ -282,8 +282,8 @@ type PullRequestStatus struct {
 }
 
 // RolloutStatus is what the check after the merge records about the target's rollout. Only the executor writes
-// it; once status.rollout exists it is never removed, each field is set once and never changed, and ended never
-// goes back to false (rules on the RemediationRequest, so that dropping rollout or the whole status and writing it
+// it; once status.rollout exists it is never removed, each field is set once and never changed (pausedSince is
+// only set or cleared, never moved, and pausedSeconds never decreases), and ended never goes back to false (rules on the RemediationRequest, so that dropping rollout or the whole status and writing it
 // again cannot reopen the check or move its window).
 //
 // The rollout judged is the one the applied commit produced: the executor reads the target right after the
@@ -297,6 +297,19 @@ type RolloutStatus struct {
 	// lastPhaseTransitionTime; the delivery window is then measured from it instead of from the merge.
 	// +optional
 	WaitStartedAt *metav1.Time `json:"waitStartedAt,omitempty"`
+
+	// pausedSince is when the executor first saw writes paused (RemediationSettings spec.paused) while it waited
+	// for the delivery; cleared when it sees them resumed, the paused time then added to pausedSeconds. It is
+	// never moved while set.
+	// +optional
+	PausedSince *metav1.Time `json:"pausedSince,omitempty"`
+
+	// pausedSeconds is how long, in seconds, writes were paused while the executor waited for the delivery; the
+	// delivery window is extended by it (and by the pause still running), so a pause never uses up the window.
+	// It never decreases.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	PausedSeconds int64 `json:"pausedSeconds,omitempty"`
 
 	// appliedRevision is the commit the GitOps controller reported applied when the executor first saw the merge
 	// commit delivered: the merge commit, or a later commit of the target branch that holds it.
@@ -323,7 +336,8 @@ type RolloutStatus struct {
 
 	// templateRevision is the template revision the check judges: a StatefulSet's status.updateRevision or a
 	// Deployment's deployment.kubernetes.io/revision annotation, read once the controller observed
-	// targetGeneration (and, past it, only while the template still matches templateHash). A newer revision
+	// targetGeneration and the target's current generation (a revision annotation can name a later generation
+	// before the status does), and, past targetGeneration, only while the template still matches templateHash. A newer revision
 	// ends the check with RolledOut Unknown, reason RolloutSuperseded.
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
@@ -480,6 +494,8 @@ type RemediationRequestStatus struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.targetGeneration) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.targetGeneration) && self.status.rollout.targetGeneration == oldSelf.status.rollout.targetGeneration)",message="status.rollout.targetGeneration is set once and never changed"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateHash) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateHash) && self.status.rollout.templateHash == oldSelf.status.rollout.templateHash)",message="status.rollout.templateHash is set once and never changed"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateRevision) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateRevision) && self.status.rollout.templateRevision == oldSelf.status.rollout.templateRevision)",message="status.rollout.templateRevision is set once and never changed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSince) || !has(self.status) || !has(self.status.rollout) || !has(self.status.rollout.pausedSince) || self.status.rollout.pausedSince == oldSelf.status.rollout.pausedSince",message="status.rollout.pausedSince is never moved while set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSeconds) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.pausedSeconds) && self.status.rollout.pausedSeconds >= oldSelf.status.rollout.pausedSeconds)",message="status.rollout.pausedSeconds never decreases"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.ended) || !oldSelf.status.rollout.ended || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.ended) && self.status.rollout.ended)",message="status.rollout.ended never goes back to false"
 
 // RemediationRequest is one proposed fix: a typed action on one object, carried out as a GitOps pull request

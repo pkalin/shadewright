@@ -104,10 +104,7 @@ func kustomizationApplied(t *testing.T, commit string) *unstructured.Unstructure
 func stuckStatefulSet() *appsv1.StatefulSet {
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Namespace: rolloutNamespace, Name: rolloutName, UID: rolloutUID, Generation: 3,
-			Labels: map[string]string{
-				"kustomize.toolkit.fluxcd.io/name":      "apps",
-				"kustomize.toolkit.fluxcd.io/namespace": "flux-system",
-			}},
+			Labels: fluxLabels()},
 		Spec: appsv1.StatefulSetSpec{
 			Replicas:       ptr.To[int32](2),
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{Type: appsv1.RollingUpdateStatefulSetStrategyType},
@@ -116,6 +113,14 @@ func stuckStatefulSet() *appsv1.StatefulSet {
 			ObservedGeneration: 3, Replicas: 2, ReadyReplicas: 1, CurrentReplicas: 2, UpdatedReplicas: 0,
 			CurrentRevision: revisionOld, UpdateRevision: revisionNew,
 		},
+	}
+}
+
+// fluxLabels are the labels Flux puts on the objects the Kustomization flux-system/apps applies.
+func fluxLabels() map[string]string {
+	return map[string]string{
+		"kustomize.toolkit.fluxcd.io/name":      "apps",
+		"kustomize.toolkit.fluxcd.io/namespace": "flux-system",
 	}
 }
 
@@ -708,7 +713,7 @@ func TestRolloutWithoutTransitionTime(t *testing.T) {
 // observed it yet, so the status still names the old revision.
 func gen3Unobserved() *appsv1.StatefulSet {
 	ss := stuckStatefulSet()
-	ss.Spec.Template.Spec.Containers = []corev1.Container{{Name: "cache", Image: "cache:1"}}
+	ss.Spec.Template.Spec.Containers = []corev1.Container{{Name: rolloutName, Image: "cache:1"}}
 	ss.Status = appsv1.StatefulSetStatus{ObservedGeneration: 2, Replicas: 2, ReadyReplicas: 2, CurrentReplicas: 2,
 		UpdatedReplicas: 2, CurrentRevision: revisionOld, UpdateRevision: revisionOld}
 	return ss
@@ -723,7 +728,7 @@ func (w *rolloutWorld) gen4Elsewhere(t *testing.T) {
 		t.Fatal(err)
 	}
 	live.Generation = 4
-	live.Spec.Template.Spec.Containers = []corev1.Container{{Name: "cache", Image: "cache:2"}}
+	live.Spec.Template.Spec.Containers = []corev1.Container{{Name: rolloutName, Image: "cache:2"}}
 	if err := w.c.Update(t.Context(), live); err != nil {
 		t.Fatal(err)
 	}
@@ -858,5 +863,176 @@ func TestRolloutPausedPendingDeliveryWaits(t *testing.T) {
 	}
 	if c := rolledOut(t, w); c != nil {
 		t.Fatalf("RolledOut = %+v while paused, want none", c)
+	}
+}
+
+// newDeploymentWorld is newRolloutWorld with an apps/v1 Deployment target d instead of the StatefulSet.
+func newDeploymentWorld(t *testing.T, d *appsv1.Deployment) *rolloutWorld {
+	t.Helper()
+	w := newRolloutWorld(t, stuckStatefulSet())
+	if err := w.c.Delete(t.Context(), stuckStatefulSet()); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.c.Create(t.Context(), d); err != nil {
+		t.Fatal(err)
+	}
+	w.setDeployment(t, d)
+	rr := w.request(t)
+	rr.Spec.TargetRef.Kind = "Deployment"
+	if err := w.c.Update(t.Context(), rr); err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+// setDeployment writes d's generation, template, annotations and status over the live Deployment.
+func (w *rolloutWorld) setDeployment(t *testing.T, d *appsv1.Deployment) {
+	t.Helper()
+	live := &appsv1.Deployment{}
+	if err := w.c.Get(t.Context(), client.ObjectKeyFromObject(d), live); err != nil {
+		t.Fatal(err)
+	}
+	live.Generation, live.Annotations, live.Spec = d.Generation, d.Annotations, d.Spec
+	if err := w.c.Update(t.Context(), live); err != nil {
+		t.Fatal(err)
+	}
+	live.Status = d.Status
+	if err := w.c.Status().Update(t.Context(), live); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.c.Get(t.Context(), client.ObjectKeyFromObject(d), live); err != nil || live.Generation != d.Generation {
+		t.Fatalf("the fake kept generation %d, %v; want %d", live.Generation, err, d.Generation)
+	}
+}
+
+// cacheDeployment is the target as a Deployment at generation, running image, its controller having observed
+// observed, with revision annotation rev; complete says whether every pod runs the template.
+func cacheDeployment(generation, observed int64, image, rev string, complete bool) *appsv1.Deployment {
+	d := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: rolloutNamespace, Name: rolloutName, UID: rolloutUID,
+			Generation: generation, Annotations: map[string]string{rollout.DeploymentRevisionAnnotation: rev},
+			Labels: fluxLabels()},
+		Spec: appsv1.DeploymentSpec{Replicas: ptr.To[int32](2), Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: rolloutName, Image: image}}}}},
+		Status: appsv1.DeploymentStatus{ObservedGeneration: observed, Replicas: 2, UpdatedReplicas: 0,
+			AvailableReplicas: 2},
+	}
+	if complete {
+		d.Status.UpdatedReplicas = 2
+	}
+	return d
+}
+
+// Re-check of #532, point 1: generation 4 (another template) arrived and the Deployment controller already
+// wrote its revision annotation while status.observedGeneration still says 3, the generation recorded. That
+// revision is not ours, and generation 4 completing is not our rollout.
+func TestRolloutDeploymentAnnotationAheadOfStatus(t *testing.T) {
+	w := newDeploymentWorld(t, cacheDeployment(3, 2, "cache:1", "3", false))
+	w.reader.ks = kustomizationApplied(t, w.merge)
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if st := w.request(t).Status.Rollout; st == nil || st.TargetGeneration != 3 || st.TemplateRevision != "" {
+		t.Fatalf("status.rollout = %+v, want generation 3 and no revision yet", st)
+	}
+	w.setDeployment(t, cacheDeployment(4, 3, "cache:2", "4", false))
+	w.now = w.now.Add(time.Minute)
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if st := w.request(t).Status.Rollout; st.TemplateRevision == "4" {
+		t.Fatalf("status.rollout = %+v adopted generation 4's revision from the annotation", st)
+	}
+	w.setDeployment(t, cacheDeployment(4, 4, "cache:2", "4", true))
+	w.now = w.now.Add(time.Minute)
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	c := rolledOut(t, w)
+	if c == nil || c.Status != metav1.ConditionUnknown || c.Reason != rollout.ReasonRolloutSuperseded {
+		t.Fatalf("RolledOut = %+v, want Unknown/RolloutSuperseded, not generation 4 judged ours", c)
+	}
+}
+
+// Point 2: Flux reported the merge commit applied, then applied a later commit (another template) before the
+// target was read again. Nothing is recorded against the merge commit; the next look records the later commit
+// with the generation it produced.
+func TestRolloutLaterGitTemplateBeforeCapture(t *testing.T) {
+	w := newRolloutWorld(t, gen3Unobserved())
+	w.reader.ks = kustomizationApplied(t, w.merge)
+	later, err := w.git.Push(mainBranch, "apps/cache.yaml", []byte("newer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetReads := 0
+	w.reader.fail = func(obj client.Object) error {
+		if _, ok := obj.(*appsv1.StatefulSet); ok {
+			if targetReads++; targetReads == 2 {
+				// Between Flux's answer and the read after it, Flux applies the later commit.
+				w.reader.fail = nil
+				w.gen4Elsewhere(t)
+				w.reader.ks = kustomizationApplied(t, later)
+			}
+		}
+		return nil
+	}
+	res, err := w.reconcile(t, t.Context())
+	if err != nil || res.RequeueAfter <= 0 {
+		t.Fatalf("Reconcile = %+v, %v; want a look again soon", res, err)
+	}
+	if rr := w.request(t); rr.Status.PullRequest.AppliedObservedAt != nil || rr.Status.Rollout != nil {
+		t.Fatalf("recorded generation 4 against the merge commit: %+v", rr.Status)
+	}
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if st := w.request(t).Status.Rollout; st == nil || st.AppliedRevision != later || st.TargetGeneration != 4 {
+		t.Fatalf("status.rollout = %+v, want the later commit with generation 4", st)
+	}
+}
+
+// setPaused sets RemediationSettings spec.paused.
+func (w *rolloutWorld) setPaused(t *testing.T, paused bool) {
+	t.Helper()
+	settings := &remediationv1alpha1.RemediationSettings{}
+	if err := w.c.Get(t.Context(), client.ObjectKey{Name: remediationv1alpha1.SettingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings.Spec.Paused = new(paused)
+	if err := w.c.Update(t.Context(), settings); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Re-check of #532, point 3: writes paused a minute after the merge and resumed two hours later. The window
+// keeps the 59 minutes the pause left unused: resuming does not end the check with DeliveryNotObserved; once
+// those minutes pass without the delivery, it does.
+func TestRolloutResumeKeepsUnusedDeliveryWindow(t *testing.T) {
+	w := newRolloutWorld(t, completeStatefulSet())
+	w.reader.ks = kustomizationApplied(t, w.base) // Flux still applies the commit before the merge
+	w.setPaused(t, true)
+	w.now = w.merged.Add(time.Minute)
+	if res, err := w.reconcile(t, t.Context()); err != nil || res.RequeueAfter <= 0 {
+		t.Fatalf("Reconcile = %+v, %v; want a wait", res, err)
+	}
+	w.now = w.merged.Add(2*time.Hour + time.Minute)
+	w.setPaused(t, false)
+	res, err := w.reconcile(t, t.Context())
+	if err != nil || res.RequeueAfter <= 0 {
+		t.Fatalf("Reconcile after the resume = %+v, %v; want a wait", res, err)
+	}
+	if c := rolledOut(t, w); c != nil {
+		t.Fatalf("RolledOut = %+v right after the resume, want none", c)
+	}
+	if st := w.request(t).Status.Rollout; st == nil || st.PausedSeconds != int64((2*time.Hour).Seconds()) ||
+		st.PausedSince != nil {
+		t.Fatalf("status.rollout = %+v, want two hours paused and no pause running", st)
+	}
+	w.now = w.merged.Add(deliveryWindow + 2*time.Hour + 2*time.Minute)
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if c := rolledOut(t, w); c == nil || c.Reason != rollout.ReasonDeliveryNotObserved {
+		t.Fatalf("RolledOut = %+v once the window kept ended, want DeliveryNotObserved", c)
 	}
 }

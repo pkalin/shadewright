@@ -542,6 +542,21 @@ spec:
                     description: ended is true once the check gave its final verdict
                       in RolledOut; nothing is read for it after that.
                     type: boolean
+                  pausedSeconds:
+                    description: |-
+                      pausedSeconds is how long, in seconds, writes were paused while the executor waited for the delivery; the
+                      delivery window is extended by it (and by the pause still running), so a pause never uses up the window.
+                      It never decreases.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  pausedSince:
+                    description: |-
+                      pausedSince is when the executor first saw writes paused (RemediationSettings spec.paused) while it waited
+                      for the delivery; cleared when it sees them resumed, the paused time then added to pausedSeconds. It is
+                      never moved while set.
+                    format: date-time
+                    type: string
                   targetGeneration:
                     description: |-
                       targetGeneration is the target's metadata.generation read right after appliedRevision was seen applied:
@@ -562,7 +577,8 @@ spec:
                     description: |-
                       templateRevision is the template revision the check judges: a StatefulSet's status.updateRevision or a
                       Deployment's deployment.kubernetes.io/revision annotation, read once the controller observed
-                      targetGeneration (and, past it, only while the template still matches templateHash). A newer revision
+                      targetGeneration and the target's current generation (a revision annotation can name a later generation
+                      before the status does), and, past targetGeneration, only while the template still matches templateHash. A newer revision
                       ends the check with RolledOut Unknown, reason RolloutSuperseded.
                     maxLength: 253
                     type: string
@@ -662,6 +678,14 @@ spec:
           rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateRevision)
             || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateRevision)
             && self.status.rollout.templateRevision == oldSelf.status.rollout.templateRevision)'
+        - message: status.rollout.pausedSince is never moved while set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSince)
+            || !has(self.status) || !has(self.status.rollout) || !has(self.status.rollout.pausedSince)
+            || self.status.rollout.pausedSince == oldSelf.status.rollout.pausedSince'
+        - message: status.rollout.pausedSeconds never decreases
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSeconds)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.pausedSeconds)
+            && self.status.rollout.pausedSeconds >= oldSelf.status.rollout.pausedSeconds)'
         - message: status.rollout.ended never goes back to false
           rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.ended)
             || !oldSelf.status.rollout.ended || (has(self.status) && has(self.status.rollout)

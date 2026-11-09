@@ -277,6 +277,11 @@ func (r *Resolver) scan(ctx context.Context, git providers.GitProvider, head str
 	if !okGit || !okLive {
 		return needsIntervention(ReasonFieldNotFound, "%s is not set in both %s and the live %s", fld, decl.path, id), nil
 	}
+	if !fld.Comparable(inGit) {
+		return needsIntervention(ReasonValueMismatch,
+			"%s in %s is not a value Shadewright reads (a quantity of at most %d characters, exponent of at most two digits)",
+			fld, decl.path, maxQuantityLength), nil
+	}
 	if !fld.equal(inGit, inCluster) {
 		return needsIntervention(ReasonValueMismatch,
 			"%s in %s differs from the live value; something such as a patch changes it", fld, decl.path), nil

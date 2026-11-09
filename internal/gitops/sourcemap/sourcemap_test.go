@@ -727,6 +727,10 @@ func TestResolveStops(t *testing.T) {
 			f.targetDeployment()
 			f.files["apps/orders/deployment.yaml"] = strings.Replace(deploymentYAML, "268435456", "512Mi", 1)
 		}, ni, sourcemap.ReasonValueMismatch},
+		{"memory limit in Git has an unbounded exponent", func(f *fixture) {
+			f.targetDeployment()
+			f.files["apps/orders/deployment.yaml"] = strings.Replace(deploymentYAML, "268435456", `"1e2147483647"`, 1)
+		}, ni, sourcemap.ReasonValueMismatch},
 		{"container missing in Git", func(f *fixture) {
 			f.targetDeployment()
 			f.files["apps/orders/deployment.yaml"] = strings.Replace(deploymentYAML, "- name: web", "- name: api", 1)

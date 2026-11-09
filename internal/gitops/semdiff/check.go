@@ -111,6 +111,10 @@ func Check(ctx context.Context, in Input) (Result, error) {
 		return Result{}, err
 	}
 	got, _ := field.Get(tb)
+	if !field.Comparable(got) {
+		return Result{}, refuse(ReasonPreviousValueDiffers,
+			"the rendered target does not hold the previous value: its value is not a quantity in the bounded form Shadewright reads")
+	}
 	if !field.Equals(got, previous) {
 		return Result{}, refuse(ReasonPreviousValueDiffers, "the rendered target does not hold the previous value")
 	}

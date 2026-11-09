@@ -79,7 +79,7 @@ Set by the policy check, on `PolicyAllowed`.
 | `TargetChanged` | NeedsIntervention | The UID changed while the source was mapped (see also the freshness table) | Apply a new request |
 | `PreviousValueMismatch` | Denied | `previous` (or `previousValue`) is not the live value, so the policy's percent limits would be measured from a wrong baseline | Read the live value and apply a new request |
 | `FieldNotFound` | NeedsIntervention | The field the action changes is not set on the live object, or in the file in Git | The action changes an existing value. Set it in Git first |
-| `ValueMismatch` | NeedsIntervention | The value in the file differs from the live one: someone or something changed the live object (a manual edit, an autoscaler) or Flux has not applied the file yet | Make the live value and the file agree (let Flux apply, or revert the live change), then apply a new request with `previous` equal to that value |
+| `ValueMismatch` | NeedsIntervention | The value in the file differs from the live one: someone or something changed the live object (a manual edit, an autoscaler) or Flux has not applied the file yet. Also when the memory value in the file is not a quantity Shadewright reads: at most 40 characters, a decimal number with an optional suffix (`Ki` to `Ei`, `n` to `E`) or an exponent of at most two digits (`1e9`, not `1e100`; #593) | Make the live value and the file agree (let Flux apply, or revert the live change), then apply a new request with `previous` equal to that value |
 | `WithinApprovedBounds` | allowed | Every check passed | Nothing to do |
 
 ## Delivery from Flux
@@ -253,7 +253,7 @@ Before committing, and again when the target branch moves while the pull request
 | `ObjectsAddedOrRemoved` | The change adds or removes a rendered object |
 | `OtherObjectChanged` | The change alters another rendered object, for example through a shared base |
 | `OtherFieldChanged` | The change alters another field of the target |
-| `PreviousValueDiffers` | The rendered target before the change does not hold the previous value: something else sets the field |
+| `PreviousValueDiffers` | The rendered target before the change does not hold the previous value: something else sets the field, or the rendered memory value is outside the quantity form described under `ValueMismatch` |
 | `DesiredValueMissing` | The rendered target after the change lacks the desired value, for example an overlay overrides it |
 | `FieldNotFound` | The rendered target does not set the field |
 | `SourceIgnored` | A `.sourceignore` applies to a directory of the build |
@@ -301,7 +301,7 @@ resources:
 
 For values shared by many objects, use a Kustomize patch or a component instead of an anchor. Save a file in UTF-16 or UTF-32 as UTF-8 (a UTF-8 byte order mark is accepted). Then apply a new request.
 
-The patcher reasons named inside a `PatchRefused` message are `PreviousValueDiffers` (the file no longer holds the planned baseline), `FieldMissing` (object, field or container absent), `AmbiguousContainer` (two containers with the name), `TargetNotFound`, `AmbiguousTarget`, `Unsupported` (YAML the in-place edit does not handle), `InvalidInput`, `InvalidYAML` (does not parse, duplicate key or too large) and `VerificationFailed` (the patched file differs from the original in more than the one value).
+The patcher reasons named inside a `PatchRefused` message are `PreviousValueDiffers` (the file no longer holds the planned baseline), `FieldMissing` (object, field or container absent), `AmbiguousContainer` (two containers with the name), `TargetNotFound`, `AmbiguousTarget`, `Unsupported` (YAML the in-place edit does not handle, or a memory value outside the quantity form described under `ValueMismatch`), `InvalidInput`, `InvalidYAML` (does not parse, duplicate key or too large) and `VerificationFailed` (the patched file differs from the original in more than the one value).
 
 ## Not request reasons
 

@@ -347,6 +347,9 @@ func checkScalar(n *yaml.Node, field sourcemap.Field, previous string) error {
 		return err
 	}
 	if field.Quantity {
+		if !field.Comparable(n.Value) {
+			return refuse(ReasonUnsupported, "the value is not a quantity in the bounded form Shadewright reads")
+		}
 		if !field.Equals(n.Value, previous) {
 			return refuse(ReasonPreviousValueDiffers, "the file holds another value than the plan")
 		}

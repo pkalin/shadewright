@@ -39,6 +39,7 @@ const (
 	soKust  = "apps/orders/kustomization.yaml"
 	depFile = "apps/web/deployment.yaml"
 	depKust = "apps/web/kustomization.yaml"
+	depDir  = "apps/web"
 	webName = "web"
 )
 
@@ -184,6 +185,35 @@ func TestCheckAcceptsMemoryThroughABase(t *testing.T) {
 	}
 	if res.Previous != `"512Mi"` || res.Desired != `"768Mi"` || res.Objects != 1 {
 		t.Fatalf("unexpected result %+v", res)
+	}
+}
+
+// TestCheckRefusesAnUnboundedQuantity is part of #593: a rendered memory limit with a huge decimal exponent
+// is refused before it is compared, instead of computing a power of ten of billions of digits.
+func TestCheckRefusesAnUnboundedQuantity(t *testing.T) {
+	files := map[string][]byte{
+		depKust: kust("deployment.yaml"),
+		depFile: []byte(strings.Replace(deploymentYAML, `"512Mi"`, `"1e2147483647"`, 1)),
+	}
+	act := memory("768Mi")
+	patched, err := patch.SetContainerMemoryLimit([]byte(deploymentYAML), depTarget(), *act.SetContainerMemoryLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := semdiff.Check(ctx, semdiff.Input{
+			Files: files, Path: depDir, File: depFile, Patched: patched, Target: depTarget(), Action: act,
+		})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		wantReason(t, err, semdiff.ErrPreviousValueDiffers)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Check did not return within 10s")
 	}
 }
 

@@ -545,6 +545,11 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"comment headers":          "credentials: # c\n  a: b\n",
 		"bare key children":        "auth:\n  password:\n    x\n",
 		"references over headers":  "credentials:\n  secretRef:\n    token:\n      - x\n",
+		// Issue #526: a bare short key in flow form whose value is refused.
+		"flow bare pass": "{pass: a b ",
+		"flow bare auth": "{auth: x y ",
+		"flow bare sig":  "{sig:\tq r ",
+		"flow pre-auth":  "{pre-auth: ok then ",
 	} {
 		in := rep(unit, size/len(unit))
 		start := time.Now()

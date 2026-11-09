@@ -248,6 +248,7 @@ flowchart TD
     mr -- "no: the target changed" --> start
     mr -- "yes, resolved" --> again
     mr -- "yes, mapping stopped" --> ms[Denied or NeedsIntervention: the mapping's reason]
+    mr -- "yes, Flux still reconciling" --> wk[Wait: KustomizationReconciling]
     again -- passes --> cs
     cs -- yes --> c5
     cs -- no --> nis[NeedsIntervention: IncompleteInput]

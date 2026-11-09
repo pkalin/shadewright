@@ -54,6 +54,8 @@ const (
 	sourcePath       = "apps/orders/deployment.yaml"
 	buildPath        = "apps/orders"
 	buildKustomize   = "apps/orders/kustomization.yaml"
+	// ksNotReadyMessage is the mapping's message about the Kustomization the fixtures deliver from.
+	ksNotReadyMessage = "Kustomization flux-system/apps is not Ready"
 )
 
 // stubResolver returns a canned mapping result and counts the calls.
@@ -565,5 +567,241 @@ var _ = Describe("RemediationRequest Controller", func() {
 		for _, c := range got.Status.Conditions {
 			Expect(c.Message).NotTo(ContainSubstring("://"))
 		}
+	})
+
+	// Duplicates of a merged request (#556): the lab run of 2026-11-08, where two requests for the Incident
+	// another request had just fixed ended NeedsIntervention (KustomizationNotReady) instead of Superseded.
+	Context("when another request of the same Incident and target was merged", func() {
+		// mergeAnother creates a request of the same Incident and target as request, Merged at mergedAt with
+		// pull request #51, holding no lock, as the pull request step leaves it.
+		mergeAnother := func(mergedAt time.Time) *remediationv1alpha1.RemediationRequest {
+			w := fx.MemoryLimitRequest(requestNamespace, request.Name+"-merged")
+			w.Spec.PolicyRef = request.Spec.PolicyRef
+			w.Spec.TargetRef = request.Spec.TargetRef
+			Expect(k8sClient.Create(ctx, w)).To(Succeed())
+			DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, w))).To(Succeed()) })
+			at := metav1.NewMicroTime(mergedAt)
+			w.Status.Phase = remediationv1alpha1.PhaseMerged
+			w.Status.PlanDigest = limitsDigest
+			w.Status.LastPhaseTransitionTime = &at
+			w.Status.HoldsTarget = new(false)
+			w.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: 51,
+				URL: "https://github.com/o/r/pull/51", HeadSHA: baseCommit}
+			Expect(k8sClient.Status().Update(ctx, w)).To(Succeed())
+			return w
+		}
+		// queueBehindLock marks request Queued behind the target lock, as it waited while the other one held it.
+		queueBehindLock := func() {
+			rr := fetch()
+			meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionQueued,
+				Status: metav1.ConditionTrue, Reason: ReasonTargetLocked, Message: queuedMessages[ReasonTargetLocked]})
+			Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		}
+		expectSuperseded := func(w *remediationv1alpha1.RemediationRequest) {
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+			c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+			Expect(c).NotTo(BeNil())
+			Expect(c.Status).To(Equal(metav1.ConditionFalse))
+			Expect(c.Reason).To(Equal(remediationv1alpha1.ReasonAnotherRequestMerged))
+			Expect(c.Message).To(ContainSubstring(w.Name))
+			Expect(c.Message).To(ContainSubstring("#51"))
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionQueued)).To(BeNil())
+			Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+			Expect(got.Status.PlanDigest).To(BeEmpty())
+		}
+
+		It("ends a duplicate waiting behind the lock Superseded, naming the merged request, and reads no Git", func() {
+			create(func() {})
+			queueBehindLock()
+			w := mergeAnother(time.Now().Add(time.Second))
+			// Flux is applying the merged revision: what the duplicate found in the lab.
+			stub.result = sourcemap.Result{Outcome: sourcemap.NeedsIntervention,
+				Reason: sourcemap.ReasonKustomizationReconciling, Message: ksNotReadyMessage}
+			_, err := reconcileOnce()
+			Expect(err).NotTo(HaveOccurred())
+			expectSuperseded(w)
+			Expect(stub.calls.Load()).To(BeZero())
+		})
+
+		It("ends a duplicate whose merge lands while it is decided, before it takes the lock", func() {
+			create(func() {})
+			var w *remediationv1alpha1.RemediationRequest
+			stub.during = func() {
+				if w == nil {
+					w = mergeAnother(time.Now().Add(time.Second))
+				}
+			}
+			_, err := reconcileOnce()
+			Expect(err).NotTo(HaveOccurred())
+			expectSuperseded(w)
+			Expect(stub.calls.Load()).To(BeNumerically("==", 1))
+		})
+
+		It("decides a request proposed after the merge as usual", func() {
+			create(func() {})
+			mergeAnother(time.Now().Add(-time.Hour))
+			_, err := reconcileOnce()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+		})
+
+		// reconcileAt reconciles request with the reconciler's clock at now.
+		reconcileAt := func(now time.Time) (reconcile.Result, error) {
+			r := &RemediationRequestReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(),
+				Source: stub, Now: func() time.Time { return now }}
+			return r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		}
+
+		// A request in a wait (Flux reconciling) is not Queued: it is checked before the policy check runs again,
+		// so it ends Superseded rather than in a wait that times out NeedsIntervention (#556 review).
+		It("ends a duplicate that waits for Flux Superseded once another request merges", func() {
+			create(func() {})
+			stub.result = sourcemap.Result{Outcome: sourcemap.NeedsIntervention,
+				Reason: sourcemap.ReasonKustomizationReconciling, Message: ksNotReadyMessage}
+			_, err := reconcileOnce()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fetch().Status.Phase).To(BeEmpty())
+			Expect(meta.IsStatusConditionTrue(fetch().Status.Conditions, remediationv1alpha1.ConditionQueued)).To(BeFalse())
+			calls := stub.calls.Load()
+
+			w := mergeAnother(time.Now().Add(time.Second))
+			_, err = reconcileOnce()
+			Expect(err).NotTo(HaveOccurred())
+			expectSuperseded(w)
+			Expect(stub.calls.Load()).To(Equal(calls), "the duplicate read nothing more from Git")
+		})
+
+		// A merge whose change no longer holds on the live target (reverted, or never applied long after the
+		// merge) supersedes nothing: the duplicate is decided as usual (#556 review).
+		It("decides a duplicate as usual when the merged change is not in effect", func() {
+			create(func() {})
+			mergeAnother(time.Now().Add(time.Second))
+			// An hour later the live target still holds the value the merged request replaced (256Mi).
+			_, err := reconcileAt(time.Now().Add(time.Hour))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+		})
+
+		It("ends a duplicate Superseded while the merged change holds on the live target", func() {
+			create(func() {
+				deployment.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = resource.MustParse("384Mi")
+			})
+			w := mergeAnother(time.Now().Add(time.Second))
+			_, err := reconcileAt(time.Now().Add(time.Hour))
+			Expect(err).NotTo(HaveOccurred())
+			expectSuperseded(w)
+		})
+
+		It("leaves a request of another Incident alone", func() {
+			create(func() {
+				request.Spec.IncidentRef = otherIncident
+			})
+			mergeAnother(time.Now().Add(time.Second))
+			_, err := reconcileOnce()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+		})
+	})
+
+	// Flux mid-reconcile of a merged revision (#556): the mapping's KustomizationReconciling is a bounded wait,
+	// not NeedsIntervention, and a real failure still ends the request at once.
+	Context("when Flux is reconciling the Kustomization", func() {
+		reconciling := func() sourcemap.Result {
+			return sourcemap.Result{Outcome: sourcemap.NeedsIntervention, Reason: sourcemap.ReasonKustomizationReconciling,
+				Message: "Kustomization flux-system/apps is not Ready for its current generation"}
+		}
+		reconcileAt := func(now time.Time) (reconcile.Result, error) {
+			r := &RemediationRequestReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(),
+				Source: stub, Now: func() time.Time { return now }}
+			return r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		}
+
+		It("waits instead of ending the request NeedsIntervention, then decides once Flux is Ready", func() {
+			create(func() {})
+			stub.result = reconciling()
+			start := time.Now()
+			res, err := reconcileAt(start)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+			got := fetch()
+			Expect(got.Status.Phase).To(BeEmpty())
+			c := condition(got)
+			Expect(c.Status).To(Equal(metav1.ConditionUnknown))
+			Expect(c.Reason).To(Equal(string(sourcemap.ReasonKustomizationReconciling)))
+			Expect(got.Status.HoldsTarget).To(BeNil())
+
+			stub.result = resolved()
+			_, err = reconcileAt(start.Add(time.Minute))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+		})
+
+		It("ends NeedsIntervention KustomizationNotReady once the wait is over", func() {
+			create(func() {})
+			stub.result = reconciling()
+			start := time.Now()
+			_, err := reconcileAt(start)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconcileAt(start.Add(DefaultTargetStateTimeout))
+			Expect(err).NotTo(HaveOccurred())
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			c := condition(got)
+			Expect(c.Reason).To(Equal(string(sourcemap.ReasonKustomizationNotReady)))
+			Expect(c.Message).To(ContainSubstring("did not finish reconciling"))
+		})
+
+		// A wait, then a pass queued behind the lock for longer than the wait's timeout, then Flux reconciling
+		// again (applying the holder's merge): a new wait episode with its own clock, not one that ends at once
+		// because the old wait's start was kept while the request was Queued (#556 design review).
+		It("starts a new wait after the request was queued behind the lock", func() {
+			create(func() {})
+			stub.result = reconciling()
+			start := time.Now()
+			_, err := reconcileAt(start)
+			Expect(err).NotTo(HaveOccurred())
+
+			holder := fx.MemoryLimitRequest(requestNamespace, request.Name+"-holder")
+			holder.Spec.PolicyRef = request.Spec.PolicyRef
+			holder.Spec.TargetRef = request.Spec.TargetRef
+			holder.Spec.IncidentRef = otherIncident
+			Expect(k8sClient.Create(ctx, holder)).To(Succeed())
+			DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, holder))).To(Succeed()) })
+			holder.Status.Phase = remediationv1alpha1.PhasePolicyChecked
+			holder.Status.HoldsTarget = new(true)
+			Expect(k8sClient.Status().Update(ctx, holder)).To(Succeed())
+
+			stub.result = resolved()
+			_, err = reconcileAt(start.Add(time.Minute))
+			Expect(err).NotTo(HaveOccurred())
+			got := fetch()
+			Expect(meta.IsStatusConditionTrue(got.Status.Conditions, remediationv1alpha1.ConditionQueued)).To(BeTrue())
+			Expect(got.Status.Phase).To(BeEmpty())
+
+			Expect(k8sClient.Delete(ctx, holder)).To(Succeed())
+			stub.result = reconciling()
+			later := start.Add(DefaultTargetStateTimeout + 5*time.Minute)
+			res, err := reconcileAt(later)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+			got = fetch()
+			Expect(got.Status.Phase).To(BeEmpty())
+			c := condition(got)
+			Expect(c.Status).To(Equal(metav1.ConditionUnknown))
+			Expect(c.Reason).To(Equal(string(sourcemap.ReasonKustomizationReconciling)))
+			Expect(c.LastTransitionTime.Time).To(BeTemporally("==", later.Truncate(time.Second)))
+		})
+
+		It("still ends a failing Kustomization NeedsIntervention at once", func() {
+			create(func() {})
+			stub.result = sourcemap.Result{Outcome: sourcemap.NeedsIntervention,
+				Reason: sourcemap.ReasonKustomizationNotReady, Message: ksNotReadyMessage}
+			_, err := reconcileOnce()
+			Expect(err).NotTo(HaveOccurred())
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			Expect(condition(got).Reason).To(Equal(string(sourcemap.ReasonKustomizationNotReady)))
+		})
 	})
 })

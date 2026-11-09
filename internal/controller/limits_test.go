@@ -244,6 +244,16 @@ func holding(o *remediationv1alpha1.RemediationRequest, holds bool) *remediation
 	return o
 }
 
+// otherIncident is an Incident other than the one the test fixtures' requests name.
+var otherIncident = remediationv1alpha1.IncidentRef{Name: "other-incident", UID: "66666666-6666-4666-8666-666666666666"}
+
+// ofIncident moves o to another Incident than the request the limits check, so a merged o tests the lock and
+// not the supersede of a duplicate (duplicates.go).
+func ofIncident(o *remediationv1alpha1.RemediationRequest) *remediationv1alpha1.RemediationRequest {
+	o.Spec.IncidentRef = otherIncident
+	return o
+}
+
 // TestLimitsLockHeldWhilePullRequestMayBeOpen checks #294 and #376: status.holdsTarget decides the lock, and a
 // request written before the field existed derives it from its status, keeping the lock while a recorded pull
 // request is not shown closed or merged (fail closed). A request queued behind a stopped holder checks again
@@ -291,9 +301,10 @@ func TestLimitsLockHeldWhilePullRequestMayBeOpen(t *testing.T) {
 		"derived: closed by Shadewright": stopped(remediationv1alpha1.PhaseNeedsIntervention, ReasonPullRequestClosed),
 		"derived: closed by a person":    stopped(remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestClosed),
 		"derived: merged after the stop": stopped(remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestMerged),
-		"derived: Merged":                stopped(remediationv1alpha1.PhaseMerged, ReasonPullRequestOpened),
-		"derived: Succeeded":             stopped(remediationv1alpha1.PhaseSucceeded, ReasonPullRequestOpened),
-		"derived: Superseded":            stopped(remediationv1alpha1.PhaseSuperseded, ReasonPullRequestOpened),
+		// Of another Incident: a merged request of the same one supersedes the request instead (duplicates.go).
+		"derived: Merged":     ofIncident(stopped(remediationv1alpha1.PhaseMerged, ReasonPullRequestOpened)),
+		"derived: Succeeded":  ofIncident(stopped(remediationv1alpha1.PhaseSucceeded, ReasonPullRequestOpened)),
+		"derived: Superseded": stopped(remediationv1alpha1.PhaseSuperseded, ReasonPullRequestOpened),
 		"derived: no pull request recorded": otherRequest("stopped", limitsTarget,
 			remediationv1alpha1.PhaseNeedsIntervention, time.Minute),
 		"field: false although a pull request is recorded open": holding(stopped(

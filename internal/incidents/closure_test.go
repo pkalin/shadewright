@@ -65,6 +65,15 @@ func request(name string, createdAgo time.Duration, phase remediationv1alpha1.Re
 	}
 }
 
+// mergedElsewhereRequest is request name in phase Superseded with PlanFresh False and reason
+// AnotherRequestMerged: a duplicate the executor ended because another request was merged (#556).
+func mergedElsewhereRequest(name string, createdAgo time.Duration) remediationv1alpha1.RemediationRequest {
+	rr := request(name, createdAgo, remediationv1alpha1.PhaseSuperseded)
+	rr.Status.Conditions = []metav1.Condition{{Type: remediationv1alpha1.ConditionPlanFresh,
+		Status: metav1.ConditionFalse, Reason: remediationv1alpha1.ReasonAnotherRequestMerged}}
+	return rr
+}
+
 func TestClosure(t *testing.T) {
 	const (
 		quiet = QuietBeforeResolved + time.Minute
@@ -163,6 +172,26 @@ func TestClosure(t *testing.T) {
 				request("a", 2*time.Hour, remediationv1alpha1.PhaseSuperseded),
 			},
 			phase: resolved, reason: ReasonRequestSucceeded},
+		// #556: a newer duplicate that ended Superseded because the older request was merged does not escalate:
+		// the merged request decides (Merged moves nothing, Succeeded resolves).
+		{name: "proposed, a duplicate superseded by a merge leaves the merged request to decide", inc: proposed,
+			requests: []remediationv1alpha1.RemediationRequest{
+				request("a", 2*time.Hour, remediationv1alpha1.PhaseMerged),
+				mergedElsewhereRequest("b", time.Hour),
+			}},
+		{name: "proposed, a duplicate superseded by a merge, the merged request succeeded", inc: proposed,
+			requests: []remediationv1alpha1.RemediationRequest{
+				request("a", 2*time.Hour, remediationv1alpha1.PhaseSucceeded),
+				mergedElsewhereRequest("b", time.Hour),
+			},
+			phase: resolved, reason: ReasonRequestSucceeded},
+		{name: "proposed, a superseded request with another reason still escalates", inc: proposed,
+			requests: func() []remediationv1alpha1.RemediationRequest {
+				rr := mergedElsewhereRequest("b", time.Hour)
+				rr.Status.Conditions[0].Reason = "TargetChanged"
+				return []remediationv1alpha1.RemediationRequest{request("a", 2*time.Hour, remediationv1alpha1.PhaseMerged), rr}
+			}(),
+			phase: escalated, reason: ReasonRequestSuperseded},
 		{name: "proposed, superseded at the same second is the older", inc: proposed,
 			requests: []remediationv1alpha1.RemediationRequest{
 				request("z", time.Hour, remediationv1alpha1.PhaseSuperseded),

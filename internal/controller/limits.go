@@ -581,17 +581,20 @@ var (
 )
 
 // waitForLimits holds back a request that a limit does not let through: it sets Queued True with the limit as
-// the reason, writes the status when that changed, and checks again after s.recheckDelay.
+// the reason, writes the status when that changed, and checks again after s.recheckDelay. A wait for the
+// target's state that the request was in before ends here (endWait): the policy check let it through, so a later
+// wait is a new one with its own clock, not one that already lasted the whole time the request was Queued (#556).
 func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	s limitsState) (reconcile.Result, error) {
 	reason := s.reason
-	if meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+	queued := meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionQueued,
 		Status:             metav1.ConditionTrue,
 		Reason:             reason,
 		Message:            queuedMessages[reason],
 		ObservedGeneration: rr.Generation,
-	}) {
+	})
+	if endWait(&rr.Status.Conditions) || queued {
 		if err := r.Status().Update(ctx, rr); err != nil {
 			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 		}
@@ -601,10 +604,11 @@ func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *re
 	return reconcile.Result{RequeueAfter: s.recheckDelay()}, nil
 }
 
-// setPhase sets the request's phase and, when it changes, lastPhaseTransitionTime to now and, when the request
-// ended, status.breakerCounts (classifyBreaker). That reads the plan digest and status.breakerProbe, so a caller
-// sets those first. A phase that ends the request also declines its Pending reviewer hints (declineOnEnd): every
-// path that ends a request comes through here.
+// setPhase sets the request's phase and, when it changes, lastPhaseTransitionTime to now (and, for Merged with a
+// recorded pull request, status.pullRequest.mergedAt once) and, when the request ended, status.breakerCounts
+// (classifyBreaker). That reads the plan digest and status.breakerProbe, so a caller sets those first. A phase
+// that ends the request also declines its Pending reviewer hints (declineOnEnd): every path that ends a request
+// comes through here.
 func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.RemediationRequest,
 	phase remediationv1alpha1.RemediationPhase) {
 	declineOnEnd(rr, phase)
@@ -614,6 +618,11 @@ func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.Remediat
 	rr.Status.Phase = phase
 	t := metav1.NewMicroTime(r.now())
 	rr.Status.LastPhaseTransitionTime = &t
+	if phase == remediationv1alpha1.PhaseMerged && rr.Status.PullRequest != nil && rr.Status.PullRequest.MergedAt == nil {
+		// The merge's own time, which no later phase moves: duplicates created before it end Superseded (#556).
+		merged := t
+		rr.Status.PullRequest.MergedAt = &merged
+	}
 	// The breaker's watermark is set in the same status write that ends the request (breakercounts.go).
 	classifyBreaker(rr)
 }
@@ -697,6 +706,15 @@ func (r *RemediationRequestReconciler) holdBack(ctx context.Context, rr *remedia
 			res, err = r.waitForLimits(ctx, rr, s)
 			return res, false, true, clr, err
 		}
+	}
+	// The limits let the request through. A duplicate of a request of the same Incident and target merged
+	// meanwhile ends Superseded instead (duplicates.go, #556): a Queued one before it reads Git, and every one
+	// under the admission lock right before it would take the target lock.
+	if ended, err := r.endIfDuplicate(ctx, rr); ended || err != nil {
+		if ended {
+			r.forget(client.ObjectKeyFromObject(rr))
+		}
+		return reconcile.Result{}, false, true, clr, err
 	}
 	if queued && meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionQueued) != nil {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionQueued)

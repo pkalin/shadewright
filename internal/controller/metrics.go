@@ -149,7 +149,7 @@ var denialReasons = func() map[string]struct{} {
 		sourcemap.ReasonInvalidInput, sourcemap.ReasonTargetNotFound, sourcemap.ReasonTargetChanged,
 		sourcemap.ReasonHelmManaged, sourcemap.ReasonNoFluxLabels, sourcemap.ReasonInvalidFluxLabels,
 		sourcemap.ReasonKustomizationNotFound, sourcemap.ReasonKustomizationSuspended,
-		sourcemap.ReasonKustomizationNotReady, sourcemap.ReasonNotInInventory,
+		sourcemap.ReasonKustomizationNotReady, sourcemap.ReasonKustomizationReconciling, sourcemap.ReasonNotInInventory,
 		sourcemap.ReasonKustomizationTransforms, sourcemap.ReasonRemoteCluster, sourcemap.ReasonDecryption,
 		sourcemap.ReasonUnsupportedSource, sourcemap.ReasonSourceNotFound, sourcemap.ReasonSourceNotBranch,
 		sourcemap.ReasonSourceIncludes, sourcemap.ReasonSourceOptions, sourcemap.ReasonSourceNotReady,

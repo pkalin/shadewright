@@ -54,6 +54,12 @@ const (
 	ReasonHandoffAborted = "HandoffAborted"
 )
 
+// ReasonAnotherRequestMerged is the PlanFresh reason of a request that ended Superseded because another request
+// of the same Incident and target was merged after it was created, while that merge's change is still in effect,
+// before it took the target lock or opened a pull request (#556). The closure rules of the Incident follow the
+// merged request instead of this one.
+const ReasonAnotherRequestMerged = "AnotherRequestMerged"
+
 // HintSource is the system a hint came from. GitHub is the only one; Azure DevOps is planned.
 // +kubebuilder:validation:Enum=GitHub
 type HintSource string

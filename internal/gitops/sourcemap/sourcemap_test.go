@@ -454,13 +454,27 @@ func TestResolveStops(t *testing.T) {
 		{"Kustomization not Ready", func(f *fixture) {
 			set(f.ks, []any{map[string]any{"type": "Ready", "status": "False"}}, "status", "conditions")
 		}, ni, sourcemap.ReasonKustomizationNotReady},
+		{"Kustomization Stalled", func(f *fixture) {
+			set(f.ks, []any{map[string]any{"type": "Ready", "status": "Unknown"},
+				map[string]any{"type": "Stalled", "status": "True"}}, "status", "conditions")
+		}, ni, sourcemap.ReasonKustomizationNotReady},
+		// A reconcile in progress, with no failure reported, has its own reason, so the policy check can wait
+		// for it (#556).
+		{"Kustomization applying a new revision", func(f *fixture) {
+			set(f.ks, []any{map[string]any{"type": "Reconciling", "status": "True", "reason": "Progressing"},
+				map[string]any{"type": "Ready", "status": "Unknown", "reason": "Progressing"}}, "status", "conditions")
+		}, ni, sourcemap.ReasonKustomizationReconciling},
+		{"Kustomization health check canceled by a new reconcile", func(f *fixture) {
+			set(f.ks, []any{map[string]any{"type": "Ready", "status": "False", "reason": "HealthCheckCanceled"}},
+				"status", "conditions")
+		}, ni, sourcemap.ReasonKustomizationReconciling},
 		{"Kustomization without conditions", func(f *fixture) {
 			unstructured.RemoveNestedField(f.ks.Object, "status", "conditions")
-		}, ni, sourcemap.ReasonKustomizationNotReady},
-		{"Kustomization status for an older generation", func(f *fixture) { f.ks.SetGeneration(3) }, ni, sourcemap.ReasonKustomizationNotReady},
+		}, ni, sourcemap.ReasonKustomizationReconciling},
+		{"Kustomization status for an older generation", func(f *fixture) { f.ks.SetGeneration(3) }, ni, sourcemap.ReasonKustomizationReconciling},
 		{"Ready condition for an older generation", func(f *fixture) {
 			set(f.ks, []any{map[string]any{"type": "Ready", "status": "True", "observedGeneration": int64(1)}}, "status", "conditions")
-		}, ni, sourcemap.ReasonKustomizationNotReady},
+		}, ni, sourcemap.ReasonKustomizationReconciling},
 		{"inventory lacks the object", func(f *fixture) {
 			set(f.ks, []any{map[string]any{"id": "orders_web_apps_Deployment", "v": "v1"}}, "status", "inventory", "entries")
 		}, dn, sourcemap.ReasonNotInInventory},

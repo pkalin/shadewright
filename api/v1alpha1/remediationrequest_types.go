@@ -214,7 +214,9 @@ const (
 	PhaseCancelled RemediationPhase = "Cancelled"
 	// PhaseSuperseded means a plan input changed, or the ScaledObject is no longer ready, or the module that
 	// contributes the action was disabled, so the pull request is closed and a new request is needed. With
-	// reason HandedOff (ADR-0028) a replacement took over the pull request instead, which stays open.
+	// reason HandedOff (ADR-0028) a replacement took over the pull request instead, which stays open. With
+	// reason AnotherRequestMerged (on PlanFresh) another request of the same Incident and target was merged
+	// while this one waited, before it took the target lock or opened a pull request.
 	// Terminal.
 	PhaseSuperseded RemediationPhase = "Superseded"
 	// PhaseNeedsIntervention means the controller cannot continue on its own, for example because the target
@@ -296,6 +298,13 @@ type PullRequestStatus struct {
 	// a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge.
 	// +optional
 	AppliedObservedAt *metav1.Time `json:"appliedObservedAt,omitempty"`
+
+	// mergedAt is when the executor first recorded the request Merged, set in the status write that sets the
+	// phase and never moved, unlike lastPhaseTransitionTime, which every later phase moves. A duplicate of the same
+	// Incident and target created before it ends Superseded (reason AnotherRequestMerged, #556). Empty on a
+	// request merged before the field existed.
+	// +optional
+	MergedAt *metav1.MicroTime `json:"mergedAt,omitempty"`
 
 	// reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge
 	// gate), written only with reviewer hints on: InProgress once the executor created it on that head, Passed

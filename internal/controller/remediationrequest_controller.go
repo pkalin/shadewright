@@ -108,7 +108,8 @@ type RemediationRequestReconciler struct {
 	// stored in status.deadline. Zero means [DefaultPullRequestTimeout].
 	PullRequestTimeout time.Duration
 	// TargetStateTimeout is how long the policy check waits for a target whose state is not known yet (a
-	// ScaledObject KEDA has not reported on) before it ends the request in NeedsIntervention. Zero means
+	// ScaledObject KEDA has not reported on), or for Flux to finish reconciling the Kustomization that
+	// delivers it (#556), before it ends the request in NeedsIntervention. Zero means
 	// [DefaultTargetStateTimeout].
 	TargetStateTimeout time.Duration
 	// Delivery builds the delivery verifier of the check after the merge (rollout.go), given the Git host's
@@ -181,9 +182,18 @@ func (r *RemediationRequestReconciler) forget(key types.NamespacedName) {
 }
 
 // DefaultTargetStateTimeout is how long the policy check waits by default for KEDA to report on a
-// ScaledObject. KEDA reconciles a new or changed ScaledObject within seconds; ten minutes covers an operator
-// restart without leaving a request undecided for long.
+// ScaledObject, or for Flux to finish reconciling the delivery of the target. KEDA reconciles a new or changed
+// ScaledObject within seconds, and Flux applies a merged revision within its interval and health check
+// timeout (minutes); ten minutes covers an operator restart without leaving a request undecided for long.
 const DefaultTargetStateTimeout = 10 * time.Minute
+
+// targetStateTimeout is TargetStateTimeout, or [DefaultTargetStateTimeout] when it is zero.
+func (r *RemediationRequestReconciler) targetStateTimeout() time.Duration {
+	if r.TargetStateTimeout <= 0 {
+		return DefaultTargetStateTimeout
+	}
+	return r.TargetStateTimeout
+}
 
 // Retry delays while the policy check waits for a target's state: the delay doubles with the time waited, from
 // targetStateMinDelay to targetStateMaxDelay, and never passes the end of TargetStateTimeout.
@@ -390,13 +400,8 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		}
 		return orStepErr(res, err, stepErr)
 	}
-	// A request a limit holds back (Queued) checks only the limits until they let it through, so it does not
-	// read Git while it waits. Every other request is decided first, so a refusal is never held back.
-	if meta.IsStatusConditionTrue(rr.Status.Conditions, remediationv1alpha1.ConditionQueued) {
-		if res, _, stop, clr, err := r.holdBack(ctx, rr, true); stop {
-			r.clearStale(ctx, rr.Namespace, clr)
-			return res, err
-		}
+	if res, stop, err := r.beforeCheck(ctx, rr); stop {
+		return res, err
 	}
 
 	checkCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
@@ -491,6 +496,28 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 	return ctrl.Result{}, nil
 }
 
+// beforeCheck runs what comes before the policy check of an undecided request, and reports whether the
+// reconcile stops there (with its result and error). A request a limit holds back (Queued) checks only the
+// limits until they let it through, so it does not read Git while it waits; holdBack lets it through only after
+// it found no merged duplicate (endIfDuplicate). Every other request is decided first, so a refusal is never
+// held back, but a duplicate of a merged request ends Superseded before the policy check, so neither a wait for
+// the target's state nor a refusal comes first (#556): a request in a wait is not Queued.
+func (r *RemediationRequestReconciler) beforeCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	ctrl.Result, bool, error) {
+	if meta.IsStatusConditionTrue(rr.Status.Conditions, remediationv1alpha1.ConditionQueued) {
+		res, _, stop, clr, err := r.holdBack(ctx, rr, true)
+		if stop {
+			r.clearStale(ctx, rr.Namespace, clr)
+		}
+		return res, stop, err
+	}
+	ended, err := r.endIfDuplicate(ctx, rr)
+	if ended {
+		r.forget(client.ObjectKeyFromObject(rr))
+	}
+	return ctrl.Result{}, ended || err != nil, err
+}
+
 // outcome is what the policy check writes to the status.
 type outcome struct {
 	phase          remediationv1alpha1.RemediationPhase
@@ -505,30 +532,38 @@ type outcome struct {
 	planDigest     string
 	// deadline is the pull request step's deadline, started with an allowed decision unless writes are paused.
 	deadline *metav1.Time
-	// wait means the target's state is not known yet (policy.OutcomeWait): the request is decided again later,
-	// and only the PolicyAllowed condition (Unknown, reason and message) is written meanwhile.
+	// wait means the target's state is not known yet (policy.OutcomeWait), or Flux is still reconciling its
+	// delivery (sourcemap.Reason.Reconciling): the request is decided again later, and only the PolicyAllowed
+	// condition (Unknown, reason and message) is written meanwhile.
 	wait bool
+	// timeoutReason and timeoutMessage are the NeedsIntervention reason and message a wait ends with once it
+	// has lasted TargetStateTimeout (waitForTarget).
+	timeoutReason, timeoutMessage string
 }
 
 // waitForTarget handles a decision to wait for the target's state. The wait's clock is the PolicyAllowed
-// condition's lastTransitionTime while the condition is Unknown with the wait's reason; recordWait (through
-// setPolicyAllowed) starts it when the condition takes that reason and keeps it while the reason stays. With no
-// such condition, or one whose time is after now, the wait has just started. While it has lasted less than
-// TargetStateTimeout this returns the delay before the next check; past the timeout it returns a
-// NeedsIntervention outcome and no delay.
+// condition's lastTransitionTime while the condition is Unknown with a wait reason (waitReason); recordWait
+// (through setPolicyAllowed) starts it when the condition takes a wait reason and keeps it while the reason stays
+// a wait reason, so one wait episode is bounded as a whole, also when its reason alternates (KEDA has not
+// reported, then Flux reconciles, then KEDA again, #556). With no such condition, or one whose time is after now,
+// the wait has just started. While it has lasted less than TargetStateTimeout this returns the delay before the
+// next check; past the timeout it returns a NeedsIntervention outcome (the reason of the wait it ends with) and
+// no delay.
 func (r *RemediationRequestReconciler) waitForTarget(rr *remediationv1alpha1.RemediationRequest, out outcome) (
 	outcome, time.Duration) {
-	timeout := r.TargetStateTimeout
-	if timeout <= 0 {
-		timeout = DefaultTargetStateTimeout
-	}
+	timeout := r.targetStateTimeout()
 	var waited time.Duration
 	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPolicyAllowed); c != nil &&
-		c.Status == metav1.ConditionUnknown && c.Reason == out.reason {
+		c.Status == metav1.ConditionUnknown && waitReason(c.Reason) && waitReason(out.reason) {
 		waited = max(r.now().Sub(c.LastTransitionTime.Time), 0)
 	}
 	if waited >= timeout {
-		return needsIntervention(string(policy.ReasonScaledObjectNotReady), messageTargetStateTimeout), 0
+		reason, message := out.timeoutReason, out.timeoutMessage
+		if reason == "" {
+			// Every wait names its end; one that does not still ends, as a person's case.
+			reason, message = string(sourcemap.ReasonInvalidInput), "The wait for the target's state has no end reason"
+		}
+		return needsIntervention(reason, message), 0
 	}
 	delay := min(max(waited, targetStateMinDelay), targetStateMaxDelay, timeout-waited)
 	return out, delay
@@ -538,8 +573,8 @@ func (r *RemediationRequestReconciler) waitForTarget(rr *remediationv1alpha1.Rem
 // already says so, and requeues it after delay. The phase is left as it is (none or Pending), so the next
 // reconcile runs the policy check again.
 //
-// The wait clock (lastTransitionTime) starts when the condition takes the wait's reason and is kept while the
-// reason stays (setPolicyAllowed), so the wait ends TargetStateTimeout after it started.
+// The wait clock (lastTransitionTime) starts when the condition takes a wait reason and is kept while the
+// reason stays a wait reason (setPolicyAllowed), so the wait ends TargetStateTimeout after it started.
 func (r *RemediationRequestReconciler) recordWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	out outcome, delay time.Duration) (ctrl.Result, error) {
 	changed := setPolicyAllowed(&rr.Status.Conditions, metav1.Condition{
@@ -567,20 +602,45 @@ func (r *RemediationRequestReconciler) recordWait(ctx context.Context, rr *remed
 // setPolicyAllowed sets the PolicyAllowed condition c in conditions and reports whether anything changed. A new
 // reason starts a new transition time, now: meta.SetStatusCondition alone keeps the old time while the status
 // stays the same, so an Unknown condition with another reason would lend its age to a wait (and its start to
-// the decision that ends one). No path writes an Unknown PolicyAllowed with another reason before a wait today
-// (recordWait is the only write without a phase and has one reason); this guards a second wait reason or
-// another writer of the condition. A recorded time after now is not trusted either (a clock that went back, a
-// status written by hand) and starts again at now, since a wait measured from it would never time out. A
-// condition with the same reason and a time not after now keeps its time when its message or generation
-// changes.
+// the decision that ends one). The one exception is a move between two wait reasons (waitReason) of an Unknown
+// condition: that is the same wait, so it keeps its start and TargetStateTimeout bounds it as a whole (#556).
+// A recorded time after now is not trusted either (a clock that went back, a status written by hand) and starts
+// again at now, since a wait measured from it would never time out. A condition with the same reason and a time
+// not after now keeps its time when its message or generation changes.
 func setPolicyAllowed(conditions *[]metav1.Condition, c metav1.Condition, now time.Time) bool {
 	c.Type = remediationv1alpha1.ConditionPolicyAllowed
 	c.LastTransitionTime = metav1.Time{Time: now}
 	if old := meta.FindStatusCondition(*conditions, c.Type); old != nil &&
-		(old.Reason != c.Reason || old.LastTransitionTime.After(now)) {
+		((old.Reason != c.Reason && !sameWait(old, &c)) || old.LastTransitionTime.After(now)) {
 		meta.RemoveStatusCondition(conditions, c.Type)
 	}
 	return meta.SetStatusCondition(conditions, c)
+}
+
+// endWait removes a PolicyAllowed condition that records a wait for the target's state (Unknown with a wait
+// reason) and reports whether it did. It is called when the limits queue a request, which happens only after a
+// policy check that did not wait, so the wait it records is over; a wait after that starts its own clock
+// (waitForTarget), instead of one counted from before the request was Queued.
+func endWait(conditions *[]metav1.Condition) bool {
+	c := meta.FindStatusCondition(*conditions, remediationv1alpha1.ConditionPolicyAllowed)
+	if c == nil || c.Status != metav1.ConditionUnknown || !waitReason(c.Reason) {
+		return false
+	}
+	meta.RemoveStatusCondition(conditions, remediationv1alpha1.ConditionPolicyAllowed)
+	return true
+}
+
+// waitReason reports whether reason is one the policy check waits on rather than decides: KEDA has not reported
+// on the ScaledObject (policy.ReasonScaledObjectReadinessUnknown), or Flux is reconciling the Kustomization that
+// delivers the target (sourcemap.Reason.Reconciling).
+func waitReason(reason string) bool {
+	return reason == string(policy.ReasonScaledObjectReadinessUnknown) || sourcemap.Reason(reason).Reconciling()
+}
+
+// sameWait reports whether old and c are both an Unknown PolicyAllowed with a wait reason: one wait episode.
+func sameWait(old, c *metav1.Condition) bool {
+	return old.Status == metav1.ConditionUnknown && c.Status == metav1.ConditionUnknown &&
+		waitReason(old.Reason) && waitReason(c.Reason)
 }
 
 func denied(reason, message string) outcome {
@@ -690,8 +750,15 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 		}
 	case sourcemap.Denied:
 		return denied(string(res.Reason), res.Message), nil
+	case sourcemap.NeedsIntervention:
+		if res.Reason.Reconciling() {
+			// Flux is still applying a revision (a pull request just merged, #556): wait for it, bounded by
+			// TargetStateTimeout, rather than stop the request on a passing state.
+			return fluxWait(res), nil
+		}
+		return needsIntervention(string(res.Reason), res.Message), nil
 	default:
-		// NeedsIntervention, and anything unknown: a person must look. Never Denied, never retried.
+		// Anything unknown: a person must look. Never Denied, never retried.
 		return needsIntervention(string(res.Reason), res.Message), nil
 	}
 
@@ -734,6 +801,14 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 		}
 	}
 	return o, nil
+}
+
+// fluxWait is the outcome of a mapping that stopped because Flux is still reconciling the Kustomization: a
+// wait whose end, after TargetStateTimeout, is NeedsIntervention with KustomizationNotReady, as before #556.
+func fluxWait(res sourcemap.Result) outcome {
+	return outcome{wait: true, status: metav1.ConditionUnknown, reason: string(res.Reason), message: res.Message,
+		timeoutReason: string(sourcemap.ReasonKustomizationNotReady), timeoutMessage: res.Message +
+			"; Flux did not finish reconciling it within the time the policy check waits, a person must look"}
 }
 
 // buildTooLarge loads the build the plan names, at the commit the mapping read, with the render check's own
@@ -829,6 +904,7 @@ func decided(d policy.Decision, pol *remediationv1alpha1.RemediationPolicy) outc
 		o.phase, o.status = remediationv1alpha1.PhaseDenied, metav1.ConditionFalse
 	case policy.OutcomeWait:
 		o.wait = true
+		o.timeoutReason, o.timeoutMessage = string(policy.ReasonScaledObjectNotReady), messageTargetStateTimeout
 	default:
 		// NeedsIntervention, and anything unknown.
 		o.phase, o.status = remediationv1alpha1.PhaseNeedsIntervention, metav1.ConditionUnknown
@@ -1056,6 +1132,13 @@ func (r *RemediationRequestReconciler) ensureFresh(ctx context.Context, rr *reme
 		return freshness.Result{}, r.endFreshness(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 			reasonRepositoryUnusable, messageRepositoryUnusable)
 	}
+	if errors.Is(err, freshness.ErrReconciling) {
+		over, werr := r.reconcilingTooLong(ctx, rr)
+		if werr != nil || !over {
+			return freshness.Result{}, errors.Join(err, werr)
+		}
+		err = &freshness.StaleError{Reason: freshness.ReasonSourceChanged, Message: messageReconcilingTooLong}
+	}
 	staleErr, ok := errors.AsType[*freshness.StaleError](err)
 	if !ok {
 		return freshness.Result{}, err
@@ -1073,6 +1156,44 @@ func (r *RemediationRequestReconciler) ensureFresh(ctx context.Context, rr *reme
 		return freshness.Result{}, fmt.Errorf("mark the cleanup of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
 	return freshness.Result{}, r.cleanUpStale(ctx, rr, staleErr)
+}
+
+// messageReconcilingTooLong is the fixed PlanFresh message of a plan taken as stale because Flux did not finish
+// reconciling the delivery of the target within TargetStateTimeout.
+const messageReconcilingTooLong = "Flux did not finish reconciling the Kustomization that delivers the target " +
+	"within the time the freshness check waits, so the plan cannot be confirmed fresh"
+
+// reconcilingTooLong bounds the retries of a freshness check that stops because Flux is still reconciling the
+// delivery of the target (freshness.ErrReconciling, #556), in every phase, also once the pull request is open
+// and no deadline bounds them. The clock is the PlanFresh condition Unknown with reason KustomizationReconciling:
+// written now when there is none (or one with another reason, or a time after now), kept while the retries
+// last, and removed by clearWaits once a check passes. It reports true once TargetStateTimeout has passed since
+// then: the caller takes the plan as stale (SourceChanged), as it did at once before #556, so a reconcile that
+// never ends cannot hold the request, or its pull request, for good. A failed status write is returned.
+func (r *RemediationRequestReconciler) reconcilingTooLong(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	bool, error) {
+	now := r.now()
+	reason := string(sourcemap.ReasonKustomizationReconciling)
+	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh); c != nil &&
+		c.Status == metav1.ConditionUnknown && c.Reason == reason && !c.LastTransitionTime.After(now) {
+		return now.Sub(c.LastTransitionTime.Time) >= r.targetStateTimeout(), nil
+	}
+	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type:   remediationv1alpha1.ConditionPlanFresh,
+		Status: metav1.ConditionUnknown,
+		Reason: reason,
+		Message: "Flux is reconciling the Kustomization that delivers the target; Shadewright writes nothing to " +
+			"Git until the freshness check passes",
+		ObservedGeneration: rr.Generation,
+		LastTransitionTime: metav1.Time{Time: now},
+	})
+	if err := r.Status().Update(ctx, rr); err != nil {
+		return false, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	logf.FromContext(ctx).Info("Waiting for Flux before the freshness check of RemediationRequest",
+		"remediationRequest", client.ObjectKeyFromObject(rr))
+	return false, nil
 }
 
 // staleReasons are the reasons of a stale plan (freshness.StaleError), the only ones staleMark accepts.

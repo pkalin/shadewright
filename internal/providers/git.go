@@ -131,6 +131,37 @@ func IsObjectID(s string) bool {
 	return true
 }
 
+// MaxChainCommits is the most commits of its own a Shadewright branch carries over the target branch: one of
+// the first request of a supersede chain and one per hint the chain consumed (ADR-0028 sections 4 and 6, at
+// most three). GitProvider.CheckChain accepts no longer chain.
+const MaxChainCommits = 4
+
+// CheckRunName is the name of the check run the executor creates on the heads of its pull requests (ADR-0028
+// section 5). The ruleset of the GitOps repository requires it with the Shadewright App as its source.
+const CheckRunName = "shadewright/review"
+
+// CheckRunStatus is the status of a check run.
+type CheckRunStatus string
+
+// Check run statuses.
+const (
+	// CheckRunInProgress: the check waits, here for an approval of the head (ADR-0028 section 5).
+	CheckRunInProgress CheckRunStatus = "InProgress"
+)
+
+// MaxCheckRunTextBytes is the most bytes of a check run's title or summary.
+const MaxCheckRunTextBytes = 4 << 10
+
+// CheckRun is a check run to create on a commit. Title and Summary are fixed text the caller builds from typed
+// fields, never text read from the cluster or the code host.
+type CheckRun struct {
+	// Name is the check's name; CheckRunName is the only one Shadewright creates.
+	Name    string
+	Status  CheckRunStatus
+	Title   string
+	Summary string
+}
+
 // MaxCommentMarkerBytes is the longest marker GitProvider.CommentChangeRequest accepts.
 const MaxCommentMarkerBytes = 256
 
@@ -205,12 +236,33 @@ type GitProvider interface {
 	// of the target branch, so a branch that carries anything else is refused with an error and never extended.
 	CommitFile(ctx context.Context, branch, expectedHead string, change FileChange) (string, error)
 
+	// AppendCommit commits one file change on a Shadewright branch that already carries commits of its own
+	// (the supersede handoff, ADR-0028 section 4), and returns the new commit: its one parent is expectedHead,
+	// which must be the branch head and must not be the head of the target branch or an ancestor of it, and its
+	// tree is the tree of expectedHead with the content of the file at change.Path replaced (same mode).
+	// ErrConflict when the head has moved; it never force-pushes. ErrNotFound when the file does not exist at
+	// expectedHead. Whether the branch carries only the planned change is the caller's check (CheckChain),
+	// made before.
+	AppendCommit(ctx context.Context, branch, expectedHead string, change FileChange) (string, error)
+
 	// CheckBranch reports what commit, the head of a Shadewright branch, carries over the target branch, as
 	// seen in the trees: BranchAtTarget when it is the head of the target branch or an ancestor of it,
 	// BranchOneChange when it has exactly one parent, that parent is the head of the target branch or an
 	// ancestor of it, and the two trees differ at most in the content of the regular file at path (same mode),
 	// and BranchForeign for anything else. It only reads. Errors are failures to find out, never an answer.
 	CheckBranch(ctx context.Context, commit, path string) (BranchState, error)
+
+	// CheckChain is CheckBranch for a branch that may carry up to commits commits of its own (the supersede
+	// chain of ADR-0028 section 4): BranchAtTarget as CheckBranch; BranchOneChange when commit and each of its
+	// ancestors down to the first one whose parent is the head of the target branch or an ancestor of it, at
+	// most commits of them in all, has exactly one parent and differs from it at most in the content of the
+	// regular file at path (same mode); BranchForeign for anything else. CheckChain(ctx, c, p, 1) answers as
+	// CheckBranch(ctx, c, p). commits outside 1 to MaxChainCommits is an error. It only reads.
+	CheckChain(ctx context.Context, commit, path string, commits int) (BranchState, error)
+
+	// Parents returns the parents of a commit, in order. ErrNotFound when the commit does not exist. It only
+	// reads.
+	Parents(ctx context.Context, commit string) ([]string, error)
 
 	// CheckMerged reports what head, the head of a change request that mergeCommit merged into the target
 	// branch, carried over the target branch as it was before the merge: BranchOneChange with head's parent
@@ -242,4 +294,13 @@ type GitProvider interface {
 	// CloseChangeRequest closes a change request without merging. Closing a closed one succeeds; closing a
 	// merged one returns ErrConflict.
 	CloseChangeRequest(ctx context.Context, number int64) error
+
+	// UpdateChangeRequest replaces the title and the body of an open change request from a Shadewright branch
+	// of this repository to the target branch. A closed or merged one is ErrConflict; any other change request
+	// is refused. Writing the same title and body again succeeds. It is a write.
+	UpdateChangeRequest(ctx context.Context, number int64, title, body string) error
+
+	// CreateCheckRun creates the check run run on commit head, a full object ID. Each call creates one, so
+	// the caller records that it did. It is a write.
+	CreateCheckRun(ctx context.Context, head string, run CheckRun) error
 }

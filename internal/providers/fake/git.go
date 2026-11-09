@@ -53,6 +53,8 @@ type Git struct {
 	crs      []*providers.ChangeRequest
 	auto     map[int64]bool
 	comments map[int64][]string
+	// checkRuns are the check runs created per commit, guarded by mu.
+	checkRuns map[string][]providers.CheckRun
 	// fb is the feedback of the change requests (feedback.go), guarded by mu.
 	fb feedbackStore
 }

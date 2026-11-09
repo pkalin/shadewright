@@ -18,14 +18,20 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -251,5 +257,42 @@ func TestAnEvictedCommentEditedLaterIsJudgedAgain(t *testing.T) {
 	}
 	if findHint(rr.Status.Hints, remediationv1alpha1.HintSourceGitHub, 1) == nil {
 		t.Fatalf("the edited comment was not judged again: hints %+v", rr.Status.Hints)
+	}
+}
+
+// infoLog returns a context whose logger keeps the Info lines (verbosity 0 only) in the returned builder.
+func infoLog() (context.Context, *strings.Builder) {
+	var out strings.Builder
+	var mu sync.Mutex
+	return logr.NewContext(context.Background(), funcr.New(func(_, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		out.WriteString(args + "\n")
+	}, funcr.Options{})), &out
+}
+
+// A failed read of the Incident and an outcome the API does not list are logged at Info, with the cause.
+func TestAnswerHintsLogsWhatItCannotAnswer(t *testing.T) {
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	r, rr := answerFixture(t, now, "SomethingNew")
+	ctx, out := infoLog()
+	r.answerHints(ctx, rr, now)
+	if !strings.Contains(out.String(), `"outcome"="SomethingNew"`) {
+		t.Errorf("the unlisted outcome was not logged at Info: %q", out.String())
+	}
+
+	r, rr = answerFixture(t, now, "")
+	r.APIReader = clientfake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return errors.New("etcd is down")
+		},
+	}).Build()
+	ctx, out = infoLog()
+	r.answerHints(ctx, rr, now)
+	if !strings.Contains(out.String(), "etcd is down") {
+		t.Errorf("the failed Incident read was not logged at Info: %q", out.String())
+	}
+	if rr.Status.Hints[0].State != remediationv1alpha1.HintPending {
+		t.Errorf("a failed read answered the hint: %+v", rr.Status.Hints[0])
 	}
 }

@@ -536,6 +536,7 @@ func (r *RemediationRequestReconciler) answerHints(ctx context.Context, upd *rem
 	if !slices.ContainsFunc(upd.Status.Hints, func(h remediationv1alpha1.Hint) bool { return open(&h) }) {
 		return
 	}
+	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(upd))
 	inc := r.hintIncident(ctx, upd)
 	for i := range upd.Status.Hints {
 		h := &upd.Status.Hints[i]
@@ -550,7 +551,9 @@ func (r *RemediationRequestReconciler) answerHints(ctx context.Context, upd *rem
 				h.State, h.Reason = remediationv1alpha1.HintDeclined, outcome
 			default:
 				// An outcome the API does not list (a newer analyzer): declined all the same, as no answer it
-				// can name.
+				// can name, and logged with the outcome so it stays told apart from a real NoAnswer.
+				log.Info("Declined a reviewer hint of RemediationRequest: the Incident's outcome is not a hint reason",
+					"comment", h.CommentID, "outcome", outcome, "reason", ReasonHintNoAnswer)
 				h.State, h.Reason = remediationv1alpha1.HintDeclined, ReasonHintNoAnswer
 			}
 			continue
@@ -573,8 +576,8 @@ func (r *RemediationRequestReconciler) hintIncident(ctx context.Context,
 	defer cancel()
 	inc := &remediationv1alpha1.Incident{}
 	if err := r.reader().Get(readCtx, client.ObjectKey{Namespace: upd.Namespace, Name: ref.Name}, inc); err != nil {
-		logf.FromContext(ctx).V(1).Info("Could not read the Incident of RemediationRequest to answer its hints",
-			"remediationRequest", client.ObjectKeyFromObject(upd), "error", err.Error())
+		logf.FromContext(ctx).Info("Could not read the Incident of RemediationRequest to answer its hints",
+			"remediationRequest", client.ObjectKeyFromObject(upd), "incident", ref.Name, "error", err.Error())
 		return nil
 	}
 	if inc.UID != types.UID(ref.UID) {

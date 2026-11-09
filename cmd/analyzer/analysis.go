@@ -248,9 +248,10 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 }
 
 // setupAnalysis builds the analysis controller and registers it with the manager, or logs that the analysis
-// is off.
-func setupAnalysis(mgr ctrl.Manager, f analysisFlags, builder analysis.ContextBuilder, sources analyzer.Sources,
-	redactor *redact.Redactor, tp trace.TracerProvider) error {
+// is off. The trigger (inc) then counts the reviewer hints of the requests the analysis answers them on
+// (ADR-0028), selected by the analysis's own predicate; with the analysis off it counts none.
+func setupAnalysis(mgr ctrl.Manager, inc *incidents.Controller, f analysisFlags, builder analysis.ContextBuilder,
+	sources analyzer.Sources, redactor *redact.Redactor, tp trace.TracerProvider) error {
 	c, err := buildAnalysis(f, analysisDeps{
 		cache: mgr.GetCache(), apiReader: mgr.GetAPIReader(), client: mgr.GetClient(), builder: builder,
 		sources: sources, redactor: redactor, log: ctrl.Log.WithName("analysis"), tracerProvider: tp,
@@ -262,6 +263,7 @@ func setupAnalysis(mgr ctrl.Manager, f analysisFlags, builder analysis.ContextBu
 		setupLog.Info("The analysis is off: --triage-model is not set, so no model is called and Incidents are not analyzed")
 		return nil
 	}
+	inc.SetAnalysisRequests(c.IsAnalysisRequest)
 	if c.Store != nil {
 		// The Warning event of a record not written is about the Incident, in the operator namespace, with the
 		// grant on core Events there that the leader election Role holds (see the Incident controller's

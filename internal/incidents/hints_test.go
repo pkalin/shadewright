@@ -67,6 +67,32 @@ func refOf(h remediationv1alpha1.Hint) *remediationv1alpha1.HintRef {
 	return &r
 }
 
+// HintByRef returns only the hint the ref pins, and only while it is Pending on a request that may hold hints
+// for the Incident: an earlier pending hint is not taken instead.
+func TestHintByRef(t *testing.T) {
+	earlier, pinned := hint(1, 10*time.Minute), hint(2, 5*time.Minute)
+	ref := *refOf(pinned)
+	inc := proposed(20 * time.Minute)
+	inc.Status.Phase = remediationv1alpha1.IncidentAnalyzing
+	if got := HintByRef(inc, []remediationv1alpha1.RemediationRequest{hinted("a", earlier, pinned)}, ref); got == nil ||
+		got.Ref() != ref {
+		t.Errorf("HintByRef = %+v, want the pinned hint", got)
+	}
+	declined := pinned
+	declined.State = remediationv1alpha1.HintDeclined
+	waiting := hinted("a", pinned)
+	waiting.Status.Phase = remediationv1alpha1.PhaseMerged
+	for name, requests := range map[string][]remediationv1alpha1.RemediationRequest{
+		"declined":          {hinted("a", earlier, declined)},
+		"only another hint": {hinted("a", earlier)},
+		"not awaiting":      {waiting},
+	} {
+		if got := HintByRef(inc, requests, ref); got != nil {
+			t.Errorf("%s: HintByRef = %+v, want none", name, got.Hint)
+		}
+	}
+}
+
 func TestPendingHint(t *testing.T) {
 	first, second := hint(1, 10*time.Minute), hint(2, 5*time.Minute)
 	declined := hint(3, 20*time.Minute)
@@ -258,7 +284,17 @@ func hintControllerWith(t *testing.T, incs []*remediationv1alpha1.Incident, perD
 	cl := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&remediationv1alpha1.Incident{}, &remediationv1alpha1.RemediationRequest{}).
 		WithObjects(objs...).Build()
-	return loaded(t, cl), cl
+	c := loaded(t, cl)
+	c.SetAnalysisRequests(analysisRequest)
+	return c, cl
+}
+
+// foreignLabel marks a request in the tests that the analysis would not take as its own.
+const foreignLabel = "test.shadewright.io/foreign"
+
+// analysisRequest stands in for the analysis's predicate (analysis.Controller.IsAnalysisRequest).
+func analysisRequest(_ *remediationv1alpha1.Incident, rr *remediationv1alpha1.RemediationRequest) bool {
+	return rr.Labels[foreignLabel] == ""
 }
 
 func analyzedCondition(inc *remediationv1alpha1.Incident) *metav1.Condition {
@@ -369,6 +405,45 @@ func TestAnsweredHintIsNotDueAgain(t *testing.T) {
 	}
 	if got := getIncident(t, cl); meta.IsStatusConditionTrue(got.Status.Conditions, ConditionAnalysisDue) {
 		t.Errorf("an answered hint marked the Incident due: %+v", got.Status.Conditions)
+	}
+}
+
+// The trigger counts only the hints of requests the analysis takes as its own (the same predicate): a hint on
+// any other request neither marks the Incident due (no unit of the budget) nor is refused, past the cooldown or
+// within it; with the analysis off (no predicate) no hint counts.
+func TestTriggerCountsOnlyTheAnalysisRequests(t *testing.T) {
+	foreign := func() remediationv1alpha1.RemediationRequest {
+		rr := hinted("a", hint(1, time.Minute))
+		rr.Labels = map[string]string{foreignLabel: "true"}
+		return rr
+	}
+	for _, tt := range []struct {
+		name        string
+		analyzedAgo time.Duration
+		request     remediationv1alpha1.RemediationRequest
+		off         bool
+	}{
+		{name: "foreign request past the cooldown", analyzedAgo: 20 * time.Minute, request: foreign()},
+		{name: "foreign request within the cooldown", analyzedAgo: 5 * time.Minute, request: foreign()},
+		{name: "analysis off", analyzedAgo: 20 * time.Minute, request: hinted("a", hint(1, time.Minute)), off: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c, cl := hintController(t, proposed(tt.analyzedAgo), 10, 0, tt.request)
+			if tt.off {
+				c.SetAnalysisRequests(nil)
+			}
+			if err := c.markDue(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			got := getIncident(t, cl)
+			if meta.IsStatusConditionTrue(got.Status.Conditions, ConditionAnalysisDue) {
+				t.Errorf("a hint the analysis would not answer marked the Incident due: %+v", got.Status.Conditions)
+			}
+			if got.Status.HandledHint != nil || analyzedCondition(got) != nil {
+				t.Errorf("the trigger answered a hint the analysis would not answer: handledHint %v, Analyzed %+v",
+					got.Status.HandledHint, analyzedCondition(got))
+			}
+		})
 	}
 }
 

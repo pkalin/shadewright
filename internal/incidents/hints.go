@@ -87,9 +87,7 @@ func PendingHint(inc *remediationv1alpha1.Incident, requests []remediationv1alph
 	var found *ReviewerHint
 	for i := range requests {
 		rr := &requests[i]
-		if rr.Spec.IncidentRef.Name != inc.Name ||
-			types.UID(rr.Spec.IncidentRef.UID) != inc.UID ||
-			rr.Status.Phase != remediationv1alpha1.PhaseAwaitingApproval || rr.Status.PullRequest == nil {
+		if !holdsHints(inc, rr) {
 			continue
 		}
 		for j := range rr.Status.Hints {
@@ -110,6 +108,32 @@ func PendingHint(inc *remediationv1alpha1.Incident, requests []remediationv1alph
 		return nil
 	}
 	return found
+}
+
+// HintByRef returns the hint pinned by ref while it is still Pending on one of requests that counts for
+// [PendingHint] (inc's, in AwaitingApproval with a pull request), or nil. A lost run of inc with a hint is
+// retried with only that hint: the one its claim named in status.handledHint.
+func HintByRef(inc *remediationv1alpha1.Incident, requests []remediationv1alpha1.RemediationRequest,
+	ref remediationv1alpha1.HintRef) *ReviewerHint {
+	for i := range requests {
+		rr := &requests[i]
+		if !holdsHints(inc, rr) {
+			continue
+		}
+		for j := range rr.Status.Hints {
+			if h := &rr.Status.Hints[j]; h.State == remediationv1alpha1.HintPending && HintRefOf(h) == ref {
+				return &ReviewerHint{Request: rr, Hint: h}
+			}
+		}
+	}
+	return nil
+}
+
+// holdsHints reports whether rr may hold a hint an analysis of inc answers: its incidentRef names inc by
+// name and UID, and it is in AwaitingApproval with a recorded pull request.
+func holdsHints(inc *remediationv1alpha1.Incident, rr *remediationv1alpha1.RemediationRequest) bool {
+	return rr.Spec.IncidentRef.Name == inc.Name && types.UID(rr.Spec.IncidentRef.UID) == inc.UID &&
+		rr.Status.Phase == remediationv1alpha1.PhaseAwaitingApproval && rr.Status.PullRequest != nil
 }
 
 // earlierHint orders hints by acceptedAt, then source, comment ID and the name of the request holding them.

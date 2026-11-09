@@ -431,7 +431,7 @@ func TestConcludeRecordAndOutcomeAgreeOnARecoveredRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	rr := &remediationv1alpha1.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Name: string(name),
-		Namespace: inc.Namespace}, Spec: spec}
+		Namespace: inc.Namespace, Labels: map[string]string{LabelIncidentUID: string(inc.UID)}}, Spec: spec}
 	if err := c.Client.Create(t.Context(), rr); err != nil {
 		t.Fatal(err)
 	}

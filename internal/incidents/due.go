@@ -241,10 +241,9 @@ func (c *Controller) decider(inc *remediationv1alpha1.Incident, now time.Time, s
 	if t := c.memory[inc.UID]; t != nil {
 		m.Waiting, m.WentQuiet, m.WatchedSince = t.waiting, t.quiet, t.watchedSince
 	}
-	requests := c.hintRequests
 	return func(fresh *remediationv1alpha1.Incident) (bool, string) {
 		m := m
-		m.Hinted = PendingHint(fresh, requests) != nil
+		m.Hinted = PendingHint(fresh, c.hintRequestsOf(fresh)) != nil
 		return Due(fresh, m, now, s, *used)
 	}
 }
@@ -462,7 +461,7 @@ func (c *Controller) reportNotRecent(inc *remediationv1alpha1.Incident) {
 // timeout.
 func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Incident, now time.Time, due bool, reason string,
 	decide func(*remediationv1alpha1.Incident) (bool, string), only string) (bool, string, bool, error) {
-	if ref, _ := HintAnswer(cached, c.hintRequests, due, reason); ref == nil &&
+	if ref, _ := HintAnswer(cached, c.hintRequestsOf(cached), due, reason); ref == nil &&
 		conditionAgrees(cached, due, reason, runEnded(cached, now, c.cfg.AnalysisTimeout)) {
 		return due, reason, false, nil
 	}
@@ -478,7 +477,7 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 		wrote = false
 		// A reviewer hint refused without an analysis is answered in the same update (ADR-0028 section 3),
 		// also when the condition already agrees: the answer is what the executor reads.
-		ref, outcome := HintAnswer(inc, c.hintRequests, due, reason)
+		ref, outcome := HintAnswer(inc, c.hintRequestsOf(inc), due, reason)
 		if (only != "" && reason != only) ||
 			(ref == nil && conditionAgrees(inc, due, reason, runEnded(inc, now, c.cfg.AnalysisTimeout))) {
 			return nil

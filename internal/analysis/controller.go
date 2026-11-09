@@ -82,7 +82,7 @@ const maxListedRequests = 100
 // Incident. A claim lists the requests with its Incident's UID and records in status.remediationRequests the
 // one the previous run created and whose outcome write was lost (ADR-0025 decision 6). It is a lookup key
 // only: a request is recorded only within that run's claim window and with the form an analysis gives it
-// (isAnalysisRequest), and nothing reads it to decide what may run (invariant 1).
+// (IsAnalysisRequest), and nothing reads it to decide what may run (invariant 1).
 const LabelIncidentUID = "remediation.shadewright.io/incident-uid"
 
 // Controller runs the analysis of the Incidents the trigger marks due (design 3.2 and 3.3). It claims an
@@ -252,21 +252,9 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("listing the RemediationRequests of Incident %s: %w", inc.Name, err)
 	}
-	hint := c.reviewerHint(inc, requests)
-	if hint == nil && inc.Status.Phase == remediationv1alpha1.IncidentProposed {
-		// The hint the trigger saw is answered or gone: nothing to claim. The trigger takes the mark back.
-		logger.Info("Did not claim a Proposed Incident without a pending reviewer hint", "incident", inc.Name)
-		return ctrl.Result{}, nil
-	}
-	if lostHintGone(inc, hint) {
-		if err := c.releaseLostHintRun(ctx, inc); err != nil {
-			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
-				return ctrl.Result{RequeueAfter: time.Second}, nil
-			}
-			return ctrl.Result{}, fmt.Errorf("releasing the lost hint run of Incident %s: %w", inc.Name, err)
-		}
-		logger.Info("Released a lost analysis whose reviewer hint is no longer pending", "incident", inc.Name)
-		return ctrl.Result{}, nil
+	hint, done, res, err := c.settleHint(ctx, inc, requests)
+	if done {
+		return res, err
 	}
 	claimed, err := c.claim(ctx, inc, c.unrecordedRequests(inc, requests), hint)
 	if err != nil {
@@ -297,8 +285,11 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		spec := withReplacement(requestSpec(claimed, *out.Plan), hint)
 		// The name the create uses, kept for a create that fails after the server took it (finish).
 		attempted, _ = requestName(claimed, spec)
-		created, err = c.publish(ctx, claimed, spec)
+		created, err = c.publish(ctx, claimed, spec, hint)
 		switch {
+		case errors.Is(err, errHintNotPending):
+			// The hint was answered, declined or removed while the model ran: no replacement for it.
+			out.Reason, out.Plan, attempted = ReasonHintNotPending, nil, ""
 		case errors.Is(err, errClaimLost):
 			logger.Info("Dropped the result of an analysis whose claim was lost", append([]any{"incident", inc.Name,
 				"run", runID, "reason", out.Reason, "calls", out.Calls, "tokens", out.Tokens, "models", out.Models},
@@ -337,6 +328,46 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("writing the analysis outcome of Incident %s: %w", inc.Name, err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// settleHint decides, before the claim, which reviewer hint the run of inc answers (reviewerHint), from
+// requests listed live. It ends the reconcile (done) without a claim when there is nothing to run: a lost run
+// of a hint whose replacement exists is finished (existingReplacement, finishLostHintRun), a Proposed
+// Incident without a pending hint is left alone, and a lost run of a hint no longer Pending is released
+// (lostHintGone, releaseLostHintRun). A conflicting or missing Incident is tried again in a second.
+func (c *Controller) settleHint(ctx context.Context, inc *remediationv1alpha1.Incident,
+	requests []remediationv1alpha1.RemediationRequest) (*incidents.ReviewerHint, bool, ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	written := func(err error, what string) (*incidents.ReviewerHint, bool, ctrl.Result, error) {
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			return nil, true, ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		return nil, true, ctrl.Result{}, fmt.Errorf("%s of Incident %s: %w", what, inc.Name, err)
+	}
+	if repl := c.existingReplacement(inc, requests); repl != nil {
+		// A lost run of a reviewer hint that already created its replacement: its outcome is written now,
+		// with no model call and no second replacement for the same hint.
+		if err := c.finishLostHintRun(ctx, inc, remediationv1alpha1.Name(repl.Name)); err != nil {
+			return written(err, "recording the replacement of the lost hint run")
+		}
+		logger.Info("Recorded the replacement a lost analysis of a reviewer hint created", "incident", inc.Name,
+			"request", repl.Name)
+		return nil, true, ctrl.Result{}, nil
+	}
+	hint := c.reviewerHint(inc, requests)
+	if hint == nil && inc.Status.Phase == remediationv1alpha1.IncidentProposed {
+		// The hint the trigger saw is answered or gone: nothing to claim. The trigger takes the mark back.
+		logger.Info("Did not claim a Proposed Incident without a pending reviewer hint", "incident", inc.Name)
+		return nil, true, ctrl.Result{}, nil
+	}
+	if lostHintGone(inc, hint) {
+		if err := c.releaseLostHintRun(ctx, inc); err != nil {
+			return written(err, "releasing the lost hint run")
+		}
+		logger.Info("Released a lost analysis whose reviewer hint is no longer pending", "incident", inc.Name)
+		return nil, true, ctrl.Result{}, nil
+	}
+	return hint, false, ctrl.Result{}, nil
 }
 
 // conclude writes the record and then the outcome, and returns the record's ID. When the create failed
@@ -428,9 +459,11 @@ func (c *Controller) recheck(ctx context.Context, claimed *remediationv1alpha1.I
 
 // publish creates the request of a plan within the claim: it rechecks the claim live just before the create
 // (retrying a transient read error, see recheckRetrying), then the create and its reuse check share one
-// timeout, cut to the time left on the claim, so the create cannot outlive it.
+// timeout, cut to the time left on the claim, so the create cannot outlive it. With a reviewer hint it also
+// reads the request holding the hint live within that timeout, and returns errHintNotPending without a create
+// when the hint is no longer Pending there (hintPending).
 func (c *Controller) publish(ctx context.Context, claimed *remediationv1alpha1.Incident,
-	spec remediationv1alpha1.RemediationRequestSpec) (remediationv1alpha1.Name, error) {
+	spec remediationv1alpha1.RemediationRequestSpec, hint *incidents.ReviewerHint) (remediationv1alpha1.Name, error) {
 	if err := c.recheckRetrying(ctx, claimed); err != nil {
 		return "", err
 	}
@@ -439,7 +472,43 @@ func (c *Controller) publish(ctx context.Context, claimed *remediationv1alpha1.I
 		return "", err
 	}
 	defer cancel()
+	if hint != nil {
+		pending, err := c.hintPending(cctx, hint)
+		if err != nil {
+			return "", err
+		}
+		if !pending {
+			return "", errHintNotPending
+		}
+	}
 	return c.createRequest(cctx, claimed, spec)
+}
+
+// errHintNotPending: the reviewer hint of the run is no longer Pending when its replacement would be created.
+var errHintNotPending = errors.New("the reviewer hint is no longer pending")
+
+// hintPending reads the request holding hint live and reports whether it is still the request read before
+// (same UID), in AwaitingApproval with a pull request, and holds the hint, by its pin, in state Pending: the
+// executor may have answered, declined or removed it while the model ran.
+func (c *Controller) hintPending(ctx context.Context, hint *incidents.ReviewerHint) (bool, error) {
+	live := &remediationv1alpha1.RemediationRequest{}
+	if err := c.Reader.Get(ctx, client.ObjectKeyFromObject(hint.Request), live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading RemediationRequest %s: %w", hint.Request.Name, err)
+	}
+	if live.UID != hint.Request.UID || live.Status.Phase != remediationv1alpha1.PhaseAwaitingApproval ||
+		live.Status.PullRequest == nil {
+		return false, nil
+	}
+	ref := hint.Ref()
+	for i := range live.Status.Hints {
+		if h := &live.Status.Hints[i]; incidents.HintRefOf(h) == ref {
+			return h.State == remediationv1alpha1.HintPending, nil
+		}
+	}
+	return false, nil
 }
 
 // recheckBackoff bounds the wait between two live reads of the recheck before the create.
@@ -497,38 +566,92 @@ func (c *Controller) incidentRequests(ctx context.Context, inc *remediationv1alp
 	return list.Items, nil
 }
 
-// reviewerHint returns the reviewer hint the analysis of inc answers ([incidents.PendingHint]), from requests
-// read live with the form an analysis gives a request of inc (isAnalysisRequest), or nil. Only an Incident in
-// phase Proposed, or Analyzing with its run taken as lost (run again with the same hint only while that hint
-// is still the pending one, [lostHintGone]), has
-// one: the executor stores hints only for a request in AwaitingApproval, which keeps its Incident Proposed.
+// reviewerHint returns the reviewer hint the analysis of inc answers, from requests read live with the form
+// an analysis gives a request of inc (IsAnalysisRequest), or nil. A Proposed Incident answers the next
+// pending one ([incidents.PendingHint]). An Analyzing Incident (its run taken as lost) answers only the hint
+// its claim named in status.handledHint, while that hint is still Pending ([incidents.HintByRef]); a claim
+// that named none runs again without a hint, so a retried run never takes a hint the trigger did not mark it
+// due for (its cooldown and budget unchecked). The executor stores hints only for a request in
+// AwaitingApproval, which keeps its Incident Proposed, so no other phase has one.
 func (c *Controller) reviewerHint(inc *remediationv1alpha1.Incident,
 	requests []remediationv1alpha1.RemediationRequest) *incidents.ReviewerHint {
 	switch inc.Status.Phase {
-	case remediationv1alpha1.IncidentProposed, remediationv1alpha1.IncidentAnalyzing:
-	default:
-		return nil
+	case remediationv1alpha1.IncidentProposed:
+		return incidents.PendingHint(inc, c.ownRequests(inc, requests))
+	case remediationv1alpha1.IncidentAnalyzing:
+		if inc.Status.HandledHint == nil {
+			return nil
+		}
+		return incidents.HintByRef(inc, c.ownRequests(inc, requests), *inc.Status.HandledHint)
 	}
+	return nil
+}
+
+// ownRequests returns the requests that have the form an analysis gives a request of inc (IsAnalysisRequest).
+func (c *Controller) ownRequests(inc *remediationv1alpha1.Incident,
+	requests []remediationv1alpha1.RemediationRequest) []remediationv1alpha1.RemediationRequest {
 	own := make([]remediationv1alpha1.RemediationRequest, 0, len(requests))
 	for i := range requests {
-		if c.isAnalysisRequest(inc, &requests[i]) {
+		if c.IsAnalysisRequest(inc, &requests[i]) {
 			own = append(own, requests[i])
 		}
 	}
-	return incidents.PendingHint(inc, own)
+	return own
+}
+
+// existingReplacement returns, for a lost run of a reviewer hint (phase Analyzing, status.handledHint set), a
+// request of inc (IsAnalysisRequest) that already replaces a request for that hint (spec.replaces.hint equal
+// to status.handledHint), or nil: the lost run created it before its outcome write was lost. The run is then
+// not analyzed again, whatever the hint's state now, so one hint never gets two replacements and the one made
+// is recorded (ADR-0028, invariant 5).
+func (c *Controller) existingReplacement(inc *remediationv1alpha1.Incident,
+	requests []remediationv1alpha1.RemediationRequest) *remediationv1alpha1.RemediationRequest {
+	handled := inc.Status.HandledHint
+	if inc.Status.Phase != remediationv1alpha1.IncidentAnalyzing || handled == nil {
+		return nil
+	}
+	var found *remediationv1alpha1.RemediationRequest
+	for i := range requests {
+		rr := &requests[i]
+		if rr.Spec.Replaces == nil || rr.Spec.Replaces.Hint != *handled || !c.IsAnalysisRequest(inc, rr) {
+			continue
+		}
+		// The earliest, then the first by name, for a stable choice.
+		if found == nil || rr.CreationTimestamp.Before(&found.CreationTimestamp) ||
+			(rr.CreationTimestamp.Equal(&found.CreationTimestamp) && rr.Name < found.Name) {
+			found = rr
+		}
+	}
+	return found
+}
+
+// finishLostHintRun writes the outcome of a lost hint run whose replacement exists (existingReplacement), with
+// the resourceVersion read: the phase Proposed, the replacement recorded in status.remediationRequests (once),
+// the Analyzed condition Proposed, and status.handledHint and lastAnalysisTime kept. No model call, no unit of
+// the budget and no request: the lost run already took its unit and made its request. The AnalysisDue mark is
+// left to the trigger, as in releaseLostHintRun.
+func (c *Controller) finishLostHintRun(ctx context.Context, inc *remediationv1alpha1.Incident,
+	request remediationv1alpha1.Name) error {
+	done := inc.DeepCopy()
+	now := metav1.NewTime(c.now().UTC().Truncate(time.Second))
+	done.Status.Phase = remediationv1alpha1.IncidentProposed
+	if !slices.Contains(done.Status.RemediationRequests, request) {
+		done.Status.RemediationRequests = appendBounded(done.Status.RemediationRequests, request, maxRecorded)
+	}
+	meta.SetStatusCondition(&done.Status.Conditions, metav1.Condition{
+		Type: ConditionAnalyzed, Status: metav1.ConditionTrue, Reason: string(ReasonProposed),
+		Message: outcomeMessages[ReasonProposed], ObservedGeneration: done.Generation, LastTransitionTime: now,
+	})
+	return c.Client.Status().Update(ctx, done, client.FieldOwner(FieldOwner))
 }
 
 // lostHintGone reports whether inc is a lost run of a reviewer hint (phase Analyzing, its claim taken as lost,
-// status.handledHint set) whose hint is no longer the pending one (hint, read live): it was answered, declined
-// or removed meanwhile. Such a run is not run again: a Proposed Incident is analyzed again only for a pending
-// hint (ADR-0028), so a rerun without it would be a model call nobody asked for, and could create a
-// replacement with no hint behind it.
+// status.handledHint set) whose hint is no longer Pending (hint, read live by reviewerHint, is nil): it was
+// answered, declined or removed meanwhile. Such a run is not run again: a Proposed Incident is analyzed again
+// only for a pending hint (ADR-0028), so a rerun without it would be a model call nobody asked for, and could
+// create a replacement with no hint behind it.
 func lostHintGone(inc *remediationv1alpha1.Incident, hint *incidents.ReviewerHint) bool {
-	handled := inc.Status.HandledHint
-	if inc.Status.Phase != remediationv1alpha1.IncidentAnalyzing || handled == nil {
-		return false
-	}
-	return hint == nil || hint.Ref() != *handled
+	return inc.Status.Phase == remediationv1alpha1.IncidentAnalyzing && inc.Status.HandledHint != nil && hint == nil
 }
 
 // releaseLostHintRun ends a lost hint run whose hint is gone ([lostHintGone]) without an analysis: no model
@@ -554,7 +677,7 @@ func (c *Controller) releaseLostHintRun(ctx context.Context, inc *remediationv1a
 // decision 6). Only a request created within that run's claim window (from lastAnalysisTime to its expiry)
 // counts, so a name the status dropped at its bound never comes back, and only one per run, which creates at
 // most one. The label and spec are set by whoever creates the request, so it must also have the form an
-// analysis gives it (isAnalysisRequest). Without a lastAnalysisTime nothing counts.
+// analysis gives it (IsAnalysisRequest). Without a lastAnalysisTime nothing counts.
 func (c *Controller) unrecordedRequests(inc *remediationv1alpha1.Incident,
 	requests []remediationv1alpha1.RemediationRequest) []remediationv1alpha1.Name {
 	if inc.Status.LastAnalysisTime == nil {
@@ -567,7 +690,7 @@ func (c *Controller) unrecordedRequests(inc *remediationv1alpha1.Incident,
 		created := rr.CreationTimestamp.Time
 		if created.Before(start) || !created.Before(end) ||
 			slices.Contains(inc.Status.RemediationRequests, remediationv1alpha1.Name(rr.Name)) ||
-			!c.isAnalysisRequest(inc, rr) {
+			!c.IsAnalysisRequest(inc, rr) {
 			continue
 		}
 		// The earliest, then the first by name, for a stable choice.
@@ -582,14 +705,20 @@ func (c *Controller) unrecordedRequests(inc *remediationv1alpha1.Incident,
 	return []remediationv1alpha1.Name{remediationv1alpha1.Name(found.Name)}
 }
 
-// isAnalysisRequest reports whether rr has the form the analysis gives a request of inc: its spec names inc
+// IsAnalysisRequest reports whether rr has the form the analysis gives a request of inc: the label
+// LabelIncidentUID with inc's UID, and a spec that names inc
 // and its subject, GitOps mode, approval required, the policy configured for its action type, and the name
 // derived from inc's UID and that spec (requestName), spec.replaces and spec.chainRoot included (a
 // replacement's, ADR-0028; the link itself is checked by the executor at admission, never here). It proves
 // nothing about who created rr: whoever may
 // create RemediationRequests in the operator namespace can still forge one (threat model G5.6).
-func (c *Controller) isAnalysisRequest(inc *remediationv1alpha1.Incident, rr *remediationv1alpha1.RemediationRequest) bool {
+// The trigger selects the requests whose hints mark an Incident due with this same predicate (main.go), so it
+// never counts a hint the analysis would not answer.
+func (c *Controller) IsAnalysisRequest(inc *remediationv1alpha1.Incident, rr *remediationv1alpha1.RemediationRequest) bool {
 	s := rr.Spec
+	if rr.Labels[LabelIncidentUID] != string(inc.UID) {
+		return false
+	}
 	if s.IncidentRef != (remediationv1alpha1.IncidentRef{Name: inc.Name, UID: remediationv1alpha1.UID(inc.UID)}) ||
 		s.TargetRef != inc.Spec.Subject || s.Mode != remediationv1alpha1.RemediationModeGitOps ||
 		s.ApprovalRequired == nil || !*s.ApprovalRequired {
@@ -786,7 +915,7 @@ var outcomeMessages = map[Reason]string{
 	ReasonUnexpectedModel:         "A reply came from another model than the one configured for the deployment; handed off to a person",
 	ReasonEndpointNotAllowed:      "The model endpoint is outside the analyzer's allow-list of host suffixes; nothing was sent; handed off to a person",
 	ReasonPlanUnchanged:           "The analysis with a reviewer hint proposed the plan of the request it would replace; no replacement was created",
-	ReasonHintNotPending:          "A lost analysis of a reviewer hint was not run again: the hint is no longer pending",
+	ReasonHintNotPending:          "The reviewer hint was no longer pending; no replacement was created for it",
 }
 
 // finish writes the outcome in one status update: Proposed with the request's name, or Escalated, and the
@@ -910,7 +1039,7 @@ func (c *Controller) recoverRequest(ctx context.Context, claimed *remediationv1a
 		}
 		return ""
 	}
-	if !c.isAnalysisRequest(claimed, rr) {
+	if !c.IsAnalysisRequest(claimed, rr) {
 		return ""
 	}
 	return name

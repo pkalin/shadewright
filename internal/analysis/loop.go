@@ -128,8 +128,9 @@ const (
 	// ReasonPlanUnchanged: an analysis with a reviewer hint proposed the plan of the request it would replace,
 	// so no replacement was created (ADR-0028 section 4).
 	ReasonPlanUnchanged Reason = "PlanUnchanged"
-	// ReasonHintNotPending: a lost analysis of a reviewer hint was released without running again, because its
-	// hint is no longer pending (ADR-0028).
+	// ReasonHintNotPending: the reviewer hint of an analysis was no longer pending, so no replacement was
+	// created for it: a lost run was released without running again, or the hint was answered, declined or
+	// removed while the model ran (ADR-0028).
 	ReasonHintNotPending Reason = "HintNotPending"
 )
 

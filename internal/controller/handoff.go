@@ -614,7 +614,7 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 		ObservedGeneration: rr.Generation,
 	})
 	if cr.State == providers.ChangeRequestMerged {
-		recordMerge(rr, cr)
+		recordMerge(ctx, rr, cr)
 		return r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,
 			"The pull request was merged with this request's change, right after the handoff"))
 	}

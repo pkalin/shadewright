@@ -46,7 +46,7 @@ func TestRecordMerge(t *testing.T) {
 			if !tc.noPR {
 				rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: 1}
 			}
-			recordMerge(rr, tc.cr)
+			recordMerge(t.Context(), rr, tc.cr)
 			if tc.noPR {
 				if rr.Status.PullRequest != nil {
 					t.Fatalf("a pull request was recorded: %+v", rr.Status.PullRequest)

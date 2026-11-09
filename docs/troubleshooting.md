@@ -226,7 +226,7 @@ Before merge the executor rechecks every five minutes, and on any change to the 
 | `PolicyChanged` | The policy was deleted, recreated or edited (any change of its generation) | Apply a new request against the new policy |
 | `SettingsChanged` | The settings or the repository entry were removed, or its URL, installation or branch changed | As above |
 | `TargetChanged` | The target is gone, has another UID, or no longer holds the previous value live | As above |
-| `TargetFileChanged` | The file on the target branch is gone, no longer declares the target alone, no longer holds the previous value, or now uses YAML anchors, aliases, merge keys or text on a separator line, another line break or a directive (#594) | As above |
+| `TargetFileChanged` | The file on the target branch is gone, no longer declares the target alone, no longer holds the previous value, or now uses YAML anchors, aliases, merge keys or text on a separator line, another line break or a directive (#594), or holds more than 131,072 YAML nodes in one document (#595) | As above |
 | `PlanChanged` | The recorded inputs no longer give the recorded digest | Apply a new request |
 | `SourceChanged` | Mapping the target again gives another repository, branch or file, or now denies or needs a person | Look at the Flux objects, apply a new request |
 | `ScaledObjectNotReady` | The ScaledObject is not ready on two reads | Fix the autoscaler |

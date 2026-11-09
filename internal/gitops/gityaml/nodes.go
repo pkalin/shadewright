@@ -24,8 +24,10 @@ import (
 // MaxNodes is the most YAML nodes (documents, collections and scalars) [Objects] accepts in one input, as
 // counted by [Nodes]. A YAML parser builds a tree of every document before anything looks at it, about 170
 // bytes of heap per node, and a file of 1 MiB can hold about a million nodes, so the count is the bound on
-// that tree (#595). Real manifests, CRDs included, take 37 to 64 bytes per node, so a file of 1 MiB of them
-// stays under it.
+// that tree (#595). The count runs 2 to 5 counted nodes per real node: real manifests, CRDs included, take
+// about 8 to 15 bytes per counted node (a managedFields dump about 4), so a dense manifest near 1 MiB can be
+// refused. The count is proven an upper bound against go.yaml.in/yaml/v3 only (FuzzNodes); the source mapping
+// parses with sigs.k8s.io/yaml (yaml v2), where the bound rests on measured peaks (TestReadFieldPeakHeap).
 const MaxNodes = 1 << 17
 
 // bom is the UTF-8 byte order mark, which the parser skips at the start of a line.

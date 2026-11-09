@@ -18,7 +18,7 @@ The design left the library open, leaning towards `kyaml`. Four approaches were 
 | Target inside an anchor | Patched; anchor and alias replaced by two separate copies | Patched, and the alias changed silently | Refused, because its path query cannot pass an anchor | Refused on purpose |
 | Multi-document files | Manual split | Yes | Yes | Yes |
 | Licence | MIT and BSD-3-Clause | Apache-2.0 | MIT | MIT and Apache-2.0 |
-| New modules for the operator | None | None (`sigs.k8s.io/kustomize/kyaml` is already a direct dependency, added by [#176](https://github.com/pkalin/shadewright/pull/176) for the semantic diff; `go-errors`, `go-gitignore` and `treeprint` are already in the module graph) | None (already in the module graph) | None (`go.yaml.in/yaml/v3` is already a direct dependency, v3.0.5 in `go.mod`) |
+| New modules for the operator | None | None (`sigs.k8s.io/kustomize/kyaml` is already a direct dependency, added by [#176](https://github.com/pkalin/shadewright/pull/176) for the semantic diff; `go-errors`, `go-gitignore` and `treeprint` are already in the module graph) | None (already in the module graph) | None (`go.yaml.in/yaml/v3` is already a direct dependency, v3.0.6 in `go.mod` since 2026-11-09) |
 | Last release | 2025-07 | 2026-10 | 2026-01 | 2026-10 |
 
 ## Decision
@@ -35,7 +35,7 @@ The code lives in `internal/gitops/patch` (#55); the spike stays under `hack/` a
 ## Consequences
 
 - The pull request diff is one line, so a reviewer sees exactly the approved change, and comments such as `# raised from 384Mi on 2026-10-14` stay attached to the line.
-- No new dependency: `go.yaml.in/yaml/v3` is already a direct dependency (v3.0.5 in `go.mod`).
+- No new dependency: `go.yaml.in/yaml/v3` is already a direct dependency (v3.0.6 in `go.mod` since 2026-11-09).
 - The patcher handles only scalar replacement. Adding a field that does not exist yet, or editing a list, would need a different technique. That fits the closed action catalog: every action changes an existing scalar, and ADR-0012 already requires the old value to be present. A future action that needs more must revisit this ADR.
 - Some valid files are refused (anchors, block scalars, tags on the target). They stop with `NeedsIntervention`, never with a wrong edit.
 - The semantic check decodes the file twice; the file is at most 1 MiB, so this is cheap. Amended on 2026-11-09: see the next item.
@@ -141,4 +141,4 @@ The code lives in `internal/gitops/patch` (#55); the spike stays under `hack/` a
 
 ## Amendments
 
-None.
+- 2026-11-09 ([#595](https://github.com/pkalin/shadewright/issues/595)): step 4 and the Consequences. The patcher counts the YAML nodes of the file from its bytes before any part is decoded and refuses more than 131,072 (`InvalidYAML`), checks the target from a copy of the decoded tree so verification never sees a changed original, and treats NaN as equal only to NaN. A dense file of 1 MiB had held about 260 MiB at the patcher's peak, past the executor's limit. The decision (replace one scalar in place, verify by decoding) is unchanged; the bound only refuses more. The `go.yaml.in/yaml/v3` version was corrected to the one in `go.mod`.

@@ -79,7 +79,7 @@ Set by the policy check, on `PolicyAllowed`.
 | `TargetChanged` | NeedsIntervention | The UID changed while the source was mapped (see also the freshness table) | Apply a new request |
 | `PreviousValueMismatch` | Denied | `previous` (or `previousValue`) is not the live value, so the policy's percent limits would be measured from a wrong baseline | Read the live value and apply a new request |
 | `FieldNotFound` | NeedsIntervention | The field the action changes is not set on the live object, or in the file in Git | The action changes an existing value. Set it in Git first |
-| `ValueMismatch` | NeedsIntervention | The value in the file differs from the live one: someone or something changed the live object (a manual edit, an autoscaler) or Flux has not applied the file yet. Also when the memory value in the file is not a quantity Shadewright reads: at most 40 characters, a decimal number with an optional suffix (`Ki` to `Ei`, `n` to `E`) or an exponent of at most two digits (`1e9`, not `1e100`; #593) | Make the live value and the file agree (let Flux apply, or revert the live change), then apply a new request with `previous` equal to that value |
+| `ValueMismatch` | NeedsIntervention | The value in the file differs from the live one: someone or something changed the live object (a manual edit, an autoscaler) or Flux has not applied the file yet. Also when the memory value in the file is not a quantity Shadewright reads: at most 40 characters, a decimal number with an optional suffix (`Ki` to `Ei`, `n` to `E`) or an exponent of at most two digits (`1e9`, not `1e100`; #593), in the file or on the live object. Some valid but unusual spellings are refused too, on purpose: `536870912e000` (a three-digit exponent) or a number with over 34 trailing zeros (longer than 40 characters); write `512Mi` instead | Make the live value and the file agree (let Flux apply, or revert the live change), then apply a new request with `previous` equal to that value |
 | `WithinApprovedBounds` | allowed | Every check passed | Nothing to do |
 
 ## Delivery from Flux
@@ -148,7 +148,7 @@ On `PolicyAllowed`; all `Denied` unless marked. These are the checks of the poli
 | `RequestNamespaceNotAllowed` | The request's namespace is not in `requestNamespaces` | Add the operator namespace to the policy |
 | `ModeNotSupported` | Mode is not GitOps | Use GitOps |
 | `ActionUnknown` | The action type is not in the catalog | Use a catalog action |
-| `InvalidParameters` | Parameters missing, from another action, outside the catalog's range, or `desired` equals `previous` (memory: whole bytes between 1Mi and 1Ti; replicas: 1 to 1000) | Correct the parameters |
+| `InvalidParameters` | Parameters missing, from another action, outside the catalog's range, or `desired` equals `previous` (memory: whole bytes between 1Mi and 1Ti, written in the quantity form described under `ValueMismatch`; replicas: 1 to 1000) | Correct the parameters |
 | `KindExcluded` | The target's kind is never remediated: Shadewright's own, admission, CRD, RBAC and Flux API groups; Secrets, ServiceAccounts, Namespaces, PersistentVolumes and Claims, NetworkPolicies | By design. Change it by hand |
 | `KindNotAllowed` | The action cannot target that apiVersion and kind | Use the kinds above |
 | `TargetNamespaceNotAllowed` | The target's namespace is not in `targets.namespaces` | Add it, or the change is out of scope |
@@ -257,7 +257,7 @@ Before committing, and again when the target branch moves while the pull request
 | `DesiredValueMissing` | The rendered target after the change lacks the desired value, for example an overlay overrides it |
 | `FieldNotFound` | The rendered target does not set the field |
 | `SourceIgnored` | A `.sourceignore` applies to a directory of the build |
-| `SchemaInvalid` | The changed object fails the basic schema checks |
+| `SchemaInvalid` | The changed object fails the basic schema checks, for example its memory request is outside the quantity form described under `ValueMismatch` |
 
 Fix for all: make the build plain, so the one value is declared once and nothing overrides it, then apply a new request.
 
@@ -313,7 +313,7 @@ An analysis that ends without a request shows why in the reason of its `Analyzed
 
 | Reason | Meaning | What to do |
 | --- | --- | --- |
-| `PreviousValueUnknown` | The pod template the analyzer read has no container of the proposed name, sets no memory limit for it, or could not be read | The action changes an existing limit: set one in Git first, or handle the incident by hand |
+| `PreviousValueUnknown` | The pod template the analyzer read has no container of the proposed name, sets no memory limit for it, sets one outside the quantity form described under `ValueMismatch`, or could not be read | The action changes an existing limit: set one in Git first, or handle the incident by hand |
 | `NoChange` | The proposed limit is the one the pod template already sets; during a rollout, older pods may still run with another | Let the rollout finish, then check whether the symptom remains |
 | `DirectionReversed` | Measured from the pod template's limit, the proposed change goes the other way than the model reasoned (an increase becomes a decrease, or back), or the model wrote the same previous and desired value, usually because older pods of a rollout hold another limit | Read the template's limit and decide by hand, or wait for the rollout and the next analysis |
 

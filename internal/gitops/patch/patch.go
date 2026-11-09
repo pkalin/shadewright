@@ -20,9 +20,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"unicode/utf8"
 
@@ -519,7 +521,11 @@ func verify(before original, after []byte, field sourcemap.Field, desired string
 		b := before.values[i]
 		if i == before.idx {
 			node, err := locate(na, field)
-			if err != nil || node.Kind != yaml.ScalarNode || node.Value != desired || !copyTarget(b, a, field) {
+			if err != nil || node.Kind != yaml.ScalarNode || node.Value != desired {
+				return fail
+			}
+			var ok bool
+			if b, ok = withTarget(b, a, field.Steps); !ok {
 				return fail
 			}
 		}
@@ -575,40 +581,57 @@ func equal(a, b any) bool {
 	return reflect.DeepEqual(a, b)
 }
 
-// copyTarget copies the value at the field in src over the one in dst, in place, so that a following
-// comparison ignores exactly that value.
-func copyTarget(dst, src any, field sourcemap.Field) bool {
-	for i, step := range field.Steps {
-		dm, ok1 := dst.(map[string]any)
-		sm, ok2 := src.(map[string]any)
-		if !ok1 || !ok2 {
-			return false
-		}
-		if i == len(field.Steps)-1 {
-			if _, ok := dm[step.Key]; !ok {
-				return false
-			}
-			dm[step.Key] = sm[step.Key]
-			return true
-		}
-		dst, src = dm[step.Key], sm[step.Key]
-		if step.Name != "" {
-			dst, src = pick(dst, step.Name), pick(src, step.Name)
-		}
+// withTarget returns dst with the value at steps taken from src, so that a following comparison ignores
+// exactly that value, or false when dst does not hold the path. It copies only the maps and lists on the path
+// and leaves dst as it is, since dst is the original the patched file is compared with.
+func withTarget(dst, src any, steps []sourcemap.Step) (any, bool) {
+	dm, ok1 := dst.(map[string]any)
+	sm, ok2 := src.(map[string]any)
+	if len(steps) == 0 || !ok1 || !ok2 {
+		return nil, false
 	}
-	return false
+	step := steps[0]
+	d, ok := dm[step.Key]
+	if !ok {
+		return nil, false
+	}
+	out := maps.Clone(dm)
+	if len(steps) == 1 {
+		out[step.Key] = sm[step.Key]
+		return out, true
+	}
+	s := sm[step.Key]
+	if step.Name == "" {
+		v, ok := withTarget(d, s, steps[1:])
+		out[step.Key] = v
+		return out, ok
+	}
+	items, _ := d.([]any)
+	i := pick(items, step.Name)
+	if i < 0 {
+		return nil, false
+	}
+	srcItems, _ := s.([]any)
+	j := pick(srcItems, step.Name)
+	if j < 0 {
+		return nil, false
+	}
+	v, ok := withTarget(items[i], srcItems[j], steps[1:])
+	list := slices.Clone(items)
+	list[i] = v
+	out[step.Key] = list
+	return out, ok
 }
 
-// pick returns the only element of a list of maps whose name equals name, or nil.
-func pick(list any, name string) any {
-	items, _ := list.([]any)
-	var found any
-	for _, it := range items {
+// pick returns the index of the only element of a list of maps whose name equals name, or -1.
+func pick(items []any, name string) int {
+	found := -1
+	for i, it := range items {
 		if m, ok := it.(map[string]any); ok && m["name"] == name {
-			if found != nil {
-				return nil
+			if found >= 0 {
+				return -1
 			}
-			found = m
+			found = i
 		}
 	}
 	return found

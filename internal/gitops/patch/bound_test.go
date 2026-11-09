@@ -18,6 +18,7 @@ package patch
 
 import (
 	"errors"
+	"reflect"
 	goruntime "runtime"
 	"runtime/debug"
 	"strings"
@@ -25,7 +26,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/gityaml"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/testutil/deadline"
 )
 
@@ -214,5 +217,35 @@ func TestNodeBudgetPeakHeap(t *testing.T) {
 				t.Errorf("got %v, want %v naming the nodes", err, ErrInvalidYAML)
 			}
 		})
+	}
+}
+
+// verify compares the patched file with the values findDocument kept and leaves them as they were.
+func TestVerifyKeepsTheOriginal(t *testing.T) {
+	in := read(t, "deployment.yaml")
+	p := mem("web", "512Mi", "768Mi")
+	field, err := sourcemap.FieldFor(v1alpha1.Action{
+		Type: v1alpha1.ActionSetContainerMemoryLimit, SetContainerMemoryLimit: &p,
+	}, deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, err := findDocument(in, deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := SetContainerMemoryLimit(in, deployment, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verify(found, out, field, p.Desired.String()); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := findDocument(in, deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(found.values, fresh.values) {
+		t.Error("verify changed the values of the original it compares with")
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,31 +44,46 @@ import (
 //   - Admission (chainLink, check): before anything else is read about it, the full chain link is checked once:
 //     the predecessor exists with the UID named, is not being deleted, names the same Incident, target and chain
 //     root, waits for review (AwaitingApproval) with a recorded pull request that is open as far as its status
-//     says, has no handoff of its own yet, and holds the named hint Pending. A link that fails is Denied
-//     (ChainLinkInvalid) and takes nothing over. The limits then count the predecessor neither as a holder of
-//     the target lock nor as an active request (checkLimits), so the replacement takes its lock and slot; the
-//     admission's status write sets holdsTarget and status.handoff.from (Reserved) together (step 1).
+//     says, has no handoff of its own that stands or is done (one that aborted does not count), and holds the
+//     named hint Pending. A link that fails is Denied (ChainLinkInvalid) and takes nothing over. The limits then
+//     count the predecessor neither as a holder of the target lock nor as an active request (checkLimits), so the
+//     replacement takes its lock and slot; the admission's status write sets holdsTarget and status.handoff.from
+//     (Reserved) together (step 1). Only a replacement admitted so frees a slot for another request
+//     (admittedPredecessor).
 //   - Step 2 (reserve): one status write on the predecessor sets status.handoff.to (Intent, the branch head it
-//     expects) and its hint Reserved, with the resourceVersion read, so only a successor that read the hint
-//     Pending reserves it. A conflict is read again; a predecessor that left AwaitingApproval, or whose hint is
-//     no longer Pending or is reserved for another, ends the replacement Cancelled (HandoffRefused).
+//     expects; it replaces an aborted one of an earlier replacement) and its hint Reserved, with the
+//     resourceVersion read, so only a successor that read the hint Pending reserves it. A conflict is read again;
+//     a predecessor that left AwaitingApproval, or whose hint is no longer Pending or is reserved for another,
+//     ends the replacement Cancelled (HandoffRefused).
 //   - Step 3 (takeOver): after the freshness check, the render check and the branch rule (#524): the branch head
 //     is the expected head and carries only the predecessor's chain of changes to the target file, which holds
-//     exactly the predecessor's plan on the target file now, and the new plan renders as planned. The pull
-//     request is read (it must be open), the branch moves by one commit on top of the expected head
-//     (AppendCommit, a compare-and-swap), and the pull request is read again. A head that is not the expected
-//     one is accepted only when it is that commit: its one parent is the expected head, the chain holds only
-//     changes to the target file and the file is the new plan (recomputed). Anything else, a merge or a close
-//     around the update with the old head, or a plan that would change another file, ends the replacement
-//     Cancelled (HandoffAborted), and the predecessor stays as it is.
+//     exactly the predecessor's plan on the target file now, and the new plan renders as planned. The commit's
+//     content must also be handoffContent: the predecessor's value in the file at the expected head changed to the
+//     new plan's. The pull request is read (it must be open), the branch moves by one commit on top of the
+//     expected head (AppendCommit, a compare-and-swap), and the pull request is read again. A head that is not the
+//     expected one is accepted only when it is that commit (isHandoffCommit): its one parent is the expected head,
+//     the chain holds only changes to the target file and the file is handoffContent, which depends on the two
+//     specs and the expected head only, so a target branch that moved since does not hide it. Anything else, a
+//     merge or a close around the update with the old head, a predecessor being deleted, or a plan that would
+//     change another file, ends the replacement Cancelled (HandoffAborted), and the predecessor stays as it is.
+//   - Recovery (recoverHandoff): a replacement whose update happened before a restart or a lost write finds its
+//     commit before the freshness check, and goes on to the read after the update, so neither the freshness
+//     check nor the deadline takes its commit, or a merge of it, for a stale plan.
 //   - Step 4 (recordHandoff): the replacement records the pull request with the new head, the hints of the chain
-//     (each consumed one, the one it answers among them) and the predecessor's comment cursor, sets from Done and
-//     moves to PRCreated; a merge right after the update whose merged head is the new commit makes it Merged.
-//   - Step 5 (followHandoff): the predecessor ends Superseded with reason HandedOff, its to Done, its hint
+//     (each consumed one, the one it answers among them, and the predecessor's other Pending hints, which it
+//     answers anew since the cursor it carries is past their comments) and the predecessor's comment cursor, sets
+//     from Done and moves to PRCreated; a merge right after the update whose merged head is the new commit makes
+//     it Merged.
+//   - Step 5 (supersedePredecessor): the predecessor ends Superseded with reason HandedOff, its to Done, its hint
 //     Consumed and holdsTarget false. It is the one Superseded whose pull request may be open (prMayBeOpen).
 //   - Step 6 (followHandoff): while the pull request waits, its title and body are rewritten for the new plan
 //     with the replacement's marker, and the check run shadewright/review is created in progress on the new
-//     head, each recorded in status.handoff.from once done.
+//     head, each recorded in status.handoff.from as Done (InProgress) or Refused; a refusal is never recorded as
+//     done, and a body the Git host did not rewrite keeps the predecessor's marker, which the replacement keeps
+//     accepting.
+//   - The merge gate (reviewGate, ADR-0028 section 5): while the request waits for review, the check run
+//     completes with success once the latest review of someone who wrote no hint in the chain approves the
+//     recorded head.
 //
 // Each step is one write, idempotent, and a restart finds where it stopped from the two statuses and the
 // branch. Every write, in Git and in status, passes the kill switch first (writeAllowed, gatedGit); while
@@ -75,8 +91,10 @@ import (
 // its look at the pull request) aborts an intent whose replacement is gone or ended without taking over, and
 // declines a Pending hint whose replacements all ended without the handoff (ReplacementDenied when one was
 // Denied, else HandoffAborted); a request that ends for any other reason aborts its intent in the write that
-// ends it (declineOnEnd). While its intent stands, the predecessor reads no new comments, and its watch takes a
-// head that is the replacement's commit (expectedHandoffHead) for the expected one instead of HeadMoved.
+// ends it (declineOnEnd). While its intent stands, the predecessor reads no new comments, writes nothing to Git
+// (no freshness check, so no close of a stale plan; recheck), never closes the pull request (closeChangeRequest,
+// and its finalizer waits for the replacement: handoffHolds), and its watch takes a head that is the
+// replacement's commit (expectedHandoffHead) for the expected one instead of HeadMoved.
 
 // Hint reasons of the predecessor's side of a handoff.
 const (
@@ -88,8 +106,8 @@ const (
 	ReasonHintHandoffAborted = "HandoffAborted"
 )
 
-// The check run created on the head a handoff pushed (ADR-0028 section 5). Completing it on an approval is the
-// merge gate's work; until then it says why it waits.
+// The check run created on the head a handoff pushed (ADR-0028 section 5), in progress until the merge gate
+// (reviewGate) completes it; until then it says why it waits.
 const (
 	checkRunTitle   = "Waiting for an approval of this head"
 	checkRunSummary = "Shadewright changed this pull request after a reviewer hint. The check completes once someone " +
@@ -197,7 +215,9 @@ func (r *RemediationRequestReconciler) chainLink(ctx context.Context, rr *remedi
 	case pred.Status.Phase != remediationv1alpha1.PhaseAwaitingApproval || pr == nil || opened == nil ||
 		opened.Reason != ReasonPullRequestOpened:
 		return "The request it replaces does not wait for review with an open pull request", nil
-	case pred.Status.Handoff != nil && pred.Status.Handoff.To != nil:
+	case pred.Status.Handoff != nil && pred.Status.Handoff.To != nil &&
+		pred.Status.Handoff.To.Phase != remediationv1alpha1.HandoffAborted:
+		// A handoff that aborted left the request as it was: a later hint of it may still be answered.
 		return "The request it replaces is already handed over", nil
 	}
 	if h := hintByRef(pred, rep.Hint); h == nil || h.State != remediationv1alpha1.HintPending {
@@ -232,7 +252,8 @@ func (r *RemediationRequestReconciler) handoffStep(ctx context.Context, rr *reme
 		to = pred.Status.Handoff.To
 	}
 	switch {
-	case to == nil:
+	case to == nil, to.Phase == remediationv1alpha1.HandoffAborted && to.UID != remediationv1alpha1.UID(rr.UID):
+		// No intent yet, or only the aborted one of an earlier replacement, which this one's intent replaces.
 		return r.reserve(ctx, rr, pred)
 	case to.UID != remediationv1alpha1.UID(rr.UID) || to.Hint != from.Hint:
 		return reconcile.Result{}, r.endHandoff(ctx, rr, remediationv1alpha1.ReasonHandoffRefused,
@@ -244,6 +265,11 @@ func (r *RemediationRequestReconciler) handoffStep(ctx context.Context, rr *reme
 		// Done is written only after this request recorded the pull request (step 4), which moved it out of
 		// PolicyChecked: this is an old read, retried.
 		return reconcile.Result{}, errors.New("the predecessor is handed over, but this request has not recorded it")
+	case !pred.DeletionTimestamp.IsZero():
+		// Its finalizer waits for this request to take over or end (handoffHolds); before the update, it ends.
+		// After an update the restart finds the commit first (recoverHandoff) and records it.
+		return reconcile.Result{}, r.endHandoff(ctx, rr, remediationv1alpha1.ReasonHandoffAborted,
+			"The request it replaces is being deleted; nothing was taken over")
 	}
 	return r.takeOver(ctx, rr, pred, to, fresh)
 }
@@ -334,7 +360,7 @@ func (r *RemediationRequestReconciler) takeOver(ctx context.Context, rr, pred *r
 	if head != to.ExpectedHead {
 		// The update may have happened before a restart, a lost answer or a lost status write: only the
 		// replacement's own commit goes on to the read after the update.
-		ours, err := r.isHandoffCommit(ctx, git, pred, to, head, changed)
+		ours, err := r.isHandoffCommit(ctx, git, rr, pred, to, head)
 		switch {
 		case err != nil:
 			return reconcile.Result{}, err
@@ -354,6 +380,16 @@ func (r *RemediationRequestReconciler) takeOver(ctx context.Context, rr, pred *r
 		}
 		return reconcile.Result{}, r.endHandoff(ctx, rr, remediationv1alpha1.ReasonHandoffAborted,
 			ref.message+" ("+ref.reason+"); the pull request was left as it is")
+	}
+	// The commit must be what a restart recognises as this handoff's (isHandoffCommit): the predecessor's value
+	// in the pull request's file changed to the new plan's, and nothing else.
+	switch want, ok, err := handoffContent(ctx, git, rr, pred, head); {
+	case err != nil:
+		return reconcile.Result{}, err
+	case !ok || !bytes.Equal(want, changed):
+		return reconcile.Result{}, r.endHandoff(ctx, rr, remediationv1alpha1.ReasonHandoffAborted,
+			"The new plan cannot be written as one change of the value the pull request's file holds; the pull "+
+				"request was left as it is")
 	}
 	newHead, err := git.AppendCommit(ctx, branch, head, providers.FileChange{
 		Path: path, Content: changed, Message: commitTitle(rr),
@@ -403,12 +439,56 @@ func (r *RemediationRequestReconciler) checkHandoff(ctx context.Context, git pro
 	return nil, nil
 }
 
-// isHandoffCommit reports whether head, a branch head that is not the expected one, is the commit of this
-// handoff: its one parent is the expected head, the chain below it changes only the target file, and the file
-// is the new plan, changed, recomputed from the target branch now.
+// rebasedAction is rr's action as a change from the value pred's plan sets: the commit of a handoff changes the
+// pull request's file, which holds pred's desired value, to rr's. ok is false when the two plans are not the
+// same kind of change, which no single commit of a handoff can make.
+func rebasedAction(rr, pred *remediationv1alpha1.RemediationRequest) (remediationv1alpha1.Action, bool) {
+	a := *rr.Spec.Action.DeepCopy()
+	p := pred.Spec.Action
+	switch {
+	case a.Type != p.Type || rr.Spec.TargetRef != pred.Spec.TargetRef:
+		return a, false
+	case a.SetContainerMemoryLimit != nil && p.SetContainerMemoryLimit != nil &&
+		a.SetContainerMemoryLimit.Container == p.SetContainerMemoryLimit.Container:
+		a.SetContainerMemoryLimit.Previous = p.SetContainerMemoryLimit.Desired
+	case a.AdjustKedaMaxReplicas != nil && p.AdjustKedaMaxReplicas != nil:
+		a.AdjustKedaMaxReplicas.PreviousValue = p.AdjustKedaMaxReplicas.DesiredValue
+	default:
+		return a, false
+	}
+	return a, true
+}
+
+// handoffContent is the content the commit of rr's handoff gives the target file: the file at base, the
+// predecessor's head, with pred's value changed to rr's by the typed patcher. It depends only on the two
+// specs and base, never on the target branch, so a restart computes the same whatever the target branch did
+// meanwhile. ok is false when the patcher refuses (the file at base does not hold pred's value); an error is
+// a read worth retrying.
+func handoffContent(ctx context.Context, git providers.GitProvider, rr, pred *remediationv1alpha1.RemediationRequest,
+	base string) ([]byte, bool, error) {
+	a, ok := rebasedAction(rr, pred)
+	if !ok || pred.Status.Source == nil {
+		return nil, false, nil
+	}
+	file, err := git.ReadFile(ctx, base, string(pred.Status.Source.Path), providers.MaxFileBytes)
+	if err != nil {
+		return nil, false, freshness.WrapProvider("read the file of the pull request", err)
+	}
+	out, err := applyAction(file.Data, rr.Spec.TargetRef, a, false)
+	if err != nil {
+		return nil, false, nil
+	}
+	return out, true, nil
+}
+
+// isHandoffCommit reports whether head, a branch head that is not the expected one, is the commit of rr's
+// handoff of pred: its one parent is the expected head, the chain below it changes only the target file, and
+// the file is handoffContent of the expected head.
 func (r *RemediationRequestReconciler) isHandoffCommit(ctx context.Context, git providers.GitProvider,
-	pred *remediationv1alpha1.RemediationRequest, to *remediationv1alpha1.OutgoingHandoff, head string,
-	changed []byte) (bool, error) {
+	rr, pred *remediationv1alpha1.RemediationRequest, to *remediationv1alpha1.OutgoingHandoff, head string) (bool, error) {
+	if pred.Status.Source == nil {
+		return false, nil
+	}
 	parents, err := git.Parents(ctx, head)
 	if err != nil {
 		return false, freshness.WrapProvider("read the parents of the branch head", err)
@@ -423,33 +503,38 @@ func (r *RemediationRequestReconciler) isHandoffCommit(ctx context.Context, git 
 	case bs != providers.BranchOneChange:
 		return false, nil
 	}
+	want, ok, err := handoffContent(ctx, git, rr, pred, to.ExpectedHead)
+	if err != nil || !ok {
+		return false, err
+	}
 	file, err := git.ReadFile(ctx, head, path, providers.MaxFileBytes)
 	if err != nil {
 		return false, freshness.WrapProvider("read the file of the pull request", err)
 	}
-	return bytes.Equal(file.Data, changed), nil
+	return bytes.Equal(file.Data, want), nil
 }
 
 // expectedHandoffHead reports whether head, the moved head of the recorded pull request of a predecessor whose
-// intent stands, is the replacement's commit as far as the predecessor can tell (ADR-0028 section 4 item 8):
-// one commit on top of the head it recorded that changes only the target file. Any other head is HeadMoved as
-// before.
+// intent stands, is the replacement's commit (ADR-0028 section 4 item 8, design 6.5.4): one commit on top of the
+// head it recorded that changes only the target file, to exactly the replacement's plan (isHandoffCommit, with
+// the replacement read as it is now). Any other head, a person's push of one commit to the target file
+// included, is HeadMoved as before.
 func (r *RemediationRequestReconciler) expectedHandoffHead(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, head string) (bool, error) {
 	to := intent(rr)
 	if to == nil || to.ExpectedHead != rr.Status.PullRequest.HeadSHA || rr.Status.Source == nil {
 		return false, nil
 	}
-	parents, err := git.Parents(ctx, head)
-	if err != nil {
-		return false, freshness.WrapProvider("read the parents of the pull request's head", err)
-	}
-	if len(parents) != 1 || parents[0] != to.ExpectedHead {
+	repl := &remediationv1alpha1.RemediationRequest{}
+	switch err := r.Get(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(to.Name)}, repl); {
+	case apierrors.IsNotFound(err):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("get the replacement of RemediationRequest %s: %w", rr.Name, err)
+	case repl.UID != types.UID(to.UID):
 		return false, nil
 	}
-	bs, err := branchStateOf(ctx, git, string(rr.Status.Source.Path), head,
-		min(chainDepth(rr)+1, providers.MaxChainCommits))
-	return err == nil && bs == providers.BranchOneChange, err
+	return r.isHandoffCommit(ctx, git, repl, rr, to, head)
 }
 
 // afterUpdate reads the pull request after the branch update (ADR-0028 section 4 item 5): open, the replacement
@@ -494,10 +579,19 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 	for _, h := range pred.Status.Hints {
 		consumed := h.State == remediationv1alpha1.HintConsumed
 		answered := refOf(&h) == from.Hint
-		if (!consumed && !answered) || findHint(rr.Status.Hints, h.Source, h.CommentID) != nil {
+		if findHint(rr.Status.Hints, h.Source, h.CommentID) != nil {
 			continue
 		}
-		h.State, h.Reason = remediationv1alpha1.HintConsumed, ""
+		switch {
+		case consumed || answered:
+			h.State, h.Reason = remediationv1alpha1.HintConsumed, ""
+		case h.State == remediationv1alpha1.HintPending:
+			// Another hint of the same pull request, accepted before the intent: the cursor carried over is past
+			// its comment, and the predecessor ends without answering it, so this request answers it, anew.
+			h.Reason, h.Outcome = "", ""
+		default:
+			continue
+		}
 		rr.Status.Hints = append(rr.Status.Hints, h)
 	}
 	if rr.Status.CommentCursor == nil && pred.Status.CommentCursor != nil {
@@ -542,14 +636,21 @@ func (r *RemediationRequestReconciler) endHandoff(ctx context.Context, rr *remed
 }
 
 // followHandoff is step 6 of a replacement that took the pull request over, each part once and recorded: while
-// the pull request waits for review, its title and body are rewritten and the check run is created on the
-// recorded head. A final refusal of the Git host is logged and recorded as done, so it is not asked again on
-// every look; a closed or merged pull request leaves nothing to do. An error is returned for a retry; rr is
-// updated in place by every status write that went through. The caller has done step 5 first.
+// the pull request waits for review, its title and body are rewritten and the check run shadewright/review is
+// created in progress on the recorded head; once the request waits for review, the merge gate (reviewGate)
+// completes it. A final refusal of the Git host is recorded as Refused, never as done, so it is not asked again
+// on every look; a pull request closed or merged meanwhile leaves the step for the watch to decide. An error is
+// returned for a retry; rr is updated in place by every status write that went through. The caller has done
+// step 5 first.
 func (r *RemediationRequestReconciler) followHandoff(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	from := rr.Status.Handoff.From
-	if p := rr.Status.Phase; (p != remediationv1alpha1.PhasePRCreated && p != remediationv1alpha1.PhaseAwaitingApproval) ||
-		rr.Status.PullRequest == nil || (from.PullRequestUpdated && from.CheckRunCreated) {
+	p := rr.Status.Phase
+	if (p != remediationv1alpha1.PhasePRCreated && p != remediationv1alpha1.PhaseAwaitingApproval) ||
+		rr.Status.PullRequest == nil {
+		return nil
+	}
+	gate := p == remediationv1alpha1.PhaseAwaitingApproval && from.CheckRun == remediationv1alpha1.ReviewCheckInProgress
+	if from.PullRequestUpdate != "" && from.CheckRun != "" && !gate {
 		return nil
 	}
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
@@ -560,40 +661,164 @@ func (r *RemediationRequestReconciler) followHandoff(ctx context.Context, rr *re
 	}
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
 	pr := rr.Status.PullRequest
-	done := func(err error, what string) (bool, error) {
-		switch {
-		case err == nil:
-			return true, nil
-		case providers.IsConflict(err):
-			// Closed or merged meanwhile: the watch of the pull request decides; nothing is left to rewrite.
-			return true, nil
-		}
-		if reason, _, final := refusal(err); final {
-			log.Info("The Git host refused a step after the handoff of RemediationRequest; it is not asked again",
-				"step", what, "reason", reason)
-			return true, nil
-		}
-		return false, err
-	}
-	if !from.PullRequestUpdated {
+	if from.PullRequestUpdate == "" {
 		err := git.UpdateChangeRequest(stepCtx, pr.Number, commitTitle(rr), pullRequestBody(rr, r.verifiedIncidentName(stepCtx, rr)))
-		if ok, err := done(err, "rewrite the pull request"); !ok {
+		step, err := stepOutcome(log, err, "rewrite the pull request")
+		switch {
+		case err != nil:
 			return freshness.WrapProvider("rewrite the pull request", err)
+		case step == "":
+			// Closed or merged meanwhile: the watch of the pull request decides; nothing is left to rewrite.
+			return nil
 		}
-		if err := r.recordStep(stepCtx, rr, func(f *remediationv1alpha1.IncomingHandoff) { f.PullRequestUpdated = true }); err != nil {
+		if err := r.recordStep(stepCtx, rr, func(f *remediationv1alpha1.IncomingHandoff) { f.PullRequestUpdate = step }); err != nil {
 			return err
 		}
 	}
-	if !rr.Status.Handoff.From.CheckRunCreated {
+	if rr.Status.Handoff.From.CheckRun == "" {
 		err := git.CreateCheckRun(stepCtx, pr.HeadSHA, providers.CheckRun{Name: providers.CheckRunName,
 			Status: providers.CheckRunInProgress, Title: checkRunTitle, Summary: checkRunSummary})
-		if ok, err := done(err, "create the check run"); !ok {
+		step, err := stepOutcome(log, err, "create the check run")
+		switch {
+		case err != nil:
 			return freshness.WrapProvider("create the check run", err)
+		case step == "":
+			return nil
 		}
-		if err := r.recordStep(stepCtx, rr, func(f *remediationv1alpha1.IncomingHandoff) { f.CheckRunCreated = true }); err != nil {
+		state := remediationv1alpha1.ReviewCheckInProgress
+		if step == remediationv1alpha1.HandoffStepRefused {
+			state = remediationv1alpha1.ReviewCheckRefused
+		}
+		if err := r.recordStep(stepCtx, rr, func(f *remediationv1alpha1.IncomingHandoff) { f.CheckRun = state }); err != nil {
 			return err
 		}
 	}
+	if rr.Status.Phase == remediationv1alpha1.PhaseAwaitingApproval &&
+		rr.Status.Handoff.From.CheckRun == remediationv1alpha1.ReviewCheckInProgress {
+		return r.reviewGate(stepCtx, git, rr)
+	}
+	return nil
+}
+
+// stepOutcome maps the answer of a write after the handoff to its record: Done, Refused for a final refusal
+// (logged), "" for a conflict (closed or merged meanwhile; nothing is recorded), or the error for a retry.
+func stepOutcome(log logr.Logger, err error, what string) (remediationv1alpha1.HandoffStep, error) {
+	switch {
+	case err == nil:
+		return remediationv1alpha1.HandoffStepDone, nil
+	case providers.IsConflict(err):
+		return "", nil
+	}
+	if reason, _, final := refusal(err); final {
+		log.Info("The Git host refused a step after the handoff of RemediationRequest; it is not asked again",
+			"step", what, "reason", reason)
+		return remediationv1alpha1.HandoffStepRefused, nil
+	}
+	return "", err
+}
+
+// The merge gate (ADR-0028 section 5): the check run completes once someone who wrote no hint in the chain
+// approves the recorded head.
+const (
+	// maxReviewLooks bounds the looks at the reviews of one pull request per reconcile; a list longer than that
+	// leaves the check in progress until a later look reads it whole.
+	maxReviewLooks = 4
+	// reviewApproved is the state of an approving review.
+	reviewApproved = "APPROVED"
+	// checkRunPassedTitle and checkRunPassedSummary are the text of the completed check.
+	checkRunPassedTitle   = "Approved"
+	checkRunPassedSummary = "Someone who wrote no hint in this pull request approved its latest head."
+	// hintApprovalComment is posted once per approval of the head by a hint author.
+	hintApprovalComment = "This approval does not satisfy the check shadewright/review: its author wrote a " +
+		"reviewer hint in this pull request, and the person who steered a change through a hint cannot also be " +
+		"its only approver. Someone who wrote no hint here has to approve the latest head."
+)
+
+// reviewGate is the merge gate of a request waiting for review whose check run is in progress: it reads every
+// review of the pull request and, when the latest review of a person who wrote no hint in the chain (compared by
+// user ID) approves the recorded head, completes the check run with success and records it Passed. An approval
+// of an earlier head never counts. An approval of the head by a hint author does not count either, and gets a
+// comment saying why, once per review (by its marker). A list it cannot read whole leaves the check in progress.
+func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest) error {
+	fs, ok := feedbackOf(git)
+	if !ok {
+		return nil
+	}
+	pr := rr.Status.PullRequest
+	latest := map[int64]providers.Feedback{}
+	var order []int64
+	cur := providers.FeedbackCursor{}
+	complete := false
+	for range maxReviewLooks {
+		page, err := fs.ListReviews(ctx, pr.Number, cur)
+		if err != nil {
+			return freshness.WrapProvider("list the reviews of the pull request", err)
+		}
+		for _, it := range page.Items {
+			if it.Kind != providers.FeedbackReview || it.Author.Kind != providers.AuthorPerson {
+				continue
+			}
+			if _, seen := latest[it.Author.ID]; !seen {
+				order = append(order, it.Author.ID)
+			}
+			if prev, seen := latest[it.Author.ID]; !seen || !it.CreatedAt.Before(prev.CreatedAt) {
+				latest[it.Author.ID] = it
+			}
+		}
+		if complete = page.Complete; complete {
+			break
+		}
+		cur = page.Next
+	}
+	if !complete {
+		return nil
+	}
+	authors := map[int64]bool{}
+	for _, h := range rr.Status.Hints {
+		authors[h.Author.ID] = true
+	}
+	passed := false
+	var steered []int64
+	for _, id := range order {
+		rv := latest[id]
+		if rv.ReviewState != reviewApproved || rv.CommitID != pr.HeadSHA {
+			continue
+		}
+		if authors[id] {
+			steered = append(steered, rv.ID)
+			continue
+		}
+		passed = true
+	}
+	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
+	for _, id := range steered {
+		mark := fmt.Sprintf("<!-- shadewright review-gate review=%d -->", id)
+		if err := git.CommentChangeRequest(ctx, pr.Number, mark, hintApprovalComment+"\n\n"+mark); err != nil {
+			log.Info("Could not say why an approval does not count for RemediationRequest", "review", id,
+				"error", err.Error())
+		}
+	}
+	if !passed {
+		return nil
+	}
+	err := git.CreateCheckRun(ctx, pr.HeadSHA, providers.CheckRun{Name: providers.CheckRunName,
+		Status: providers.CheckRunSuccess, Title: checkRunPassedTitle, Summary: checkRunPassedSummary})
+	step, err := stepOutcome(log, err, "complete the check run")
+	switch {
+	case err != nil:
+		return freshness.WrapProvider("complete the check run", err)
+	case step == "":
+		return nil
+	}
+	state := remediationv1alpha1.ReviewCheckPassed
+	if step == remediationv1alpha1.HandoffStepRefused {
+		state = remediationv1alpha1.ReviewCheckRefused
+	}
+	if err := r.recordStep(ctx, rr, func(f *remediationv1alpha1.IncomingHandoff) { f.CheckRun = state }); err != nil {
+		return err
+	}
+	log.Info("Completed the review check of RemediationRequest", "pullRequest", pr.Number, "state", state)
 	return nil
 }
 
@@ -623,8 +848,8 @@ func reserveOnAdmission(rr *remediationv1alpha1.RemediationRequest) {
 
 // afterHandoff runs the steps after a handoff for a request that took a pull request over (Reconcile, any
 // phase): the predecessor ends HandedOff, returned as an error until it did so it is retried with backoff; the
-// pull request is rewritten while it waits, only logged on failure and retried with the next look. A pause
-// leaves both for later.
+// pull request is rewritten and the check run created and completed while it waits, only logged on failure and
+// retried with the next look. A pause leaves both for later.
 func (r *RemediationRequestReconciler) afterHandoff(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	if !tookOver(rr) {
 		return nil
@@ -641,16 +866,30 @@ func (r *RemediationRequestReconciler) afterHandoff(ctx context.Context, rr *rem
 
 // supersedePredecessor is step 5: the predecessor whose intent names rr ends Superseded with reason HandedOff,
 // its to Done, its hint Consumed and its lock released, in one status write. A predecessor that is gone, or
-// already handed over, needs nothing. It reads the cache, which costs nothing on every later reconcile; a copy
-// older than the predecessor makes the write a conflict, retried.
+// already handed over, needs nothing. It reads the cache first, which costs nothing on every later reconcile;
+// a cached copy that does not show the end yet is read again from the API server, so a cache that has not seen
+// the intent never leaves the predecessor holding the lock. A copy older than the predecessor makes the write a
+// conflict, retried.
 func (r *RemediationRequestReconciler) supersedePredecessor(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	from := rr.Status.Handoff.From
+	key := types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}
 	pred := &remediationv1alpha1.RemediationRequest{}
-	switch err := r.Get(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}, pred); {
+	switch err := r.Get(ctx, key, pred); {
 	case apierrors.IsNotFound(err):
 		return nil
 	case err != nil:
 		return fmt.Errorf("get the RemediationRequest %s replaces: %w", rr.Name, err)
+	}
+	if pred.UID != types.UID(from.UID) || handedOff(pred) {
+		return nil
+	}
+	if to := intent(pred); !ended(pred.Status.Phase) && (to == nil || to.UID != remediationv1alpha1.UID(rr.UID)) {
+		switch err := r.getLive(ctx, key, pred); {
+		case apierrors.IsNotFound(err):
+			return nil
+		case err != nil:
+			return fmt.Errorf("get the RemediationRequest %s replaces: %w", rr.Name, err)
+		}
 	}
 	to := intent(pred)
 	if pred.UID != types.UID(from.UID) || to == nil || to.UID != remediationv1alpha1.UID(rr.UID) {
@@ -670,6 +909,104 @@ func (r *RemediationRequestReconciler) supersedePredecessor(ctx context.Context,
 		return err
 	}
 	return nil
+}
+
+// recoverHandoff runs before the freshness check of a replacement admitted with from Reserved whose predecessor
+// records its intent: when the branch head is not the expected one but is this handoff's commit
+// (isHandoffCommit, which does not depend on the target branch), the update happened before a restart or a lost
+// write, and the request goes on to the read after the update (afterUpdate) instead of the freshness check, so a
+// merge of the new commit, or a target branch that moved since, is the replacement's and never taken for a
+// stale plan. done is false when there is nothing to recover; the caller then goes on as before.
+func (r *RemediationRequestReconciler) recoverHandoff(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	res reconcile.Result, done bool, err error) {
+	ho := rr.Status.Handoff
+	if rr.Spec.Replaces == nil || ho == nil || ho.From == nil || ho.From.Phase != remediationv1alpha1.HandoffReserved ||
+		rr.Status.Phase != remediationv1alpha1.PhasePolicyChecked || rr.Status.Source == nil ||
+		rr.Status.PlanRepository == nil || staleMark(rr) != nil {
+		return reconcile.Result{}, false, nil
+	}
+	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
+	defer cancel()
+	res, done, err = r.recoverStep(stepCtx, rr)
+	err = boundErr(ctx, stepCtx, "recovery of the handoff", err)
+	switch {
+	case errors.Is(err, errStopped):
+		return reconcile.Result{}, true, nil
+	case err != nil:
+		res, err = r.retry(ctx, rr, err)
+		return res, true, err
+	}
+	return res, done, nil
+}
+
+// recoverStep is the look of recoverHandoff.
+func (r *RemediationRequestReconciler) recoverStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	reconcile.Result, bool, error) {
+	from := rr.Status.Handoff.From
+	pred := &remediationv1alpha1.RemediationRequest{}
+	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}, pred); {
+	case apierrors.IsNotFound(err):
+		return reconcile.Result{}, false, nil
+	case err != nil:
+		return reconcile.Result{}, true, fmt.Errorf("get the RemediationRequest %s replaces: %w", rr.Name, err)
+	}
+	to := intent(pred)
+	if pred.UID != types.UID(from.UID) || to == nil || to.UID != remediationv1alpha1.UID(rr.UID) ||
+		pred.Status.PullRequest == nil {
+		return reconcile.Result{}, false, nil
+	}
+	git, err := r.openPlanRepository(ctx, rr)
+	if err != nil {
+		// Settings that cannot reach the repository are the freshness check's to handle (NeedsIntervention).
+		return reconcile.Result{}, false, nil
+	}
+	head, err := git.BranchHead(ctx, freshness.BranchName(rr))
+	switch {
+	case errors.Is(err, providers.ErrNotFound):
+		return reconcile.Result{}, false, nil
+	case err != nil:
+		return reconcile.Result{}, true, freshness.WrapProvider("read the head of the branch", err)
+	case head == to.ExpectedHead:
+		return reconcile.Result{}, false, nil
+	}
+	switch ours, err := r.isHandoffCommit(ctx, git, rr, pred, to, head); {
+	case err != nil:
+		return reconcile.Result{}, true, err
+	case !ours:
+		// A foreign push: the handoff step after the freshness check ends it.
+		return reconcile.Result{}, false, nil
+	}
+	res, err := r.afterUpdate(ctx, git, rr, pred, head)
+	return res, true, err
+}
+
+// handoffHolds is the finalizer's look at a request with an outgoing handoff (ADR-0028 section 4 item 8): keep
+// is true when its pull request is its replacement's (handed over, or the replacement took it over and has not
+// ended this request yet), so it must not be closed; wait is true while the replacement may still take it over.
+// When the replacement is gone or ended without taking over, the intent is aborted in rr (in memory only, as
+// rr is being deleted) and the close goes on as for any request.
+func (r *RemediationRequestReconciler) handoffHolds(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	keep, wait bool, err error) {
+	if handedOff(rr) {
+		return true, false, nil
+	}
+	to := intent(rr)
+	if to == nil {
+		return false, false, nil
+	}
+	repl := &remediationv1alpha1.RemediationRequest{}
+	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(to.Name)}, repl); {
+	case apierrors.IsNotFound(err):
+	case err != nil:
+		return false, false, fmt.Errorf("get the replacement of RemediationRequest %s: %w", rr.Name, err)
+	case repl.UID != types.UID(to.UID):
+	case tookOver(repl):
+		return true, false, nil
+	case !ended(repl.Status.Phase):
+		return false, true, nil
+	}
+	abortIntent(rr, ReasonHintHandoffAborted)
+	return false, false, nil
 }
 
 // settleHandoff is the predecessor's side of a handoff, in upd, the status about to be written with the look at

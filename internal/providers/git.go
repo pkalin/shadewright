@@ -147,6 +147,10 @@ type CheckRunStatus string
 const (
 	// CheckRunInProgress: the check waits, here for an approval of the head (ADR-0028 section 5).
 	CheckRunInProgress CheckRunStatus = "InProgress"
+	// CheckRunSuccess: the check completed with conclusion success, here after an approval of the head by someone
+	// who wrote no hint in the pull request. A check run of the same name created later on the same commit
+	// supersedes an earlier one, so completing it is creating a completed one.
+	CheckRunSuccess CheckRunStatus = "Success"
 )
 
 // MaxCheckRunTextBytes is the most bytes of a check run's title or summary.
@@ -301,6 +305,7 @@ type GitProvider interface {
 	UpdateChangeRequest(ctx context.Context, number int64, title, body string) error
 
 	// CreateCheckRun creates the check run run on commit head, a full object ID. Each call creates one, so
-	// the caller records that it did. It is a write.
+	// the caller records that it did; the latest run of a name on a commit is the one the host counts. It is a
+	// write.
 	CreateCheckRun(ctx context.Context, head string, run CheckRun) error
 }

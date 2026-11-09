@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -525,6 +526,31 @@ func TestLimitsMaxConcurrentRemediations(t *testing.T) {
 			res, got, err := reconcileLimits(t, r, rr)
 			expectQueued(t, r, rr, res, err, got, stub, ReasonTargetLocked)
 		}
+	})
+	const predName, predUID = "pred", "uid-pred"
+	t.Run("an unchecked spec.replaces counts no pair", func(t *testing.T) {
+		pred := a(predName, remediationv1alpha1.PhaseAwaitingApproval)
+		claim := a("claim", remediationv1alpha1.PhasePRCreated)
+		claim.Spec.Replaces = &remediationv1alpha1.RequestReplacement{Name: predName, UID: predUID,
+			Hint: remediationv1alpha1.HintRef{Source: remediationv1alpha1.HintSourceGitHub, CommentID: 1,
+				Digest: "sha256:" + strings.Repeat("0", 64)}}
+		claim.Spec.ChainRoot = predUID
+		r, _, rr, stub := limitsWorld(t, 2, pred, claim)
+		res, got, err := reconcileLimits(t, r, rr)
+		expectQueued(t, r, rr, res, err, got, stub, ReasonConcurrencyLimit)
+	})
+	t.Run("an admitted replacement and its predecessor count once", func(t *testing.T) {
+		pred := a(predName, remediationv1alpha1.PhaseAwaitingApproval)
+		repl := a("repl", remediationv1alpha1.PhasePolicyChecked)
+		repl.Spec.Replaces = &remediationv1alpha1.RequestReplacement{Name: predName, UID: predUID,
+			Hint: remediationv1alpha1.HintRef{Source: remediationv1alpha1.HintSourceGitHub, CommentID: 1,
+				Digest: "sha256:" + strings.Repeat("0", 64)}}
+		repl.Spec.ChainRoot = predUID
+		repl.Status.Handoff = &remediationv1alpha1.Handoff{From: &remediationv1alpha1.IncomingHandoff{
+			Name: predName, UID: predUID, Hint: repl.Spec.Replaces.Hint, Phase: remediationv1alpha1.HandoffReserved}}
+		r, _, rr, _ := limitsWorld(t, 2, pred, repl)
+		_, got, err := reconcileLimits(t, r, rr)
+		expectAdmitted(t, err, got)
 	})
 	t.Run("deleting without the finalizer holds no slot", func(t *testing.T) {
 		o := a("a", remediationv1alpha1.PhasePRCreated)

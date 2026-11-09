@@ -324,6 +324,25 @@ func TestCreateCheckRun(t *testing.T) {
 	}
 }
 
+// A completed check run is created with its conclusion: the merge gate's success (ADR-0028 section 5).
+func TestCreateCheckRunCompleted(t *testing.T) {
+	done := providers.CheckRun{Name: providers.CheckRunName, Status: providers.CheckRunSuccess,
+		Title: "Approved", Summary: "Someone who wrote no hint approved the head."}
+	post := status(http.MethodPost, "/check-runs", http.StatusCreated, "")
+	post.raw = `{"id":2}`
+	post.check = func(t *testing.T, b map[string]any) {
+		want := `{"conclusion":"success","head_sha":"` + shaCommit + `","name":"shadewright/review","output":{"summary":"` +
+			done.Summary + `","title":"` + done.Title + `"},"status":"completed"}`
+		if got, _ := json.Marshal(b); string(got) != want {
+			t.Errorf("check run body = %s", got)
+		}
+	}
+	h := newHarness(t, post)
+	if err := h.p.CreateCheckRun(ctx, shaCommit, done); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCreateCheckRunFailures(t *testing.T) {
 	h := newHarness(t, status(http.MethodPost, "/check-runs", http.StatusForbidden, fxForbidden))
 	err := h.p.CreateCheckRun(ctx, shaCommit, run)

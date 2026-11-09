@@ -1394,6 +1394,19 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	}
 	closes := r.OpenRepository != nil && rr.Status.PlanRepository != nil &&
 		(closeOnDelete(rr.Status.Phase) || ptr.Deref(rr.Status.HoldsTarget, false))
+	if closes {
+		// A pull request handed over to a replacement is the replacement's: never closed here (ADR-0028 section
+		// 4 item 8). While the replacement may still take it over, the deletion waits for it.
+		keep, wait, err := r.handoffHolds(ctx, rr)
+		switch {
+		case err != nil:
+			return reconcile.Result{}, err
+		case wait:
+			return reconcile.Result{RequeueAfter: stepDelay}, nil
+		case keep:
+			closes = false
+		}
+	}
 	if closes && ended(rr.Status.Phase) {
 		// A request that ended was not active until it was deleted, so another may have been let through
 		// meanwhile: the close waits for a slot under the cap (waitForCapOnDelete).
@@ -1505,12 +1518,12 @@ func marker(rr *remediationv1alpha1.RemediationRequest) string {
 
 // hasMarker reports whether body carries this request's marker on a line of its own. A replacement that took
 // the pull request over (ADR-0028 section 4) also accepts its predecessor's marker, by the predecessor's UID,
-// until it has rewritten the body with its own (handoff step 6).
+// until the Git host has rewritten the body with its own (handoff step 6); a refused rewrite leaves it there.
 func hasMarker(body string, rr *remediationv1alpha1.RemediationRequest) bool {
 	want := marker(rr)
 	var from string
 	if ho := rr.Status.Handoff; ho != nil && ho.From != nil && ho.From.Phase == remediationv1alpha1.HandoffDone &&
-		!ho.From.PullRequestUpdated {
+		ho.From.PullRequestUpdate != remediationv1alpha1.HandoffStepDone {
 		from = fmt.Sprintf("<!-- shadewright request-uid=%s plan-digest=", ho.From.UID)
 	}
 	for line := range strings.Lines(body) {

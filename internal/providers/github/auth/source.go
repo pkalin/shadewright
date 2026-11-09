@@ -55,11 +55,14 @@ const (
 	minValidity     = time.Minute
 )
 
-// permissions are the installation token permissions of design section 8.4, nothing more.
+// permissions are the installation token permissions of design section 8.4, nothing more: checks is for the
+// check run shadewright/review, the merge gate of ADR-0028 section 5. A token request fails when the App was not
+// granted every one of them, so the App needs checks: write before this release runs.
 var permissions = map[string]string{
 	"contents":      permWrite,
 	"pull_requests": permWrite,
 	"issues":        permWrite,
+	"checks":        permWrite,
 	"metadata":      "read",
 }
 

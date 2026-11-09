@@ -549,11 +549,17 @@ spec:
                   from:
                     description: from is the incoming side, set on a replacement.
                     properties:
-                      checkRunCreated:
+                      checkRun:
                         description: |-
-                          checkRunCreated is true once the check run shadewright/review was created, in progress, on the head this
-                          request recorded (ADR-0028 sections 4 and 5).
-                        type: boolean
+                          checkRun is the state of the check run shadewright/review on the head this request recorded (ADR-0028
+                          sections 4 and 5, the merge gate): InProgress once created, Passed once completed with success after an
+                          approval of that head by someone who wrote no hint in the chain, Refused when the Git host refused to
+                          create or complete it for good.
+                        enum:
+                        - InProgress
+                        - Passed
+                        - Refused
+                        type: string
                       hint:
                         description: hint is the predecessor's hint the replacement
                           answers.
@@ -592,11 +598,15 @@ spec:
                         - Done
                         - Aborted
                         type: string
-                      pullRequestUpdated:
+                      pullRequestUpdate:
                         description: |-
-                          pullRequestUpdated is true once the title and the body of the pull request were rewritten for this
-                          request's plan, with its marker (ADR-0028 section 4, step 6).
-                        type: boolean
+                          pullRequestUpdate records the rewrite of the pull request's title and body for this request's plan, with
+                          its marker (ADR-0028 section 4, step 6): Done once the Git host did it, Refused when it refused it for
+                          good. Until it is Done the body carries the predecessor's marker, which this request accepts as its own.
+                        enum:
+                        - Done
+                        - Refused
+                        type: string
                       uid:
                         description: uid of the predecessor.
                         pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
@@ -615,13 +625,17 @@ spec:
                         self.hint == oldSelf.hint
                     - message: the steps after a handoff are recorded only once it
                         is Done
-                      rule: (!has(self.pullRequestUpdated) && !has(self.checkRunCreated))
+                      rule: (!has(self.pullRequestUpdate) && !has(self.checkRun))
                         || self.phase == 'Done'
-                    - message: a recorded step after a handoff is never unset
-                      rule: (!has(oldSelf.pullRequestUpdated) || !oldSelf.pullRequestUpdated
-                        || (has(self.pullRequestUpdated) && self.pullRequestUpdated))
-                        && (!has(oldSelf.checkRunCreated) || !oldSelf.checkRunCreated
-                        || (has(self.checkRunCreated) && self.checkRunCreated))
+                    - message: the record of the pull request's rewrite never changes
+                        once set
+                      rule: '!has(oldSelf.pullRequestUpdate) || (has(self.pullRequestUpdate)
+                        && self.pullRequestUpdate == oldSelf.pullRequestUpdate)'
+                    - message: the check run moves only from InProgress to Passed
+                        or Refused
+                      rule: '!has(oldSelf.checkRun) || (has(self.checkRun) && (self.checkRun
+                        == oldSelf.checkRun || (oldSelf.checkRun == ''InProgress''
+                        && self.checkRun in [''Passed'', ''Refused''])))'
                     - message: an incoming handoff moves only from Reserved to Done
                         or Aborted
                       rule: oldSelf.phase == self.phase || (oldSelf.phase == 'Reserved'
@@ -687,13 +701,16 @@ spec:
                     x-kubernetes-validations:
                     - message: an outgoing handoff is Intent, Done or Aborted
                       rule: self.phase in ['Intent', 'Done', 'Aborted']
-                    - message: 'an outgoing handoff is pinned: only its phase changes'
-                      rule: self.name == oldSelf.name && self.uid == oldSelf.uid &&
-                        self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead
+                    - message: 'an outgoing handoff is pinned: only its phase changes,
+                        or an Aborted one is replaced'
+                      rule: (oldSelf.phase == 'Aborted' && self.phase == 'Intent')
+                        || (self.name == oldSelf.name && self.uid == oldSelf.uid &&
+                        self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead)
                     - message: an outgoing handoff moves only from Intent to Done
-                        or Aborted
+                        or Aborted, or from Aborted to the Intent of another replacement
                       rule: oldSelf.phase == self.phase || (oldSelf.phase == 'Intent'
-                        && self.phase in ['Done', 'Aborted'])
+                        && self.phase in ['Done', 'Aborted']) || (oldSelf.phase ==
+                        'Aborted' && self.phase == 'Intent' && self.uid != oldSelf.uid)
                 type: object
                 x-kubernetes-validations:
                 - message: a handoff has from, to or both

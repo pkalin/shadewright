@@ -195,8 +195,13 @@ func (p *Provider) UpdateChangeRequest(ctx context.Context, number int64, title,
 	return statusError(opUpdateCR, r.status)
 }
 
-// checkRunStatus maps a check run status to GitHub's value.
-var checkRunStatus = map[providers.CheckRunStatus]string{providers.CheckRunInProgress: "in_progress"}
+// checkRunStatus maps a check run status to GitHub's status; checkRunConclusion gives the conclusion of a
+// completed one.
+var (
+	checkRunStatus = map[providers.CheckRunStatus]string{
+		providers.CheckRunInProgress: "in_progress", providers.CheckRunSuccess: "completed"}
+	checkRunConclusion = map[providers.CheckRunStatus]string{providers.CheckRunSuccess: "success"}
+)
 
 // CreateCheckRun creates a check run on head (providers.GitProvider.CreateCheckRun). It needs the App
 // permission checks: write.
@@ -214,10 +219,14 @@ func (p *Provider) CreateCheckRun(ctx context.Context, head string, run provider
 	}
 	ctx, cancel := p.withTimeout(ctx)
 	defer cancel()
-	r, err := p.do(ctx, call{op: opCheckRun, method: http.MethodPost, path: "/check-runs", body: map[string]any{
+	body := map[string]any{
 		"name": run.Name, "head_sha": head, "status": status,
 		"output": map[string]string{"title": run.Title, "summary": run.Summary},
-	}})
+	}
+	if c, ok := checkRunConclusion[run.Status]; ok {
+		body["conclusion"] = c
+	}
+	r, err := p.do(ctx, call{op: opCheckRun, method: http.MethodPost, path: "/check-runs", body: body})
 	if err != nil {
 		return err
 	}

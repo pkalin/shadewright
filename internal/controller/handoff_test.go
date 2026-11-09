@@ -69,12 +69,19 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		hint       remediationv1alpha1.Hint
 		// hook, when set, is the status hook of the reconciler's client.
 		hook func(rr *remediationv1alpha1.RemediationRequest) (fail, after bool)
+		// stale, when set, is what the reconciler's client reads for the predecessor, as a cache behind the API.
+		stale *remediationv1alpha1.RemediationRequest
+		// replacements counts the replacements of the spec, so each has its own name.
+		replacements int
 	)
 
 	reconciler := func() *RemediationRequestReconciler {
 		c := k8sClient
 		if hook != nil {
 			c = &statusHook{Client: k8sClient, fail: hook}
+		}
+		if stale != nil {
+			c = &staleRead{Client: c, obj: stale}
 		}
 		return &RemediationRequestReconciler{
 			Client: c, APIReader: k8sClient, Scheme: k8sClient.Scheme(),
@@ -128,9 +135,10 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 	}
 	// replace creates the replacement of pred answering h with a new desired limit.
 	replace := func(desired string, h remediationv1alpha1.HintRef) {
+		replacements++
 		p := get(pred)
 		repl = &remediationv1alpha1.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: requestNamespace,
-			Name: fmt.Sprintf("handoff-repl-%d", seq)}, Spec: *p.Spec.DeepCopy()}
+			Name: fmt.Sprintf("handoff-repl-%d-%d", seq, replacements)}, Spec: *p.Spec.DeepCopy()}
 		repl.Spec.Action.SetContainerMemoryLimit.Desired = resource.MustParse(desired)
 		repl.Spec.Replaces = &remediationv1alpha1.RequestReplacement{Name: remediationv1alpha1.Name(p.Name),
 			UID: remediationv1alpha1.UID(p.UID), Hint: h}
@@ -182,7 +190,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 	BeforeEach(func() {
 		seq++
 		clock = time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
-		hook, repl = nil, nil
+		hook, stale, repl = nil, nil, nil
 		err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fx.TargetNamespace}})
 		Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
 		deployment = &appsv1.Deployment{
@@ -326,8 +334,8 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		Expect(p.Status.Hints[0].State).To(Equal(remediationv1alpha1.HintConsumed))
 		Expect(prMayBeOpen(p)).To(BeTrue(), "the one Superseded whose pull request may be open")
 		r = get(repl)
-		Expect(r.Status.Handoff.From.PullRequestUpdated).To(BeTrue())
-		Expect(r.Status.Handoff.From.CheckRunCreated).To(BeTrue())
+		Expect(r.Status.Handoff.From.PullRequestUpdate).To(Equal(remediationv1alpha1.HandoffStepDone))
+		Expect(r.Status.Handoff.From.CheckRun).To(Equal(remediationv1alpha1.ReviewCheckInProgress))
 		Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 		Expect(r.Status.HoldsTarget).To(Equal(new(true)))
 		crs := git.ChangeRequests()
@@ -539,4 +547,336 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		Expect(freshness.BranchName(get(repl))).To(Equal(branch()))
 		Expect(freshness.BranchName(get(pred))).To(Equal(branch()))
 	})
+
+	// remove deletes rr at once, its finalizer included.
+	remove := func(rr *remediationv1alpha1.RemediationRequest) {
+		got := get(rr)
+		base := got.DeepCopy()
+		controllerutil.RemoveFinalizer(got, FinalizerName)
+		Expect(k8sClient.Patch(ctx, got, client.MergeFrom(base))).To(Succeed())
+		Expect(k8sClient.Delete(ctx, got)).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), &remediationv1alpha1.RemediationRequest{}))
+		}).Should(BeTrue())
+	}
+	// secondHint stores a second Pending hint on the predecessor, after the cooldown of the first.
+	secondHint := func() remediationv1alpha1.Hint {
+		clock = clock.Add(time.Minute)
+		git.AddComment(number, providers.Feedback{ID: 7002,
+			Author: providers.FeedbackAuthor{ID: writerID, Login: "reviewer-one", Kind: providers.AuthorPerson},
+			Body:   "/shadewright reanalyze: try a little less", CreatedAt: clock})
+		pollOf(pred)
+		h := findHint(get(pred).Status.Hints, remediationv1alpha1.HintSourceGitHub, 7002)
+		Expect(h).NotTo(BeNil())
+		Expect(h.State).To(Equal(remediationv1alpha1.HintPending))
+		return *h
+	}
+	prState := func() providers.ChangeRequestState {
+		crs := git.ChangeRequests()
+		Expect(crs).To(HaveLen(1))
+		return crs[0].State
+	}
+
+	It("keeps recognising the pull request when the Git host refuses its rewrite", func() {
+		git.SetFail(func(op string) error {
+			if op == "UpdateChangeRequest" || op == "CreateCheckRun" {
+				return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+			}
+			return nil
+		})
+		replace("512Mi", ref(hint))
+		pollUntil(tookOver)
+		pollOf(repl)
+		git.SetFail(nil)
+		r := get(repl)
+		Expect(r.Status.Handoff.From.PullRequestUpdate).To(Equal(remediationv1alpha1.HandoffStepRefused))
+		Expect(r.Status.Handoff.From.CheckRun).To(Equal(remediationv1alpha1.ReviewCheckRefused))
+		Expect(git.CheckRuns(r.Status.PullRequest.HeadSHA)).To(BeEmpty())
+		cr, err := reconciler().findOwnChangeRequest(ctx, r)
+		Expect(err).NotTo(HaveOccurred(), "the body still carries the predecessor's marker, which stays accepted")
+		Expect(cr).NotTo(BeNil())
+		Expect(cr.Number).To(Equal(number))
+	})
+
+	It("owns a merge of its commit after a restart that lost the record of the handoff", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		hook = func(rr *remediationv1alpha1.RemediationRequest) (bool, bool) {
+			return rr.UID == repl.UID && tookOver(rr), false
+		}
+		pollOf(repl)
+		hook = nil
+		updated := head()
+		Expect(updated).NotTo(Equal(oldHead))
+		_, err := git.Merge(number)
+		Expect(err).NotTo(HaveOccurred())
+		drive(3)
+		Expect(get(repl).Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		p := get(pred)
+		Expect(p.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+		Expect(condition(p, remediationv1alpha1.ConditionApproved).Reason).To(Equal(remediationv1alpha1.ReasonHandedOff))
+	})
+
+	It("recovers its own commit after the target file moved on the target branch", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		hook = func(rr *remediationv1alpha1.RemediationRequest) (bool, bool) {
+			return rr.UID == repl.UID && tookOver(rr), false
+		}
+		pollOf(repl)
+		hook = nil
+		updated := head()
+		Expect(updated).NotTo(Equal(oldHead))
+		_, err := git.Push(mainBranch, sourcePath, append([]byte("# owned by the orders team\n"),
+			deploymentManifest(deployment.Name, deployment.Namespace, workerContainer, "256Mi")...))
+		Expect(err).NotTo(HaveOccurred())
+		pollUntil(tookOver)
+		Expect(head()).To(Equal(updated))
+	})
+
+	It("never closes the pull request from the predecessor's finalizer once the replacement holds it", func() {
+		replace("512Mi", ref(hint))
+		pollUntil(tookOver)
+		Expect(k8sClient.Delete(ctx, get(pred))).To(Succeed())
+		pollOf(pred)
+		pollOf(pred)
+		Expect(prState()).To(Equal(providers.ChangeRequestOpen))
+		pollOf(repl)
+		Expect(get(repl).Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(prState()).To(Equal(providers.ChangeRequestOpen))
+	})
+
+	It("never closes the pull request for the predecessor's stale plan while its intent stands", func() {
+		replace("512Mi", ref(hint))
+		pollUntil(tookOver)
+		pol := &remediationv1alpha1.RemediationPolicy{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), pol)).To(Succeed())
+		pol.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 150
+		Expect(k8sClient.Update(ctx, pol)).To(Succeed())
+		clock = clock.Add(time.Hour)
+		pollOf(pred)
+		pollOf(pred)
+		Expect(prState()).To(Equal(providers.ChangeRequestOpen))
+	})
+
+	It("takes a person's one-commit push to the target file for a foreign push", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		_, err := git.Push(branch(), sourcePath,
+			deploymentManifest(deployment.Name, deployment.Namespace, workerContainer, "384Mi"))
+		Expect(err).NotTo(HaveOccurred())
+		pollOf(pred)
+		p := get(pred)
+		Expect(p.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(p.Status.Handoff.To.Phase).To(Equal(remediationv1alpha1.HandoffAborted))
+		drive(2)
+		Expect(get(repl).Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+	})
+
+	It("takes the pull request over for a later hint after an earlier handoff aborted", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		remove(repl)
+		pollOf(pred)
+		p := get(pred)
+		Expect(p.Status.Handoff.To.Phase).To(Equal(remediationv1alpha1.HandoffAborted))
+		Expect(p.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		second := secondHint()
+		replace("384Mi", ref(second))
+		pollUntil(tookOver)
+		Expect(fileAt(head())).To(ContainSubstring("384Mi"))
+		pollOf(repl)
+		p = get(pred)
+		Expect(p.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+		Expect(p.Status.Handoff.To.UID).To(Equal(remediationv1alpha1.UID(repl.UID)))
+	})
+
+	It("carries a second Pending hint over to the replacement instead of losing it", func() {
+		second := secondHint()
+		replace("512Mi", ref(hint))
+		pollUntil(tookOver)
+		pollOf(repl)
+		Expect(get(pred).Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+		h := findHint(get(repl).Status.Hints, second.Source, second.CommentID)
+		Expect(h).NotTo(BeNil(), "the replacement reads comments on from a cursor past the second hint")
+		Expect(h.State).To(Equal(remediationv1alpha1.HintPending))
+	})
+
+	It("ends the predecessor although the cache has not seen its intent yet", func() {
+		replace("512Mi", ref(hint))
+		before := get(pred)
+		pollUntil(tookOver)
+		stale = before
+		pollOf(repl)
+		stale = nil
+		Expect(get(pred).Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+	})
+
+	It("keeps a lock while another pull request of the branch may merge the replacement's commit", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		git.SetAfter(func(op string) error {
+			if op == opAppend {
+				if err := git.CloseChangeRequest(ctx, number); err != nil {
+					return err
+				}
+				_, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: branch(),
+					BaseBranch: mainBranch, Title: "someone else's", Body: "reopened by hand"})
+				return err
+			}
+			return nil
+		})
+		pollOf(repl)
+		git.SetAfter(nil)
+		drive(3)
+		Expect(holdsLock(get(pred)) || holdsLock(get(repl))).To(BeTrue(),
+			"an open pull request carries the replacement's commit")
+	})
+
+	It("lets one of two replacements racing for one hint take the pull request over", func() {
+		replace("512Mi", ref(hint))
+		first := repl
+		replace("384Mi", ref(hint))
+		second := repl
+		for range 6 {
+			pollOf(first)
+			pollOf(second)
+			pollOf(pred)
+		}
+		took := 0
+		for _, rr := range []*remediationv1alpha1.RemediationRequest{first, second} {
+			if tookOver(get(rr)) {
+				took++
+			}
+		}
+		Expect(took).To(Equal(1))
+		parents, err := git.Parents(ctx, head())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(parents).To(Equal([]string{oldHead}), "one commit on top of the old head")
+		Expect(git.ChangeRequests()).To(HaveLen(1))
+		remove(first)
+	})
+
+	It("aborts the handoff when the pull request is closed right before the update", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		closed := false
+		git.SetFail(func(op string) error {
+			if op == opFind && !closed {
+				closed = true
+				return git.CloseChangeRequest(ctx, number)
+			}
+			return nil
+		})
+		pollOf(repl)
+		git.SetFail(nil)
+		Expect(closed).To(BeTrue())
+		drive(2)
+		r := get(repl)
+		Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		Expect(condition(r, remediationv1alpha1.ConditionPROpened).Reason).To(Equal(remediationv1alpha1.ReasonHandoffAborted))
+		Expect(head()).To(Equal(oldHead), "no update of a closed pull request")
+		p := get(pred)
+		Expect(p.Status.Handoff.To.Phase).To(Equal(remediationv1alpha1.HandoffAborted))
+		Expect(p.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(condition(p, remediationv1alpha1.ConditionPROpened).Reason).To(Equal(ReasonChangeRequestClosed))
+	})
+
+	Context("the merge gate", func() {
+		const otherID = int64(2002)
+		review := func(id, author int64, state, commit string) {
+			git.AddReview(number, providers.Feedback{ID: id, Author: providers.FeedbackAuthor{ID: author,
+				Login: fmt.Sprintf("reviewer-%d", author), Kind: providers.AuthorPerson},
+				ReviewState: state, CommitID: commit, CreatedAt: clock})
+			clock = clock.Add(time.Second)
+		}
+		var newHead string
+		// waiting takes the pull request over and brings the replacement to AwaitingApproval with its check run
+		// in progress.
+		waiting := func() {
+			replace("512Mi", ref(hint))
+			pollUntil(tookOver)
+			pollUntil(func(rr *remediationv1alpha1.RemediationRequest) bool {
+				return rr.Status.Phase == remediationv1alpha1.PhaseAwaitingApproval
+			})
+			newHead = get(repl).Status.PullRequest.HeadSHA
+			Expect(get(repl).Status.Handoff.From.CheckRun).To(Equal(remediationv1alpha1.ReviewCheckInProgress))
+		}
+		gateState := func() remediationv1alpha1.ReviewCheckState { return get(repl).Status.Handoff.From.CheckRun }
+
+		It("completes the check run once someone who wrote no hint approves the head", func() {
+			waiting()
+			review(9001, otherID, "COMMENTED", newHead)
+			pollOf(repl)
+			Expect(gateState()).To(Equal(remediationv1alpha1.ReviewCheckInProgress))
+			review(9002, otherID, "APPROVED", newHead)
+			pollOf(repl)
+			Expect(gateState()).To(Equal(remediationv1alpha1.ReviewCheckPassed))
+			runs := git.CheckRuns(newHead)
+			Expect(runs).To(HaveLen(2))
+			Expect(runs[1].Status).To(Equal(providers.CheckRunSuccess))
+			pollOf(repl)
+			Expect(git.CheckRuns(newHead)).To(HaveLen(2), "completed once")
+		})
+
+		It("never counts an approval of an earlier head", func() {
+			waiting()
+			review(9001, otherID, "APPROVED", oldHead)
+			pollOf(repl)
+			Expect(gateState()).To(Equal(remediationv1alpha1.ReviewCheckInProgress))
+			Expect(git.CheckRuns(newHead)).To(HaveLen(1))
+		})
+
+		It("never counts a hint author's approval, and says why once per review", func() {
+			waiting()
+			review(9001, writerID, "APPROVED", newHead)
+			pollOf(repl)
+			pollOf(repl)
+			Expect(gateState()).To(Equal(remediationv1alpha1.ReviewCheckInProgress))
+			Expect(git.CheckRuns(newHead)).To(HaveLen(1))
+			said := 0
+			for _, c := range git.Comments(number) {
+				if strings.Contains(c, "review-gate review=9001") {
+					said++
+				}
+			}
+			Expect(said).To(Equal(1))
+		})
+
+		It("counts the latest review of each person: a later request for changes withdraws an approval", func() {
+			waiting()
+			review(9001, otherID, "APPROVED", newHead)
+			review(9002, otherID, "CHANGES_REQUESTED", newHead)
+			pollOf(repl)
+			Expect(gateState()).To(Equal(remediationv1alpha1.ReviewCheckInProgress))
+		})
+
+		It("records a refused completion without counting it as passed", func() {
+			waiting()
+			review(9001, otherID, "APPROVED", newHead)
+			git.SetFail(func(op string) error {
+				if op == "CreateCheckRun" {
+					return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+				}
+				return nil
+			})
+			pollOf(repl)
+			git.SetFail(nil)
+			Expect(gateState()).To(Equal(remediationv1alpha1.ReviewCheckRefused))
+		})
+	})
 })
+
+// staleRead is a client whose reads of obj's key return obj, as a cache that has not seen the later writes.
+type staleRead struct {
+	client.Client
+	obj *remediationv1alpha1.RemediationRequest
+}
+
+func (c *staleRead) Get(ctx context.Context, key client.ObjectKey, out client.Object, opts ...client.GetOption) error {
+	if rr, ok := out.(*remediationv1alpha1.RemediationRequest); ok && key == client.ObjectKeyFromObject(c.obj) {
+		c.obj.DeepCopyInto(rr)
+		return nil
+	}
+	return c.Client.Get(ctx, key, out, opts...)
+}

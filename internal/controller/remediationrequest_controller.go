@@ -139,7 +139,9 @@ type RemediationRequestReconciler struct {
 	// ReviewerHints turns on the reading of reviewer hints from the comments of a waiting pull request
 	// (hints.go, ADR-0028). It is off by default, and cmd/main.go does not turn it on yet: a stored hint makes
 	// the analyzer propose a replacement, which takes the pull request over by the supersede handoff (handoff.go),
-	// and the merge gate (ADR-0028 section 5) that keeps a hint author from approving alone is not built yet.
+	// whose head gets the merge gate (ADR-0028 section 5). The gate holds only once the GitOps repository requires
+	// the check shadewright/review with the App as its source, which Shadewright cannot verify; the check is not
+	// yet created on pull requests no handoff touched.
 	ReviewerHints bool
 
 	// admitMu makes the check of the limits and the status write that lets a request through the policy check
@@ -265,6 +267,10 @@ var errRepositoryGone = errors.New("the repository of the plan is not configured
 // errChangeRequestNotOurs means a pull request is recorded, but the branch's pull request is not that number
 // with this request's marker (or there is none), so the recorded number is not closed.
 var errChangeRequestNotOurs = errors.New("the recorded change request is not the request's own")
+
+// errHandoffInFlight means the request's intent to hand its pull request over stands (ADR-0028 section 4): the
+// replacement may hold the pull request, so nothing closes it until the intent is done or aborted.
+var errHandoffInFlight = errors.New("the change request is being handed over to a replacement")
 
 // errTargetBranchChanged means the repository entry of the plan now names another target branch. Its provider
 // is bound to the new branch and must not touch a change request against the old one, so nothing is closed.
@@ -911,6 +917,22 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		return ctrl.Result{}, r.ignoreSuperseded(r.endFreshness(ctx, rr, remediationv1alpha1.PhaseSuperseded,
 			mark.Reason, mark.Message))
 	}
+	if intent(rr) != nil {
+		// Handed over in flight (handoff.go): the replacement decides what happens to the pull request, and this
+		// request writes nothing to Git, so neither a stale plan nor a render refusal closes the pull request the
+		// replacement may hold. It goes on once the intent is Done (it ends HandedOff) or aborted (settleHandoff).
+		// A pull request closed meanwhile was closed by a person (neither side closes it while the intent
+		// stands): the rejection ends this request and aborts the intent in the same write (declineOnEnd).
+		if outcome == prClosed {
+			return r.rejected(ctx, rr)
+		}
+		return ctrl.Result{RequeueAfter: r.pullRequestPollInterval()}, nil
+	}
+	// A replacement whose branch update happened before a restart or a lost write records it before the
+	// freshness check, which would take its own commit, or a merge of it, for a stale plan.
+	if res, done, err := r.recoverHandoff(ctx, rr); done {
+		return res, err
+	}
 	// A request whose cleanup started finishes it in ensureFresh, also past the deadline.
 	if rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked && rr.Status.Deadline != nil &&
 		staleMark(rr) == nil && r.now().After(rr.Status.Deadline.Time) {
@@ -1158,10 +1180,18 @@ func (r *RemediationRequestReconciler) endFreshness(ctx context.Context, rr *rem
 // merged one is, because the change landed. It returns [errRepositoryGone] when that repository is not in the
 // settings, [errTargetBranchChanged] when its entry now names another target branch, [errChangeRequestNotOurs]
 // when a recorded pull request is not the branch's own, and [freshness.ErrPaused] when the settings read now
-// pause writes.
+// pause writes. A request with an outgoing handoff that stands or is done never closes anything: the pull
+// request is, or may become, its replacement's ([errChangeRequestNotOurs] when handed over,
+// [errHandoffInFlight] while the intent stands).
 func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	if r.OpenRepository == nil {
 		return errors.New("cannot close the change request: no Git provider")
+	}
+	switch {
+	case handedOff(rr):
+		return errChangeRequestNotOurs
+	case intent(rr) != nil:
+		return errHandoffInFlight
 	}
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {

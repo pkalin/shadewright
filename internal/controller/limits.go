@@ -378,8 +378,22 @@ type limitsEntry struct {
 	// deleting is a request being deleted; ended is a request in one of endedPhases.
 	deleting bool
 	ended    bool
-	// replaces is the UID of the request a replacement takes over (spec.replaces), empty for any other.
+	// replaces is the UID of the request a replacement takes over (spec.replaces), set only once the executor
+	// admitted the replacement with its checked chain link (admittedPredecessor); empty for any other, so a
+	// spec.replaces nobody checked never frees a slot.
 	replaces types.UID
+}
+
+// admittedPredecessor returns the UID of the request o takes over when the executor admitted o as its
+// replacement: spec.replaces, matched by the status.handoff.from that only the admission writes, while it is
+// Reserved or Done. Anything else, an unchecked spec.replaces or an aborted handoff, returns empty.
+func admittedPredecessor(o *remediationv1alpha1.RemediationRequest) types.UID {
+	rep, ho := o.Spec.Replaces, o.Status.Handoff
+	if rep == nil || ho == nil || ho.From == nil || ho.From.UID != rep.UID ||
+		(ho.From.Phase != remediationv1alpha1.HandoffReserved && ho.From.Phase != remediationv1alpha1.HandoffDone) {
+		return ""
+	}
+	return types.UID(rep.UID)
 }
 
 // predecessorOf returns the UID of the request rr replaces, empty when it replaces none.
@@ -458,9 +472,7 @@ func (r *RemediationRequestReconciler) readLimits(ctx context.Context, namespace
 				outcome: breakerOutcome(o), counts: ptr.Deref(o.Status.BreakerCounts, false), name: o.Name,
 				resourceVersion: o.ResourceVersion, uid: o.UID, deleting: !o.DeletionTimestamp.IsZero(),
 				ended: ended(o.Status.Phase)}
-			if o.Spec.Replaces != nil {
-				e.replaces = types.UID(o.Spec.Replaces.UID)
-			}
+			e.replaces = admittedPredecessor(o)
 			e.final = e.outcome == outcomeSuccess && o.Status.Phase == remediationv1alpha1.PhaseSucceeded
 			if o.Status.LastPhaseTransitionTime != nil {
 				e.at = o.Status.LastPhaseTransitionTime.Time

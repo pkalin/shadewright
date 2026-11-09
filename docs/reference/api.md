@@ -379,15 +379,16 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `from` | [IncomingHandoff](#incominghandoff) | No | from is the incoming side, set on a replacement.<br>Rule: an incoming handoff is Reserved, Done or Aborted<br>Rule: an incoming handoff is pinned: only its phase changes<br>Rule: the steps after a handoff are recorded only once it is Done<br>Rule: a recorded step after a handoff is never unset<br>Rule: an incoming handoff moves only from Reserved to Done or Aborted |
-| `to` | [OutgoingHandoff](#outgoinghandoff) | No | to is the outgoing side, set on a predecessor.<br>Rule: an outgoing handoff is Intent, Done or Aborted<br>Rule: an outgoing handoff is pinned: only its phase changes<br>Rule: an outgoing handoff moves only from Intent to Done or Aborted |
+| `from` | [IncomingHandoff](#incominghandoff) | No | from is the incoming side, set on a replacement.<br>Rule: an incoming handoff is Reserved, Done or Aborted<br>Rule: an incoming handoff is pinned: only its phase changes<br>Rule: the steps after a handoff are recorded only once it is Done<br>Rule: the record of the pull request's rewrite never changes once set<br>Rule: the check run moves only from InProgress to Passed or Refused<br>Rule: an incoming handoff moves only from Reserved to Done or Aborted |
+| `to` | [OutgoingHandoff](#outgoinghandoff) | No | to is the outgoing side, set on a predecessor.<br>Rule: an outgoing handoff is Intent, Done or Aborted<br>Rule: an outgoing handoff is pinned: only its phase changes, or an Aborted one is replaced<br>Rule: an outgoing handoff moves only from Intent to Done or Aborted, or from Aborted to the Intent of another replacement |
 
 ### HandoffPhase
 
 HandoffPhase is how far one side of a handoff has come. Incoming, on the replacement: Reserved (it took the
 target lock and named its predecessor), then Done (it holds the pull request) or Aborted. Outgoing, on the
 predecessor: Intent (it expects its replacement's commit on top of expectedHead), then Done (it ended
-Superseded with HandedOff) or Aborted. Each side starts in its first phase and moves only once.
+Superseded with HandedOff) or Aborted. Each side starts in its first phase and moves only once; an outgoing
+side that was Aborted may be replaced by the Intent of a later replacement for another hint.
 
 - Underlying type: string
 - One of `Reserved`, `Intent`, `Done`, `Aborted`
@@ -400,6 +401,20 @@ Used by: [IncomingHandoff](#incominghandoff), [OutgoingHandoff](#outgoinghandoff
 | `Intent` |  |
 | `Done` |  |
 | `Aborted` |  |
+
+### HandoffStep
+
+HandoffStep is the record of a step after a handoff that the Git host either did or refused for good.
+
+- Underlying type: string
+- One of `Done`, `Refused`
+
+Used by: [IncomingHandoff](#incominghandoff).
+
+| Value | Description |
+| --- | --- |
+| `Done` | HandoffStepDone: the Git host did the step. |
+| `Refused` | HandoffStepRefused: the Git host refused the step for good (a permission the App lacks, a rule, an invalid request); it is not asked again. |
 
 ### Hint
 
@@ -607,8 +622,9 @@ Validation rules:
 
 - an incoming handoff is Reserved, Done or Aborted: `self.phase in ['Reserved', 'Done', 'Aborted']`
 - an incoming handoff is pinned: only its phase changes: `self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint`
-- the steps after a handoff are recorded only once it is Done: `(!has(self.pullRequestUpdated) && !has(self.checkRunCreated)) || self.phase == 'Done'`
-- a recorded step after a handoff is never unset: `(!has(oldSelf.pullRequestUpdated) || !oldSelf.pullRequestUpdated || (has(self.pullRequestUpdated) && self.pullRequestUpdated)) && (!has(oldSelf.checkRunCreated) || !oldSelf.checkRunCreated || (has(self.checkRunCreated) && self.checkRunCreated))`
+- the steps after a handoff are recorded only once it is Done: `(!has(self.pullRequestUpdate) && !has(self.checkRun)) || self.phase == 'Done'`
+- the record of the pull request's rewrite never changes once set: `!has(oldSelf.pullRequestUpdate) || (has(self.pullRequestUpdate) && self.pullRequestUpdate == oldSelf.pullRequestUpdate)`
+- the check run moves only from InProgress to Passed or Refused: `!has(oldSelf.checkRun) || (has(self.checkRun) && (self.checkRun == oldSelf.checkRun || (oldSelf.checkRun == 'InProgress' && self.checkRun in ['Passed', 'Refused'])))`
 - an incoming handoff moves only from Reserved to Done or Aborted: `oldSelf.phase == self.phase || (oldSelf.phase == 'Reserved' && self.phase in ['Done', 'Aborted'])`
 
 Used by: [Handoff](#handoff).
@@ -619,8 +635,8 @@ Used by: [Handoff](#handoff).
 | `uid` | [UID](#uid) | Yes | uid of the predecessor.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `hint` | [HintRef](#hintref) | Yes | hint is the predecessor's hint the replacement answers. |
 | `phase` | [HandoffPhase](#handoffphase) | Yes | phase is how far this side has come.<br>One of `Reserved`, `Intent`, `Done`, `Aborted` |
-| `pullRequestUpdated` | boolean | No | pullRequestUpdated is true once the title and the body of the pull request were rewritten for this request's plan, with its marker (ADR-0028 section 4, step 6). |
-| `checkRunCreated` | boolean | No | checkRunCreated is true once the check run shadewright/review was created, in progress, on the head this request recorded (ADR-0028 sections 4 and 5). |
+| `pullRequestUpdate` | [HandoffStep](#handoffstep) | No | pullRequestUpdate records the rewrite of the pull request's title and body for this request's plan, with its marker (ADR-0028 section 4, step 6): Done once the Git host did it, Refused when it refused it for good. Until it is Done the body carries the predecessor's marker, which this request accepts as its own.<br>One of `Done`, `Refused` |
+| `checkRun` | [ReviewCheckState](#reviewcheckstate) | No | checkRun is the state of the check run shadewright/review on the head this request recorded (ADR-0028 sections 4 and 5, the merge gate): InProgress once created, Passed once completed with success after an approval of that head by someone who wrote no hint in the chain, Refused when the Git host refused to create or complete it for good.<br>One of `InProgress`, `Passed`, `Refused` |
 
 ### IntegrationStatus
 
@@ -777,14 +793,15 @@ Used by: [IncidentStatus](#incidentstatus).
 
 OutgoingHandoff is the predecessor's side of a handoff: the replacement that takes it over, the hint of this
 request it answers (which must be in status.hints, Reserved while the intent stands) and the branch head the
-replacement's commit must have as its parent. Only its phase changes once written.
+replacement's commit must have as its parent. Only its phase changes once written, except that an Aborted one is
+replaced by the Intent of a later replacement, for another hint of this request.
 
 
 Validation rules:
 
 - an outgoing handoff is Intent, Done or Aborted: `self.phase in ['Intent', 'Done', 'Aborted']`
-- an outgoing handoff is pinned: only its phase changes: `self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead`
-- an outgoing handoff moves only from Intent to Done or Aborted: `oldSelf.phase == self.phase || (oldSelf.phase == 'Intent' && self.phase in ['Done', 'Aborted'])`
+- an outgoing handoff is pinned: only its phase changes, or an Aborted one is replaced: `(oldSelf.phase == 'Aborted' && self.phase == 'Intent') || (self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead)`
+- an outgoing handoff moves only from Intent to Done or Aborted, or from Aborted to the Intent of another replacement: `oldSelf.phase == self.phase || (oldSelf.phase == 'Intent' && self.phase in ['Done', 'Aborted']) || (oldSelf.phase == 'Aborted' && self.phase == 'Intent' && self.uid != oldSelf.uid)`
 
 Used by: [Handoff](#handoff).
 
@@ -1112,6 +1129,25 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `path` | [GitFilePath](#gitfilepath) | Yes | path is the file that declares the target.<br>Maximum length: 512<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.ya?ml$` |
 | `buildPath` | [GitDirPath](#gitdirpath) | No | buildPath is the directory the Flux Kustomization builds (its spec.path, "." for the repository root). Before every commit the pull request step renders it with and without the change and refuses anything but the planned difference (design 8.2, steps 4 and 5). The policy check always sets it, and the plan digest covers it; a request without it is never committed.<br>Maximum length: 512<br>Minimum length: 1<br>Pattern: <code>^(\.&#124;&#91;A-Za-z0-9_]&#91;A-Za-z0-9_.-]*(/&#91;A-Za-z0-9_]&#91;A-Za-z0-9_.-]*)*)$</code> |
 | `baseCommit` | string | Yes | baseCommit is the full SHA of the target branch the change was made against. It is fixed when the branch is created; later merges to the target branch do not change it.<br>Pattern: `^[0-9a-f]{40}$` |
+
+### ReviewCheckState
+
+ReviewCheckState is how far the check run shadewright/review of a head has come (ADR-0028 section 5).
+InProgress: created, in progress, waiting for an approval of the head by someone who wrote no hint in the
+chain. Passed: completed with conclusion success after such an approval. Refused: the Git host refused to
+create or complete it for good, so the required check does not pass on this head and the pull request
+cannot merge until a person acts.
+
+- Underlying type: string
+- One of `InProgress`, `Passed`, `Refused`
+
+Used by: [IncomingHandoff](#incominghandoff).
+
+| Value | Description |
+| --- | --- |
+| `InProgress` |  |
+| `Passed` |  |
+| `Refused` |  |
 
 ### RolloutStatus
 

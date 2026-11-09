@@ -79,6 +79,10 @@ func TestChainLinkRefusals(t *testing.T) {
 		"already handed over": {func(p *remediationv1alpha1.RemediationRequest) {
 			p.Status.Handoff = &remediationv1alpha1.Handoff{To: &remediationv1alpha1.OutgoingHandoff{}}
 		}, "already handed over"},
+		"an earlier handoff aborted": {func(p *remediationv1alpha1.RemediationRequest) {
+			p.Status.Handoff = &remediationv1alpha1.Handoff{To: &remediationv1alpha1.OutgoingHandoff{
+				Phase: remediationv1alpha1.HandoffAborted}}
+		}, ""},
 		"hint not pending": {func(p *remediationv1alpha1.RemediationRequest) {
 			p.Status.Hints[0].State = remediationv1alpha1.HintDeclined
 		}, "named hint"},

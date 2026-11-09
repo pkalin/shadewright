@@ -171,7 +171,8 @@ func TestRequestClaimsScopeAndSignature(t *testing.T) {
 	if len(body.Repositories) != 1 || body.Repositories[0] != "fleet" {
 		t.Fatalf("repositories = %v", body.Repositories)
 	}
-	want := map[string]string{"contents": permWrite, "pull_requests": permWrite, "issues": permWrite, "metadata": "read"}
+	want := map[string]string{"contents": permWrite, "pull_requests": permWrite, "issues": permWrite,
+		"checks": permWrite, "metadata": "read"}
 	if len(body.Permissions) != len(want) {
 		t.Fatalf("permissions = %v", body.Permissions)
 	}

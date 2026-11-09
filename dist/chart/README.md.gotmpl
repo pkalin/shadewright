@@ -83,7 +83,7 @@ analyzer:
 - **What a standby gives.** Leader election is always on, so one Pod per component holds the Lease and works; the others wait. When the leader's Pod fails or is evicted, a standby takes over after about one Lease duration (15 seconds by default) instead of after a Pod start. Writes use optimistic concurrency and deterministic names, so a second Pod is safe.
 - **What it costs.** An idle Pod per component and identity (its requests and limits, and one more node slot).
 - **What it does not give.** No throughput: only the leader reconciles. Horizontal scaling is a separate feature ([#559](https://github.com/pkalin/shadewright/issues/559)).
-- **What the chart adds above 1.** A PodDisruptionBudget with `minAvailable: 1` for that component, and a preferred Pod anti-affinity by node (`kubernetes.io/hostname`), so a node drain or a node failure leaves one Pod. With a single node both Pods share it. An `affinity` of your own that sets `podAntiAffinity` replaces the chart's term. With 1 replica neither object is rendered.
+- **What the chart adds above 1.** A PodDisruptionBudget with `minAvailable: 1` for that component, and a preferred Pod anti-affinity by node (`kubernetes.io/hostname`), so a node drain or a node failure leaves one Pod. With a single node both Pods share it, and a drain of that node stops at the second Pod: its replacement cannot be scheduled while the node is cordoned, so the budget holds until you delete the Pod yourself or uncordon the node. An `affinity` of your own that sets `podAntiAffinity` replaces the chart's term. With 1 replica neither object is rendered.
 - **No RBAC change.** Each component already holds the grant for its own Lease.
 
 ## Network policy

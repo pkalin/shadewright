@@ -405,7 +405,9 @@ spec:
                       counts as judged, so an evicted one returned again unchanged is not judged again, while one edited after
                       its judgement has a later update time and is. The watermark only grows, and is dropped once since passes
                       evictedAt. A command edited during a sweep and passed by it may count as judged too when more than
-                      MaxSeenComments newer ones were judged first: it is then not judged, never accepted twice.
+                      MaxSeenComments newer ones were judged first: it is then not judged, never accepted twice. Those newer
+                      ones include commands from authors without write access, so anyone who can comment can cause this on
+                      purpose; it fails closed (the edited command is missed, its author posts a new comment).
                     format: date-time
                     type: string
                   evictedID:
@@ -452,7 +454,10 @@ spec:
                   since:
                     description: |-
                       since is the oldest update time the current sweep of the comments asks for. Every comment created at or
-                      before it was returned by an earlier look.
+                      before it was returned by an earlier look, so a command in one counts as an edit (EditedAfterSeen). That
+                      is an assumption about the code host: the GitHub adapter sets since a minute before the host's time when
+                      the previous sweep began, assuming a new comment shows up in the list within a minute. One that shows up
+                      later is refused as EditedAfterSeen and has to be posted again: it fails closed.
                     format: date-time
                     type: string
                   sweepStart:

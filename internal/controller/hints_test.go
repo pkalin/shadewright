@@ -528,7 +528,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		recorder = record.NewFakeRecorder(10)
 		id := byWriter("/shadewright reanalyze: the sidecar")
 		git.SetFail(func(op string) error {
-			if op == "CanWrite" {
+			if op == opCanWrite {
 				return &providers.RetryableError{Err: errors.New("GitHub author permission: status 502")}
 			}
 			return nil
@@ -548,7 +548,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		readOnly := comment(providers.AuthorPerson, readerID, "reader", "/shadewright reanalyze: me too")
 		id := byWriter("/shadewright reanalyze: the sidecar")
 		git.SetFail(func(op string) error {
-			if op == "CanWrite" && asks() == 2 {
+			if op == opCanWrite && asks() == 2 {
 				return &providers.RetryableError{Err: errors.New("GitHub author permission: status 502")}
 			}
 			return nil
@@ -596,7 +596,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		writeTimeout = 2 * time.Second
 		git.SetFail(func(op string) error {
 			switch op {
-			case "FindChangeRequest":
+			case opFind:
 				time.Sleep(1400 * time.Millisecond)
 			case "ListComments":
 				time.Sleep(900 * time.Millisecond)
@@ -669,7 +669,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 
 		pause(false)
 		git.SetFail(func(op string) error {
-			if op == "CanWrite" {
+			if op == opCanWrite {
 				pause(true) // the pause is set while the look runs
 			}
 			return nil
@@ -763,7 +763,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 			Entry("reviewer hints turned off", func() { hintsOff = true }),
 			Entry("the pull request cannot be read", func() {
 				git.SetFail(func(op string) error {
-					if op == "FindChangeRequest" {
+					if op == opFind {
 						return &providers.RetryableError{Err: errors.New("GitHub find pull request: status 502")}
 					}
 					return nil

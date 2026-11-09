@@ -76,6 +76,12 @@ func overlapRepository(t *testing.T, now *time.Time) (*fakegit.Git, int64) {
 	return g, cr.Number
 }
 
+// Test values: an outcome of the analysis that declines a hint, and the fake's permission question.
+const (
+	outcomeNoProposal = "NoProposal"
+	opCanWrite        = "CanWrite"
+)
+
 var overlapWriter = providers.FeedbackAuthor{ID: 1, Login: "writer", Kind: providers.AuthorPerson}
 
 // More refusals than the ring keeps are not judged again when the next sweep returns them unchanged.
@@ -143,9 +149,15 @@ func TestMergeSeen(t *testing.T) {
 		t.Fatalf("%d seen, %d evicted; want the bound %d and 5", len(got), len(evicted),
 			remediationv1alpha1.MaxSeenComments)
 	}
+	oldest := got[0].UpdatedAt
+	for _, k := range got {
+		if k.UpdatedAt.Before(&oldest) {
+			oldest = k.UpdatedAt
+		}
+	}
 	for _, e := range evicted {
-		if e.UpdatedAt.Time.After(got[0].UpdatedAt.Time) && e.UpdatedAt.Time.After(at(11)) {
-			t.Fatalf("evicted %+v is newer than a kept one", e)
+		if e.UpdatedAt.After(oldest.Time) {
+			t.Fatalf("evicted %+v is newer than a kept one (%v)", e, oldest)
 		}
 	}
 }
@@ -186,10 +198,10 @@ func answerFixture(t *testing.T, at time.Time, outcome string) (*RemediationRequ
 func TestAnswerHintsMapsTheIncidentsOutcome(t *testing.T) {
 	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
 	for outcome, want := range map[string]remediationv1alpha1.Hint{
-		"SomethingNew":   {State: remediationv1alpha1.HintDeclined, Reason: ReasonHintNoAnswer},
-		"NoProposal":     {State: remediationv1alpha1.HintDeclined, Reason: "NoProposal"},
-		outcomeProposed:  {State: remediationv1alpha1.HintPending, Outcome: outcomeProposed},
-		"RunbookMatched": {State: remediationv1alpha1.HintPending, Outcome: outcomeRunbookMatched},
+		"SomethingNew":    {State: remediationv1alpha1.HintDeclined, Reason: ReasonHintNoAnswer},
+		outcomeNoProposal: {State: remediationv1alpha1.HintDeclined, Reason: outcomeNoProposal},
+		outcomeProposed:   {State: remediationv1alpha1.HintPending, Outcome: outcomeProposed},
+		"RunbookMatched":  {State: remediationv1alpha1.HintPending, Outcome: outcomeRunbookMatched},
 	} {
 		r, rr := answerFixture(t, now, outcome)
 		r.answerHints(context.Background(), rr, now)
@@ -226,7 +238,7 @@ func TestAnEvictedRefusedCommentIsNotAcceptedLater(t *testing.T) {
 		t.Fatal("first sweep should refuse every command at the cap")
 	}
 	rr.Status.Hints[2].State = remediationv1alpha1.HintDeclined
-	rr.Status.Hints[2].Reason = "NoProposal"
+	rr.Status.Hints[2].Reason = outcomeNoProposal
 	now = now.Add(time.Minute)
 	overlapSweep(t, g, number, rr, now)
 	if h := findHint(rr.Status.Hints, remediationv1alpha1.HintSourceGitHub, 1); h != nil {

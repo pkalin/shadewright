@@ -32,7 +32,7 @@ func TestResolveRefusesTextAfterABareCR(t *testing.T) {
 	cases := map[string]string{
 		"aliases": "# config\n--- # comment\rmetadata: {annotations: &a {x: y}, labels: *a}\n",
 		"an alias bomb": "# config\n--- # comment\rmetadata:\r" +
-			strings.ReplaceAll(aliasBomb("  "), "\n", "\r") + "\n",
+			strings.ReplaceAll(aliasBomb(), "\n", "\r") + "\n",
 	}
 	for name, head := range cases {
 		t.Run(name, func(t *testing.T) {

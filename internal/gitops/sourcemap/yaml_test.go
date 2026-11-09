@@ -37,11 +37,12 @@ const executorMemory = 128 << 20
 // anchors is in the message of every refusal of an anchor, alias or merge key.
 const anchors = "anchors"
 
-// aliasBomb returns the entries of a mapping, indented by indent, of about 200 KB: a list of 100,000 plain
+// aliasBomb returns the entries of a mapping, indented by two spaces, of about 200 KB: a list of 100,000 plain
 // items, then lists of aliases that expand to 710,000 more. The plain items keep the share of aliases under
 // what go.yaml.in/yaml/v2 refuses as excessive aliasing, so before #594 sigs.k8s.io/yaml decoded it and
 // allocated over 150 MiB.
-func aliasBomb(indent string) string {
+func aliasBomb() string {
+	const indent = "  "
 	var b strings.Builder
 	b.WriteString(indent + "pad: [" + strings.Repeat("x,", 100000) + "x]\n")
 	b.WriteString(indent + "a0: &a0 [" + strings.Repeat("x,", 999) + "x]\n")
@@ -76,10 +77,10 @@ func TestResolveRefusesYAMLAliases(t *testing.T) {
 	}{
 		{"an alias bomb in a manifest", func(f *fixture) {
 			f.files[soFile] = scaledObjectYAML + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bomb\n" +
-				"  namespace: orders\ndata:\n" + aliasBomb("  ")
+				"  namespace: orders\ndata:\n" + aliasBomb()
 		}, soFile, anchors},
 		{"an alias bomb in a kustomization file", func(f *fixture) {
-			f.files[ksFile] = ksHead + ksResources + "metadata:\n" + aliasBomb("  ")
+			f.files[ksFile] = ksHead + ksResources + "metadata:\n" + aliasBomb()
 		}, ksFile, anchors},
 		{"an anchor in a kustomization file", func(f *fixture) {
 			f.files[ksFile] = ksHead + "resources: &r\n  - scaledobject.yaml\n  - ./deployment.yaml\n"
@@ -136,7 +137,7 @@ func TestReadFieldRefusesYAMLAliases(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := []byte(scaledObjectYAML + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bomb\ndata:\n" +
-		aliasBomb("  "))
+		aliasBomb())
 	var got any
 	n := allocated(func() { got, _, err = sourcemap.ReadField(data, target, field) })
 	// The first anchor is on line 28 of the file (scaledObjectYAML has 20 lines).

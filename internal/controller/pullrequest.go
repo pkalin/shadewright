@@ -779,19 +779,23 @@ func (r *RemediationRequestReconciler) requireOnTarget(ctx context.Context, git 
 }
 
 // endMerged ends a request whose pull request, carrying its marker but never recorded (its open's answer or
-// status write was lost), a person merged (#524). Merged only when its head held exactly the planned change
-// (checkMerged); otherwise MergedWithForeignChange with the pull request recorded. A read that fails decides
-// nothing and is returned for a retry.
+// status write was lost), a person merged (#524). The pull request is recorded either way. Merged only when its
+// head held exactly the planned change (checkMerged), with its merge commit recorded as watchStep does
+// (recordMerge, #561), so delivery is checked against that commit; otherwise MergedWithForeignChange without a
+// merge commit, since the change that landed is not the planned one. A read that fails decides nothing and is
+// returned for a retry, with the status unchanged.
 func (r *RemediationRequestReconciler) endMerged(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) error {
 	ref, err := r.checkMerged(ctx, git, rr, cr)
-	switch {
-	case err != nil:
+	if err != nil {
 		return err
-	case ref != nil:
-		rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}
+	}
+	rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}
+	if ref != nil {
 		return r.mergedForeign(ctx, rr, ref)
 	}
+	markClosed(rr, ReasonChangeRequestMerged, "was merged")
+	recordMerge(rr, cr)
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged, "The pull request was merged")
 }
 

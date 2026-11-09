@@ -895,6 +895,35 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
 	})
 
+	It("records the pull request and its merge commit when it was merged after a lost open (#561)", func() {
+		var sha string
+		got := mergedAfterLostOpen(func(string) {}, func(n int64) (string, error) {
+			var err error
+			sha, err = git.Merge(n)
+			return sha, err
+		})
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(got.Status.PullRequest).NotTo(BeNil(), "the pull request is recorded")
+		Expect(got.Status.PullRequest.Number).To(Equal(openRequests()[0].Number))
+		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha), "delivery is checked against this commit")
+		cond := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal(ReasonChangeRequestMerged))
+		approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(approved).NotTo(BeNil())
+		Expect(approved.Status).To(Equal(metav1.ConditionTrue))
+		Expect(approved.Reason).To(Equal(ReasonChangeRequestMerged))
+	})
+
+	It("does not record a merge commit when the merged pull request found after a lost open held more (#561)", func() {
+		got := mergedAfterLostOpen(func(branch string) {
+			_, err := git.Push(branch, "README.yaml", []byte("a: 3\n"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(got.Status.PullRequest.MergeCommitSHA).To(BeEmpty(), "a foreign change is not checked for delivery")
+	})
+
 	It("records a clean pull request merged with a merge commit after a lost open as Merged (#524)", func() {
 		// The merge commit takes the head into the target branch, so the head is an ancestor of the target now; it
 		// is judged against its own parent, not the current target.

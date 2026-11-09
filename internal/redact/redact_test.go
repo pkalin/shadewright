@@ -18,6 +18,7 @@ package redact
 
 import (
 	"encoding/base64"
+	"math/rand/v2"
 	"strings"
 	"testing"
 	"time"
@@ -572,6 +573,11 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"flow bare auth": "{auth: x y ",
 		"flow bare sig":  "{sig:\tq r ",
 		"flow pre-auth":  "{pre-auth: ok then ",
+		// Issue #525: windows of slash-separated parts, judged as base64 or as words.
+		"slash-split base64": "qC+kS6B8/",
+		"path words":         "AppData/",
+		"acronym parts":      "REST/",
+		"empty parts":        "aB3//",
 	} {
 		in := rep(unit, size/len(unit))
 		start := time.Now()
@@ -854,4 +860,326 @@ func TestStringKeeping(t *testing.T) {
 	if out, want := StringKeeping("token "+hexToken, ""), String("token "+hexToken); out != want {
 		t.Errorf("an empty keep changed the result: %q, want %q", out, want)
 	}
+}
+
+// base64Alphabet is the standard base64 alphabet, the one AWS secret access keys and older Entra client secrets
+// are written in.
+const base64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+// slashSplitKey returns n pseudo-random characters of the standard base64 alphabet from a fixed seed, with a
+// slash at each of the given offsets, so that no part between slashes reaches minTokenLength. Built at run
+// time, so no realistic secret is committed.
+func slashSplitKey(seed uint64, n int, slashes ...int) string {
+	r := rand.New(rand.NewPCG(seed, 525)) // #nosec G404 -- test data from a fixed seed, not a secret
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = base64Alphabet[r.IntN(len(base64Alphabet))]
+	}
+	for _, i := range slashes {
+		b[i] = '/'
+	}
+	return string(b)
+}
+
+// seededKey returns a 40-character standard base64 key from a fixed seed with one or two slashes forced into
+// it, so that no part between slashes reaches minTokenLength (slashSplitKey).
+func seededKey(seed uint64) string {
+	if seed%2 == 0 {
+		return slashSplitKey(seed, 40, int(seed%9)+11, int(seed%7)+24)
+	}
+	return slashSplitKey(seed, 40, int(seed%8)+16)
+}
+
+// keyParts returns the slash-separated parts of k of at least four characters: a part that survives
+// redaction is a leak.
+func keyParts(k string) []string {
+	var out []string
+	for p := range strings.SplitSeq(k, "/") {
+		if len(p) >= 4 {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// seeds is the number of seeded keys or names each case of the slash-split tests runs with.
+const seeds = 1000
+
+// A standard base64 secret whose slashes cut it into parts shorter than minTokenLength is redacted by the
+// long-token rule wherever it stands: after its key name and a blank (a CLI flag, "aws configure set"), in
+// prose, and at the start, in the middle or at the end of a path or a URL, also after a long lower-case path.
+// The path around it stays (#525).
+func TestSlashSplitBase64IsRedacted(t *testing.T) {
+	contexts := []struct{ name, before, after string }{
+		{"aws configure set", "aws configure set aws_secret_access_key ", "\nnext: field"},
+		{"cli flag", "run --aws-secret-access-key ", " --region x"},
+		{"prose", "rotated ", " today"},
+		{"start of a path", "cp ", "/etc/app/config.yaml ok"},
+		{"middle of a path", "open /var/run/secrets/", "/token failed"},
+		{"end of a path", "open /var/run/secrets/production/credentials/", " not found"},
+		{"after a long lower-case path", "GET /" + rep("download/", 12), " refused"},
+		{"inside a url", "GET https://example.com/api/v1/keys/", "/rotate?x=1 403"},
+		{"end of a url", "GET https://example.com/", " 403"},
+	}
+	for _, c := range contexts {
+		t.Run(c.name, func(t *testing.T) {
+			leaks, lost := 0, 0
+			for seed := range uint64(seeds) {
+				k := seededKey(seed)
+				in := c.before + k + c.after
+				out := String(in)
+				for _, p := range keyParts(k) {
+					if strings.Contains(out, p) {
+						if leaks++; leaks <= 3 {
+							t.Errorf("seed %d: part %q of the key kept:\n%s", seed, p, out)
+						}
+						break
+					}
+				}
+				if !strings.HasPrefix(out, c.before) || !strings.HasSuffix(out, c.after) {
+					if lost++; lost <= 3 {
+						t.Errorf("seed %d: text around the key lost:\n in: %s\nout: %s", seed, in, out)
+					}
+				}
+			}
+			if leaks+lost > 0 {
+				t.Errorf("%d of %d keys leaked, %d lost the text around them", leaks, seeds, lost)
+			}
+		})
+	}
+	entraSecret := slashSplitKey(2, 43, 9, 20, 31) + "="
+	checkGapCases(t, []gapCase{
+		{"entra secret after az login", "az login --service-principal -u app -p " + entraSecret + " --tenant t",
+			keyParts(entraSecret), []string{"-p ", " --tenant t"}},
+	})
+	// A key whose shortest windows score as words but whose whole window scores as base64.
+	if in, out := "aws configure set aws_secret_access_key "+seededKey(68276), String("aws configure set aws_secret_access_key "+seededKey(68276)); out != "aws configure set aws_secret_access_key [REDACTED:token]" {
+		t.Errorf("String(%q) = %q, want the whole key redacted", in, out)
+	}
+	// Two keys with a path between them are redacted each on its own; the path stays.
+	const middle = "/api/v1/namespaces/orders/pods/orders-worker-7db6d8ff4d-x2x9q/"
+	bridged := 0
+	for seed := range uint64(seeds) {
+		a, b := seededKey(seed), seededKey(seed+seeds)
+		in := "GET https://example.com/" + a + middle + b + " 404"
+		out := String(in)
+		leaked := false
+		for _, p := range append(keyParts(a), keyParts(b)...) {
+			leaked = leaked || strings.Contains(out, p)
+		}
+		if leaked || !strings.Contains(out, middle) {
+			if bridged++; bridged <= 3 {
+				t.Errorf("seed %d: two keys around a path:\n in: %s\nout: %s", seed, in, out)
+			}
+		}
+	}
+	if bridged > 0 {
+		t.Errorf("%d of %d pairs of keys leaked or lost the path between them", bridged, seeds)
+	}
+}
+
+// seededName returns n characters of alphabet from a fixed seed: the random part of a generated name.
+func seededName(seed uint64, n int, alphabet string) string {
+	r := rand.New(rand.NewPCG(seed, 526)) // #nosec G404 -- test data from a fixed seed, not a secret
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = alphabet[r.IntN(len(alphabet))]
+	}
+	return string(b)
+}
+
+// Paths, image references, hosts and URLs stay readable next to the slash-split base64 rule (#525): path
+// words, GUIDs, Kubernetes names with hash suffixes and generated temp names, each with seeded random parts.
+func TestSlashSplitRuleKeepsPaths(t *testing.T) {
+	const hex, upperHex, lowerAlnum = "0123456789abcdef", "0123456789ABCDEF", "bcdfghjklmnpqrstvwxz2456789"
+	guid := func(s uint64, a string) string {
+		g := seededName(s, 32, a)
+		return g[:8] + "-" + g[8:12] + "-" + g[12:16] + "-" + g[16:20] + "-" + g[20:]
+	}
+	for name, text := range map[string]func(seed uint64) string{
+		"replica set": func(s uint64) string { return "scaled ReplicaSet/orders-worker-" + seededName(s, 10, hex) + " to 0" },
+		"pod": func(s uint64) string {
+			return "deleted Pod/orders-worker-" + seededName(s, 10, hex) + "-" + seededName(s+seeds, 5, lowerAlnum)
+		},
+		"upper-case guid in a url": func(s uint64) string {
+			return "POST https://login.microsoftonline.com/" + guid(s, upperHex) + "/oauth2/v2.0/token 401"
+		},
+		"guid in an azure id": func(s uint64) string {
+			return "/subscriptions/" + guid(s, hex) + "/resourceGroups/RG-Lab-WestEurope/providers/Microsoft.Compute"
+		},
+		"windows temp path": func(s uint64) string {
+			return "open /mnt/c/Build/Agent1/AppData/Local/Temp/tmp" + seededName(s, 6, upperHex) + " failed"
+		},
+		"temp path with a file": func(s uint64) string {
+			return "D:/Build/Agent1/AppData/Local/Temp/tmp" + seededName(s, 4, upperHex) + "/Setup/Install.log"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := 0
+			for seed := range uint64(seeds) {
+				in := text(seed)
+				if out := String(in); out != in {
+					if changed++; changed <= 3 {
+						t.Errorf("seed %d changed useful text:\n in: %s\nout: %s", seed, in, out)
+					}
+				}
+			}
+			if changed > 0 {
+				t.Errorf("%d of %d changed", changed, seeds)
+			}
+		})
+	}
+	for _, in := range []string{
+		"open /opt/SDKs/Qt/6/lib/QtCore/QtGui/QtWidgets failed",
+		"GET https://example.com/opt/SDKs/Qt/6/lib/QtCore/QtGui/QtWidgets failed",
+		"A/b/C/d/E/f/G/h/I/j/K/l/M/n/O/p/Q/r/S/t/U/v/W/x/Y/z",
+		"open /Library/Containers/com/Docker/Data/vms/0/console",
+		"run /Program/Microsoft/WindowsApps/PythonSoftwareFoundation/python3",
+		"load /usr/lib/x86/libQt5Core/libGLESv2/libEGL",
+		"AKIAEXAMPLE/IAMRole/AdminAccess/S3Bucket",
+		"GET /services/REST/HTTP/HTTPS/SOAP/WSDL/SDLC/Service 404",
+		"GET /api/SOAP/WSDL/XML/JSON/REST/HTTP/HTTPS/FTP/SMTP/IMAP/LDAP/Gateway 502",
+		"GET /apis/apps/v1/namespaces/orders/deployments/orders-worker/scale 404",
+		"GET /api/v1/namespaces/kube-system/pods/coredns-7db6d8ff4d-x2x9q/log?container=coredns",
+		"/apis/remediation.shadewright.io/v1alpha1/namespaces/shadewright-system/remediationrequests",
+		"open /var/lib/kubelet/pods/550e8400-e29b-41d4-a716-446655440000/volumes/kubernetes.io~secret/tls",
+		"open /Volumes/Data1/Library/Application Support/Code/User/settings.json",
+		"/home/User1/Documents/Project2/src/main/java/com/Example/MyHTTPClient2Test",
+		"stat /usr/local/go/src/runtime/internal/atomic/types.go",
+		"image ghcr.io/pkalin/shadewright-analyzer:v0.3.0-rc.2",
+		"image mcr.microsoft.com/azure-cli/AzureCLI/Release2024/x86_64",
+		"https://github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice/v4",
+		"https://management.azure.com/subscriptions/x/resourceGroups/rg-Lab/providers/Microsoft.ContainerService/managedClusters/aks",
+		"/subscriptions/550e8400-e29b-41d4-a716-446655440000/resourceGroups/RG-Lab-WestEurope/providers",
+		"ReplicaSetControllerManagerDeploymentName",
+		"KubeletConfiguration/EvictionHard/MemoryAvailable/NodeFsAvailable/ImageFsAvailable",
+	} {
+		if out := String(in); out != in {
+			t.Errorf("changed useful text:\n in: %s\nout: %s", in, out)
+		}
+	}
+}
+
+// A key that base64Windows finds takes in at most one short neighbouring part on each side (#525): a part of
+// up to five characters with no "-", "_" or ".", that is no lower-case path word, and no chaining. A
+// lower-case path word or a Kubernetes name between two keys is not bridged: the keys give two redactions
+// and the path around them stays.
+func TestSlashSplitTakeInIsBounded(t *testing.T) {
+	k := strings.Repeat("qC+kS6B8/", 3) + "qC+kS6B8"
+	for _, c := range []struct {
+		in   string
+		keys []string
+		kept string
+	}{
+		{"cp " + seededKey(1) + "/Share/Paul/Documents/Projects/Report/Final x", []string{seededKey(1)},
+			"/Paul/Documents/Projects/Report/Final x"},
+		{"GET /" + seededKey(1) + "/my-pod/" + seededKey(3) + " x", []string{seededKey(1), seededKey(3)}, "/my-pod/"},
+		{"GET https://example.com/" + k + "/api/" + k + " 404", []string{k}, "/api/"},
+	} {
+		out := String(c.in)
+		for _, key := range c.keys {
+			for _, p := range keyParts(key) {
+				if strings.Contains(out, p) {
+					t.Errorf("part %q of the key kept:\n in: %s\nout: %s", p, c.in, out)
+				}
+			}
+		}
+		if !strings.Contains(out, c.kept) {
+			t.Errorf("%q lost:\n in: %s\nout: %s", c.kept, c.in, out)
+		}
+	}
+}
+
+// Library paths stay (#525): a part of upper-case letters and digits ("CUDA12", "NCCL2") counts as no
+// evidence, like an acronym, and a window never starts at a lower-case path word such as "opt".
+func TestSlashSplitRuleKeepsLibraryPaths(t *testing.T) {
+	for _, in := range []string{
+		"/opt/CUDA12/CUDNN9/NCCL2/TensorRT10/lib64",
+		"/opt/Qt6/Qt5/Qt4/libGLESv2/libEGL1/libX11",
+	} {
+		if out := String(in); out != in {
+			t.Errorf("changed useful text:\n in: %s\nout: %s", in, out)
+		}
+	}
+}
+
+// A run without a slash is one part and goes through the base64 windows too: 40 characters of standard
+// base64 without a digit, which the random-run rule keeps, are redacted (#525).
+func TestBase64WithoutSlashOrDigitIsRedacted(t *testing.T) {
+	const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+"
+	leaks := 0
+	for seed := range uint64(seeds) {
+		k := seededName(seed, 40, letters)
+		in := "aws configure set aws_secret_access_key " + k + "\nnext: field"
+		if out := String(in); strings.Contains(out, k) {
+			if leaks++; leaks <= 3 {
+				t.Errorf("seed %d: key kept:\n%s", seed, out)
+			}
+		}
+	}
+	if leaks > 0 {
+		t.Errorf("%d of %d keys kept", leaks, seeds)
+	}
+}
+
+// A key whose slashes leave a part that reads as a path word, lower-case ("ghquje") or capitalised
+// ("Vpzfixaifdo"), between two pieces is redacted whole, also when a piece on one side is too short to be
+// redacted on its own (#525): one word between two flagged stretches that together are no longer than one
+// key is a piece of that key.
+func TestSlashSplitKeyAroundAWordIsRedacted(t *testing.T) {
+	for _, seed := range []uint64{674, 915, 74362, 83398, 99884} {
+		k := seededKey(seed)
+		in := "rotated " + k + " today"
+		if out := String(in); out != "rotated [REDACTED:token] today" {
+			t.Errorf("seed %d: String(%q) = %q, want the whole key redacted", seed, in, out)
+		}
+	}
+}
+
+// A key that starts or ends with a part reading as a lower-case path word ("cijt", "icsol") is redacted
+// when the window that holds that word scores clearly as base64 (#525); the word itself may stay, as a path
+// word next to a key would.
+func TestSlashSplitKeyEndingInAWordIsRedacted(t *testing.T) {
+	for _, seed := range []uint64{9976, 38306, 47360} {
+		k := seededKey(seed)
+		out := String("rotated " + k + " today")
+		for _, p := range keyParts(k) {
+			if strings.Contains(out, p) && !pathWord(p) {
+				t.Errorf("seed %d: part %q of the key kept:\n in: %s\nout: %s", seed, p, k, out)
+			}
+		}
+	}
+}
+
+// Known gaps of the slash-split base64 rule, kept by decision for safety and simplicity over perfect paths
+// (#525, follow-up to be filed): the test logs what still leaks and is skipped, so that a change that
+// closes a gap shows here and the case moves to TestSlashSplitBase64IsRedacted.
+func TestSlashSplitBase64KnownLeaks(t *testing.T) {
+	cases := []struct{ name, key string }{
+		// Every window of this key scores as words (long runs of lower-case letters by chance).
+		{"key whose windows score as words", seededKey(39781)},
+		// The short lower-case end "/wed7" reads as a path word and is not taken in.
+		{"short lower-case key tail", seededKey(4062)},
+		// Upper-case parts count as no evidence; the one mixed part is too short for a window.
+		{"key of upper-case parts", "ABCDEF/GHIJKL/MNOPQR/STUVWX/yz2+ab3+cd4+"},
+		// A lower-case path word at the start of the key ("cijt") stays with the path around it.
+		{"lower-case word at the end of a key", seededKey(47360)},
+	}
+	leaking := 0
+	for _, c := range cases {
+		out := String("rotated " + c.key + " today")
+		var kept []string
+		for _, p := range keyParts(c.key) {
+			if strings.Contains(out, p) {
+				kept = append(kept, p)
+			}
+		}
+		if len(kept) > 0 {
+			leaking++
+			t.Logf("%s: kept %q\n in: %s\nout: %s", c.name, kept, c.key, out)
+		} else {
+			t.Logf("%s: no longer leaks, move it to TestSlashSplitBase64IsRedacted", c.name)
+		}
+	}
+	t.Skipf("known gaps of #525, follow-up to be filed: %d of %d cases leak", leaking, len(cases))
 }

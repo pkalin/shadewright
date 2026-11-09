@@ -87,8 +87,8 @@ const (
 // truncationMark ends a field the caps cut.
 const truncationMark = " [truncated]"
 
-// replyText is the diagnosis and the evidence of the last reply that decoded as a result, redacted as the analyzer redacts
-// the result's text (keeping the Incident's name) and capped (replySummaryCap and the others).
+// replyText is the diagnosis and the evidence of the last reply that decoded as a result, redacted as the
+// analyzer redacts the result's text (keeping the Incident's name) and capped (replySummaryCap and the others).
 type replyText struct {
 	Summary    string          `json:"summary"`
 	Hypotheses []string        `json:"hypotheses,omitempty"`

@@ -55,6 +55,19 @@ accepted result's summary, hypotheses and evidence quotes; when the loop accepte
 score and the diagnosis fails. The harness refuses a rubric that leaves out, rewords or repeats a fact, so a
 change of the facts in the fleet repository cannot pass unscored.
 
+A fact scores what the model infers, not an echo of what Shadewright already knows, and not where the model read
+a value. Besides `all` and `any`, a fact can use `anyOf`, a list of groups of terms: one group with all its terms
+in the diagnosis is enough, so a value counts when it is cited from any source the scenario's recorded context
+holds (the memory limit from the pod template line, `48Mi`, or from the limit metric). A reply that gives no
+such value still fails the fact. `subject` lists terms of the Incident's subject (`Kind namespace/name`) and is
+scored from the Incident, not from the reply. What the model must infer and can miss stays required: that cache-0
+is healthy on the old template (`statefulset-oom`), and the pull error of `bad-image`. The hard gates are
+unchanged: the verbatim quote check, the refusal scenarios and the action bounds.
+
+Report schema version 3 changed what a diagnosis fact means (`anyOf` and `subject` above). Scores of an earlier
+version are not comparable with it: the same replies score higher under version 3 (the 45 runs of the real-model
+run of 2026-11-09 went from 30 to 36 passed).
+
 A scenario run passes when both parts pass. The run passes when the share of passing scenario runs reaches the
 threshold (`EVAL_MIN_PASS_RATE`, 1 by default; CI always uses 1).
 
@@ -198,11 +211,11 @@ fix any rubric the harness then refuses.
 
 ## The report
 
-`report.json` (schema version 2) and `report.md`, the same content for a person. The JSON fields:
+`report.json` (schema version 3) and `report.md`, the same content for a person. The JSON fields:
 
 | Field | Meaning |
 | --- | --- |
-| `schemaVersion` | 2; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too |
+| `schemaVersion` | 3; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too. Version 3: a diagnosis fact is scored on its value from any source of the context (`anyOf`) and the subject from the Incident, so diagnosis scores of version 2 or earlier are not comparable |
 | `mode` | `fake` (recorded replies) or `foundry` (the real model) |
 | `manifest` | The evaluation manifest, below |
 | `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis`, `reply` and `error` (set when the run could not start; it fails) |

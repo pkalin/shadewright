@@ -2,9 +2,9 @@
 # result's summary, hypotheses or evidence quotes must contain (case ignored), or why it is not scored.
 facts:
   - fact: the failing Kustomization flux-system/apps and its Ready condition False
-    # The condition is not in the context (the Flux module's symptom is not consumed yet); the object is.
-    all: ["Kustomization"]
-    any: ["flux-system/apps", "Kustomization apps"]
+    # The condition is not in the context (the Flux module's symptom is not consumed yet); the object is the
+    # Incident's subject, so it is scored from the Incident, not from the reply.
+    subject: ["Kustomization", "flux-system/apps"]
   - fact: the error, a dry-run failure on Service demo/web (ports[0].port, a string where an integer is required)
     all: ["dry-run"]
     # fingerprint.Normalize writes the index in parentheses.

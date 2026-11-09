@@ -37,7 +37,9 @@ import (
 // a field's meaning.
 // Version 2: costUSD sums each role at its own prices (costUSDByRole), and usageUnknownCalls counts failed
 // calls too.
-const reportSchemaVersion = 2
+// Version 3: a fact is scored on its value from any source the context holds (anyOf), and a subject fact from
+// the Incident (docs/evaluation.md); diagnosis scores of version 2 are not comparable.
+const reportSchemaVersion = 3
 
 // report is the result of one evaluation run.
 type report struct {

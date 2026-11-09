@@ -403,7 +403,24 @@ var _ = Describe("RemediationRequest", func() {
 		Entry("one byte", "1", "desired must be between 1Mi and 1Ti"),
 		Entry("a fraction of a byte", "1m", "previous and desired must be whole bytes"),
 		Entry("above 1Ti", "2Ti", "desired must be between 1Mi and 1Ti"),
+		// #593: the rules compare a value only when its approximate float is small, so the API server never
+		// computes a power of ten of billions of digits. The exponent is a multiple of 3, so the client sends it
+		// as written.
+		Entry("a huge exponent", "1e2147483646", "desired must be between 1Mi and 1Ti"),
+		Entry("a huge negative exponent", "-1e2147483646", "desired must be between 1Mi and 1Ti"),
 	)
+
+	It("refuses a previous value with a huge exponent", func() {
+		rr := fx.MemoryLimitRequest("default", unique("rr"))
+		rr.Spec.Action.SetContainerMemoryLimit.Previous = resource.MustParse("1e2147483646")
+		expectRefused(rr, "previous must be between 1Mi and 1Ti")
+	})
+
+	It("refuses a negative previous value with a huge exponent", func() {
+		rr := fx.MemoryLimitRequest("default", unique("rr"))
+		rr.Spec.Action.SetContainerMemoryLimit.Previous = resource.MustParse("-1e2147483646")
+		expectRefused(rr, "previous must be between 1Mi and 1Ti")
+	})
 
 	It("refuses a container name that is not a DNS label", func() {
 		rr := fx.MemoryLimitRequest("default", unique("rr"))

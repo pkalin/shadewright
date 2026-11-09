@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/quantity"
 )
 
 // validate runs the basic schema checks on the changed target. A Deployment or StatefulSet must convert to
@@ -75,7 +76,16 @@ func checkMemory(containers []corev1.Container, action v1alpha1.Action) error {
 	if !ok || limit.Sign() <= 0 {
 		return refuse(ReasonSchemaInvalid, "the memory limit must be positive")
 	}
-	if req, ok := found.Resources.Requests[corev1.ResourceMemory]; ok && req.Cmp(limit) > 0 {
+	req, ok := found.Resources.Requests[corev1.ResourceMemory]
+	if !ok {
+		return nil
+	}
+	// The request is kept from Git, untrusted (invariant 4): a huge exponent is refused, never compared (#593).
+	c, ok := quantity.Cmp(req, limit)
+	if !ok {
+		return refuse(ReasonSchemaInvalid, "the memory request or limit is not a quantity in the bounded form Shadewright reads")
+	}
+	if c > 0 {
 		return refuse(ReasonSchemaInvalid, "the memory limit is below the memory request")
 	}
 	return nil

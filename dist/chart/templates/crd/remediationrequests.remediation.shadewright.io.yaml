@@ -127,16 +127,29 @@ spec:
                     type: object
                     x-kubernetes-validations:
                     - message: desired must differ from previous
-                      rule: quantity(string(self.desired)).compareTo(quantity(string(self.previous)))
-                        != 0
+                      rule: '!(quantity(string(self.previous)).asApproximateFloat()
+                        >= -2e12 && quantity(string(self.previous)).asApproximateFloat()
+                        <= 2e12 && quantity(string(self.desired)).asApproximateFloat()
+                        >= -2e12 && quantity(string(self.desired)).asApproximateFloat()
+                        <= 2e12) || quantity(string(self.desired)).compareTo(quantity(string(self.previous)))
+                        != 0'
                     - message: previous and desired must be whole bytes
-                      rule: quantity(string(self.previous)).isInteger() && quantity(string(self.desired)).isInteger()
+                      rule: '!(quantity(string(self.previous)).asApproximateFloat()
+                        >= -2e12 && quantity(string(self.previous)).asApproximateFloat()
+                        <= 2e12 && quantity(string(self.desired)).asApproximateFloat()
+                        >= -2e12 && quantity(string(self.desired)).asApproximateFloat()
+                        <= 2e12) || (quantity(string(self.previous)).isInteger() &&
+                        quantity(string(self.desired)).isInteger())'
                     - message: previous must be between 1Mi and 1Ti
-                      rule: quantity(string(self.previous)).compareTo(quantity('1Mi'))
+                      rule: quantity(string(self.previous)).asApproximateFloat() >=
+                        -2e12 && quantity(string(self.previous)).asApproximateFloat()
+                        <= 2e12 && quantity(string(self.previous)).compareTo(quantity('1Mi'))
                         >= 0 && quantity(string(self.previous)).compareTo(quantity('1Ti'))
                         <= 0
                     - message: desired must be between 1Mi and 1Ti
-                      rule: quantity(string(self.desired)).compareTo(quantity('1Mi'))
+                      rule: quantity(string(self.desired)).asApproximateFloat() >=
+                        -2e12 && quantity(string(self.desired)).asApproximateFloat()
+                        <= 2e12 && quantity(string(self.desired)).compareTo(quantity('1Mi'))
                         >= 0 && quantity(string(self.desired)).compareTo(quantity('1Ti'))
                         <= 0
                   type:

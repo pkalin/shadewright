@@ -32,6 +32,7 @@ import (
 	"github.com/pkalin/shadewright/internal/gitops/repopath"
 	"github.com/pkalin/shadewright/internal/policy/pathmatch"
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/quantity"
 )
 
 // defaultTargetBranch is the default of GitRepository.targetBranch in RemediationSettings.
@@ -276,6 +277,16 @@ func (r *Resolver) scan(ctx context.Context, git providers.GitProvider, head str
 	inCluster, okLive := fld.Get(live.Object)
 	if !okGit || !okLive {
 		return needsIntervention(ReasonFieldNotFound, "%s is not set in both %s and the live %s", fld, decl.path, id), nil
+	}
+	if !fld.Comparable(inGit) {
+		return needsIntervention(ReasonValueMismatch,
+			"%s in %s is not a value Shadewright reads: an integer, or a quantity string of at most %d characters with an exponent of at most two digits",
+			fld, decl.path, quantity.MaxLength), nil
+	}
+	if !fld.Comparable(inCluster) {
+		return needsIntervention(ReasonValueMismatch,
+			"%s of the live %s is not a value Shadewright reads: an integer, or a quantity string of at most %d characters with an exponent of at most two digits",
+			fld, id, quantity.MaxLength), nil
 	}
 	if !fld.equal(inGit, inCluster) {
 		return needsIntervention(ReasonValueMismatch,

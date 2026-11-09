@@ -73,8 +73,8 @@ type Result struct {
 //
 // Renders are serialised in the process (kustomize keeps global state). ctx bounds the wait for that turn:
 // when it ends first, Check returns ctx.Err() without rendering. A render that has started runs to its end,
-// since kustomize cannot be cancelled; the limits on the build ([MaxVisits], [MaxBuildBytes], [MaxBuildDocuments]) bound how long
-// it can take.
+// since kustomize cannot be cancelled; the limits on the build ([MaxVisits], [MaxBuildBytes], [MaxBuildDocuments],
+// [MaxTransformBytes]) bound how long it can take.
 func Check(ctx context.Context, in Input) (Result, error) {
 	field, previous, desired, err := plan(in)
 	if err != nil {
@@ -157,6 +157,18 @@ func plan(in Input) (sourcemap.Field, any, any, error) {
 
 // tree walks the build of dir in files and returns the files it reads.
 func tree(ctx context.Context, files map[string][]byte, dir string) (*walker, error) {
+	w, err := walkTree(ctx, files, dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := w.checkGrowth(); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+// walkTree is tree without the check of what patches and transformers add ([walker.checkGrowth]).
+func walkTree(ctx context.Context, files map[string][]byte, dir string) (*walker, error) {
 	w := newWalker(func(_ context.Context, p string) ([]byte, bool, error) {
 		data, ok := files[p]
 		return data, ok, nil

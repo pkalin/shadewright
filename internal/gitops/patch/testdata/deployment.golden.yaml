@@ -34,11 +34,12 @@ spec:
         image: ghcr.io/example/orders-worker:1.4.2   # pinned by the release job
         args: ["--queue", "orders", "--concurrency=8"]
         resources:
-          requests: &req
+          requests:
             memory: 256Mi
           limits:
             memory: "768Mi" # raised from 384Mi on 2026-10-14
       - name: sidecar
         image: ghcr.io/example/log-shipper:0.9.0
         resources:
-          requests: *req
+          requests:
+            memory: 256Mi

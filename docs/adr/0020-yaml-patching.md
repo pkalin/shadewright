@@ -18,7 +18,7 @@ The design left the library open, leaning towards `kyaml`. Four approaches were 
 | Target inside an anchor | Patched; anchor and alias replaced by two separate copies | Patched, and the alias changed silently | Refused, because its path query cannot pass an anchor | Refused on purpose |
 | Multi-document files | Manual split | Yes | Yes | Yes |
 | Licence | MIT and BSD-3-Clause | Apache-2.0 | MIT | MIT and Apache-2.0 |
-| New modules for the operator | None | None (`sigs.k8s.io/kustomize/kyaml` is already a direct dependency, added by [#176](https://github.com/pkalin/shadewright/pull/176) for the semantic diff; `go-errors`, `go-gitignore` and `treeprint` are already in the module graph) | None (already in the module graph) | None (`go.yaml.in/yaml/v3` is already a direct dependency, v3.0.5 in `go.mod`) |
+| New modules for the operator | None | None (`sigs.k8s.io/kustomize/kyaml` is already a direct dependency, added by [#176](https://github.com/pkalin/shadewright/pull/176) for the semantic diff; `go-errors`, `go-gitignore` and `treeprint` are already in the module graph) | None (already in the module graph) | None (`go.yaml.in/yaml/v3` is already a direct dependency, v3.0.6 in `go.mod` since 2026-11-09) |
 | Last release | 2025-07 | 2026-10 | 2026-01 | 2026-10 |
 
 ## Decision
@@ -28,17 +28,18 @@ Patch by replacing the bytes of one scalar:
 1. Parse the file with `go.yaml.in/yaml/v3` (the maintained successor of `gopkg.in/yaml.v3`) into nodes, only to find the document and the scalar node of the field, using the same identity as the source mapping (apiVersion, kind, namespace and name; exactly one container of that name). The node tree is used only for positions; the source mapping stays the authority on which document declares the target.
 2. Refuse with `NeedsIntervention` when the scalar or any node on its path has an anchor or is an alias, when there is a merge key (`<<`) or a flow-style collection on the path, when a path mapping repeats a key, or when the scalar is not plain, single-quoted or double-quoted (no block or flow scalar, no tag). The same applies to the identity fields of every document in the file (`apiVersion`, `kind`, `metadata.name`, `metadata.namespace`), so another declaration of the target cannot hide behind an alias, a merge key or a tag such as `!!binary`.
 3. Turn the node's line and column into a byte offset, check that the bytes there are exactly the old value in its quoting, and replace only those bytes, keeping the quote style. Columns count characters, not bytes; if the check fails, refuse instead of guessing. This is a check of the position only: whether the file still holds the request's previous value is decided by value, as in [ADR-0012](0012-object-to-source-mapping.md) (`256Mi` equals `268435456`). The new value is written in its canonical form: `Quantity.String()` for memory, a decimal integer for replicas. A plain scalar that YAML reads as a number other than its text (a leading zero, `0x`, `0o`, an underscore or an exponent) is refused.
-4. Decode the original and the patched file and require that they differ only in the target value. This also catches any case the rules above miss, such as an alias elsewhere that points into the target. A parse error in either file, or a target whose decoded value is not the desired value, refuses with `NeedsIntervention`.
+4. Decode the original and the patched file and require that they differ only in the target value. This also catches any case the rules above miss, such as an alias elsewhere that points into the target. A parse error in either file, or a target whose decoded value is not the desired value, refuses with `NeedsIntervention`. Amended on 2026-11-09: see the last item of Consequences.
 
 The code lives in `internal/gitops/patch` (#55); the spike stays under `hack/` as the record of the comparison.
 
 ## Consequences
 
 - The pull request diff is one line, so a reviewer sees exactly the approved change, and comments such as `# raised from 384Mi on 2026-10-14` stay attached to the line.
-- No new dependency: `go.yaml.in/yaml/v3` is already a direct dependency (v3.0.5 in `go.mod`).
+- No new dependency: `go.yaml.in/yaml/v3` is already a direct dependency (v3.0.6 in `go.mod` since 2026-11-09).
 - The patcher handles only scalar replacement. Adding a field that does not exist yet, or editing a list, would need a different technique. That fits the closed action catalog: every action changes an existing scalar, and ADR-0012 already requires the old value to be present. A future action that needs more must revisit this ADR.
 - Some valid files are refused (anchors, block scalars, tags on the target). They stop with `NeedsIntervention`, never with a wrong edit.
-- The semantic check decodes the file twice; the file is at most 1 MiB, so this is cheap.
+- The semantic check decodes the file twice; the file is at most 1 MiB, so this is cheap. Amended on 2026-11-09: see the next item.
+- 2026-11-09 (amendment, [#595](https://github.com/pkalin/shadewright/issues/595)): a file of 1 MiB packed with nodes held about 260 MiB at the patcher's peak, past the executor's 128 MiB, since it kept the node trees of every document and parsed the original again to verify, and an alias bomb elsewhere in the file expanded on decode. The patcher now runs the YAML check of the source mapping and the semantic diff (`internal/gitops/gityaml`) before anything parses the file. The check refuses, with `InvalidYAML`, a file of more than 131,072 YAML nodes (`MaxNodes`), counted from the bytes before any tree is built (the count errs high), and anchors, aliases and merge keys anywhere in the file, before step 2 sees them. Step 4 no longer decodes the original a second time: the patcher reads the file one document at a time, keeps the node tree of the target document and the decoded value of each document, and compares the patched file, read one document at a time, with those values. The decision is unchanged.
 
 ## Alternatives considered
 
@@ -140,4 +141,4 @@ The code lives in `internal/gitops/patch` (#55); the spike stays under `hack/` a
 
 ## Amendments
 
-None.
+- 2026-11-09 ([#595](https://github.com/pkalin/shadewright/issues/595)): step 4 and the Consequences. The patcher counts the YAML nodes of the file from its bytes before any part is decoded and refuses more than 131,072 (`InvalidYAML`), checks the target from a copy of the decoded tree so verification never sees a changed original, and treats NaN as equal only to NaN. A dense file of 1 MiB had held about 260 MiB at the patcher's peak, past the executor's limit. The decision (replace one scalar in place, verify by decoding) is unchanged; the bound only refuses more. The `go.yaml.in/yaml/v3` version was corrected to the one in `go.mod`.

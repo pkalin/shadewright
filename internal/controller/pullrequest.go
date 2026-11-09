@@ -965,9 +965,12 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	case errors.Is(err, errClosed):
 		return prClosed, nil
 	}
-	hintCtx, cancelHints := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
-	r.watchHints(hintCtx, look, rr)
-	cancelHints()
+	if ctx.Err() == nil {
+		// A deadline of their own: a slow check of the pull request does not leave them its remainder.
+		hintCtx, cancelHints := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
+		r.watchHints(hintCtx, look, rr)
+		cancelHints()
+	}
 	if err != nil {
 		logf.FromContext(ctx).V(1).Info("Could not check the pull request of RemediationRequest",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())

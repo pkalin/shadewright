@@ -7,7 +7,7 @@
 # silently ignored):
 #   make docker-build DOCKER_BUILD_ARGS='--build-context <FROM reference>=docker-image://<mirror>/<image>'
 # The builder always runs on the build host and cross-compiles (CGO is off), so a multi-arch build needs no QEMU.
-FROM --platform=$BUILDPLATFORM golang:1.26.10@sha256:670bb5aa5349ae03b8516764718486f4f16399134bdc9acd0c46a23f043ab05c AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:e519d3b0a5b285e5aa53ab9eef02bc6bbb9cb04608389b743a136a9ce75f0d1e AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

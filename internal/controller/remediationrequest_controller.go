@@ -111,6 +111,14 @@ type RemediationRequestReconciler struct {
 	// ScaledObject KEDA has not reported on) before it ends the request in NeedsIntervention. Zero means
 	// [DefaultTargetStateTimeout].
 	TargetStateTimeout time.Duration
+	// Delivery builds the delivery verifier of the check after the merge (rollout.go), given the Git host's
+	// answer to whether one commit is in the history of another. Nil disables that check: a request stops in
+	// Merged and nothing is read after it.
+	Delivery func(ancestry providers.AncestryChecker) (DeliveryVerifier, error)
+	// RolloutDeadline is how long after the merge commit is seen applied the target's rollout may take before it
+	// is reported stuck (RolledOut False, RolloutStuck). Zero means rollout.DefaultDeadline; it is bounded to
+	// [rollout.MinDeadline, rollout.MaxDeadline].
+	RolloutDeadline time.Duration
 	// Now is the clock; nil means time.Now (tests set it).
 	Now func() time.Time
 	// Recorder records the kill switch's Events about a request (WritesPaused, WritesResumed). They are core/v1
@@ -304,7 +312,14 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if !progresses(rr) {
 			r.checked.Delete(req.NamespacedName)
 			// Stopped: nothing is written to Git any more, but a lock still held waits for its pull request.
-			return r.checkHeld(ctx, rr)
+			res, err := r.checkHeld(ctx, rr)
+			if err != nil || rr.Status.Phase != remediationv1alpha1.PhaseMerged {
+				return res, err
+			}
+			// A merged request is followed until its rollout is reported (rollout.go); it only reads and
+			// writes its own status and one Event.
+			after, err := r.afterMerge(ctx, rr)
+			return earlier(res, after), err
 		}
 		res, err := r.recheck(ctx, rr)
 		if !progresses(rr) {

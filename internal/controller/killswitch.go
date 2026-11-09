@@ -154,6 +154,18 @@ func (g *gatedGit) FindChangeRequest(ctx context.Context, headBranch string) (pr
 	return g.git.FindChangeRequest(ctx, headBranch)
 }
 
+// IsAncestor is a read and passes straight through, when the wrapped provider can answer it
+// ([providers.AncestryChecker]); otherwise it returns errNoAncestry. The check after the merge uses it.
+func (g *gatedGit) IsAncestor(ctx context.Context, ancestor, commit string) (bool, error) {
+	checker, ok := g.git.(providers.AncestryChecker)
+	if !ok {
+		return false, errNoAncestry
+	}
+	return checker.IsAncestor(ctx, ancestor, commit)
+}
+
+var _ providers.AncestryChecker = (*gatedGit)(nil)
+
 // gate calls allow before a write method and returns the context to call the wrapped provider with: it
 // carries allow as the write checkpoint ([providers.WithWriteCheckpoint]), so an adapter that makes several
 // requests in one method, or retries one, asks the gate again right before each of them. The adapter gets

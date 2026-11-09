@@ -40,6 +40,8 @@ import (
 	"github.com/pkalin/shadewright/internal/cmdutil"
 	"github.com/pkalin/shadewright/internal/controller"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/pkalin/shadewright/internal/providers"
+	fluxdelivery "github.com/pkalin/shadewright/internal/providers/delivery/flux"
 	"github.com/pkalin/shadewright/internal/providers/registry"
 	// +kubebuilder:scaffold:imports
 )
@@ -129,6 +131,16 @@ func main() {
 		// The core/v1 recorder writes with the grant on core Events that the executor's leader election Role
 		// already holds in the operator namespace, where the requests are, as the analyzer's recorder does.
 		Recorder: mgr.GetEventRecorderFor("shadewright-executor"), //nolint:staticcheck // see above
+	}
+	// After the merge the executor reads the Flux Kustomization that applies the target, with the get it holds
+	// for the source mapping, and asks the plan's Git host (a read) whether a later applied commit holds the
+	// merge commit; then it reports the target's rollout (#532).
+	reconciler.Delivery = func(ancestry providers.AncestryChecker) (controller.DeliveryVerifier, error) {
+		v, err := fluxdelivery.New(mgr.GetAPIReader(), ancestry)
+		if err != nil {
+			return nil, err
+		}
+		return v, nil
 	}
 	// The policy check and the freshness rechecks share one resolver. Its cache keeps file reads at a commit,
 	// which never change, so a plan rechecked every five minutes does not scan the same tree again. It only

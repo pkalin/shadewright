@@ -214,6 +214,102 @@ var _ = Describe("RemediationRequest", func() {
 		}
 	})
 
+	// Review of #532: status.rollout is set once, so clearing waitStartedAt cannot restart the delivery window,
+	// clearing ended cannot reopen a final verdict, and dropping rollout cannot let the executor adopt another
+	// revision after a restart.
+	It("keeps status.rollout and its fields once set", func() {
+		rr := fx.RemediationRequest("default", unique("rr"))
+		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+		started := metav1.NewTime(time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC))
+		rr.Status.Rollout = &v1alpha1.RolloutStatus{WaitStartedAt: &started}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the first write of waitStartedAt is allowed")
+		rr.Status.Rollout.AppliedRevision = strings.Repeat("a", 40)
+		rr.Status.Rollout.TargetGeneration = 3
+		rr.Status.Rollout.TemplateHash = strings.Repeat("b", 64)
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the first write of the applied fields is allowed")
+		rr.Status.Rollout.TemplateRevision = "cache-7b9c"
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the first write of templateRevision is allowed")
+		rr.Status.Rollout.Ended = true
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "ending the check is allowed")
+
+		const revisionSetOnce = "status.rollout.templateRevision is set once"
+		later := metav1.NewTime(started.Add(time.Hour))
+		for name, tc := range map[string]struct {
+			change func(*v1alpha1.RemediationRequest)
+			msg    string
+		}{
+			"waitStartedAt cleared": {func(r *v1alpha1.RemediationRequest) { r.Status.Rollout.WaitStartedAt = nil },
+				"status.rollout.waitStartedAt is set once"},
+			"waitStartedAt moved": {func(r *v1alpha1.RemediationRequest) { r.Status.Rollout.WaitStartedAt = &later },
+				"status.rollout.waitStartedAt is set once"},
+			"appliedRevision changed": {func(r *v1alpha1.RemediationRequest) {
+				r.Status.Rollout.AppliedRevision = strings.Repeat("c", 40)
+			}, "status.rollout.appliedRevision is set once"},
+			"targetGeneration changed": {func(r *v1alpha1.RemediationRequest) { r.Status.Rollout.TargetGeneration = 4 },
+				"status.rollout.targetGeneration is set once"},
+			"targetGeneration cleared": {func(r *v1alpha1.RemediationRequest) { r.Status.Rollout.TargetGeneration = 0 },
+				"status.rollout.targetGeneration is set once"},
+			"templateHash changed": {func(r *v1alpha1.RemediationRequest) {
+				r.Status.Rollout.TemplateHash = strings.Repeat("d", 64)
+			}, "status.rollout.templateHash is set once"},
+			"templateRevision changed": {func(r *v1alpha1.RemediationRequest) {
+				r.Status.Rollout.TemplateRevision = "cache-8e1f"
+			}, revisionSetOnce},
+			"templateRevision cleared": {func(r *v1alpha1.RemediationRequest) { r.Status.Rollout.TemplateRevision = "" },
+				revisionSetOnce},
+			"ended cleared": {func(r *v1alpha1.RemediationRequest) { r.Status.Rollout.Ended = false },
+				"status.rollout.ended never goes back to false"},
+			"rollout dropped": {func(r *v1alpha1.RemediationRequest) { r.Status.Rollout = nil },
+				"status.rollout is kept once set"},
+			"rollout written again empty": {func(r *v1alpha1.RemediationRequest) {
+				r.Status.Rollout = &v1alpha1.RolloutStatus{}
+			}, revisionSetOnce},
+			"status emptied": {func(r *v1alpha1.RemediationRequest) { r.Status = v1alpha1.RemediationRequestStatus{} },
+				"status.rollout is kept once set"},
+		} {
+			got := &v1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+			tc.change(got)
+			err := k8sClient.Status().Update(ctx, got)
+			Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+			Expect(err.Error()).To(ContainSubstring(tc.msg), name)
+		}
+	})
+
+	It("never moves status.rollout.pausedSince and never lowers pausedSeconds", func() {
+		rr := fx.RemediationRequest("default", unique("rr"))
+		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+		since := metav1.NewTime(time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC))
+		rr.Status.Rollout = &v1alpha1.RolloutStatus{PausedSince: &since}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "setting pausedSince is allowed")
+		rr.Status.Rollout.PausedSince, rr.Status.Rollout.PausedSeconds = nil, 600
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "clearing it and adding the paused time is allowed")
+		rr.Status.Rollout.PausedSince = &since
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "a second pause is allowed")
+
+		later := metav1.NewTime(since.Add(time.Hour))
+		for name, tc := range map[string]struct {
+			change func(*v1alpha1.RolloutStatus)
+			msg    string
+		}{
+			"pausedSince moved": {func(r *v1alpha1.RolloutStatus) { r.PausedSince = &later },
+				"status.rollout.pausedSince is never moved"},
+			"pausedSeconds lowered": {func(r *v1alpha1.RolloutStatus) { r.PausedSeconds = 60 },
+				"status.rollout.pausedSeconds never decreases"},
+			"pausedSeconds cleared": {func(r *v1alpha1.RolloutStatus) { r.PausedSeconds = 0 },
+				"status.rollout.pausedSeconds never decreases"},
+		} {
+			got := &v1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+			tc.change(got.Status.Rollout)
+			err := k8sClient.Status().Update(ctx, got)
+			Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+			Expect(err.Error()).To(ContainSubstring(tc.msg), name)
+		}
+	})
+
 	It("refuses appliedObservedAt without mergeCommitSHA", func() {
 		rr := fx.RemediationRequest("default", unique("rr"))
 		Expect(k8sClient.Create(ctx, rr)).To(Succeed())

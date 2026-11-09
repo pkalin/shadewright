@@ -291,10 +291,78 @@ type PullRequestStatus struct {
 
 	// appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later
 	// commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a
-	// deadline measured from it (the rollout check, #532) cannot be pushed back. Not written yet: the delivery
-	// check after the merge is planned.
+	// deadline measured from it (the rollout check, condition RolledOut) cannot be pushed back. Written only for
+	// a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge.
 	// +optional
 	AppliedObservedAt *metav1.Time `json:"appliedObservedAt,omitempty"`
+}
+
+// RolloutStatus is what the check after the merge records about the target's rollout. Only the executor writes
+// it; once status.rollout exists it is never removed, each field is set once and never changed (pausedSince is
+// only set or cleared, never moved, and pausedSeconds never decreases), and ended never goes back to false.
+// These rules sit on the RemediationRequest, so that dropping rollout, or the whole status, and writing it again
+// cannot reopen the check or move its window.
+//
+// The rollout judged is the one the applied commit produced: the executor reads the target right after the
+// GitOps controller reports the commit applied and records, in the same status write as
+// status.pullRequest.appliedObservedAt, the commit applied (appliedRevision), the target's generation
+// (targetGeneration) and a hash of its pod template (templateHash). A later commit of the target branch that holds
+// the merge commit counts as ours: the template it produced is judged. A change made outside Git (kubectl edit,
+// another controller) is not told apart from a Git one when it lands before that read, so it is not covered.
+type RolloutStatus struct {
+	// waitStartedAt is when the executor started waiting for the delivery of a merged request that has no
+	// lastPhaseTransitionTime; the delivery window is then measured from it instead of from the merge.
+	// +optional
+	WaitStartedAt *metav1.Time `json:"waitStartedAt,omitempty"`
+
+	// pausedSince is when the executor first saw writes paused (RemediationSettings spec.paused) while it waited
+	// for the delivery; cleared when it sees them resumed, the paused time then added to pausedSeconds. It is
+	// never moved while set.
+	// +optional
+	PausedSince *metav1.Time `json:"pausedSince,omitempty"`
+
+	// pausedSeconds is how long, in seconds, writes were paused while the executor waited for the delivery; the
+	// delivery window is extended by it (and by the pause still running), so a pause never uses up the window.
+	// It never decreases.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	PausedSeconds int64 `json:"pausedSeconds,omitempty"`
+
+	// appliedRevision is the commit the GitOps controller reported applied when the executor first saw the merge
+	// commit delivered: the merge commit, or a later commit of the target branch that holds it.
+	// +kubebuilder:validation:MinLength=40
+	// +kubebuilder:validation:MaxLength=40
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	// +optional
+	AppliedRevision string `json:"appliedRevision,omitempty"`
+
+	// targetGeneration is the target's metadata.generation read right after appliedRevision was seen applied:
+	// the generation the applied commit produced.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	TargetGeneration int64 `json:"targetGeneration,omitempty"`
+
+	// templateHash is the SHA-256 of the target's pod template at targetGeneration. When the target's controller
+	// first reports a generation past targetGeneration, the revision it names is recorded only if the template
+	// is still this one; otherwise the check ends with RolledOut Unknown, reason RolloutSuperseded.
+	// +kubebuilder:validation:MinLength=64
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
+	// +optional
+	TemplateHash string `json:"templateHash,omitempty"`
+
+	// templateRevision is the template revision the check judges: a StatefulSet's status.updateRevision or a
+	// Deployment's deployment.kubernetes.io/revision annotation, read once the controller observed
+	// targetGeneration and the target's current generation (a revision annotation can name a later generation
+	// before the status does), and, past targetGeneration, only while the template still matches templateHash. A newer revision
+	// ends the check with RolledOut Unknown, reason RolloutSuperseded.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	TemplateRevision string `json:"templateRevision,omitempty"`
+
+	// ended is true once the check gave its final verdict in RolledOut; nothing is read for it after that.
+	// +optional
+	Ended bool `json:"ended,omitempty"`
 }
 
 // PlanRepository identifies the repository a plan was made for: the URL and provider installation taken from
@@ -399,6 +467,10 @@ type RemediationRequestStatus struct {
 	// +optional
 	PullRequest *PullRequestStatus `json:"pullRequest,omitempty"`
 
+	// rollout is what the check after the merge keeps between reconciles (the RolledOut condition).
+	// +optional
+	Rollout *RolloutStatus `json:"rollout,omitempty"`
+
 	// deadline is when the current step gives up.
 	// +optional
 	Deadline *metav1.Time `json:"deadline,omitempty"`
@@ -421,7 +493,9 @@ type RemediationRequestStatus struct {
 	Handoff *Handoff `json:"handoff,omitempty"`
 
 	// conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
-	// Verified, PlanFresh, WritesPaused and Queued.
+	// Verified, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run
+	// the applied template; False with reason RolloutStuck or DeliveryNotObserved, Unknown while in progress and
+	// with reason KindNotChecked, RolloutSuperseded or RolloutNotDetermined when the check ends without a verdict).
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -456,6 +530,17 @@ type RemediationRequestStatus struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to) || self.status.handoff.to.phase == 'Intent' || (has(oldSelf.status) && has(oldSelf.status.handoff) && has(oldSelf.status.handoff.to))",message="status.handoff.to starts in Intent"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from) || (has(self.spec.replaces) && self.status.handoff.from.name == self.spec.replaces.name && self.status.handoff.from.uid == self.spec.replaces.uid && self.status.handoff.from.hint.source == self.spec.replaces.hint.source && self.status.handoff.from.hint.commentID == self.spec.replaces.hint.commentID && self.status.handoff.from.hint.digest == self.spec.replaces.hint.digest)",message="status.handoff.from must match spec.replaces"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to) || (has(self.status.hints) && self.status.hints.exists(h, h.source == self.status.handoff.to.hint.source && h.commentID == self.status.handoff.to.hint.commentID && h.digest == self.status.handoff.to.hint.digest && h.state != 'Pending' && (self.status.handoff.to.phase != 'Intent' || h.state == 'Reserved')))",message="status.handoff.to must name a hint in status.hints that is no longer Pending, and Reserved while the intent stands"
+// The same holds for status.rollout: once set it stays, each of its fields is set once, and ended never goes
+// back to false, so the delivery window cannot restart and a final verdict cannot reopen.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || (has(self.status) && has(self.status.rollout))",message="status.rollout is kept once set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.waitStartedAt) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.waitStartedAt) && self.status.rollout.waitStartedAt == oldSelf.status.rollout.waitStartedAt)",message="status.rollout.waitStartedAt is set once and never changed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.appliedRevision) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.appliedRevision) && self.status.rollout.appliedRevision == oldSelf.status.rollout.appliedRevision)",message="status.rollout.appliedRevision is set once and never changed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.targetGeneration) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.targetGeneration) && self.status.rollout.targetGeneration == oldSelf.status.rollout.targetGeneration)",message="status.rollout.targetGeneration is set once and never changed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateHash) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateHash) && self.status.rollout.templateHash == oldSelf.status.rollout.templateHash)",message="status.rollout.templateHash is set once and never changed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateRevision) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateRevision) && self.status.rollout.templateRevision == oldSelf.status.rollout.templateRevision)",message="status.rollout.templateRevision is set once and never changed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSince) || !has(self.status) || !has(self.status.rollout) || !has(self.status.rollout.pausedSince) || self.status.rollout.pausedSince == oldSelf.status.rollout.pausedSince",message="status.rollout.pausedSince is never moved while set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSeconds) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.pausedSeconds) && self.status.rollout.pausedSeconds >= oldSelf.status.rollout.pausedSeconds)",message="status.rollout.pausedSeconds never decreases"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.ended) || !oldSelf.status.rollout.ended || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.ended) && self.status.rollout.ended)",message="status.rollout.ended never goes back to false"
 
 // RemediationRequest is one proposed fix: a typed action on one object, carried out as a GitOps pull request
 // after deterministic policy allows it.

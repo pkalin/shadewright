@@ -378,7 +378,9 @@ spec:
               conditions:
                 description: |-
                   conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
-                  Verified, PlanFresh, WritesPaused and Queued.
+                  Verified, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run
+                  the applied template; False with reason RolloutStuck or DeliveryNotObserved, Unknown while in progress and
+                  with reason KindNotChecked, RolloutSuperseded or RolloutNotDetermined when the check ends without a verdict).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -781,8 +783,8 @@ spec:
                     description: |-
                       appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later
                       commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a
-                      deadline measured from it (the rollout check, #532) cannot be pushed back. Not written yet: the delivery
-                      check after the merge is planned.
+                      deadline measured from it (the rollout check, condition RolledOut) cannot be pushed back. Written only for
+                      a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge.
                     format: date-time
                     type: string
                   headSHA:
@@ -827,6 +829,69 @@ spec:
                 x-kubernetes-validations:
                 - message: appliedObservedAt needs mergeCommitSHA
                   rule: '!has(self.appliedObservedAt) || has(self.mergeCommitSHA)'
+              rollout:
+                description: rollout is what the check after the merge keeps between
+                  reconciles (the RolledOut condition).
+                properties:
+                  appliedRevision:
+                    description: |-
+                      appliedRevision is the commit the GitOps controller reported applied when the executor first saw the merge
+                      commit delivered: the merge commit, or a later commit of the target branch that holds it.
+                    maxLength: 40
+                    minLength: 40
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  ended:
+                    description: ended is true once the check gave its final verdict
+                      in RolledOut; nothing is read for it after that.
+                    type: boolean
+                  pausedSeconds:
+                    description: |-
+                      pausedSeconds is how long, in seconds, writes were paused while the executor waited for the delivery; the
+                      delivery window is extended by it (and by the pause still running), so a pause never uses up the window.
+                      It never decreases.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  pausedSince:
+                    description: |-
+                      pausedSince is when the executor first saw writes paused (RemediationSettings spec.paused) while it waited
+                      for the delivery; cleared when it sees them resumed, the paused time then added to pausedSeconds. It is
+                      never moved while set.
+                    format: date-time
+                    type: string
+                  targetGeneration:
+                    description: |-
+                      targetGeneration is the target's metadata.generation read right after appliedRevision was seen applied:
+                      the generation the applied commit produced.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  templateHash:
+                    description: |-
+                      templateHash is the SHA-256 of the target's pod template at targetGeneration. When the target's controller
+                      first reports a generation past targetGeneration, the revision it names is recorded only if the template
+                      is still this one; otherwise the check ends with RolledOut Unknown, reason RolloutSuperseded.
+                    maxLength: 64
+                    minLength: 64
+                    pattern: ^[0-9a-f]{64}$
+                    type: string
+                  templateRevision:
+                    description: |-
+                      templateRevision is the template revision the check judges: a StatefulSet's status.updateRevision or a
+                      Deployment's deployment.kubernetes.io/revision annotation, read once the controller observed
+                      targetGeneration and the target's current generation (a revision annotation can name a later generation
+                      before the status does), and, past targetGeneration, only while the template still matches templateHash. A newer revision
+                      ends the check with RolledOut Unknown, reason RolloutSuperseded.
+                    maxLength: 253
+                    type: string
+                  waitStartedAt:
+                    description: |-
+                      waitStartedAt is when the executor started waiting for the delivery of a merged request that has no
+                      lastPhaseTransitionTime; the delivery window is then measured from it instead of from the merge.
+                    format: date-time
+                    type: string
+                type: object
               source:
                 description: source is where the change is made, resolved by the controller
                   before the policy check.
@@ -925,6 +990,41 @@ spec:
             self.status.handoff.to.hint.source && h.commentID == self.status.handoff.to.hint.commentID
             && h.digest == self.status.handoff.to.hint.digest && h.state != ''Pending''
             && (self.status.handoff.to.phase != ''Intent'' || h.state == ''Reserved'')))'
+        - message: status.rollout is kept once set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || (has(self.status)
+            && has(self.status.rollout))'
+        - message: status.rollout.waitStartedAt is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.waitStartedAt)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.waitStartedAt)
+            && self.status.rollout.waitStartedAt == oldSelf.status.rollout.waitStartedAt)'
+        - message: status.rollout.appliedRevision is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.appliedRevision)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.appliedRevision)
+            && self.status.rollout.appliedRevision == oldSelf.status.rollout.appliedRevision)'
+        - message: status.rollout.targetGeneration is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.targetGeneration)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.targetGeneration)
+            && self.status.rollout.targetGeneration == oldSelf.status.rollout.targetGeneration)'
+        - message: status.rollout.templateHash is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateHash)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateHash)
+            && self.status.rollout.templateHash == oldSelf.status.rollout.templateHash)'
+        - message: status.rollout.templateRevision is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateRevision)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateRevision)
+            && self.status.rollout.templateRevision == oldSelf.status.rollout.templateRevision)'
+        - message: status.rollout.pausedSince is never moved while set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSince)
+            || !has(self.status) || !has(self.status.rollout) || !has(self.status.rollout.pausedSince)
+            || self.status.rollout.pausedSince == oldSelf.status.rollout.pausedSince'
+        - message: status.rollout.pausedSeconds never decreases
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSeconds)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.pausedSeconds)
+            && self.status.rollout.pausedSeconds >= oldSelf.status.rollout.pausedSeconds)'
+        - message: status.rollout.ended never goes back to false
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.ended)
+            || !oldSelf.status.rollout.ended || (has(self.status) && has(self.status.rollout)
+            && has(self.status.rollout.ended) && self.status.rollout.ended)'
     selectableFields:
     - jsonPath: .status.phase
     - jsonPath: .status.breakerProbe

@@ -71,6 +71,15 @@ Validation rules:
 - status.handoff.to starts in Intent: `!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to) || self.status.handoff.to.phase == 'Intent' || (has(oldSelf.status) && has(oldSelf.status.handoff) && has(oldSelf.status.handoff.to))`
 - status.handoff.from must match spec.replaces: `!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from) || (has(self.spec.replaces) && self.status.handoff.from.name == self.spec.replaces.name && self.status.handoff.from.uid == self.spec.replaces.uid && self.status.handoff.from.hint.source == self.spec.replaces.hint.source && self.status.handoff.from.hint.commentID == self.spec.replaces.hint.commentID && self.status.handoff.from.hint.digest == self.spec.replaces.hint.digest)`
 - status.handoff.to must name a hint in status.hints that is no longer Pending, and Reserved while the intent stands: `!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to) || (has(self.status.hints) && self.status.hints.exists(h, h.source == self.status.handoff.to.hint.source && h.commentID == self.status.handoff.to.hint.commentID && h.digest == self.status.handoff.to.hint.digest && h.state != 'Pending' && (self.status.handoff.to.phase != 'Intent' || h.state == 'Reserved')))`
+- status.rollout is kept once set: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || (has(self.status) && has(self.status.rollout))`
+- status.rollout.waitStartedAt is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.waitStartedAt) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.waitStartedAt) && self.status.rollout.waitStartedAt == oldSelf.status.rollout.waitStartedAt)`
+- status.rollout.appliedRevision is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.appliedRevision) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.appliedRevision) && self.status.rollout.appliedRevision == oldSelf.status.rollout.appliedRevision)`
+- status.rollout.targetGeneration is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.targetGeneration) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.targetGeneration) && self.status.rollout.targetGeneration == oldSelf.status.rollout.targetGeneration)`
+- status.rollout.templateHash is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateHash) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateHash) && self.status.rollout.templateHash == oldSelf.status.rollout.templateHash)`
+- status.rollout.templateRevision is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateRevision) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateRevision) && self.status.rollout.templateRevision == oldSelf.status.rollout.templateRevision)`
+- status.rollout.pausedSince is never moved while set: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSince) || !has(self.status) || !has(self.status.rollout) || !has(self.status.rollout.pausedSince) || self.status.rollout.pausedSince == oldSelf.status.rollout.pausedSince`
+- status.rollout.pausedSeconds never decreases: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSeconds) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.pausedSeconds) && self.status.rollout.pausedSeconds >= oldSelf.status.rollout.pausedSeconds)`
+- status.rollout.ended never goes back to false: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.ended) || !oldSelf.status.rollout.ended || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.ended) && self.status.rollout.ended)`
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -822,7 +831,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `headSHA` | string | Yes | headSHA is the commit Shadewright pushed. Any other head stops automation.<br>Pattern: `^[0-9a-f]{40}$` |
 | `renderedTargetHead` | string | No | renderedTargetHead is the head of the target branch at which the change in the pull request was last rendered and found to be exactly the planned one. While the pull request waits, the change is rendered again only when the target branch head is another commit; empty means not rendered since it was recorded.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
 | `mergeCommitSHA` | string | No | mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when Shadewright sees the merge of the pull request it pushed. Delivery is checked against it: the GitOps controller must report this commit, or a later commit of the target branch containing it, as applied. Empty until then, and when the host reported none. Once set it never changes.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
-| `appliedObservedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a deadline measured from it (the rollout check, #532) cannot be pushed back. Not written yet: the delivery check after the merge is planned. |
+| `appliedObservedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a deadline measured from it (the rollout check, condition RolledOut) cannot be pushed back. Written only for a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge. |
 
 ### RecordID
 
@@ -959,10 +968,11 @@ Used by: [RemediationRequest](#remediationrequest).
 | `policyRevision` | string | No | policyRevision is the policy name and generation the decision used, as name/generation. The policy UID is recorded next to it, because a deleted and recreated policy can reach the same generation again.<br>Maximum length: 128 |
 | `policyUID` | [UID](#uid) | No | policyUID is the UID of the policy the decision used. It is part of the plan digest.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists.<br>Rule: appliedObservedAt needs mergeCommitSHA |
+| `rollout` | [RolloutStatus](#rolloutstatus) | No | rollout is what the check after the merge keeps between reconciles (the RolledOut condition). |
 | `deadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | deadline is when the current step gives up. |
 | `hints` | [Hint](#hint) array | No | hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a replacement carried over from its chain, at most MaxHints (ADR-0028). Only the executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed. Planned: nothing writes them yet.<br>Maximum items: 3<br>List type: map<br>List key: `source`<br>List key: `commentID`<br>Rule: text must be at most 2048 bytes<br>Rule: a Declined hint needs a reason<br>Rule: a stored hint is pinned: only its state and reason change<br>Rule: the reason of a Consumed or Declined hint never changes<br>Rule: a hint moves only from Pending to Reserved or Declined, and from Reserved to Consumed or Declined |
 | `handoff` | [Handoff](#handoff) | No | handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is written once and never removed; only its phase moves on. Planned: nothing writes it yet.<br>Rule: a handoff has from, to or both |
-| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified, PlanFresh, WritesPaused and Queued.<br>List type: map<br>List key: `type` |
+| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run the applied template; False with reason RolloutStuck or DeliveryNotObserved, Unknown while in progress and with reason KindNotChecked, RolloutSuperseded or RolloutNotDetermined when the check ends without a verdict).<br>List type: map<br>List key: `type` |
 
 ### RemediationSettingsSpec
 
@@ -1024,6 +1034,35 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `path` | [GitFilePath](#gitfilepath) | Yes | path is the file that declares the target.<br>Maximum length: 512<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.ya?ml$` |
 | `buildPath` | [GitDirPath](#gitdirpath) | No | buildPath is the directory the Flux Kustomization builds (its spec.path, "." for the repository root). Before every commit the pull request step renders it with and without the change and refuses anything but the planned difference (design 8.2, steps 4 and 5). The policy check always sets it, and the plan digest covers it; a request without it is never committed.<br>Maximum length: 512<br>Minimum length: 1<br>Pattern: <code>^(\.&#124;&#91;A-Za-z0-9_]&#91;A-Za-z0-9_.-]*(/&#91;A-Za-z0-9_]&#91;A-Za-z0-9_.-]*)*)$</code> |
 | `baseCommit` | string | Yes | baseCommit is the full SHA of the target branch the change was made against. It is fixed when the branch is created; later merges to the target branch do not change it.<br>Pattern: `^[0-9a-f]{40}$` |
+
+### RolloutStatus
+
+RolloutStatus is what the check after the merge records about the target's rollout. Only the executor writes
+it; once status.rollout exists it is never removed, each field is set once and never changed (pausedSince is
+only set or cleared, never moved, and pausedSeconds never decreases), and ended never goes back to false.
+These rules sit on the RemediationRequest, so that dropping rollout, or the whole status, and writing it again
+cannot reopen the check or move its window.
+
+The rollout judged is the one the applied commit produced: the executor reads the target right after the
+GitOps controller reports the commit applied and records, in the same status write as
+status.pullRequest.appliedObservedAt, the commit applied (appliedRevision), the target's generation
+(targetGeneration) and a hash of its pod template (templateHash). A later commit of the target branch that holds
+the merge commit counts as ours: the template it produced is judged. A change made outside Git (kubectl edit,
+another controller) is not told apart from a Git one when it lands before that read, so it is not covered.
+
+
+Used by: [RemediationRequestStatus](#remediationrequeststatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `waitStartedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | waitStartedAt is when the executor started waiting for the delivery of a merged request that has no lastPhaseTransitionTime; the delivery window is then measured from it instead of from the merge. |
+| `pausedSince` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | pausedSince is when the executor first saw writes paused (RemediationSettings spec.paused) while it waited for the delivery; cleared when it sees them resumed, the paused time then added to pausedSeconds. It is never moved while set. |
+| `pausedSeconds` | integer | No | pausedSeconds is how long, in seconds, writes were paused while the executor waited for the delivery; the delivery window is extended by it (and by the pause still running), so a pause never uses up the window. It never decreases.<br>Minimum: 0 |
+| `appliedRevision` | string | No | appliedRevision is the commit the GitOps controller reported applied when the executor first saw the merge commit delivered: the merge commit, or a later commit of the target branch that holds it.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
+| `targetGeneration` | integer | No | targetGeneration is the target's metadata.generation read right after appliedRevision was seen applied: the generation the applied commit produced.<br>Minimum: 0 |
+| `templateHash` | string | No | templateHash is the SHA-256 of the target's pod template at targetGeneration. When the target's controller first reports a generation past targetGeneration, the revision it names is recorded only if the template is still this one; otherwise the check ends with RolledOut Unknown, reason RolloutSuperseded.<br>Maximum length: 64<br>Minimum length: 64<br>Pattern: `^[0-9a-f]{64}$` |
+| `templateRevision` | string | No | templateRevision is the template revision the check judges: a StatefulSet's status.updateRevision or a Deployment's deployment.kubernetes.io/revision annotation, read once the controller observed targetGeneration and the target's current generation (a revision annotation can name a later generation before the status does), and, past targetGeneration, only while the template still matches templateHash. A newer revision ends the check with RolledOut Unknown, reason RolloutSuperseded.<br>Maximum length: 253 |
+| `ended` | boolean | No | ended is true once the check gave its final verdict in RolledOut; nothing is read for it after that. |
 
 ### SetContainerMemoryLimit
 

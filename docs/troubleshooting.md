@@ -192,6 +192,30 @@ Stops before a pull request is recorded are on `PullRequestOpened`; after, on `A
 | `WaitingForReview` | `Approved` is `False`: the pull request waits for a person. With `approval` not required it still waits, because auto-merge is not built | Review and merge it |
 | `PullRequestClosed` | Shadewright closed its pull request (stale plan or a change that no longer renders as planned); the message gives the number and why | See the freshness and render tables |
 
+## Rollout after the merge
+
+<span class="sw-status sw-built">built</span> On `RolledOut`, for a Deployment or StatefulSet target, after the Flux Kustomization named by the target's labels reports the merge commit (or a later commit of the target branch that holds it) applied; that time is `status.pullRequest.appliedObservedAt`. The phase stays `Merged`. Until the delivery is seen applied the request has no `RolledOut`; after an hour without it, see `DeliveryNotObserved` below. The check always ends with one of the verdicts below; `status.rollout` records the commit Flux applied, the target generation and template it produced (read right after the apply), the template revision it judged, and `ended` once it is over; each is set once. A later commit of the target branch that holds the merge commit counts as ours; a change made outside Git before that read is not told apart. Shadewright only reports: it never deletes or restarts a pod (invariant 2), and it reads only the target object and its Kustomization with the `get` it already has, never the pods. While writes are paused (`spec.paused`), a later applied commit is not checked against the merge commit on the Git host, so the check waits, and the time paused does not count against the hour: after a resume the check has what was left of it.
+
+| Reason | Status | Cause | Fix |
+| --- | --- | --- | --- |
+| `RolloutComplete` | `True` | Every pod runs the applied template and is ready | Nothing |
+| `RolloutProgressing` | `Unknown` | The rollout is under way and the deadline (10 minutes after the revision was applied) has not passed | Wait |
+| `DeliveryNotObserved` | `False` | The merge commit (or a later commit of the target branch that holds it) was not seen applied by the Kustomization named by the target's labels within an hour of the merge: Flux has not applied it, its apply fails, the target has no Kustomization labels or is installed by a HelmRelease. The message names the Kustomization and the merge commit; one Event is recorded and the rollout is not checked | Check the Kustomization (`flux get kustomizations`, its `Ready` message), then the rollout yourself as below |
+| `KindNotChecked` | `Unknown` | The target is not a Deployment or StatefulSet (for example a ScaledObject), whose rollout the check does not cover. No Event | Check the target yourself |
+| `RolloutStuck` | `False` | The rollout did not complete within the deadline. For a StatefulSet the message gives how many pods are not Ready and names the pods on the old revision, highest ordinal first, inferred from the StatefulSet status (`spec.ordinals.start` honoured); it names a pod to delete only when every pod is not Ready, since the status does not say which pod is. For a Deployment it gives the counts. One Event is recorded; the rollout is read again for an hour, so one you unblock turns `True` | See below |
+| `RolloutSuperseded` | `Unknown` | The target moved on to a newer template revision than the one applied with the merge commit (another change was applied), or its template changed again before its controller observed the generation the applied commit produced, so this rollout is not judged. One Normal Event | Check the newer rollout yourself |
+| `RolloutNotDetermined` | `Unknown` | The check ended without a verdict: the target is gone or was replaced, or it (or the delivery) could not be read until the end of the check. One Event; the executor log has the error | Check the target and the executor log |
+
+**A StatefulSet stuck on the old revision.** A StatefulSet with the default `OrderedReady` policy does not replace a pod that is not Ready on the old revision, so a fix for a crashing pod (for example a larger memory limit) is applied to the template but never reaches the pod. Kubernetes documents this as [forced rollback](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/#forced-rollback). Find the pod that is not Ready. If it runs the old revision, check that the new template is the one you want, then delete that pod yourself, never a Ready one. If a pod on the new revision is not Ready, the new template fails: fix it instead.
+
+```bash
+kubectl -n <namespace> get statefulset <name> -o jsonpath='{.status.currentRevision} {.status.updateRevision} {.status.updatedReplicas}/{.spec.replicas}{"\n"}'
+kubectl -n <namespace> get pods -L controller-revision-hash
+kubectl -n <namespace> delete pod <name>-<ordinal>
+```
+
+The pod is recreated from the new revision and the rollout continues. With `updateStrategy: OnDelete` every pod needs this step. **A Deployment stuck**: read `kubectl rollout status deployment/<name>` and the events of its new ReplicaSet (image pull, quota, a failing readiness probe).
+
 ## Freshness
 
 Before merge the executor rechecks every five minutes, and on any change to the request (once its pull request waits, only when none ran in the last five minutes), that the plan still matches the world. A stale plan ends `Superseded` with `PlanFresh=False`, and its pull request is closed (branch left in place). If the close cannot be done the phase is `NeedsIntervention` with `TargetBranchChanged`, `ForeignChangeRequest`, `RepositoryUnavailable`, `RepositoryUnusable`, `GitForbidden` or `GitRejected` as above.

@@ -829,6 +829,13 @@ const testTriggerInterval = 200 * time.Millisecond
 
 var triggerConfig = Config{TriggerInterval: testTriggerInterval, Now: func() time.Time { return triggerNow }}
 
+// restartConfig is triggerConfig with the production trigger interval, and so the production deadlines (a
+// pass 8 s, its budget read 5 s). The trigger's first pass runs as soon as the controller starts, so every
+// step of TestRestartKeepsCooldownsAndBudget is decided by the first pass after a start, not by later ticks.
+// One pass there reads and writes about 60 times: under load (a full `make test`), or with 40 ms added to
+// each call, no pass finished within the 180 ms of triggerConfig, and the test timed out (#563).
+var restartConfig = Config{TriggerInterval: DefaultTriggerInterval, Now: triggerConfig.Now}
+
 // Restarting the controller with 50 open Incidents whose cooldowns hold marks none of them due again, and
 // the budget used today, read back from the budget ConfigMap, still limits the new ones.
 func TestRestartKeepsCooldownsAndBudget(t *testing.T) {
@@ -848,7 +855,7 @@ func TestRestartKeepsCooldownsAndBudget(t *testing.T) {
 	createIncident(t, ns, 52, incidentStatus(2*time.Minute, time.Hour, 0))
 	createIncident(t, ns, 53, incidentStatus(2*time.Minute, time.Hour, 0))
 
-	first := start(t, ns, triggerConfig)
+	first := start(t, ns, restartConfig)
 	eventually(t, ns, 53, dueIs(false, ReasonDailyBudgetReached))
 	eventually(t, ns, 51, dueIs(true, ReasonCooldownExpired))
 	eventually(t, ns, 52, dueIs(true, ReasonFirstAnalysis))
@@ -864,7 +871,7 @@ func TestRestartKeepsCooldownsAndBudget(t *testing.T) {
 
 	// A new Incident arrives while the analyzer is down. After the restart the budget is still used up.
 	createIncident(t, ns, 54, incidentStatus(2*time.Minute, time.Hour, 0))
-	start(t, ns, triggerConfig)
+	start(t, ns, restartConfig)
 	eventually(t, ns, 54, dueIs(false, ReasonDailyBudgetReached))
 
 	after := listIncidents(t, ns)

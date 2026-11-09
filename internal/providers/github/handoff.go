@@ -138,15 +138,13 @@ func (p *Provider) AppendCommit(
 }
 
 // UpdateChangeRequest replaces the title and body of an open pull request from a shadewright/ branch to the
-// target branch (providers.GitProvider.UpdateChangeRequest). The same title and body are not sent again.
+// target branch (providers.GitProvider.UpdateChangeRequest). The same title and body are not sent again. Input
+// GitHub would refuse (an empty or too long title, a body over its limit, text that is not UTF-8) is refused
+// with providers.ErrRejected before any write, so the caller records it as final instead of asking again on
+// every look. The pull request is read first: one closed or merged meanwhile is ErrConflict whatever the input.
 func (p *Provider) UpdateChangeRequest(ctx context.Context, number int64, title, body string) error {
-	switch {
-	case number < 1:
-		return errors.New(opUpdateCR + ": number must be positive")
-	case strings.TrimSpace(title) == "" || !utf8.ValidString(title) || utf8.RuneCountInString(title) > maxTitleRunes:
-		return errors.New(opUpdateCR + ": title is empty, too long or not UTF-8")
-	case !utf8.ValidString(body) || utf8.RuneCountInString(body) > maxBodyRunes:
-		return errors.New(opUpdateCR + ": body is too long or not UTF-8")
+	if number < 1 {
+		return fmt.Errorf("%s: number must be positive: %w", opUpdateCR, providers.ErrRejected)
 	}
 	ctx, cancel := p.withTimeout(ctx)
 	defer cancel()
@@ -162,6 +160,12 @@ func (p *Provider) UpdateChangeRequest(ctx context.Context, number int64, title,
 	}
 	if err := open(pr); err != nil {
 		return err
+	}
+	switch {
+	case strings.TrimSpace(title) == "" || !utf8.ValidString(title) || utf8.RuneCountInString(title) > maxTitleRunes:
+		return fmt.Errorf("%s: title is empty, too long or not UTF-8: %w", opUpdateCR, providers.ErrRejected)
+	case !utf8.ValidString(body) || utf8.RuneCountInString(body) > maxBodyRunes:
+		return fmt.Errorf("%s: body is too long or not UTF-8: %w", opUpdateCR, providers.ErrRejected)
 	}
 	if pr.Title == title && pr.Body != nil && *pr.Body == body {
 		return nil
@@ -199,8 +203,10 @@ func (p *Provider) UpdateChangeRequest(ctx context.Context, number int64, title,
 // completed one.
 var (
 	checkRunStatus = map[providers.CheckRunStatus]string{
-		providers.CheckRunInProgress: "in_progress", providers.CheckRunSuccess: "completed"}
-	checkRunConclusion = map[providers.CheckRunStatus]string{providers.CheckRunSuccess: "success"}
+		providers.CheckRunInProgress: "in_progress", providers.CheckRunSuccess: "completed",
+		providers.CheckRunFailure: "completed"}
+	checkRunConclusion = map[providers.CheckRunStatus]string{providers.CheckRunSuccess: "success",
+		providers.CheckRunFailure: "failure"}
 )
 
 // CreateCheckRun creates a check run on head (providers.GitProvider.CreateCheckRun). It needs the App

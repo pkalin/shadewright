@@ -138,7 +138,7 @@ func TestPolicyCheckDeadlineIsRetryable(t *testing.T) {
 	}
 }
 
-// The caller's cancellation stays distinct from the phase deadline.
+// The caller's cancellation stays distinct from the phase deadline (inside Reconcile, which then returns nil).
 func TestPolicyCheckCallerCancellationIsDistinct(t *testing.T) {
 	c, rr := deadlineWorld(t)
 	src := newBlockingResolver()
@@ -148,7 +148,7 @@ func TestPolicyCheckCallerCancellationIsDistinct(t *testing.T) {
 
 	var err error
 	within(t, "Reconcile", func() {
-		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
+		_, err = r.reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
 	})
 	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrTimeout) {
 		t.Fatalf("want context.Canceled and not ErrTimeout, got %v", err)

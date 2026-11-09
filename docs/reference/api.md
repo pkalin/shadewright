@@ -913,7 +913,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `renderedTargetHead` | string | No | renderedTargetHead is the head of the target branch at which the change in the pull request was last rendered and found to be exactly the planned one. While the pull request waits, the change is rendered again only when the target branch head is another commit; empty means not rendered since it was recorded.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
 | `mergeCommitSHA` | string | No | mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when Shadewright sees the merge of the pull request it pushed. Delivery is checked against it: the GitOps controller must report this commit, or a later commit of the target branch containing it, as applied. Empty until then, and when the host reported none. Once set it never changes.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
 | `appliedObservedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a deadline measured from it (the rollout check, condition RolledOut) cannot be pushed back. Written only for a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge. |
-| `reviewCheck` | [ReviewCheck](#reviewcheck) | No | reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge gate), written only with reviewer hints on: InProgress once the executor created it on that head, Passed once it completed it with success after an approval of that head by someone who wrote no hint in the chain, Refused when the Git host refused to create or complete it for good (condition Approved then says so). It always names headSHA: a new head starts without it, so a state never outlives its head.<br>Rule: on one head the check run moves only from InProgress to Passed or Refused |
+| `reviewCheck` | [ReviewCheck](#reviewcheck) | No | reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge gate), written only with reviewer hints on: InProgress once the executor created it on that head, Passed once it completed it with success after an approval of that head by someone who wrote no hint in the chain, Failed when the executor could not read every review of the pull request and completed it with failure (it fails closed; condition Approved False with reason ReviewListTooLong), Refused when the Git host refused to create or complete it for good (condition Approved then says so). It always names headSHA: a new head starts without it, so a state never outlives its head.<br>Rule: on one head the check run moves only from InProgress to Passed, Failed or Refused |
 
 ### RecordID
 
@@ -1140,30 +1140,31 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 ReviewCheck is the check run shadewright/review on one head of the pull request (ADR-0028 section 5),
 pinned to that head: a state recorded for one head never counts for another. Every head the executor pushes
 or adopts starts without one, and the executor creates the check in progress on it. On one head the state
-moves only from InProgress to Passed or Refused.
+moves only from InProgress to Passed, Failed or Refused.
 
 
 Validation rules:
 
-- on one head the check run moves only from InProgress to Passed or Refused: `self.head != oldSelf.head || self.state == oldSelf.state || (oldSelf.state == 'InProgress' && self.state in ['Passed', 'Refused'])`
+- on one head the check run moves only from InProgress to Passed, Failed or Refused: `self.head != oldSelf.head || self.state == oldSelf.state || (oldSelf.state == 'InProgress' && self.state in ['Passed', 'Failed', 'Refused'])`
 
 Used by: [PullRequestStatus](#pullrequeststatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `head` | string | Yes | head is the commit the check run is on, always the pull request's recorded head (headSHA).<br>Pattern: `^[0-9a-f]{40}$` |
-| `state` | [ReviewCheckState](#reviewcheckstate) | Yes | state is how far the check run on head has come.<br>One of `InProgress`, `Passed`, `Refused` |
+| `state` | [ReviewCheckState](#reviewcheckstate) | Yes | state is how far the check run on head has come.<br>One of `InProgress`, `Passed`, `Failed`, `Refused` |
 
 ### ReviewCheckState
 
 ReviewCheckState is how far the check run shadewright/review of a head has come (ADR-0028 section 5).
 InProgress: created, in progress, waiting for an approval of the head by someone who wrote no hint in the
-chain. Passed: completed with conclusion success after such an approval. Refused: the Git host refused to
-create or complete it for good, so the required check does not pass on this head and the pull request
-cannot merge until a person acts.
+chain. Passed: completed with conclusion success after such an approval. Failed: completed with conclusion
+failure because the merge gate could not read every review of the pull request, so it fails closed on this
+head and a person decides the merge. Refused: the Git host refused to create or complete it for good, so the
+required check does not pass on this head and the pull request cannot merge until a person acts.
 
 - Underlying type: string
-- One of `InProgress`, `Passed`, `Refused`
+- One of `InProgress`, `Passed`, `Failed`, `Refused`
 
 Used by: [ReviewCheck](#reviewcheck).
 
@@ -1171,6 +1172,7 @@ Used by: [ReviewCheck](#reviewcheck).
 | --- | --- |
 | `InProgress` |  |
 | `Passed` |  |
+| `Failed` |  |
 | `Refused` |  |
 
 ### RolloutStatus

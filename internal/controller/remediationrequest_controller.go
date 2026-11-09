@@ -161,13 +161,23 @@ type RemediationRequestReconciler struct {
 	// permissionWarned holds, per request name, the comment the last HintPermissionUnknown Event was recorded for
 	// (permissionWarning, hints.go), so each comment is warned about once. Memory only, dropped with checked.
 	permissionWarned sync.Map
+	// steeredCommented holds, per request name, the reviews of hint authors whose comment saying why they do not
+	// count is on the pull request (reviewGate), so it is asked for once per review, not on every look. Memory
+	// only, dropped with checked: after a restart the marker finds the comment already posted.
+	steeredCommented sync.Map
+	// rewritten holds, per request name, the answer of the Git host to the rewrite after a handoff whose status
+	// write has not gone through (followHandoff), so a retry records it without sending the rewrite again.
+	// Memory only, dropped with checked: after a restart the rewrite is sent again, which is idempotent.
+	rewritten sync.Map
 }
 
-// forget drops what this process keeps in memory about a request: its last full recheck and its last
-// permission warning.
+// forget drops what this process keeps in memory about a request: its last full recheck, its last
+// permission warning, the comments of the merge gate it posted and a rewrite not recorded yet.
 func (r *RemediationRequestReconciler) forget(key types.NamespacedName) {
 	r.checked.Delete(key)
 	r.permissionWarned.Delete(key)
+	r.steeredCommented.Delete(key)
+	r.rewritten.Delete(key)
 }
 
 // DefaultTargetStateTimeout is how long the policy check waits by default for KEDA to report on a
@@ -221,6 +231,15 @@ func boundErr(parent, phase context.Context, name string, err error) error {
 		return fmt.Errorf("%s: %w", name, ErrTimeout)
 	}
 	return err
+}
+
+// orStepErr returns res and err, or, when err is nil, stepErr from the steps after a handoff for the error
+// backoff (controller-runtime ignores res with an error).
+func orStepErr(res ctrl.Result, err, stepErr error) (ctrl.Result, error) {
+	if err == nil && stepErr != nil {
+		return ctrl.Result{}, stepErr
+	}
+	return res, err
 }
 
 // ErrSuperseded is returned by ensureFresh when the plan went stale: the request is now Superseded and its
@@ -306,6 +325,20 @@ func (r *RemediationRequestReconciler) getLive(ctx context.Context, key types.Na
 // TargetStateTimeout. Only errors worth retrying (an API or Git host failure) are
 // returned.
 func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	res, err := r.reconcile(ctx, req)
+	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
+		// The manager cancelled the reconcile (it is shutting down): not a failure to log and retry with
+		// backoff. Whatever was cut short is found again from the status on the next start. A reconcile timeout
+		// (DeadlineExceeded) is still returned, so it is retried.
+		logf.FromContext(ctx).V(1).Info("Stopped reconciling RemediationRequest: the reconcile was cancelled",
+			"remediationRequest", req.NamespacedName, "error", err.Error())
+		return ctrl.Result{}, nil
+	}
+	return res, err
+}
+
+// reconcile is Reconcile before its handling of a cancellation.
+func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	rr := &remediationv1alpha1.RemediationRequest{}
@@ -330,27 +363,32 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 	if rr.Status.Phase != "" && rr.Status.Phase != remediationv1alpha1.PhasePending {
-		if err := r.afterHandoff(ctx, rr); err != nil {
-			return ctrl.Result{}, err
+		// A step after the handoff whose status write failed does not hold back the look at the pull request,
+		// so a merge or a close is still recorded; its error is returned after it, for a retry with backoff.
+		stepErr := r.afterHandoff(ctx, rr)
+		if stepErr != nil && !errors.Is(stepErr, errStepNotRecorded) {
+			return ctrl.Result{}, stepErr
 		}
 		if !progresses(rr) {
 			r.forget(req.NamespacedName)
 			// Stopped: nothing is written to Git any more, but a lock still held waits for its pull request.
 			res, err := r.checkHeld(ctx, rr)
 			if err != nil || rr.Status.Phase != remediationv1alpha1.PhaseMerged {
-				return res, err
+				return orStepErr(res, err, stepErr)
 			}
 			// A merged request is followed until its rollout is reported (rollout.go); it only reads and
 			// writes its own status and one Event.
 			after, err := r.afterMerge(ctx, rr)
-			return earlier(res, after), err
+			return orStepErr(earlier(res, after), err, stepErr)
 		}
 		res, err := r.recheck(ctx, rr)
 		if !progresses(rr) {
 			// The recheck ended the request (Merged, Superseded, NeedsIntervention, ...): it is never looked at again.
 			r.forget(req.NamespacedName)
+			// A step not recorded is not retried for an ended request: the next reconcile does not run it.
+			return res, err
 		}
-		return res, err
+		return orStepErr(res, err, stepErr)
 	}
 	// A request a limit holds back (Queued) checks only the limits until they let it through, so it does not
 	// read Git while it waits. Every other request is decided first, so a refusal is never held back.

@@ -151,6 +151,9 @@ const (
 	// who wrote no hint in the pull request. A check run of the same name created later on the same commit
 	// supersedes an earlier one, so completing it is creating a completed one.
 	CheckRunSuccess CheckRunStatus = "Success"
+	// CheckRunFailure: the check completed with conclusion failure, here when the merge gate could not read every
+	// review of the pull request and fails closed on the head.
+	CheckRunFailure CheckRunStatus = "Failure"
 )
 
 // MaxCheckRunTextBytes is the most bytes of a check run's title or summary.
@@ -301,7 +304,8 @@ type GitProvider interface {
 
 	// UpdateChangeRequest replaces the title and the body of an open change request from a Shadewright branch
 	// of this repository to the target branch. A closed or merged one is ErrConflict; any other change request
-	// is refused. Writing the same title and body again succeeds. It is a write.
+	// is refused. A title or body the host would refuse (over its limit, not UTF-8) is ErrRejected. Writing the
+	// same title and body again succeeds. It is a write.
 	UpdateChangeRequest(ctx context.Context, number int64, title, body string) error
 
 	// CreateCheckRun creates the check run run on commit head, a full object ID. Each call creates one, so

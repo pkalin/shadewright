@@ -1010,8 +1010,10 @@ spec:
                       reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge
                       gate), written only with reviewer hints on: InProgress once the executor created it on that head, Passed
                       once it completed it with success after an approval of that head by someone who wrote no hint in the
-                      chain, Refused when the Git host refused to create or complete it for good (condition Approved then says
-                      so). It always names headSHA: a new head starts without it, so a state never outlives its head.
+                      chain, Failed when the executor could not read every review of the pull request and completed it with
+                      failure (it fails closed; condition Approved False with reason ReviewListTooLong), Refused when the Git host
+                      refused to create or complete it for good (condition Approved then says so). It always names headSHA: a new
+                      head starts without it, so a state never outlives its head.
                     properties:
                       head:
                         description: head is the commit the check run is on, always
@@ -1023,6 +1025,7 @@ spec:
                         enum:
                         - InProgress
                         - Passed
+                        - Failed
                         - Refused
                         type: string
                     required:
@@ -1031,10 +1034,10 @@ spec:
                     type: object
                     x-kubernetes-validations:
                     - message: on one head the check run moves only from InProgress
-                        to Passed or Refused
+                        to Passed, Failed or Refused
                       rule: self.head != oldSelf.head || self.state == oldSelf.state
                         || (oldSelf.state == 'InProgress' && self.state in ['Passed',
-                        'Refused'])
+                        'Failed', 'Refused'])
                   url:
                     description: url of the pull request.
                     maxLength: 2048

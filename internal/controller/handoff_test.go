@@ -579,7 +579,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 
 	It("keeps recognising the pull request when the Git host refuses its rewrite", func() {
 		git.SetFail(func(op string) error {
-			if op == "UpdateChangeRequest" || op == opCreateCheckRun {
+			if op == opUpdateChangeRequest || op == opCreateCheckRun {
 				return fmt.Errorf("status 403: %w", providers.ErrForbidden)
 			}
 			return nil

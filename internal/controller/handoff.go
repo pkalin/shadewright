@@ -22,8 +22,10 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -632,11 +634,15 @@ func (r *RemediationRequestReconciler) endHandoff(ctx context.Context, rr *remed
 
 // followHandoff is step 6 of a replacement that took the pull request over, once and recorded: while the pull
 // request waits for review, its title and body are rewritten for this request's plan, with its marker. A final
-// refusal of the Git host is recorded as Refused, never as done, so it is not asked again on every look; a pull
-// request closed or merged meanwhile leaves the step for the watch to decide. An error is returned for a retry;
-// rr is updated in place by the status write when it went through. The check run shadewright/review is not
-// this step's: it is created on every head after the look at the comments (reviewCheck), so the merge gate
-// never decides before the hints of that look are stored. The caller has done step 5 first.
+// refusal of the Git host is recorded as Refused, never as done, so it is not asked again on every look, and
+// says so (condition PullRequestOpened with ReasonPullRequestRewriteRefused, a Warning Event); a pull request
+// closed or merged meanwhile leaves the step for the watch to decide. The answer of the Git host is kept in
+// memory until its status write went through, so a write that failed is retried without the rewrite being sent
+// again (after a restart it is sent again, which is idempotent). An error is returned for a retry, wrapping
+// errStepNotRecorded when only the status write failed; rr is updated in place by the status write when it
+// went through. The check run shadewright/review is not this step's: it is created on every head after the
+// look at the comments (reviewCheck), so the merge gate never decides before the hints of that look are
+// stored. The caller has done step 5 first.
 func (r *RemediationRequestReconciler) followHandoff(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	from := rr.Status.Handoff.From
 	p := rr.Status.Phase
@@ -646,23 +652,77 @@ func (r *RemediationRequestReconciler) followHandoff(ctx context.Context, rr *re
 	}
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
-	git, err := r.openPlanRepository(stepCtx, rr)
-	if err != nil {
+	key := client.ObjectKeyFromObject(rr)
+	pr := rr.Status.PullRequest
+	done := rewriteDone{uid: rr.UID, number: pr.Number}
+	if v, ok := r.rewritten.Load(key); ok && v.(rewriteDone).uid == done.uid && v.(rewriteDone).number == done.number {
+		done = v.(rewriteDone)
+	} else {
+		git, err := r.openPlanRepository(stepCtx, rr)
+		if err != nil {
+			return err
+		}
+		log := logf.FromContext(ctx).WithValues("remediationRequest", key)
+		err = git.UpdateChangeRequest(stepCtx, pr.Number, commitTitle(rr), pullRequestBody(rr, r.verifiedIncidentName(stepCtx, rr)))
+		step, err := stepOutcome(log, err, "rewrite the pull request")
+		switch {
+		case err != nil:
+			return freshness.WrapProvider("rewrite the pull request", err)
+		case step == "":
+			// Closed or merged meanwhile: the watch of the pull request decides; nothing is left to rewrite.
+			return nil
+		}
+		done.step = step
+		r.rewritten.Store(key, done)
+	}
+	// A failed read of the settings here is not a failed status write: it is logged and the next look records
+	// the answer kept above.
+	if err := r.writeAllowed(stepCtx); err != nil {
 		return err
 	}
-	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
-	pr := rr.Status.PullRequest
-	err = git.UpdateChangeRequest(stepCtx, pr.Number, commitTitle(rr), pullRequestBody(rr, r.verifiedIncidentName(stepCtx, rr)))
-	step, err := stepOutcome(log, err, "rewrite the pull request")
-	switch {
-	case err != nil:
-		return freshness.WrapProvider("rewrite the pull request", err)
-	case step == "":
-		// Closed or merged meanwhile: the watch of the pull request decides; nothing is left to rewrite.
-		return nil
+	upd := rr.DeepCopy()
+	upd.Status.Handoff.From.PullRequestUpdate = done.step
+	if done.step == remediationv1alpha1.HandoffStepRefused {
+		meta.SetStatusCondition(&upd.Status.Conditions, metav1.Condition{
+			Type:               remediationv1alpha1.ConditionPROpened,
+			Status:             metav1.ConditionTrue,
+			Reason:             ReasonPullRequestRewriteRefused,
+			Message:            rewriteRefused,
+			ObservedGeneration: upd.Generation,
+		})
 	}
-	return r.recordStep(stepCtx, rr, func(f *remediationv1alpha1.IncomingHandoff) { f.PullRequestUpdate = step })
+	if err := r.Status().Update(stepCtx, upd); err != nil {
+		return fmt.Errorf("%w: update status of RemediationRequest %s/%s: %w", errStepNotRecorded, rr.Namespace, rr.Name, err)
+	}
+	upd.DeepCopyInto(rr)
+	r.rewritten.Delete(key)
+	if done.step == remediationv1alpha1.HandoffStepRefused && r.Recorder != nil {
+		r.Recorder.Event(rr, corev1.EventTypeWarning, ReasonPullRequestRewriteRefused, rewriteRefused)
+	}
+	return nil
 }
+
+// rewriteDone is what rewritten holds per request: the answer of the Git host to the rewrite of pull request
+// number for the request with uid, whose status write has not gone through yet.
+type rewriteDone struct {
+	uid    types.UID
+	number int64
+	step   remediationv1alpha1.HandoffStep
+}
+
+// ReasonPullRequestRewriteRefused is the reason of condition PullRequestOpened (True) and of the Warning Event
+// when the Git host refused for good to rewrite the title and body of a pull request taken over: the pull
+// request is the replacement's, but its text still shows the plan it replaced.
+const ReasonPullRequestRewriteRefused = "PullRequestRewriteRefused"
+
+// rewriteRefused is the fixed message of ReasonPullRequestRewriteRefused.
+const rewriteRefused = "This request took the pull request over, but the Git host refused for good to rewrite its " +
+	"title and body (a permission of the App, a rule, or text over the host's limit), so they still describe the " +
+	"plan it replaced; the branch carries this request's plan"
+
+// errStepNotRecorded means a step after the handoff was done on the Git host but its status write failed: the
+// caller retries it with backoff, and the answer of the host kept in memory is recorded without asking again.
+var errStepNotRecorded = errors.New("the step after the handoff was not recorded")
 
 // stepOutcome maps the answer of a write after the handoff to its record: Done, Refused for a final refusal
 // (logged), "" for a conflict (closed or merged meanwhile; nothing is recorded), or the error for a retry.
@@ -681,19 +741,6 @@ func stepOutcome(log logr.Logger, err error, what string) (remediationv1alpha1.H
 	return "", err
 }
 
-// recordStep records a step after the handoff in rr's status, through the kill switch.
-func (r *RemediationRequestReconciler) recordStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	set func(*remediationv1alpha1.IncomingHandoff)) error {
-	if err := r.writeAllowed(ctx); err != nil {
-		return err
-	}
-	set(rr.Status.Handoff.From)
-	if err := r.Status().Update(ctx, rr); err != nil {
-		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
-	}
-	return nil
-}
-
 // reserveOnAdmission is the replacement's part of handoff step 1, in the status write that admits it: it names
 // the request it takes over, Reserved. Any other request is left as it is.
 func reserveOnAdmission(rr *remediationv1alpha1.RemediationRequest) {
@@ -707,8 +754,13 @@ func reserveOnAdmission(rr *remediationv1alpha1.RemediationRequest) {
 
 // afterHandoff runs the steps after a handoff for a request that took a pull request over (Reconcile, any
 // phase): the predecessor ends HandedOff, returned as an error until it did so it is retried with backoff; the
-// pull request is rewritten while it waits, only logged on failure and retried with the next look. A pause
-// leaves both for later. The check run is not done here but after the look at the comments (reviewCheck).
+// pull request is rewritten while it waits. A failure of the rewrite on the Git host (or of a read of the
+// settings) is logged and retried with the next look, which the poll of the waiting pull request brings; a
+// final refusal is recorded Refused by followHandoff and not asked again. A failed status write after the
+// rewrite is returned wrapping errStepNotRecorded: the caller still runs the recheck, so a merge or a close is
+// not missed, and returns it for a retry with backoff, which does not send the rewrite again. A cancelled
+// reconcile returns at once, not logged as a failure. A pause leaves both steps for later. The check run is not
+// done here but after the look at the comments (reviewCheck).
 func (r *RemediationRequestReconciler) afterHandoff(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	if !tookOver(rr) {
 		return nil
@@ -716,10 +768,17 @@ func (r *RemediationRequestReconciler) afterHandoff(ctx context.Context, rr *rem
 	if err := r.supersedePredecessor(ctx, rr); err != nil && !errors.Is(err, freshness.ErrPaused) {
 		return err
 	}
-	if err := r.followHandoff(ctx, rr); err != nil {
-		logf.FromContext(ctx).Info("Could not finish the steps after the handoff of RemediationRequest",
-			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+	err := r.followHandoff(ctx, rr)
+	switch {
+	case err == nil, errors.Is(err, freshness.ErrPaused):
+		return nil
+	case ctx.Err() != nil:
+		return fmt.Errorf("steps after the handoff cancelled: %w", ctx.Err())
+	case errors.Is(err, errStepNotRecorded):
+		return err
 	}
+	logf.FromContext(ctx).Info("Could not finish the steps after the handoff of RemediationRequest",
+		"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
 	return nil
 }
 
@@ -792,10 +851,50 @@ func (r *RemediationRequestReconciler) recoverHandoff(ctx context.Context, rr *r
 	case errors.Is(err, errStopped):
 		return reconcile.Result{}, true, nil
 	case err != nil:
-		res, err = r.retry(ctx, rr, err)
+		res, err = r.retryRecovery(ctx, rr, err)
 		return res, true, err
 	}
 	return res, done, nil
+}
+
+// handoffRecoveryGrace is how long after its deadline a replacement keeps retrying a recovery that fails for a
+// reason worth retrying (the Git host or the API server did not answer): its commit may be on the pull request
+// already, so the deadline alone does not end it, but the target is not held for as long as the failure lasts.
+const handoffRecoveryGrace = 15 * time.Minute
+
+// ReasonHandoffRecoveryFailed is the reason of NeedsIntervention when the recovery of a handoff kept failing
+// until handoffRecoveryGrace after the deadline: whether the handoff commit is on the pull request is unknown.
+const ReasonHandoffRecoveryFailed = "HandoffRecoveryFailed"
+
+// retryRecovery is retry for an error of recoverStep. Before the deadline, and for an error retry ends or
+// waits on (a pause, a final refusal, settings that cannot reach the repository), it is retry. Past the
+// deadline a failure worth retrying is retried, after the delay the host asked for (Retry-After, which the
+// deadline does not cut short) or with the error backoff, until handoffRecoveryGrace after the deadline; then
+// the request ends NeedsIntervention with ReasonHandoffRecoveryFailed, and its handoff Aborted (declineOnEnd).
+func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	err error) (reconcile.Result, error) {
+	_, _, final := refusal(err)
+	if rr.Status.Deadline == nil || !r.now().After(rr.Status.Deadline.Time) || final || ctx.Err() != nil ||
+		errors.Is(err, freshness.ErrPaused) || errors.Is(err, freshness.ErrRepositoryUnusable) ||
+		errors.Is(err, errTargetBranchChanged) || errors.Is(err, errRepositoryGone) {
+		return r.retry(ctx, rr, err)
+	}
+	left := rr.Status.Deadline.Add(handoffRecoveryGrace).Sub(r.now())
+	if left <= 0 {
+		logf.FromContext(ctx).Info("Could not recover the handoff of RemediationRequest before the grace ended",
+			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
+			ReasonHandoffRecoveryFailed, "The deadline passed and the branch could not be read to learn whether "+
+				"this request's commit is on the pull request it replaces; check the branch and the pull request"))
+	}
+	d := retryAfterOf(err)
+	if d <= 0 {
+		return reconcile.Result{}, err
+	}
+	d = min(d, max(left, stepDelay))
+	logf.FromContext(ctx).Info("Waiting before retrying the recovery of the handoff of RemediationRequest",
+		"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", d)
+	return reconcile.Result{RequeueAfter: d}, nil
 }
 
 // recoverStep is the look of recoverHandoff.
@@ -816,8 +915,11 @@ func (r *RemediationRequestReconciler) recoverStep(ctx context.Context, rr *reme
 	}
 	git, err := r.openPlanRepository(ctx, rr)
 	if err != nil {
-		// Settings that cannot reach the repository are the freshness check's to handle (NeedsIntervention).
-		return reconcile.Result{}, false, nil
+		// Returned, never dropped: the deadline check comes next, and a replacement whose commit may already be
+		// on the pull request must not expire because the repository could not be opened for one look.
+		// retryRecovery waits out a pause, ends settings that cannot reach the repository in NeedsIntervention,
+		// as the freshness check would, and retries the rest, past the deadline only for a grace.
+		return reconcile.Result{}, true, err
 	}
 	head, err := git.BranchHead(ctx, freshness.BranchName(rr))
 	switch {
@@ -872,7 +974,7 @@ func (r *RemediationRequestReconciler) handoffHolds(ctx context.Context, rr *rem
 // its pull request: an intent whose replacement is gone or ended without taking over is aborted, and a Pending
 // hint the analysis answered with a replacement is declined once every replacement that names it ended without
 // the handoff. A replacement Denied for its chain link (ChainLinkInvalid) is not counted: an invalid link takes
-// nothing, not even the hint. A read that fails decides nothing.
+// nothing, not even the hint. A read that fails decides nothing and is logged at Info.
 func (r *RemediationRequestReconciler) settleHandoff(ctx context.Context, upd *remediationv1alpha1.RemediationRequest) {
 	gaveUp := func(repl *remediationv1alpha1.RemediationRequest) bool {
 		return ended(repl.Status.Phase) && !tookOver(repl)
@@ -890,6 +992,12 @@ func (r *RemediationRequestReconciler) settleHandoff(ctx context.Context, upd *r
 		case apierrors.IsNotFound(err):
 			abortIntent(upd, ReasonHintHandoffAborted)
 		case err != nil:
+			// Decides nothing: the intent stands until a later look reads the replacement. A cancelled reconcile
+			// is not a failure worth a line.
+			if ctx.Err() == nil {
+				logf.FromContext(ctx).Info("Could not read the replacement of RemediationRequest",
+					"remediationRequest", client.ObjectKeyFromObject(upd), "replacement", to.Name, "error", err.Error())
+			}
 		case repl.UID != types.UID(to.UID):
 			abortIntent(upd, ReasonHintHandoffAborted)
 		case gaveUp(repl):

@@ -514,7 +514,8 @@ func TestRolloutCancelledWritesNothing(t *testing.T) {
 		}
 		return nil
 	}
-	if _, err := w.reconcile(t, ctx); !errors.Is(err, context.Canceled) {
+	// reconcile, not Reconcile: Reconcile returns nil on a cancellation (TestReconcileDoesNotReturnCancellationAsFailure).
+	if _, err := w.r.reconcile(ctx, reconcile.Request{NamespacedName: w.key}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 	rr := w.request(t)

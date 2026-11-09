@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -128,7 +130,14 @@ func (g *Git) AppendCommit(ctx context.Context, branch, expectedHead string, ch 
 	return sha, g.after("AppendCommit")
 }
 
-// UpdateChangeRequest replaces the title and body of an open change request.
+// The limits of the title and body of a change request, as the GitHub adapter enforces them.
+const (
+	maxTitleRunes = 256
+	maxBodyRunes  = 65536
+)
+
+// UpdateChangeRequest replaces the title and body of an open change request. An empty or too long title, a too
+// long body or text that is not UTF-8 is providers.ErrRejected, as the GitHub adapter refuses it.
 func (g *Git) UpdateChangeRequest(ctx context.Context, n int64, title, body string) error {
 	if err := g.before("UpdateChangeRequest"); err != nil {
 		return err
@@ -145,6 +154,12 @@ func (g *Git) UpdateChangeRequest(ctx context.Context, n int64, title, body stri
 	if cr.State != providers.ChangeRequestOpen {
 		g.mu.Unlock()
 		return fmt.Errorf("change request %d is %s: %w", n, cr.State, providers.ErrConflict)
+	}
+	// The rule of the GitHub adapter, after the open state like there: input the host would refuse is final.
+	if strings.TrimSpace(title) == "" || !utf8.ValidString(title) || utf8.RuneCountInString(title) > maxTitleRunes ||
+		!utf8.ValidString(body) || utf8.RuneCountInString(body) > maxBodyRunes {
+		g.mu.Unlock()
+		return fmt.Errorf("change request %d: title or body is empty, too long or not UTF-8: %w", n, providers.ErrRejected)
 	}
 	cr.Title, cr.Body = title, body
 	g.mu.Unlock()

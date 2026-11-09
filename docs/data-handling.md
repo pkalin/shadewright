@@ -55,7 +55,7 @@ What is kept: nothing is stored beyond the Incident's status (phase, the conditi
 
 | To | What | When |
 | --- | --- | --- |
-| `api.github.com` | Reads of the files and branch heads in the configured repository; a branch, one commit changing one value in one file, a pull request, and a close of that pull request. The App JWT (10 minutes) and an installation token scoped to that one repository, with four permissions | Only the executor, and only after a request is allowed and writes are not paused |
+| `api.github.com` | Reads of the files and branch heads in the configured repository; a branch, one commit changing one value in one file, a pull request, and a close of that pull request. The App JWT (10 minutes) and an installation token scoped to that one repository, with five permissions (`checks: write` since #539; the handoff writes of reviewer hints, a second commit, a rewritten title and body, a check run and a comment, are not enabled in the shipped binary) | Only the executor, and only after a request is allowed and writes are not paused |
 | Key Vault | The SHA-256 digest of the JWT to sign. The key stays in the vault | Each time a new installation token is needed |
 | Microsoft Entra ID | The projected ServiceAccount token, for a Key Vault token | Same |
 | The Kubernetes API | Reads and the writes listed in the [configuration reference](reference/configuration.md#namespaces-and-rolebindings) | Always |

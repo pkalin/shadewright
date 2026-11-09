@@ -12,7 +12,7 @@ The rule for everything below: no PATs, no client secrets, no long-lived API key
 
 In the cluster its ServiceAccount is read-only ([2.2.2](2-architecture.md#222-analyzer-permissions), the full list in [Configuration](../reference/configuration.md)). Of the RemediationPolicies it may only `get` the ones `--action-policies` names, by `resourceNames` (no `list` or `watch`, no rule without a name), so the context can show the model the bounds of the policy that will decide its proposal (3.3, [#493](https://github.com/pkalin/shadewright/issues/493)). Reading a policy decides nothing: the executor reads it again and decides (invariant 1).
 
-<span class="sw-status sw-built">built</span> (#537) It also reads the reviewer hints the executor stored in request status ([ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)), never the pull request comment itself, and writes nothing new for them (its replacement request is the create it already has): it cannot write request status, so it cannot forge a hint. It records the ID of the hint it handled in the Incident status it already writes (`status.handledHint`), and the executor's `get` on that Incident reads the `Analyzed` condition and that ID to learn a refusal (<span class="sw-status sw-built">built</span>, #538, code merged, not enabled in the binary (no flag) until #539; the analyzer reads the condition to decide nothing).
+<span class="sw-status sw-built">built</span> (#537) It also reads the reviewer hints the executor stored in request status ([ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)), never the pull request comment itself, and writes nothing new for them (its replacement request is the create it already has): it cannot write request status, so it cannot forge a hint. It records the ID of the hint it handled in the Incident status it already writes (`status.handledHint`), and the executor's `get` on that Incident reads the `Analyzed` condition and that ID to learn a refusal (<span class="sw-status sw-built">built</span>, #538, code merged, not enabled in the shipped binary (cmd/main.go never sets `ReviewerHints`); the analyzer reads the condition to decide nothing).
 
 **Why.** The analyzer talks to a model and writes records.
 
@@ -29,7 +29,7 @@ In the cluster its ServiceAccount is read-only ([2.2.2](2-architecture.md#222-an
 **The JWT and the token.**
 
 - The JWT is issued 60 seconds in the past and lives 10 minutes in total.
-- The token request names the one repository and the four permissions of section 8.4 (<span class="sw-status sw-planned">planned</span> a fifth, `checks: write`, for the merge gate of reviewer hints, [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)).
+- The token request names the one repository and the five permissions of section 8.4 (the fifth, `checks: write`, for the merge gate of reviewer hints, [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md), since #539; GitHub refuses a token request that names a permission the App lacks).
 - The response is refused unless it lists exactly that repository.
 - The token is cached until 5 minutes before it expires, and concurrent callers share one refresh.
 - The token prints as a placeholder, never as its value (`internal/providers/github/auth`).
@@ -86,7 +86,7 @@ In the cluster its ServiceAccount is read-only ([2.2.2](2-architecture.md#222-an
 
 | Topic | Detail |
 | --- | --- |
-| Installation token | One hour; checked to list only the one repository; requests the four permissions of section 8.4 |
+| Installation token | One hour; checked to list only the one repository; requests the five permissions of section 8.4 |
 | JWT | Issued 60 seconds in the past, 10 minutes in total |
 | Token cache | Until 5 minutes before expiry; one shared refresh |
 | Sign call deadline | 30 seconds, or the caller's if shorter; 10 seconds per try |

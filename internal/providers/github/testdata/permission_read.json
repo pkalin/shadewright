@@ -1,0 +1,12 @@
+{
+ "permission": "read",
+ "role_name": "read",
+ "user": {
+  "login": "reviewer-one",
+  "id": 1234567,
+  "node_id": "MDQ6VXNlcjEyMzQ1Njc=",
+  "type": "User",
+  "site_admin": false,
+  "role_name": "read"
+ }
+}

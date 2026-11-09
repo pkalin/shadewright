@@ -1,0 +1,19 @@
+[
+ {
+  "id": 80001,
+  "node_id": "PRR_kwDO80001",
+  "user": {
+   "login": "reviewer-one",
+   "id": 1234567,
+   "type": "User",
+   "site_admin": false
+  },
+  "body": "LEAKED-BODY-MARKER",
+  "state": "COMMENTED",
+  "html_url": "https://github.com/evil/fleet/pull/12#pullrequestreview-80001",
+  "pull_request_url": "https://api.github.com/repos/evil/fleet/pulls/12",
+  "author_association": "MEMBER",
+  "commit_id": "7777777777777777777777777777777777777777",
+  "submitted_at": "2026-11-08T09:00:00Z"
+ }
+]

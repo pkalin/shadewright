@@ -36,6 +36,12 @@ limitations under the License.
 //   - ReadFile resolves the path through the trees of the commit, refuses anything that is not a regular file,
 //     checks the size before downloading the blob, reads at most MaxFileBytes+1 bytes and checks the content
 //     against its Git hash.
+//   - The [providers.FeedbackSource] methods (ADR-0028) only read. ListComments and ListReviews read at most
+//     providers.MaxFeedbackPages pages of 30 and keep at most providers.MaxFeedbackBytes of bodies, each cut to
+//     providers.MaxFeedbackBodyBytes and marked when cut; an item whose URLs name another repository, another
+//     pull request or an issue fails the whole look. CanWrite reads the base permission of a person (admin,
+//     maintain or write accepted; anything else and a 404 refused) and refuses an answer for another account
+//     ID; bots and Apps are refused without a request.
 //
 // Writes are idempotent: creating a branch that already exists at the same commit succeeds, and opening a
 // change request for a head branch that already has an open one returns that one.

@@ -36,10 +36,14 @@ limitations under the License.
 //   - ReadFile resolves the path through the trees of the commit, refuses anything that is not a regular file,
 //     checks the size before downloading the blob, reads at most MaxFileBytes+1 bytes and checks the content
 //     against its Git hash.
-//   - The [providers.FeedbackSource] methods (ADR-0028) only read. ListComments and ListReviews read at most
-//     providers.MaxFeedbackPages pages of 30 and keep at most providers.MaxFeedbackBytes of bodies, each cut to
-//     providers.MaxFeedbackBodyBytes and marked when cut; an item whose URLs name another repository, another
-//     pull request or an issue fails the whole look. CanWrite reads the base permission of a person (admin,
+//   - The [providers.FeedbackSource] methods (ADR-0028) only read. ListComments and ListReviews first check
+//     that the pull request is a Shadewright one to the target branch, then read at most
+//     providers.MaxFeedbackPages pages of 30, each within its own deadline, decoding one item at a time and
+//     stopping once providers.MaxFeedbackBytes of bodies are kept, each cut to providers.MaxFeedbackBodyBytes
+//     and marked when cut. A cursor (page, last ID, and for comments the since of the sweep, which never
+//     decreases) carries each look on from the last. A malformed item is skipped and counted; an item whose
+//     URLs name another repository, another pull request or an issue fails the whole look, without a retry.
+//     CanWrite reads the base permission of a person (admin,
 //     maintain or write accepted; anything else and a 404 refused) and refuses an answer for another account
 //     ID; bots and Apps are refused without a request.
 //

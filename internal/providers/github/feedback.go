@@ -18,7 +18,10 @@ package github
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/url"
@@ -37,13 +40,19 @@ const (
 	opPermission   = "GitHub author permission"
 )
 
-// feedbackPerPage is the page size of a feedback look. GitHub allows 100, but a body may be 65,536 characters,
-// up to about 384 KiB once JSON-escaped, and a page must always fit in feedbackPageLimit: otherwise anyone who
-// can comment could make every look fail with a page that is too large.
+// feedbackPerPage is the page size of a feedback look, and feedbackPageLimit the most bytes read of one page.
+// A body may be 65,536 characters, up to about 384 KiB once JSON-escaped, so a page of feedbackPerPage items
+// always fits: otherwise anyone who can comment could make every look fail with a page that is too large.
+// A page is decoded one item at a time and each body is cut as it is decoded, so a look holds at most
+// MaxFeedbackBytes of bodies plus one item, however many bytes it reads.
 const (
 	feedbackPerPage   = 30
 	feedbackPageLimit = feedbackPerPage * (400 << 10)
 )
+
+// clockMargin is subtracted from the host's time when a sweep of comments began, to make the next sweep's
+// since: GitHub's times are whole seconds.
+const clockMargin = time.Second
 
 // loginPattern bounds a login before it goes into a path. GitHub logins are shorter and use fewer characters;
 // this is the pattern of the API's HintAuthor.login.
@@ -57,38 +66,50 @@ type userJSON struct {
 	Type  string `json:"type"`
 }
 
+// Times are strings, parsed per item, so a malformed time makes that item malformed instead of the page.
 type commentJSON struct {
 	ID        int64     `json:"id"`
 	HTMLURL   string    `json:"html_url"`
 	IssueURL  string    `json:"issue_url"`
 	User      *userJSON `json:"user"`
 	Body      *string   `json:"body"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	CreatedAt string    `json:"created_at"`
+	UpdatedAt string    `json:"updated_at"`
 	// PerformedViaGitHubApp is set when an App posted the comment, also for a user.
 	PerformedViaGitHubApp *struct{} `json:"performed_via_github_app"`
 }
 
 type reviewJSON struct {
-	ID             int64      `json:"id"`
-	HTMLURL        string     `json:"html_url"`
-	PullRequestURL string     `json:"pull_request_url"`
-	User           *userJSON  `json:"user"`
-	Body           *string    `json:"body"`
-	State          string     `json:"state"`
-	CommitID       string     `json:"commit_id"`
-	SubmittedAt    *time.Time `json:"submitted_at"`
+	ID             int64     `json:"id"`
+	HTMLURL        string    `json:"html_url"`
+	PullRequestURL string    `json:"pull_request_url"`
+	User           *userJSON `json:"user"`
+	Body           *string   `json:"body"`
+	State          string    `json:"state"`
+	CommitID       *string   `json:"commit_id"`
+	SubmittedAt    *string   `json:"submitted_at"`
 }
 
-// reviewStates are the states of a submitted review. PENDING is a draft only its author sees, and is skipped.
+// reviewStates are the states of a submitted review. PENDING is a draft only its author sees, and is ignored.
 // A review of a commit that is gone may have no commit_id.
 var reviewStates = map[string]bool{"APPROVED": true, "CHANGES_REQUESTED": true, "COMMENTED": true, "DISMISSED": true}
 
-// author converts the user of an item. A missing user (a deleted account) or a malformed one is refused, so
-// an item is never attributed to nobody.
-func author(op string, u *userJSON, viaApp bool) (providers.FeedbackAuthor, error) {
+// errForeignItem refuses a whole look: an item names another repository, pull request or an issue.
+var errForeignItem = fmt.Errorf("an item of another repository or pull request: %w", errStreamRefused)
+
+// item is one decoded element of a page.
+type item struct {
+	id int64
+	// malformed items are counted as skipped; ignored ones (a pending review) are not counted.
+	malformed, ignored bool
+	fb                 providers.Feedback
+}
+
+// author converts the user of an item. A missing or malformed user is an error, so an item is never
+// attributed to nobody.
+func author(u *userJSON, viaApp bool) (providers.FeedbackAuthor, bool) {
 	if u == nil || u.ID < 1 || !loginPattern.MatchString(strings.TrimSuffix(u.Login, "[bot]")) {
-		return providers.FeedbackAuthor{}, errors.New(op + ": GitHub returned an item without a valid author")
+		return providers.FeedbackAuthor{}, false
 	}
 	a := providers.FeedbackAuthor{ID: u.ID, Login: u.Login, Kind: providers.AuthorPerson}
 	switch {
@@ -97,7 +118,7 @@ func author(op string, u *userJSON, viaApp bool) (providers.FeedbackAuthor, erro
 	case viaApp:
 		a.Kind = providers.AuthorApp
 	}
-	return a, nil
+	return a, true
 }
 
 // cutBody bounds a body to providers.MaxFeedbackBodyBytes without splitting a rune, and reports a cut. Invalid
@@ -114,176 +135,270 @@ func cutBody(s string) (string, bool) {
 	return s[:cut], true
 }
 
-// look collects the items of one look within its bounds.
-type look struct {
-	since time.Time
-	page  providers.FeedbackPage
-	bytes int
-}
-
-// add keeps item unless the byte bound is reached, which ends the look as incomplete.
-func (l *look) add(item providers.Feedback) bool {
-	if l.bytes+len(item.Body) > providers.MaxFeedbackBytes {
-		return false
-	}
-	l.bytes += len(item.Body)
-	l.page.Items = append(l.page.Items, item)
-	return true
-}
-
-// finish sets Complete and Resume. An incomplete look resumes no later than the creation of its last item:
-// an item past the bound was created after it, and updated no earlier than it was created.
-func (l *look) finish(complete bool) providers.FeedbackPage {
-	l.page.Complete = complete
-	l.page.Resume = l.since
-	for _, it := range l.page.Items {
-		if it.UpdatedAt.After(l.page.Resume) {
-			l.page.Resume = it.UpdatedAt
-		}
-	}
-	if n := len(l.page.Items); !complete && n > 0 {
-		if last := l.page.Items[n-1].CreatedAt; last.Before(l.page.Resume) {
-			l.page.Resume = last
-		}
-	}
-	return l.page
-}
-
-// listPages reads up to providers.MaxFeedbackPages pages of path, handing each decoded page to each. each
-// returns false to stop the look as incomplete. full reports whether a page held feedbackPerPage items.
-func (p *Provider) listPages(ctx context.Context, op, path string, query url.Values,
-	each func(r response) (cont, full bool, err error)) (bool, error) {
-	for page := 1; page <= providers.MaxFeedbackPages; page++ {
-		q := url.Values{paramPerPage: {strconv.Itoa(feedbackPerPage)}, "page": {strconv.Itoa(page)}}
-		maps.Copy(q, query)
-		r, err := p.do(ctx, call{op: op, method: http.MethodGet, path: path, query: q, limit: feedbackPageLimit})
-		if err != nil {
-			return false, err
-		}
-		if !r.ok() {
-			return false, statusError(op, r.status)
-		}
-		cont, full, err := each(r)
-		switch {
-		case err != nil:
-			return false, err
-		case !cont:
-			return false, nil
-		case !full:
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// ListComments returns the conversation comments of pull request number updated at or after since, oldest
-// first, within the bounds of one look. A comment of another repository, or of another issue or pull request,
-// fails the whole look.
-func (p *Provider) ListComments(ctx context.Context, number int64, since time.Time) (providers.FeedbackPage, error) {
-	if number < 1 {
-		return providers.FeedbackPage{}, errors.New(opListComments + ": number must be positive")
-	}
-	ctx, cancel := p.withTimeout(ctx)
-	defer cancel()
-	num := strconv.FormatInt(number, 10)
-	wantIssue := apiBase + "/repos/" + p.repo.String() + "/issues/" + num
-	wantHTML := "https://github.com/" + p.repo.String() + "/pull/" + num + "#"
-	var query url.Values
-	if !since.IsZero() {
-		query = url.Values{"since": {since.UTC().Format(time.RFC3339)}}
-	}
-	l := look{since: since}
-	complete, err := p.listPages(ctx, opListComments, "/issues/"+num+"/comments", query,
-		func(r response) (bool, bool, error) {
-			var page []commentJSON
-			if err := decode(opListComments, r, &page); err != nil {
-				return false, false, err
-			}
-			for _, c := range page {
-				// The issue URL names the repository and the number; the HTML URL proves a pull request.
-				if !strings.EqualFold(c.IssueURL, wantIssue) || !hasPrefixFold(c.HTMLURL, wantHTML) {
-					return false, false, errors.New(opListComments + ": GitHub returned a comment of another repository or pull request")
-				}
-				if c.ID < 1 || c.CreatedAt.IsZero() || c.UpdatedAt.Before(c.CreatedAt) {
-					return false, false, errors.New(opListComments + ": GitHub returned an unexpected comment")
-				}
-				a, err := author(opListComments, c.User, c.PerformedViaGitHubApp != nil)
-				if err != nil {
-					return false, false, err
-				}
-				item := providers.Feedback{Kind: providers.FeedbackComment, ID: c.ID, Author: a,
-					CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt}
-				if c.Body != nil {
-					item.Body, item.Truncated = cutBody(*c.Body)
-				}
-				if !l.add(item) {
-					return false, false, nil
-				}
-			}
-			return true, len(page) >= feedbackPerPage, nil
-		})
-	if err != nil {
-		return providers.FeedbackPage{}, err
-	}
-	return l.finish(complete), nil
-}
-
-// ListReviews returns the bodies of the submitted reviews of pull request number submitted at or after since,
-// oldest first, within the bounds of one look. GitHub has no since for reviews, so pages are read from the
-// first one and older reviews are skipped here; reviews past the page bound are reported as incomplete.
-func (p *Provider) ListReviews(ctx context.Context, number int64, since time.Time) (providers.FeedbackPage, error) {
-	if number < 1 {
-		return providers.FeedbackPage{}, errors.New(opListReviews + ": number must be positive")
-	}
-	ctx, cancel := p.withTimeout(ctx)
-	defer cancel()
-	num := strconv.FormatInt(number, 10)
-	wantPull := apiBase + "/repos/" + p.repo.String() + "/pulls/" + num
-	wantHTML := "https://github.com/" + p.repo.String() + "/pull/" + num + "#"
-	l := look{since: since}
-	complete, err := p.listPages(ctx, opListReviews, "/pulls/"+num+"/reviews", nil,
-		func(r response) (bool, bool, error) {
-			var page []reviewJSON
-			if err := decode(opListReviews, r, &page); err != nil {
-				return false, false, err
-			}
-			for _, rv := range page {
-				if !strings.EqualFold(rv.PullRequestURL, wantPull) || !hasPrefixFold(rv.HTMLURL, wantHTML) {
-					return false, false, errors.New(opListReviews + ": GitHub returned a review of another repository or pull request")
-				}
-				if rv.State == "PENDING" {
-					continue
-				}
-				if rv.ID < 1 || !reviewStates[rv.State] || rv.SubmittedAt == nil ||
-					(rv.CommitID != "" && !validSHA(rv.CommitID)) {
-					return false, false, errors.New(opListReviews + ": GitHub returned an unexpected review")
-				}
-				if rv.SubmittedAt.Before(since) {
-					continue
-				}
-				a, err := author(opListReviews, rv.User, false)
-				if err != nil {
-					return false, false, err
-				}
-				item := providers.Feedback{Kind: providers.FeedbackReview, ID: rv.ID, Author: a,
-					CreatedAt: *rv.SubmittedAt, UpdatedAt: *rv.SubmittedAt, ReviewState: rv.State, CommitID: rv.CommitID}
-				if rv.Body != nil {
-					item.Body, item.Truncated = cutBody(*rv.Body)
-				}
-				if !l.add(item) {
-					return false, false, nil
-				}
-			}
-			return true, len(page) >= feedbackPerPage, nil
-		})
-	if err != nil {
-		return providers.FeedbackPage{}, err
-	}
-	return l.finish(complete), nil
+func parseTime(s string) (time.Time, bool) {
+	t, err := time.Parse(time.RFC3339, s)
+	return t, err == nil && !t.IsZero()
 }
 
 func hasPrefixFold(s, prefix string) bool {
 	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
+}
+
+// pageResult is what decodePage kept of one page.
+type pageResult struct {
+	items []item
+	// n is how many elements the page held, or had been decoded when the byte budget stopped it.
+	n int
+	// stopped is true when the byte budget ended the page before its last element.
+	stopped bool
+}
+
+// decodePage reads a JSON array one element at a time. An element that is not a T is a malformed item; one
+// that conv reports foreign refuses the page. Elements with an ID up to afterID are dropped, and keeping stops
+// before the bodies kept would pass budget, without reading further.
+func decodePage[T any](r io.Reader, budget int, afterID int64, conv func(T) (item, bool)) (pageResult, error) {
+	var res pageResult
+	dec := json.NewDecoder(r)
+	if tok, err := dec.Token(); err != nil {
+		return res, err
+	} else if d, ok := tok.(json.Delim); !ok || d != '[' {
+		return res, &json.SyntaxError{}
+	}
+	used := 0
+	for dec.More() {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return res, err
+		}
+		res.n++
+		var v T
+		if err := json.Unmarshal(raw, &v); err != nil {
+			res.items = append(res.items, item{malformed: true})
+			continue
+		}
+		it, own := conv(v)
+		switch {
+		case !own:
+			return res, errForeignItem
+		case it.id >= 1 && it.id <= afterID:
+			continue
+		case !it.malformed && !it.ignored:
+			if used+len(it.fb.Body) > budget {
+				res.stopped = true
+				return res, nil
+			}
+			used += len(it.fb.Body)
+		}
+		res.items = append(res.items, it)
+	}
+	if _, err := dec.Token(); err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+// lookResult is one look over a list.
+type lookResult struct {
+	page providers.FeedbackPage
+	// ended is true when the look read a page that was not full: nothing more is there now.
+	ended    bool
+	lastPage int
+	afterID  int64
+	// started is the host's time of the look's first response; zero when it sent none.
+	started time.Time
+}
+
+// look reads up to providers.MaxFeedbackPages pages of path from cursor's page, each within its own deadline,
+// so a slow page does not take the time of the pages before it. It returns the items after cursor.AfterID.
+func (p *Provider) look(ctx context.Context, op, path string, query url.Values, cur providers.FeedbackCursor,
+	decode func(r io.Reader, budget int, afterID int64) (pageResult, error)) (lookResult, error) {
+	first := max(cur.Page, 1)
+	res := lookResult{lastPage: first, afterID: cur.AfterID}
+	budget := providers.MaxFeedbackBytes
+	for page := first; page < first+providers.MaxFeedbackPages; page++ {
+		q := url.Values{paramPerPage: {strconv.Itoa(feedbackPerPage)}, "page": {strconv.Itoa(page)}}
+		maps.Copy(q, query)
+		var pr pageResult
+		pctx, cancel := p.withTimeout(ctx)
+		r, err := p.do(pctx, call{op: op, method: http.MethodGet, path: path, query: q, limit: feedbackPageLimit,
+			stream: func(body io.Reader) error {
+				var err error
+				pr, err = decode(body, budget, res.afterID)
+				if errors.Is(err, errForeignItem) {
+					return fmt.Errorf("%s: GitHub returned %w", op, err)
+				}
+				return err
+			}})
+		cancel()
+		if err != nil {
+			return lookResult{}, err
+		}
+		if !r.ok() {
+			return lookResult{}, statusError(op, r.status)
+		}
+		if page == first {
+			if t, err := http.ParseTime(r.header.Get("Date")); err == nil {
+				res.started = t
+			}
+		}
+		res.lastPage = page
+		for _, it := range pr.items {
+			res.afterID = max(res.afterID, it.id)
+			switch {
+			case it.malformed:
+				res.page.Skipped++
+			case !it.ignored:
+				budget -= len(it.fb.Body)
+				res.page.Items = append(res.page.Items, it.fb)
+			}
+		}
+		if pr.stopped {
+			return res, nil
+		}
+		if pr.n < feedbackPerPage {
+			res.ended = true
+			return res, nil
+		}
+	}
+	return res, nil
+}
+
+// ownPull refuses a pull request that is not a Shadewright one to the target branch of this repository,
+// within its own deadline.
+func (p *Provider) ownPull(ctx context.Context, op string, number int64) error {
+	ctx, cancel := p.withTimeout(ctx)
+	defer cancel()
+	_, err := p.pullFor(ctx, op, number)
+	return err
+}
+
+func validCursor(c providers.FeedbackCursor) bool {
+	return c.Page >= 0 && c.AfterID >= 0
+}
+
+// ListComments returns the conversation comments of pull request number, oldest first, within the bounds of
+// one look. A sweep asks for the comments updated since cursor.Since and pages through them across looks;
+// when it reaches the end, the next sweep asks for those updated since this one began (by GitHub's clock), so
+// an edit made during a sweep is read by the next one, and Since never decreases. A pull request that is not
+// Shadewright's is refused, and so is a look holding a comment of another repository, issue or pull request.
+func (p *Provider) ListComments(ctx context.Context, number int64, cur providers.FeedbackCursor) (providers.FeedbackPage, error) {
+	if number < 1 || !validCursor(cur) {
+		return providers.FeedbackPage{}, errors.New(opListComments + ": number or cursor is invalid")
+	}
+	if err := p.ownPull(ctx, opListComments, number); err != nil {
+		return providers.FeedbackPage{}, err
+	}
+	num := strconv.FormatInt(number, 10)
+	wantIssue := apiBase + "/repos/" + p.repo.String() + "/issues/" + num
+	wantHTML := "https://github.com/" + p.repo.String() + "/pull/" + num + "#"
+	conv := func(c commentJSON) (item, bool) {
+		// The issue URL names the repository and the number; the HTML URL proves a pull request.
+		if !strings.EqualFold(c.IssueURL, wantIssue) || !hasPrefixFold(c.HTMLURL, wantHTML) {
+			return item{}, false
+		}
+		it := item{id: c.ID, malformed: true}
+		created, okC := parseTime(c.CreatedAt)
+		updated, okU := parseTime(c.UpdatedAt)
+		a, okA := author(c.User, c.PerformedViaGitHubApp != nil)
+		if c.ID < 1 || !okC || !okU || updated.Before(created) || !okA {
+			return it, true
+		}
+		it.malformed = false
+		it.fb = providers.Feedback{Kind: providers.FeedbackComment, ID: c.ID, Author: a,
+			CreatedAt: created, UpdatedAt: updated}
+		if c.Body != nil {
+			it.fb.Body, it.fb.Truncated = cutBody(*c.Body)
+		}
+		return it, true
+	}
+	var query url.Values
+	if !cur.Since.IsZero() {
+		query = url.Values{"since": {cur.Since.UTC().Format(time.RFC3339)}}
+	}
+	res, err := p.look(ctx, opListComments, "/issues/"+num+"/comments", query, cur,
+		func(r io.Reader, budget int, afterID int64) (pageResult, error) {
+			return decodePage(r, budget, afterID, conv)
+		})
+	if err != nil {
+		return providers.FeedbackPage{}, err
+	}
+	// Without a Date header the sweep has no start, and the next sweep keeps the same since: it reads again,
+	// never skips.
+	start := cur.SweepStart
+	if cur.Page == 0 {
+		start = res.started
+	}
+	out := res.page
+	if res.ended {
+		out.Complete = true
+		out.Next = providers.FeedbackCursor{Since: cur.Since}
+		if s := start.Add(-clockMargin); !start.IsZero() && s.After(cur.Since) {
+			out.Next.Since = s
+		}
+		return out, nil
+	}
+	out.Next = providers.FeedbackCursor{Since: cur.Since, Page: res.lastPage, AfterID: res.afterID, SweepStart: start}
+	return out, nil
+}
+
+// ListReviews returns the bodies of the submitted reviews of pull request number after cursor, oldest first,
+// within the bounds of one look. GitHub lists reviews in the order they were created and has no since, so the
+// cursor is a page and the last review ID returned: each look goes on from there, and a look that reached the
+// end starts the next on that same page, to see the reviews added to it. A pull request that is not
+// Shadewright's is refused, and so is a look holding a review of another repository or pull request.
+func (p *Provider) ListReviews(ctx context.Context, number int64, cur providers.FeedbackCursor) (providers.FeedbackPage, error) {
+	if number < 1 || !validCursor(cur) {
+		return providers.FeedbackPage{}, errors.New(opListReviews + ": number or cursor is invalid")
+	}
+	if err := p.ownPull(ctx, opListReviews, number); err != nil {
+		return providers.FeedbackPage{}, err
+	}
+	num := strconv.FormatInt(number, 10)
+	wantPull := apiBase + "/repos/" + p.repo.String() + "/pulls/" + num
+	wantHTML := "https://github.com/" + p.repo.String() + "/pull/" + num + "#"
+	conv := func(rv reviewJSON) (item, bool) {
+		if !strings.EqualFold(rv.PullRequestURL, wantPull) || !hasPrefixFold(rv.HTMLURL, wantHTML) {
+			return item{}, false
+		}
+		it := item{id: rv.ID, malformed: true}
+		if rv.State == "PENDING" {
+			// A draft gets its ID when it is started, so a later submit could fall behind the cursor; only the
+			// App's own drafts are visible to it, and it writes none.
+			it.malformed, it.ignored = false, true
+			return it, true
+		}
+		var submitted time.Time
+		ok := rv.SubmittedAt != nil
+		if ok {
+			submitted, ok = parseTime(*rv.SubmittedAt)
+		}
+		commit := ""
+		if rv.CommitID != nil {
+			commit = *rv.CommitID
+		}
+		a, okA := author(rv.User, false)
+		if rv.ID < 1 || !reviewStates[rv.State] || !ok || (commit != "" && !validSHA(commit)) || !okA {
+			return it, true
+		}
+		it.malformed = false
+		it.fb = providers.Feedback{Kind: providers.FeedbackReview, ID: rv.ID, Author: a,
+			CreatedAt: submitted, UpdatedAt: submitted, ReviewState: rv.State, CommitID: commit}
+		if rv.Body != nil {
+			it.fb.Body, it.fb.Truncated = cutBody(*rv.Body)
+		}
+		return it, true
+	}
+	res, err := p.look(ctx, opListReviews, "/pulls/"+num+"/reviews", nil, cur,
+		func(r io.Reader, budget int, afterID int64) (pageResult, error) {
+			return decodePage(r, budget, afterID, conv)
+		})
+	if err != nil {
+		return providers.FeedbackPage{}, err
+	}
+	out := res.page
+	out.Complete = res.ended
+	out.Next = providers.FeedbackCursor{Page: res.lastPage, AfterID: res.afterID}
+	return out, nil
 }
 
 // writePermissions are the values of the base permission field that may write. GitHub reports maintain and

@@ -226,7 +226,14 @@ type call struct {
 	limit  int64
 	// graphQL sends the call to the GraphQL endpoint instead of path.
 	graphQL bool
+	// stream, when set, reads a 2xx body itself instead of buffering it whole: it gets at most limit+1 bytes
+	// and is called again from the start on each attempt. An error wrapping errStreamRefused is final and
+	// returned as is; a JSON syntax error is "not valid JSON"; any other error is a transport failure.
+	stream func(io.Reader) error
 }
+
+// errStreamRefused marks an error of a call's stream that refuses the content: final, never retried.
+var errStreamRefused = errors.New("refused")
 
 // response is a response whose status is not a transient failure. body is read only for 2xx.
 type response struct {
@@ -346,6 +353,9 @@ func (p *Provider) once(ctx context.Context, c call) (response, error) {
 		if limit <= 0 {
 			limit = maxJSONBody
 		}
+		if c.stream != nil {
+			return p.readStream(ctx, c, resp, limit)
+		}
 		data, err := readBounded(resp, limit)
 		if errors.Is(err, errBodyTooLarge) {
 			return response{}, fmt.Errorf("%s: %w", c.op, errBodyTooLarge)
@@ -369,6 +379,27 @@ func (p *Provider) once(ctx context.Context, c call) (response, error) {
 		}
 	}
 	return response{status: code}, nil
+}
+
+// readStream hands a 2xx body to the call's stream, bounded to limit+1 bytes, and classifies its error.
+func (p *Provider) readStream(ctx context.Context, c call, resp *http.Response, limit int64) (response, error) {
+	if resp.ContentLength > limit {
+		return response{}, fmt.Errorf("%s: %w", c.op, errBodyTooLarge)
+	}
+	lr := &io.LimitedReader{R: resp.Body, N: limit + 1}
+	err := c.stream(lr)
+	var syntax *json.SyntaxError
+	switch {
+	case lr.N <= 0:
+		return response{}, fmt.Errorf("%s: %w", c.op, errBodyTooLarge)
+	case err == nil:
+		return response{status: resp.StatusCode, header: resp.Header}, nil
+	case errors.Is(err, errStreamRefused):
+		return response{}, err
+	case errors.As(err, &syntax):
+		return response{}, fmt.Errorf("%s: GitHub response is not valid JSON", c.op)
+	}
+	return response{}, p.transportError(ctx, c.op, err)
 }
 
 func readBounded(resp *http.Response, limit int64) ([]byte, error) {

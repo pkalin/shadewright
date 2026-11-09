@@ -17,13 +17,16 @@ limitations under the License.
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,14 +39,22 @@ import (
 const (
 	commentsPath = "/issues/12/comments"
 	reviewsPath  = "/pulls/12/reviews"
+	pullPath     = "/pulls/12"
 	permPath     = "/collaborators/reviewer-one/permission"
 	prNumber     = 12
+	hDate        = "Date"
 )
 
 var (
 	since    = time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
 	reviewer = providers.FeedbackAuthor{ID: 1234567, Login: "reviewer-one", Kind: providers.AuthorPerson}
+	// hostNow is GitHub's clock in the Date header of the first page of a sweep.
+	hostNow = time.Date(2026, 11, 9, 8, 0, 0, 0, time.UTC)
+	start   = providers.FeedbackCursor{Since: since}
 )
+
+// ownPR is the read that proves the pull request is a Shadewright one; every look starts with it.
+func ownPR() step { return get(pullPath, "pull_open.json") }
 
 func pageQuery(page int) string {
 	return "page=" + strconv.Itoa(page) + "&per_page=" + strconv.Itoa(feedbackPerPage)
@@ -53,10 +64,10 @@ func commentsQuery(page int) string {
 	return pageQuery(page) + "&since=2026-11-08T10%3A00%3A00Z"
 }
 
-// recordedComment returns the first comment of comments_mixed.json as a map, to build pages from.
-func recordedComment(t *testing.T) map[string]any {
+// recorded returns the first element of a recorded list, to build pages from.
+func recorded(t *testing.T, file string) map[string]any {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join("testdata", "comments_mixed.json"))
+	data, err := os.ReadFile(filepath.Join("testdata", file))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,10 +78,19 @@ func recordedComment(t *testing.T) map[string]any {
 	return all[0]
 }
 
+func marshal(t *testing.T, v any) string {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
 // commentPage is n copies of the recorded comment, one minute apart from first, with IDs from id and body.
 func commentPage(t *testing.T, n int, id int64, first time.Time, body string) string {
 	t.Helper()
-	base := recordedComment(t)
+	base := recorded(t, "comments_mixed.json")
 	page := make([]map[string]any, n)
 	for i := range page {
 		c := maps.Clone(base)
@@ -80,21 +100,50 @@ func commentPage(t *testing.T, n int, id int64, first time.Time, body string) st
 		c["html_url"] = "https://github.com/acme/fleet/pull/12#issuecomment-" + strconv.FormatInt(cid, 10)
 		page[i] = c
 	}
-	data, err := json.Marshal(page)
-	if err != nil {
-		t.Fatal(err)
+	return marshal(t, page)
+}
+
+// reviewPage is n copies of the recorded review, with IDs from id.
+func reviewPage(t *testing.T, n int, id int64) string {
+	t.Helper()
+	base := recorded(t, "reviews.json")
+	page := make([]map[string]any, n)
+	for i := range page {
+		r := maps.Clone(base)
+		rid := id + int64(i)
+		r["id"] = rid
+		r["html_url"] = "https://github.com/acme/fleet/pull/12#pullrequestreview-" + strconv.FormatInt(rid, 10)
+		page[i] = r
 	}
-	return string(data)
+	return marshal(t, page)
 }
 
 func commentsStep(page int, raw string) step {
 	return step{method: http.MethodGet, path: commentsPath, query: commentsQuery(page), status: http.StatusOK, raw: raw}
 }
 
+func reviewsStep(page int, raw string) step {
+	return step{method: http.MethodGet, path: reviewsPath, query: pageQuery(page), status: http.StatusOK, raw: raw}
+}
+
+// dated sets GitHub's Date header on a step.
+func dated(s step) step {
+	s.header = map[string]string{hDate: hostNow.Format(http.TimeFormat)}
+	return s
+}
+
+func ids(items []providers.Feedback) []int64 {
+	out := make([]int64, len(items))
+	for i, it := range items {
+		out[i] = it.ID
+	}
+	return out
+}
+
 func TestListCommentsFlagsBotsAndApps(t *testing.T) {
-	h := newHarness(t, step{method: http.MethodGet, path: commentsPath, query: commentsQuery(1),
-		status: http.StatusOK, file: "comments_mixed.json"})
-	got, err := h.p.ListComments(ctx, prNumber, since)
+	h := newHarness(t, ownPR(), dated(step{method: http.MethodGet, path: commentsPath, query: commentsQuery(1),
+		status: http.StatusOK, file: "comments_mixed.json"}))
+	got, err := h.p.ListComments(ctx, prNumber, start)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,57 +165,100 @@ func TestListCommentsFlagsBotsAndApps(t *testing.T) {
 	if first.ID != 3201234567 || !strings.HasPrefix(first.Body, "/shadewright reanalyze: the leak") || first.Truncated {
 		t.Errorf("first item = %+v", first)
 	}
-	// A short page is the last one; Resume is the latest update seen.
-	if !got.Complete || !got.Resume.Equal(time.Date(2026, 11, 8, 10, 20, 0, 0, time.UTC)) {
-		t.Errorf("complete %v, resume %v", got.Complete, got.Resume)
+	// A short page ends the sweep; the next asks for what changed since GitHub's clock at its start.
+	wantNext := providers.FeedbackCursor{Since: hostNow.Add(-clockMargin)}
+	if !got.Complete || got.Next != wantNext {
+		t.Errorf("complete %v, next %+v", got.Complete, got.Next)
 	}
 }
 
-func TestListCommentsPagingStopsAtTheBound(t *testing.T) {
-	steps := make([]step, 0, providers.MaxFeedbackPages)
+func TestListCommentsPagingStopsAtTheBoundAndGoesOn(t *testing.T) {
+	steps := []step{ownPR()}
 	for page := 1; page <= providers.MaxFeedbackPages; page++ {
-		first := since.Add(time.Duration(page) * time.Hour)
-		steps = append(steps, commentsStep(page, commentPage(t, feedbackPerPage, int64(page*1000), first, "ok")))
+		s := commentsStep(page, commentPage(t, feedbackPerPage, int64(page*1000), since.Add(time.Duration(page)*time.Hour), "ok"))
+		if page == 1 {
+			s = dated(s)
+		}
+		steps = append(steps, s)
 	}
-	h := newHarness(t, steps...) // a sixth request fails the script
-	got, err := h.p.ListComments(ctx, prNumber, since)
+	h := newHarness(t, steps...) // a sixth page fails the script
+	got, err := h.p.ListComments(ctx, prNumber, start)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got.Items) != providers.MaxFeedbackPages*feedbackPerPage || got.Complete {
 		t.Fatalf("got %d items, complete %v", len(got.Items), got.Complete)
 	}
-	last := got.Items[len(got.Items)-1]
-	if !got.Resume.Equal(last.CreatedAt) {
-		t.Errorf("resume %v, want the creation of the last item %v", got.Resume, last.CreatedAt)
+	lastID := got.Items[len(got.Items)-1].ID
+	want := providers.FeedbackCursor{Since: since, Page: providers.MaxFeedbackPages, AfterID: lastID, SweepStart: hostNow}
+	if got.Next != want {
+		t.Fatalf("next %+v, want %+v", got.Next, want)
 	}
-}
 
-func TestListCommentsResumeNeverPassesAnUnreadComment(t *testing.T) {
-	// The first comment of the last page was edited late: an incomplete look must not resume after it.
-	steps := make([]step, 0, providers.MaxFeedbackPages)
-	for page := 1; page <= providers.MaxFeedbackPages; page++ {
-		raw := commentPage(t, feedbackPerPage, int64(page*1000), since.Add(time.Duration(page)*time.Hour), "ok")
-		if page == 1 {
-			raw = strings.Replace(raw, `"updated_at":"2026-11-08T11:00:00Z"`, `"updated_at":"2026-11-09T00:00:00Z"`, 1)
-		}
-		steps = append(steps, commentsStep(page, raw))
-	}
-	h := newHarness(t, steps...)
-	got, err := h.p.ListComments(ctx, prNumber, since)
+	// The next look reads the last page again (nothing new on it) and goes on to the end.
+	last := providers.MaxFeedbackPages
+	h = newHarness(t, ownPR(),
+		commentsStep(last, commentPage(t, feedbackPerPage, int64(last*1000), since, "ok")),
+		commentsStep(last+1, commentPage(t, 2, 9000, since.Add(9*time.Hour), "new")))
+	got, err = h.p.ListComments(ctx, prNumber, want)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := got.Items[len(got.Items)-1].CreatedAt; !got.Resume.Equal(want) {
-		t.Errorf("resume %v, want %v", got.Resume, want)
+	if !slices.Equal(ids(got.Items), []int64{9000, 9001}) || !got.Complete {
+		t.Fatalf("items %v, complete %v", ids(got.Items), got.Complete)
+	}
+	if want := (providers.FeedbackCursor{Since: hostNow.Add(-clockMargin)}); got.Next != want {
+		t.Errorf("next %+v, want %+v (the sweep's start, not this look's)", got.Next, want)
+	}
+}
+
+func TestListCommentsOldEditedCommentsDoNotHoldTheCursorBack(t *testing.T) {
+	// Five full pages of comments created long before since and edited after it: the cursor moves past them.
+	steps := []step{ownPR()}
+	old := since.Add(-30 * 24 * time.Hour)
+	for page := 1; page <= providers.MaxFeedbackPages; page++ {
+		var page0 []map[string]any
+		if err := json.Unmarshal([]byte(commentPage(t, feedbackPerPage, int64(page*1000), old, "ok")), &page0); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range page0 {
+			c["updated_at"] = "2026-11-08T11:00:00Z"
+		}
+		steps = append(steps, commentsStep(page, marshal(t, page0)))
+	}
+	h := newHarness(t, steps...)
+	got, err := h.p.ListComments(ctx, prNumber, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Next.Since.Before(since) || got.Next.Page != providers.MaxFeedbackPages || got.Next.AfterID != 5029 {
+		t.Errorf("next %+v: went back or did not move on", got.Next)
+	}
+}
+
+func TestListCommentsSinceNeverDecreases(t *testing.T) {
+	// GitHub's clock says the sweep began before the cursor's since; and without a Date header there is no start.
+	early := dated(commentsStep(1, "[]"))
+	early.header[hDate] = since.Add(-time.Hour).Format(http.TimeFormat)
+	for name, s := range map[string]step{"clock behind": early, "no Date": commentsStep(1, "[]")} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, ownPR(), s)
+			got, err := h.p.ListComments(ctx, prNumber, start)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Next != start || !got.Complete {
+				t.Errorf("next %+v, complete %v; want since kept", got.Next, got.Complete)
+			}
+		})
 	}
 }
 
 func TestListCommentsCutsALongBody(t *testing.T) {
 	// A three-byte rune straddles the bound, so a cut by bytes alone would split it.
 	long := strings.Repeat("a", providers.MaxFeedbackBodyBytes-1) + "€" + strings.Repeat("b", 100)
-	h := newHarness(t, commentsStep(1, commentPage(t, 1, 1, since, long)))
-	got, err := h.p.ListComments(ctx, prNumber, since)
+	h := newHarness(t, ownPR(), commentsStep(1, commentPage(t, 1, 1, since, long)))
+	got, err := h.p.ListComments(ctx, prNumber, start)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,25 +269,92 @@ func TestListCommentsCutsALongBody(t *testing.T) {
 	}
 }
 
-func TestListCommentsStopsAtTheByteBound(t *testing.T) {
+func TestListCommentsStopsAtTheByteBoundAndGoesOn(t *testing.T) {
 	body := strings.Repeat("x", providers.MaxFeedbackBodyBytes)
 	keep := providers.MaxFeedbackBytes / providers.MaxFeedbackBodyBytes
-	// Two full pages hold more than the byte bound: the look ends inside the second, without a third request.
 	if keep <= feedbackPerPage || keep >= 2*feedbackPerPage {
 		t.Fatalf("test needs the byte bound inside the second page")
 	}
-	h := newHarness(t,
-		commentsStep(1, commentPage(t, feedbackPerPage, 1, since, body)),
-		commentsStep(2, commentPage(t, feedbackPerPage, 1000, since.Add(time.Hour), body)))
-	got, err := h.p.ListComments(ctx, prNumber, since)
+	page2 := commentPage(t, feedbackPerPage, 1000, since.Add(time.Hour), body)
+	// Two full pages hold more than the byte bound: the look ends inside the second, without a third request.
+	h := newHarness(t, ownPR(), dated(commentsStep(1, commentPage(t, feedbackPerPage, 1, since, body))),
+		commentsStep(2, page2))
+	got, err := h.p.ListComments(ctx, prNumber, start)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got.Items) != keep || got.Complete {
 		t.Fatalf("got %d items, complete %v; want %d, incomplete", len(got.Items), got.Complete, keep)
 	}
-	if want := got.Items[keep-1].CreatedAt; !got.Resume.Equal(want) {
-		t.Errorf("resume %v, want %v", got.Resume, want)
+	lastKept := got.Items[keep-1].ID
+	want := providers.FeedbackCursor{Since: since, Page: 2, AfterID: lastKept, SweepStart: hostNow}
+	if got.Next != want {
+		t.Fatalf("next %+v, want %+v", got.Next, want)
+	}
+	// The next look starts on the second page again and returns the rest of it, none twice.
+	h = newHarness(t, ownPR(), commentsStep(2, page2), commentsStep(3, "[]"))
+	got, err = h.p.ListComments(ctx, prNumber, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := feedbackPerPage*2 - keep; len(got.Items) != n || got.Items[0].ID != lastKept+1 || !got.Complete {
+		t.Errorf("got %d items from %d, complete %v; want %d from %d", len(got.Items), got.Items[0].ID,
+			got.Complete, n, lastKept+1)
+	}
+}
+
+// byteCounter counts the bytes read through it.
+type byteCounter struct {
+	r io.Reader
+	n int
+}
+
+func (c *byteCounter) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
+}
+
+func TestDecodePageStopsReadingAtTheByteBound(t *testing.T) {
+	// A page far larger than the byte bound: decoding stops reading once the bound is reached.
+	body := strings.Repeat("x", providers.MaxFeedbackBodyBytes)
+	raw := commentPage(t, 200, 1, since, body)
+	cr := &byteCounter{r: strings.NewReader(raw)}
+	conv := func(c commentJSON) (item, bool) {
+		b, cut := cutBody(*c.Body)
+		return item{id: c.ID, fb: providers.Feedback{ID: c.ID, Body: b, Truncated: cut}}, true
+	}
+	res, err := decodePage(cr, providers.MaxFeedbackBytes, 0, conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.stopped || len(res.items) != providers.MaxFeedbackBytes/providers.MaxFeedbackBodyBytes {
+		t.Fatalf("stopped %v with %d items", res.stopped, len(res.items))
+	}
+	if cr.n > len(raw)/2 {
+		t.Errorf("read %d of %d bytes to keep %d", cr.n, len(raw), providers.MaxFeedbackBytes)
+	}
+}
+
+func TestListCommentsSkipsMalformedItems(t *testing.T) {
+	good := recorded(t, "comments_mixed.json")
+	edited := maps.Clone(good)
+	edited["id"], edited["updated_at"] = 11, "2026-11-08T09:00:00Z" // updated before created
+	badTime := maps.Clone(good)
+	badTime["id"], badTime["created_at"] = 12, "yesterday"
+	badType := maps.Clone(good)
+	badType["id"] = "13"
+	noUser := maps.Clone(good)
+	noUser["id"], noUser["user"] = 14, nil
+	last := maps.Clone(good)
+	last["id"] = 15
+	h := newHarness(t, ownPR(), commentsStep(1, marshal(t, []any{edited, badTime, badType, noUser, last})))
+	got, err := h.p.ListComments(ctx, prNumber, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ids(got.Items), []int64{15}) || got.Skipped != 4 || !got.Complete {
+		t.Errorf("items %v, skipped %d, complete %v", ids(got.Items), got.Skipped, got.Complete)
 	}
 }
 
@@ -205,41 +364,67 @@ func TestListCommentsRefusesAnotherRepository(t *testing.T) {
 		"issue, not pull":  "comments_on_issue.json",
 	} {
 		t.Run(name, func(t *testing.T) {
-			h := newHarness(t, step{method: http.MethodGet, path: commentsPath, query: commentsQuery(1),
+			h := newHarness(t, ownPR(), step{method: http.MethodGet, path: commentsPath, query: commentsQuery(1),
 				status: http.StatusOK, file: file})
-			got, err := h.p.ListComments(ctx, prNumber, since)
+			got, err := h.p.ListComments(ctx, prNumber, start)
 			assertSafe(t, err)
-			if len(got.Items) != 0 {
-				t.Errorf("returned %d items with the error", len(got.Items))
+			if providers.IsRetryable(err) || len(got.Items) != 0 {
+				t.Errorf("retryable %v, %d items with the error", providers.IsRetryable(err), len(got.Items))
+			}
+			if len(h.sleeps) != 0 {
+				t.Error("a refusal was retried")
 			}
 		})
 	}
 }
 
+func TestListFeedbackRefusesAPullRequestNotOurs(t *testing.T) {
+	for name, list := range map[string]func(*Provider) (providers.FeedbackPage, error){
+		"comments": func(p *Provider) (providers.FeedbackPage, error) { return p.ListComments(ctx, 13, start) },
+		"reviews":  func(p *Provider) (providers.FeedbackPage, error) { return p.ListReviews(ctx, 13, start) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, get("/pulls/13", "pull_foreign.json")) // no list request follows
+			_, err := list(h.p)
+			assertSafe(t, err)
+		})
+	}
+}
+
 func TestListCommentsWithoutSince(t *testing.T) {
-	h := newHarness(t, step{method: http.MethodGet, path: commentsPath, query: pageQuery(1),
+	h := newHarness(t, ownPR(), step{method: http.MethodGet, path: commentsPath, query: pageQuery(1),
 		status: http.StatusOK, raw: "[]"})
-	got, err := h.p.ListComments(ctx, prNumber, time.Time{})
-	if err != nil || !got.Complete || len(got.Items) != 0 || !got.Resume.IsZero() {
+	got, err := h.p.ListComments(ctx, prNumber, providers.FeedbackCursor{})
+	if err != nil || !got.Complete || len(got.Items) != 0 {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 }
 
-func TestListCommentsRefusesAnInvalidAuthor(t *testing.T) {
-	raw := `[{"id":5,"html_url":"https://github.com/acme/fleet/pull/12#issuecomment-5",` +
-		`"issue_url":"https://api.github.com/repos/acme/fleet/issues/12","user":null,` +
-		`"created_at":"2026-11-08T10:12:03Z","updated_at":"2026-11-08T10:12:03Z","body":"x"}]`
-	h := newHarness(t, commentsStep(1, raw))
-	_, err := h.p.ListComments(ctx, prNumber, since)
-	assertSafe(t, err)
+func TestListCommentsEachPageHasItsOwnDeadline(t *testing.T) {
+	// Four pages of 80ms each under a 200ms timeout: a deadline shared by the look would end it on the fourth.
+	slow := func(s step) step {
+		s.check = func(*testing.T, map[string]any) { time.Sleep(80 * time.Millisecond) }
+		return s
+	}
+	steps := []step{ownPR()}
+	for page := 1; page <= 3; page++ {
+		steps = append(steps, slow(commentsStep(page, commentPage(t, feedbackPerPage, int64(page*1000), since, "ok"))))
+	}
+	steps = append(steps, slow(commentsStep(4, "[]")))
+	h := newHarness(t, steps...)
+	h.p.timeout = 200 * time.Millisecond
+	got, err := h.p.ListComments(ctx, prNumber, start)
+	if err != nil || len(got.Items) != 3*feedbackPerPage || !got.Complete {
+		t.Fatalf("got %d items, complete %v, err %v", len(got.Items), got.Complete, err)
+	}
 }
 
 func TestListCommentsServerErrors(t *testing.T) {
 	t.Run("retried", func(t *testing.T) {
-		h := newHarness(t,
+		h := newHarness(t, ownPR(),
 			step{method: http.MethodGet, path: commentsPath, status: http.StatusBadGateway},
 			commentsStep(1, "[]"))
-		if _, err := h.p.ListComments(ctx, prNumber, since); err != nil {
+		if _, err := h.p.ListComments(ctx, prNumber, start); err != nil {
 			t.Fatal(err)
 		}
 		if len(h.sleeps) != 1 {
@@ -247,26 +432,40 @@ func TestListCommentsServerErrors(t *testing.T) {
 		}
 	})
 	t.Run("final", func(t *testing.T) {
-		steps := make([]step, 0, DefaultMaxAttempts)
+		steps := append(make([]step, 0, 1+DefaultMaxAttempts), ownPR())
 		for range DefaultMaxAttempts {
 			steps = append(steps, step{method: http.MethodGet, path: commentsPath, status: http.StatusInternalServerError})
 		}
 		h := newHarness(t, steps...)
-		_, err := h.p.ListComments(ctx, prNumber, since)
+		_, err := h.p.ListComments(ctx, prNumber, start)
 		if !providers.IsRetryable(err) {
 			t.Fatalf("got %v", err)
 		}
 		assertSafe(t, err)
 	})
+	t.Run("cut off mid body is retried", func(t *testing.T) {
+		h := newHarness(t, ownPR(), commentsStep(1, `[{"id":1`), commentsStep(1, "[]"))
+		if _, err := h.p.ListComments(ctx, prNumber, start); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("not JSON is final", func(t *testing.T) {
+		h := newHarness(t, ownPR(), commentsStep(1, `{"message":"`+bodyMarker+`"}`))
+		_, err := h.p.ListComments(ctx, prNumber, start)
+		assertSafe(t, err)
+		if providers.IsRetryable(err) {
+			t.Errorf("got %v", err)
+		}
+	})
 }
 
 func TestListCommentsRateLimit(t *testing.T) {
 	t.Run("short delay waited for", func(t *testing.T) {
-		h := newHarness(t,
+		h := newHarness(t, ownPR(),
 			step{method: http.MethodGet, path: commentsPath, status: http.StatusTooManyRequests,
 				header: map[string]string{hRetry: "3"}},
 			commentsStep(1, "[]"))
-		if _, err := h.p.ListComments(ctx, prNumber, since); err != nil {
+		if _, err := h.p.ListComments(ctx, prNumber, start); err != nil {
 			t.Fatal(err)
 		}
 		if len(h.sleeps) != 1 || h.sleeps[0] != 3*time.Second {
@@ -275,17 +474,17 @@ func TestListCommentsRateLimit(t *testing.T) {
 	})
 	t.Run("long delay returned", func(t *testing.T) {
 		reset := strconv.FormatInt(t0.Add(10*time.Minute).Unix(), 10)
-		h := newHarness(t, step{method: http.MethodGet, path: commentsPath, status: http.StatusForbidden,
+		h := newHarness(t, ownPR(), step{method: http.MethodGet, path: commentsPath, status: http.StatusForbidden,
 			header: map[string]string{hdrRemaining: "0", hdrReset: reset}})
-		_, err := h.p.ListComments(ctx, prNumber, since)
+		_, err := h.p.ListComments(ctx, prNumber, start)
 		if d, ok := providers.RetryAfter(err); !ok || d != 10*time.Minute {
 			t.Fatalf("got %v", err)
 		}
 		assertSafe(t, err)
 	})
 	t.Run("forbidden without rate limit is final", func(t *testing.T) {
-		h := newHarness(t, status(http.MethodGet, commentsPath, http.StatusForbidden, fxForbidden))
-		_, err := h.p.ListComments(ctx, prNumber, since)
+		h := newHarness(t, ownPR(), status(http.MethodGet, commentsPath, http.StatusForbidden, fxForbidden))
+		_, err := h.p.ListComments(ctx, prNumber, start)
 		if !providers.IsForbidden(err) || providers.IsRetryable(err) {
 			t.Fatalf("got %v", err)
 		}
@@ -298,8 +497,8 @@ func TestListCommentsCancelledWhilePaging(t *testing.T) {
 	defer cancel()
 	first := commentsStep(1, commentPage(t, feedbackPerPage, 1, since, "ok"))
 	first.check = func(*testing.T, map[string]any) { cancel() }
-	h := newHarness(t, first) // the second page is never asked for
-	got, err := h.p.ListComments(cctx, prNumber, since)
+	h := newHarness(t, ownPR(), first) // the second page is never asked for
+	got, err := h.p.ListComments(cctx, prNumber, start)
 	if !errors.Is(err, context.Canceled) || providers.IsRetryable(err) {
 		t.Fatalf("got %v", err)
 	}
@@ -309,45 +508,113 @@ func TestListCommentsCancelledWhilePaging(t *testing.T) {
 	}
 }
 
-func TestListCommentsValidatesNumber(t *testing.T) {
+func TestListFeedbackValidatesInput(t *testing.T) {
 	h := newHarness(t)
-	if _, err := h.p.ListComments(ctx, 0, since); err == nil {
+	if _, err := h.p.ListComments(ctx, 0, start); err == nil {
 		t.Error("accepted number 0")
 	}
-	if _, err := h.p.ListReviews(ctx, -1, since); err == nil {
+	if _, err := h.p.ListReviews(ctx, -1, start); err == nil {
 		t.Error("accepted number -1")
+	}
+	if _, err := h.p.ListReviews(ctx, prNumber, providers.FeedbackCursor{Page: -1}); err == nil {
+		t.Error("accepted a negative page")
 	}
 }
 
 func TestListReviews(t *testing.T) {
-	h := newHarness(t, step{method: http.MethodGet, path: reviewsPath, query: pageQuery(1),
+	h := newHarness(t, ownPR(), step{method: http.MethodGet, path: reviewsPath, query: pageQuery(1),
 		status: http.StatusOK, file: "reviews.json"})
-	got, err := h.p.ListReviews(ctx, prNumber, since)
+	got, err := h.p.ListReviews(ctx, prNumber, providers.FeedbackCursor{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 80001 was submitted before since, 80003 is a draft.
-	if len(got.Items) != 2 || !got.Complete {
-		t.Fatalf("got %+v", got)
+	// 80003 is a draft.
+	if !slices.Equal(ids(got.Items), []int64{80001, 80002, 80004}) || !got.Complete || got.Skipped != 0 {
+		t.Fatalf("items %v, complete %v, skipped %d", ids(got.Items), got.Complete, got.Skipped)
 	}
-	approved, bot := got.Items[0], got.Items[1]
-	if approved.ID != 80002 || approved.Kind != providers.FeedbackReview || approved.ReviewState != "APPROVED" ||
+	approved, bot := got.Items[1], got.Items[2]
+	if approved.Kind != providers.FeedbackReview || approved.ReviewState != "APPROVED" ||
 		approved.CommitID != shaCommit || approved.Author.Kind != providers.AuthorPerson {
 		t.Errorf("approved = %+v", approved)
 	}
-	if bot.ID != 80004 || bot.Author.Kind != providers.AuthorBot || bot.CommitID != "" {
+	if bot.Author.Kind != providers.AuthorBot || bot.CommitID != "" {
 		t.Errorf("bot review = %+v", bot)
 	}
-	if want := time.Date(2026, 11, 8, 11, 30, 0, 0, time.UTC); !got.Resume.Equal(want) {
-		t.Errorf("resume %v, want %v", got.Resume, want)
+	if want := (providers.FeedbackCursor{Page: 1, AfterID: 80004}); got.Next != want {
+		t.Errorf("next %+v, want %+v", got.Next, want)
+	}
+}
+
+func TestListReviewsCursorMovesPastTheBound(t *testing.T) {
+	steps := []step{ownPR()}
+	for page := 1; page <= providers.MaxFeedbackPages; page++ {
+		steps = append(steps, reviewsStep(page, reviewPage(t, feedbackPerPage, int64(page*1000))))
+	}
+	h := newHarness(t, steps...)
+	got, err := h.p.ListReviews(ctx, prNumber, providers.FeedbackCursor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := providers.MaxFeedbackPages
+	want := providers.FeedbackCursor{Page: last, AfterID: int64(last*1000 + feedbackPerPage - 1)}
+	if got.Complete || got.Next != want {
+		t.Fatalf("complete %v, next %+v, want %+v", got.Complete, got.Next, want)
+	}
+	// Reviews past the bound are read by the next look; the page it starts on is not returned twice.
+	h = newHarness(t, ownPR(), reviewsStep(last, reviewPage(t, feedbackPerPage, int64(last*1000))),
+		reviewsStep(last+1, reviewPage(t, 3, 9000)))
+	got, err = h.p.ListReviews(ctx, prNumber, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ids(got.Items), []int64{9000, 9001, 9002}) || !got.Complete {
+		t.Fatalf("items %v, complete %v", ids(got.Items), got.Complete)
+	}
+	// At the end, the next look reads that last page again, for reviews added to it.
+	if want := (providers.FeedbackCursor{Page: last + 1, AfterID: 9002}); got.Next != want {
+		t.Errorf("next %+v, want %+v", got.Next, want)
+	}
+}
+
+func TestListReviewsSkipsMalformedItems(t *testing.T) {
+	good := recorded(t, "reviews.json")
+	unknown := maps.Clone(good)
+	unknown["id"], unknown["state"] = 1, "SOMETHING_NEW"
+	noTime := maps.Clone(good)
+	noTime["id"] = 2
+	delete(noTime, "submitted_at")
+	badCommit := maps.Clone(good)
+	badCommit["id"], badCommit["commit_id"] = 3, "not-a-sha"
+	last := maps.Clone(good)
+	last["id"] = 4
+	h := newHarness(t, ownPR(), reviewsStep(1, marshal(t, []any{unknown, noTime, badCommit, last})))
+	got, err := h.p.ListReviews(ctx, prNumber, providers.FeedbackCursor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ids(got.Items), []int64{4}) || got.Skipped != 3 || got.Next.AfterID != 4 {
+		t.Errorf("items %v, skipped %d, next %+v", ids(got.Items), got.Skipped, got.Next)
 	}
 }
 
 func TestListReviewsRefusesAnotherRepository(t *testing.T) {
-	h := newHarness(t, step{method: http.MethodGet, path: reviewsPath, query: pageQuery(1),
+	h := newHarness(t, ownPR(), step{method: http.MethodGet, path: reviewsPath, query: pageQuery(1),
 		status: http.StatusOK, file: "reviews_foreign.json"})
-	_, err := h.p.ListReviews(ctx, prNumber, since)
+	_, err := h.p.ListReviews(ctx, prNumber, providers.FeedbackCursor{})
 	assertSafe(t, err)
+}
+
+func TestReadStreamRefusesATooLargePage(t *testing.T) {
+	p := newHarness(t).p
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(make([]byte, 100))),
+		ContentLength: -1, Header: http.Header{}}
+	_, err := p.readStream(ctx, call{op: opListComments, stream: func(r io.Reader) error {
+		_, err := io.Copy(io.Discard, r)
+		return err
+	}}, resp, 10)
+	if !errors.Is(err, errBodyTooLarge) {
+		t.Fatalf("got %v", err)
+	}
 }
 
 func TestCanWrite(t *testing.T) {

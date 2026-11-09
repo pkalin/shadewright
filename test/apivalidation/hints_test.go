@@ -357,7 +357,7 @@ var _ = Describe("RemediationRequest status.refusedHints", func() {
 			expectStatusRefused(rr, msg)
 		},
 		Entry("an unknown reason", func(r *v1alpha1.RefusedHint) { r.Reason = "Rude" }, "status.refusedHints[0].reason"),
-		Entry("an unknown source", func(r *v1alpha1.RefusedHint) { r.Source = "Slack" }, "status.refusedHints[0].source"),
+		Entry("an unknown source", func(r *v1alpha1.RefusedHint) { r.Source = "Email" }, "status.refusedHints[0].source"),
 		Entry("comment ID 0", func(r *v1alpha1.RefusedHint) { r.CommentID = 0 }, "status.refusedHints[0].commentID"),
 		Entry("author ID 0", func(r *v1alpha1.RefusedHint) { r.Author.ID = 0 }, "status.refusedHints[0].author.id"),
 		Entry("a login with a space", func(r *v1alpha1.RefusedHint) { r.Author.Login = "octo cat" }, "status.refusedHints[0].author.login"),

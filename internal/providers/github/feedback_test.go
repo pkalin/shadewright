@@ -847,9 +847,10 @@ func TestListCommentsKeepsNoTagOfASweepWithItemsOrSkips(t *testing.T) {
 }
 
 func TestListFeedbackSendsNoConditionOutsideTheFirstPageOfACommentSweep(t *testing.T) {
-	// A continuation of a sweep, and the reviews, never ask conditionally, whatever the cursor holds.
+	// A continuation of a sweep, and the reviews, never ask conditionally, whatever the cursor holds: not even
+	// page 1, when the continuation finds page 2 empty and steps back to it.
 	cont := providers.FeedbackCursor{Since: since, Page: 2, AfterID: 41, SweepStart: hostNow, ETag: `"t"`}
-	h := newHarness(t, ownPR(), commentsStep(2, commentPage(t, 2, 41, since, "x")),
+	h := newHarness(t, ownPR(), commentsStep(2, "[]"), commentsStep(1, commentPage(t, 2, 40, since, "x")),
 		ownPR(), reviewsStep(1, reviewPage(t, 1, 1)))
 	if _, err := h.p.ListComments(ctx, prNumber, cont); err != nil {
 		t.Fatal(err)

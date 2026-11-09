@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -624,5 +625,81 @@ func TestPlanOutsideThePolicyFails(t *testing.T) {
 	reply.Content = original
 	if res := run(t, scheme, s); res.Pass || !strings.Contains(res.Outcome.Detail, "TargetNamespaceNotAllowed") {
 		t.Errorf("uncovered subject: pass %t, outcome %+v", res.Pass, res.Outcome)
+	}
+}
+
+// The report keeps the text of the result the loop accepted (#600), redacted as the analyzer redacts it, so a
+// missed fact can be traced to what the model wrote; a run without an accepted result has none.
+func TestReportKeepsTheReplyText(t *testing.T) {
+	const token = "ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE" // #nosec G101 -- obviously fake, for the redaction check
+	scheme, s := mustScenario(t, scnBadImage)
+	s.recording.Replies[0].Content = strings.Replace(s.recording.Replies[0].Content, "cannot start:",
+		"cannot start (token "+token+"):", 1)
+	res := run(t, scheme, s)
+	r := &report{Mode: "fake", Manifest: manifest{MinPassRate: 1, Repeats: 1, Rubric: manifestRubric{FleetCommit: "abc"}},
+		Scenarios: []scenarioResult{res}}
+	r.summarise(nil)
+	dir := t.TempDir()
+	if err := r.write(dir); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Scenarios []struct {
+			Reply *replyText `json:"reply"`
+		} `json:"scenarios"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	reply := got.Scenarios[0].Reply
+	if reply == nil {
+		t.Fatalf("no reply in the report:\n%s", raw)
+	}
+	if !strings.Contains(reply.Summary, "Deployment demo/web cannot start") || len(reply.Hypotheses) != 1 ||
+		!strings.Contains(reply.Hypotheses[0], "6.17.99 was never published") || len(reply.Evidence) != 2 ||
+		reply.Evidence[0].Source != "c1" || reply.Evidence[0].Quote != "ghcr.io/stefanprodan/podinfo:6.17.99: not found" ||
+		reply.Truncated {
+		t.Errorf("reply %+v", reply)
+	}
+	if strings.Contains(string(raw), "FAKEFAKE") {
+		t.Errorf("the token reached the report:\n%s", raw)
+	}
+
+	_, s = mustScenario(t, scnBadImage)
+	s.recording.Replies[0].Model = "another-model-1"
+	if res := run(t, scheme, s); res.Reply != nil {
+		t.Errorf("a refused reply was kept: %+v", res.Reply)
+	}
+}
+
+// Each field of the kept reply holds its cap, marked when cut, and a cut never splits a UTF-8 sequence.
+func TestReplyTextKeepsItsCaps(t *testing.T) {
+	long := "a" + strings.Repeat("é", replySummaryCap) // two bytes each after one, so a plain cut would split one
+	res := &analysis.Result{Summary: long}
+	for range replyMaxItems + 2 {
+		res.Hypotheses = append(res.Hypotheses, analysis.Hypothesis{Description: long})
+		res.Evidence = append(res.Evidence, analysis.Evidence{Source: "c1", Quote: long})
+	}
+	got := replyOf(res, func(s string) string { return s })
+	if !got.Truncated || len(got.Hypotheses) != replyMaxItems || len(got.Evidence) != replyMaxItems {
+		t.Fatalf("truncated %t, %d hypotheses, %d evidence", got.Truncated, len(got.Hypotheses), len(got.Evidence))
+	}
+	check := func(field, s string, limit int) {
+		if len(s) > limit || !strings.HasSuffix(s, truncationMark) || !utf8.ValidString(s) {
+			t.Errorf("%s: %d bytes, valid %t", field, len(s), utf8.ValidString(s))
+		}
+	}
+	check("summary", got.Summary, replySummaryCap)
+	check("hypothesis", got.Hypotheses[0], replyItemCap)
+	check("quote", got.Evidence[0].Quote, replyItemCap)
+
+	short := replyOf(&analysis.Result{Summary: "ok", Evidence: []analysis.Evidence{{Source: "c1", Quote: "a quote"}}},
+		func(s string) string { return s })
+	if short.Truncated || short.Summary != "ok" || short.Evidence[0].Quote != "a quote" {
+		t.Errorf("short reply %+v", short)
 	}
 }

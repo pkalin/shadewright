@@ -617,6 +617,19 @@ func setPolicyAllowed(conditions *[]metav1.Condition, c metav1.Condition, now ti
 	return meta.SetStatusCondition(conditions, c)
 }
 
+// endWait removes a PolicyAllowed condition that records a wait for the target's state (Unknown with a wait
+// reason) and reports whether it did. It is called when the limits queue a request, which happens only after a
+// policy check that did not wait, so the wait it records is over; a wait after that starts its own clock
+// (waitForTarget), instead of one counted from before the request was Queued.
+func endWait(conditions *[]metav1.Condition) bool {
+	c := meta.FindStatusCondition(*conditions, remediationv1alpha1.ConditionPolicyAllowed)
+	if c == nil || c.Status != metav1.ConditionUnknown || !waitReason(c.Reason) {
+		return false
+	}
+	meta.RemoveStatusCondition(conditions, remediationv1alpha1.ConditionPolicyAllowed)
+	return true
+}
+
 // waitReason reports whether reason is one the policy check waits on rather than decides: KEDA has not reported
 // on the ScaledObject (policy.ReasonScaledObjectReadinessUnknown), or Flux is reconciling the Kustomization that
 // delivers the target (sourcemap.Reason.Reconciling).

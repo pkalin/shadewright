@@ -238,7 +238,7 @@ An outcome before the latest success never changes the breaker's state: the fail
 
 A request held back stays `Pending` and shows the condition `Queued` with one of `TargetLocked`, `ConcurrencyLimitReached`, `CircuitOpen` or `CircuitHalfOpen`. It checks only the limits every 30 seconds, so it does not read Git. Once they let it through, the whole policy check runs again.
 
-**What can go wrong: the clock.** The time a request spends `Queued` is not paused for the wait for KEDA (section 6). Its clock is the `PolicyAllowed` condition, which `Queued` does not reset. A request that waited for its `ScaledObject` before it was queued, and finds it unreported again once the limits let it through, can reach `TargetStateTimeout` at once.
+**The clock of a wait.** A wait for the target's state (KEDA has not reported, Flux is reconciling, section 6) is timed by the `PolicyAllowed` condition. The limits queue a request only after a policy check that did not wait, and `Queued` removes a waiting condition (#556), so time spent `Queued` never counts towards a later wait: a request that waited for Flux, was then queued behind the lock and meets Flux again applying the holder's merge once it is let through starts a new wait of `TargetStateTimeout`.
 
 ### How the state is read
 

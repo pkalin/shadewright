@@ -581,17 +581,20 @@ var (
 )
 
 // waitForLimits holds back a request that a limit does not let through: it sets Queued True with the limit as
-// the reason, writes the status when that changed, and checks again after s.recheckDelay.
+// the reason, writes the status when that changed, and checks again after s.recheckDelay. A wait for the
+// target's state that the request was in before ends here (endWait): the policy check let it through, so a later
+// wait is a new one with its own clock, not one that already lasted the whole time the request was Queued (#556).
 func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	s limitsState) (reconcile.Result, error) {
 	reason := s.reason
-	if meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+	queued := meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionQueued,
 		Status:             metav1.ConditionTrue,
 		Reason:             reason,
 		Message:            queuedMessages[reason],
 		ObservedGeneration: rr.Generation,
-	}) {
+	})
+	if endWait(&rr.Status.Conditions) || queued {
 		if err := r.Status().Update(ctx, rr); err != nil {
 			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 		}

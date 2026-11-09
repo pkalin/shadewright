@@ -49,7 +49,8 @@ import (
 //
 // Only a request that cannot have a pull request of its own is ended this way: no phase or Pending, no recorded
 // pull request, no target lock, no supersede chain (spec.replaces, status.handoff: ADR-0028's checks decide
-// those). The merged request names the same Incident UID and target UID, and was merged (mergeTime, which no
+// those). The merged request names the same Incident UID and target UID, the same action type and the same
+// field (another container of the same Deployment is another fix), and was merged (mergeTime, which no
 // later phase moves) after the duplicate was created, so a request proposed after the merge (the fix did not
 // help) is decided as usual. Its change must still be in effect (changeInEffect): the live target holds its
 // planned value, or, within TargetStateTimeout of the merge, still the value it replaced (Flux has not applied
@@ -81,15 +82,35 @@ func mergeTime(w *remediationv1alpha1.RemediationRequest) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// mergesBefore reports whether w is a merged request of rr's Incident and target that was merged after rr was
-// created: a merge rr was proposed without knowing about.
+// mergesBefore reports whether w is a merged request of rr's Incident and target, changing the same field with
+// the same action type (sameField), that was merged after rr was created: a merge rr was proposed without
+// knowing about.
 func mergesBefore(w, rr *remediationv1alpha1.RemediationRequest) bool {
 	if w.UID == rr.UID || rr.Spec.IncidentRef.UID == "" || w.Spec.IncidentRef.UID != rr.Spec.IncidentRef.UID ||
-		w.Spec.TargetRef.UID != rr.Spec.TargetRef.UID || !slices.Contains(successPhases, w.Status.Phase) {
+		w.Spec.TargetRef.UID != rr.Spec.TargetRef.UID || !slices.Contains(successPhases, w.Status.Phase) ||
+		!sameField(w, rr) {
 		return false
 	}
 	at, ok := mergeTime(w)
 	return ok && rr.CreationTimestamp.Time.Before(at)
+}
+
+// sameField reports whether w and rr have the same action type and change the same field of the target
+// (sourcemap.FieldFor): the memory limit of another container of the same Deployment is another fix, so its
+// merge supersedes nothing. A field that cannot be located is never the same.
+func sameField(w, rr *remediationv1alpha1.RemediationRequest) bool {
+	if w.Spec.Action.Type != rr.Spec.Action.Type {
+		return false
+	}
+	wf, err := sourcemap.FieldFor(w.Spec.Action, w.Spec.TargetRef)
+	if err != nil {
+		return false
+	}
+	rf, err := sourcemap.FieldFor(rr.Spec.Action, rr.Spec.TargetRef)
+	if err != nil {
+		return false
+	}
+	return wf.Quantity == rf.Quantity && slices.Equal(wf.Steps, rf.Steps)
 }
 
 // changeInEffect reports whether the change of the merged request w still holds: the live target, read from the

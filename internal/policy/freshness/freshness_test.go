@@ -687,6 +687,36 @@ func TestMappingWhileFluxReconcilesIsRetried(t *testing.T) {
 	}
 }
 
+// While Flux reconciles, the Git-only part of the check still runs: a target file on the target branch that no
+// longer holds the previous value is stale at once, without waiting for Flux (#556 design review). Only the
+// part that needs the mapping waits.
+func TestStaleFileWhileFluxReconciles(t *testing.T) {
+	w := newWorld(t)
+	w.resolve = func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
+		return sourcemap.Result{Outcome: sourcemap.NeedsIntervention, Reason: sourcemap.ReasonKustomizationReconciling}, nil
+	}
+	if _, err := w.git.Push("main", sourcePath, manifest("512Mi")); err != nil {
+		t.Fatal(err)
+	}
+	wantStale(t, w.fresh(t), freshness.ReasonTargetFileChanged)
+}
+
+// A repository that cannot be opened while Flux reconciles is still reported as such, next to ErrReconciling,
+// so the caller ends the request for a person instead of waiting out the reconcile.
+func TestUnusableRepositoryWhileFluxReconciles(t *testing.T) {
+	w := newWorld(t)
+	w.resolve = func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
+		return sourcemap.Result{Outcome: sourcemap.NeedsIntervention, Reason: sourcemap.ReasonKustomizationReconciling}, nil
+	}
+	w.open = func(context.Context, v1alpha1.GitRepository) (providers.GitProvider, error) {
+		return nil, providers.ErrInvalidConfig
+	}
+	err := w.fresh(t)
+	if !errors.Is(err, freshness.ErrRepositoryUnusable) || !errors.Is(err, freshness.ErrReconciling) {
+		t.Fatalf("want ErrRepositoryUnusable and ErrReconciling, got %v", err)
+	}
+}
+
 func TestNoResolverFailsClosed(t *testing.T) {
 	w := newWorld(t)
 	w.resolve = nil

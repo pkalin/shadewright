@@ -80,6 +80,8 @@ var ErrRepositoryUnusable = errors.New("the repository settings cannot be used t
 // ErrReconciling means the source mapping stopped because Flux is still reconciling the Kustomization that
 // delivers the target, with no failure reported (sourcemap.Reason.Reconciling): the plan is neither fresh nor
 // known to be stale. The caller retries, and bounds how long (#556): a reconcile that never ends looks the same.
+// Check returns it only after the Git-only check of the target file passed: a file that no longer holds the
+// previous value is stale whatever Flux does.
 var ErrReconciling = errors.New("the GitOps controller is still reconciling the delivery of the target")
 
 // ErrPaused means RemediationSettings pauses every write. The plan is not stale; the write waits.
@@ -307,10 +309,21 @@ func (c Checker) Check(ctx context.Context, rr *v1alpha1.RemediationRequest) (Re
 		// A stale verdict closes the change request, so it gets the consistency checks a fresh one gets first.
 		return Result{}, c.confirmStale(ctx, rr, repo, pol, settings, live, mapped, err)
 	}
+	if errors.Is(err, ErrReconciling) {
+		// Flux is still reconciling, so the mapping gave no verdict; the Git-only part of the check needs no
+		// mapping and still runs: a target file on the target branch that no longer holds the previous value is
+		// stale now (#556). Otherwise the check waits for Flux like any retry; a failed read is joined, so the
+		// caller still sees ErrRepositoryUnusable or a delay the host asked for.
+		_, _, fileErr := c.checkFile(ctx, rr, repo, nil)
+		if _, isStale := errors.AsType[*StaleError](fileErr); isStale {
+			return Result{}, fileErr
+		}
+		return Result{}, errors.Join(err, fileErr)
+	}
 	if err != nil {
 		return Result{}, err
 	}
-	git, file, err := c.checkFile(ctx, rr, repo, mapped.Source.BaseCommit)
+	git, file, err := c.checkFile(ctx, rr, repo, &mapped.Source.BaseCommit)
 	if err != nil {
 		return Result{}, err
 	}
@@ -631,10 +644,11 @@ func (c Checker) checkTarget(ctx context.Context, rr *v1alpha1.RemediationReques
 
 // checkFile reads the target file at the head of the target branch, not of the pull request branch, so a merge
 // that changed the value is seen, and checks that it still holds the previous value. It reads the head again
-// after the file and fails with a retry error if the branch moved. On a pass it returns the repository it
-// opened and the file it read.
+// after the file and fails with a retry error if the branch moved. mapped is the commit the source mapping read,
+// which the head must be; nil when there is no mapping to agree with (Flux still reconciling), and then only a
+// stale verdict of this check is used. On a pass it returns the repository it opened and the file it read.
 func (c Checker) checkFile(ctx context.Context, rr *v1alpha1.RemediationRequest, repo v1alpha1.GitRepository,
-	mapped string) (providers.GitProvider, []byte, error) {
+	mapped *string) (providers.GitProvider, []byte, error) {
 	src := rr.Status.Source
 	field, err := sourcemap.FieldFor(rr.Spec.Action, rr.Spec.TargetRef)
 	if err != nil {
@@ -652,7 +666,7 @@ func (c Checker) checkFile(ctx context.Context, rr *v1alpha1.RemediationRequest,
 	}
 	// The mapping and this read must see one commit. If the branch moved since the mapping, the mapped source
 	// may describe another tree than the file read here: not fresh, not stale; the caller retries.
-	if head != mapped {
+	if mapped != nil && head != *mapped {
 		return nil, nil, errors.New("the target branch moved while its source was mapped, checking again")
 	}
 	file, err := git.ReadFile(ctx, head, string(src.Path), providers.MaxFileBytes)

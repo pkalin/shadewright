@@ -752,6 +752,47 @@ var _ = Describe("RemediationRequest Controller", func() {
 			Expect(c.Message).To(ContainSubstring("did not finish reconciling"))
 		})
 
+		// A wait, then a pass queued behind the lock for longer than the wait's timeout, then Flux reconciling
+		// again (applying the holder's merge): a new wait episode with its own clock, not one that ends at once
+		// because the old wait's start was kept while the request was Queued (#556 design review).
+		It("starts a new wait after the request was queued behind the lock", func() {
+			create(func() {})
+			stub.result = reconciling()
+			start := time.Now()
+			_, err := reconcileAt(start)
+			Expect(err).NotTo(HaveOccurred())
+
+			holder := fx.MemoryLimitRequest(requestNamespace, request.Name+"-holder")
+			holder.Spec.PolicyRef = request.Spec.PolicyRef
+			holder.Spec.TargetRef = request.Spec.TargetRef
+			holder.Spec.IncidentRef = otherIncident
+			Expect(k8sClient.Create(ctx, holder)).To(Succeed())
+			DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, holder))).To(Succeed()) })
+			holder.Status.Phase = remediationv1alpha1.PhasePolicyChecked
+			holder.Status.HoldsTarget = new(true)
+			Expect(k8sClient.Status().Update(ctx, holder)).To(Succeed())
+
+			stub.result = resolved()
+			_, err = reconcileAt(start.Add(time.Minute))
+			Expect(err).NotTo(HaveOccurred())
+			got := fetch()
+			Expect(meta.IsStatusConditionTrue(got.Status.Conditions, remediationv1alpha1.ConditionQueued)).To(BeTrue())
+			Expect(got.Status.Phase).To(BeEmpty())
+
+			Expect(k8sClient.Delete(ctx, holder)).To(Succeed())
+			stub.result = reconciling()
+			later := start.Add(DefaultTargetStateTimeout + 5*time.Minute)
+			res, err := reconcileAt(later)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+			got = fetch()
+			Expect(got.Status.Phase).To(BeEmpty())
+			c := condition(got)
+			Expect(c.Status).To(Equal(metav1.ConditionUnknown))
+			Expect(c.Reason).To(Equal(string(sourcemap.ReasonKustomizationReconciling)))
+			Expect(c.LastTransitionTime.Time).To(BeTemporally("==", later.Truncate(time.Second)))
+		})
+
 		It("still ends a failing Kustomization NeedsIntervention at once", func() {
 			create(func() {})
 			stub.result = sourcemap.Result{Outcome: sourcemap.NeedsIntervention,

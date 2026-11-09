@@ -77,6 +77,15 @@ func TestMergesBefore(t *testing.T) {
 		"on another target": func(o *remediationv1alpha1.RemediationRequest) {
 			o.Spec.TargetRef.UID = "44444444-4444-4444-8444-444444444444"
 		},
+		// Another container of the same Deployment is another field: its merge fixes nothing for this one
+		// (#556 design review).
+		"on another container": func(o *remediationv1alpha1.RemediationRequest) {
+			o.Spec.Action.SetContainerMemoryLimit.Container = "sidecar"
+		},
+		"another action type": func(o *remediationv1alpha1.RemediationRequest) {
+			o.Spec.Action = remediationv1alpha1.Action{Type: remediationv1alpha1.ActionAdjustKedaMaxReplicas,
+				AdjustKedaMaxReplicas: &remediationv1alpha1.AdjustKedaMaxReplicas{PreviousValue: 5, DesiredValue: 10}}
+		},
 		"not merged": func(o *remediationv1alpha1.RemediationRequest) {
 			o.Status.Phase = remediationv1alpha1.PhaseNeedsIntervention
 		},

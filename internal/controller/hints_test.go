@@ -41,9 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/analysis"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
-	"github.com/pkalin/shadewright/internal/incidents"
 	"github.com/pkalin/shadewright/internal/providers"
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
@@ -558,23 +556,23 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 				Expect(h.State).To(Equal(remediationv1alpha1.HintDeclined))
 				Expect(h.Reason).To(Equal(reason))
 			},
-			Entry("cooldown", incidents.OutcomeHintCoolingDown),
-			Entry("budget", incidents.OutcomeHintBudgetSpent),
-			Entry("no proposal", string(analysis.ReasonNoProposal)),
-			Entry("plan unchanged", string(analysis.ReasonPlanUnchanged)),
-			Entry("model unavailable", string(analysis.ReasonModelUnavailable)),
+			Entry("cooldown", "CoolingDown"),
+			Entry("budget", "BudgetSpent"),
+			Entry("no proposal", "NoProposal"),
+			Entry("plan unchanged", "PlanUnchanged"),
+			Entry("model unavailable", "ModelUnavailable"),
 		)
 
 		It("leaves a hint Pending while it is analyzed, after a proposal, or when another hint was handled", func() {
-			answer(remediationv1alpha1.IncidentAnalyzing, string(analysis.ReasonNoProposal), refOf(stored))
+			answer(remediationv1alpha1.IncidentAnalyzing, "NoProposal", refOf(stored))
 			poll()
 			Expect(fetch().Status.Hints[0].State).To(Equal(remediationv1alpha1.HintPending))
 			other := refOf(stored)
 			other.Digest = "sha256:" + strings.Repeat("0", 64)
-			answer(remediationv1alpha1.IncidentProposed, string(analysis.ReasonNoProposal), other)
+			answer(remediationv1alpha1.IncidentProposed, "NoProposal", other)
 			poll()
 			Expect(fetch().Status.Hints[0].State).To(Equal(remediationv1alpha1.HintPending))
-			answer(remediationv1alpha1.IncidentProposed, string(analysis.ReasonProposed), refOf(stored))
+			answer(remediationv1alpha1.IncidentProposed, outcomeProposed, refOf(stored))
 			poll()
 			Expect(fetch().Status.Hints[0].State).To(Equal(remediationv1alpha1.HintPending),
 				"a replacement answers it (the handoff)")
@@ -601,7 +599,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 			again.ResourceVersion, again.UID = "", ""
 			Expect(k8sClient.Create(ctx, again)).To(Succeed())
 			incident = again
-			answer(remediationv1alpha1.IncidentProposed, string(analysis.ReasonNoProposal), refOf(stored))
+			answer(remediationv1alpha1.IncidentProposed, "NoProposal", refOf(stored))
 			poll()
 			Expect(fetch().Status.Hints[0].State).To(Equal(remediationv1alpha1.HintPending))
 		})
@@ -627,10 +625,11 @@ func mustHead(g *fakegit.Git) string {
 	return head
 }
 
+// The executor keeps copies of the analyzer's Analyzed condition and outcomes; importing the analyzer here would
+// register its metrics in this binary. TestOutcomesTheExecutorCopies in internal/analysis pins the same values.
 func TestHintOutcomesMatchTheAnalyzer(t *testing.T) {
-	if conditionIncidentAnalyzed != incidents.ConditionAnalyzed || outcomeProposed != string(analysis.ReasonProposed) ||
-		outcomeRunbookMatched != string(analysis.ReasonRunbookMatched) {
-		t.Fatal("the executor's copies of the Analyzed condition and its outcomes differ from the analyzer's")
+	if conditionIncidentAnalyzed != "Analyzed" || outcomeProposed != "Proposed" || outcomeRunbookMatched != "RunbookMatched" {
+		t.Fatal("the executor's copies of the Analyzed condition and its outcomes changed")
 	}
 }
 

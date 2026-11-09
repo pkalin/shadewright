@@ -37,6 +37,15 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
+// The executor reads the Analyzed condition and these outcomes from the Incident to answer a hint, from copies
+// in internal/controller/hints.go (it does not import the analyzer); TestHintOutcomesMatchTheAnalyzer there pins
+// the same values, so a change here must change both.
+func TestOutcomesTheExecutorCopies(t *testing.T) {
+	if incidents.ConditionAnalyzed != "Analyzed" || ReasonProposed != "Proposed" || ReasonRunbookMatched != "RunbookMatched" {
+		t.Fatal("the Analyzed condition or an outcome the executor copies changed: change internal/controller/hints.go too")
+	}
+}
+
 // timedOutMessage is the message of the trigger's AnalysisTimedOut mark in these tests.
 const timedOutMessage = "The run timed out"
 

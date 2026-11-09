@@ -83,8 +83,8 @@ const ReasonHintNoAnswer = "NoAnswer"
 const maxPermissionAsks = 10
 
 // The Incident's Analyzed condition and the outcome reasons with which the analysis creates a replacement
-// request (internal/incidents and internal/analysis, which the executor does not import; a test keeps them
-// equal).
+// request (internal/incidents and internal/analysis, which the executor does not import; a test on each
+// side pins the same values).
 const (
 	conditionIncidentAnalyzed = "Analyzed"
 	outcomeProposed           = "Proposed"

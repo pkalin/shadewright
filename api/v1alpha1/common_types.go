@@ -115,12 +115,12 @@ type AdjustKedaMaxReplicas struct {
 
 // SetContainerMemoryLimit changes resources.limits.memory of one container. previous must match the file in
 // Git when the patch is applied, or the plan is stale. Both values are whole bytes between 1Mi and 1Ti. The
-// rules compare a value only once its approximate float is at most 2e12: the quantity library would compute a
-// huge decimal exponent digit by digit (#593).
-// +kubebuilder:validation:XValidation:rule="!(quantity(string(self.previous)).asApproximateFloat() <= 2e12 && quantity(string(self.desired)).asApproximateFloat() <= 2e12) || quantity(string(self.desired)).compareTo(quantity(string(self.previous))) != 0",message="desired must differ from previous"
-// +kubebuilder:validation:XValidation:rule="!(quantity(string(self.previous)).asApproximateFloat() <= 2e12 && quantity(string(self.desired)).asApproximateFloat() <= 2e12) || (quantity(string(self.previous)).isInteger() && quantity(string(self.desired)).isInteger())",message="previous and desired must be whole bytes"
-// +kubebuilder:validation:XValidation:rule="quantity(string(self.previous)).asApproximateFloat() <= 2e12 && quantity(string(self.previous)).compareTo(quantity('1Mi')) >= 0 && quantity(string(self.previous)).compareTo(quantity('1Ti')) <= 0",message="previous must be between 1Mi and 1Ti"
-// +kubebuilder:validation:XValidation:rule="quantity(string(self.desired)).asApproximateFloat() <= 2e12 && quantity(string(self.desired)).compareTo(quantity('1Mi')) >= 0 && quantity(string(self.desired)).compareTo(quantity('1Ti')) <= 0",message="desired must be between 1Mi and 1Ti"
+// rules compare a value only once its approximate float is between -2e12 and 2e12: the quantity library would
+// compute a huge decimal exponent digit by digit, for either sign (#593).
+// +kubebuilder:validation:XValidation:rule="!(quantity(string(self.previous)).asApproximateFloat() >= -2e12 && quantity(string(self.previous)).asApproximateFloat() <= 2e12 && quantity(string(self.desired)).asApproximateFloat() >= -2e12 && quantity(string(self.desired)).asApproximateFloat() <= 2e12) || quantity(string(self.desired)).compareTo(quantity(string(self.previous))) != 0",message="desired must differ from previous"
+// +kubebuilder:validation:XValidation:rule="!(quantity(string(self.previous)).asApproximateFloat() >= -2e12 && quantity(string(self.previous)).asApproximateFloat() <= 2e12 && quantity(string(self.desired)).asApproximateFloat() >= -2e12 && quantity(string(self.desired)).asApproximateFloat() <= 2e12) || (quantity(string(self.previous)).isInteger() && quantity(string(self.desired)).isInteger())",message="previous and desired must be whole bytes"
+// +kubebuilder:validation:XValidation:rule="quantity(string(self.previous)).asApproximateFloat() >= -2e12 && quantity(string(self.previous)).asApproximateFloat() <= 2e12 && quantity(string(self.previous)).compareTo(quantity('1Mi')) >= 0 && quantity(string(self.previous)).compareTo(quantity('1Ti')) <= 0",message="previous must be between 1Mi and 1Ti"
+// +kubebuilder:validation:XValidation:rule="quantity(string(self.desired)).asApproximateFloat() >= -2e12 && quantity(string(self.desired)).asApproximateFloat() <= 2e12 && quantity(string(self.desired)).compareTo(quantity('1Mi')) >= 0 && quantity(string(self.desired)).compareTo(quantity('1Ti')) <= 0",message="desired must be between 1Mi and 1Ti"
 type SetContainerMemoryLimit struct {
 	// container is the container name in the pod template.
 	// +kubebuilder:validation:MinLength=1

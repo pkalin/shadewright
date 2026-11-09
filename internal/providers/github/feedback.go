@@ -215,6 +215,8 @@ type lookResult struct {
 	notModified bool
 	// etag is the entity tag of the first page of a new sweep, as the host sent it (unchecked).
 	etag string
+	// pages holds the page each item of page.Items was read from.
+	pages []int
 }
 
 // look reads up to providers.MaxFeedbackPages pages of path from cursor's page, each within its own deadline,
@@ -287,6 +289,7 @@ func (p *Provider) look(ctx context.Context, op, path string, query url.Values, 
 			case !it.ignored:
 				budget -= len(it.fb.Body)
 				res.page.Items = append(res.page.Items, it.fb)
+				res.pages = append(res.pages, page)
 			}
 		}
 		if pr.stopped {
@@ -318,6 +321,13 @@ func next(cur providers.FeedbackCursor, res lookResult, quiet bool) providers.Fe
 		start = res.started
 	}
 	out := res.page
+	// A caller that stops after an item goes on from that item's page, after its ID, in this sweep.
+	if len(res.pages) == len(out.Items) && len(out.Items) > 0 {
+		out.Resume = make([]providers.FeedbackCursor, len(out.Items))
+		for i, it := range out.Items {
+			out.Resume[i] = providers.FeedbackCursor{Since: cur.Since, Page: res.pages[i], AfterID: it.ID, SweepStart: start}
+		}
+	}
 	if res.ended {
 		out.Complete = true
 		out.Next = providers.FeedbackCursor{Since: cur.Since}

@@ -141,12 +141,22 @@ func (g *Git) ListComments(ctx context.Context, n int64, cur providers.FeedbackC
 	}
 	slices.SortFunc(all, func(a, b providers.Feedback) int { return cmp.Compare(a.ID, b.ID) })
 	limit := cmp.Or(g.fb.perLook, DefaultFeedbackPerLook)
+	resume := func(items []providers.Feedback) []providers.FeedbackCursor {
+		if len(items) == 0 {
+			return nil
+		}
+		out := make([]providers.FeedbackCursor, len(items))
+		for i, it := range items {
+			out[i] = providers.FeedbackCursor{Since: cur.Since, Page: 1, AfterID: it.ID, SweepStart: start}
+		}
+		return out
+	}
 	if len(all) > limit {
 		items := slices.Clone(all[:limit])
-		return providers.FeedbackPage{Items: items, Next: providers.FeedbackCursor{
+		return providers.FeedbackPage{Items: items, Resume: resume(items), Next: providers.FeedbackCursor{
 			Since: cur.Since, Page: 1, AfterID: items[len(items)-1].ID, SweepStart: start}}, nil
 	}
-	out := providers.FeedbackPage{Items: all, Complete: true, Next: cur}
+	out := providers.FeedbackPage{Items: all, Resume: resume(all), Complete: true, Next: cur}
 	if cur.Page != 0 || len(all) != 0 {
 		out.Next = providers.FeedbackCursor{Since: cur.Since}
 		if s := start.Add(-time.Second); s.After(cur.Since) {

@@ -908,7 +908,6 @@ spec:
                     reason:
                       description: reason says why no hint was stored.
                       enum:
-                      - NoWriteAccess
                       - CapReached
                       - TooLong
                       - NotRedactable

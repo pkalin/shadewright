@@ -114,7 +114,8 @@ type Feedback struct {
 }
 
 // FeedbackCursor is where a look starts; the zero value starts from the beginning. The caller stores the Next
-// cursor of a look durably once it has handled every item of that look, and passes it to the next look of the
+// cursor of a look durably once it has handled every item of that look (or Resume[i] of FeedbackPage once it
+// handled the items up to i and stopped), and passes it to the next look of the
 // same list; its fields mean something only to the adapter that returned it, except the promise of Since
 // below. A cursor never goes back: Since never decreases, nor AfterID within a sweep. Page may: when items
 // were deleted, a look steps back to find its place, and a look that spent its pages doing so returns no items
@@ -148,6 +149,10 @@ type FeedbackPage struct {
 	Complete bool
 	// Next is the cursor of the next look.
 	Next FeedbackCursor
+	// Resume holds one cursor per item, or none: Resume[i] is the cursor of a look that goes on after Items[i],
+	// within the same sweep. A caller that handled the items up to i, and stopped there, stores Resume[i]
+	// instead of Next, so the next look returns the items after it and not those it handled.
+	Resume []FeedbackCursor
 }
 
 // FeedbackSource reads the feedback on a change request the executor opened, and asks the host whether an

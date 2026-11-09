@@ -328,14 +328,14 @@ var _ = Describe("RemediationRequest status.hints", func() {
 func testRefused(commentID int64) v1alpha1.RefusedHint {
 	return v1alpha1.RefusedHint{
 		Source: v1alpha1.HintSourceGitHub, CommentID: commentID, Author: v1alpha1.HintAuthor{ID: 42, Login: "octo-cat"},
-		Reason: v1alpha1.HintRefusalNoWriteAccess, RefusedAt: metav1.NewTime(time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)),
+		Reason: v1alpha1.HintRefusalCapReached, RefusedAt: metav1.NewTime(time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)),
 	}
 }
 
 var _ = Describe("RemediationRequest status.refusedHints", func() {
 	It("accepts MaxRefusedHints refusals, each reason, and drops the oldest", func() {
 		rr := createdRequest(false)
-		reasons := []v1alpha1.HintRefusal{v1alpha1.HintRefusalNoWriteAccess, v1alpha1.HintRefusalCapReached,
+		reasons := []v1alpha1.HintRefusal{v1alpha1.HintRefusalCapReached,
 			v1alpha1.HintRefusalTooLong, v1alpha1.HintRefusalNotRedactable, v1alpha1.HintRefusalEmpty,
 			v1alpha1.HintRefusalEditedAfterAccept, v1alpha1.HintRefusalEditedAfterSeen}
 		for i := range v1alpha1.MaxRefusedHints {
@@ -372,6 +372,8 @@ var _ = Describe("RemediationRequest status.refusedHints", func() {
 			expectStatusRefused(rr, msg)
 		},
 		Entry("an unknown reason", func(r *v1alpha1.RefusedHint) { r.Reason = "Rude" }, "status.refusedHints[0].reason"),
+		Entry("a non-writer's refusal, never recorded", func(r *v1alpha1.RefusedHint) { r.Reason = "NoWriteAccess" },
+			"status.refusedHints[0].reason"),
 		Entry("an unknown source", func(r *v1alpha1.RefusedHint) { r.Source = "Email" }, "status.refusedHints[0].source"),
 		Entry("comment ID 0", func(r *v1alpha1.RefusedHint) { r.CommentID = 0 }, "status.refusedHints[0].commentID"),
 		Entry("author ID 0", func(r *v1alpha1.RefusedHint) { r.Author.ID = 0 }, "status.refusedHints[0].author.id"),

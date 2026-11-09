@@ -271,20 +271,18 @@ type Handoff struct {
 // MaxRefusedHints is the most refusals a request's status.refusedHints keeps; the oldest goes first.
 const MaxRefusedHints = 10
 
-// HintRefusal says why the executor stored no hint for a comment that carried the command (ADR-0028
-// section 2). NoWriteAccess: the code host says the author may not write to the repository, or does not know
-// the author. CapReached: MaxHints hints of the request are Consumed or Reserved already, which count for its whole
-// supersede chain.
-// TooLong: the hint is over MaxHintTextBytes after redaction, or the body was cut before the end of its first
-// line. NotRedactable: the redacted text still holds something the redactor would change. Empty: the command
-// has no text. EditedAfterAccept: the comment of a stored hint was edited; the stored hint stays as it was.
-// EditedAfterSeen: a comment the executor had read already was edited to carry the command.
-// +kubebuilder:validation:Enum=NoWriteAccess;CapReached;TooLong;NotRedactable;Empty;EditedAfterAccept;EditedAfterSeen
+// HintRefusal says why the executor stored no hint for a writer's comment that carried the command (ADR-0028
+// section 2); a command of an author without write access is never recorded, so it cannot push a record out.
+// CapReached: MaxHints hints of the request are Consumed or Reserved already, which count for its whole
+// supersede chain. TooLong: the hint is over MaxHintTextBytes after redaction, or the body was cut before the
+// end of its first line. NotRedactable: the redacted text still holds something the redactor would change.
+// Empty: the command has no text. EditedAfterAccept: the comment of a stored hint was edited; the stored hint
+// stays as it was. EditedAfterSeen: a comment the executor had read already was edited to carry the command.
+// +kubebuilder:validation:Enum=CapReached;TooLong;NotRedactable;Empty;EditedAfterAccept;EditedAfterSeen
 type HintRefusal string
 
 // The refusals, one per value of the HintRefusal enum.
 const (
-	HintRefusalNoWriteAccess     HintRefusal = "NoWriteAccess"
 	HintRefusalCapReached        HintRefusal = "CapReached"
 	HintRefusalTooLong           HintRefusal = "TooLong"
 	HintRefusalNotRedactable     HintRefusal = "NotRedactable"

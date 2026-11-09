@@ -449,23 +449,21 @@ Used by: [IncidentStatus](#incidentstatus), [IncomingHandoff](#incominghandoff),
 
 ### HintRefusal
 
-HintRefusal says why the executor stored no hint for a comment that carried the command (ADR-0028
-section 2). NoWriteAccess: the code host says the author may not write to the repository, or does not know
-the author. CapReached: MaxHints hints of the request are Consumed or Reserved already, which count for its whole
-supersede chain.
-TooLong: the hint is over MaxHintTextBytes after redaction, or the body was cut before the end of its first
-line. NotRedactable: the redacted text still holds something the redactor would change. Empty: the command
-has no text. EditedAfterAccept: the comment of a stored hint was edited; the stored hint stays as it was.
-EditedAfterSeen: a comment the executor had read already was edited to carry the command.
+HintRefusal says why the executor stored no hint for a writer's comment that carried the command (ADR-0028
+section 2); a command of an author without write access is never recorded, so it cannot push a record out.
+CapReached: MaxHints hints of the request are Consumed or Reserved already, which count for its whole
+supersede chain. TooLong: the hint is over MaxHintTextBytes after redaction, or the body was cut before the
+end of its first line. NotRedactable: the redacted text still holds something the redactor would change.
+Empty: the command has no text. EditedAfterAccept: the comment of a stored hint was edited; the stored hint
+stays as it was. EditedAfterSeen: a comment the executor had read already was edited to carry the command.
 
 - Underlying type: string
-- One of `NoWriteAccess`, `CapReached`, `TooLong`, `NotRedactable`, `Empty`, `EditedAfterAccept`, `EditedAfterSeen`
+- One of `CapReached`, `TooLong`, `NotRedactable`, `Empty`, `EditedAfterAccept`, `EditedAfterSeen`
 
 Used by: [RefusedHint](#refusedhint).
 
 | Value | Description |
 | --- | --- |
-| `NoWriteAccess` |  |
 | `CapReached` |  |
 | `TooLong` |  |
 | `NotRedactable` |  |
@@ -902,7 +900,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `source` | [HintSource](#hintsource) | Yes | source is the system the comment is in.<br>One of `GitHub` |
 | `commentID` | integer | Yes | commentID is the comment's ID in the source.<br>Minimum: 1 |
 | `author` | [HintAuthor](#hintauthor) | Yes | author wrote the comment, as the source's API reported it. |
-| `reason` | [HintRefusal](#hintrefusal) | Yes | reason says why no hint was stored.<br>One of `NoWriteAccess`, `CapReached`, `TooLong`, `NotRedactable`, `Empty`, `EditedAfterAccept`, `EditedAfterSeen` |
+| `reason` | [HintRefusal](#hintrefusal) | Yes | reason says why no hint was stored.<br>One of `CapReached`, `TooLong`, `NotRedactable`, `Empty`, `EditedAfterAccept`, `EditedAfterSeen` |
 | `refusedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | refusedAt is when the executor refused it. |
 
 ### RemediationMode

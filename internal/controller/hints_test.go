@@ -42,6 +42,7 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
@@ -276,7 +277,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		Expect(lists).To(BeZero())
 	})
 
-	It("refuses a read-only author, an outside author and an empty one, and ignores bots, "+
+	It("records no refusal of a read-only or outside author, refuses a writer's empty one, and ignores bots, "+
 		"the App, reviews and anything that is not the command", func() {
 		accepted := make([]int64, 0, remediationv1alpha1.MaxHints+1)
 		accepted = append(accepted, byWriter("/shadewright reanalyze: one"), byWriter("/shadewright reanalyze: two"))
@@ -304,11 +305,53 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		}
 		Expect(ids).To(Equal(accepted))
 		Expect(refusals()).To(Equal(map[int64]remediationv1alpha1.HintRefusal{
-			readOnly: remediationv1alpha1.HintRefusalNoWriteAccess,
-			outside:  remediationv1alpha1.HintRefusalNoWriteAccess,
-			empty:    remediationv1alpha1.HintRefusalEmpty,
-		}))
+			empty: remediationv1alpha1.HintRefusalEmpty,
+		}), "a non-writer's refusal is counted, not recorded: it cannot push a record out")
+		Expect(refusals()).NotTo(HaveKey(readOnly))
+		Expect(refusals()).NotTo(HaveKey(outside))
 		Expect(asks()).To(Equal(3), "one question per new author with the command; none for bots or Apps")
+	})
+
+	It("asks a non-writer first, and records none of the refusals a writer's command would get", func() {
+		comment(providers.AuthorPerson, outsideID, "stranger", "/shadewright reanalyze:   ")
+		comment(providers.AuthorPerson, readerID, "reader", "/shadewright reanalyze: "+
+			strings.Repeat("a", remediationv1alpha1.MaxHintTextBytes+1))
+		poll()
+		Expect(fetch().Status.RefusedHints).To(BeEmpty())
+		Expect(fetch().Status.Hints).To(BeEmpty())
+		Expect(asks()).To(Equal(2))
+	})
+
+	It("judges a writer's comment after more than twice maxPermissionAsks commands of non-writers", func() {
+		for i := range 2*maxPermissionAsks + 1 {
+			comment(providers.AuthorPerson, 3000+int64(i), fmt.Sprintf("s%d", i), "/shadewright reanalyze: x")
+		}
+		late := byWriter("/shadewright reanalyze: after the crowd")
+		for range 4 {
+			poll()
+			if len(fetch().Status.Hints) > 0 {
+				break
+			}
+		}
+		got := fetch()
+		Expect(got.Status.Hints).To(HaveLen(1))
+		Expect(got.Status.Hints[0].CommentID).To(Equal(late))
+		Expect(got.Status.RefusedHints).To(BeEmpty())
+		Expect(asks()).To(Equal(2*maxPermissionAsks+2), "each author was asked once: every look went on")
+	})
+
+	It("declines a Pending hint when someone else pushes to the pull request", func() {
+		byWriter("/shadewright reanalyze: the sidecar")
+		poll()
+		got := fetch()
+		Expect(got.Status.Hints).To(HaveLen(1))
+		_, err := git.Push(freshness.BranchName(got), sourcePath, []byte("kind: Deployment\n"))
+		Expect(err).NotTo(HaveOccurred())
+		poll()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(got.Status.Hints[0].State).To(Equal(remediationv1alpha1.HintDeclined))
+		Expect(got.Status.Hints[0].Reason).To(Equal(ReasonHintRequestEnded))
 	})
 
 	It("refuses a hint once MaxHints are Consumed or Reserved, and counts no Pending or Declined one", func() {
@@ -369,7 +412,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		poll()
 		Expect(refusals()).To(HaveKeyWithValue(unclean, remediationv1alpha1.HintRefusalNotRedactable))
 		Expect(fetch().Status.Hints).To(BeEmpty(), "nothing is stored in part")
-		Expect(asks()).To(BeZero(), "the size and the redaction are checked before the host is asked")
+		Expect(asks()).To(Equal(2), "the author is asked first, once per look")
 	})
 
 	It("handles a comment once across restarts, also when it is returned again on the watermark", func() {
@@ -392,10 +435,9 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		Expect(got.Status.Hints).To(HaveLen(1))
 		Expect(got.Status.Hints[0]).To(Equal(first.Status.Hints[0]))
 		Expect(got.Status.Hints[0].CommentID).To(Equal(id))
-		Expect(refusals()).To(Equal(map[int64]remediationv1alpha1.HintRefusal{
-			readOnly: remediationv1alpha1.HintRefusalNoWriteAccess,
-		}))
-		Expect(asks()).To(Equal(2), "no comment was handled twice")
+		Expect(refusals()).NotTo(HaveKey(readOnly))
+		Expect(asks()).To(Equal(5), "the stored hint is never asked about again; the non-writer's comment, "+
+			"not recorded, is asked about once per look that returns it on the watermark")
 		Expect(got.ResourceVersion).To(Equal(first.ResourceVersion), "a look that finds nothing new writes nothing")
 	})
 
@@ -432,7 +474,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		Expect(refusals()).To(Equal(map[int64]remediationv1alpha1.HintRefusal{
 			id: remediationv1alpha1.HintRefusalEditedAfterSeen,
 		}))
-		Expect(asks()).To(BeZero())
+		Expect(asks()).To(Equal(1), "the author is asked first")
 	})
 
 	It("accepts a comment edited before it was first read, with its last text", func() {
@@ -464,12 +506,10 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 			got := fetch()
 			Expect(got.Status.Hints).To(HaveLen(1))
 			Expect(got.Status.Hints[0].CommentID).To(Equal(id))
-			Expect(refusals()).To(Equal(map[int64]remediationv1alpha1.HintRefusal{
-				readOnly: remediationv1alpha1.HintRefusalNoWriteAccess,
-			}))
+			Expect(refusals()).NotTo(HaveKey(readOnly))
 			Expect(got.Status.CommentCursor).NotTo(BeNil())
 			if after {
-				Expect(asks()).To(Equal(2), "the write went through: nothing is asked again")
+				Expect(asks()).To(Equal(3), "the write went through: only the non-writer on the watermark is asked again")
 			} else {
 				Expect(asks()).To(Equal(4), "the write was lost: the same comments are handled again")
 			}
@@ -490,8 +530,8 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		poll()
 		got := fetch()
 		Expect(got.Status.Hints).To(BeEmpty())
-		Expect(refusals()).To(HaveKey(readOnly), "the comment before the failure is handled")
-		Expect(got.Status.CommentCursor).To(BeNil(), "the cursor stays until every comment of the look is handled")
+		Expect(refusals()).NotTo(HaveKey(readOnly))
+		Expect(got.Status.CommentCursor).NotTo(BeNil(), "the cursor passes the comment judged before the failure")
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 		git.SetFail(nil)
 		poll()
@@ -513,10 +553,9 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		Expect(asks()).To(Equal(maxPermissionAsks))
 		got := fetch()
 		Expect(got.Status.Hints).To(BeEmpty())
-		Expect(refusals()).To(HaveLen(maxPermissionAsks))
-		Expect(refusals()).NotTo(HaveKey(late), "a comment not judged is not refused")
-		Expect(refusals()).To(HaveKeyWithValue(crowd[0], remediationv1alpha1.HintRefusalNoWriteAccess))
-		Expect(got.Status.CommentCursor).To(Equal(before), "the cursor does not pass a comment not judged")
+		Expect(got.Status.RefusedHints).To(BeEmpty(), "neither the non-writers nor the comment not judged")
+		Expect(got.Status.CommentCursor).NotTo(Equal(before), "the cursor passes the comments judged")
+		Expect(got.Status.CommentCursor.AfterID).To(Equal(crowd[len(crowd)-1]), "and stops before the one not judged")
 
 		poll()
 		Expect(asks()).To(Equal(maxPermissionAsks+1), "only the author not asked yet is asked")
@@ -702,6 +741,57 @@ func mustHead(g *fakegit.Git) string {
 func TestHintOutcomesMatchTheAnalyzer(t *testing.T) {
 	if conditionIncidentAnalyzed != "Analyzed" || outcomeProposed != "Proposed" || outcomeRunbookMatched != "RunbookMatched" {
 		t.Fatal("the executor's copies of the Analyzed condition and its outcomes changed")
+	}
+}
+
+// Every path that ends a request goes through setPhase, so a Pending hint never outlives its request.
+func TestSetPhaseDeclinesPendingHintsWhenTheRequestEnds(t *testing.T) {
+	closedBy := func(reason string) []metav1.Condition {
+		return []metav1.Condition{{Type: remediationv1alpha1.ConditionPROpened, Status: metav1.ConditionTrue, Reason: reason}}
+	}
+	for _, tc := range []struct {
+		name       string
+		phase      remediationv1alpha1.RemediationPhase
+		conditions []metav1.Condition
+		want       string
+	}{
+		{name: "still waiting", phase: remediationv1alpha1.PhaseAwaitingApproval},
+		{name: "a merge", phase: remediationv1alpha1.PhaseMerged, want: ReasonHintPullRequestMerged},
+		{name: "merged with a foreign change", phase: remediationv1alpha1.PhaseNeedsIntervention,
+			conditions: closedBy(ReasonChangeRequestMerged), want: ReasonHintPullRequestMerged},
+		{name: "closed", phase: remediationv1alpha1.PhaseNeedsIntervention,
+			conditions: closedBy(ReasonChangeRequestClosed), want: ReasonHintPullRequestClosed},
+		{name: "closed by Shadewright", phase: remediationv1alpha1.PhaseSuperseded,
+			conditions: closedBy(ReasonPullRequestClosed), want: ReasonHintPullRequestClosed},
+		{name: "head moved", phase: remediationv1alpha1.PhaseNeedsIntervention, want: ReasonHintRequestEnded},
+		{name: "superseded", phase: remediationv1alpha1.PhaseSuperseded, want: ReasonHintRequestEnded},
+		{name: "cancelled", phase: remediationv1alpha1.PhaseCancelled, want: ReasonHintRequestEnded},
+		{name: "expired", phase: remediationv1alpha1.PhaseExpired, want: ReasonHintRequestEnded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := &remediationv1alpha1.RemediationRequest{}
+			rr.Status.Phase = remediationv1alpha1.PhaseAwaitingApproval
+			rr.Status.Conditions = tc.conditions
+			rr.Status.Hints = []remediationv1alpha1.Hint{
+				{CommentID: 1, State: remediationv1alpha1.HintPending},
+				{CommentID: 2, State: remediationv1alpha1.HintReserved},
+				{CommentID: 3, State: remediationv1alpha1.HintDeclined, Reason: "BudgetSpent"},
+			}
+			(&RemediationRequestReconciler{}).setPhase(rr, tc.phase)
+			h := rr.Status.Hints
+			if tc.want == "" {
+				if h[0].State != remediationv1alpha1.HintPending {
+					t.Fatalf("a request still waiting declined its hint: %+v", h[0])
+				}
+				return
+			}
+			if h[0].State != remediationv1alpha1.HintDeclined || h[0].Reason != tc.want {
+				t.Fatalf("Pending hint is %s %q; want Declined %q", h[0].State, h[0].Reason, tc.want)
+			}
+			if h[1].State != remediationv1alpha1.HintReserved || h[2].Reason != "BudgetSpent" {
+				t.Fatalf("only Pending hints change: %+v", h)
+			}
+		})
 	}
 }
 

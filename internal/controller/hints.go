@@ -47,25 +47,27 @@ import (
 //   - The command is the first line only, starting exactly with hintCommand; its text is the rest of that
 //     line. Anything else is not a command and is ignored.
 //   - A comment already stored as a hint is never handled again; one edited since (another updated time) is
-//     recorded as refused (EditedAfterAccept) and the stored hint stays as it is. A comment already refused is
-//     not handled again. A comment created before the cursor's since was read by an earlier look, so if it
-//     carries the command now it was edited to: refused (EditedAfterSeen).
-//   - The text is redacted (internal/redact) before anything is stored, refused when the redacted text is not
-//     clean (NotRedactable) or longer than MaxHintTextBytes (TooLong), and refused when MaxHints of the
-//     request's hints are Consumed or Reserved (CapReached): the hints of the whole supersede chain are carried
-//     into it (#539). Pending and Declined hints do not count. When status.hints holds MaxStoredHints entries,
-//     a further command is not stored and not refused: it stays unjudged, the cursor passes it, and a log line
-//     counts it.
-//   - Only then is the code host asked whether the author may write, at most maxPermissionAsks authors per
-//     look; a refusal or an unknown author is NoWriteAccess. A failed question, or one beyond the bound, stops
-//     the look there: what was handled before it is stored, the cursor is not, and the next look reads the
-//     rest again.
+//     recorded as refused (EditedAfterAccept) and the stored hint stays as it is. A command already recorded
+//     as refused is not judged again (the record spares a question; progress never depends on it).
+//   - When status.hints holds MaxStoredHints entries, a further command is not stored and not refused: it
+//     stays unjudged, the cursor passes it, and a log line counts it.
+//   - Then the code host is asked whether the author may write, at most maxPermissionAsks authors per look.
+//     A refusal or an unknown author ends it there: such commands are counted in a log line, never recorded,
+//     so a person without write access cannot push records out of status.refusedHints. A failed question, or
+//     one beyond the bound, stops the look at that comment: the comments before it are judged and stored, and
+//     the cursor moves to just after the last of them (FeedbackPage.Resume), so every look makes progress.
+//   - A writer's command is refused when it has no text (Empty) or was cut by the host (TooLong), when the
+//     comment was created before the cursor's since, so it was read by an earlier look and edited later to
+//     carry the command (EditedAfterSeen), and when MaxHints of the request's hints are Consumed or Reserved
+//     (CapReached): the hints of the whole supersede chain are carried into it (#539); Pending and Declined
+//     hints do not count. The text is redacted (internal/redact) before anything is stored, and refused when
+//     the redacted text is not clean (NotRedactable) or longer than MaxHintTextBytes (TooLong).
 //   - An accepted hint is pinned (comment ID, digest of the stored text, the comment's updated time) in
 //     status.hints, Pending.
 //
-// The same look answers Pending hints from the Incident the request names (answerHints). When the pull
-// request is seen merged or closed, the update that records it declines the Pending hints too
-// (declinePendingHints). Everything goes into
+// The same look answers Pending hints from the Incident the request names (answerHints). Whatever ends the
+// request (a merge, a close, a moved head, a stale plan) declines its Pending hints in the status write that
+// records the end: setPhase calls declineOnEnd. Everything else goes into
 // the request's status in one update, with the resourceVersion read, and only after the kill switch allowed
 // it: a lost or refused write stores nothing, and the next look reads the same comments again and makes the
 // same decisions (invariant 5). Nothing here writes to Git.
@@ -88,6 +90,9 @@ const ReasonHintNoAnswer = "NoAnswer"
 const (
 	ReasonHintPullRequestMerged = "PullRequestMerged"
 	ReasonHintPullRequestClosed = "PullRequestClosed"
+	// ReasonHintRequestEnded: the request ended for another reason (a moved head, a stale plan, a cancel), so
+	// no replacement can take its pull request over.
+	ReasonHintRequestEnded = "RequestEnded"
 )
 
 // maxPermissionAsks is how many authors one look asks the code host about. Anyone who can comment on the
@@ -167,10 +172,16 @@ func (r *RemediationRequestReconciler) pollHints(ctx context.Context, git provid
 	if err != nil {
 		lookErr = fmt.Errorf("list the comments of the pull request: %w", err)
 	} else {
-		var all bool
-		if all, lookErr = r.takeComments(ctx, fs, upd, source, cur, page.Items, now); all {
-			// Every comment of the look was handled: the cursor moves on in the same write.
+		var n int
+		n, lookErr = r.takeComments(ctx, fs, upd, source, cur, page.Items, now)
+		switch {
+		case n == len(page.Items):
+			// Every comment of the look was judged: the cursor moves on in the same write.
 			upd.Status.CommentCursor = cursorStatus(page.Next)
+		case n > 0 && len(page.Resume) == len(page.Items):
+			// The look stopped: the cursor passes the comments it judged, so the next look starts after them
+			// and every look makes progress, whatever the record of refusals keeps.
+			upd.Status.CommentCursor = cursorStatus(page.Resume[n-1])
 		}
 	}
 	r.answerHints(ctx, upd, now)
@@ -190,24 +201,28 @@ func (r *RemediationRequestReconciler) pollHints(ctx context.Context, git provid
 	return lookErr
 }
 
-// takeComments handles the comments of one look in order, into upd's status (see the top of this file). It
-// reports whether it handled them all. It stops, with the comments before handled, at a comment whose author
-// would be one more than maxPermissionAsks to ask about (no error: a later look judges it), or at a
-// permission question that failed (its error).
+// takeComments judges the comments of one look in order, into upd's status (see the top of this file), and
+// returns how many of them it judged: all of them, or fewer when it stopped at a comment whose author would be
+// one more than maxPermissionAsks to ask about (no error: a later look judges it) or at a permission question
+// that failed (its error). The comments before that one are judged.
 func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs providers.FeedbackSource,
 	upd *remediationv1alpha1.RemediationRequest, source remediationv1alpha1.HintSource,
-	cur providers.FeedbackCursor, items []providers.Feedback, now time.Time) (bool, error) {
+	cur providers.FeedbackCursor, items []providers.Feedback, now time.Time) (int, error) {
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(upd))
 	st := &upd.Status
 	asked := map[int64]bool{}
-	unstored := 0
+	unstored, outsiders := 0, 0
 	defer func() {
 		if unstored > 0 {
 			log.Info("Did not store reviewer hints of RemediationRequest: its list of hints is full",
 				"comments", unstored, "maxStoredHints", remediationv1alpha1.MaxStoredHints)
 		}
+		if outsiders > 0 {
+			log.Info("Ignored reviewer hint commands of authors without write access for RemediationRequest",
+				"comments", outsiders)
+		}
 	}()
-	for _, c := range items {
+	for i, c := range items {
 		if c.Kind != providers.FeedbackComment || c.Author.Kind != providers.AuthorPerson || c.ID < 1 ||
 			c.Author.ID < 1 || !hintLoginPattern.MatchString(c.Author.Login) {
 			continue
@@ -224,13 +239,38 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 			}
 			continue
 		}
-		if findRefused(st.RefusedHints, source, c.ID) {
-			continue
-		}
 		text, isCommand, why := parseHintCommand(c.Body, c.Truncated)
 		switch {
 		case !isCommand:
 			continue
+		case findRefused(st.RefusedHints, source, c.ID):
+			// Recorded already: the record spares a question; progress never depends on it (the cursor).
+			continue
+		case len(st.Hints) >= remediationv1alpha1.MaxStoredHints:
+			// Nothing more can be stored; the comment stays unjudged and the cursor passes it (#542 replies).
+			unstored++
+			continue
+		}
+		// The author first: only a writer's command is judged further and recorded, so a person without write
+		// access cannot push records out of status.refusedHints; theirs are only counted.
+		may, ok := asked[c.Author.ID]
+		if !ok {
+			if len(asked) >= maxPermissionAsks {
+				// The bound limits the questions of one look, not which comments are judged: this one and the
+				// ones after it stay unjudged, the cursor stops before it, and the next look asks.
+				return i, nil
+			}
+			var err error
+			if may, err = fs.CanWrite(ctx, c.Author); err != nil {
+				return i, fmt.Errorf("ask whether the author of comment %d may write: %w", c.ID, err)
+			}
+			asked[c.Author.ID] = may
+		}
+		if !may {
+			outsiders++
+			continue
+		}
+		switch {
 		case why != "":
 			refuse(why)
 			continue
@@ -240,10 +280,6 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 		case chainHints(st.Hints) >= remediationv1alpha1.MaxHints:
 			refuse(remediationv1alpha1.HintRefusalCapReached)
 			continue
-		case len(st.Hints) >= remediationv1alpha1.MaxStoredHints:
-			// Nothing more can be stored; the comment stays unjudged and the cursor passes it (#542 replies).
-			unstored++
-			continue
 		}
 		stored := redact.String(text)
 		switch {
@@ -252,23 +288,6 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 			continue
 		case len(stored) > remediationv1alpha1.MaxHintTextBytes:
 			refuse(remediationv1alpha1.HintRefusalTooLong)
-			continue
-		}
-		may, ok := asked[c.Author.ID]
-		if !ok {
-			if len(asked) >= maxPermissionAsks {
-				// The bound limits the questions of one look, not which comments are judged: this one and the
-				// ones after it stay unhandled, so the cursor does not pass them, and the next look asks.
-				return false, nil
-			}
-			var err error
-			if may, err = fs.CanWrite(ctx, c.Author); err != nil {
-				return false, fmt.Errorf("ask whether the author of comment %d may write: %w", c.ID, err)
-			}
-			asked[c.Author.ID] = may
-		}
-		if !may {
-			refuse(remediationv1alpha1.HintRefusalNoWriteAccess)
 			continue
 		}
 		sum := sha256.Sum256([]byte(stored))
@@ -282,7 +301,7 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 		})
 		log.Info("Accepted a reviewer hint for RemediationRequest", "comment", c.ID, "author", c.Author.ID)
 	}
-	return true, nil
+	return len(items), nil
 }
 
 // chainHints counts the hints that count toward the cap of a supersede chain: Consumed and Reserved ones.
@@ -296,10 +315,28 @@ func chainHints(hints []remediationv1alpha1.Hint) int {
 	return n
 }
 
-// declinePendingHints declines the Pending hints of rr with reason (ReasonHintPullRequestMerged or
-// ReasonHintPullRequestClosed): its pull request ended, so no replacement can take it over. The caller writes
-// the status, in the same update that records the end.
-func declinePendingHints(rr *remediationv1alpha1.RemediationRequest, reason string) {
+// declineOnEnd declines the Pending hints of rr when phase ends the request, before setPhase records it, so
+// the status write that ends the request declines them too: no replacement can take its pull request over.
+// The reason says why: ReasonHintPullRequestMerged for a merge (the phase, or a close condition markClosed
+// wrote for one), ReasonHintPullRequestClosed for a close, ReasonHintRequestEnded for anything else. Only the
+// phases a request goes through while its pull request may still be reviewed leave them Pending.
+func declineOnEnd(rr *remediationv1alpha1.RemediationRequest, phase remediationv1alpha1.RemediationPhase) {
+	switch phase {
+	case remediationv1alpha1.PhasePending, remediationv1alpha1.PhasePolicyChecked, remediationv1alpha1.PhasePRCreated,
+		remediationv1alpha1.PhaseAwaitingApproval, remediationv1alpha1.PhaseAutoMergeQueued:
+		return
+	}
+	reason := ReasonHintRequestEnded
+	switch closed := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPROpened); {
+	case phase == remediationv1alpha1.PhaseMerged || phase == remediationv1alpha1.PhaseWaitingForDelivery ||
+		phase == remediationv1alpha1.PhaseVerifying || phase == remediationv1alpha1.PhaseSucceeded:
+		reason = ReasonHintPullRequestMerged
+	case closed == nil:
+	case closed.Reason == ReasonChangeRequestMerged:
+		reason = ReasonHintPullRequestMerged
+	case closed.Reason == ReasonChangeRequestClosed || closed.Reason == ReasonPullRequestClosed:
+		reason = ReasonHintPullRequestClosed
+	}
 	for i := range rr.Status.Hints {
 		if h := &rr.Status.Hints[i]; h.State == remediationv1alpha1.HintPending {
 			h.State, h.Reason = remediationv1alpha1.HintDeclined, reason

@@ -846,6 +846,39 @@ func TestListCommentsKeepsNoTagOfASweepWithItemsOrSkips(t *testing.T) {
 	}
 }
 
+func TestListCommentsResumesAfterEachItem(t *testing.T) {
+	full := commentPage(t, feedbackPerPage, 1, since, "x")
+	rest := commentPage(t, 2, feedbackPerPage+1, since, "y")
+	h := newHarness(t, ownPR(), dated(commentsStep(1, full)), commentsStep(2, rest))
+	got, err := h.p.ListComments(ctx, prNumber, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Resume) != len(got.Items) || len(got.Items) != feedbackPerPage+2 {
+		t.Fatalf("%d items, %d resume cursors; want %d of each", len(got.Items), len(got.Resume), feedbackPerPage+2)
+	}
+	for i, it := range got.Items {
+		page := 1
+		if i >= feedbackPerPage {
+			page = 2
+		}
+		want := providers.FeedbackCursor{Since: since, Page: page, AfterID: it.ID, SweepStart: hostNow}
+		if got.Resume[i] != want {
+			t.Fatalf("resume %d is %+v; want %+v", i, got.Resume[i], want)
+		}
+	}
+
+	// A look from the cursor after the last item of page 1 returns only the items after it.
+	h = newHarness(t, ownPR(), commentsStep(1, full), commentsStep(2, rest))
+	again, err := h.p.ListComments(ctx, prNumber, got.Resume[feedbackPerPage-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []int64{feedbackPerPage + 1, feedbackPerPage + 2}; !slices.Equal(ids(again.Items), want) {
+		t.Fatalf("items %v; want %v", ids(again.Items), want)
+	}
+}
+
 func TestListFeedbackSendsNoConditionOutsideTheFirstPageOfACommentSweep(t *testing.T) {
 	// A continuation of a sweep, and the reviews, never ask conditionally, whatever the cursor holds: not even
 	// page 1, when the continuation finds page 2 empty and steps back to it.

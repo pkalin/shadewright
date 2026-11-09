@@ -46,8 +46,12 @@ func TestFeedbackSweeps(t *testing.T) {
 	}
 
 	first, err := g.ListComments(ctx, cr.Number, providers.FeedbackCursor{})
-	if err != nil || first.Complete || len(first.Items) != 2 {
+	if err != nil || first.Complete || len(first.Items) != 2 || len(first.Resume) != 2 {
 		t.Fatalf("first look: %+v, %v", first, err)
+	}
+	resumed, err := g.ListComments(ctx, cr.Number, first.Resume[0])
+	if err != nil || len(resumed.Items) != 2 || resumed.Items[0].ID != 2 {
+		t.Fatalf("a look after the first item returns the items after it: %+v, %v", resumed, err)
 	}
 	second, err := g.ListComments(ctx, cr.Number, first.Next)
 	if err != nil || !second.Complete || len(second.Items) != 1 || second.Items[0].ID != 3 {
@@ -67,8 +71,8 @@ func TestFeedbackSweeps(t *testing.T) {
 	if err != nil || len(edited.Items) != 1 || edited.Items[0].Body != "edited" {
 		t.Fatalf("an edit is returned again: %+v, %v", edited, err)
 	}
-	if lists, _ := g.FeedbackCalls(); lists != 4 {
-		t.Fatalf("lists %d, want 4", lists)
+	if lists, _ := g.FeedbackCalls(); lists != 5 {
+		t.Fatalf("lists %d, want 5", lists)
 	}
 }
 

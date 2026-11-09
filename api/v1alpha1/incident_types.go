@@ -182,6 +182,13 @@ type IncidentStatus struct {
 	// +optional
 	LastAnalysisTime *metav1.Time `json:"lastAnalysisTime,omitempty"`
 
+	// handledHint is the reviewer hint the analysis claimed by lastAnalysisTime answers (ADR-0028 section 3):
+	// written in the status update that takes the claim and kept with the outcome in the Analyzed condition, so
+	// a restarted analyzer does not run the same hint twice and the executor can match a refusal to the hint.
+	// Absent for an analysis without a hint. Planned: nothing writes it yet.
+	// +optional
+	HandledHint *HintRef `json:"handledHint,omitempty"`
+
 	// analysisRecords are the newest analysis record IDs, oldest first (at most MaxAnalysisRecords).
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=20

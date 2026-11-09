@@ -64,11 +64,18 @@ Validation rules:
 
 - status.pullRequest.mergeCommitSHA is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.mergeCommitSHA) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.mergeCommitSHA) && self.status.pullRequest.mergeCommitSHA == oldSelf.status.pullRequest.mergeCommitSHA)`
 - status.pullRequest.appliedObservedAt is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.appliedObservedAt) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt) && self.status.pullRequest.appliedObservedAt == oldSelf.status.pullRequest.appliedObservedAt)`
+- status.hints: a stored hint is never removed: `!has(oldSelf.status) || !has(oldSelf.status.hints) || (has(self.status) && has(self.status.hints) && oldSelf.status.hints.all(o, self.status.hints.exists(h, h.source == o.source && h.commentID == o.commentID)))`
+- status.handoff.from is never removed: `!has(oldSelf.status) || !has(oldSelf.status.handoff) || !has(oldSelf.status.handoff.from) || (has(self.status) && has(self.status.handoff) && has(self.status.handoff.from))`
+- status.handoff.to is never removed: `!has(oldSelf.status) || !has(oldSelf.status.handoff) || !has(oldSelf.status.handoff.to) || (has(self.status) && has(self.status.handoff) && has(self.status.handoff.to))`
+- status.handoff.from starts in Reserved: `!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from) || self.status.handoff.from.phase == 'Reserved' || (has(oldSelf.status) && has(oldSelf.status.handoff) && has(oldSelf.status.handoff.from))`
+- status.handoff.to starts in Intent: `!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to) || self.status.handoff.to.phase == 'Intent' || (has(oldSelf.status) && has(oldSelf.status.handoff) && has(oldSelf.status.handoff.to))`
+- status.handoff.from must match spec.replaces: `!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from) || (has(self.spec.replaces) && self.status.handoff.from.name == self.spec.replaces.name && self.status.handoff.from.uid == self.spec.replaces.uid && self.status.handoff.from.hint.source == self.spec.replaces.hint.source && self.status.handoff.from.hint.commentID == self.spec.replaces.hint.commentID && self.status.handoff.from.hint.digest == self.spec.replaces.hint.digest)`
+- status.handoff.to must name a hint in status.hints that is no longer Pending, and Reserved while the intent stands: `!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to) || (has(self.status.hints) && self.status.hints.exists(h, h.source == self.status.handoff.to.hint.source && h.commentID == self.status.handoff.to.hint.commentID && h.digest == self.status.handoff.to.hint.digest && h.state != 'Pending' && (self.status.handoff.to.phase != 'Intent' || h.state == 'Reserved')))`
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
-| `spec` | [RemediationRequestSpec](#remediationrequestspec) | Yes | spec is the plan.<br>Rule: spec is immutable; a changed plan is a new RemediationRequest<br>Rule: AdjustKedaMaxReplicas can only target a keda.sh ScaledObject<br>Rule: SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet |
+| `spec` | [RemediationRequestSpec](#remediationrequestspec) | Yes | spec is the plan.<br>Rule: spec is immutable; a changed plan is a new RemediationRequest<br>Rule: AdjustKedaMaxReplicas can only target a keda.sh ScaledObject<br>Rule: SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet<br>Rule: replaces and chainRoot are set together or not at all |
 | `status` | [RemediationRequestStatus](#remediationrequeststatus) | No | status is the progress, written by the controller. |
 
 ## RemediationSettings
@@ -316,6 +323,135 @@ Used by: [RemediationSettingsSpec](#remediationsettingsspec).
 | `provider` | [GitProviderType](#gitprovidertype) | Yes | provider selects the Git hosting adapter.<br>One of `GitHub` |
 | `github` | [GitHubRepository](#githubrepository) | No | github holds GitHub App settings. |
 
+### Handoff
+
+Handoff records the supersede handoff (ADR-0028 section 4), written in this order: the replacement's
+admission sets from (phase Reserved); one write on the predecessor sets to (phase Intent) and its hint
+Reserved; after the branch update the replacement's from moves to Done, then the predecessor ends Superseded
+with HandedOff, its to Done and its hint Consumed. A request in the middle of a chain has both: from for the
+handoff that gave it the pull request, to for the one that passes it on. Each side is written once, starts
+in its first phase and is never removed; only its phase moves on.
+
+
+Validation rules:
+
+- a handoff has from, to or both: `has(self.from) || has(self.to)`
+
+Used by: [RemediationRequestStatus](#remediationrequeststatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `from` | [IncomingHandoff](#incominghandoff) | No | from is the incoming side, set on a replacement.<br>Rule: an incoming handoff is Reserved, Done or Aborted<br>Rule: an incoming handoff is pinned: only its phase changes<br>Rule: an incoming handoff moves only from Reserved to Done or Aborted |
+| `to` | [OutgoingHandoff](#outgoinghandoff) | No | to is the outgoing side, set on a predecessor.<br>Rule: an outgoing handoff is Intent, Done or Aborted<br>Rule: an outgoing handoff is pinned: only its phase changes<br>Rule: an outgoing handoff moves only from Intent to Done or Aborted |
+
+### HandoffPhase
+
+HandoffPhase is how far one side of a handoff has come. Incoming, on the replacement: Reserved (it took the
+target lock and named its predecessor), then Done (it holds the pull request) or Aborted. Outgoing, on the
+predecessor: Intent (it expects its replacement's commit on top of expectedHead), then Done (it ended
+Superseded with HandedOff) or Aborted. Each side starts in its first phase and moves only once.
+
+- Underlying type: string
+- One of `Reserved`, `Intent`, `Done`, `Aborted`
+
+Used by: [IncomingHandoff](#incominghandoff), [OutgoingHandoff](#outgoinghandoff).
+
+| Value | Description |
+| --- | --- |
+| `Reserved` |  |
+| `Intent` |  |
+| `Done` |  |
+| `Aborted` |  |
+
+### Hint
+
+Hint is one reviewer hint the executor accepted from a comment on the request's pull request (ADR-0028
+section 2): its author had write access when it was accepted, its text is redacted and bounded, and it is
+pinned by comment ID, digest and the comment's updatedAt. Only the executor writes it; the analyzer reads
+the stored text, never the comment.
+
+
+Validation rules:
+
+- text must be at most 2048 bytes: `size(bytes(self.text)) <= 2048`
+- a Declined hint needs a reason: `self.state != 'Declined' || has(self.reason)`
+- a stored hint is pinned: only its state and reason change: `self.source == oldSelf.source && self.commentID == oldSelf.commentID && self.digest == oldSelf.digest && self.text == oldSelf.text && self.author == oldSelf.author && self.updatedAt == oldSelf.updatedAt && self.acceptedAt == oldSelf.acceptedAt`
+- the reason of a Consumed or Declined hint never changes: `!(oldSelf.state in ['Consumed', 'Declined']) || (has(self.reason) == has(oldSelf.reason) && (!has(self.reason) || self.reason == oldSelf.reason))`
+- a hint moves only from Pending to Reserved or Declined, and from Reserved to Consumed or Declined: `oldSelf.state == self.state || (oldSelf.state == 'Pending' && self.state in ['Reserved', 'Declined']) || (oldSelf.state == 'Reserved' && self.state in ['Consumed', 'Declined'])`
+
+Used by: [RemediationRequestStatus](#remediationrequeststatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `source` | [HintSource](#hintsource) | Yes | source is the system the comment is in.<br>One of `GitHub` |
+| `commentID` | integer | Yes | commentID is the comment's ID in the source.<br>Minimum: 1 |
+| `author` | [HintAuthor](#hintauthor) | Yes | author wrote the comment. |
+| `text` | string | Yes | text is the hint after redaction, at most 2048 bytes. It is untrusted input: the analysis fences it as a reviewer's opinion, never as instructions or evidence.<br>Maximum length: 2048<br>Minimum length: 1 |
+| `digest` | string | Yes | digest is the SHA-256 of text.<br>Pattern: `^sha256:[0-9a-f]{64}$` |
+| `updatedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | updatedAt is the comment's updated time when the hint was accepted. A comment whose updated time differs later was edited after acceptance, and the edit is ignored. |
+| `acceptedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | acceptedAt is when the executor accepted the hint. |
+| `state` | [HintState](#hintstate) | Yes | state says what became of the hint.<br>One of `Pending`, `Reserved`, `Consumed`, `Declined` |
+| `reason` | string | No | reason says why a Declined hint was declined, for example BudgetSpent or NoProposal.<br>Maximum length: 64<br>Minimum length: 1<br>Pattern: `^[A-Z][A-Za-z0-9]*$` |
+
+### HintAuthor
+
+HintAuthor is the comment's author as the source's API reported it, never a name taken from the comment's
+text. The merge gate compares authors by id, so a renamed login carries nothing over.
+
+
+Used by: [Hint](#hint).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | Yes | id is the author's numeric user ID in the source.<br>Minimum: 1 |
+| `login` | string | Yes | login is the author's login when the hint was accepted, for the reader only.<br>Maximum length: 100<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9][A-Za-z0-9._-]*$` |
+
+### HintRef
+
+HintRef pins one hint: where it came from, the comment that carried it and the digest of the stored text.
+A comment edited after the hint was stored does not change what the pin names.
+
+
+Used by: [IncidentStatus](#incidentstatus), [IncomingHandoff](#incominghandoff), [OutgoingHandoff](#outgoinghandoff), [RequestReplacement](#requestreplacement).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `source` | [HintSource](#hintsource) | Yes | source is the system the comment is in.<br>One of `GitHub` |
+| `commentID` | integer | Yes | commentID is the comment's ID in the source.<br>Minimum: 1 |
+| `digest` | string | Yes | digest is the SHA-256 of the stored, redacted hint text.<br>Pattern: `^sha256:[0-9a-f]{64}$` |
+
+### HintSource
+
+HintSource is the system a hint came from. GitHub is the only one; Azure DevOps is planned.
+
+- Underlying type: string
+- One of `GitHub`
+
+Used by: [Hint](#hint), [HintRef](#hintref).
+
+| Value | Description |
+| --- | --- |
+| `GitHub` | HintSourceGitHub is a comment on a GitHub pull request. |
+
+### HintState
+
+HintState says what became of a hint. Pending: stored, not yet answered. Reserved: named by exactly one
+replacement being admitted. Consumed: the replacement holds the pull request. Declined: answered without a
+replacement, with the reason. A hint moves only from Pending to Reserved or Declined, and from Reserved to
+Consumed or Declined; Consumed and Declined are final.
+
+- Underlying type: string
+- One of `Pending`, `Reserved`, `Consumed`, `Declined`
+
+Used by: [Hint](#hint).
+
+| Value | Description |
+| --- | --- |
+| `Pending` |  |
+| `Reserved` |  |
+| `Consumed` |  |
+| `Declined` |  |
+
 ### IncidentPhase
 
 IncidentPhase summarizes an incident.
@@ -391,9 +527,31 @@ Used by: [Incident](#incident).
 | `occurrencesDroppedThrough` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | occurrencesDroppedThrough is when the newest occurrence dropped from occurrences began. An occurrence with no record that began no later than this is treated as counted in full, so the bound never counts one twice. |
 | `resolvedTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | resolvedTime is when the Incident moved to phase Resolved, written in the same status update (design 3.2). It cannot change while the phase stays Resolved. A symptom seen again within 24 hours of it, or with it missing, moves the Incident to Escalated without an analysis; seen again later, it opens the next occurrence of the fingerprint as a new Incident. |
 | `lastAnalysisTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | lastAnalysisTime is when the analyzer last ran; it drives the cooldown. |
+| `handledHint` | [HintRef](#hintref) | No | handledHint is the reviewer hint the analysis claimed by lastAnalysisTime answers (ADR-0028 section 3): written in the status update that takes the claim and kept with the outcome in the Analyzed condition, so a restarted analyzer does not run the same hint twice and the executor can match a refusal to the hint. Absent for an analysis without a hint. Planned: nothing writes it yet. |
 | `analysisRecords` | [RecordID](#recordid) array | No | analysisRecords are the newest analysis record IDs, oldest first (at most MaxAnalysisRecords).<br>Maximum items: 20<br>Maximum length: 200<br>Minimum length: 1<br>Pattern: `^[a-z0-9][a-z0-9-]{0,199}$`<br>List type: atomic |
 | `remediationRequests` | [Name](#name) array | No | remediationRequests are the names of requests made for this incident, oldest first.<br>Maximum items: 20<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`<br>List type: atomic |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase.<br>List type: map<br>List key: `type` |
+
+### IncomingHandoff
+
+IncomingHandoff is the replacement's side of a handoff: the predecessor it takes over and the hint it
+answers, equal to spec.replaces. Only its phase changes once written.
+
+
+Validation rules:
+
+- an incoming handoff is Reserved, Done or Aborted: `self.phase in ['Reserved', 'Done', 'Aborted']`
+- an incoming handoff is pinned: only its phase changes: `self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint`
+- an incoming handoff moves only from Reserved to Done or Aborted: `oldSelf.phase == self.phase || (oldSelf.phase == 'Reserved' && self.phase in ['Done', 'Aborted'])`
+
+Used by: [Handoff](#handoff).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | [Name](#name) | Yes | name of the predecessor.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
+| `uid` | [UID](#uid) | Yes | uid of the predecessor.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `hint` | [HintRef](#hintref) | Yes | hint is the predecessor's hint the replacement answers. |
+| `phase` | [HandoffPhase](#handoffphase) | Yes | phase is how far this side has come.<br>One of `Reserved`, `Intent`, `Done`, `Aborted` |
 
 ### IntegrationStatus
 
@@ -515,7 +673,7 @@ Name is a DNS label used to reference other Shadewright objects or entries.
 - Minimum length: 1
 - Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 
-Used by: [GitRepository](#gitrepository), [IncidentStatus](#incidentstatus), [PolicyGitOps](#policygitops), [PolicyTargets](#policytargets), [RemediationPolicySpec](#remediationpolicyspec), [RemediationRequestSpec](#remediationrequestspec), [ResolvedSource](#resolvedsource).
+Used by: [GitRepository](#gitrepository), [IncidentStatus](#incidentstatus), [IncomingHandoff](#incominghandoff), [OutgoingHandoff](#outgoinghandoff), [PolicyGitOps](#policygitops), [PolicyTargets](#policytargets), [RemediationPolicySpec](#remediationpolicyspec), [RemediationRequestSpec](#remediationrequestspec), [RequestReplacement](#requestreplacement), [ResolvedSource](#resolvedsource).
 
 ### ObjectRef
 
@@ -545,6 +703,29 @@ Used by: [IncidentStatus](#incidentstatus).
 | `id` | string | Yes | id names the occurrence: "event:" and the Event UID, "termination:" and a hash of the pod UID, the container and the termination, or "condition:" and a hash of the object UID, the kind, the symptom reason and when the condition began, for a symptom read from an object's status by a module's symptom source.<br>Maximum length: 76<br>Pattern: <code>^(event&#124;termination&#124;condition):&#91;A-Za-z0-9-]{1,64}$</code> |
 | `total` | integer | Yes | total is the highest total of the occurrence counted: the event's series count, or 1 for a termination or a condition.<br>Maximum: 2147483647<br>Minimum: 0 |
 | `began` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | began is when the occurrence began: the event's creation time, the termination's finish time or the condition's last transition time. Absent when the cluster did not report one. |
+
+### OutgoingHandoff
+
+OutgoingHandoff is the predecessor's side of a handoff: the replacement that takes it over, the hint of this
+request it answers (which must be in status.hints, Reserved while the intent stands) and the branch head the
+replacement's commit must have as its parent. Only its phase changes once written.
+
+
+Validation rules:
+
+- an outgoing handoff is Intent, Done or Aborted: `self.phase in ['Intent', 'Done', 'Aborted']`
+- an outgoing handoff is pinned: only its phase changes: `self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead`
+- an outgoing handoff moves only from Intent to Done or Aborted: `oldSelf.phase == self.phase || (oldSelf.phase == 'Intent' && self.phase in ['Done', 'Aborted'])`
+
+Used by: [Handoff](#handoff).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | [Name](#name) | Yes | name of the replacement.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
+| `uid` | [UID](#uid) | Yes | uid of the replacement, so a request recreated under the same name is never taken for it.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `hint` | [HintRef](#hintref) | Yes | hint is this request's hint the replacement answers. |
+| `expectedHead` | string | Yes | expectedHead is the head of the branch when the intent was recorded: the replacement's commit must have it as its parent.<br>Pattern: `^[0-9a-f]{40}$` |
+| `phase` | [HandoffPhase](#handoffphase) | Yes | phase is how far this side has come.<br>One of `Reserved`, `Intent`, `Done`, `Aborted` |
 
 ### PlanRepository
 
@@ -692,7 +873,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `Failed` | PhaseFailed means a step failed, for example verification did not pass before the timeout. Terminal. |
 | `Expired` | PhaseExpired means a step reached its deadline. Terminal. |
 | `Cancelled` | PhaseCancelled means the request was cancelled before the change was merged. Terminal. |
-| `Superseded` | PhaseSuperseded means a plan input changed, or the ScaledObject is no longer ready, or the module that contributes the action was disabled, so the pull request is closed and a new request is needed. Terminal. |
+| `Superseded` | PhaseSuperseded means a plan input changed, or the ScaledObject is no longer ready, or the module that contributes the action was disabled, so the pull request is closed and a new request is needed. With reason HandedOff (planned, ADR-0028) a replacement took over the pull request instead, which stays open. Terminal. |
 | `NeedsIntervention` | PhaseNeedsIntervention means the controller cannot continue on its own, for example because the target is not declared in a plain manifest; a human must act. |
 
 ### RemediationPolicySpec
@@ -739,6 +920,7 @@ Validation rules:
 - spec is immutable; a changed plan is a new RemediationRequest: `self == oldSelf`
 - AdjustKedaMaxReplicas can only target a keda.sh ScaledObject: `self.action.type != 'AdjustKedaMaxReplicas' || (self.targetRef.apiVersion.startsWith('keda.sh/') && self.targetRef.kind == 'ScaledObject')`
 - SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet: `self.action.type != 'SetContainerMemoryLimit' || (self.targetRef.apiVersion == 'apps/v1' && self.targetRef.kind in ['Deployment', 'StatefulSet'])`
+- replaces and chainRoot are set together or not at all: `has(self.replaces) == has(self.chainRoot)`
 
 Used by: [RemediationRequest](#remediationrequest).
 
@@ -751,6 +933,8 @@ Used by: [RemediationRequest](#remediationrequest).
 | `policyRef` | [Name](#name) | Yes | policyRef names the RemediationPolicy that must allow this plan.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 | `action` | [Action](#action) | Yes | action is the typed change.<br>Rule: adjustKedaMaxReplicas must be set if and only if type is AdjustKedaMaxReplicas<br>Rule: setContainerMemoryLimit must be set if and only if type is SetContainerMemoryLimit |
 | `verification` | [Verification](#verification) | No | verification says when the change counts as a success.<br>Default: `{}`<br>Rule: stableFor must be at least 1m<br>Rule: timeout must be at most 24h<br>Rule: timeout must be longer than stableFor |
+| `replaces` | [RequestReplacement](#requestreplacement) | No | replaces names the request this one replaces and the reviewer hint of that request it answers (ADR-0028 section 4). Set only by the analyzer on a replacement, together with chainRoot. It is part of the plan, so it is part of the request's name: the same plan answering another hint is another request. Planned: the executor does not act on it yet. |
+| `chainRoot` | [UID](#uid) | No | chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or its own UID when it has none. Set together with replaces. The branch of the pull request derives from it (planned), so every request of a chain works on the same branch and pull request.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 
 ### RemediationRequestStatus
 
@@ -776,6 +960,8 @@ Used by: [RemediationRequest](#remediationrequest).
 | `policyUID` | [UID](#uid) | No | policyUID is the UID of the policy the decision used. It is part of the plan digest.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists.<br>Rule: appliedObservedAt needs mergeCommitSHA |
 | `deadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | deadline is when the current step gives up. |
+| `hints` | [Hint](#hint) array | No | hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a replacement carried over from its chain, at most MaxHints (ADR-0028). Only the executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed. Planned: nothing writes them yet.<br>Maximum items: 3<br>List type: map<br>List key: `source`<br>List key: `commentID`<br>Rule: text must be at most 2048 bytes<br>Rule: a Declined hint needs a reason<br>Rule: a stored hint is pinned: only its state and reason change<br>Rule: the reason of a Consumed or Declined hint never changes<br>Rule: a hint moves only from Pending to Reserved or Declined, and from Reserved to Consumed or Declined |
+| `handoff` | [Handoff](#handoff) | No | handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is written once and never removed; only its phase moves on. Planned: nothing writes it yet.<br>Rule: a handoff has from, to or both |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified, PlanFresh, WritesPaused and Queued.<br>List type: map<br>List key: `type` |
 
 ### RemediationSettingsSpec
@@ -809,6 +995,19 @@ Used by: [RemediationSettings](#remediationsettings).
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions report problems. The analyzer writes UnknownModules: True when spec.modules names a module that it does not have compiled in, which then contributes nothing; DetectionFailed: True when its last run could not list the nodes or read the discovery API, so the report is from the last run that succeeded, or shows only generic active when none has; and NoWatchedNamespaces: True when it was started with no namespace to watch (the chart's default), so it reads no events or pods and records no Incident; and SymptomSourcesNotWatched: True when an active module declares a symptom source for a kind the collector does not watch (not served, not granted, or the check or the watch failed), Unknown while such a kind has not been checked yet, set only while it watches namespaces. A kind whose optional grant the chart leaves out on purpose (the Kyverno cluster-wide kinds) is not reported.<br>List type: map<br>List key: `type` |
 | `platform` | [PlatformStatus](#platformstatus) | No | platform is the platform the analyzer detected and the one it uses. The analyzer writes it at start, when spec changes, every 10 minutes, and when the watch state of a symptom source kind changes (ADR-0024), with the only write it has outside the operator namespace. Status is a report, never an input: no component reads any field of it to decide anything.<br>Rule: detected is left out, not generic, when no platform claims the cluster<br>Rule: active is generic or the detected platform |
 | `integrations` | [IntegrationStatus](#integrationstatus) array | No | integrations lists every integration module that is enabled or detected, with whether it is active. A detected add-on whose module is not enabled is listed too, so the cluster admin sees what could be enabled. Written like platform. At most 64: 32 enabled (the spec cap) and 32 more detected, since a detected add-on needs a compiled-in module and internal/modules refuses more than 32.<br>Maximum items: 64<br>List type: map<br>List key: `name`<br>Rule: version is set if and only if the integration is detected<br>Rule: an integration that is not detected is not active |
+
+### RequestReplacement
+
+RequestReplacement names the request a replacement takes over and the hint it answers (ADR-0028 section 4).
+
+
+Used by: [RemediationRequestSpec](#remediationrequestspec).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | [Name](#name) | Yes | name of the replaced request, in the same namespace.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
+| `uid` | [UID](#uid) | Yes | uid of the replaced request, so a request recreated under the same name is never taken for it.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `hint` | [HintRef](#hintref) | Yes | hint is the pinned hint of the replaced request that this plan answers. |
 
 ### ResolvedSource
 
@@ -869,7 +1068,7 @@ UID is a Kubernetes object UID in its canonical lower-case form.
 - Underlying type: string
 - Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 
-Used by: [IncidentRef](#incidentref), [ObjectRef](#objectref), [RemediationRequestStatus](#remediationrequeststatus).
+Used by: [IncidentRef](#incidentref), [IncomingHandoff](#incominghandoff), [ObjectRef](#objectref), [OutgoingHandoff](#outgoinghandoff), [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus), [RequestReplacement](#requestreplacement).
 
 ### Verification
 

@@ -1118,6 +1118,11 @@ func coveredParts(parts []windowPart) []bool {
 // maxTakeInPart is the longest part next to a key that takeInKeyParts takes in with it.
 const maxTakeInPart = 5
 
+// maxBase64Key is the most characters, slashes and padding aside, of the slash-split secrets base64Windows
+// is meant for: the 44 of an older Entra client secret. Two stretches and the one part between them that
+// hold no more than that are one key, whatever the part reads as (takeInKeyParts).
+const maxBase64Key = 44
+
 // keyStretch is a stretch of parts that base64Windows redacts: from the first to the last non-empty part,
 // with the characters of its parts.
 type keyStretch struct{ first, last, chars int }
@@ -1159,12 +1164,13 @@ func takeInKeyParts(parts []windowPart, redact []bool) {
 	for _, s := range stretches[1:] {
 		prev := &merged[len(merged)-1]
 		c := nextNonEmpty(parts, prev.last, 1)
-		if c != nextNonEmpty(parts, s.first, -1) || !shortPart(parts[c]) ||
-			parts[c].lowerWord && prev.chars >= minBase64Stretch && s.chars >= minBase64Stretch {
+		joined := prev.chars + parts[c].chars + s.chars
+		if c != nextNonEmpty(parts, s.first, -1) || !parts[c].base64 || joined > maxBase64Key &&
+			(!shortPart(parts[c]) || parts[c].lowerWord && prev.chars >= minBase64Stretch && s.chars >= minBase64Stretch) {
 			merged = append(merged, s)
 			continue
 		}
-		prev.last, prev.chars = s.last, prev.chars+parts[c].chars+s.chars
+		prev.last, prev.chars = s.last, joined
 	}
 	for k, s := range merged {
 		first, last := s.first, s.last

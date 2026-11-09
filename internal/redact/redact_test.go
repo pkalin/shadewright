@@ -929,9 +929,6 @@ func TestSlashSplitBase64IsRedacted(t *testing.T) {
 				in := c.before + k + c.after
 				out := String(in)
 				for _, p := range keyParts(k) {
-					if knownLeakSeeds[seed] {
-						break // TestSlashSplitBase64KnownLeaks
-					}
 					if strings.Contains(out, p) {
 						if leaks++; leaks <= 3 {
 							t.Errorf("seed %d: part %q of the key kept:\n%s", seed, p, out)
@@ -966,9 +963,6 @@ func TestSlashSplitBase64IsRedacted(t *testing.T) {
 		a, b := seededKey(seed), seededKey(seed+seeds)
 		in := "GET https://example.com/" + a + middle + b + " 404"
 		out := String(in)
-		if knownLeakSeeds[seed] || knownLeakSeeds[seed+seeds] {
-			continue // TestSlashSplitBase64KnownLeaks
-		}
 		leaked := false
 		for _, p := range append(keyParts(a), keyParts(b)...) {
 			leaked = leaked || strings.Contains(out, p)
@@ -1128,9 +1122,19 @@ func TestBase64WithoutSlashOrDigitIsRedacted(t *testing.T) {
 	}
 }
 
-// knownLeakSeeds are the seeds below seeds (seededKey) whose keys leak a part by a known gap
-// (TestSlashSplitBase64KnownLeaks): a lower-case word of six letters or more inside the key.
-var knownLeakSeeds = map[uint64]bool{674: true, 915: true}
+// A key whose slashes leave a part that reads as a path word, lower-case ("ghquje") or capitalised
+// ("Vpzfixaifdo"), between two pieces is redacted whole, also when a piece on one side is too short to be
+// redacted on its own (#525): one word between two flagged stretches that together are no longer than one
+// key is a piece of that key.
+func TestSlashSplitKeyAroundAWordIsRedacted(t *testing.T) {
+	for _, seed := range []uint64{674, 915, 74362, 83398, 99884} {
+		k := seededKey(seed)
+		in := "rotated " + k + " today"
+		if out := String(in); out != "rotated [REDACTED:token] today" {
+			t.Errorf("seed %d: String(%q) = %q, want the whole key redacted", seed, in, out)
+		}
+	}
+}
 
 // Known gaps of the slash-split base64 rule, kept by decision for safety and simplicity over perfect paths
 // (#525, follow-up to be filed): the test logs what still leaks and is skipped, so that a change that
@@ -1143,10 +1147,6 @@ func TestSlashSplitBase64KnownLeaks(t *testing.T) {
 		{"short lower-case key tail", seededKey(4062)},
 		// Upper-case parts count as no evidence; the one mixed part is too short for a window.
 		{"key of upper-case parts", "ABCDEF/GHIJKL/MNOPQR/STUVWX/yz2+ab3+cd4+"},
-		// A lower-case word of six letters inside the key ("ghquje", "iqifug") is neither redacted nor
-		// bridged, and the piece of the key on one side is under minBase64Stretch.
-		{"six-letter word inside a key", seededKey(674)},
-		{"six-letter word inside a key", seededKey(915)},
 	}
 	leaking := 0
 	for _, c := range cases {

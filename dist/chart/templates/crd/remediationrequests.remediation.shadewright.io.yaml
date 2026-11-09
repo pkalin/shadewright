@@ -1012,6 +1012,7 @@ spec:
                         enum:
                         - InProgress
                         - Passed
+                        - Failed
                         - Refused
                         type: string
                     required:
@@ -1020,10 +1021,10 @@ spec:
                     type: object
                     x-kubernetes-validations:
                     - message: on one head the check run moves only from InProgress
-                        to Passed or Refused
+                        to Passed, Failed or Refused
                       rule: self.head != oldSelf.head || self.state == oldSelf.state
                         || (oldSelf.state == 'InProgress' && self.state in ['Passed',
-                        'Refused'])
+                        'Failed', 'Refused'])
                   url:
                     description: url of the pull request.
                     maxLength: 2048

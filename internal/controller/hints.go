@@ -527,6 +527,11 @@ func declineOnEnd(rr *remediationv1alpha1.RemediationRequest, phase remediationv
 	// request that ends here keeps what it ends with, and its replacement learns of it from this status
 	// (handoff.go). A handoff that happened set its intent Done before the end it caused.
 	abortIntent(rr, reason)
+	// Likewise on the replacement's side: one that ends with its handoff still Reserved did not take the pull
+	// request over, whatever ended it (endHandoff, a retry that stopped, the grace of the recovery).
+	if ho := rr.Status.Handoff; ho != nil && ho.From != nil && ho.From.Phase == remediationv1alpha1.HandoffReserved {
+		ho.From.Phase = remediationv1alpha1.HandoffAborted
+	}
 }
 
 // parseHintCommand reads the command from the first line of body. isCommand is false when the first line does

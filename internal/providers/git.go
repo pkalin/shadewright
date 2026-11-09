@@ -151,6 +151,9 @@ const (
 	// who wrote no hint in the pull request. A check run of the same name created later on the same commit
 	// supersedes an earlier one, so completing it is creating a completed one.
 	CheckRunSuccess CheckRunStatus = "Success"
+	// CheckRunFailure: the check completed with conclusion failure, here when the merge gate could not read every
+	// review of the pull request and fails closed on the head.
+	CheckRunFailure CheckRunStatus = "Failure"
 )
 
 // MaxCheckRunTextBytes is the most bytes of a check run's title or summary.

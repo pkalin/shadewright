@@ -361,6 +361,25 @@ func TestCreateCheckRunCompleted(t *testing.T) {
 	}
 }
 
+// A failed check run is created completed with conclusion failure: the merge gate fails closed (#604).
+func TestCreateCheckRunFailed(t *testing.T) {
+	failed := providers.CheckRun{Name: providers.CheckRunName, Status: providers.CheckRunFailure,
+		Title: "Too many reviews", Summary: "The gate could not read every review."}
+	post := status(http.MethodPost, "/check-runs", http.StatusCreated, "")
+	post.raw = `{"id":3}`
+	post.check = func(t *testing.T, b map[string]any) {
+		want := `{"conclusion":"failure","head_sha":"` + shaCommit + `","name":"shadewright/review","output":{"summary":"` +
+			failed.Summary + `","title":"` + failed.Title + `"},"status":"completed"}`
+		if got, _ := json.Marshal(b); string(got) != want {
+			t.Errorf("check run body = %s", got)
+		}
+	}
+	h := newHarness(t, post)
+	if err := h.p.CreateCheckRun(ctx, shaCommit, failed); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCreateCheckRunFailures(t *testing.T) {
 	h := newHarness(t, status(http.MethodPost, "/check-runs", http.StatusForbidden, fxForbidden))
 	err := h.p.CreateCheckRun(ctx, shaCommit, run)

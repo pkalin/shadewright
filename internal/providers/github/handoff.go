@@ -203,8 +203,10 @@ func (p *Provider) UpdateChangeRequest(ctx context.Context, number int64, title,
 // completed one.
 var (
 	checkRunStatus = map[providers.CheckRunStatus]string{
-		providers.CheckRunInProgress: "in_progress", providers.CheckRunSuccess: "completed"}
-	checkRunConclusion = map[providers.CheckRunStatus]string{providers.CheckRunSuccess: "success"}
+		providers.CheckRunInProgress: "in_progress", providers.CheckRunSuccess: "completed",
+		providers.CheckRunFailure: "completed"}
+	checkRunConclusion = map[providers.CheckRunStatus]string{providers.CheckRunSuccess: "success",
+		providers.CheckRunFailure: "failure"}
 )
 
 // CreateCheckRun creates a check run on head (providers.GitProvider.CreateCheckRun). It needs the App

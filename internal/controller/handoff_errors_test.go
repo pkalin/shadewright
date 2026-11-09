@@ -26,7 +26,6 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -209,36 +208,6 @@ func (p pagedReviews) ListReviews(ctx context.Context, n int64, cur providers.Fe
 	return page, err
 }
 
-// A list of reviews too long to read in one look leaves the check in progress, and says why: an error for the
-// log on every look, and a Warning Event once per head.
-func TestReviewGateSaysWhyAListTooLongKeepsItWaiting(t *testing.T) {
-	r, g, _, rr, cr, head := tookOverWorld(t)
-	ctx := context.Background()
-	events := record.NewFakeRecorder(10)
-	r.Recorder = events
-	rr.Status.PullRequest.ReviewCheck = &api.ReviewCheck{Head: head, State: api.ReviewCheckInProgress}
-	if err := r.Status().Update(ctx, rr); err != nil {
-		t.Fatal(err)
-	}
-	approve(g, cr.Number, 90, 3003, head)
-	git := &gatedGit{git: pagedReviews{g}, allow: r.writeAllowed}
-	for range 2 {
-		if err := r.reviewGate(ctx, git, rr); !errors.Is(err, errReviewsUnread) {
-			t.Fatalf("a list of reviews too long to read gave %v", err)
-		}
-	}
-	if rr.Status.PullRequest.ReviewCheck.State != api.ReviewCheckInProgress {
-		t.Fatalf("the gate decided on a list it did not read whole: %+v", rr.Status.PullRequest.ReviewCheck)
-	}
-	var got []string
-	for len(events.Events) > 0 {
-		got = append(got, <-events.Events)
-	}
-	if len(got) != 1 || !strings.Contains(got[0], "Warning "+ReasonReviewListTooLong) {
-		t.Fatalf("Events: %q", got)
-	}
-}
-
 // The comment that says why a hint author's approval does not count is asked for once per review in this
 // process, not on every look: each ask reads the comments of the pull request for its marker.
 func TestReviewGateAsksForTheHintAuthorCommentOnce(t *testing.T) {
@@ -251,7 +220,7 @@ func TestReviewGateAsksForTheHintAuthorCommentOnce(t *testing.T) {
 	approve(g, cr.Number, 91, rr.Status.Hints[0].Author.ID, head)
 	var asks atomic.Int32
 	g.SetFail(func(op string) error {
-		if op == "CommentChangeRequest" {
+		if op == opComment {
 			asks.Add(1)
 		}
 		return nil
@@ -280,7 +249,7 @@ func TestReviewGateAsksAgainAfterAFailedComment(t *testing.T) {
 	}
 	approve(g, cr.Number, 91, rr.Status.Hints[0].Author.ID, head)
 	g.SetFail(func(op string) error {
-		if op == "CommentChangeRequest" {
+		if op == opComment {
 			return &providers.RetryableError{Err: errors.New("status 502")}
 		}
 		return nil

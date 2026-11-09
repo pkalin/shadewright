@@ -18,9 +18,9 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -47,8 +47,12 @@ import (
 //     what it accepted (pollHints), so an approver whose hint is already on the pull request is never counted.
 //     It completes the check with success once the latest review of someone who wrote no hint in the chain
 //     (every hint in status.hints, whatever became of it, compared by user ID) approves the recorded head.
-//   - A final refusal (InProgress or Passed) is recorded as Refused, with condition Approved False and a Warning
-//     Event, both with reason ReviewCheckRefused, so a pull request the required check blocks says why.
+//   - A list of reviews too long to read in one gate (maxReviewLooks) completes the check with failure and is
+//     recorded as Failed, with condition Approved False and a Warning Event, both with reason
+//     ReviewListTooLong: the gate fails closed on that head, never passes on a list it did not read whole, and
+//     does not read the list again on that head.
+//   - A final refusal (InProgress, Passed or Failed) is recorded as Refused, with condition Approved False and a
+//     Warning Event, both with reason ReviewCheckRefused, so a pull request the required check blocks says why.
 //
 // A restart between a write to the Git host and the status write creates the check again on the same head: a
 // check created in progress after one that passed makes the head wait again until the gate passes it again,
@@ -64,14 +68,20 @@ const (
 
 const (
 	// maxReviewLooks bounds the looks at the reviews of one pull request per reconcile. Every gate reads the
-	// list from its start, so a list longer than that leaves the check in progress for good, which the gate says
-	// (errReviewsUnread, ReasonReviewListTooLong): a person decides the merge.
+	// list from its start, so a list longer than that would never be read whole: the gate fails the check on
+	// that head (ReasonReviewListTooLong) and a person decides the merge.
 	maxReviewLooks = 4
 	// reviewApproved is the state of an approving review.
 	reviewApproved = "APPROVED"
 	// checkRunPassedTitle and checkRunPassedSummary are the text of the completed check.
 	checkRunPassedTitle   = "Approved"
 	checkRunPassedSummary = "Someone who wrote no hint in this pull request approved its latest head."
+	// checkRunFailedTitle and checkRunFailedSummary are the text of the check failed on a list of reviews too
+	// long to read.
+	checkRunFailedTitle   = "Too many reviews to check"
+	checkRunFailedSummary = "This pull request has more reviews than Shadewright reads, so it cannot tell whether " +
+		"someone who wrote no reviewer hint approved its latest head. The check fails on this head; a person " +
+		"decides the merge."
 	// hintApprovalComment is posted once per approval of the head by a hint author.
 	hintApprovalComment = "This approval does not satisfy the check shadewright/review: its author wrote a " +
 		"reviewer hint in this pull request, and the person who steered a change through a hint cannot also be " +
@@ -141,9 +151,9 @@ func (r *RemediationRequestReconciler) reviewCheck(ctx context.Context, rr *reme
 	return r.reviewGate(stepCtx, git, rr)
 }
 
-// recordReviewCheck records state for the recorded head in rr's status, through the kill switch; Refused also
-// sets condition Approved False with ReasonReviewCheckRefused and, once written, records a Warning Event. rr is
-// changed only when the write went through.
+// recordReviewCheck records state for the recorded head in rr's status, through the kill switch; Refused and
+// Failed also set condition Approved False with their reason (reviewCheckWarning) and, once written, record a
+// Warning Event. rr is changed only when the write went through.
 func (r *RemediationRequestReconciler) recordReviewCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	state remediationv1alpha1.ReviewCheckState) error {
 	if err := r.writeAllowed(ctx); err != nil {
@@ -152,14 +162,13 @@ func (r *RemediationRequestReconciler) recordReviewCheck(ctx context.Context, rr
 	upd := rr.DeepCopy()
 	head := upd.Status.PullRequest.HeadSHA
 	upd.Status.PullRequest.ReviewCheck = &remediationv1alpha1.ReviewCheck{Head: head, State: state}
-	const refused = "The Git host refused the check run shadewright/review on the pull request's head for good; " +
-		"a ruleset that requires it blocks the merge until a person acts (the App's checks permission, a rule)"
-	if state == remediationv1alpha1.ReviewCheckRefused {
+	reason, message := reviewCheckWarning(state)
+	if reason != "" {
 		meta.SetStatusCondition(&upd.Status.Conditions, metav1.Condition{
 			Type:               remediationv1alpha1.ConditionApproved,
 			Status:             metav1.ConditionFalse,
-			Reason:             ReasonReviewCheckRefused,
-			Message:            refused,
+			Reason:             reason,
+			Message:            message,
 			ObservedGeneration: upd.Generation,
 		})
 	}
@@ -168,11 +177,11 @@ func (r *RemediationRequestReconciler) recordReviewCheck(ctx context.Context, rr
 	}
 	upd.DeepCopyInto(rr)
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
-	if state == remediationv1alpha1.ReviewCheckRefused {
-		log.Info("The Git host refused the review check of RemediationRequest", "pullRequest",
-			rr.Status.PullRequest.Number, "head", head)
+	if reason != "" {
+		log.Info("Recorded the review check of RemediationRequest as not passing", "pullRequest",
+			rr.Status.PullRequest.Number, "head", head, "state", state, "reason", reason)
 		if r.Recorder != nil {
-			r.Recorder.Event(rr, corev1.EventTypeWarning, ReasonReviewCheckRefused, refused)
+			r.Recorder.Event(rr, corev1.EventTypeWarning, reason, message)
 		}
 		return nil
 	}
@@ -186,8 +195,10 @@ func (r *RemediationRequestReconciler) recordReviewCheck(ctx context.Context, rr
 // in the chain (compared by user ID) approves the recorded head, completes the check run with success and
 // records it Passed. An approval of an earlier head never counts. An approval of the head by a hint author does
 // not count either, and gets a comment saying why, once per review (by its marker); this process asks for it
-// once per review, not on every look, as each ask reads the comments for the marker. A list it cannot read
-// whole leaves the check in progress and returns errReviewsUnread, with a Warning Event once per head.
+// once per review, not on every look, as each ask reads the comments for the marker, and not again after a
+// final refusal. The comments get half of the time left, so one that runs out of time never keeps a passing
+// gate from completing the check; the rest are asked on a later look. A list it cannot read whole completes
+// the check with failure and records it Failed (fail closed), so that head is not read again.
 func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest) error {
 	fs, ok := feedbackOf(git)
@@ -221,8 +232,7 @@ func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git provi
 		cur = page.Next
 	}
 	if !complete {
-		r.warnReviewsUnread(rr)
-		return fmt.Errorf("%w (%d looks): the check stays in progress", errReviewsUnread, maxReviewLooks)
+		return r.completeReviewCheck(ctx, git, rr, remediationv1alpha1.ReviewCheckFailed)
 	}
 	authors := map[int64]bool{}
 	for _, h := range rr.Status.Hints {
@@ -241,70 +251,97 @@ func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git provi
 		}
 		passed = true
 	}
+	if err := r.commentSteered(ctx, git, rr, steered); err != nil {
+		return err
+	}
+	if !passed {
+		return nil
+	}
+	return r.completeReviewCheck(ctx, git, rr, remediationv1alpha1.ReviewCheckPassed)
+}
+
+// commentSteered posts the comment saying why an approval does not count on each review in steered that this
+// process has not answered yet, within half of the time left in ctx. A comment posted, or refused for good, is
+// remembered (answerSteered); a failure worth retrying is logged and asked again on a later look, and so are the
+// comments left when their time ran out. Only the caller's cancellation is returned.
+func (r *RemediationRequestReconciler) commentSteered(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, steered []int64) error {
+	commentCtx, cancel := ctx, context.CancelFunc(func() {})
+	if dl, ok := ctx.Deadline(); ok {
+		commentCtx, cancel = context.WithDeadline(ctx, time.Now().Add(time.Until(dl)/2))
+	}
+	defer cancel()
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
 	for _, id := range steered {
 		if r.steeredAnswered(rr, id) {
 			continue
 		}
 		mark := fmt.Sprintf("<!-- shadewright review-gate review=%d -->", id)
-		err := git.CommentChangeRequest(ctx, pr.Number, mark, hintApprovalComment+"\n\n"+mark)
+		err := git.CommentChangeRequest(commentCtx, rr.Status.PullRequest.Number, mark, hintApprovalComment+"\n\n"+mark)
+		reason, _, final := refusal(err)
 		switch {
 		case err == nil:
 			r.answerSteered(rr, id)
 		case ctx.Err() != nil:
-			return fmt.Errorf("comment on an approval that does not count cancelled: %w", ctx.Err())
+			return fmt.Errorf("comment on an approval that does not count stopped: %w", ctx.Err())
+		case commentCtx.Err() != nil:
+			log.Info("Ran out of time to say why approvals do not count for RemediationRequest; the rest are "+
+				"asked on a later look", "review", id)
+			return nil
+		case final:
+			r.answerSteered(rr, id)
+			log.Info("The Git host refused the comment saying why an approval does not count for RemediationRequest; "+
+				"it is not asked again", "review", id, "reason", reason)
 		default:
 			log.Info("Could not say why an approval does not count for RemediationRequest", "review", id,
 				"error", err.Error())
 		}
 	}
-	if !passed {
-		return nil
+	return nil
+}
+
+// completeReviewCheck completes the check run on the recorded head as state (Passed with success, Failed with
+// failure) and records it; a final refusal is recorded Refused, and a pull request closed or merged meanwhile
+// (a conflict) records nothing.
+func (r *RemediationRequestReconciler) completeReviewCheck(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, state remediationv1alpha1.ReviewCheckState) error {
+	run := providers.CheckRun{Name: providers.CheckRunName, Status: providers.CheckRunSuccess,
+		Title: checkRunPassedTitle, Summary: checkRunPassedSummary}
+	if state == remediationv1alpha1.ReviewCheckFailed {
+		run = providers.CheckRun{Name: providers.CheckRunName, Status: providers.CheckRunFailure,
+			Title: checkRunFailedTitle, Summary: checkRunFailedSummary}
 	}
-	err := git.CreateCheckRun(ctx, pr.HeadSHA, providers.CheckRun{Name: providers.CheckRunName,
-		Status: providers.CheckRunSuccess, Title: checkRunPassedTitle, Summary: checkRunPassedSummary})
-	step, err := stepOutcome(log, err, "complete the check run")
+	err := git.CreateCheckRun(ctx, rr.Status.PullRequest.HeadSHA, run)
+	step, err := stepOutcome(logf.FromContext(ctx), err, "complete the check run")
 	switch {
 	case err != nil:
 		return freshness.WrapProvider("complete the check run", err)
 	case step == "":
 		return nil
-	}
-	state := remediationv1alpha1.ReviewCheckPassed
-	if step == remediationv1alpha1.HandoffStepRefused {
+	case step == remediationv1alpha1.HandoffStepRefused:
 		state = remediationv1alpha1.ReviewCheckRefused
 	}
 	return r.recordReviewCheck(ctx, rr, state)
 }
 
-// ReasonReviewListTooLong is the reason of the Warning Event when the reviews of a pull request were too many to
-// read in one look: the gate leaves the check run in progress, so the merge waits until a person acts.
+// ReasonReviewListTooLong is the reason of condition Approved (False) and of the Warning Event when the reviews
+// of a pull request were too many for the merge gate to read: it failed the check run on the head, so a ruleset
+// that requires it blocks the merge until a person acts.
 const ReasonReviewListTooLong = "ReviewListTooLong"
 
-// errReviewsUnread means the merge gate could not read every review of the pull request in one look.
-var errReviewsUnread = errors.New("the reviews of the pull request are too many to read in one look")
-
-// reviewsWarning is what reviewsWarned holds per request: the head the last ReviewListTooLong Event was for.
-type reviewsWarning struct {
-	uid  types.UID
-	head string
-}
-
-// warnReviewsUnread records a Warning Event on rr when the gate could not read every review of its pull request:
-// the check stays in progress, so a ruleset that requires it blocks the merge until a person acts. One Event per
-// head and request in this process; nothing is stored, so a restart may warn once more.
-func (r *RemediationRequestReconciler) warnReviewsUnread(rr *remediationv1alpha1.RemediationRequest) {
-	if r.Recorder == nil {
-		return
+// reviewCheckWarning returns the reason and fixed message of condition Approved (False) and of the Warning Event
+// for a state of the check run that does not pass, or "" for one that needs neither.
+func reviewCheckWarning(state remediationv1alpha1.ReviewCheckState) (reason, message string) {
+	switch state {
+	case remediationv1alpha1.ReviewCheckRefused:
+		return ReasonReviewCheckRefused, "The Git host refused the check run shadewright/review on the pull " +
+			"request's head for good; a ruleset that requires it blocks the merge until a person acts (the App's " +
+			"checks permission, a rule)"
+	case remediationv1alpha1.ReviewCheckFailed:
+		return ReasonReviewListTooLong, "The pull request has more reviews than the merge gate reads, so the " +
+			"check run shadewright/review failed on this head; a person decides the merge"
 	}
-	w := reviewsWarning{uid: rr.UID, head: rr.Status.PullRequest.HeadSHA}
-	if last, ok := r.reviewsWarned.Swap(client.ObjectKeyFromObject(rr), w); ok && last == w {
-		return
-	}
-	r.Recorder.Eventf(rr, corev1.EventTypeWarning, ReasonReviewListTooLong,
-		"The merge gate could not read every review of pull request #%d in one look, so the check "+
-			"shadewright/review stays in progress on this head; a person decides the merge",
-		rr.Status.PullRequest.Number)
+	return "", ""
 }
 
 // steeredReviews is what steeredCommented holds per request: the reviews of hint authors whose comment was

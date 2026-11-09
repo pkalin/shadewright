@@ -1136,6 +1136,21 @@ func TestSlashSplitKeyAroundAWordIsRedacted(t *testing.T) {
 	}
 }
 
+// A key that starts or ends with a part reading as a lower-case path word ("cijt", "icsol") is redacted
+// when the window that holds that word scores clearly as base64 (#525); the word itself may stay, as a path
+// word next to a key would.
+func TestSlashSplitKeyEndingInAWordIsRedacted(t *testing.T) {
+	for _, seed := range []uint64{9976, 38306, 47360} {
+		k := seededKey(seed)
+		out := String("rotated " + k + " today")
+		for _, p := range keyParts(k) {
+			if strings.Contains(out, p) && !pathWord(p) {
+				t.Errorf("seed %d: part %q of the key kept:\n in: %s\nout: %s", seed, p, k, out)
+			}
+		}
+	}
+}
+
 // Known gaps of the slash-split base64 rule, kept by decision for safety and simplicity over perfect paths
 // (#525, follow-up to be filed): the test logs what still leaks and is skipped, so that a change that
 // closes a gap shows here and the case moves to TestSlashSplitBase64IsRedacted.
@@ -1147,6 +1162,8 @@ func TestSlashSplitBase64KnownLeaks(t *testing.T) {
 		{"short lower-case key tail", seededKey(4062)},
 		// Upper-case parts count as no evidence; the one mixed part is too short for a window.
 		{"key of upper-case parts", "ABCDEF/GHIJKL/MNOPQR/STUVWX/yz2+ab3+cd4+"},
+		// A lower-case path word at the start of the key ("cijt") stays with the path around it.
+		{"lower-case word at the end of a key", seededKey(47360)},
 	}
 	leaking := 0
 	for _, c := range cases {

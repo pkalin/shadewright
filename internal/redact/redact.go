@@ -1040,21 +1040,23 @@ type windowPart struct {
 // It judges every window of adjacent parts that holds from minBase64Window to maxBase64Window characters of
 // evidence, apart from the parts around it, so path words next to a key cannot dilute it: the window counts
 // when it mixes cases, its parts average at least four characters, and its pairs of neighbouring characters
-// score at most maxBase64Score on average (wordScore). A window never starts or ends at an empty part or a
-// lower-case path word ("/opt/" before library names). Parts with "-" or "_" (Kubernetes names, UUIDs)
+// score at most maxBase64Score on average (wordScore). A window never starts or ends at an empty part, and one
+// that starts or ends at a lower-case path word must score at most -maxBase64Score ("/opt/" before library
+// names scores as words, "cijt/" before a key as base64). Parts with "-" or "_" (Kubernetes names, UUIDs)
 // never join a window, and parts of upper-case letters, maybe with digits (acronyms and library names such
 // as "HTTPS" or "CUDA12"), join one without counting as evidence either way.
 //
 // Of the parts that some window covers, path words (pathWord) are kept and the others are flagged;
-// takeInKeyParts then adds at most one short part on each side of each key. Each stretch of adjacent
-// redacted parts is one range, so two keys with a path between them give two ranges and the path stays.
+// takeInKeyParts then joins the pieces of a key and adds at most one short part on each side of it. Each
+// stretch of adjacent redacted parts is one range, so two keys with a path between them give two ranges and
+// the path stays.
 // Windows are bounded by maxBase64Window, so the cost is linear in the run.
 //
 // Known gaps, kept for safety and simplicity over perfect paths (TestSlashSplitBase64KnownLeaks): a key
 // whose windows all score as words stays whole; a short lower-case end of a key that no window covers
 // ("/wed7") stays, as a path word would; a key of upper-case parts with one short mixed part
-// ("ABCDEF/GHIJKL/.../yz2+ab3+cd4+") has too little evidence and stays; and a lower-case word of six
-// letters or more inside a key splits it, so a piece under minBase64Stretch on one side stays.
+// ("ABCDEF/GHIJKL/.../yz2+ab3+cd4+") has too little evidence and stays; and a lower-case path word at either
+// end of a key ("cijt/...") is kept with the path around it.
 func base64Windows(run string, add func(start, end int)) {
 	var parts []windowPart
 	for pos := 0; pos <= len(run); {
@@ -1083,7 +1085,7 @@ func coveredParts(parts []windowPart) []bool {
 	// diff counts, as a difference array, the qualifying windows over each part.
 	var diff []int
 	for lo := range parts {
-		if parts[lo].lowerWord || parts[lo].empty {
+		if parts[lo].empty {
 			continue
 		}
 		var w windowPart
@@ -1095,7 +1097,11 @@ func coveredParts(parts []windowPart) []bool {
 			if w.chars > maxBase64Window || 4*n > maxBase64Window {
 				break
 			}
-			if !p.lowerWord && !p.empty && w.chars >= minBase64Window && upper && lower && w.chars >= 4*n && w.score <= maxBase64Score*float64(w.pairs) {
+			limit := maxBase64Score
+			if parts[lo].lowerWord || p.lowerWord {
+				limit = -maxBase64Score // a window at a lower-case path word must read clearly as base64
+			}
+			if !p.empty && w.chars >= minBase64Window && upper && lower && w.chars >= 4*n && w.score <= limit*float64(w.pairs) {
 				if diff == nil {
 					diff = make([]int, len(parts)+1)
 				}
@@ -1129,14 +1135,15 @@ type keyStretch struct{ first, last, chars int }
 
 // takeInKeyParts decides, from the parts that windows flagged (redact on entry: covered and no path word),
 // which parts to redact, and writes that back into redact. Flagged parts with only empty parts ("//")
-// between them form one stretch. Only short parts are ever added to a stretch (shortPart: at most
-// maxTakeInPart characters, no "-", "_" or "."), so a long path part, a Kubernetes name or a file name never
-// is, and a lower-case path word ("etc", "api", "keys") only to join two pieces of one key:
+// between them form one stretch. A part with "-" or "_" (a Kubernetes name) is never added to a stretch, a
+// lower-case path word ("etc", "api", "keys") or a long part only to join two pieces of one key:
 //
-//   - One short part alone between two stretches joins them when it is no lower-case path word, or when
-//     either stretch is shorter than minBase64Stretch (a piece of the same key that would be kept on its
-//     own). A lower-case path word between two stretches of at least that length ("/api/" between two keys)
-//     stays, and the keys are redacted each on its own.
+//   - One part alone between two stretches joins them when the two stretches and the part hold at most
+//     maxBase64Key characters, whatever the part reads as ("ghquje" or "Vpzfixaifdo" inside a key). Beyond
+//     that, it joins them only when it is short (shortPart: at most maxTakeInPart characters) and no
+//     lower-case path word, or when either stretch is shorter than minBase64Stretch (a piece of the same key
+//     that would be kept on its own). A lower-case path word between two stretches of at least that length
+//     ("/api/" between two keys) stays, and the keys are redacted each on its own.
 //   - Then each stretch takes in at most one more part on each side: the next non-empty part, when it is
 //     short, no lower-case path word and not between two stretches, such as "wed7" at the end of ".../wed7"
 //     or a short capitalised word. A part taken in takes in nothing further, so the path after a key loses
@@ -1255,8 +1262,9 @@ const (
 // pathWord reports whether part, next to or at the end of a base64 window, is a path word rather than a
 // piece of the key: at least three lower-case letters that read as a word (minPathWordScore), maybe after
 // one capital and maybe followed by digits ("etc", "credentials", "python3", "Documents"), or a version
-// ("v1"). A path word that a window covers is not flagged as key; a lower-case one never starts or ends a
-// window, and is redacted with a key only when it is short and joins two pieces of one (takeInKeyParts).
+// ("v1"). A path word that a window covers is not flagged as key; a window that starts or ends at a
+// lower-case one must score clearly as base64, and a lower-case one is redacted with a key only when it joins
+// two pieces of one (takeInKeyParts).
 func pathWord(part string) bool {
 	capital := part != "" && part[0] >= 'A' && part[0] <= 'Z'
 	if capital {

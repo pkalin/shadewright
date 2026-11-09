@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/gitops/gityaml"
 	"github.com/pkalin/shadewright/internal/gitops/patch"
 	"github.com/pkalin/shadewright/internal/gitops/semdiff"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
@@ -804,6 +805,10 @@ func TestCheckRefusesAnchors(t *testing.T) {
 		"a kustomization file with aliases on a separator": func(f map[string][]byte) {
 			f[soKust] = []byte("# The orders app.\n--- {resources: [scaledobject.yaml], metadata: {annotations: &a {x: y}, labels: *a}}\n")
 		},
+		// "---#" starts no comment: the parser reads the line as a key holding what follows.
+		"a kustomization file with aliases glued on a separator": func(f map[string][]byte) {
+			f[soKust] = []byte("# The orders app.\n---#x: {annotations: &a {x: y}, labels: *a}\nresources: [scaledobject.yaml]\n")
+		},
 		"a kustomization file past the document budget": func(f map[string][]byte) {
 			f[soKust] = append(append(kust("scaledobject.yaml"), emptyDocs(documentBudget+1)...),
 				"x: &x 1\ny: *x\n"...)
@@ -823,8 +828,12 @@ func TestCheckRefusesAnchors(t *testing.T) {
 				return
 			}
 			wantReason(t, err, semdiff.ErrInvalidYAML)
-			if !strings.Contains(err.Error(), "anchors") && !strings.Contains(err.Error(), "separator") {
-				t.Fatalf("got %v, want anchors or the separator named", err)
+			want := gityaml.ErrAnchor
+			if strings.HasSuffix(name, "on a separator") {
+				want = gityaml.ErrSeparator
+			}
+			if !strings.Contains(err.Error(), want.Error()) {
+				t.Fatalf("got %v, want %q named", err, want)
 			}
 		})
 	}

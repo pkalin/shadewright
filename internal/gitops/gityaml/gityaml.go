@@ -53,6 +53,10 @@ var (
 	ErrSeparator = errors.New("a document separator holds more than a comment")
 	// ErrNotParse is a part that does not parse as YAML.
 	ErrNotParse = errors.New("does not parse as YAML")
+	// ErrLineBreak is a line break other than LF or CRLF: a bare CR, NEL, LS or PS.
+	ErrLineBreak = errors.New("a line ends in a line break other than LF or CRLF")
+	// ErrDirective is a YAML directive, a line that starts with "%".
+	ErrDirective = errors.New("YAML directives (lines starting with %) are not supported")
 )
 
 // Error is a refusal of [Objects]: its cause and the line of the file it is at, counted from 1, or 0 when it
@@ -110,7 +114,12 @@ func Parts(data []byte) []Part {
 //     the result, so a few bytes could expand into thousands of objects or hundreds of megabytes, or without
 //     end through an anchor that contains itself, which overflowed the Go stack and ended the process;
 //   - a separator line with more than a comment after "---": kustomize drops that text, but a parser given
-//     the whole file reads it as the start of the next document, so an anchor there would not be checked;
+//     the whole file reads it as the start of the next document, so an anchor there would not be checked; a
+//     comment needs a space or a tab before its "#", since "---#x: ..." is a key holding what follows;
+//   - a line break other than LF or CRLF (a bare CR, NEL, LS or PS): kustomize splits at LF only, while the
+//     parsers end a line at each of them, so the text after one on a separator line would be read unchecked;
+//   - a YAML directive (a line that starts with "%"): kustomize decodes the part before the first separator
+//     on its own, where a directive does not parse, while a parser of the whole file accepts it;
 //   - a part that does not parse, which kustomize could not build either.
 //
 // Each part between separators is decoded as kustomize decodes it, and every document in it counts: 1 for a
@@ -120,6 +129,9 @@ func Parts(data []byte) []Part {
 func Objects(data []byte, limit int) (int, error) {
 	if !utf8.Valid(data) {
 		return 0, &Error{Err: ErrNotUTF8}
+	}
+	if err := checkLines(string(data)); err != nil {
+		return 0, err
 	}
 	n := 0
 	parts := Parts(data)
@@ -131,11 +143,47 @@ func Objects(data []byte, limit int) (int, error) {
 		if n += c; n > limit {
 			break
 		}
-		if s := strings.TrimSpace(p.sep); s != "" && !strings.HasPrefix(s, "#") {
+		if !commentOnly(p.sep) {
 			return 0, &Error{Line: parts[i+1].Line - 1, Err: ErrSeparator}
 		}
 	}
 	return min(n, limit+1), nil
+}
+
+// checkLines refuses a line break other than LF or CRLF, and a line that starts with "%" (a directive), in s,
+// which is UTF-8. It reads the whole of s.
+func checkLines(s string) *Error {
+	line := 1
+	for i, r := range s {
+		switch r {
+		case '\n':
+			line++
+		case '\r':
+			if !strings.HasPrefix(s[i+1:], "\n") {
+				return &Error{Line: line, Err: ErrLineBreak}
+			}
+		case '\u0085', ' ', ' ':
+			return &Error{Line: line, Err: ErrLineBreak}
+		case '%':
+			if i == 0 || s[i-1] == '\n' {
+				return &Error{Line: line, Err: ErrDirective}
+			}
+		}
+	}
+	return nil
+}
+
+// commentOnly reports whether sep, what follows "---" on a separator line, is empty, blank, or a comment
+// after a space or a tab. Only a space or a tab separates "---" from a comment for the YAML parsers.
+func commentOnly(sep string) bool {
+	if sep == "" {
+		return true
+	}
+	if sep[0] != ' ' && sep[0] != '\t' {
+		return false
+	}
+	s := strings.TrimLeft(sep, " \t")
+	return s == "" || s[0] == '#'
 }
 
 // keyKind is the key that names an object's kind.

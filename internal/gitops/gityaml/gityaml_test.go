@@ -48,6 +48,22 @@ func TestObjects(t *testing.T) {
 		"a part that does not parse":     {"a: 1\n---\nb: [\n", 0, gityaml.ErrNotParse, 3},
 		"a separator in a block scalar":  {"a: |\n  x\n--- &b\n  y\n", 0, gityaml.ErrSeparator, 3},
 		"a document end marker in parts": {"a: 1\n...\n--- # c\nb: 2\n", 2, nil, 0},
+		"a tab before a comment":         {"a: 1\n---\t# c\nb: 2\n", 2, nil, 0},
+		// The YAML parsers also end a line at CR, NEL, LS and PS, so the text after one on a separator line
+		// would be read as a document that kustomize's split drops unchecked (#594).
+		"a bare CR after a comment": {"# c\n--- # x\rb: &a [1]\rc: *a\n", 0, gityaml.ErrLineBreak, 2},
+		"a bare CR at the end":      {"a: 1\nb: 2\r", 0, gityaml.ErrLineBreak, 2},
+		"a CR before CRLF":          {"a: 1\r\r\nb: 2\r\n", 0, gityaml.ErrLineBreak, 1},
+		"a NEL after a comment":     {"# c\n--- # x\u0085b: &a [1]\u0085c: *a\n", 0, gityaml.ErrLineBreak, 2},
+		"an LS after a comment":     {"# c\n--- # x b: &a [1] c: *a\n", 0, gityaml.ErrLineBreak, 2},
+		"a PS after a comment":      {"# c\n--- # x b: &a [1] c: *a\n", 0, gityaml.ErrLineBreak, 2},
+		// "---#" starts no comment: the parsers read the line as a plain key holding what follows (#594).
+		"a separator glued to a key":        {"# c\n---#x: {a: &a [1], c: *a}\n", 0, gityaml.ErrSeparator, 2},
+		"a no-break space before a comment": {"# c\n---  #x: 1\n", 0, gityaml.ErrSeparator, 2},
+		// kustomize decodes the part before the first separator on its own, where a directive does not parse,
+		// while a parser of the whole file accepts it (#594).
+		"a directive":          {"%YAML 1.1\n---\na: 1\n", 0, gityaml.ErrDirective, 1},
+		"a directive in parts": {"a: 1\n---\n%TAG ! tag:x,2026:\n---\nb: 2\n", 0, gityaml.ErrDirective, 3},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

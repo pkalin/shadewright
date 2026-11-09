@@ -291,18 +291,34 @@ func TestUpdateChangeRequestRefuses(t *testing.T) {
 	if err := h.p.UpdateChangeRequest(ctx, 13, newTitle, newBody); err == nil {
 		t.Fatal("a pull request Shadewright did not open was updated")
 	}
+	h = newHarness(t) // no request
+	if err := h.p.UpdateChangeRequest(ctx, 0, newTitle, newBody); !providers.IsRejected(err) {
+		t.Errorf("number 0: got %v, want a rejection", err)
+	}
 	for name, c := range map[string]struct {
-		number      int64
 		title, body string
 	}{
-		"number 0":      {0, newTitle, newBody},
-		"blank title":   {12, " ", newBody},
-		"invalid body":  {12, newTitle, "\xff"},
-		"body too long": {12, newTitle, strings.Repeat("a", maxBodyRunes+1)},
+		"blank title":   {" ", newBody},
+		"invalid body":  {newTitle, "\xff"},
+		"body too long": {newTitle, strings.Repeat("a", maxBodyRunes+1)},
 	} {
-		// Final, never retried: the same request fails the same way (#590).
-		if err := h.p.UpdateChangeRequest(ctx, c.number, c.title, c.body); !providers.IsRejected(err) {
+		// Final, never retried: the same request fails the same way (#590). The pull request is read first,
+		// so a closed or merged one stays a conflict.
+		h := newHarness(t, get("/pulls/12", "pull_open.json"))
+		if err := h.p.UpdateChangeRequest(ctx, 12, c.title, c.body); !providers.IsRejected(err) {
 			t.Errorf("%s: got %v, want a rejection", name, err)
+		}
+	}
+}
+
+// A pull request merged or closed meanwhile is a conflict, also when the new body is one the host would refuse:
+// the caller leaves it to the watch instead of recording the rewrite Refused (#604).
+func TestUpdateChangeRequestNotOpenIsConflictBeforeInvalidInput(t *testing.T) {
+	for _, file := range []string{"pull_closed.json", "pull_merged.json"} {
+		h := newHarness(t, get("/pulls/12", file))
+		err := h.p.UpdateChangeRequest(ctx, 12, newTitle, strings.Repeat("a", maxBodyRunes+1))
+		if !providers.IsConflict(err) {
+			t.Fatalf("%s: got %v, want a conflict", file, err)
 		}
 	}
 }

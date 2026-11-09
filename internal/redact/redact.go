@@ -26,11 +26,12 @@ limitations under the License.
 //
 // Redaction is best effort and errs on the side of removing too much: an IP address or an email in a log
 // line is removed even when it is harmless, and so are the user name of any URL ("ssh://git@host"), long
-// runs that mix letters and digits, such as Git commit hashes and container IDs, long base64 runs that mix
-// cases and change character class often, slashes or not (also a base64 blob that is not a secret), and
-// every scalar value under a secret-named YAML key ("credentials:\n  user: admin" loses "admin"). Values
-// that look like references rather than secrets, such as "secretName: db-creds", are kept, because the name
-// of a missing Secret is what a diagnosis needs, and so is the hex of an image digest.
+// runs that mix letters and digits, such as Git commit hashes and container IDs, 32 characters or more of
+// mixed-case base64 that slashes cut short (also a base64 blob that is not a secret, and a capitalised word
+// or a number right next to it in a path), and every scalar value under a secret-named YAML key
+// ("credentials:\n  user: admin" loses "admin"). Values that look like references rather than secrets, such
+// as "secretName: db-creds", are kept, because the name of a missing Secret is what a diagnosis needs, and
+// so is the hex of an image digest.
 //
 // Where a rule would also match prose, it asks the value to look like a credential: the word after "Basic"
 // or "Bearer", and the value of the short keys "pass", "auth" and "sig" before a colon, on their own ("pass:
@@ -52,6 +53,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"iter"
+	"math"
 	"net/netip"
 	"regexp"
 	"slices"
@@ -916,9 +918,9 @@ const minTokenLength = 24
 
 // longTokenSpan redacts a run of base64, base64url or hex characters when some part of it between slashes
 // looks random: a piece between hyphens of at least minTokenLength that mixes letters and digits, or a
-// hyphenated part of at least that length that mixes upper case, lower case and digits (base64url), or when
-// the run as a whole looks like standard base64 (randomWhole), however its slashes cut it.
-// Paths and image names (short parts between slashes), long names made of words, Kubernetes names
+// hyphenated part of at least that length that mixes upper case, lower case and digits (base64url). A run
+// that no such part makes random may still hold standard base64 that its slashes cut short: then only the
+// slash-separated parts that read as base64 are redacted (base64Window). Paths and image names (short parts between slashes), long names made of words, Kubernetes names
 // and UUIDs (lower case, short pieces between hyphens) and the hex of an image digest ("sha256:...", which
 // identifies a build, not a credential, also with a suffix such as "-amd64") are kept; what follows the
 // digest's hex is judged on its own.
@@ -932,15 +934,14 @@ func longTokenSpan(s string, m []int, _ int) (int, int, bool) {
 	if randomRun(run) {
 		return start, m[1], true
 	}
+	if a, b, ok := base64Window(run); ok {
+		return start + a, start + b, true
+	}
 	return 0, 0, false
 }
 
-// randomRun reports whether some part of run between slashes looks random, or the whole run does, as
-// described for longTokenSpan.
+// randomRun reports whether some part of run between slashes looks random, as described for longTokenSpan.
 func randomRun(run string) bool {
-	if randomWhole(run) {
-		return true
-	}
 	for part := range strings.SplitSeq(run, "/") {
 		if len(part) < minTokenLength {
 			continue
@@ -957,52 +958,209 @@ func randomRun(run string) bool {
 	return false
 }
 
-// randomWhole reports whether run, judged whole, looks like standard base64 rather than a path or a name: at
-// least minTokenLength characters besides "/", "-", "_" and the "=" padding, both cases, and a change of
-// character class (lower case, upper case, digit, other) between at least minClassChanges of the
-// neighbouring characters inside the parts that those separate. Random base64 changes class between about
-// two thirds of its neighbours, so the slashes of a secret written in it (an AWS secret access key, an older
-// Entra client secret) cannot cut it into parts that pass as path words (#525). Words change class rarely:
-// paths, image references, URLs and CamelCase names stay below a third, and Kubernetes paths and names hold
-// one case only.
-func randomWhole(run string) bool {
-	run = strings.TrimRight(run, "=")
-	var chars, pairs, changes int
-	prev := -1
-	for i := range len(run) {
-		c := run[i]
-		if c == '/' || c == '-' || c == '_' {
-			prev = -1
-			continue
-		}
-		class := charClass(c)
-		if prev >= 0 {
-			pairs++
-			if class != prev {
-				changes++
-			}
-		}
-		chars, prev = chars+1, class
+// minBase64Window is the number of characters, slashes and padding aside, from which slash-separated parts
+// are judged together as standard base64 (base64Window): less than the 40 of an AWS secret access key or
+// the 44 of an older Entra client secret, and enough for the score of a window to tell words from base64.
+const minBase64Window = 32
+
+// maxBase64Score is the highest score per pair of neighbouring characters (wordScore) at which a window
+// counts as base64. Random base64 scores about -0.47 and a window of 32 random characters scores above 0.15
+// a few times in 10,000; a 40-character key gives several windows, and none of 100,000 seeded slash-split
+// keys went unflagged. Path words score from about 0.2 (a Windows temp path ending in a random name) to 0.9
+// (TestSlashSplitRuleKeepsPaths).
+const maxBase64Score = 0.15
+
+// Character classes for wordScore.
+const (
+	classVowel = iota // a lower-case vowel
+	classConsonant
+	classUpper
+	classDigit
+	classOther
+	numClasses
+)
+
+// wordScore holds, for a character of one class followed by one of another, the log of how much likelier
+// that pair is in words (paths, CamelCase names) than in random base64, where each of the 64 characters is
+// as likely in any place. The rates for words are rough estimates; the threshold maxBase64Score was set by
+// measuring random keys and real paths, not from these rates alone.
+var wordScore = func() (t [numClasses][numClasses]float64) {
+	inWords := [numClasses][numClasses]float64{
+		classVowel:     {.12, .75, .07, .05, .01},
+		classConsonant: {.45, .38, .08, .07, .02},
+		classUpper:     {.35, .30, .30, .04, .01},
+		classDigit:     {.07, .08, .15, .65, .05},
+		classOther:     {.15, .25, .30, .20, .10},
 	}
-	return chars >= minTokenLength && mixesCase(run) && changes*minClassChanges.den >= pairs*minClassChanges.num
+	inBase64 := [numClasses]float64{5.0 / 64, 21.0 / 64, 26.0 / 64, 10.0 / 64, 2.0 / 64}
+	for a := range t {
+		for b := range t[a] {
+			t[a][b] = math.Log(inWords[a][b] / inBase64[b])
+		}
+	}
+	return t
+}()
+
+// wordClass returns the class of c for wordScore.
+func wordClass(c byte) int {
+	switch {
+	case c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u':
+		return classVowel
+	case c >= 'a' && c <= 'z':
+		return classConsonant
+	case c >= 'A' && c <= 'Z':
+		return classUpper
+	case c >= '0' && c <= '9':
+		return classDigit
+	}
+	return classOther
 }
 
-// minClassChanges is the share of neighbouring characters, 3 in 10, that randomWhole asks to change
-// character class. A random base64 run of 40 characters falls below it a few times in 100,000 (about once in
-// 10,000 when three slashes cut it); the paths and names of TestSlashSplitRuleKeepsPaths stay at or below 0.28.
-var minClassChanges = struct{ num, den int }{3, 10}
+// windowPart is one slash-separated part of a run, with what base64Window adds up over a window of parts.
+type windowPart struct {
+	start, end   int     // byte range in the run, padding included
+	chars, pairs int     // characters, and pairs of neighbouring ones, padding excluded
+	score        float64 // sum of wordScore over the pairs
+	upper, lower bool    // holds an upper-case or a lower-case letter
+	base64       bool    // may be part of standard base64: no "-" or "_", and "=" only as final padding
+}
 
-// charClass returns the class of c for randomWhole: lower case, upper case, digit or other.
-func charClass(c byte) int {
-	switch {
-	case c >= 'a' && c <= 'z':
-		return 0
-	case c >= 'A' && c <= 'Z':
-		return 1
-	case c >= '0' && c <= '9':
-		return 2
+// base64Window finds standard base64 cut short by slashes in a run that randomRun keeps (#525), such as an
+// AWS secret access key after a path or in a CLI flag. It judges every window of adjacent parts that holds
+// at least minBase64Window characters, apart from the parts around it, so path words next to a key cannot
+// dilute it: the window counts when it mixes cases, its parts average at least four characters, and its
+// pairs of neighbouring characters score at most maxBase64Score on average (wordScore). It returns the
+// range of the run from the first part of the first such window to the last part of the last one, without
+// any part at either end that reads as a word. Parts with "-" or "_" (Kubernetes names, UUIDs) are never
+// part of a window. Each window is built from the previous one by adding and removing parts, so the cost is
+// linear in the run.
+func base64Window(run string) (int, int, bool) {
+	var parts []windowPart
+	for pos := 0; pos <= len(run); {
+		end := pos + strings.IndexByte(run[pos:], '/')
+		if end < pos {
+			end = len(run)
+		}
+		parts = append(parts, newWindowPart(run, pos, end))
+		pos = end + 1
 	}
-	return 3
+	first, last := -1, -1
+	for i := 0; i < len(parts); {
+		if !parts[i].base64 {
+			i++
+			continue
+		}
+		k := i
+		for k < len(parts) && parts[k].base64 {
+			k++
+		}
+		var w windowPart
+		var upper, lower, n int
+		j := i
+		for lo := i; lo < k; lo++ {
+			for ; j < k && w.chars < minBase64Window; j++ {
+				w.chars, w.pairs, w.score = w.chars+parts[j].chars, w.pairs+parts[j].pairs, w.score+parts[j].score
+				upper, lower, n = upper+b2i(parts[j].upper), lower+b2i(parts[j].lower), n+1
+			}
+			if w.chars < minBase64Window {
+				break
+			}
+			if upper > 0 && lower > 0 && w.chars >= 4*n && w.score <= maxBase64Score*float64(w.pairs) {
+				if first < 0 {
+					first = lo
+				}
+				last = j - 1
+			}
+			p := parts[lo]
+			w.chars, w.pairs, w.score = w.chars-p.chars, w.pairs-p.pairs, w.score-p.score
+			upper, lower, n = upper-b2i(p.upper), lower-b2i(p.lower), n-1
+		}
+		i = k
+	}
+	if first < 0 {
+		return 0, 0, false
+	}
+	// A short part of the key outside every window, next to it, is taken in; path words that a window
+	// reached into are left out.
+	for first > 0 && parts[first-1].base64 && !pathWord(run[parts[first-1].start:parts[first-1].end]) {
+		first--
+	}
+	for last < len(parts)-1 && parts[last+1].base64 && !pathWord(run[parts[last+1].start:parts[last+1].end]) {
+		last++
+	}
+	for first < last && (parts[first].chars == 0 || pathWord(run[parts[first].start:parts[first].end])) {
+		first++
+	}
+	for last > first && (parts[last].chars == 0 || pathWord(run[parts[last].start:parts[last].end])) {
+		last--
+	}
+	return parts[first].start, parts[last].end, true
+}
+
+// minPathWordScore is the score per pair (wordScore) from which a part of lower-case letters only reads as
+// a path word ("etc", "api", "credentials") in pathWord.
+const minPathWordScore = 0.4
+
+// pathWord reports whether part, next to or at the end of a base64 window, is a path word rather than a
+// piece of the key: at least three lower-case letters that read as a word (minPathWordScore), maybe
+// followed by digits ("etc", "credentials", "python3"), or a version ("v1"). Anything else next to a key is
+// taken for part of it: a short or capitalised word or a number there is redacted with the key, which costs
+// less than a piece of a key that happens to look like a word.
+func pathWord(part string) bool {
+	letters := 0
+	for letters < len(part) && part[letters] >= 'a' && part[letters] <= 'z' {
+		letters++
+	}
+	for i := letters; i < len(part); i++ {
+		if part[i] < '0' || part[i] > '9' {
+			return false
+		}
+	}
+	if part[:letters] == "v" && letters < len(part) {
+		return true
+	}
+	if letters < 3 {
+		return false
+	}
+	var score float64
+	for i := 1; i < letters; i++ {
+		score += wordScore[wordClass(part[i-1])][wordClass(part[i])]
+	}
+	return score >= minPathWordScore*float64(letters-1)
+}
+
+// newWindowPart returns the part run[start:end] for base64Window.
+func newWindowPart(run string, start, end int) windowPart {
+	p := windowPart{start: start, end: end, base64: true}
+	text := run[start:end]
+	if end == len(run) {
+		text = strings.TrimRight(text, "=")
+	}
+	for i := range len(text) {
+		c := text[i]
+		switch {
+		case c == '-' || c == '_' || c == '=':
+			p.base64 = false
+		case c >= 'A' && c <= 'Z':
+			p.upper = true
+		case c >= 'a' && c <= 'z':
+			p.lower = true
+		}
+		if i > 0 {
+			p.score += wordScore[wordClass(text[i-1])][wordClass(c)]
+		}
+	}
+	p.chars = len(text)
+	p.pairs = max(0, len(text)-1)
+	return p
+}
+
+// b2i returns 1 for true and 0 for false.
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // mixesCase reports whether s holds both an upper-case and a lower-case ASCII letter.

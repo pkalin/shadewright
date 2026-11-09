@@ -573,6 +573,9 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"flow bare auth": "{auth: x y ",
 		"flow bare sig":  "{sig:\tq r ",
 		"flow pre-auth":  "{pre-auth: ok then ",
+		// Issue #525: windows of slash-separated parts, judged as base64 or as words.
+		"slash-split base64": "qC+kS6B8/",
+		"path words":         "AppData/",
 	} {
 		in := rep(unit, size/len(unit))
 		start := time.Now()
@@ -876,35 +879,138 @@ func slashSplitKey(seed uint64, n int, slashes ...int) string {
 	return string(b)
 }
 
-// A standard base64 secret whose slashes cut it into parts shorter than minTokenLength is redacted by the
-// long-token rule, also where no key-value rule sees it: after its key name and a blank (a CLI flag, "aws
-// configure set"), or in prose (#525).
-func TestSlashSplitBase64IsRedacted(t *testing.T) {
-	awsKey := slashSplitKey(1, 40, 13, 21)
-	entraSecret := slashSplitKey(2, 43, 9, 20, 31) + "="
-	checkGapCases(t, []gapCase{
-		{"aws configure set", "aws configure set aws_secret_access_key " + awsKey + nextField,
-			[]string{awsKey[:13], awsKey[14:21], awsKey[22:]}, []string{"aws_secret_access_key ", nextField}},
-		{"aws cli flag", "run --aws-secret-access-key " + awsKey + endText, []string{awsKey[22:]}, []string{endText}},
-		{"aws env name and a blank", "AWS_SECRET_ACCESS_KEY " + awsKey + endText, []string{awsKey[22:]}, []string{endText}},
-		{"aws key in prose", "rotated " + awsKey + " today", []string{awsKey[22:]}, []string{"rotated ", " today"}},
-		{"entra secret after az login", "az login --service-principal -u app -p " + entraSecret + " --tenant t",
-			[]string{entraSecret[:9], entraSecret[10:20], entraSecret[32:43]}, []string{" --tenant t"}},
-		{"entra secret in prose", "client secret was " + entraSecret + endText, []string{entraSecret[32:43]}, []string{endText}},
-	})
-	// Any slash-split key, not only the ones above: the same seeds give the same keys on every run.
-	for seed := uint64(100); seed < 1100; seed++ {
-		k := slashSplitKey(seed, 40, int(seed%13)+1, int(seed%11)+18, int(seed%7)+30)
-		if out := String("aws configure set aws_secret_access_key " + k); strings.Contains(out, k[31:]) {
-			t.Errorf("seed %d: key kept:\n%s", seed, out)
-		}
+// seededKey returns a 40-character standard base64 key from a fixed seed with one or two slashes forced into
+// it, so that no part between slashes reaches minTokenLength (slashSplitKey).
+func seededKey(seed uint64) string {
+	if seed%2 == 0 {
+		return slashSplitKey(seed, 40, int(seed%9)+11, int(seed%7)+24)
 	}
+	return slashSplitKey(seed, 40, int(seed%8)+16)
 }
 
-// Paths, image references and URLs stay readable next to the slash-split base64 rule (#525): their parts
-// are words, so the run changes character class too rarely to look random, or it holds one case only.
+// keyParts returns the slash-separated parts of k of at least four characters: a part that survives
+// redaction is a leak.
+func keyParts(k string) []string {
+	var out []string
+	for p := range strings.SplitSeq(k, "/") {
+		if len(p) >= 4 {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// seeds is the number of seeded keys or names each case of the slash-split tests runs with.
+const seeds = 1000
+
+// A standard base64 secret whose slashes cut it into parts shorter than minTokenLength is redacted by the
+// long-token rule wherever it stands: after its key name and a blank (a CLI flag, "aws configure set"), in
+// prose, and at the start, in the middle or at the end of a path or a URL, also after a long lower-case path.
+// The path around it stays (#525).
+func TestSlashSplitBase64IsRedacted(t *testing.T) {
+	contexts := []struct{ name, before, after string }{
+		{"aws configure set", "aws configure set aws_secret_access_key ", "\nnext: field"},
+		{"cli flag", "run --aws-secret-access-key ", " --region x"},
+		{"prose", "rotated ", " today"},
+		{"start of a path", "cp ", "/etc/app/config.yaml ok"},
+		{"middle of a path", "open /var/run/secrets/", "/token failed"},
+		{"end of a path", "open /var/run/secrets/production/credentials/", " not found"},
+		{"after a long lower-case path", "GET /" + rep("download/", 12), " refused"},
+		{"inside a url", "GET https://example.com/api/v1/keys/", "/rotate?x=1 403"},
+		{"end of a url", "GET https://example.com/", " 403"},
+	}
+	for _, c := range contexts {
+		t.Run(c.name, func(t *testing.T) {
+			leaks, lost := 0, 0
+			for seed := range uint64(seeds) {
+				k := seededKey(seed)
+				in := c.before + k + c.after
+				out := String(in)
+				for _, p := range keyParts(k) {
+					if strings.Contains(out, p) {
+						if leaks++; leaks <= 3 {
+							t.Errorf("seed %d: part %q of the key kept:\n%s", seed, p, out)
+						}
+						break
+					}
+				}
+				if !strings.HasPrefix(out, c.before) || !strings.HasSuffix(out, c.after) {
+					if lost++; lost <= 3 {
+						t.Errorf("seed %d: text around the key lost:\n in: %s\nout: %s", seed, in, out)
+					}
+				}
+			}
+			if leaks+lost > 0 {
+				t.Errorf("%d of %d keys leaked, %d lost the text around them", leaks, seeds, lost)
+			}
+		})
+	}
+	entraSecret := slashSplitKey(2, 43, 9, 20, 31) + "="
+	checkGapCases(t, []gapCase{
+		{"entra secret after az login", "az login --service-principal -u app -p " + entraSecret + " --tenant t",
+			keyParts(entraSecret), []string{"-p ", " --tenant t"}},
+	})
+}
+
+// seededName returns n characters of alphabet from a fixed seed: the random part of a generated name.
+func seededName(seed uint64, n int, alphabet string) string {
+	r := rand.New(rand.NewPCG(seed, 526)) // #nosec G404 -- test data from a fixed seed, not a secret
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = alphabet[r.IntN(len(alphabet))]
+	}
+	return string(b)
+}
+
+// Paths, image references, hosts and URLs stay readable next to the slash-split base64 rule (#525): path
+// words, GUIDs, Kubernetes names with hash suffixes and generated temp names, each with seeded random parts.
 func TestSlashSplitRuleKeepsPaths(t *testing.T) {
+	const hex, upperHex, lowerAlnum = "0123456789abcdef", "0123456789ABCDEF", "bcdfghjklmnpqrstvwxz2456789"
+	guid := func(s uint64, a string) string {
+		g := seededName(s, 32, a)
+		return g[:8] + "-" + g[8:12] + "-" + g[12:16] + "-" + g[16:20] + "-" + g[20:]
+	}
+	for name, text := range map[string]func(seed uint64) string{
+		"replica set": func(s uint64) string { return "scaled ReplicaSet/orders-worker-" + seededName(s, 10, hex) + " to 0" },
+		"pod": func(s uint64) string {
+			return "deleted Pod/orders-worker-" + seededName(s, 10, hex) + "-" + seededName(s+seeds, 5, lowerAlnum)
+		},
+		"upper-case guid in a url": func(s uint64) string {
+			return "POST https://login.microsoftonline.com/" + guid(s, upperHex) + "/oauth2/v2.0/token 401"
+		},
+		"guid in an azure id": func(s uint64) string {
+			return "/subscriptions/" + guid(s, hex) + "/resourceGroups/RG-Lab-WestEurope/providers/Microsoft.Compute"
+		},
+		"windows temp path": func(s uint64) string {
+			return "open /mnt/c/Users/JDoe1/AppData/Local/Temp/tmp" + seededName(s, 6, upperHex) + " failed"
+		},
+		"temp path with a file": func(s uint64) string {
+			return "C:/Users/JDoe1/AppData/Local/Temp/tmp" + seededName(s, 4, upperHex) + "/Setup/Install.log"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := 0
+			for seed := range uint64(seeds) {
+				in := text(seed)
+				if out := String(in); out != in {
+					if changed++; changed <= 3 {
+						t.Errorf("seed %d changed useful text:\n in: %s\nout: %s", seed, in, out)
+					}
+				}
+			}
+			if changed > 0 {
+				t.Errorf("%d of %d changed", changed, seeds)
+			}
+		})
+	}
 	for _, in := range []string{
+		"open /opt/SDKs/Qt/6/lib/QtCore/QtGui/QtWidgets failed",
+		"GET https://example.com/opt/SDKs/Qt/6/lib/QtCore/QtGui/QtWidgets failed",
+		"A/b/C/d/E/f/G/h/I/j/K/l/M/n/O/p/Q/r/S/t/U/v/W/x/Y/z",
+		"open /Library/Containers/com/Docker/Data/vms/0/console",
+		"run /Program/Microsoft/WindowsApps/PythonSoftwareFoundation/python3",
+		"load /usr/lib/x86/libQt5Core/libGLESv2/libEGL",
+		"AKIAEXAMPLE/IAMRole/AdminAccess/S3Bucket",
 		"GET /apis/apps/v1/namespaces/orders/deployments/orders-worker/scale 404",
 		"GET /api/v1/namespaces/kube-system/pods/coredns-7db6d8ff4d-x2x9q/log?container=coredns",
 		"/apis/remediation.shadewright.io/v1alpha1/namespaces/shadewright-system/remediationrequests",

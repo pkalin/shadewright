@@ -144,63 +144,112 @@ func (r *RemediationRequestReconciler) afterMerge(ctx context.Context, rr *remed
 	}
 	stepCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
 	defer cancel()
-	recorded := false
+	var fresh client.Object
 	if rr.Status.PullRequest.AppliedObservedAt == nil {
 		var (
 			res reconcile.Result
 			err error
 		)
-		if res, recorded, err = r.waitForDelivery(ctx, stepCtx, rr, now); !recorded {
+		if res, fresh, err = r.waitForDelivery(ctx, stepCtx, rr, now); fresh == nil {
 			return res, err
 		}
 	}
-	return r.judgeRollout(ctx, stepCtx, rr, now, recorded)
+	return r.judgeRollout(ctx, stepCtx, rr, now, fresh)
 }
 
-// waitForDelivery asks whether the merge commit is applied. When it is, it records now as the applied time in rr
-// (not written yet) and returns true. Otherwise it waits for the delivery within the window after the merge
-// and, past the window, ends the check: DeliveryNotObserved when the delivery was checked and not seen (or the
-// target is gone), RolloutNotDetermined when it could not be checked until the end of the grace period. A
-// window that ends while writes are paused waits for the pause to end, since the Git host is not asked then.
+// waitForDelivery asks whether the merge commit is applied. When it is, it records in rr (not written yet; the
+// rollout's first status write carries them all) now as the applied time, the commit applied, and the generation
+// and template hash of the target read right after, and returns that target. Otherwise it waits for the delivery
+// within the window after the merge and, past the window, ends the check: DeliveryNotObserved when the
+// delivery was checked and not seen (or the target is gone), RolloutNotDetermined when it could not be checked
+// until the end of the grace period. A window that ends while writes are paused waits for the pause to end: the
+// pause is read directly, whatever the delivery check needed, since the Git host is not asked while it lasts.
 func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Context,
-	rr *remediationv1alpha1.RemediationRequest, now time.Time) (reconcile.Result, bool, error) {
+	rr *remediationv1alpha1.RemediationRequest, now time.Time) (reconcile.Result, client.Object, error) {
 	start, err := r.deliveryStart(ctx, rr, now)
 	if err != nil {
-		return reconcile.Result{}, false, err
+		return reconcile.Result{}, nil, err
 	}
 	windowEnd := start.Add(deliveryWindow)
-	applied, target, err := r.delivered(stepCtx, rr)
+	d, err := r.delivered(stepCtx, rr)
 	err = boundErr(ctx, stepCtx, "delivery check", err)
 	if ctx.Err() != nil {
-		return reconcile.Result{}, false, err
+		return reconcile.Result{}, nil, err
 	}
-	if err == nil && applied && recordApplied(rr, now) {
+	if err == nil && d.applied && recordApplied(rr, now) {
+		st := rolloutStatus(rr)
+		st.TargetGeneration = max(d.target.GetGeneration(), 0)
+		st.TemplateHash = rollout.TemplateHash(d.target)
+		if isCommitID(d.commit) {
+			st.AppliedRevision = d.commit
+		}
 		logf.FromContext(ctx).Info("Observed the merge commit of RemediationRequest applied",
-			"remediationRequest", client.ObjectKeyFromObject(rr), "appliedObservedAt", now.Truncate(time.Second))
-		return reconcile.Result{}, true, nil
+			"remediationRequest", client.ObjectKeyFromObject(rr), "appliedObservedAt", now.Truncate(time.Second),
+			"appliedRevision", st.AppliedRevision, "targetGeneration", st.TargetGeneration)
+		return reconcile.Result{}, d.target, nil
 	}
 	if now.Before(windowEnd) {
 		if err != nil {
-			return reconcile.Result{}, false, err
+			return reconcile.Result{}, nil, err
 		}
-		return reconcile.Result{RequeueAfter: pollAfter(windowEnd.Sub(now))}, false, nil
+		return reconcile.Result{RequeueAfter: pollAfter(windowEnd.Sub(now))}, nil, nil
+	}
+	// The window ended: a pause holds it open, whether or not this check reached the Git host.
+	paused, pauseErr := r.writesPaused(stepCtx)
+	pauseErr = boundErr(ctx, stepCtx, "pause check", pauseErr)
+	if ctx.Err() != nil {
+		return reconcile.Result{}, nil, pauseErr
+	}
+	if pauseErr == nil && paused {
+		return reconcile.Result{RequeueAfter: freshRecheckDelay}, nil, nil
+	}
+	if err == nil {
+		// Not knowing whether writes are paused is a failed read, never a verdict.
+		err = pauseErr
 	}
 	switch {
 	case errors.Is(err, freshness.ErrPaused):
-		return reconcile.Result{RequeueAfter: freshRecheckDelay}, false, nil
+		return reconcile.Result{RequeueAfter: freshRecheckDelay}, nil, nil
 	case err == nil:
-		return reconcile.Result{}, false, r.deliveryNotObserved(ctx, rr, now, target)
+		return reconcile.Result{}, nil, r.deliveryNotObserved(ctx, rr, now, d.target)
 	case errors.Is(err, errTargetGone):
-		return reconcile.Result{}, false, r.deliveryNotObserved(ctx, rr, now, nil)
+		return reconcile.Result{}, nil, r.deliveryNotObserved(ctx, rr, now, nil)
 	case now.After(windowEnd.Add(finalGrace)):
 		logf.FromContext(ctx).Info("The delivery of RemediationRequest could not be checked",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-		return reconcile.Result{}, false, r.endRollout(ctx, rr, now, metav1.ConditionUnknown,
+		return reconcile.Result{}, nil, r.endRollout(ctx, rr, now, metav1.ConditionUnknown,
 			rollout.ReasonRolloutNotDetermined, "The rollout was not checked: the delivery of merge commit "+
 				rr.Status.PullRequest.MergeCommitSHA+" could not be checked until the end of the check (the "+
 				"executor log has the error)", corev1.EventTypeWarning)
 	}
-	return reconcile.Result{}, false, err
+	return reconcile.Result{}, nil, err
+}
+
+// writesPaused reads RemediationSettings and reports whether writes are paused (spec.paused). Missing settings
+// are not a pause.
+func (r *RemediationRequestReconciler) writesPaused(ctx context.Context) (bool, error) {
+	settings := &remediationv1alpha1.RemediationSettings{}
+	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
+	case apierrors.IsNotFound(err):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
+	}
+	return freshness.Paused(settings), nil
+}
+
+// isCommitID reports whether s is a full lower-case hex SHA-1 object ID, the form status.rollout.appliedRevision
+// accepts.
+func isCommitID(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // deliveryStart returns when the delivery window starts: the move to Merged, or, for a request without that
@@ -221,32 +270,42 @@ func (r *RemediationRequestReconciler) deliveryStart(ctx context.Context, rr *re
 }
 
 // judgeRollout reads the target after the delivery was seen applied (never before: an earlier read could show
-// the old template fully rolled out), records the template revision it judges, and reports. The check ends with a
+// the old template fully rolled out), or uses fresh, the target read when the delivery was just seen applied
+// (nil otherwise), records the template revision it judges, and reports. The check ends with a
 // verdict: Complete, Superseded, Stuck once read after the end of the check (applied time, deadline and
 // stuckWatch), or RolloutNotDetermined when the target is gone or cannot be read until the end of the grace
 // period. Until then a failed read is retried and a stuck rollout is read again, so one a person unblocks turns
 // True.
 func (r *RemediationRequestReconciler) judgeRollout(ctx, stepCtx context.Context,
-	rr *remediationv1alpha1.RemediationRequest, now time.Time, recorded bool) (reconcile.Result, error) {
+	rr *remediationv1alpha1.RemediationRequest, now time.Time, fresh client.Object) (reconcile.Result, error) {
 	deadline := rollout.ClampDeadline(r.RolloutDeadline)
 	appliedAt := rr.Status.PullRequest.AppliedObservedAt.Time
 	end := appliedAt.Add(deadline + stuckWatch)
-	target := rolloutTarget(rr.Spec.TargetRef)
-	readErr := boundErr(ctx, stepCtx, "rollout check", r.readTarget(stepCtx, rr.Spec.TargetRef, target))
-	if ctx.Err() != nil {
-		// Cancelled: no verdict and no write, not even the applied time; the next reconcile sees the same.
-		return reconcile.Result{}, readErr
-	}
-	if readErr != nil {
-		if errors.Is(readErr, errTargetGone) || now.After(end.Add(finalGrace)) {
-			return reconcile.Result{}, r.endRollout(ctx, rr, now, metav1.ConditionUnknown,
-				rollout.ReasonRolloutNotDetermined, "The rollout was not judged: the target is gone or was "+
-					"replaced, or could not be read until the end of the check", corev1.EventTypeWarning)
+	recorded := fresh != nil
+	target := fresh
+	if target == nil {
+		target = rolloutTarget(rr.Spec.TargetRef)
+		readErr := boundErr(ctx, stepCtx, "rollout check", r.readTarget(stepCtx, rr.Spec.TargetRef, target))
+		if ctx.Err() != nil {
+			// Cancelled: no verdict and no write; the next reconcile sees the same.
+			return reconcile.Result{}, readErr
 		}
-		// The applied time, when just seen, is a fact: it is kept, and the rollout is read again.
-		return reconcile.Result{}, errors.Join(readErr, r.writeIf(ctx, rr, recorded))
+		if readErr != nil {
+			if errors.Is(readErr, errTargetGone) || now.After(end.Add(finalGrace)) {
+				return reconcile.Result{}, r.endRollout(ctx, rr, now, metav1.ConditionUnknown,
+					rollout.ReasonRolloutNotDetermined, "The rollout was not judged: the target is gone or was "+
+						"replaced, or could not be read until the end of the check", corev1.EventTypeWarning)
+			}
+			return reconcile.Result{}, readErr
+		}
 	}
-	changed := recordRevision(rr, target)
+	changed, replaced := recordRevision(rr, target)
+	if replaced {
+		return reconcile.Result{}, r.endRollout(ctx, rr, now, metav1.ConditionUnknown,
+			rollout.ReasonRolloutSuperseded, fmt.Sprintf("The target's template changed again before its "+
+				"controller observed generation %d, the one the applied commit produced; this rollout is not judged",
+				rolloutStatus(rr).TargetGeneration), corev1.EventTypeNormal)
+	}
 	result, err := rollout.Evaluate(target, rolloutStatus(rr).TemplateRevision, appliedAt, now, deadline)
 	if err != nil {
 		return reconcile.Result{}, r.endRollout(ctx, rr, now, metav1.ConditionUnknown,
@@ -269,20 +328,34 @@ func (r *RemediationRequestReconciler) judgeRollout(ctx, stepCtx context.Context
 	return reconcile.Result{RequeueAfter: pollAfter(appliedAt.Add(deadline).Sub(now))}, nil
 }
 
-// recordRevision records, once each, the target's generation first read after the delivery and the template
-// revision its controller rolls out for that generation. It reports whether it changed the status.
-func recordRevision(rr *remediationv1alpha1.RemediationRequest, target client.Object) bool {
+// recordRevision records, once, the template revision the target's controller rolls out for targetGeneration,
+// the generation the applied commit produced (recorded with the applied time). It waits until the controller
+// observed that generation. When the controller reports a later one first, that revision is ours only if the
+// target is at the generation observed and its template is still the one recorded (a scale keeps it); otherwise
+// replaced is true and no revision is recorded. changed reports whether it changed the status.
+func recordRevision(rr *remediationv1alpha1.RemediationRequest, target client.Object) (changed, replaced bool) {
 	st := rolloutStatus(rr)
-	changed := false
-	if st.TargetGeneration == 0 {
-		st.TargetGeneration, changed = max(target.GetGeneration(), 0), true
+	if st.TemplateRevision != "" {
+		return false, false
 	}
-	if st.TemplateRevision == "" {
-		if rev, ok := rollout.Revision(target, st.TargetGeneration); ok && len(rev) <= 253 {
-			st.TemplateRevision, changed = rev, true
+	observed := rollout.ObservedGeneration(target)
+	switch {
+	case observed < st.TargetGeneration:
+		return false, false
+	case observed > st.TargetGeneration:
+		if target.GetGeneration() != observed {
+			// Yet another generation waits to be observed; look again once it is.
+			return false, false
+		}
+		if st.TemplateHash == "" || rollout.TemplateHash(target) != st.TemplateHash {
+			return false, true
 		}
 	}
-	return changed
+	if rev, ok := rollout.Revision(target, st.TargetGeneration); ok && len(rev) <= 253 {
+		st.TemplateRevision = rev
+		return true, false
+	}
+	return false, false
 }
 
 // rolloutStatus returns status.rollout, created when missing.
@@ -392,31 +465,49 @@ func (r *RemediationRequestReconciler) writeIf(ctx context.Context, rr *remediat
 	return nil
 }
 
+// delivery is what delivered found: whether the merge commit is applied, the commit the unit applied, and the
+// target (read again after an Applied answer, so it shows what the applied commit produced; nil when the first
+// read failed).
+type delivery struct {
+	applied bool
+	commit  string
+	target  client.Object
+}
+
 // delivered reports whether the Flux Kustomization named by the target's labels applied the merge commit, or a
 // later commit of the target branch that holds it. Every outcome but Applied is false: Pending, Failed (Flux
 // may still retry; the phases of #94 report it), a target without Kustomization labels. A read that fails is an
 // error.
 func (r *RemediationRequestReconciler) delivered(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
-	bool, client.Object, error) {
+	delivery, error) {
 	ref := rr.Spec.TargetRef
 	target := rolloutTarget(ref)
 	if err := r.readTarget(ctx, ref, target); err != nil {
-		return false, nil, err
+		return delivery{}, err
 	}
 	name, namespace, ok := kustomizationOf(target)
 	if !ok {
-		return false, target, nil
+		return delivery{target: target}, nil
 	}
 	verifier, err := r.Delivery(planAncestry{r: r, rr: rr})
 	if err != nil {
-		return false, target, fmt.Errorf("build the delivery verifier: %w", err)
+		return delivery{target: target}, fmt.Errorf("build the delivery verifier: %w", err)
 	}
 	unit := providers.DeliveryUnit{Kind: "Kustomization", Namespace: namespace, Name: name}
-	outcome, _, err := verifier.Verify(ctx, unit, rr.Status.PullRequest.MergeCommitSHA, string(rr.Status.Source.TargetBranch))
+	outcome, status, err := verifier.Verify(ctx, unit, rr.Status.PullRequest.MergeCommitSHA, string(rr.Status.Source.TargetBranch))
 	if err != nil {
-		return false, target, fmt.Errorf("verify the delivery of the merge commit: %w", err)
+		return delivery{target: target}, fmt.Errorf("verify the delivery of the merge commit: %w", err)
 	}
-	return outcome == providers.DeliveryApplied, target, nil
+	if outcome != providers.DeliveryApplied {
+		return delivery{target: target}, nil
+	}
+	// The first read may predate the apply Flux just reported: read the target again, so the generation
+	// recorded is the one the applied commit produced.
+	after := rolloutTarget(ref)
+	if err := r.readTarget(ctx, ref, after); err != nil {
+		return delivery{target: target}, err
+	}
+	return delivery{applied: true, commit: status.AppliedCommit, target: after}, nil
 }
 
 // readTarget reads the target into obj from the API server and checks that it is the object the request names

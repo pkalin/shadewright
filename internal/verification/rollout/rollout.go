@@ -26,6 +26,9 @@ limitations under the License.
 package rollout
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -106,6 +109,48 @@ func Revision(target client.Object, generation int64) (rev string, ok bool) {
 		}
 	}
 	return rev, rev != ""
+}
+
+// ObservedGeneration is the generation target's controller last reported in status.observedGeneration, or 0
+// for another kind.
+func ObservedGeneration(target client.Object) int64 {
+	switch t := target.(type) {
+	case *appsv1.Deployment:
+		if t != nil {
+			return t.Status.ObservedGeneration
+		}
+	case *appsv1.StatefulSet:
+		if t != nil {
+			return t.Status.ObservedGeneration
+		}
+	}
+	return 0
+}
+
+// TemplateHash returns the SHA-256, in lower-case hex, of target's pod template as JSON, or "" for another
+// kind. Two reads of an unchanged template give the same hash, so a later generation that only scaled the
+// target keeps it.
+func TemplateHash(target client.Object) string {
+	var tmpl any
+	switch t := target.(type) {
+	case *appsv1.Deployment:
+		if t != nil {
+			tmpl = t.Spec.Template
+		}
+	case *appsv1.StatefulSet:
+		if t != nil {
+			tmpl = t.Spec.Template
+		}
+	}
+	if tmpl == nil {
+		return ""
+	}
+	b, err := json.Marshal(tmpl)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // currentRevision is the revision target names now, whatever generation its controller observed.

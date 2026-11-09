@@ -329,3 +329,34 @@ func TestBlockingPod(t *testing.T) {
 		t.Errorf("message %q offers a Ready pod or misses the failing new template", res.Message)
 	}
 }
+
+// TemplateHash changes with the pod template only: a scale keeps it, a new image changes it, and a kind without
+// a template has none.
+func TestTemplateHash(t *testing.T) {
+	d := &appsv1.Deployment{Spec: appsv1.DeploymentSpec{Replicas: ptr.To[int32](2),
+		Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "app:1"}}}}}}
+	h := TemplateHash(d)
+	if len(h) != 64 || strings.Trim(h, "0123456789abcdef") != "" {
+		t.Fatalf("TemplateHash = %q, want 64 lower-case hex digits", h)
+	}
+	scaled := d.DeepCopy()
+	scaled.Spec.Replicas = ptr.To[int32](5)
+	if got := TemplateHash(scaled); got != h {
+		t.Errorf("a scale changed the hash: %s != %s", got, h)
+	}
+	changed := d.DeepCopy()
+	changed.Spec.Template.Spec.Containers[0].Image = "app:2"
+	if got := TemplateHash(changed); got == h {
+		t.Error("a new image kept the hash")
+	}
+	ss := &appsv1.StatefulSet{Spec: appsv1.StatefulSetSpec{Template: d.Spec.Template}}
+	if got := TemplateHash(ss); got != h {
+		t.Errorf("the same template in a StatefulSet hashed %s, want %s", got, h)
+	}
+	if got := TemplateHash(&corev1.ConfigMap{}); got != "" {
+		t.Errorf("TemplateHash(ConfigMap) = %q, want none", got)
+	}
+	if got := ObservedGeneration(&appsv1.StatefulSet{Status: appsv1.StatefulSetStatus{ObservedGeneration: 4}}); got != 4 {
+		t.Errorf("ObservedGeneration = %d, want 4", got)
+	}
+}

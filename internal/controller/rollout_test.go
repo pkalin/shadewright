@@ -25,6 +25,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -32,6 +33,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -48,6 +50,8 @@ const (
 	rolloutName      = "cache"
 	rolloutUID       = "44444444-4444-4444-8444-444444444444"
 	revisionNew      = "cache-7b9c"
+	revisionOld      = "cache-6d4f"
+	revisionNext     = "cache-8e1f"
 )
 
 // rolloutReader is the executor's API reader in these tests: the Kustomization comes from ks, everything else
@@ -110,7 +114,7 @@ func stuckStatefulSet() *appsv1.StatefulSet {
 		},
 		Status: appsv1.StatefulSetStatus{
 			ObservedGeneration: 3, Replicas: 2, ReadyReplicas: 1, CurrentReplicas: 2, UpdatedReplicas: 0,
-			CurrentRevision: "cache-6d4f", UpdateRevision: revisionNew,
+			CurrentRevision: revisionOld, UpdateRevision: revisionNew,
 		},
 	}
 }
@@ -168,16 +172,21 @@ func newRolloutWorld(t *testing.T, ss *appsv1.StatefulSet) *rolloutWorld {
 		WithStatusSubresource(&remediationv1alpha1.RemediationRequest{}).Build()
 	w := &rolloutWorld{c: c, reader: &rolloutReader{Reader: c}, git: git, rec: record.NewFakeRecorder(10),
 		now: merged.Add(time.Minute), merged: merged, merge: merge, base: base, key: client.ObjectKeyFromObject(rr)}
-	w.r = &RemediationRequestReconciler{Client: c, Scheme: c.Scheme(), APIReader: w.reader, Recorder: w.rec,
+	w.r = w.newReconciler(c)
+	return w
+}
+
+// newReconciler is the executor of the world writing through c; a new one is a restart.
+func (w *rolloutWorld) newReconciler(c client.Client) *RemediationRequestReconciler {
+	return &RemediationRequestReconciler{Client: c, Scheme: c.Scheme(), APIReader: w.reader, Recorder: w.rec,
 		Now: func() time.Time { return w.now },
 		OpenRepository: func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
-			return git, nil
+			return w.git, nil
 		},
 		Delivery: func(a providers.AncestryChecker) (DeliveryVerifier, error) {
 			return fluxdelivery.New(w.reader, a)
 		},
 	}
-	return w
 }
 
 func (w *rolloutWorld) reconcile(t *testing.T, ctx context.Context) (reconcile.Result, error) {
@@ -317,6 +326,9 @@ func TestRolloutLaterCommitCountsAsDelivered(t *testing.T) {
 	if rr.Status.PullRequest.AppliedObservedAt == nil ||
 		!meta.IsStatusConditionTrue(rr.Status.Conditions, rollout.ConditionRolledOut) {
 		t.Fatalf("a later commit holding the merge commit was not counted: %+v", rr.Status)
+	}
+	if got := rr.Status.Rollout; got == nil || got.AppliedRevision != later {
+		t.Fatalf("status.rollout = %+v, want appliedRevision %s, the commit Flux applied", got, later)
 	}
 }
 
@@ -467,9 +479,10 @@ func TestRolloutReadFailureIsRetried(t *testing.T) {
 		if _, err := w.reconcile(t, t.Context()); !errors.Is(err, boom) {
 			t.Fatalf("err = %v, want the read error", err)
 		}
+		// The applied time is written only with the generation the applied commit produced, read after it.
 		rr := w.request(t)
-		if rr.Status.PullRequest.AppliedObservedAt == nil {
-			t.Fatal("the delivery seen was not kept")
+		if rr.Status.PullRequest.AppliedObservedAt != nil || rr.Status.Rollout != nil {
+			t.Fatalf("the applied time was kept without the target read after it: %+v", rr.Status)
 		}
 		if c := meta.FindStatusCondition(rr.Status.Conditions, rollout.ConditionRolledOut); c != nil {
 			t.Fatalf("a failed read set %+v", c)
@@ -521,6 +534,8 @@ func (w *rolloutWorld) appliedLongAgo(t *testing.T, applied time.Time) {
 	t.Helper()
 	w.mutate(t, func(rr *remediationv1alpha1.RemediationRequest) {
 		rr.Status.PullRequest.AppliedObservedAt = new(metav1.NewTime(applied))
+		rr.Status.Rollout = &remediationv1alpha1.RolloutStatus{AppliedRevision: w.merge, TargetGeneration: 3,
+			TemplateHash: rollout.TemplateHash(stuckStatefulSet())}
 		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: rollout.ConditionRolledOut,
 			Status: metav1.ConditionUnknown, Reason: rollout.ReasonRolloutProgressing, Message: "in progress"})
 	})
@@ -660,7 +675,7 @@ func TestRolloutNewerRevisionSupersedes(t *testing.T) {
 		t.Fatalf("status.rollout = %+v, want revision %s at generation 3", got, revisionNew)
 	}
 	next := stuckStatefulSet()
-	next.Status.UpdateRevision = "cache-8e1f"
+	next.Status.UpdateRevision = revisionNext
 	w.setTarget(t, next)
 	w.now = w.now.Add(rollout.DefaultDeadline + time.Minute)
 	if res, err := w.reconcile(t, t.Context()); err != nil || res.RequeueAfter != 0 {
@@ -686,5 +701,162 @@ func TestRolloutWithoutTransitionTime(t *testing.T) {
 	}
 	if c := rolledOut(t, w); c == nil || c.Status != metav1.ConditionTrue {
 		t.Fatalf("RolledOut = %+v, want True", c)
+	}
+}
+
+// gen3Unobserved is the target right after the applied commit produced generation 3: its controller has not
+// observed it yet, so the status still names the old revision.
+func gen3Unobserved() *appsv1.StatefulSet {
+	ss := stuckStatefulSet()
+	ss.Spec.Template.Spec.Containers = []corev1.Container{{Name: "cache", Image: "cache:1"}}
+	ss.Status = appsv1.StatefulSetStatus{ObservedGeneration: 2, Replicas: 2, ReadyReplicas: 2, CurrentReplicas: 2,
+		UpdatedReplicas: 2, CurrentRevision: revisionOld, UpdateRevision: revisionOld}
+	return ss
+}
+
+// gen4Elsewhere replaces the target with generation 4, another template, fully rolled out as cache-8e1f, before
+// its controller ever reported generation 3.
+func (w *rolloutWorld) gen4Elsewhere(t *testing.T) {
+	t.Helper()
+	live := &appsv1.StatefulSet{}
+	if err := w.c.Get(t.Context(), client.ObjectKey{Namespace: rolloutNamespace, Name: rolloutName}, live); err != nil {
+		t.Fatal(err)
+	}
+	live.Generation = 4
+	live.Spec.Template.Spec.Containers = []corev1.Container{{Name: "cache", Image: "cache:2"}}
+	if err := w.c.Update(t.Context(), live); err != nil {
+		t.Fatal(err)
+	}
+	live.Status = appsv1.StatefulSetStatus{ObservedGeneration: 4, Replicas: 2, ReadyReplicas: 2, CurrentReplicas: 2,
+		UpdatedReplicas: 2, CurrentRevision: revisionNext, UpdateRevision: revisionNext}
+	if err := w.c.Status().Update(t.Context(), live); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.c.Get(t.Context(), client.ObjectKeyFromObject(live), live); err != nil || live.Generation != 4 {
+		t.Fatalf("the fake kept generation %d, %v; want 4", live.Generation, err)
+	}
+}
+
+// expectNotJudgedAsComplete checks that a rollout of another template than the applied one ended without a
+// verdict about it: never RolloutComplete for that template.
+func expectNotJudgedAsComplete(t *testing.T, w *rolloutWorld) {
+	t.Helper()
+	c := rolledOut(t, w)
+	if c == nil || c.Status != metav1.ConditionUnknown || c.Reason != rollout.ReasonRolloutSuperseded {
+		t.Fatalf("RolledOut = %+v, want Unknown/RolloutSuperseded, not a rollout of generation 4 judged ours", c)
+	}
+	if got := w.request(t).Status.Rollout; got == nil || got.TemplateRevision == revisionNext {
+		t.Fatalf("status.rollout = %+v adopted generation 4's revision", got)
+	}
+}
+
+// Review of #532, point 5a: the applied commit produced generation 3, and generation 4 (another template)
+// arrived before the controller reported generation 3. Generation 4's revision is not ours to judge.
+func TestRolloutLaterGenerationBeforeObservedIsNotOurs(t *testing.T) {
+	w := newRolloutWorld(t, gen3Unobserved())
+	w.reader.ks = kustomizationApplied(t, w.merge)
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	st := w.request(t).Status.Rollout
+	if st == nil || st.TargetGeneration != 3 || st.TemplateHash == "" || st.AppliedRevision != w.merge ||
+		st.TemplateRevision != "" {
+		t.Fatalf("status.rollout = %+v, want generation 3, its template hash and the merge commit, no revision", st)
+	}
+	w.gen4Elsewhere(t)
+	w.now = w.now.Add(time.Minute)
+	if res, err := w.reconcile(t, t.Context()); err != nil || res.RequeueAfter != 0 {
+		t.Fatalf("Reconcile = %+v, %v; want done", res, err)
+	}
+	expectNotJudgedAsComplete(t, w)
+}
+
+// A later generation that keeps the template (a scale, an HPA) is still our rollout.
+func TestRolloutLaterGenerationSameTemplateIsOurs(t *testing.T) {
+	w := newRolloutWorld(t, gen3Unobserved())
+	w.reader.ks = kustomizationApplied(t, w.merge)
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	live := &appsv1.StatefulSet{}
+	if err := w.c.Get(t.Context(), client.ObjectKey{Namespace: rolloutNamespace, Name: rolloutName}, live); err != nil {
+		t.Fatal(err)
+	}
+	live.Generation, live.Spec.Replicas = 4, ptr.To[int32](3)
+	if err := w.c.Update(t.Context(), live); err != nil {
+		t.Fatal(err)
+	}
+	live.Status = appsv1.StatefulSetStatus{ObservedGeneration: 4, Replicas: 3, ReadyReplicas: 3, CurrentReplicas: 3,
+		UpdatedReplicas: 3, CurrentRevision: revisionNew, UpdateRevision: revisionNew}
+	if err := w.c.Status().Update(t.Context(), live); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if c := rolledOut(t, w); c == nil || c.Status != metav1.ConditionTrue {
+		t.Fatalf("RolledOut = %+v, want True", c)
+	}
+	if got := w.request(t).Status.Rollout; got.TemplateRevision != revisionNew {
+		t.Fatalf("status.rollout = %+v, want revision %s", got, revisionNew)
+	}
+}
+
+// Point 5b: the first status write fails and the executor restarts; the rollout it then records is still tied
+// to the generation the applied commit produced, so generation 4 arriving later is not judged ours.
+func TestRolloutFailedFirstWriteThenRestart(t *testing.T) {
+	w := newRolloutWorld(t, gen3Unobserved())
+	w.reader.ks = kustomizationApplied(t, w.merge)
+	boom := errors.New("write failed")
+	w.r = w.newReconciler(interceptor.NewClient(w.c.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+			return boom
+		},
+	}))
+	if _, err := w.reconcile(t, t.Context()); !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the write error", err)
+	}
+	if rr := w.request(t); rr.Status.PullRequest.AppliedObservedAt != nil || rr.Status.Rollout != nil {
+		t.Fatalf("a failed write left %+v", rr.Status)
+	}
+	// Restart: a new reconciler, the same world.
+	w.r = w.newReconciler(w.c)
+	w.now = w.now.Add(time.Minute)
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if st := w.request(t).Status.Rollout; st == nil || st.TargetGeneration != 3 {
+		t.Fatalf("status.rollout = %+v after the restart, want generation 3", st)
+	}
+	w.gen4Elsewhere(t)
+	w.now = w.now.Add(time.Minute)
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	expectNotJudgedAsComplete(t, w)
+}
+
+// Point 6: Flux has not observed its latest generation, so the delivery is Pending without any question to the
+// Git host. A window that ends while writes are paused still waits.
+func TestRolloutPausedPendingDeliveryWaits(t *testing.T) {
+	w := newRolloutWorld(t, completeStatefulSet())
+	ks := kustomizationApplied(t, w.base)
+	ks.SetGeneration(2)
+	w.reader.ks = ks
+	settings := &remediationv1alpha1.RemediationSettings{}
+	if err := w.c.Get(t.Context(), client.ObjectKey{Name: remediationv1alpha1.SettingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings.Spec.Paused = new(true)
+	if err := w.c.Update(t.Context(), settings); err != nil {
+		t.Fatal(err)
+	}
+	w.now = w.merged.Add(deliveryWindow + time.Hour)
+	res, err := w.reconcile(t, t.Context())
+	if err != nil || res.RequeueAfter <= 0 {
+		t.Fatalf("Reconcile = %+v, %v; want a wait", res, err)
+	}
+	if c := rolledOut(t, w); c != nil {
+		t.Fatalf("RolledOut = %+v while paused, want none", c)
 	}
 }

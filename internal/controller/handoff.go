@@ -494,6 +494,16 @@ func (r *RemediationRequestReconciler) isHandoffCommit(ctx context.Context, git 
 	switch bs, err := branchStateOf(ctx, git, path, head, min(chainDepth(pred)+1, providers.MaxChainCommits)); {
 	case err != nil:
 		return false, err
+	case bs == providers.BranchAtTarget:
+		// A merge took head into the target branch (a merge commit or a fast-forward, #591), so the chain can no
+		// longer be told apart from it. head is judged against its own parent instead, the head the predecessor
+		// recorded (checked above), whose chain was checked when it was recorded.
+		switch state, parent, err := git.CheckCommit(ctx, head, path); {
+		case err != nil:
+			return false, freshness.WrapProvider("check what the merged branch head holds", err)
+		case state != providers.BranchOneChange || parent != to.ExpectedHead:
+			return false, nil
+		}
 	case bs != providers.BranchOneChange:
 		return false, nil
 	}

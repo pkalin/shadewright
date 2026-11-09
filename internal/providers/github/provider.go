@@ -549,6 +549,31 @@ func (p *Provider) CheckMerged(ctx context.Context, head, mergeCommit, path stri
 	return state, parent, nil
 }
 
+// CheckCommit reports what commit carries over its own parent, whatever the target branch holds
+// (providers.GitProvider.CheckCommit): one parent, and the trees compared as CheckBranch compares them.
+func (p *Provider) CheckCommit(ctx context.Context, commit, path string) (providers.BranchState, string, error) {
+	switch {
+	case !validSHA(commit):
+		return 0, "", errors.New(opCheckBranch + ": commit is not a full SHA")
+	case !validPath(path):
+		return 0, "", errors.New(opCheckBranch + ": path is invalid")
+	}
+	ctx, cancel := p.withTimeout(ctx)
+	defer cancel()
+	parents, err := p.parents(ctx, commit)
+	if err != nil {
+		return 0, "", err
+	}
+	if len(parents) != 1 {
+		return providers.BranchForeign, "", nil
+	}
+	state, err := p.changedOnly(ctx, commit, parents[0], strings.Split(path, "/"))
+	if err != nil || state != providers.BranchOneChange {
+		return state, "", err
+	}
+	return state, parents[0], nil
+}
+
 // changedOnly compares the trees of commit and parent along the path segs, from the root trees down.
 func (p *Provider) changedOnly(ctx context.Context, commit, parent string, segs []string) (providers.BranchState, error) {
 	shaA, shaB := commit, parent

@@ -1526,21 +1526,85 @@ func marker(rr *remediationv1alpha1.RemediationRequest) string {
 // hasMarker reports whether body carries this request's marker on a line of its own. A replacement that took
 // the pull request over (ADR-0028 section 4) also accepts its predecessor's marker, by the predecessor's UID,
 // until the Git host has rewritten the body with its own (handoff step 6); a refused rewrite leaves it there.
+// The marker of a request further up the chain, left by more than one refused rewrite, needs reads of the
+// chain: ownsMarker.
 func hasMarker(body string, rr *remediationv1alpha1.RemediationRequest) bool {
-	want := marker(rr)
-	var from string
-	if ho := rr.Status.Handoff; ho != nil && ho.From != nil && ho.From.Phase == remediationv1alpha1.HandoffDone &&
-		ho.From.PullRequestUpdate != remediationv1alpha1.HandoffStepDone {
-		from = fmt.Sprintf("<!-- shadewright request-uid=%s plan-digest=", ho.From.UID)
+	var from types.UID
+	if inheritsMarker(rr) {
+		from = types.UID(rr.Status.Handoff.From.UID)
 	}
+	return carriesMarker(body, marker(rr), from)
+}
+
+// inheritsMarker reports whether rr took its pull request over and the Git host has not rewritten the body with
+// rr's marker (handoff step 6 pending or refused), so the body may still carry an earlier request's marker.
+func inheritsMarker(rr *remediationv1alpha1.RemediationRequest) bool {
+	ho := rr.Status.Handoff
+	return ho != nil && ho.From != nil && ho.From.Phase == remediationv1alpha1.HandoffDone &&
+		ho.From.PullRequestUpdate != remediationv1alpha1.HandoffStepDone
+}
+
+// carriesMarker reports whether body has the marker want on a line of its own, or the marker of a request in
+// uids with any plan digest.
+func carriesMarker(body, want string, uids ...types.UID) bool {
 	for line := range strings.Lines(body) {
 		line = strings.TrimRight(line, "\r\n")
-		if line == want || (from != "" && strings.HasPrefix(line, from) && strings.HasSuffix(line, " -->") &&
-			!strings.ContainsAny(line[len(from):len(line)-len(" -->")], " <>")) {
+		if line == want {
 			return true
+		}
+		for _, uid := range uids {
+			if uid == "" {
+				continue
+			}
+			from := fmt.Sprintf("<!-- shadewright request-uid=%s plan-digest=", uid)
+			if strings.HasPrefix(line, from) && strings.HasSuffix(line, " -->") &&
+				!strings.ContainsAny(line[len(from):len(line)-len(" -->")], " <>") {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// ownsMarker is hasMarker for the look-ups of a recorded pull request (the close, the lock's look-up). Beyond
+// hasMarker, a replacement whose body was not rewritten also accepts the marker of an earlier request of its
+// own supersede chain that the body may still carry after more than one refused rewrite (#591): it walks the
+// chain from rr through status.handoff.from, each link read by name and accepted only with the UID it names,
+// the same chain root as rr and an outgoing handoff to the request below it, and stops at the first request
+// whose own rewrite was done (the body holds its marker, or a later one) or that has no incoming handoff (it
+// opened the pull request). A request of another chain, or one the chain does not reach, is never accepted, so
+// the pull request of another chain or Incident is never claimed. A link that no longer exists ends the walk,
+// failing closed; a read that fails is returned for a retry.
+func (r *RemediationRequestReconciler) ownsMarker(ctx context.Context, body string,
+	rr *remediationv1alpha1.RemediationRequest) (bool, error) {
+	if ok := hasMarker(body, rr); ok || !inheritsMarker(rr) {
+		return ok, nil
+	}
+	root := chainRootOf(rr)
+	var uids []types.UID
+	cur := rr
+	for range providers.MaxChainCommits {
+		if !inheritsMarker(cur) {
+			break
+		}
+		from := cur.Status.Handoff.From
+		pred := &remediationv1alpha1.RemediationRequest{}
+		err := r.Get(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}, pred)
+		if apierrors.IsNotFound(err) {
+			break
+		}
+		if err != nil {
+			return false, fmt.Errorf("get RemediationRequest %s of the supersede chain of %s: %w", from.Name, rr.Name, err)
+		}
+		ho := pred.Status.Handoff
+		if pred.UID != types.UID(from.UID) || chainRootOf(pred) != root || ho == nil || ho.To == nil ||
+			ho.To.UID != remediationv1alpha1.UID(cur.UID) {
+			break
+		}
+		uids = append(uids, pred.UID)
+		cur = pred
+	}
+	return carriesMarker(body, marker(rr), uids...), nil
 }
 
 // change describes the action in words: the field, the previous and the planned value.

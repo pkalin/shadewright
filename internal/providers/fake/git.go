@@ -297,6 +297,23 @@ func (g *Git) onlyFile(c commit, parent, path string) bool {
 	return true
 }
 
+// CheckCommit reports what commit carries over its own parent (providers.GitProvider.CheckCommit).
+func (g *Git) CheckCommit(ctx context.Context, sha, path string) (providers.BranchState, string, error) {
+	if err := g.before("CheckCommit"); err != nil {
+		return 0, "", err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c, ok := g.commits[sha]
+	if !ok {
+		return 0, "", fmt.Errorf("commit %q: %w", sha, providers.ErrNotFound)
+	}
+	if c.parent == "" || c.merged != "" || !g.onlyFile(c, c.parent, path) {
+		return providers.BranchForeign, "", nil
+	}
+	return providers.BranchOneChange, c.parent, nil
+}
+
 // CheckMerged reports what head carried over the target branch before mergeCommit merged it
 // (providers.GitProvider.CheckMerged).
 func (g *Git) CheckMerged(ctx context.Context, head, mergeCommit, path string) (providers.BranchState, string, error) {
@@ -395,6 +412,11 @@ func (g *Git) CheckBranch(ctx context.Context, sha, path string) (providers.Bran
 // Push moves a branch as someone else would, by committing a file change outside Shadewright. It returns
 // the new head. Tests use it to simulate a base branch that moved or a pushed review branch.
 func (g *Git) Push(branch, path string, content []byte) (string, error) {
+	return g.PushFiles(branch, map[string][]byte{path: content})
+}
+
+// PushFiles is Push with one commit that changes or adds every file in files.
+func (g *Git) PushFiles(branch string, files map[string][]byte) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	cur, ok := g.branches[branch]
@@ -402,7 +424,9 @@ func (g *Git) Push(branch, path string, content []byte) (string, error) {
 		return "", fmt.Errorf("branch %q: %w", branch, providers.ErrNotFound)
 	}
 	next := maps.Clone(g.commits[cur].files)
-	next[path] = slices.Clone(content)
+	for path, content := range files {
+		next[path] = slices.Clone(content)
+	}
 	sha := g.store(cur, next)
 	g.branches[branch] = sha
 	g.syncHeads(branch, sha)

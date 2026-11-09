@@ -393,6 +393,22 @@ spec:
                     maxLength: 256
                     pattern: ^(W/)?"[!#-~]*"$
                     type: string
+                  evictedAt:
+                    description: |-
+                      evictedAt is the newest update time of the commands pushed out of seen by its bound; with evictedID it is
+                      the watermark of those commands. A command with an ID up to evictedID and an update time up to evictedAt
+                      counts as judged, so an evicted one returned again unchanged is not judged again, while one edited after
+                      its judgement has a later update time and is. The watermark only grows, and is dropped once since passes
+                      evictedAt. A command edited during a sweep and passed by it may count as judged too when more than
+                      MaxSeenComments newer ones were judged first: it is then not judged, never accepted twice.
+                    format: date-time
+                    type: string
+                  evictedID:
+                    description: evictedID is the highest ID of the commands pushed
+                      out of seen; set together with evictedAt.
+                    format: int64
+                    minimum: 0
+                    type: integer
                   page:
                     description: page is the page the next look starts on; 0 starts
                       a new sweep.
@@ -444,6 +460,9 @@ spec:
                 - message: etag is kept only on the first page of a new sweep
                   rule: '!has(self.etag) || ((!has(self.page) || self.page == 0) &&
                     (!has(self.afterID) || self.afterID == 0))'
+                - message: evictedAt and evictedID are set together
+                  rule: has(self.evictedAt) == (has(self.evictedID) && self.evictedID
+                    > 0)
               conditions:
                 description: |-
                   conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,

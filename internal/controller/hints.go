@@ -50,8 +50,10 @@ import (
 //     line. Anything else is not a command and is ignored.
 //   - A comment already stored as a hint is never handled again; the first edit seen (another updated time)
 //     sets the hint's editedAfterAccept, once, and the stored hint stays as it is. A command the cursor lists
-//     as seen with the same updated time was judged already with this text and is not judged again, so the
-//     overlap of two sweeps costs nothing; status.refusedHints is only a record, never the key.
+//     as seen with the same updated time, or under the watermark of the ones pushed out of seen by its bound,
+//     was judged already with this text and is not judged again, so the overlap of two sweeps costs nothing and
+//     a verdict that would differ now (CapReached) is not reached again; status.refusedHints is only a record,
+//     never the key.
 //   - When status.hints holds MaxStoredHints entries, a further command is not stored and not refused: it
 //     stays unjudged, the cursor passes it, and a log line counts it.
 //   - Then the code host is asked whether the author may write, at most maxPermissionAsks authors per look.
@@ -197,10 +199,7 @@ func (r *RemediationRequestReconciler) pollHints(ctx context.Context, git provid
 func (r *RemediationRequestReconciler) lookComments(ctx context.Context, fs providers.FeedbackSource,
 	upd *remediationv1alpha1.RemediationRequest, source remediationv1alpha1.HintSource,
 	cur providers.FeedbackCursor, page providers.FeedbackPage, now time.Time) error {
-	var before []remediationv1alpha1.SeenComment
-	if upd.Status.CommentCursor != nil {
-		before = upd.Status.CommentCursor.Seen
-	}
+	before := seenOf(upd.Status.CommentCursor)
 	var judged []remediationv1alpha1.SeenComment
 	n, err := r.takeComments(ctx, fs, upd, source, cur, page.Items, before, &judged, now)
 	var next *remediationv1alpha1.CommentCursor
@@ -216,16 +215,52 @@ func (r *RemediationRequestReconciler) lookComments(ctx context.Context, fs prov
 	if next.Since != nil {
 		since = next.Since.Time
 	}
-	next.Seen = mergeSeen(before, judged, since)
+	kept, evicted := mergeSeen(before.seen, judged, since)
+	next.Seen = kept
+	at, id := before.evictedAt, before.evictedID
+	for _, e := range evicted {
+		if e.UpdatedAt.After(at) {
+			at = e.UpdatedAt.Time
+		}
+		id = max(id, e.CommentID)
+	}
+	if id > 0 && !at.Before(since) {
+		// Kept while a sweep from since may return an evicted command again; it only grows until then.
+		next.EvictedAt, next.EvictedID = new(metav1.NewTime(at)), id
+	}
 	upd.Status.CommentCursor = next
 	return err
 }
 
-// wasSeen reports whether c is in seen with the same update time: judged already with this very text.
-func wasSeen(seen []remediationv1alpha1.SeenComment, c providers.Feedback) bool {
+// seenSet is what a look knows was judged already: the seen comments of the cursor, and the watermark of the
+// commands pushed out of them by the bound (evictedAt, evictedID).
+type seenSet struct {
+	seen      []remediationv1alpha1.SeenComment
+	evictedAt time.Time
+	evictedID int64
+}
+
+// seenOf reads the seen comments and the watermark of a stored cursor.
+func seenOf(c *remediationv1alpha1.CommentCursor) seenSet {
+	if c == nil {
+		return seenSet{}
+	}
+	out := seenSet{seen: c.Seen}
+	if c.EvictedAt != nil && c.EvictedID > 0 {
+		out.evictedAt, out.evictedID = c.EvictedAt.Time, c.EvictedID
+	}
+	return out
+}
+
+// has reports whether c was judged already with this very text: it is in seen with the same update time, or it
+// is under the watermark of the evicted ones (an ID up to evictedID, an update time up to evictedAt).
+func (s seenSet) has(c providers.Feedback) bool {
 	at := c.UpdatedAt.Truncate(time.Second)
-	for _, s := range seen {
-		if s.CommentID == c.ID && s.UpdatedAt.Time.Equal(at) {
+	if s.evictedID > 0 && c.ID <= s.evictedID && !at.After(s.evictedAt) {
+		return true
+	}
+	for _, e := range s.seen {
+		if e.CommentID == c.ID && e.UpdatedAt.Time.Equal(at) {
 			return true
 		}
 	}
@@ -234,9 +269,10 @@ func wasSeen(seen []remediationv1alpha1.SeenComment, c providers.Feedback) bool 
 
 // mergeSeen returns the seen comments a later look may return again unchanged: those of old and judged updated at
 // or after since (an older one comes back only edited, with another update time), one per comment at its newest
-// update time, at most MaxSeenComments of the newest, in comment ID order. One that does not fit is judged
-// again if it comes back, which costs a question and records nothing twice.
-func mergeSeen(old, judged []remediationv1alpha1.SeenComment, since time.Time) []remediationv1alpha1.SeenComment {
+// update time, at most MaxSeenComments of the newest, in comment ID order. The ones that do not fit are returned
+// as evicted, for the watermark that keeps them judged.
+func mergeSeen(old, judged []remediationv1alpha1.SeenComment, since time.Time) (
+	kept, evicted []remediationv1alpha1.SeenComment) {
 	newest := map[int64]metav1.Time{}
 	for _, s := range slices.Concat(old, judged) {
 		if s.UpdatedAt.Time.Before(since) {
@@ -257,22 +293,26 @@ func mergeSeen(old, judged []remediationv1alpha1.SeenComment, since time.Time) [
 		}
 		return cmp.Compare(b.CommentID, a.CommentID)
 	})
-	out = out[:min(len(out), remediationv1alpha1.MaxSeenComments)]
-	slices.SortFunc(out, func(a, b remediationv1alpha1.SeenComment) int { return cmp.Compare(a.CommentID, b.CommentID) })
-	if len(out) == 0 {
-		return nil
+	cut := min(len(out), remediationv1alpha1.MaxSeenComments)
+	kept, evicted = out[:cut], out[cut:]
+	slices.SortFunc(kept, func(a, b remediationv1alpha1.SeenComment) int { return cmp.Compare(a.CommentID, b.CommentID) })
+	if len(kept) == 0 {
+		kept = nil
 	}
-	return out
+	if len(evicted) == 0 {
+		evicted = nil
+	}
+	return kept, evicted
 }
 
 // takeComments judges the comments of one look in order, into upd's status (see the top of this file), and
 // returns how many of them it judged: all of them, or fewer when it stopped at a comment whose author would be
 // one more than maxPermissionAsks to ask about (no error: a later look judges it) or at a permission question
-// that failed (its error). The comments before that one are judged. A command in seenBefore with the same update
-// time is not judged again; each command it reaches a verdict on is appended to judged.
+// that failed (its error). The comments before that one are judged. A command seenBefore has is not judged
+// again; each command it reaches a verdict on is appended to judged.
 func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs providers.FeedbackSource,
 	upd *remediationv1alpha1.RemediationRequest, source remediationv1alpha1.HintSource,
-	cur providers.FeedbackCursor, items []providers.Feedback, seenBefore []remediationv1alpha1.SeenComment,
+	cur providers.FeedbackCursor, items []providers.Feedback, seenBefore seenSet,
 	judged *[]remediationv1alpha1.SeenComment, now time.Time) (int, error) {
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(upd))
 	st := &upd.Status
@@ -312,7 +352,7 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 		if !isCommand {
 			continue
 		}
-		if wasSeen(seenBefore, c) {
+		if seenBefore.has(c) {
 			// Judged already with this very text: the overlap of two sweeps returned it again.
 			continue
 		}

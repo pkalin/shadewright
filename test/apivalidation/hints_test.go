@@ -441,7 +441,19 @@ var _ = Describe("RemediationRequest status.commentCursor", func() {
 			"status.commentCursor.seen: Too many"),
 		Entry("a seen comment ID 0", v1alpha1.CommentCursor{Seen: []v1alpha1.SeenComment{{CommentID: 0, UpdatedAt: at}}},
 			"status.commentCursor.seen[0].commentID"),
+		Entry("evictedAt without evictedID", v1alpha1.CommentCursor{EvictedAt: &at},
+			"evictedAt and evictedID are set together"),
+		Entry("evictedID without evictedAt", v1alpha1.CommentCursor{EvictedID: 7},
+			"evictedAt and evictedID are set together"),
+		Entry("a negative evictedID", v1alpha1.CommentCursor{EvictedAt: &at, EvictedID: -1},
+			"status.commentCursor.evictedID"),
 	)
+
+	It("accepts the watermark of evicted comments", func() {
+		rr := createdRequest(false)
+		rr.Status.CommentCursor = &v1alpha1.CommentCursor{Since: &at, EvictedAt: &at, EvictedID: 7}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+	})
 
 	It("accepts MaxSeenComments seen comments", func() {
 		rr := createdRequest(false)
@@ -623,7 +635,7 @@ var _ = Describe("RemediationRequest status.handoff", func() {
 		a.Status.Handoff = &v1alpha1.Handoff{To: outgoing(v1alpha1.HandoffIntent, 1)}
 		Expect(k8sClient.Status().Update(ctx, a)).To(Succeed())
 		a.Status.Hints[0].State = v1alpha1.HintDeclined
-		a.Status.Hints[0].Reason = v1alpha1.ReasonHandoffAborted
+		a.Status.Hints[0].Reason = "RequestEnded" // the reason of a hint whose handoff aborted is #539's to choose
 		a.Status.Handoff.To.Phase = v1alpha1.HandoffAborted
 		Expect(k8sClient.Status().Update(ctx, a)).To(Succeed())
 		for _, phase := range []v1alpha1.HandoffPhase{v1alpha1.HandoffIntent, v1alpha1.HandoffDone} {

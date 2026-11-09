@@ -336,6 +336,7 @@ type RefusedHint struct {
 // the look judged. Once set it is kept, and since never decreases (CEL on RemediationRequest). Its fields
 // other than seen mean something only to the code host's adapter.
 // +kubebuilder:validation:XValidation:rule="!has(self.etag) || ((!has(self.page) || self.page == 0) && (!has(self.afterID) || self.afterID == 0))",message="etag is kept only on the first page of a new sweep"
+// +kubebuilder:validation:XValidation:rule="has(self.evictedAt) == (has(self.evictedID) && self.evictedID > 0)",message="evictedAt and evictedID are set together"
 type CommentCursor struct {
 	// since is the oldest update time the current sweep of the comments asks for. Every comment created at or
 	// before it was returned by an earlier look.
@@ -372,6 +373,20 @@ type CommentCursor struct {
 	// +kubebuilder:validation:MaxItems=50
 	// +optional
 	Seen []SeenComment `json:"seen,omitempty"`
+
+	// evictedAt is the newest update time of the commands pushed out of seen by its bound; with evictedID it is
+	// the watermark of those commands. A command with an ID up to evictedID and an update time up to evictedAt
+	// counts as judged, so an evicted one returned again unchanged is not judged again, while one edited after
+	// its judgement has a later update time and is. The watermark only grows, and is dropped once since passes
+	// evictedAt. A command edited during a sweep and passed by it may count as judged too when more than
+	// MaxSeenComments newer ones were judged first: it is then not judged, never accepted twice.
+	// +optional
+	EvictedAt *metav1.Time `json:"evictedAt,omitempty"`
+
+	// evictedID is the highest ID of the commands pushed out of seen; set together with evictedAt.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	EvictedID int64 `json:"evictedID,omitempty"`
 }
 
 // MaxSeenComments is the most entries status.commentCursor.seen keeps.

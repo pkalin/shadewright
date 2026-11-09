@@ -119,7 +119,10 @@ func TestMergeSeen(t *testing.T) {
 	at := func(s int) time.Time { return time.Date(2026, 11, 9, 12, 0, s, 0, time.UTC) }
 	since := at(10)
 	old := []remediationv1alpha1.SeenComment{seen(1, at(5)), seen(2, at(12))}
-	got := mergeSeen(old, []remediationv1alpha1.SeenComment{seen(2, at(20)), seen(3, at(15))}, since)
+	got, evicted := mergeSeen(old, []remediationv1alpha1.SeenComment{seen(2, at(20)), seen(3, at(15))}, since)
+	if len(evicted) != 0 {
+		t.Fatalf("evicted %+v; want none within the bound", evicted)
+	}
 	if len(got) != 2 || got[0].CommentID != 2 || !got[0].UpdatedAt.Time.Equal(at(20)) || got[1].CommentID != 3 {
 		t.Fatalf("got %+v; want 2 at its newest time and 3, and not 1 (before since)", got)
 	}
@@ -127,8 +130,15 @@ func TestMergeSeen(t *testing.T) {
 	for i := range remediationv1alpha1.MaxSeenComments + 5 {
 		many = append(many, seen(int64(i+1), at(11+i%40)))
 	}
-	if got := mergeSeen(nil, many, since); len(got) != remediationv1alpha1.MaxSeenComments {
-		t.Fatalf("%d seen; want the bound %d", len(got), remediationv1alpha1.MaxSeenComments)
+	got, evicted = mergeSeen(nil, many, since)
+	if len(got) != remediationv1alpha1.MaxSeenComments || len(evicted) != 5 {
+		t.Fatalf("%d seen, %d evicted; want the bound %d and 5", len(got), len(evicted),
+			remediationv1alpha1.MaxSeenComments)
+	}
+	for _, e := range evicted {
+		if e.UpdatedAt.Time.After(got[0].UpdatedAt.Time) && e.UpdatedAt.Time.After(at(11)) {
+			t.Fatalf("evicted %+v is newer than a kept one", e)
+		}
 	}
 }
 
@@ -148,5 +158,65 @@ func TestIncidentAnswerMapsAnUnlistedOutcomeToNoAnswer(t *testing.T) {
 		if got, ok := incidentAnswer(inc, h); !ok || got != want {
 			t.Errorf("outcome %s: got %q, %v; want %q", outcome, got, ok, want)
 		}
+	}
+}
+
+// A command refused at the cap and pushed out of the seen list by more than MaxSeenComments others is still
+// judged when the next sweep returns it unchanged: a slot freed later does not turn it into a hint.
+func TestAnEvictedRefusedCommentIsNotAcceptedLater(t *testing.T) {
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	g, number := overlapRepository(t, &now)
+	rr := &remediationv1alpha1.RemediationRequest{}
+	// Two consumed hints and one reservation fill the cap; declining the reservation is permitted.
+	for id := int64(101); id <= 103; id++ {
+		state := remediationv1alpha1.HintConsumed
+		if id == 103 {
+			state = remediationv1alpha1.HintReserved
+		}
+		rr.Status.Hints = append(rr.Status.Hints, remediationv1alpha1.Hint{
+			Source: remediationv1alpha1.HintSourceGitHub, CommentID: id,
+			State: state,
+		})
+	}
+	for id := int64(1); id <= remediationv1alpha1.MaxSeenComments+1; id++ {
+		g.AddComment(number, providers.Feedback{ID: id, Author: overlapWriter,
+			Body: hintCommand + " check the sidecar", CreatedAt: now})
+	}
+	overlapSweep(t, g, number, rr, now)
+	if len(rr.Status.Hints) != 3 {
+		t.Fatal("first sweep should refuse every command at the cap")
+	}
+	rr.Status.Hints[2].State = remediationv1alpha1.HintDeclined
+	rr.Status.Hints[2].Reason = "NoProposal"
+	now = now.Add(time.Minute)
+	overlapSweep(t, g, number, rr, now)
+	if h := findHint(rr.Status.Hints, remediationv1alpha1.HintSourceGitHub, 1); h != nil {
+		t.Fatalf("unchanged comment refused in the first sweep became a new %s hint after seen overflow", h.State)
+	}
+}
+
+// An evicted comment edited after its judgement is judged again with its new text.
+func TestAnEvictedCommentEditedLaterIsJudgedAgain(t *testing.T) {
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	g, number := overlapRepository(t, &now)
+	rr := &remediationv1alpha1.RemediationRequest{}
+	for id := int64(1); id <= remediationv1alpha1.MaxSeenComments+1; id++ {
+		g.AddComment(number, providers.Feedback{ID: id, Author: overlapWriter, Body: hintCommand, CreatedAt: now})
+	}
+	overlapSweep(t, g, number, rr, now)
+	if c := rr.Status.CommentCursor; c == nil || c.EvictedAt == nil || c.EvictedID != 1 {
+		t.Fatalf("cursor %+v; want the evicted comment 1 in its watermark", c)
+	}
+	_, before := g.FeedbackCalls()
+	now = now.Add(time.Minute)
+	if err := g.EditComment(number, 1, hintCommand+" check the sidecar", now); err != nil {
+		t.Fatal(err)
+	}
+	overlapSweep(t, g, number, rr, now)
+	if _, after := g.FeedbackCalls(); after != before+1 {
+		t.Fatalf("permission questions %d -> %d; want the edited comment judged again", before, after)
+	}
+	if findHint(rr.Status.Hints, remediationv1alpha1.HintSourceGitHub, 1) == nil {
+		t.Fatalf("the edited comment was not judged again: hints %+v", rr.Status.Hints)
 	}
 }

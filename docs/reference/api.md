@@ -237,6 +237,7 @@ other than seen mean something only to the code host's adapter.
 Validation rules:
 
 - etag is kept only on the first page of a new sweep: `!has(self.etag) || ((!has(self.page) || self.page == 0) && (!has(self.afterID) || self.afterID == 0))`
+- evictedAt and evictedID are set together: `has(self.evictedAt) == (has(self.evictedID) && self.evictedID > 0)`
 
 Used by: [RemediationRequestStatus](#remediationrequeststatus).
 
@@ -248,6 +249,8 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `sweepStart` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | sweepStart is the code host's time when the current sweep began. |
 | `etag` | string | No | etag is the entity tag of the last answer to the first page of a sweep that held no comment, sent as If-None-Match, so an unchanged answer is "not modified" and costs no read.<br>Maximum length: 256<br>Pattern: `^(W/)?"[!#-~]*"$` |
 | `seen` | [SeenComment](#seencomment) array | No | seen are the commands the executor judged whose update time is at or after since, so a look that returns them again unchanged (the overlap of two sweeps) does not judge them again: at most MaxSeenComments, the newest. A comment returned with another update time was edited and is judged again.<br>Maximum items: 50<br>List type: map<br>List key: `commentID` |
+| `evictedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | evictedAt is the newest update time of the commands pushed out of seen by its bound; with evictedID it is the watermark of those commands. A command with an ID up to evictedID and an update time up to evictedAt counts as judged, so an evicted one returned again unchanged is not judged again, while one edited after its judgement has a later update time and is. The watermark only grows, and is dropped once since passes evictedAt. A command edited during a sweep and passed by it may count as judged too when more than MaxSeenComments newer ones were judged first: it is then not judged, never accepted twice. |
+| `evictedID` | integer | No | evictedID is the highest ID of the commands pushed out of seen; set together with evictedAt.<br>Minimum: 0 |
 
 ### GitBranch
 
@@ -1039,7 +1042,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `deadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | deadline is when the current step gives up. |
 | `hints` | [Hint](#hint) array | No | hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all, and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed, so a Declined hint stays as the record of what was asked. Planned: carrying them over to a replacement.<br>Maximum items: 10<br>List type: map<br>List key: `source`<br>List key: `commentID`<br>Rule: status.hints: at most 3 hints are Consumed or Reserved (`self.filter(h, h.state in ['Consumed', 'Reserved']).size() <= 3`) |
 | `refusedHints` | [RefusedHint](#refusedhint) array | No | refusedHints are the newest comments with the command that the executor refused, at most MaxRefusedHints, oldest first; an older one is dropped. Only the executor writes them.<br>Maximum items: 10<br>List type: map<br>List key: `source`<br>List key: `commentID` |
-| `commentCursor` | [CommentCursor](#commentcursor) | No | commentCursor is where the executor's next look at the comments of the pull request starts (ADR-0028 section 3). Only the executor writes it.<br>Rule: etag is kept only on the first page of a new sweep |
+| `commentCursor` | [CommentCursor](#commentcursor) | No | commentCursor is where the executor's next look at the comments of the pull request starts (ADR-0028 section 3). Only the executor writes it.<br>Rule: etag is kept only on the first page of a new sweep<br>Rule: evictedAt and evictedID are set together |
 | `handoff` | [Handoff](#handoff) | No | handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is written once and never removed; only its phase moves on. Planned: nothing writes it yet.<br>Rule: a handoff has from, to or both |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run the applied template; False with reason RolloutStuck or DeliveryNotObserved, Unknown while in progress and with reason KindNotChecked, RolloutSuperseded or RolloutNotDetermined when the check ends without a verdict).<br>List type: map<br>List key: `type` |
 

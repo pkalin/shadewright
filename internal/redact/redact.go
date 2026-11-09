@@ -27,11 +27,11 @@ limitations under the License.
 // Redaction is best effort and errs on the side of removing too much: an IP address or an email in a log
 // line is removed even when it is harmless, and so are the user name of any URL ("ssh://git@host"), long
 // runs that mix letters and digits, such as Git commit hashes and container IDs, 32 characters or more of
-// mixed-case base64 that slashes cut short (also a base64 blob that is not a secret, and a capitalised word
-// or a number right next to it in a path), and every scalar value under a secret-named YAML key
-// ("credentials:\n  user: admin" loses "admin"). Values that look like references rather than secrets, such
-// as "secretName: db-creds", are kept, because the name of a missing Secret is what a diagnosis needs, and
-// so is the hex of an image digest.
+// mixed-case base64 that slashes cut short, or that has no slash and no digit (also a base64 blob that is not
+// a secret, and at most one short part of up to five characters on each side of it in a path), and every
+// scalar value under a secret-named YAML key ("credentials:\n  user: admin" loses "admin"). Values that look
+// like references rather than secrets, such as "secretName: db-creds", are kept, because the name of a
+// missing Secret is what a diagnosis needs, and so is the hex of an image digest.
 //
 // Where a rule would also match prose, it asks the value to look like a credential: the word after "Basic"
 // or "Bearer", and the value of the short keys "pass", "auth" and "sig" before a colon, on their own ("pass:
@@ -1028,22 +1028,33 @@ type windowPart struct {
 	upper, lower bool    // holds an upper-case or a lower-case letter, as evidence
 	base64       bool    // may be part of standard base64: no "-" or "_", and "=" only as final padding
 	empty        bool    // no characters besides padding
+	word         bool    // a path word (pathWord)
+	lowerWord    bool    // a path word that starts with a lower-case letter
 }
 
 // base64Windows finds standard base64 cut short by slashes in a run that randomRun keeps (#525), such as an
 // AWS secret access key after a path or in a CLI flag, and calls add with each range of the run to redact.
+// A run without a slash is one part and goes through the same windows: a run of 32 or more characters that
+// randomRun keeps (letters and "+" without a digit, say) is redacted when it scores as base64.
 //
 // It judges every window of adjacent parts that holds from minBase64Window to maxBase64Window characters of
 // evidence, apart from the parts around it, so path words next to a key cannot dilute it: the window counts
 // when it mixes cases, its parts average at least four characters, and its pairs of neighbouring characters
-// score at most maxBase64Score on average (wordScore). Parts with "-" or "_" (Kubernetes names, UUIDs) never
-// join a window, and parts of upper-case letters only (acronyms such as "REST" or "HTTPS") join one without
-// counting as evidence either way.
+// score at most maxBase64Score on average (wordScore). A window never starts or ends at an empty part or a
+// lower-case path word ("/opt/" before library names). Parts with "-" or "_" (Kubernetes names, UUIDs)
+// never join a window, and parts of upper-case letters, maybe with digits (acronyms and library names such
+// as "HTTPS" or "CUDA12"), join one without counting as evidence either way.
 //
-// Of the parts that some window covers, path words (pathWord) are kept, and a part of the key outside every
-// window, next to one that is redacted, is taken in unless it is a path word. Each stretch of adjacent
+// Of the parts that some window covers, path words (pathWord) are kept and the others are flagged;
+// takeInKeyParts then adds at most one short part on each side of each key. Each stretch of adjacent
 // redacted parts is one range, so two keys with a path between them give two ranges and the path stays.
 // Windows are bounded by maxBase64Window, so the cost is linear in the run.
+//
+// Known gaps, kept for safety and simplicity over perfect paths (TestSlashSplitBase64KnownLeaks): a key
+// whose windows all score as words stays whole; a short lower-case end of a key that no window covers
+// ("/wed7") stays, as a path word would; a key of upper-case parts with one short mixed part
+// ("ABCDEF/GHIJKL/.../yz2+ab3+cd4+") has too little evidence and stays; and a lower-case word of six
+// letters or more inside a key splits it, so a piece under minBase64Stretch on one side stays.
 func base64Windows(run string, add func(start, end int)) {
 	var parts []windowPart
 	for pos := 0; pos <= len(run); {
@@ -1058,12 +1069,11 @@ func base64Windows(run string, add func(start, end int)) {
 	if covered == nil {
 		return
 	}
-	word := func(i int) bool { return parts[i].empty || pathWord(run[parts[i].start:parts[i].end]) }
 	redact := make([]bool, len(parts))
-	for i := range parts {
-		redact[i] = covered[i] && !word(i)
+	for i, p := range parts {
+		redact[i] = covered[i] && !p.word
 	}
-	takeInKeyParts(parts, redact, word)
+	takeInKeyParts(parts, redact)
 	addStretches(parts, redact, add)
 }
 
@@ -1073,6 +1083,9 @@ func coveredParts(parts []windowPart) []bool {
 	// diff counts, as a difference array, the qualifying windows over each part.
 	var diff []int
 	for lo := range parts {
+		if parts[lo].lowerWord || parts[lo].empty {
+			continue
+		}
 		var w windowPart
 		var upper, lower bool
 		for j := lo; j < len(parts) && parts[j].base64; j++ {
@@ -1082,7 +1095,7 @@ func coveredParts(parts []windowPart) []bool {
 			if w.chars > maxBase64Window || 4*n > maxBase64Window {
 				break
 			}
-			if w.chars >= minBase64Window && upper && lower && w.chars >= 4*n && w.score <= maxBase64Score*float64(w.pairs) {
+			if !p.lowerWord && !p.empty && w.chars >= minBase64Window && upper && lower && w.chars >= 4*n && w.score <= maxBase64Score*float64(w.pairs) {
 				if diff == nil {
 					diff = make([]int, len(parts)+1)
 				}
@@ -1102,38 +1115,93 @@ func coveredParts(parts []windowPart) []bool {
 	return covered
 }
 
-// takeInKeyParts marks as redacted the parts that belong to a key next to the redacted ones: one word alone
-// between redacted parts, and parts that are no path words (word) next to a redacted part, across empty
-// parts ("//").
-func takeInKeyParts(parts []windowPart, redact []bool, word func(int) bool) {
-	// One word between redacted parts is more likely a piece of the key than a path: two keys around a path
-	// leave at least two words between them.
-	for i := 1; i < len(parts); i++ {
-		if redact[i] || !redact[i-1] {
+// maxTakeInPart is the longest part next to a key that takeInKeyParts takes in with it.
+const maxTakeInPart = 5
+
+// keyStretch is a stretch of parts that base64Windows redacts: from the first to the last non-empty part,
+// with the characters of its parts.
+type keyStretch struct{ first, last, chars int }
+
+// takeInKeyParts decides, from the parts that windows flagged (redact on entry: covered and no path word),
+// which parts to redact, and writes that back into redact. Flagged parts with only empty parts ("//")
+// between them form one stretch. Only short parts are ever added to a stretch (shortPart: at most
+// maxTakeInPart characters, no "-", "_" or "."), so a long path part, a Kubernetes name or a file name never
+// is, and a lower-case path word ("etc", "api", "keys") only to join two pieces of one key:
+//
+//   - One short part alone between two stretches joins them when it is no lower-case path word, or when
+//     either stretch is shorter than minBase64Stretch (a piece of the same key that would be kept on its
+//     own). A lower-case path word between two stretches of at least that length ("/api/" between two keys)
+//     stays, and the keys are redacted each on its own.
+//   - Then each stretch takes in at most one more part on each side: the next non-empty part, when it is
+//     short, no lower-case path word and not between two stretches, such as "wed7" at the end of ".../wed7"
+//     or a short capitalised word. A part taken in takes in nothing further, so the path after a key loses
+//     one short part at most.
+//
+// Each step looks at a part and its neighbours once, so the cost is linear in the number of parts.
+func takeInKeyParts(parts []windowPart, redact []bool) {
+	var stretches []keyStretch
+	for i := range parts {
+		if !redact[i] || parts[i].empty {
 			continue
 		}
-		j, words := i, 0
-		for ; j < len(parts) && !redact[j]; j++ {
-			words += b2i(!parts[j].empty)
+		if n := len(stretches); n > 0 && nextNonEmpty(parts, stretches[n-1].last, 1) == i {
+			stretches[n-1].last, stretches[n-1].chars = i, stretches[n-1].chars+parts[i].chars
+			continue
 		}
-		if j < len(parts) && words <= 1 {
-			for k := i; k < j; k++ {
-				redact[k] = true
+		stretches = append(stretches, keyStretch{first: i, last: i, chars: parts[i].chars})
+	}
+	clear(redact)
+	if len(stretches) == 0 {
+		return
+	}
+	// Join stretches across one short part.
+	merged := []keyStretch{stretches[0]}
+	for _, s := range stretches[1:] {
+		prev := &merged[len(merged)-1]
+		c := nextNonEmpty(parts, prev.last, 1)
+		if c != nextNonEmpty(parts, s.first, -1) || !shortPart(parts[c]) ||
+			parts[c].lowerWord && prev.chars >= minBase64Stretch && s.chars >= minBase64Stretch {
+			merged = append(merged, s)
+			continue
+		}
+		prev.last, prev.chars = s.last, prev.chars+parts[c].chars+s.chars
+	}
+	for k, s := range merged {
+		first, last := s.first, s.last
+		// takeIn returns the part next to the stretch edge at i in direction step when it may be taken in.
+		takeIn := func(i, step int) int {
+			c := nextNonEmpty(parts, i, step)
+			if c < 0 || parts[c].lowerWord || !shortPart(parts[c]) {
+				return i
 			}
+			beyond := nextNonEmpty(parts, c, step)
+			if beyond >= 0 && (step < 0 && k > 0 && beyond == merged[k-1].last ||
+				step > 0 && k+1 < len(merged) && beyond == merged[k+1].first) {
+				return i // between two stretches
+			}
+			return c
 		}
-		i = j
-	}
-	// Take in key parts next to a redacted part, across empty parts ("//").
-	for i := 1; i < len(parts); i++ {
-		if !redact[i] && parts[i].base64 && redact[i-1] && (parts[i].empty || !word(i)) {
+		first, last = takeIn(first, -1), takeIn(last, 1)
+		for i := first; i <= last; i++ {
 			redact[i] = true
 		}
 	}
-	for i := len(parts) - 2; i >= 0; i-- {
-		if !redact[i] && parts[i].base64 && redact[i+1] && (parts[i].empty || !word(i)) {
-			redact[i] = true
+}
+
+// nextNonEmpty returns the index of the first non-empty part after i in direction step (1 or -1), or -1.
+func nextNonEmpty(parts []windowPart, i, step int) int {
+	for i += step; i >= 0 && i < len(parts); i += step {
+		if !parts[i].empty {
+			return i
 		}
 	}
+	return -1
+}
+
+// shortPart reports whether p is short enough to be redacted with a key next to it (takeInKeyParts): at most
+// maxTakeInPart characters of standard base64, so no "-" or "_" (and no ".", which ends a run).
+func shortPart(p windowPart) bool {
+	return p.base64 && !p.empty && p.end-p.start <= maxTakeInPart
 }
 
 // addStretches calls add with the range of each stretch of adjacent redacted parts, without empty parts at
@@ -1179,11 +1247,15 @@ const (
 )
 
 // pathWord reports whether part, next to or at the end of a base64 window, is a path word rather than a
-// piece of the key: at least three lower-case letters that read as a word (minPathWordScore), maybe
-// followed by digits ("etc", "credentials", "python3"), or a version ("v1"). Anything else next to a key is
-// taken for part of it: a short or capitalised word or a number there is redacted with the key, which costs
-// less than a piece of a key that happens to look like a word.
+// piece of the key: at least three lower-case letters that read as a word (minPathWordScore), maybe after
+// one capital and maybe followed by digits ("etc", "credentials", "python3", "Documents"), or a version
+// ("v1"). A path word that a window covers is not flagged as key; a lower-case one never starts or ends a
+// window, and is redacted with a key only when it is short and joins two pieces of one (takeInKeyParts).
 func pathWord(part string) bool {
+	capital := part != "" && part[0] >= 'A' && part[0] <= 'Z'
+	if capital {
+		part = part[1:]
+	}
 	letters := 0
 	for letters < len(part) && part[letters] >= 'a' && part[letters] <= 'z' {
 		letters++
@@ -1193,7 +1265,7 @@ func pathWord(part string) bool {
 			return false
 		}
 	}
-	if part[:letters] == "v" && letters < len(part) {
+	if !capital && part[:letters] == "v" && letters < len(part) {
 		return true
 	}
 	if letters < 3 {
@@ -1209,9 +1281,9 @@ func pathWord(part string) bool {
 	return score >= minPathWordScore*float64(letters-1)
 }
 
-// newWindowPart returns the part run[start:end] for base64Windows. A part of upper-case letters only is an
-// acronym as often as a piece of a key, so it counts as no evidence: its characters fill a window, but it
-// adds no pairs, no score and no case.
+// newWindowPart returns the part run[start:end] for base64Windows. A part of upper-case letters, maybe with
+// digits, is an acronym or a library name ("REST", "CUDA12", "NCCL2") as often as a piece of a key, so it
+// counts as no evidence: its characters fill a window, but it adds no pairs, no score and no case.
 func newWindowPart(run string, start, end int) windowPart {
 	p := windowPart{start: start, end: end, base64: true}
 	text := run[start:end]
@@ -1230,26 +1302,20 @@ func newWindowPart(run string, start, end int) windowPart {
 		case c >= 'a' && c <= 'z':
 			p.lower = true
 		}
-		acronym = acronym && c >= 'A' && c <= 'Z'
+		acronym = acronym && (c >= 'A' && c <= 'Z' || c >= '0' && c <= '9')
 		if i > 0 {
 			p.score += wordScore[wordClass(text[i-1])][wordClass(c)]
 		}
 	}
 	p.chars = len(text)
-	if acronym {
+	p.word = !p.empty && pathWord(run[start:end])
+	p.lowerWord = p.word && run[start] >= 'a' && run[start] <= 'z'
+	if acronym && p.upper {
 		p.upper, p.score = false, 0
 		return p
 	}
 	p.pairs = max(0, len(text)-1)
 	return p
-}
-
-// b2i returns 1 for true and 0 for false.
-func b2i(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 // mixesCase reports whether s holds both an upper-case and a lower-case ASCII letter.

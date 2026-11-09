@@ -103,6 +103,16 @@ func (c *Controller) markDue(ctx context.Context) error {
 		return fmt.Errorf("listing the Incidents: %w", err)
 	}
 	c.noteStates(list.Items)
+	// The requests whose reviewer hints make a Proposed Incident due (ADR-0028). A failed listing fails
+	// closed for the hints only: no hint makes an Incident due in this pass, and the error is returned.
+	var hintErr error
+	var requests remediationv1alpha1.RemediationRequestList
+	if err := c.cache.List(ctx, &requests, client.InNamespace(c.cfg.Namespace)); err != nil {
+		c.hintRequests, c.hintsListed = nil, false
+		hintErr = fmt.Errorf("listing the RemediationRequests for reviewer hints: %w", err)
+	} else {
+		c.hintRequests, c.hintsListed = requests.Items, true
+	}
 	now := c.cfg.Now()
 	s := TriggerSettings{Debounce: c.cfg.Debounce, SettleLimit: c.cfg.SettleLimit, Cooldown: c.cfg.Cooldown,
 		AnalysisTimeout: c.cfg.AnalysisTimeout, RecentWindow: c.cfg.RecentWindow}
@@ -194,6 +204,9 @@ func (c *Controller) markDue(ctx context.Context) error {
 	if readErr != nil {
 		errs = append([]error{readErr}, errs...)
 	}
+	if hintErr != nil {
+		errs = append([]error{hintErr}, errs...)
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("deciding which Incidents are due, %d errors, first: %w", len(errs), errs[0])
 	}
@@ -219,14 +232,28 @@ type trace struct {
 }
 
 // decider returns the decision of [Due] for one Incident, with what the controller knows of it ([Memory])
-// and the budget used so far in this pass (*used, read when called).
+// and the budget used so far in this pass (*used, read when called). Whether a reviewer hint waits for it
+// ([Memory].Hinted) is decided on the copy decided, from the requests of the pass, since an answered hint
+// depends on the Incident's own status.
 func (c *Controller) decider(inc *remediationv1alpha1.Incident, now time.Time, s TriggerSettings,
 	used *int) func(*remediationv1alpha1.Incident) (bool, string) {
 	m := Memory{Held: c.heldSince(inc.Spec.Fingerprint)}
 	if t := c.memory[inc.UID]; t != nil {
 		m.Waiting, m.WentQuiet, m.WatchedSince = t.waiting, t.quiet, t.watchedSince
 	}
-	return func(fresh *remediationv1alpha1.Incident) (bool, string) { return Due(fresh, m, now, s, *used) }
+	return func(fresh *remediationv1alpha1.Incident) (bool, string) {
+		m := m
+		m.Hinted = PendingHint(fresh, c.hintRequestsOf(fresh)) != nil
+		m.Settles = c.settles(fresh)
+		return Due(fresh, m, now, s, *used)
+	}
+}
+
+// settles reports [SettlesWithoutAnalysis] for inc from the requests of the pass, only when they could be
+// listed and the analysis selects them: a failed listing, or the analysis off, never makes a run due without
+// the budget.
+func (c *Controller) settles(inc *remediationv1alpha1.Incident) bool {
+	return c.hintsListed && c.analysisRequest != nil && SettlesWithoutAnalysis(inc, c.hintRequestsOf(inc))
 }
 
 // account reports a NotRecent that setDue wrote, counts a unit of the budget in *used (when used is not nil)
@@ -237,7 +264,9 @@ func (c *Controller) account(inc *remediationv1alpha1.Incident, due bool, reason
 	if wrote && reason == ReasonNotRecent {
 		c.reportNotRecent(inc)
 	}
-	if used != nil && (due || (err != nil && wasDue)) {
+	// A lost hint run the analysis ends without a model call takes no unit ([SettlesWithoutAnalysis]).
+	settles := reason == ReasonAnalysisTimedOut && c.settles(inc)
+	if used != nil && (due || (err != nil && wasDue)) && !settles {
 		*used++
 	}
 	return err
@@ -431,6 +460,43 @@ func (c *Controller) reportNotRecent(inc *remediationv1alpha1.Incident) {
 		recentWindow(TriggerSettings{RecentWindow: c.cfg.RecentWindow, Debounce: c.cfg.Debounce}))
 }
 
+// hintPendingLive reads, live, the request that holds the hint ref in the pass's requests, before the trigger
+// refuses that hint ([answerHint]), and reports whether the hint is still Pending there on a request the
+// analysis selects. The cache may lag behind the analysis: a hint it still shows Pending may be answered or
+// declined already, and the analysis may have answered a later hint meanwhile, so a refusal written from the
+// cache alone could overwrite that newer answer and let the later hint be analyzed twice. It also reports false
+// when inc's status.handledHint names a hint of that request accepted after ref. A read error is returned, so
+// nothing is refused on a failed read.
+func (c *Controller) hintPendingLive(ctx context.Context, inc *remediationv1alpha1.Incident,
+	ref remediationv1alpha1.HintRef) (bool, error) {
+	h := PendingHint(inc, c.hintRequestsOf(inc))
+	if h == nil || h.Ref() != ref {
+		return false, nil
+	}
+	live := &remediationv1alpha1.RemediationRequest{}
+	if err := c.reader.Get(ctx, client.ObjectKeyFromObject(h.Request), live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading RemediationRequest %s for a reviewer hint: %w", h.Request.Name, err)
+	}
+	if c.analysisRequest == nil || !c.analysisRequest(inc, live) {
+		return false, nil
+	}
+	current := HintByRef(inc, []remediationv1alpha1.RemediationRequest{*live}, ref)
+	if current == nil {
+		return false, nil
+	}
+	if handled := inc.Status.HandledHint; handled != nil && *handled != ref {
+		for i := range live.Status.Hints {
+			if lh := &live.Status.Hints[i]; HintRefOf(lh) == *handled && lh.AcceptedAt.After(current.Hint.AcceptedAt.Time) {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
 // setDue sets the AnalysisDue condition of one Incident to what decide says. cached is the Incident as the
 // cache holds it and (due, reason) what decide said of it: when its condition already agrees
 // ([conditionAgrees]), nothing is written. Otherwise the Incident is read fresh from the API server, decided
@@ -442,7 +508,8 @@ func (c *Controller) reportNotRecent(inc *remediationv1alpha1.Incident) {
 // timeout.
 func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Incident, now time.Time, due bool, reason string,
 	decide func(*remediationv1alpha1.Incident) (bool, string), only string) (bool, string, bool, error) {
-	if conditionAgrees(cached, due, reason, runEnded(cached, now, c.cfg.AnalysisTimeout)) {
+	if ref, _ := HintAnswer(cached, c.hintRequestsOf(cached), due, reason); ref == nil &&
+		conditionAgrees(cached, due, reason, runEnded(cached, now, c.cfg.AnalysisTimeout)) {
 		return due, reason, false, nil
 	}
 	wrote := false
@@ -455,8 +522,24 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 		}
 		due, reason = decide(inc)
 		wrote = false
-		if (only != "" && reason != only) || conditionAgrees(inc, due, reason, runEnded(inc, now, c.cfg.AnalysisTimeout)) {
+		// A reviewer hint refused without an analysis is answered in the same update (ADR-0028 section 3),
+		// also when the condition already agrees: the answer is what the executor reads.
+		ref, outcome := HintAnswer(inc, c.hintRequestsOf(inc), due, reason)
+		if ref != nil && (only == "" || reason == only) {
+			pending, err := c.hintPendingLive(wctx, inc, *ref)
+			if err != nil {
+				return err
+			}
+			if !pending {
+				ref = nil
+			}
+		}
+		if (only != "" && reason != only) ||
+			(ref == nil && conditionAgrees(inc, due, reason, runEnded(inc, now, c.cfg.AnalysisTimeout))) {
 			return nil
+		}
+		if ref != nil {
+			answerHint(inc, *ref, outcome, c.cfg.Now())
 		}
 		status := metav1.ConditionFalse
 		if due {
@@ -550,6 +633,7 @@ var dueMessages = map[string]string{
 	ReasonNewOccurrence:        "An occurrence began after the last analysis and the cooldown has passed",
 	ReasonCooldownExpired:      "The symptom recurred and the cooldown since the last analysis has passed",
 	ReasonAnalysisTimedOut:     "The last analysis did not finish within the analysis timeout and the cooldown has passed",
+	ReasonReviewerHint:         "A request naming the incident holds a reviewer hint no analysis has answered, and the cooldown has passed",
 	ReasonNotObserved:          "No observation is recorded yet",
 	ReasonNotRecent:            "The incident was never analyzed and was not seen within the recent window; a new observation makes it due again once it has settled",
 	ReasonAnalyzing:            "An analysis is running",

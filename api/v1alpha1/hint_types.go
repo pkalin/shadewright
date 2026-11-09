@@ -20,7 +20,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Reviewer hints and the supersede handoff (ADR-0028). Planned: the types are in the API, nothing writes them yet.
+// Reviewer hints and the supersede handoff (ADR-0028). The analyzer reads stored hints and writes spec.replaces,
+// spec.chainRoot and the Incident's status.handledHint; planned: nothing writes status.hints or status.handoff
+// yet.
 
 // MaxHints is the most hints a request's status.hints holds, which is also the most hints one supersede chain
 // can consume: the consumed hints of a chain are carried into the replacement's status (ADR-0028 section 6).

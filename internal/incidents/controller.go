@@ -238,6 +238,14 @@ type Controller struct {
 	// an Incident deleted and created again under the same name starts with nothing. Only the trigger
 	// goroutine uses it.
 	memory map[types.UID]*trace
+	// hintRequests are the RemediationRequests the cache held when the current trigger pass began, for the
+	// reviewer hints of the Incidents it decides ([PendingHint]); nil when that listing failed. Only the
+	// trigger goroutine uses it.
+	hintRequests []remediationv1alpha1.RemediationRequest
+	// hintsListed: the listing of hintRequests in the current pass succeeded.
+	hintsListed bool
+	// analysisRequest selects, of hintRequests, those whose hints count for an Incident (SetAnalysisRequests).
+	analysisRequest func(*remediationv1alpha1.Incident, *remediationv1alpha1.RemediationRequest) bool
 	// lastEvent is when the last Warning event at the cap was written.
 	lastEvent time.Time
 	// capNear is whether the last trigger pass found the Incidents at or over capNearThreshold and reported
@@ -386,6 +394,29 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager, obs <-chan collector.Obs
 // AnalysisTimeout returns how long an Incident may stay in phase Analyzing before the trigger takes its
 // analysis as lost: Config.AnalysisTimeout, or its default. The analysis bounds its claim with it.
 func (c *Controller) AnalysisTimeout() time.Duration { return c.cfg.AnalysisTimeout }
+
+// SetAnalysisRequests sets the predicate that selects the RemediationRequests whose reviewer hints the trigger
+// counts for an Incident: the one the analysis uses (analysis.Controller.IsAnalysisRequest), so a hint the
+// analysis would not answer never marks an Incident due nor takes a unit of the budget, and is never refused
+// by the trigger either. Without it (the analysis is off) no request counts. Call it before the manager starts.
+func (c *Controller) SetAnalysisRequests(f func(*remediationv1alpha1.Incident, *remediationv1alpha1.RemediationRequest) bool) {
+	c.analysisRequest = f
+}
+
+// hintRequestsOf returns the requests of the current trigger pass that may hold a reviewer hint for inc
+// (SetAnalysisRequests).
+func (c *Controller) hintRequestsOf(inc *remediationv1alpha1.Incident) []remediationv1alpha1.RemediationRequest {
+	if c.analysisRequest == nil {
+		return nil
+	}
+	var own []remediationv1alpha1.RemediationRequest
+	for i := range c.hintRequests {
+		if c.analysisRequest(inc, &c.hintRequests[i]) {
+			own = append(own, c.hintRequests[i])
+		}
+	}
+	return own
+}
 
 // NeedLeaderElection reports that only the leader writes Incidents.
 func (c *Controller) NeedLeaderElection() bool { return true }

@@ -281,7 +281,8 @@ spec:
                   handledHint is the reviewer hint the analysis claimed by lastAnalysisTime answers (ADR-0028 section 3):
                   written in the status update that takes the claim and kept with the outcome in the Analyzed condition, so
                   a restarted analyzer does not run the same hint twice and the executor can match a refusal to the hint.
-                  Absent for an analysis without a hint. Planned: nothing writes it yet.
+                  Absent for an analysis without a hint. The trigger also writes it, with the Analyzed reason CoolingDown or
+                  BudgetSpent, for a hint it refuses without an analysis.
                 properties:
                   commentID:
                     description: commentID is the comment's ID in the source.

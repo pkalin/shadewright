@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/quantity"
 )
 
 // keySpec is the spec field of every object.
@@ -130,12 +131,23 @@ func (f Field) Get(obj map[string]any) (any, bool) {
 }
 
 // Equals reports whether two decoded values are the same value of this field: as quantities for a Quantity
-// field (256Mi equals 268435456), otherwise by their JSON encoding.
+// field (256Mi equals 268435456), otherwise by their JSON encoding. A value that is not Comparable equals
+// nothing, itself included.
 func (f Field) Equals(a, b any) bool { return f.equal(a, b) }
+
+// Comparable reports whether Equals can read a value of this field. A Quantity field reads an integer
+// number, or a string in the bounded form of quantity.Parse; a string outside it is refused, never parsed.
+// Every value is comparable for any other field.
+func (f Field) Comparable(v any) bool {
+	if !f.Quantity {
+		return true
+	}
+	_, ok := toQuantity(v)
+	return ok
+}
 
 // equal reports whether two field values are the same. Without Quantity they must have the same JSON form,
 // so the number 15 equals 15 decoded either as an integer or a float, but not the string "15".
-
 func (f Field) equal(a, b any) bool {
 	if f.Quantity {
 		qa, okA := toQuantity(a)
@@ -147,11 +159,14 @@ func (f Field) equal(a, b any) bool {
 	return errA == nil && errB == nil && bytes.Equal(ja, jb)
 }
 
+// toQuantity reads a value as a quantity: an integer number, or a string in the bounded form of
+// quantity.Parse. Content of the GitOps repository and the live values Flux applied from it are untrusted
+// (invariant 4), and resource.Quantity has arbitrary precision: a string outside that form is refused, never
+// parsed, because comparing it can compute a power of ten of billions of digits (#593).
 func toQuantity(v any) (resource.Quantity, bool) {
 	switch x := v.(type) {
 	case string:
-		q, err := resource.ParseQuantity(x)
-		return q, err == nil
+		return quantity.Parse(x)
 	case int64:
 		return *resource.NewQuantity(x, resource.DecimalSI), true
 	case float64:

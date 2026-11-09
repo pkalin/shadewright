@@ -127,16 +127,29 @@ spec:
                     type: object
                     x-kubernetes-validations:
                     - message: desired must differ from previous
-                      rule: quantity(string(self.desired)).compareTo(quantity(string(self.previous)))
-                        != 0
+                      rule: '!(quantity(string(self.previous)).asApproximateFloat()
+                        >= -2e12 && quantity(string(self.previous)).asApproximateFloat()
+                        <= 2e12 && quantity(string(self.desired)).asApproximateFloat()
+                        >= -2e12 && quantity(string(self.desired)).asApproximateFloat()
+                        <= 2e12) || quantity(string(self.desired)).compareTo(quantity(string(self.previous)))
+                        != 0'
                     - message: previous and desired must be whole bytes
-                      rule: quantity(string(self.previous)).isInteger() && quantity(string(self.desired)).isInteger()
+                      rule: '!(quantity(string(self.previous)).asApproximateFloat()
+                        >= -2e12 && quantity(string(self.previous)).asApproximateFloat()
+                        <= 2e12 && quantity(string(self.desired)).asApproximateFloat()
+                        >= -2e12 && quantity(string(self.desired)).asApproximateFloat()
+                        <= 2e12) || (quantity(string(self.previous)).isInteger() &&
+                        quantity(string(self.desired)).isInteger())'
                     - message: previous must be between 1Mi and 1Ti
-                      rule: quantity(string(self.previous)).compareTo(quantity('1Mi'))
+                      rule: quantity(string(self.previous)).asApproximateFloat() >=
+                        -2e12 && quantity(string(self.previous)).asApproximateFloat()
+                        <= 2e12 && quantity(string(self.previous)).compareTo(quantity('1Mi'))
                         >= 0 && quantity(string(self.previous)).compareTo(quantity('1Ti'))
                         <= 0
                     - message: desired must be between 1Mi and 1Ti
-                      rule: quantity(string(self.desired)).compareTo(quantity('1Mi'))
+                      rule: quantity(string(self.desired)).asApproximateFloat() >=
+                        -2e12 && quantity(string(self.desired)).asApproximateFloat()
+                        <= 2e12 && quantity(string(self.desired)).compareTo(quantity('1Mi'))
                         >= 0 && quantity(string(self.desired)).compareTo(quantity('1Ti'))
                         <= 0
                   type:
@@ -696,9 +709,12 @@ spec:
                         self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead)
                     - message: an outgoing handoff moves only from Intent to Done
                         or Aborted, or from Aborted to the Intent of another replacement
+                        for another hint
                       rule: oldSelf.phase == self.phase || (oldSelf.phase == 'Intent'
                         && self.phase in ['Done', 'Aborted']) || (oldSelf.phase ==
-                        'Aborted' && self.phase == 'Intent' && self.uid != oldSelf.uid)
+                        'Aborted' && self.phase == 'Intent' && self.uid != oldSelf.uid
+                        && (self.hint.source != oldSelf.hint.source || self.hint.commentID
+                        != oldSelf.hint.commentID))
                 type: object
                 x-kubernetes-validations:
                 - message: a handoff has from, to or both
@@ -1258,13 +1274,14 @@ spec:
             == self.spec.replaces.hint.source && self.status.handoff.from.hint.commentID
             == self.spec.replaces.hint.commentID && self.status.handoff.from.hint.digest
             == self.spec.replaces.hint.digest)'
-        - message: status.handoff.to must name a hint in status.hints that is no longer
-            Pending, and Reserved while the intent stands
+        - message: status.handoff.to must name a hint in status.hints that is Reserved
+            while it is Intent, Consumed once Done and Declined once Aborted
           rule: '!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to)
             || (has(self.status.hints) && self.status.hints.exists(h, h.source ==
             self.status.handoff.to.hint.source && h.commentID == self.status.handoff.to.hint.commentID
-            && h.digest == self.status.handoff.to.hint.digest && h.state != ''Pending''
-            && (self.status.handoff.to.phase != ''Intent'' || h.state == ''Reserved'')))'
+            && h.digest == self.status.handoff.to.hint.digest && h.state == (self.status.handoff.to.phase
+            == ''Intent'' ? ''Reserved'' : self.status.handoff.to.phase == ''Done''
+            ? ''Consumed'' : ''Declined'')))'
         - message: status.commentCursor is kept once set
           rule: '!has(oldSelf.status) || !has(oldSelf.status.commentCursor) || (has(self.status)
             && has(self.status.commentCursor))'

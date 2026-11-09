@@ -178,6 +178,7 @@ func TestRefusals(t *testing.T) {
 		want error
 	}{
 		{"previous differs", sub(`"512Mi"`, `"384Mi"`), ErrPreviousValueDiffers},
+		{"unbounded exponent", sub(`"512Mi"`, `"1e2147483647"`), ErrUnsupported},
 		{"container missing", sub("name: web", "name: api"), ErrFieldMissing},
 		{"limits missing", sub(`          limits:
             memory: "512Mi" # raised from 384Mi on 2026-10-14

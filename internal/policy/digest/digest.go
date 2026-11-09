@@ -30,12 +30,14 @@ package digest
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/quantity"
 )
 
 // Prefix starts every digest.
@@ -89,10 +91,20 @@ type Source struct {
 	BaseCommit string
 }
 
-// Compute returns the plan digest of in: "sha256:" followed by 64 lower-case hex characters.
-func Compute(in Input) string {
+// ErrUnboundedQuantity is returned by Compute for a memory value outside the bounded quantity form.
+var ErrUnboundedQuantity = errors.New("the memory values are not quantities in the bounded form " +
+	"(at most 40 characters, an exponent of at most two digits)")
+
+// Compute returns the plan digest of in: "sha256:" followed by 64 lower-case hex characters. A request is
+// untrusted input (invariant 4): a memory value outside the bounded quantity form (a huge decimal exponent,
+// #593) is refused with ErrUnboundedQuantity, since writing it as a plain decimal number would print billions
+// of digits.
+func Compute(in Input) (string, error) {
+	if p := in.Action.SetContainerMemoryLimit; p != nil && (!quantity.Bounded(p.Previous) || !quantity.Bounded(p.Desired)) {
+		return "", ErrUnboundedQuantity
+	}
 	sum := sha256.Sum256(encode(in))
-	return Prefix + hex.EncodeToString(sum[:])
+	return Prefix + hex.EncodeToString(sum[:]), nil
 }
 
 // encode writes in in the canonical encoding. Each field is a label and a value, both written as
@@ -136,7 +148,8 @@ func encode(in Input) []byte {
 }
 
 // canonicalQuantity writes a quantity as a plain decimal number with no exponent, suffix, trailing
-// fractional zeros or leading plus sign, so equal values always give the same text.
+// fractional zeros or leading plus sign, so equal values always give the same text. Compute has made sure q
+// is bounded, so the text has at most a few hundred digits.
 func canonicalQuantity(q resource.Quantity) string {
 	s := q.AsDec().String()
 	if strings.Contains(s, ".") {

@@ -33,6 +33,7 @@ import (
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/fake"
+	"github.com/pkalin/shadewright/internal/testutil/deadline"
 )
 
 const (
@@ -40,6 +41,7 @@ const (
 	soKust  = "apps/orders/kustomization.yaml"
 	depFile = "apps/web/deployment.yaml"
 	depKust = "apps/web/kustomization.yaml"
+	depDir  = "apps/web"
 	webName = "web"
 )
 
@@ -186,6 +188,40 @@ func TestCheckAcceptsMemoryThroughABase(t *testing.T) {
 	if res.Previous != `"512Mi"` || res.Desired != `"768Mi"` || res.Objects != 1 {
 		t.Fatalf("unexpected result %+v", res)
 	}
+}
+
+// TestCheckRefusesAnUnboundedQuantity is part of #593: a rendered memory limit with a huge decimal exponent
+// is refused before it is compared, instead of computing a power of ten of billions of digits. The patch is
+// made from the fixture, since the patcher refuses the file itself.
+func TestCheckRefusesAnUnboundedQuantity(t *testing.T) {
+	file := strings.Replace(deploymentYAML, `"512Mi"`, `"1e2147483647"`, 1)
+	checkRefusesUnbounded(t, file, deploymentYAML, semdiff.ErrPreviousValueDiffers)
+}
+
+// TestCheckRefusesAnUnboundedMemoryRequest is part of #593: the memory request the change keeps from Git is
+// compared with the new limit, so a request with a huge decimal exponent next to a normal limit is refused
+// too (found by a second review of #598).
+func TestCheckRefusesAnUnboundedMemoryRequest(t *testing.T) {
+	file := strings.Replace(deploymentYAML, "memory: 256Mi", `memory: "1e2147483647"`, 1)
+	checkRefusesUnbounded(t, file, file, semdiff.ErrSchemaInvalid)
+}
+
+// checkRefusesUnbounded checks the memory change of file, patched from patchFrom, in a child process that must
+// end within 5s. Check runs without a deadline of its own, so a hang fails the test in one way only: the
+// child's limit.
+func checkRefusesUnbounded(t *testing.T, file, patchFrom string, want *semdiff.Error) {
+	deadline.Within(t, 5*time.Second, func(t *testing.T) {
+		act := memory("768Mi")
+		patched, err := patch.SetContainerMemoryLimit([]byte(patchFrom), depTarget(), *act.SetContainerMemoryLimit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = semdiff.Check(context.Background(), semdiff.Input{
+			Files: map[string][]byte{depKust: kust("deployment.yaml"), depFile: []byte(file)},
+			Path:  depDir, File: depFile, Patched: patched, Target: depTarget(), Action: act,
+		})
+		wantReason(t, err, want)
+	})
 }
 
 // sharedBase builds two ScaledObjects, a-orders-worker and b-orders-worker, from one base file.

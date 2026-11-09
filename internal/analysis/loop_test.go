@@ -33,6 +33,7 @@ import (
 	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/incidents"
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/testutil/deadline"
 	"github.com/pkalin/shadewright/internal/tools"
 )
 
@@ -868,6 +869,23 @@ func TestPreviousMemoryLimitComesFromThePodTemplate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPreviousFromTemplateRefusesAnUnboundedTemplateLimit is part of #593: the template's limit is the live
+// one Flux applied from Git, so it may hold a huge decimal exponent. It is handed off as unknown before it is
+// compared, instead of computing a power of ten of billions of digits. The model's values need no such case:
+// the result schema allows no exponent.
+func TestPreviousFromTemplateRefusesAnUnboundedTemplateLimit(t *testing.T) {
+	deadline.Within(t, 10*time.Second, func(t *testing.T) {
+		f := newFixture()
+		f.builder.c.Template = []incidentcontext.TemplateContainer{
+			{Name: testContainer, MemoryLimit: new(resource.MustParse("1e2147483647"))},
+		}
+		f.triage.steps = []step{reply(validResult)}
+		if out := f.analyze(t, testLimits()); out.Reason != ReasonPreviousValueUnknown {
+			t.Fatalf("reason %s, want %s", out.Reason, ReasonPreviousValueUnknown)
+		}
+	})
 }
 
 // A subject without a namespace or UID cannot be targeted: the proposal is refused as such, whatever the

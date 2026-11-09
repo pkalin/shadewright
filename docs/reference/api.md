@@ -70,7 +70,7 @@ Validation rules:
 - status.handoff.from starts in Reserved: `!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from) || self.status.handoff.from.phase == 'Reserved' || (has(oldSelf.status) && has(oldSelf.status.handoff) && has(oldSelf.status.handoff.from))`
 - status.handoff.to starts in Intent: `!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to) || self.status.handoff.to.phase == 'Intent' || (has(oldSelf.status) && has(oldSelf.status.handoff) && has(oldSelf.status.handoff.to))`
 - status.handoff.from must match spec.replaces: `!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from) || (has(self.spec.replaces) && self.status.handoff.from.name == self.spec.replaces.name && self.status.handoff.from.uid == self.spec.replaces.uid && self.status.handoff.from.hint.source == self.spec.replaces.hint.source && self.status.handoff.from.hint.commentID == self.spec.replaces.hint.commentID && self.status.handoff.from.hint.digest == self.spec.replaces.hint.digest)`
-- status.handoff.to must name a hint in status.hints that is no longer Pending, and Reserved while the intent stands: `!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to) || (has(self.status.hints) && self.status.hints.exists(h, h.source == self.status.handoff.to.hint.source && h.commentID == self.status.handoff.to.hint.commentID && h.digest == self.status.handoff.to.hint.digest && h.state != 'Pending' && (self.status.handoff.to.phase != 'Intent' || h.state == 'Reserved')))`
+- status.handoff.to must name a hint in status.hints that is Reserved while it is Intent, Consumed once Done and Declined once Aborted: `!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to) || (has(self.status.hints) && self.status.hints.exists(h, h.source == self.status.handoff.to.hint.source && h.commentID == self.status.handoff.to.hint.commentID && h.digest == self.status.handoff.to.hint.digest && h.state == (self.status.handoff.to.phase == 'Intent' ? 'Reserved' : self.status.handoff.to.phase == 'Done' ? 'Consumed' : 'Declined')))`
 - status.commentCursor is kept once set: `!has(oldSelf.status) || !has(oldSelf.status.commentCursor) || (has(self.status) && has(self.status.commentCursor))`
 - status.commentCursor.since never decreases: `!has(oldSelf.status) || !has(oldSelf.status.commentCursor) || !has(oldSelf.status.commentCursor.since) || (has(self.status) && has(self.status.commentCursor) && has(self.status.commentCursor.since) && self.status.commentCursor.since >= oldSelf.status.commentCursor.since)`
 - status.rollout is kept once set: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || (has(self.status) && has(self.status.rollout))`
@@ -382,7 +382,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `from` | [IncomingHandoff](#incominghandoff) | No | from is the incoming side, set on a replacement.<br>Rule: an incoming handoff is Reserved, Done or Aborted<br>Rule: an incoming handoff is pinned: only its phase changes<br>Rule: the rewrite after a handoff is recorded only once it is Done<br>Rule: the record of the pull request's rewrite never changes once set<br>Rule: an incoming handoff moves only from Reserved to Done or Aborted |
-| `to` | [OutgoingHandoff](#outgoinghandoff) | No | to is the outgoing side, set on a predecessor.<br>Rule: an outgoing handoff is Intent, Done or Aborted<br>Rule: an outgoing handoff is pinned: only its phase changes, or an Aborted one is replaced<br>Rule: an outgoing handoff moves only from Intent to Done or Aborted, or from Aborted to the Intent of another replacement |
+| `to` | [OutgoingHandoff](#outgoinghandoff) | No | to is the outgoing side, set on a predecessor.<br>Rule: an outgoing handoff is Intent, Done or Aborted<br>Rule: an outgoing handoff is pinned: only its phase changes, or an Aborted one is replaced<br>Rule: an outgoing handoff moves only from Intent to Done or Aborted, or from Aborted to the Intent of another replacement for another hint |
 
 ### HandoffPhase
 
@@ -794,16 +794,17 @@ Used by: [IncidentStatus](#incidentstatus).
 ### OutgoingHandoff
 
 OutgoingHandoff is the predecessor's side of a handoff: the replacement that takes it over, the hint of this
-request it answers (which must be in status.hints, Reserved while the intent stands) and the branch head the
-replacement's commit must have as its parent. Only its phase changes once written, except that an Aborted one is
-replaced by the Intent of a later replacement, for another hint of this request.
+request it answers (which must be in status.hints, in the state its phase implies: Reserved while Intent,
+Consumed once Done, Declined once Aborted) and the branch head the replacement's commit must have as its
+parent. Only its phase changes once written, except that an Aborted one is replaced by the Intent of a later
+replacement, for another hint of this request.
 
 
 Validation rules:
 
 - an outgoing handoff is Intent, Done or Aborted: `self.phase in ['Intent', 'Done', 'Aborted']`
 - an outgoing handoff is pinned: only its phase changes, or an Aborted one is replaced: `(oldSelf.phase == 'Aborted' && self.phase == 'Intent') || (self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead)`
-- an outgoing handoff moves only from Intent to Done or Aborted, or from Aborted to the Intent of another replacement: `oldSelf.phase == self.phase || (oldSelf.phase == 'Intent' && self.phase in ['Done', 'Aborted']) || (oldSelf.phase == 'Aborted' && self.phase == 'Intent' && self.uid != oldSelf.uid)`
+- an outgoing handoff moves only from Intent to Done or Aborted, or from Aborted to the Intent of another replacement for another hint: `oldSelf.phase == self.phase || (oldSelf.phase == 'Intent' && self.phase in ['Done', 'Aborted']) || (oldSelf.phase == 'Aborted' && self.phase == 'Intent' && self.uid != oldSelf.uid && (self.hint.source != oldSelf.hint.source || self.hint.commentID != oldSelf.hint.commentID))`
 
 Used by: [Handoff](#handoff).
 
@@ -1216,15 +1217,17 @@ Used by: [CommentCursor](#commentcursor).
 ### SetContainerMemoryLimit
 
 SetContainerMemoryLimit changes resources.limits.memory of one container. previous must match the file in
-Git when the patch is applied, or the plan is stale. Both values are whole bytes between 1Mi and 1Ti.
+Git when the patch is applied, or the plan is stale. Both values are whole bytes between 1Mi and 1Ti. The
+rules compare a value only once its approximate float is between -2e12 and 2e12: the quantity library would
+compute a huge decimal exponent digit by digit, for either sign (#593).
 
 
 Validation rules:
 
-- desired must differ from previous: `quantity(string(self.desired)).compareTo(quantity(string(self.previous))) != 0`
-- previous and desired must be whole bytes: `quantity(string(self.previous)).isInteger() && quantity(string(self.desired)).isInteger()`
-- previous must be between 1Mi and 1Ti: `quantity(string(self.previous)).compareTo(quantity('1Mi')) >= 0 && quantity(string(self.previous)).compareTo(quantity('1Ti')) <= 0`
-- desired must be between 1Mi and 1Ti: `quantity(string(self.desired)).compareTo(quantity('1Mi')) >= 0 && quantity(string(self.desired)).compareTo(quantity('1Ti')) <= 0`
+- desired must differ from previous: `!(quantity(string(self.previous)).asApproximateFloat() >= -2e12 && quantity(string(self.previous)).asApproximateFloat() <= 2e12 && quantity(string(self.desired)).asApproximateFloat() >= -2e12 && quantity(string(self.desired)).asApproximateFloat() <= 2e12) || quantity(string(self.desired)).compareTo(quantity(string(self.previous))) != 0`
+- previous and desired must be whole bytes: `!(quantity(string(self.previous)).asApproximateFloat() >= -2e12 && quantity(string(self.previous)).asApproximateFloat() <= 2e12 && quantity(string(self.desired)).asApproximateFloat() >= -2e12 && quantity(string(self.desired)).asApproximateFloat() <= 2e12) || (quantity(string(self.previous)).isInteger() && quantity(string(self.desired)).isInteger())`
+- previous must be between 1Mi and 1Ti: `quantity(string(self.previous)).asApproximateFloat() >= -2e12 && quantity(string(self.previous)).asApproximateFloat() <= 2e12 && quantity(string(self.previous)).compareTo(quantity('1Mi')) >= 0 && quantity(string(self.previous)).compareTo(quantity('1Ti')) <= 0`
+- desired must be between 1Mi and 1Ti: `quantity(string(self.desired)).asApproximateFloat() >= -2e12 && quantity(string(self.desired)).asApproximateFloat() <= 2e12 && quantity(string(self.desired)).compareTo(quantity('1Mi')) >= 0 && quantity(string(self.desired)).compareTo(quantity('1Ti')) <= 0`
 
 Used by: [Action](#action).
 

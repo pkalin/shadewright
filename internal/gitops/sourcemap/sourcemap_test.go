@@ -727,6 +727,10 @@ func TestResolveStops(t *testing.T) {
 			f.targetDeployment()
 			f.files["apps/orders/deployment.yaml"] = strings.Replace(deploymentYAML, "268435456", "512Mi", 1)
 		}, ni, sourcemap.ReasonValueMismatch},
+		{"memory limit in Git has an unbounded exponent", func(f *fixture) {
+			f.targetDeployment()
+			f.files["apps/orders/deployment.yaml"] = strings.Replace(deploymentYAML, "268435456", `"1e2147483647"`, 1)
+		}, ni, sourcemap.ReasonValueMismatch},
 		{"container missing in Git", func(f *fixture) {
 			f.targetDeployment()
 			f.files["apps/orders/deployment.yaml"] = strings.Replace(deploymentYAML, "- name: web", "- name: api", 1)
@@ -756,6 +760,38 @@ func TestResolveStops(t *testing.T) {
 				t.Errorf("message quotes a URL: %s", res.Message)
 			}
 			sameWithCache(t, tc.change, res)
+		})
+	}
+}
+
+// TestResolveNamesTheUnreadableMemoryValue is part of #593: a memory value Shadewright does not read, in Git
+// or on the live object, is named as such, whatever its type, and never compared.
+func TestResolveNamesTheUnreadableMemoryValue(t *testing.T) {
+	const depPath = "apps/orders/deployment.yaml"
+	for name, tc := range map[string]struct {
+		change func(*fixture)
+		want   string
+	}{
+		"a boolean in Git": {func(f *fixture) {
+			f.files[depPath] = strings.Replace(deploymentYAML, "268435456", "true", 1)
+		}, "in " + depPath + " is not a value Shadewright reads: an integer, or a quantity string"},
+		"an unbounded exponent on the live object": {func(f *fixture) {
+			containers, _, _ := unstructured.NestedSlice(f.deployment.Object, "spec", "template", "spec", "containers")
+			containers[1] = map[string]any{"name": "web", "resources": map[string]any{"limits": map[string]any{"memory": hugeExponent}}}
+			set(f.deployment, containers, "spec", "template", "spec", "containers")
+		}, "of the live "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture()
+			f.targetDeployment()
+			tc.change(f)
+			res, _, err := f.run(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Reason != sourcemap.ReasonValueMismatch || !strings.Contains(res.Message, tc.want) {
+				t.Fatalf("result %s (%s), want %s naming %q", res.Reason, res.Message, sourcemap.ReasonValueMismatch, tc.want)
+			}
 		})
 	}
 }

@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/gitops/gityaml"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy"
 	"github.com/pkalin/shadewright/internal/policy/digest"
@@ -663,6 +664,9 @@ func (c Checker) checkFile(ctx context.Context, rr *v1alpha1.RemediationRequest,
 		return nil, nil, stale(ReasonTargetFileChanged, "%s no longer exists on the target branch", src.Path)
 	}
 	got, found, err := sourcemap.ReadField(file.Data, rr.Spec.TargetRef, field)
+	if refused, ok := errors.AsType[*gityaml.Error](err); ok {
+		return nil, nil, stale(ReasonTargetFileChanged, "%s on the target branch holds YAML that is refused: %v", src.Path, refused)
+	}
 	if err != nil {
 		return nil, nil, stale(ReasonTargetFileChanged, "%s on the target branch no longer declares the target alone: %v", src.Path, err)
 	}

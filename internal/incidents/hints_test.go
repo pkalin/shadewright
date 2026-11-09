@@ -344,6 +344,77 @@ func TestHintedMarkTakesABudgetUnit(t *testing.T) {
 	}
 }
 
+// lostHintRun is the Incident of closureIncident as a run of hint h taken as lost: Analyzing since 20
+// minutes, handledHint h, marked not due while it ran.
+func lostHintRun(h remediationv1alpha1.Hint) *remediationv1alpha1.Incident {
+	inc := proposed(20 * time.Minute)
+	inc.Status.Phase = remediationv1alpha1.IncidentAnalyzing
+	inc.Status.HandledHint = refOf(h)
+	inc.Status = withDueCondition(inc.Status, metav1.ConditionFalse, ReasonAnalyzing)
+	inc.Status.Conditions[0].ObservedGeneration = inc.Generation
+	return inc
+}
+
+// A lost hint run the analysis ends without a model call (its replacement exists, or its hint is no longer
+// Pending) is marked due with the budget spent or 0 too, and takes no unit: an Incident decided after it is
+// still due on the last unit. One that would call the model again (its hint still Pending, no replacement)
+// waits for the budget like any lost run.
+func TestLostHintRunThatSettlesNeedsNoBudget(t *testing.T) {
+	h := hint(1, time.Minute)
+	replacement := func() remediationv1alpha1.RemediationRequest {
+		rr := request("replacement", 19*time.Minute, remediationv1alpha1.PhasePending)
+		rr.Spec.Replaces = &remediationv1alpha1.RequestReplacement{Name: "a", Hint: *refOf(h)}
+		return rr
+	}
+	declined := h
+	declined.State = remediationv1alpha1.HintDeclined
+	for _, tt := range []struct {
+		name     string
+		perDay   int32
+		used     int
+		requests []remediationv1alpha1.RemediationRequest
+		due      bool
+	}{
+		{"replacement, budget spent", 1, 1, []remediationv1alpha1.RemediationRequest{hinted("a", h), replacement()}, true},
+		{"replacement, analysis disabled", 0, 0, []remediationv1alpha1.RemediationRequest{hinted("a", h), replacement()}, true},
+		{"hint declined, budget spent", 1, 1, []remediationv1alpha1.RemediationRequest{hinted("a", declined)}, true},
+		{"hint pending, budget spent", 1, 1, []remediationv1alpha1.RemediationRequest{hinted("a", h)}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c, cl := hintController(t, lostHintRun(h), tt.perDay, tt.used, tt.requests...)
+			if err := c.markDue(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if got := getIncident(t, cl); meta.IsStatusConditionTrue(got.Status.Conditions, ConditionAnalysisDue) != tt.due {
+				t.Errorf("AnalysisDue %+v, want due %v", meta.FindStatusCondition(got.Status.Conditions, ConditionAnalysisDue), tt.due)
+			}
+		})
+	}
+	t.Run("takes no unit", func(t *testing.T) {
+		other := &remediationv1alpha1.Incident{
+			ObjectMeta: metav1.ObjectMeta{Name: Name(fp(2)), Namespace: fakeNamespace, UID: types.UID(otherUID)},
+			Spec:       specOf(observation(2, 2, 1, 1, triggerNow)), Status: incidentStatus(2*time.Minute, time.Hour, 0),
+		}
+		other.Status.Occurrences[0].ID = eventID(2)
+		lost := lostHintRun(h)
+		lost.Status.FirstSeen = ago(2 * time.Hour)
+		c, cl := hintControllerWith(t, []*remediationv1alpha1.Incident{lost, other}, 1, 0, hinted("a", h), replacement())
+		if err := c.markDue(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if got := getIncident(t, cl); !dueIs(true, ReasonAnalysisTimedOut)(got) {
+			t.Fatalf("lost run: AnalysisDue %+v, want due with AnalysisTimedOut", got.Status.Conditions)
+		}
+		got := &remediationv1alpha1.Incident{}
+		if err := cl.Get(t.Context(), client.ObjectKeyFromObject(other), got); err != nil {
+			t.Fatal(err)
+		}
+		if !meta.IsStatusConditionTrue(got.Status.Conditions, ConditionAnalysisDue) {
+			t.Errorf("other Incident: AnalysisDue %+v, want due on the unit the lost run did not take", got.Status.Conditions)
+		}
+	})
+}
+
 // A hint refused by the cooldown or the budget is an answer, not a queue (ADR-0028 section 2): the trigger
 // records the hint in status.handledHint with the Analyzed reason the executor reads, once.
 func TestPassAnswersARefusedHint(t *testing.T) {

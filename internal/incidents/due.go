@@ -108,10 +108,10 @@ func (c *Controller) markDue(ctx context.Context) error {
 	var hintErr error
 	var requests remediationv1alpha1.RemediationRequestList
 	if err := c.cache.List(ctx, &requests, client.InNamespace(c.cfg.Namespace)); err != nil {
-		c.hintRequests = nil
+		c.hintRequests, c.hintsListed = nil, false
 		hintErr = fmt.Errorf("listing the RemediationRequests for reviewer hints: %w", err)
 	} else {
-		c.hintRequests = requests.Items
+		c.hintRequests, c.hintsListed = requests.Items, true
 	}
 	now := c.cfg.Now()
 	s := TriggerSettings{Debounce: c.cfg.Debounce, SettleLimit: c.cfg.SettleLimit, Cooldown: c.cfg.Cooldown,
@@ -244,8 +244,16 @@ func (c *Controller) decider(inc *remediationv1alpha1.Incident, now time.Time, s
 	return func(fresh *remediationv1alpha1.Incident) (bool, string) {
 		m := m
 		m.Hinted = PendingHint(fresh, c.hintRequestsOf(fresh)) != nil
+		m.Settles = c.settles(fresh)
 		return Due(fresh, m, now, s, *used)
 	}
+}
+
+// settles reports [SettlesWithoutAnalysis] for inc from the requests of the pass, only when they could be
+// listed and the analysis selects them: a failed listing, or the analysis off, never makes a run due without
+// the budget.
+func (c *Controller) settles(inc *remediationv1alpha1.Incident) bool {
+	return c.hintsListed && c.analysisRequest != nil && SettlesWithoutAnalysis(inc, c.hintRequestsOf(inc))
 }
 
 // account reports a NotRecent that setDue wrote, counts a unit of the budget in *used (when used is not nil)
@@ -256,7 +264,9 @@ func (c *Controller) account(inc *remediationv1alpha1.Incident, due bool, reason
 	if wrote && reason == ReasonNotRecent {
 		c.reportNotRecent(inc)
 	}
-	if used != nil && (due || (err != nil && wasDue)) {
+	// A lost hint run the analysis ends without a model call takes no unit ([SettlesWithoutAnalysis]).
+	settles := reason == ReasonAnalysisTimedOut && c.settles(inc)
+	if used != nil && (due || (err != nil && wasDue)) && !settles {
 		*used++
 	}
 	return err

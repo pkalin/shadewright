@@ -162,6 +162,9 @@ type Memory struct {
 	// Hinted: a request naming the incident holds a reviewer hint no analysis has answered ([PendingHint]),
 	// read from the requests the controller's cache holds.
 	Hinted bool
+	// Settles: the incident is a lost run of a reviewer hint the analysis ends without a model call
+	// ([SettlesWithoutAnalysis]), read from the same requests.
+	Settles bool
 }
 
 // Due decides whether an incident is due for analysis at now, and gives the reason (one of the Reason
@@ -180,7 +183,9 @@ type Memory struct {
 //   - in phase Proposed (without a hint) or Escalated: not due (Proposed, Escalated);
 //   - in phase Analyzing: not due (Analyzing) until AnalysisTimeout after lastAnalysisTime, then not due
 //     (CoolingDown) until the cooldown has passed too, then due again (AnalysisTimedOut); without a
-//     lastAnalysisTime not due (AnalysisStartUnknown), since neither can be placed;
+//     lastAnalysisTime not due (AnalysisStartUnknown), since neither can be placed. A lost run of a reviewer
+//     hint that the analysis ends without a model call (m.Settles) is due (AnalysisTimedOut) once
+//     AnalysisTimeout has passed, without the cooldown, the debounce or the budget: it takes no unit;
 //   - in phase Open or Resolved (or none), never analyzed: due (FirstAnalysis), unless last seen (in the
 //     status or held) longer ago than RecentWindow (or Debounce, when that is longer), not marked due
 //     already ([markedDue]) and its newest occurrence is no lasting state ([lastingState]): not due
@@ -225,6 +230,9 @@ func Due(inc *remediationv1alpha1.Incident, m Memory, now time.Time, s TriggerSe
 		switch {
 		case now.Before(last.Add(s.AnalysisTimeout)):
 			return false, ReasonAnalyzing
+		case m.Settles:
+			// Ended without a model call: no cooldown, debounce or unit of the budget to wait for.
+			return true, ReasonAnalysisTimedOut
 		case now.Before(last.Add(s.Cooldown)):
 			return false, ReasonCoolingDown
 		}

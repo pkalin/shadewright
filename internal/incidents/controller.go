@@ -242,6 +242,8 @@ type Controller struct {
 	// reviewer hints of the Incidents it decides ([PendingHint]); nil when that listing failed. Only the
 	// trigger goroutine uses it.
 	hintRequests []remediationv1alpha1.RemediationRequest
+	// hintsListed: the listing of hintRequests in the current pass succeeded.
+	hintsListed bool
 	// analysisRequest selects, of hintRequests, those whose hints count for an Incident (SetAnalysisRequests).
 	analysisRequest func(*remediationv1alpha1.Incident, *remediationv1alpha1.RemediationRequest) bool
 	// lastEvent is when the last Warning event at the cap was written.

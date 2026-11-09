@@ -129,6 +129,39 @@ func HintByRef(inc *remediationv1alpha1.Incident, requests []remediationv1alpha1
 	return nil
 }
 
+// ReplacementFor returns the earliest of requests (then the first by name) whose incidentRef names inc by
+// name and UID and whose spec.replaces.hint is ref, or nil: a replacement an analysis already created for the
+// hint ref.
+func ReplacementFor(inc *remediationv1alpha1.Incident, requests []remediationv1alpha1.RemediationRequest,
+	ref remediationv1alpha1.HintRef) *remediationv1alpha1.RemediationRequest {
+	var found *remediationv1alpha1.RemediationRequest
+	for i := range requests {
+		rr := &requests[i]
+		if rr.Spec.Replaces == nil || rr.Spec.Replaces.Hint != ref || rr.Spec.IncidentRef.Name != inc.Name ||
+			types.UID(rr.Spec.IncidentRef.UID) != inc.UID {
+			continue
+		}
+		if found == nil || rr.CreationTimestamp.Before(&found.CreationTimestamp) ||
+			(rr.CreationTimestamp.Equal(&found.CreationTimestamp) && rr.Name < found.Name) {
+			found = rr
+		}
+	}
+	return found
+}
+
+// SettlesWithoutAnalysis reports whether the analysis ends a lost run of inc without a model call: inc is in
+// phase Analyzing with status.handledHint set, and either a replacement for that hint exists among requests
+// ([ReplacementFor]: it is recorded) or the hint is no longer Pending there ([HintByRef]: the run is
+// released). Such a run takes no unit of the budget, so the trigger marks it due (AnalysisTimedOut) with the
+// budget spent or 0 too. requests must be the requests the analysis takes as its own.
+func SettlesWithoutAnalysis(inc *remediationv1alpha1.Incident, requests []remediationv1alpha1.RemediationRequest) bool {
+	handled := inc.Status.HandledHint
+	if inc.Status.Phase != remediationv1alpha1.IncidentAnalyzing || handled == nil {
+		return false
+	}
+	return ReplacementFor(inc, requests, *handled) != nil || HintByRef(inc, requests, *handled) == nil
+}
+
 // holdsHints reports whether rr may hold a hint an analysis of inc answers: its incidentRef names inc by
 // name and UID, and it is in AwaitingApproval with a recorded pull request.
 func holdsHints(inc *remediationv1alpha1.Incident, rr *remediationv1alpha1.RemediationRequest) bool {

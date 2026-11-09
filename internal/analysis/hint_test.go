@@ -22,11 +22,14 @@ import (
 	"encoding/hex"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -512,32 +515,90 @@ func TestLostRunWithoutAHintTakesNone(t *testing.T) {
 
 // A hint the executor moves on while the model runs gets no replacement: the request holding it is read live
 // before the create, and the outcome is HintNotPending, Proposed, with the hint kept for the executor.
+// The hint is checked before the plan is compared, so the plan of the request it would replace is reported as
+// HintNotPending too.
 func TestHintMovedOnDuringTheRunGetsNoReplacement(t *testing.T) {
+	for name, result := range map[string]string{"another plan": resultWith("768Mi"), "the same plan": validResult} {
+		t.Run(name, func(t *testing.T) {
+			ns := namespace(t)
+			setSettings(t, 10)
+			inc := dueIncident(t, ns, nil)
+			analyzeWith(t, ns, inc, validResult)
+			first := newest(t, inc)
+			h := awaitWithHint(t, ns, first, 801)
+			live := markHintDue(t, inc)
+
+			f := newFixture()
+			f.triage.steps = []step{reply(result)}
+			withHook(f, func(ctx context.Context) { declineHint(ctx, t, ns, first) })
+			c, _ := newController(t, ns, f)
+			reconcile(t, c, live)
+			if n := len(requestsIn(t, ns)); n != 1 {
+				t.Errorf("%d requests, want the first only", n)
+			}
+			got := liveIncident(t, inc)
+			if got.Status.Phase != remediationv1alpha1.IncidentProposed || got.Status.HandledHint == nil || *got.Status.HandledHint != h {
+				t.Errorf("phase %s, handledHint %v; want Proposed and the hint", got.Status.Phase, got.Status.HandledHint)
+			}
+			if cond := meta.FindStatusCondition(got.Status.Conditions, ConditionAnalyzed); cond == nil ||
+				cond.Reason != string(ReasonHintNotPending) {
+				t.Errorf("Analyzed %+v, want HintNotPending", cond)
+			}
+		})
+	}
+}
+
+// declineHint declines the first hint of request name, as the executor does.
+func declineHint(ctx context.Context, t *testing.T, ns string, name remediationv1alpha1.Name) {
+	t.Helper()
+	rr := &remediationv1alpha1.RemediationRequest{}
+	if err := env.admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: string(name)}, rr); err != nil {
+		t.Error(err)
+		return
+	}
+	rr.Status.Hints[0].State, rr.Status.Hints[0].Reason = remediationv1alpha1.HintDeclined, "Withdrawn"
+	if err := env.admin.Status().Update(ctx, rr); err != nil {
+		t.Error(err)
+	}
+}
+
+// decliningReader declines the hint of request name right after the controller lists the requests, before
+// its claim, as an executor that answers it meanwhile.
+type decliningReader struct {
+	client.Reader
+	t    *testing.T
+	ns   string
+	name remediationv1alpha1.Name
+}
+
+func (r *decliningReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if err := r.Reader.List(ctx, list, opts...); err != nil {
+		return err
+	}
+	if _, ok := list.(*remediationv1alpha1.RemediationRequestList); ok {
+		declineHint(ctx, r.t, r.ns, r.name)
+	}
+	return nil
+}
+
+// A hint declined after the requests were listed and before the claim is read again before the model call:
+// the run is released to Proposed with HintNotPending, with no model call and no unit of the budget.
+func TestHintDeclinedBeforeTheClaimCallsNoModel(t *testing.T) {
 	ns := namespace(t)
 	setSettings(t, 10)
 	inc := dueIncident(t, ns, nil)
 	analyzeWith(t, ns, inc, validResult)
 	first := newest(t, inc)
-	h := awaitWithHint(t, ns, first, 801)
+	h := awaitWithHint(t, ns, first, 901)
 	live := markHintDue(t, inc)
 
 	f := newFixture()
 	f.triage.steps = []step{reply(resultWith("768Mi"))}
-	withHook(f, func(ctx context.Context) {
-		rr := &remediationv1alpha1.RemediationRequest{}
-		if err := env.admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: string(first)}, rr); err != nil {
-			t.Error(err)
-			return
-		}
-		rr.Status.Hints[0].State, rr.Status.Hints[0].Reason = remediationv1alpha1.HintDeclined, "Withdrawn"
-		if err := env.admin.Status().Update(ctx, rr); err != nil {
-			t.Error(err)
-		}
-	})
 	c, _ := newController(t, ns, f)
+	c.Reader = &decliningReader{Reader: env.admin, t: t, ns: ns, name: first}
 	reconcile(t, c, live)
-	if n := len(requestsIn(t, ns)); n != 1 {
-		t.Errorf("%d requests, want the first only", n)
+	if f.triage.calls() != 0 || f.reserved != 0 {
+		t.Errorf("a declined hint was analyzed: %d calls, %d reservations", f.triage.calls(), f.reserved)
 	}
 	got := liveIncident(t, inc)
 	if got.Status.Phase != remediationv1alpha1.IncidentProposed || got.Status.HandledHint == nil || *got.Status.HandledHint != h {
@@ -546,6 +607,128 @@ func TestHintMovedOnDuringTheRunGetsNoReplacement(t *testing.T) {
 	if cond := meta.FindStatusCondition(got.Status.Conditions, ConditionAnalyzed); cond == nil ||
 		cond.Reason != string(ReasonHintNotPending) {
 		t.Errorf("Analyzed %+v, want HintNotPending", cond)
+	}
+}
+
+// requestReadFailing fails the live reads of RemediationRequests with a server timeout while on, fails of
+// them (all, when fails is negative).
+type requestReadFailing struct {
+	client.Reader
+	on    atomic.Bool
+	fails atomic.Int32
+}
+
+func (r *requestReadFailing) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*remediationv1alpha1.RemediationRequest); ok && r.on.Load() {
+		if r.fails.Load() < 0 || r.fails.Add(-1) >= 0 {
+			return apierrors.NewServerTimeout(remediationv1alpha1.GroupVersion.WithResource("remediationrequests").GroupResource(), "get", 1)
+		}
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+// A read of the request holding the hint that fails is retried within the claim, and one that keeps failing
+// is returned as an error with no outcome: the hint is not answered by an API failure (neither
+// RequestNotCreated nor HintNotPending), and the Incident stays Analyzing for the trigger to take as lost.
+func TestHintReadFailureWritesNoOutcome(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		afterModel bool
+		fails      int32
+		calls      int
+		proposed   bool
+	}{
+		{name: "transient, after the model", afterModel: true, fails: 2, calls: 1, proposed: true},
+		{name: "lasting, before the model", fails: -1},
+		{name: "lasting, after the model", afterModel: true, fails: -1, calls: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := namespace(t)
+			setSettings(t, 10)
+			inc := dueIncident(t, ns, nil)
+			analyzeWith(t, ns, inc, validResult)
+			awaitWithHint(t, ns, newest(t, inc), 1001)
+			live := markHintDue(t, inc)
+
+			f := newFixture()
+			f.triage.steps = []step{reply(resultWith("768Mi"))}
+			r := &requestReadFailing{Reader: env.admin}
+			r.fails.Store(tt.fails)
+			r.on.Store(!tt.afterModel)
+			withHook(f, func(context.Context) { r.on.Store(true) })
+			c, _ := newController(t, ns, f)
+			c.Reader = r
+			// A claim with little time beyond the create and the outcome write, so a lasting failure gives up soon.
+			c.ClaimTimeout = createTimeout + finalWriteTimeout + 2*time.Second
+			_, err := c.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(live)})
+			if f.triage.calls() != tt.calls {
+				t.Errorf("%d model calls, want %d", f.triage.calls(), tt.calls)
+			}
+			got := liveIncident(t, inc)
+			cond := meta.FindStatusCondition(got.Status.Conditions, ConditionAnalyzed)
+			if tt.proposed {
+				if err != nil || got.Status.Phase != remediationv1alpha1.IncidentProposed || len(requestsIn(t, ns)) != 2 {
+					t.Errorf("err %v, phase %s, %d requests; want the replacement after the retries", err,
+						got.Status.Phase, len(requestsIn(t, ns)))
+				}
+				return
+			}
+			if err == nil {
+				t.Error("a lasting read failure was not returned")
+			}
+			if got.Status.Phase != remediationv1alpha1.IncidentAnalyzing || cond == nil || cond.Reason != string(ReasonProposed) ||
+				len(requestsIn(t, ns)) != 1 {
+				t.Errorf("phase %s, Analyzed %+v, %d requests; want Analyzing with the first run's outcome and no replacement",
+					got.Status.Phase, cond, len(requestsIn(t, ns)))
+			}
+		})
+	}
+}
+
+// pagingReader returns the requests one per page, as an API server with a small limit does.
+type pagingReader struct {
+	client.Reader
+}
+
+func (r *pagingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	rl, ok := list.(*remediationv1alpha1.RemediationRequestList)
+	if !ok {
+		return r.Reader.List(ctx, list, opts...)
+	}
+	o := (&client.ListOptions{}).ApplyOptions(opts)
+	all := &remediationv1alpha1.RemediationRequestList{}
+	if err := r.Reader.List(ctx, all, client.InNamespace(o.Namespace), client.MatchingLabelsSelector{Selector: o.LabelSelector}); err != nil {
+		return err
+	}
+	i := 0
+	if o.Continue != "" {
+		i = int(o.Continue[0] - '0')
+	}
+	rl.Items = all.Items[i : i+1]
+	rl.Continue = ""
+	if i+1 < len(all.Items) {
+		rl.Continue = string(rune('0' + i + 1))
+	}
+	return nil
+}
+
+// The live listing of an Incident's requests reads every page, as the trigger's cache holds every request, so a
+// hint past the first page is claimed rather than left due for ever.
+func TestIncidentRequestsReadsEveryPage(t *testing.T) {
+	ns := namespace(t)
+	setSettings(t, 10)
+	inc := dueIncident(t, ns, nil)
+	analyzeWith(t, ns, inc, validResult)
+	h := awaitWithHint(t, ns, newest(t, inc), 1101)
+	analyzeWith(t, ns, markHintDue(t, inc), resultWith("768Mi"))
+	c, _ := newController(t, ns, newFixture())
+	c.Reader = &pagingReader{Reader: env.admin}
+	got, err := c.incidentRequests(t.Context(), liveIncident(t, inc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Errorf("listed %d requests, want both (hint %v)", len(got), h)
 	}
 }
 

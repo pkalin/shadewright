@@ -75,7 +75,7 @@ const createTimeout = 20 * time.Second
 // maxRecorded is the most request names status.remediationRequests keeps.
 const maxRecorded = 20
 
-// maxListedRequests bounds the requests of one Incident a claim reads by label.
+// maxListedRequests is the page size of the live listing of one Incident's requests by label.
 const maxListedRequests = 100
 
 // LabelIncidentUID is the label every RemediationRequest the analysis creates carries: the UID of its
@@ -263,6 +263,9 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		return ctrl.Result{}, fmt.Errorf("claiming Incident %s: %w", inc.Name, err)
 	}
+	if res, done, err := c.hintStillPending(ctx, claimed, hint); done {
+		return res, err
+	}
 	limits := LimitsOf(settings)
 	var hintText string
 	if hint != nil {
@@ -276,32 +279,30 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// The run's identity in the logs (ADR-0025 decision 1): a correlation key, never read to decide anything.
 	runID := claimed.Status.LastAnalysisTime.UTC().Format(time.RFC3339)
 	var created, attempted remediationv1alpha1.Name
-	if out.Plan != nil && hint != nil && samePlan(hint.Request.Spec, requestSpec(claimed, *out.Plan)) {
-		// A replacement with the plan of the request it replaces would change nothing: none is created, and
-		// the reviewer is told through the outcome (ADR-0028 section 4).
-		out.Reason, out.Plan = ReasonPlanUnchanged, nil
-	}
-	if out.Plan != nil {
+	out, err = c.checkPlan(ctx, claimed, hint, out)
+	if err == nil && out.Plan != nil {
 		spec := withReplacement(requestSpec(claimed, *out.Plan), hint)
 		// The name the create uses, kept for a create that fails after the server took it (finish).
 		attempted, _ = requestName(claimed, spec)
-		created, err = c.publish(ctx, claimed, spec, hint)
-		switch {
-		case errors.Is(err, errHintNotPending):
-			// The hint was answered, declined or removed while the model ran: no replacement for it.
-			out.Reason, out.Plan, attempted = ReasonHintNotPending, nil, ""
-		case errors.Is(err, errClaimLost):
-			logger.Info("Dropped the result of an analysis whose claim was lost", append([]any{"incident", inc.Name,
-				"run", runID, "reason", out.Reason, "calls", out.Calls, "tokens", out.Tokens, "models", out.Models},
-				resultFields(out)...)...)
-			return ctrl.Result{}, nil
-		case err != nil:
+		created, err = c.publish(ctx, claimed, spec)
+		if err != nil && !errors.Is(err, errClaimLost) {
 			if ctx.Err() != nil {
 				return ctrl.Result{}, ctx.Err()
 			}
 			logger.Error(err, "Failed to create the RemediationRequest of an analysis", "incident", inc.Name, "run", runID)
-			out.Reason, out.Plan, created = ReasonRequestNotCreated, nil, ""
+			out.Reason, out.Plan, created, err = ReasonRequestNotCreated, nil, "", nil
 		}
+	}
+	switch {
+	case errors.Is(err, errClaimLost):
+		logger.Info("Dropped the result of an analysis whose claim was lost", append([]any{"incident", inc.Name,
+			"run", runID, "reason", out.Reason, "calls", out.Calls, "tokens", out.Tokens, "models", out.Models},
+			resultFields(out)...)...)
+		return ctrl.Result{}, nil
+	case err != nil:
+		// The request holding the hint could not be read: no outcome is written for it, so the hint is not
+		// answered by an API failure. The Incident stays Analyzing and the trigger takes the run as lost later.
+		return ctrl.Result{}, fmt.Errorf("reading the reviewer hint of Incident %s after its analysis: %w", inc.Name, err)
 	}
 	logger.Info("Analyzed Incident", append([]any{"incident", inc.Name, "run", runID, "reason", out.Reason,
 		"escalated", out.Escalated, "calls", out.Calls, "toolCalls", out.ToolCalls, "tokens", out.Tokens,
@@ -330,11 +331,63 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	return ctrl.Result{}, nil
 }
 
+// hintStillPending reads, after the claim and before the model call, whether the hint the run answers is
+// still Pending (hintPendingRetrying): the executor may have declined it after the requests were listed. When
+// it is not, the run ends (done) without a model call or a unit of the budget: the claim is released to
+// Proposed with HintNotPending (releaseHintRun). A read that keeps failing ends it with the error and no
+// outcome; the Incident stays Analyzing and the trigger takes the run as lost later. Without a hint it does
+// nothing.
+func (c *Controller) hintStillPending(ctx context.Context, claimed *remediationv1alpha1.Incident,
+	hint *incidents.ReviewerHint) (ctrl.Result, bool, error) {
+	if hint == nil {
+		return ctrl.Result{}, false, nil
+	}
+	pending, err := c.hintPendingRetrying(ctx, claimed, hint)
+	switch {
+	case errors.Is(err, errClaimLost):
+		return ctrl.Result{}, true, nil
+	case err != nil:
+		return ctrl.Result{}, true, fmt.Errorf("reading the reviewer hint of Incident %s: %w", claimed.Name, err)
+	case pending:
+		return ctrl.Result{}, false, nil
+	}
+	if err := c.releaseHintRun(ctx, claimed); err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			return ctrl.Result{RequeueAfter: time.Second}, true, nil
+		}
+		return ctrl.Result{}, true, fmt.Errorf("releasing the hint run of Incident %s: %w", claimed.Name, err)
+	}
+	log.FromContext(ctx).Info("Released an analysis whose reviewer hint is no longer pending", "incident", claimed.Name)
+	return ctrl.Result{}, true, nil
+}
+
+// checkPlan reads, once the model proposed a plan for a hint, whether the hint is still Pending
+// (hintPendingRetrying), before anything else is decided about the plan: a hint answered, declined or removed
+// while the model ran gets no replacement (HintNotPending), whatever the plan. Then a plan equal to the one of
+// the request it would replace creates nothing either (PlanUnchanged, ADR-0028 section 4). A read that keeps
+// failing is returned, never turned into an outcome.
+func (c *Controller) checkPlan(ctx context.Context, claimed *remediationv1alpha1.Incident, hint *incidents.ReviewerHint,
+	out Outcome) (Outcome, error) {
+	if out.Plan == nil || hint == nil {
+		return out, nil
+	}
+	pending, err := c.hintPendingRetrying(ctx, claimed, hint)
+	switch {
+	case err != nil:
+		return out, err
+	case !pending:
+		out.Reason, out.Plan = ReasonHintNotPending, nil
+	case samePlan(hint.Request.Spec, requestSpec(claimed, *out.Plan)):
+		out.Reason, out.Plan = ReasonPlanUnchanged, nil
+	}
+	return out, nil
+}
+
 // settleHint decides, before the claim, which reviewer hint the run of inc answers (reviewerHint), from
 // requests listed live. It ends the reconcile (done) without a claim when there is nothing to run: a lost run
 // of a hint whose replacement exists is finished (existingReplacement, finishLostHintRun), a Proposed
 // Incident without a pending hint is left alone, and a lost run of a hint no longer Pending is released
-// (lostHintGone, releaseLostHintRun). A conflicting or missing Incident is tried again in a second.
+// (lostHintGone, releaseHintRun). A conflicting or missing Incident is tried again in a second.
 func (c *Controller) settleHint(ctx context.Context, inc *remediationv1alpha1.Incident,
 	requests []remediationv1alpha1.RemediationRequest) (*incidents.ReviewerHint, bool, ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -361,7 +414,7 @@ func (c *Controller) settleHint(ctx context.Context, inc *remediationv1alpha1.In
 		return nil, true, ctrl.Result{}, nil
 	}
 	if lostHintGone(inc, hint) {
-		if err := c.releaseLostHintRun(ctx, inc); err != nil {
+		if err := c.releaseHintRun(ctx, inc); err != nil {
 			return written(err, "releasing the lost hint run")
 		}
 		logger.Info("Released a lost analysis whose reviewer hint is no longer pending", "incident", inc.Name)
@@ -459,11 +512,9 @@ func (c *Controller) recheck(ctx context.Context, claimed *remediationv1alpha1.I
 
 // publish creates the request of a plan within the claim: it rechecks the claim live just before the create
 // (retrying a transient read error, see recheckRetrying), then the create and its reuse check share one
-// timeout, cut to the time left on the claim, so the create cannot outlive it. With a reviewer hint it also
-// reads the request holding the hint live within that timeout, and returns errHintNotPending without a create
-// when the hint is no longer Pending there (hintPending).
+// timeout, cut to the time left on the claim, so the create cannot outlive it.
 func (c *Controller) publish(ctx context.Context, claimed *remediationv1alpha1.Incident,
-	spec remediationv1alpha1.RemediationRequestSpec, hint *incidents.ReviewerHint) (remediationv1alpha1.Name, error) {
+	spec remediationv1alpha1.RemediationRequestSpec) (remediationv1alpha1.Name, error) {
 	if err := c.recheckRetrying(ctx, claimed); err != nil {
 		return "", err
 	}
@@ -472,20 +523,22 @@ func (c *Controller) publish(ctx context.Context, claimed *remediationv1alpha1.I
 		return "", err
 	}
 	defer cancel()
-	if hint != nil {
-		pending, err := c.hintPending(cctx, hint)
-		if err != nil {
-			return "", err
-		}
-		if !pending {
-			return "", errHintNotPending
-		}
-	}
 	return c.createRequest(cctx, claimed, spec)
 }
 
-// errHintNotPending: the reviewer hint of the run is no longer Pending when its replacement would be created.
-var errHintNotPending = errors.New("the reviewer hint is no longer pending")
+// hintPendingRetrying reads, within the claim, whether hint is still Pending (hintPending). A read error is
+// retried with backoff as in recheckRetrying; only when the claim has no time left for it is the error
+// returned, and never taken for an answer: the caller writes no outcome for it.
+func (c *Controller) hintPendingRetrying(ctx context.Context, claimed *remediationv1alpha1.Incident,
+	hint *incidents.ReviewerHint) (bool, error) {
+	var pending bool
+	err := c.readRetrying(ctx, claimed, "the request holding a reviewer hint", func(rctx context.Context) error {
+		var err error
+		pending, err = c.hintPending(rctx, hint)
+		return err
+	})
+	return pending, err
+}
 
 // hintPending reads the request holding hint live and reports whether it is still the request read before
 // (same UID), in AwaitingApproval with a pull request, and holds the hint, by its pin, in state Pending: the
@@ -522,13 +575,23 @@ const (
 // only when that time runs out is the error returned, and the result handed off. A lost claim or a stop is
 // returned at once.
 func (c *Controller) recheckRetrying(ctx context.Context, claimed *remediationv1alpha1.Incident) error {
+	return c.readRetrying(ctx, claimed, "an Incident", func(rctx context.Context) error {
+		_, err := c.recheck(rctx, claimed)
+		return err
+	})
+}
+
+// readRetrying runs read, a live read within the claim, retrying an error that is not a lost claim with
+// backoff while the claim has time left beyond the create and the outcome write (see recheckRetrying).
+func (c *Controller) readRetrying(ctx context.Context, claimed *remediationv1alpha1.Incident, what string,
+	read func(context.Context) error) error {
 	backoff := recheckFirstBackoff
 	for {
 		rctx, cancel, err := c.withinClaim(ctx, claimed, createTimeout, 0, false)
 		if err != nil {
 			return err
 		}
-		_, err = c.recheck(rctx, claimed)
+		err = read(rctx)
 		cancel()
 		if err == nil || errors.Is(err, errClaimLost) || ctx.Err() != nil {
 			return err
@@ -536,8 +599,8 @@ func (c *Controller) recheckRetrying(ctx context.Context, claimed *remediationv1
 		if c.claimLeft(claimed, c.afterCreate()+createTimeout) < backoff {
 			return err
 		}
-		log.FromContext(ctx).Info("Retrying the live read of an Incident before the create", "incident",
-			claimed.Name, "error", err.Error())
+		log.FromContext(ctx).Info("Retrying a live read within the claim", "incident", claimed.Name,
+			"read", what, "error", err.Error())
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -547,23 +610,28 @@ func (c *Controller) recheckRetrying(ctx context.Context, claimed *remediationv1
 	}
 }
 
-// incidentRequests lists, live, the requests labelled with inc's UID, at most maxListedRequests. Without a
-// lastAnalysisTime it lists nothing: such an Incident was never analyzed, so no request of it is unrecorded
-// and none holds a hint for it.
+// incidentRequests lists, live, every request labelled with inc's UID, in pages of maxListedRequests: the
+// trigger counts the hints of all the requests its cache holds, so a hint past a cut here would keep the
+// Incident due and never be claimed. Without a lastAnalysisTime it lists nothing: such an Incident was never
+// analyzed, so no request of it is unrecorded and none holds a hint for it.
 func (c *Controller) incidentRequests(ctx context.Context, inc *remediationv1alpha1.Incident) ([]remediationv1alpha1.RemediationRequest, error) {
 	if inc.Status.LastAnalysisTime == nil {
 		return nil, nil
 	}
-	list := &remediationv1alpha1.RemediationRequestList{}
-	if err := c.Reader.List(ctx, list, client.InNamespace(c.Namespace),
-		client.MatchingLabels{LabelIncidentUID: string(inc.UID)}, client.Limit(maxListedRequests)); err != nil {
-		return nil, err
+	var items []remediationv1alpha1.RemediationRequest
+	next := ""
+	for {
+		list := &remediationv1alpha1.RemediationRequestList{}
+		if err := c.Reader.List(ctx, list, client.InNamespace(c.Namespace),
+			client.MatchingLabels{LabelIncidentUID: string(inc.UID)}, client.Limit(maxListedRequests),
+			client.Continue(next)); err != nil {
+			return nil, err
+		}
+		items = append(items, list.Items...)
+		if next = list.Continue; next == "" {
+			return items, nil
+		}
 	}
-	if list.Continue != "" {
-		log.FromContext(ctx).Info("Listed only the first RemediationRequests labelled with an Incident's UID",
-			"incident", inc.Name, "limit", maxListedRequests)
-	}
-	return list.Items, nil
 }
 
 // reviewerHint returns the reviewer hint the analysis of inc answers, from requests read live with the form
@@ -603,33 +671,22 @@ func (c *Controller) ownRequests(inc *remediationv1alpha1.Incident,
 // request of inc (IsAnalysisRequest) that already replaces a request for that hint (spec.replaces.hint equal
 // to status.handledHint), or nil: the lost run created it before its outcome write was lost. The run is then
 // not analyzed again, whatever the hint's state now, so one hint never gets two replacements and the one made
-// is recorded (ADR-0028, invariant 5).
+// is recorded (ADR-0028, invariant 5). The trigger marks such a run due without a unit of the budget
+// ([incidents.SettlesWithoutAnalysis]), from the same selection.
 func (c *Controller) existingReplacement(inc *remediationv1alpha1.Incident,
 	requests []remediationv1alpha1.RemediationRequest) *remediationv1alpha1.RemediationRequest {
 	handled := inc.Status.HandledHint
 	if inc.Status.Phase != remediationv1alpha1.IncidentAnalyzing || handled == nil {
 		return nil
 	}
-	var found *remediationv1alpha1.RemediationRequest
-	for i := range requests {
-		rr := &requests[i]
-		if rr.Spec.Replaces == nil || rr.Spec.Replaces.Hint != *handled || !c.IsAnalysisRequest(inc, rr) {
-			continue
-		}
-		// The earliest, then the first by name, for a stable choice.
-		if found == nil || rr.CreationTimestamp.Before(&found.CreationTimestamp) ||
-			(rr.CreationTimestamp.Equal(&found.CreationTimestamp) && rr.Name < found.Name) {
-			found = rr
-		}
-	}
-	return found
+	return incidents.ReplacementFor(inc, c.ownRequests(inc, requests), *handled)
 }
 
 // finishLostHintRun writes the outcome of a lost hint run whose replacement exists (existingReplacement), with
 // the resourceVersion read: the phase Proposed, the replacement recorded in status.remediationRequests (once),
 // the Analyzed condition Proposed, and status.handledHint and lastAnalysisTime kept. No model call, no unit of
 // the budget and no request: the lost run already took its unit and made its request. The AnalysisDue mark is
-// left to the trigger, as in releaseLostHintRun.
+// left to the trigger, as in releaseHintRun.
 func (c *Controller) finishLostHintRun(ctx context.Context, inc *remediationv1alpha1.Incident,
 	request remediationv1alpha1.Name) error {
 	done := inc.DeepCopy()
@@ -654,12 +711,13 @@ func lostHintGone(inc *remediationv1alpha1.Incident, hint *incidents.ReviewerHin
 	return inc.Status.Phase == remediationv1alpha1.IncidentAnalyzing && inc.Status.HandledHint != nil && hint == nil
 }
 
-// releaseLostHintRun ends a lost hint run whose hint is gone ([lostHintGone]) without an analysis: no model
+// releaseHintRun ends a run of a hint that is no longer Pending without an analysis: a lost run
+// ([lostHintGone]), or one just claimed whose hint the executor moved on meanwhile (hintStillPending). No model
 // call, no unit of the budget, no request. It writes, with the resourceVersion read, the phase Proposed (the
 // request the hint was given on, or its successor, still decides the Incident through the closure rules),
 // keeps status.handledHint and lastAnalysisTime, and sets the Analyzed condition to HintNotPending, so the
 // executor does not wait on the hint.
-func (c *Controller) releaseLostHintRun(ctx context.Context, inc *remediationv1alpha1.Incident) error {
+func (c *Controller) releaseHintRun(ctx context.Context, inc *remediationv1alpha1.Incident) error {
 	released := inc.DeepCopy()
 	now := metav1.NewTime(c.now().UTC().Truncate(time.Second))
 	released.Status.Phase = remediationv1alpha1.IncidentProposed

@@ -18,6 +18,7 @@ package redact
 
 import (
 	"encoding/base64"
+	"math/rand/v2"
 	"strings"
 	"testing"
 	"time"
@@ -853,5 +854,74 @@ func TestStringKeeping(t *testing.T) {
 	}
 	if out, want := StringKeeping("token "+hexToken, ""), String("token "+hexToken); out != want {
 		t.Errorf("an empty keep changed the result: %q, want %q", out, want)
+	}
+}
+
+// base64Alphabet is the standard base64 alphabet, the one AWS secret access keys and older Entra client secrets
+// are written in.
+const base64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+// slashSplitKey returns n pseudo-random characters of the standard base64 alphabet from a fixed seed, with a
+// slash at each of the given offsets, so that no part between slashes reaches minTokenLength. Built at run
+// time, so no realistic secret is committed.
+func slashSplitKey(seed uint64, n int, slashes ...int) string {
+	r := rand.New(rand.NewPCG(seed, 525)) // #nosec G404 -- test data from a fixed seed, not a secret
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = base64Alphabet[r.IntN(len(base64Alphabet))]
+	}
+	for _, i := range slashes {
+		b[i] = '/'
+	}
+	return string(b)
+}
+
+// A standard base64 secret whose slashes cut it into parts shorter than minTokenLength is redacted by the
+// long-token rule, also where no key-value rule sees it: after its key name and a blank (a CLI flag, "aws
+// configure set"), or in prose (#525).
+func TestSlashSplitBase64IsRedacted(t *testing.T) {
+	awsKey := slashSplitKey(1, 40, 13, 21)
+	entraSecret := slashSplitKey(2, 43, 9, 20, 31) + "="
+	checkGapCases(t, []gapCase{
+		{"aws configure set", "aws configure set aws_secret_access_key " + awsKey + nextField,
+			[]string{awsKey[:13], awsKey[14:21], awsKey[22:]}, []string{"aws_secret_access_key ", nextField}},
+		{"aws cli flag", "run --aws-secret-access-key " + awsKey + endText, []string{awsKey[22:]}, []string{endText}},
+		{"aws env name and a blank", "AWS_SECRET_ACCESS_KEY " + awsKey + endText, []string{awsKey[22:]}, []string{endText}},
+		{"aws key in prose", "rotated " + awsKey + " today", []string{awsKey[22:]}, []string{"rotated ", " today"}},
+		{"entra secret after az login", "az login --service-principal -u app -p " + entraSecret + " --tenant t",
+			[]string{entraSecret[:9], entraSecret[10:20], entraSecret[32:43]}, []string{" --tenant t"}},
+		{"entra secret in prose", "client secret was " + entraSecret + endText, []string{entraSecret[32:43]}, []string{endText}},
+	})
+	// Any slash-split key, not only the ones above: the same seeds give the same keys on every run.
+	for seed := uint64(100); seed < 1100; seed++ {
+		k := slashSplitKey(seed, 40, int(seed%13)+1, int(seed%11)+18, int(seed%7)+30)
+		if out := String("aws configure set aws_secret_access_key " + k); strings.Contains(out, k[31:]) {
+			t.Errorf("seed %d: key kept:\n%s", seed, out)
+		}
+	}
+}
+
+// Paths, image references and URLs stay readable next to the slash-split base64 rule (#525): their parts
+// are words, so the run changes character class too rarely to look random, or it holds one case only.
+func TestSlashSplitRuleKeepsPaths(t *testing.T) {
+	for _, in := range []string{
+		"GET /apis/apps/v1/namespaces/orders/deployments/orders-worker/scale 404",
+		"GET /api/v1/namespaces/kube-system/pods/coredns-7db6d8ff4d-x2x9q/log?container=coredns",
+		"/apis/remediation.shadewright.io/v1alpha1/namespaces/shadewright-system/remediationrequests",
+		"open /var/lib/kubelet/pods/550e8400-e29b-41d4-a716-446655440000/volumes/kubernetes.io~secret/tls",
+		"open /Users/Example/Library/Application Support/Code/User/settings.json",
+		"/home/User1/Documents/Project2/src/main/java/com/Example/MyHTTPClient2Test",
+		"stat /usr/local/go/src/runtime/internal/atomic/types.go",
+		"image ghcr.io/pkalin/shadewright-analyzer:v0.3.0-rc.2",
+		"image mcr.microsoft.com/azure-cli/AzureCLI/Release2024/x86_64",
+		"https://github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice/v4",
+		"https://management.azure.com/subscriptions/x/resourceGroups/rg-Lab/providers/Microsoft.ContainerService/managedClusters/aks",
+		"/subscriptions/550e8400-e29b-41d4-a716-446655440000/resourceGroups/RG-Lab-WestEurope/providers",
+		"ReplicaSetControllerManagerDeploymentName",
+		"KubeletConfiguration/EvictionHard/MemoryAvailable/NodeFsAvailable/ImageFsAvailable",
+	} {
+		if out := String(in); out != in {
+			t.Errorf("changed useful text:\n in: %s\nout: %s", in, out)
+		}
 	}
 }

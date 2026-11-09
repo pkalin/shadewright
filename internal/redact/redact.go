@@ -26,10 +26,11 @@ limitations under the License.
 //
 // Redaction is best effort and errs on the side of removing too much: an IP address or an email in a log
 // line is removed even when it is harmless, and so are the user name of any URL ("ssh://git@host"), long
-// runs that mix letters and digits, such as Git commit hashes and container IDs, and every scalar value
-// under a secret-named YAML key ("credentials:\n  user: admin" loses "admin"). Values that look like
-// references rather than secrets, such as "secretName: db-creds", are kept, because the name of a missing
-// Secret is what a diagnosis needs, and so is the hex of an image digest.
+// runs that mix letters and digits, such as Git commit hashes and container IDs, long base64 runs that mix
+// cases and change character class often, slashes or not (also a base64 blob that is not a secret), and
+// every scalar value under a secret-named YAML key ("credentials:\n  user: admin" loses "admin"). Values
+// that look like references rather than secrets, such as "secretName: db-creds", are kept, because the name
+// of a missing Secret is what a diagnosis needs, and so is the hex of an image digest.
 //
 // Where a rule would also match prose, it asks the value to look like a credential: the word after "Basic"
 // or "Bearer", and the value of the short keys "pass", "auth" and "sig" before a colon, on their own ("pass:
@@ -915,8 +916,9 @@ const minTokenLength = 24
 
 // longTokenSpan redacts a run of base64, base64url or hex characters when some part of it between slashes
 // looks random: a piece between hyphens of at least minTokenLength that mixes letters and digits, or a
-// hyphenated part of at least that length that mixes upper case, lower case and digits (base64url).
-// Paths and image names (short parts between slashes), long names made of letters only, Kubernetes names
+// hyphenated part of at least that length that mixes upper case, lower case and digits (base64url), or when
+// the run as a whole looks like standard base64 (randomWhole), however its slashes cut it.
+// Paths and image names (short parts between slashes), long names made of words, Kubernetes names
 // and UUIDs (lower case, short pieces between hyphens) and the hex of an image digest ("sha256:...", which
 // identifies a build, not a credential, also with a suffix such as "-amd64") are kept; what follows the
 // digest's hex is judged on its own.
@@ -933,8 +935,12 @@ func longTokenSpan(s string, m []int, _ int) (int, int, bool) {
 	return 0, 0, false
 }
 
-// randomRun reports whether some part of run between slashes looks random, as described for longTokenSpan.
+// randomRun reports whether some part of run between slashes looks random, or the whole run does, as
+// described for longTokenSpan.
 func randomRun(run string) bool {
+	if randomWhole(run) {
+		return true
+	}
 	for part := range strings.SplitSeq(run, "/") {
 		if len(part) < minTokenLength {
 			continue
@@ -949,6 +955,54 @@ func randomRun(run string) bool {
 		}
 	}
 	return false
+}
+
+// randomWhole reports whether run, judged whole, looks like standard base64 rather than a path or a name: at
+// least minTokenLength characters besides "/", "-", "_" and the "=" padding, both cases, and a change of
+// character class (lower case, upper case, digit, other) between at least minClassChanges of the
+// neighbouring characters inside the parts that those separate. Random base64 changes class between about
+// two thirds of its neighbours, so the slashes of a secret written in it (an AWS secret access key, an older
+// Entra client secret) cannot cut it into parts that pass as path words (#525). Words change class rarely:
+// paths, image references, URLs and CamelCase names stay below a third, and Kubernetes paths and names hold
+// one case only.
+func randomWhole(run string) bool {
+	run = strings.TrimRight(run, "=")
+	var chars, pairs, changes int
+	prev := -1
+	for i := range len(run) {
+		c := run[i]
+		if c == '/' || c == '-' || c == '_' {
+			prev = -1
+			continue
+		}
+		class := charClass(c)
+		if prev >= 0 {
+			pairs++
+			if class != prev {
+				changes++
+			}
+		}
+		chars, prev = chars+1, class
+	}
+	return chars >= minTokenLength && mixesCase(run) && changes*minClassChanges.den >= pairs*minClassChanges.num
+}
+
+// minClassChanges is the share of neighbouring characters, 3 in 10, that randomWhole asks to change
+// character class. A random base64 run of 40 characters falls below it a few times in 100,000 (about once in
+// 10,000 when three slashes cut it); the paths and names of TestSlashSplitRuleKeepsPaths stay at or below 0.28.
+var minClassChanges = struct{ num, den int }{3, 10}
+
+// charClass returns the class of c for randomWhole: lower case, upper case, digit or other.
+func charClass(c byte) int {
+	switch {
+	case c >= 'a' && c <= 'z':
+		return 0
+	case c >= 'A' && c <= 'Z':
+		return 1
+	case c >= '0' && c <= '9':
+		return 2
+	}
+	return 3
 }
 
 // mixesCase reports whether s holds both an upper-case and a lower-case ASCII letter.

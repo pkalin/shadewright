@@ -29,10 +29,10 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"
 
 	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/gitops/gityaml"
 	"github.com/pkalin/shadewright/internal/gitops/repopath"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -121,6 +121,15 @@ func (w *walker) walk(ctx context.Context, dir string, depth int) (*Result, erro
 	}
 	if stop != nil || err != nil {
 		return stop, err
+	}
+	// sigs.k8s.io/yaml replaces aliases by copies, so the file is checked first (#594). The check stops counting
+	// past MaxDocuments without reading the rest, so a file over it is refused too.
+	if n, err := gityaml.Objects(file.Data, MaxDocuments); err != nil {
+		r := needsIntervention(ReasonFileNotReadable, "%s %v", file.Path, err)
+		return &r, nil
+	} else if n > MaxDocuments {
+		r := needsIntervention(ReasonInputTooLarge, "%s holds more than %d YAML documents", file.Path, MaxDocuments)
+		return &r, nil
 	}
 	var k map[string]any
 	if err := yaml.UnmarshalStrict(file.Data, &k); err != nil {
@@ -415,6 +424,9 @@ func (w *walker) findDeclaration(ctx context.Context, id identity) (declaration,
 				return declaration{}, new(needsIntervention(ReasonInputTooLarge,
 					"the build holds more than %d YAML documents", MaxDocuments)), nil
 			}
+			if refused, ok := errors.AsType[*gityaml.Error](err); ok {
+				return declaration{}, new(needsIntervention(ReasonFileNotReadable, "%s %v", p, refused)), nil
+			}
 			if err != nil {
 				r := needsIntervention(ReasonFileNotReadable, "%s is not valid YAML", p)
 				return declaration{}, &r, nil
@@ -477,27 +489,102 @@ func match(doc map[string]any, id identity) matchKind {
 // errTooManyDocuments is returned by documents.next when the document budget is spent.
 var errTooManyDocuments = errors.New("too many YAML documents")
 
+// errSeparator is returned by documents.read for a separator line with more than a comment after "---".
+var errSeparator = errors.New("invalid YAML document separator")
+
 // documents decodes a multi-document YAML file one document at a time, counting each against a budget of
 // MaxDocuments that may be shared by several files.
 type documents struct {
-	r       *utilyaml.YAMLReader
+	r       *bufio.Reader
 	decoded *int
+	// line is the number of lines read from the file so far.
+	line int
 }
 
-func newDocuments(data []byte, decoded *int) documents {
-	return documents{r: utilyaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(data))), decoded: decoded}
+func newDocuments(data []byte, decoded *int) *documents {
+	return &documents{r: bufio.NewReader(bytes.NewReader(data)), decoded: decoded}
+}
+
+// readLine returns the next line with "\n" after it, without its own "\n" or "\r\n", as
+// k8s.io/apimachinery's yaml.LineReader does, and counts it.
+func (d *documents) readLine() ([]byte, error) {
+	var b bytes.Buffer
+	isPrefix, err := true, error(nil)
+	for isPrefix && err == nil {
+		var l []byte
+		l, isPrefix, err = d.r.ReadLine()
+		b.Write(l)
+	}
+	b.WriteByte('\n')
+	d.line++
+	return b.Bytes(), err
+}
+
+// read returns the next document and the line of the file it starts at, split as k8s.io/apimachinery's
+// yaml.YAMLReader splits a file, so that a refusal can name the line of the file: at each line that starts
+// with "---" and holds at most a comment after it, which is dropped, except one before any other line of its
+// document, which is kept.
+func (d *documents) read() ([]byte, int, error) {
+	var buf bytes.Buffer
+	start := 0
+	for {
+		line, err := d.readLine()
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, 0, err
+		}
+		if rest, ok := bytes.CutPrefix(line, []byte("---")); ok {
+			if s := strings.TrimSpace(string(rest)); s != "" && s[0] != '#' {
+				return nil, 0, errSeparator
+			}
+			if buf.Len() != 0 {
+				return buf.Bytes(), start, nil
+			}
+			if err != nil {
+				return nil, 0, err
+			}
+		}
+		if err != nil {
+			if buf.Len() != 0 {
+				return buf.Bytes(), start, nil
+			}
+			return nil, 0, err
+		}
+		if buf.Len() == 0 {
+			start = d.line
+		}
+		buf.Write(line)
+	}
 }
 
 // next returns the next document, nil for one that is empty or holds only comments, io.EOF after the last,
-// errTooManyDocuments when the budget is spent, or another error when the file is not valid YAML. A
-// document is counted before it is decoded, so the one over the budget is never decoded. Duplicate keys are
-// an error, so a document cannot hide a second value for the same field.
-func (d documents) next() (map[string]any, error) {
-	raw, err := d.r.Read()
+// errTooManyDocuments when the budget is spent, a [*gityaml.Error] whose line is the file's for one
+// [gityaml.Objects] refuses, or another error when the file is not valid YAML. A document is counted before it
+// is checked or decoded, so the one over the budget is never decoded. It is checked before sigs.k8s.io/yaml
+// decodes it, since that parser replaces aliases by copies (#594); a document of more than MaxDocuments objects
+// (a List) is over the budget too, since the check does not read past it. Duplicate keys are an error, so a
+// document cannot hide a second value for the same field.
+//
+// The check builds a tree of the document that is dropped before sigs.k8s.io/yaml decodes it, so the two do
+// not add up: for a document of 1 MiB the peak heap stays that of the decode alone
+// (TestReadFieldPeakHeap).
+func (d *documents) next() (map[string]any, error) {
+	raw, start, err := d.read()
 	if err != nil {
 		return nil, err
 	}
 	if *d.decoded++; *d.decoded > MaxDocuments {
+		return nil, errTooManyDocuments
+	}
+	if n, err := gityaml.Objects(raw, MaxDocuments); err != nil {
+		e, ok := errors.AsType[*gityaml.Error](err)
+		if !ok {
+			return nil, err
+		}
+		if e.Line == 0 {
+			return nil, e
+		}
+		return nil, &gityaml.Error{Line: start + e.Line - 1, Err: e.Err}
+	} else if n > MaxDocuments {
 		return nil, errTooManyDocuments
 	}
 	var doc map[string]any
@@ -528,6 +615,9 @@ func ReadField(data []byte, target v1alpha1.ObjectRef, field Field) (value any, 
 		}
 		if errors.Is(err, errTooManyDocuments) {
 			return nil, false, fmt.Errorf("the file holds more than %d YAML documents", MaxDocuments)
+		}
+		if refused, ok := errors.AsType[*gityaml.Error](err); ok {
+			return nil, false, refused
 		}
 		if err != nil {
 			return nil, false, fmt.Errorf("the file is not valid YAML")

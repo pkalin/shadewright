@@ -351,6 +351,20 @@ func TestTargetFileOnTheTargetBranch(t *testing.T) {
 			wantStale(t, w.fresh(t), freshness.ReasonTargetFileChanged)
 		})
 	}
+	// A file the YAML check refuses is named as such, not as one that no longer declares the target (#594).
+	t.Run("the file now holds an anchor", func(t *testing.T) {
+		w := newWorld(t)
+		data := bytes.Replace(manifest("256Mi"), []byte("metadata:\n"), []byte("metadata: &m\n"), 1)
+		if _, err := w.git.Push("main", sourcePath, data); err != nil {
+			t.Fatal(err)
+		}
+		err := w.fresh(t)
+		wantStale(t, err, freshness.ReasonTargetFileChanged)
+		want := sourcePath + " on the target branch holds YAML that is refused: line 3: YAML anchors"
+		if se, _ := errors.AsType[*freshness.StaleError](err); !strings.HasPrefix(se.Message, want) {
+			t.Fatalf("message %q, want it to start with %q", se.Message, want)
+		}
+	})
 	t.Run("a change on the pull request branch alone is not looked at", func(t *testing.T) {
 		w := newWorld(t)
 		head, _ := w.git.BranchHead(context.Background(), "main")

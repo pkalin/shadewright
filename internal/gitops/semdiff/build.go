@@ -71,6 +71,7 @@ const (
 	kindComponent     = "Component"
 	apiKustomization  = "kustomize.config.k8s.io/v1beta1"
 	apiComponent      = "kustomize.config.k8s.io/v1alpha1"
+	keyKind           = "kind"
 	keyResources      = "resources"
 	keyComponents     = "components"
 	keyPatches        = "patches"

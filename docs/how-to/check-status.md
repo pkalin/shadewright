@@ -4,7 +4,7 @@ title: Check status with kubectl
 
 # Check status with kubectl
 
-`kubectl shadewright status` answers in one command what you would otherwise read from conditions by hand: which Incidents exist, whether each is due for analysis and why, what the last analysis decided, which requests it made with their policy decision and pull request, how much of the day's analysis budget is used, and whether the kill switch is on. It is a kubectl plugin: a separate binary that runs on your machine with your kubeconfig and your permissions. Nothing is installed in the cluster.
+`kubectl shadewright status` answers in one command what you would otherwise read from conditions by hand: which Incidents exist, whether each is due for analysis and why, what the last analysis decided, which requests it made with their policy decision and pull request, how much of the day's analysis budget is used, and whether the kill switch is on. `kubectl shadewright explain <name>` answers why one request is in its phase ([below](#explain-one-request)). It is a kubectl plugin: a separate binary that runs on your machine with your kubeconfig and your permissions. Nothing is installed in the cluster.
 
 ## Install
 
@@ -97,6 +97,45 @@ Namespace shadewright-system
 - **Kill switch** is `spec.paused` of `RemediationSettings` `default` ([pause and resume](pause-and-resume.md)).
 
 A setting or the budget that the plugin cannot read with your permissions, or that fails to read, is shown as unknown with the reason, never as "analysis stopped": it says nothing about what the analyzer can read; a list of Incidents or requests that fails stops the command with an error.
+
+## Explain one request
+
+```bash
+kubectl shadewright explain <request> -n shadewright-system
+kubectl shadewright explain <incident> -n shadewright-system      # each of its requests, newest first
+kubectl shadewright explain <request> -n shadewright-system -o json
+```
+
+The name is looked up as a RemediationRequest first, then as an Incident. The flags are those of `status` without `-A`. For a request it shows:
+
+```text
+Request rr-3f1c... in namespace shadewright-system
+  Phase:        NeedsIntervention, since 60s ago
+  Stopped by:   Approved False, BranchDiverged: <the condition's message>
+  Read more:    https://shadewright.io/troubleshooting/#pull-request-step
+  Incident:     incident-3f1c... (Deployment demo/web, OOMKilled, phase Proposed)
+  Action:       SetContainerMemoryLimit on Deployment demo/web, container app, 256Mi to 512Mi
+  Policy:       WithinApprovedBounds: Every check passed (policy default, revision default/3), approval required
+  Plan digest:  sha256:...
+  Source:       repository fleet, branch main, file apps/demo/deployment.yaml
+  Pull request: https://github.com/<owner>/<repo>/pull/12, head 4b825dc
+  Conditions, oldest first:
+    30m ago    PolicyAllowed=True WithinApprovedBounds: Every check passed
+    29m ago    PullRequestOpened=True PullRequestOpened: <message>
+    2m ago     Approved=False BranchDiverged: <message>
+
+Kill switch:  off: writes are allowed
+```
+
+- **Stopped by** is shown only in a phase that ends a request without a merge (`Denied`, `NeedsIntervention`, `Superseded`, `Expired`, `Cancelled`, `Failed`): the most recent condition that is not `True`, leaving out `WritesPaused` and `Queued`, which only hold a request back. **Read more** links to the section of [troubleshooting](../troubleshooting.md) whose table lists that reason. Table rows have no anchors of their own on this site, so the link goes to the section and you find the row by its reason. A reason listed in two sections links the one of its condition (on `PlanFresh`, [freshness](../troubleshooting.md#freshness)), else the first. A reason the page does not list links the page and says so.
+- **Policy** is the reason and message of `PolicyAllowed`, the policy and its generation the decision used (`status.policyRevision`) and whether a person must approve (`status.effectiveApprovalRequired`). **Action** shows the parameters the policy checked against its bounds: the previous and the desired value. The bounds themselves are in the `RemediationPolicy`, which the plugin does not read.
+- **Pull request** follows the link rule of `status` (below), with the head Shadewright recorded and, once merged, the merge commit.
+- **Replaces** and **Replaced by** are the two sides of a supersede handoff ([ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)), with the phase of each side; **Chain root** is `spec.chainRoot`.
+- **Incident** is the Incident the request names, shown only when its UID is the one in `spec.incidentRef`. Otherwise the line says why: not found, another Incident of that name, or not readable with your permissions.
+
+For an Incident, the output starts with the Incident (subject, reason, phase and the last analysis), then each request whose `spec.incidentRef` names it by name and UID, newest first. The JSON output holds the same fields: `kind` (`RemediationRequest` or `Incident`), `incident`, `incidentState`, `settings` and `requests`, each request with `stop` (`condition`, `status`, `reason`, `message`, `link`, `listed`) and `conditions`, oldest first.
+
+`explain` reads the request, its Incident and `RemediationSettings` with `get`, and for an Incident lists the requests of its namespace: reads the Role under [permissions](#permissions) already grants. It calls neither the Git host nor a model.
 
 ## What it does not do
 

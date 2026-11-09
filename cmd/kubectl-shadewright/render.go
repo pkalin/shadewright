@@ -30,9 +30,9 @@ import (
 	"github.com/pkalin/shadewright/internal/incidents"
 )
 
-// renderJSON writes the report as indented JSON. Its strings were cleaned in collect; the encoder also
-// escapes what remains of HTML and the line separators.
-func renderJSON(w io.Writer, r *Report) error {
+// renderJSON writes a report or an explanation as indented JSON. Its strings were cleaned in collect or explain;
+// the encoder also escapes what remains of HTML and the line separators.
+func renderJSON(w io.Writer, r any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(r)

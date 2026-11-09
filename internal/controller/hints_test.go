@@ -38,6 +38,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -924,5 +926,63 @@ func TestCommentCursorRoundTrip(t *testing.T) {
 	got = cursorOf(cursorStatus(providers.FeedbackCursor{Since: at.Add(900 * time.Millisecond)}))
 	if !got.Since.Equal(at) {
 		t.Errorf("since %v, want %v", got.Since, at)
+	}
+}
+
+// slowCommentsGit is a provider whose comment list answers only when its context ends.
+type slowCommentsGit struct{ *fakegit.Git }
+
+func (g *slowCommentsGit) ListComments(ctx context.Context, _ int64, _ providers.FeedbackCursor) (
+	providers.FeedbackPage, error) {
+	<-ctx.Done()
+	return providers.FeedbackPage{}, ctx.Err()
+}
+
+// A look at the comments that keeps using up its deadline must not keep an overdue hint Pending: the answers,
+// the kill switch read and the status update get a deadline of their own. The interceptors refuse a call on an
+// ended context, as the real client does.
+func TestSlowCommentsDoNotStarveHintAnswers(t *testing.T) {
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	r, rr := answerFixture(t, now.Add(-2*HintAnswerTimeout), "")
+	rr.Status.Phase = remediationv1alpha1.PhaseAwaitingApproval
+	rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: 1}
+	refuseEnded := interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+			opts ...client.GetOption) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	}
+	c := clientfake.NewClientBuilder().WithScheme(r.APIReader.(client.Client).Scheme()).
+		WithStatusSubresource(rr).WithObjects(rr, fx.RemediationSettings()).
+		WithInterceptorFuncs(refuseEnded).Build()
+	r.Client, r.APIReader = c, c
+	r.ReviewerHints = true
+	r.WriteTimeout = 20 * time.Millisecond
+	r.Now = func() time.Time { return now }
+	look := hintLook{git: &gatedGit{git: &slowCommentsGit{Git: fakegit.NewGit(mainBranch, nil)}},
+		host: remediationv1alpha1.GitProviderGitHub}
+	for range 2 {
+		// The reconcile's own context; the guard only keeps a broken build from hanging.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		r.watchHints(ctx, look, rr)
+		cancel()
+	}
+	stored := &remediationv1alpha1.RemediationRequest{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(rr), stored); err != nil {
+		t.Fatal(err)
+	}
+	if h := stored.Status.Hints[0]; h.State != remediationv1alpha1.HintDeclined || h.Reason != ReasonHintNoAnswer {
+		t.Fatalf("overdue hint stayed %s (%q) after slow looks at the comments; want Declined/NoAnswer", h.State,
+			h.Reason)
 	}
 }

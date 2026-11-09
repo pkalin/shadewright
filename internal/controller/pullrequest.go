@@ -950,7 +950,7 @@ const (
 // to AwaitingApproval. On an error the caller goes on to the freshness check, which owns the handling of
 // paused writes, changed settings and provider failures; the error is returned with prUnchecked, so a delay the
 // host asked for is kept. Delivery after the merge is a later step (#94, #95). Unless the request ended or its
-// pull request is closed, the reviewer hints are handled next, within a deadline of their own (watchHints):
+// pull request is closed, the reviewer hints are handled next, within deadlines of their own (pollHints):
 // the comments only when the look found the pull request waiting for review, the answers of Pending hints and
 // their timeout always.
 func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
@@ -966,10 +966,8 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 		return prClosed, nil
 	}
 	if ctx.Err() == nil {
-		// A deadline of their own: a slow check of the pull request does not leave them its remainder.
-		hintCtx, cancelHints := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
-		r.watchHints(hintCtx, look, rr)
-		cancelHints()
+		// Deadlines of their own (pollHints): a slow check of the pull request does not leave them its remainder.
+		r.watchHints(ctx, look, rr)
 	}
 	if err != nil {
 		logf.FromContext(ctx).V(1).Info("Could not check the pull request of RemediationRequest",

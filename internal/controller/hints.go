@@ -151,9 +151,9 @@ type hintLook struct {
 	host remediationv1alpha1.GitProviderType
 }
 
-// watchHints runs pollHints after each look at the pull request of a request that may still be reviewed. A
-// failure is logged and changes nothing: the watch of the pull request goes on, and the next look tries again
-// from the stored cursor.
+// watchHints runs pollHints after each look at the pull request of a request that may still be reviewed, with
+// the reconcile's context (pollHints bounds its steps itself). A failure is logged and changes nothing: the
+// watch of the pull request goes on, and the next look tries again from the stored cursor.
 func (r *RemediationRequestReconciler) watchHints(ctx context.Context, look hintLook,
 	rr *remediationv1alpha1.RemediationRequest) {
 	if err := r.pollHints(ctx, look, rr); err != nil {
@@ -164,31 +164,38 @@ func (r *RemediationRequestReconciler) watchHints(ctx context.Context, look hint
 
 // pollHints is one look at the comments of rr's pull request, when look has a provider and reviewer hints are
 // on, and the answers of its Pending hints (with their timeout) in any case, written in one status update. rr
-// is updated in place only when that write succeeded.
+// is updated in place only when that write succeeded. ctx is the reconcile's context: the look and the rest
+// (the answers, the kill switch read and the status update) each get a deadline of their own
+// (WriteTimeout), so a look at the comments that keeps using up its deadline never keeps an overdue hint
+// Pending.
 func (r *RemediationRequestReconciler) pollHints(ctx context.Context, look hintLook,
 	rr *remediationv1alpha1.RemediationRequest) error {
 	now := r.now()
 	upd := rr.DeepCopy()
 	var lookErr error
 	if source, fs, ok := r.feedbackFor(look, rr); ok {
+		lookCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 		cur := cursorOf(upd.Status.CommentCursor)
-		page, err := fs.ListComments(ctx, upd.Status.PullRequest.Number, cur)
+		page, err := fs.ListComments(lookCtx, upd.Status.PullRequest.Number, cur)
 		if err != nil {
 			lookErr = fmt.Errorf("list the comments of the pull request: %w", err)
 		} else {
-			lookErr = r.lookComments(ctx, fs, upd, source, cur, page, now)
+			lookErr = r.lookComments(lookCtx, fs, upd, source, cur, page, now)
 		}
+		cancel()
 	}
-	r.answerHints(ctx, upd, now)
+	storeCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
+	defer cancel()
+	r.answerHints(storeCtx, upd, now)
 	if equality.Semantic.DeepEqual(rr.Status, upd.Status) {
 		return lookErr
 	}
 	// The kill switch covers this status write too (ADR-0028 section 4): while writes are paused, nothing is
 	// stored, and the next look after the pause makes the same decisions.
-	if err := r.writeAllowed(ctx); err != nil {
+	if err := r.writeAllowed(storeCtx); err != nil {
 		return errors.Join(lookErr, fmt.Errorf("store reviewer hints: %w", err))
 	}
-	if err := r.Status().Update(ctx, upd); err != nil {
+	if err := r.Status().Update(storeCtx, upd); err != nil {
 		return errors.Join(lookErr, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace,
 			rr.Name, err))
 	}

@@ -266,7 +266,7 @@ Fix for all: make the build plain, so the one value is declared once and nothing
 
 ### A build over the budget
 
-The render runs in the executor, inside its 128 Mi memory limit, so the build of one Flux Kustomization path may hold at most 4 MiB of input and 1,024 objects ([design 8.2.2](design/8-gitops-on-github.md#822-steps-4-and-5-the-semantic-diff-check)). Input counts with repetition: every path to a directory adds its kustomization file and the files it lists, so a 1 MiB base under four overlays counts 4 MiB. The YAML documents of the resource and patch files (and inline patches) count the same way, at most 4,096, so that many small objects are refused before kustomize builds them; the 1,024 objects are counted on the render's output. The limits are fixed in the code; nothing in the settings raises them.
+The render runs in the executor, inside its memory limit (256 Mi since #615; the limits below were measured against 128 Mi and stay the bound), so the build of one Flux Kustomization path may hold at most 4 MiB of input and 1,024 objects ([design 8.2.2](design/8-gitops-on-github.md#822-steps-4-and-5-the-semantic-diff-check)). Input counts with repetition: every path to a directory adds its kustomization file and the files it lists, so a 1 MiB base under four overlays counts 4 MiB. The YAML documents of the resource and patch files (and inline patches) count the same way, at most 4,096, so that many small objects are refused before kustomize builds them; the 1,024 objects are counted on the render's output. The limits are fixed in the code; nothing in the settings raises them.
 
 What the request shows (no Event is recorded for either case):
 

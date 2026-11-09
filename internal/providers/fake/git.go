@@ -53,6 +53,8 @@ type Git struct {
 	crs      []*providers.ChangeRequest
 	auto     map[int64]bool
 	comments map[int64][]string
+	// fb is the feedback of the change requests (feedback.go), guarded by mu.
+	fb feedbackStore
 }
 
 // NewGit returns a repository whose branch base, its target branch, has one commit holding files.

@@ -136,6 +136,11 @@ type RemediationRequestReconciler struct {
 	// so a merge or a close is seen within it. Zero means [DefaultPullRequestPollInterval]; SetupWithManager
 	// refuses a value outside [MinPullRequestPollInterval, MaxPullRequestPollInterval].
 	PullRequestPollInterval time.Duration
+	// ReviewerHints turns on the reading of reviewer hints from the comments of a waiting pull request
+	// (hints.go, ADR-0028). It is off by default, and cmd/main.go does not turn it on yet: a stored hint makes
+	// the analyzer propose a replacement, which only the supersede handoff (#539) and the merge gate (ADR-0028
+	// section 5) may take over the pull request with.
+	ReviewerHints bool
 
 	// admitMu makes the check of the limits and the status write that lets a request through the policy check
 	// one step, so two workers can never both take the last slot or the same target.

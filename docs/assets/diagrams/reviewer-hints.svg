@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 620" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Shadewright reviewer hints</title>
-  <desc id="d">Mostly planned. A reviewer with write access comments on the pull request at the code host. The executor, through its GitProvider adapter and a narrow FeedbackSource interface, reads the comment, checks the author's permission in the code host, redacts and bounds the text and pins it into the status of the RemediationRequest, which only the executor writes. The analyzer reads the pinned hint, analyzes again with the hint as a fenced reviewer-input section, and proposes a new RemediationRequest that names the one it replaces. The executor takes the existing pull request and branch over to the new request, adds one commit to the same branch, creates the required check run shadewright/review, which only an approval of the latest head from someone who wrote no hint can satisfy, and replies in the same pull request. Integrations other than the code host (on-call tools, chat, inbound alerts) belong to a future shadewright-coordinator with one credential per integration; how its hints reach the status is decided in its own ADR. A hint never authorizes anything: the policy still decides. Built: the analyzer's part (it reads a pinned hint, analyzes with it fenced and proposes the replacement); the rest is planned.</desc>
+  <desc id="d">Mostly planned. A reviewer with write access comments on the pull request at the code host. The executor, through its GitProvider adapter and a narrow FeedbackSource interface, reads the comment, checks the author's permission in the code host, redacts and bounds the text and pins it into the status of the RemediationRequest, which only the executor writes. The analyzer reads the pinned hint, analyzes again with the hint as a fenced reviewer-input section, and proposes a new RemediationRequest that names the one it replaces. The executor takes the existing pull request and branch over to the new request, adds one commit to the same branch, creates the required check run shadewright/review, which only an approval of the latest head from someone who wrote no hint can satisfy, and replies in the same pull request. Integrations other than the code host (on-call tools, chat, inbound alerts) belong to a future shadewright-coordinator with one credential per integration; how its hints reach the status is decided in its own ADR. A hint never authorizes anything: the policy still decides. Built: the adapter's reads of comments and permission, the executor's hint intake (permission, redaction, bounds, pin; off by default until the handoff and the merge gate exist) and the analyzer's part (it reads a pinned hint, analyzes with it fenced and proposes the replacement); the rest is planned.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
@@ -58,14 +58,13 @@
   <text class="s" x="58" y="358">no hint author counts</text>
 
   <!-- executor row -->
-  <rect class="pl" x="284" y="110" width="220" height="84" rx="10"/>
-  <text class="pn" x="492" y="126" text-anchor="end">planned</text>
+  <rect class="box" x="284" y="110" width="220" height="84" rx="10"/>
   <text class="h" x="298" y="146">GitProvider adapter</text>
   <text class="s" x="298" y="166">FeedbackSource: comments,</text>
-  <text class="s" x="298" y="182">permission, reply</text>
+  <text class="s" x="298" y="182">permission; reply planned</text>
 
-  <rect class="pl" x="540" y="110" width="220" height="84" rx="10"/>
-  <text class="pn" x="748" y="126" text-anchor="end">planned</text>
+  <rect class="box" x="540" y="110" width="220" height="84" rx="10"/>
+  <text class="pn" x="748" y="126" text-anchor="end">off by default</text>
   <text class="h" x="554" y="146">Hint intake</text>
   <text class="s" x="554" y="166">permission · redact · bound</text>
   <text class="s" x="554" y="182">pin by ID, digest, time</text>

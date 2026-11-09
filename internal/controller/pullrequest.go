@@ -162,31 +162,38 @@ func (r *RemediationRequestReconciler) now() time.Time {
 // or the same errors as closeChangeRequest.
 func (r *RemediationRequestReconciler) openPlanRepository(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	providers.GitProvider, error) {
+	git, _, err := r.openPlanRepositoryOf(ctx, rr)
+	return git, err
+}
+
+// openPlanRepositoryOf is openPlanRepository that also returns the type of the provider that hosts it.
+func (r *RemediationRequestReconciler) openPlanRepositoryOf(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) (providers.GitProvider, remediationv1alpha1.GitProviderType, error) {
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err):
-		return nil, errRepositoryGone
+		return nil, "", errRepositoryGone
 	case err != nil:
-		return nil, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
+		return nil, "", fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 	}
 	if freshness.Paused(settings) {
-		return nil, freshness.ErrPaused
+		return nil, "", freshness.ErrPaused
 	}
 	repo, ok := freshness.FindRepository(settings, rr.Status.PlanRepository)
 	if !ok {
-		return nil, errRepositoryGone
+		return nil, "", errRepositoryGone
 	}
 	if src := rr.Status.Source; src == nil || repo.TargetBranch != src.TargetBranch {
-		return nil, errTargetBranchChanged
+		return nil, "", errTargetBranchChanged
 	}
 	git, err := r.openRepository(ctx, repo)
 	if providers.IsInvalidConfig(err) {
-		return nil, freshness.ErrRepositoryUnusable
+		return nil, "", freshness.ErrRepositoryUnusable
 	}
 	if err != nil {
-		return nil, freshness.WrapProvider("open the repository", err)
+		return nil, "", freshness.WrapProvider("open the repository", err)
 	}
-	return git, nil
+	return git, repo.Provider, nil
 }
 
 // advance runs the pull request step for a fresh request in PolicyChecked, PRCreated or AwaitingApproval. It
@@ -971,7 +978,7 @@ func (r *RemediationRequestReconciler) rejected(ctx context.Context, rr *remedia
 }
 
 func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	git, err := r.openPlanRepository(ctx, rr)
+	git, host, err := r.openPlanRepositoryOf(ctx, rr)
 	if err != nil {
 		return err
 	}
@@ -995,6 +1002,8 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		return errClosed
 	}
 	if rr.Status.Phase != remediationv1alpha1.PhasePRCreated {
+		// Open, with the head Shadewright pushed: reviewer hints are read now (AwaitingApproval only).
+		r.watchHints(ctx, git, host, rr)
 		return nil
 	}
 	r.setPhase(rr, remediationv1alpha1.PhaseAwaitingApproval)

@@ -112,6 +112,10 @@
         "image"
       ],
       "properties": {
+        "replicas": {
+          "type": "integer",
+          "minimum": 1
+        },
         "image": {
           "$ref": "#/definitions/image"
         },
@@ -168,6 +172,10 @@
         "image"
       ],
       "properties": {
+        "replicas": {
+          "type": "integer",
+          "minimum": 1
+        },
         "image": {
           "$ref": "#/definitions/image"
         },

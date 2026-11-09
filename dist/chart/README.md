@@ -69,6 +69,23 @@ settings:
       integrations: [flux]
 ```
 
+## Standby replicas
+
+Both Deployments run one Pod by default. `executor.replicas` and `analyzer.replicas` (each at least 1) add warm standbys:
+
+```yaml
+executor:
+  replicas: 2
+analyzer:
+  replicas: 2
+```
+
+- **What a standby gives.** Leader election is always on, so one Pod per component holds the Lease and works; the others wait. When the leader's Pod fails or is evicted, a standby takes over after about one Lease duration (15 seconds by default) instead of after a Pod start. Writes use optimistic concurrency and deterministic names, so a second Pod is safe.
+- **What it costs.** An idle Pod per component and identity (its requests and limits, and one more node slot).
+- **What it does not give.** No throughput: only the leader reconciles. Horizontal scaling is a separate feature ([#559](https://github.com/pkalin/shadewright/issues/559)).
+- **What the chart adds above 1.** A PodDisruptionBudget with `minAvailable: 1` for that component, and a preferred Pod anti-affinity by node (`kubernetes.io/hostname`), so a node drain or a node failure leaves one Pod. With a single node both Pods share it. An `affinity` of your own that sets `podAntiAffinity` replaces the chart's term. With 1 replica neither object is rendered.
+- **No RBAC change.** Each component already holds the grant for its own Lease.
+
 ## Network policy
 
 On by default (`networkPolicy.enabled: true`). The chart installs a default deny for the release namespace (ingress and egress), one egress policy per component and one ingress policy for the metrics port:
@@ -184,17 +201,11 @@ helm uninstall shadewright --namespace shadewright-system
 |-----|------|---------|-------------|
 | rbac.helpers.enabled | bool | `false` | Install admin, editor and viewer ClusterRoles for each custom resource. Shadewright does not use them, they are for your people. Off by default (least privilege). |
 
-### Identity
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| executor.identity.azure.clientId | string | empty (no identity) | Client ID (a UUID, not a secret) of the executor's Azure managed identity for workload identity. Sets the ServiceAccount annotation `azure.workload.identity/client-id` and the Pod label `azure.workload.identity/use`. Empty sets neither: the executor then cannot sign for the GitHub App, so a request that reaches the Git step is retried quietly and stays Pending. Must differ from the analyzer's, or the chart refuses to render (separate identities, never one for both). |
-| analyzer.identity.azure.clientId | string | empty (no identity) | Client ID (a UUID, not a secret) of the analyzer's Azure managed identity, for the analyzer's Entra ID tokens: the model call (Cognitive Services audience) and, with `analyzer.analysis.recordStore.azureBlob.account`, the analysis records (Storage audience). Sets the ServiceAccount annotation `azure.workload.identity/client-id` and the Pod label `azure.workload.identity/use`. Needed when `analyzer.analysis.triageModel` is set; leave it empty otherwise. It must differ from the executor's or the chart refuses to render (separate identities, never one for both). |
-
 ### Executor
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| executor.replicas | int | `1` | Number of Pods. 1 (the default) runs the one Pod. Above 1 the extra Pods are warm standbys: leader election keeps one of them active and the others idle, and when the leader's Pod fails a standby takes over after about one Lease duration (15 seconds by default). A standby costs an idle Pod and adds no throughput. Above 1 the chart also renders a PodDisruptionBudget (`minAvailable: 1`) and a preferred Pod anti-affinity by node, unless `affinity` sets `podAntiAffinity` itself. |
 | executor.serviceAccount.annotations | object | `{}` | Further ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `executor.identity.azure.clientId`. |
 | executor.resources.limits.cpu | string | `"500m"` | CPU limit (optional; removing it with `null` lets the container use idle CPU). |
 | executor.resources.limits.memory | string | `"128Mi"` | Memory limit. Required by the schema (a `null` override is refused), so the container's memory is never unbounded. |
@@ -211,10 +222,18 @@ helm uninstall shadewright --namespace shadewright-system
 | executor.priorityClassName | string | `""` | Priority class of the Pod. Empty uses the cluster default. |
 | executor.imagePullSecrets | list | `[]` | Image pull secrets of this component only, added to the global `imagePullSecrets`, a list of `{name: <secret>}` (at most 16). |
 
+### Identity
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| executor.identity.azure.clientId | string | empty (no identity) | Client ID (a UUID, not a secret) of the executor's Azure managed identity for workload identity. Sets the ServiceAccount annotation `azure.workload.identity/client-id` and the Pod label `azure.workload.identity/use`. Empty sets neither: the executor then cannot sign for the GitHub App, so a request that reaches the Git step is retried quietly and stays Pending. Must differ from the analyzer's, or the chart refuses to render (separate identities, never one for both). |
+| analyzer.identity.azure.clientId | string | empty (no identity) | Client ID (a UUID, not a secret) of the analyzer's Azure managed identity, for the analyzer's Entra ID tokens: the model call (Cognitive Services audience) and, with `analyzer.analysis.recordStore.azureBlob.account`, the analysis records (Storage audience). Sets the ServiceAccount annotation `azure.workload.identity/client-id` and the Pod label `azure.workload.identity/use`. Needed when `analyzer.analysis.triageModel` is set; leave it empty otherwise. It must differ from the executor's or the chart refuses to render (separate identities, never one for both). |
+
 ### Analyzer
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| analyzer.replicas | int | `1` | Number of Pods. 1 (the default) runs the one Pod. Above 1 the extra Pods are warm standbys: leader election keeps one of them active and the others idle, and when the leader's Pod fails a standby takes over after about one Lease duration (15 seconds by default). A standby costs an idle Pod and adds no throughput. Above 1 the chart also renders a PodDisruptionBudget (`minAvailable: 1`) and a preferred Pod anti-affinity by node, unless `affinity` sets `podAntiAffinity` itself. |
 | analyzer.watchNamespaces | list | empty (no namespace) | Unique namespace names, at most 256. The analyzer reads events, Pods and workloads only in these namespaces: the chart passes them as `--watch-namespaces` and binds the read-only watch ClusterRole with one RoleBinding in each (`kube-system` included only if you list it). Empty (the default) watches no namespace, never all of them: the analyzer starts, is Ready and records no Incident, and no RoleBinding is created. `*` is refused. |
 | analyzer.maxIncidents | string | null (the binary's default, 500) | Most Incidents kept in the operator namespace (`--max-incidents`), 1 or more. Null (unset) keeps the binary's default of 500. |
 | analyzer.podLogs.enabled | bool | `true` | Give the analyzer the pod logs source (`--pod-logs`) and its grant: `get` on `pods/log` in the watch ClusterRole, bound only in the watched namespaces. `false` passes `--pod-logs=false` and renders no `pods/log` rule. With more than 256 watched namespaces the analyzer refuses to start unless this is `false`. |

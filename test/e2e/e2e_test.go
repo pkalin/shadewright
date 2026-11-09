@@ -222,6 +222,68 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 		})
 
+		// A standby (chart value executor.replicas above 1, issue 568) is a second Pod of the same Deployment: one
+		// holds the Lease, and when the leader's Pod is deleted the other takes it over. The suite deploys with
+		// kustomize, so the Deployment is scaled here; the Lease logic is the same.
+		It("should let a standby executor take over the Lease when the leader Pod is deleted", func() {
+			const lease = "shadewright-executor-leader-election"
+			holder := func(g Gomega) string {
+				cmd := exec.Command("kubectl", "get", "lease", lease, "-n", namespace,
+					"-o", "jsonpath={.spec.holderIdentity}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty(), "nobody holds "+lease)
+				return output
+			}
+			scale := func(replicas int) {
+				cmd := exec.Command("kubectl", "scale", "deployment/shadewright-executor", "-n", namespace,
+					fmt.Sprintf("--replicas=%d", replicas))
+				_, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
+			}
+			// Always leave one replica for the tests that follow.
+			DeferCleanup(func() {
+				scale(1)
+				Eventually(func(g Gomega) {
+					cmd := exec.Command("kubectl", "get", "deployment", "shadewright-executor", "-n", namespace,
+						"-o", "jsonpath={.status.replicas}/{.status.readyReplicas}")
+					output, err := utils.Run(cmd)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(output).To(Equal("1/1"))
+				}, 2*time.Minute, time.Second).Should(Succeed())
+			})
+
+			By("scaling the executor to two replicas and waiting for both to be Ready")
+			scale(2)
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "shadewright-executor", "-n", namespace,
+					"-o", "jsonpath={.status.readyReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("2"))
+			}, 3*time.Minute, time.Second).Should(Succeed())
+
+			By("finding the Pod that holds the Lease (the holder identity is <pod name>_<uuid>)")
+			var leader, leaderPod string
+			Eventually(func(g Gomega) {
+				leader = holder(g)
+				leaderPod = strings.SplitN(leader, "_", 2)[0]
+				g.Expect(leaderPod).To(ContainSubstring("shadewright-executor"))
+			}).Should(Succeed())
+
+			By("deleting the leader Pod")
+			cmd := exec.Command("kubectl", "delete", "pod", leaderPod, "-n", namespace, "--wait=false")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the standby to hold the Lease")
+			Eventually(func(g Gomega) {
+				now := holder(g)
+				g.Expect(now).NotTo(Equal(leader), "the Lease is still held by the deleted Pod")
+				g.Expect(strings.SplitN(now, "_", 2)[0]).NotTo(Equal(leaderPod))
+			}, 2*time.Minute, time.Second).Should(Succeed())
+		})
+
 		It("should ensure the metrics endpoint is serving metrics", func() {
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
 			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,

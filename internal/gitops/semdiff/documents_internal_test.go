@@ -24,6 +24,8 @@ import (
 	"unicode/utf16"
 
 	"sigs.k8s.io/kustomize/api/provider"
+
+	"github.com/pkalin/shadewright/internal/gitops/gityaml"
 )
 
 // kustomizeObjects returns how many objects kustomize reads from data, or false when it refuses it.
@@ -165,6 +167,17 @@ func TestDocumentsRefuseTooManyNodes(t *testing.T) {
 	}
 }
 
+// A mapping of more than gityaml.MaxMappingKeys keys is refused with TooLarge before kustomize decodes it, whose
+// duplicate key check is quadratic in the keys of one mapping (#608).
+func TestDocumentsRefuseWideMapping(t *testing.T) {
+	in := []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: big\ndata:\n" +
+		strings.Repeat("  k:\n", gityaml.MaxMappingKeys+1))
+	_, err := documents("f.yaml", in)
+	if !errors.Is(err, ErrTooLarge) || !strings.Contains(err.Error(), "f.yaml line 6: a mapping holds more than 2048 keys") {
+		t.Fatalf("documents: %v, want TooLarge naming the file, the line and the keys", err)
+	}
+}
+
 func TestDocumentsStopAtTheBudget(t *testing.T) {
 	for name, in := range map[string]string{
 		"separators": strings.Repeat("\n---", 3*MaxBuildDocuments),
@@ -181,8 +194,8 @@ func TestDocumentsStopAtTheBudget(t *testing.T) {
 	}
 }
 
-// FuzzDocuments checks that documents never panics, refuses only with InvalidYAML or, for too many YAML nodes,
-// TooLarge, and never counts fewer
+// FuzzDocuments checks that documents never panics, refuses only with InvalidYAML or, for too many YAML nodes
+// or keys in one mapping, TooLarge, and never counts fewer
 // objects than kustomize reads from bytes it accepts. Every input reaches kustomize: anchors are refused, so
 // nothing accepted expands.
 func FuzzDocuments(f *testing.F) {
@@ -196,8 +209,10 @@ func FuzzDocuments(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		got, err := documents("f.yaml", data)
 		if err != nil {
-			if !errors.Is(err, ErrInvalidYAML) && (!errors.Is(err, ErrTooLarge) || !strings.Contains(err.Error(), "YAML nodes")) {
-				t.Fatalf("documents(%q): %v, want only InvalidYAML or TooLarge for the nodes", data, err)
+			if !errors.Is(err, ErrInvalidYAML) && (!errors.Is(err, ErrTooLarge) ||
+				!strings.Contains(err.Error(), gityaml.ErrTooManyNodes.Error()) &&
+					!strings.Contains(err.Error(), gityaml.ErrTooManyKeys.Error())) {
+				t.Fatalf("documents(%q): %v, want only InvalidYAML or TooLarge for the nodes or keys", data, err)
 			}
 			return
 		}

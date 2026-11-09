@@ -227,6 +227,43 @@ func TestResolveRefusesDenseYAML(t *testing.T) {
 	}
 }
 
+// A mapping of more than gityaml.MaxMappingKeys keys is refused with InputTooLarge, in kustomization files and
+// manifests alike, as the patcher and the render refuse it (#608).
+func TestResolveRefusesWideMapping(t *testing.T) {
+	keys := strings.Repeat("  k:\n", gityaml.MaxMappingKeys+1)
+	tests := []struct {
+		name   string
+		change func(f *fixture)
+		file   string
+	}{
+		{"a manifest", func(f *fixture) {
+			f.files[soFile] = scaledObjectYAML + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: big\n" +
+				"  namespace: orders\ndata:\n" + keys
+		}, soFile},
+		{"a kustomization file", func(f *fixture) {
+			f.files[ksFile] = "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n" +
+				"resources:\n  - scaledobject.yaml\n  - ./deployment.yaml\nmetadata:\n" + keys
+		}, ksFile},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture()
+			tc.change(f)
+			res, _, err := f.run(t)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if res.Outcome != sourcemap.NeedsIntervention || res.Reason != sourcemap.ReasonInputTooLarge {
+				t.Fatalf("result = %s/%s (%s), want NeedsIntervention/InputTooLarge", res.Outcome, res.Reason, res.Message)
+			}
+			if !strings.HasPrefix(res.Message, tc.file+" line ") || !strings.HasSuffix(res.Message, gityaml.ErrTooManyKeys.Error()) {
+				t.Fatalf("message %q, want the file, a line and the keys", res.Message)
+			}
+			sameWithCache(t, tc.change, res)
+		})
+	}
+}
+
 // ReadField refuses a document of 1 MiB packed with nodes before any tree of it is built, and reads the largest
 // document the node count accepts within a quarter of the executor's memory (#595). Before, the 1 MiB document
 // was decoded.

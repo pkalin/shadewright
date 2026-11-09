@@ -59,7 +59,19 @@ var (
 	ErrDirective = errors.New("YAML directives (lines starting with %) are not supported")
 	// ErrTooManyNodes is input of more than MaxNodes YAML nodes, as [Nodes] counts them.
 	ErrTooManyNodes = fmt.Errorf("holds more than %d YAML nodes", MaxNodes)
+	// ErrTooManyKeys is a mapping of more than MaxMappingKeys keys.
+	ErrTooManyKeys = fmt.Errorf("a mapping holds more than %d keys", MaxMappingKeys)
 )
+
+// MaxMappingKeys is the most keys [Objects] accepts in one YAML mapping. The parsers that decode a file after
+// the check into Go values, go.yaml.in/yaml/v3 in the patcher and kustomize's fork of it in the render, look
+// for a duplicate key by comparing each key with every key after it in the same mapping, so the time is
+// quadratic in the keys of one mapping: a mapping of 43,000 keys, within MaxNodes, took 4.3 s in the patcher's
+// decode and 6.3 s in a render, about ten times that under the race detector (#608). At 2,048 keys the decode
+// still costs about what it costs per key at 1,024 (6 ms for the patcher's decode, 13 ms for a render), so the
+// work stays about linear in the input; the largest mapping in about 500 real manifests over 20 KB, CRDs
+// included, held 76 keys.
+const MaxMappingKeys = 2048
 
 // Error is a refusal of [Objects]: its cause and the line of the file it is at, counted from 1, or 0 when it
 // is about the whole file.
@@ -125,6 +137,9 @@ func Parts(data []byte) []Part {
 //   - input of more than [MaxNodes] YAML nodes as [Nodes] counts them, before any part is decoded: a parser
 //     builds the whole tree of a document before anything looks at it, so a dense document of 1 MiB would
 //     take more heap than the executor has (#595);
+//   - a mapping of more than [MaxMappingKeys] keys, found in the node tree of each part before anything
+//     decodes it into Go values: the duplicate key check of those decoders is quadratic in the keys of one
+//     mapping, so a mapping of tens of thousands of keys held the CPU for seconds (#608);
 //   - a part that does not parse, which kustomize could not build either.
 //
 // Each part between separators is decoded as kustomize decodes it, and every document in it counts: 1 for a
@@ -216,30 +231,34 @@ func objectsIn(part string, limit int) (int, *Error) {
 			}
 			return 0, &Error{Line: l, Err: ErrNotParse}
 		}
-		if a := anchored(&doc); a != nil {
-			return 0, &Error{Line: a.Line, Err: ErrAnchor}
+		if a, cause := refused(&doc); a != nil {
+			return 0, &Error{Line: a.Line, Err: cause}
 		}
 		n = min(n+listObjects(&doc, limit), limit+1)
 	}
 	return max(n, 1), nil
 }
 
-// anchored returns the first node below n that has an anchor, is an alias, or is a merge key: a mapping key
-// with the merge tag (a plain "<<" has it too) or a "<<" key however quoted, or nil. A "<<" value is plain
-// text: only a key merges.
-func anchored(n *yaml.Node) *yaml.Node {
+// refused returns the first node below n that the check refuses, in document order, and the cause, or nil:
+// a node that has an anchor, is an alias, or is a merge key (a mapping key with the merge tag, which a plain
+// "<<" has too, or a "<<" key however quoted), with [ErrAnchor]; a mapping of more than [MaxMappingKeys] keys
+// with [ErrTooManyKeys]. A "<<" value is plain text: only a key merges.
+func refused(n *yaml.Node) (*yaml.Node, error) {
 	if n.Anchor != "" || n.Kind == yaml.AliasNode {
-		return n
+		return n, ErrAnchor
+	}
+	if n.Kind == yaml.MappingNode && len(n.Content) > 2*MaxMappingKeys {
+		return n, ErrTooManyKeys
 	}
 	for i, c := range n.Content {
 		if n.Kind == yaml.MappingNode && i%2 == 0 && (c.ShortTag() == "!!merge" || c.Kind == yaml.ScalarNode && c.Value == "<<") {
-			return c
+			return c, ErrAnchor
 		}
-		if a := anchored(c); a != nil {
-			return a
+		if a, cause := refused(c); a != nil {
+			return a, cause
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // listObjects counts the objects kustomize may make of n, which holds no alias (kustomize api

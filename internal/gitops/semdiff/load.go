@@ -98,5 +98,8 @@ func Load(ctx context.Context, git providers.GitProvider, commit, dir string) (m
 	if err := w.walk(ctx, root, kindKustomization, 0); err != nil {
 		return nil, err
 	}
+	if err := w.checkGrowth(); err != nil {
+		return nil, err
+	}
 	return w.files, nil
 }

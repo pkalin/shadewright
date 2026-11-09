@@ -123,6 +123,13 @@ type walker struct {
 	buildDocs     int
 	// docs caches the documents of each file read ([documents]).
 	docs map[string]int
+	// shapes caches the shape of each file read ([shapeOf]); shape, coef, patchBytes and patchShape add up, with
+	// repetition per visit, what [MaxTransformBytes] bounds ([growth]).
+	shapes     map[string]*shape
+	shape      shape
+	coef       coef
+	patchBytes int
+	patchShape shape
 	// generate, when set, lists directories so that root, the path rendered, may have no kustomization file:
 	// the walk then generates the one Flux would (Load only; Check finds it in the files it is given).
 	generate repopath.Lister
@@ -143,13 +150,31 @@ type refs struct {
 	bytes   int
 	// docs is what one visit adds to the documents of the build: those of its files and inline patches.
 	docs int
+	// coef is what its transformers copy per place; inline are its inline patches without a target, and
+	// inlineShape their shape.
+	coef        *coef
+	inline      []string
+	inlineShape shape
+	// targeted are its patches with a target, which kustomize applies to every object the target selects.
+	targeted []patchSource
+	// patchBytes and patchShape are what one visit adds through targeted: their bytes and their shape.
+	patchBytes int
+	patchShape shape
+	// shaped is set once the shapes above are counted ([walker.countShapes]).
+	shaped bool
+}
+
+// patchSource is a patch with a target: a file (path) or inline text.
+type patchSource struct {
+	path   string
+	inline string
 }
 
 func newWalker(read reader) *walker {
 	w := &walker{
 		read: read, files: map[string][]byte{}, resources: map[string]bool{},
 		parsed: map[dirKind]*refs{}, ignoreChecked: map[string]bool{}, dirResources: map[string]bool{},
-		docs: map[string]int{},
+		docs: map[string]int{}, shapes: map[string]*shape{},
 	}
 	w.isDir = func(p string) bool { return w.dirResources[p] }
 	return w
@@ -199,6 +224,21 @@ func (w *walker) walk(ctx context.Context, dir, want string, depth int) error {
 	if w.buildDocs += r.docs; w.buildDocs > MaxBuildDocuments {
 		return refuse(ReasonTooLarge, fmt.Sprintf("the build reads more than %d YAML documents", MaxBuildDocuments))
 	}
+	// Only now: documents stops reading a file at its budget, so a file over it was not checked and is never
+	// decoded again.
+	if !r.shaped {
+		if err := w.countShapes(r); err != nil {
+			return err
+		}
+		r.shaped = true
+	}
+	for _, f := range r.files {
+		w.shape.add(w.shapes[f], 1)
+	}
+	w.shape.add(&r.inlineShape, 1)
+	w.coef.add(r.coef)
+	w.patchBytes = satAdd(w.patchBytes, r.patchBytes)
+	w.patchShape.add(&r.patchShape, 1)
 	// A directory below dir adds one level per directory passed, as in the source mapping, so a base found
 	// deep below a path without a kustomization file is bounded like a chain of kustomizations.
 	for _, d := range r.dirs {
@@ -210,6 +250,53 @@ func (w *walker) walk(ctx context.Context, dir, want string, depth int) error {
 		if err := w.walk(ctx, d, kindComponent, depth+repopath.NestDepth(dir, d)); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// countShapes fills in, on the first visit of r, the shape of its files and inline patches and the bytes and
+// shape of its targeted patches. Every file and inline patch was checked by [documents] in full before (the build is within
+// MaxBuildDocuments), so it is UTF-8 YAML without anchors, aliases or merge keys.
+func (w *walker) countShapes(r *refs) error {
+	for _, f := range r.files {
+		if _, ok := w.shapes[f]; ok {
+			continue
+		}
+		s, err := shapeOf(f, w.files[f])
+		if err != nil {
+			return err
+		}
+		w.shapes[f] = s
+	}
+	for _, p := range r.inline {
+		s, err := shapeOf("an inline patch", []byte(p))
+		if err != nil {
+			return err
+		}
+		r.inlineShape.add(s, 1)
+	}
+	for _, t := range r.targeted {
+		s, data := w.shapes[t.path], []byte(t.inline)
+		if t.path != "" {
+			data = w.files[t.path]
+		} else {
+			var err error
+			if s, err = shapeOf("an inline patch", data); err != nil {
+				return err
+			}
+		}
+		r.patchBytes = satAdd(r.patchBytes, jsonBytes(string(data)))
+		r.patchShape.add(s, 1)
+	}
+	return nil
+}
+
+// checkGrowth refuses a build whose patches and transformers can add more than [MaxTransformBytes] to its
+// render ([growth]). The walk calls it once the whole tree is counted, so every visit is in the sums.
+func (w *walker) checkGrowth() error {
+	if growth(&w.coef, &w.shape, w.patchBytes, &w.patchShape, w.buildDocs) > MaxTransformBytes {
+		return refuse(ReasonTooLarge, fmt.Sprintf(
+			"the patches and transformers of the build can add more than %d bytes to the render", MaxTransformBytes))
 	}
 	return nil
 }
@@ -319,6 +406,7 @@ func (w *walker) parse(ctx context.Context, dir, want string) (*refs, error) {
 		return nil, err
 	}
 	r.bytes = len(data)
+	r.coef = transformCoef(k)
 	return r, nil
 }
 
@@ -453,57 +541,80 @@ func collectRefs(name, dir string, k map[string]any, resources map[string]bool, 
 	if r.components, err = list(keyComponents); err != nil {
 		return nil, err
 	}
-	patches, inline, err := patchFiles(name, dir, k[keyPatches], bad)
+	p, err := patchFiles(name, dir, k[keyPatches], bad)
 	if err != nil {
 		return nil, err
 	}
-	r.files = append(r.files, patches...)
-	r.patches = patches
-	r.docs = inline
+	r.files = append(r.files, p.files...)
+	r.patches = p.files
+	r.docs = p.docs
+	r.inline = p.inline
+	r.targeted = p.targeted
 	return r, nil
 }
 
-// patchFiles validates the patches list and returns the local files it reads, and the documents of its inline
-// patches ([documents]), which kustomize reads like a patch file. An inline patch with a JSON patch copy
+// patchList is what the patches list of a kustomization file reads: its local files, the documents of its
+// inline patches, its inline patches without a target, and the patches with a target.
+type patchList struct {
+	files    []string
+	docs     int
+	inline   []string
+	targeted []patchSource
+}
+
+// patchFiles validates the patches list and returns the local files it reads, the documents of its inline
+// patches ([documents]), which kustomize reads like a patch file, the inline patches without a target, and the
+// patches with a target, which kustomize applies to every object the target selects. An inline patch with a JSON patch copy
 // operation is refused ([refuseCopy]); the walk checks patch files the same way.
-func patchFiles(name, dir string, raw any, bad error) ([]string, int, error) {
+func patchFiles(name, dir string, raw any, bad error) (patchList, error) {
+	var l patchList
 	if raw == nil {
-		return nil, 0, nil
+		return l, nil
 	}
 	items, ok := raw.([]any)
 	if !ok {
-		return nil, 0, refuse(ReasonUnsupportedKustomization, "patches in "+name+" is not a list")
+		return l, refuse(ReasonUnsupportedKustomization, "patches in "+name+" is not a list")
 	}
-	var files []string
-	docs := 0
 	for _, it := range items {
 		m, ok := it.(map[string]any)
 		if !ok {
-			return nil, 0, refuse(ReasonUnsupportedKustomization, "a patch in "+name+" is not a map")
+			return l, refuse(ReasonUnsupportedKustomization, "a patch in "+name+" is not a map")
 		}
 		for key := range m {
 			if !patchKeys[key] {
-				return nil, 0, refuse(ReasonUnsupportedKustomization, "a patch in "+name+" uses an unsupported field")
+				return l, refuse(ReasonUnsupportedKustomization, "a patch in "+name+" uses an unsupported field")
 			}
 		}
+		// Any target, however narrow it looks, counts as selecting every object: its fields are regular
+		// expressions and label or annotation selectors, which the walk does not evaluate.
+		_, targeted := m["target"]
 		if raw, ok := m["path"]; ok {
 			s, isString := raw.(string)
 			p, valid := repopath.Join(dir, s)
 			if !isString || !valid {
-				return nil, 0, bad
+				return l, bad
 			}
-			files = append(files, p)
+			l.files = append(l.files, p)
+			if targeted {
+				l.targeted = append(l.targeted, patchSource{path: p})
+			}
 		}
 		if s, ok := m["patch"].(string); ok {
-			d, err := documents("an inline patch in "+name, []byte(s))
+			what := "an inline patch in " + name
+			d, err := documents(what, []byte(s))
 			if err != nil {
-				return nil, 0, err
+				return l, err
 			}
-			if err := refuseCopy("an inline patch in "+name, []byte(s)); err != nil {
-				return nil, 0, err
+			if err := refuseCopy(what, []byte(s)); err != nil {
+				return l, err
 			}
-			docs = min(docs+d, MaxBuildDocuments+1)
+			l.docs = min(l.docs+d, MaxBuildDocuments+1)
+			if targeted {
+				l.targeted = append(l.targeted, patchSource{inline: s})
+			} else {
+				l.inline = append(l.inline, s)
+			}
 		}
 	}
-	return files, docs, nil
+	return l, nil
 }

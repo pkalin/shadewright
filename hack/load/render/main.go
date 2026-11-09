@@ -31,6 +31,12 @@ limitations under the License.
 //   - patches: 1,023 ConfigMaps of about 78 bytes, plus the Deployment, and n strategic merge patches of them
 //     (one label each, files of 1,000): with n = 3072 the build is at the document bound with the most objects
 //     the render accepts, every one patched three times.
+//   - annotations: as flat with 4 MiB, plus a common annotation sized so that the bound on what transformers
+//     add to the render (semdiff.MaxTransformBytes, 3 places per object) is at n percent of the budget: with n =
+//     100 the build is at all three byte budgets at once (#495).
+//   - images:  as flat with 4 MiB, plus a Pod of 1,000 containers whose image an images entry renames, sized so
+//     that the bound (2 places per container) is at n percent of the budget: the costliest place per byte
+//     measured (#495).
 //   - heavy:   as docs, each ConfigMap padded so that the build is just under the 4 MiB byte budget: both
 //     input bounds at once. Files hold as many as fit in 1 MiB, and a ConfigMap is at most about 1 MiB, so
 //     with n below 4 the build stays under the byte budget.
@@ -61,6 +67,8 @@ const (
 	shapeDocs    = "docs"
 	shapeHeavy   = "heavy"
 	shapePatches = "patches"
+	shapeAnnot   = "annotations"
+	shapeImages  = "images"
 )
 
 const deployment = `apiVersion: apps/v1
@@ -97,7 +105,8 @@ func main() {
 		var err error
 		if n, err = strconv.Atoi(os.Args[2]); err != nil || n < 1 {
 			fmt.Fprintln(os.Stderr,
-				"usage: render flat|diamond|tiny|docs|heavy|patches [MiB or number of ConfigMaps, default 4]")
+				"usage: render flat|diamond|tiny|docs|heavy|patches|annotations|images "+
+					"[MiB, number of ConfigMaps or percent, default 4]")
 			os.Exit(2)
 		}
 	}
@@ -275,6 +284,31 @@ func build(shape string, n int) (map[string][]byte, string) {
 			fmt.Fprintf(&k, "  - path: %s\n", f)
 		}
 		files["apps/kustomization.yaml"] = kust(k.String(), "deployment.yaml", "cm.yaml")
+	case shapeAnnot, shapeImages:
+		res := append(make([]string, 0, 6), "deployment.yaml")
+		files["apps/deployment.yaml"] = []byte(deployment)
+		for i := range 4 {
+			f := fmt.Sprintf("cm%d.yaml", i)
+			res = append(res, f)
+			files["apps/"+f] = configMaps(fmt.Sprintf("cm%d", i), 255)
+		}
+		budget := semdiff.MaxTransformBytes * n / 100
+		extra := ""
+		if shape == shapeAnnot {
+			// 4 x 255 ConfigMaps and the Deployment: 1,021 documents, 3 places each; the key "a" counts 1 byte.
+			extra = "commonAnnotations:\n  a: " + strings.Repeat("x", budget/(3*1021)-1) + "\n"
+		} else {
+			var p strings.Builder
+			p.WriteString("apiVersion: v1\nkind: Pod\nmetadata:\n  name: p\n  namespace: web\nspec:\n  containers:\n")
+			for range 1000 {
+				p.WriteString("    - image: a\n")
+			}
+			files["apps/pod.yaml"] = []byte(p.String())
+			res = append(res, "pod.yaml")
+			// 1,001 containers (the Deployment's too), 2 places each; the entry's keys and name count 12 bytes.
+			extra = "images:\n  - name: a\n    newName: " + strings.Repeat("x", budget/(2*1001)-12) + "\n"
+		}
+		files["apps/kustomization.yaml"] = kust(extra, res...)
 	case shapeTiny:
 		res := append(make([]string, 0, n+1), "deployment.yaml")
 		files["apps/deployment.yaml"] = []byte(deployment)

@@ -460,6 +460,43 @@ func (c *Controller) reportNotRecent(inc *remediationv1alpha1.Incident) {
 		recentWindow(TriggerSettings{RecentWindow: c.cfg.RecentWindow, Debounce: c.cfg.Debounce}))
 }
 
+// hintPendingLive reads, live, the request that holds the hint ref in the pass's requests, before the trigger
+// refuses that hint ([answerHint]), and reports whether the hint is still Pending there on a request the
+// analysis selects. The cache may lag behind the analysis: a hint it still shows Pending may be answered or
+// declined already, and the analysis may have answered a later hint meanwhile, so a refusal written from the
+// cache alone could overwrite that newer answer and let the later hint be analyzed twice. It also reports false
+// when inc's status.handledHint names a hint of that request accepted after ref. A read error is returned, so
+// nothing is refused on a failed read.
+func (c *Controller) hintPendingLive(ctx context.Context, inc *remediationv1alpha1.Incident,
+	ref remediationv1alpha1.HintRef) (bool, error) {
+	h := PendingHint(inc, c.hintRequestsOf(inc))
+	if h == nil || h.Ref() != ref {
+		return false, nil
+	}
+	live := &remediationv1alpha1.RemediationRequest{}
+	if err := c.reader.Get(ctx, client.ObjectKeyFromObject(h.Request), live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading RemediationRequest %s for a reviewer hint: %w", h.Request.Name, err)
+	}
+	if c.analysisRequest == nil || !c.analysisRequest(inc, live) {
+		return false, nil
+	}
+	current := HintByRef(inc, []remediationv1alpha1.RemediationRequest{*live}, ref)
+	if current == nil {
+		return false, nil
+	}
+	if handled := inc.Status.HandledHint; handled != nil && *handled != ref {
+		for i := range live.Status.Hints {
+			if lh := &live.Status.Hints[i]; HintRefOf(lh) == *handled && lh.AcceptedAt.After(current.Hint.AcceptedAt.Time) {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
 // setDue sets the AnalysisDue condition of one Incident to what decide says. cached is the Incident as the
 // cache holds it and (due, reason) what decide said of it: when its condition already agrees
 // ([conditionAgrees]), nothing is written. Otherwise the Incident is read fresh from the API server, decided
@@ -488,6 +525,15 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 		// A reviewer hint refused without an analysis is answered in the same update (ADR-0028 section 3),
 		// also when the condition already agrees: the answer is what the executor reads.
 		ref, outcome := HintAnswer(inc, c.hintRequestsOf(inc), due, reason)
+		if ref != nil && (only == "" || reason == only) {
+			pending, err := c.hintPendingLive(wctx, inc, *ref)
+			if err != nil {
+				return err
+			}
+			if !pending {
+				ref = nil
+			}
+		}
 		if (only != "" && reason != only) ||
 			(ref == nil && conditionAgrees(inc, due, reason, runEnded(inc, now, c.cfg.AnalysisTimeout))) {
 			return nil

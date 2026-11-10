@@ -78,8 +78,9 @@ The analyzer and executor Deployments of the namespace, found by the label `cont
 | --- | --- | --- |
 | fail: no Deployment labelled ... | None in that namespace | Pass the operator namespace with `-n` |
 | fail: not available | Its `Available` condition is not `True`, or no replica is available | `kubectl -n <ns> describe deploy/<name>` and the pod events: image pull, workload identity, resources |
-| fail: rollout stuck | Its `Progressing` condition is `False` with `ProgressDeadlineExceeded`: the old replicas still serve, but the current spec will not roll out by itself | `kubectl -n <ns> describe deploy/<name>` and the events of the new pods; fix the cause, then roll out again |
-| warn: a rollout is under way | Available, but not every replica runs the current spec yet | Wait for `kubectl -n <ns> rollout status deploy/<name>` |
+| fail: rollout stuck | Its `Progressing` condition is `False` with `ProgressDeadlineExceeded` for the current generation: the old replicas still serve, but the current spec will not roll out by itself | `kubectl -n <ns> describe deploy/<name>` and the events of the new pods; fix the cause, then roll out again |
+| warn: rollout pending | Available, but the Deployment controller has not observed the current spec yet (`status.observedGeneration` is below `metadata.generation`), so its conditions, a passed progress deadline included, are about an earlier spec | Run doctor again in a moment, or wait for `kubectl -n <ns> rollout status deploy/<name>` |
+| warn: a rollout is under way: N of M replicas updated, K running | Available, but fewer replicas than `spec.replicas` run the current spec, or old replicas still run next to the updated ones | Wait for `kubectl -n <ns> rollout status deploy/<name>` |
 | warn: only N of M replicas ready | Available, but fewer replicas are ready than `spec.replicas` | `kubectl -n <ns> get pods -l control-plane=<component>` and the events of the pods that are not ready |
 | warn: scaled to 0 replicas | Stopped on purpose | Scale it up when it should run |
 
@@ -97,7 +98,7 @@ Each entry of `spec.repositories` must be complete for the executor to open a pu
 
 ## Flux
 
-For each repository with a URL: the Flux `GitRepository` objects, in every namespace, whose `spec.url` equals the repository's URL exactly (the match the executor makes, [ADR-0012](../adr/0012-object-to-source-mapping.md)), and the `Kustomization` objects that apply each of them. Each is checked against the rules the executor's source mapping applies to its spec (the same code, so the two cannot differ), then its `Ready` condition. The rules that need a target object, such as `status.inventory`, are not checked.
+For each repository with a URL: the Flux `GitRepository` objects, in every namespace, whose `spec.url` equals the repository's URL exactly (the match the executor makes, [ADR-0012](../adr/0012-object-to-source-mapping.md)), and the `Kustomization` objects that apply each of them. Each is checked against the rules the executor's source mapping applies to its spec (the same code, so the two cannot differ), then its `Ready` condition, and for a Ready Kustomization whether it has applied the revision its GitRepository last fetched. The rules that need a target object, such as `status.inventory`, are not checked.
 
 | Result | Meaning | What to do |
 | --- | --- | --- |
@@ -105,6 +106,7 @@ For each repository with a URL: the Flux `GitRepository` objects, in every names
 | fail: tracks branch X, not the target branch | The executor denies every request for targets it delivers (`BranchMismatch`) | Make `spec.ref.branch` and `targetBranch` equal |
 | fail: failing, ... | `Stalled` is `True` or `Ready` is `False` for the current generation; the reason and the controller's message follow | `flux get sources git -A`, `flux get kustomizations -A`, and [delivery from Flux](../troubleshooting.md#delivery-from-flux) |
 | warn: reconciling | Not `Ready` yet and not failing | Run doctor again once Flux has reconciled |
+| warn: Ready, but it has not applied the revision its GitRepository last fetched | On a Kustomization: its `status.lastAppliedRevision` is not the `status.artifact.revision` of its Ready GitRepository, by the executor's own comparison. Flux is still reconciling, and until it has applied that revision the executor refuses requests for its targets (`RevisionMismatch`) | Run doctor again after the Kustomization's next reconcile (`flux reconcile kustomization <name> -n <ns>` starts one); if it stays, see [delivery from Flux](../troubleshooting.md#delivery-from-flux) |
 | warn: no Flux GitRepository has the URL | No target delivered from this repository can be changed (`RepositoryNotConfigured`). After a cut list (below) it says "among the ones read": one may exist | Make the URLs equal, character for character (no `.git`, lower case) |
 | warn: no Kustomization applies this GitRepository | Nothing applies it, or a HelmRelease does, which doctor does not check. After a cut list (below) it says "among the ones read": one may exist | Check that the path you expect is applied |
 | warn: does not serve Flux | Flux is not installed in the cluster | Install Flux, or expect every request to stop at the source mapping |

@@ -315,9 +315,11 @@ func checkDeployments(ctx context.Context, c client.Reader, d *Diagnosis, namesp
 }
 
 // deploymentLevel says whether a Deployment is available: pass when its Available condition is True for the
-// current generation with all replicas updated and ready, warn while a rollout is under way, when fewer
-// replicas are ready than desired or when it is scaled to 0, fail when it is not available or its rollout
-// passed its progress deadline.
+// current generation with all replicas updated and ready and none beyond the desired count, warn while the
+// controller has not observed the current generation (rollout pending), while a rollout is under way (fewer
+// replicas updated than desired, or old ones still running), when fewer replicas are ready than desired or when
+// it is scaled to 0, fail when it is not available or the rollout of the current generation passed its progress
+// deadline.
 func deploymentLevel(dep *appsv1.Deployment) (string, string) {
 	desired := int32(1)
 	if dep.Spec.Replicas != nil {
@@ -343,12 +345,18 @@ func deploymentLevel(dep *appsv1.Deployment) (string, string) {
 			why = conditionWhy(available)
 		}
 		return levelFail, "not available, " + replicas + " (" + why + ")"
+	case dep.Status.ObservedGeneration < dep.Generation:
+		// The controller has not seen the current spec yet, so its conditions, a passed progress deadline
+		// included, are about an earlier generation.
+		return levelWarn, "available, rollout pending: the current spec is not observed yet, " + replicas
 	case progressing != nil && progressing.Status == corev1.ConditionFalse &&
 		progressing.Reason == deploymentProgressDeadlineExceeded:
 		// The rollout stopped: the old replicas keep serving, but the new spec will not roll out by itself.
 		return levelFail, "rollout stuck, " + replicas + " (" + conditionWhy(progressing) + ")"
-	case dep.Status.ObservedGeneration < dep.Generation || dep.Status.UpdatedReplicas < desired:
-		return levelWarn, "available, but a rollout is under way: " + replicas
+	case dep.Status.UpdatedReplicas < desired || dep.Status.Replicas > desired:
+		// Fewer replicas than desired run the current spec, or old ones still run next to them.
+		return levelWarn, fmt.Sprintf("available, but a rollout is under way: %d of %d replicas updated, %d running",
+			dep.Status.UpdatedReplicas, desired, dep.Status.Replicas)
 	case dep.Status.ReadyReplicas < desired:
 		return levelWarn, fmt.Sprintf("available, but only %d of %d replicas ready", dep.Status.ReadyReplicas, desired)
 	}
@@ -482,7 +490,7 @@ func checkFlux(ctx context.Context, c client.Reader, d *Diagnosis, s *remediatio
 			src := &matched[i]
 			checkGitRepository(d, src, name, target)
 			if ksErr == nil {
-				checkKustomizations(d, src, kustomizations, ksTruncated)
+				checkKustomizations(d, src, target, kustomizations, ksTruncated)
 			}
 		}
 	}
@@ -528,9 +536,10 @@ func refusal(stop *sourcemap.Result) string {
 }
 
 // checkKustomizations checks the Kustomizations that apply src: a spec the executor refuses (sourcemap,
-// ADR-0012) is a fail, otherwise the level follows Ready. truncated says the list was cut short.
-func checkKustomizations(d *Diagnosis, src *unstructured.Unstructured, all []unstructured.Unstructured,
-	truncated bool) {
+// ADR-0012) is a fail, otherwise the level follows Ready, and a Ready one that has not applied the revision
+// src last fetched from target is a warn. truncated says the list was cut short.
+func checkKustomizations(d *Diagnosis, src *unstructured.Unstructured, target string,
+	all []unstructured.Unstructured, truncated bool) {
 	found := false
 	for i := range all {
 		ks := &all[i]
@@ -548,6 +557,11 @@ func checkKustomizations(d *Diagnosis, src *unstructured.Unstructured, all []uns
 			continue
 		}
 		level, detail := fluxLevel(ks.Object)
+		if level == levelPass && behind(ks, src, target) {
+			level, detail = levelWarn, "Ready, but it has not applied the revision its GitRepository last fetched: "+
+				"Flux is still reconciling, and until it has the executor refuses requests for its targets "+
+				"(RevisionMismatch)"
+		}
 		d.add("Flux Kustomization "+objName(ks), level, detail, anchorFlux)
 	}
 	if !found {
@@ -557,6 +571,17 @@ func checkKustomizations(d *Diagnosis, src *unstructured.Unstructured, all []uns
 		}
 		d.add("Flux Kustomizations of "+objName(src), levelWarn, detail, anchorFlux)
 	}
+}
+
+// behind reports whether a Kustomization has not applied the revision its GitRepository last fetched, by the
+// executor's own comparison (fluxstatus.AppliedFetched, ADR-0012). It is false when the GitRepository is
+// refused, tracks another branch than target or is not Ready: its own check reports that.
+func behind(ks, src *unstructured.Unstructured, target string) bool {
+	_, branch, stop := sourcemap.CheckGitRepository(src)
+	if stop != nil || branch != target || !fluxstatus.Ready(src.Object) {
+		return false
+	}
+	return !fluxstatus.AppliedFetched(ks.Object, src.Object, branch)
 }
 
 // fluxLevel is pass for a Ready object, warn while it reconciles, fail with the failing condition otherwise.

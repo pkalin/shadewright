@@ -133,13 +133,20 @@ func fluxObj(kind, name string, spec map[string]any, ready, reason, msg string) 
 	return u
 }
 
+// testRevision is the revision Flux fetched and applied in the healthy objects.
+const testRevision = testBranch + "@sha1:0123456789abcdef0123456789abcdef01234567"
+
 func healthySource() *unstructured.Unstructured {
-	return fluxObj(fluxstatus.KindGitRepository, testSource, gitSpec(testRepo, testBranch), "True", "Succeeded", "")
+	u := fluxObj(fluxstatus.KindGitRepository, testSource, gitSpec(testRepo, testBranch), "True", "Succeeded", "")
+	u.Object[fieldStatus].(map[string]any)["artifact"] = map[string]any{"revision": testRevision}
+	return u
 }
 
 func healthyKustomization() *unstructured.Unstructured {
-	return fluxObj(fluxstatus.KindKustomization, testKs, ksSpec(testSource), "True",
+	u := fluxObj(fluxstatus.KindKustomization, testKs, ksSpec(testSource), "True",
 		"ReconciliationSucceeded", "")
+	u.Object[fieldStatus].(map[string]any)["lastAppliedRevision"] = testRevision
+	return u
 }
 
 // healthyObjects is an install on which every check passes. It holds a failing Kustomization of another
@@ -325,9 +332,9 @@ func TestDoctorChecks(t *testing.T) {
 	rollout.Status.ObservedGeneration = 1
 	scaledDown := healthyDeployment("executor")
 	scaledDown.Spec.Replicas = ptr.To[int32](0)
-	// A rollout past its deadline: the old replica still serves, so Available stays True.
+	// A rollout of the current generation past its deadline: the old replica still serves, so Available stays
+	// True.
 	stuck := healthyDeployment("executor")
-	stuck.Status.ObservedGeneration = 1
 	stuck.Status.Conditions = append(stuck.Status.Conditions, appsv1.DeploymentCondition{
 		Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse, Reason: "ProgressDeadlineExceeded",
 		Message: "ReplicaSet has timed out progressing"})
@@ -335,6 +342,15 @@ func TestDoctorChecks(t *testing.T) {
 	notAllReady.Spec.Replicas = ptr.To[int32](3)
 	notAllReady.Status.Replicas, notAllReady.Status.UpdatedReplicas = 3, 3
 	notAllReady.Status.ReadyReplicas, notAllReady.Status.AvailableReplicas = 1, 1
+	// A deadline exceeded by an earlier generation: the controller has not looked at the current spec yet.
+	staleDeadline := healthyDeployment("executor")
+	staleDeadline.Status.ObservedGeneration = 1
+	staleDeadline.Status.Conditions = append(staleDeadline.Status.Conditions, appsv1.DeploymentCondition{
+		Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse, Reason: "ProgressDeadlineExceeded",
+		Message: "ReplicaSet has timed out progressing"})
+	// One updated replica, and an old one still running next to it.
+	oldReplica := healthyDeployment("executor")
+	oldReplica.Status.Replicas, oldReplica.Status.ReadyReplicas, oldReplica.Status.AvailableReplicas = 2, 2, 2
 
 	// Ready sources and Kustomizations whose spec the executor's source mapping refuses.
 	readySource := func(spec map[string]any) *unstructured.Unstructured {
@@ -365,6 +381,10 @@ func TestDoctorChecks(t *testing.T) {
 		"Progressing", "")
 	otherURL := healthySource()
 	otherURL.Object["spec"] = gitSpec(testRepo+"-other", testBranch)
+	// Both Ready, but the Kustomization still runs the commit before the one the source fetched.
+	ksBehind := healthyKustomization()
+	ksBehind.Object[fieldStatus].(map[string]any)["lastAppliedRevision"] =
+		testBranch + "@sha1:fedcba9876543210fedcba9876543210fedcba98"
 	ksFailing := fluxObj(fluxstatus.KindKustomization, testKs, ksSpec(testSource), "False", "BuildFailed",
 		"kustomize build failed")
 
@@ -422,6 +442,10 @@ func TestDoctorChecks(t *testing.T) {
 			check: chkExecutor, want: levelWarn, detail: "scaled to 0"},
 		"executor rollout stuck": {change: func(o []client.Object) []client.Object { return replace(o, stuck) },
 			check: chkExecutor, want: levelFail, detail: "rollout stuck, 1 of 1 replicas available (ProgressDeadlineExceeded"},
+		"executor stale deadline": {change: func(o []client.Object) []client.Object { return replace(o, staleDeadline) },
+			check: chkExecutor, want: levelWarn, detail: "rollout pending"},
+		"executor old replica running": {change: func(o []client.Object) []client.Object { return replace(o, oldReplica) },
+			check: chkExecutor, want: levelWarn, detail: "rollout is under way: 1 of 1 replicas updated, 2 running"},
 		"executor not all ready": {change: func(o []client.Object) []client.Object { return replace(o, notAllReady) },
 			check: chkExecutor, want: levelWarn, detail: "only 1 of 3 replicas ready"},
 		"deployments forbidden": {funcs: forbiddenList(listKind("DeploymentList"), errForbidden),
@@ -473,6 +497,10 @@ func TestDoctorChecks(t *testing.T) {
 			check: "Flux for repository", want: levelWarn, detail: "no Flux GitRepository has the URL"},
 		"kustomization failing": {change: func(o []client.Object) []client.Object { return replace(o, ksFailing) },
 			check: chkKs, want: levelFail, detail: "BuildFailed: kustomize build failed",
+			also: map[string]string{chkSource: levelPass}},
+		"kustomization behind its source": {change: func(o []client.Object) []client.Object {
+			return replace(o, ksBehind)
+		}, check: chkKs, want: levelWarn, detail: "has not applied the revision",
 			also: map[string]string{chkSource: levelPass}},
 		"no kustomization": {change: func(o []client.Object) []client.Object {
 			return without(o, isKind(fluxstatus.KindKustomization))

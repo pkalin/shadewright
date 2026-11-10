@@ -30,24 +30,34 @@ The module always creates its own Key Vault, Foundry account with the model depl
 
 ### 3. Two layers
 
-[![Environment layer, shared by clusters: Foundry account, Key Vault, analysis storage, audit log, private endpoints and DNS. Cluster layer, one per cluster: analyzer and executor identities, federated credentials, role assignments and Helm values. The adopter brings the cluster and the network.](../assets/diagrams/azure-layers.svg)](../assets/diagrams/azure-layers.svg "Open full size")
+[![Environment layer, shared by clusters: Foundry account, Key Vault, analysis storage, audit log, and network access (restricted public endpoints by default, private endpoints and DNS on request). Cluster layer, one per cluster: analyzer and executor identities, federated credentials, role assignments and Helm values. The adopter brings the cluster and the network.](../assets/diagrams/azure-layers.svg)](../assets/diagrams/azure-layers.svg "Open full size")
 
-- **Environment layer**, once, shared by clusters: Foundry account and model deployments, Key Vault, analysis storage, audit log workspace, private endpoints and (optionally) private DNS zones. It outputs resource IDs, endpoint names, and the zones and records the services expect.
+- **Environment layer**, once, shared by clusters: Foundry account and model deployments, Key Vault, analysis storage, audit log workspace, the service firewall rules, and in private mode the private endpoints and (optionally) private DNS zones. It outputs resource IDs, endpoint names and, in private mode, the zones and records the services expect.
 - **Cluster layer**, once per cluster: the analyzer and executor managed identities, a federated credential for each that trusts the cluster's OIDC issuer and one ServiceAccount, the role assignments on the environment layer's resources, and the Helm values for the chart as an output.
 
 The split follows the lifetimes in the lab: the foundation outlives a cluster (records, the key and the audit trail are kept), the federation is recreated with every cluster because the issuer URL changes (`lab/federation.tf`). A second cluster adds a cluster layer and nothing else. Identities are per cluster, so a cluster's pods never hold the token of another cluster's identity and one cluster's grants can be removed alone. Still one identity per component, never one token for both.
 
-[![What the module creates and what the adopter brings: left, the services, endpoints, identities, federated credentials, role assignments and outputs the module creates; right, the cluster's OIDC issuer, the subnet for private endpoints, optional existing DNS zones, names and tags, and optional role definitions the adopter passes in.](../assets/diagrams/azure-module-boundary.svg)](../assets/diagrams/azure-module-boundary.svg "Open full size")
+[![What the module creates and what the adopter brings: left, the services, endpoints, identities, federated credentials, role assignments and outputs the module creates; right, the cluster's OIDC issuer, the cluster's subnet or egress IPs, in private mode the subnet for private endpoints and optional existing DNS zones, names and tags, and optional role definitions the adopter passes in.](../assets/diagrams/azure-module-boundary.svg)](../assets/diagrams/azure-module-boundary.svg "Open full size")
 
-### 4. Private by default, DNS in one of three modes
+### 4. Restricted by default, private on request
 
-Public network access is off on every service. The module creates a private endpoint for each service in a subnet **passed in by ID**; the network around the subnet is the adopter's. Private DNS has three modes, one variable:
+Decided on 2026-11-08 ([#546](https://github.com/pkalin/shadewright/issues/546#issuecomment-6726981902)): full privacy is the adopter's choice, not the default.
 
-1. **Create.** The module creates the private DNS zones, links them to the virtual network it is told about, and registers the endpoint records.
-2. **Existing.** The adopter passes the IDs of zones that already exist (a hub or a Virtual WAN). The module registers the records in them and creates no zone. The deployer needs the right to join the zone and write records there.
-3. **None.** The module creates no zone and no record. Azure Policy in the landing zone registers the records for private endpoints. The module outputs the zones and records it expects so the platform team can check them.
+**Default: restricted public endpoints.** The services keep public endpoints, and each one is locked down with its own features:
 
-A restricted (not private) setting exists for a quick start: public access on with an allowlist, as in the lab today. It is not the default.
+- Entra ID only: Shared Key and local authentication are off, so no account key or API key can be used.
+- A service firewall that allows only the cluster's subnet (virtual network service endpoints, no extra cost) or its egress IPs, plus trusted Azure services where a service needs them.
+- No public blob access on the storage account.
+
+**On request: private endpoints.** One module variable turns every public endpoint off and puts a private endpoint for each service in a subnet **passed in by ID**; the network around the subnet is the adopter's. Private DNS then works in one of three modes:
+
+1. **`module`.** The module creates the private DNS zones (every Foundry zone it needs, vault and blob), links them to the virtual networks it is given, and registers the endpoint records.
+2. **`existing`.** The adopter passes the IDs of zones that already exist, for example in a hub subscription or a Virtual WAN. The module registers the records in them and creates no zone. The deployer needs the right to write records there.
+3. **`policy`.** The module creates no record. Azure Policy in the landing zone adds them, and the module ignores the DNS zone groups it does not own, so a later plan shows no diff.
+
+In every private mode the module outputs the zones and record names it expects, for the in-cluster check of section 8.
+
+Private endpoints are not the default because each one is billed per month and needs DNS work that most small installs do not need. An enterprise that needs them switches one setting.
 
 ### 5. Deployer permissions per layer, and the landing-zone option
 
@@ -55,7 +65,7 @@ The module states what the identity that runs Terraform needs, per layer, so a p
 
 | Layer | Deployer needs | Why |
 | --- | --- | --- |
-| Environment | Create resources in the resource group; join the subnet for private endpoints; write DNS records in the zones (modes create and existing); write role assignments and, by default, role definitions | The services, the endpoints, the DNS records and the roles that scope the grants |
+| Environment | Create resources in the resource group; set the service firewalls; in private mode, join the subnet for private endpoints and write DNS records in the zones (DNS modes `module` and `existing`); write role assignments and, by default, role definitions | The services, the endpoints, the DNS records and the roles that scope the grants |
 | Cluster | Create managed identities and federated credentials in the resource group; write role assignments on the environment layer's resources | One identity and one credential per component, and the grants of section 6 |
 
 The role assignments are the sensitive part: writing them is a privileged right. The module needs it only for the assignments it lists, so the documentation shows how to restrict the deployer to them (a role assignment condition limited to the module's roles) instead of asking for Owner.
@@ -72,7 +82,7 @@ The module ships naming defaults, close to what the lab uses (a resource type ab
 
 ### 8. Accepted risk: private mode is not exercised in the lab
 
-The lab runs the restricted, public-endpoint setting; it does not run private endpoints or any of the three DNS modes, because the network that would make them real (hub, firewall, private zones) is the part the module does not create and the lab does not pay for. So the private path can be wrong in ways the lab never shows. We accept that, and reduce it: the module outputs the zones and records it expects, the module's tests cover the plan of each mode, and the documentation gives an in-cluster check (resolve each service's name from a pod and call the endpoint) that an adopter runs after install. The risk stays on the register until an adopter or a priced lab run has exercised private mode.
+The lab runs the default, restricted setting; it does not run private endpoints or any of the three DNS modes, because the network that would make them real (hub, firewall, private zones) is the part the module does not create and the lab does not pay for. So the private path can be wrong in ways the lab never shows. We accept that, and reduce it: the module outputs the zones and records it expects, the module's tests cover the plan of each mode, and the documentation gives an in-cluster check (resolve each service's name from a pod and call the endpoint) that an adopter runs after install. The risk stays on the register until an adopter or a priced lab run has exercised private mode.
 
 ### 9. Known limitation: an existing model gateway
 
@@ -84,7 +94,8 @@ Some organizations put every model call behind an API Management gateway they ow
 - More resources than a bring-your-own design: an adopter who wants to reuse a Key Vault or a Foundry account cannot. That cost is the price of scoped grants.
 - A deployer with rights to write role assignments is needed in every setup. The landing-zone option removes the need to create definitions, not to assign them.
 - Two layers mean two applies, with outputs passed from one to the other, in a fixed order, and a destroy that goes the other way.
-- The private path ships with less proof than the restricted one (section 8).
+- The private path ships with less proof than the restricted default (section 8).
+- The default keeps public endpoints: what protects the services is Entra ID only access and the service firewalls, not the network path. An adopter whose policy forbids public endpoints must turn on private mode.
 - A new repository to maintain: CI, ruleset, releases, Registry publishing.
 - Invariant 6 now has an Azure half whose grants live in the module's pinned test; the operator's AGENTS.md text does not change.
 
@@ -94,7 +105,7 @@ Some organizations put every model call behind an API Management gateway they ow
 - **One instance of everything per cluster.** One layer, simpler. Not chosen: it multiplies Foundry accounts (with their model quota), Key Vaults and Apps' keys for no gain in isolation, since the grants are already per identity, and it ties the records and the audit trail to a cluster that may be recreated (`lab/` is disposable on purpose).
 - **A full stack that also creates AKS and the network.** A one-command demo. Not chosen: AKS, networks, hubs and firewalls are the adopter's to decide, and a module that creates them cannot be used on an existing cluster. The lab keeps its own AKS code in `shadewright-azure`.
 - **A module inside `shadewright-azure`.** No new repository. Not chosen: the Terraform Registry needs a repository named `terraform-<provider>-<name>` with its own tags and releases, the lab holds lab-only code and values, and a module consumed from a lab repository is not a published, versioned interface.
-- **Public endpoints by default, private on request.** Easier to try. Not chosen: a default that exposes the Key Vault and the records to the internet is the wrong default for a tool whose point is least privilege.
+- **Private endpoints by default.** No public endpoint at all. Not chosen: every install would pay for one endpoint per service each month and need private DNS before the first apply, which most small installs neither need nor have. With Entra ID only access, service firewalls limited to the cluster's subnet or egress IPs and no shared keys, a public endpoint accepts nothing from anyone else; installs that need no public path at all turn on private mode.
 
 ## Amendments
 

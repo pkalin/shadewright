@@ -303,7 +303,9 @@ func TestWideMappingRefusedInTime(t *testing.T) {
 			if !errors.Is(err, ErrInvalidYAML) || !strings.Contains(err.Error(), gityaml.ErrTooManyKeys.Error()) {
 				t.Fatalf("got %v, want %v naming the keys", err, ErrInvalidYAML)
 			}
-			if took > time.Second {
+			// The race detector slows this about tenfold (3.9 s on CI), so the time is checked only without it;
+			// make test runs this test once more without -race.
+			if !raceDetector && took > time.Second {
 				t.Errorf("the refusal took %s, want well under a second", took)
 			}
 		})

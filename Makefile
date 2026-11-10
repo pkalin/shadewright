@@ -118,6 +118,8 @@ test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -coverprofile cover.out
 	@# The redact timing tests skip under -race (internal/redact/race_test.go): run them again without it.
 	go test -run 'StayLinear$$' ./internal/redact
+	@# The time bound of the wide mapping refusal is checked only without -race (internal/gitops/patch/race_test.go).
+	go test -run 'TestWideMappingRefusedInTime$$' ./internal/gitops/patch
 
 # The evaluation harness (test/eval, docs/evaluation.md). make test runs it too; these targets write the report.
 EVAL_REPORT_DIR ?= $(LOCALBIN)/eval

@@ -37,7 +37,14 @@ Through the API, the rule in the ruleset reads as follows, with the App's numeri
 }
 ```
 
-The rule applies to every pull request to that branch. The executor creates the check only on the pull requests it opened, so a pull request a person opens to that branch waits for a check that never comes.
+### Pull requests people open to that branch
+
+The rule applies to every pull request to the target branch, but only Shadewright's pull requests get the check `shadewright/review`: the executor creates it only on the pull requests it opened. A pull request a person opens to that branch waits for a check that never comes, and cannot merge. Choose one of these before you save the rule:
+
+- **Maintainers on the ruleset's bypass list.** Add the role or team that merges people's changes as a bypass actor of the ruleset. They can merge their own pull requests past the missing check; GitHub records each bypass. Everyone else's pull requests to that branch stay blocked until a bypass actor merges them. Never add the Shadewright App to the bypass list.
+- **A separate target branch for Shadewright.** The repository entry's `targetBranch` must be the branch Flux tracks ([configuration](../reference/configuration.md)), so make that a branch only Shadewright opens pull requests against, and require the check only there. People open their pull requests to another branch, which never waits for the check, and a maintainer carries that branch over to the tracked one with a push under the ruleset's bypass, as the scenario clusters do with `cluster/<cluster>` ([ADR-0022](../adr/0022-scenario-switch-and-clusters.md)). It costs one more step before a person's change is applied.
+
+The lab fleet uses a maintainer bypass: its ruleset for `cluster/*` lists the repository admin role, the maintainer's, as its bypass actor, so the maintainer's own pull requests and resets of `cluster/lab` still go through.
 
 The App also needs the `checks: write` permission. Every token request of the executor names it since #539, so an App without it already fails ([ADR-0006](../adr/0006-github-app-key-in-key-vault.md)). Nothing else changes: no new App permission and no Kubernetes RBAC.
 
@@ -66,7 +73,7 @@ The executor logs the setting once at start:
 kubectl -n shadewright-system logs deploy/shadewright-executor | grep 'Configured reviewer hints'
 ```
 
-The line shows `enabled` true. Within about one `--pull-request-poll-interval` (a minute by default), every waiting Shadewright pull request shows the check `shadewright/review`, in progress until a reviewer who wrote no hint approves its latest head. In the pull request's merge box the check is listed as required; if it is not, the rule of step 1 is missing.
+The line shows `enabled` true and, as a reminder, the required check `shadewright/review`. Within about one `--pull-request-poll-interval` (a minute by default), every waiting Shadewright pull request shows the check `shadewright/review`, in progress until a reviewer who wrote no hint approves its latest head. In the pull request's merge box the check is listed as required; if it is not, the rule of step 1 is missing.
 
 ## Turn it off
 

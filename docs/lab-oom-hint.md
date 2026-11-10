@@ -11,11 +11,10 @@ scenario leads to a replacement request that takes over the same pull request an
 [OOM acceptance run](lab-oom-acceptance.md) and uses its names and placeholders (`<owner>`, the namespace
 `shadewright-system`).
 
-!!! warning "Not runnable on a shipped release yet"
-    Reviewer hints are built but **not enabled in the shipped binary**: `cmd/main.go` never sets the executor's
-    `ReviewerHints`, so comments are not read. Run this only with a release or a build that enables them (after
-    [#590](https://github.com/pkalin/shadewright/issues/590), [#591](https://github.com/pkalin/shadewright/issues/591)
-    and [#592](https://github.com/pkalin/shadewright/issues/592), all merged). Without it, step 3 ends with no
+!!! note "Reviewer hints are off by default"
+    The executor reads hints only with the flag `--reviewer-hints`, which the chart sets from
+    `executor.reviewerHints.enabled` ([#631](https://github.com/pkalin/shadewright/issues/631)). Run this with a release
+    that has that value, and turn it on as in [Before you start](#before-you-start). Without it, step 3 ends with no
     record in `status.hints` and nothing below happens. The reply in the pull request
     ([#542](https://github.com/pkalin/shadewright/issues/542)) is **not merged**: where this page says "no reply", the
     executor writes nothing to the pull request about a hint, and the outcome is read from the cluster. Those steps
@@ -32,11 +31,18 @@ scenario leads to a replacement request that takes over the same pull request an
   and the OOM scenario is on. Use its evaluation setup (the fleet's `main` applies the settings, the `demo-memory`
   policy and the analyzer's model). The hand-written request and Incident samples of that run are not used here: the
   analyzer makes the requests.
-- The executor runs with reviewer hints on, and its GitHub App has `checks: write` besides the four permissions of
-  [ADR-0006](adr/0006-github-app-key-in-key-vault.md) (the App's settings page, "Permissions").
 - The fleet repository's ruleset for `cluster/*` requires the check `shadewright/review` with the Shadewright App as
-  the expected source. Shadewright cannot verify this and the merge gate does not hold without it (see
+  the expected source, and lists the maintainer's role as its bypass actor, so the maintainer's own pull requests to
+  `cluster/lab` can still merge
+  ([turn reviewer hints on](how-to/turn-on-reviewer-hints.md#pull-requests-people-open-to-that-branch)). Shadewright cannot verify this and the merge gate does not hold without it (see
   [use](use.md#give-a-reviewer-hint)). This run never merges, but check it, because step 5 reads the check.
+- The executor runs with reviewer hints on: in the fleet, `infrastructure/shadewright-lab` sets
+  `executor.reviewerHints.enabled: true` in the HelmRelease values (a fleet pull request, merged to `main` before
+  `cluster/lab` is reset), with a release that has the value. Check that the executor logged it:
+  `kubectl -n shadewright-system logs deploy/shadewright-executor | grep 'Configured reviewer hints'` shows
+  `enabled` true and the required check.
+- The executor's GitHub App has `checks: write` besides the four permissions of
+  [ADR-0006](adr/0006-github-app-key-in-key-vault.md) (the App's settings page, "Permissions").
 - Two GitHub accounts: yours (write access) and a second one with **read** access only, as a collaborator or a member
   of a team with the Read role (Triage is refused too). `gh auth switch` changes between them, or use the web
   interface for the second.

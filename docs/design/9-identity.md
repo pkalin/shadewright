@@ -24,7 +24,7 @@ In the cluster its ServiceAccount is read-only ([2.2.2](2-architecture.md#222-an
 
 **Why.** The private key never exists in the pod or in a Kubernetes Secret ([ADR-0006](../adr/0006-github-app-key-in-key-vault.md)). A compromised pod cannot copy the key out, but while it runs it can still sign with it ([threat model](../threat-model.md)).
 
-<span class="sw-status sw-planned">planned</span> The same identity and token serve the reviewer hints of [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md) for the code host. An integration other than the code host gets no access to this key: it belongs to a future `shadewright-coordinator` with its own credentials.
+<span class="sw-status sw-built">built</span> (off by default, opt-in with the executor flag `--reviewer-hints`, #631) The same identity and token serve the reviewer hints of [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md) for the code host. An integration other than the code host gets no access to this key: it belongs to a future `shadewright-coordinator` with its own credentials.
 
 **The JWT and the token.**
 

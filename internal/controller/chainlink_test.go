@@ -92,16 +92,24 @@ func TestChainLinkRefusals(t *testing.T) {
 			p := pred()
 			c.change(p)
 			reader := clientfake.NewClientBuilder().WithScheme(deadlineScheme(t)).WithObjects(p).Build()
-			r := &RemediationRequestReconciler{Client: reader, APIReader: reader}
-			why, err := r.chainLink(context.Background(), repl)
+			r := &RemediationRequestReconciler{Client: reader, APIReader: reader, ReviewerHints: true}
+			_, why, err := r.chainLink(context.Background(), repl)
 			if err != nil || (c.want == "") != (why == "") || !strings.Contains(why, c.want) {
 				t.Fatalf("chainLink() = %q, %v, want a refusal with %q", why, err, c.want)
 			}
 		})
 	}
+	// Hints off refuses a replacement whose link holds (ADR-0028 amendment of 2026-11-10).
+	valid := clientfake.NewClientBuilder().WithScheme(deadlineScheme(t)).WithObjects(pred()).Build()
+	off := &RemediationRequestReconciler{Client: valid, APIReader: valid}
+	if reason, _, err := off.chainLink(context.Background(), repl); err != nil ||
+		reason != remediationv1alpha1.ReasonHintsTurnedOff {
+		t.Fatalf("chainLink() with reviewer hints off = %q, %v, want %q", reason, err,
+			remediationv1alpha1.ReasonHintsTurnedOff)
+	}
 	reader := clientfake.NewClientBuilder().WithScheme(deadlineScheme(t)).Build()
-	r := &RemediationRequestReconciler{Client: reader, APIReader: reader}
-	if why, err := r.chainLink(context.Background(), repl); err != nil || !strings.Contains(why, "does not exist") {
+	r := &RemediationRequestReconciler{Client: reader, APIReader: reader, ReviewerHints: true}
+	if _, why, err := r.chainLink(context.Background(), repl); err != nil || !strings.Contains(why, "does not exist") {
 		t.Fatalf("chainLink() without the predecessor = %q, %v", why, err)
 	}
 }

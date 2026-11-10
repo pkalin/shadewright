@@ -781,8 +781,9 @@ spec:
                         reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or
                         NoProposal), NoAnswer when none came within the executor's bound, or the end of the request
                         (PullRequestMerged, PullRequestClosed, RequestEnded), or the end of its replacement without the handoff:
-                        ReplacementDenied when the replacement was Denied, HandoffAborted when it ended otherwise.
-                        HintDeclineReasons lists them.
+                        ReplacementDenied when the replacement was Denied, HandoffAborted when it ended otherwise, or
+                        HintsTurnedOff when the executor runs with reviewer hints off, which declines every Pending or Reserved
+                        hint. HintDeclineReasons lists them.
                       enum:
                       - NoModelConfigured
                       - BudgetSpent
@@ -817,6 +818,7 @@ spec:
                       - RequestEnded
                       - ReplacementDenied
                       - HandoffAborted
+                      - HintsTurnedOff
                       type: string
                     reply:
                       description: |-

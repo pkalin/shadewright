@@ -38,6 +38,7 @@ nav = [
       { "Check an install with kubectl" = "how-to/check-install.md" },
       { "Find why a request was refused" = "how-to/find-why-refused.md" },
       { "Clear Resolved Incidents at the cap" = "how-to/clear-resolved-incidents.md" },
+      { "Turn reviewer hints on" = "how-to/turn-on-reviewer-hints.md" },
     ] },
     { "Troubleshooting" = "troubleshooting.md" },
     { "FAQ" = "faq.md" },

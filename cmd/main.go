@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -40,6 +41,7 @@ import (
 	"github.com/pkalin/shadewright/internal/cmdutil"
 	"github.com/pkalin/shadewright/internal/controller"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	fluxdelivery "github.com/pkalin/shadewright/internal/providers/delivery/flux"
 	"github.com/pkalin/shadewright/internal/providers/registry"
@@ -58,13 +60,51 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// executorFlags are the executor's own flags that set fields of the RemediationRequest reconciler.
+type executorFlags struct {
+	pollInterval  time.Duration
+	reviewerHints bool
+}
+
+// bindExecutorFlags registers the executor's reconciler flags on fs.
+func bindExecutorFlags(fs *flag.FlagSet) *executorFlags {
+	f := &executorFlags{}
+	fs.DurationVar(&f.pollInterval, "pull-request-poll-interval", controller.DefaultPullRequestPollInterval,
+		"How often the executor looks at a pull request that waits for review, so a merge or a close is seen "+
+			"within it. Between "+controller.ShortDuration(controller.MinPullRequestPollInterval)+" and "+
+			controller.ShortDuration(controller.MaxPullRequestPollInterval)+" (0 uses the default); "+
+			"the full recheck of the plan stays every "+controller.ShortDuration(controller.FullRecheckInterval)+".")
+	fs.BoolVar(&f.reviewerHints, "reviewer-hints", false,
+		"Read reviewer hints (/shadewright reanalyze:) from the comments of the pull requests the executor opened "+
+			"(ADR-0028). Off by default. Turn it on only when the target branch of the GitOps repository requires "+
+			"the check shadewright/review with the Shadewright App as its source: without that rule the merge "+
+			"gate only informs and does not block.")
+	return f
+}
+
+// newReconciler builds the RemediationRequest reconciler with the fields the flags hold. main builds it only
+// here, so a test of this function covers the wiring of the flags.
+func (f *executorFlags) newReconciler(c client.Client, s *runtime.Scheme, namespace string, apiReader client.Reader,
+	open freshness.RepositoryOpener, recorder record.EventRecorder) *controller.RemediationRequestReconciler {
+	return &controller.RemediationRequestReconciler{
+		Client:                  c,
+		Scheme:                  s,
+		Namespace:               namespace,
+		APIReader:               apiReader,
+		OpenRepository:          open,
+		Recorder:                recorder,
+		PullRequestPollInterval: f.pollInterval,
+		ReviewerHints:           f.reviewerHints,
+	}
+}
+
 func main() {
 	var opts cmdutil.Options
 	var namespace string
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var webhookPort int
-	var pollInterval time.Duration
 	opts.BindFlags(flag.CommandLine)
+	ef := bindExecutorFlags(flag.CommandLine)
 	flag.StringVar(&namespace, "namespace", os.Getenv("POD_NAMESPACE"),
 		"The operator namespace: the only namespace whose RemediationRequests are reconciled. "+
 			"Defaults to the POD_NAMESPACE environment variable.")
@@ -73,11 +113,6 @@ func main() {
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
 	flag.IntVar(&webhookPort, "webhook-port", 9443, "Port the webhook server listens on. "+
 		"Defaults to 9443. Set -1 to disable the webhook server.")
-	flag.DurationVar(&pollInterval, "pull-request-poll-interval", controller.DefaultPullRequestPollInterval,
-		"How often the executor looks at a pull request that waits for review, so a merge or a close is seen "+
-			"within it. Between "+controller.ShortDuration(controller.MinPullRequestPollInterval)+" and "+
-			controller.ShortDuration(controller.MaxPullRequestPollInterval)+" (0 uses the default); "+
-			"the full recheck of the plan stays every "+controller.ShortDuration(controller.FullRecheckInterval)+".")
 	flag.Parse()
 
 	ctrl.SetLogger(cmdutil.NewLogger(&opts))
@@ -121,17 +156,17 @@ func main() {
 		return settings.Spec.Repositories, nil
 	}}
 
-	reconciler := &controller.RemediationRequestReconciler{
-		Client:                  mgr.GetClient(),
-		Scheme:                  mgr.GetScheme(),
-		Namespace:               namespace,
-		APIReader:               mgr.GetAPIReader(),
-		OpenRepository:          repos.Open,
-		PullRequestPollInterval: pollInterval,
-		// The core/v1 recorder writes with the grant on core Events that the executor's leader election Role
-		// already holds in the operator namespace, where the requests are, as the analyzer's recorder does.
-		Recorder: mgr.GetEventRecorderFor("shadewright-executor"), //nolint:staticcheck // see above
+	// The core/v1 recorder writes with the grant on core Events that the executor's leader election Role
+	// already holds in the operator namespace, where the requests are, as the analyzer's recorder does.
+	recorder := mgr.GetEventRecorderFor("shadewright-executor") //nolint:staticcheck // see above
+	reconciler := ef.newReconciler(mgr.GetClient(), mgr.GetScheme(), namespace, mgr.GetAPIReader(), repos.Open, recorder)
+	// Logged once, so the setting of a running executor can be read from its log. The merge gate of ADR-0028
+	// holds only with the repository rule this binary cannot verify, hence the reminder when hints are on.
+	hintsLog := []any{"enabled", ef.reviewerHints}
+	if ef.reviewerHints {
+		hintsLog = append(hintsLog, "requiredCheck", "shadewright/review from the Shadewright App on the target branch")
 	}
+	setupLog.Info("Configured reviewer hints", hintsLog...)
 	// After the merge the executor reads the Flux Kustomization that applies the target, with the get it holds
 	// for the source mapping, and asks the plan's Git host (a read) whether a later applied commit holds the
 	// merge commit; then it reports the target's rollout (#532).

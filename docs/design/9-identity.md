@@ -12,7 +12,7 @@ The rule for everything below: no PATs, no client secrets, no long-lived API key
 
 In the cluster its ServiceAccount is read-only ([2.2.2](2-architecture.md#222-analyzer-permissions), the full list in [Configuration](../reference/configuration.md)). Of the RemediationPolicies it may only `get` the ones `--action-policies` names, by `resourceNames` (no `list` or `watch`, no rule without a name), so the context can show the model the bounds of the policy that will decide its proposal (3.3, [#493](https://github.com/pkalin/shadewright/issues/493)). Reading a policy decides nothing: the executor reads it again and decides (invariant 1).
 
-<span class="sw-status sw-built">built</span> (#537) It also reads the reviewer hints the executor stored in request status ([ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)), never the pull request comment itself, and writes nothing new for them (its replacement request is the create it already has): it cannot write request status, so it cannot forge a hint. It records the ID of the hint it handled in the Incident status it already writes (`status.handledHint`), and the executor's `get` on that Incident reads the `Analyzed` condition and that ID to learn a refusal (<span class="sw-status sw-built">built</span>, #538, code merged, not enabled in the shipped binary (cmd/main.go never sets `ReviewerHints`); the analyzer reads the condition to decide nothing).
+<span class="sw-status sw-built">built</span> (#537) It also reads the reviewer hints the executor stored in request status ([ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)), never the pull request comment itself, and writes nothing new for them (its replacement request is the create it already has): it cannot write request status, so it cannot forge a hint. It records the ID of the hint it handled in the Incident status it already writes (`status.handledHint`), and the executor's `get` on that Incident reads the `Analyzed` condition and that ID to learn a refusal (<span class="sw-status sw-built">built</span>, #538, code merged, off by default, opt-in with `--reviewer-hints` (#631); the analyzer reads the condition to decide nothing).
 
 **Why.** The analyzer talks to a model and writes records.
 
@@ -24,7 +24,7 @@ In the cluster its ServiceAccount is read-only ([2.2.2](2-architecture.md#222-an
 
 **Why.** The private key never exists in the pod or in a Kubernetes Secret ([ADR-0006](../adr/0006-github-app-key-in-key-vault.md)). A compromised pod cannot copy the key out, but while it runs it can still sign with it ([threat model](../threat-model.md)).
 
-<span class="sw-status sw-built">built</span> (not enabled in the shipped binary, design 2.3) The same identity and token serve the reviewer hints of [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md) for the code host. An integration other than the code host gets no access to this key: it belongs to a future `shadewright-coordinator` with its own credentials.
+<span class="sw-status sw-built">built</span> (off by default, opt-in with the executor flag `--reviewer-hints`, #631) The same identity and token serve the reviewer hints of [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md) for the code host. An integration other than the code host gets no access to this key: it belongs to a future `shadewright-coordinator` with its own credentials.
 
 **The JWT and the token.**
 

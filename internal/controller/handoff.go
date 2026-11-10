@@ -71,6 +71,12 @@ import (
 //   - Recovery (recoverHandoff): a replacement whose update happened before a restart or a lost write finds its
 //     commit before the freshness check, and goes on to the read after the update, so neither the freshness
 //     check nor the deadline takes its commit, or a merge of it, for a stale plan.
+//   - Hints off (ADR-0028 amendment of 2026-11-10): an executor running without --reviewer-hints Denies every
+//     replacement at admission (HintsTurnedOff) and ends one admitted before at its next step, the recovery
+//     included, without taking anything over (a commit pushed before the restart is not recorded, so the
+//     predecessor stops as for a foreign push); the predecessor declines the hint and aborts its intent
+//     (declineHintsOff). A replacement that recorded the takeover before stops NeedsIntervention
+//     (hintsOffTakenOver, from afterHandoff and the watch), without step 5, step 6 or AwaitingApproval.
 //   - Step 4 (recordHandoff): the replacement records the pull request with the new head, the hints of the chain
 //     (each consumed one, the one it answers among them, the predecessor's other Pending hints, which it
 //     answers anew since the cursor it carries is past their comments, and its Declined ones, kept as they are
@@ -98,6 +104,10 @@ import (
 // (no freshness check, so no close of a stale plan; recheck), never closes the pull request (closeChangeRequest,
 // and its finalizer waits for the replacement: handoffHolds), and its watch takes a head that is the
 // replacement's commit (expectedHandoffHead) for the expected one instead of HeadMoved.
+
+// msgHintsTurnedOff starts the message of a replacement refused or ended because the executor runs with
+// reviewer hints off (remediationv1alpha1.ReasonHintsTurnedOff).
+const msgHintsTurnedOff = "Reviewer hints are turned off in the executor (flag --reviewer-hints)"
 
 // Hint reasons of the predecessor's side of a handoff.
 const (
@@ -178,46 +188,53 @@ func chainRootOf(rr *remediationv1alpha1.RemediationRequest) remediationv1alpha1
 }
 
 // chainLink checks the full chain link of a replacement, once, at the policy check that admits it (ADR-0028
-// section 4 item 2), before anything else is read about it. It returns the refusal's message, "" when the link
-// holds or rr replaces nothing, and an error only for a read worth retrying.
+// section 4 item 2), before anything else is read about it. It returns the refusal's reason and message, ""
+// when the link holds or rr replaces nothing, and an error only for a read worth retrying. With reviewer hints
+// off every replacement is refused (ReasonHintsTurnedOff, ADR-0028 amendment of 2026-11-10), whatever its link.
 func (r *RemediationRequestReconciler) chainLink(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
-	string, error) {
+	reason, message string, err error) {
 	rep := rr.Spec.Replaces
 	if rep == nil {
-		return "", nil
+		return "", "", nil
+	}
+	if !r.ReviewerHints {
+		return remediationv1alpha1.ReasonHintsTurnedOff, msgHintsTurnedOff, nil
+	}
+	invalid := func(why string) (string, string, error) {
+		return remediationv1alpha1.ReasonChainLinkInvalid, why, nil
 	}
 	pred := &remediationv1alpha1.RemediationRequest{}
 	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(rep.Name)}, pred); {
 	case apierrors.IsNotFound(err):
-		return "The request it replaces does not exist", nil
+		return invalid("The request it replaces does not exist")
 	case err != nil:
-		return "", fmt.Errorf("get the RemediationRequest %s replaces: %w", rr.Name, err)
+		return "", "", fmt.Errorf("get the RemediationRequest %s replaces: %w", rr.Name, err)
 	}
 	pr := pred.Status.PullRequest
 	opened := meta.FindStatusCondition(pred.Status.Conditions, remediationv1alpha1.ConditionPROpened)
 	switch {
 	case pred.UID != types.UID(rep.UID):
-		return "The request it replaces has another UID", nil
+		return invalid("The request it replaces has another UID")
 	case !pred.DeletionTimestamp.IsZero():
-		return "The request it replaces is being deleted", nil
+		return invalid("The request it replaces is being deleted")
 	case pred.Spec.IncidentRef != rr.Spec.IncidentRef:
-		return "The request it replaces names another Incident", nil
+		return invalid("The request it replaces names another Incident")
 	case pred.Spec.TargetRef != rr.Spec.TargetRef:
-		return "The request it replaces names another target", nil
+		return invalid("The request it replaces names another target")
 	case chainRootOf(pred) != rr.Spec.ChainRoot:
-		return "The request it replaces belongs to another chain", nil
+		return invalid("The request it replaces belongs to another chain")
 	case pred.Status.Phase != remediationv1alpha1.PhaseAwaitingApproval || pr == nil || opened == nil ||
 		opened.Reason != ReasonPullRequestOpened:
-		return "The request it replaces does not wait for review with an open pull request", nil
+		return invalid("The request it replaces does not wait for review with an open pull request")
 	case pred.Status.Handoff != nil && pred.Status.Handoff.To != nil &&
 		pred.Status.Handoff.To.Phase != remediationv1alpha1.HandoffAborted:
 		// A handoff that aborted left the request as it was: a later hint of it may still be answered.
-		return "The request it replaces is already handed over", nil
+		return invalid("The request it replaces is already handed over")
 	}
 	if h := hintByRef(pred, rep.Hint); h == nil || h.State != remediationv1alpha1.HintPending {
-		return "The request it replaces does not hold the named hint Pending", nil
+		return invalid("The request it replaces does not hold the named hint Pending")
 	}
-	return "", nil
+	return "", "", nil
 }
 
 // handoffStep does the next step of a replacement admitted with status.handoff.from Reserved, one write per
@@ -226,6 +243,12 @@ func (r *RemediationRequestReconciler) chainLink(ctx context.Context, rr *remedi
 func (r *RemediationRequestReconciler) handoffStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	fresh freshness.Result) (reconcile.Result, error) {
 	from := rr.Status.Handoff.From
+	if !r.ReviewerHints {
+		// Admitted while hints were on, and the executor now runs with them off: nothing is taken over, and the
+		// predecessor declines the hint and aborts its intent on its next look (declineHintsOff).
+		return reconcile.Result{}, r.endHandoff(ctx, rr, remediationv1alpha1.ReasonHintsTurnedOff, msgHintsTurnedOff+
+			"; nothing was taken over")
+	}
 	if fresh.Head == "" || fresh.Git == nil {
 		return reconcile.Result{}, errNoHead
 	}
@@ -781,9 +804,17 @@ func reserveOnAdmission(rr *remediationv1alpha1.RemediationRequest) {
 // not missed, and returns it for a retry with backoff, which does not send the rewrite again. A cancelled
 // reconcile returns at once, not logged as a failure. A pause leaves both steps for later. The check run is not
 // done here but after the look at the comments (reviewCheck).
+// With reviewer hints off it does neither step: a request that still progresses stops (hintsOffTakenOver).
 func (r *RemediationRequestReconciler) afterHandoff(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	if !tookOver(rr) {
 		return nil
+	}
+	if !r.ReviewerHints {
+		// Hints off fails closed (ADR-0028 amendment of 2026-11-10): a request that took the pull request over
+		// before a restart stops (hintsOffTakenOver), and neither supersedes its predecessor nor rewrites the pull
+		// request, at any phase, an ended one included. A predecessor not ended yet aborts its intent
+		// (declineHintsOff) and stops as for a foreign push, as when the record of the handoff was lost.
+		return r.ignoreStopped(r.hintsOffTakenOver(ctx, rr))
 	}
 	if err := r.supersedePredecessor(ctx, rr); err != nil && !errors.Is(err, freshness.ErrPaused) {
 		return err
@@ -800,6 +831,26 @@ func (r *RemediationRequestReconciler) afterHandoff(ctx context.Context, rr *rem
 	logf.FromContext(ctx).Info("Could not finish the steps after the handoff of RemediationRequest",
 		"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
 	return nil
+}
+
+// msgHintsOffTakenOver is the message of a request that took a pull request over and stops because reviewer
+// hints are off: its head was steered by a hint and has no merge gate.
+const msgHintsOffTakenOver = msgHintsTurnedOff + "; this request took the pull request over for a reviewer " +
+	"hint, and the check shadewright/review is no longer kept on its head: automation stopped, close the pull " +
+	"request"
+
+// hintsOffTakenOver stops, NeedsIntervention with ReasonHintsTurnedOff, a request that took a pull request over
+// (tookOver) and still progresses, for an executor running with reviewer hints off: its head was steered by a
+// hint, and without hints the check run shadewright/review is neither created nor completed (reviewCheck), so
+// the request must not reach or stay in AwaitingApproval. A request that ended is left as it is. The stop is
+// not held back by the kill switch: it writes nothing to Git and only stops automation, like the stops of the
+// watch. The error wraps errStopped once rr stopped, and is nil when there was nothing to stop.
+func (r *RemediationRequestReconciler) hintsOffTakenOver(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	if r.ReviewerHints || !tookOver(rr) || !progresses(rr) {
+		return nil
+	}
+	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, remediationv1alpha1.ReasonHintsTurnedOff,
+		msgHintsOffTakenOver)
 }
 
 // supersedePredecessor is step 5: the predecessor whose intent names rr ends Superseded with reason HandedOff,
@@ -921,6 +972,13 @@ func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *re
 func (r *RemediationRequestReconciler) recoverStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, bool, error) {
 	from := rr.Status.Handoff.From
+	if !r.ReviewerHints {
+		// Hints off: a commit an executor with hints on pushed before a restart is not recorded either. The
+		// predecessor, whose intent is aborted (declineHintsOff), then stops as for a foreign push on its next look,
+		// so no Shadewright request holds a head that a hint steered without the merge gate.
+		return reconcile.Result{}, true, r.endHandoff(ctx, rr, remediationv1alpha1.ReasonHintsTurnedOff,
+			msgHintsTurnedOff+"; nothing was recorded as taken over")
+	}
 	pred := &remediationv1alpha1.RemediationRequest{}
 	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}, pred); {
 	case apierrors.IsNotFound(err):

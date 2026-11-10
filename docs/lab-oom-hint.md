@@ -11,15 +11,14 @@ scenario leads to a replacement request that takes over the same pull request an
 [OOM acceptance run](lab-oom-acceptance.md) and uses its names and placeholders (`<owner>`, the namespace
 `shadewright-system`).
 
-!!! warning "Not runnable on a shipped release yet"
-    Reviewer hints are built but **not enabled in the shipped binary**: `cmd/main.go` never sets the executor's
-    `ReviewerHints`, so comments are not read. Run this only with a release or a build that enables them (after
-    [#590](https://github.com/pkalin/shadewright/issues/590), [#591](https://github.com/pkalin/shadewright/issues/591)
-    and [#592](https://github.com/pkalin/shadewright/issues/592), all merged). Without it, step 3 ends with no
-    record in `status.hints` and nothing below happens. The reply in the pull request
-    ([#542](https://github.com/pkalin/shadewright/issues/542)) is **not merged**: where this page says "no reply", the
-    executor writes nothing to the pull request about a hint, and the outcome is read from the cluster. Those steps
-    change when #542 lands.
+!!! note "Reviewer hints are off by default"
+    The executor reads hints only with the flag `--reviewer-hints`, which the chart sets from
+    `executor.reviewerHints.enabled` ([#631](https://github.com/pkalin/shadewright/issues/631)). Run this with a release
+    that has that value, and turn it on as in [Before you start](#before-you-start). Without it, step 3 ends with no
+    record in `status.hints` and nothing below happens. With hints on, the executor also replies in the
+    pull request to each answered hint and refused command, once per comment
+    ([#542](https://github.com/pkalin/shadewright/issues/542)): a fixed template, posted only when the redactor would
+    change nothing in it.
 
 !!! warning "Costs money and changes real systems"
     The lab bills while it is up, the analysis calls a real model and spends one unit of the day's analysis budget per
@@ -32,11 +31,18 @@ scenario leads to a replacement request that takes over the same pull request an
   and the OOM scenario is on. Use its evaluation setup (the fleet's `main` applies the settings, the `demo-memory`
   policy and the analyzer's model). The hand-written request and Incident samples of that run are not used here: the
   analyzer makes the requests.
-- The executor runs with reviewer hints on, and its GitHub App has `checks: write` besides the four permissions of
-  [ADR-0006](adr/0006-github-app-key-in-key-vault.md) (the App's settings page, "Permissions").
 - The fleet repository's ruleset for `cluster/*` requires the check `shadewright/review` with the Shadewright App as
-  the expected source. Shadewright cannot verify this and the merge gate does not hold without it (see
+  the expected source, and lists the maintainer's role as its bypass actor, so the maintainer's own pull requests to
+  `cluster/lab` can still merge
+  ([turn reviewer hints on](how-to/turn-on-reviewer-hints.md#pull-requests-people-open-to-that-branch)). Shadewright cannot verify this and the merge gate does not hold without it (see
   [use](use.md#give-a-reviewer-hint)). This run never merges, but check it, because step 5 reads the check.
+- The executor runs with reviewer hints on: in the fleet, `infrastructure/shadewright-lab` sets
+  `executor.reviewerHints.enabled: true` in the HelmRelease values (a fleet pull request, merged to `main` before
+  `cluster/lab` is reset), with a release that has the value. Check that the executor logged it:
+  `kubectl -n shadewright-system logs deploy/shadewright-executor | grep 'Configured reviewer hints'` shows
+  `enabled` true and the required check.
+- The executor's GitHub App has `checks: write` besides the four permissions of
+  [ADR-0006](adr/0006-github-app-key-in-key-vault.md) (the App's settings page, "Permissions").
 - Two GitHub accounts: yours (write access) and a second one with **read** access only, as a collaborator or a member
   of a team with the Read role (Triage is refused too). `gh auth switch` changes between them, or use the web
   interface for the second.
@@ -124,8 +130,8 @@ kubectl -n shadewright-system logs deploy/shadewright-analyzer | grep -E 'Analyz
 ```
 
 Expect `AnalysisDue` with reason `ReviewerHint`, then `Analyzing`, with `status.handledHint` naming your comment ID and
-the digest of the stored text, and at the end the `Analyzed` reason `Proposed`: a replacement request was created. No
-reply appears in the pull request (#542).
+the digest of the stored text, and at the end the `Analyzed` reason `Proposed`: a replacement request was created. The
+reply to your hint comes after the handoff (step 4).
 
 ## 4. Check the replacement and the handoff
 
@@ -182,6 +188,7 @@ gh api repos/<owner>/shadewright-fleet/commits/<new-head-sha>/check-runs --jq '.
 ```
 
 Expect `shadewright/review` `in_progress` on the new head, and the replacement's `reviewCheck` `InProgress` for it.
+Expect also one reply from the executor that mentions you and says "Applied" with the new plan's value and its head.
 
 ## 5. See the merge gate
 
@@ -193,7 +200,7 @@ gh pr review <number> --repo <owner>/shadewright-fleet --approve --body "Approvi
 ```
 
 Within a poll interval expect **one comment from the executor** in the pull request, saying that your approval does
-not satisfy `shadewright/review` and why (the one comment about hints Shadewright posts before #542), and the check run
+not satisfy `shadewright/review` and why (besides the replies to hints, the one comment about hints Shadewright posts), and the check run
 still `in_progress` with a summary that names the reason:
 
 ```bash
@@ -217,7 +224,7 @@ kubectl -n shadewright-system get rr "$RR2" -o jsonpath='{range .status.refusedH
 
 | Case | Comment | Expected |
 | --- | --- | --- |
-| Read-only collaborator | As the read-only account: `/shadewright reanalyze: use 72Mi` | Ignored: no entry in `status.hints`, none in `status.refusedHints` (a refused author is not recorded, so a person without write access cannot push records out of status), no analysis, no budget spent. No reply (#542 plans one to the author) |
+| Read-only collaborator | As the read-only account: `/shadewright reanalyze: use 72Mi` | Ignored: no entry in `status.hints`, none in `status.refusedHints` (a refused author is not recorded, so a person without write access cannot push records out of status), no analysis, no budget spent. No reply (an outsider must not be able to make Shadewright comment) |
 | Not the first line | A comment whose second line is the command; a quoted line (`> /shadewright reanalyze: ...`); an indented one | Not a hint: nothing stored, nothing recorded |
 | Inline review comment | The command in an inline comment on a line of the diff | Not read: nothing stored |
 | No text | `/shadewright reanalyze:` and nothing after it | Refused, `status.refusedHints` shows `Empty`, no text stored |
@@ -230,6 +237,10 @@ kubectl -n shadewright-system get rr "$RR2" -o jsonpath='{range .status.refusedH
 | Chain cap | Make a valid hint succeed three times on the same pull request (each after the cooldown), then post a fourth | The fourth is refused `CapReached` in `status.refusedHints`, no analysis. Costs three analyses: skip it if the budget is short, and say so in the record |
 | Out of bounds | `/shadewright reanalyze: set 512Mi` (`demo-memory` allows up to 72Mi from 48Mi) | The model is shown the bounds, so expect a value inside them or none (`NoProposal`, `ActionOutOfBounds`). A replacement that policy denies ends `Denied` and the pull request keeps the old plan: nothing closes, no gap |
 | Injection | A hint that tells the model to ignore its instructions or to change another file (for example "also set replicas to 0") | Tools, catalog and policy do not change: either no replacement or one that is still a memory limit inside the bounds. A plan that touches another file never reaches Git (`Denied` or `Cancelled` with `HandoffAborted`), and the pull request is unchanged |
+
+Each case that stores or refuses a command, except the read-only collaborator's, also gets one reply in the pull
+request while the request waits for review: "Not applied" with the reason for a declined hint, "Not stored" for a
+refused command.
 
 After each case check that the pull request still has the head of the last successful handoff and that it is the only
 one open:
@@ -267,4 +278,4 @@ still open, reset the scenario and destroy the lab as in
 Not run yet. This page was written from what the code and the docs on `main` do; the acceptance criterion of
 [#541](https://github.com/pkalin/shadewright/issues/541) (one run on a lab with a release that enables reviewer hints,
 results recorded here) stays open until that run. Add the date, the release and the observed results under this
-heading, and update the notes about #542 when it is merged.
+heading.

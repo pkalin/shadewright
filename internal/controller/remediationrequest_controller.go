@@ -138,11 +138,17 @@ type RemediationRequestReconciler struct {
 	// refuses a value outside [MinPullRequestPollInterval, MaxPullRequestPollInterval].
 	PullRequestPollInterval time.Duration
 	// ReviewerHints turns on the reading of reviewer hints from the comments of a waiting pull request
-	// (hints.go, ADR-0028). It is off by default, and cmd/main.go does not turn it on yet: a stored hint makes
-	// the analyzer propose a replacement, which takes the pull request over by the supersede handoff (handoff.go),
-	// whose head gets the merge gate (ADR-0028 section 5). The gate holds only once the GitOps repository requires
-	// the check shadewright/review with the App as its source, which Shadewright cannot verify; the check is not
-	// yet created on pull requests no handoff touched.
+	// (hints.go, ADR-0028) and the check run shadewright/review on every recorded head of a waiting pull request
+	// (reviewcheck.go). It is off by default; cmd/main.go sets it from the executor flag --reviewer-hints (chart
+	// value executor.reviewerHints.enabled). A stored hint makes the analyzer propose a replacement, which takes
+	// the pull request over by the supersede handoff (handoff.go), and the merge gate (ADR-0028 section 5) is
+	// that check. The gate holds only once the target branch of the GitOps repository requires the check
+	// shadewright/review with the App as its source, which Shadewright cannot verify: without that rule the
+	// check informs and does not block, so turn hints on only after the rule is in place. Off fails closed
+	// (ADR-0028 amendment of 2026-11-10): every Pending or Reserved hint is declined with HintsTurnedOff
+	// (declineHintsOff), a replacement is Denied at admission (chainLink), one admitted before ends without
+	// the handoff (handoffStep, recoverStep), and one that took the pull request over stops NeedsIntervention
+	// (hintsOffTakenOver).
 	ReviewerHints bool
 
 	// admitMu makes the check of the limits and the status write that lets a request through the policy check
@@ -659,6 +665,21 @@ func needsIntervention(reason, message string) outcome {
 		reason: reason, message: message}
 }
 
+// checkChainLink is the chain link check of check (chainLink): refused is true with the Denied outcome when the
+// link does not hold (ChainLinkInvalid) or reviewer hints are off (HintsTurnedOff).
+func (r *RemediationRequestReconciler) checkChainLink(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	out outcome, refused bool, err error) {
+	switch reason, why, err := r.chainLink(ctx, rr); {
+	case err != nil:
+		return outcome{}, false, err
+	case reason == remediationv1alpha1.ReasonHintsTurnedOff:
+		return denied(remediationv1alpha1.ReasonHintsTurnedOff, why+"; nothing was taken over"), true, nil
+	case reason != "":
+		return denied(remediationv1alpha1.ReasonChainLinkInvalid, why+"; nothing was taken over"), true, nil
+	}
+	return outcome{}, false, nil
+}
+
 // check gathers the input and decides. The error is non-nil only for a failure worth retrying.
 //
 // The refusal order (design 5.3): a missing policy or settings object, a kind the action cannot change, a missing
@@ -668,11 +689,8 @@ func needsIntervention(reason, message string) outcome {
 func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	outcome, error) {
 	// A replacement's chain link comes first, before anything else is read about it (ADR-0028 section 4 item 2).
-	switch why, err := r.chainLink(ctx, rr); {
-	case err != nil:
-		return outcome{}, err
-	case why != "":
-		return denied(remediationv1alpha1.ReasonChainLinkInvalid, why+"; nothing was taken over"), nil
+	if out, refused, err := r.checkChainLink(ctx, rr); err != nil || refused {
+		return out, err
 	}
 	pol := &remediationv1alpha1.RemediationPolicy{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: string(rr.Spec.PolicyRef)}, pol); {

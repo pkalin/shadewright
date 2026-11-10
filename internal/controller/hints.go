@@ -71,7 +71,9 @@ import (
 //   - An accepted hint is pinned (comment ID, digest of the stored text, the comment's updated time) in
 //     status.hints, Pending.
 //
-// The same look answers Pending hints from the Incident the request names (answerHints). Whatever ends the
+// With reviewer hints off, nothing is read and every Pending or Reserved hint is declined (declineHintsOff), so
+// a hint stored while they were on is not acted on. The same look answers Pending hints from the Incident the
+// request names (answerHints). Whatever ends the
 // request (a merge, a close, a moved head, a stale plan) declines its Pending hints in the status write that
 // records the end: setPhase calls declineOnEnd. Everything else goes into
 // the request's status in one update, with the resourceVersion read, and only after the kill switch allowed
@@ -167,7 +169,8 @@ func (r *RemediationRequestReconciler) watchHints(ctx context.Context, look hint
 }
 
 // pollHints is one look at the comments of rr's pull request, when look has a provider and reviewer hints are
-// on, and the answers of its Pending hints (with their timeout) in any case, written in one status update. rr
+// on, and the answers of its Pending hints (with their timeout) in any case, written in one status update; with
+// reviewer hints off it declines every Pending or Reserved hint instead (declineHintsOff). rr
 // is updated in place only when that write succeeded. ctx is the reconcile's context: the look and the rest
 // (the answers, the kill switch read and the status update) each get a deadline of their own
 // (WriteTimeout), so a look at the comments that keeps using up its deadline never keeps an overdue hint
@@ -192,6 +195,11 @@ func (r *RemediationRequestReconciler) pollHints(ctx context.Context, look hintL
 	}
 	storeCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
+	if !r.ReviewerHints {
+		// Hints off fails closed (ADR-0028, amendment of 2026-11-10): a hint stored while they were on is
+		// declined, so neither the analysis nor a handoff acts on it.
+		declineHintsOff(upd)
+	}
 	r.answerHints(storeCtx, upd, now)
 	r.settleHandoff(storeCtx, upd)
 	looked = looked && lookErr == nil
@@ -536,6 +544,21 @@ func declineOnEnd(rr *remediationv1alpha1.RemediationRequest, phase remediationv
 	// request over, whatever ended it (endHandoff, a retry that stopped, the grace of the recovery).
 	if ho := rr.Status.Handoff; ho != nil && ho.From != nil && ho.From.Phase == remediationv1alpha1.HandoffReserved {
 		ho.From.Phase = remediationv1alpha1.HandoffAborted
+	}
+}
+
+// declineHintsOff declines every Pending or Reserved hint of rr with ReasonHintsTurnedOff, and aborts an
+// intent that still stands, for an executor that runs with reviewer hints off: a hint stored while they were
+// on is not acted on, by the analysis (which only answers a Pending hint) or by a handoff (the replacement
+// ends without it: handoffStep, recoverStep). A hint the analysis answered with a replacement (outcome set) is declined too.
+// Consumed and Declined hints stay as they are.
+func declineHintsOff(rr *remediationv1alpha1.RemediationRequest) {
+	abortIntent(rr, remediationv1alpha1.ReasonHintsTurnedOff)
+	for i := range rr.Status.Hints {
+		if h := &rr.Status.Hints[i]; h.State == remediationv1alpha1.HintPending ||
+			h.State == remediationv1alpha1.HintReserved {
+			h.State, h.Reason = remediationv1alpha1.HintDeclined, remediationv1alpha1.ReasonHintsTurnedOff
+		}
 	}
 }
 

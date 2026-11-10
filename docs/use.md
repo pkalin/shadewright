@@ -12,14 +12,14 @@ What you do with Shadewright once it is installed: understand what it proposes, 
 - [Your first proposal, to a reviewed pull request](first-proposal.md): the hand-written request, the pull request it opens, and what the phases mean.
 - [Troubleshooting](troubleshooting.md): every condition reason of a `RemediationRequest` with its cause and fix.
 - [Emergency stop](emergency.md): pause the executor and stop the analysis.
-- [Give a reviewer hint](#give-a-reviewer-hint): steer a proposal from its pull request (not enabled yet).
+- [Give a reviewer hint](#give-a-reviewer-hint): steer a proposal from its pull request (off by default: [turn reviewer hints on](how-to/turn-on-reviewer-hints.md)).
 - [FAQ](faq.md) and [Glossary](glossary.md).
 
 The concepts are explained in the design: the [request lifecycle](design/6-reconciliation.md#6-reconciliation), the [API objects](design/5-api.md#5-api) (`RemediationRequest`, `Incident`, `RemediationPolicy`, `RemediationSettings`), [what `approvalRequired` means](design/8-gitops-on-github.md#81-what-approvalrequired-means) and [how a change is made](design/8-gitops-on-github.md#82-making-a-change). The fields of each object are in the [API reference](reference/api.md).
 
 ## Give a reviewer hint
 
-**Not enabled in the shipped binary yet.** The code is on `main` ([ADR-0028](adr/0028-reviewer-hints-through-the-pull-request.md)), but `cmd/main.go` never turns the executor's `ReviewerHints` setting on, so a comment is not read until the tasks #590, #591 and #592 land. What follows is what happens once it is on.
+**Off by default.** The executor reads hints only when it runs with `--reviewer-hints` (chart value `executor.reviewerHints.enabled`), and that needs a repository rule first: [turn reviewer hints on](how-to/turn-on-reviewer-hints.md) ([ADR-0028](adr/0028-reviewer-hints-through-the-pull-request.md)). Without the flag no comment is read. What follows is what happens when it is on.
 
 **How.** Comment on the pull request Shadewright opened. The first line must start exactly with `/shadewright reanalyze:`, followed by your hint on the same line:
 

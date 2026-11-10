@@ -29,8 +29,9 @@ limitations under the License.
 //     n = 4095 the build is at the document bound, over the object cap, which is checked
 //     after kustomize has built them, so it measures the largest render the document bound lets through.
 //   - patches: 1,023 ConfigMaps of about 78 bytes, plus the Deployment, and n strategic merge patches of them
-//     (one label each, files of 1,000): with n = 3072 the build is at the document bound with the most objects
-//     the render accepts, every one patched three times.
+//     (one label each, files of 1,000): with n = 1708 the build is at the transform budget
+//     (semdiff.MaxTransformBytes), which counts a patch without a target as one with a target since #626; with
+//     n = 3072 (the document bound, every object patched three times) it is refused before the render.
 //   - annotations: as flat with 4 MiB, plus a common annotation of one long value sized so that the bound on
 //     what patches and transformers add to the render (semdiff.MaxTransformBytes) is at n percent of the budget:
 //     with n = 100 the build is at every byte budget at once (#495). The size is n percent of the largest the

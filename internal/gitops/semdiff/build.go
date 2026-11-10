@@ -72,6 +72,9 @@ const (
 	apiKustomization  = "kustomize.config.k8s.io/v1beta1"
 	apiComponent      = "kustomize.config.k8s.io/v1alpha1"
 	keyKind           = "kind"
+	keyAPIVersion     = "apiVersion"
+	keyMetadata       = "metadata"
+	keyName           = "name"
 	keyResources      = "resources"
 	keyComponents     = "components"
 	keyPatches        = "patches"
@@ -83,7 +86,7 @@ const (
 // functions), openapi, crds, configurations, replacements, the deprecated bases, patchesStrategicMerge and
 // patchesJson6902, buildMetadata and sortOptions. A patch may not use JSON patch copy operations ([refuseCopy]).
 var allowedKeys = map[string]bool{
-	"apiVersion": true, keyKind: true, "metadata": true,
+	keyAPIVersion: true, keyKind: true, keyMetadata: true,
 	keyResources: true, keyComponents: true, keyPatches: true,
 	keyNamespace: true, "namePrefix": true, "nameSuffix": true,
 	"labels": true, "commonLabels": true, "commonAnnotations": true,
@@ -127,6 +130,8 @@ type walker struct {
 	// transformers can add to the render ([visitGrowth]), which [MaxTransformBytes] bounds.
 	scans  map[string]*scan
 	growth cost
+	// merged sums what each visit's patches merge into one path of an object ([MaxMergedKeys]).
+	merged *mergeWidths
 	// generate, when set, lists directories so that root, the path rendered, may have no kustomization file:
 	// the walk then generates the one Flux would (Load only; Check finds it in the files it is given).
 	generate repopath.Lister
@@ -167,7 +172,7 @@ func newWalker(read reader) *walker {
 	w := &walker{
 		read: read, files: map[string][]byte{}, resources: map[string]bool{},
 		parsed: map[dirKind]*refs{}, ignoreChecked: map[string]bool{}, dirResources: map[string]bool{},
-		docs: map[string]int{}, scans: map[string]*scan{},
+		docs: map[string]int{}, scans: map[string]*scan{}, merged: newMergeWidths(),
 	}
 	w.isDir = func(p string) bool { return w.dirResources[p] }
 	return w
@@ -259,6 +264,7 @@ func (w *walker) visit(ctx context.Context, dir, want string, depth int) (*shape
 		return s, o, nil
 	}
 	w.growth = w.growth.plus(visitGrowth(s, o))
+	w.merged.add(o.widths)
 	return s, nil, nil
 }
 
@@ -280,18 +286,28 @@ func (w *walker) countShapes(r *refs) error {
 	o.coef.add(r.coef)
 	for i, list := range [][]patchSource{r.untargeted, r.targeted} {
 		for _, p := range list {
+			name, data := p.path, w.files[p.path]
 			s := w.scans[p.path]
 			if p.path == "" {
+				name, data = "an inline patch", []byte(p.inline)
 				var err error
-				if s, err = scanOf("an inline patch", []byte(p.inline), 0); err != nil {
+				if s, err = scanOf(name, data, 0); err != nil {
 					return err
 				}
 			}
+			if s.widths == nil {
+				var err error
+				if s.widths, err = patchWidths(name, data); err != nil {
+					return err
+				}
+			}
+			o.widths.add(s.widths)
 			// A patch adds no object.
 			sh := s.shape
 			sh.docs, sh.kinds = 0, nil
 			if i == 0 {
 				o.untargeted.add(&sh, 1)
+				o.untargetedCost = o.untargetedCost.plus(cost{s.bytes, s.nodes})
 			} else {
 				o.targeted = append(o.targeted, targetedPatch{shape: sh, cost: cost{s.bytes, s.nodes}, kind: p.kind})
 			}
@@ -305,8 +321,13 @@ func (w *walker) countShapes(r *refs) error {
 }
 
 // checkGrowth refuses a build whose patches and transformers can add more than [MaxTransformBytes] to its
-// render ([visitGrowth]). The walk calls it once the whole tree is counted, so every visit is in the sum.
+// render ([visitGrowth]), or whose patches can merge more than [MaxMergedKeys] keys and items into one mapping or
+// sequence of an object. The walk calls it once the whole tree is counted, so every visit is in the sums.
 func (w *walker) checkGrowth() error {
+	if w.merged.widest() > MaxMergedKeys {
+		return refuse(ReasonTooLarge, fmt.Sprintf("the patches of the build can merge more than %d keys or items "+
+			"into one mapping or list of an object", MaxMergedKeys))
+	}
 	if w.growth.total() > MaxTransformBytes {
 		return refuse(ReasonTooLarge, fmt.Sprintf("the patches and transformers of the build can add more than %d "+
 			"bytes to the render, counting %d for each YAML node", MaxTransformBytes, NodeBytes))

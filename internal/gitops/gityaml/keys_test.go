@@ -20,8 +20,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -53,6 +56,59 @@ func widestMapping(data string) (int, bool) {
 			return w, errors.Is(err, io.EOF)
 		}
 		w = max(w, widest(&n))
+	}
+}
+
+// duplicateKeys reports whether a mapping in the documents go.yaml.in/yaml/v3 builds for data holds two scalar
+// keys that are surely one key (exact: the same text, or values that decode equal) or may be (loose: also the
+// same as JSON object keys, numbers compared at 32-bit precision), and whether data parses.
+func duplicateKeys(data string) (exact, loose, ok bool) {
+	looseKey := func(v any) string {
+		switch v := v.(type) {
+		case nil:
+			return "null"
+		case string:
+			return v
+		case int:
+			return strconv.FormatFloat(float64(float32(v)), 'g', -1, 32)
+		case float64:
+			if math.IsNaN(v) {
+				return ".nan"
+			}
+			return strconv.FormatFloat(float64(float32(v)), 'g', -1, 32)
+		}
+		return fmt.Sprint(v)
+	}
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n.Kind == yaml.MappingNode {
+			var keys []*yaml.Node
+			for i := 0; i < len(n.Content); i += 2 {
+				if n.Content[i].Kind == yaml.ScalarNode {
+					keys = append(keys, n.Content[i])
+				}
+			}
+			for i, a := range keys {
+				for _, b := range keys[i+1:] {
+					var va, vb any
+					ea, eb := a.Decode(&va), b.Decode(&vb)
+					same := a.Value == b.Value || ea == nil && eb == nil && reflect.DeepEqual(va, vb)
+					exact = exact || same
+					loose = loose || same || ea == nil && eb == nil && looseKey(va) == looseKey(vb)
+				}
+			}
+		}
+		for _, c := range n.Content {
+			walk(c)
+		}
+	}
+	dec := yaml.NewDecoder(strings.NewReader(data))
+	for {
+		var n yaml.Node
+		if err := dec.Decode(&n); err != nil {
+			return exact, loose, errors.Is(err, io.EOF)
+		}
+		walk(&n)
 	}
 }
 
@@ -112,7 +168,8 @@ func TestObjectsMappingKeys(t *testing.T) {
 // A scalar key a mapping already holds is refused at its line, however it is quoted or tagged and at any depth,
 // before any decoder compares the keys (#608): 2,048 copies of one long key took seconds and gigabytes in the
 // decoders' duplicate key check. A mapping wider than MaxMappingKeys is refused for its width first. The same
-// key in two mappings, and complex keys, pass.
+// key in two mappings, complex keys and distinct numbers pass. Keys are compared as decoders resolve them, not
+// as text only: a hexadecimal 0x1 and 1, or ~ and null, are one key, and the last value would silently win.
 func TestObjectsDuplicateKeys(t *testing.T) {
 	cases := []struct {
 		name string
@@ -123,6 +180,14 @@ func TestObjectsDuplicateKeys(t *testing.T) {
 		{"repeated in a block mapping", "a: 1\nb: 2\na: 3\n", 3, gityaml.ErrDuplicateKey},
 		{"quoted", "a: 1\n'a': 2\n", 2, gityaml.ErrDuplicateKey},
 		{"tagged", "1: x\n!!str 1: y\n", 2, gityaml.ErrDuplicateKey},
+		{"hexadecimal and decimal", "0x1: a\n1: b\n", 2, gityaml.ErrDuplicateKey},
+		{"two spellings of null", "~: a\nnull: b\n", 2, gityaml.ErrDuplicateKey},
+		{"empty and null", "? \n: a\nNULL: b\n", 3, gityaml.ErrDuplicateKey},
+		{"two spellings of true", "true: a\nTrue: b\n", 2, gityaml.ErrDuplicateKey},
+		{"float and integer", "1.0: a\n1: b\n", 2, gityaml.ErrDuplicateKey},
+		{"integer and quoted text", "0x1: a\n'1': b\n", 2, gityaml.ErrDuplicateKey},
+		{"octal and decimal", "0o10: a\n8: b\n", 2, gityaml.ErrDuplicateKey},
+		{"null and its text", "~: a\n'~': b\n", 2, gityaml.ErrDuplicateKey},
 		{"repeated in a flow mapping", "x: [{k, k}]\n", 1, gityaml.ErrDuplicateKey},
 		{"nested", "metadata:\n  labels:\n    a: b\n    a: c\n", 4, gityaml.ErrDuplicateKey},
 		{"second document", "a: b\n---\nc: d\nc: e\n", 4, gityaml.ErrDuplicateKey},
@@ -138,9 +203,11 @@ func TestObjectsDuplicateKeys(t *testing.T) {
 		})
 	}
 	for name, in := range map[string]string{
-		"two mappings": "a: {k: 1}\nb: {k: 2}\n",
-		"complex keys": "? [a]\n: 1\n? [b]\n: 2\n",
-		"values":       "a: x\nb: x\n",
+		"two mappings":     "a: {k: 1}\nb: {k: 2}\n",
+		"complex keys":     "? [a]\n: 1\n? [b]\n: 2\n",
+		"values":           "a: x\nb: x\n",
+		"distinct numbers": "1: a\n2: b\n0x10: c\n",
+		"YAML 1.1 words":   "on: a\ntrue: b\nyes: c\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := gityaml.Objects([]byte(in), 10); err != nil {
@@ -150,8 +217,9 @@ func TestObjectsDuplicateKeys(t *testing.T) {
 	}
 }
 
-// Real manifests pass: the CRDs of this repository, far from the bound, and a ConfigMap of MaxMappingKeys entries
-// (#608).
+// Real manifests pass: the CRDs of this repository, well under the bound, and a ConfigMap of MaxMappingKeys
+// entries (#608). A CRD may hold up to half the bound in one mapping, so that normal API growth does not fail
+// the test; the widest held 21 keys in November 2026.
 func TestObjectsRealManifests(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("..", "..", "..", "config", "crd", "bases", "*.yaml"))
 	if err != nil || len(files) == 0 {
@@ -165,8 +233,8 @@ func TestObjectsRealManifests(t *testing.T) {
 		if _, err := gityaml.Objects(data, 10); err != nil {
 			t.Errorf("%s: Objects = %v, want no error", f, err)
 		}
-		if w, _ := widestMapping(string(data)); w > gityaml.MaxMappingKeys/8 {
-			t.Errorf("%s: a mapping of %d keys, closer to the bound than expected", f, w)
+		if w, _ := widestMapping(string(data)); w > gityaml.MaxMappingKeys/2 {
+			t.Errorf("%s: a mapping of %d keys, more than half of MaxMappingKeys", f, w)
 		}
 	}
 	var b strings.Builder
@@ -179,8 +247,9 @@ func TestObjectsRealManifests(t *testing.T) {
 	}
 }
 
-// FuzzMappingKeys checks that the check refuses input it accepts parsing only for a mapping of more than
-// MaxMappingKeys keys when the tree holds one, and always when it does (#608).
+// FuzzMappingKeys checks that the check refuses input it accepts parsing for a mapping of more than
+// MaxMappingKeys keys only when the tree holds one, and always when it does; and for a duplicate key only when a
+// mapping may hold one key twice, and always when one surely does (#608).
 func FuzzMappingKeys(f *testing.F) {
 	for _, in := range nodeCases {
 		f.Add(in)
@@ -190,15 +259,20 @@ func FuzzMappingKeys(f *testing.F) {
 	f.Add("a: b\n---\n" + flowKeys(gityaml.MaxMappingKeys+1))
 	f.Add("{" + strings.Repeat("k: ,", gityaml.MaxMappingKeys) + "k: }\n")
 	f.Add(strings.Repeat("? k\n", gityaml.MaxMappingKeys+1))
+	f.Add("0x1: a\n1: b\n")
+	f.Add("~: a\nnull: b\n")
+	f.Add("1.0: a\n'1': b\n")
+	f.Add("a: {k: 1, 'k': 2}\n")
 	f.Fuzz(func(t *testing.T, in string) {
 		if len(in) > 1<<16 || !utf8.ValidString(in) {
 			return
 		}
 		// Per part, as the check decodes: kustomize splits at a separator line even inside a block scalar.
-		w, ok := 0, true
+		w, ok, exact, loose := 0, true, false, false
 		for _, p := range gityaml.Parts([]byte(in)) {
 			pw, pok := widestMapping(p.Text)
-			w, ok = max(w, pw), ok && pok
+			pe, pl, _ := duplicateKeys(p.Text)
+			w, ok, exact, loose = max(w, pw), ok && pok, exact || pe, loose || pl
 		}
 		_, err := gityaml.Objects([]byte(in), 1<<20)
 		if errors.Is(err, gityaml.ErrTooManyKeys) && w <= gityaml.MaxMappingKeys {
@@ -206,6 +280,12 @@ func FuzzMappingKeys(f *testing.F) {
 		}
 		if ok && w > gityaml.MaxMappingKeys && err == nil {
 			t.Fatalf("Objects(%q) accepted a mapping of %d keys", in, w)
+		}
+		if errors.Is(err, gityaml.ErrDuplicateKey) && !loose {
+			t.Fatalf("Objects(%q) refused a duplicate key in mappings without one", in)
+		}
+		if ok && exact && err == nil {
+			t.Fatalf("Objects(%q) accepted a mapping that holds one key twice", in)
 		}
 	})
 }

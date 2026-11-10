@@ -247,9 +247,9 @@ func objectsIn(part string, limit int) (int, *Error) {
 // refused returns the first node below n that the check refuses, in document order, and the cause, or nil:
 // a node that has an anchor, is an alias, or is a merge key (a mapping key with the merge tag, which a plain
 // "<<" has too, or a "<<" key however quoted), with [ErrAnchor]; a mapping of more than [MaxMappingKeys] keys
-// with [ErrTooManyKeys]; a scalar key whose text an earlier key of the same mapping has, with
-// [ErrDuplicateKey]. Like the decoders, it compares the text of the key, not its tag or quoting. A "<<" value is
-// plain text: only a key merges.
+// with [ErrTooManyKeys]; a scalar key that has the text of an earlier key of the same mapping (as the decoders'
+// own check and kustomize's field lookup compare keys, whatever the tag or quoting) or its resolved value
+// ([keyOf]), with [ErrDuplicateKey]. A "<<" value is plain text: only a key merges.
 func refused(n *yaml.Node) (*yaml.Node, error) {
 	if n.Anchor != "" || n.Kind == yaml.AliasNode {
 		return n, ErrAnchor
@@ -259,18 +259,24 @@ func refused(n *yaml.Node) (*yaml.Node, error) {
 		if len(n.Content) > 2*MaxMappingKeys {
 			return n, ErrTooManyKeys
 		}
-		keys = make(map[string]struct{}, len(n.Content)/2)
+		if len(n.Content) > 2 {
+			keys = make(map[string]struct{}, len(n.Content))
+		}
 	}
 	for i, c := range n.Content {
 		if n.Kind == yaml.MappingNode && i%2 == 0 {
 			if c.ShortTag() == "!!merge" || c.Kind == yaml.ScalarNode && c.Value == "<<" {
 				return c, ErrAnchor
 			}
-			if c.Kind == yaml.ScalarNode {
-				if _, dup := keys[c.Value]; dup {
+			if c.Kind == yaml.ScalarNode && keys != nil {
+				// Text and resolved value in one set, told apart by their first byte.
+				t, r := "t"+c.Value, "r"+keyOf(c)
+				_, dupT := keys[t]
+				_, dupR := keys[r]
+				if dupT || dupR {
 					return c, ErrDuplicateKey
 				}
-				keys[c.Value] = struct{}{}
+				keys[t], keys[r] = struct{}{}, struct{}{}
 			}
 		}
 		if a, cause := refused(c); a != nil {
@@ -278,6 +284,55 @@ func refused(n *yaml.Node) (*yaml.Node, error) {
 		}
 	}
 	return nil, nil
+}
+
+// keyOf returns the resolved value refused compares a scalar key by, besides its text: two keys are one key
+// when a decoder may give them the same map key, so that one value silently replaces the other. A key with the
+// string tag (quoted, plain text that resolves to a string, or tagged !!str) is its text. Any other key is its
+// value as go.yaml.in/yaml/v3 decodes it, written as sigs.k8s.io/yaml writes a JSON object key: "0x1" and "1"
+// are both "1", "~" and "null" both "null", "1.0" and "1" both "1". go.yaml.in/yaml/v3 keeps the last value of
+// "0x1" and "1" without an error, and sigs.k8s.io/yaml that of "1.0" and "1", or of "0x1" and "1" quoted. The
+// tag is left out on purpose, so a plain 1 and a quoted "1" are one key. It errs towards refusing: two NaN
+// keys are one key, and a key it cannot decode is its tag and text. YAML 1.1 boolean words ("on", "yes") stay
+// strings, as go.yaml.in/yaml/v3 and kustomize read them; sigs.k8s.io/yaml refuses "on" next to "true" itself.
+func keyOf(k *yaml.Node) string {
+	tag := k.ShortTag()
+	if tag == "!!str" {
+		return k.Value
+	}
+	var v any
+	if err := k.Decode(&v); err != nil {
+		return tag + " " + k.Value
+	}
+	switch v := v.(type) {
+	case nil:
+		return "null"
+	case bool:
+		return strconv.FormatBool(v)
+	case int:
+		return strconv.Itoa(v)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case uint64:
+		return strconv.FormatUint(v, 10)
+	case float64:
+		// As sigs.k8s.io/yaml writes a float key (yaml.convertToJSONableObject): 32-bit precision, and YAML's
+		// names for infinities and NaN.
+		switch f := strconv.FormatFloat(v, 'g', -1, 32); f {
+		case "+Inf":
+			return ".inf"
+		case "-Inf":
+			return "-.inf"
+		case "NaN":
+			return ".nan"
+		default:
+			return f
+		}
+	case string:
+		return v
+	default:
+		return fmt.Sprint(v)
+	}
 }
 
 // listObjects counts the objects kustomize may make of n, which holds no alias (kustomize api

@@ -380,9 +380,14 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 			continue
 		}
 		refuse := func(why remediationv1alpha1.HintRefusal) {
-			if refuseHint(st, source, c, why, now) {
+			switch {
+			case refuseHint(st, source, c, why, now):
 				log.Info("Refused a reviewer hint for RemediationRequest", "comment", c.ID,
 					"author", c.Author.ID, "reason", string(why))
+			case !findRefused(st.RefusedHints, source, c.ID):
+				log.Info("Refused a reviewer hint for RemediationRequest without a record: every recorded "+
+					"refusal still waits for its reply", "comment", c.ID, "author", c.Author.ID,
+					"reason", string(why), "max", remediationv1alpha1.MaxRefusedHints)
 			}
 		}
 		if h := findHint(st.Hints, source, c.ID); h != nil {
@@ -408,7 +413,7 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 				UpdatedAt: metav1.NewTime(c.UpdatedAt.UTC().Truncate(time.Second))})
 		}
 		if len(st.Hints) >= remediationv1alpha1.MaxStoredHints {
-			// Nothing more can be stored; the comment stays unjudged and the cursor passes it (#542 replies).
+			// Nothing more can be stored; the comment stays unjudged and the cursor passes it (no record, so no reply).
 			unstored++
 			mark()
 			continue
@@ -577,23 +582,33 @@ func parseHintCommand(body string, truncated bool) (text string, isCommand bool,
 	return text, true, ""
 }
 
-// refuseHint records the refusal of comment c, unless one is recorded, dropping the oldest beyond
-// MaxRefusedHints. It reports whether it recorded one.
+// refuseHint records the refusal of comment c, unless one is recorded (see addRefused). It reports whether it
+// recorded one.
 func refuseHint(st *remediationv1alpha1.RemediationRequestStatus, source remediationv1alpha1.HintSource,
 	c providers.Feedback, why remediationv1alpha1.HintRefusal, now time.Time) bool {
 	if findRefused(st.RefusedHints, source, c.ID) {
 		return false
 	}
-	st.RefusedHints = append(st.RefusedHints, remediationv1alpha1.RefusedHint{
+	return addRefused(st, remediationv1alpha1.RefusedHint{
 		Source: source, CommentID: c.ID,
 		Author:    remediationv1alpha1.HintAuthor{ID: c.Author.ID, Login: c.Author.Login},
 		Reason:    why,
 		RefusedAt: metav1.NewTime(now.UTC().Truncate(time.Second)),
 	})
-	if n := len(st.RefusedHints); n > remediationv1alpha1.MaxRefusedHints {
-		st.RefusedHints = append([]remediationv1alpha1.RefusedHint(nil),
-			st.RefusedHints[n-remediationv1alpha1.MaxRefusedHints:]...)
+}
+
+// addRefused appends f to the refusals of st, which must not hold its comment. At MaxRefusedHints it first
+// drops the oldest refusal that has its reply recorded; a refusal still waiting for its reply is never dropped,
+// so when all of them wait, f is not recorded and addRefused reports false.
+func addRefused(st *remediationv1alpha1.RemediationRequestStatus, f remediationv1alpha1.RefusedHint) bool {
+	if len(st.RefusedHints) >= remediationv1alpha1.MaxRefusedHints {
+		i := slices.IndexFunc(st.RefusedHints, func(r remediationv1alpha1.RefusedHint) bool { return r.Reply != "" })
+		if i < 0 {
+			return false
+		}
+		st.RefusedHints = slices.Delete(slices.Clone(st.RefusedHints), i, i+1)
 	}
+	st.RefusedHints = append(st.RefusedHints, f)
 	return true
 }
 

@@ -59,6 +59,10 @@ var (
 	// "..", holds a slash or a NUL byte or is not valid UTF-8, or a type that is neither a file, a directory, a
 	// symbolic link nor a submodule. It is permanent for that commit: the tree does not change.
 	ErrInvalidEntry = errors.New("invalid directory entry")
+	// ErrTooManyComments means a change request holds more comments than the adapter reads to look for a
+	// comment marker, so it cannot tell whether its own comment is there already: it posts nothing (fail
+	// closed). It lasts while the conversation does: a retry fails the same way.
+	ErrTooManyComments = errors.New("too many comments to look for a marker")
 )
 
 // RetryableError is a transient failure with an optional delay requested by the remote system, for example

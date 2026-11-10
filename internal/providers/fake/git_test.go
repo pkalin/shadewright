@@ -384,16 +384,16 @@ func TestGitCheckMergedAndComment(t *testing.T) {
 	g, head := newRepo(t)
 	ctx := context.Background()
 	c, cr := mustOpen(t, g, head)
-	if err := g.CommentChangeRequest(ctx, cr.Number, "<!-- m -->", "note <!-- m -->"); err != nil {
+	if err := g.CommentChangeRequest(ctx, cr.Number, "<!-- m -->", "note\n<!-- m -->"); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.CommentChangeRequest(ctx, cr.Number, "<!-- m -->", "again <!-- m -->"); err != nil {
+	if err := g.CommentChangeRequest(ctx, cr.Number, "<!-- m -->", "again\n<!-- m -->"); err != nil {
 		t.Errorf("comment with a marker already there: %v", err)
 	}
 	if err := g.CommentChangeRequest(ctx, cr.Number, "<!-- m -->", "no marker"); err == nil {
 		t.Error("a body without its marker was allowed")
 	}
-	if got := g.Comments(cr.Number); len(got) != 1 || got[0] != "note <!-- m -->" {
+	if got := g.Comments(cr.Number); len(got) != 1 || got[0] != "note\n<!-- m -->" {
 		t.Errorf("comments = %v", got)
 	}
 	if _, err := g.Push(base, "other.yaml", []byte("a: 1\n")); err != nil {
@@ -413,7 +413,7 @@ func TestGitCheckMergedAndComment(t *testing.T) {
 	if got, _, err := g.CheckMerged(ctx, c, c, path); err != nil || got != providers.BranchForeign {
 		t.Errorf("CheckMerged() of the head itself = %v, %v", got, err)
 	}
-	if err := g.CommentChangeRequest(ctx, cr.Number, "<!-- n -->", "late <!-- n -->"); !providers.IsConflict(err) {
+	if err := g.CommentChangeRequest(ctx, cr.Number, "<!-- n -->", "late\n<!-- n -->"); !providers.IsConflict(err) {
 		t.Errorf("comment on a merged change request: %v", err)
 	}
 }
@@ -513,4 +513,52 @@ func TestGitMergeSameChangeAlreadyOnBase(t *testing.T) {
 	if string(f.Data) != newVal {
 		t.Errorf("merged content %q", f.Data)
 	}
+}
+
+// The fake follows the contract of CommentChangeRequest: only the App's own comments count, the marker must be a
+// whole line, and past the comments it reads it posts nothing (ErrTooManyComments).
+func TestGitCommentChangeRequestContract(t *testing.T) {
+	ctx := context.Background()
+	t.Run("a person's marker does not count", func(t *testing.T) {
+		g, head := newRepo(t)
+		_, cr := mustOpen(t, g, head)
+		g.AddComment(cr.Number, providers.Feedback{ID: 1, Body: "forged\n<!-- m -->"})
+		if err := g.CommentChangeRequest(ctx, cr.Number, "<!-- m -->", "note\n<!-- m -->"); err != nil {
+			t.Fatal(err)
+		}
+		if got := g.Comments(cr.Number); len(got) != 1 {
+			t.Errorf("the App's comments = %v, want the one posted", got)
+		}
+	})
+	t.Run("the marker is a whole line", func(t *testing.T) {
+		g, head := newRepo(t)
+		_, cr := mustOpen(t, g, head)
+		if err := g.CommentChangeRequest(ctx, cr.Number, "<!-- m -->", "x <!-- m --> y"); err == nil {
+			t.Error("a body without the marker as a line was allowed")
+		}
+		if err := g.CommentChangeRequest(ctx, cr.Number, "<!-- m --> y", "x\n<!-- m --> y"); err != nil {
+			t.Fatal(err)
+		}
+		// The App's comment holds "<!-- m -->" only inside a line: it is no comment with that marker.
+		if err := g.CommentChangeRequest(ctx, cr.Number, "<!-- m -->", "note\n<!-- m -->"); err != nil {
+			t.Fatal(err)
+		}
+		if got := g.Comments(cr.Number); len(got) != 2 {
+			t.Errorf("the App's comments = %v, want two", got)
+		}
+	})
+	t.Run("too many comments", func(t *testing.T) {
+		g, head := newRepo(t)
+		_, cr := mustOpen(t, g, head)
+		for i := range fake.MaxComments + 1 {
+			g.AddComment(cr.Number, providers.Feedback{ID: int64(i + 1), Body: "other"})
+		}
+		err := g.CommentChangeRequest(ctx, cr.Number, "<!-- m -->", "note\n<!-- m -->")
+		if !errors.Is(err, providers.ErrTooManyComments) {
+			t.Fatalf("got %v, want ErrTooManyComments", err)
+		}
+		if got := g.Comments(cr.Number); len(got) != 0 {
+			t.Errorf("posted past the bound: %v", got)
+		}
+	})
 }

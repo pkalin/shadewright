@@ -999,3 +999,50 @@ func TestCallerCancellationIsDistinct(t *testing.T) {
 		t.Fatalf("waiter err = %v, want a plain cancellation", err)
 	}
 }
+
+func TestAppIDReadOnceWithTheJWT(t *testing.T) {
+	var hits atomic.Int32
+	e := setup(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.Method != http.MethodGet || r.URL.Path != "/app" ||
+			!strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ey") {
+			t.Errorf("request %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"id":31337,"slug":"shadewright","client_id":"`+testClientID+`"}`)
+	})
+	for range 2 {
+		id, err := e.src.AppID(context.Background())
+		if err != nil || id != 31337 {
+			t.Fatalf("AppID = %d, %v", id, err)
+		}
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("GET /app sent %d times, want once", hits.Load())
+	}
+}
+
+func TestAppIDFailures(t *testing.T) {
+	for name, c := range map[string]struct {
+		status int
+		body   string
+		check  func(error) bool
+	}{
+		"server error": {http.StatusBadGateway, "", providers.IsRetryable},
+		"no ID":        {http.StatusOK, `{"slug":"x"}`, func(err error) bool { return !providers.IsRetryable(err) }},
+		"not JSON":     {http.StatusOK, testToken, func(err error) bool { return !providers.IsRetryable(err) }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := setup(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(c.status)
+				_, _ = io.WriteString(w, c.body)
+			})
+			id, err := e.src.AppID(context.Background())
+			if err == nil || id != 0 || !c.check(err) {
+				t.Fatalf("AppID = %d, %v", id, err)
+			}
+			if strings.Contains(err.Error(), testToken) || strings.Contains(err.Error(), "api.github.com") {
+				t.Fatalf("error leaks: %v", err)
+			}
+		})
+	}
+}

@@ -167,7 +167,11 @@ executor:
       # -- Memory request.
       # @section -- Executor
       memory: 64Mi
-  # -- Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--metrics-cert-path`, `--metrics-cert-name`, `--metrics-cert-key`, `--namespace`, `--watch-namespaces`, `--cluster-id` and `--max-incidents`.
+  reviewerHints:
+    # -- Turns reviewer hints on (ADR-0028): passes `--reviewer-hints`, so the executor reads `/shadewright reanalyze:` comments on the pull requests it opened and creates the check run `shadewright/review` on their heads. Off by default. Required repository rule first: the target branch of the GitOps repository must require the status check `shadewright/review` with the Shadewright GitHub App as its expected source (ADR-0028 section 5). Shadewright cannot verify that rule; without it the check only informs and a hint author can approve their own steered change. The App needs `checks: write`, which every token request names since #539; no Kubernetes RBAC changes.
+    # @section -- Executor
+    enabled: false
+  # -- Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--metrics-cert-path`, `--metrics-cert-name`, `--metrics-cert-key`, `--namespace`, `--watch-namespaces`, `--cluster-id`, `--max-incidents` and `--reviewer-hints` (use `reviewerHints.enabled`).
   # @section -- Executor
   extraArgs: []
   metricsTLS:

@@ -132,6 +132,15 @@
           "type": "string",
           "pattern": "^([0-9]+(B|KiB|MiB|GiB|TiB)?)?$"
         },
+        "reviewerHints": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          }
+        },
         "extraArgs": {
           "type": "array",
           "items": {

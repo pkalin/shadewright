@@ -17,7 +17,7 @@ What Shadewright stores, what it sends where, what it publishes and how long eac
 | Prometheus (only with `--prometheus-url`; read by the context builder and the read tools when the analysis runs, #76) | The results of the approved query templates ([design, section 4](design/4-tools.md#4-tools)), only for the **watched namespaces**: Prometheus applies no authorization, so the adapter refuses any other namespace before a request | Analyzer |
 | Flux `Kustomization` and `GitRepository`, the target workload or `ScaledObject`, policy and settings | Status and spec, for source mapping and the freshness check | Executor |
 | The Git repository | The files of the build for the target's Kustomization (up to 256 files, 1 MiB each), through the GitHub API | Executor |
-| The pull requests it opened (reviewer hints, see below; **not enabled** in the shipped binary) | The conversation comments (never inline review comments), the author's ID, login, type and base permission, and the reviews of the pull request | Executor |
+| The pull requests it opened (reviewer hints, see below; **off by default**, `--reviewer-hints`) | The conversation comments (never inline review comments), the author's ID, login, type and base permission, and the reviews of the pull request | Executor |
 
 Neither identity reads Secrets or ConfigMap data (except its own budget ConfigMap). The executor reads no **pod logs**. The analyzer may (`get` on `pods/log` in the watched namespaces only; `--pod-logs=false` turns the source off, and in the Helm chart `analyzer.podLogs.enabled=false` also removes the grant), but reads none yet: the context builder that holds the pod logs source is not called until the analysis loop is built ([#76](https://github.com/pkalin/shadewright/issues/76)). Once it is, the source reads one container per call, only in the watched namespaces, at most 24 hours back and at most 1 MiB per request (at most two requests per call), and returns at most 256 KiB of whole lines, redacted before it leaves the adapter and again by the context builder ([design, section 4](design/4-tools.md#4-tools)). Excerpts are never stored in a custom resource.
 
@@ -41,7 +41,7 @@ Anything in the cluster is readable by whoever has `get` on it, so treat the Inc
 
 ## Reviewer hints
 
-<span class="sw-status sw-built">built</span> in the code, **not enabled in the shipped binary**: `cmd/main.go` never turns the executor's `ReviewerHints` setting on, so no comment is read and nothing below is stored until the follow-up tasks #590, #591 and #592 land ([ADR-0028](adr/0028-reviewer-hints-through-the-pull-request.md)). This is what the code does once it is on.
+<span class="sw-status sw-built">built</span>, **off by default**: no comment is read and nothing below is stored unless the executor runs with `--reviewer-hints` (chart value `executor.reviewerHints.enabled`, [how to turn it on](how-to/turn-on-reviewer-hints.md)) ([ADR-0028](adr/0028-reviewer-hints-through-the-pull-request.md)). This is what it does when it is on.
 
 A hint is a comment on a pull request Shadewright opened. Its first line starts with `/shadewright reanalyze:`, and the rest of that line is the hint. The executor reads the comments of a pull request that waits for review, only a person's, and asks the code host whether the author may write (the check is made when the hint is accepted). Everything else is ignored.
 
@@ -74,7 +74,7 @@ What is kept: nothing is stored beyond the Incident's status (phase, the conditi
 
 | To | What | When |
 | --- | --- | --- |
-| `api.github.com` | Reads of the files and branch heads in the configured repository; a branch, one commit changing one value in one file, a pull request, and a close of that pull request. The App JWT (10 minutes) and an installation token scoped to that one repository, with five permissions (`checks: write` since #539; the handoff writes of reviewer hints, a second commit, a rewritten title and body, a check run and a comment, are not enabled in the shipped binary; see [reviewer hints](#reviewer-hints)) | Only the executor, and only after a request is allowed and writes are not paused |
+| `api.github.com` | Reads of the files and branch heads in the configured repository; a branch, one commit changing one value in one file, a pull request, and a close of that pull request. The App JWT (10 minutes) and an installation token scoped to that one repository, with five permissions (`checks: write` since #539; the handoff writes of reviewer hints, a second commit, a rewritten title and body, a check run and a comment, are off by default (`--reviewer-hints`); see [reviewer hints](#reviewer-hints)) | Only the executor, and only after a request is allowed and writes are not paused |
 | Key Vault | The SHA-256 digest of the JWT to sign. The key stays in the vault | Each time a new installation token is needed |
 | Microsoft Entra ID | The projected ServiceAccount token, for a Key Vault token | Same |
 | The Kubernetes API | Reads and the writes listed in the [configuration reference](reference/configuration.md#namespaces-and-rolebindings) | Always |

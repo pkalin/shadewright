@@ -138,11 +138,13 @@ type RemediationRequestReconciler struct {
 	// refuses a value outside [MinPullRequestPollInterval, MaxPullRequestPollInterval].
 	PullRequestPollInterval time.Duration
 	// ReviewerHints turns on the reading of reviewer hints from the comments of a waiting pull request
-	// (hints.go, ADR-0028). It is off by default, and cmd/main.go does not turn it on yet: a stored hint makes
-	// the analyzer propose a replacement, which takes the pull request over by the supersede handoff (handoff.go),
-	// whose head gets the merge gate (ADR-0028 section 5). The gate holds only once the GitOps repository requires
-	// the check shadewright/review with the App as its source, which Shadewright cannot verify; the check is not
-	// yet created on pull requests no handoff touched.
+	// (hints.go, ADR-0028) and the check run shadewright/review on every recorded head of a waiting pull request
+	// (reviewcheck.go). It is off by default; cmd/main.go sets it from the executor flag --reviewer-hints (chart
+	// value executor.reviewerHints.enabled). A stored hint makes the analyzer propose a replacement, which takes
+	// the pull request over by the supersede handoff (handoff.go), and the merge gate (ADR-0028 section 5) is
+	// that check. The gate holds only once the target branch of the GitOps repository requires the check
+	// shadewright/review with the App as its source, which Shadewright cannot verify: without that rule the
+	// check informs and does not block, so turn hints on only after the rule is in place.
 	ReviewerHints bool
 
 	// admitMu makes the check of the limits and the status write that lets a request through the policy check

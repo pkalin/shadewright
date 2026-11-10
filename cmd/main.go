@@ -58,13 +58,41 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// executorFlags are the executor's own flags that set fields of the RemediationRequest reconciler.
+type executorFlags struct {
+	pollInterval  time.Duration
+	reviewerHints bool
+}
+
+// bindExecutorFlags registers the executor's reconciler flags on fs.
+func bindExecutorFlags(fs *flag.FlagSet) *executorFlags {
+	f := &executorFlags{}
+	fs.DurationVar(&f.pollInterval, "pull-request-poll-interval", controller.DefaultPullRequestPollInterval,
+		"How often the executor looks at a pull request that waits for review, so a merge or a close is seen "+
+			"within it. Between "+controller.ShortDuration(controller.MinPullRequestPollInterval)+" and "+
+			controller.ShortDuration(controller.MaxPullRequestPollInterval)+" (0 uses the default); "+
+			"the full recheck of the plan stays every "+controller.ShortDuration(controller.FullRecheckInterval)+".")
+	fs.BoolVar(&f.reviewerHints, "reviewer-hints", false,
+		"Read reviewer hints (/shadewright reanalyze:) from the comments of the pull requests the executor opened "+
+			"(ADR-0028). Off by default. Turn it on only when the target branch of the GitOps repository requires "+
+			"the check shadewright/review with the Shadewright App as its source: without that rule the merge "+
+			"gate only informs and does not block.")
+	return f
+}
+
+// configure sets the reconciler fields the flags hold.
+func (f *executorFlags) configure(r *controller.RemediationRequestReconciler) {
+	r.PullRequestPollInterval = f.pollInterval
+	r.ReviewerHints = f.reviewerHints
+}
+
 func main() {
 	var opts cmdutil.Options
 	var namespace string
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var webhookPort int
-	var pollInterval time.Duration
 	opts.BindFlags(flag.CommandLine)
+	ef := bindExecutorFlags(flag.CommandLine)
 	flag.StringVar(&namespace, "namespace", os.Getenv("POD_NAMESPACE"),
 		"The operator namespace: the only namespace whose RemediationRequests are reconciled. "+
 			"Defaults to the POD_NAMESPACE environment variable.")
@@ -73,11 +101,6 @@ func main() {
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
 	flag.IntVar(&webhookPort, "webhook-port", 9443, "Port the webhook server listens on. "+
 		"Defaults to 9443. Set -1 to disable the webhook server.")
-	flag.DurationVar(&pollInterval, "pull-request-poll-interval", controller.DefaultPullRequestPollInterval,
-		"How often the executor looks at a pull request that waits for review, so a merge or a close is seen "+
-			"within it. Between "+controller.ShortDuration(controller.MinPullRequestPollInterval)+" and "+
-			controller.ShortDuration(controller.MaxPullRequestPollInterval)+" (0 uses the default); "+
-			"the full recheck of the plan stays every "+controller.ShortDuration(controller.FullRecheckInterval)+".")
 	flag.Parse()
 
 	ctrl.SetLogger(cmdutil.NewLogger(&opts))
@@ -122,16 +145,20 @@ func main() {
 	}}
 
 	reconciler := &controller.RemediationRequestReconciler{
-		Client:                  mgr.GetClient(),
-		Scheme:                  mgr.GetScheme(),
-		Namespace:               namespace,
-		APIReader:               mgr.GetAPIReader(),
-		OpenRepository:          repos.Open,
-		PullRequestPollInterval: pollInterval,
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		Namespace:      namespace,
+		APIReader:      mgr.GetAPIReader(),
+		OpenRepository: repos.Open,
 		// The core/v1 recorder writes with the grant on core Events that the executor's leader election Role
 		// already holds in the operator namespace, where the requests are, as the analyzer's recorder does.
 		Recorder: mgr.GetEventRecorderFor("shadewright-executor"), //nolint:staticcheck // see above
 	}
+	ef.configure(reconciler)
+	// Logged once, so the setting of a running executor can be read from its log. The merge gate of ADR-0028
+	// holds only with the repository rule this binary cannot verify, hence the reminder.
+	setupLog.Info("Configured reviewer hints", "enabled", ef.reviewerHints,
+		"requiredCheck", "shadewright/review from the Shadewright App on the target branch")
 	// After the merge the executor reads the Flux Kustomization that applies the target, with the get it holds
 	// for the source mapping, and asks the plan's Git host (a read) whether a later applied commit holds the
 	// merge commit; then it reports the target's rollout (#532).

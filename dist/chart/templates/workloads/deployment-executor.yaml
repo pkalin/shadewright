@@ -62,7 +62,7 @@ spec:
         - --metrics-cert-path=/etc/shadewright/metrics-tls
         {{- end }}
         {{- end }}
-        {{- if $c.reviewerHints.enabled }}
+        {{- if dig "reviewerHints" "enabled" false $c }}
         # Reviewer hints (ADR-0028): the target branch must require the check shadewright/review from the App.
         - --reviewer-hints
         {{- end }}

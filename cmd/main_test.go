@@ -26,7 +26,7 @@ import (
 )
 
 // TestExecutorFlagsConfigureTheReconciler: --reviewer-hints is off unless given, and the flags reach the
-// reconciler's ReviewerHints and PullRequestPollInterval.
+// ReviewerHints and PullRequestPollInterval of the reconciler newReconciler builds, the one main runs.
 func TestExecutorFlagsConfigureTheReconciler(t *testing.T) {
 	cases := map[string]struct {
 		args      []string
@@ -46,9 +46,10 @@ func TestExecutorFlagsConfigureTheReconciler(t *testing.T) {
 			if err := fs.Parse(c.args); err != nil {
 				t.Fatalf("parse %v: %v", c.args, err)
 			}
-			// Start from the opposite value, so a field configure leaves alone is caught.
-			r := &controller.RemediationRequestReconciler{ReviewerHints: !c.wantHints}
-			ef.configure(r)
+			r := ef.newReconciler(nil, nil, "shadewright-system", nil, nil, nil)
+			if r.Namespace != "shadewright-system" {
+				t.Errorf("Namespace = %q, want shadewright-system", r.Namespace)
+			}
 			if r.ReviewerHints != c.wantHints {
 				t.Errorf("ReviewerHints = %v, want %v", r.ReviewerHints, c.wantHints)
 			}

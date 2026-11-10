@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -40,6 +41,7 @@ import (
 	"github.com/pkalin/shadewright/internal/cmdutil"
 	"github.com/pkalin/shadewright/internal/controller"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	fluxdelivery "github.com/pkalin/shadewright/internal/providers/delivery/flux"
 	"github.com/pkalin/shadewright/internal/providers/registry"
@@ -80,10 +82,20 @@ func bindExecutorFlags(fs *flag.FlagSet) *executorFlags {
 	return f
 }
 
-// configure sets the reconciler fields the flags hold.
-func (f *executorFlags) configure(r *controller.RemediationRequestReconciler) {
-	r.PullRequestPollInterval = f.pollInterval
-	r.ReviewerHints = f.reviewerHints
+// newReconciler builds the RemediationRequest reconciler with the fields the flags hold. main builds it only
+// here, so a test of this function covers the wiring of the flags.
+func (f *executorFlags) newReconciler(c client.Client, s *runtime.Scheme, namespace string, apiReader client.Reader,
+	open freshness.RepositoryOpener, recorder record.EventRecorder) *controller.RemediationRequestReconciler {
+	return &controller.RemediationRequestReconciler{
+		Client:                  c,
+		Scheme:                  s,
+		Namespace:               namespace,
+		APIReader:               apiReader,
+		OpenRepository:          open,
+		Recorder:                recorder,
+		PullRequestPollInterval: f.pollInterval,
+		ReviewerHints:           f.reviewerHints,
+	}
 }
 
 func main() {
@@ -144,21 +156,17 @@ func main() {
 		return settings.Spec.Repositories, nil
 	}}
 
-	reconciler := &controller.RemediationRequestReconciler{
-		Client:         mgr.GetClient(),
-		Scheme:         mgr.GetScheme(),
-		Namespace:      namespace,
-		APIReader:      mgr.GetAPIReader(),
-		OpenRepository: repos.Open,
-		// The core/v1 recorder writes with the grant on core Events that the executor's leader election Role
-		// already holds in the operator namespace, where the requests are, as the analyzer's recorder does.
-		Recorder: mgr.GetEventRecorderFor("shadewright-executor"), //nolint:staticcheck // see above
-	}
-	ef.configure(reconciler)
+	// The core/v1 recorder writes with the grant on core Events that the executor's leader election Role
+	// already holds in the operator namespace, where the requests are, as the analyzer's recorder does.
+	recorder := mgr.GetEventRecorderFor("shadewright-executor") //nolint:staticcheck // see above
+	reconciler := ef.newReconciler(mgr.GetClient(), mgr.GetScheme(), namespace, mgr.GetAPIReader(), repos.Open, recorder)
 	// Logged once, so the setting of a running executor can be read from its log. The merge gate of ADR-0028
-	// holds only with the repository rule this binary cannot verify, hence the reminder.
-	setupLog.Info("Configured reviewer hints", "enabled", ef.reviewerHints,
-		"requiredCheck", "shadewright/review from the Shadewright App on the target branch")
+	// holds only with the repository rule this binary cannot verify, hence the reminder when hints are on.
+	hintsLog := []any{"enabled", ef.reviewerHints}
+	if ef.reviewerHints {
+		hintsLog = append(hintsLog, "requiredCheck", "shadewright/review from the Shadewright App on the target branch")
+	}
+	setupLog.Info("Configured reviewer hints", hintsLog...)
 	// After the merge the executor reads the Flux Kustomization that applies the target, with the get it holds
 	// for the source mapping, and asks the plan's Git host (a read) whether a later applied commit holds the
 	// merge commit; then it reports the target's rollout (#532).

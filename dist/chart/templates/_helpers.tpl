@@ -203,7 +203,11 @@ Takes a dict with .component ("executor" or "analyzer") and .context. Renders no
 {{- $reserved := splitList " " (include "shadewright.reservedFlags" .context) -}}
 {{- range $c.extraArgs -}}
 {{- $name := . | trimPrefix "--" | splitList "=" | first -}}
-{{- if has $name $reserved -}}
+{{- if and (eq $name "reviewer-hints") (eq $.component "analyzer") -}}
+{{- fail "analyzer.extraArgs may not set --reviewer-hints: it is an executor flag, turned on with executor.reviewerHints.enabled" -}}
+{{- else if eq $name "reviewer-hints" -}}
+{{- fail "executor.extraArgs may not set --reviewer-hints: use executor.reviewerHints.enabled" -}}
+{{- else if has $name $reserved -}}
 {{- fail (printf "%s.extraArgs may not set --%s: the chart sets it" $.component $name) -}}
 {{- end -}}
 {{- end -}}

@@ -77,11 +77,21 @@ The line shows `enabled` true and, as a reminder, the required check `shadewrigh
 
 ## Turn it off
 
-Set `executor.reviewerHints.enabled` back to `false` and upgrade, then remove the rule of step 1.
+1. Set `executor.reviewerHints.enabled` back to `false` and upgrade.
+2. Close the pull request of every request that stopped in `NeedsIntervention` with reason `HintsTurnedOff`. Each one took its pull request over for a hint before the switch, so the pull request may carry a change a hint steered, and the check `shadewright/review` is no longer kept on it. Also close, or review by hand, the pull request of a request that stopped with reason `HeadMoved` and an aborted handoff (`Aborted` in the third column): a handoff pushed its commit there just before the switch. List them, with their pull requests:
 
-Hints off fails closed, which makes this order safe. On its first look at each waiting pull request, the executor declines every stored hint that was not applied yet (`Pending` or `Reserved`, reason `HintsTurnedOff`), so the analyzer starts no analysis for it. A replacement the analyzer proposed for a hint is denied at admission (`HintsTurnedOff`), and one already admitted ends `Cancelled` with that reason without touching the pull request, which keeps its plan. If a handoff had pushed its commit just before the restart, the commit is not adopted: the original request stops in `NeedsIntervention`, as for any foreign push, and its pull request stays open for a person to review or close. So no change a hint steered reaches a pull request after the switch without the check.
+    ```bash
+    kubectl -n shadewright-system get remediationrequests -o jsonpath='{range .items[?(@.status.phase=="NeedsIntervention")]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="Approved")].reason}{"\t"}{.status.handoff.to.phase}{"\t"}{.status.pullRequest.url}{"\n"}{end}' \
+      | grep -wE 'HintsTurnedOff|HeadMoved'
+    ```
 
-Until you remove the rule, the executor no longer creates or completes the check, so Shadewright's pull requests wait and cannot merge; nothing is lost. A pull request that a hint changed before the switch keeps that change: once the rule is gone, any approval lets it merge, so review those by hand.
+    `kubectl shadewright explain <name>` shows the stop of one request. Close each such pull request without merging.
+
+3. Remove the rule of step 1.
+
+Hints off fails closed, which makes this order safe. On its first look at each waiting pull request, the executor declines every stored hint that was not applied yet (`Pending` or `Reserved`, reason `HintsTurnedOff`), so the analyzer starts no analysis for it. A replacement the analyzer proposed for a hint is denied at admission (`HintsTurnedOff`), and one already admitted ends `Cancelled` with that reason without touching the pull request, which keeps its plan. If a handoff had pushed its commit just before the restart, the commit is not adopted: the original request stops in `NeedsIntervention`, as for any foreign push, and its pull request stays open for a person to review or close. A replacement that had already taken the pull request over stops in `NeedsIntervention` with reason `HintsTurnedOff`, whatever step it stood at: it no longer ends the original request, rewrites the pull request or waits for review as Shadewright's. So no change a hint steered waits for review as Shadewright's after the switch without the check.
+
+Until you remove the rule, the executor no longer creates or completes the check, so Shadewright's pull requests wait and cannot merge; nothing is lost. That is why step 2 comes before step 3: once the rule is gone, any approval lets a pull request merge, including one a hint changed.
 
 !!! note "Not yet run"
     These steps were not run against a live cluster for this documentation. The flag, the chart value and the log line are covered by unit and chart tests; the lab run is #541.

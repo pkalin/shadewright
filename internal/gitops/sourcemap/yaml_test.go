@@ -102,6 +102,12 @@ func TestResolveRefusesYAMLAliases(t *testing.T) {
 			f.files[soFile] = "---\n---\n# c\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: c\n" +
 				"  namespace: orders\n  labels: &l {a: b}\n---\n" + scaledObjectYAML
 		}, soFile, soFile + " line 10: YAML anchors"},
+		// The decoders build an error for every pair of equal keys, so many copies of one long key held the CPU
+		// for seconds (#608).
+		{"a key twice in one mapping of a manifest", func(f *fixture) {
+			f.files[soFile] = scaledObjectYAML + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: c\n" +
+				"  namespace: orders\ndata:\n  a: x\n  a: y\n"
+		}, soFile, soFile + " line 29: " + gityaml.ErrDuplicateKey.Error()},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

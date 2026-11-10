@@ -194,6 +194,27 @@ func keysFile(t *testing.T, n int) []byte {
 		strings.Repeat("{a,b,c,d,e,f,g,h},", n) + "{a}]}\n")
 }
 
+// A file whose mapping repeats one long key is refused by the YAML check, before the decode's duplicate key
+// check, in well under a second (#608). Before, that check built an error holding the key for every pair of
+// equal keys: 2,048 copies of a 480-byte key took 4.7 s and 2.4 GB of allocations.
+func TestDuplicateKeysRefusedInTime(t *testing.T) {
+	var b strings.Builder
+	b.Write(read(t, "deployment.yaml"))
+	b.WriteString("---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: big\n  namespace: orders\ndata:\n")
+	b.WriteString(strings.Repeat("  "+strings.Repeat("k", 480)+": x\n", gityaml.MaxMappingKeys))
+	deadline.Within(t, 30*time.Second, func(t *testing.T) {
+		start := time.Now()
+		_, err := SetContainerMemoryLimit([]byte(b.String()), deployment, mem("web", "512Mi", "768Mi"))
+		took := time.Since(start)
+		if !errors.Is(err, ErrInvalidYAML) || !strings.Contains(err.Error(), gityaml.ErrDuplicateKey.Error()) {
+			t.Fatalf("got %v, want %v naming the duplicate key", err, ErrInvalidYAML)
+		}
+		if took > time.Second {
+			t.Errorf("the refusal took %s, want well under a second", took)
+		}
+	})
+}
+
 // atBudget returns the most items of file that the node count accepts.
 func atBudget(t *testing.T, file func(*testing.T, int) []byte) int {
 	t.Helper()

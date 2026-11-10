@@ -65,7 +65,6 @@ func TestDocumentsBoundWhatKustomizeReads(t *testing.T) {
 			"\n", 5},
 		"escaped kind":       {"\"k\\x69nd\": \"Config\\x4dapList\"\n\"\\x69tems\": [" + cm("a") + ", " + cm("b") + "]\n", 3},
 		"items as a mapping": {"kind: List\nitems: {a: " + cm("a") + ", b: " + cm("b") + "}\n", 5},
-		"two kind keys":      {"kind: ConfigMap\nkind: List\nitems: [" + cm("a") + "]\n", 2},
 		"a quoted << value":  {"kind: ConfigMap\nmetadata: {name: a}\ndata: {x: \"<<\"}\n", 1},
 		// Only a key merges: a plain "<<" value has the merge tag but is plain text to kustomize.
 		"a plain << value":     {"kind: ConfigMap\nmetadata: {name: a}\ndata: {operator: <<}\n", 1},
@@ -173,8 +172,25 @@ func TestDocumentsRefuseWideMapping(t *testing.T) {
 	in := []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: big\ndata:\n" +
 		strings.Repeat("  k:\n", gityaml.MaxMappingKeys+1))
 	_, err := documents("f.yaml", in)
-	if !errors.Is(err, ErrTooLarge) || !strings.Contains(err.Error(), "f.yaml line 6: a mapping holds more than 2048 keys") {
+	if !errors.Is(err, ErrTooLarge) || !strings.Contains(err.Error(), "f.yaml line 6: a mapping holds more than 256 keys") {
 		t.Fatalf("documents: %v, want TooLarge naming the file, the line and the keys", err)
+	}
+}
+
+// A mapping that repeats a key is refused with InvalidYAML before kustomize decodes it, whose duplicate key check
+// builds an error holding the key for every pair of equal keys (#608): 2,048 copies of a 480-byte key took 1.5 s
+// and 911 MB of allocations in a render.
+func TestDocumentsRefuseDuplicateKey(t *testing.T) {
+	in := []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: big\ndata:\n" +
+		strings.Repeat("  "+strings.Repeat("k", 480)+": x\n", gityaml.MaxMappingKeys))
+	_, err := documents("f.yaml", in)
+	if !errors.Is(err, ErrInvalidYAML) || !strings.Contains(err.Error(), "f.yaml line 7: "+gityaml.ErrDuplicateKey.Error()) {
+		t.Fatalf("documents: %v, want InvalidYAML naming the file, the line and the duplicate key", err)
+	}
+	// Two "kind" keys, which the count of a List would have had to read both of.
+	_, err = documents("f.yaml", []byte("kind: ConfigMap\nkind: List\nitems: ["+cm("a")+"]\n"))
+	if !errors.Is(err, ErrInvalidYAML) || !strings.Contains(err.Error(), "f.yaml line 2: "+gityaml.ErrDuplicateKey.Error()) {
+		t.Fatalf("documents: %v, want InvalidYAML for two kind keys", err)
 	}
 }
 

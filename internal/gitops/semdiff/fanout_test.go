@@ -268,9 +268,10 @@ func TestLoadTransformBudgetCountsNodes(t *testing.T) {
 		return "patches:\n  - target:\n      kind: ConfigMap\n    patch: '" + body + "'\n"
 	}
 	for name, extra := range map[string]string{
-		// About 3.5 KiB on each of 1,024 objects, under 4 MiB in all: about 1,000 nodes each.
+		// About 3.5 KiB on each of 1,024 objects, under 4 MiB in all: about 1,000 nodes each, in two mappings
+		// so that neither is over gityaml.MaxMappingKeys keys.
 		"targeted patch of tiny entries": patch("{apiVersion: v1, kind: ConfigMap, metadata: {name: any, " +
-			"annotations: {" + denseEntries(3500) + "}}}"),
+			"annotations: {" + denseEntries(1750) + "}, labels: {" + denseEntries(1750) + "}}}"),
 		"targeted patch of a list of numbers": patch("{apiVersion: v1, kind: ConfigMap, metadata: {name: any}, " +
 			"extra: [" + strings.Repeat("1,", 1750) + "1]}"),
 		// About 1.3 KiB in each of 3 places of 1,024 objects, under 4 MiB in all: about 400 nodes per place.

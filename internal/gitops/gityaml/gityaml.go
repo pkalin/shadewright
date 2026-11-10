@@ -61,17 +61,20 @@ var (
 	ErrTooManyNodes = fmt.Errorf("holds more than %d YAML nodes", MaxNodes)
 	// ErrTooManyKeys is a mapping of more than MaxMappingKeys keys.
 	ErrTooManyKeys = fmt.Errorf("a mapping holds more than %d keys", MaxMappingKeys)
+	// ErrDuplicateKey is a scalar key that a mapping already holds.
+	ErrDuplicateKey = errors.New("a mapping holds a key twice")
 )
 
 // MaxMappingKeys is the most keys [Objects] accepts in one YAML mapping. The parsers that decode a file after
 // the check into Go values, go.yaml.in/yaml/v3 in the patcher and kustomize's fork of it in the render, look
 // for a duplicate key by comparing each key with every key after it in the same mapping, so the time is
 // quadratic in the keys of one mapping: a mapping of 43,000 keys, within MaxNodes, took 4.3 s in the patcher's
-// decode and 6.3 s in a render, about ten times that under the race detector (#608). At 2,048 keys the decode
-// still costs about what it costs per key at 1,024 (6 ms for the patcher's decode, 13 ms for a render), so the
-// work stays about linear in the input; the largest mapping in about 500 real manifests over 20 KB, CRDs
-// included, held 76 keys.
-const MaxMappingKeys = 2048
+// decode and 6.3 s in a render, about ten times that under the race detector (#608). The widest mapping in
+// about 500 real manifests over 20 KB, CRDs included, held 76 keys, so 256 leaves room for real files and keeps
+// the comparisons of one mapping under 33,000. Duplicate keys are refused before any decode too
+// ([ErrDuplicateKey]): the decoders build an error text, holding the key, for every pair of equal keys, so 2,048
+// copies of one long key took seconds and gigabytes of allocations.
+const MaxMappingKeys = 256
 
 // Error is a refusal of [Objects]: its cause and the line of the file it is at, counted from 1, or 0 when it
 // is about the whole file.
@@ -137,9 +140,11 @@ func Parts(data []byte) []Part {
 //   - input of more than [MaxNodes] YAML nodes as [Nodes] counts them, before any part is decoded: a parser
 //     builds the whole tree of a document before anything looks at it, so a dense document of 1 MiB would
 //     take more heap than the executor has (#595);
-//   - a mapping of more than [MaxMappingKeys] keys, found in the node tree of each part before anything
-//     decodes it into Go values: the duplicate key check of those decoders is quadratic in the keys of one
-//     mapping, so a mapping of tens of thousands of keys held the CPU for seconds (#608);
+//   - a mapping of more than [MaxMappingKeys] keys, or one that holds a scalar key twice, found in the node
+//     tree of each part before anything decodes it into Go values: the duplicate key check of those decoders
+//     is quadratic in the keys of one mapping and builds an error for every pair of equal keys, so a mapping
+//     of tens of thousands of keys, or of a few thousand copies of one long key, held the CPU for seconds
+//     (#608); the decoders refuse a duplicate key anyway;
 //   - a part that does not parse, which kustomize could not build either.
 //
 // Each part between separators is decoded as kustomize decodes it, and every document in it counts: 1 for a
@@ -242,17 +247,31 @@ func objectsIn(part string, limit int) (int, *Error) {
 // refused returns the first node below n that the check refuses, in document order, and the cause, or nil:
 // a node that has an anchor, is an alias, or is a merge key (a mapping key with the merge tag, which a plain
 // "<<" has too, or a "<<" key however quoted), with [ErrAnchor]; a mapping of more than [MaxMappingKeys] keys
-// with [ErrTooManyKeys]. A "<<" value is plain text: only a key merges.
+// with [ErrTooManyKeys]; a scalar key whose text an earlier key of the same mapping has, with
+// [ErrDuplicateKey]. Like the decoders, it compares the text of the key, not its tag or quoting. A "<<" value is
+// plain text: only a key merges.
 func refused(n *yaml.Node) (*yaml.Node, error) {
 	if n.Anchor != "" || n.Kind == yaml.AliasNode {
 		return n, ErrAnchor
 	}
-	if n.Kind == yaml.MappingNode && len(n.Content) > 2*MaxMappingKeys {
-		return n, ErrTooManyKeys
+	var keys map[string]struct{}
+	if n.Kind == yaml.MappingNode {
+		if len(n.Content) > 2*MaxMappingKeys {
+			return n, ErrTooManyKeys
+		}
+		keys = make(map[string]struct{}, len(n.Content)/2)
 	}
 	for i, c := range n.Content {
-		if n.Kind == yaml.MappingNode && i%2 == 0 && (c.ShortTag() == "!!merge" || c.Kind == yaml.ScalarNode && c.Value == "<<") {
-			return c, ErrAnchor
+		if n.Kind == yaml.MappingNode && i%2 == 0 {
+			if c.ShortTag() == "!!merge" || c.Kind == yaml.ScalarNode && c.Value == "<<" {
+				return c, ErrAnchor
+			}
+			if c.Kind == yaml.ScalarNode {
+				if _, dup := keys[c.Value]; dup {
+					return c, ErrDuplicateKey
+				}
+				keys[c.Value] = struct{}{}
+			}
 		}
 		if a, cause := refused(c); a != nil {
 			return a, cause

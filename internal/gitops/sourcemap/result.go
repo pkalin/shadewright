@@ -128,8 +128,8 @@ const (
 	// generators, components, transformers, a namespace or name prefix, or remote resources
 	// (NeedsIntervention).
 	ReasonUnsupportedKustomization Reason = "UnsupportedKustomization"
-	// ReasonFileNotReadable means a file the build needs is missing, too large or not valid YAML
-	// (NeedsIntervention).
+	// ReasonFileNotReadable means a file the build needs is missing, too large or not valid YAML, or
+	// repeats a key in one mapping (#608) (NeedsIntervention).
 	ReasonFileNotReadable Reason = "FileNotReadable"
 	// ReasonTooManyFiles means the build is deeper or wider than the mapping reads: too many nested
 	// directories (MaxDepth, or MaxListDepth below a path without a kustomization file), manifests, file reads

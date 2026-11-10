@@ -66,10 +66,13 @@ func blockKeys(n int) string {
 	return b.String()
 }
 
-// flowKeys returns a flow mapping of n keys without values, the same key repeated (a duplicate key is still a
-// key of the tree).
+// flowKeys returns a flow mapping of n distinct keys without values.
 func flowKeys(n int) string {
-	return "a: [{" + strings.Repeat("k,", n-1) + "k}]\n"
+	keys := make([]string, n)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("k%d", i)
+	}
+	return "a: [{" + strings.Join(keys, ",") + "}]\n"
 }
 
 // A mapping of more than MaxMappingKeys keys is refused at the line of its first key, in a block or a flow mapping, at any depth
@@ -106,8 +109,49 @@ func TestObjectsMappingKeys(t *testing.T) {
 	}
 }
 
-// Real manifests are far from the bound: the CRDs of this repository and a ConfigMap of 1,000 entries pass
-// the check (#608).
+// A scalar key a mapping already holds is refused at its line, however it is quoted or tagged and at any depth,
+// before any decoder compares the keys (#608): 2,048 copies of one long key took seconds and gigabytes in the
+// decoders' duplicate key check. A mapping wider than MaxMappingKeys is refused for its width first. The same
+// key in two mappings, and complex keys, pass.
+func TestObjectsDuplicateKeys(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		line int
+		want error
+	}{
+		{"repeated in a block mapping", "a: 1\nb: 2\na: 3\n", 3, gityaml.ErrDuplicateKey},
+		{"quoted", "a: 1\n'a': 2\n", 2, gityaml.ErrDuplicateKey},
+		{"tagged", "1: x\n!!str 1: y\n", 2, gityaml.ErrDuplicateKey},
+		{"repeated in a flow mapping", "x: [{k, k}]\n", 1, gityaml.ErrDuplicateKey},
+		{"nested", "metadata:\n  labels:\n    a: b\n    a: c\n", 4, gityaml.ErrDuplicateKey},
+		{"second document", "a: b\n---\nc: d\nc: e\n", 4, gityaml.ErrDuplicateKey},
+		{"too wide first", strings.Repeat("k:\n", gityaml.MaxMappingKeys+1), 1, gityaml.ErrTooManyKeys},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := gityaml.Objects([]byte(c.in), 10)
+			var e *gityaml.Error
+			if !errors.As(err, &e) || !errors.Is(err, c.want) || e.Line != c.line {
+				t.Fatalf("Objects = %v, want %v at line %d", err, c.want, c.line)
+			}
+		})
+	}
+	for name, in := range map[string]string{
+		"two mappings": "a: {k: 1}\nb: {k: 2}\n",
+		"complex keys": "? [a]\n: 1\n? [b]\n: 2\n",
+		"values":       "a: x\nb: x\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := gityaml.Objects([]byte(in), 10); err != nil {
+				t.Fatalf("Objects = %v, want no error", err)
+			}
+		})
+	}
+}
+
+// Real manifests pass: the CRDs of this repository, far from the bound, and a ConfigMap of MaxMappingKeys entries
+// (#608).
 func TestObjectsRealManifests(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("..", "..", "..", "config", "crd", "bases", "*.yaml"))
 	if err != nil || len(files) == 0 {
@@ -127,11 +171,11 @@ func TestObjectsRealManifests(t *testing.T) {
 	}
 	var b strings.Builder
 	b.WriteString("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: dashboards\n  namespace: monitoring\ndata:\n")
-	for i := range 1000 {
+	for i := range gityaml.MaxMappingKeys {
 		fmt.Fprintf(&b, "  dashboard-%04d.json: |\n    {\"title\": \"Dashboard %d\", \"panels\": []}\n", i, i)
 	}
 	if _, err := gityaml.Objects([]byte(b.String()), 10); err != nil {
-		t.Errorf("a ConfigMap of 1,000 entries: Objects = %v, want no error", err)
+		t.Errorf("a ConfigMap of %d entries: Objects = %v, want no error", gityaml.MaxMappingKeys, err)
 	}
 }
 

@@ -130,8 +130,10 @@ type walker struct {
 	// transformers can add to the render ([visitGrowth]), which [MaxTransformBytes] bounds.
 	scans  map[string]*scan
 	growth cost
-	// merged sums what each visit's patches merge into one path of an object ([MaxMergedKeys]).
-	merged *mergeWidths
+	// merged sums what each visit's patches merge into one path of an object ([MaxMergedKeys]); renames counts
+	// the visits that may rename objects ([ops.renames]), so a visit learns whether one below it did.
+	merged  *mergedKeys
+	renames int
 	// generate, when set, lists directories so that root, the path rendered, may have no kustomization file:
 	// the walk then generates the one Flux would (Load only; Check finds it in the files it is given).
 	generate repopath.Lister
@@ -162,17 +164,18 @@ type refs struct {
 }
 
 // patchSource is a patch: a file (path) or inline text; kind is the kind its target names, when that is a
-// plain name, and kindChange is set when its options allow it to change the kind of an object.
+// plain name, and kindChange and nameChange are set when its options allow it to change the kind or the name
+// of an object.
 type patchSource struct {
-	path, inline, kind string
-	kindChange         bool
+	path, inline, kind     string
+	kindChange, nameChange bool
 }
 
 func newWalker(read reader) *walker {
 	w := &walker{
 		read: read, files: map[string][]byte{}, resources: map[string]bool{},
 		parsed: map[dirKind]*refs{}, ignoreChecked: map[string]bool{}, dirResources: map[string]bool{},
-		docs: map[string]int{}, scans: map[string]*scan{}, merged: newMergeWidths(),
+		docs: map[string]int{}, scans: map[string]*scan{}, merged: newMergedKeys(),
 	}
 	w.isDir = func(p string) bool { return w.dirResources[p] }
 	return w
@@ -243,6 +246,7 @@ func (w *walker) visit(ctx context.Context, dir, want string, depth int) (*shape
 	}
 	o := newOps()
 	o.add(r.ops)
+	renamesBelow := w.renames
 	// A directory below dir adds one level per directory passed, as in the source mapping, so a base found
 	// deep below a path without a kustomization file is bounded like a chain of kustomizations.
 	for _, d := range r.dirs {
@@ -258,13 +262,20 @@ func (w *walker) visit(ctx context.Context, dir, want string, depth int) (*shape
 			return nil, nil, err
 		}
 		s.add(sub, 1)
+		// Kustomize runs a component before the patches of the kustomization that lists it.
+		o.renamesFirst = o.renamesFirst || comp.renames()
 		o.add(comp)
 	}
 	if want == kindComponent {
 		return s, o, nil
 	}
 	w.growth = w.growth.plus(visitGrowth(s, o))
-	w.merged.add(o.widths)
+	// The patches of a kustomization run before its name prefix and suffix, so only a rename below the visit,
+	// by a component or by a patch may let a patch reach an object under another name or kind than it names.
+	w.merged.apply(o, w.renames > renamesBelow || o.renamesFirst || o.nameChanges || o.moves || o.kindChanges)
+	if o.renames() {
+		w.renames++
+	}
 	return s, nil, nil
 }
 
@@ -295,13 +306,18 @@ func (w *walker) countShapes(r *refs) error {
 					return err
 				}
 			}
-			if s.widths == nil {
+			if s.merges == nil {
 				var err error
-				if s.widths, err = patchWidths(name, data); err != nil {
+				if s.merges, err = patchMergesOf(name, data); err != nil {
 					return err
 				}
 			}
-			o.widths.add(s.widths)
+			mp := mergePatch{merges: s.merges, targeted: i == 1, kind: p.kind}
+			if mp.kind == "" {
+				mp.kind = anyKind
+			}
+			o.merges = append(o.merges, mp)
+			o.nameChanges = o.nameChanges || s.merges.json || p.nameChange
 			// A patch adds no object.
 			sh := s.shape
 			sh.docs, sh.kinds = 0, nil
@@ -636,6 +652,7 @@ func patchFiles(name, dir string, raw any, bad error) (patchList, error) {
 		// Any value of allowKindChange counts: kustomize refuses a malformed one.
 		opts, _ := m["options"].(map[string]any)
 		_, kindChange := opts["allowKindChange"]
+		_, nameChange := opts["allowNameChange"]
 		if raw, ok := m["path"]; ok {
 			s, isString := raw.(string)
 			p, valid := repopath.Join(dir, s)
@@ -644,9 +661,9 @@ func patchFiles(name, dir string, raw any, bad error) (patchList, error) {
 			}
 			l.files = append(l.files, p)
 			if targeted {
-				l.targeted = append(l.targeted, patchSource{path: p, kind: kind, kindChange: kindChange})
+				l.targeted = append(l.targeted, patchSource{path: p, kind: kind, kindChange: kindChange, nameChange: nameChange})
 			} else {
-				l.untargeted = append(l.untargeted, patchSource{path: p, kindChange: kindChange})
+				l.untargeted = append(l.untargeted, patchSource{path: p, kindChange: kindChange, nameChange: nameChange})
 			}
 		}
 		if s, ok := m["patch"].(string); ok {
@@ -660,9 +677,9 @@ func patchFiles(name, dir string, raw any, bad error) (patchList, error) {
 			}
 			l.docs = min(l.docs+d, MaxBuildDocuments+1)
 			if targeted {
-				l.targeted = append(l.targeted, patchSource{inline: s, kind: kind, kindChange: kindChange})
+				l.targeted = append(l.targeted, patchSource{inline: s, kind: kind, kindChange: kindChange, nameChange: nameChange})
 			} else {
-				l.untargeted = append(l.untargeted, patchSource{inline: s, kindChange: kindChange})
+				l.untargeted = append(l.untargeted, patchSource{inline: s, kindChange: kindChange, nameChange: nameChange})
 			}
 		}
 	}

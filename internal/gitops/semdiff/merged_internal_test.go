@@ -52,19 +52,23 @@ func TestGrowthCountsAnUntargetedPatchAsATargetedOne(t *testing.T) {
 // TestMergeWidthsPaths counts keys and items per path: the keys that name the object count for none, the items
 // of a sequence and the keys of their mappings share one path each, and patches add up path by path.
 func TestMergeWidthsPaths(t *testing.T) {
-	a, err := patchWidths("a", []byte("apiVersion: v1\nkind: Pod\nmetadata:\n  name: p\n  namespace: n\n"+
+	a, err := patchMergesOf("a", []byte("apiVersion: v1\nkind: Pod\nmetadata:\n  name: p\n  namespace: n\n"+
 		"  labels: {x: y}\nspec:\n  containers:\n    - name: a\n      env: [{name: E}]\n    - name: b\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := patchWidths("b", []byte("- op: add\n  path: /metadata/labels/z\n  value: v\n---\n"+
-		"apiVersion: v1\nkind: Pod\nmetadata:\n  name: q\n  labels: {z: v}\n"))
+	b, err := patchMergesOf("b", []byte("- op: add\n  path: /metadata/labels/z\n  value: v\n---\n"+
+		"apiVersion: v1\nkind: Pod\nmetadata:\n  name: p\n  labels: {z: v}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := newMergeWidths()
-	m.add(a)
-	m.add(b)
+	if a.json || !b.json || len(a.docs) != 1 || len(b.docs) != 1 || b.docs[0].key != (objectKey{"Pod", "p"}) {
+		t.Fatalf("got %+v and %+v, want one document each naming Pod p, and a JSON patch in b", a, b)
+	}
+	k := newMergedKeys()
+	k.apply(&ops{merges: []mergePatch{{merges: a}, {merges: b}}}, false)
+	m := k.paths
+	counts := k.objects[objectKey{"Pod", "p"}]
 	md := m.child(0, "metadata")
 	containers := m.child(m.child(0, "spec"), "containers")
 	item := m.child(containers, itemKey)
@@ -76,11 +80,52 @@ func TestMergeWidthsPaths(t *testing.T) {
 		"keys of the containers items": {item, 3},
 		"env items":                    {m.child(item, "env"), 1},
 	} {
-		if got := m.n[c.at]; got != c.want {
+		if got := counts[c.at]; got != c.want {
 			t.Errorf("%s: got %d, want %d", name, got, c.want)
 		}
 	}
-	if got := m.widest(); got != 3 {
+	if got := k.widest(); got != 3 {
 		t.Errorf("widest: got %d, want 3", got)
+	}
+}
+
+// TestMergedKeysPerObject sums per object: patches naming distinct objects do not add up, a patch with a target
+// counts toward every object of its kind (or of any kind), and after a rename every patch counts toward every
+// object.
+func TestMergedKeysPerObject(t *testing.T) {
+	data := func(kind, name string, n int) *patchMerges {
+		var p strings.Builder
+		fmt.Fprintf(&p, "kind: %s\nmetadata:\n  name: %s\ndata:\n", kind, name)
+		for i := range n {
+			fmt.Fprintf(&p, "  k%d: v\n", i)
+		}
+		pm, err := patchMergesOf("p", []byte(p.String()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pm
+	}
+	a, b := mergePatch{merges: data("ConfigMap", "a", 3)}, mergePatch{merges: data("ConfigMap", "b", 5)}
+	cms := mergePatch{merges: data("ConfigMap", "x", 7), targeted: true, kind: "ConfigMap"}
+	secrets := mergePatch{merges: data("Secret", "x", 11), targeted: true, kind: "Secret"}
+	all := mergePatch{merges: data("Pod", "x", 13), targeted: true, kind: anyKind}
+	for name, c := range map[string]struct {
+		patches []mergePatch
+		renamed bool
+		want    int
+	}{
+		"distinct objects":                  {[]mergePatch{a, b, a}, false, 6},
+		"one object and its kind":           {[]mergePatch{a, b, cms}, false, 12},
+		"another kind":                      {[]mergePatch{a, b, secrets}, false, 11},
+		"any kind":                          {[]mergePatch{a, b, cms, secrets, all}, false, 25},
+		"renamed: every patch on every one": {[]mergePatch{a, b, a}, true, 11},
+	} {
+		t.Run(name, func(t *testing.T) {
+			k := newMergedKeys()
+			k.apply(&ops{merges: c.patches}, c.renamed)
+			if got := k.widest(); got != c.want {
+				t.Errorf("widest: got %d, want %d", got, c.want)
+			}
+		})
 	}
 }

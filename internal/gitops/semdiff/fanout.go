@@ -52,15 +52,21 @@ import (
 const MaxTransformBytes = 4 << 20
 
 // MaxMergedKeys bounds the keys and items the strategic merge patches of a build can merge into one mapping or
-// sequence of an object (#626), counted per path from the object's root and summed over every patch and every
-// visit ([mergeWidths]). [MaxTransformBytes] counts what patches add, which is linear in their size, but
-// kustomize merges each patch into the whole object it patches, so its time grows faster than the merged
-// mapping's width: one ConfigMap and 60 patches of 255 data keys each, within every other bound, rendered one
+// sequence of an object (#626), counted per object and per path from its root and summed over every patch that
+// may reach that object in every visit ([mergedKeys]). [MaxTransformBytes] counts what patches add, which is
+// linear in their size, but kustomize merges each patch into the whole object it patches, so its time grows
+// faster than the merged mapping's width: one ConfigMap and 60 patches of 255 data keys each, within every other bound, rendered one
 // mapping of 15,300 keys in 16 s and allocated 4 GB (measured 2026-11-10, Go 1.27.3, arm64). With 16 such
-// patches (4,080 keys) the render took 0.5 s. The sum per path does not tell objects apart, so patches of
-// distinct objects at one path count together, which only over-counts; the keys that name the object it
-// patches (apiVersion, kind, metadata, and its name and namespace) are in that object already and count for
-// none. A resource's own mapping adds at most gityaml.MaxMappingKeys more.
+// patches (4,080 keys) the render took 0.5 s. A patch without a target counts toward the object it names (kind
+// and name), one with a target toward every object its target may select; where objects may be renamed before
+// a patch runs, every patch counts toward every object. The keys that name the object it patches (apiVersion,
+// kind, metadata, and its name and namespace) are in that object already and count for none. A resource's own
+// mapping adds at most gityaml.MaxMappingKeys more.
+//
+// The bound is an estimate with known gaps, not a bound of the render: it does not count keys merged under
+// sibling paths of one mapping together, keys that labels, commonLabels or commonAnnotations add, patches
+// wrapped in a List, JSON 6902 moves, or a list a JSON patch creates that a strategic merge patch then merges
+// into. #614 tracks bounding the render itself.
 const MaxMergedKeys = 4096
 
 // NodeBytes is what one YAML node a patch or transformer adds counts for against [MaxTransformBytes]: the heap a
@@ -557,9 +563,9 @@ type scan struct {
 	bytes, nodes       int
 	rename             int
 	moves, kindChanges bool
-	// widths is what the file merges into the objects as a patch ([patchWidths]), counted on its first use as
+	// merges is what the file merges into the objects as a patch ([patchMergesOf]), counted on its first use as
 	// one: nil until then.
-	widths *mergeWidths
+	merges *patchMerges
 }
 
 func newScan() *scan {
@@ -755,9 +761,11 @@ type ops struct {
 	untargeted     shape
 	untargetedCost cost
 	targeted       []targetedPatch
-	// widths are the keys and items the strategic merge patches merge into each path of an object
-	// ([mergeWidths]).
-	widths *mergeWidths
+	// merges are the strategic merge patches, which [mergedKeys] counts per object. nameChanges is set when
+	// one of the patches may change the name of an object (a JSON patch, or allowNameChange), and renamesFirst
+	// when a component listed renames objects before the patches of the kustomization run ([ops.renames]).
+	merges                    []mergePatch
+	nameChanges, renamesFirst bool
 	// rename sums, per patch, the largest scalar it may write as a name or a namespace; moves is set when one
 	// of them is a JSON patch with an operation other than add, replace, remove or test, and kindChanges when
 	// one may change the kind of an object.
@@ -765,7 +773,22 @@ type ops struct {
 	moves, kindChanges bool
 }
 
-func newOps() *ops { return &ops{coef: *newCoef(), widths: newMergeWidths()} }
+func newOps() *ops { return &ops{coef: *newCoef()} }
+
+// renames says whether o may give an object another name or kind: a name prefix or suffix, a patch that may
+// change a name or a kind, or a JSON patch that moves values. A patch run later may then name the object by
+// either name.
+func (o *ops) renames() bool {
+	return o.coef.refs > 0 || o.nameChanges || o.renamesFirst || o.moves || o.kindChanges
+}
+
+// mergePatch is a patch file or inline patch as a visit applies it: what it merges, and, with a target, the
+// kind the target names (anyKind when it may select any kind).
+type mergePatch struct {
+	merges   *patchMerges
+	targeted bool
+	kind     string
+}
 
 // targetedPatch is a patch with a target: its shape, what it adds to each object it selects, and the kind its
 // target names when that is a plain name ("" when the target may select any kind: its fields are regular
@@ -781,7 +804,9 @@ func (o *ops) add(p *ops) {
 	o.untargeted.add(&p.untargeted, 1)
 	o.untargetedCost = o.untargetedCost.plus(p.untargetedCost)
 	o.targeted = append(o.targeted, p.targeted...)
-	o.widths.add(p.widths)
+	o.merges = append(o.merges, p.merges...)
+	o.nameChanges = o.nameChanges || p.nameChanges
+	o.renamesFirst = o.renamesFirst || p.renamesFirst
 	o.rename = satAdd(o.rename, p.rename)
 	o.moves = o.moves || p.moves
 	o.kindChanges = o.kindChanges || p.kindChanges
@@ -883,20 +908,6 @@ func (m *mergeWidths) child(parent int, key string) int {
 	return id
 }
 
-// add adds the counts of o to m, path by path.
-func (m *mergeWidths) add(o *mergeWidths) {
-	ids := make([]int, len(o.steps))
-	for i := 1; i < len(o.steps); i++ {
-		ids[i] = m.child(ids[o.steps[i].parent], o.steps[i].key)
-	}
-	for i, n := range o.n {
-		m.n[ids[i]] = satAdd(m.n[ids[i]], n)
-	}
-}
-
-// widest is the most keys and items counted at one path.
-func (m *mergeWidths) widest() int { return slices.Max(m.n) }
-
 // names says whether key, below the path at, names the object a patch applies to: apiVersion, kind and metadata
 // at the root, name and namespace under metadata. Every object holds them, so a patch merges none of them in.
 func (m *mergeWidths) names(at int, key string) bool {
@@ -929,11 +940,28 @@ func (m *mergeWidths) count(n *yaml.Node, at int) {
 	}
 }
 
-// patchWidths returns what the strategic merge patches in a patch file or inline patch, which [scanOf] has
+// objectKey names the object a strategic merge patch without a target applies to: its kind and name. The
+// namespace is left out, so patches of objects that differ only by it count together, which only over-counts.
+type objectKey struct{ kind, name string }
+
+// mergeDoc is one strategic merge patch document: the object it names and what it merges into each path.
+type mergeDoc struct {
+	key    objectKey
+	widths *mergeWidths
+}
+
+// patchMerges is what a patch file or inline patch merges: its strategic merge patch documents, and whether it
+// holds a JSON patch too, which may change the name of an object.
+type patchMerges struct {
+	docs []mergeDoc
+	json bool
+}
+
+// patchMergesOf returns what the strategic merge patches in a patch file or inline patch, which [scanOf] has
 // accepted, merge into the objects they patch. A document that is a sequence is a JSON patch: it merges nothing,
 // and [MaxTransformBytes] counts each of its values.
-func patchWidths(name string, data []byte) (*mergeWidths, error) {
-	m := newMergeWidths()
+func patchMergesOf(name string, data []byte) (*patchMerges, error) {
+	pm := &patchMerges{}
 	for _, p := range gityaml.Parts(data) {
 		dec := yaml.NewDecoder(strings.NewReader(p.Text))
 		for {
@@ -945,10 +973,124 @@ func patchWidths(name string, data []byte) (*mergeWidths, error) {
 			if err != nil {
 				return nil, refuse(ReasonInvalidYAML, fmt.Sprintf("%s line %d: %v", name, p.Line, gityaml.ErrNotParse))
 			}
-			if len(doc.Content) == 1 && doc.Content[0].Kind == yaml.MappingNode {
-				m.count(doc.Content[0], 0)
+			if len(doc.Content) != 1 {
+				continue
+			}
+			switch root := doc.Content[0]; root.Kind {
+			case yaml.MappingNode:
+				m := newMergeWidths()
+				m.count(root, 0)
+				pm.docs = append(pm.docs, mergeDoc{objectKey{kindOf(&doc), nameOf(root)}, m})
+			case yaml.SequenceNode:
+				pm.json = true
 			}
 		}
 	}
-	return m, nil
+	return pm, nil
+}
+
+// nameOf is metadata.name of a document's root mapping, or "" when it has none.
+func nameOf(root *yaml.Node) string {
+	md := valueAt(root, keyMetadata)
+	if md == nil || md.Kind != yaml.MappingNode {
+		return ""
+	}
+	if n := valueAt(md, keyName); n != nil && n.Kind == yaml.ScalarNode {
+		return n.Value
+	}
+	return ""
+}
+
+// valueAt is the value of key in the mapping m, or nil.
+func valueAt(m *yaml.Node, key string) *yaml.Node {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return m.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// mergedKeys sums, per object and per path from its root, the keys and items the strategic merge patches of a
+// build may merge into the mapping or sequence at that path ([MaxMergedKeys]). A patch without a target counts
+// toward the object it names (objects); one with a target toward every object of the kind it names, or of any
+// kind (kinds, anyKind), as it may reach each. Paths share one trie (paths; its own counts stay unused) and the
+// counts are sparse, so many objects with a small patch each cost what their patches hold.
+type mergedKeys struct {
+	paths   *mergeWidths
+	objects map[objectKey]map[int]int
+	kinds   map[string]map[int]int
+}
+
+func newMergedKeys() *mergedKeys {
+	return &mergedKeys{paths: newMergeWidths(), objects: map[objectKey]map[int]int{}, kinds: map[string]map[int]int{}}
+}
+
+// apply adds the patches of a visit. When objects may have another name or kind than a patch names by the time
+// it runs (renamed: the walk below the visit, or a component it lists, renames objects, or one of its own
+// patches may), every patch counts toward every object.
+func (m *mergedKeys) apply(o *ops, renamed bool) {
+	for _, p := range o.merges {
+		for _, d := range p.merges.docs {
+			var dst map[int]int
+			switch {
+			case renamed:
+				dst = bucket(m.kinds, anyKind)
+			case p.targeted:
+				dst = bucket(m.kinds, p.kind)
+			default:
+				dst = bucket(m.objects, d.key)
+			}
+			m.add(dst, d.widths)
+		}
+	}
+}
+
+// bucket returns the counts of k, adding them when new.
+func bucket[K comparable](buckets map[K]map[int]int, k K) map[int]int {
+	b, ok := buckets[k]
+	if !ok {
+		b = map[int]int{}
+		buckets[k] = b
+	}
+	return b
+}
+
+// add adds the counts of w to dst, path by path.
+func (m *mergedKeys) add(dst map[int]int, w *mergeWidths) {
+	ids := make([]int, len(w.steps))
+	for i := 1; i < len(w.steps); i++ {
+		ids[i] = m.paths.child(ids[w.steps[i].parent], w.steps[i].key)
+	}
+	for i, n := range w.n {
+		if n > 0 {
+			dst[ids[i]] = satAdd(dst[ids[i]], n)
+		}
+	}
+}
+
+// widest is the most keys and items counted at one path of one object: what the patches naming it, those whose
+// target names its kind and those whose target may select any kind merge there together. An object no patch
+// names gets those of its kind and of any kind.
+func (m *mergedKeys) widest() int {
+	anyK := m.kinds[anyKind]
+	best := 0
+	for _, n := range anyK {
+		best = max(best, n)
+	}
+	for k, counts := range m.kinds {
+		if k == anyKind {
+			continue
+		}
+		for p, n := range counts {
+			best = max(best, satAdd(n, anyK[p]))
+		}
+	}
+	for key, counts := range m.objects {
+		kc := m.kinds[key.kind]
+		for p, n := range counts {
+			best = max(best, satAdd(satAdd(n, kc[p]), anyK[p]))
+		}
+	}
+	return best
 }

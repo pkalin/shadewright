@@ -123,3 +123,60 @@ func TestLoadTransformBudgetUntargetedPatch(t *testing.T) {
 		})
 	}
 }
+
+// configMapsPatched is ordersRepo with n ConfigMaps and one patch file without a target holding, for each, a
+// strategic merge patch that sets six data keys.
+func configMapsPatched(n int) map[string][]byte {
+	files := ordersRepo()
+	var p strings.Builder
+	for i := range n {
+		fmt.Fprintf(&p, "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm%d\n  namespace: orders\n"+
+			"data: {a: '1', b: '2', c: '3', d: '4', e: '5', f: '6'}\n", i)
+	}
+	files["apps/orders/cms.yaml"] = configMapsYAML(n)
+	files["apps/orders/data.yaml"] = []byte(p.String())
+	files[soKust] = append([]byte("patches:\n  - path: data.yaml\n"), kust("scaledobject.yaml", "cms.yaml")...)
+	return files
+}
+
+// TestCheckMergedKeysPerObject checks that the bound sums per object, as design 8.2.2 says: 800 ConfigMaps
+// with one small patch each render, though the patches together merge 4,800 keys into the data mappings,
+// which the first sum, across objects, refused.
+func TestCheckMergedKeysPerObject(t *testing.T) {
+	if _, err := semdiff.Check(context.Background(), soInput(t, configMapsPatched(800), "apps/orders", 15)); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+}
+
+// TestCheckMergedKeysAfterRename keeps the bound an upper bound where a patch may reach an object under another
+// name: below a name prefix, patches naming the ConfigMap by its old and its new name count together.
+func TestCheckMergedKeysAfterRename(t *testing.T) {
+	for name, c := range map[string]struct {
+		prefix string
+		over   bool
+	}{
+		"no prefix: two objects":           {"", false},
+		"a prefix below: one object, over": {"namePrefix: x-\n", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			files := mergedPatches(repeat(256, 16), false)
+			files["apps/orders/base/kustomization.yaml"] = append([]byte(c.prefix), kust("cm.yaml")...)
+			files["apps/orders/base/cm.yaml"] = files["apps/orders/cm.yaml"]
+			delete(files, "apps/orders/cm.yaml")
+			files["apps/orders/other.yaml"] = []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x-c\n")
+			files["apps/orders/p16.yaml"] = []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x-c\ndata:\n  z: v\n")
+			k := strings.Replace(string(files[soKust]), "patches:\n", "patches:\n  - path: p16.yaml\n", 1)
+			k = strings.Replace(k, "  - cm.yaml\n", "  - base\n", 1)
+			if c.prefix == "" {
+				k += "  - other.yaml\n"
+			}
+			files[soKust] = []byte(k)
+			_, err := semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
+			if c.over {
+				wantMergedKeysBound(t, err)
+			} else if err != nil {
+				t.Fatalf("Check: %v", err)
+			}
+		})
+	}
+}

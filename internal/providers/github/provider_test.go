@@ -1494,8 +1494,9 @@ func TestCommentChangeRequest(t *testing.T) {
 	post := commentPost()
 	for name, steps := range map[string][]step{
 		"no comments": {open, comments(1), post},
+		// The first page is read again at the end, for a comment a deletion moved onto it.
 		"two pages, newest first": {open, lastPage(comments(1, fullPage(person("other"))...), 2),
-			comments(2, person("other")), post},
+			comments(2, person("other")), comments(1, fullPage(person("other"))...), post},
 		"marker present": {open, comments(1, person("other"), own("x\n"+commentMarker))},
 		// A person can paste the marker; only the App's own comments count, so the reply is still posted.
 		"marker forged by a person": {open, comments(1, person("x\n"+commentMarker)), post},
@@ -1519,6 +1520,17 @@ func TestCommentChangeRequest(t *testing.T) {
 	}
 }
 
+// A comment deleted on page 1 during the search moves the first comment of page 2 onto page 1, which was read
+// already: page 1 is read once more at the end, so the App's reply there is found and not posted again.
+func TestCommentChangeRequestFindsAMarkerMovedOntoPageOne(t *testing.T) {
+	moved := append(fullPage(person("other"))[1:], own("note\n"+commentMarker))
+	h := newHarness(t, get("/pulls/12", "pull_open.json"), lastPage(comments(1, fullPage(person("other"))...), 2),
+		comments(2), comments(1, moved...))
+	if err := h.p.CommentChangeRequest(ctx, 12, commentMarker, "note\n"+commentMarker); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCommentChangeRequestFailsClosedPastTheBound(t *testing.T) {
 	last := maxCommentPages + 5
 	steps := []step{get("/pulls/12", "pull_open.json"), lastPage(comments(1, fullPage(person("other"))...), last)}
@@ -1537,13 +1549,22 @@ func TestCommentChangeRequestRechecksTheMarkerBeforeAnotherPost(t *testing.T) {
 	open := get("/pulls/12", "pull_open.json")
 	lost := commentPost()
 	lost.status = http.StatusBadGateway
-	// The first post went through but its answer was lost: the marker is found and nothing is posted again.
-	h := newHarness(t, open, comments(1), lost, comments(1, own("note\n"+commentMarker)))
+	// The answer of the post was lost: the comment may exist while the list does not show it yet, so the call
+	// neither looks again at once nor posts again; it returns the failure for a later call.
+	h := newHarness(t, open, comments(1), lost)
+	if err := h.p.CommentChangeRequest(ctx, 12, commentMarker, "note\n"+commentMarker); !providers.IsRetryable(err) {
+		t.Fatalf("got %v, want a retryable error and no second post", err)
+	}
+	if len(h.sleeps) != 0 {
+		t.Errorf("waited %v within the call", h.sleeps)
+	}
+	// The post went through: the next call finds the marker and posts nothing.
+	h = newHarness(t, open, comments(1, own("note\n"+commentMarker)))
 	if err := h.p.CommentChangeRequest(ctx, 12, commentMarker, "note\n"+commentMarker); err != nil {
 		t.Fatal(err)
 	}
-	// It was not posted: the marker is looked for again, then it is posted once more.
-	h = newHarness(t, open, comments(1), lost, comments(1), commentPost())
+	// It was not posted: the next call looks for the marker, then posts once.
+	h = newHarness(t, open, comments(1), commentPost())
 	if err := h.p.CommentChangeRequest(ctx, 12, commentMarker, "note\n"+commentMarker); err != nil {
 		t.Fatal(err)
 	}

@@ -23,6 +23,7 @@ import (
 	"maps"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -58,9 +59,13 @@ import (
 //   - The write passes the kill switch (gatedGit): while writes are paused nothing is posted and nothing is
 //     recorded, and the next look after the pause posts it. The status write that records the replies passes
 //     it too.
-//   - A post that fails for a reason worth retrying is tried again on later looks, at most maxReplyAttempts
-//     times per process (memory only, so a restart allows that many again), then recorded GaveUp; the count is
-//     dropped only once the record is written, so a lost status write does not allow more tries. A final
+//   - A post that fails for a reason worth retrying ends the look's replies, and no look posts a reply of the
+//     request again before a wait has passed: the delay the Git host asked for (a rate limit), at least
+//     replyRetryWait, since the post may have gone through while the list of comments the marker is looked for
+//     in lags behind it. The look at the pull request is requeued for the end of the wait. A reply is tried
+//     again at most maxReplyAttempts times per process (memory only, so a restart allows that many again), then
+//     recorded GaveUp; a rate limit is no try. The count is dropped only once the record is written, so a lost
+//     status write does not allow more tries. A final
 //     refusal of the Git host is recorded Refused at once. A pull request closed or merged meanwhile records
 //     nothing and ends the look: the next look ends the request.
 //   - A reply never changes a hint's state, the plan or the pull request: it only reports what happened.
@@ -72,16 +77,26 @@ const maxReplyAttempts = 5
 // the pages it reads for the marker, the post), and the rest wait for the next look.
 const maxRepliesPerLook = 5
 
+// replyRetryWait is how long the replies of a request wait after a post failed for a reason worth retrying:
+// the post may have gone through, and the list of comments the marker is looked for in can lag behind it.
+const replyRetryWait = 30 * time.Second
+
+// maxReplyWait bounds the wait of the replies after a rate limit: a longer delay the host asks for is cut to it,
+// and a wait found longer than it means the clock went back.
+const maxReplyWait = time.Hour
+
 // maxReplyQuoteBytes is the most bytes of the hint's text a reply quotes.
 const maxReplyQuoteBytes = 200
 
 // replyHeadPattern is the shape of a recorded head the redaction check keeps.
 var replyHeadPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
-// replyTries is what replyAttempts holds per request: the failed posts of this process, by reply marker.
+// replyTries is what replyAttempts holds per request: the failed posts of this process, by reply marker, and
+// the time before which no reply of the request is posted.
 type replyTries struct {
-	uid   types.UID
-	tries map[string]int
+	uid       types.UID
+	tries     map[string]int
+	notBefore time.Time
 }
 
 // replyItem is one entry of status that waits for a reply: a hint or a refused command, never both.
@@ -184,8 +199,8 @@ func (r *RemediationRequestReconciler) replyHints(ctx context.Context, look hint
 		if it.source() != source {
 			continue // a comment of another code host is not this provider's to answer
 		}
-		if tried >= maxRepliesPerLook {
-			break
+		if tried >= maxRepliesPerLook || r.replyWait(upd) > 0 {
+			break // the rest wait for a later look
 		}
 		tried++
 		rec, err := r.replyOne(stepCtx, look.git, upd, it)
@@ -269,6 +284,14 @@ func (r *RemediationRequestReconciler) replyOne(ctx context.Context, git provide
 		log.Info("The Git host refused the reply to a reviewer hint of RemediationRequest; it is not asked again",
 			"reason", reason)
 		return remediationv1alpha1.HintReplyRefused, nil
+	}
+	after, limited := providers.RetryAfter(err)
+	r.waitReplies(rr, min(max(after, replyRetryWait), maxReplyWait))
+	if limited {
+		// A rate limit: the host turned the post away before making it, and it is no try.
+		log.Info("Could not post the reply to a reviewer hint of RemediationRequest: rate limited; it is tried "+
+			"again after the delay", "retryAfter", after)
+		return "", nil
 	}
 	if n := r.countReplyTry(rr, mark); n < maxReplyAttempts {
 		log.Info("Could not post the reply to a reviewer hint of RemediationRequest; it is tried again",
@@ -424,19 +447,51 @@ func refusalText(reason remediationv1alpha1.HintRefusal) string {
 	return "it could not be stored"
 }
 
-// countReplyTry counts one more failed post of the reply with marker mark for rr, and returns the count.
-// Reconciles of one request never overlap, so the read and the store below do not race.
-func (r *RemediationRequestReconciler) countReplyTry(rr *remediationv1alpha1.RemediationRequest, mark string) int {
-	key := client.ObjectKeyFromObject(rr)
+// loadReplyTries returns a copy of what this process holds about the replies of rr (the same request: name and
+// UID), empty when nothing. Reconciles of one request never overlap, so a load, a change and a store do not
+// race.
+func (r *RemediationRequestReconciler) loadReplyTries(rr *remediationv1alpha1.RemediationRequest) replyTries {
 	t := replyTries{uid: rr.UID, tries: map[string]int{}}
-	if v, ok := r.replyAttempts.Load(key); ok {
+	if v, ok := r.replyAttempts.Load(client.ObjectKeyFromObject(rr)); ok {
 		if old, ok := v.(replyTries); ok && old.uid == rr.UID {
 			maps.Copy(t.tries, old.tries)
+			t.notBefore = old.notBefore
 		}
 	}
+	return t
+}
+
+// countReplyTry counts one more failed post of the reply with marker mark for rr, and returns the count.
+func (r *RemediationRequestReconciler) countReplyTry(rr *remediationv1alpha1.RemediationRequest, mark string) int {
+	t := r.loadReplyTries(rr)
 	t.tries[mark]++
-	r.replyAttempts.Store(key, t)
+	r.replyAttempts.Store(client.ObjectKeyFromObject(rr), t)
 	return t.tries[mark]
+}
+
+// waitReplies keeps every reply of rr from being posted for d from now.
+func (r *RemediationRequestReconciler) waitReplies(rr *remediationv1alpha1.RemediationRequest, d time.Duration) {
+	t := r.loadReplyTries(rr)
+	t.notBefore = r.now().Add(d)
+	r.replyAttempts.Store(client.ObjectKeyFromObject(rr), t)
+}
+
+// replyWait returns how long the replies of rr still wait (waitReplies); zero when they may be posted. A wait
+// longer than maxReplyWait means the clock went back: it is over.
+func (r *RemediationRequestReconciler) replyWait(rr *remediationv1alpha1.RemediationRequest) time.Duration {
+	v, ok := r.replyAttempts.Load(client.ObjectKeyFromObject(rr))
+	if !ok {
+		return 0
+	}
+	t, ok := v.(replyTries)
+	if !ok || t.uid != rr.UID {
+		return 0
+	}
+	left := t.notBefore.Sub(r.now())
+	if left <= 0 || left > maxReplyWait {
+		return 0
+	}
+	return left
 }
 
 // replyTries returns the failed posts this process counted for the reply with marker mark of rr.
@@ -463,7 +518,7 @@ func (r *RemediationRequestReconciler) forgetReplyTries(rr *remediationv1alpha1.
 	if _, counted := old.tries[mark]; !counted {
 		return
 	}
-	t := replyTries{uid: old.uid, tries: maps.Clone(old.tries)}
+	t := replyTries{uid: old.uid, tries: maps.Clone(old.tries), notBefore: old.notBefore}
 	delete(t.tries, mark)
 	r.replyAttempts.Store(key, t)
 }

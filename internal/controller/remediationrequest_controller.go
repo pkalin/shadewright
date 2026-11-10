@@ -1029,7 +1029,11 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 			return r.waitOrFail(ctx, rr, &capped)
 		}
 		if wait, ok := r.pollOnly(rr, outcome); ok {
-			// Still open, and the last full recheck is recent: only the pull request was read (#434).
+			// Still open, and the last full recheck is recent: only the pull request was read (#434). Replies to
+			// hints that wait (a rate limit, a post that may have gone through) get the look at the end of the wait.
+			if d := r.replyWait(rr); d > 0 {
+				wait = min(wait, d)
+			}
 			return ctrl.Result{RequeueAfter: wait}, nil
 		}
 	}

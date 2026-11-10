@@ -274,6 +274,8 @@ func mustOpen(t *testing.T, r *RemediationRequestReconciler, rr *api.Remediation
 func TestReplyRetriedThenGivenUp(t *testing.T) {
 	ctx := context.Background()
 	r, g, p := replyWorld(t, []api.Hint{declinedHint(46, "NoAnswer", "x")}, nil)
+	now := time.Now()
+	r.Now = func() time.Time { return now }
 	tries := 0
 	g.SetFail(func(op string) error {
 		if op == opCommentChangeRequest {
@@ -291,6 +293,7 @@ func TestReplyRetriedThenGivenUp(t *testing.T) {
 		if i < maxReplyAttempts-1 && rec != "" {
 			t.Fatalf("recorded %q after %d tries", rec, i+1)
 		}
+		now = now.Add(replyRetryWait) // each failure makes the replies wait
 	}
 	if rec := stored(t, r, p).Status.Hints[0].Reply; rec != api.HintReplyGaveUp || tries != maxReplyAttempts {
 		t.Fatalf("recorded %q after %d tries, want GaveUp after %d", rec, tries, maxReplyAttempts)
@@ -321,6 +324,8 @@ func TestReplyRefusedForGoodAndAfterALostAnswer(t *testing.T) {
 
 	// A post whose answer was lost is retried, and the marker keeps it from being posted twice.
 	r, g, p = replyWorld(t, []api.Hint{declinedHint(49, "NoAnswer", "z")}, nil)
+	now := time.Now()
+	r.Now = func() time.Time { return now }
 	lost := true
 	g.SetAfter(func(op string) error {
 		if op == opCommentChangeRequest && lost {
@@ -334,6 +339,7 @@ func TestReplyRefusedForGoodAndAfterALostAnswer(t *testing.T) {
 		if err := r.replyHints(ctx, look, p); err != nil {
 			t.Fatal(err)
 		}
+		now = now.Add(replyRetryWait)
 	}
 	if got := replies(g, p.Status.PullRequest.Number); len(got) != 1 {
 		t.Fatalf("replies after a lost answer: %d", len(got))
@@ -386,6 +392,8 @@ func refusedCommand(id int64, rec api.HintReply) api.RefusedHint {
 func TestGaveUpSurvivesALostStatusWrite(t *testing.T) {
 	ctx := context.Background()
 	r, g, p := replyWorld(t, []api.Hint{declinedHint(50, "NoAnswer", "x")}, nil)
+	now := time.Now()
+	r.Now = func() time.Time { return now }
 	tries := 0
 	g.SetFail(func(op string) error {
 		if op != opCommentChangeRequest {
@@ -401,6 +409,7 @@ func TestGaveUpSurvivesALostStatusWrite(t *testing.T) {
 	look := hintLook{git: mustOpen(t, r, p), host: api.GitProviderGitHub}
 	for range maxReplyAttempts {
 		_ = r.replyHints(ctx, look, stored(t, r, p))
+		now = now.Add(replyRetryWait)
 	}
 	if rec := stored(t, r, p).Status.Hints[0].Reply; rec != "" {
 		t.Fatalf("recorded %q while writes were paused", rec)
@@ -482,5 +491,85 @@ func TestRefusedHintsKeepEntriesThatWaitForAReply(t *testing.T) {
 		findRefused(st.RefusedHints, api.HintSourceGitHub, 4) || !findRefused(st.RefusedHints, api.HintSourceGitHub, 1) ||
 		len(st.RefusedHints) != api.MaxRefusedHints {
 		t.Fatalf("the replied entry was not the one dropped: %+v", st.RefusedHints)
+	}
+}
+
+// A rate limit is no try: a secondary limit across more looks than maxReplyAttempts never records GaveUp, and
+// no look asks again before the delay the host asked for has passed.
+func TestReplyRateLimitIsNoTry(t *testing.T) {
+	ctx := context.Background()
+	r, g, p := replyWorld(t, []api.Hint{declinedHint(54, "NoAnswer", "x")}, nil)
+	now := time.Now()
+	r.Now = func() time.Time { return now }
+	tries := 0
+	limited := true
+	g.SetFail(func(op string) error {
+		if op == opCommentChangeRequest && limited {
+			tries++
+			return &providers.RetryableError{RetryAfter: 2 * time.Minute, Err: errors.New("rate limit")}
+		}
+		return nil
+	})
+	look := hintLook{git: mustOpen(t, r, p), host: api.GitProviderGitHub}
+	for i := range 2 * maxReplyAttempts {
+		if err := r.replyHints(ctx, look, stored(t, r, p)); err != nil {
+			t.Fatal(err)
+		}
+		if rec := stored(t, r, p).Status.Hints[0].Reply; rec != "" {
+			t.Fatalf("recorded %q after %d rate limits", rec, i+1)
+		}
+		if d := r.replyWait(p); d != 2*time.Minute {
+			t.Fatalf("wait = %v, want the 2m the host asked for", d)
+		}
+		// A look within the delay does not ask.
+		if err := r.replyHints(ctx, look, stored(t, r, p)); err != nil || tries != i+1 {
+			t.Fatalf("asked within the delay: %d tries, %v", tries, err)
+		}
+		now = now.Add(2 * time.Minute)
+	}
+	limited = false
+	if err := r.replyHints(ctx, look, stored(t, r, p)); err != nil {
+		t.Fatal(err)
+	}
+	if rec := stored(t, r, p).Status.Hints[0].Reply; rec != api.HintReplyPosted ||
+		len(replies(g, p.Status.PullRequest.Number)) != 1 {
+		t.Fatalf("recorded %q, want Posted once the limit passed", rec)
+	}
+}
+
+// After a post that may have gone through, a look within replyRetryWait neither looks for the marker nor
+// posts: a list of comments that lags behind could hide the reply just made.
+func TestReplyWaitsAfterAnAmbiguousFailure(t *testing.T) {
+	ctx := context.Background()
+	r, g, p := replyWorld(t, []api.Hint{declinedHint(55, "NoAnswer", "x"), declinedHint(56, "NoAnswer", "y")}, nil)
+	now := time.Now()
+	r.Now = func() time.Time { return now }
+	tries := 0
+	g.SetFail(func(op string) error {
+		if op == opCommentChangeRequest {
+			tries++
+			if tries == 1 {
+				return &providers.RetryableError{Err: errors.New("status 502")}
+			}
+		}
+		return nil
+	})
+	look := hintLook{git: mustOpen(t, r, p), host: api.GitProviderGitHub}
+	if err := r.replyHints(ctx, look, stored(t, r, p)); err != nil {
+		t.Fatal(err)
+	}
+	if tries != 1 {
+		t.Fatalf("asked %d times in the look of the failure, want once", tries)
+	}
+	now = now.Add(replyRetryWait - time.Second)
+	if err := r.replyHints(ctx, look, stored(t, r, p)); err != nil || tries != 1 {
+		t.Fatalf("asked again within the wait: %d tries, %v", tries, err)
+	}
+	now = now.Add(time.Second)
+	if err := r.replyHints(ctx, look, stored(t, r, p)); err != nil {
+		t.Fatal(err)
+	}
+	if got := stored(t, r, p).Status.Hints; got[0].Reply != api.HintReplyPosted || got[1].Reply != api.HintReplyPosted {
+		t.Fatalf("recorded %q and %q, want both Posted after the wait", got[0].Reply, got[1].Reply)
 	}
 }

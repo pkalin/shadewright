@@ -1168,9 +1168,10 @@ const (
 // CommentChangeRequest adds one comment to an open pull request from a shadewright/ branch to the target
 // branch, unless a comment the App posted as its own bot user holds marker as a whole line already. It reads
 // the comments newest first, at most maxCommentPages pages; past them it posts nothing and returns
-// ErrTooManyComments. The post itself is never repeated blindly: after a failure worth retrying the marker is
-// looked for again first, so a post whose answer was lost is not made twice. A closed or merged pull request is
-// ErrConflict; other pull requests are refused.
+// ErrTooManyComments. The post is made at most once per call: a post that failed for a reason worth retrying
+// may have gone through, and the list of comments can lag behind it, so the failure is returned for a later
+// call (the next look at the pull request), which looks for the marker again before it posts. A closed or
+// merged pull request is ErrConflict; other pull requests are refused.
 func (p *Provider) CommentChangeRequest(ctx context.Context, number int64, marker, body string) error {
 	switch {
 	case number < 1:
@@ -1198,26 +1199,20 @@ func (p *Provider) CommentChangeRequest(ctx context.Context, number int64, marke
 		op: opCommentCR, method: http.MethodPost, path: "/issues/" + strconv.FormatInt(number, 10) + "/comments",
 		body: map[string]string{"body": body},
 	}
-	for attempt := 0; ; attempt++ {
-		switch found, err := p.hasComment(ctx, number, marker, app); {
-		case err != nil:
-			return err
-		case found:
-			return nil
-		}
-		r, err := p.once(ctx, post)
-		switch {
-		case err == nil && r.status == http.StatusCreated:
-			return nil
-		case err == nil:
-			return statusError(opCommentCR, r.status)
-		case !providers.IsRetryable(err) || attempt+1 >= p.attempts:
-			return err
-		}
-		if err := p.backoff(ctx, opCommentCR, attempt, err); err != nil {
-			return err
-		}
+	switch found, err := p.hasComment(ctx, number, marker, app); {
+	case err != nil:
+		return err
+	case found:
+		return nil
 	}
+	r, err := p.once(ctx, post)
+	switch {
+	case err != nil:
+		return err
+	case r.status != http.StatusCreated:
+		return statusError(opCommentCR, r.status)
+	}
+	return nil
 }
 
 // ownApp returns the ID of the App whose installation tokens the provider uses.
@@ -1264,10 +1259,12 @@ func hasMarkerLine(body, marker string) bool {
 }
 
 // hasComment reports whether a comment of pull request number that the App app posted holds marker. It reads
-// the first page, which names the last, then the pages from the last back, newest first, at most
-// maxCommentPages pages in all; a marker beyond them is unknown, ErrTooManyComments. Comments are only ever
-// appended at the end or deleted, and a deletion moves later comments to earlier pages, which are read later,
-// so a comment present through the whole search is never missed.
+// the first page, which names the last, then the pages from the last back to the second, newest first, then
+// the first page once more, at most maxCommentPages distinct pages; a marker beyond them is unknown,
+// ErrTooManyComments. Comments are only ever appended at the end or deleted, and a deletion moves later
+// comments only to earlier places: a comment on a page not read yet stays on a page not read yet, or reaches
+// the first page, which is read again at the end. So a comment present through the whole search is never
+// missed.
 func (p *Provider) hasComment(ctx context.Context, number int64, marker string, app int64) (bool, error) {
 	cs, last, err := p.commentPage(ctx, number, 1)
 	if err != nil {
@@ -1290,7 +1287,13 @@ func (p *Provider) hasComment(ctx context.Context, number int64, marker string, 
 		return false, fmt.Errorf("%s: the pull request has more than %d pages of comments: %w", opCommentCR,
 			maxCommentPages, providers.ErrTooManyComments)
 	}
-	return false, nil
+	if last < 2 {
+		return false, nil // one page, read in one answer
+	}
+	if cs, _, err = p.commentPage(ctx, number, 1); err != nil {
+		return false, err
+	}
+	return slices.ContainsFunc(cs, func(c markedCommentJSON) bool { return ownMarked(c, marker, app) }), nil
 }
 
 // commentPage reads one page of the comments of pull request number, and the number of the last page that the

@@ -334,18 +334,29 @@ func (g *Git) CheckMerged(ctx context.Context, head, mergeCommit, path string) (
 	return providers.BranchOneChange, c.parent, nil
 }
 
-// CommentChangeRequest adds a comment to an open change request, unless one holds marker already.
+// MaxComments is how many comments of a change request CommentChangeRequest reads to look for its marker, as
+// many as the GitHub adapter reads (50 pages of 20); past them it posts nothing (ErrTooManyComments).
+const MaxComments = 1000
+
+// CommentChangeRequest adds a comment to an open change request, unless a comment it posted (the App's own,
+// kept apart from the people's comments of AddComment) holds marker as a whole line already, as the
+// interface says. A marker in a person's comment does not count. When the change request holds more than
+// MaxComments comments, the App's and the people's together, it posts nothing and returns ErrTooManyComments.
 func (g *Git) CommentChangeRequest(ctx context.Context, n int64, marker, body string) error {
 	if err := g.before("CommentChangeRequest"); err != nil {
 		return err
 	}
-	if marker == "" || strings.ContainsAny(marker, "\r\n") || len(marker) > providers.MaxCommentMarkerBytes ||
-		!strings.Contains(body, marker) {
-		return errors.New("comment marker is invalid or not in the body")
+	if strings.TrimSpace(marker) == "" || strings.ContainsAny(marker, "\r\n") ||
+		len(marker) > providers.MaxCommentMarkerBytes || !markerLine(body, marker) {
+		return errors.New("comment marker is invalid or not a line of the body")
 	}
 	g.mu.Lock()
+	if len(g.comments[n])+len(g.fb.comments[n]) > MaxComments {
+		g.mu.Unlock()
+		return fmt.Errorf("change request %d: %w", n, providers.ErrTooManyComments)
+	}
 	for _, c := range g.comments[n] {
-		if strings.Contains(c, marker) {
+		if markerLine(c, marker) {
 			g.mu.Unlock()
 			return nil
 		}
@@ -369,7 +380,19 @@ func (g *Git) CommentChangeRequest(ctx context.Context, n int64, marker, body st
 	return g.after("CommentChangeRequest")
 }
 
-// Comments returns the comments of change request n, oldest first.
+// markerLine reports whether a line of body, without surrounding white space, is marker.
+func markerLine(body, marker string) bool {
+	marker = strings.TrimSpace(marker)
+	for line := range strings.SplitSeq(body, "\n") {
+		if strings.TrimSpace(line) == marker {
+			return true
+		}
+	}
+	return false
+}
+
+// Comments returns the comments CommentChangeRequest posted on change request n (the App's own), oldest first;
+// the people's comments of AddComment are not among them.
 func (g *Git) Comments(n int64) []string {
 	g.mu.Lock()
 	defer g.mu.Unlock()

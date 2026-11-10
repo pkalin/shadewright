@@ -20,9 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,8 +43,10 @@ type ListGetter struct {
 var _ client.Reader = ListGetter{}
 
 // Get lists the objects of obj's kind in key's namespace whose name is key's name, at most two, and copies the
-// one found into obj. None is a NotFound error; the Reader's errors are returned as they are, so a caller can
-// classify them.
+// one found into obj. None is a NotFound error that names the kind as obj gives it. A kind the API server does
+// not serve (a no-match error: Flux's CRDs not installed) is an error that is neither a NotFound nor a
+// no-match, since no object is known to be missing; the Reader's other errors are returned as they are, so a
+// caller can classify them.
 func (g ListGetter) Get(ctx context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
 	u, ok := obj.(*unstructured.Unstructured)
 	if !ok || g.Reader == nil {
@@ -58,11 +60,14 @@ func (g ListGetter) Get(ctx context.Context, key client.ObjectKey, obj client.Ob
 	list.SetGroupVersionKind(gvk.GroupVersion().WithKind(gvk.Kind + "List"))
 	if err := g.Reader.List(ctx, list, client.InNamespace(key.Namespace),
 		client.MatchingFields{"metadata.name": key.Name}, client.Limit(2)); err != nil {
+		if meta.IsNoMatchError(err) {
+			return fmt.Errorf("%w: the API server does not serve %s", errListGetter, gvk.Kind)
+		}
 		return err
 	}
 	switch len(list.Items) {
 	case 0:
-		return apierrors.NewNotFound(schema.GroupResource{Group: gvk.Group, Resource: strings.ToLower(gvk.Kind)}, key.Name)
+		return apierrors.NewNotFound(schema.GroupResource{Group: gvk.Group, Resource: gvk.Kind}, key.Name)
 	case 1:
 	default:
 		return fmt.Errorf("%w: the list by name returned more than one object", errListGetter)

@@ -33,6 +33,7 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analysis"
 	"github.com/pkalin/shadewright/internal/analyzer"
+	"github.com/pkalin/shadewright/internal/analyzer/collector"
 	"github.com/pkalin/shadewright/internal/analyzer/models"
 	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/incidents"
@@ -55,9 +56,10 @@ type analysisFlags struct {
 	storeAccount, storeContainer string
 	// claimTimeout is the Incident trigger's AnalysisTimeout: how long a claim lasts (ADR-0025 decision 1).
 	claimTimeout time.Duration
-	// fluxGrant is true when --module-grants names the Flux module's grant (list and watch on Flux objects in
-	// the watched namespaces): only then does get_delivery_status get a delivery system (#562).
-	fluxGrant bool
+	// moduleGrants are the grants of --module-grants, nil when the flag is not given. get_delivery_status gets a
+	// delivery system (#562) when they hold the Flux module's grant by the collector's rule (collector.Granted),
+	// so the tool and the collector's Flux sources turn on together.
+	moduleGrants []string
 }
 
 // bind registers the analysis flags on fs.
@@ -248,15 +250,17 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 }
 
 // readTools returns the read tools of an escalation, on the same sources and redactor as the context builder,
-// bound to the watched namespaces. get_delivery_status gets the Flux adapter's status reader (#562) only when
-// the install rendered the Flux module's grant (f.fluxGrant): it then reads one Kustomization or HelmRelease of
-// a watched namespace with the list that grant holds (analyzer.ListGetter on the API reader), no get and no
-// informer, so the analyzer gets no new permission. Its delivery namespaces are the watched ones, where that
+// bound to the watched namespaces. get_delivery_status gets the Flux adapter's status reader (#562) by the
+// collector's rule for the Flux module's grant (collector.Granted): when --module-grants names it, or is not
+// given. It then reads one Kustomization or HelmRelease of a watched namespace, and the GitRepository of a
+// Kustomization, with the list that grant holds (analyzer.ListGetter on the API reader), no get and no
+// informer, so the analyzer gets no new permission; where the grant is not bound after all, the list is
+// refused and the tool answers "could not fetch". Its delivery namespaces are the watched ones, where that
 // grant is bound. The loop does not offer it yet.
 func readTools(f analysisFlags, d analysisDeps) (*tools.Set, error) {
 	cfg := tools.Config{Pods: d.cache, Events: d.cache, Objects: d.apiReader, Logs: d.sources.Logs,
 		Metrics: d.sources.Metrics, Redactor: d.redactor, Namespaces: f.watched}
-	if f.fluxGrant && len(f.watched) > 0 {
+	if collector.Granted(f.moduleGrants, collector.GrantFlux) && len(f.watched) > 0 {
 		delivery, err := fluxdelivery.NewStatusReader(analyzer.ListGetter{Reader: d.apiReader})
 		if err != nil {
 			return nil, fmt.Errorf("the delivery status reader: %w", err)

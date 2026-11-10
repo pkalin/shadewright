@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/pkalin/shadewright/internal/fluxstatus"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/delivery/flux"
 )
@@ -61,11 +62,14 @@ func recorded(t *testing.T, name string) *unstructured.Unstructured {
 	return u
 }
 
-// reader serves one object, or fails with err. It records the reads.
+// reader serves one object (and any of others), or fails with err, or with sourceErr for a GitRepository. It
+// records the reads.
 type reader struct {
-	obj   *unstructured.Unstructured
-	err   error
-	reads int
+	obj       *unstructured.Unstructured
+	others    []*unstructured.Unstructured
+	err       error
+	sourceErr error
+	reads     int
 }
 
 func (r *reader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
@@ -77,12 +81,32 @@ func (r *reader) Get(ctx context.Context, key client.ObjectKey, obj client.Objec
 		return r.err
 	}
 	u := obj.(*unstructured.Unstructured)
-	if r.obj == nil || r.obj.GroupVersionKind() != u.GroupVersionKind() ||
-		r.obj.GetNamespace() != key.Namespace || r.obj.GetName() != key.Name {
-		return apierrors.NewNotFound(schema.GroupResource{Group: u.GroupVersionKind().Group, Resource: "x"}, key.Name)
+	if r.sourceErr != nil && u.GetKind() == "GitRepository" {
+		return r.sourceErr
 	}
-	r.obj.DeepCopyInto(u)
-	return nil
+	for _, o := range append([]*unstructured.Unstructured{r.obj}, r.others...) {
+		if o != nil && o.GroupVersionKind() == u.GroupVersionKind() &&
+			o.GetNamespace() == key.Namespace && o.GetName() == key.Name {
+			o.DeepCopyInto(u)
+			return nil
+		}
+	}
+	return apierrors.NewNotFound(schema.GroupResource{Group: u.GroupVersionKind().Group, Resource: "x"}, key.Name)
+}
+
+// source is the recorded GitRepository of the recorded Kustomizations, Ready for its current generation and
+// last fetched at revision.
+func source(t *testing.T, revision string) *unstructured.Unstructured {
+	t.Helper()
+	u := recorded(t, "gitrepository-auth-failed.json")
+	ready := []any{map[string]any{"type": "Ready", "status": "True", "reason": "Succeeded", "observedGeneration": int64(2)}}
+	if err := unstructured.SetNestedSlice(u.Object, ready, "status", "conditions"); err != nil {
+		t.Fatal(err)
+	}
+	if err := unstructured.SetNestedField(u.Object, revision, "status", "artifact", "revision"); err != nil {
+		t.Fatal(err)
+	}
+	return u
 }
 
 func (r *reader) List(context.Context, client.ObjectList, ...client.ListOption) error {
@@ -366,7 +390,8 @@ func TestNewStatusReaderNeedsAReader(t *testing.T) {
 func TestStatusReaderReadsAsTheVerifier(t *testing.T) {
 	for _, file := range []string{readyFile, buildFailed, "kustomization-stalled.json", helmFailed} {
 		u := recorded(t, file)
-		sr, err := flux.NewStatusReader(&reader{obj: u})
+		applied := fluxstatus.AppliedRevision(fluxstatus.Status(recorded(t, readyFile).Object))
+		sr, err := flux.NewStatusReader(&reader{obj: u, others: []*unstructured.Unstructured{source(t, applied)}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -384,6 +409,76 @@ func TestStatusReaderReadsAsTheVerifier(t *testing.T) {
 	}
 	if _, err := sr.Status(t.Context(), unitOf(recorded(t, readyFile))); !errors.Is(err, providers.ErrForbidden) {
 		t.Errorf("forbidden read: %v", err)
+	}
+}
+
+// The status reader compares a Kustomization that would count as applied with its GitRepository, by the
+// executor's rule (sourcemap.BehindSource), reports spec.suspend, and never reports a status it could not
+// compare: a GitRepository it cannot read fails the read, and is never a NotFound of the unit.
+func TestStatusReaderComparesTheSource(t *testing.T) {
+	ks := recorded(t, readyFile)
+	applied := fluxstatus.AppliedRevision(fluxstatus.Status(ks.Object))
+	newer := "cluster/kind@sha1:" + revNew
+	for _, tc := range []struct {
+		name   string
+		source *unstructured.Unstructured
+		behind bool
+		reads  int
+	}{
+		{"at its source", source(t, applied), false, 2},
+		{"behind its source", source(t, newer), true, 2},
+	} {
+		r := &reader{obj: ks, others: []*unstructured.Unstructured{tc.source}}
+		sr, err := flux.NewStatusReader(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, err := sr.Status(t.Context(), unitOf(ks))
+		if err != nil || st.BehindSource != tc.behind || r.reads != tc.reads {
+			t.Errorf("%s: %v, BehindSource %v, %d reads", tc.name, err, st.BehindSource, r.reads)
+		}
+		// The executor's verifier never compares: BehindSource stays false and one read is made.
+		vr := &reader{obj: ks, others: []*unstructured.Unstructured{tc.source}}
+		v, err := flux.New(vr, ancestry{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st, err := v.Status(t.Context(), unitOf(ks)); err != nil || st.BehindSource || vr.reads != 1 {
+			t.Errorf("%s: verifier %v, BehindSource %v, %d reads", tc.name, err, st.BehindSource, vr.reads)
+		}
+	}
+
+	suspended := ks.DeepCopy()
+	if err := unstructured.SetNestedField(suspended.Object, true, "spec", "suspend"); err != nil {
+		t.Fatal(err)
+	}
+	r := &reader{obj: suspended}
+	sr, err := flux.NewStatusReader(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, err := sr.Status(t.Context(), unitOf(suspended)); err != nil || !st.Suspended || r.reads != 1 {
+		t.Errorf("suspended: %v, Suspended %v, %d reads", err, st.Suspended, r.reads)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		sourceErr error
+		want      error
+	}{
+		{"source missing", nil, nil},
+		{"source forbidden", apierrors.NewForbidden(schema.GroupResource{}, "x", errors.New("no")), providers.ErrForbidden},
+	} {
+		sr, err := flux.NewStatusReader(&reader{obj: ks, sourceErr: tc.sourceErr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = sr.Status(t.Context(), unitOf(ks))
+		var retryable *providers.RetryableError
+		if err == nil || errors.Is(err, providers.ErrNotFound) ||
+			(tc.want != nil && !errors.Is(err, tc.want)) || (tc.want == nil && !errors.As(err, &retryable)) {
+			t.Errorf("%s: %v", tc.name, err)
+		}
 	}
 }
 

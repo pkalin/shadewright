@@ -76,8 +76,8 @@ type Config struct {
 	// Metrics is the metrics source; nil means query_metrics is not available.
 	Metrics providers.MetricsSource
 	// Delivery is the delivery system; nil means get_delivery_status is not available. The analyzer passes
-	// the Flux adapter's status reader only when the chart rendered the Flux module's grant (list and watch on
-	// Flux objects in the watched namespaces), reading one object with list (analyzer.ListGetter).
+	// the Flux adapter's status reader by the collector's rule for the Flux module's grant (list and watch on
+	// Flux objects in the watched namespaces; collector.Granted), reading with list (analyzer.ListGetter).
 	Delivery providers.DeliveryVerifier
 	// Redactor redacts every piece of text before it is cut or returned. Required.
 	Redactor Redactor

@@ -490,8 +490,8 @@ func TestGetDeliveryStatus(t *testing.T) {
 	}
 }
 
-// get_delivery_status reports applied, pending and failed from the unit's status: applied only when it is
-// Ready for its current generation and reports no failure.
+// get_delivery_status reports suspended, applied, pending and failed from the unit's status: suspended first,
+// applied only when it is Ready for its current generation, reports no failure and is not behind its source.
 func TestDeliveryState(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -504,6 +504,9 @@ func TestDeliveryState(t *testing.T) {
 		{"not ready", providers.DeliveryStatus{Generation: 1, ObservedGeneration: 1}, deliveryPending},
 		{"failed", providers.DeliveryStatus{Failed: true, Generation: 1, ObservedGeneration: 1}, deliveryFailed},
 		{"failed while ready", providers.DeliveryStatus{Failed: true, Ready: true, Generation: 1, ObservedGeneration: 1}, deliveryFailed},
+		{"suspended while ready", providers.DeliveryStatus{Suspended: true, Ready: true, Generation: 1, ObservedGeneration: 1}, deliverySuspended},
+		{"suspended and failed", providers.DeliveryStatus{Suspended: true, Failed: true, Generation: 1, ObservedGeneration: 1}, deliverySuspended},
+		{"ready but behind its source", providers.DeliveryStatus{BehindSource: true, Ready: true, Generation: 1, ObservedGeneration: 1}, deliveryPending},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t, nil)

@@ -28,11 +28,13 @@ limitations under the License.
 // AppliedCommit stays empty and its outcome is never Applied; the delivery of a commit to a HelmRelease is
 // shown by the Kustomization that applies it.
 //
-// [StatusReader] is the same read without the comparison, for a caller with no Git host: the analyzer's
-// get_delivery_status tool.
+// [StatusReader] is the same read without the commit comparison, for a caller with no Git host: the analyzer's
+// get_delivery_status tool. It also reads the GitRepository of a Kustomization that would otherwise count as
+// applied, to say whether the Kustomization is behind it (providers.DeliveryStatus.BehindSource).
 //
-// It reads only: the caller needs get on the kind in the unit's namespace, nothing else, or what its reader's
-// Get needs instead (the analyzer's reader gets one object with list, internal/analyzer.ListGetter). It does
+// It reads only: the caller needs get on the kind in the unit's namespace (and, for [StatusReader], on
+// GitRepositories where the Kustomizations' sources are), nothing else, or what its reader's Get needs
+// instead (the analyzer's reader gets one object with list, internal/analyzer.ListGetter). It does
 // not retry; a failed read is classified (providers.ErrNotFound, providers.ErrForbidden, a
 // [providers.RetryableError] or the context's error) and never reported as a status.
 package flux
@@ -52,6 +54,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/pkalin/shadewright/internal/fluxstatus"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
@@ -116,37 +119,90 @@ func (v *Verifier) Verify(ctx context.Context, unit providers.DeliveryUnit, merg
 	return outcome, st, err
 }
 
-// Status reads the unit and reports its status.
+// Status reads the unit and reports its status. It does not compare the unit with its source:
+// BehindSource stays false.
 func (v *Verifier) Status(ctx context.Context, unit providers.DeliveryUnit) (providers.DeliveryStatus, error) {
-	return v.status.Status(ctx, unit)
+	st, _, err := v.status.read(ctx, unit)
+	return st, err
 }
 
-// Status reads the unit and reports its status.
+// Status reads the unit and reports its status. A Kustomization of a GitRepository that is Ready for its
+// current generation, reports no failure and is not suspended is also compared with that GitRepository, by
+// the executor's source mapping rule (sourcemap.BehindSource): BehindSource says it has not applied the
+// revision the GitRepository last fetched. A GitRepository that cannot be read fails the whole read (never a
+// NotFound: the unit was found), so the status is never reported without that comparison.
 func (r *StatusReader) Status(ctx context.Context, unit providers.DeliveryUnit) (providers.DeliveryStatus, error) {
+	st, obj, err := r.read(ctx, unit)
+	if err != nil {
+		return providers.DeliveryStatus{}, err
+	}
+	if unit.Kind != fluxstatus.KindKustomization || fluxstatus.SourceKind(obj.Object) != fluxstatus.KindGitRepository ||
+		st.Failed || st.Suspended || !st.Ready || !st.Current() {
+		return st, nil
+	}
+	src, err := r.source(ctx, obj)
+	if err != nil {
+		return providers.DeliveryStatus{}, err
+	}
+	st.BehindSource = sourcemap.BehindSource(obj, src)
+	return st, nil
+}
+
+// source reads the GitRepository that the Kustomization ks names in spec.sourceRef (its own namespace when
+// the reference names none). Every failure is an error that is not providers.ErrNotFound.
+func (r *StatusReader) source(ctx context.Context, ks *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	const kind = fluxstatus.KindGitRepository
+	name, _, _ := unstructured.NestedString(ks.Object, "spec", "sourceRef", "name")
+	ns, _, _ := unstructured.NestedString(ks.Object, "spec", "sourceRef", "namespace")
+	if ns == "" {
+		ns = ks.GetNamespace()
+	}
+	if len(validation.IsDNS1123Label(ns)) > 0 || len(validation.IsDNS1123Subdomain(name)) > 0 {
+		return nil, fmt.Errorf("read %s: spec.sourceRef of the Kustomization is not a valid object reference", kind)
+	}
+	src := &unstructured.Unstructured{}
+	src.SetGroupVersionKind(sourcemap.GitRepositoryGVK)
+	if err := r.reader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, src); err != nil {
+		err = readError(ctx, kind, err)
+		if errors.Is(err, providers.ErrNotFound) {
+			return nil, &providers.RetryableError{Err: fmt.Errorf("read %s: the Kustomization's source was not found", kind)}
+		}
+		return nil, err
+	}
+	if src.GetNamespace() != ns || src.GetName() != name || src.GroupVersionKind() != sourcemap.GitRepositoryGVK {
+		return nil, &providers.RetryableError{Err: fmt.Errorf("read %s: the reader returned another object", kind)}
+	}
+	return src, nil
+}
+
+// read reads the unit and reports its status, with the object read.
+func (r *StatusReader) read(ctx context.Context, unit providers.DeliveryUnit) (
+	providers.DeliveryStatus, *unstructured.Unstructured, error) {
 	gvk, ok := kinds[unit.Kind]
 	if !ok {
-		return providers.DeliveryStatus{}, fmt.Errorf("kind is not Kustomization or HelmRelease: %w", ErrInvalidUnit)
+		return providers.DeliveryStatus{}, nil, fmt.Errorf("kind is not Kustomization or HelmRelease: %w", ErrInvalidUnit)
 	}
 	if len(validation.IsDNS1123Label(unit.Namespace)) > 0 || len(validation.IsDNS1123Subdomain(unit.Name)) > 0 {
-		return providers.DeliveryStatus{}, fmt.Errorf("namespace or name is not a valid object reference: %w", ErrInvalidUnit)
+		return providers.DeliveryStatus{}, nil, fmt.Errorf("namespace or name is not a valid object reference: %w", ErrInvalidUnit)
 	}
 	if err := ctx.Err(); err != nil {
-		return providers.DeliveryStatus{}, fmt.Errorf("read %s: %w", unit.Kind, err)
+		return providers.DeliveryStatus{}, nil, fmt.Errorf("read %s: %w", unit.Kind, err)
 	}
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(gvk)
 	if err := r.reader.Get(ctx, client.ObjectKey{Namespace: unit.Namespace, Name: unit.Name}, obj); err != nil {
-		return providers.DeliveryStatus{}, readError(ctx, unit.Kind, err)
+		return providers.DeliveryStatus{}, nil, readError(ctx, unit.Kind, err)
 	}
 	if obj.GetNamespace() != unit.Namespace || obj.GetName() != unit.Name || obj.GroupVersionKind() != gvk {
-		return providers.DeliveryStatus{}, &providers.RetryableError{
+		return providers.DeliveryStatus{}, nil, &providers.RetryableError{
 			Err: fmt.Errorf("read %s: the reader returned another object", unit.Kind)}
 	}
-	return statusOf(unit.Kind, obj.Object), nil
+	return statusOf(unit.Kind, obj), obj, nil
 }
 
-// statusOf reads the status of a unit of kind from its object.
-func statusOf(kind string, obj map[string]any) providers.DeliveryStatus {
+// statusOf reads the status of a unit of kind from its object, and whether its spec suspends it.
+func statusOf(kind string, u *unstructured.Unstructured) providers.DeliveryStatus {
+	obj := u.Object
 	status := fluxstatus.Status(obj)
 	generation, hasGeneration := fluxstatus.Generation(obj)
 	observed, _ := fluxstatus.ObservedGeneration(obj)
@@ -156,6 +212,7 @@ func statusOf(kind string, obj map[string]any) providers.DeliveryStatus {
 		Generation:         max(generation, 0),
 		ObservedGeneration: max(observed, 0),
 		Message:            bounded(fluxstatus.ReadyMessage(obj)),
+		Suspended:          sourcemap.Suspended(u),
 	}
 	cond, typ := fluxstatus.Failing(status, generation, hasGeneration)
 	reason, _ := cond["reason"].(string)

@@ -18,8 +18,9 @@ limitations under the License.
 // (Kustomizations, HelmReleases, GitRepositories) in the watched namespaces, bound there by one RoleBinding each
 // (chart value analyzer.modules.flux.enabled, off by default).
 // Only list and watch, for the informers of the sources, never get. The read tool get_delivery_status reads one
-// Kustomization or HelmRelease with list too, by a field selector on its name (analyzer.ListGetter, #562), and
-// only while this grant is rendered (--module-grants names flux).
+// Kustomization or HelmRelease, and a Kustomization's GitRepository, with list too, by a field selector on the
+// name (analyzer.ListGetter, #562), by the collector's rule for this grant (collector.Granted: --module-grants
+// names flux, or is not given).
 //
 // +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=list;watch
 // +kubebuilder:rbac:groups=helm.toolkit.fluxcd.io,resources=helmreleases,verbs=list;watch

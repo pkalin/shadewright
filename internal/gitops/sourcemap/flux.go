@@ -145,11 +145,32 @@ func kustomizationRef(ks *unstructured.Unstructured) string {
 
 // kustomizationSuspended stops on a suspended Kustomization, which would not apply a merge.
 func kustomizationSuspended(ks *unstructured.Unstructured) *Result {
-	if suspended, _, _ := unstructured.NestedBool(ks.Object, "spec", "suspend"); suspended {
+	if Suspended(ks) {
 		r := needsIntervention(ReasonKustomizationSuspended, "%s is suspended", kustomizationRef(ks))
 		return &r
 	}
 	return nil
+}
+
+// Suspended reports whether a Flux object sets spec.suspend: Flux does not reconcile it, so it applies no new
+// revision. The mapping stops on a suspended Kustomization by this rule, and the analyzer's
+// get_delivery_status reports a suspended Kustomization or HelmRelease by it.
+func Suspended(obj *unstructured.Unstructured) bool {
+	suspended, _, _ := unstructured.NestedBool(obj.Object, "spec", "suspend")
+	return suspended
+}
+
+// BehindSource reports whether a Kustomization has not applied the revision its GitRepository src last
+// fetched, by the mapping's own comparison (checkRevision, [fluxstatus.AppliedFetched]). It is false when src
+// is refused by [CheckGitRepository] or is not Ready for its current generation: those are reported apart,
+// and the mapping stops on them before it compares. `kubectl shadewright doctor` and the analyzer's
+// get_delivery_status both call it.
+func BehindSource(ks, src *unstructured.Unstructured) bool {
+	_, branch, stop := CheckGitRepository(src)
+	if stop != nil || !fluxstatus.Ready(src.Object) {
+		return false
+	}
+	return !fluxstatus.AppliedFetched(ks.Object, src.Object, branch)
 }
 
 // kustomizationRemote stops on a Kustomization with spec.kubeConfig, which applies to another cluster. Its

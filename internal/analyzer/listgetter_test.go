@@ -19,10 +19,12 @@ package analyzer
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -104,7 +106,14 @@ func TestListGetterResults(t *testing.T) {
 		err   error
 		check func(error) bool
 	}{
-		{"none is not found", nil, nil, apierrors.IsNotFound},
+		{"none is not found, naming the kind as asked", nil, nil, func(err error) bool {
+			return apierrors.IsNotFound(err) && strings.Contains(err.Error(), "Kustomization.kustomize.toolkit.fluxcd.io")
+		}},
+		// Flux's CRDs not installed: the kind is not served, which is not a missing object.
+		{"a kind not served is not a not found", nil, &meta.NoKindMatchError{GroupKind: kustomizationGVK.GroupKind()},
+			func(err error) bool {
+				return errors.Is(err, errListGetter) && !meta.IsNoMatchError(err) && !apierrors.IsNotFound(err)
+			}},
 		{"two are refused", []unstructured.Unstructured{unit(watchedNS, unitName, true), unit(watchedNS, unitName, true)}, nil,
 			func(err error) bool { return errors.Is(err, errListGetter) }},
 		{"another name is refused", []unstructured.Unstructured{unit(watchedNS, "other", true)}, nil,

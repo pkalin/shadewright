@@ -259,6 +259,7 @@ func TestPromptAsksForTheScopeAndTheSpecificCause(t *testing.T) {
 		for _, want := range []string{
 			`In "summary", state the scope of the failure`,
 			"name the ones that fail and the ones that are healthy",
+			"so the summary stays within its 1024 bytes",
 			"Name the specific cause the blocks give, not only the symptom",
 			`say what that message says is wrong and cite it in "evidence" as rule 2 says`,
 		} {

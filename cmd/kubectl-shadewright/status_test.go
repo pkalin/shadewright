@@ -407,7 +407,7 @@ func TestParseStatus(t *testing.T) {
 		t.Errorf("parseStatus = %+v, %v", f, err)
 	}
 	for _, args := range [][]string{
-		{"-o", "yaml"}, {"extra"}, {"--request-timeout", "-1"}, {"--request-timeout", "1x"}, {"--watch"},
+		{"-o", "yaml"}, {"extra"}, {"--request-timeout", "-1"}, {"--request-timeout", "1x"}, {"--follow"},
 	} {
 		if _, err := parseStatus(args); err == nil {
 			t.Errorf("parseStatus(%q) succeeded", args)
@@ -437,7 +437,7 @@ func TestParseTimeout(t *testing.T) {
 // status -h prints the usage on stdout and succeeds.
 func TestRunPrintsErrorsOnce(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	err := run([]string{"status", "--watch"}, &stdout, &stderr)
+	err := run([]string{"status", "--follow"}, &stdout, &stderr)
 	if err == nil || stdout.Len() != 0 || stderr.Len() != 0 {
 		t.Errorf("bad flag: err %v, stdout %q, stderr %q; want an error and no output", err, stdout.String(), stderr.String())
 	}

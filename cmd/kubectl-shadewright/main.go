@@ -15,7 +15,8 @@ limitations under the License.
 */
 
 // Command kubectl-shadewright is a kubectl plugin that shows what Shadewright is doing in a cluster:
-// `kubectl shadewright status` for an overview, `kubectl shadewright explain <name>` for why one request (or
+// `kubectl shadewright status` for an overview (with -w, read again at an interval until interrupted),
+// `kubectl shadewright explain <name>` for why one request (or
 // each request of one Incident) is in its phase, `kubectl shadewright doctor` for read-only checks of an install.
 // It runs with the caller's kubeconfig and RBAC, and only
 // reads (get and list): the Incidents and RemediationRequests of the operator namespace, the
@@ -37,7 +38,9 @@ import (
 	"io"
 	"math"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -55,13 +58,14 @@ import (
 const usage = `kubectl shadewright: read-only view of Shadewright in a cluster.
 
 Usage:
-  kubectl shadewright status [flags]
+  kubectl shadewright status [-w [--interval dur]] [flags]
   kubectl shadewright explain <request-or-incident> [flags]
   kubectl shadewright doctor [flags]
   kubectl shadewright version
 
 Commands:
-  status    Incidents, requests, the day's analysis budget and the kill switch
+  status    Incidents, requests, the day's analysis budget and the kill switch; with -w, refreshed until
+            Ctrl-C
   explain   why one RemediationRequest is in its phase: its condition timeline, Incident, action, policy
             decision, plan digest, pull request and handoffs, and for a stop the troubleshooting section;
             given an Incident's name, the same for each of its requests, newest first
@@ -77,7 +81,11 @@ Flags:
       --kubeconfig string     path to the kubeconfig file
       --context string        kubeconfig context to use
       --request-timeout dur   time limit for all reads, as kubectl takes it: seconds ("30"), a duration
-                              ("30s", "1m") or 0 for no limit (default 30s)
+                              ("30s", "1m") or 0 for no limit (default 30s); with -w, for each refresh
+  -w, --watch                 status only: read again every --interval and redraw (with -o json, one JSON
+                              document per line) until Ctrl-C; a failed refresh prints its error and the
+                              next one runs
+      --interval dur          time between refreshes with -w, seconds or a duration, at least 1s (default 5s)
 
 Exit status:
   0 on success, 1 on an error; doctor also exits 1 when any check fails, never for a warn alone
@@ -108,6 +116,9 @@ type cmdFlags struct {
 	namespace, output, kubeconfig, context string
 	allNamespaces                          bool
 	timeout                                time.Duration
+	// watch and interval are status --watch: refresh every interval until interrupted.
+	watch    bool
+	interval time.Duration
 	// name is the argument of explain: a RemediationRequest or Incident name.
 	name string
 }
@@ -151,6 +162,13 @@ func parseFlags(cmd string, args []string) (cmdFlags, error) {
 	fs.StringVar(&f.kubeconfig, "kubeconfig", "", "path to the kubeconfig file")
 	fs.StringVar(&f.context, "context", "", "kubeconfig context")
 	fs.StringVar(&timeout, "request-timeout", "30s", "time limit for all reads")
+	interval := defaultInterval.String()
+	if cmd == cmdStatus {
+		for _, n := range []string{"w", "watch"} {
+			fs.BoolVar(&f.watch, n, false, "refresh until interrupted")
+		}
+		fs.StringVar(&interval, "interval", interval, "time between refreshes")
+	}
 	var names []string
 	for {
 		if err := fs.Parse(args); err != nil {
@@ -165,6 +183,16 @@ func parseFlags(cmd string, args []string) (cmdFlags, error) {
 	var err error
 	if f.timeout, err = parseTimeout(timeout); err != nil {
 		return f, err
+	}
+	if cmd == cmdStatus {
+		intervalSet := false
+		fs.Visit(func(fl *flag.Flag) { intervalSet = intervalSet || fl.Name == "interval" })
+		if intervalSet && !f.watch {
+			return f, errors.New("--interval needs --watch")
+		}
+		if f.interval, err = parseInterval(interval); err != nil {
+			return f, err
+		}
 	}
 	switch {
 	case cmd != cmdExplain && len(names) > 0:
@@ -194,6 +222,17 @@ func parseTimeout(s string) (time.Duration, error) {
 	d, err := time.ParseDuration(s)
 	if err != nil || d < 0 {
 		return 0, fmt.Errorf("--request-timeout must be seconds or a duration such as 30s or 1m, not %q", s)
+	}
+	return d, nil
+}
+
+// parseInterval reads --interval: a whole number of seconds or a Go duration, at least minInterval, so a
+// watch cannot turn into a stream of reads against the API server.
+func parseInterval(s string) (time.Duration, error) {
+	d, err := parseTimeout(s)
+	if err != nil || d < minInterval {
+		return 0, fmt.Errorf("--interval must be at least %s, as seconds (\"5\") or a duration (\"5s\"), not %q",
+			minInterval, clean(s, maxName))
 	}
 	return d, nil
 }
@@ -240,6 +279,14 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if f.watch {
+		// A watch runs until Ctrl-C (or SIGTERM) and gives each refresh its own time limit instead.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		w := watchOptions{interval: f.interval, timeout: f.timeout, output: f.output, redraw: isTerminal(stdout)}
+		return watchStatus(ctx, client.Reader(c), Options{Namespace: namespace, AllNamespaces: f.allNamespaces},
+			w, realClock{}, versionWarning(ctx, c), stdout, stderr)
+	}
 	ctx, cancel := context.Background(), context.CancelFunc(func() {})
 	if f.timeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, f.timeout)
@@ -249,14 +296,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runDoctor(ctx, c, namespace, f.output, stdout)
 	}
 	now := time.Now()
-	// The version check runs next to the reads, with its own short limit, so a slow CRD read cannot use up
-	// the time of the other reads.
-	warning := make(chan string, 1)
-	go func() {
-		cctx, ccancel := context.WithTimeout(ctx, crdCheckTimeout)
-		defer ccancel()
-		warning <- crdVersionWarning(cctx, c, version)
-	}()
+	warning := versionWarning(ctx, c)
 	var out any
 	if args[0] == cmdExplain {
 		out, err = explain(ctx, client.Reader(c), namespace, f.name)
@@ -276,6 +316,19 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return renderExplainText(stdout, e, now)
 	}
 	return renderText(stdout, out.(*Report), now)
+}
+
+// versionWarning starts the CRD version check next to the reads, with its own short limit, so a slow CRD read
+// cannot use up the time of the other reads. The channel receives one value (possibly "") and is buffered, so
+// the goroutine ends even when nobody reads it.
+func versionWarning(ctx context.Context, c client.Reader) <-chan string {
+	warning := make(chan string, 1)
+	go func() {
+		cctx, ccancel := context.WithTimeout(ctx, crdCheckTimeout)
+		defer ccancel()
+		warning <- crdVersionWarning(cctx, c, version)
+	}()
+	return warning
 }
 
 // newClient builds the client from the kubeconfig, with the context, namespace and timeout of f, and returns

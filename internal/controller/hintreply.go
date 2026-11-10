@@ -424,6 +424,8 @@ func declineText(reason string) string {
 		return "the analysis gave no answer in time"
 	case "HandoffAborted":
 		return "the new plan could not take this pull request over"
+	case remediationv1alpha1.ReasonHintsTurnedOff:
+		return "reviewer hints are turned off in the executor"
 	case ReasonHintPullRequestMerged, ReasonHintPullRequestClosed, ReasonHintRequestEnded:
 		return "the request of this pull request ended first"
 	}

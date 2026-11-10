@@ -1060,6 +1060,11 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	case providers.ChangeRequestClosed:
 		return hintLook{}, errClosed
 	}
+	if !r.ReviewerHints && tookOver(rr) {
+		// A head a hint steered, with hints off: never AwaitingApproval, and no hints read (afterHandoff stops
+		// such a request first; this holds for any caller).
+		return hintLook{}, r.hintsOffTakenOver(ctx, rr)
+	}
 	if rr.Status.Phase != remediationv1alpha1.PhasePRCreated {
 		if intent(rr) != nil {
 			// Handed over: new comments are the replacement's to read, from the cursor it carries over.

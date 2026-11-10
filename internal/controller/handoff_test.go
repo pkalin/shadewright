@@ -593,6 +593,133 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 			Expect(p.Status.Hints[0].State).To(Equal(remediationv1alpha1.HintDeclined))
 			Expect(git.CheckRuns(head())).To(BeEmpty(), "no check run is created with hints off")
 		})
+
+		// Every state a replacement can be left in by a restart, before and after each persisted write of the
+		// handoff (handoffStep, recoverStep, afterHandoff), then an executor with hints off: the replacement never
+		// reaches AwaitingApproval, never supersedes its predecessor and never rewrites the pull request, whichever
+		// of the two is looked at first.
+		type offState struct {
+			name string
+			// setup brings the handoff to the state, with hints on.
+			setup func()
+			// replPhase is the phase the replacement ends in; predPhase the predecessor's.
+			replPhase, predPhase remediationv1alpha1.RemediationPhase
+		}
+		lose := func(lost func(rr *remediationv1alpha1.RemediationRequest) bool) {
+			hook = func(rr *remediationv1alpha1.RemediationRequest) (bool, bool) {
+				return rr.UID == repl.UID && lost(rr), false
+			}
+			pollOf(repl)
+			hook = nil
+		}
+		states := []offState{
+			{
+				name: "admitted, before the intent",
+				setup: func() {
+					pollUntil(func(rr *remediationv1alpha1.RemediationRequest) bool { return reserved(rr) })
+				},
+				replPhase: remediationv1alpha1.PhaseCancelled, predPhase: remediationv1alpha1.PhaseAwaitingApproval,
+			},
+			{
+				name:      "intent recorded, before the branch update",
+				setup:     untilIntent,
+				replPhase: remediationv1alpha1.PhaseCancelled, predPhase: remediationv1alpha1.PhaseAwaitingApproval,
+			},
+			{
+				name: "branch updated, its record lost",
+				setup: func() {
+					untilIntent()
+					lose(tookOver)
+				},
+				replPhase: remediationv1alpha1.PhaseCancelled, predPhase: remediationv1alpha1.PhaseNeedsIntervention,
+			},
+			{
+				name: "takeover recorded, before the predecessor's end",
+				setup: func() {
+					pollUntil(tookOver)
+					Expect(get(pred).Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+				},
+				replPhase: remediationv1alpha1.PhaseNeedsIntervention, predPhase: remediationv1alpha1.PhaseNeedsIntervention,
+			},
+			{
+				name: "predecessor ended, the replacement's writes after it lost",
+				setup: func() {
+					pollUntil(tookOver)
+					lose(func(*remediationv1alpha1.RemediationRequest) bool { return true })
+					Expect(get(pred).Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+					r := get(repl)
+					Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhasePRCreated))
+					Expect(r.Status.Handoff.From.PullRequestUpdate).To(BeEmpty())
+				},
+				replPhase: remediationv1alpha1.PhaseNeedsIntervention, predPhase: remediationv1alpha1.PhaseSuperseded,
+			},
+			{
+				name: "rewritten, the move to AwaitingApproval lost",
+				setup: func() {
+					pollUntil(tookOver)
+					lose(func(rr *remediationv1alpha1.RemediationRequest) bool {
+						return rr.Status.Phase == remediationv1alpha1.PhaseAwaitingApproval
+					})
+					r := get(repl)
+					Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhasePRCreated))
+					Expect(r.Status.Handoff.From.PullRequestUpdate).To(Equal(remediationv1alpha1.HandoffStepDone))
+				},
+				replPhase: remediationv1alpha1.PhaseNeedsIntervention, predPhase: remediationv1alpha1.PhaseSuperseded,
+			},
+			{
+				name: "waiting for review with its check run",
+				setup: func() {
+					pollUntil(func(rr *remediationv1alpha1.RemediationRequest) bool {
+						return rr.Status.PullRequest != nil && rr.Status.PullRequest.ReviewCheck != nil
+					})
+				},
+				replPhase: remediationv1alpha1.PhaseNeedsIntervention, predPhase: remediationv1alpha1.PhaseSuperseded,
+			},
+		}
+		entries := make([]TableEntry, 0, 2*len(states))
+		for _, s := range states {
+			entries = append(entries, Entry(s.name+", the replacement looked at first", s, false),
+				Entry(s.name+", the predecessor looked at first", s, true))
+		}
+		DescribeTable("never adopts a head a hint steered after a restart",
+			func(s offState, predFirst bool) {
+				replace("512Mi", ref(hint))
+				s.setup()
+				title, checks := git.ChangeRequests()[0].Title, len(git.CheckRuns(head()))
+				wasSuperseded := get(pred).Status.Phase == remediationv1alpha1.PhaseSuperseded
+				var awaiting, superseded bool
+				hook = func(rr *remediationv1alpha1.RemediationRequest) (bool, bool) {
+					switch {
+					case rr.UID == repl.UID && rr.Status.Phase == remediationv1alpha1.PhaseAwaitingApproval:
+						awaiting = true
+					case rr.UID == pred.UID && rr.Status.Phase == remediationv1alpha1.PhaseSuperseded:
+						superseded = true
+					}
+					return false, false
+				}
+				hintsOff = true
+				if predFirst {
+					pollOf(pred)
+				}
+				drive(3)
+				hook = nil
+				Expect(awaiting).To(BeFalse(), "the replacement was moved to AwaitingApproval")
+				Expect(superseded && !wasSuperseded).To(BeFalse(), "the predecessor was superseded")
+				r := get(repl)
+				Expect(r.Status.Phase).To(Equal(s.replPhase))
+				Expect(get(pred).Status.Phase).To(Equal(s.predPhase))
+				if s.replPhase == remediationv1alpha1.PhaseNeedsIntervention {
+					Expect(condition(r, remediationv1alpha1.ConditionApproved).Reason).To(
+						Equal(remediationv1alpha1.ReasonHintsTurnedOff))
+				}
+				crs := git.ChangeRequests()
+				Expect(crs).To(ConsistOf(HaveField("State", providers.ChangeRequestOpen)),
+					"the pull request stays open for a person")
+				Expect(crs[0].Title).To(Equal(title), "the pull request was not rewritten")
+				Expect(git.CheckRuns(head())).To(HaveLen(checks), "no check run is created with hints off")
+			},
+			entries,
+		)
 	})
 
 	It("aborts on a foreign push during the handoff, and the predecessor stops as before", func() {

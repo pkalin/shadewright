@@ -54,8 +54,9 @@ const (
 	ReasonHandoffAborted = "HandoffAborted"
 	// ReasonHintsTurnedOff: the executor runs with reviewer hints off (its flag --reviewer-hints unset), so it
 	// takes nothing a hint asked for (ADR-0028, amendment of 2026-11-10). It is the reason of a Pending or
-	// Reserved hint the executor declines, of a replacement Denied at admission and of a replacement admitted
-	// before that ends Cancelled without the handoff.
+	// Reserved hint the executor declines, of a replacement Denied at admission, of a replacement admitted
+	// before that ends Cancelled without the handoff, and of a replacement that took the pull request over
+	// before and stops NeedsIntervention.
 	ReasonHintsTurnedOff = "HintsTurnedOff"
 )
 

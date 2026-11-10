@@ -75,7 +75,8 @@ import (
 //     replacement at admission (HintsTurnedOff) and ends one admitted before at its next step, the recovery
 //     included, without taking anything over (a commit pushed before the restart is not recorded, so the
 //     predecessor stops as for a foreign push); the predecessor declines the hint and aborts its intent
-//     (declineHintsOff).
+//     (declineHintsOff). A replacement that recorded the takeover before stops NeedsIntervention
+//     (hintsOffTakenOver, from afterHandoff and the watch), without step 5, step 6 or AwaitingApproval.
 //   - Step 4 (recordHandoff): the replacement records the pull request with the new head, the hints of the chain
 //     (each consumed one, the one it answers among them, the predecessor's other Pending hints, which it
 //     answers anew since the cursor it carries is past their comments, and its Declined ones, kept as they are
@@ -793,9 +794,17 @@ func reserveOnAdmission(rr *remediationv1alpha1.RemediationRequest) {
 // not missed, and returns it for a retry with backoff, which does not send the rewrite again. A cancelled
 // reconcile returns at once, not logged as a failure. A pause leaves both steps for later. The check run is not
 // done here but after the look at the comments (reviewCheck).
+// With reviewer hints off it does neither step: a request that still progresses stops (hintsOffTakenOver).
 func (r *RemediationRequestReconciler) afterHandoff(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	if !tookOver(rr) {
 		return nil
+	}
+	if !r.ReviewerHints {
+		// Hints off fails closed (ADR-0028 amendment of 2026-11-10): a request that took the pull request over
+		// before a restart stops (hintsOffTakenOver), and neither supersedes its predecessor nor rewrites the pull
+		// request, at any phase, an ended one included. A predecessor not ended yet aborts its intent
+		// (declineHintsOff) and stops as for a foreign push, as when the record of the handoff was lost.
+		return r.ignoreStopped(r.hintsOffTakenOver(ctx, rr))
 	}
 	if err := r.supersedePredecessor(ctx, rr); err != nil && !errors.Is(err, freshness.ErrPaused) {
 		return err
@@ -812,6 +821,26 @@ func (r *RemediationRequestReconciler) afterHandoff(ctx context.Context, rr *rem
 	logf.FromContext(ctx).Info("Could not finish the steps after the handoff of RemediationRequest",
 		"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
 	return nil
+}
+
+// msgHintsOffTakenOver is the message of a request that took a pull request over and stops because reviewer
+// hints are off: its head was steered by a hint and has no merge gate.
+const msgHintsOffTakenOver = msgHintsTurnedOff + "; this request took the pull request over for a reviewer " +
+	"hint, and the check shadewright/review is no longer kept on its head: automation stopped, close the pull " +
+	"request"
+
+// hintsOffTakenOver stops, NeedsIntervention with ReasonHintsTurnedOff, a request that took a pull request over
+// (tookOver) and still progresses, for an executor running with reviewer hints off: its head was steered by a
+// hint, and without hints the check run shadewright/review is neither created nor completed (reviewCheck), so
+// the request must not reach or stay in AwaitingApproval. A request that ended is left as it is. The stop is
+// not held back by the kill switch: it writes nothing to Git and only stops automation, like the stops of the
+// watch. The error wraps errStopped once rr stopped, and is nil when there was nothing to stop.
+func (r *RemediationRequestReconciler) hintsOffTakenOver(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	if r.ReviewerHints || !tookOver(rr) || !progresses(rr) {
+		return nil
+	}
+	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, remediationv1alpha1.ReasonHintsTurnedOff,
+		msgHintsOffTakenOver)
 }
 
 // supersedePredecessor is step 5: the predecessor whose intent names rr ends Superseded with reason HandedOff,

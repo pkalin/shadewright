@@ -146,8 +146,9 @@ type RemediationRequestReconciler struct {
 	// shadewright/review with the App as its source, which Shadewright cannot verify: without that rule the
 	// check informs and does not block, so turn hints on only after the rule is in place. Off fails closed
 	// (ADR-0028 amendment of 2026-11-10): every Pending or Reserved hint is declined with HintsTurnedOff
-	// (declineHintsOff), a replacement is Denied at admission (chainLink), and one admitted before ends without
-	// the handoff (handoffStep, recoverStep).
+	// (declineHintsOff), a replacement is Denied at admission (chainLink), one admitted before ends without
+	// the handoff (handoffStep, recoverStep), and one that took the pull request over stops NeedsIntervention
+	// (hintsOffTakenOver).
 	ReviewerHints bool
 
 	// admitMu makes the check of the limits and the status write that lets a request through the policy check

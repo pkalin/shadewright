@@ -75,8 +75,9 @@ type Config struct {
 	Logs providers.LogSource
 	// Metrics is the metrics source; nil means query_metrics is not available.
 	Metrics providers.MetricsSource
-	// Delivery is the delivery system; nil means get_delivery_status is not available. The analyzer has no
-	// grant on Flux objects today, so it is nil until one is decided.
+	// Delivery is the delivery system; nil means get_delivery_status is not available. The analyzer passes
+	// the Flux adapter's status reader by the collector's rule for the Flux module's grant (list and watch on
+	// Flux objects in the watched namespaces; collector.Granted), reading with list (analyzer.ListGetter).
 	Delivery providers.DeliveryVerifier
 	// Redactor redacts every piece of text before it is cut or returned. Required.
 	Redactor Redactor
@@ -85,8 +86,8 @@ type Config struct {
 	Namespaces []string
 	// DeliveryNamespaces is the set of namespaces whose delivery objects get_delivery_status may read: Flux
 	// keeps its Kustomizations and HelmReleases in its own namespace, not in the workloads'. It is separate
-	// from Namespaces and widens no other read. nil or empty refuses every one (fail closed); which namespaces
-	// the analyzer passes is decided with the Flux adapter and its grant.
+	// from Namespaces and widens no other read. nil or empty refuses every one (fail closed). The analyzer
+	// passes the watched namespaces, the only ones where its Flux grant is bound, and only with Delivery set.
 	DeliveryNamespaces []string
 	// Timeout bounds the reads of one call; zero means [DefaultTimeout], at most [MaxTimeout].
 	Timeout time.Duration

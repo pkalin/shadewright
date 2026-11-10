@@ -284,6 +284,7 @@ func main() {
 	}
 
 	af.namespace, af.watched, af.claimTimeout = namespace, watched, inc.AnalysisTimeout()
+	af.moduleGrants = moduleGrants
 	if err := setupAnalysis(mgr, inc, af, contextBuilder, sources, redactor, tp); err != nil {
 		setupLog.Error(err, "Failed to set up the analysis")
 		os.Exit(1)

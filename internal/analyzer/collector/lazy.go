@@ -84,6 +84,14 @@ const (
 // ModuleGrants are the grant names [Config.Grants] accepts.
 var ModuleGrants = []string{GrantKEDA, GrantFlux, GrantKyverno, GrantKyvernoCluster}
 
+// Granted reports whether the module grants the chart rendered (--module-grants, [Config.Grants]) hold grant.
+// nil grants mean not known (an install without the flag), and then every grant counts: the collector checks
+// whether it may list a kind before it watches it. The collector and the analyzer's get_delivery_status (the
+// Flux grant) both decide by it.
+func Granted(grants []string, grant string) bool {
+	return grants == nil || slices.Contains(grants, grant)
+}
+
 // grantOf returns the grant that holds the reads of a kind of [SourceKinds] that is not built in, and whether
 // it is optional: a kind whose optional grant the chart left out is [WatchOmitted], not [WatchNotGranted].
 func grantOf(gvk schema.GroupVersionKind) (name string, optional bool) {
@@ -598,15 +606,11 @@ func (l *lazySource) stop() {
 }
 
 // granted reports whether the chart rendered the grant of the kind ([Config.Grants]), and else the state to
-// report: nothing is checked or watched then. Every kind is checked when the grants are not known.
+// report: nothing is checked or watched then. Every kind is checked when the grants are not known ([Granted]).
 func (l *lazySource) granted() (WatchState, bool) {
-	grants := l.r.c.cfg.Grants
-	if grants == nil {
-		return "", true
-	}
 	name, optional := grantOf(l.r.gvk)
 	switch {
-	case slices.Contains(grants, name):
+	case Granted(l.r.c.cfg.Grants, name):
 		return "", true
 	case optional:
 		return WatchOmitted, false

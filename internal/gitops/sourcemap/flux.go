@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/pkalin/shadewright/internal/fluxstatus"
+	"github.com/pkalin/shadewright/internal/providers"
 )
 
 // Labels Flux sets on the objects it applies.
@@ -145,11 +146,35 @@ func kustomizationRef(ks *unstructured.Unstructured) string {
 
 // kustomizationSuspended stops on a suspended Kustomization, which would not apply a merge.
 func kustomizationSuspended(ks *unstructured.Unstructured) *Result {
-	if suspended, _, _ := unstructured.NestedBool(ks.Object, "spec", "suspend"); suspended {
+	if Suspended(ks) {
 		r := needsIntervention(ReasonKustomizationSuspended, "%s is suspended", kustomizationRef(ks))
 		return &r
 	}
 	return nil
+}
+
+// Suspended reports whether a Flux object sets spec.suspend: Flux does not reconcile it, so it applies no new
+// revision. The mapping stops on a suspended Kustomization by this rule, and the analyzer's
+// get_delivery_status reports a suspended Kustomization or HelmRelease by it.
+func Suspended(obj *unstructured.Unstructured) bool {
+	suspended, _, _ := unstructured.NestedBool(obj.Object, "spec", "suspend")
+	return suspended
+}
+
+// CompareSource compares a Kustomization with its GitRepository src by the mapping's own comparison
+// (checkRevision, [fluxstatus.AppliedFetched]): [providers.SourceBehind] when it has not applied the revision
+// src last fetched, [providers.SourceAtRevision] when it has, and [providers.SourceUnchecked] when src is
+// refused by [CheckGitRepository] or is not Ready for its current generation, since the mapping stops on those
+// before it compares. `kubectl shadewright doctor` and the analyzer's get_delivery_status both call it.
+func CompareSource(ks, src *unstructured.Unstructured) providers.SourceComparison {
+	_, branch, stop := CheckGitRepository(src)
+	if stop != nil || !fluxstatus.Ready(src.Object) {
+		return providers.SourceUnchecked
+	}
+	if !fluxstatus.AppliedFetched(ks.Object, src.Object, branch) {
+		return providers.SourceBehind
+	}
+	return providers.SourceAtRevision
 }
 
 // kustomizationRemote stops on a Kustomization with spec.kubeConfig, which applies to another cluster. Its

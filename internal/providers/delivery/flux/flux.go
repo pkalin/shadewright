@@ -28,9 +28,17 @@ limitations under the License.
 // AppliedCommit stays empty and its outcome is never Applied; the delivery of a commit to a HelmRelease is
 // shown by the Kustomization that applies it.
 //
-// It reads only: the caller needs get on the kind in the unit's namespace, nothing else. It does not retry; a
-// failed read is classified (providers.ErrNotFound, providers.ErrForbidden, a [providers.RetryableError] or the
-// context's error) and never reported as a status.
+// [StatusReader] is the same read without the commit comparison, for a caller with no Git host: the analyzer's
+// get_delivery_status tool. It also reads the GitRepository of a Kustomization that would otherwise count as
+// applied, to say whether the Kustomization applied what it last fetched (providers.DeliveryStatus.Source).
+// Its message goes to a model, so it redacts the whole message before it bounds it: a cut first could leave
+// the prefix of a secret that no rule recognises.
+//
+// It reads only: the caller needs get on the kind in the unit's namespace (and, for [StatusReader], on
+// GitRepositories where the Kustomizations' sources are), nothing else, or what its reader's Get needs
+// instead (the analyzer's reader gets one object with list, internal/analyzer.ListGetter). It does
+// not retry; a failed read is classified (providers.ErrNotFound, providers.ErrForbidden, a
+// [providers.RetryableError] or the context's error) and never reported as a status.
 package flux
 
 import (
@@ -48,10 +56,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/pkalin/shadewright/internal/fluxstatus"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
-// MaxMessageBytes bounds the message copied from the unit's Ready condition.
+// MaxMessageBytes bounds the message copied from the unit's Ready condition. [StatusReader] bounds it after
+// redacting it.
 const MaxMessageBytes = 1024
 
 // ErrInvalidUnit means a unit is not one this adapter can read: another kind, or a namespace or name that is
@@ -66,9 +77,34 @@ var kinds = map[string]schema.GroupVersionKind{
 		Group: fluxstatus.HelmGroup, Version: fluxstatus.HelmVersion, Kind: fluxstatus.KindHelmRelease},
 }
 
-// Verifier reads Flux delivery units.
+// StatusReader reads the status of Flux delivery units, with no commit to compare. [Verifier] reads through
+// it.
+type StatusReader struct {
+	reader client.Reader
+	// redact redacts the message before it is bounded; nil leaves it as it is (the executor's [Verifier]).
+	redact func(string) string
+}
+
+var _ providers.DeliveryVerifier = (*StatusReader)(nil)
+
+// NewStatusReader returns a StatusReader that reads with reader and redacts each message whole with red
+// before it bounds it to MaxMessageBytes; a nil red means the built-in rules of package redact. The caller
+// still redacts what it shows: this only keeps the cut from splitting a secret into a prefix no rule
+// recognises.
+func NewStatusReader(reader client.Reader, red *redact.Redactor) (*StatusReader, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("reader is required: %w", providers.ErrInvalidConfig)
+	}
+	r := &StatusReader{reader: reader, redact: redact.String}
+	if red != nil {
+		r.redact = red.String
+	}
+	return r, nil
+}
+
+// Verifier reads Flux delivery units and compares what they applied with a merge commit.
 type Verifier struct {
-	reader   client.Reader
+	status   StatusReader
 	ancestry providers.AncestryChecker
 }
 
@@ -80,7 +116,7 @@ func New(reader client.Reader, ancestry providers.AncestryChecker) (*Verifier, e
 	if reader == nil || ancestry == nil {
 		return nil, fmt.Errorf("reader and ancestry checker are required: %w", providers.ErrInvalidConfig)
 	}
-	return &Verifier{reader: reader, ancestry: ancestry}, nil
+	return &Verifier{status: StatusReader{reader: reader}, ancestry: ancestry}, nil
 }
 
 // Verify reads the unit and says whether it delivered mergeCommit, merged into branch: the outcome, the status
@@ -96,32 +132,93 @@ func (v *Verifier) Verify(ctx context.Context, unit providers.DeliveryUnit, merg
 	return outcome, st, err
 }
 
-// Status reads the unit and reports its status.
+// Status reads the unit and reports its status. It does not compare the unit with its source: Source stays
+// providers.SourceNotCompared.
 func (v *Verifier) Status(ctx context.Context, unit providers.DeliveryUnit) (providers.DeliveryStatus, error) {
+	st, _, err := v.status.read(ctx, unit)
+	return st, err
+}
+
+// Status reads the unit and reports its status. A Kustomization of a GitRepository that is Ready for its
+// current generation, reports no failure and is not suspended is also compared with that GitRepository, by
+// the executor's source mapping rule (sourcemap.CompareSource): Source says whether it applied the revision
+// the GitRepository last fetched, or that the GitRepository is refused by the mapping's source rules or not
+// Ready, so the comparison could not be made (providers.SourceUnchecked, never applied). A GitRepository
+// that cannot be read fails the whole read (never a NotFound: the unit was found), so the status is never
+// reported without that comparison.
+func (r *StatusReader) Status(ctx context.Context, unit providers.DeliveryUnit) (providers.DeliveryStatus, error) {
+	st, obj, err := r.read(ctx, unit)
+	if err != nil {
+		return providers.DeliveryStatus{}, err
+	}
+	if unit.Kind != fluxstatus.KindKustomization || fluxstatus.SourceKind(obj.Object) != fluxstatus.KindGitRepository ||
+		st.Failed || st.Suspended || !st.Ready || !st.Current() {
+		return st, nil
+	}
+	src, err := r.source(ctx, obj)
+	if err != nil {
+		return providers.DeliveryStatus{}, err
+	}
+	st.Source = sourcemap.CompareSource(obj, src)
+	return st, nil
+}
+
+// source reads the GitRepository that the Kustomization ks names in spec.sourceRef (its own namespace when
+// the reference names none). Every failure is an error that is not providers.ErrNotFound.
+func (r *StatusReader) source(ctx context.Context, ks *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	const kind = fluxstatus.KindGitRepository
+	name, _, _ := unstructured.NestedString(ks.Object, "spec", "sourceRef", "name")
+	ns, _, _ := unstructured.NestedString(ks.Object, "spec", "sourceRef", "namespace")
+	if ns == "" {
+		ns = ks.GetNamespace()
+	}
+	if len(validation.IsDNS1123Label(ns)) > 0 || len(validation.IsDNS1123Subdomain(name)) > 0 {
+		return nil, fmt.Errorf("read %s: spec.sourceRef of the Kustomization is not a valid object reference", kind)
+	}
+	src := &unstructured.Unstructured{}
+	src.SetGroupVersionKind(sourcemap.GitRepositoryGVK)
+	if err := r.reader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, src); err != nil {
+		err = readError(ctx, kind, err)
+		if errors.Is(err, providers.ErrNotFound) {
+			return nil, &providers.RetryableError{Err: fmt.Errorf("read %s: the Kustomization's source was not found", kind)}
+		}
+		return nil, err
+	}
+	if src.GetNamespace() != ns || src.GetName() != name || src.GroupVersionKind() != sourcemap.GitRepositoryGVK {
+		return nil, &providers.RetryableError{Err: fmt.Errorf("read %s: the reader returned another object", kind)}
+	}
+	return src, nil
+}
+
+// read reads the unit and reports its status, with the object read.
+func (r *StatusReader) read(ctx context.Context, unit providers.DeliveryUnit) (
+	providers.DeliveryStatus, *unstructured.Unstructured, error) {
 	gvk, ok := kinds[unit.Kind]
 	if !ok {
-		return providers.DeliveryStatus{}, fmt.Errorf("kind is not Kustomization or HelmRelease: %w", ErrInvalidUnit)
+		return providers.DeliveryStatus{}, nil, fmt.Errorf("kind is not Kustomization or HelmRelease: %w", ErrInvalidUnit)
 	}
 	if len(validation.IsDNS1123Label(unit.Namespace)) > 0 || len(validation.IsDNS1123Subdomain(unit.Name)) > 0 {
-		return providers.DeliveryStatus{}, fmt.Errorf("namespace or name is not a valid object reference: %w", ErrInvalidUnit)
+		return providers.DeliveryStatus{}, nil, fmt.Errorf("namespace or name is not a valid object reference: %w", ErrInvalidUnit)
 	}
 	if err := ctx.Err(); err != nil {
-		return providers.DeliveryStatus{}, fmt.Errorf("read %s: %w", unit.Kind, err)
+		return providers.DeliveryStatus{}, nil, fmt.Errorf("read %s: %w", unit.Kind, err)
 	}
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(gvk)
-	if err := v.reader.Get(ctx, client.ObjectKey{Namespace: unit.Namespace, Name: unit.Name}, obj); err != nil {
-		return providers.DeliveryStatus{}, readError(ctx, unit.Kind, err)
+	if err := r.reader.Get(ctx, client.ObjectKey{Namespace: unit.Namespace, Name: unit.Name}, obj); err != nil {
+		return providers.DeliveryStatus{}, nil, readError(ctx, unit.Kind, err)
 	}
 	if obj.GetNamespace() != unit.Namespace || obj.GetName() != unit.Name || obj.GroupVersionKind() != gvk {
-		return providers.DeliveryStatus{}, &providers.RetryableError{
+		return providers.DeliveryStatus{}, nil, &providers.RetryableError{
 			Err: fmt.Errorf("read %s: the reader returned another object", unit.Kind)}
 	}
-	return statusOf(unit.Kind, obj.Object), nil
+	return statusOf(unit.Kind, obj, r.redact), obj, nil
 }
 
-// statusOf reads the status of a unit of kind from its object.
-func statusOf(kind string, obj map[string]any) providers.DeliveryStatus {
+// statusOf reads the status of a unit of kind from its object, and whether its spec suspends it. A non-nil
+// red redacts the whole message before it is bounded.
+func statusOf(kind string, u *unstructured.Unstructured, red func(string) string) providers.DeliveryStatus {
+	obj := u.Object
 	status := fluxstatus.Status(obj)
 	generation, hasGeneration := fluxstatus.Generation(obj)
 	observed, _ := fluxstatus.ObservedGeneration(obj)
@@ -130,7 +227,8 @@ func statusOf(kind string, obj map[string]any) providers.DeliveryStatus {
 		Ready:              fluxstatus.Ready(obj),
 		Generation:         max(generation, 0),
 		ObservedGeneration: max(observed, 0),
-		Message:            bounded(fluxstatus.ReadyMessage(obj)),
+		Message:            bounded(fluxstatus.ReadyMessage(obj), red),
+		Suspended:          sourcemap.Suspended(u),
 	}
 	cond, typ := fluxstatus.Failing(status, generation, hasGeneration)
 	reason, _ := cond["reason"].(string)
@@ -152,9 +250,13 @@ func commitOf(revision string) (ref, commit string) {
 	return ref, commit
 }
 
-// bounded returns s as valid UTF-8 and at most MaxMessageBytes long, cut at a rune boundary.
-func bounded(s string) string {
+// bounded returns s as valid UTF-8, redacted whole by a non-nil red, and at most MaxMessageBytes long, cut at
+// a rune boundary.
+func bounded(s string, red func(string) string) string {
 	s = strings.ToValidUTF8(s, "�")
+	if red != nil {
+		s = red(s)
+	}
 	if len(s) <= MaxMessageBytes {
 		return s
 	}

@@ -17,7 +17,10 @@ limitations under the License.
 // Package flux makes the ClusterRole analyzer-watch-flux: the reads of the Flux module's symptom sources
 // (Kustomizations, HelmReleases, GitRepositories) in the watched namespaces, bound there by one RoleBinding each
 // (chart value analyzer.modules.flux.enabled, off by default).
-// Only list and watch, for the informers of the sources: nothing reads these kinds by name.
+// Only list and watch, for the informers of the sources, never get. The read tool get_delivery_status reads one
+// Kustomization or HelmRelease, and a Kustomization's GitRepository, with list too, by a field selector on the
+// name (analyzer.ListGetter, #562), by the collector's rule for this grant (collector.Granted: --module-grants
+// names flux, or is not given).
 //
 // +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=list;watch
 // +kubebuilder:rbac:groups=helm.toolkit.fluxcd.io,resources=helmreleases,verbs=list;watch

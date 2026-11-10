@@ -58,7 +58,32 @@ type DeliveryStatus struct {
 	ObservedGeneration int64
 	// Message is the delivery system's own summary; it is untrusted text.
 	Message string
+	// Suspended is true when the unit's spec says the delivery system does not reconcile it (Flux's
+	// spec.suspend), so it applies no new revision. [DeliveryStatus.Outcome] does not read it.
+	Suspended bool
+	// Source is what a comparison of the unit with its source found, or [SourceNotCompared] when the reader
+	// did not compare: the executor's verifier never does (it compares with a merge commit instead), and the
+	// analyzer's Flux status reader does only for a Kustomization of a GitRepository that would otherwise
+	// count as applied. [DeliveryStatus.Outcome] does not read it.
+	Source SourceComparison
 }
+
+// SourceComparison is what a comparison of a delivery unit with its source found.
+type SourceComparison string
+
+// Values of [DeliveryStatus.Source].
+const (
+	// SourceNotCompared: the reader did not compare the unit with its source.
+	SourceNotCompared SourceComparison = ""
+	// SourceAtRevision: the unit applied the revision its source last fetched.
+	SourceAtRevision SourceComparison = "AtRevision"
+	// SourceBehind: the unit has not applied the revision its source last fetched.
+	SourceBehind SourceComparison = "Behind"
+	// SourceUnchecked: the source could not be compared with, since it is refused by the rules a write
+	// follows (suspended, for example) or not Ready for its current generation. Whether the unit is behind it
+	// is unknown, so the unit never counts as applied by its source.
+	SourceUnchecked SourceComparison = "Unchecked"
+)
 
 // DeliveryOutcome is what a unit's status says about one commit.
 type DeliveryOutcome string

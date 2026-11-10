@@ -653,7 +653,9 @@ func (r *run) escalate(model providers.ModelProvider) (*Result, *remediationv1al
 }
 
 // offered returns the tool definitions offered on escalation: every configured tool except
-// get_delivery_status, whose delivery namespaces are not decided yet (#76 comment of 2026-11-05).
+// get_delivery_status. It reads Flux objects only in the watched namespaces (#562), and a call bound to the
+// subject's namespace would reach only a unit kept there, not Flux's own namespace; offering it is a decision
+// of its own (#76 comment of 2026-11-05).
 func (r *run) offered() []providers.ToolDefinition {
 	if r.a.cfg.Tools == nil {
 		return nil

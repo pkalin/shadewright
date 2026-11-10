@@ -39,6 +39,7 @@ import (
 	"github.com/pkalin/shadewright/internal/fluxstatus"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/incidents"
+	"github.com/pkalin/shadewright/internal/providers"
 )
 
 // The levels of a check. Only a fail makes the command exit non-zero.
@@ -574,14 +575,14 @@ func checkKustomizations(d *Diagnosis, src *unstructured.Unstructured, target st
 }
 
 // behind reports whether a Kustomization has not applied the revision its GitRepository last fetched, by the
-// executor's own comparison (fluxstatus.AppliedFetched, ADR-0012). It is false when the GitRepository is
+// executor's own comparison (sourcemap.CompareSource, ADR-0012). It is false when the GitRepository is
 // refused, tracks another branch than target or is not Ready: its own check reports that.
 func behind(ks, src *unstructured.Unstructured, target string) bool {
 	_, branch, stop := sourcemap.CheckGitRepository(src)
-	if stop != nil || branch != target || !fluxstatus.Ready(src.Object) {
+	if stop != nil || branch != target {
 		return false
 	}
-	return !fluxstatus.AppliedFetched(ks.Object, src.Object, branch)
+	return sourcemap.CompareSource(ks, src) == providers.SourceBehind
 }
 
 // fluxLevel is pass for a Ready object, warn while it reconciles, fail with the failing condition otherwise.

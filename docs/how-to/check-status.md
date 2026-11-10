@@ -62,6 +62,7 @@ kubectl shadewright version     # kubectl-shadewright v0.2.0
 kubectl shadewright status -n shadewright-system
 kubectl shadewright status -A            # every namespace that holds Incidents or requests, and the context's
 kubectl shadewright status -n shadewright-system -o json
+kubectl shadewright status -n shadewright-system -w      # redraw every 5 seconds until Ctrl-C
 ```
 
 | Flag | Meaning |
@@ -70,7 +71,9 @@ kubectl shadewright status -n shadewright-system -o json
 | `-A`, `--all-namespaces` | Read Incidents and requests in every namespace, grouped by namespace. The namespace of `-n` or of the context is always shown, with its budget, even without Incidents |
 | `-o`, `--output` | `text` (default) or `json`. The JSON holds the same fields, with times in RFC 3339 |
 | `--kubeconfig`, `--context` | As for kubectl |
-| `--request-timeout` | Limit for all reads together, as kubectl takes it: seconds (`30`), a duration (`30s`, `1m`), or `0` for no limit (default `30s`). The CRD version check has its own 5 second limit and runs next to the reads |
+| `--request-timeout` | Limit for all reads together, as kubectl takes it: seconds (`30`), a duration (`30s`, `1m`), or `0` for no limit (default `30s`). With `-w` the limit applies to each refresh. The CRD version check has its own 5 second limit and runs next to the reads |
+| `-w`, `--watch` | `status` only: read again every `--interval` and show the result until you press Ctrl-C ([below](#watch-a-request-move)) |
+| `--interval` | `status` only: time between refreshes with `-w`, as seconds (`10`) or a duration (`10s`, `1m`), at least `1s` (default `5s`). Refused without `-w` |
 
 The text output, per namespace:
 
@@ -97,6 +100,19 @@ Namespace shadewright-system
 - **Kill switch** is `spec.paused` of `RemediationSettings` `default` ([pause and resume](pause-and-resume.md)).
 
 A setting or the budget that the plugin cannot read with your permissions, or that fails to read, is shown as unknown with the reason, never as "analysis stopped": it says nothing about what the analyzer can read; a list of Incidents or requests that fails stops the command with an error.
+
+## Watch a request move
+
+`-w` runs `status` again every `--interval` until you press Ctrl-C (or the process gets SIGTERM), so you can follow a request through its phases without rerunning the command. Both flags apply to `status` only: `explain` and `doctor` refuse them.
+
+- **Text**, on a terminal: the screen is cleared and redrawn each time, under a line with the interval and the time of the read (`Every 5s, last read 2026-11-06T12:00:05Z (Ctrl-C to stop)`). When the output is redirected to a file or a pipe nothing is cleared: each refresh follows the previous one after a blank line.
+- **JSON** (`-o json`): one JSON document per refresh, each on one line (newline-delimited JSON), with the same fields as a single `-o json`, for `jq` or a script.
+- **A refresh that fails** (the API server unreachable, `--request-timeout` reached) prints `Error at <time>: <reason>` on standard error and nothing on standard output, and the next refresh runs as planned: on a terminal the last good status stays on the screen, and standard output keeps only complete refreshes, so the JSON stays parseable.
+- **A refresh refused** as Forbidden or Unauthorized (a missing permission, expired credentials) stops the command with that error and exit status 1, since waiting does not grant access.
+- **A closed pipe** (`-w -o json | head -1`) ends it as it ends other commands: killed by SIGPIPE, exit status 141 in the shell. A failed write to another kind of output stops it with an error.
+- Ctrl-C stops it with exit status 0, between refreshes or in the middle of one; a refresh cut short prints nothing. If a read does not return, a second Ctrl-C ends the process at once. The CRD version warning is printed after the first refresh and, on a terminal, again under each redraw, which clears it.
+
+It polls with the same `get` and `list` reads as a single `status`, not with a Kubernetes `watch`: no new permission, the [roles below](#permissions) are enough. Each refresh reads everything again, so nothing is missed or shown twice when the API server restarts between two refreshes. The interval counts from the end of one refresh to the start of the next. The minimum of one second keeps one watching person from becoming a load on the API server; with `-A` on a large cluster, prefer a longer interval.
 
 ## Explain one request
 
@@ -139,7 +155,7 @@ For an Incident, the output starts with the Incident (subject, reason, phase and
 
 ## What it does not do
 
-- **It only reads.** It sends `get` and `list` requests and nothing else: no write, no `watch`, no `exec`, no logs. The code reads through a client type that has no write methods.
+- **It only reads.** It sends `get` and `list` requests and nothing else (`-w` repeats them): no write, no `watch`, no `exec`, no logs. The code reads through a client type that has no write methods.
 - **It prints no terminal control text.** Names, symptoms, condition messages and any other string from the cluster (which includes text a model wrote, invariant 4 in the [threat model](../threat-model.md)) are cleaned before printing: ANSI and OSC escape sequences are removed whole (so a name cannot set the window title, write a hidden link, move the cursor or clear the screen), then every other control, format (bidirectional overrides, zero-width characters) and line separator character; tabs and line breaks become spaces, and each field is cut to a fixed length. The JSON output carries the same cleaned strings.
 - **It links only to your Git repository.** A pull request link is printed only when `status.pullRequest.url` is exactly the URL the GitHub adapter writes for the repository the request was resolved to (`status.source.repositoryRef` in `RemediationSettings`) and that number. Otherwise only the number is printed, with "link not shown". A status written by someone other than the executor, or a repository entry that changed since, cannot put a link on your screen.
 

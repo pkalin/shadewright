@@ -178,7 +178,7 @@ KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.37.0 --bin-dir "$PWD/bin" -p path)
   go test ./internal/controller/... -ginkgo.focus "RemediationRequest"   # one spec; run `make test` once first, the bin dir must be absolute
 make test-e2e             # installs the pinned kind (KIND_VERSION) into bin/ and creates an isolated cluster; CI runs it, not needed locally
 make build                # bin/manager and bin/analyzer
-make build-plugin         # bin/kubectl-shadewright, the read-only `kubectl shadewright status`, `explain` and `doctor` plugin
+make build-plugin         # bin/kubectl-shadewright, the read-only `kubectl shadewright status` (also `status --watch`), `explain` and `doctor` plugin
 make run                  # controller against the current kubeconfig context
 ```
 

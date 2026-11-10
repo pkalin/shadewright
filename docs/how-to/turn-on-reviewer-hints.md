@@ -41,7 +41,7 @@ Through the API, the rule in the ruleset reads as follows, with the App's numeri
 
 The rule applies to every pull request to the target branch, but only Shadewright's pull requests get the check `shadewright/review`: the executor creates it only on the pull requests it opened. A pull request a person opens to that branch waits for a check that never comes, and cannot merge. Choose one of these before you save the rule:
 
-- **Maintainers on the ruleset's bypass list.** Add the role or team that merges people's changes as a bypass actor of the ruleset. They can merge their own pull requests past the missing check; GitHub records each bypass. Everyone else's pull requests to that branch stay blocked until a bypass actor merges them. Never add the Shadewright App to the bypass list.
+- **Maintainers on the ruleset's bypass list.** Add the role or team that merges people's changes as a bypass actor of the ruleset. They can merge their own pull requests past the missing check; GitHub records each bypass. Everyone else's pull requests to that branch stay blocked until a bypass actor merges them. The bypass is not limited to people's pull requests: every bypass actor can also merge Shadewright's pull requests past `shadewright/review`, including a change they steered with their own hint, so for them the gate does not hold. Keep the list to the repository admin role, or use a separate target branch (below). Never add the Shadewright App to the bypass list.
 - **A separate target branch for Shadewright.** The repository entry's `targetBranch` must be the branch Flux tracks ([configuration](../reference/configuration.md)), so make that a branch only Shadewright opens pull requests against, and require the check only there. People open their pull requests to another branch, which never waits for the check, and a maintainer carries that branch over to the tracked one with a push under the ruleset's bypass, as the scenario clusters do with `cluster/<cluster>` ([ADR-0022](../adr/0022-scenario-switch-and-clusters.md)). It costs one more step before a person's change is applied.
 
 The lab fleet uses a maintainer bypass: its ruleset for `cluster/*` lists the repository admin role, the maintainer's, as its bypass actor, so the maintainer's own pull requests and resets of `cluster/lab` still go through.
@@ -77,7 +77,11 @@ The line shows `enabled` true and, as a reminder, the required check `shadewrigh
 
 ## Turn it off
 
-Set `executor.reviewerHints.enabled` back to `false` and upgrade, then remove the rule of step 1. Once hints are off the executor no longer completes the check, so while the rule stays, Shadewright's pull requests cannot merge.
+Set `executor.reviewerHints.enabled` back to `false` and upgrade, then remove the rule of step 1.
+
+Hints off fails closed, which makes this order safe. On its first look at each waiting pull request, the executor declines every stored hint that was not applied yet (`Pending` or `Reserved`, reason `HintsTurnedOff`), so the analyzer starts no analysis for it. A replacement the analyzer proposed for a hint is denied at admission (`HintsTurnedOff`), and one already admitted ends `Cancelled` with that reason without touching the pull request, which keeps its plan. If a handoff had pushed its commit just before the restart, the commit is not adopted: the original request stops in `NeedsIntervention`, as for any foreign push, and its pull request stays open for a person to review or close. So no change a hint steered reaches a pull request after the switch without the check.
+
+Until you remove the rule, the executor no longer creates or completes the check, so Shadewright's pull requests wait and cannot merge; nothing is lost. A pull request that a hint changed before the switch keeps that change: once the rule is gone, any approval lets it merge, so review those by hand.
 
 !!! note "Not yet run"
     These steps were not run against a live cluster for this documentation. The flag, the chart value and the log line are covered by unit and chart tests; the lab run is #541.

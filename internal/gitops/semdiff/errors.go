@@ -34,8 +34,9 @@ const (
 	// ReasonTooLarge means the build is over a limit: file size, number of files or reads, nesting depth, the
 	// number of directory visits, the build bytes ([MaxBuildBytes]), the YAML documents read before the render
 	// ([MaxBuildDocuments]), the YAML nodes of one file (gityaml.MaxNodes), the keys of one mapping
-	// (gityaml.MaxMappingKeys), what patches and transformers can add to the render ([MaxTransformBytes]) or
-	// the rendered objects ([MaxObjects]).
+	// (gityaml.MaxMappingKeys), what patches and transformers can add to the render ([MaxTransformBytes]), the
+	// keys and items patches can merge into one mapping or sequence of an object ([MaxMergedKeys]) or the
+	// rendered objects ([MaxObjects]).
 	ReasonTooLarge Reason = "TooLarge"
 	// ReasonInvalidYAML means a kustomization file does not parse or has a duplicate key, or a file of the
 	// build is not UTF-8, does not parse, repeats a key in one mapping (#608), or uses YAML anchors, aliases or merge keys (a "<<" key, not a "<<" value), which kustomize would

@@ -1,6 +1,5 @@
 //go:build race
 
-
 /*
 Copyright 2026 The Shadewright Authors.
 

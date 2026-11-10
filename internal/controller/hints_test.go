@@ -752,25 +752,38 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 			Expect(h.Outcome).To(Equal(outcomeProposed))
 		})
 
-		DescribeTable("declines a hint with no answer once HintAnswerTimeout has passed, also when the comments "+
-			"are not read",
-			func(skip func()) {
-				skip()
-				clock = clock.Add(HintAnswerTimeout)
-				poll()
-				h := fetch().Status.Hints[0]
-				Expect(h.State).To(Equal(remediationv1alpha1.HintDeclined))
-				Expect(h.Reason).To(Equal(ReasonHintNoAnswer))
-			},
-			Entry("reviewer hints turned off", func() { hintsOff = true }),
-			Entry("the pull request cannot be read", func() {
+		It("declines a hint with no answer once HintAnswerTimeout has passed, also when the comments are not read",
+			func() {
 				git.SetFail(func(op string) error {
 					if op == opFind {
 						return &providers.RetryableError{Err: errors.New("GitHub find pull request: status 502")}
 					}
 					return nil
 				})
-			}),
+				clock = clock.Add(HintAnswerTimeout)
+				poll()
+				h := fetch().Status.Hints[0]
+				Expect(h.State).To(Equal(remediationv1alpha1.HintDeclined))
+				Expect(h.Reason).To(Equal(ReasonHintNoAnswer))
+			})
+
+		// Hints off fails closed (ADR-0028 amendment of 2026-11-10): a hint stored while they were on is declined
+		// on the first look, answered by a replacement or not, so neither the analysis nor a handoff acts on it.
+		DescribeTable("declines a stored hint at once when the executor runs with reviewer hints off",
+			func(answered bool) {
+				if answered {
+					answer(remediationv1alpha1.IncidentProposed, outcomeProposed, refOf(stored))
+					poll()
+					Expect(fetch().Status.Hints[0].Outcome).To(Equal(outcomeProposed))
+				}
+				hintsOff = true
+				poll()
+				h := fetch().Status.Hints[0]
+				Expect(h.State).To(Equal(remediationv1alpha1.HintDeclined))
+				Expect(h.Reason).To(Equal(remediationv1alpha1.ReasonHintsTurnedOff))
+			},
+			Entry("not answered yet", false),
+			Entry("answered with a replacement", true),
 		)
 
 		It("declines a hint with no answer once HintAnswerTimeout has passed", func() {

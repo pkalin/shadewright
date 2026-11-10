@@ -52,6 +52,11 @@ const (
 	// ReasonHandoffAborted: a replacement ended Cancelled because the handoff was abandoned in Git: a foreign
 	// push to the branch, or the pull request closed or merged with the old head around the branch update.
 	ReasonHandoffAborted = "HandoffAborted"
+	// ReasonHintsTurnedOff: the executor runs with reviewer hints off (its flag --reviewer-hints unset), so it
+	// takes nothing a hint asked for (ADR-0028, amendment of 2026-11-10). It is the reason of a Pending or
+	// Reserved hint the executor declines, of a replacement Denied at admission and of a replacement admitted
+	// before that ends Cancelled without the handoff.
+	ReasonHintsTurnedOff = "HintsTurnedOff"
 )
 
 // ReasonAnotherRequestMerged is the PlanFresh reason of a request that ended Superseded because another request
@@ -171,9 +176,10 @@ type Hint struct {
 	// reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or
 	// NoProposal), NoAnswer when none came within the executor's bound, or the end of the request
 	// (PullRequestMerged, PullRequestClosed, RequestEnded), or the end of its replacement without the handoff:
-	// ReplacementDenied when the replacement was Denied, HandoffAborted when it ended otherwise.
-	// HintDeclineReasons lists them.
-	// +kubebuilder:validation:Enum=NoModelConfigured;BudgetSpent;BudgetUnavailable;NoProposal;MissingData;NoEvidence;TargetNotSupported;PreviousValueUnknown;NoChange;DirectionReversed;NoPolicyForAction;ActionOutOfBounds;InvalidOutput;EscalationNotConfigured;StepLimit;TokenLimit;DeadlineExceeded;ModelUnavailable;ModelNotFound;ModelForbidden;ModelError;UnexpectedModel;EndpointNotAllowed;PlanUnchanged;HintNotPending;RequestNotCreated;CoolingDown;NoAnswer;PullRequestMerged;PullRequestClosed;RequestEnded;ReplacementDenied;HandoffAborted
+	// ReplacementDenied when the replacement was Denied, HandoffAborted when it ended otherwise, or
+	// HintsTurnedOff when the executor runs with reviewer hints off, which declines every Pending or Reserved
+	// hint. HintDeclineReasons lists them.
+	// +kubebuilder:validation:Enum=NoModelConfigured;BudgetSpent;BudgetUnavailable;NoProposal;MissingData;NoEvidence;TargetNotSupported;PreviousValueUnknown;NoChange;DirectionReversed;NoPolicyForAction;ActionOutOfBounds;InvalidOutput;EscalationNotConfigured;StepLimit;TokenLimit;DeadlineExceeded;ModelUnavailable;ModelNotFound;ModelForbidden;ModelError;UnexpectedModel;EndpointNotAllowed;PlanUnchanged;HintNotPending;RequestNotCreated;CoolingDown;NoAnswer;PullRequestMerged;PullRequestClosed;RequestEnded;ReplacementDenied;HandoffAborted;HintsTurnedOff
 	// +optional
 	Reason string `json:"reason,omitempty"`
 
@@ -199,7 +205,7 @@ var HintDeclineReasons = []string{"NoModelConfigured", "BudgetSpent", "BudgetUna
 	"TokenLimit", "DeadlineExceeded", "ModelUnavailable", "ModelNotFound", "ModelForbidden", "ModelError",
 	"UnexpectedModel", "EndpointNotAllowed", "PlanUnchanged", "HintNotPending", "RequestNotCreated",
 	"CoolingDown", "NoAnswer", "PullRequestMerged", "PullRequestClosed", "RequestEnded", "ReplacementDenied",
-	"HandoffAborted"}
+	"HandoffAborted", "HintsTurnedOff"}
 
 // RequestReplacement names the request a replacement takes over and the hint it answers (ADR-0028 section 4).
 type RequestReplacement struct {

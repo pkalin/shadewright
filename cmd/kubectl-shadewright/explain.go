@@ -106,6 +106,7 @@ var troubleshootingSections = map[string][]string{
 	"HandoffRecoveryFailed":             {secPullRequest},
 	"HandoffRefused":                    {secPhases},
 	"HeadMoved":                         {secPullRequest},
+	"HintsTurnedOff":                    {secPhases},
 	"HelmManaged":                       {secFlux},
 	"IncompleteInput":                   {secPolicy},
 	"IncreaseTooLarge":                  {secPolicy},

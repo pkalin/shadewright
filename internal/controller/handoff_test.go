@@ -73,6 +73,8 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		stale *remediationv1alpha1.RemediationRequest
 		// replacements counts the replacements of the spec, so each has its own name.
 		replacements int
+		// hintsOff builds the reconciler without ReviewerHints, as an executor restarted with the flag unset.
+		hintsOff bool
 	)
 
 	reconciler := func() *RemediationRequestReconciler {
@@ -98,7 +100,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 				return git, nil
 			},
 			Now:           func() time.Time { return clock },
-			ReviewerHints: true,
+			ReviewerHints: !hintsOff,
 		}
 	}
 	// pollOf runs one reconcile of obj with a new reconciler, as after a restart.
@@ -190,7 +192,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 	BeforeEach(func() {
 		seq++
 		clock = time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
-		hook, stale, repl = nil, nil, nil
+		hook, stale, repl, hintsOff = nil, nil, nil, false
 		err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fx.TargetNamespace}})
 		Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
 		deployment = &appsv1.Deployment{
@@ -512,6 +514,85 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		Expect(p.Status.Hints[0].State).To(Equal(remediationv1alpha1.HintPending), "an invalid link takes not even the hint")
 		Expect(p.Status.Handoff).To(BeNil())
 		Expect(head()).To(Equal(oldHead))
+	})
+
+	// Hints off fails closed (ADR-0028 amendment of 2026-11-10): an executor restarted with the flag unset takes
+	// nothing a hint stored before asked for, at whatever step the handoff stood.
+	Describe("with reviewer hints turned off", func() {
+		// keptAsItWas checks that the predecessor keeps its pull request as it was and declined the hint.
+		keptAsItWas := func() {
+			p := get(pred)
+			Expect(p.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			Expect(p.Status.HoldsTarget).To(Equal(new(true)))
+			Expect(p.Status.Hints[0].State).To(Equal(remediationv1alpha1.HintDeclined))
+			Expect(p.Status.Hints[0].Reason).To(Equal(remediationv1alpha1.ReasonHintsTurnedOff))
+			Expect(head()).To(Equal(oldHead), "nothing was pushed")
+			Expect(git.ChangeRequests()).To(ConsistOf(HaveField("State", providers.ChangeRequestOpen)))
+		}
+		// cancelled checks that the replacement ended without the handoff, for hints being off.
+		cancelled := func() {
+			r := get(repl)
+			Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+			Expect(condition(r, remediationv1alpha1.ConditionPROpened).Reason).To(
+				Equal(remediationv1alpha1.ReasonHintsTurnedOff))
+			Expect(tookOver(r)).To(BeFalse())
+			Expect(r.Status.HoldsTarget).To(Equal(new(false)))
+		}
+
+		It("declines a stored hint and denies its replacement at admission", func() {
+			answer()
+			pollOf(pred)
+			Expect(get(pred).Status.Hints[0].Outcome).To(Equal(outcomeProposed))
+			hintsOff = true
+			replace("512Mi", ref(hint))
+			drive(3)
+			r := get(repl)
+			Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseDenied))
+			Expect(condition(r, remediationv1alpha1.ConditionPolicyAllowed).Reason).To(
+				Equal(remediationv1alpha1.ReasonHintsTurnedOff))
+			Expect(r.Status.Handoff).To(BeNil())
+			keptAsItWas()
+			Expect(get(pred).Status.Handoff).To(BeNil())
+		})
+
+		It("ends a replacement admitted before, without the intent", func() {
+			replace("512Mi", ref(hint))
+			pollUntil(func(rr *remediationv1alpha1.RemediationRequest) bool { return reserved(rr) })
+			Expect(get(pred).Status.Handoff).To(BeNil())
+			hintsOff = true
+			drive(3)
+			cancelled()
+			keptAsItWas()
+		})
+
+		It("ends a replacement whose intent stands, and the predecessor aborts the intent", func() {
+			replace("512Mi", ref(hint))
+			untilIntent()
+			hintsOff = true
+			drive(3)
+			cancelled()
+			keptAsItWas()
+			Expect(get(pred).Status.Handoff.To.Phase).To(Equal(remediationv1alpha1.HandoffAborted))
+		})
+
+		It("does not record a commit pushed before the restart, and the predecessor stops as for a foreign push", func() {
+			replace("512Mi", ref(hint))
+			untilIntent()
+			hook = func(rr *remediationv1alpha1.RemediationRequest) (bool, bool) {
+				return rr.UID == repl.UID && tookOver(rr), false
+			}
+			pollOf(repl)
+			hook = nil
+			Expect(head()).NotTo(Equal(oldHead), "the commit was pushed, its record lost")
+			hintsOff = true
+			drive(3)
+			cancelled()
+			p := get(pred)
+			Expect(p.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			Expect(git.ChangeRequests()).To(ConsistOf(HaveField("State", providers.ChangeRequestOpen)), "the pull request stays open for a person")
+			Expect(p.Status.Hints[0].State).To(Equal(remediationv1alpha1.HintDeclined))
+			Expect(git.CheckRuns(head())).To(BeEmpty(), "no check run is created with hints off")
+		})
 	})
 
 	It("aborts on a foreign push during the handoff, and the predecessor stops as before", func() {

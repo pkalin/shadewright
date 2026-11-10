@@ -400,7 +400,7 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 				UpdatedAt: metav1.NewTime(c.UpdatedAt.UTC().Truncate(time.Second))})
 		}
 		if len(st.Hints) >= remediationv1alpha1.MaxStoredHints {
-			// Nothing more can be stored; the comment stays unjudged and the cursor passes it (#542 replies).
+			// Nothing more can be stored; the comment stays unjudged and the cursor passes it (no record, so no reply).
 			unstored++
 			mark()
 			continue

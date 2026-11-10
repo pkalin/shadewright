@@ -818,6 +818,17 @@ spec:
                       - ReplacementDenied
                       - HandoffAborted
                       type: string
+                    reply:
+                      description: |-
+                        reply records the executor's reply to this hint in the pull request, once the hint is Declined or
+                        Consumed (ADR-0028 section 7). Once set it never changes.
+                      enum:
+                      - Posted
+                      - NotRedactable
+                      - TooLong
+                      - Refused
+                      - GaveUp
+                      type: string
                     source:
                       description: source is the system the comment is in.
                       enum:
@@ -879,6 +890,11 @@ spec:
                     rule: oldSelf.state == self.state || (oldSelf.state == 'Pending'
                       && self.state in ['Reserved', 'Declined']) || (oldSelf.state
                       == 'Reserved' && self.state in ['Consumed', 'Declined'])
+                  - message: only a Consumed or Declined hint has a reply
+                    rule: '!has(self.reply) || self.state in [''Consumed'', ''Declined'']'
+                  - message: the reply of a hint never changes once set
+                    rule: '!has(oldSelf.reply) || (has(self.reply) && self.reply ==
+                      oldSelf.reply)'
                 maxItems: 10
                 type: array
                 x-kubernetes-list-map-keys:
@@ -1109,6 +1125,17 @@ spec:
                       description: refusedAt is when the executor refused it.
                       format: date-time
                       type: string
+                    reply:
+                      description: |-
+                        reply records the executor's reply to the refused command in the pull request (ADR-0028 section 7).
+                        Once set it never changes.
+                      enum:
+                      - Posted
+                      - NotRedactable
+                      - TooLong
+                      - Refused
+                      - GaveUp
+                      type: string
                     source:
                       description: source is the system the comment is in.
                       enum:
@@ -1121,6 +1148,10 @@ spec:
                   - refusedAt
                   - source
                   type: object
+                  x-kubernetes-validations:
+                  - message: the reply to a refused hint never changes once set
+                    rule: '!has(oldSelf.reply) || (has(self.reply) && self.reply ==
+                      oldSelf.reply)'
                 maxItems: 10
                 type: array
                 x-kubernetes-list-map-keys:

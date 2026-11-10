@@ -16,10 +16,13 @@ limitations under the License.
 
 // Command kubectl-shadewright is a kubectl plugin that shows what Shadewright is doing in a cluster:
 // `kubectl shadewright status` for an overview, `kubectl shadewright explain <name>` for why one request (or
-// each request of one Incident) is in its phase. It runs with the caller's kubeconfig and RBAC, and only
+// each request of one Incident) is in its phase, `kubectl shadewright doctor` for read-only checks of an install.
+// It runs with the caller's kubeconfig and RBAC, and only
 // reads (get and list): the Incidents and RemediationRequests of the operator namespace, the
 // RemediationSettings and the analysis budget ConfigMap, and the version label of its CRDs, to warn when they
-// come from another release than the plugin (`kubectl shadewright version` prints the plugin's). Every string
+// come from another release than the plugin (`kubectl shadewright version` prints the plugin's). Doctor also
+// reads the CRDs, the analyzer and executor Deployments and the Flux GitRepositories and Kustomizations, and
+// never decides anything from the RemediationSettings status (invariant 6). Every string
 // from the cluster, which includes text the model wrote, is cleaned of control characters and terminal escape
 // sequences before it is printed (invariant 4), and a pull request link is printed only for the Git repository
 // configured in RemediationSettings. A troubleshooting link is a fixed URL chosen by the reason, never built
@@ -54,6 +57,7 @@ const usage = `kubectl shadewright: read-only view of Shadewright in a cluster.
 Usage:
   kubectl shadewright status [flags]
   kubectl shadewright explain <request-or-incident> [flags]
+  kubectl shadewright doctor [flags]
   kubectl shadewright version
 
 Commands:
@@ -61,6 +65,10 @@ Commands:
   explain   why one RemediationRequest is in its phase: its condition timeline, Incident, action, policy
             decision, plan digest, pull request and handoffs, and for a stop the troubleshooting section;
             given an Incident's name, the same for each of its requests, newest first
+  doctor    read-only checks of an install: the CRDs and the version they serve, the RemediationSettings
+            and its repositories, the kill switch, the analyzer and executor Deployments, and the Flux
+            sources and Kustomizations of the repositories; each check is pass, warn or fail. Exits 1 when
+            any check fails; a warn (including a read your permissions do not allow) does not
 
 Flags:
   -n, --namespace string      operator namespace (default: the kubeconfig context's namespace)
@@ -70,12 +78,16 @@ Flags:
       --context string        kubeconfig context to use
       --request-timeout dur   time limit for all reads, as kubectl takes it: seconds ("30"), a duration
                               ("30s", "1m") or 0 for no limit (default 30s)
+
+Exit status:
+  0 on success, 1 on an error; doctor also exits 1 when any check fails, never for a warn alone
 `
 
 // The commands that read the cluster.
 const (
 	cmdStatus  = "status"
 	cmdExplain = "explain"
+	cmdDoctor  = "doctor"
 )
 
 // The output formats.
@@ -91,7 +103,7 @@ func main() {
 	}
 }
 
-// cmdFlags are the flags of the status and explain commands.
+// cmdFlags are the flags of the status, explain and doctor commands.
 type cmdFlags struct {
 	namespace, output, kubeconfig, context string
 	allNamespaces                          bool
@@ -112,8 +124,13 @@ func parseExplain(args []string) (cmdFlags, error) {
 	return parseFlags(cmdExplain, args)
 }
 
+// parseDoctor parses the flags of the doctor command: those of status without -A, and no argument.
+func parseDoctor(args []string) (cmdFlags, error) {
+	return parseFlags(cmdDoctor, args)
+}
+
 // parseFlags parses the flags of cmd. Explain takes exactly one name, which may stand between flags as with
-// kubectl; status takes none.
+// kubectl; status and doctor take none.
 func parseFlags(cmd string, args []string) (cmdFlags, error) {
 	var f cmdFlags
 	var timeout string
@@ -150,7 +167,7 @@ func parseFlags(cmd string, args []string) (cmdFlags, error) {
 		return f, err
 	}
 	switch {
-	case cmd == cmdStatus && len(names) > 0:
+	case cmd != cmdExplain && len(names) > 0:
 		return f, fmt.Errorf("unexpected argument %q", clean(names[0], maxName))
 	case cmd == cmdExplain && len(names) == 0:
 		return f, errors.New("explain needs the name of a RemediationRequest or an Incident")
@@ -205,6 +222,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		f, err = parseStatus(args[1:])
 	case cmdExplain:
 		f, err = parseExplain(args[1:])
+	case cmdDoctor:
+		f, err = parseDoctor(args[1:])
 	default:
 		_, _ = fmt.Fprint(stderr, usage)
 		return fmt.Errorf("unknown command %q", clean(args[0], maxName))
@@ -226,6 +245,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 		ctx, cancel = context.WithTimeout(ctx, f.timeout)
 	}
 	defer cancel()
+	if args[0] == cmdDoctor {
+		return runDoctor(ctx, c, namespace, f.output, stdout)
+	}
 	now := time.Now()
 	// The version check runs next to the reads, with its own short limit, so a slow CRD read cannot use up
 	// the time of the other reads.
@@ -289,4 +311,23 @@ func newClient(f cmdFlags) (client.Client, string, error) {
 		return nil, "", fmt.Errorf("creating the client: %w", err)
 	}
 	return c, namespace, nil
+}
+
+// runDoctor runs the checks and writes them, then returns errChecksFailed when any failed, so the command exits
+// non-zero only on a fail. The CRD version is one of its checks, so it runs no separate version warning.
+func runDoctor(ctx context.Context, c client.Reader, namespace, output string, stdout io.Writer) error {
+	d := doctor(ctx, c, namespace, version)
+	var err error
+	if output == outputJSON {
+		err = renderJSON(stdout, d)
+	} else {
+		err = renderDoctorText(stdout, d)
+	}
+	if err != nil {
+		return err
+	}
+	if d.Failed {
+		return errChecksFailed
+	}
+	return nil
 }

@@ -102,7 +102,7 @@ Both Deployments run one replica by default (the Helm chart can add standbys, se
 4. **Pause writes (optional)**: set `spec.paused: true` on the `RemediationSettings` object if you want no pull request opened or closed while the pods restart. Analysis goes on. Unpause afterwards.
 5. **Use the same release for both images.** Analyzer and executor share the CRDs and the API types, and only a pair built from one tag has been tested together. Replace both digests in your overlay (the release page lists them; [verify them](#verify-a-release) first) and keep the `?ref=` of the base on the same tag.
 6. **Apply**: `kubectl apply -k .` applies the CRDs and the Deployments together. Wait for the CRDs (`kubectl wait --for=condition=Established crd/...`, as in getting started) and then for `kubectl -n shadewright-system rollout status deploy/shadewright-analyzer deploy/shadewright-executor`. Only the pod holding the Lease (`shadewright-executor-leader-election`, `shadewright-analyzer-leader-election`) works, so a new pod does nothing until it has the Lease, which can take a short while after the old pod is gone.
-7. **Check** the settings status (`DetectionFailed` is `False`), the Deployments' logs for errors, and that the waiting requests still show their phase.
+7. **Check** with [`kubectl shadewright doctor`](how-to/check-install.md) of the new release (it exits 1 when a check fails), the settings status (`DetectionFailed` is `False`), the Deployments' logs for errors, and that the waiting requests still show their phase.
 8. **Unpause** if you paused.
 
 What happens to requests that are waiting for a person when you upgrade:

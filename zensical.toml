@@ -35,6 +35,7 @@ nav = [
       { "Limit the namespaces it watches" = "how-to/limit-watched-namespaces.md" },
       { "Read an Incident" = "how-to/read-an-incident.md" },
       { "Check status with kubectl" = "how-to/check-status.md" },
+      { "Check an install with kubectl" = "how-to/check-install.md" },
       { "Find why a request was refused" = "how-to/find-why-refused.md" },
       { "Clear Resolved Incidents at the cap" = "how-to/clear-resolved-incidents.md" },
     ] },

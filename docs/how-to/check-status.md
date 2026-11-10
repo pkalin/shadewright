@@ -4,7 +4,7 @@ title: Check status with kubectl
 
 # Check status with kubectl
 
-`kubectl shadewright status` answers in one command what you would otherwise read from conditions by hand: which Incidents exist, whether each is due for analysis and why, what the last analysis decided, which requests it made with their policy decision and pull request, how much of the day's analysis budget is used, and whether the kill switch is on. `kubectl shadewright explain <name>` answers why one request is in its phase ([below](#explain-one-request)). It is a kubectl plugin: a separate binary that runs on your machine with your kubeconfig and your permissions. Nothing is installed in the cluster.
+`kubectl shadewright status` answers in one command what you would otherwise read from conditions by hand: which Incidents exist, whether each is due for analysis and why, what the last analysis decided, which requests it made with their policy decision and pull request, how much of the day's analysis budget is used, and whether the kill switch is on. `kubectl shadewright explain <name>` answers why one request is in its phase ([below](#explain-one-request)), and `kubectl shadewright doctor` checks an install ([check an install](check-install.md)). It is a kubectl plugin: a separate binary that runs on your machine with your kubeconfig and your permissions. Nothing is installed in the cluster.
 
 ## Install
 

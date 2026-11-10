@@ -216,6 +216,8 @@ func TestNoReplyToPendingOrReservedHints(t *testing.T) {
 	ctx := context.Background()
 	pending := declinedHint(45, "", "pending")
 	pending.State = api.HintPending
+	// Accepted now, so the look does not decline it as NoAnswer (HintAnswerTimeout) before the replies.
+	pending.AcceptedAt = metav1.NewTime(time.Now().UTC().Truncate(time.Second))
 	r, g, p := replyWorld(t, []api.Hint{pending}, nil)
 	if _, err := r.watchPullRequest(ctx, p); err != nil {
 		t.Fatal(err)

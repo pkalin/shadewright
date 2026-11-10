@@ -70,7 +70,9 @@ var (
 // for a duplicate key by comparing each key with every key after it in the same mapping, so the time is
 // quadratic in the keys of one mapping: a mapping of 43,000 keys, within MaxNodes, took 4.3 s in the patcher's
 // decode and 6.3 s in a render, about ten times that under the race detector (#608). The widest mapping in
-// about 500 real manifests over 20 KB, CRDs included, held 76 keys, so 256 leaves room for real files and keeps
+// about 500 YAML files over 20 KB (this repository's CRDs, the CRDs in the Go module cache, a 353 KB Prometheus
+// operator CRD among them, and Kubernetes API test fixtures; surveyed 2026-11-10) held 76 keys, and the widest
+// in the lab fleet and chart holds 21, so 256 leaves room for real files and keeps
 // the comparisons of one mapping under 33,000. Duplicate keys are refused before any decode too
 // ([ErrDuplicateKey]): the decoders build an error text, holding the key, for every pair of equal keys, so 2,048
 // copies of one long key took seconds and gigabytes of allocations.

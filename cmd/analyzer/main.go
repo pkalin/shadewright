@@ -21,6 +21,7 @@ package main
 import (
 	"flag"
 	"os"
+	"slices"
 	"strings"
 
 	"go.opentelemetry.io/otel/trace"
@@ -284,6 +285,7 @@ func main() {
 	}
 
 	af.namespace, af.watched, af.claimTimeout = namespace, watched, inc.AnalysisTimeout()
+	af.fluxGrant = slices.Contains(moduleGrants, collector.GrantFlux)
 	if err := setupAnalysis(mgr, inc, af, contextBuilder, sources, redactor, tp); err != nil {
 		setupLog.Error(err, "Failed to set up the analysis")
 		os.Exit(1)

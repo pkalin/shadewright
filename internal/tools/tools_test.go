@@ -481,8 +481,38 @@ func TestGetDeliveryStatus(t *testing.T) {
 	if r.Status != StatusOK || !strings.Contains(r.Text, "ready: false") || strings.Contains(r.Text, leakPassword) {
 		t.Errorf("%q:\n%s", r.Status, r.Text)
 	}
+	// The state is a fixed word code writes: never a value a quote may cite.
+	if !strings.Contains(r.Text, "delivery: pending\n") || slices.Contains(r.Data(), deliveryPending) {
+		t.Errorf("state of a unit that is not Ready:\n%s\ndata %q", r.Text, r.Data())
+	}
 	if nf := e.call(t, NameGetDeliveryStatus, with(NameGetDeliveryStatus, map[string]any{argName: "other"})); nf.Status != StatusNotFound {
 		t.Errorf("missing unit: %q", nf.Status)
+	}
+}
+
+// get_delivery_status reports applied, pending and failed from the unit's status: applied only when it is
+// Ready for its current generation and reports no failure.
+func TestDeliveryState(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		st   providers.DeliveryStatus
+		want string
+	}{
+		{"ready and current", providers.DeliveryStatus{Ready: true, Generation: 2, ObservedGeneration: 2}, deliveryApplied},
+		{"ready for an older generation", providers.DeliveryStatus{Ready: true, Generation: 3, ObservedGeneration: 2}, deliveryPending},
+		{"ready with no generation", providers.DeliveryStatus{Ready: true}, deliveryPending},
+		{"not ready", providers.DeliveryStatus{Generation: 1, ObservedGeneration: 1}, deliveryPending},
+		{"failed", providers.DeliveryStatus{Failed: true, Generation: 1, ObservedGeneration: 1}, deliveryFailed},
+		{"failed while ready", providers.DeliveryStatus{Failed: true, Ready: true, Generation: 1, ObservedGeneration: 1}, deliveryFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, nil)
+			e.delivery.Set(providers.DeliveryUnit{Kind: kustomization, Namespace: fluxNS, Name: unitName}, tc.st)
+			r := e.call(t, NameGetDeliveryStatus, with(NameGetDeliveryStatus, nil))
+			if r.Status != StatusOK || !strings.Contains(r.Text, "delivery: "+tc.want+"\n") {
+				t.Errorf("want %s, got %q:\n%s", tc.want, r.Status, r.Text)
+			}
+		})
 	}
 }
 

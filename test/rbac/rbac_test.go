@@ -1068,7 +1068,8 @@ func decodeAll(t *testing.T, path string) []map[string]any {
 func TestModuleRolesGrantOnlyWhenBound(t *testing.T) {
 	ctx := context.Background()
 	// get is granted only where an object is read by name: the ScaledObject a KEDA HPA names as its owner. The
-	// sources' informers need list and watch.
+	// sources' informers need list and watch. get_delivery_status reads one Kustomization or HelmRelease with
+	// list too (analyzer.ListGetter, #562), so the Flux role keeps no get.
 	type kind struct {
 		group, resource string
 		get             bool

@@ -44,6 +44,7 @@ const (
 	readyFile     = "kustomization-ready.json"
 	mainBranch    = "main"
 	helmRelease   = "HelmRelease"
+	helmFailed    = "helmrelease-upgrade-failed.json"
 )
 
 // recorded reads an object recorded for the Flux module, as the API reader decodes it (integers as int64).
@@ -351,6 +352,38 @@ func TestNewNeedsAReader(t *testing.T) {
 	}
 	if _, err := flux.New(&reader{}, nil); !errors.Is(err, providers.ErrInvalidConfig) {
 		t.Errorf("New(..., nil) error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestNewStatusReaderNeedsAReader(t *testing.T) {
+	if _, err := flux.NewStatusReader(nil); !errors.Is(err, providers.ErrInvalidConfig) {
+		t.Errorf("NewStatusReader(nil) error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+// The status reader of the analyzer's tool reports what the executor's verifier reports, and classifies a
+// failed read the same way.
+func TestStatusReaderReadsAsTheVerifier(t *testing.T) {
+	for _, file := range []string{readyFile, buildFailed, "kustomization-stalled.json", helmFailed} {
+		u := recorded(t, file)
+		sr, err := flux.NewStatusReader(&reader{obj: u})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := sr.Status(t.Context(), unitOf(u))
+		if err != nil {
+			t.Fatalf("%s: %v", file, err)
+		}
+		if want := status(t, u); got != want {
+			t.Errorf("%s: StatusReader = %+v\nVerifier = %+v", file, got, want)
+		}
+	}
+	sr, err := flux.NewStatusReader(&reader{err: apierrors.NewForbidden(schema.GroupResource{}, "x", errors.New("no"))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sr.Status(t.Context(), unitOf(recorded(t, readyFile))); !errors.Is(err, providers.ErrForbidden) {
+		t.Errorf("forbidden read: %v", err)
 	}
 }
 

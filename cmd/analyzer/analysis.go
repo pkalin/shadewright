@@ -37,6 +37,7 @@ import (
 	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/incidents"
 	"github.com/pkalin/shadewright/internal/providers"
+	fluxdelivery "github.com/pkalin/shadewright/internal/providers/delivery/flux"
 	"github.com/pkalin/shadewright/internal/providers/model/foundry"
 	"github.com/pkalin/shadewright/internal/providers/store/azureblob"
 	"github.com/pkalin/shadewright/internal/redact"
@@ -54,6 +55,9 @@ type analysisFlags struct {
 	storeAccount, storeContainer string
 	// claimTimeout is the Incident trigger's AnalysisTimeout: how long a claim lasts (ADR-0025 decision 1).
 	claimTimeout time.Duration
+	// fluxGrant is true when --module-grants names the Flux module's grant (list and watch on Flux objects in
+	// the watched namespaces): only then does get_delivery_status get a delivery system (#562).
+	fluxGrant bool
 }
 
 // bind registers the analysis flags on fs.
@@ -203,13 +207,9 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	if err != nil {
 		return nil, err
 	}
-	// The read tools of an escalation, on the same sources and redactor as the context builder, bound to the
-	// watched namespaces. get_delivery_status has no delivery system (the analyzer may read Flux objects
-	// only for the Flux module's symptom sources, behind a chart value), and the loop does not offer it.
-	set, err := tools.New(tools.Config{Pods: d.cache, Events: d.cache, Objects: d.apiReader, Logs: d.sources.Logs,
-		Metrics: d.sources.Metrics, Redactor: d.redactor, Namespaces: f.watched})
+	set, err := readTools(f, d)
 	if err != nil {
-		return nil, fmt.Errorf("the read tools: %w", err)
+		return nil, err
 	}
 	expected := map[analysis.Role]string{analysis.RoleTriage: triage}
 	if escalation != "" {
@@ -245,6 +245,29 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 		return nil, err
 	}
 	return c, nil
+}
+
+// readTools returns the read tools of an escalation, on the same sources and redactor as the context builder,
+// bound to the watched namespaces. get_delivery_status gets the Flux adapter's status reader (#562) only when
+// the install rendered the Flux module's grant (f.fluxGrant): it then reads one Kustomization or HelmRelease of
+// a watched namespace with the list that grant holds (analyzer.ListGetter on the API reader), no get and no
+// informer, so the analyzer gets no new permission. Its delivery namespaces are the watched ones, where that
+// grant is bound. The loop does not offer it yet.
+func readTools(f analysisFlags, d analysisDeps) (*tools.Set, error) {
+	cfg := tools.Config{Pods: d.cache, Events: d.cache, Objects: d.apiReader, Logs: d.sources.Logs,
+		Metrics: d.sources.Metrics, Redactor: d.redactor, Namespaces: f.watched}
+	if f.fluxGrant && len(f.watched) > 0 {
+		delivery, err := fluxdelivery.NewStatusReader(analyzer.ListGetter{Reader: d.apiReader})
+		if err != nil {
+			return nil, fmt.Errorf("the delivery status reader: %w", err)
+		}
+		cfg.Delivery, cfg.DeliveryNamespaces = delivery, f.watched
+	}
+	set, err := tools.New(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("the read tools: %w", err)
+	}
+	return set, nil
 }
 
 // setupAnalysis builds the analysis controller and registers it with the manager, or logs that the analysis

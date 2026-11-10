@@ -28,9 +28,13 @@ limitations under the License.
 // AppliedCommit stays empty and its outcome is never Applied; the delivery of a commit to a HelmRelease is
 // shown by the Kustomization that applies it.
 //
-// It reads only: the caller needs get on the kind in the unit's namespace, nothing else. It does not retry; a
-// failed read is classified (providers.ErrNotFound, providers.ErrForbidden, a [providers.RetryableError] or the
-// context's error) and never reported as a status.
+// [StatusReader] is the same read without the comparison, for a caller with no Git host: the analyzer's
+// get_delivery_status tool.
+//
+// It reads only: the caller needs get on the kind in the unit's namespace, nothing else, or what its reader's
+// Get needs instead (the analyzer's reader gets one object with list, internal/analyzer.ListGetter). It does
+// not retry; a failed read is classified (providers.ErrNotFound, providers.ErrForbidden, a
+// [providers.RetryableError] or the context's error) and never reported as a status.
 package flux
 
 import (
@@ -66,9 +70,25 @@ var kinds = map[string]schema.GroupVersionKind{
 		Group: fluxstatus.HelmGroup, Version: fluxstatus.HelmVersion, Kind: fluxstatus.KindHelmRelease},
 }
 
-// Verifier reads Flux delivery units.
+// StatusReader reads the status of Flux delivery units, with no commit to compare. [Verifier] reads through
+// it.
+type StatusReader struct {
+	reader client.Reader
+}
+
+var _ providers.DeliveryVerifier = (*StatusReader)(nil)
+
+// NewStatusReader returns a StatusReader that reads with reader.
+func NewStatusReader(reader client.Reader) (*StatusReader, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("reader is required: %w", providers.ErrInvalidConfig)
+	}
+	return &StatusReader{reader: reader}, nil
+}
+
+// Verifier reads Flux delivery units and compares what they applied with a merge commit.
 type Verifier struct {
-	reader   client.Reader
+	status   StatusReader
 	ancestry providers.AncestryChecker
 }
 
@@ -80,7 +100,7 @@ func New(reader client.Reader, ancestry providers.AncestryChecker) (*Verifier, e
 	if reader == nil || ancestry == nil {
 		return nil, fmt.Errorf("reader and ancestry checker are required: %w", providers.ErrInvalidConfig)
 	}
-	return &Verifier{reader: reader, ancestry: ancestry}, nil
+	return &Verifier{status: StatusReader{reader: reader}, ancestry: ancestry}, nil
 }
 
 // Verify reads the unit and says whether it delivered mergeCommit, merged into branch: the outcome, the status
@@ -98,6 +118,11 @@ func (v *Verifier) Verify(ctx context.Context, unit providers.DeliveryUnit, merg
 
 // Status reads the unit and reports its status.
 func (v *Verifier) Status(ctx context.Context, unit providers.DeliveryUnit) (providers.DeliveryStatus, error) {
+	return v.status.Status(ctx, unit)
+}
+
+// Status reads the unit and reports its status.
+func (r *StatusReader) Status(ctx context.Context, unit providers.DeliveryUnit) (providers.DeliveryStatus, error) {
 	gvk, ok := kinds[unit.Kind]
 	if !ok {
 		return providers.DeliveryStatus{}, fmt.Errorf("kind is not Kustomization or HelmRelease: %w", ErrInvalidUnit)
@@ -110,7 +135,7 @@ func (v *Verifier) Status(ctx context.Context, unit providers.DeliveryUnit) (pro
 	}
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(gvk)
-	if err := v.reader.Get(ctx, client.ObjectKey{Namespace: unit.Namespace, Name: unit.Name}, obj); err != nil {
+	if err := r.reader.Get(ctx, client.ObjectKey{Namespace: unit.Namespace, Name: unit.Name}, obj); err != nil {
 		return providers.DeliveryStatus{}, readError(ctx, unit.Kind, err)
 	}
 	if obj.GetNamespace() != unit.Namespace || obj.GetName() != unit.Name || obj.GroupVersionKind() != gvk {

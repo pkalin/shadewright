@@ -72,8 +72,8 @@ kubectl shadewright status -n shadewright-system -w      # redraw every 5 second
 | `-o`, `--output` | `text` (default) or `json`. The JSON holds the same fields, with times in RFC 3339 |
 | `--kubeconfig`, `--context` | As for kubectl |
 | `--request-timeout` | Limit for all reads together, as kubectl takes it: seconds (`30`), a duration (`30s`, `1m`), or `0` for no limit (default `30s`). With `-w` the limit applies to each refresh. The CRD version check has its own 5 second limit and runs next to the reads |
-| `-w`, `--watch` | Read again every `--interval` and show the result until you press Ctrl-C ([below](#watch-a-request-move)) |
-| `--interval` | Time between refreshes with `-w`: seconds (`10`) or a duration (`10s`, `1m`), at least `1s` (default `5s`). Refused without `-w` |
+| `-w`, `--watch` | `status` only: read again every `--interval` and show the result until you press Ctrl-C ([below](#watch-a-request-move)) |
+| `--interval` | `status` only: time between refreshes with `-w`, as seconds (`10`) or a duration (`10s`, `1m`), at least `1s` (default `5s`). Refused without `-w` |
 
 The text output, per namespace:
 
@@ -103,12 +103,14 @@ A setting or the budget that the plugin cannot read with your permissions, or th
 
 ## Watch a request move
 
-`-w` runs `status` again every `--interval` until you press Ctrl-C (or the process gets SIGTERM), so you can follow a request through its phases without rerunning the command:
+`-w` runs `status` again every `--interval` until you press Ctrl-C (or the process gets SIGTERM), so you can follow a request through its phases without rerunning the command. Both flags apply to `status` only: `explain` and `doctor` refuse them.
 
 - **Text**, on a terminal: the screen is cleared and redrawn each time, under a line with the interval and the time of the read (`Every 5s, last read 2026-11-06T12:00:05Z (Ctrl-C to stop)`). When the output is redirected to a file or a pipe nothing is cleared: each refresh follows the previous one after a blank line.
 - **JSON** (`-o json`): one JSON document per refresh, each on one line (newline-delimited JSON), with the same fields as a single `-o json`, for `jq` or a script.
-- **A refresh that fails** (a list refused, the API server unreachable, `--request-timeout` reached) prints `Error at <time>: <reason>` on standard error, and the next refresh runs as planned: standard output keeps only complete refreshes, so the JSON stays parseable. The command stops with an error only when it cannot write its output (a closed pipe).
-- Ctrl-C stops it with exit status 0, between refreshes or in the middle of one; a refresh cut short prints nothing. The CRD version warning is printed once, after the first refresh.
+- **A refresh that fails** (the API server unreachable, `--request-timeout` reached) prints `Error at <time>: <reason>` on standard error and nothing on standard output, and the next refresh runs as planned: on a terminal the last good status stays on the screen, and standard output keeps only complete refreshes, so the JSON stays parseable.
+- **A refresh refused** as Forbidden or Unauthorized (a missing permission, expired credentials) stops the command with that error and exit status 1, since waiting does not grant access.
+- **A closed pipe** (`-w -o json | head -1`) ends it as it ends other commands: killed by SIGPIPE, exit status 141 in the shell. A failed write to another kind of output stops it with an error.
+- Ctrl-C stops it with exit status 0, between refreshes or in the middle of one; a refresh cut short prints nothing. If a read does not return, a second Ctrl-C ends the process at once. The CRD version warning is printed after the first refresh and, on a terminal, again under each redraw, which clears it.
 
 It polls with the same `get` and `list` reads as a single `status`, not with a Kubernetes `watch`: no new permission, the [roles below](#permissions) are enough. Each refresh reads everything again, so nothing is missed or shown twice when the API server restarts between two refreshes. The interval counts from the end of one refresh to the start of the next. The minimum of one second keeps one watching person from becoming a load on the API server; with `-A` on a large cluster, prefer a longer interval.
 

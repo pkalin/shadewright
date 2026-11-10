@@ -104,6 +104,8 @@ type Source struct {
 	tok      Token
 	expires  time.Time
 	inflight *refresh
+	// appID is the App's numeric ID once read; it never changes.
+	appID int64
 }
 
 type refresh struct {
@@ -323,6 +325,66 @@ func (s *Source) fetch(ctx context.Context) (Token, time.Time, error) {
 		return Token{}, time.Time{}, s.requestError(ctx, err)
 	}
 	return s.parse(op, data)
+}
+
+// AppID returns the numeric ID of the GitHub App, read once with GET /app under the App's JWT and kept, since an
+// App's ID never changes. Concurrent first calls may each read it. Config.Timeout bounds the call. Errors are
+// classed as Token's are, with fixed text only.
+func (s *Source) AppID(ctx context.Context) (int64, error) {
+	s.mu.Lock()
+	id := s.appID
+	s.mu.Unlock()
+	if id > 0 {
+		return id, nil
+	}
+	callCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	id, err := s.fetchAppID(callCtx)
+	if err != nil {
+		return 0, s.callError(ctx, callCtx, err)
+	}
+	s.mu.Lock()
+	s.appID = id
+	s.mu.Unlock()
+	return id, nil
+}
+
+func (s *Source) fetchAppID(ctx context.Context) (int64, error) {
+	const op = "GitHub App identity"
+	jwt, err := buildJWT(ctx, s.signer, s.clientID, s.now())
+	if err != nil {
+		return 0, s.classifyCtx(err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiBase+"/app", nil)
+	if err != nil {
+		return 0, errors.New("build App identity request")
+	}
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", "shadewright")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return 0, s.requestError(ctx, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return 0, s.statusError(op, resp)
+	}
+	data, err := readBounded(resp)
+	if errors.Is(err, errTooLarge) {
+		return 0, fmt.Errorf("%s: %w", op, err)
+	}
+	if err != nil {
+		return 0, s.requestError(ctx, err)
+	}
+	var v struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil || v.ID < 1 {
+		return 0, fmt.Errorf("%s: response holds no App ID", op)
+	}
+	return v.ID, nil
 }
 
 // classifyCtx marks a deadline hit while signing as retryable.

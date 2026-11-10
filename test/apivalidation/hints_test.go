@@ -288,7 +288,7 @@ var _ = Describe("RemediationRequest status.hints", func() {
 
 		rr = createdRequest(false)
 		for _, rec := range []v1alpha1.HintReply{v1alpha1.HintReplyPosted, v1alpha1.HintReplyNotRedactable,
-			v1alpha1.HintReplyTooLong, v1alpha1.HintReplyRefused, v1alpha1.HintReplyGaveUp} {
+			v1alpha1.HintReplyTooManyComments, v1alpha1.HintReplyRefused, v1alpha1.HintReplyGaveUp} {
 			h = testHint(1, v1alpha1.HintDeclined)
 			h.Reply = rec
 			rr.Status.Hints = []v1alpha1.Hint{h}

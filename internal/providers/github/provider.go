@@ -1159,15 +1159,18 @@ func (p *Provider) pullFor(ctx context.Context, op string, number int64) (pullJS
 const paramPerPage = "per_page"
 
 // Comment pages CommentChangeRequest reads for its marker: commentsPerPage comments of at most 64 KiB each fit
-// in maxJSONBody, and past maxCommentPages pages the comment is posted without looking further.
+// in maxJSONBody, and a pull request with more than maxCommentPages pages is not commented on (fail closed).
 const (
 	commentsPerPage = 20
-	maxCommentPages = 10
+	maxCommentPages = 50
 )
 
 // CommentChangeRequest adds one comment to an open pull request from a shadewright/ branch to the target
-// branch, unless one of its first maxCommentPages pages of comments holds marker already. A closed or merged
-// one is ErrConflict; other pull requests are refused.
+// branch, unless a comment the App posted as its own bot user holds marker as a whole line already. It reads
+// the comments newest first, at most maxCommentPages pages; past them it posts nothing and returns
+// ErrTooManyComments. The post itself is never repeated blindly: after a failure worth retrying the marker is
+// looked for again first, so a post whose answer was lost is not made twice. A closed or merged pull request is
+// ErrConflict; other pull requests are refused.
 func (p *Provider) CommentChangeRequest(ctx context.Context, number int64, marker, body string) error {
 	switch {
 	case number < 1:
@@ -1175,11 +1178,15 @@ func (p *Provider) CommentChangeRequest(ctx context.Context, number int64, marke
 	case strings.TrimSpace(body) == "" || len(body) > maxMessageBytes || !utf8.ValidString(body):
 		return errors.New(opCommentCR + ": comment is empty, too long or not UTF-8")
 	case strings.TrimSpace(marker) == "" || strings.ContainsAny(marker, "\r\n") ||
-		len(marker) > providers.MaxCommentMarkerBytes || !strings.Contains(body, marker):
-		return errors.New(opCommentCR + ": marker is invalid or not in the comment")
+		len(marker) > providers.MaxCommentMarkerBytes || !hasMarkerLine(body, marker):
+		return errors.New(opCommentCR + ": marker is invalid or not a line of the comment")
 	}
 	ctx, cancel := p.withTimeout(ctx)
 	defer cancel()
+	app, err := p.ownApp(ctx)
+	if err != nil {
+		return err
+	}
 	pr, err := p.pullFor(ctx, opCommentCR, number)
 	if err != nil {
 		return err
@@ -1187,54 +1194,167 @@ func (p *Provider) CommentChangeRequest(ctx context.Context, number int64, marke
 	if pr.MergedAt != nil || pr.State != stateOpen {
 		return fmt.Errorf("%s: pull request is not open: %w", opCommentCR, providers.ErrConflict)
 	}
-	switch found, err := p.hasComment(ctx, number, marker); {
-	case err != nil:
-		return err
-	case found:
-		return nil
-	}
-	r, err := p.do(ctx, call{
+	post := call{
 		op: opCommentCR, method: http.MethodPost, path: "/issues/" + strconv.FormatInt(number, 10) + "/comments",
 		body: map[string]string{"body": body},
-	})
-	if err != nil {
-		return err
 	}
-	if r.status != http.StatusCreated {
-		return statusError(opCommentCR, r.status)
+	for attempt := 0; ; attempt++ {
+		switch found, err := p.hasComment(ctx, number, marker, app); {
+		case err != nil:
+			return err
+		case found:
+			return nil
+		}
+		r, err := p.once(ctx, post)
+		switch {
+		case err == nil && r.status == http.StatusCreated:
+			return nil
+		case err == nil:
+			return statusError(opCommentCR, r.status)
+		case !providers.IsRetryable(err) || attempt+1 >= p.attempts:
+			return err
+		}
+		if err := p.backoff(ctx, opCommentCR, attempt, err); err != nil {
+			return err
+		}
 	}
-	return nil
 }
 
-// hasComment reports whether a comment of pull request number holds marker, reading at most maxCommentPages
-// pages.
-func (p *Provider) hasComment(ctx context.Context, number int64, marker string) (bool, error) {
-	for page := 1; page <= maxCommentPages; page++ {
-		r, err := p.do(ctx, call{op: opCommentCR, method: http.MethodGet,
-			path:  "/issues/" + strconv.FormatInt(number, 10) + "/comments",
-			query: url.Values{paramPerPage: {strconv.Itoa(commentsPerPage)}, "page": {strconv.Itoa(page)}}})
+// ownApp returns the ID of the App whose installation tokens the provider uses.
+func (p *Provider) ownApp(ctx context.Context) (int64, error) {
+	if p.appID == nil {
+		return 0, errors.New(opCommentCR + ": the App's identity is unknown")
+	}
+	id, err := p.appID(ctx)
+	if err != nil {
+		return 0, appIDError(opCommentCR, err)
+	}
+	if id < 1 {
+		return 0, errors.New(opCommentCR + ": the App's identity is unknown")
+	}
+	return id, nil
+}
+
+// commentJSON's fields that tell who posted a comment, for the marker search.
+type markedCommentJSON struct {
+	Body                  string    `json:"body"`
+	User                  *userJSON `json:"user"`
+	PerformedViaGitHubApp *struct {
+		ID int64 `json:"id"`
+	} `json:"performed_via_github_app"`
+}
+
+// ownMarked reports whether c is a comment the App app posted as its bot user, with marker as a whole line.
+// A person's comment never counts, also one made through the App on their behalf (its user is the person),
+// so nobody else can forge a marker and suppress a comment.
+func ownMarked(c markedCommentJSON, marker string, app int64) bool {
+	return c.User != nil && c.User.Type == "Bot" && c.PerformedViaGitHubApp != nil &&
+		c.PerformedViaGitHubApp.ID == app && hasMarkerLine(c.Body, marker)
+}
+
+// hasMarkerLine reports whether a line of body, without surrounding white space, is marker.
+func hasMarkerLine(body, marker string) bool {
+	marker = strings.TrimSpace(marker)
+	for line := range strings.SplitSeq(body, "\n") {
+		if strings.TrimSpace(line) == marker {
+			return true
+		}
+	}
+	return false
+}
+
+// hasComment reports whether a comment of pull request number that the App app posted holds marker. It reads
+// the first page, which names the last, then the pages from the last back, newest first, at most
+// maxCommentPages pages in all; a marker beyond them is unknown, ErrTooManyComments. Comments are only ever
+// appended at the end or deleted, and a deletion moves later comments to earlier pages, which are read later,
+// so a comment present through the whole search is never missed.
+func (p *Provider) hasComment(ctx context.Context, number int64, marker string, app int64) (bool, error) {
+	cs, last, err := p.commentPage(ctx, number, 1)
+	if err != nil {
+		return false, err
+	}
+	if slices.ContainsFunc(cs, func(c markedCommentJSON) bool { return ownMarked(c, marker, app) }) {
+		return true, nil
+	}
+	stop := max(2, last-maxCommentPages+2) // page 1 and pages stop..last: at most maxCommentPages
+	for page := last; page >= stop; page-- {
+		cs, _, err := p.commentPage(ctx, number, page)
 		if err != nil {
 			return false, err
 		}
-		if !r.ok() {
-			return false, statusError(opCommentCR, r.status)
-		}
-		var comments []struct {
-			Body string `json:"body"`
-		}
-		if err := decode(opCommentCR, r, &comments); err != nil {
-			return false, err
-		}
-		for _, c := range comments {
-			if strings.Contains(c.Body, marker) {
-				return true, nil
-			}
-		}
-		if len(comments) < commentsPerPage {
-			return false, nil
+		if slices.ContainsFunc(cs, func(c markedCommentJSON) bool { return ownMarked(c, marker, app) }) {
+			return true, nil
 		}
 	}
+	if stop > 2 {
+		return false, fmt.Errorf("%s: the pull request has more than %d pages of comments: %w", opCommentCR,
+			maxCommentPages, providers.ErrTooManyComments)
+	}
 	return false, nil
+}
+
+// commentPage reads one page of the comments of pull request number, and the number of the last page that the
+// Link header names (the page itself when it names none).
+func (p *Provider) commentPage(ctx context.Context, number int64, page int) ([]markedCommentJSON, int, error) {
+	r, err := p.do(ctx, call{op: opCommentCR, method: http.MethodGet,
+		path:  "/issues/" + strconv.FormatInt(number, 10) + "/comments",
+		query: url.Values{paramPerPage: {strconv.Itoa(commentsPerPage)}, "page": {strconv.Itoa(page)}}})
+	if err != nil {
+		return nil, 0, err
+	}
+	if !r.ok() {
+		return nil, 0, statusError(opCommentCR, r.status)
+	}
+	var cs []markedCommentJSON
+	if err := decode(opCommentCR, r, &cs); err != nil {
+		return nil, 0, err
+	}
+	last, err := lastLinkPage(r.header.Get("Link"))
+	if err != nil {
+		return nil, 0, fmt.Errorf("%s: %w", opCommentCR, err)
+	}
+	return cs, max(last, page), nil
+}
+
+// maxLinkPage bounds the page number read from a Link header.
+const maxLinkPage = 1 << 20
+
+// lastLinkPage returns the page number of the rel="last" link of a Link header: 0 when the header is empty or
+// names no next page (this page is the last). A next page without a last one, or a last one without a valid
+// page number, is an error: the search would not know where the newest comments are.
+func lastLinkPage(link string) (int, error) {
+	if link == "" {
+		return 0, nil
+	}
+	next := false
+	for part := range strings.SplitSeq(link, ",") {
+		target, params, ok := strings.Cut(strings.TrimSpace(part), ";")
+		rel := strings.TrimSpace(params)
+		switch {
+		case !ok:
+			return 0, errors.New("GitHub returned a malformed Link header")
+		case rel == `rel="next"`:
+			next = true
+			continue
+		case rel != `rel="last"`:
+			continue
+		}
+		raw, okL := strings.CutPrefix(strings.TrimSpace(target), "<")
+		raw, okR := strings.CutSuffix(raw, ">")
+		u, err := url.Parse(raw)
+		if !okL || !okR || err != nil {
+			return 0, errors.New("GitHub returned a malformed Link header")
+		}
+		n, err := strconv.Atoi(u.Query().Get("page"))
+		if err != nil || n < 1 || n > maxLinkPage {
+			return 0, errors.New("GitHub returned a malformed Link header")
+		}
+		return n, nil
+	}
+	if next {
+		return 0, errors.New("GitHub returned a Link header with a next page and no last one")
+	}
+	return 0, nil
 }
 
 // closeState is nil for a closed pull request, ErrConflict for a merged one, and false for an open one.

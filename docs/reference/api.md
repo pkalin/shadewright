@@ -453,7 +453,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `reason` | string | No | reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or NoProposal), NoAnswer when none came within the executor's bound, or the end of the request (PullRequestMerged, PullRequestClosed, RequestEnded), or the end of its replacement without the handoff: ReplacementDenied when the replacement was Denied, HandoffAborted when it ended otherwise. HintDeclineReasons lists them.<br>One of `NoModelConfigured`, `BudgetSpent`, `BudgetUnavailable`, `NoProposal`, `MissingData`, `NoEvidence`, `TargetNotSupported`, `PreviousValueUnknown`, `NoChange`, `DirectionReversed`, `NoPolicyForAction`, `ActionOutOfBounds`, `InvalidOutput`, `EscalationNotConfigured`, `StepLimit`, `TokenLimit`, `DeadlineExceeded`, `ModelUnavailable`, `ModelNotFound`, `ModelForbidden`, `ModelError`, `UnexpectedModel`, `EndpointNotAllowed`, `PlanUnchanged`, `HintNotPending`, `RequestNotCreated`, `CoolingDown`, `NoAnswer`, `PullRequestMerged`, `PullRequestClosed`, `RequestEnded`, `ReplacementDenied`, `HandoffAborted` |
 | `editedAfterAccept` | boolean | No | editedAfterAccept is true once the executor saw the comment edited after it accepted the hint. The stored text stays as it was; the edit is recorded once, here, whatever the number of edits. |
 | `outcome` | string | No | outcome is the analysis's outcome that answered the hint with a replacement (Proposed or RunbookMatched), recorded when the executor first read it in the Incident. The hint is answered from then on, whatever the Incident handles later: it waits for the handoff, and the answer timeout no longer applies. Once set it never changes.<br>One of `Proposed`, `RunbookMatched` |
-| `reply` | [HintReply](#hintreply) | No | reply records the executor's reply to this hint in the pull request, once the hint is Declined or Consumed (ADR-0028 section 7). Once set it never changes.<br>One of `Posted`, `NotRedactable`, `TooLong`, `Refused`, `GaveUp` |
+| `reply` | [HintReply](#hintreply) | No | reply records the executor's reply to this hint in the pull request, once the hint is Declined or Consumed (ADR-0028 section 7). Once set it never changes.<br>One of `Posted`, `NotRedactable`, `TooManyComments`, `Refused`, `GaveUp` |
 
 ### HintAuthor
 
@@ -510,14 +510,15 @@ Used by: [RefusedHint](#refusedhint).
 HintReply records what became of the executor's reply to a hint, or to a refused command, in the pull
 request (ADR-0028 section 7). The reply is built from a fixed template and typed fields, plus the quoted
 first line of the stored hint, its one free text. It is posted only when the redactor would change nothing
-in it and it fits MaxHintReplyBytes, so it fails closed. Posted: the reply is in the pull request (posted,
-or found there by its marker). NotRedactable: the redactor would still change the reply, so nothing was
-posted. TooLong: the reply was over MaxHintReplyBytes, so nothing was posted. Refused: the Git host refused
-the comment for good (a permission the App lacks, a rule, an invalid request). GaveUp: posting failed on
-every try within the executor's bound. Only Posted means the author was told.
+in it, so it fails closed. Posted: the reply is in the pull request (posted, or found there by its marker
+in a comment of the executor's own). NotRedactable: the redactor would still change the reply, so nothing
+was posted. TooManyComments: the pull request has more comments than the executor reads to find an
+earlier reply, so nothing was posted rather than risk a second reply. Refused: the Git host refused the
+comment for good (a permission the App lacks, a rule, an invalid request). GaveUp: posting failed on every
+try within the executor's bound. Only Posted means the author was told.
 
 - Underlying type: string
-- One of `Posted`, `NotRedactable`, `TooLong`, `Refused`, `GaveUp`
+- One of `Posted`, `NotRedactable`, `TooManyComments`, `Refused`, `GaveUp`
 
 Used by: [Hint](#hint), [RefusedHint](#refusedhint).
 
@@ -525,7 +526,7 @@ Used by: [Hint](#hint), [RefusedHint](#refusedhint).
 | --- | --- |
 | `Posted` |  |
 | `NotRedactable` |  |
-| `TooLong` |  |
+| `TooManyComments` |  |
 | `Refused` |  |
 | `GaveUp` |  |
 
@@ -974,7 +975,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `author` | [HintAuthor](#hintauthor) | Yes | author wrote the comment, as the source's API reported it. |
 | `reason` | [HintRefusal](#hintrefusal) | Yes | reason says why no hint was stored.<br>One of `CapReached`, `TooLong`, `NotRedactable`, `Empty`, `EditedAfterSeen` |
 | `refusedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | refusedAt is when the executor refused it. |
-| `reply` | [HintReply](#hintreply) | No | reply records the executor's reply to the refused command in the pull request (ADR-0028 section 7). Once set it never changes.<br>One of `Posted`, `NotRedactable`, `TooLong`, `Refused`, `GaveUp` |
+| `reply` | [HintReply](#hintreply) | No | reply records the executor's reply to the refused command in the pull request (ADR-0028 section 7). Once set it never changes.<br>One of `Posted`, `NotRedactable`, `TooManyComments`, `Refused`, `GaveUp` |
 
 ### RemediationMode
 
@@ -1102,7 +1103,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `rollout` | [RolloutStatus](#rolloutstatus) | No | rollout is what the check after the merge keeps between reconciles (the RolledOut condition). |
 | `deadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | deadline is when the current step gives up. |
 | `hints` | [Hint](#hint) array | No | hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all, and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed, so a Declined hint stays as the record of what was asked. Planned: carrying them over to a replacement.<br>Maximum items: 10<br>List type: map<br>List key: `source`<br>List key: `commentID`<br>Rule: status.hints: at most 3 hints are Consumed or Reserved (`self.filter(h, h.state in ['Consumed', 'Reserved']).size() <= 3`) |
-| `refusedHints` | [RefusedHint](#refusedhint) array | No | refusedHints are the newest comments with the command that the executor refused, at most MaxRefusedHints, oldest first; an older one is dropped. Only the executor writes them.<br>Maximum items: 10<br>List type: map<br>List key: `source`<br>List key: `commentID`<br>Rule: the reply to a refused hint never changes once set |
+| `refusedHints` | [RefusedHint](#refusedhint) array | No | refusedHints are the newest comments with the command that the executor refused, at most MaxRefusedHints, oldest first; the oldest one whose reply is recorded is dropped for a new one, and while every one still waits for its reply a new refusal is not recorded. Only the executor writes them.<br>Maximum items: 10<br>List type: map<br>List key: `source`<br>List key: `commentID`<br>Rule: the reply to a refused hint never changes once set |
 | `commentCursor` | [CommentCursor](#commentcursor) | No | commentCursor is where the executor's next look at the comments of the pull request starts (ADR-0028 section 3). Only the executor writes it.<br>Rule: etag is kept only on the first page of a new sweep<br>Rule: evictedAt and evictedID are set together |
 | `handoff` | [Handoff](#handoff) | No | handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is never removed; Handoff says what may change. Only the executor writes it.<br>Rule: a handoff has from, to or both |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run the applied template; False with reason RolloutStuck or DeliveryNotObserved, Unknown while in progress and with reason KindNotChecked, RolloutSuperseded or RolloutNotDetermined when the check ends without a verdict).<br>List type: map<br>List key: `type` |

@@ -38,6 +38,9 @@ import (
 // opCommentChangeRequest is the fake Git's name of CommentChangeRequest, for SetFail.
 const opCommentChangeRequest = "CommentChangeRequest"
 
+// reviewerB is the author of the refused commands in these tests.
+const reviewerB = "reviewer-b"
+
 // replyWorld is gateWorld's predecessor waiting for review with the branch's head recorded and hints as its
 // only hints. It returns the reconciler, the fake Git and the request as stored.
 func replyWorld(t *testing.T, hints []api.Hint, refused []api.RefusedHint) (*RemediationRequestReconciler,
@@ -193,7 +196,7 @@ func TestNoReplyWhilePaused(t *testing.T) {
 func TestReplyToARefusedCommand(t *testing.T) {
 	ctx := context.Background()
 	refused := api.RefusedHint{Source: api.HintSourceGitHub, CommentID: 44,
-		Author: api.HintAuthor{ID: 2003, Login: "reviewer-b"}, Reason: api.HintRefusalCapReached,
+		Author: api.HintAuthor{ID: 2003, Login: reviewerB}, Reason: api.HintRefusalCapReached,
 		RefusedAt: metav1.NewTime(time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC))}
 	r, g, p := replyWorld(t, nil, []api.RefusedHint{refused})
 	if _, err := r.watchPullRequest(ctx, p); err != nil {
@@ -349,6 +352,9 @@ func TestReplyQuote(t *testing.T) {
 		{"has <!-- a marker", ""},
 		{"closes -->", ""},
 		{"tab\there", ""},
+		// Format characters (bidi overrides, zero width) become spaces, as in cluster text before redaction.
+		{"evil\u202egnp.exe", "` evil gnp.exe `"},
+		{"zero\u200bwidth\u2066", "` zero width  `"},
 		{long, "` " + strings.Repeat("é", maxReplyQuoteBytes/2) + "... `"},
 	} {
 		if got := replyQuote(c.in); got != c.want {
@@ -368,5 +374,113 @@ func TestEveryReasonHasItsOwnWords(t *testing.T) {
 		if refusalText(reason) == refusalText("Unknown") {
 			t.Errorf("refusal %s has no words of its own", reason)
 		}
+	}
+}
+
+func refusedCommand(id int64, rec api.HintReply) api.RefusedHint {
+	return api.RefusedHint{Source: api.HintSourceGitHub, CommentID: id,
+		Author: api.HintAuthor{ID: 2003, Login: reviewerB}, Reason: api.HintRefusalEmpty,
+		RefusedAt: metav1.NewTime(time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)), Reply: rec}
+}
+
+func TestGaveUpSurvivesALostStatusWrite(t *testing.T) {
+	ctx := context.Background()
+	r, g, p := replyWorld(t, []api.Hint{declinedHint(50, "NoAnswer", "x")}, nil)
+	tries := 0
+	g.SetFail(func(op string) error {
+		if op != opCommentChangeRequest {
+			return nil
+		}
+		tries++
+		if tries == maxReplyAttempts {
+			// The status write that would record GaveUp is held back.
+			setPaused(t, r, true)
+		}
+		return &providers.RetryableError{Err: errors.New("status 502")}
+	})
+	look := hintLook{git: mustOpen(t, r, p), host: api.GitProviderGitHub}
+	for range maxReplyAttempts {
+		_ = r.replyHints(ctx, look, stored(t, r, p))
+	}
+	if rec := stored(t, r, p).Status.Hints[0].Reply; rec != "" {
+		t.Fatalf("recorded %q while writes were paused", rec)
+	}
+	setPaused(t, r, false)
+	if err := r.replyHints(ctx, look, stored(t, r, p)); err != nil {
+		t.Fatal(err)
+	}
+	if rec := stored(t, r, p).Status.Hints[0].Reply; rec != api.HintReplyGaveUp || tries != maxReplyAttempts {
+		t.Fatalf("recorded %q after %d tries, want GaveUp after %d", rec, tries, maxReplyAttempts)
+	}
+}
+
+func TestReplyStopsAtAClosedPullRequest(t *testing.T) {
+	ctx := context.Background()
+	r, g, p := replyWorld(t, []api.Hint{declinedHint(51, "NoAnswer", "x"), declinedHint(52, "NoAnswer", "y")}, nil)
+	tries := 0
+	g.SetFail(func(op string) error {
+		if op == opCommentChangeRequest {
+			tries++
+			return fmt.Errorf("closed: %w", providers.ErrConflict)
+		}
+		return nil
+	})
+	if err := r.replyHints(ctx, hintLook{git: mustOpen(t, r, p), host: api.GitProviderGitHub}, p); err != nil {
+		t.Fatal(err)
+	}
+	if tries != 1 {
+		t.Fatalf("asked %d times after the pull request was closed, want once", tries)
+	}
+}
+
+func TestReplyNotPostedWhenTheMarkerCannotBeChecked(t *testing.T) {
+	ctx := context.Background()
+	r, g, p := replyWorld(t, []api.Hint{declinedHint(53, "NoAnswer", "x")}, nil)
+	g.SetFail(func(op string) error {
+		if op == opCommentChangeRequest {
+			return fmt.Errorf("busy: %w", providers.ErrTooManyComments)
+		}
+		return nil
+	})
+	if err := r.replyHints(ctx, hintLook{git: mustOpen(t, r, p), host: api.GitProviderGitHub}, p); err != nil {
+		t.Fatal(err)
+	}
+	if rec := stored(t, r, p).Status.Hints[0].Reply; rec != api.HintReplyTooManyComments {
+		t.Fatalf("recorded %q, want TooManyComments", rec)
+	}
+}
+
+func TestHandoffCarriesRefusedCommands(t *testing.T) {
+	ctx := context.Background()
+	r, _, p, rr, cr, head := gateWorld(t)
+	p.Status.RefusedHints = []api.RefusedHint{refusedCommand(60, ""), refusedCommand(61, api.HintReplyPosted)}
+	if err := r.recordHandoff(ctx, rr, p, cr, head); err != nil {
+		t.Fatal(err)
+	}
+	got := stored(t, r, rr).Status.RefusedHints
+	if len(got) != 2 || got[0].CommentID != 60 || got[0].Reply != "" || got[1].CommentID != 61 ||
+		got[1].Reply != api.HintReplyPosted {
+		t.Fatalf("refused commands after the handoff: %+v", got)
+	}
+}
+
+func TestRefusedHintsKeepEntriesThatWaitForAReply(t *testing.T) {
+	st := &api.RemediationRequestStatus{}
+	now := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
+	fb := func(id int64) providers.Feedback {
+		return providers.Feedback{ID: id, Author: providers.FeedbackAuthor{ID: 2003, Login: reviewerB}}
+	}
+	for id := range int64(api.MaxRefusedHints) {
+		refuseHint(st, api.HintSourceGitHub, fb(id+1), api.HintRefusalEmpty, now)
+	}
+	if refuseHint(st, api.HintSourceGitHub, fb(100), api.HintRefusalEmpty, now) ||
+		!findRefused(st.RefusedHints, api.HintSourceGitHub, 1) || len(st.RefusedHints) != api.MaxRefusedHints {
+		t.Fatalf("an entry that waits for its reply was dropped: %+v", st.RefusedHints)
+	}
+	st.RefusedHints[3].Reply = api.HintReplyPosted
+	if !refuseHint(st, api.HintSourceGitHub, fb(101), api.HintRefusalEmpty, now) ||
+		findRefused(st.RefusedHints, api.HintSourceGitHub, 4) || !findRefused(st.RefusedHints, api.HintSourceGitHub, 1) ||
+		len(st.RefusedHints) != api.MaxRefusedHints {
+		t.Fatalf("the replied entry was not the one dropped: %+v", st.RefusedHints)
 	}
 }

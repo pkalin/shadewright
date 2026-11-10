@@ -289,9 +289,12 @@ type GitProvider interface {
 	CheckMerged(ctx context.Context, head, mergeCommit, path string) (BranchState, string, error)
 
 	// CommentChangeRequest adds one comment with body to an open change request from a Shadewright branch of
-	// this repository to the target branch, unless a comment that holds marker is there already, which
-	// succeeds, so a retry after a lost answer or a lost status write does not post it twice. body must hold
-	// marker, one line of at most MaxCommentMarkerBytes. Any other change request is refused. It is a write.
+	// this repository to the target branch, unless a comment that the provider's own identity posted holds
+	// marker as a whole line already, which succeeds, so a retry after a lost answer or a lost status write
+	// does not post it twice; a marker in anyone else's comment does not count. A post that may have gone
+	// through is never repeated without looking for the marker again. When the provider cannot read all the
+	// comments to look for it, it posts nothing and returns ErrTooManyComments. body must hold marker as one of
+	// its lines, of at most MaxCommentMarkerBytes. Any other change request is refused. It is a write.
 	CommentChangeRequest(ctx context.Context, number int64, marker, body string) error
 
 	// OpenChangeRequest opens a change request. When an open change request for the same head branch

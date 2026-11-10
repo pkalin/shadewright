@@ -571,7 +571,8 @@ func closedOrMerged(cr providers.ChangeRequest) string {
 }
 
 // recordHandoff is step 4: the replacement records the pull request with the new head, carries every hint of
-// the chain (the merge gate excludes all their authors) and the predecessor's comment cursor, sets from Done
+// the chain (the merge gate excludes all their authors), the predecessor's refused commands (with their
+// replies, so each is answered once) and its comment cursor, sets from Done
 // and moves to PRCreated, or ends Merged when the merge took the new commit.
 func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pred *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest, newHead string) error {
@@ -600,6 +601,15 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 			continue
 		}
 		rr.Status.Hints = append(rr.Status.Hints, h)
+	}
+	// The refused commands too, with their replies: the predecessor posts nothing while its intent stands and
+	// ends without replying, so this request owes the replies it has not posted.
+	for _, f := range pred.Status.RefusedHints {
+		if !findRefused(rr.Status.RefusedHints, f.Source, f.CommentID) && !addRefused(&rr.Status, f) {
+			logf.FromContext(ctx).Info("Did not carry a refused reviewer hint over to RemediationRequest: every "+
+				"recorded refusal still waits for its reply", "remediationRequest", client.ObjectKeyFromObject(rr),
+				"comment", f.CommentID)
+		}
 	}
 	if rr.Status.CommentCursor == nil && pred.Status.CommentCursor != nil {
 		rr.Status.CommentCursor = pred.Status.CommentCursor.DeepCopy()

@@ -129,6 +129,8 @@ type HintAuthor struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.editedAfterAccept) || !oldSelf.editedAfterAccept || (has(self.editedAfterAccept) && self.editedAfterAccept)",message="editedAfterAccept is never unset"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.outcome) || (has(self.outcome) && self.outcome == oldSelf.outcome)",message="the outcome of a hint never changes once set"
 // +kubebuilder:validation:XValidation:rule="oldSelf.state == self.state || (oldSelf.state == 'Pending' && self.state in ['Reserved', 'Declined']) || (oldSelf.state == 'Reserved' && self.state in ['Consumed', 'Declined'])",message="a hint moves only from Pending to Reserved or Declined, and from Reserved to Consumed or Declined"
+// +kubebuilder:validation:XValidation:rule="!has(self.reply) || self.state in ['Consumed', 'Declined']",message="only a Consumed or Declined hint has a reply"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.reply) || (has(self.reply) && self.reply == oldSelf.reply)",message="the reply of a hint never changes once set"
 type Hint struct {
 	// source is the system the comment is in.
 	// +required
@@ -189,7 +191,33 @@ type Hint struct {
 	// +kubebuilder:validation:Enum=Proposed;RunbookMatched
 	// +optional
 	Outcome string `json:"outcome,omitempty"`
+
+	// reply records the executor's reply to this hint in the pull request, once the hint is Declined or
+	// Consumed (ADR-0028 section 7). Once set it never changes.
+	// +optional
+	Reply HintReply `json:"reply,omitempty"`
 }
+
+// HintReply records what became of the executor's reply to a hint, or to a refused command, in the pull
+// request (ADR-0028 section 7). The reply is built from a fixed template and typed fields, plus the quoted
+// first line of the stored hint, its one free text. It is posted only when the redactor would change nothing
+// in it, so it fails closed. Posted: the reply is in the pull request (posted, or found there by its marker
+// in a comment of the executor's own). NotRedactable: the redactor would still change the reply, so nothing
+// was posted. TooManyComments: the pull request has more comments than the executor reads to find an
+// earlier reply, so nothing was posted rather than risk a second reply. Refused: the Git host refused the
+// comment for good (a permission the App lacks, a rule, an invalid request). GaveUp: posting failed on every
+// try within the executor's bound. Only Posted means the author was told.
+// +kubebuilder:validation:Enum=Posted;NotRedactable;TooManyComments;Refused;GaveUp
+type HintReply string
+
+// The records of a reply, one per value of the HintReply enum.
+const (
+	HintReplyPosted          HintReply = "Posted"
+	HintReplyNotRedactable   HintReply = "NotRedactable"
+	HintReplyTooManyComments HintReply = "TooManyComments"
+	HintReplyRefused         HintReply = "Refused"
+	HintReplyGaveUp          HintReply = "GaveUp"
+)
 
 // HintDeclineReasons are the values of Hint.reason, the same as its enum: the analysis's outcomes that create
 // no replacement, and the executor's own.
@@ -363,7 +391,9 @@ type Handoff struct {
 	To *OutgoingHandoff `json:"to,omitempty"`
 }
 
-// MaxRefusedHints is the most refusals a request's status.refusedHints keeps; the oldest goes first.
+// MaxRefusedHints is the most refusals a request's status.refusedHints keeps. The oldest one with its reply
+// recorded goes first; one still waiting for its reply is never dropped, so while all of them wait a further
+// refusal is not recorded.
 const MaxRefusedHints = 10
 
 // HintRefusal says why the executor stored no hint for a writer's comment that carried the command (ADR-0028
@@ -387,6 +417,7 @@ const (
 
 // RefusedHint records a comment that carried the command and was refused, so the refusal is made once and a
 // reader sees why no hint was stored. It holds no text of the comment.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.reply) || (has(self.reply) && self.reply == oldSelf.reply)",message="the reply to a refused hint never changes once set"
 type RefusedHint struct {
 	// source is the system the comment is in.
 	// +required
@@ -408,6 +439,11 @@ type RefusedHint struct {
 	// refusedAt is when the executor refused it.
 	// +required
 	RefusedAt metav1.Time `json:"refusedAt"`
+
+	// reply records the executor's reply to the refused command in the pull request (ADR-0028 section 7).
+	// Once set it never changes.
+	// +optional
+	Reply HintReply `json:"reply,omitempty"`
 }
 
 // CommentCursor is where the executor's next look at the conversation comments of the request's pull request

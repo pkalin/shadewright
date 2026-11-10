@@ -273,6 +273,43 @@ var _ = Describe("RemediationRequest status.hints", func() {
 		expectStatusRefused(unset, "the outcome of a hint never changes once set")
 	})
 
+	It("records a reply only on an answered hint, once, and never changes it", func() {
+		rr := createdRequest(false)
+		h := testHint(1, v1alpha1.HintPending)
+		h.Reply = v1alpha1.HintReplyPosted
+		rr.Status.Hints = []v1alpha1.Hint{h}
+		expectStatusRefused(rr, "only a Consumed or Declined hint has a reply")
+
+		rr = createdRequest(false)
+		h = testHint(1, v1alpha1.HintDeclined)
+		h.Reply = "Shouted"
+		rr.Status.Hints = []v1alpha1.Hint{h}
+		expectStatusRefused(rr, "status.hints[0].reply")
+
+		rr = createdRequest(false)
+		for _, rec := range []v1alpha1.HintReply{v1alpha1.HintReplyPosted, v1alpha1.HintReplyNotRedactable,
+			v1alpha1.HintReplyTooManyComments, v1alpha1.HintReplyRefused, v1alpha1.HintReplyGaveUp} {
+			h = testHint(1, v1alpha1.HintDeclined)
+			h.Reply = rec
+			rr.Status.Hints = []v1alpha1.Hint{h}
+			Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), string(rec))
+			rr = createdRequest(false)
+		}
+
+		rr = createdRequest(false)
+		rr.Status.Hints = []v1alpha1.Hint{testHint(1, v1alpha1.HintDeclined)}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		got := reread(rr)
+		got.Status.Hints[0].Reply = v1alpha1.HintReplyGaveUp
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "a reply is recorded once")
+		changed := reread(rr)
+		changed.Status.Hints[0].Reply = v1alpha1.HintReplyPosted
+		expectStatusRefused(changed, "the reply of a hint never changes once set")
+		unset := reread(rr)
+		unset.Status.Hints[0].Reply = ""
+		expectStatusRefused(unset, "the reply of a hint never changes once set")
+	})
+
 	It("refuses two hints for the same comment", func() {
 		rr := createdRequest(false)
 		rr.Status.Hints = []v1alpha1.Hint{testHint(1, v1alpha1.HintPending), testHint(1, v1alpha1.HintDeclined)}
@@ -398,6 +435,21 @@ var _ = Describe("RemediationRequest status.refusedHints", func() {
 			rr.Status.RefusedHints = append(rr.Status.RefusedHints, testRefused(int64(i+1)))
 		}
 		expectStatusRefused(rr, "status.refusedHints: Too many")
+	})
+
+	It("records the reply to a refusal once, and never changes it", func() {
+		rr := createdRequest(false)
+		rr.Status.RefusedHints = []v1alpha1.RefusedHint{testRefused(1)}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		got := reread(rr)
+		got.Status.RefusedHints[0].Reply = v1alpha1.HintReplyNotRedactable
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		changed := reread(rr)
+		changed.Status.RefusedHints[0].Reply = v1alpha1.HintReplyPosted
+		expectStatusRefused(changed, "the reply to a refused hint never changes once set")
+		unset := reread(rr)
+		unset.Status.RefusedHints[0].Reply = ""
+		expectStatusRefused(unset, "the reply to a refused hint never changes once set")
 	})
 
 	It("refuses two refusals of the same comment", func() {

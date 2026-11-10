@@ -72,7 +72,7 @@ The managed identity's client ID goes into the annotation `azure.workload.identi
 
 ## 4. Key Vault key versions and access
 
-- Nothing needs an old version once it is replaced: a JWT lives ten minutes and is used only to get an installation token, so after the cached token turns over (within an hour) the old version is not needed.
+- Nothing needs an old version once it is replaced: a JWT lives ten minutes and is used only to get an installation token, and, once per provider, the App's own ID (`GET /app`, before its first comment on a pull request, to recognise its own earlier comments; the ID is kept and never changes), so after the cached token turns over (within an hour) the old version is not needed.
 - The executor needs only `sign`. The lab's custom role holds the single data action `Microsoft.KeyVault/vaults/keys/sign/action` and is assigned at the scope of the one key. Rotating the key under the same name keeps that assignment; a **new key name** needs `github_app_key` changed in the foundation and the assignment re-applied.
 - Importing and disabling versions needs your own `Key Vault Crypto Officer` (granted to whoever runs Terraform), not the executor's.
 - If the vault is deleted, purge protection keeps it, and the key, recoverable for 7 days in the lab.

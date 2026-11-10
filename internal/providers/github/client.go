@@ -60,6 +60,9 @@ const (
 type TokenSource interface {
 	Token(ctx context.Context) (auth.Token, error)
 	Repository() auth.Repository
+	// AppID returns the numeric ID of the App the tokens belong to: the provider counts a comment marker only
+	// in comments that App posted as its bot user.
+	AppID(ctx context.Context) (int64, error)
 }
 
 // Config configures a [Provider].
@@ -85,6 +88,7 @@ type Config struct {
 type testHooks struct {
 	transport http.RoundTripper
 	token     func(context.Context) (string, error)
+	appID     func(context.Context) (int64, error)
 	sleep     func(context.Context, time.Duration) error
 	jitter    func(time.Duration) time.Duration
 	now       func() time.Time
@@ -96,6 +100,7 @@ type Provider struct {
 	repo     auth.Repository
 	target   string
 	token    func(context.Context) (string, error)
+	appID    func(context.Context) (int64, error)
 	client   *http.Client
 	attempts int
 	base     time.Duration
@@ -124,7 +129,7 @@ func New(cfg Config) (*Provider, error) {
 			return "", err
 		}
 		return t.Reveal(), nil
-	}}
+	}, appID: src.AppID}
 	p, err := newProvider(cfg, h)
 	if err != nil {
 		return nil, err
@@ -150,6 +155,7 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 		repo:     repo,
 		target:   cfg.TargetBranch,
 		token:    h.token,
+		appID:    h.appID,
 		client:   newHTTPClient(h.transport),
 		attempts: cfg.MaxAttempts,
 		base:     cfg.BaseDelay,
@@ -261,20 +267,30 @@ func (p *Provider) do(ctx context.Context, c call) (response, error) {
 		if err == nil || !providers.IsRetryable(err) || attempt+1 >= p.attempts {
 			return resp, err
 		}
-		d, asked := providers.RetryAfter(err)
-		if asked && d > p.maxDelay {
-			return response{}, err // too long to block a reconcile: the caller requeues
-		}
-		if !asked {
-			d = p.jitter(min(p.base<<attempt, p.maxDelay))
-		}
-		if dl, ok := ctx.Deadline(); ok && p.now().Add(d).After(dl) {
-			return response{}, err
-		}
-		if serr := p.sleep(ctx, d); serr != nil {
-			return response{}, ctxError(c.op, ctx)
+		if werr := p.backoff(ctx, c.op, attempt, err); werr != nil {
+			return response{}, werr
 		}
 	}
+}
+
+// backoff waits before attempt+1 after the retryable error err: the delay GitHub asked for, or an exponential
+// one with jitter. It returns err when the wait would be longer than maxDelay (GitHub asked for more) or would
+// pass the deadline of ctx, so the caller requeues, and the end of ctx when it ends during the wait.
+func (p *Provider) backoff(ctx context.Context, op string, attempt int, err error) error {
+	d, asked := providers.RetryAfter(err)
+	if asked && d > p.maxDelay {
+		return err // too long to block a reconcile: the caller requeues
+	}
+	if !asked {
+		d = p.jitter(min(p.base<<attempt, p.maxDelay))
+	}
+	if dl, ok := ctx.Deadline(); ok && p.now().Add(d).After(dl) {
+		return err
+	}
+	if serr := p.sleep(ctx, d); serr != nil {
+		return ctxError(op, ctx)
+	}
+	return nil
 }
 
 // checkWrite runs the caller's write checkpoint ([providers.CheckWrite]) right before a request that writes is
@@ -459,6 +475,22 @@ func tokenError(op string, err error) error {
 		return fmt.Errorf("%s: %w", msg, providers.ErrForbidden)
 	}
 	return errors.New(msg)
+}
+
+// appIDError replaces an error of the token source's AppID with fixed text, keeping only its class, as
+// tokenError does.
+func appIDError(op string, err error) error {
+	const what = "the App's identity unavailable"
+	switch {
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("%s: %s: %w", op, what, context.Canceled)
+	case errors.Is(err, context.DeadlineExceeded):
+		return &providers.RetryableError{Err: fmt.Errorf("%s: %s: %w", op, what, context.DeadlineExceeded)}
+	case providers.IsRetryable(err):
+		after, _ := providers.RetryAfter(err)
+		return &providers.RetryableError{RetryAfter: after, Err: errors.New(op + ": " + what)}
+	}
+	return errors.New(op + ": " + what)
 }
 
 // ctxError reports the end of the caller's context. A deadline is retryable (a later reconcile may finish);

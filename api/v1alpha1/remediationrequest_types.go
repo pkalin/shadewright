@@ -509,7 +509,8 @@ type RemediationRequestStatus struct {
 	Hints []Hint `json:"hints,omitempty"`
 
 	// refusedHints are the newest comments with the command that the executor refused, at most
-	// MaxRefusedHints, oldest first; an older one is dropped. Only the executor writes them.
+	// MaxRefusedHints, oldest first; the oldest one whose reply is recorded is dropped for a new one, and while
+	// every one still waits for its reply a new refusal is not recorded. Only the executor writes them.
 	// +listType=map
 	// +listMapKey=source
 	// +listMapKey=commentID

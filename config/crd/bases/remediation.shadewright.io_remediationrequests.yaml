@@ -818,6 +818,17 @@ spec:
                       - ReplacementDenied
                       - HandoffAborted
                       type: string
+                    reply:
+                      description: |-
+                        reply records the executor's reply to this hint in the pull request, once the hint is Declined or
+                        Consumed (ADR-0028 section 7). Once set it never changes.
+                      enum:
+                      - Posted
+                      - NotRedactable
+                      - TooManyComments
+                      - Refused
+                      - GaveUp
+                      type: string
                     source:
                       description: source is the system the comment is in.
                       enum:
@@ -879,6 +890,11 @@ spec:
                     rule: oldSelf.state == self.state || (oldSelf.state == 'Pending'
                       && self.state in ['Reserved', 'Declined']) || (oldSelf.state
                       == 'Reserved' && self.state in ['Consumed', 'Declined'])
+                  - message: only a Consumed or Declined hint has a reply
+                    rule: '!has(self.reply) || self.state in [''Consumed'', ''Declined'']'
+                  - message: the reply of a hint never changes once set
+                    rule: '!has(oldSelf.reply) || (has(self.reply) && self.reply ==
+                      oldSelf.reply)'
                 maxItems: 10
                 type: array
                 x-kubernetes-list-map-keys:
@@ -1065,7 +1081,8 @@ spec:
               refusedHints:
                 description: |-
                   refusedHints are the newest comments with the command that the executor refused, at most
-                  MaxRefusedHints, oldest first; an older one is dropped. Only the executor writes them.
+                  MaxRefusedHints, oldest first; the oldest one whose reply is recorded is dropped for a new one, and while
+                  every one still waits for its reply a new refusal is not recorded. Only the executor writes them.
                 items:
                   description: |-
                     RefusedHint records a comment that carried the command and was refused, so the refusal is made once and a
@@ -1109,6 +1126,17 @@ spec:
                       description: refusedAt is when the executor refused it.
                       format: date-time
                       type: string
+                    reply:
+                      description: |-
+                        reply records the executor's reply to the refused command in the pull request (ADR-0028 section 7).
+                        Once set it never changes.
+                      enum:
+                      - Posted
+                      - NotRedactable
+                      - TooManyComments
+                      - Refused
+                      - GaveUp
+                      type: string
                     source:
                       description: source is the system the comment is in.
                       enum:
@@ -1121,6 +1149,10 @@ spec:
                   - refusedAt
                   - source
                   type: object
+                  x-kubernetes-validations:
+                  - message: the reply to a refused hint never changes once set
+                    rule: '!has(oldSelf.reply) || (has(self.reply) && self.reply ==
+                      oldSelf.reply)'
                 maxItems: 10
                 type: array
                 x-kubernetes-list-map-keys:

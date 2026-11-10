@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -299,6 +300,11 @@ func (r *RemediationRequestReconciler) commentSteered(ctx context.Context, git p
 			r.answerSteered(rr, id)
 			log.Info("The Git host refused the comment saying why an approval does not count for RemediationRequest; "+
 				"it is not asked again", "review", id, "reason", reason)
+		case errors.Is(err, providers.ErrTooManyComments):
+			// Fail closed: an earlier comment cannot be ruled out, so none is posted, and it is not asked again.
+			r.answerSteered(rr, id)
+			log.Info("Did not say why an approval does not count for RemediationRequest: the pull request has more "+
+				"comments than are read to find an earlier one", "review", id)
 		default:
 			log.Info("Could not say why an approval does not count for RemediationRequest", "review", id,
 				"error", err.Error())

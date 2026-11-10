@@ -170,15 +170,22 @@ type RemediationRequestReconciler struct {
 	// write has not gone through (followHandoff), so a retry records it without sending the rewrite again.
 	// Memory only, dropped with checked: after a restart the rewrite is sent again, which is idempotent.
 	rewritten sync.Map
+	// replyAttempts holds, per request name, the failed posts of each reply to a reviewer hint (replyTries,
+	// hintreply.go), so a reply is given up after maxReplyAttempts. Memory only, dropped with checked: after a
+	// restart a reply gets that many tries again, and its marker keeps a post that went through from being
+	// repeated.
+	replyAttempts sync.Map
 }
 
 // forget drops what this process keeps in memory about a request: its last full recheck, its last
-// permission warning, the comments of the merge gate it posted and a rewrite not recorded yet.
+// permission warning, the comments of the merge gate it posted, a rewrite not recorded yet and the failed
+// posts of its replies to hints.
 func (r *RemediationRequestReconciler) forget(key types.NamespacedName) {
 	r.checked.Delete(key)
 	r.permissionWarned.Delete(key)
 	r.steeredCommented.Delete(key)
 	r.rewritten.Delete(key)
+	r.replyAttempts.Delete(key)
 }
 
 // DefaultTargetStateTimeout is how long the policy check waits by default for KEDA to report on a
@@ -1023,7 +1030,11 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 			return r.waitOrFail(ctx, rr, &capped)
 		}
 		if wait, ok := r.pollOnly(rr, outcome); ok {
-			// Still open, and the last full recheck is recent: only the pull request was read (#434).
+			// Still open, and the last full recheck is recent: only the pull request was read (#434). Replies to
+			// hints that wait (a rate limit, a post that may have gone through) get the look at the end of the wait.
+			if d := r.replyWait(rr); d > 0 {
+				wait = min(wait, d)
+			}
 			return ctrl.Result{RequeueAfter: wait}, nil
 		}
 	}

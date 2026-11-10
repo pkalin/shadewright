@@ -42,6 +42,7 @@ import (
 const (
 	testRepoURL = "https://github.com/acme/fleet"
 	testToken   = "ghs_SECRETINSTALLATIONTOKEN0123456789"
+	testAppID   = 4242
 	repoPath    = "/repos/acme/fleet"
 	branch      = "shadewright/req-1"
 	branchRef   = "/git/ref/heads/shadewright/req-1"
@@ -175,6 +176,7 @@ func newHarness(t *testing.T, steps ...step) *harness {
 	p, err := newProvider(Config{RepositoryURL: testRepoURL, TargetBranch: target}, testHooks{
 		transport: h.s,
 		token:     func(context.Context) (string, error) { return testToken, nil },
+		appID:     func(context.Context) (int64, error) { return testAppID, nil },
 		sleep: func(_ context.Context, d time.Duration) error {
 			h.sleeps = append(h.sleeps, d)
 			return nil
@@ -258,6 +260,7 @@ type tokenSource struct{ repo auth.Repository }
 
 func (s tokenSource) Token(context.Context) (auth.Token, error) { return auth.Token{}, nil }
 func (s tokenSource) Repository() auth.Repository               { return s.repo }
+func (s tokenSource) AppID(context.Context) (int64, error)      { return testAppID, nil }
 
 func TestNewBindsTheTokenSourceRepository(t *testing.T) {
 	cfg := Config{RepositoryURL: testRepoURL, TargetBranch: target}
@@ -1442,39 +1445,128 @@ func TestCloseChangeRequestRefusesOthers(t *testing.T) {
 // commentMarker is the marker of the comments in the tests of CommentChangeRequest.
 const commentMarker = "<!-- shadewright comment -->"
 
-// comments is the step that answers page of the comments of pull request 12 with bodies.
-func comments(page int, bodies ...string) step {
-	cs := make([]string, 0, len(bodies))
-	for _, b := range bodies {
-		cs = append(cs, `{"body":"`+b+`"}`)
-	}
-	st := raw("/issues/12/comments", "["+strings.Join(cs, ",")+"]")
+// own is a comment the App posted as its bot user with body; person is one a person posted, with body.
+func own(body string) string {
+	return `{"body":` + strconv.Quote(body) + `,"user":{"login":"shadewright[bot]","id":9,"type":"Bot"},` +
+		`"performed_via_github_app":{"id":` + strconv.Itoa(testAppID) + `}}`
+}
+
+func person(body string) string {
+	return `{"body":` + strconv.Quote(body) + `,"user":{"login":"octo-cat","id":7,"type":"User"},` +
+		`"performed_via_github_app":null}`
+}
+
+// comments is the step that answers page of the comments of pull request 12 with items (JSON objects).
+func comments(page int, items ...string) step {
+	st := raw("/issues/12/comments", "["+strings.Join(items, ",")+"]")
 	st.query = "page=" + strconv.Itoa(page) + "&per_page=20"
 	return st
 }
 
-func TestCommentChangeRequest(t *testing.T) {
+// lastPage sets the Link header of a first page that names last as the last page.
+func lastPage(st step, last int) step {
+	st.header = map[string]string{"Link": `<https://api.github.com/repositories/1/issues/12/comments?page=2&per_page=20>; ` +
+		`rel="next", <https://api.github.com/repositories/1/issues/12/comments?page=` + strconv.Itoa(last) +
+		`&per_page=20>; rel="last"`}
+	return st
+}
+
+func fullPage(item string) []string {
+	out := make([]string, commentsPerPage)
+	for i := range out {
+		out[i] = item
+	}
+	return out
+}
+
+func commentPost() step {
 	post := status(http.MethodPost, "/issues/12/comments", http.StatusCreated, "")
 	post.check = func(t *testing.T, b map[string]any) {
-		if b["body"] != "note "+commentMarker || len(b) != 1 {
+		if b["body"] != "note\n"+commentMarker || len(b) != 1 {
 			t.Errorf("comment body = %v", b)
 		}
 	}
-	full := make([]string, 20)
-	for i := range full {
-		full[i] = "other"
-	}
+	return post
+}
+
+func TestCommentChangeRequest(t *testing.T) {
+	open := get("/pulls/12", "pull_open.json")
+	post := commentPost()
 	for name, steps := range map[string][]step{
-		"no comments":    {get("/pulls/12", "pull_open.json"), comments(1), post},
-		"two pages":      {get("/pulls/12", "pull_open.json"), comments(1, full...), comments(2, "other"), post},
-		"marker present": {get("/pulls/12", "pull_open.json"), comments(1, "other", "x "+commentMarker)},
+		"no comments": {open, comments(1), post},
+		// The first page is read again at the end, for a comment a deletion moved onto it.
+		"two pages, newest first": {open, lastPage(comments(1, fullPage(person("other"))...), 2),
+			comments(2, person("other")), comments(1, fullPage(person("other"))...), post},
+		"marker present": {open, comments(1, person("other"), own("x\n"+commentMarker))},
+		// A person can paste the marker; only the App's own comments count, so the reply is still posted.
+		"marker forged by a person": {open, comments(1, person("x\n"+commentMarker)), post},
+		// An App's comment through a person's authorization is the person's: it does not count either.
+		"marker by a person through the App": {open, comments(1, strings.Replace(own(commentMarker),
+			`"type":"Bot"`, `"type":"User"`, 1)), post},
+		"marker by another App": {open, comments(1, strings.Replace(own(commentMarker),
+			`{"id":4242}`, `{"id":4243}`, 1)), post},
+		// The marker must be a whole line, not a part of one.
+		"marker inside a line": {open, comments(1, own("x "+commentMarker+" y")), post},
+		// On a busy pull request the newest page is read first, past 200 comments too.
+		"marker on page 12": {open, lastPage(comments(1, fullPage(person("other"))...), 12),
+			comments(12, own("x\n"+commentMarker))},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, steps...)
-			if err := h.p.CommentChangeRequest(ctx, 12, commentMarker, "note "+commentMarker); err != nil {
+			if err := h.p.CommentChangeRequest(ctx, 12, commentMarker, "note\n"+commentMarker); err != nil {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// A comment deleted on page 1 during the search moves the first comment of page 2 onto page 1, which was read
+// already: page 1 is read once more at the end, so the App's reply there is found and not posted again.
+func TestCommentChangeRequestFindsAMarkerMovedOntoPageOne(t *testing.T) {
+	moved := append(fullPage(person("other"))[1:], own("note\n"+commentMarker))
+	h := newHarness(t, get("/pulls/12", "pull_open.json"), lastPage(comments(1, fullPage(person("other"))...), 2),
+		comments(2), comments(1, moved...))
+	if err := h.p.CommentChangeRequest(ctx, 12, commentMarker, "note\n"+commentMarker); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCommentChangeRequestFailsClosedPastTheBound(t *testing.T) {
+	last := maxCommentPages + 5
+	steps := []step{get("/pulls/12", "pull_open.json"), lastPage(comments(1, fullPage(person("other"))...), last)}
+	for page := last; page > last-maxCommentPages+1; page-- {
+		steps = append(steps, comments(page, fullPage(person("other"))...))
+	}
+	h := newHarness(t, steps...)
+	err := h.p.CommentChangeRequest(ctx, 12, commentMarker, "note\n"+commentMarker)
+	if !errors.Is(err, providers.ErrTooManyComments) {
+		t.Fatalf("got %v, want ErrTooManyComments and no post", err)
+	}
+	assertSafe(t, err)
+}
+
+func TestCommentChangeRequestRechecksTheMarkerBeforeAnotherPost(t *testing.T) {
+	open := get("/pulls/12", "pull_open.json")
+	lost := commentPost()
+	lost.status = http.StatusBadGateway
+	// The answer of the post was lost: the comment may exist while the list does not show it yet, so the call
+	// neither looks again at once nor posts again; it returns the failure for a later call.
+	h := newHarness(t, open, comments(1), lost)
+	if err := h.p.CommentChangeRequest(ctx, 12, commentMarker, "note\n"+commentMarker); !providers.IsRetryable(err) {
+		t.Fatalf("got %v, want a retryable error and no second post", err)
+	}
+	if len(h.sleeps) != 0 {
+		t.Errorf("waited %v within the call", h.sleeps)
+	}
+	// The post went through: the next call finds the marker and posts nothing.
+	h = newHarness(t, open, comments(1, own("note\n"+commentMarker)))
+	if err := h.p.CommentChangeRequest(ctx, 12, commentMarker, "note\n"+commentMarker); err != nil {
+		t.Fatal(err)
+	}
+	// It was not posted: the next call looks for the marker, then posts once.
+	h = newHarness(t, open, comments(1), commentPost())
+	if err := h.p.CommentChangeRequest(ctx, 12, commentMarker, "note\n"+commentMarker); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1489,12 +1581,17 @@ func TestCommentChangeRequestRefuses(t *testing.T) {
 		"foreign": {13, []step{get("/pulls/13", "pull_foreign.json")}, nil},
 		"comments unreadable": {12, []step{get("/pulls/12", "pull_open.json"),
 			status(http.MethodGet, "/issues/12/comments", http.StatusForbidden, fxForbidden)}, providers.IsForbidden},
+		"malformed Link": {12, []step{get("/pulls/12", "pull_open.json"), func() step {
+			st := comments(1, fullPage(person("other"))...)
+			st.header = map[string]string{"Link": `<https://api.github.com/x?page=2>; rel="next"`}
+			return st
+		}()}, nil},
 		"failed": {12, []step{get("/pulls/12", "pull_open.json"), comments(1),
 			status(http.MethodPost, "/issues/12/comments", http.StatusForbidden, fxForbidden)}, providers.IsForbidden},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, c.steps...)
-			err := h.p.CommentChangeRequest(ctx, c.number, commentMarker, "note "+commentMarker)
+			err := h.p.CommentChangeRequest(ctx, c.number, commentMarker, "note\n"+commentMarker)
 			if err == nil || (c.class != nil && !c.class(err)) {
 				t.Fatalf("got %v", err)
 			}
@@ -1898,6 +1995,7 @@ func TestResponseBodyIsBounded(t *testing.T) {
 type leakyTokens struct{ err error }
 
 func (s leakyTokens) Token(context.Context) (auth.Token, error) { return auth.Token{}, s.err }
+func (s leakyTokens) AppID(context.Context) (int64, error)      { return 0, s.err }
 func (s leakyTokens) Repository() auth.Repository {
 	return auth.Repository{Owner: owner, Name: "fleet"}
 }
@@ -1938,6 +2036,12 @@ func TestTokenSourceErrorsAreReplaced(t *testing.T) {
 			if errors.Is(err, leak) {
 				t.Error("the token source error is reachable")
 			}
+			// The App's ID comes from the same source: its errors are replaced the same way, before any request.
+			err = p.CommentChangeRequest(ctx, 12, commentMarker, "note\n"+commentMarker)
+			if err == nil || errors.Is(err, leak) {
+				t.Fatalf("AppID error: %v", err)
+			}
+			assertSafe(t, err)
 		})
 	}
 }

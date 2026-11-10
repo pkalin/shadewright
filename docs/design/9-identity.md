@@ -24,7 +24,7 @@ In the cluster its ServiceAccount is read-only ([2.2.2](2-architecture.md#222-an
 
 **Why.** The private key never exists in the pod or in a Kubernetes Secret ([ADR-0006](../adr/0006-github-app-key-in-key-vault.md)). A compromised pod cannot copy the key out, but while it runs it can still sign with it ([threat model](../threat-model.md)).
 
-<span class="sw-status sw-planned">planned</span> The same identity and token serve the reviewer hints of [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md) for the code host. An integration other than the code host gets no access to this key: it belongs to a future `shadewright-coordinator` with its own credentials.
+<span class="sw-status sw-built">built</span> (not enabled in the shipped binary, design 2.3) The same identity and token serve the reviewer hints of [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md) for the code host. An integration other than the code host gets no access to this key: it belongs to a future `shadewright-coordinator` with its own credentials.
 
 **The JWT and the token.**
 
@@ -32,6 +32,7 @@ In the cluster its ServiceAccount is read-only ([2.2.2](2-architecture.md#222-an
 - The token request names the one repository and the five permissions of section 8.4 (the fifth, `checks: write`, for the merge gate of reviewer hints, [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md), since #539; GitHub refuses a token request that names a permission the App lacks).
 - The response is refused unless it lists exactly that repository.
 - The token is cached until 5 minutes before it expires, and concurrent callers share one refresh.
+- The App's numeric ID is read once per provider with `GET /app` under a JWT of its own, so one more Key Vault signature (`KeySign`), and then kept, since an App's ID never changes (#542). It is read the first time the executor comments on a pull request, before it looks for the comment's marker: only a comment the App's bot user posted (`performed_via_github_app.id` equal to that ID) counts, so a person cannot paste a marker to suppress a comment. When the read fails, nothing is posted.
 - The token prints as a placeholder, never as its value (`internal/providers/github/auth`).
 
 ## 9.3. Workload identity wiring

@@ -21,7 +21,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -161,7 +164,7 @@ func TestWatchFailedRefreshKeepsGoing(t *testing.T) {
 	}}
 	for _, output := range []string{outputJSON, outputText} {
 		calls = 0
-		w := watchOptions{interval: time.Second, output: output}
+		w := watchOptions{interval: time.Second, output: output, redraw: output == outputText}
 		out, errOut, _ := runWatch(t, watchClient(t, funcs), w, 2, nil)
 		if !strings.HasPrefix(errOut, "Error at 2026-11-06T12:00:00Z: listing Incidents: etcd down") ||
 			strings.Contains(errOut, "pwned") || strings.Count(errOut, "\n") != 1 {
@@ -173,6 +176,32 @@ func TestWatchFailedRefreshKeepsGoing(t *testing.T) {
 		if output == outputJSON && strings.Count(out, "\n") != 1 {
 			t.Errorf("json: %d lines, want 1 (the good refresh)", strings.Count(out, "\n"))
 		}
+		// In text, the failed refresh writes nothing to stdout: no header without a report, and on a terminal
+		// no clearing of the last good status.
+		if output == outputText && (strings.Count(out, clearScreen) != 1 || strings.Count(out, "Every 1s") != 1 ||
+			!strings.HasPrefix(out, clearScreen+"Every 1s, last read 2026-11-06T12:00:01Z")) {
+			t.Errorf("text: the failed refresh wrote to stdout:\n%q", out)
+		}
+	}
+}
+
+// TestWatchFailedFirstRefreshNoBlankLine: without a terminal, a good refresh after a failed first one starts
+// the output, with no blank line before it.
+func TestWatchFailedFirstRefreshNoBlankLine(t *testing.T) {
+	calls := 0
+	funcs := interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, l client.ObjectList,
+		opts ...client.ListOption) error {
+		if _, ok := l.(*remediationv1alpha1.IncidentList); ok {
+			calls++
+			if calls == 1 {
+				return apierrors.NewServiceUnavailable("down")
+			}
+		}
+		return c.List(ctx, l, opts...)
+	}}
+	out, _, _ := runWatch(t, watchClient(t, funcs), watchOptions{interval: time.Second, output: outputText}, 2, nil)
+	if !strings.HasPrefix(out, "Every 1s, last read 2026-11-06T12:00:01Z") {
+		t.Errorf("output does not start with the good refresh:\n%q", out)
 	}
 }
 
@@ -263,7 +292,8 @@ func TestWatchCancelBeforeWarning(t *testing.T) {
 	}
 }
 
-// TestWatchPrintsWarningOnce: the CRD version warning is printed once, after the first refresh.
+// TestWatchPrintsWarningOnce: without a redraw, the CRD version warning is printed once, after the first
+// refresh.
 func TestWatchPrintsWarningOnce(t *testing.T) {
 	warning := make(chan string, 1)
 	warning <- "Warning: the CRDs are from another release"
@@ -297,17 +327,51 @@ func TestWatchStdoutFailureEnds(t *testing.T) {
 	}
 }
 
-// TestWatchForbiddenListKeepsGoing: a list refused by RBAC is a failed refresh like any other.
-func TestWatchForbiddenListKeepsGoing(t *testing.T) {
-	funcs := interceptor.Funcs{List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList,
-		_ ...client.ListOption) error {
-		gr := schema.GroupResource{Group: remediationv1alpha1.GroupVersion.Group, Resource: incidentsResource}
-		return apierrors.NewForbidden(gr, "", errors.New("no list"))
+// TestWatchAccessDeniedEnds: a refresh refused as Forbidden or Unauthorized ends the watch with that error,
+// since waiting does not grant access; it is not printed on stderr too, the caller prints it.
+func TestWatchAccessDeniedEnds(t *testing.T) {
+	gr := schema.GroupResource{Group: remediationv1alpha1.GroupVersion.Group, Resource: incidentsResource}
+	for name, denied := range map[string]error{
+		"forbidden":    apierrors.NewForbidden(gr, "", errors.New("no list")),
+		"unauthorized": apierrors.NewUnauthorized("token expired"),
+	} {
+		funcs := interceptor.Funcs{List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList,
+			_ ...client.ListOption) error {
+			return denied
+		}}
+		ctx, cancel := context.WithCancel(t.Context())
+		clk := &fakeClock{now: testNow, refreshes: 3, cancel: cancel}
+		var stdout, stderr bytes.Buffer
+		err := watchStatus(ctx, watchClient(t, funcs), Options{Namespace: testNS},
+			watchOptions{interval: time.Second, output: outputText, redraw: true}, clk, nil, &stdout, &stderr)
+		if !errors.Is(err, denied) || len(clk.waits) != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Errorf("%s: err %v, waits %v, stdout %q, stderr %q", name, err, clk.waits, stdout.String(),
+				stderr.String())
+		}
+		cancel()
+	}
+}
+
+// TestWatchRepeatsWarningOnRedraw: on a terminal each redraw clears the CRD version warning, so it is printed
+// again under each refresh; a failed refresh does not clear the screen and does not repeat it.
+func TestWatchRepeatsWarningOnRedraw(t *testing.T) {
+	calls := 0
+	funcs := interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, l client.ObjectList,
+		opts ...client.ListOption) error {
+		if _, ok := l.(*remediationv1alpha1.IncidentList); ok {
+			calls++
+			if calls == 2 {
+				return apierrors.NewServiceUnavailable("down")
+			}
+		}
+		return c.List(ctx, l, opts...)
 	}}
-	w := watchOptions{interval: time.Second, output: outputText}
-	_, errOut, clk := runWatch(t, watchClient(t, funcs), w, 3, nil)
-	if strings.Count(errOut, "Error at") != 3 || len(clk.waits) != 3 {
-		t.Errorf("stderr %q, waits %v", errOut, clk.waits)
+	warning := make(chan string, 1)
+	warning <- "Warning: the CRDs are from another release"
+	w := watchOptions{interval: time.Second, output: outputText, redraw: true}
+	_, errOut, _ := runWatch(t, watchClient(t, funcs), w, 3, warning)
+	if n := strings.Count(errOut, "Warning:"); n != 2 {
+		t.Errorf("warning printed %d times, want 2 (one per redraw):\n%s", n, errOut)
 	}
 }
 
@@ -346,5 +410,74 @@ func TestParseStatusWatch(t *testing.T) {
 		if _, err := parseDoctor(args); err == nil {
 			t.Errorf("doctor %q succeeded", args)
 		}
+	}
+}
+
+// envSignalHelper makes the test binary run TestSignalHelper instead of skipping it.
+const envSignalHelper = "SHADEWRIGHT_TEST_SIGNAL_HELPER"
+
+// TestSignalHelper is not a test: run by TestSecondInterruptForceQuits in a child process, it waits for the
+// first interrupt to cancel the watch context and then hangs, as a read that ignores its context would.
+func TestSignalHelper(t *testing.T) {
+	if os.Getenv(envSignalHelper) != "1" {
+		t.Skip("helper process only")
+	}
+	ctx, stop := interruptContext(context.Background())
+	defer stop()
+	_, _ = os.Stdout.WriteString("ready\n")
+	<-ctx.Done()
+	_, _ = os.Stdout.WriteString("cancelled\n")
+	time.Sleep(time.Minute)
+	os.Exit(3)
+}
+
+// TestSecondInterruptForceQuits: the first Ctrl-C cancels the watch; a second one ends the process even when
+// a call does not return, because the first restores the default handling.
+func TestSecondInterruptForceQuits(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSignalHelper$") // #nosec G702 -- reruns this test binary
+	cmd.Env = append(os.Environ(), envSignalHelper+"=1")
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill() }()
+	readLine := func(want string) {
+		t.Helper()
+		buf := make([]byte, 0, 64)
+		b := make([]byte, 1)
+		for !strings.HasSuffix(string(buf), "\n") {
+			if _, err := out.Read(b); err != nil {
+				t.Fatalf("waiting for %q: %v (read %q)", want, err, buf)
+			}
+			buf = append(buf, b[0])
+		}
+		if got := strings.TrimSpace(string(buf)); got != want {
+			t.Fatalf("child wrote %q, want %q", got, want)
+		}
+	}
+	readLine("ready")
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	readLine("cancelled")
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("child ended with %v, want killed by the interrupt", err)
+		}
+		if ws, ok := exitErr.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGINT {
+			t.Errorf("child ended with %v, want killed by SIGINT", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second interrupt did not end the process")
 	}
 }

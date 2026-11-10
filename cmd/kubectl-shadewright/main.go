@@ -38,9 +38,7 @@ import (
 	"io"
 	"math"
 	"os"
-	"os/signal"
 	"strconv"
-	"syscall"
 	"time"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -84,7 +82,7 @@ Flags:
                               ("30s", "1m") or 0 for no limit (default 30s); with -w, for each refresh
   -w, --watch                 status only: read again every --interval and redraw (with -o json, one JSON
                               document per line) until Ctrl-C; a failed refresh prints its error and the
-                              next one runs
+                              next one runs, a refresh refused as Forbidden or Unauthorized stops it
       --interval dur          time between refreshes with -w, seconds or a duration, at least 1s (default 5s)
 
 Exit status:
@@ -280,8 +278,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if f.watch {
-		// A watch runs until Ctrl-C (or SIGTERM) and gives each refresh its own time limit instead.
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		// A watch runs until Ctrl-C (or SIGTERM; a second one force-quits) and gives each refresh its own time
+		// limit instead.
+		ctx, stop := interruptContext(context.Background())
 		defer stop()
 		w := watchOptions{interval: f.interval, timeout: f.timeout, output: f.output, redraw: isTerminal(stdout)}
 		return watchStatus(ctx, client.Reader(c), Options{Namespace: namespace, AllNamespaces: f.allNamespaces},

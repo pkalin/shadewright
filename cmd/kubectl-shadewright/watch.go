@@ -22,8 +22,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -50,6 +53,23 @@ type realClock struct{}
 func (realClock) Now() time.Time                         { return time.Now() }
 func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
 
+// interruptContext returns a context cancelled by the first Ctrl-C or SIGTERM, which ends the watch. That
+// first signal also restores the default handling before the context is done, so a second one ends the
+// process even when a call does not return. stop releases the signals.
+func interruptContext(parent context.Context) (context.Context, context.CancelFunc) {
+	sctx, stopSignals := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(parent)
+	go func() {
+		<-sctx.Done()
+		stopSignals()
+		cancel()
+	}()
+	return ctx, func() {
+		stopSignals()
+		cancel()
+	}
+}
+
 // watchOptions are the settings of `status --watch`.
 type watchOptions struct {
 	// interval is the time from the end of one refresh to the start of the next.
@@ -67,12 +87,17 @@ type watchOptions struct {
 // is done (Ctrl-C), and then returns nil. It polls with the same get and list reads as a single status: a
 // Kubernetes watch would need the watch verb, which the plugin's documented role does not grant. Each refresh
 // is a whole new read, so there is no watch stream to drop or resume and no event to lose or repeat. A refresh
-// that fails writes its error to stderr and the next one runs; only a failed write to stdout ends the watch
-// with an error. warning, when not nil, carries the CRD version warning, printed once after the first refresh.
-// It starts no goroutine of its own.
+// that fails writes its error to stderr, nothing to stdout, and the next one runs. A refresh refused as
+// Forbidden or Unauthorized ends the watch with that error, since waiting does not grant access, and so does a
+// failed write to stdout. warning, when not nil, carries the CRD version warning, printed after the first
+// refresh and, when redrawing, again after each refresh that cleared the screen. It starts no goroutine of its
+// own.
 func watchStatus(ctx context.Context, c client.Reader, opts Options, w watchOptions, clk clock,
 	warning <-chan string, stdout, stderr io.Writer) error {
-	for first := true; ; first = false {
+	warnMsg := ""
+	// printed is whether a refresh was written to stdout, so the next one is set apart from it.
+	printed := false
+	for {
 		now := clk.Now()
 		rctx, cancel := ctx, context.CancelFunc(func() {})
 		if w.timeout > 0 {
@@ -84,19 +109,26 @@ func watchStatus(ctx context.Context, c client.Reader, opts Options, w watchOpti
 			// Interrupted during the reads: their error is only the cancellation, so print nothing.
 			return nil
 		}
-		if err := writeRefresh(stdout, stderr, w, report, err, now, first); err != nil {
+		if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
 			return err
 		}
+		if werr := writeRefresh(stdout, stderr, w, report, err, now, printed); werr != nil {
+			return werr
+		}
+		printed = printed || err == nil
 		if warning != nil {
 			select {
-			case msg := <-warning:
-				if msg != "" {
-					_, _ = fmt.Fprintln(stderr, msg)
-				}
+			case warnMsg = <-warning:
 			case <-ctx.Done():
 				return nil
 			}
 			warning = nil
+			if warnMsg != "" {
+				_, _ = fmt.Fprintln(stderr, warnMsg)
+			}
+		} else if w.redraw && err == nil && warnMsg != "" {
+			// This refresh cleared the screen, and the warning with it.
+			_, _ = fmt.Fprintln(stderr, warnMsg)
 		}
 		select {
 		case <-ctx.Done():
@@ -107,17 +139,18 @@ func watchStatus(ctx context.Context, c client.Reader, opts Options, w watchOpti
 }
 
 // writeRefresh writes one refresh: in text, a header with the time and the report (after clearing the screen
-// when redrawing, else after a blank line from the previous one); in JSON, the report as one line, so the
-// output is newline-delimited JSON. A failed collect writes its error, with the time, to stderr only, so stdout
-// stays valid JSON. It returns only the error of a write to stdout.
+// when redrawing, else after a blank line when an earlier refresh was printed); in JSON, the report as one
+// line, so the output is newline-delimited JSON. A failed collect writes its error, with the time, to stderr
+// only, so stdout stays valid JSON and, in text, the last good status stays on the screen. It returns only the
+// error of a write to stdout.
 func writeRefresh(stdout, stderr io.Writer, w watchOptions, report *Report, collectErr error, now time.Time,
-	first bool) error {
+	printed bool) error {
 	stamp := now.Format(time.RFC3339)
+	if collectErr != nil {
+		_, _ = fmt.Fprintf(stderr, "Error at %s: %s\n", stamp, clean(collectErr.Error(), maxMessage))
+		return nil
+	}
 	if w.output == outputJSON {
-		if collectErr != nil {
-			_, _ = fmt.Fprintf(stderr, "Error at %s: %s\n", stamp, clean(collectErr.Error(), maxMessage))
-			return nil
-		}
 		b, err := json.Marshal(report)
 		if err != nil {
 			return err
@@ -129,15 +162,11 @@ func writeRefresh(stdout, stderr io.Writer, w watchOptions, report *Report, coll
 	switch {
 	case w.redraw:
 		header = clearScreen + header
-	case !first:
+	case printed:
 		header = "\n" + header
 	}
 	if _, err := io.WriteString(stdout, header); err != nil {
 		return err
-	}
-	if collectErr != nil {
-		_, _ = fmt.Fprintf(stderr, "Error at %s: %s\n", stamp, clean(collectErr.Error(), maxMessage))
-		return nil
 	}
 	return renderText(stdout, report, now)
 }

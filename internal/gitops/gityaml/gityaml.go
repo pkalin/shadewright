@@ -59,7 +59,24 @@ var (
 	ErrDirective = errors.New("YAML directives (lines starting with %) are not supported")
 	// ErrTooManyNodes is input of more than MaxNodes YAML nodes, as [Nodes] counts them.
 	ErrTooManyNodes = fmt.Errorf("holds more than %d YAML nodes", MaxNodes)
+	// ErrTooManyKeys is a mapping of more than MaxMappingKeys keys.
+	ErrTooManyKeys = fmt.Errorf("a mapping holds more than %d keys", MaxMappingKeys)
+	// ErrDuplicateKey is a scalar key that a mapping already holds.
+	ErrDuplicateKey = errors.New("a mapping holds a key twice")
 )
+
+// MaxMappingKeys is the most keys [Objects] accepts in one YAML mapping. The parsers that decode a file after
+// the check into Go values, go.yaml.in/yaml/v3 in the patcher and kustomize's fork of it in the render, look
+// for a duplicate key by comparing each key with every key after it in the same mapping, so the time is
+// quadratic in the keys of one mapping: a mapping of 43,000 keys, within MaxNodes, took 4.3 s in the patcher's
+// decode and 6.3 s in a render, about ten times that under the race detector (#608). The widest mapping in
+// about 500 YAML files over 20 KB (this repository's CRDs, the CRDs in the Go module cache, a 353 KB Prometheus
+// operator CRD among them, and Kubernetes API test fixtures; surveyed 2026-11-10) held 76 keys, and the widest
+// in the lab fleet and chart holds 21, so 256 leaves room for real files and keeps
+// the comparisons of one mapping under 33,000. Duplicate keys are refused before any decode too
+// ([ErrDuplicateKey]): the decoders build an error text, holding the key, for every pair of equal keys, so 2,048
+// copies of one long key took seconds and gigabytes of allocations.
+const MaxMappingKeys = 256
 
 // Error is a refusal of [Objects]: its cause and the line of the file it is at, counted from 1, or 0 when it
 // is about the whole file.
@@ -125,6 +142,11 @@ func Parts(data []byte) []Part {
 //   - input of more than [MaxNodes] YAML nodes as [Nodes] counts them, before any part is decoded: a parser
 //     builds the whole tree of a document before anything looks at it, so a dense document of 1 MiB would
 //     take more heap than the executor has (#595);
+//   - a mapping of more than [MaxMappingKeys] keys, or one that holds a scalar key twice, found in the node
+//     tree of each part before anything decodes it into Go values: the duplicate key check of those decoders
+//     is quadratic in the keys of one mapping and builds an error for every pair of equal keys, so a mapping
+//     of tens of thousands of keys, or of a few thousand copies of one long key, held the CPU for seconds
+//     (#608); the decoders refuse a duplicate key anyway;
 //   - a part that does not parse, which kustomize could not build either.
 //
 // Each part between separators is decoded as kustomize decodes it, and every document in it counts: 1 for a
@@ -216,30 +238,103 @@ func objectsIn(part string, limit int) (int, *Error) {
 			}
 			return 0, &Error{Line: l, Err: ErrNotParse}
 		}
-		if a := anchored(&doc); a != nil {
-			return 0, &Error{Line: a.Line, Err: ErrAnchor}
+		if a, cause := refused(&doc); a != nil {
+			return 0, &Error{Line: a.Line, Err: cause}
 		}
 		n = min(n+listObjects(&doc, limit), limit+1)
 	}
 	return max(n, 1), nil
 }
 
-// anchored returns the first node below n that has an anchor, is an alias, or is a merge key: a mapping key
-// with the merge tag (a plain "<<" has it too) or a "<<" key however quoted, or nil. A "<<" value is plain
-// text: only a key merges.
-func anchored(n *yaml.Node) *yaml.Node {
+// refused returns the first node below n that the check refuses, in document order, and the cause, or nil:
+// a node that has an anchor, is an alias, or is a merge key (a mapping key with the merge tag, which a plain
+// "<<" has too, or a "<<" key however quoted), with [ErrAnchor]; a mapping of more than [MaxMappingKeys] keys
+// with [ErrTooManyKeys]; a scalar key that has the text of an earlier key of the same mapping (as the decoders'
+// own check and kustomize's field lookup compare keys, whatever the tag or quoting) or its resolved value
+// ([keyOf]), with [ErrDuplicateKey]. A "<<" value is plain text: only a key merges.
+func refused(n *yaml.Node) (*yaml.Node, error) {
 	if n.Anchor != "" || n.Kind == yaml.AliasNode {
-		return n
+		return n, ErrAnchor
+	}
+	var keys map[string]struct{}
+	if n.Kind == yaml.MappingNode {
+		if len(n.Content) > 2*MaxMappingKeys {
+			return n, ErrTooManyKeys
+		}
+		if len(n.Content) > 2 {
+			keys = make(map[string]struct{}, len(n.Content))
+		}
 	}
 	for i, c := range n.Content {
-		if n.Kind == yaml.MappingNode && i%2 == 0 && (c.ShortTag() == "!!merge" || c.Kind == yaml.ScalarNode && c.Value == "<<") {
-			return c
+		if n.Kind == yaml.MappingNode && i%2 == 0 {
+			if c.ShortTag() == "!!merge" || c.Kind == yaml.ScalarNode && c.Value == "<<" {
+				return c, ErrAnchor
+			}
+			if c.Kind == yaml.ScalarNode && keys != nil {
+				// Text and resolved value in one set, told apart by their first byte.
+				t, r := "t"+c.Value, "r"+keyOf(c)
+				_, dupT := keys[t]
+				_, dupR := keys[r]
+				if dupT || dupR {
+					return c, ErrDuplicateKey
+				}
+				keys[t], keys[r] = struct{}{}, struct{}{}
+			}
 		}
-		if a := anchored(c); a != nil {
-			return a
+		if a, cause := refused(c); a != nil {
+			return a, cause
 		}
 	}
-	return nil
+	return nil, nil
+}
+
+// keyOf returns the resolved value refused compares a scalar key by, besides its text: two keys are one key
+// when a decoder may give them the same map key, so that one value silently replaces the other. A key with the
+// string tag (quoted, plain text that resolves to a string, or tagged !!str) is its text. Any other key is its
+// value as go.yaml.in/yaml/v3 decodes it, written as sigs.k8s.io/yaml writes a JSON object key: "0x1" and "1"
+// are both "1", "~" and "null" both "null", "1.0" and "1" both "1". go.yaml.in/yaml/v3 keeps the last value of
+// "0x1" and "1" without an error, and sigs.k8s.io/yaml that of "1.0" and "1", or of "0x1" and "1" quoted. The
+// tag is left out on purpose, so a plain 1 and a quoted "1" are one key. It errs towards refusing: two NaN
+// keys are one key, and a key it cannot decode is its tag and text. YAML 1.1 boolean words ("on", "yes") stay
+// strings, as go.yaml.in/yaml/v3 and kustomize read them; sigs.k8s.io/yaml refuses "on" next to "true" itself.
+func keyOf(k *yaml.Node) string {
+	tag := k.ShortTag()
+	if tag == "!!str" {
+		return k.Value
+	}
+	var v any
+	if err := k.Decode(&v); err != nil {
+		return tag + " " + k.Value
+	}
+	switch v := v.(type) {
+	case nil:
+		return "null"
+	case bool:
+		return strconv.FormatBool(v)
+	case int:
+		return strconv.Itoa(v)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case uint64:
+		return strconv.FormatUint(v, 10)
+	case float64:
+		// As sigs.k8s.io/yaml writes a float key (yaml.convertToJSONableObject): 32-bit precision, and YAML's
+		// names for infinities and NaN.
+		switch f := strconv.FormatFloat(v, 'g', -1, 32); f {
+		case "+Inf":
+			return ".inf"
+		case "-Inf":
+			return "-.inf"
+		case "NaN":
+			return ".nan"
+		default:
+			return f
+		}
+	case string:
+		return v
+	default:
+		return fmt.Sprint(v)
+	}
 }
 
 // listObjects counts the objects kustomize may make of n, which holds no alias (kustomize api

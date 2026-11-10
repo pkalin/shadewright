@@ -31,12 +31,13 @@ import (
 // inline patch, for the refusal's detail. It refuses with InvalidYAML what [gityaml.Objects] refuses: input
 // that is not UTF-8, YAML anchors, aliases and merge keys, a separator line with more than a comment after
 // "---", and a part that does not parse; and with TooLarge a file of more than gityaml.MaxNodes YAML nodes,
-// before any tree of it is built (#595).
+// before any tree of it is built (#595), or a mapping of more than gityaml.MaxMappingKeys keys, before
+// kustomize decodes it (#608).
 // Once the count is over MaxBuildDocuments the rest of the input is not read, nor checked: the caller must
 // refuse it.
 func documents(name string, data []byte) (int, error) {
 	n, err := gityaml.Objects(data, MaxBuildDocuments)
-	if errors.Is(err, gityaml.ErrTooManyNodes) {
+	if errors.Is(err, gityaml.ErrTooManyNodes) || errors.Is(err, gityaml.ErrTooManyKeys) {
 		return 0, refuse(ReasonTooLarge, name+" "+err.Error())
 	}
 	if err != nil {

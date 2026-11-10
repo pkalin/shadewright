@@ -128,18 +128,18 @@ const (
 	// generators, components, transformers, a namespace or name prefix, or remote resources
 	// (NeedsIntervention).
 	ReasonUnsupportedKustomization Reason = "UnsupportedKustomization"
-	// ReasonFileNotReadable means a file the build needs is missing, too large or not valid YAML
-	// (NeedsIntervention).
+	// ReasonFileNotReadable means a file the build needs is missing, too large or not valid YAML, or
+	// repeats a key in one mapping (#608) (NeedsIntervention).
 	ReasonFileNotReadable Reason = "FileNotReadable"
 	// ReasonTooManyFiles means the build is deeper or wider than the mapping reads: too many nested
 	// directories (MaxDepth, or MaxListDepth below a path without a kustomization file), manifests, file reads
 	// and listings, or a directory over providers.MaxDirEntries entries (NeedsIntervention).
 	ReasonTooManyFiles Reason = "TooManyFiles"
 	// ReasonInputTooLarge means the build holds more than the mapping reads in all: more than MaxTotalBytes
-	// of files or MaxDocuments YAML documents, or a file of more than gityaml.MaxNodes YAML nodes
-	// (NeedsIntervention). A file over what is left of the byte budget
-	// is refused before it is downloaded or cached, even when it is also over MaxFileBytes, so a cold and a
-	// warm cache give the same reason.
+	// of files or MaxDocuments YAML documents, or a file of more than gityaml.MaxNodes YAML nodes or with a
+	// mapping of more than gityaml.MaxMappingKeys keys (NeedsIntervention). A file over what is left of the
+	// byte budget is refused before it is downloaded or cached, even when it is also over MaxFileBytes, so a
+	// cold and a warm cache give the same reason.
 	ReasonInputTooLarge Reason = "InputTooLarge"
 	// ReasonDeclarationNotFound means no document declares the object, for example because a generator or
 	// patch produces it (NeedsIntervention).

@@ -25,8 +25,9 @@ limitations under the License.
 // Before anything decodes it, the file passes the fail-closed check of internal/gitops/gityaml, as in the
 // source mapping and the semantic diff: input that is not UTF-8, YAML anchors, aliases and merge keys anywhere
 // in the file, text after "---" on a separator line other than a comment, a line break other than LF or CRLF,
-// YAML directives, more than sourcemap.MaxDocuments objects and more than [MaxNodes] YAML nodes (counted from
-// the bytes, before any tree is built) are refused with [ReasonInvalidYAML], so no decode expands an alias and
+// YAML directives, more than sourcemap.MaxDocuments objects, more than [MaxNodes] YAML nodes (counted from
+// the bytes, before any tree is built) and a mapping of more than gityaml.MaxMappingKeys keys (whose duplicate
+// key check is quadratic, #608) are refused with [ReasonInvalidYAML], so no decode expands an alias and
 // no tree holds more than MaxNodes nodes (#595). The file is then read one document at a time, keeping only
 // the node tree of the target document and the decoded values of the others; the verification reuses those
 // values instead of parsing the original again.

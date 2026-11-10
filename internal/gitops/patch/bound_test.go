@@ -18,6 +18,7 @@ package patch
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	goruntime "runtime"
 	"runtime/debug"
@@ -193,6 +194,27 @@ func keysFile(t *testing.T, n int) []byte {
 		strings.Repeat("{a,b,c,d,e,f,g,h},", n) + "{a}]}\n")
 }
 
+// A file whose mapping repeats one long key is refused by the YAML check, before the decode's duplicate key
+// check, in well under a second (#608). Before, that check built an error holding the key for every pair of
+// equal keys: 2,048 copies of a 480-byte key took 4.7 s and 2.4 GB of allocations.
+func TestDuplicateKeysRefusedInTime(t *testing.T) {
+	var b strings.Builder
+	b.Write(read(t, "deployment.yaml"))
+	b.WriteString("---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: big\n  namespace: orders\ndata:\n")
+	b.WriteString(strings.Repeat("  "+strings.Repeat("k", 480)+": x\n", gityaml.MaxMappingKeys))
+	deadline.Within(t, 30*time.Second, func(t *testing.T) {
+		start := time.Now()
+		_, err := SetContainerMemoryLimit([]byte(b.String()), deployment, mem("web", "512Mi", "768Mi"))
+		took := time.Since(start)
+		if !errors.Is(err, ErrInvalidYAML) || !strings.Contains(err.Error(), gityaml.ErrDuplicateKey.Error()) {
+			t.Fatalf("got %v, want %v naming the duplicate key", err, ErrInvalidYAML)
+		}
+		if took > time.Second {
+			t.Errorf("the refusal took %s, want well under a second", took)
+		}
+	})
+}
+
 // atBudget returns the most items of file that the node count accepts.
 func atBudget(t *testing.T, file func(*testing.T, int) []byte) int {
 	t.Helper()
@@ -251,4 +273,46 @@ func TestVerifyKeepsTheOriginal(t *testing.T) {
 	if !reflect.DeepEqual(found.values, fresh.values) {
 		t.Error("verify changed the values of the original it compares with")
 	}
+}
+
+// wideFile returns the Deployment of testdata and a ConfigMap whose data is one block mapping of n distinct
+// keys without values, three counted nodes for each, so the most keys one mapping can hold within MaxNodes.
+func wideFile(t *testing.T, n int) []byte {
+	t.Helper()
+	var b strings.Builder
+	b.Write(read(t, "deployment.yaml"))
+	b.WriteString("---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: big\n  namespace: orders\ndata:\n")
+	for i := range n {
+		fmt.Fprintf(&b, "  k%d:\n", i)
+	}
+	return []byte(b.String())
+}
+
+// A file within MaxNodes whose one mapping holds as many keys as the node count lets it is refused in well under
+// a second (#608). Before, the duplicate key check of the decode compared every pair of keys: about 43,000 keys
+// took 4 s of CPU, and about ten times that under the race detector. A mapping of gityaml.MaxMappingKeys keys
+// is still patched.
+func TestWideMappingRefusedInTime(t *testing.T) {
+	p := mem("web", "512Mi", "768Mi")
+	t.Run("at the node budget", func(t *testing.T) {
+		deadline.Within(t, 30*time.Second, func(t *testing.T) {
+			in := wideFile(t, atBudget(t, wideFile))
+			start := time.Now()
+			_, err := SetContainerMemoryLimit(in, deployment, p)
+			took := time.Since(start)
+			if !errors.Is(err, ErrInvalidYAML) || !strings.Contains(err.Error(), gityaml.ErrTooManyKeys.Error()) {
+				t.Fatalf("got %v, want %v naming the keys", err, ErrInvalidYAML)
+			}
+			if took > time.Second {
+				t.Errorf("the refusal took %s, want well under a second", took)
+			}
+		})
+	})
+	t.Run("at the key bound", func(t *testing.T) {
+		deadline.Within(t, 30*time.Second, func(t *testing.T) {
+			if _, err := SetContainerMemoryLimit(wideFile(t, gityaml.MaxMappingKeys), deployment, p); err != nil {
+				t.Fatalf("got %v, want the file patched", err)
+			}
+		})
+	})
 }

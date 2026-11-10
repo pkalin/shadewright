@@ -558,9 +558,9 @@ func (d *documents) read() ([]byte, int, error) {
 }
 
 // refusedReason is the reason for a file [gityaml.Objects] refuses: InputTooLarge for one of too many YAML
-// nodes, as for too many documents, else FileNotReadable.
+// nodes or a mapping of too many keys (#608), as for too many documents, else FileNotReadable.
 func refusedReason(err error) Reason {
-	if errors.Is(err, gityaml.ErrTooManyNodes) {
+	if errors.Is(err, gityaml.ErrTooManyNodes) || errors.Is(err, gityaml.ErrTooManyKeys) {
 		return ReasonInputTooLarge
 	}
 	return ReasonFileNotReadable

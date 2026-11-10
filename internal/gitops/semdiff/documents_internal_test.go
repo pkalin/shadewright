@@ -24,6 +24,8 @@ import (
 	"unicode/utf16"
 
 	"sigs.k8s.io/kustomize/api/provider"
+
+	"github.com/pkalin/shadewright/internal/gitops/gityaml"
 )
 
 // kustomizeObjects returns how many objects kustomize reads from data, or false when it refuses it.
@@ -63,7 +65,6 @@ func TestDocumentsBoundWhatKustomizeReads(t *testing.T) {
 			"\n", 5},
 		"escaped kind":       {"\"k\\x69nd\": \"Config\\x4dapList\"\n\"\\x69tems\": [" + cm("a") + ", " + cm("b") + "]\n", 3},
 		"items as a mapping": {"kind: List\nitems: {a: " + cm("a") + ", b: " + cm("b") + "}\n", 5},
-		"two kind keys":      {"kind: ConfigMap\nkind: List\nitems: [" + cm("a") + "]\n", 2},
 		"a quoted << value":  {"kind: ConfigMap\nmetadata: {name: a}\ndata: {x: \"<<\"}\n", 1},
 		// Only a key merges: a plain "<<" value has the merge tag but is plain text to kustomize.
 		"a plain << value":     {"kind: ConfigMap\nmetadata: {name: a}\ndata: {operator: <<}\n", 1},
@@ -165,6 +166,34 @@ func TestDocumentsRefuseTooManyNodes(t *testing.T) {
 	}
 }
 
+// A mapping of more than gityaml.MaxMappingKeys keys is refused with TooLarge before kustomize decodes it, whose
+// duplicate key check is quadratic in the keys of one mapping (#608).
+func TestDocumentsRefuseWideMapping(t *testing.T) {
+	in := []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: big\ndata:\n" +
+		strings.Repeat("  k:\n", gityaml.MaxMappingKeys+1))
+	_, err := documents("f.yaml", in)
+	if !errors.Is(err, ErrTooLarge) || !strings.Contains(err.Error(), "f.yaml line 6: a mapping holds more than 256 keys") {
+		t.Fatalf("documents: %v, want TooLarge naming the file, the line and the keys", err)
+	}
+}
+
+// A mapping that repeats a key is refused with InvalidYAML before kustomize decodes it, whose duplicate key check
+// builds an error holding the key for every pair of equal keys (#608): 2,048 copies of a 480-byte key took 1.5 s
+// and 911 MB of allocations in a render.
+func TestDocumentsRefuseDuplicateKey(t *testing.T) {
+	in := []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: big\ndata:\n" +
+		strings.Repeat("  "+strings.Repeat("k", 480)+": x\n", gityaml.MaxMappingKeys))
+	_, err := documents("f.yaml", in)
+	if !errors.Is(err, ErrInvalidYAML) || !strings.Contains(err.Error(), "f.yaml line 7: "+gityaml.ErrDuplicateKey.Error()) {
+		t.Fatalf("documents: %v, want InvalidYAML naming the file, the line and the duplicate key", err)
+	}
+	// Two "kind" keys, which the count of a List would have had to read both of.
+	_, err = documents("f.yaml", []byte("kind: ConfigMap\nkind: List\nitems: ["+cm("a")+"]\n"))
+	if !errors.Is(err, ErrInvalidYAML) || !strings.Contains(err.Error(), "f.yaml line 2: "+gityaml.ErrDuplicateKey.Error()) {
+		t.Fatalf("documents: %v, want InvalidYAML for two kind keys", err)
+	}
+}
+
 func TestDocumentsStopAtTheBudget(t *testing.T) {
 	for name, in := range map[string]string{
 		"separators": strings.Repeat("\n---", 3*MaxBuildDocuments),
@@ -181,8 +210,8 @@ func TestDocumentsStopAtTheBudget(t *testing.T) {
 	}
 }
 
-// FuzzDocuments checks that documents never panics, refuses only with InvalidYAML or, for too many YAML nodes,
-// TooLarge, and never counts fewer
+// FuzzDocuments checks that documents never panics, refuses only with InvalidYAML or, for too many YAML nodes
+// or keys in one mapping, TooLarge, and never counts fewer
 // objects than kustomize reads from bytes it accepts. Every input reaches kustomize: anchors are refused, so
 // nothing accepted expands.
 func FuzzDocuments(f *testing.F) {
@@ -196,8 +225,10 @@ func FuzzDocuments(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		got, err := documents("f.yaml", data)
 		if err != nil {
-			if !errors.Is(err, ErrInvalidYAML) && (!errors.Is(err, ErrTooLarge) || !strings.Contains(err.Error(), "YAML nodes")) {
-				t.Fatalf("documents(%q): %v, want only InvalidYAML or TooLarge for the nodes", data, err)
+			if !errors.Is(err, ErrInvalidYAML) && (!errors.Is(err, ErrTooLarge) ||
+				!strings.Contains(err.Error(), gityaml.ErrTooManyNodes.Error()) &&
+					!strings.Contains(err.Error(), gityaml.ErrTooManyKeys.Error())) {
+				t.Fatalf("documents(%q): %v, want only InvalidYAML or TooLarge for the nodes or keys", data, err)
 			}
 			return
 		}

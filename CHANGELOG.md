@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.4.0](https://github.com/pkalin/shadewright/compare/v0.3.1...v0.4.0) (2026-11-10)
+
+
+### Features
+
+* add kubectl shadewright doctor for read-only install checks ([#625](https://github.com/pkalin/shadewright/issues/625)) ([5b7a233](https://github.com/pkalin/shadewright/commit/5b7a23321877e9382009ea883942698ce7fa66da))
+* add kubectl shadewright explain for one request or Incident ([#622](https://github.com/pkalin/shadewright/issues/622)) ([fa275e0](https://github.com/pkalin/shadewright/commit/fa275e0175788a6382001c61f888fa87c32a8910))
+* add kubectl shadewright status --watch ([#628](https://github.com/pkalin/shadewright/issues/628)) ([7eed19a](https://github.com/pkalin/shadewright/commit/7eed19a5edf38448c5d0e8b615c60d4d16e410e7))
+* **analyzer:** back the delivery read tool with the Flux delivery verifier ([#633](https://github.com/pkalin/shadewright/issues/633)) ([c5af4ab](https://github.com/pkalin/shadewright/commit/c5af4ab3a269b565f422bdfec8758f37e49d6703))
+* **analyzer:** re-analyze a Proposed Incident with a pending reviewer hint ([#574](https://github.com/pkalin/shadewright/issues/574)) ([743c9f7](https://github.com/pkalin/shadewright/commit/743c9f76eea9fc8274b3d5e83095f88e34aab75e))
+* **api:** add reviewer hints and the supersede handoff to the API ([#569](https://github.com/pkalin/shadewright/issues/569)) ([c9008dc](https://github.com/pkalin/shadewright/commit/c9008dc4a4ecc5d35a3a5b62fb053db4ca433f4b)), closes [#535](https://github.com/pkalin/shadewright/issues/535)
+* **chart:** add an opt-in flag to turn reviewer hints on ([#635](https://github.com/pkalin/shadewright/issues/635)) ([e89633d](https://github.com/pkalin/shadewright/commit/e89633da6f7f71125eca7cce46b7b665fac825de))
+* **chart:** add optional standby replicas for the executor and the analyzer ([#570](https://github.com/pkalin/shadewright/issues/570)) ([12f03e6](https://github.com/pkalin/shadewright/commit/12f03e65dcc00a87986c0e1fe57241109809bc95))
+* **gitops:** accept /shadewright reanalyze hints, redact and pin them into the request status ([#582](https://github.com/pkalin/shadewright/issues/582)) ([18d26a0](https://github.com/pkalin/shadewright/commit/18d26a0e7e621cfbabcb31be37408f8fb086d566))
+* **gitops:** add the Flux delivery verifier and record the merge commit ([#565](https://github.com/pkalin/shadewright/issues/565)) ([113786b](https://github.com/pkalin/shadewright/commit/113786b695945b042151a0c58120ca1d6aaa61c5)), closes [#92](https://github.com/pkalin/shadewright/issues/92)
+* **gitops:** hand a pull request over from a superseded request to its replacement ([#588](https://github.com/pkalin/shadewright/issues/588)) ([9cb6aec](https://github.com/pkalin/shadewright/commit/9cb6aecfc262784a6bb8bbbf6343e452766cb346))
+* **gitops:** reply in the pull request with the outcome of a reviewer hint ([#634](https://github.com/pkalin/shadewright/issues/634)) ([c259e24](https://github.com/pkalin/shadewright/commit/c259e246563178afdfc7c1e34df03901685d9304))
+* **gitops:** report whether a merged change rolled out ([#573](https://github.com/pkalin/shadewright/issues/573)) ([dd72746](https://github.com/pkalin/shadewright/commit/dd727468bd2f1d8ebb2584ded3b578c290d84a6c))
+* **integrations:** read pull request comments, review bodies and the author's permission, bounded ([#572](https://github.com/pkalin/shadewright/issues/572)) ([9c59600](https://github.com/pkalin/shadewright/commit/9c5960086fae269466f2ca31cab263fea9609430))
+
+
+### Bug fixes
+
+* **analyzer:** ask for the failure's scope and its specific cause ([#637](https://github.com/pkalin/shadewright/issues/637)) ([f91a782](https://github.com/pkalin/shadewright/commit/f91a782c9ac2ef1025f35499ca05cf3c883276f2))
+* **analyzer:** keep redaction linear for bare short keys in flow form ([#583](https://github.com/pkalin/shadewright/issues/583)) ([5076c93](https://github.com/pkalin/shadewright/commit/5076c937145b310f402343b1713f9db68db158fe)), closes [#526](https://github.com/pkalin/shadewright/issues/526)
+* **analyzer:** redact base64 secrets that slashes cut into short parts ([#584](https://github.com/pkalin/shadewright/issues/584)) ([bad3260](https://github.com/pkalin/shadewright/commit/bad32606330c11b1327ddcac42ce356102c9e407))
+* **api:** refuse contradictory handoff states with CEL ([#603](https://github.com/pkalin/shadewright/issues/603)) ([b515547](https://github.com/pkalin/shadewright/commit/b515547df744ff650191fac37887d471330ea5a5))
+* **chart:** raise the executor's memory limit to 256Mi ([#617](https://github.com/pkalin/shadewright/issues/617)) ([603189b](https://github.com/pkalin/shadewright/commit/603189b17ae0c29eabcce0d985ad407f419d8f71))
+* **chart:** set GOMEMLIMIT below the memory limit of the executor and the analyzer ([#602](https://github.com/pkalin/shadewright/issues/602)) ([daaa263](https://github.com/pkalin/shadewright/commit/daaa263cc838c4f0002058a52666511eab33477e))
+* **chart:** set GOMEMLIMIT to 90 percent of the memory limit ([daaa263](https://github.com/pkalin/shadewright/commit/daaa263cc838c4f0002058a52666511eab33477e))
+* **gitops:** bound the patcher's YAML node trees ([#605](https://github.com/pkalin/shadewright/issues/605)) ([ffd222a](https://github.com/pkalin/shadewright/commit/ffd222a40fd180b6c7ee1b0498ca508cd7004b64))
+* **gitops:** bound what patches and transformers add to the render ([#610](https://github.com/pkalin/shadewright/issues/610)) ([03be1c7](https://github.com/pkalin/shadewright/commit/03be1c705e10519ae30f84653f8b9995df43db16))
+* **gitops:** count untargeted patches and bound keys merged into one mapping ([#629](https://github.com/pkalin/shadewright/issues/629)) ([8c194ae](https://github.com/pkalin/shadewright/commit/8c194ae79c2a1d5b7c5d431c35017dc7a5451b99))
+* **gitops:** end duplicate requests Superseded when another request's pull request is merged ([#616](https://github.com/pkalin/shadewright/issues/616)) ([a8a5c0c](https://github.com/pkalin/shadewright/commit/a8a5c0ccfcd56a4df463bfc6e19ce251849c3b21))
+* **gitops:** recognise the handed-over pull request after a merge commit or refused rewrites ([#607](https://github.com/pkalin/shadewright/issues/607)) ([cd57027](https://github.com/pkalin/shadewright/commit/cd570274de95dbc62f6ef69ae9ff2585c8b26592))
+* **gitops:** record the merge commit on the adopt path ([#613](https://github.com/pkalin/shadewright/issues/613)) ([79a91c4](https://github.com/pkalin/shadewright/commit/79a91c4ab061fb710dddcdba1ba8ac7f0b6fc5c9))
+* **gitops:** refuse quantities with huge exponents before parsing ([#598](https://github.com/pkalin/shadewright/issues/598)) ([58b4219](https://github.com/pkalin/shadewright/commit/58b4219226522522dc9c2f715feada3fe7119384))
+* **gitops:** refuse YAML anchors and aliases in the source mapping ([#599](https://github.com/pkalin/shadewright/issues/599)) ([5de6fe5](https://github.com/pkalin/shadewright/commit/5de6fe5828fc0ee43c46e68293a0557900905335))
+* **gitops:** refuse YAML mappings of more than 256 keys or with a duplicate key ([#624](https://github.com/pkalin/shadewright/issues/624)) ([2f22628](https://github.com/pkalin/shadewright/commit/2f22628735e7adc1d49a8758a1fc6d5a46769658))
+* **gitops:** surface and retry handoff errors instead of dropping them ([#604](https://github.com/pkalin/shadewright/issues/604)) ([55e78bc](https://github.com/pkalin/shadewright/commit/55e78bce1838d151cf07855184ce2200a31ad673))
+* link the AnotherRequestMerged and KustomizationReconciling reasons in explain ([#627](https://github.com/pkalin/shadewright/issues/627)) ([385f465](https://github.com/pkalin/shadewright/commit/385f465a10535539de2b8ae1df2aa29ec078482c))
+* redact current-format Entra client secrets whole ([#612](https://github.com/pkalin/shadewright/issues/612)) ([c07bbb3](https://github.com/pkalin/shadewright/commit/c07bbb39770392073a9c72a4b02271f926a8dc92))
+* reset condition Approved when the review check runs on a later head ([#611](https://github.com/pkalin/shadewright/issues/611)) ([5914711](https://github.com/pkalin/shadewright/commit/5914711d8f45a473c4827d965173319534d58375))
+
 ## [0.3.1](https://github.com/pkalin/shadewright/compare/v0.3.0...v0.3.1) (2026-11-08)
 
 

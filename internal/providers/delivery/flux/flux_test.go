@@ -34,6 +34,7 @@ import (
 	"github.com/pkalin/shadewright/internal/fluxstatus"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/delivery/flux"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 const (
@@ -272,6 +273,24 @@ func TestMessageIsBounded(t *testing.T) {
 	}
 }
 
+// The status reader redacts the whole message before it bounds it: a recognised secret that straddles the
+// bound is never cut into a prefix no rule recognises.
+func TestStatusReaderRedactsTheMessageBeforeItIsCut(t *testing.T) {
+	u := recorded(t, readyFile)
+	secret := "abc8Q~" + strings.Repeat("q.", 17)
+	u.Object["status"].(map[string]any)["conditions"].([]any)[0].(map[string]any)["message"] =
+		strings.Repeat(" ", flux.MaxMessageBytes-24) + secret
+	applied := fluxstatus.AppliedRevision(fluxstatus.Status(u.Object))
+	sr, err := flux.NewStatusReader(&reader{obj: u, others: []*unstructured.Unstructured{source(t, applied)}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := sr.Status(t.Context(), unitOf(u))
+	if err != nil || len(st.Message) > flux.MaxMessageBytes || strings.Contains(st.Message, secret[:20]) {
+		t.Errorf("%v: message of %d bytes ends %q", err, len(st.Message), st.Message[max(len(st.Message)-40, 0):])
+	}
+}
+
 func TestInvalidUnitIsNotRead(t *testing.T) {
 	r := &reader{obj: recorded(t, readyFile)}
 	v, err := flux.New(r, ancestry{})
@@ -380,7 +399,7 @@ func TestNewNeedsAReader(t *testing.T) {
 }
 
 func TestNewStatusReaderNeedsAReader(t *testing.T) {
-	if _, err := flux.NewStatusReader(nil); !errors.Is(err, providers.ErrInvalidConfig) {
+	if _, err := flux.NewStatusReader(nil, nil); !errors.Is(err, providers.ErrInvalidConfig) {
 		t.Errorf("NewStatusReader(nil) error = %v, want ErrInvalidConfig", err)
 	}
 }
@@ -391,7 +410,7 @@ func TestStatusReaderReadsAsTheVerifier(t *testing.T) {
 	for _, file := range []string{readyFile, buildFailed, "kustomization-stalled.json", helmFailed} {
 		u := recorded(t, file)
 		applied := fluxstatus.AppliedRevision(fluxstatus.Status(recorded(t, readyFile).Object))
-		sr, err := flux.NewStatusReader(&reader{obj: u, others: []*unstructured.Unstructured{source(t, applied)}})
+		sr, err := flux.NewStatusReader(&reader{obj: u, others: []*unstructured.Unstructured{source(t, applied)}}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -399,11 +418,19 @@ func TestStatusReaderReadsAsTheVerifier(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", file, err)
 		}
-		if want := status(t, u); got != want {
+		// Only the comparison with the source differs: the verifier never makes it.
+		if got.Source != providers.SourceNotCompared && got.Source != providers.SourceAtRevision {
+			t.Errorf("%s: Source %q", file, got.Source)
+		}
+		got.Source = providers.SourceNotCompared
+		// and the status reader redacts the message (these are shorter than the bound), the verifier does not.
+		want := status(t, u)
+		want.Message = redact.String(want.Message)
+		if got != want {
 			t.Errorf("%s: StatusReader = %+v\nVerifier = %+v", file, got, want)
 		}
 	}
-	sr, err := flux.NewStatusReader(&reader{err: apierrors.NewForbidden(schema.GroupResource{}, "x", errors.New("no"))})
+	sr, err := flux.NewStatusReader(&reader{err: apierrors.NewForbidden(schema.GroupResource{}, "x", errors.New("no"))}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,38 +440,49 @@ func TestStatusReaderReadsAsTheVerifier(t *testing.T) {
 }
 
 // The status reader compares a Kustomization that would count as applied with its GitRepository, by the
-// executor's rule (sourcemap.BehindSource), reports spec.suspend, and never reports a status it could not
-// compare: a GitRepository it cannot read fails the read, and is never a NotFound of the unit.
+// executor's rule (sourcemap.CompareSource), reports spec.suspend, and never reports a status it could not
+// compare: a GitRepository it cannot read fails the read, and is never a NotFound of the unit. A GitRepository
+// the mapping refuses or that is not Ready is unchecked, never at its revision.
 func TestStatusReaderComparesTheSource(t *testing.T) {
 	ks := recorded(t, readyFile)
 	applied := fluxstatus.AppliedRevision(fluxstatus.Status(ks.Object))
 	newer := "cluster/kind@sha1:" + revNew
+	suspendedSrc := source(t, newer)
+	if err := unstructured.SetNestedField(suspendedSrc.Object, true, "spec", "suspend"); err != nil {
+		t.Fatal(err)
+	}
+	notReady := recorded(t, "gitrepository-auth-failed.json")
+	if err := unstructured.SetNestedField(notReady.Object, newer, "status", "artifact", "revision"); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name   string
 		source *unstructured.Unstructured
-		behind bool
+		want   providers.SourceComparison
 		reads  int
 	}{
-		{"at its source", source(t, applied), false, 2},
-		{"behind its source", source(t, newer), true, 2},
+		{"at its source", source(t, applied), providers.SourceAtRevision, 2},
+		{"behind its source", source(t, newer), providers.SourceBehind, 2},
+		{"a suspended source", suspendedSrc, providers.SourceUnchecked, 2},
+		{"a source not Ready", notReady, providers.SourceUnchecked, 2},
 	} {
 		r := &reader{obj: ks, others: []*unstructured.Unstructured{tc.source}}
-		sr, err := flux.NewStatusReader(r)
+		sr, err := flux.NewStatusReader(r, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		st, err := sr.Status(t.Context(), unitOf(ks))
-		if err != nil || st.BehindSource != tc.behind || r.reads != tc.reads {
-			t.Errorf("%s: %v, BehindSource %v, %d reads", tc.name, err, st.BehindSource, r.reads)
+		if err != nil || st.Source != tc.want || r.reads != tc.reads {
+			t.Errorf("%s: %v, Source %q, %d reads", tc.name, err, st.Source, r.reads)
 		}
-		// The executor's verifier never compares: BehindSource stays false and one read is made.
+		// The executor's verifier never compares: Source stays not compared and one read is made.
 		vr := &reader{obj: ks, others: []*unstructured.Unstructured{tc.source}}
 		v, err := flux.New(vr, ancestry{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if st, err := v.Status(t.Context(), unitOf(ks)); err != nil || st.BehindSource || vr.reads != 1 {
-			t.Errorf("%s: verifier %v, BehindSource %v, %d reads", tc.name, err, st.BehindSource, vr.reads)
+		if st, err := v.Status(t.Context(), unitOf(ks)); err != nil || st.Source != providers.SourceNotCompared || vr.reads != 1 {
+			t.Errorf("%s: verifier %v, Source %q, %d reads", tc.name, err, st.Source, vr.reads)
 		}
 	}
 
@@ -453,7 +491,7 @@ func TestStatusReaderComparesTheSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &reader{obj: suspended}
-	sr, err := flux.NewStatusReader(r)
+	sr, err := flux.NewStatusReader(r, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +507,7 @@ func TestStatusReaderComparesTheSource(t *testing.T) {
 		{"source missing", nil, nil},
 		{"source forbidden", apierrors.NewForbidden(schema.GroupResource{}, "x", errors.New("no")), providers.ErrForbidden},
 	} {
-		sr, err := flux.NewStatusReader(&reader{obj: ks, sourceErr: tc.sourceErr})
+		sr, err := flux.NewStatusReader(&reader{obj: ks, sourceErr: tc.sourceErr}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

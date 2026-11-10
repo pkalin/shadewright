@@ -38,6 +38,7 @@ import (
 
 	"github.com/pkalin/shadewright/internal/analyzer/collector"
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/redact"
 	"github.com/pkalin/shadewright/internal/tools"
 )
 
@@ -409,5 +410,59 @@ func TestChartGivesTheAnalyzerNoGetOnDeliveryUnits(t *testing.T) {
 	}
 	if seen == 0 {
 		t.Error("no chart rule on Flux's delivery units: the Flux module's grant moved")
+	}
+}
+
+// TestDeliveryToolNeverAppliedOnAnUncheckedSource: a Ready Kustomization whose GitRepository is not Ready, or
+// is refused by the executor's source mapping (suspended), at another revision, is never "applied": the
+// comparison with the source could not be made, and the executor would stop before it.
+func TestDeliveryToolNeverAppliedOnAnUncheckedSource(t *testing.T) {
+	const other = "cluster/kind@sha1:1111111111111111111111111111111111111111"
+	notReady := recordedUnit(t, "gitrepository-auth-failed.json", "shop")
+	if err := unstructured.SetNestedField(notReady.Object, other, "status", "artifact", "revision"); err != nil {
+		t.Fatal(err)
+	}
+	suspended := gitSource(t, other)
+	if err := unstructured.SetNestedField(suspended.Object, true, "spec", "suspend"); err != nil {
+		t.Fatal(err)
+	}
+	for name, src := range map[string]*unstructured.Unstructured{"not Ready": notReady, "suspended": suspended} {
+		u := recordedUnit(t, "kustomization-ready.json", "shop")
+		_, res := deliveryResult(t, fluxFlags(), &listReader{t: t, obj: u, others: []*unstructured.Unstructured{src}}, u)
+		if res.Status != tools.StatusOK || !strings.HasPrefix(res.Text, "delivery: pending\n") {
+			t.Errorf("%s source: status %q, text %q, want pending", name, res.Status, res.Text)
+		}
+	}
+}
+
+// TestDeliveryToolRedactsTheMessageBeforeItIsCut: a recognised secret at the end of a Ready message longer
+// than the adapter's bound is redacted whole, so no unrecognised prefix of it reaches the model.
+func TestDeliveryToolRedactsTheMessageBeforeItIsCut(t *testing.T) {
+	u := recordedUnit(t, "kustomization-ready.json", "shop")
+	secret := "abc8Q~" + strings.Repeat("q.", 17)
+	message := strings.Repeat(" ", 1000) + secret
+	if strings.Contains(redact.String(message), secret[:24]) {
+		t.Fatal("the fixture secret is not recognised")
+	}
+	conditions, _, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
+	conditions[0].(map[string]any)["message"] = message
+	if err := unstructured.SetNestedSlice(u.Object, conditions, "status", "conditions"); err != nil {
+		t.Fatal(err)
+	}
+	_, res := deliveryResult(t, fluxFlags(),
+		&listReader{t: t, obj: u, others: []*unstructured.Unstructured{gitSource(t, appliedRevision)}}, u)
+	if res.Status != tools.StatusOK || strings.Contains(res.Text, secret[:24]) {
+		t.Fatalf("a prefix of a recognised secret survived the cut: status %q, text %q", res.Status, res.Text)
+	}
+}
+
+// TestDeliveryToolFailedListIsNotNotFound: a list that fails, even with a NotFound (a removed CRD's endpoint
+// while discovery is stale), is "could not fetch": only a successful empty list says the object is absent.
+func TestDeliveryToolFailedListIsNotNotFound(t *testing.T) {
+	u := recordedUnit(t, "kustomization-ready.json", "shop")
+	err := apierrors.NewNotFound(schema.GroupResource{Group: fluxGroups[0], Resource: "kustomizations"}, "")
+	_, res := deliveryResult(t, fluxFlags(), &listReader{t: t, obj: u, err: err}, u)
+	if res.Status != tools.StatusCouldNotFetch {
+		t.Fatalf("a failed list: status %q, text %q", res.Status, res.Text)
 	}
 }

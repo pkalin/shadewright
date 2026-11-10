@@ -43,10 +43,11 @@ type ListGetter struct {
 var _ client.Reader = ListGetter{}
 
 // Get lists the objects of obj's kind in key's namespace whose name is key's name, at most two, and copies the
-// one found into obj. None is a NotFound error that names the kind as obj gives it. A kind the API server does
-// not serve (a no-match error: Flux's CRDs not installed) is an error that is neither a NotFound nor a
-// no-match, since no object is known to be missing; the Reader's other errors are returned as they are, so a
-// caller can classify them.
+// one found into obj. Only a successful list with none is a NotFound error, which names the kind as obj gives
+// it. A failed list never is: a kind the API server does not serve (a no-match error: Flux's CRDs not
+// installed) or a list that fails with a NotFound (a removed CRD's endpoint while discovery is stale) is an
+// error that is neither a NotFound nor a no-match, since no object is known to be missing; the Reader's other
+// errors are returned as they are, so a caller can classify them.
 func (g ListGetter) Get(ctx context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
 	u, ok := obj.(*unstructured.Unstructured)
 	if !ok || g.Reader == nil {
@@ -60,8 +61,13 @@ func (g ListGetter) Get(ctx context.Context, key client.ObjectKey, obj client.Ob
 	list.SetGroupVersionKind(gvk.GroupVersion().WithKind(gvk.Kind + "List"))
 	if err := g.Reader.List(ctx, list, client.InNamespace(key.Namespace),
 		client.MatchingFields{"metadata.name": key.Name}, client.Limit(2)); err != nil {
-		if meta.IsNoMatchError(err) {
+		switch {
+		case meta.IsNoMatchError(err):
 			return fmt.Errorf("%w: the API server does not serve %s", errListGetter, gvk.Kind)
+		case apierrors.IsNotFound(err):
+			// The list itself failed (a removed CRD's endpoint while discovery is stale, for example): that
+			// says nothing about the object, so it is not reported as missing.
+			return fmt.Errorf("%w: the list of %s failed", errListGetter, gvk.Kind)
 		}
 		return err
 	}

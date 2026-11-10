@@ -261,7 +261,7 @@ func readTools(f analysisFlags, d analysisDeps) (*tools.Set, error) {
 	cfg := tools.Config{Pods: d.cache, Events: d.cache, Objects: d.apiReader, Logs: d.sources.Logs,
 		Metrics: d.sources.Metrics, Redactor: d.redactor, Namespaces: f.watched}
 	if collector.Granted(f.moduleGrants, collector.GrantFlux) && len(f.watched) > 0 {
-		delivery, err := fluxdelivery.NewStatusReader(analyzer.ListGetter{Reader: d.apiReader})
+		delivery, err := fluxdelivery.NewStatusReader(analyzer.ListGetter{Reader: d.apiReader}, d.redactor)
 		if err != nil {
 			return nil, fmt.Errorf("the delivery status reader: %w", err)
 		}

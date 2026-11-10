@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/pkalin/shadewright/internal/fluxstatus"
+	"github.com/pkalin/shadewright/internal/providers"
 )
 
 // Labels Flux sets on the objects it applies.
@@ -160,17 +161,20 @@ func Suspended(obj *unstructured.Unstructured) bool {
 	return suspended
 }
 
-// BehindSource reports whether a Kustomization has not applied the revision its GitRepository src last
-// fetched, by the mapping's own comparison (checkRevision, [fluxstatus.AppliedFetched]). It is false when src
-// is refused by [CheckGitRepository] or is not Ready for its current generation: those are reported apart,
-// and the mapping stops on them before it compares. `kubectl shadewright doctor` and the analyzer's
-// get_delivery_status both call it.
-func BehindSource(ks, src *unstructured.Unstructured) bool {
+// CompareSource compares a Kustomization with its GitRepository src by the mapping's own comparison
+// (checkRevision, [fluxstatus.AppliedFetched]): [providers.SourceBehind] when it has not applied the revision
+// src last fetched, [providers.SourceAtRevision] when it has, and [providers.SourceUnchecked] when src is
+// refused by [CheckGitRepository] or is not Ready for its current generation, since the mapping stops on those
+// before it compares. `kubectl shadewright doctor` and the analyzer's get_delivery_status both call it.
+func CompareSource(ks, src *unstructured.Unstructured) providers.SourceComparison {
 	_, branch, stop := CheckGitRepository(src)
 	if stop != nil || !fluxstatus.Ready(src.Object) {
-		return false
+		return providers.SourceUnchecked
 	}
-	return !fluxstatus.AppliedFetched(ks.Object, src.Object, branch)
+	if !fluxstatus.AppliedFetched(ks.Object, src.Object, branch) {
+		return providers.SourceBehind
+	}
+	return providers.SourceAtRevision
 }
 
 // kustomizationRemote stops on a Kustomization with spec.kubeConfig, which applies to another cluster. Its

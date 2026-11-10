@@ -114,6 +114,11 @@ func TestListGetterResults(t *testing.T) {
 			func(err error) bool {
 				return errors.Is(err, errListGetter) && !meta.IsNoMatchError(err) && !apierrors.IsNotFound(err)
 			}},
+		// A failed list says nothing about the object, even with a NotFound (a removed CRD's endpoint while
+		// discovery is stale): only a successful empty list does.
+		{"a failed list is not a not found", nil,
+			apierrors.NewNotFound(schema.GroupResource{Group: kustomizationGVK.Group, Resource: "kustomizations"}, ""),
+			func(err error) bool { return errors.Is(err, errListGetter) && !apierrors.IsNotFound(err) }},
 		{"two are refused", []unstructured.Unstructured{unit(watchedNS, unitName, true), unit(watchedNS, unitName, true)}, nil,
 			func(err error) bool { return errors.Is(err, errListGetter) }},
 		{"another name is refused", []unstructured.Unstructured{unit(watchedNS, "other", true)}, nil,

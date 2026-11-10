@@ -506,7 +506,9 @@ func TestDeliveryState(t *testing.T) {
 		{"failed while ready", providers.DeliveryStatus{Failed: true, Ready: true, Generation: 1, ObservedGeneration: 1}, deliveryFailed},
 		{"suspended while ready", providers.DeliveryStatus{Suspended: true, Ready: true, Generation: 1, ObservedGeneration: 1}, deliverySuspended},
 		{"suspended and failed", providers.DeliveryStatus{Suspended: true, Failed: true, Generation: 1, ObservedGeneration: 1}, deliverySuspended},
-		{"ready but behind its source", providers.DeliveryStatus{BehindSource: true, Ready: true, Generation: 1, ObservedGeneration: 1}, deliveryPending},
+		{"ready but behind its source", providers.DeliveryStatus{Source: providers.SourceBehind, Ready: true, Generation: 1, ObservedGeneration: 1}, deliveryPending},
+		{"ready with an unchecked source", providers.DeliveryStatus{Source: providers.SourceUnchecked, Ready: true, Generation: 1, ObservedGeneration: 1}, deliveryPending},
+		{"ready at its source", providers.DeliveryStatus{Source: providers.SourceAtRevision, Ready: true, Generation: 1, ObservedGeneration: 1}, deliveryApplied},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t, nil)

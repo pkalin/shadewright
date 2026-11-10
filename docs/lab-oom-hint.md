@@ -201,7 +201,8 @@ gh pr review <number> --repo <owner>/shadewright-fleet --approve --body "Approvi
 
 Within a poll interval expect **one comment from the executor** in the pull request, saying that your approval does
 not satisfy `shadewright/review` and why (besides the replies to hints, the one comment about hints Shadewright posts), and the check run
-still `in_progress` with a summary that names the reason:
+still `in_progress`. The check's summary is the general text (the check completes once someone who wrote no hint
+approves the latest head); the reason for this approval is in the executor's comment only:
 
 ```bash
 gh pr view <number> --repo <owner>/shadewright-fleet --json comments --jq '.comments[] | {author: .author.login, body}'
@@ -251,10 +252,12 @@ gh pr list --repo <owner>/shadewright-fleet --state open --json number,headRefNa
 
 ## 7. Close during a hint (optional)
 
-To see a hint answered when the pull request ends first: post a valid hint after the cooldown and close the pull
-request at once (`gh pr close <number> --repo <owner>/shadewright-fleet`). Expect the hint `Declined` with
-`PullRequestClosed` (or `RequestEnded`) and the request ended by the existing close handling. This is also the end of
-the run.
+To see a hint answered when the pull request ends first: post a valid hint after the cooldown, wait until it is in
+`status.hints` (one poll, about a minute), then close the pull request (`gh pr close <number> --repo
+<owner>/shadewright-fleet`). Expect the hint `Declined` with `PullRequestClosed` (or `RequestEnded`) and the request
+ended by the existing close handling. A hint posted seconds before the close is never read: the executor reads
+comments only while the pull request is open, so it gets no record and no reply (seen in the run of 2026-11-10). This
+is also the end of the run.
 
 ## 8. Record the run and tear down
 

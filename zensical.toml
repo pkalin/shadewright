@@ -116,6 +116,7 @@ nav = [
       { "0026 Policy bounds for the model" = "adr/0026-the-analyzer-shows-the-model-the-policy-bounds.md" },
       { "0027 Default models" = "adr/0027-default-models-for-triage-and-escalation.md" },
       { "0028 Reviewer hints" = "adr/0028-reviewer-hints-through-the-pull-request.md" },
+      { "0029 Azure module" = "adr/0029-azure-module-environment-and-cluster-layers.md" },
       { "0030 Merge receipt, verification" = "adr/0030-merge-receipt-and-verification-outcomes.md" },
       { "Template" = "adr/template.md" },
     ] },

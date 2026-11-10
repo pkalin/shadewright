@@ -86,7 +86,10 @@ Evaluation-only changes run there too: everything under `test/` is in the `go` g
 ### The real model: the Evaluation workflow
 
 `.github/workflows/evaluation.yml` runs `make eval-model` by hand only (`workflow_dispatch`, inputs `repeats` and
-`min_pass_rate`). It never runs on pull requests, pushes or a schedule, and it is not part of `ci.yml`. The job has
+`min_pass_rate`, passed as `EVAL_REPEATS` and `EVAL_MIN_PASS_RATE`). `EVAL_REPEATS` is the number of runs of each
+scenario, 1 by default and at most 5 (`maxRepeats` in `test/eval/eval_test.go`; a larger value fails before any
+model call). Five runs can mislead: on 2026-11-10 one round of 5 showed a scenario at 3/5 and the next round at 5/5,
+so compare two commits on two rounds (10 runs each) before calling a change a regression. It never runs on pull requests, pushes or a schedule, and it is not part of `ci.yml`. The job has
 `contents: read` and `id-token: write` and nothing else. It signs in to Azure with OIDC and no secret: it asks
 GitHub for an ID token for the audience `api://AzureADTokenExchange`, writes it to a file, and the analyzer's own
 workload identity token source exchanges it for an Entra ID token for Cognitive Services, as in the cluster. The

@@ -249,3 +249,25 @@ func TestSummaryAsksForTheSubjectAndTheValues(t *testing.T) {
 		}
 	}
 }
+
+// The system prompt asks for the scope of the failure (the failing and the healthy pods of the subject) and for
+// the specific cause an error message gives, not only the symptom (#499): the 2026-11-09 run left out the
+// healthy replica in 5 of 5 diagnoses and the reason of a pull failure in 4 of 5.
+func TestPromptAsksForTheScopeAndTheSpecificCause(t *testing.T) {
+	for _, withTools := range []bool{false, true} {
+		prompt := systemPrompt(withTools, 3)
+		for _, want := range []string{
+			`In "summary", state the scope of the failure`,
+			"name the ones that fail and the ones that are healthy",
+			"Name the specific cause the blocks give, not only the symptom",
+			`say what that message says is wrong and cite it in "evidence" as rule 2 says`,
+		} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("tools %v: the prompt lacks %q", withTools, want)
+			}
+		}
+		if withTools && !strings.Contains(prompt, "\n8. You may call the read tools offered") {
+			t.Error("the tools rule is not rule 8")
+		}
+	}
+}

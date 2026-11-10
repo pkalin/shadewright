@@ -48,7 +48,7 @@ type Result struct {
 	// their field or metric names, and states the byte bound, which the generated schema does not carry: without
 	// it, diagnoses after #498 and #500 spent the summary on why no action was allowed and left out the subject,
 	// the restart count and the metric names (#499). Rule 4 of prompts/system.tmpl adds what the summary says
-	// about the size of a proposal; keep the two consistent.
+	// about the size of a proposal, rule 7 the scope of the failure and the specific cause; keep them consistent.
 	Summary string `json:"summary" bound:"maxLen=1024" desc:"The diagnosis in a few sentences: name the incident's subject as kind namespace/name, the cause, and the observed values it rests on with their field or metric names, such as a restart count or a metric. At most 1024 bytes."`
 	// Hypotheses are the causes considered.
 	Hypotheses []Hypothesis `json:"hypotheses" bound:"maxItems=5"`

@@ -19,6 +19,8 @@ package sourcemap
 import (
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 func TestRevisionOfBranch(t *testing.T) {
@@ -48,5 +50,34 @@ func TestRevisionOfBranch(t *testing.T) {
 		if got := revisionOfBranch(tc.revision, tc.branch); got != tc.want {
 			t.Errorf("revisionOfBranch(%q, %q) = %v, want %v", tc.revision, tc.branch, got, tc.want)
 		}
+	}
+}
+
+// TestKustomizationSpecRefusal checks the exported spec rules: each refusing field gives the mapping's reason,
+// suspend wins over the others as in the mapping, and a plain spec passes.
+func TestKustomizationSpecRefusal(t *testing.T) {
+	for name, tc := range map[string]struct {
+		spec map[string]any
+		want Reason
+	}{
+		"plain":      {spec: map[string]any{"path": "./apps"}},
+		"suspended":  {spec: map[string]any{"suspend": true, "kubeConfig": map[string]any{"x": "y"}}, want: ReasonKustomizationSuspended},
+		"remote":     {spec: map[string]any{"kubeConfig": map[string]any{"x": "y"}, "images": []any{"x"}}, want: ReasonRemoteCluster},
+		"transform":  {spec: map[string]any{"postBuild": map[string]any{"x": "y"}}, want: ReasonKustomizationTransforms},
+		"decryption": {spec: map[string]any{"decryption": map[string]any{"provider": "sops"}}, want: ReasonDecryption},
+		"not set":    {spec: map[string]any{"suspend": false, "patches": []any{}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ks := &unstructured.Unstructured{Object: map[string]any{"spec": tc.spec}}
+			ks.SetNamespace("flux-system")
+			ks.SetName("apps")
+			r := KustomizationSpecRefusal(ks)
+			switch {
+			case tc.want == "" && r != nil:
+				t.Fatalf("got %s, want nil", r.Reason)
+			case tc.want != "" && (r == nil || r.Reason != tc.want || r.Outcome != NeedsIntervention):
+				t.Fatalf("got %+v, want %s", r, tc.want)
+			}
+		})
 	}
 }

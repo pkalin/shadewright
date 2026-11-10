@@ -6,7 +6,7 @@ title: Troubleshooting
 
 A `RemediationRequest` that stops says why in its conditions. Find the reason, then the row below. Every reason in the executor and the policy code is listed, taken from the code on `main`.
 
-For an overview first, run [`kubectl shadewright status`](how-to/check-status.md): per Incident its due reason, the outcome of the last analysis and its requests with phase, policy decision and pull request, then the day's analysis budget and the kill switch, read-only with your own permissions. For one request, [`kubectl shadewright explain <name>`](how-to/check-status.md#explain-one-request) prints its condition timeline and the condition that stopped it, with a link to the section below that lists the reason.
+For an overview first, run [`kubectl shadewright status`](how-to/check-status.md): per Incident its due reason, the outcome of the last analysis and its requests with phase, policy decision and pull request, then the day's analysis budget and the kill switch, read-only with your own permissions. For one request, [`kubectl shadewright explain <name>`](how-to/check-status.md#explain-one-request) prints its condition timeline and the condition that stopped it, with a link to the section below that lists the reason. When nothing works yet, or after an upgrade, [`kubectl shadewright doctor`](how-to/check-install.md) checks the install itself: CRDs, settings, kill switch, Deployments, repositories and the Flux objects that deliver them, against the executor's own source rules.
 
 ```bash
 kubectl -n shadewright-system get remediationrequest <name> \

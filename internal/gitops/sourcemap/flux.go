@@ -73,10 +73,9 @@ func inventoryID(namespace, name string, gvk schema.GroupVersionKind) string {
 // namespace and the path, or a stop result.
 func checkKustomization(ks *unstructured.Unstructured, target schema.GroupVersionKind, ns, name string) (
 	srcNamespace, srcName, path string, stop *Result) {
-	ref := fmt.Sprintf("Kustomization %s/%s", ks.GetNamespace(), ks.GetName())
-	if suspended, _, _ := unstructured.NestedBool(ks.Object, "spec", "suspend"); suspended {
-		r := needsIntervention(ReasonKustomizationSuspended, "%s is suspended", ref)
-		return "", "", "", &r
+	ref := kustomizationRef(ks)
+	if r := kustomizationSuspended(ks); r != nil {
+		return "", "", "", r
 	}
 	if !fluxstatus.Ready(ks.Object) {
 		// A reconcile in progress (a merged revision being applied) is told apart from a failure, so the
@@ -88,29 +87,17 @@ func checkKustomization(ks *unstructured.Unstructured, target schema.GroupVersio
 		r := needsIntervention(reason, "%s is not Ready for its current generation", ref)
 		return "", "", "", &r
 	}
-	// A Kustomization with spec.kubeConfig applies to another cluster. Its inventory does not say which
-	// cluster an entry is in, so a local object could match a remote entry; check this before the inventory.
-	if v, ok := field(ks.Object, "spec", "kubeConfig"); ok && !empty(v) {
-		r := needsIntervention(ReasonRemoteCluster, "%s applies to another cluster (spec.kubeConfig)", ref)
-		return "", "", "", &r
+	// Checked before the inventory: a remote cluster's inventory entry could match a local object.
+	if r := kustomizationRemote(ks); r != nil {
+		return "", "", "", r
 	}
 	if !inInventory(ks, target, ns, name) {
 		r := denied(ReasonNotInInventory,
 			"%s, named by the labels on %s %s/%s, does not list it in status.inventory", ref, target.Kind, ns, name)
 		return "", "", "", &r
 	}
-	for _, f := range kustomizationTransforms {
-		if v, ok := field(ks.Object, "spec", f); ok && !empty(v) {
-			r := needsIntervention(ReasonKustomizationTransforms,
-				"%s sets spec.%s, so the manifests in Git are not what is applied", ref, f)
-			return "", "", "", &r
-		}
-	}
-	// With spec.decryption, files may be SOPS-encrypted, even partly with plaintext fields left in, and
-	// editing them would break the SOPS MAC. Encrypted files are not supported.
-	if v, ok := field(ks.Object, "spec", "decryption"); ok && !empty(v) {
-		r := needsIntervention(ReasonDecryption, "%s decrypts its manifests (spec.decryption)", ref)
-		return "", "", "", &r
+	if r := kustomizationBuild(ks); r != nil {
+		return "", "", "", r
 	}
 	kind, _, _ := unstructured.NestedString(ks.Object, "spec", "sourceRef", "kind")
 	srcName, _, _ = unstructured.NestedString(ks.Object, "spec", "sourceRef", "name")
@@ -137,6 +124,65 @@ func checkKustomization(ks *unstructured.Unstructured, target schema.GroupVersio
 	return srcNamespace, srcName, path, nil
 }
 
+// KustomizationSpecRefusal applies the rules of ADR-0012 step 2 that read only a Kustomization's spec, in the
+// order the mapping applies them: spec.suspend, spec.kubeConfig, the fields that transform the build, and
+// spec.decryption. It returns the stop result the mapping would give, or nil when the spec passes them all.
+// The rules that need the target object (status.inventory) or the status (Ready) are not part of it. The
+// mapping and `kubectl shadewright doctor` both call these rules, so the two cannot drift apart.
+func KustomizationSpecRefusal(ks *unstructured.Unstructured) *Result {
+	if r := kustomizationSuspended(ks); r != nil {
+		return r
+	}
+	if r := kustomizationRemote(ks); r != nil {
+		return r
+	}
+	return kustomizationBuild(ks)
+}
+
+func kustomizationRef(ks *unstructured.Unstructured) string {
+	return fmt.Sprintf("Kustomization %s/%s", ks.GetNamespace(), ks.GetName())
+}
+
+// kustomizationSuspended stops on a suspended Kustomization, which would not apply a merge.
+func kustomizationSuspended(ks *unstructured.Unstructured) *Result {
+	if suspended, _, _ := unstructured.NestedBool(ks.Object, "spec", "suspend"); suspended {
+		r := needsIntervention(ReasonKustomizationSuspended, "%s is suspended", kustomizationRef(ks))
+		return &r
+	}
+	return nil
+}
+
+// kustomizationRemote stops on a Kustomization with spec.kubeConfig, which applies to another cluster. Its
+// inventory does not say which cluster an entry is in, so a local object could match a remote entry.
+func kustomizationRemote(ks *unstructured.Unstructured) *Result {
+	if v, ok := field(ks.Object, "spec", "kubeConfig"); ok && !empty(v) {
+		r := needsIntervention(ReasonRemoteCluster, "%s applies to another cluster (spec.kubeConfig)",
+			kustomizationRef(ks))
+		return &r
+	}
+	return nil
+}
+
+// kustomizationBuild stops on a Kustomization whose build is not the manifests in Git: a transform, or
+// spec.decryption.
+func kustomizationBuild(ks *unstructured.Unstructured) *Result {
+	ref := kustomizationRef(ks)
+	for _, f := range kustomizationTransforms {
+		if v, ok := field(ks.Object, "spec", f); ok && !empty(v) {
+			r := needsIntervention(ReasonKustomizationTransforms,
+				"%s sets spec.%s, so the manifests in Git are not what is applied", ref, f)
+			return &r
+		}
+	}
+	// With spec.decryption, files may be SOPS-encrypted, even partly with plaintext fields left in, and
+	// editing them would break the SOPS MAC. Encrypted files are not supported.
+	if v, ok := field(ks.Object, "spec", "decryption"); ok && !empty(v) {
+		r := needsIntervention(ReasonDecryption, "%s decrypts its manifests (spec.decryption)", ref)
+		return &r
+	}
+	return nil
+}
+
 // inInventory reports whether status.inventory lists the object with the target's group, kind and version.
 func inInventory(ks *unstructured.Unstructured, target schema.GroupVersionKind, ns, name string) bool {
 	entries, _, err := unstructured.NestedSlice(ks.Object, "status", "inventory", "entries")
@@ -153,9 +199,12 @@ func inInventory(ks *unstructured.Unstructured, target schema.GroupVersionKind, 
 	return false
 }
 
-// checkGitRepository applies the source rules of ADR-0012 step 2 and returns the URL and branch, or a stop
-// result.
-func checkGitRepository(src *unstructured.Unstructured) (url, branch string, stop *Result) {
+// CheckGitRepository applies the source rules of ADR-0012 step 2 that read only a GitRepository's spec
+// (spec.include, spec.suspend, spec.ignore, spec.recurseSubmodules, spec.sparseCheckout, and a spec.ref that
+// names only a branch) and returns the URL and branch, or the stop result the mapping would give. Readiness and
+// the fetched revision are checked apart. The mapping and `kubectl shadewright doctor` both call it, so the
+// two cannot drift apart.
+func CheckGitRepository(src *unstructured.Unstructured) (url, branch string, stop *Result) {
 	ref := fmt.Sprintf("GitRepository %s/%s", src.GetNamespace(), src.GetName())
 	if inc, ok := field(src.Object, "spec", "include"); ok && !empty(inc) {
 		r := needsIntervention(ReasonSourceIncludes, "%s includes other sources", ref)

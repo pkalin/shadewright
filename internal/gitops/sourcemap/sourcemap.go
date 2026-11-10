@@ -200,7 +200,7 @@ func (r *Resolver) delivery(ctx context.Context, in Input, id identity, live *un
 	if stop != nil {
 		return d, stop, nil
 	}
-	url, branch, stop := checkGitRepository(src)
+	url, branch, stop := CheckGitRepository(src)
 	if stop != nil {
 		return d, stop, nil
 	}

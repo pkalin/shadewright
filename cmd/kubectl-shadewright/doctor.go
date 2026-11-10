@@ -37,6 +37,7 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/fluxstatus"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/incidents"
 )
 
@@ -314,8 +315,9 @@ func checkDeployments(ctx context.Context, c client.Reader, d *Diagnosis, namesp
 }
 
 // deploymentLevel says whether a Deployment is available: pass when its Available condition is True for the
-// current generation with all replicas updated, warn while a rollout is under way or when it is scaled to 0,
-// fail otherwise.
+// current generation with all replicas updated and ready, warn while a rollout is under way, when fewer
+// replicas are ready than desired or when it is scaled to 0, fail when it is not available or its rollout
+// passed its progress deadline.
 func deploymentLevel(dep *appsv1.Deployment) (string, string) {
 	desired := int32(1)
 	if dep.Spec.Replicas != nil {
@@ -324,10 +326,13 @@ func deploymentLevel(dep *appsv1.Deployment) (string, string) {
 	if desired == 0 {
 		return levelWarn, "scaled to 0 replicas"
 	}
-	var available *appsv1.DeploymentCondition
+	var available, progressing *appsv1.DeploymentCondition
 	for i := range dep.Status.Conditions {
-		if dep.Status.Conditions[i].Type == appsv1.DeploymentAvailable {
+		switch dep.Status.Conditions[i].Type {
+		case appsv1.DeploymentAvailable:
 			available = &dep.Status.Conditions[i]
+		case appsv1.DeploymentProgressing:
+			progressing = &dep.Status.Conditions[i]
 		}
 	}
 	replicas := fmt.Sprintf("%d of %d replicas available", dep.Status.AvailableReplicas, desired)
@@ -335,16 +340,32 @@ func deploymentLevel(dep *appsv1.Deployment) (string, string) {
 	case available == nil || available.Status != corev1.ConditionTrue || dep.Status.AvailableReplicas == 0:
 		why := "no Available condition yet"
 		if available != nil {
-			why = clean(available.Reason, maxName)
-			if available.Message != "" {
-				why += ": " + clean(available.Message, maxMessage)
-			}
+			why = conditionWhy(available)
 		}
 		return levelFail, "not available, " + replicas + " (" + why + ")"
+	case progressing != nil && progressing.Status == corev1.ConditionFalse &&
+		progressing.Reason == deploymentProgressDeadlineExceeded:
+		// The rollout stopped: the old replicas keep serving, but the new spec will not roll out by itself.
+		return levelFail, "rollout stuck, " + replicas + " (" + conditionWhy(progressing) + ")"
 	case dep.Status.ObservedGeneration < dep.Generation || dep.Status.UpdatedReplicas < desired:
 		return levelWarn, "available, but a rollout is under way: " + replicas
+	case dep.Status.ReadyReplicas < desired:
+		return levelWarn, fmt.Sprintf("available, but only %d of %d replicas ready", dep.Status.ReadyReplicas, desired)
 	}
 	return levelPass, "available, " + replicas
+}
+
+// deploymentProgressDeadlineExceeded is the reason of the Progressing condition of a Deployment whose rollout
+// passed spec.progressDeadlineSeconds.
+const deploymentProgressDeadlineExceeded = "ProgressDeadlineExceeded"
+
+// conditionWhy is a condition's reason and message, cleaned for output.
+func conditionWhy(c *appsv1.DeploymentCondition) string {
+	why := clean(c.Reason, maxName)
+	if c.Message != "" {
+		why += ": " + clean(c.Message, maxMessage)
+	}
+	return why
 }
 
 // checkRepositories checks that each repository entry is complete: URL, provider settings, installation ID,
@@ -404,20 +425,23 @@ func missingGitHub(gh *remediationv1alpha1.GitHubRepository) []string {
 
 // checkFlux checks, for each repository with a URL, the Flux GitRepositories whose spec.url equals it exactly
 // (the match the executor's source mapping makes, ADR-0012) and the Kustomizations that apply them: the
-// branch they track and whether they are Ready. A cluster without Flux, or a caller who may not list its
-// objects, gets a warn.
+// spec rules the executor applies to them, the branch they track and whether they are Ready. A cluster
+// without Flux, a caller who may not list its objects, or a list cut at listMaxPages pages gets a warn.
 func checkFlux(ctx context.Context, c client.Reader, d *Diagnosis, s *remediationv1alpha1.RemediationSettings) {
 	if s == nil || len(s.Spec.Repositories) == 0 {
 		return
 	}
-	sources, err := listAll(ctx, c, fluxGitRepositories)
+	sources, srcTruncated, err := listAll(ctx, c, fluxGitRepositories)
 	if err != nil {
 		fluxReadFailed(d, "GitRepositories", err)
 		return
 	}
+	if srcTruncated {
+		listTruncated(d, "GitRepositories")
+	}
 	var kustomizations []unstructured.Unstructured
 	var ksErr error
-	listedKs := false
+	listedKs, ksTruncated := false, false
 	for _, repo := range s.Spec.Repositories {
 		if repo.URL == "" {
 			continue
@@ -434,23 +458,31 @@ func checkFlux(ctx context.Context, c client.Reader, d *Diagnosis, s *remediatio
 			}
 		}
 		if len(matched) == 0 {
-			d.add("Flux for repository "+name, levelWarn, "no Flux GitRepository has the URL of this repository "+
-				"exactly, so no target delivered from it can be changed", anchorFlux)
+			detail := "no Flux GitRepository has the URL of this repository exactly, so no target delivered " +
+				"from it can be changed"
+			if srcTruncated {
+				detail = "no Flux GitRepository among the ones read has the URL of this repository exactly " +
+					"(the list was cut short), so one may exist"
+			}
+			d.add("Flux for repository "+name, levelWarn, detail, anchorFlux)
 			continue
 		}
 		if !listedKs {
-			// Listed once, and a failure reported once, for all the sources.
-			kustomizations, ksErr = listAll(ctx, c, fluxKustomizations)
+			// Listed once, and a failure or a cut reported once, for all the sources.
+			kustomizations, ksTruncated, ksErr = listAll(ctx, c, fluxKustomizations)
 			listedKs = true
-			if ksErr != nil {
+			switch {
+			case ksErr != nil:
 				fluxReadFailed(d, "Kustomizations", ksErr)
+			case ksTruncated:
+				listTruncated(d, "Kustomizations")
 			}
 		}
 		for i := range matched {
 			src := &matched[i]
 			checkGitRepository(d, src, name, target)
 			if ksErr == nil {
-				checkKustomizations(d, src, kustomizations)
+				checkKustomizations(d, src, kustomizations, ksTruncated)
 			}
 		}
 	}
@@ -466,9 +498,21 @@ func fluxReadFailed(d *Diagnosis, what string, err error) {
 	d.add("Flux "+what, level, detail, anchorFlux)
 }
 
+// listTruncated reports a cluster-wide Flux list cut at listMaxPages pages.
+func listTruncated(d *Diagnosis, what string) {
+	d.add("Flux "+what, levelWarn, fmt.Sprintf("more than %d objects: only the first %d were read, so the checks "+
+		"below may miss some", listPageSize*listMaxPages, listPageSize*listMaxPages), anchorFlux)
+}
+
+// checkGitRepository checks a GitRepository against the executor's own source rules (sourcemap, ADR-0012):
+// a source the executor refuses is a fail, as is one that tracks another branch than the repository's target.
 func checkGitRepository(d *Diagnosis, src *unstructured.Unstructured, repo, target string) {
 	check := "Flux GitRepository " + objName(src) + " (repository " + repo + ")"
-	branch, _, _ := unstructured.NestedString(src.Object, "spec", "ref", "branch")
+	_, branch, stop := sourcemap.CheckGitRepository(src)
+	if stop != nil {
+		d.add(check, levelFail, refusal(stop), anchorFlux)
+		return
+	}
 	if branch != target {
 		d.add(check, levelFail, fmt.Sprintf("tracks branch %q, not the target branch %s of the repository",
 			clean(branch, maxName), clean(target, maxName)), anchorFlux)
@@ -478,7 +522,15 @@ func checkGitRepository(d *Diagnosis, src *unstructured.Unstructured, repo, targ
 	d.add(check, level, detail, anchorFlux)
 }
 
-func checkKustomizations(d *Diagnosis, src *unstructured.Unstructured, all []unstructured.Unstructured) {
+// refusal is the detail of a check that the executor's source mapping would stop on: its reason and message.
+func refusal(stop *sourcemap.Result) string {
+	return "the executor refuses it: " + clean(string(stop.Reason), maxName) + ": " + clean(stop.Message, maxMessage)
+}
+
+// checkKustomizations checks the Kustomizations that apply src: a spec the executor refuses (sourcemap,
+// ADR-0012) is a fail, otherwise the level follows Ready. truncated says the list was cut short.
+func checkKustomizations(d *Diagnosis, src *unstructured.Unstructured, all []unstructured.Unstructured,
+	truncated bool) {
 	found := false
 	for i := range all {
 		ks := &all[i]
@@ -491,12 +543,19 @@ func checkKustomizations(d *Diagnosis, src *unstructured.Unstructured, all []uns
 			continue
 		}
 		found = true
+		if stop := sourcemap.KustomizationSpecRefusal(ks); stop != nil {
+			d.add("Flux Kustomization "+objName(ks), levelFail, refusal(stop), anchorFlux)
+			continue
+		}
 		level, detail := fluxLevel(ks.Object)
 		d.add("Flux Kustomization "+objName(ks), level, detail, anchorFlux)
 	}
 	if !found {
-		d.add("Flux Kustomizations of "+objName(src), levelWarn, "no Kustomization applies this GitRepository",
-			anchorFlux)
+		detail := "no Kustomization applies this GitRepository"
+		if truncated {
+			detail = "no Kustomization among the ones read applies this GitRepository (the list was cut short)"
+		}
+		d.add("Flux Kustomizations of "+objName(src), levelWarn, detail, anchorFlux)
 	}
 }
 
@@ -523,9 +582,10 @@ func objName(o *unstructured.Unstructured) string {
 	return clean(o.GetNamespace(), maxName) + "/" + clean(o.GetName(), maxName)
 }
 
-// listAll lists every object of a kind in all namespaces, in pages, up to listMaxPages pages.
-func listAll(ctx context.Context, c client.Reader, gvk schema.GroupVersionKind) ([]unstructured.Unstructured, error) {
-	var out []unstructured.Unstructured
+// listAll lists every object of a kind in all namespaces, in pages, up to listMaxPages pages. truncated is
+// true when the server had more after the last page read.
+func listAll(ctx context.Context, c client.Reader, gvk schema.GroupVersionKind) (
+	items []unstructured.Unstructured, truncated bool, err error) {
 	token := ""
 	for range listMaxPages {
 		list := &unstructured.UnstructuredList{}
@@ -535,14 +595,14 @@ func listAll(ctx context.Context, c client.Reader, gvk schema.GroupVersionKind) 
 			opts = append(opts, client.Continue(token))
 		}
 		if err := c.List(ctx, list, opts...); err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		out = append(out, list.Items...)
+		items = append(items, list.Items...)
 		if token = list.GetContinue(); token == "" {
-			break
+			return items, false, nil
 		}
 	}
-	return out, nil
+	return items, true, nil
 }
 
 // renderDoctorText writes one line per check, the docs link under each warn and fail, and a count.

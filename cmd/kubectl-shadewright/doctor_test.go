@@ -108,7 +108,8 @@ func healthyDeployment(comp string) *appsv1.Deployment {
 		ObjectMeta: metav1.ObjectMeta{Name: "shadewright-" + comp, Namespace: testNS, Generation: 2,
 			Labels: map[string]string{componentLabel: comp}},
 		Spec: appsv1.DeploymentSpec{Replicas: ptr.To[int32](1)},
-		Status: appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 1, UpdatedReplicas: 1, AvailableReplicas: 1,
+		Status: appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1,
+			AvailableReplicas: 1,
 			Conditions: []appsv1.DeploymentCondition{{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue,
 				Reason: "MinimumReplicasAvailable"}}},
 	}
@@ -324,6 +325,37 @@ func TestDoctorChecks(t *testing.T) {
 	rollout.Status.ObservedGeneration = 1
 	scaledDown := healthyDeployment("executor")
 	scaledDown.Spec.Replicas = ptr.To[int32](0)
+	// A rollout past its deadline: the old replica still serves, so Available stays True.
+	stuck := healthyDeployment("executor")
+	stuck.Status.ObservedGeneration = 1
+	stuck.Status.Conditions = append(stuck.Status.Conditions, appsv1.DeploymentCondition{
+		Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse, Reason: "ProgressDeadlineExceeded",
+		Message: "ReplicaSet has timed out progressing"})
+	notAllReady := healthyDeployment("executor")
+	notAllReady.Spec.Replicas = ptr.To[int32](3)
+	notAllReady.Status.Replicas, notAllReady.Status.UpdatedReplicas = 3, 3
+	notAllReady.Status.ReadyReplicas, notAllReady.Status.AvailableReplicas = 1, 1
+
+	// Ready sources and Kustomizations whose spec the executor's source mapping refuses.
+	readySource := func(spec map[string]any) *unstructured.Unstructured {
+		return fluxObj(fluxstatus.KindGitRepository, testSource, spec, "True", "Succeeded", "")
+	}
+	withSpec := func(spec map[string]any, key string, v any) map[string]any {
+		spec[key] = v
+		return spec
+	}
+	sourceSuspended := readySource(withSpec(gitSpec(testRepo, testBranch), "suspend", true))
+	sourceIgnore := readySource(withSpec(gitSpec(testRepo, testBranch), "ignore", "/*\n!/apps"))
+	sourceSparse := readySource(withSpec(gitSpec(testRepo, testBranch), "sparseCheckout", []any{"apps"}))
+	sourceTag := readySource(withSpec(gitSpec(testRepo, testBranch), "ref",
+		map[string]any{"branch": testBranch, "tag": "v1.0.0"}))
+	readyKs := func(spec map[string]any) *unstructured.Unstructured {
+		return fluxObj(fluxstatus.KindKustomization, testKs, spec, "True", "ReconciliationSucceeded", "")
+	}
+	ksSuspended := readyKs(withSpec(ksSpec(testSource), "suspend", true))
+	ksPostBuild := readyKs(withSpec(ksSpec(testSource), "postBuild",
+		map[string]any{"substitute": map[string]any{"x": "y"}}))
+	ksDecryption := readyKs(withSpec(ksSpec(testSource), "decryption", map[string]any{"provider": "sops"}))
 
 	otherBranch := healthySource()
 	otherBranch.Object["spec"] = gitSpec(testRepo, "develop")
@@ -388,6 +420,10 @@ func TestDoctorChecks(t *testing.T) {
 			check: chkExecutor, want: levelWarn, detail: "rollout"},
 		"executor scaled to 0": {change: func(o []client.Object) []client.Object { return replace(o, scaledDown) },
 			check: chkExecutor, want: levelWarn, detail: "scaled to 0"},
+		"executor rollout stuck": {change: func(o []client.Object) []client.Object { return replace(o, stuck) },
+			check: chkExecutor, want: levelFail, detail: "rollout stuck, 1 of 1 replicas available (ProgressDeadlineExceeded"},
+		"executor not all ready": {change: func(o []client.Object) []client.Object { return replace(o, notAllReady) },
+			check: chkExecutor, want: levelWarn, detail: "only 1 of 3 replicas ready"},
 		"deployments forbidden": {funcs: forbiddenList(listKind("DeploymentList"), errForbidden),
 			check: chkExecutor, want: levelWarn, detail: msgForbidden,
 			also: map[string]string{"Deployment analyzer": levelWarn}},
@@ -414,6 +450,25 @@ func TestDoctorChecks(t *testing.T) {
 			return replace(o, sourceReconciling)
 		}, check: chkSource, want: levelWarn, detail: "reconciling",
 			also: map[string]string{chkKs: levelPass}},
+		"source suspended": {change: func(o []client.Object) []client.Object { return replace(o, sourceSuspended) },
+			check: chkSource, want: levelFail, detail: "the executor refuses it: SourceOptions: GitRepository " +
+				testFluxNS + "/" + testSource + " sets spec.suspend",
+			also: map[string]string{chkKs: levelPass}},
+		"source ignores files": {change: func(o []client.Object) []client.Object { return replace(o, sourceIgnore) },
+			check: chkSource, want: levelFail, detail: "SourceOptions", also: map[string]string{chkKs: levelPass}},
+		"source sparse checkout": {change: func(o []client.Object) []client.Object { return replace(o, sourceSparse) },
+			check: chkSource, want: levelFail, detail: "sets spec.sparseCheckout",
+			also: map[string]string{chkKs: levelPass}},
+		"source pinned to a tag": {change: func(o []client.Object) []client.Object { return replace(o, sourceTag) },
+			check: chkSource, want: levelFail, detail: "SourceNotBranch", also: map[string]string{chkKs: levelPass}},
+		"kustomization suspended": {change: func(o []client.Object) []client.Object { return replace(o, ksSuspended) },
+			check: chkKs, want: levelFail, detail: "the executor refuses it: KustomizationSuspended",
+			also: map[string]string{chkSource: levelPass}},
+		"kustomization postBuild": {change: func(o []client.Object) []client.Object { return replace(o, ksPostBuild) },
+			check: chkKs, want: levelFail, detail: "KustomizationTransforms", also: map[string]string{chkSource: levelPass}},
+		"kustomization decryption": {change: func(o []client.Object) []client.Object {
+			return replace(o, ksDecryption)
+		}, check: chkKs, want: levelFail, detail: "Decryption", also: map[string]string{chkSource: levelPass}},
 		"no source for the repository": {change: func(o []client.Object) []client.Object { return replace(o, otherURL) },
 			check: "Flux for repository", want: levelWarn, detail: "no Flux GitRepository has the URL"},
 		"kustomization failing": {change: func(o []client.Object) []client.Object { return replace(o, ksFailing) },
@@ -462,6 +517,50 @@ func TestDoctorChecks(t *testing.T) {
 				if c.Level != want {
 					t.Errorf("%s: %s %q, want %s", c.Name, c.Level, c.Detail, want)
 				}
+			}
+		})
+	}
+}
+
+// TestDoctorListTruncated makes the server always return one more page of a Flux kind: doctor stops after
+// listMaxPages pages, warns that the list was cut, and says a missing match may be one it did not read.
+func TestDoctorListTruncated(t *testing.T) {
+	for name, tc := range map[string]struct {
+		kind, cut, missing, detail string
+	}{
+		"sources": {kind: fluxGitRepositories.Kind, cut: chkSources, missing: "Flux for repository " + testRepoName,
+			detail: "no Flux GitRepository among the ones read"},
+		"kustomizations": {kind: fluxKustomizations.Kind, cut: chkKs + "s",
+			missing: chkKs + "s of " + testFluxNS + "/" + testSource,
+			detail:  "no Kustomization among the ones read"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pages := 0
+			funcs := &interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList,
+				opts ...client.ListOption) error {
+				if !listKind(tc.kind)(list) {
+					return c.List(ctx, list, opts...)
+				}
+				pages++
+				list.(*unstructured.UnstructuredList).SetContinue("more")
+				return nil
+			}}
+			d := runChecks(t, healthyObjects(), funcs)
+			if pages != listMaxPages {
+				t.Errorf("read %d pages, want %d", pages, listMaxPages)
+			}
+			byName := map[string]Check{}
+			for _, c := range d.Checks {
+				byName[c.Name] = c
+			}
+			if c := byName[tc.cut]; c.Level != levelWarn || !strings.Contains(c.Detail, "only the first 10000") {
+				t.Errorf("%s: %s %q, want a warn about the cut", tc.cut, c.Level, c.Detail)
+			}
+			if c := byName[tc.missing]; c.Level != levelWarn || !strings.Contains(c.Detail, tc.detail) {
+				t.Errorf("%s: %s %q, want a warn containing %q", tc.missing, c.Level, c.Detail, tc.detail)
+			}
+			if d.Failed {
+				t.Error("Failed is true")
 			}
 		})
 	}

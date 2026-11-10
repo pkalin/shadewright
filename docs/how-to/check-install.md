@@ -78,7 +78,9 @@ The analyzer and executor Deployments of the namespace, found by the label `cont
 | --- | --- | --- |
 | fail: no Deployment labelled ... | None in that namespace | Pass the operator namespace with `-n` |
 | fail: not available | Its `Available` condition is not `True`, or no replica is available | `kubectl -n <ns> describe deploy/<name>` and the pod events: image pull, workload identity, resources |
+| fail: rollout stuck | Its `Progressing` condition is `False` with `ProgressDeadlineExceeded`: the old replicas still serve, but the current spec will not roll out by itself | `kubectl -n <ns> describe deploy/<name>` and the events of the new pods; fix the cause, then roll out again |
 | warn: a rollout is under way | Available, but not every replica runs the current spec yet | Wait for `kubectl -n <ns> rollout status deploy/<name>` |
+| warn: only N of M replicas ready | Available, but fewer replicas are ready than `spec.replicas` | `kubectl -n <ns> get pods -l control-plane=<component>` and the events of the pods that are not ready |
 | warn: scaled to 0 replicas | Stopped on purpose | Scale it up when it should run |
 
 ## Repositories
@@ -91,19 +93,22 @@ Each entry of `spec.repositories` must be complete for the executor to open a pu
 | fail: provider ... is not one this plugin knows | The plugin is older than the CRDs | Install the plugin of the CRDs' release |
 | warn: targetBranch is not set | `main` is used | Set it when the branch Flux tracks is another one |
 | warn: none configured | No pull request can be opened (observe-only) | Add a repository when you leave observe-only |
+| warn: not checked: the RemediationSettings was not read | The settings object does not exist or is not readable with your permissions (see [settings](#settings)), so neither the repositories nor Flux were checked | Fix the settings check first |
 
 ## Flux
 
-For each repository with a URL: the Flux `GitRepository` objects, in every namespace, whose `spec.url` equals the repository's URL exactly (the match the executor makes, [ADR-0012](../adr/0012-object-to-source-mapping.md)), and the `Kustomization` objects that apply each of them.
+For each repository with a URL: the Flux `GitRepository` objects, in every namespace, whose `spec.url` equals the repository's URL exactly (the match the executor makes, [ADR-0012](../adr/0012-object-to-source-mapping.md)), and the `Kustomization` objects that apply each of them. Each is checked against the rules the executor's source mapping applies to its spec (the same code, so the two cannot differ), then its `Ready` condition. The rules that need a target object, such as `status.inventory`, are not checked.
 
 | Result | Meaning | What to do |
 | --- | --- | --- |
+| fail: the executor refuses it: `<reason>`: ... | The executor's source mapping stops on this object's spec for every target it delivers, even when Flux reports it `Ready`. Doctor runs the executor's own rules, so the reason is the one a request would get: on a GitRepository `SourceOptions` (`spec.suspend`, `spec.ignore`, `spec.recurseSubmodules` or `spec.sparseCheckout`), `SourceIncludes` (`spec.include`) or `SourceNotBranch` (no `spec.ref.branch`, or `spec.ref.tag`, `semver`, `name` or `commit`); on a Kustomization `KustomizationSuspended` (`spec.suspend`), `RemoteCluster` (`spec.kubeConfig`), `KustomizationTransforms` (`patches`, `images`, `components`, `namePrefix`, `nameSuffix`, `targetNamespace`, `postBuild` and the like) or `Decryption` (`spec.decryption`) | Remove the field, or expect the requests for its targets to stop with that reason; see [delivery from Flux](../troubleshooting.md#delivery-from-flux) |
 | fail: tracks branch X, not the target branch | The executor denies every request for targets it delivers (`BranchMismatch`) | Make `spec.ref.branch` and `targetBranch` equal |
 | fail: failing, ... | `Stalled` is `True` or `Ready` is `False` for the current generation; the reason and the controller's message follow | `flux get sources git -A`, `flux get kustomizations -A`, and [delivery from Flux](../troubleshooting.md#delivery-from-flux) |
 | warn: reconciling | Not `Ready` yet and not failing | Run doctor again once Flux has reconciled |
-| warn: no Flux GitRepository has the URL | No target delivered from this repository can be changed (`RepositoryNotConfigured`) | Make the URLs equal, character for character (no `.git`, lower case) |
-| warn: no Kustomization applies this GitRepository | Nothing applies it, or a HelmRelease does, which doctor does not check | Check that the path you expect is applied |
+| warn: no Flux GitRepository has the URL | No target delivered from this repository can be changed (`RepositoryNotConfigured`). After a cut list (below) it says "among the ones read": one may exist | Make the URLs equal, character for character (no `.git`, lower case) |
+| warn: no Kustomization applies this GitRepository | Nothing applies it, or a HelmRelease does, which doctor does not check. After a cut list (below) it says "among the ones read": one may exist | Check that the path you expect is applied |
 | warn: does not serve Flux | Flux is not installed in the cluster | Install Flux, or expect every request to stop at the source mapping |
+| warn: more than 10000 objects: only the first 10000 were read | The cluster holds more GitRepositories or Kustomizations than doctor lists (20 pages of 500); a "none among the ones read" warn below may be one it did not reach | Check the objects of that repository with `flux get sources git -A` and `flux get kustomizations -A` |
 
 ## Permissions
 

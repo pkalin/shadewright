@@ -77,6 +77,24 @@ They are two binaries, two Deployments, two ServiceAccounts and two identities.
 
 A model's output is therefore only ever a proposal that the analyzer writes as a request, and deterministic policy in the executor decides whether it may run. A slow model call also cannot block the executor. See [design 2.2](design/2-architecture.md#22-components) and [design 9](design/9-identity.md#9-identity).
 
+## Where the model sits in the loop
+
+Shadewright is a Kubernetes controller: it observes, decides and acts against a goal, with its state in CRDs and its limits in policy. A model takes part in one step of that loop, the diagnosis, because that step has to read text (events, logs, recent Git changes) and choose a fix that nobody wrote down in advance. Every other step is deterministic code:
+
+| Step | Who does it |
+| --- | --- |
+| Observe: turn events and pod status into Incidents | The collector, by rules |
+| Diagnose: say what is wrong and which typed action would fix it | A runbook when one matches, otherwise the model <span class="sw-status sw-planned">planned</span> |
+| Decide whether the change may happen | Policy in the executor, never the model |
+| Act | A pull request; after review, the GitOps controller applies it |
+| Verify the effect | Deterministic checks <span class="sw-status sw-planned">planned</span> |
+
+So the model never tries a fix, checks the result and tries again on its own. Its output is one proposal, and the loop around it stays the same as in any other controller.
+
+A known problem with a known fix belongs in a runbook, which makes no model call; the model is for incidents no runbook matched ([design 3.3](design/3-observation-and-deduplication.md#33-analysis)). No runbook ships yet, so today every analysis takes the model path.
+
+Autoscaling, rollbacks and reconcile loops need no model at all, and they already have controllers that own them (an HPA, KEDA, Flux). Shadewright changes their declarations in Git and never competes with them for the same fields ([design 7](design/7-existing-controllers.md#7-existing-controllers)).
+
 ## Observe-only mode <span class="sw-status sw-built">built</span>
 
 What you get from the install in [observe-only mode](install.md): the analyzer watches the namespaces you name and records Incidents, no `RemediationSettings` entry names a repository, and `spec.paused` is true, so the executor could not write to Git even if a request existed. It is the recommended first state, see [install in observe-only mode](install.md).

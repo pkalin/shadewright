@@ -81,15 +81,27 @@ A model's output is therefore only ever a proposal that the analyzer writes as a
 
 Shadewright is a Kubernetes controller: it observes, decides and acts against a goal, with its state in CRDs and its limits in policy. A model takes part in one step of that loop, the diagnosis, because that step has to read text (events, logs, recent Git changes) and choose a fix that nobody wrote down in advance. Every other step is deterministic code:
 
-| Step | Who does it |
-| --- | --- |
-| Observe: turn events and pod status into Incidents | The collector, by rules |
-| Diagnose: say what is wrong and which typed action would fix it | A runbook when one matches, otherwise the model <span class="sw-status sw-planned">planned</span> |
-| Decide whether the change may happen | Policy in the executor, never the model |
-| Act | A pull request; after review, the GitOps controller applies it |
-| Verify the effect | Deterministic checks <span class="sw-status sw-planned">planned</span> |
+```mermaid
+flowchart TB
+    obs[Observe: collector, Incidents]
+    subgraph diagnose [Diagnose]
+        direction LR
+        rb[Runbook, when one matches]
+        model[Model, for the rest]
+    end
+    dec[Decide: policy in the executor]
+    act[Act: pull request, review, GitOps controller]
+    ver[Verify: deterministic checks, then observe again]
+    obs --> diagnose
+    rb -.-> dec
+    model -.-> dec
+    dec --> act
+    act -.-> ver
+    classDef planned stroke-dasharray: 5 5
+    class rb,model,ver planned
+```
 
-So the model never tries a fix, checks the result and tries again on its own. Its output is one proposal, and the loop around it stays the same as in any other controller.
+Dashed boxes are <span class="sw-status sw-planned">planned</span>: no runbook exists yet, the analysis that calls the model runs only in lab evaluations, and the verifier is not built. So the model never tries a fix, checks the result and tries again on its own. Its output is one proposal, and the loop around it stays the same as in any other controller.
 
 A known problem with a known fix belongs in a runbook, which makes no model call; the model is for incidents no runbook matched ([design 3.3](design/3-observation-and-deduplication.md#33-analysis)). No runbook ships yet, so today every analysis takes the model path.
 

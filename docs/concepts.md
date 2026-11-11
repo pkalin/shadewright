@@ -98,14 +98,14 @@ flowchart TB
     dec --> act
     act -.-> ver
     classDef planned stroke-dasharray: 5 5
-    class rb,model,ver planned
+    class rb,ver planned
 ```
 
-Dashed boxes are <span class="sw-status sw-planned">planned</span>: no runbook exists yet, the analysis that calls the model runs only in lab evaluations, and the verifier is not built. So the model never tries a fix, checks the result and tries again on its own. Its output is one proposal, and the loop around it stays the same as in any other controller.
+Dashed boxes are <span class="sw-status sw-planned">planned</span>: no runbook exists yet and the verifier is not built. The model path is <span class="sw-status sw-built">built</span> but off by default (`--triage-model`), and until the fail-closed evaluation check exists a run with a real model is a lab evaluation, not production use ([ADR-0025](adr/0025-analysis-claims-units-and-evaluation-manifest.md)). So the model never tries a fix, checks the result and tries again on its own. Its output is one proposal, and the loop around it stays the same as in any other controller.
 
 A known problem with a known fix belongs in a runbook, which makes no model call; the model is for incidents no runbook matched ([design 3.3](design/3-observation-and-deduplication.md#33-analysis)). No runbook ships yet, so today every analysis takes the model path.
 
-Autoscaling, rollbacks and reconcile loops need no model at all, and they already have controllers that own them (an HPA, KEDA, Flux). Shadewright changes their declarations in Git and never competes with them for the same fields ([design 7](design/7-existing-controllers.md#7-existing-controllers)).
+Autoscaling and reconcile loops need no model at all, and they already have controllers that own them (an HPA, KEDA, Flux). Shadewright changes their declarations in Git and never competes with them for the same fields ([design 7](design/7-existing-controllers.md#7-existing-controllers)).
 
 ## Observe-only mode <span class="sw-status sw-built">built</span>
 

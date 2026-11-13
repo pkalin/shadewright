@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 470" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Order of the Kustomize and Flux transformations the source mapping may learn</title>
+  <desc id="d">Four steps, none built, all decided on 2026-11-13. Step 1: namespace, from a namespace field in the kustomization file or from the Flux spec.targetNamespace; 46 percent of the surveyed Flux Kustomizations stop first on targetNamespace; the value is bound into the plan digest. Step 2: images, read as context; the fact that images are set is bound, not their content. Step 3: postBuild substitute and substituteFrom; 15 percent stop first here; allowed only when no substitution placeholder is in the identity fields of any document or in the edited scalar; only the reference list and the inline variable names are bound; no ConfigMap is read and the executor gets no grant. Step 4: configMapGenerator from local files and literals, which the real case that prompted the issue uses; secretGenerator never. Patches, components, Helm and remote bases stay refused. Every step still ends in the plan digest, the render check and a person merging the pull request.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <style>
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:#241a3d;stroke:#7c24fc;stroke-width:1.6}
+      .bad{fill:#2a1720;stroke:#7a3348;stroke-width:1.2}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12px}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .lanet{fill:#7d7999;font-size:12.5px;font-weight:600;letter-spacing:.14em}
+      .badt{fill:#ff8fa3;font-size:13px;font-weight:600}
+      .plan{stroke-dasharray:6 5}
+    </style>
+  </defs>
+  <rect width="1120" height="470" rx="18" fill="#0e0e16"/>
+  <text class="lanet" x="40" y="44">PROPOSED ORDER (NOTHING OF THIS IS BUILT)</text>
+  <text class="s" x="40" y="64">Today the mapping reads plain manifests and resources lists only (ADR-0012).</text>
+
+  <rect class="key plan" x="40" y="92" width="240" height="190" rx="14"/>
+  <text class="h" x="58" y="122">1. namespace</text>
+  <text class="s" x="58" y="146">namespace: in a kustomization file,</text>
+  <text class="s" x="58" y="162">or spec.targetNamespace in Flux</text>
+  <text class="s" x="58" y="186">Survey: 46% stop first here</text>
+  <text class="lbl" x="58" y="214">Digest: the value</text>
+  <text class="lbl" x="58" y="230">Render: target keeps its</text>
+  <text class="lbl" x="58" y="246">live namespace after the change</text>
+
+  <rect class="key plan" x="300" y="92" width="240" height="190" rx="14"/>
+  <text class="h" x="318" y="122">2. images</text>
+  <text class="s" x="318" y="146">read as context only, in the file</text>
+  <text class="s" x="318" y="162">or in Flux spec.images</text>
+  <text class="s" x="318" y="186">Survey: not counted separately</text>
+  <text class="lbl" x="318" y="214">Digest: that images are set,</text>
+  <text class="lbl" x="318" y="230">not their content</text>
+  <text class="lbl" x="318" y="246">No action can change an image</text>
+
+  <rect class="key plan" x="560" y="92" width="240" height="190" rx="14"/>
+  <text class="h" x="578" y="122">3. postBuild</text>
+  <text class="s" x="578" y="146">substitute and substituteFrom</text>
+  <text class="s" x="578" y="162">only when no $ reaches identity</text>
+  <text class="s" x="578" y="178">fields or the edited scalar</text>
+  <text class="s" x="578" y="202">Survey: 15% stop first here</text>
+  <text class="lbl" x="578" y="230">Digest: the reference list and</text>
+  <text class="lbl" x="578" y="246">inline names; no ConfigMap</text>
+  <text class="lbl" x="578" y="262">is read, no new grant</text>
+
+  <rect class="box plan" x="820" y="92" width="260" height="190" rx="14"/>
+  <text class="h" x="838" y="122">4. configMapGenerator</text>
+  <text class="s" x="838" y="146">Local files and literals: the</text>
+  <text class="s" x="838" y="162">real case uses one</text>
+  <text class="lbl" x="838" y="214">Decided: configMapGenerator</text>
+  <text class="lbl" x="838" y="230">only, bounded as in #610;</text>
+  <text class="lbl" x="838" y="246">secretGenerator never</text>
+
+  <path class="f" d="M280 187H294" marker-end="url(#a)"/>
+  <path class="f" d="M540 187H554" marker-end="url(#a)"/>
+  <path class="f" d="M800 187H814" marker-end="url(#a)"/>
+
+  <rect class="bad" x="40" y="318" width="1040" height="52" rx="12"/>
+  <text class="badt" x="58" y="340">Stay refused</text>
+  <text class="s" x="170" y="340">patches (in Git or in Flux), components, Helm, remote bases, a name prefix or suffix, decryption, kubeConfig</text>
+  <text class="s" x="170" y="358">Components and Helm are outside issue #166; the survey shows components as the first stop for 18% of Flux Kustomizations.</text>
+
+  <rect class="box" x="40" y="396" width="1040" height="52" rx="12"/>
+  <text class="h" x="58" y="418">Unchanged for every step</text>
+  <text class="s" x="58" y="436">The model names only the target; the mapping decides the file; the render check runs on every commit; the plan digest is checked before every write; a person merges.</text>
+</svg>

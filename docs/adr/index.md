@@ -30,5 +30,6 @@
 | [0026](0026-the-analyzer-shows-the-model-the-policy-bounds.md) | The analyzer shows the model the policy bounds | Proposed |
 | [0027](0027-default-models-for-triage-and-escalation.md) | Default models for triage and escalation | Proposed |
 | [0028](0028-reviewer-hints-through-the-pull-request.md) | Reviewer hints through the pull request, the coordinator for other integrations, and the supersede handoff | Accepted, amended |
+| [0030](0030-merge-receipt-and-verification-outcomes.md) | The merge receipt and the three outcomes of verification | Accepted |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

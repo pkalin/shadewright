@@ -26,6 +26,7 @@ Decided on 2026-11-01:
 | Analysis claims (2026-11-05) | Analysis claims, units and the evaluation manifest ([ADR-0025](../adr/0025-analysis-claims-units-and-evaluation-manifest.md)) |
 | Policy bounds for the model (2026-11-07, proposed) | The context shows the model the bounds of the policy that decides its proposal, once and before it answers; no feedback after a denial, no clamping, the policy decides ([ADR-0026](../adr/0026-the-analyzer-shows-the-model-the-policy-bounds.md)) |
 | Reviewer hints (2026-11-08) | Hints from the code host's pull request are read by the executor through `FeedbackSource`; other integrations belong to a future coordinator; one pull request for the whole conversation, taken over by the replacement request with one fast-forward commit ([ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)) |
+| Verification after the merge (2026-11-13, proposed) | A merge receipt set once with `Merged`; rolled out, configured and cleared as separate conditions; cleared read from container status in v0.5.0; missing or stale data ends in a new phase `Inconclusive`; a revert is a new request ([ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md)) |
 
 
 Packaging, in detail:

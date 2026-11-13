@@ -146,7 +146,23 @@ helm upgrade shadewright oci://ghcr.io/pkalin/charts/shadewright --version <new 
 - Keep the same `clusterId` on every upgrade. It is hashed into every Incident fingerprint, so changing it, also from the empty default (the UID of `kube-system`) to a value of your own, starts every Incident afresh. A client-side render (`helm template`, `helm diff`, Argo CD, Flux with a dry-run) asks no cluster and cannot read the `kube-system` UID, so it fails until `clusterId` is set: put it in the values of any such tool, and set it to the value the live release uses (`helm get values shadewright -n shadewright-system`, or `kubectl get ns kube-system -o jsonpath='{.metadata.uid}'` if you left it empty).
 - The settings object is not changed by an upgrade, see [The settings object](#the-settings-object-and-helm).
 
-Then, from v0.1.0, the patch of step 3, and steps 7 and 8 (check, unpause). `helm rollback` is a downgrade and carries the same warning.
+Then, from v0.1.0, the patch of step 3, and steps 7 and 8 (check, unpause). `helm rollback` is a downgrade and carries the same warning; for a rollback from v0.5.0 see [the next section](#roll-back-from-v050).
+
+### Roll back from v0.5.0
+
+**v0.5.0 is a breaking change for rollback.** Putting only an older executor image under the v0.5.0 CRDs does not work (decided 2026-11-13, [#705](https://github.com/pkalin/shadewright/issues/705)). The v0.5.0 CRD of `RemediationRequest` has rules that reject a status write which leaves out a value already stored: `status.mergeReceipt` and `status.mergeCommitAwaitedSince` (set once), `status.verification` (kept once set), and `status.queuedBehind` (kept once it names a request). A v0.4.x executor does not know these fields, so its status writes drop them and the API server refuses the writes. The rules stay as they are, because they are what keeps those fields from being changed or removed by anything else. This is not a major release: the project is before 1.0 and a breaking change bumps the minor version.
+
+What to do instead:
+
+1. Pause writes (`spec.paused: true` on `RemediationSettings`) and let the pull requests you care about finish or close, as in [upgrade](#upgrade) step 4.
+2. Roll back the whole release, CRDs included, so the old schema and the old images arrive together. With Helm, the CRDs are templates of the chart, so `helm rollback shadewright <revision> --namespace shadewright-system --wait --timeout 5m` (or `helm upgrade` with the older `--version` and your values file) applies the old CRDs with the old Deployments. With the manifests, apply the older release's `config/default` (`kubectl apply -k` with the `?ref=` and the digests of that release). Do not set `crd.enabled=false` for this: that leaves the v0.5.0 CRDs in place, which is the case this section warns about.
+3. Check as in [upgrade](#upgrade) step 7, then unpause.
+
+What the old CRD does to requests that are in flight. The fields that v0.4.0 does not have are `spec.reverts`, `status.mergeReceipt`, `status.mergeCommitAwaitedSince`, `status.verification`, `status.queuedBehind`, `status.conflictSeen` and the conditions `Cleared` and `Configured`. The API server prunes them from the stored objects, at the latest on the next write of each object. A request that was `Merged` or `Verifying` loses its receipt and its verification window, and one that waited behind another loses `queuedBehind`. A revert request loses `spec.reverts`, and so its link to the request it reverts.
+
+The v0.4.x executor does not move a request on after `Merged`. Its code treats `Merged`, `WaitingForDelivery`, `Verifying` and `Succeeded` alike: the circuit breaker counts the merge as a success, and nothing sets those phases or reads the receipt. A request that the v0.5.0 executor left in `WaitingForDelivery` or `Verifying` (only with `--verify-outcomes`, off by default) stays there, with no verdict, until you delete it. A request in `Inconclusive` was written with a phase that is not in the v0.4.0 phase list.
+
+The chart sets `helm.sh/resource-policy: keep` on the CRDs (`crd.keep`), so check after the rollback which CRDs exist (`kubectl get crd | grep shadewright`). The `VerificationReport` CRD is new in v0.5.0: it is not in v0.4.0, and whether Helm leaves it behind on a rollback has not been tried. If it stays, nothing of v0.4.x uses it. A rollback from v0.5.0 to v0.4.x has not been run against a cluster.
 
 ## Uninstall
 

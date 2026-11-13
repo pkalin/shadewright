@@ -118,6 +118,7 @@ nav = [
       { "0028 Reviewer hints" = "adr/0028-reviewer-hints-through-the-pull-request.md" },
       { "0029 Azure module" = "adr/0029-azure-module-environment-and-cluster-layers.md" },
       { "0030 Merge receipt, verification" = "adr/0030-merge-receipt-and-verification-outcomes.md" },
+      { "0031 Kustomize transformations" = "adr/0031-kustomize-transformations-in-the-source-mapping.md" },
       { "Template" = "adr/template.md" },
     ] },
   ] },

@@ -29,7 +29,9 @@ limitations under the License.
 // runs that mix letters and digits, such as Git commit hashes and container IDs, 32 characters or more of
 // mixed-case base64 that slashes cut short, or that has no slash and no digit (also a base64 blob that is not
 // a secret, and at most one short part of up to five characters on each side of it in a path), and every
-// scalar value under a secret-named YAML key ("credentials:\n  user: admin" loses "admin"). Values that look
+// scalar value under a secret-named YAML key ("credentials:\n  user: admin" loses "admin"), and the value after
+// a secret-named command-line flag and a blank ("--client-secret x", "--password x"; "--use-token --verbose"
+// keeps "--verbose"), however it reads. Values that look
 // like references rather than secrets, such as "secretName: db-creds", are kept, because the name of a
 // missing Secret is what a diagnosis needs, and so is the hex of an image digest.
 //
@@ -45,7 +47,10 @@ limitations under the License.
 // from a password or token.
 //
 // Known gaps: JSON escaped more than three times, a Kubernetes environment entry whose "value" comes before
-// its "name" or more than 16 lines after it, and a secret in a format no rule knows.
+// its "name" or more than 16 lines after it, a base64 secret cut short by slashes with no secret key name
+// before it whose parts read as words or acronyms (whole or in part, see base64Windows), a secret after a key
+// name and a blank without "--" ("aws configure set aws_secret_access_key x", which only the long-token
+// rule judges), and a secret in a format no rule knows.
 package redact
 
 import (
@@ -1052,8 +1057,10 @@ type windowPart struct {
 // the path stays.
 // Windows are bounded by maxBase64Window, so the cost is linear in the run.
 //
-// Known gaps, kept for safety and simplicity over perfect paths (TestSlashSplitBase64KnownLeaks): a key
-// whose windows all score as words stays whole; a short lower-case end of a key that no window covers
+// Known gaps when no secret key name stands before the key, kept for safety and simplicity over perfect paths
+// (TestSlashSplitBase64KnownLeaks; after a key name such as "client_secret=" or "--client-secret" the
+// key-value and flag rules redact the whole value whatever it reads as, #585): a key whose windows all score
+// as words stays whole; a short lower-case end of a key that no window covers
 // ("/wed7") stays, as a path word would; a key of upper-case parts with one short mixed part
 // ("ABCDEF/GHIJKL/.../yz2+ab3+cd4+") has too little evidence and stays; and a lower-case path word at either
 // end of a key ("cijt/...") is kept with the path around it.
@@ -1570,6 +1577,25 @@ func keyValueSpan(boundary int) func(s string, m []int, prevEnd int) (int, int, 
 	}
 }
 
+// flagValueSpan is the span function of the command-line flag rule: a secret-named flag ("--client-secret",
+// "--aws-secret-access-key", "--password") followed by blanks, or, in an argument list, by a comma
+// ("\"--password\", \"...\""), and then its value. The key name is the signal: the whole value is redacted up
+// to the next blank, or between its quotes, whatever it reads as, so a key that the long-token rule would
+// keep in part (TestSlashSplitBase64KnownLeaks) goes whole. The flag counts only where it starts a word
+// (after the start of the text or a byte that is not a token byte), so "a--token x" is not a flag. A value
+// that starts with "--" is the next flag, not a value, and is left alone: the flag before it takes none
+// ("--use-token --verbose"). The rest is keyValueSpan with boundaryWhitespace, so a reference flag
+// ("--secret-name", "--token-ttl", "--password-file") keeps its value.
+func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
+	if m[0] > 0 && isTokenByte(s[m[0]-1]) || strings.HasPrefix(s[m[1]:], "--") {
+		return 0, 0, false
+	}
+	return flagKeyValueSpan(s, m, prevEnd)
+}
+
+// flagKeyValueSpan reads the value of a secret-named flag (flagValueSpan).
+var flagKeyValueSpan = keyValueSpan(boundaryWhitespace)
+
 // commentOverBlock reports whether the value of the key in group 1 of m, at the end of m, is a YAML comment
 // ("credentials: # set by CI") over a block on the following lines, which the next-line rule redacts so
 // that reference children keep their names: a "#" after a colon and a blank, a key first on its line, and
@@ -1605,9 +1631,11 @@ const (
 	secretWordExpr = `(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?|connection[_-]?string|conn[_-]?str)`
 	bareKeyExpr    = `(?:[A-Za-z0-9_.-]*` + secretWordExpr + `[A-Za-z0-9_.-]*|` + shortKeyExpr + `)`
 	// shortKeyExpr names short keys that hold secrets but are also parts of other words ("bypass",
-	// "author", "signal"), so they count only as a whole key or as the last part of a longer one after "_",
-	// "." or "-" ("DB_PASS", "basic_auth").
-	shortKeyExpr  = `(?:[A-Za-z0-9_.-]*[_.-]|\b)(?:pass|auth|sig)`
+	// "author", "signal", "kansas", "sasl"), so they count only as a whole key or as the last part of a
+	// longer one after "_", "." or "-" ("DB_PASS", "basic_auth", "AZURE_STORAGE_SAS"); "sas" (an Azure shared
+	// access signature) also as the last part of a camelCase key ("storageSas", "blobSAS"), where a lower-case
+	// letter or a digit comes before its capital.
+	shortKeyExpr  = `(?:(?:[A-Za-z0-9_.-]*[_.-]|\b)(?:pass|auth|sig|sas)|[A-Za-z0-9_.-]*(?-i:[a-z0-9](?:Sas|SAS)))`
 	secretKeyExpr = `["']?` + bareKeyExpr + `["']?`
 	flowKeyExpr   = `\\*["']` + bareKeyExpr + `\\*["']|` + bareKeyExpr
 	// nextLineHeaderExpr is a YAML key that names a secret with nothing after its colon but blanks or a
@@ -1683,6 +1711,11 @@ func builtinRules() []rule {
 		// format's boundary. Env files, logfmt and free text: the value runs to the next whitespace.
 		{kind: KindCredential, span: keyValueSpan(boundaryWhitespace), re: regexp.MustCompile(
 			`(?i)(` + bareKeyExpr + `)[ \t]*[:=][ \t]*`)},
+		// Command-line flags whose name holds a secret, with the value after blanks, or after a comma in an
+		// argument list: "--client-secret <value>", "\"--password\", \"<value>\"" (flagValueSpan). "--name=value"
+		// is the rule above.
+		{kind: KindCredential, span: flagValueSpan, re: regexp.MustCompile(
+			`(?i)--(` + bareKeyExpr + `)["']?(?:[ \t]*,[ \t]*|[ \t]+)`)},
 		// JSON and YAML flow mappings: a field after "{" or ",", ending at its closing quote or at , } ].
 		// JSON whitespace, newlines included and also escaped, may surround the key and the colon.
 		{kind: KindCredential, span: keyValueSpan(boundaryFlow), re: regexp.MustCompile(

@@ -119,8 +119,8 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 .PHONY: test
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -coverprofile cover.out
-	@# The redact timing tests skip under -race (internal/redact/race_test.go): run them again without it.
-	go test -run 'StayLinear$$' ./internal/redact
+	@# The redact timing tests and the 100,000 seeded keys skip under -race (internal/redact/race_test.go): run them again without it.
+	go test -run 'StayLinear$$|TestSeededKeysAfterAKeyNameAreRedacted$$' ./internal/redact
 	@# The time bound of the wide mapping refusal is checked only without -race (internal/gitops/patch/race_test.go).
 	go test -run 'TestWideMappingRefusedInTime$$' ./internal/gitops/patch
 

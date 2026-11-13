@@ -25,10 +25,13 @@ Events, logs, annotations, tool descriptions and Git files may carry prompt inje
 - Built-in rules for common token formats (current-format Microsoft Entra client secrets among them, matched whole although they hold `~` and `.`, also glued to each other or with `~` percent-encoded; one cut to 36 characters or fewer is not matched), and long random tokens without a known prefix.
 - JWTs, private keys, connection strings, and credentials in URLs (any userinfo).
 - `Authorization` values, and Basic and Bearer values that look like credentials.
-- Values of secret-named keys in env, JSON (also escaped inside a string) and YAML forms (all scalar values under a secret-named YAML key).
+- Values of secret-named keys in env, JSON (also escaped inside a string) and YAML forms (all scalar values under a secret-named YAML key), and of secret-named command-line flags (`--client-secret <value>`, also in an argument list). After such a key name the whole value goes, up to the next blank or its closing quote, whatever it reads as.
+- Base64 secrets that slashes cut into short parts, such as an AWS secret access key in a path, judged by how the parts read (#525).
 - Kubernetes environment variables whose name holds a secret.
 - Emails and IP addresses.
 - Patterns supplied by the operator.
+
+**Known limits.** The key name is the stronger signal ([#585](https://github.com/pkalin/shadewright/issues/585)). With no secret key name in front, a slash-split base64 key can still leak whole or in part: a key whose parts all read as words, a key made of upper-case parts, or a short part at its start or end that reads as a path word. So can a value after a key name and a blank without `--` (`aws configure set aws_secret_access_key <value>`), because `kubectl get secret <name>` has the same shape. The key names are a closed list in code (`internal/redact`), with no setting to extend them.
 
 **No access to Secrets.** Neither identity has any permission on `Secret` objects. `test/rbac` fails if any role of the analyzer names `secrets`.
 

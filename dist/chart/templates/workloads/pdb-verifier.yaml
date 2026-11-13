@@ -1,3 +1,4 @@
+{{- if include "shadewright.verifierEnabled" . }}
 {{- if gt (int .Values.verifier.replicas) 1 }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -11,4 +12,5 @@ spec:
   selector:
     matchLabels:
       {{- include "shadewright.selectorLabels" (dict "component" "verifier" "context" $) | nindent 6 }}
+{{- end }}
 {{- end }}

@@ -53,7 +53,7 @@ func nonDNSRules(t *testing.T, key string, r rendered) []networkingv1.NetworkPol
 // TestEgressIsSeparatePerComponentAndTheAnalyzerHasNoExecutorOnlyRule: the default policies select one
 // component each, and the analyzer's rules are a subset of the executor's (no rule meant for GitHub only).
 func TestEgressIsSeparatePerComponentAndTheAnalyzerHasNoExecutorOnlyRule(t *testing.T) {
-	r := defaultRender(t)
+	r := defaultRender(t, withVerifier)
 	for _, k := range []string{"shadewright-default-deny", "shadewright-allow-metrics-traffic"} {
 		if r.chart["NetworkPolicy/"+operatorNS+"/"+k] == nil {
 			t.Errorf("%s not rendered", k)

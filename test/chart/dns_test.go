@@ -86,7 +86,7 @@ func TestDNSEgressProfilesRenderAndTheHookUsesTheWorkloadRule(t *testing.T) {
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			r := defaultRender(t, c.set...)
+			r := defaultRender(t, append([]string{withVerifier}, c.set...)...)
 			analyzer := dnsRule(t, analyzerEgressKey, r.chart[analyzerEgressKey])
 			executor := dnsRule(t, executorEgressKey, r.chart[executorEgressKey])
 			verifier := dnsRule(t, verifierEgressKey, r.chart[verifierEgressKey])

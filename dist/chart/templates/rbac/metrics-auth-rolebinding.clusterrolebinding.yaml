@@ -16,7 +16,9 @@ subjects:
 - kind: ServiceAccount
   name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer" "context" $) }}
   namespace: {{ .Release.Namespace }}
+{{- if include "shadewright.verifierEnabled" . }}
 - kind: ServiceAccount
   name: {{ include "shadewright.resourceName" (dict "suffix" "verifier" "context" $) }}
   namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- end }}

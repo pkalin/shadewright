@@ -1,3 +1,4 @@
+{{- if include "shadewright.verifierEnabled" . }}
 {{- /*
 The verifier's reads in the namespaces it watches (ADR-0030 section 7). Bound only by the RoleBindings of
 verifier-watch-rolebindings.yaml, one per namespace, never by a ClusterRoleBinding.
@@ -7,7 +8,7 @@ kind: ClusterRole
 metadata:
   name: {{ include "shadewright.resourceName" (dict "suffix" "verifier-watch-role" "context" $) }}
   labels:
-    {{- include "shadewright.labels" (dict "component" "" "context" $) | nindent 4 }}
+    {{- include "shadewright.labels" (dict "component" "verifier" "context" $) | nindent 4 }}
 rules:
 - apiGroups:
   - ""
@@ -23,3 +24,4 @@ rules:
   - statefulsets
   verbs:
   - get
+{{- end }}

@@ -159,6 +159,16 @@ null. --watch-namespaces and the RoleBindings of verifier-watch-rolebindings.yam
 {{- end }}
 
 {{/*
+"true" when the verifier is deployed, else empty: only with at least one namespace in
+shadewright.verifierWatchNamespaces. Without one the chart renders no verifier object at all (Deployment,
+ServiceAccount, Roles, bindings, PDB, metrics Service, NetworkPolicy, Lease, ServiceMonitor, the metrics-auth
+subject), and a merged request can end only Inconclusive.
+*/}}
+{{- define "shadewright.verifierEnabled" -}}
+{{- if (include "shadewright.verifierWatchNamespaces" . | fromJsonArray) -}}true{{- end -}}
+{{- end }}
+
+{{/*
 Flags the chart renders itself in the Deployments. extraArgs may not name them, so a free list cannot turn off
 leader election, the metrics authentication or the watched namespaces. Keep in step with the args in
 templates/workloads. "namespace" is not an arg of the chart but the Pods get it from POD_NAMESPACE.

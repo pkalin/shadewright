@@ -1,10 +1,11 @@
+{{- if include "shadewright.verifierEnabled" . }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "shadewright.resourceName" (dict "suffix" "verifier-role" "context" $) }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "shadewright.labels" (dict "component" "" "context" $) | nindent 4 }}
+    {{- include "shadewright.labels" (dict "component" "verifier" "context" $) | nindent 4 }}
 rules:
 - apiGroups:
   - remediation.shadewright.io
@@ -27,3 +28,4 @@ rules:
   - verificationreports/status
   verbs:
   - update
+{{- end }}

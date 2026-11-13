@@ -134,7 +134,7 @@ can shadewright-verifier no create incidents.remediation.shadewright.io -n "${NS
 can shadewright-verifier no get secrets -n "${NS}"
 can shadewright-verifier no get secrets -n demo
 can shadewright-verifier no update deployments.apps -n demo
-# The executor gains one read: the reports.
-can shadewright-executor yes get verificationreports.remediation.shadewright.io -n "${NS}"
+# Planned in #683: the executor's get on verificationreports (ADR-0030 section 7). It is not granted yet.
+can shadewright-executor no get verificationreports.remediation.shadewright.io -n "${NS}"
 
 exit "${fail}"

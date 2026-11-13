@@ -1,3 +1,4 @@
+{{- if include "shadewright.verifierEnabled" . }}
 {{- if .Values.networkPolicy.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -23,4 +24,5 @@ spec:
       app.kubernetes.io/name: {{ include "shadewright.name" . }}
   policyTypes:
   - Egress
+{{- end }}
 {{- end }}

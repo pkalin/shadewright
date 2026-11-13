@@ -625,6 +625,7 @@
           "$ref": "#/definitions/metricsTLS"
         },
         "watchNamespaces": {
+          "description": "Null uses analyzer.watchNamespaces. The verifier and all its objects are rendered only when the resulting list is not empty; without it a merged request can end only Inconclusive.",
           "anyOf": [
             {
               "type": "null"

@@ -72,6 +72,7 @@ done
   --set executor.metricsTLS.secretName=executor-metrics-tls \
   --set analyzer.metricsTLS.secretName=analyzer-metrics-tls \
   --set verifier.metricsTLS.secretName=verifier-metrics-tls \
+  --set 'verifier.watchNamespaces={default}' \
   --wait --timeout 5m
 
 # ---- The scraper: a ServiceAccount allowed to read /metrics, in a namespace the NetworkPolicy lets in ------------

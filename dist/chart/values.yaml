@@ -361,7 +361,7 @@ verifier:
     # -- Image pull policy. One of `Always`, `IfNotPresent` or `Never`.
     # @section -- Images
     pullPolicy: IfNotPresent
-  # -- Namespaces whose pods and workloads the verifier reads (`--watch-namespaces`): `list` on `pods`, `get` on `deployments`, `replicasets` and `statefulsets`, through one read-only RoleBinding in each namespace (each must exist). `null` (the default) uses `analyzer.watchNamespaces`; a list, an empty one included, is used as it is, and an empty list watches none (never all). Names must be unique, at most 256, DNS labels (`*` is refused).
+  # -- Namespaces whose pods and workloads the verifier reads (`--watch-namespaces`): `list` on `pods`, `get` on `deployments`, `replicasets` and `statefulsets`, through one read-only RoleBinding in each namespace (each must exist). `null` (the default) uses `analyzer.watchNamespaces`; a list, an empty one included, is used as it is, and an empty list watches none (never all). Names must be unique, at most 256, DNS labels (`*` is refused). The verifier is deployed only when this list (after the `null` fallback) is not empty: with none, the chart renders no verifier Deployment, ServiceAccount, Role, binding, PDB, metrics Service or metrics authentication subject, and a merged request can end only `Inconclusive`, never `Succeeded`. There is no separate `enabled` key.
   # @default -- `null`, so `analyzer.watchNamespaces`
   # @section -- Verifier
   watchNamespaces: null

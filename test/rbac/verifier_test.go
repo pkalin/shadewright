@@ -17,6 +17,7 @@ limitations under the License.
 package rbac
 
 import (
+	"io/fs"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -33,67 +34,103 @@ import (
 )
 
 const (
-	verifierRoleFile = "role.yaml"
-	kindRoleBinding  = "RoleBinding"
+	kindRoleBinding = "RoleBinding"
 )
 
-// TestVerifierRulesAreExactlySection7 reads every role in config/rbac/verifier and checks that together they
-// grant exactly the rules of ADR-0030 section 7: list on pods and get on replicasets, deployments and
-// statefulsets (the watch ClusterRole, bound per namespace); get, list and watch on remediationrequests, get and
-// create on verificationreports and update on verificationreports/status (a Role in the operator namespace);
-// its own Lease and core Events. No ClusterRoleBinding, no wildcard, nothing else.
+// TestVerifierRulesAreExactlySection7 reads every role and binding in config/rbac and config/watch, follows
+// each binding whose subject is the verifier's ServiceAccount to its role, and checks that together they grant
+// exactly the rules of ADR-0030 section 7, keyed by the kind of binding: through RoleBindings, list on pods and
+// get on replicasets, deployments and statefulsets (the watch ClusterRole, bound per namespace); get, list and
+// watch on remediationrequests, get and create on verificationreports and update on verificationreports/status
+// (a Role in the operator namespace); its own Lease and core Events. Through a ClusterRoleBinding, only the
+// metrics authentication grant the executor and the analyzer have: create on tokenreviews and
+// subjectaccessreviews (the shared metrics-auth binding). No wildcard, nothing else: any further cluster-wide
+// rule fails here.
 //
 //nolint:goconst // literals keep the table readable
 func TestVerifierRulesAreExactlySection7(t *testing.T) {
-	type key struct{ kind, group, resource, verb, name string }
+	const crb = "ClusterRoleBinding"
+	type key struct{ binding, group, resource, verb, name string }
 	want := map[key]bool{
-		{kindCR, "", "pods", "list", ""}:                                             true,
-		{kindCR, "apps", "replicasets", "get", ""}:                                   true,
-		{kindCR, "apps", "deployments", "get", ""}:                                   true,
-		{kindCR, "apps", "statefulsets", "get", ""}:                                  true,
-		{kindRole, group, "remediationrequests", "get", ""}:                          true,
-		{kindRole, group, "remediationrequests", "list", ""}:                         true,
-		{kindRole, group, "remediationrequests", "watch", ""}:                        true,
-		{kindRole, group, "verificationreports", "get", ""}:                          true,
-		{kindRole, group, "verificationreports", "create", ""}:                       true,
-		{kindRole, group, "verificationreports/status", "update", ""}:                true,
-		{kindRole, "coordination.k8s.io", "leases", "get", cmdutil.VerifierLease}:    true,
-		{kindRole, "coordination.k8s.io", "leases", "update", cmdutil.VerifierLease}: true,
-		{kindRole, "coordination.k8s.io", "leases", "patch", cmdutil.VerifierLease}:  true,
-		{kindRole, "", "events", "create", ""}:                                       true,
-		{kindRole, "", "events", "patch", ""}:                                        true,
+		{kindRoleBinding, "", "pods", "list", ""}:                                           true,
+		{kindRoleBinding, "apps", "replicasets", "get", ""}:                                 true,
+		{kindRoleBinding, "apps", "deployments", "get", ""}:                                 true,
+		{kindRoleBinding, "apps", "statefulsets", "get", ""}:                                true,
+		{kindRoleBinding, group, "remediationrequests", "get", ""}:                          true,
+		{kindRoleBinding, group, "remediationrequests", "list", ""}:                         true,
+		{kindRoleBinding, group, "remediationrequests", "watch", ""}:                        true,
+		{kindRoleBinding, group, "verificationreports", "get", ""}:                          true,
+		{kindRoleBinding, group, "verificationreports", "create", ""}:                       true,
+		{kindRoleBinding, group, "verificationreports/status", "update", ""}:                true,
+		{kindRoleBinding, "coordination.k8s.io", "leases", "get", cmdutil.VerifierLease}:    true,
+		{kindRoleBinding, "coordination.k8s.io", "leases", "update", cmdutil.VerifierLease}: true,
+		{kindRoleBinding, "coordination.k8s.io", "leases", "patch", cmdutil.VerifierLease}:  true,
+		{kindRoleBinding, "", "events", "create", ""}:                                       true,
+		{kindRoleBinding, "", "events", "patch", ""}:                                        true,
+		{crb, "authentication.k8s.io", "tokenreviews", "create", ""}:                        true,
+		{crb, "authorization.k8s.io", "subjectaccessreviews", "create", ""}:                 true,
+	}
+	// Names in config/watch carry the kustomize name prefix already; the rest get it at build time.
+	bare := func(name string) string { return strings.TrimPrefix(name, "shadewright-") }
+	roles := map[string][]rbacv1.PolicyRule{}
+	var bindings []map[string]any
+	for _, dir := range []string{filepath.Join("..", "..", "config", "rbac"), filepath.Join("..", "..", "config", "watch")} {
+		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || filepath.Ext(path) != ".yaml" || d.Name() == "kustomization.yaml" {
+				return err
+			}
+			for _, u := range decodeAll(t, path) {
+				switch u["kind"] {
+				case kindRoleBinding, crb:
+					bindings = append(bindings, u)
+					continue
+				}
+				rules, aggregated, ok := policyRules(t, path, u)
+				if !ok {
+					continue
+				}
+				name := bare(u["metadata"].(map[string]any)["name"].(string))
+				if aggregated && strings.HasPrefix(name, verifierID) {
+					t.Errorf("%s: an aggregated ClusterRole", path)
+				}
+				roles[u["kind"].(string)+"/"+name] = rules
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	got := map[key]bool{}
-	root := filepath.Join("..", "..", "config", "rbac", verifierID)
-	for _, file := range []string{verifierRoleFile, "leader_election.yaml", "role_binding.yaml", "service_account.yaml",
-		filepath.Join("watch", verifierRoleFile)} {
-		path := filepath.Join(root, file)
-		for _, u := range decodeAll(t, path) {
-			if u["kind"] == "ClusterRoleBinding" {
-				t.Errorf("%s: a ClusterRoleBinding; the verifier is bound per namespace only", path)
+	for _, b := range bindings {
+		var rb rbacv1.RoleBinding // the fields read here are the same for a ClusterRoleBinding
+		if err := decodeInto(b, &rb); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.ContainsFunc(rb.Subjects, func(s rbacv1.Subject) bool {
+			return s.Kind == "ServiceAccount" && bare(s.Name) == verifierID
+		}) {
+			continue
+		}
+		rules, ok := roles[rb.RoleRef.Kind+"/"+bare(rb.RoleRef.Name)]
+		if !ok {
+			t.Errorf("%s %s binds the verifier to %s %s, which config/rbac does not hold", b["kind"], rb.Name,
+				rb.RoleRef.Kind, rb.RoleRef.Name)
+			continue
+		}
+		for _, r := range rules {
+			names := r.ResourceNames
+			if len(names) == 0 {
+				names = []string{""}
 			}
-			rules, aggregated, ok := policyRules(t, path, u)
-			if !ok {
-				continue
-			}
-			if aggregated {
-				t.Errorf("%s: an aggregated ClusterRole", path)
-			}
-			kind := u["kind"].(string)
-			for _, r := range rules {
-				names := r.ResourceNames
-				if len(names) == 0 {
-					names = []string{""}
-				}
-				for _, g := range r.APIGroups {
-					for _, res := range r.Resources {
-						for _, v := range r.Verbs {
-							for _, n := range names {
-								if g == "*" || res == "*" || v == "*" || strings.HasSuffix(res, "/*") {
-									t.Errorf("%s: wildcard in %v", path, r)
-								}
-								got[key{kind, g, res, v, n}] = true
+			for _, g := range r.APIGroups {
+				for _, res := range r.Resources {
+					for _, v := range r.Verbs {
+						for _, n := range names {
+							if g == "*" || res == "*" || v == "*" || strings.HasSuffix(res, "/*") {
+								t.Errorf("%s: wildcard in %v", rb.RoleRef.Name, r)
 							}
+							got[key{b["kind"].(string), g, res, v, n}] = true
 						}
 					}
 				}

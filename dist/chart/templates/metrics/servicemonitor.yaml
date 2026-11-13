@@ -23,11 +23,15 @@ executor.metricsTLS, analyzer.metricsTLS and verifier.metricsTLS) and the Servic
 {{- if not $tls.serverName }}
 {{- fail "metrics.serviceMonitor.tls.enabled needs metrics.serviceMonitor.tls.serverName" }}
 {{- end }}
-{{- if not (and $.Values.executor.metricsTLS.secretName $.Values.analyzer.metricsTLS.secretName $.Values.verifier.metricsTLS.secretName) }}
-{{- fail "metrics.serviceMonitor.tls.enabled needs executor.metricsTLS.secretName, analyzer.metricsTLS.secretName and verifier.metricsTLS.secretName: a component without its certificate serves a self-signed one the CA does not verify" }}
+{{- if not (and $.Values.executor.metricsTLS.secretName $.Values.analyzer.metricsTLS.secretName (or $.Values.verifier.metricsTLS.secretName (not (include "shadewright.verifierEnabled" $)))) }}
+{{- fail "metrics.serviceMonitor.tls.enabled needs executor.metricsTLS.secretName, analyzer.metricsTLS.secretName and, when the verifier is deployed, verifier.metricsTLS.secretName: a component without its certificate serves a self-signed one the CA does not verify" }}
 {{- end }}
 {{- end }}
-{{- range $component := list "executor" "analyzer" "verifier" }}
+{{- $components := list "executor" "analyzer" }}
+{{- if include "shadewright.verifierEnabled" $ }}
+{{- $components = append $components "verifier" }}
+{{- end }}
+{{- range $component := $components }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor

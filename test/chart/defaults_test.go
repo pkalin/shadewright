@@ -65,6 +65,10 @@ func ciValues(t *testing.T) []string {
 
 // defaultRender renders the chart as chart-testing installs it: the default values with ci/default-values.yaml
 // (image.allowTag) and a clusterId, since helm template asks no cluster for the kube-system UID.
+// withVerifier gives the verifier a namespace to watch, so the chart renders it: with the defaults it watches
+// none and is not deployed.
+const withVerifier = "verifier.watchNamespaces={demo}"
+
 func defaultRender(t *testing.T, set ...string) rendered {
 	t.Helper()
 	return renderArgs(t, helmArgsWith(t, ciValues(t), append([]string{"clusterId=chart-test"}, set...)...))
@@ -84,9 +88,10 @@ func container(t *testing.T, r rendered, k string) corev1.Container {
 }
 
 // TestDefaultValuesWatchNothingAndHaveNoIdentity checks the install with no values (invariant 6 and the issue's
-// default): the analyzer watches no namespace and has no RoleBinding outside the operator namespace, neither
-// component has an Azure workload identity, so the executor cannot reach Key Vault to sign for the GitHub App,
-// and with image.allowTag (chart-testing's only value) the images run by the appVersion tag.
+// default): the analyzer watches no namespace and has no RoleBinding outside the operator namespace, the
+// verifier, with no namespace to watch, is not deployed, neither the executor nor the analyzer has an Azure
+// workload identity, so the executor cannot reach Key Vault to sign for the GitHub App, and with image.allowTag
+// (chart-testing's only value) the images run by the appVersion tag.
 func TestDefaultValuesWatchNothingAndHaveNoIdentity(t *testing.T) {
 	_, appVersion := chartVersions(t)
 	r := defaultRender(t)
@@ -103,7 +108,12 @@ func TestDefaultValuesWatchNothingAndHaveNoIdentity(t *testing.T) {
 			t.Errorf("%s: a RoleBinding outside the operator namespace with no watched namespace", k)
 		}
 	}
-	for _, comp := range components {
+	for _, k := range []string{verifierDeployment, "ServiceAccount/" + operatorNS + "/shadewright-verifier"} {
+		if r.chart[k] != nil {
+			t.Errorf("%s rendered with no namespace to watch", k)
+		}
+	}
+	for _, comp := range []string{executorComp, analyzerComp} {
 		dk := "Deployment/" + operatorNS + "/shadewright-" + comp
 		c := container(t, r, dk)
 		if want := "ghcr.io/pkalin/shadewright-" + comp + ":" + appVersion; c.Image != want {
@@ -169,7 +179,8 @@ func TestRBACEqualsKustomizeForEveryToggle(t *testing.T) {
 			var want map[string]*unstructured.Unstructured
 			if tc.defaults {
 				r = defaultRender(t, append([]string{fmt.Sprintf("rbac.helpers.enabled=%t", tc.helpers)}, tc.set...)...)
-				want = rbacOnly(r.kustomizeDefault, !tc.helpers)
+				// With no namespace to watch the chart deploys no verifier; config/default always has one.
+				want = withoutVerifier(t, rbacOnly(r.kustomizeDefault, !tc.helpers))
 			} else {
 				r = render(t, tc.helpers, tc.set...)
 				want = rbacOnly(r.kustomize, !tc.helpers)
@@ -637,8 +648,9 @@ func TestOnlyTheBudgetConfigMapSurvivesUninstall(t *testing.T) {
 			t.Errorf("%s has %s = %q: Leases are recreated and must not be kept", k, keep, v)
 		}
 	}
-	if n != 3 {
-		t.Errorf("rendered %d Leases, want 3", n)
+	// The defaults deploy no verifier, so its Lease is not rendered.
+	if n != 2 {
+		t.Errorf("rendered %d Leases, want 2", n)
 	}
 }
 
@@ -715,4 +727,35 @@ func TestMetricsTLSProfileMountsTheSecretAndVerifiesTheCertificate(t *testing.T)
 			}
 		})
 	}
+}
+
+// withoutVerifier drops the verifier's RBAC objects and its subject in the metrics-auth binding: what the chart
+// leaves out when the verifier watches no namespace.
+func withoutVerifier(t *testing.T, in map[string]*unstructured.Unstructured) map[string]*unstructured.Unstructured {
+	t.Helper()
+	const sa = "shadewright-verifier"
+	out := map[string]*unstructured.Unstructured{}
+	for k, u := range in {
+		if strings.HasPrefix(u.GetName(), sa+"-") {
+			continue
+		}
+		if u.GetKind() == kindClusterRoleBinding && u.GetName() == "shadewright-metrics-auth-rolebinding" {
+			u = u.DeepCopy()
+			subjects, _, err := unstructured.NestedSlice(u.Object, "subjects")
+			if err != nil {
+				t.Fatal(err)
+			}
+			kept := subjects[:0]
+			for _, s := range subjects {
+				if m, ok := s.(map[string]any); !ok || m["name"] != sa {
+					kept = append(kept, s)
+				}
+			}
+			if err := unstructured.SetNestedSlice(u.Object, kept, "subjects"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		out[k] = u
+	}
+	return out
 }

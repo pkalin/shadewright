@@ -98,7 +98,8 @@ func TestVerifierRulesAreExactlyTheDecidedSet(t *testing.T) {
 }
 
 // TestVerifierWatchBindingsEqualTheFlag: one RoleBinding per namespace of the list the flag carries; null falls
-// back to analyzer.watchNamespaces; a list of its own, [] included, is used as it is.
+// back to analyzer.watchNamespaces; a list of its own, [] included, is used as it is, and an empty one deploys
+// no verifier.
 func TestVerifierWatchBindingsEqualTheFlag(t *testing.T) {
 	// helm --set cannot write an empty list, so those cases come from a values file.
 	empty := filepath.Join(t.TempDir(), "empty.yaml")
@@ -125,6 +126,13 @@ func TestVerifierWatchBindingsEqualTheFlag(t *testing.T) {
 			got := verifierWatchBindings(r)
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("RoleBindings in %v, want %v", got, tc.want)
+			}
+			if len(tc.want) == 0 {
+				// No namespace to watch: no verifier at all, so no flag to compare.
+				if r.chart[verifierDeployment] != nil {
+					t.Error("the verifier is deployed with no namespace to watch")
+				}
+				return
 			}
 			if flag := verifierWatchFlag(t, r); flag != strings.Join(tc.want, ",") {
 				t.Errorf("--watch-namespaces=%q, want %q", flag, strings.Join(tc.want, ","))
@@ -214,7 +222,7 @@ func TestVerifierImageFollowsItsOwnValues(t *testing.T) {
 		"ghcr.io/pkalin/shadewright-verifier@sha256:"+strings.Repeat("3", 64); got != want {
 		t.Errorf("image %s, want %s", got, want)
 	}
-	out, err := runErr(t, helmArgsWith(t, nil, "clusterId=chart-test", "image.allowTag=false",
+	out, err := runErr(t, helmArgsWith(t, nil, "clusterId=chart-test", "image.allowTag=false", withVerifier,
 		"executor.image.digest=sha256:"+strings.Repeat("1", 64),
 		"analyzer.image.digest=sha256:"+strings.Repeat("2", 64)))
 	if err == nil || !strings.Contains(out, "verifier.image.digest is empty") {
@@ -272,4 +280,128 @@ func TestVerifierExtraArgsRefuseReservedFlags(t *testing.T) {
 		}
 	}
 	run(t, repoRoot(t), tool(t, "HELM", "helm"), helmArgs(t, false, "verifier.extraArgs={--zap-log-level=debug}")...)
+}
+
+// TestVerifierBindingsAreExactlyTheDecidedSet follows every binding whose subject is the verifier's
+// ServiceAccount to its role and checks the complete set of rules it grants, keyed by the kind of binding.
+// Through RoleBindings: the rules of ADR-0030 section 7. Through a ClusterRoleBinding: only the metrics
+// authentication grant the executor and the analyzer have (create on tokenreviews and subjectaccessreviews,
+// the shared metrics-auth binding). Any further rule, cluster-wide or not, fails here.
+func TestVerifierBindingsAreExactlyTheDecidedSet(t *testing.T) {
+	rep := "remediation.shadewright.io"
+	want := []string{
+		"RoleBinding||pods|list|*all*",
+		"RoleBinding|apps|deployments|get|*all*", "RoleBinding|apps|replicasets|get|*all*",
+		"RoleBinding|apps|statefulsets|get|*all*",
+		"RoleBinding|" + rep + "|remediationrequests|get|*all*", "RoleBinding|" + rep + "|remediationrequests|list|*all*",
+		"RoleBinding|" + rep + "|remediationrequests|watch|*all*",
+		"RoleBinding|" + rep + "|verificationreports|create|*all*", "RoleBinding|" + rep + "|verificationreports|get|*all*",
+		"RoleBinding|" + rep + "|verificationreports/status|update|*all*",
+		"RoleBinding|coordination.k8s.io|leases|get|shadewright-verifier-leader-election",
+		"RoleBinding|coordination.k8s.io|leases|patch|shadewright-verifier-leader-election",
+		"RoleBinding|coordination.k8s.io|leases|update|shadewright-verifier-leader-election",
+		"RoleBinding||events|create|*all*", "RoleBinding||events|patch|*all*",
+		"ClusterRoleBinding|authentication.k8s.io|tokenreviews|create|*all*",
+		"ClusterRoleBinding|authorization.k8s.io|subjectaccessreviews|create|*all*",
+	}
+	slices.Sort(want)
+	r := render(t, false)
+	var got []string
+	for k, u := range r.chart {
+		if u.GetKind() != kindRoleBinding && u.GetKind() != kindClusterRoleBinding {
+			continue
+		}
+		b := convert[rbacv1.RoleBinding](t, u) // the fields read here are the same for a ClusterRoleBinding
+		if !slices.ContainsFunc(b.Subjects, func(s rbacv1.Subject) bool {
+			return s.Kind == "ServiceAccount" && s.Name == verifierSA && s.Namespace == operatorNS
+		}) {
+			continue
+		}
+		roleKey := kindClusterRole + "//" + b.RoleRef.Name
+		if b.RoleRef.Kind == kindRole {
+			roleKey = kindRole + "/" + u.GetNamespace() + "/" + b.RoleRef.Name
+		}
+		role := r.chart[roleKey]
+		if role == nil {
+			t.Errorf("%s binds the verifier to %s, which is not rendered", k, roleKey)
+			continue
+		}
+		for _, line := range describe(t, role) {
+			got = append(got, u.GetKind()+"|"+line)
+		}
+	}
+	slices.Sort(got)
+	got = slices.Compact(got)
+	if missing, extra := diffLines(want, got); len(missing)+len(extra) != 0 {
+		t.Errorf("the verifier's bindings: missing %v, extra %v", missing, extra)
+	}
+}
+
+// TestVerifierRenderedOnlyWithWatchedNamespaces: with no namespace to watch (the default) no verifier object is
+// rendered, not even its subject in the metrics-auth binding, its ServiceMonitor or its helm test URL; with one,
+// all of them are, and every one carries the component label verifier.
+func TestVerifierRenderedOnlyWithWatchedNamespaces(t *testing.T) {
+	isVerifier := func(k string, u *unstructured.Unstructured) bool {
+		return strings.Contains(k, verifierSA) || strings.Contains(k, "shadewright-verifier-leader-election") ||
+			strings.Contains(k, "allow-verifier-egress")
+	}
+	all := []string{
+		"Deployment/" + operatorNS + "/" + verifierSA,
+		"ServiceAccount/" + operatorNS + "/" + verifierSA,
+		"Role/" + operatorNS + "/" + verifierSA + "-role",
+		"RoleBinding/" + operatorNS + "/" + verifierSA + "-rolebinding",
+		"Role/" + operatorNS + "/" + verifierSA + "-leader-election-role",
+		"RoleBinding/" + operatorNS + "/" + verifierSA + "-leader-election-rolebinding",
+		"ClusterRole//" + verifierSA + "-watch-role",
+		"RoleBinding/demo/" + verifierSA + "-watch",
+		"PodDisruptionBudget/" + operatorNS + "/" + verifierSA,
+		"Service/" + operatorNS + "/" + verifierSA + "-metrics-service",
+		"ServiceMonitor/" + operatorNS + "/" + verifierSA + "-metrics",
+		"Lease/" + operatorNS + "/shadewright-verifier-leader-election",
+	}
+	set := []string{"metrics.serviceMonitor.enabled=true", "verifier.replicas=2", "networkPolicy.enabled=true"}
+
+	on := render(t, false, set...)
+	for _, k := range all {
+		u := on.chart[k]
+		if u == nil {
+			t.Errorf("with a watched namespace: %s not rendered", k)
+			continue
+		}
+		if c := u.GetLabels()["app.kubernetes.io/component"]; c != verifierComp {
+			t.Errorf("%s: component label %q, want %q", k, c, verifierComp)
+		}
+	}
+	for k, u := range on.chart {
+		if isVerifier(k, u) && !slices.Contains(all, k) && u.GetLabels()["app.kubernetes.io/component"] != verifierComp {
+			t.Errorf("%s: component label %q, want %q", k, u.GetLabels()["app.kubernetes.io/component"], verifierComp)
+		}
+	}
+
+	off := render(t, false, append(set, "analyzer.watchNamespaces=null")...)
+	for k, u := range off.chart {
+		if isVerifier(k, u) {
+			t.Errorf("without a watched namespace: %s rendered", k)
+		}
+	}
+	if mb := off.chart["ClusterRoleBinding//"+release+"-metrics-auth-rolebinding"]; mb == nil {
+		t.Error("the metrics-auth binding is gone with the verifier")
+	} else if strings.Contains(asJSON(t, mb.Object), verifierSA) {
+		t.Error("the metrics-auth binding names the verifier, which is not deployed")
+	}
+	pod := off.tests["Pod/"+operatorNS+"/"+release+"-test-metrics"]
+	if pod == nil {
+		t.Fatal("helm test Pod not rendered")
+	}
+	if strings.Contains(asJSON(t, pod.Object), `"name":"VERIFIER_URL"`) {
+		t.Error("the helm test Pod asks the metrics Service of a verifier that is not deployed")
+	}
+	// TLS for the ServiceMonitor needs no verifier certificate when there is no verifier.
+	runArgs := helmArgs(t, false, "analyzer.watchNamespaces=null", "metrics.serviceMonitor.enabled=true",
+		"metrics.serviceMonitor.tls.enabled=true", "metrics.serviceMonitor.tls.serverName=x",
+		"metrics.serviceMonitor.tls.ca.secret.name=ca", "executor.metricsTLS.secretName=e",
+		"analyzer.metricsTLS.secretName=a")
+	if out, err := runErr(t, runArgs); err != nil {
+		t.Errorf("ServiceMonitor TLS without a verifier asked for its certificate:\n%s", out)
+	}
 }

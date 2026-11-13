@@ -1,0 +1,139 @@
+# Argo CD v3.6.1 spike, kind cluster. spec.sources with two entries: spec.source is absent and status.sync.revision is empty (status.sync.revisions holds the revisions).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: multi-source
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://kubernetes.default.svc
+  project: default
+  sources:
+  - path: apps/demo
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: main
+  - path: apps/rec
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: main
+  syncPolicy:
+    automated: {}
+status:
+  controllerNamespace: argocd
+  health:
+    lastTransitionTime: '2026-11-13T18:36:07Z'
+    message: Caused by apps/Deployment:demo/web
+    status: Progressing
+  history:
+  - deployStartedAt: '2026-11-13T18:36:07Z'
+    deployedAt: '2026-11-13T18:36:08Z'
+    id: 0
+    initiatedBy:
+      automated: true
+    revisions:
+    - fa13b73b64a1f8f79096681a5a46b5372964f324
+    - fa13b73b64a1f8f79096681a5a46b5372964f324
+    source:
+      repoURL: ''
+    sources:
+    - path: apps/demo
+      repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+      targetRevision: main
+    - path: apps/rec
+      repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+      targetRevision: main
+  operationState:
+    finishedAt: '2026-11-13T18:36:08Z'
+    message: successfully synced (all tasks run)
+    operation:
+      initiatedBy:
+        automated: true
+      retry:
+        limit: 5
+      sync:
+        revisions:
+        - fa13b73b64a1f8f79096681a5a46b5372964f324
+        - fa13b73b64a1f8f79096681a5a46b5372964f324
+        sources:
+        - path: apps/demo
+          repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+          targetRevision: main
+        - path: apps/rec
+          repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+          targetRevision: main
+    phase: Succeeded
+    startedAt: '2026-11-13T18:36:07Z'
+    syncResult:
+      resources:
+      - group: ''
+        hookPhase: Running
+        kind: ConfigMap
+        message: configmap/rec-top configured
+        name: rec-top
+        namespace: demo
+        status: Synced
+        syncPhase: Sync
+        version: v1
+      - group: apps
+        hookPhase: Running
+        images:
+        - registry.k8s.io/pause:3.10
+        kind: Deployment
+        message: deployment.apps/web configured
+        name: web
+        namespace: demo
+        status: Synced
+        syncPhase: Sync
+        version: v1
+      revision: ''
+      revisions:
+      - fa13b73b64a1f8f79096681a5a46b5372964f324
+      - fa13b73b64a1f8f79096681a5a46b5372964f324
+      source:
+        repoURL: ''
+      sources:
+      - path: apps/demo
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+      - path: apps/rec
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+  reconciledAt: '2026-11-13T18:36:08Z'
+  resourceHealthSource: appTree
+  resources:
+  - kind: ConfigMap
+    name: rec-top
+    namespace: demo
+    status: Synced
+    version: v1
+  - group: apps
+    kind: Deployment
+    name: web
+    namespace: demo
+    status: Synced
+    version: v1
+  sourceHydrator: {}
+  sourceTypes:
+  - Kustomize
+  - Directory
+  summary:
+    images:
+    - registry.k8s.io/pause:3.10
+  sync:
+    comparedTo:
+      destination:
+        namespace: demo
+        server: https://kubernetes.default.svc
+      source:
+        repoURL: ''
+      sources:
+      - path: apps/demo
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+      - path: apps/rec
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+    revisions:
+    - fa13b73b64a1f8f79096681a5a46b5372964f324
+    - fa13b73b64a1f8f79096681a5a46b5372964f324
+    status: Synced

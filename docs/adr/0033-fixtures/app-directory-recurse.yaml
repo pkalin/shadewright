@@ -1,0 +1,115 @@
+# Argo CD v3.6.1 spike, kind cluster. spec.source.directory.recurse set.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: directory-recurse
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    directory:
+      recurse: true
+    path: apps/rec
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: main
+  syncPolicy:
+    automated: {}
+status:
+  conditions:
+  - lastTransitionTime: '2026-11-13T18:36:08Z'
+    message: ConfigMap/rec-top is part of applications argocd/directory-recurse and multi-source
+    type: SharedResourceWarning
+  controllerNamespace: argocd
+  health:
+    lastTransitionTime: '2026-11-13T18:36:08Z'
+    status: Healthy
+  history:
+  - deployStartedAt: '2026-11-13T18:36:07Z'
+    deployedAt: '2026-11-13T18:36:08Z'
+    id: 0
+    initiatedBy:
+      automated: true
+    revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+    source:
+      directory:
+        recurse: true
+      path: apps/rec
+      repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+      targetRevision: main
+  operationState:
+    finishedAt: '2026-11-13T18:36:08Z'
+    message: successfully synced (all tasks run)
+    operation:
+      initiatedBy:
+        automated: true
+      retry:
+        limit: 5
+      sync:
+        revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+        source:
+          directory:
+            recurse: true
+          path: apps/rec
+          repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+          targetRevision: main
+    phase: Succeeded
+    startedAt: '2026-11-13T18:36:07Z'
+    syncResult:
+      resources:
+      - group: ''
+        hookPhase: Running
+        kind: ConfigMap
+        message: configmap/rec-top created
+        name: rec-top
+        namespace: demo
+        status: Synced
+        syncPhase: Sync
+        version: v1
+      - group: ''
+        hookPhase: Running
+        kind: ConfigMap
+        message: configmap/rec-sub created
+        name: rec-sub
+        namespace: demo
+        status: Synced
+        syncPhase: Sync
+        version: v1
+      revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+      source:
+        directory:
+          recurse: true
+        path: apps/rec
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+  reconciledAt: '2026-11-13T18:36:08Z'
+  resourceHealthSource: appTree
+  resources:
+  - kind: ConfigMap
+    name: rec-sub
+    namespace: demo
+    status: Synced
+    version: v1
+  - kind: ConfigMap
+    name: rec-top
+    namespace: demo
+    status: OutOfSync
+    version: v1
+  sourceHydrator: {}
+  sourceType: Directory
+  summary: {}
+  sync:
+    comparedTo:
+      destination:
+        namespace: demo
+        server: https://kubernetes.default.svc
+      source:
+        directory:
+          recurse: true
+        path: apps/rec
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+    revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+    status: OutOfSync

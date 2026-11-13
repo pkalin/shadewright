@@ -1,0 +1,49 @@
+# Argo CD v3.6.1 spike, kind cluster. No spec.syncPolicy: nothing syncs a new revision by itself; the Application stays OutOfSync with no operation.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: manual
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    path: apps/demo
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: main
+status:
+  conditions:
+  - lastTransitionTime: '2026-11-13T18:36:07Z'
+    message: Deployment/web is part of applications argocd/manual and demo
+    type: SharedResourceWarning
+  controllerNamespace: argocd
+  health:
+    lastTransitionTime: '2026-11-13T18:36:07Z'
+    message: Caused by apps/Deployment:demo/web
+    status: Progressing
+  reconciledAt: '2026-11-13T18:36:07Z'
+  resourceHealthSource: appTree
+  resources:
+  - group: apps
+    kind: Deployment
+    name: web
+    namespace: demo
+    status: OutOfSync
+    version: v1
+  sourceType: Kustomize
+  summary:
+    images:
+    - registry.k8s.io/pause:3.10
+  sync:
+    comparedTo:
+      destination:
+        namespace: demo
+        server: https://kubernetes.default.svc
+      source:
+        path: apps/demo
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+    revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+    status: OutOfSync

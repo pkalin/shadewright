@@ -1,0 +1,47 @@
+# Argo CD v3.6.1 spike, kind cluster. spec.source.plugin set; ComparisonError (no such plugin) and sync.revision main. The socket path in the message is shortened.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: plugin
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    path: apps/demo
+    plugin:
+      name: example
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: main
+  syncPolicy:
+    automated: {}
+status:
+  conditions:
+  - lastTransitionTime: '2026-11-13T18:36:07Z'
+    message: 'Failed to load target state: failed to generate manifest for source 1 of 1: rpc error: code
+      = Unknown desc = CMP processing failed for application "plugin": could not find cmp-server plugin
+      with name "example" supporting the given repository: error dialing to cmp-server for plugin example.sock:
+      error dial proxy: dial unix <socket path>: connect: no such file
+      or directory'
+    type: ComparisonError
+  controllerNamespace: argocd
+  health:
+    lastTransitionTime: '2026-11-13T18:36:07Z'
+    status: Healthy
+  reconciledAt: '2026-11-13T18:36:07Z'
+  resourceHealthSource: appTree
+  sync:
+    comparedTo:
+      destination:
+        namespace: demo
+        server: https://kubernetes.default.svc
+      source:
+        path: apps/demo
+        plugin:
+          name: example
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+    revision: main
+    status: Unknown

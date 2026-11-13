@@ -1,0 +1,107 @@
+# Argo CD v3.6.1 spike, kind cluster. spec.source.helm set; status.sourceType Helm.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: helm
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    helm:
+      parameters:
+      - name: mem
+        value: 8Mi
+    path: apps/helm
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: main
+  syncPolicy:
+    automated: {}
+status:
+  controllerNamespace: argocd
+  health:
+    lastTransitionTime: '2026-11-13T18:36:08Z'
+    status: Healthy
+  history:
+  - deployStartedAt: '2026-11-13T18:36:07Z'
+    deployedAt: '2026-11-13T18:36:08Z'
+    id: 0
+    initiatedBy:
+      automated: true
+    revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+    source:
+      helm:
+        parameters:
+        - name: mem
+          value: 8Mi
+      path: apps/helm
+      repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+      targetRevision: main
+  operationState:
+    finishedAt: '2026-11-13T18:36:08Z'
+    message: successfully synced (all tasks run)
+    operation:
+      initiatedBy:
+        automated: true
+      retry:
+        limit: 5
+      sync:
+        revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+        source:
+          helm:
+            parameters:
+            - name: mem
+              value: 8Mi
+          path: apps/helm
+          repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+          targetRevision: main
+    phase: Succeeded
+    startedAt: '2026-11-13T18:36:07Z'
+    syncResult:
+      resources:
+      - group: ''
+        hookPhase: Running
+        kind: ConfigMap
+        message: configmap/helmdemo created
+        name: helmdemo
+        namespace: demo
+        status: Synced
+        syncPhase: Sync
+        version: v1
+      revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+      source:
+        helm:
+          parameters:
+          - name: mem
+            value: 8Mi
+        path: apps/helm
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+  reconciledAt: '2026-11-13T18:36:08Z'
+  resourceHealthSource: appTree
+  resources:
+  - kind: ConfigMap
+    name: helmdemo
+    namespace: demo
+    status: Synced
+    version: v1
+  sourceHydrator: {}
+  sourceType: Helm
+  summary: {}
+  sync:
+    comparedTo:
+      destination:
+        namespace: demo
+        server: https://kubernetes.default.svc
+      source:
+        helm:
+          parameters:
+          - name: mem
+            value: 8Mi
+        path: apps/helm
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+    revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+    status: Synced

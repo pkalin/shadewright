@@ -1,0 +1,27 @@
+# Argo CD v3.6.1 spike, kind cluster. spec.destination.name instead of server; InvalidSpecError for an unknown cluster name.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: other-cluster
+  namespace: argocd
+spec:
+  destination:
+    name: other-cluster
+    namespace: demo
+  project: default
+  source:
+    path: apps/demo
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: main
+  syncPolicy:
+    automated: {}
+status:
+  conditions:
+  - lastTransitionTime: '2026-11-13T18:36:07Z'
+    message: 'there are no clusters with this name: other-cluster'
+    type: InvalidSpecError
+  health:
+    lastTransitionTime: '2026-11-13T18:36:07Z'
+    status: Unknown
+  sync:
+    status: Unknown

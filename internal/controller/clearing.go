@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -51,14 +52,16 @@ import (
 //     ReportMismatch, incomplete coverage is PartialRollout) and the target reports exactly the desired
 //     replicas available (else NotAvailable). A good check opens the executor's own window, a bad one resets
 //     it, but only when it closes an open window or names another reason than the last reset (resetWindow);
-//     the window lives in status.verification, so a restart loses nothing of it. A reset whose status write
-//     failed is kept in memory (unwrittenResets) and applied again by the next check, so the retry, which
-//     reads the window from before it, cannot end the request across that bad check. Before RolledOut is True
-//     nothing opens or resets the window.
+//     the window lives in status.verification. A reset whose status write failed is kept in memory
+//     (unwrittenResets) and applied again by the next check, so the retry, which reads the window from before
+//     it, cannot end the request across that bad check. A restart or a leader change loses that memory, so no
+//     window counts time from before this process began reconciling (counted): every open window then needs a
+//     full stableFor again. Before RolledOut is True nothing opens or resets the window.
 //   - Success (clearing.Succeeds) needs a good check, a report whose sample counter rose since a check at most
 //     one poll interval earlier by the executor's clock, taken again after the report read (the counter is
-//     kept in memory: a restart delays success by one check), and both spans at least the effective stableFor
-//     plus the node grace, each on its own writer's clock. One status write then sets Succeeded, Cleared True
+//     kept in memory, like the start of reconciling), and both spans at least the effective stableFor plus the
+//     node grace, each on its own writer's clock, the executor's counted from the later of its windowStart and
+//     the start of reconciling. One status write then sets Succeeded, Cleared True
 //     (NoRecurrence) and Verified True. A request whose spec.verification.checks names QueueBacklogDecreasing
 //     ends Inconclusive with CheckNotAvailable instead, since no metrics are read.
 //   - A ScaledObject has no pods of its own: its window is good while it is ready by the KedaReady rule (else
@@ -140,6 +143,52 @@ func (u *unwrittenResets) get(key types.NamespacedName) (remediationv1alpha1.Win
 // forget drops the reset kept for the request with key.
 func (u *unwrittenResets) forget(key types.NamespacedName) {
 	u.m.Delete(key)
+}
+
+// reconcilingSince is the moment, on the executor's clock, this process began reconciling: set once, by the
+// first of sinceMarker (started when the manager's leader election is won, or at once without leader
+// election) and the first check that asks for it. A standby replica takes it when it becomes leader, not when
+// its process started, since it checked nothing before. A check can run before sinceMarker starts (the
+// manager starts both together), and then its own later time is kept, which can only delay an end.
+type reconcilingSince struct {
+	t atomic.Pointer[time.Time]
+}
+
+// mark sets the moment to at unless it is set, and returns it.
+func (s *reconcilingSince) mark(at time.Time) time.Time {
+	s.t.CompareAndSwap(nil, &at)
+	return *s.t.Load()
+}
+
+// sinceMarker is the runnable that sets the reconciler's reconcilingSince when the manager's leader election
+// is won.
+type sinceMarker struct {
+	r *RemediationRequestReconciler
+}
+
+// Start sets the moment and waits for the manager to stop.
+func (m sinceMarker) Start(ctx context.Context) error {
+	m.r.since.mark(m.r.now())
+	<-ctx.Done()
+	return nil
+}
+
+// NeedLeaderElection makes the moment the start of leadership on a standby that becomes leader later.
+func (sinceMarker) NeedLeaderElection() bool { return true }
+
+// counted returns the executor's window w as this process counts its span (ADR-0030 section 4, amendment of
+// 2026-11-13): an open window that opened before this process began reconciling counts from that moment. A
+// reset this process recorded but could not store, and an earlier process lost with its memory
+// (unwrittenResets), may lie in the stored window; no check of this process does, so after a restart or a
+// leader change every open window needs a full stableFor again. Only the span changes: a closed window stays
+// closed and the stored windowStart is never rewritten (storeWindow gets w, not this).
+func (r *RemediationRequestReconciler) counted(w verification.Window) verification.Window {
+	since := r.since.mark(r.now())
+	if w.Open() && w.Start.Time.Before(since) {
+		start := metav1.NewTime(since)
+		w.Start = &start
+	}
+	return w
 }
 
 // checkWindow returns the executor's window a check starts from: the stored one, with a reset of an earlier
@@ -334,7 +383,7 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 	changed = storeWindow(rr, w) || changed
 	r.unwrittenResets.note(client.ObjectKeyFromObject(rr), w)
 	if good && verification.Succeeds(verification.Success{Report: sampled, Contract: contract, Freshness: fresh,
-		Executor: w, Now: now, StableFor: stableFor, NodeGrace: r.nodeGrace()}) {
+		Executor: r.counted(w), Now: now, StableFor: stableFor, NodeGrace: r.nodeGrace()}) {
 		if namesBacklogCheck(rr) {
 			return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
 				ReasonCheckNotAvailable, fmt.Sprintf("No restart or OOM kill for %s, but the check "+
@@ -355,7 +404,7 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 	}
 	if sampled != nil && good {
 		st := &sampled.Status
-		if verification.ReportWindow(st).Span(st.SampledAt.Time) >= need && w.Span(now) >= need {
+		if verification.ReportWindow(st).Span(st.SampledAt.Time) >= need && r.counted(w).Span(now) >= need {
 			interval = verification.FastPollInterval
 		}
 	}
@@ -495,7 +544,7 @@ func (r *RemediationRequestReconciler) clearScaledStep(ctx context.Context,
 	changed = storeWindow(rr, w) || changed
 	r.unwrittenResets.note(client.ObjectKeyFromObject(rr), w)
 	revert := remediationv1alpha1.IsRevert(rr)
-	if w.Span(now) >= stableFor {
+	if r.counted(w).Span(now) >= stableFor {
 		reason, message := ReasonClearingNotChecked, fmt.Sprintf("The %s was rolled out and configured for %s; "+
 			"its symptom is not visible in container status, so clearing is not checked", ref.Kind, stableFor)
 		switch {
@@ -564,7 +613,7 @@ func (r *RemediationRequestReconciler) clearRevertStep(ctx context.Context,
 	}
 	changed = storeWindow(rr, w) || changed
 	r.unwrittenResets.note(client.ObjectKeyFromObject(rr), w)
-	if good && w.Span(now) >= stableFor {
+	if good && r.counted(w).Span(now) >= stableFor {
 		return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
 			remediationv1alpha1.ReasonRevertApplied, revertAppliedMessage(rr.Spec.TargetRef.Kind, stableFor))
 	}

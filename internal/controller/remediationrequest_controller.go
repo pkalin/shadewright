@@ -204,6 +204,9 @@ type RemediationRequestReconciler struct {
 	// unwrittenResets holds, per request in Verifying, a reset of the executor's window whose status write was lost
 	// (clearing.go), applied again by the next check. Memory only; dropped like reportCounters.
 	unwrittenResets unwrittenResets
+	// since is when this process began reconciling, on its clock (clearing.go): no window counts time before
+	// it. Memory only, set once.
+	since reconcilingSince
 }
 
 // forget drops what this process keeps in memory about a request: its last full recheck, its last
@@ -1040,6 +1043,9 @@ func (r *RemediationRequestReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	requestPhases.setNamespace(r.Namespace)
 	if err := mgr.Add(requestPhases.source.Runnable(mgr.GetCache(), &remediationv1alpha1.RemediationRequest{})); err != nil {
 		return fmt.Errorf("adding the source of the RemediationRequest phase metric: %w", err)
+	}
+	if err := mgr.Add(sinceMarker{r: r}); err != nil {
+		return fmt.Errorf("adding the start of reconciling of the RemediationRequest controller: %w", err)
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&remediationv1alpha1.RemediationRequest{}).

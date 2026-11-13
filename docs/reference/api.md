@@ -288,6 +288,20 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `evictedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | evictedAt is the newest update time of the commands pushed out of seen by its bound; with evictedID it is the watermark of those commands. A command with an ID up to evictedID and an update time up to evictedAt counts as judged, so an evicted one returned again unchanged is not judged again, while one edited after its judgement has a later update time and is. The watermark only grows, and is dropped once since passes evictedAt. A command edited during a sweep and passed by it may count as judged too when more than MaxSeenComments newer ones were judged first: it is then not judged, never accepted twice. Those newer ones include commands from authors without write access, so anyone who can comment can cause this on purpose; it fails closed (the edited command is missed, its author posts a new comment). |
 | `evictedID` | integer | No | evictedID is the highest ID of the commands pushed out of seen; set together with evictedAt.<br>Minimum: 0 |
 
+### ConflictSeen
+
+ConflictSeen is when and on which commits the executor first saw its pull request reported with a merge
+conflict (PullRequestStatus.conflictSeen).
+
+
+Used by: [PullRequestStatus](#pullrequeststatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `at` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | at is when the executor saw the conflict, on its own clock. |
+| `headSHA` | string | Yes | headSHA is the pull request's head at that read, always the recorded head.<br>Pattern: `^[0-9a-f]{40}$` |
+| `targetHead` | string | Yes | targetHead is the head of the target branch the freshness check read with it.<br>Pattern: `^[0-9a-f]{40}$` |
+
 ### GitBranch
 
 GitBranch is a branch name. Names that git or a shell could read as something else (a leading dash,
@@ -1010,6 +1024,7 @@ Validation rules:
 
 - appliedObservedAt needs mergeCommitSHA: `!has(self.appliedObservedAt) || has(self.mergeCommitSHA)`
 - reviewCheck names the recorded head: `!has(self.reviewCheck) || self.reviewCheck.head == self.headSHA`
+- conflictSeen names the recorded head: `!has(self.conflictSeen) || self.conflictSeen.headSHA == self.headSHA`
 
 Used by: [RemediationRequestStatus](#remediationrequeststatus).
 
@@ -1023,6 +1038,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `appliedObservedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a deadline measured from it (the rollout check, condition RolledOut) cannot be pushed back. Written only for a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge. |
 | `mergedAt` | [MicroTime](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#microtime-v1-meta) | No | mergedAt is when the executor first recorded the request Merged, set in the status write that sets the phase and never moved, unlike lastPhaseTransitionTime, which every later phase moves. A duplicate of the same Incident and target created before it ends Superseded (reason AnotherRequestMerged, #556). Empty on a request merged before the field existed. |
 | `reviewCheck` | [ReviewCheck](#reviewcheck) | No | reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge gate), written only with reviewer hints on: InProgress once the executor created it on that head, Passed once it completed it with success after an approval of that head by someone who wrote no hint in the chain, Failed when the executor could not read every review of the pull request and completed it with failure (it fails closed; condition Approved False with reason ReviewListTooLong), Refused when the Git host refused to create or complete it for good (condition Approved then says so). It always names headSHA: a new head starts without it, so a state never outlives its head.<br>Rule: on one head the check run moves only from InProgress to Passed, Failed or Refused |
+| `conflictSeen` | [ConflictSeen](#conflictseen) | No | conflictSeen records the first read in which the Git host reported this pull request open with a merge conflict while the plan was fresh. GitHub computes mergeability lazily and may report a stale conflict, so one read does not end the request: it ends NeedsIntervention with reason ChangeRequestConflict only on a later conflicted read, with the plan still fresh, at least two minutes after at, on the same head and target branch head. Any read that finds no conflict (an unknown answer included) removes it, and a new target branch head starts the wait again. Only the executor writes it. |
 
 ### RecordID
 
@@ -1181,7 +1197,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `planRepository` | [PlanRepository](#planrepository) | No | planRepository is the repository and installation the plan digest covers, set together with planDigest. |
 | `policyRevision` | string | No | policyRevision is the policy name and generation the decision used, as name/generation. The policy UID is recorded next to it, because a deleted and recreated policy can reach the same generation again.<br>Maximum length: 128 |
 | `policyUID` | [UID](#uid) | No | policyUID is the UID of the policy the decision used. It is part of the plan digest.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
-| `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists.<br>Rule: appliedObservedAt needs mergeCommitSHA<br>Rule: reviewCheck names the recorded head |
+| `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists.<br>Rule: appliedObservedAt needs mergeCommitSHA<br>Rule: reviewCheck names the recorded head<br>Rule: conflictSeen names the recorded head |
 | `mergeReceipt` | [MergeReceipt](#mergereceipt) | No | mergeReceipt binds the merge to its repository, target branch, pull request, head and merge commit (ADR-0030 section 1). It is written in the status write that sets Merged and is never changed or removed after (validation rules on the object). A request merged without a full merge commit ID gets none and ends Inconclusive with reason NoMergeReceipt; a merge with a foreign change (MergedWithForeignChange) gets none either. Unset on a request merged before the field existed (condition Verified Unknown, reason MergedBeforeVerification). |
 | `mergeCommitAwaitedSince` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes from it (GitHub computes it after the merge), keeping the phase, and then records the merge without a receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a change it cannot check. Set once and never changed or removed (a validation rule on the object), so a restart does not start the wait again. Unset when the commit was reported at once. |
 | `rollout` | [RolloutStatus](#rolloutstatus) | No | rollout is what the check after the merge keeps between reconciles (the RolledOut condition). |

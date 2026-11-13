@@ -1077,6 +1077,9 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		if outcome, lookErr = r.watchPullRequest(ctx, rr); outcome == prStopped {
 			return ctrl.Result{}, nil
 		}
+		if err := r.clearConflictSeen(ctx, rr, outcome); err != nil {
+			return ctrl.Result{}, err
+		}
 		if outcome == prMergeCommitPending {
 			// Merged without a merge commit yet: looked at again until the host reports one or the wait ends.
 			return ctrl.Result{RequeueAfter: min(r.mergeCommitWaitLeft(rr), r.pullRequestPollInterval())}, nil
@@ -1106,15 +1109,7 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 			mark.Reason, mark.Message))
 	}
 	if intent(rr) != nil {
-		// Handed over in flight (handoff.go): the replacement decides what happens to the pull request, and this
-		// request writes nothing to Git, so neither a stale plan nor a render refusal closes the pull request the
-		// replacement may hold. It goes on once the intent is Done (it ends HandedOff) or aborted (settleHandoff).
-		// A pull request closed meanwhile was closed by a person (neither side closes it while the intent
-		// stands): the rejection ends this request and aborts the intent in the same write (declineOnEnd).
-		if outcome == prClosed {
-			return r.rejected(ctx, rr)
-		}
-		return ctrl.Result{RequeueAfter: r.pullRequestPollInterval()}, nil
+		return r.waitHandedOver(ctx, rr, outcome)
 	}
 	// A replacement whose branch update happened before a restart or a lost write records it before the
 	// freshness check, which would take its own commit, or a merge of it, for a stale plan.
@@ -1147,13 +1142,27 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 	case err != nil:
 		return r.refuseOrWait(ctx, rr, err)
 	case outcome == prClosed, outcome == prConflicted:
-		return r.endLooked(ctx, rr, outcome)
+		return r.endLooked(ctx, rr, outcome, fresh)
 	default:
 		if err := r.clearWaits(ctx, rr); err != nil {
 			return ctrl.Result{}, err
 		}
 		return r.advance(ctx, rr, fresh)
 	}
+}
+
+// waitHandedOver is the recheck of a request handed over in flight (handoff.go): the replacement decides what
+// happens to the pull request, and this request writes nothing to Git, so neither a stale plan nor a render
+// refusal closes the pull request the replacement may hold. It goes on once the intent is Done (it ends
+// HandedOff) or aborted (settleHandoff). A pull request closed meanwhile was closed by a person (neither side
+// closes it while the intent stands): the rejection ends this request and aborts the intent in the same write
+// (declineOnEnd).
+func (r *RemediationRequestReconciler) waitHandedOver(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	outcome prOutcome) (ctrl.Result, error) {
+	if outcome == prClosed {
+		return r.rejected(ctx, rr)
+	}
+	return ctrl.Result{RequeueAfter: r.pullRequestPollInterval()}, nil
 }
 
 // ignoreSuperseded returns nil for ErrSuperseded and err otherwise.

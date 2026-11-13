@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1380 710" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
 <title id="t">Shadewright verification outcomes</title>
-<desc id="d">Overview of ADR-0030: the path of a RemediationRequest after the merge. Built: Merged, step 1 (the merge receipt and the end Inconclusive with reason NoMergeReceipt), step 2 (delivery against the receipt), the outcomes rolled out and configured with the executor's own checks in Verifying, the ends Inconclusive and Failed for those (the steps after Merged only with the executor flag --verify-outcomes, off by default until the report is read), the VerificationReport type with its window checks, and the verifier, which samples the pods and writes the reports that the executor does not read yet; the outcome cleared, the stable window as the executor judges it, Succeeded and the revert request are planned. 1. The merge receipt, status.mergeReceipt, is written once in the status write that sets Merged and records repository.url and repository.installationID, targetBranch, pullRequest, headSHA, mergeCommitSHA and mergedAt; without a merge commit from the host the request ends Inconclusive with reason NoMergeReceipt. 2. Delivery is checked against the receipt: Merged moves to WaitingForDelivery with status.deadline one hour after mergedAt, the check asks about mergeCommitSHA on targetBranch, and when Flux applied the merge commit or a descendant the condition Delivered is True and the phase is Verifying; Flux failing on the merge commit itself ends Failed with reason DeliveryFailed. 3. Three outcomes are kept apart, each with its own condition: rolled out (Delivered and RolledOut, read with get on the Kustomization and the target and the host's ancestry answer), configured (Configured, the live field equals the desired value, read with get on the target) and cleared (Cleared, container status of the pods: no OOM kill, restarts flat against durable baselines, every desired replica on the applied revision). Cleared is read from a VerificationReport that a separate identity, shadewright-verifier, writes after listing the pods and verifying their owners; it has no model access and no Git App, and the executor checks the report's binding, age and coverage. The executor writes the three conditions and Verified sums them up. 4. The stable window runs while the request is Verifying: the verifier samples every 30 seconds and the executor rechecks the template and the report on every reconcile; a bad sample or a stale report moves windowStart forward and records lastReset; success needs good samples until windowStart plus stableFor plus nodeGrace. 5. Terminal phases: Succeeded (Cleared True, Verified True), Inconclusive (Verified Unknown with a reason) and Failed (Verified False with a reason). From Failed the analyzer creates a revert request with spec.reverts and approvalRequired true, which goes through policy (#96) and ends Inconclusive with reason RevertApplied, never Succeeded; Inconclusive never leads to a revert.</desc>
+<desc id="d">Overview of ADR-0030: the path of a RemediationRequest after the merge. Built: Merged, step 1 (the merge receipt and the end Inconclusive with reason NoMergeReceipt), step 2 (delivery against the receipt), the outcomes rolled out and configured with the executor's own checks in Verifying, the outcome cleared judged by the executor from the verifier's VerificationReport, the stable window, and the ends Succeeded, Inconclusive and Failed (the steps after Merged only with the executor flag --verify-outcomes, off by default); the revert request is planned. 1. The merge receipt, status.mergeReceipt, is written once in the status write that sets Merged and records repository.url and repository.installationID, targetBranch, pullRequest, headSHA, mergeCommitSHA and mergedAt; without a merge commit from the host the request ends Inconclusive with reason NoMergeReceipt. 2. Delivery is checked against the receipt: Merged moves to WaitingForDelivery with status.deadline one hour after mergedAt, the check asks about mergeCommitSHA on targetBranch, and when Flux applied the merge commit or a descendant the condition Delivered is True and the phase is Verifying; Flux failing on the merge commit itself ends Failed with reason DeliveryFailed. 3. Three outcomes are kept apart, each with its own condition: rolled out (Delivered and RolledOut, read with get on the Kustomization and the target and the host's ancestry answer), configured (Configured, the live field equals the desired value, read with get on the target) and cleared (Cleared, container status of the pods: no OOM kill, restarts flat against durable baselines, every desired replica on the applied revision). Cleared is read from a VerificationReport that a separate identity, shadewright-verifier, writes after listing the pods and verifying their owners; it has no model access and no Git App, and the executor checks the report's binding, age and coverage. The executor writes the three conditions and Verified sums them up. 4. The stable window runs while the request is Verifying: the verifier samples every 30 seconds and the executor rechecks the template and the report on every reconcile; a bad sample or a stale report moves windowStart forward and records lastReset; success needs good samples until windowStart plus stableFor plus nodeGrace. 5. Terminal phases: Succeeded (Cleared True, Verified True), Inconclusive (Verified Unknown with a reason) and Failed (Verified False with a reason). From Failed the analyzer creates a revert request with spec.reverts and approvalRequired true, which goes through policy (#96) and ends Inconclusive with reason RevertApplied, never Succeeded; Inconclusive never leads to a revert.</desc>
 <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
 <style>
 .pl{fill:#1d1b2b;stroke:#7c24fc;stroke-width:1.4;stroke-dasharray:5 4}
@@ -70,7 +70,7 @@
 <text class="s" x="554" y="312">Evidence: the live field equals the</text>
 <text class="s" x="554" y="331">desired value (sourcemap.FieldFor)</text>
 <text class="s" x="554" y="350">Read with: get on the target</text>
-<rect class="pl" x="540" y="380" width="330" height="172" rx="10"/>
+<rect class="bt" x="540" y="380" width="330" height="172" rx="10"/>
 <text class="h" x="554" y="406">Cleared</text>
 <text class="s" x="554" y="428">Condition: Cleared (new type)</text>
 <text class="s" x="554" y="447">Evidence: a fresh VerificationReport:</text>
@@ -82,7 +82,7 @@
 <text class="lbl" x="540" y="580">Verified sums the three up and decides the phase.</text>
 <text class="lbl" x="540" y="600">The executor writes them; kubectl shadewright</text>
 <text class="lbl" x="540" y="620">explain shows three lines.</text>
-<rect class="pl" x="910" y="80" width="190" height="420" rx="10"/>
+<rect class="bt" x="910" y="80" width="190" height="420" rx="10"/>
 <text class="h" x="924" y="106">Stable window</text>
 <text class="s" x="924" y="128">Phase Verifying</text>
 <text class="s" x="924" y="147"></text>
@@ -102,7 +102,7 @@
 <text class="s" x="924" y="413"></text>
 <text class="s" x="924" y="432">Success after stableFor</text>
 <text class="s" x="924" y="451">plus nodeGrace</text>
-<rect class="pl" x="1120" y="80" width="240" height="100" rx="10"/>
+<rect class="bt" x="1120" y="80" width="240" height="100" rx="10"/>
 <text class="h" x="1134" y="106">Succeeded</text>
 <text class="s" x="1134" y="128">Cleared True (NoRecurrence)</text>
 <text class="s" x="1134" y="147">Verified True</text>
@@ -130,16 +130,16 @@
 <path class="fb" d="M250 290H280" marker-end="url(#a)"/>
 <path class="fb" d="M510 290H525" marker-end="url(#a)"/>
 <path class="fb" d="M525 155V305" />
-<path class="f" d="M525 305V455" />
+<path class="fb" d="M525 305V455" />
 <path class="fb" d="M525 155H540" marker-end="url(#a)"/>
 <path class="fb" d="M525 305H540" marker-end="url(#a)"/>
-<path class="f" d="M525 455H540" marker-end="url(#a)"/>
-<path class="f" d="M870 155H890M870 305H890M870 455H890"/><path class="f" d="M890 155V455"/>
-<path class="f" d="M890 290H910" marker-end="url(#a)"/>
-<path class="f" d="M1100 290H1105"/><path class="f" d="M1105 130V485"/>
-<path class="f" d="M1105 130H1120" marker-end="url(#a)"/>
-<path class="f" d="M1105 290H1120" marker-end="url(#a)"/>
-<path class="f" d="M1105 485H1120" marker-end="url(#a)"/>
+<path class="fb" d="M525 455H540" marker-end="url(#a)"/>
+<path class="fb" d="M870 155H890M870 305H890M870 455H890"/><path class="fb" d="M890 155V455"/>
+<path class="fb" d="M890 290H910" marker-end="url(#a)"/>
+<path class="fb" d="M1100 290H1105"/><path class="fb" d="M1105 130V485"/>
+<path class="fb" d="M1105 130H1120" marker-end="url(#a)"/>
+<path class="fb" d="M1105 290H1120" marker-end="url(#a)"/>
+<path class="fb" d="M1105 485H1120" marker-end="url(#a)"/>
 <path class="f" d="M1240 530V565" marker-end="url(#a)"/>
 <rect class="bt" x="910" y="565" width="190" height="115" rx="10"/>
 <text class="h" x="924" y="591">Verifier</text>
@@ -147,7 +147,7 @@
 <text class="s" x="924" y="632">reads pods, ReplicaSets</text>
 <text class="s" x="924" y="651">no model, no Git App</text>
 <text class="lbl" x="924" y="670">VerificationReport</text>
-<path class="f" d="M910 600H882V500H872" marker-end="url(#a)"/>
-<rect class="pl" x="20" y="638" width="26" height="14" rx="3"/><text class="s" x="56" y="650">dashed: planned, not built (built: the merge receipt, delivery, rolled out, configured, the ends Inconclusive</text>
-<text class="s" x="56" y="667">and Failed with the flag --verify-outcomes, off by default, the VerificationReport type and the verifier)</text>
+<path class="fb" d="M910 600H882V500H872" marker-end="url(#a)"/>
+<rect class="pl" x="20" y="638" width="26" height="14" rx="3"/><text class="s" x="56" y="650">dashed: planned, not built (built: everything else, the steps after Merged with the flag --verify-outcomes,</text>
+<text class="s" x="56" y="667">off by default; planned: the revert request, #96)</text>
 </svg>

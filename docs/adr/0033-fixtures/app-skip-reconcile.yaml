@@ -1,0 +1,19 @@
+# Argo CD v3.6.1 spike, kind cluster. Annotation argocd.argoproj.io/skip-reconcile true on a new Application: no status at all.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  annotations:
+    argocd.argoproj.io/skip-reconcile: 'true'
+  name: skipped
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    path: apps/demo
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: main
+  syncPolicy:
+    automated: {}

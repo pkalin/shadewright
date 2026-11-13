@@ -262,7 +262,7 @@ The target: an audit trail of input references, model and tool versions, the pol
 
 ## 10.9. Verification
 
-**Planned (#92).** Metrics and health are watched after the change. A failed fix leads to escalation or a reviewed revert PR, never to further unbounded experiments. [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) sets the contract for v0.5.0: container status is the evidence for a cleared symptom, missing or stale data ends `Inconclusive` and never `Succeeded`, and a revert is a new request from the analyzer through the same policy and pull request path. The `VerificationReport` type and the checks that judge it (`internal/verification/clearing`) are built (#679); the verifier (#682) writes a report only for requests in `Verifying`, which they reach only with `--verify-outcomes` (off by default), and nothing reads a report until the executor's wiring (#683) is built.
+**Planned (#92).** Metrics and health are watched after the change. A failed fix leads to escalation or a reviewed revert PR, never to further unbounded experiments. [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) sets the contract for v0.5.0: container status is the evidence for a cleared symptom, missing or stale data ends `Inconclusive` and never `Succeeded`, and a revert is a new request from the analyzer through the same policy and pull request path. Built: the `VerificationReport` type and the checks that judge it (`internal/verification/clearing`, #679), the verifier that writes it (#682) only for requests in `Verifying`, which they reach only with `--verify-outcomes`, and the executor, which reads it with `get` as untrusted evidence and judges `Cleared` from it (#683, behind `--verify-outcomes`, off by default). A missing, never sampled, stale, mismatched or incomplete report resets the executor's own window and can never end a request `Succeeded`; an OOM kill or recorded restarts in a report bound to the request end it `Failed`. A compromised verifier can forge a quiet window and so a `Succeeded`, which authorizes no change (ADR-0030 section 7, an accepted risk). The revert after a failure is planned (#96).
 
 ## 10.10. Excluded from the MVP
 
@@ -272,7 +272,7 @@ Emergency direct actions on the cluster could come later as a separate catalog w
 
 ## 10.11. What each identity can read and write
 
-What each identity can read and write. Arrows show where data goes: a read points at the identity, a write away from it. The roles come from kubebuilder markers in `internal/analyzer`, `internal/analyzer/collector` and `internal/controller`, the analyzer's namespaced reads are bound per watched namespace in `config/watch`, and `test/rbac` checks them against a real API server. Dashed boxes and links are designed but not built yet.
+What each identity can read and write. Arrows show where data goes: a read points at the identity, a write away from it. The roles come from kubebuilder markers in `internal/analyzer`, `internal/analyzer/collector` and `internal/controller`, the analyzer's namespaced reads are bound per watched namespace in `config/watch`, the verifier's in `internal/verifier` and `internal/verifier/watchrbac`, and `test/rbac` checks them against a real API server. Dashed boxes and links are designed but not built yet.
 
 ```mermaid
 flowchart TB
@@ -289,6 +289,8 @@ flowchart TB
     tgt[Target objects, Flux Kustomizations and GitRepositories]
     ex([Executor])
     rrs["RemediationRequest status, shadewright-system only"]
+    vf([Verifier])
+    vr["VerificationReport and its status, shadewright-system only"]
     kv[Key Vault key, sign only]
     sec[Secrets]
     nodes[Nodes, cluster-wide]
@@ -311,8 +313,13 @@ flowchart TB
     ex -- update --> rrs
     ex -- add, remove finalizer --> rr
     ex -- sign --> kv
+    wl -- "list pods, get workloads" --> vf
+    rr -- read --> vf
+    vf -- "create, update status" --> vr
+    vr -- get --> ex
     sec -- no access --x an
     sec -- no access --x ex
+    sec -- no access --x vf
     classDef planned stroke-dasharray: 5 5
     class fm planned
 ```

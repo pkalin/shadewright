@@ -266,6 +266,13 @@ const (
 	// with the field accessor of the source mapping, and False with reason ValueChanged when it does not (a
 	// later commit overwrote it), which ends the request Inconclusive (ADR-0030 section 3).
 	ConditionConfigured = "Configured"
+	// ConditionCleared says whether the symptom cleared after the change (ADR-0030 section 3), judged by the
+	// executor with the verifier's VerificationReport as its evidence: True with reason NoRecurrence when a quiet
+	// window held for the effective stableFor plus the node grace, False with reason OOMKilled or Restarted when
+	// the report recorded that, and Unknown while the window runs (reason Observing) and when the request ends
+	// without evidence (the reason of Verified, for example ClearingNotChecked for a ScaledObject, whose symptom
+	// container status does not show).
+	ConditionCleared = "Cleared"
 	// ConditionPlanFresh is False, with the reason, when an input of the plan digest changed, the ScaledObject
 	// is no longer ready or the action's module was disabled, and the request was superseded (or stopped because its change request could not be closed). It is also False, with the
 	// stale reason and the phase unchanged, once the cleanup of a stale plan has started: it is written before
@@ -452,6 +459,47 @@ type RolloutStatus struct {
 	// ended is true once the check gave its final verdict in RolledOut; nothing is read for it after that.
 	// +optional
 	Ended bool `json:"ended,omitempty"`
+}
+
+// VerificationReset is a reset of the executor's own verification window (ADR-0030 section 4): a check of a
+// Verifying request that was not good.
+type VerificationReset struct {
+	// reason says why the window was reset: NotAvailable (the target reports other available replicas than
+	// desired, fewer or more, or a ScaledObject is not ready by the KedaReady rule), StaleReport (the verifier's report is
+	// missing, was never sampled, or its sample counter stopped rising), ReportMismatch (the report names another
+	// request, merge commit, target, template revision or container) or PartialRollout (the report does not cover
+	// every desired replica). Every one is a reset of the no-evidence class.
+	// +kubebuilder:validation:Enum=NotAvailable;StaleReport;ReportMismatch;PartialRollout
+	// +required
+	Reason ResetReason `json:"reason"`
+
+	// time is when the reset was recorded, on the executor's clock. It is never earlier than windowStart at that
+	// moment or the previous reset, so the window is open only while windowStart is later than it.
+	// +required
+	Time metav1.Time `json:"time"`
+}
+
+// VerificationWindow is the executor's own stable window of a Verifying request (ADR-0030 section 4), kept next
+// to the verifier's window in the VerificationReport. Every time in it is on the executor's clock, and it is
+// never compared with a time of the report. A restart of the executor loses nothing of it. A lastReset is
+// counted: resets is at least 1 when it is set.
+// +kubebuilder:validation:XValidation:rule="!has(self.lastReset) || (has(self.resets) && self.resets >= 1)",message="lastReset requires resets of at least 1"
+type VerificationWindow struct {
+	// windowStart is when the current window opened: the first good check after the last reset. It only moves
+	// forward.
+	// +optional
+	WindowStart *metav1.Time `json:"windowStart,omitempty"`
+
+	// lastReset is the last reset of the window. Kept once set; its time never moves back.
+	// +optional
+	LastReset *VerificationReset `json:"lastReset,omitempty"`
+
+	// resets counts the resets of the window: a bad check that closes an open window or names another reason
+	// than lastReset. The same reason again on a closed window is not counted and writes nothing. It never
+	// decreases, and it is at least 1 while lastReset is set.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Resets int64 `json:"resets,omitempty"`
 }
 
 // PlanRepository identifies the repository a plan was made for: the URL and provider installation taken from
@@ -642,6 +690,12 @@ type RemediationRequestStatus struct {
 	// +optional
 	Deadline *metav1.Time `json:"deadline,omitempty"`
 
+	// verification is the executor's own stable window while the request is Verifying (ADR-0030 section 4). Only
+	// the executor writes it; once set it is kept, windowStart and the time of lastReset only move forward and
+	// resets never decreases (validation rules on the object).
+	// +optional
+	Verification *VerificationWindow `json:"verification,omitempty"`
+
 	// hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a
 	// replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all,
 	// and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the
@@ -677,7 +731,7 @@ type RemediationRequestStatus struct {
 	Handoff *Handoff `json:"handoff,omitempty"`
 
 	// conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
-	// Verified, Configured, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's
+	// Verified, Configured, Cleared, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's
 	// pods run the applied template; True with reason RolloutComplete, or RolloutPartitioned when a partitioned
 	// StatefulSet keeps pods on the old revision on purpose; False with reason RolloutStuck or
 	// DeliveryNotObserved, Unknown while in progress and with reason KindNotChecked, RolloutSuperseded or
@@ -744,6 +798,13 @@ type RemediationRequestStatus struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSince) || !has(self.status) || !has(self.status.rollout) || !has(self.status.rollout.pausedSince) || self.status.rollout.pausedSince == oldSelf.status.rollout.pausedSince",message="status.rollout.pausedSince is never moved while set"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSeconds) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.pausedSeconds) && self.status.rollout.pausedSeconds >= oldSelf.status.rollout.pausedSeconds)",message="status.rollout.pausedSeconds never decreases"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.ended) || !oldSelf.status.rollout.ended || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.ended) && self.status.rollout.ended)",message="status.rollout.ended never goes back to false"
+// status.verification, the executor's own stable window, is kept once set, its windowStart and the time of its
+// lastReset only move forward and resets never decreases, so no write can move the window back (ADR-0030
+// section 4).
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.verification) || (has(self.status) && has(self.status.verification))",message="status.verification is kept once set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.windowStart) || (has(self.status) && has(self.status.verification) && has(self.status.verification.windowStart) && timestamp(self.status.verification.windowStart) >= timestamp(oldSelf.status.verification.windowStart))",message="status.verification.windowStart only moves forward"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.lastReset) || (has(self.status) && has(self.status.verification) && has(self.status.verification.lastReset) && timestamp(self.status.verification.lastReset.time) >= timestamp(oldSelf.status.verification.lastReset.time))",message="status.verification.lastReset is kept once set and its time never moves back"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.resets) || (has(self.status) && has(self.status.verification) && has(self.status.verification.resets) && self.status.verification.resets >= oldSelf.status.verification.resets)",message="status.verification.resets never decreases"
 // status.queuedBehind is kept once set: its entries may be replaced, but the field is never removed or emptied,
 // so a write cannot drop the record that ends a request queued behind a pull request closed unmerged (#643).
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.queuedBehind) || size(oldSelf.status.queuedBehind) == 0 || (has(self.status) && has(self.status.queuedBehind) && size(self.status.queuedBehind) > 0)",message="status.queuedBehind is kept once set"

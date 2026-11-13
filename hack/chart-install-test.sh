@@ -135,7 +135,14 @@ can shadewright-verifier no create incidents.remediation.shadewright.io -n "${NS
 can shadewright-verifier no get secrets -n "${NS}"
 can shadewright-verifier no get secrets -n demo
 can shadewright-verifier no update deployments.apps -n demo
-# Planned in #683: the executor's get on verificationreports (ADR-0030 section 7). It is not granted yet.
-can shadewright-executor no get verificationreports.remediation.shadewright.io -n "${NS}"
+# The executor reads the verifier's report as its evidence for Cleared (ADR-0030 section 7, #683): get only, in
+# the operator namespace, never a write, and nothing on pods.
+can shadewright-executor yes get verificationreports.remediation.shadewright.io -n "${NS}"
+can shadewright-executor no list verificationreports.remediation.shadewright.io -n "${NS}"
+can shadewright-executor no create verificationreports.remediation.shadewright.io -n "${NS}"
+can shadewright-executor no update verificationreports.remediation.shadewright.io --subresource=status -n "${NS}"
+can shadewright-executor no get verificationreports.remediation.shadewright.io -n demo
+can shadewright-executor no list pods -n demo
+can shadewright-executor no get pods -n demo
 
 exit "${fail}"

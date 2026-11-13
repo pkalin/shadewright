@@ -123,11 +123,11 @@ type RemediationRequestReconciler struct {
 	// node monitor grace period. Zero means [DefaultNodeGrace] (1 minute); SetupWithManager refuses a negative
 	// value.
 	NodeGrace time.Duration
-	// VerifyOutcomes turns on the phases after the merge (phases.go, ADR-0030): a Merged request with a merge
-	// receipt moves to WaitingForDelivery and Verifying and ends Failed or Inconclusive. It is off by default;
-	// cmd/main.go sets it from the executor flag --verify-outcomes (chart value executor.verification.enabled).
-	// Until the executor reads the verifier's report (#683) no request can end Succeeded, so with it on every
-	// merge would end Inconclusive or Failed and the circuit breaker would never close again. On, the breaker reads
+	// VerifyOutcomes turns on the phases after the merge (phases.go, clearing.go, ADR-0030): a Merged request with
+	// a merge receipt moves to WaitingForDelivery and Verifying and ends Succeeded, Failed or Inconclusive, with
+	// Cleared judged from the verifier's VerificationReport. It is off by default; cmd/main.go sets it from the
+	// executor flag --verify-outcomes (chart value executor.verification.enabled). Without a verifier deployed no
+	// report is written, so with it on every merge ends Inconclusive or Failed. On, the breaker reads
 	// a Merged request with a merge receipt as undecided (verificationPending). Off, a Merged request keeps the
 	// rollout report of #532 and is a success for the breaker, and a request found in WaitingForDelivery or
 	// Verifying ends Inconclusive with reason VerificationDisabled.
@@ -197,6 +197,11 @@ type RemediationRequestReconciler struct {
 	// restart a reply gets that many tries again, and its marker keeps a post that went through from being
 	// repeated.
 	replyAttempts sync.Map
+	// reportCounters holds, per request in Verifying, the executor's memory of its VerificationReport's sample
+	// counter (clearing.go). Memory only: after a restart success waits one more check. Dropped when the request
+	// ends, is being deleted or is gone, not with forget, which runs on every reconcile of a request after the
+	// merge.
+	reportCounters reportCounters
 }
 
 // forget drops what this process keeps in memory about a request: its last full recheck, its last
@@ -414,11 +419,13 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 	if err := r.Get(ctx, req.NamespacedName, rr); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.forget(req.NamespacedName)
+			r.reportCounters.forget(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !rr.DeletionTimestamp.IsZero() {
 		r.forget(req.NamespacedName)
+		r.reportCounters.forget(req.NamespacedName)
 		return r.finalize(ctx, rr)
 	}
 	if err := r.backfill(ctx, rr); err != nil {

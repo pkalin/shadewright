@@ -1,0 +1,126 @@
+# Argo CD v3.6.1 spike, kind cluster. The automated sync of a commit failed five times: operationState.phase Failed, syncResult.revision names the commit, sync.status OutOfSync, condition SyncError. status.resources also lists a workload that only claims the Application in its tracking-id annotation (entry without a sync status).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    path: apps/demo
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: main
+  syncPolicy:
+    automated: {}
+status:
+  conditions:
+  - lastTransitionTime: '2026-11-13T18:49:50Z'
+    message: 'Failed last sync attempt to [1f365bec17b6a6206ac0fa91ea81c5ad8c81c5e3]: one or more objects
+      failed to apply, reason: error when patching "/dev/shm/217217376":  "" is invalid: patch: Invalid
+      value: "": unrecognized type: int32 (retried 5 times).'
+    type: SyncError
+  controllerNamespace: argocd
+  health:
+    lastTransitionTime: '2026-11-13T18:46:38Z'
+    status: Healthy
+  history:
+  - deployStartedAt: '2026-11-13T18:34:24Z'
+    deployedAt: '2026-11-13T18:34:42Z'
+    id: 0
+    initiatedBy:
+      automated: true
+    revision: 023f21f2fb283378cb80d817a9e2fe136080706b
+    source:
+      path: apps/demo
+      repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+      targetRevision: main
+  - deployStartedAt: '2026-11-13T18:38:38Z'
+    deployedAt: '2026-11-13T18:38:38Z'
+    id: 1
+    initiatedBy:
+      automated: true
+    revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+    source:
+      path: apps/demo
+      repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+      targetRevision: main
+  - deployStartedAt: '2026-11-13T18:42:08Z'
+    deployedAt: '2026-11-13T18:42:08Z'
+    id: 2
+    initiatedBy:
+      automated: true
+    revision: 9caeaa45812a0d2870b6b3edd175b925b0c6c46a
+    source:
+      path: apps/demo
+      repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+      targetRevision: main
+  operationState:
+    finishedAt: '2026-11-13T18:49:50Z'
+    message: 'one or more objects failed to apply, reason: error when patching "/dev/shm/217217376":  ""
+      is invalid: patch: Invalid value: "": unrecognized type: int32 (retried 5 times).'
+    operation:
+      initiatedBy:
+        automated: true
+      retry:
+        limit: 5
+      sync:
+        revision: 1f365bec17b6a6206ac0fa91ea81c5ad8c81c5e3
+        source:
+          path: apps/demo
+          repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+          targetRevision: main
+    phase: Failed
+    retryCount: 5
+    startedAt: '2026-11-13T18:44:40Z'
+    syncResult:
+      resources:
+      - group: apps
+        hookPhase: Failed
+        images:
+        - registry.k8s.io/pause:3.10
+        kind: Deployment
+        message: 'error when patching "/dev/shm/217217376":  "" is invalid: patch: Invalid value: "":
+          unrecognized type: int32'
+        name: web
+        namespace: demo
+        status: SyncFailed
+        syncPhase: Sync
+        version: v1
+      revision: 1f365bec17b6a6206ac0fa91ea81c5ad8c81c5e3
+      source:
+        path: apps/demo
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+  reconciledAt: '2026-11-13T18:49:50Z'
+  resourceHealthSource: appTree
+  resources:
+  - group: apps
+    kind: Deployment
+    name: forged
+    namespace: demo
+    version: v1
+  - group: apps
+    kind: Deployment
+    name: web
+    namespace: demo
+    status: OutOfSync
+    version: v1
+  sourceHydrator: {}
+  sourceType: Kustomize
+  summary:
+    images:
+    - registry.k8s.io/pause:3.10
+  sync:
+    comparedTo:
+      destination:
+        namespace: demo
+        server: https://kubernetes.default.svc
+      source:
+        path: apps/demo
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+    revision: 1f365bec17b6a6206ac0fa91ea81c5ad8c81c5e3
+    status: OutOfSync

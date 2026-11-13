@@ -90,6 +90,10 @@ Validation rules:
 - status.rollout.pausedSince is never moved while set: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSince) || !has(self.status) || !has(self.status.rollout) || !has(self.status.rollout.pausedSince) || self.status.rollout.pausedSince == oldSelf.status.rollout.pausedSince`
 - status.rollout.pausedSeconds never decreases: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSeconds) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.pausedSeconds) && self.status.rollout.pausedSeconds >= oldSelf.status.rollout.pausedSeconds)`
 - status.rollout.ended never goes back to false: `!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.ended) || !oldSelf.status.rollout.ended || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.ended) && self.status.rollout.ended)`
+- status.verification is kept once set: `!has(oldSelf.status) || !has(oldSelf.status.verification) || (has(self.status) && has(self.status.verification))`
+- status.verification.windowStart only moves forward: `!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.windowStart) || (has(self.status) && has(self.status.verification) && has(self.status.verification.windowStart) && timestamp(self.status.verification.windowStart) >= timestamp(oldSelf.status.verification.windowStart))`
+- status.verification.lastReset is kept once set and its time never moves back: `!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.lastReset) || (has(self.status) && has(self.status.verification) && has(self.status.verification.lastReset) && timestamp(self.status.verification.lastReset.time) >= timestamp(oldSelf.status.verification.lastReset.time))`
+- status.verification.resets never decreases: `!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.resets) || (has(self.status) && has(self.status.verification) && has(self.status.verification.resets) && self.status.verification.resets >= oldSelf.status.verification.resets)`
 - status.queuedBehind is kept once set: `!has(oldSelf.status) || !has(oldSelf.status.queuedBehind) || size(oldSelf.status.queuedBehind) == 0 || (has(self.status) && has(self.status.queuedBehind) && size(self.status.queuedBehind) > 0)`
 
 | Field | Type | Required | Description |
@@ -1202,11 +1206,12 @@ Used by: [RemediationRequest](#remediationrequest).
 | `mergeCommitAwaitedSince` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes from it (GitHub computes it after the merge), keeping the phase, and then records the merge without a receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a change it cannot check. Set once and never changed or removed (a validation rule on the object), so a restart does not start the wait again. Unset when the commit was reported at once. |
 | `rollout` | [RolloutStatus](#rolloutstatus) | No | rollout is what the check after the merge keeps between reconciles (the RolledOut condition). |
 | `deadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | deadline is when the current step gives up, on the executor's clock. In WaitingForDelivery it is the end of the delivery window: one hour after mergeReceipt.mergedAt, extended by the time writes were paused. In Verifying it is the timeout, written on entering the phase: status.pullRequest.appliedObservedAt plus the larger of spec.verification.timeout and the rollout deadline plus the effective stableFor plus the executor's --node-grace. Past the merge a deadline never ends a request Expired: the evidence decides between Failed and Inconclusive (ADR-0030 sections 2, 4 and 6). |
+| `verification` | [VerificationWindow](#verificationwindow) | No | verification is the executor's own stable window while the request is Verifying (ADR-0030 section 4). Only the executor writes it; once set it is kept, windowStart and the time of lastReset only move forward and resets never decreases (validation rules on the object).<br>Rule: lastReset requires resets of at least 1 |
 | `hints` | [Hint](#hint) array | No | hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all, and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed, so a Declined hint stays as the record of what was asked. Planned: carrying them over to a replacement.<br>Maximum items: 10<br>List type: map<br>List key: `source`<br>List key: `commentID`<br>Rule: status.hints: at most 3 hints are Consumed or Reserved (`self.filter(h, h.state in ['Consumed', 'Reserved']).size() <= 3`) |
 | `refusedHints` | [RefusedHint](#refusedhint) array | No | refusedHints are the newest comments with the command that the executor refused, at most MaxRefusedHints, oldest first; the oldest one whose reply is recorded is dropped for a new one, and while every one still waits for its reply a new refusal is not recorded. Only the executor writes them.<br>Maximum items: 10<br>List type: map<br>List key: `source`<br>List key: `commentID`<br>Rule: the reply to a refused hint never changes once set |
 | `commentCursor` | [CommentCursor](#commentcursor) | No | commentCursor is where the executor's next look at the comments of the pull request starts (ADR-0028 section 3). Only the executor writes it.<br>Rule: etag is kept only on the first page of a new sweep<br>Rule: evictedAt and evictedID are set together |
 | `handoff` | [Handoff](#handoff) | No | handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is never removed; Handoff says what may change. Only the executor writes it.<br>Rule: a handoff has from, to or both |
-| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified, Configured, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run the applied template; True with reason RolloutComplete, or RolloutPartitioned when a partitioned StatefulSet keeps pods on the old revision on purpose; False with reason RolloutStuck or DeliveryNotObserved, Unknown while in progress and with reason KindNotChecked, RolloutSuperseded or RolloutNotDetermined when the check ends without a verdict).<br>List type: map<br>List key: `type` |
+| `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered, Verified, Configured, Cleared, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run the applied template; True with reason RolloutComplete, or RolloutPartitioned when a partitioned StatefulSet keeps pods on the old revision on purpose; False with reason RolloutStuck or DeliveryNotObserved, Unknown while in progress and with reason KindNotChecked, RolloutSuperseded or RolloutNotDetermined when the check ends without a verdict).<br>List type: map<br>List key: `type` |
 
 ### RemediationSettingsSpec
 
@@ -1270,11 +1275,12 @@ Used by: [RemediationRequestSpec](#remediationrequestspec).
 ResetReason says why a verification window was reset (ADR-0030 section 4). The verifier sets Restarted,
 PodNotReady, PartialRollout, EvidenceMissing, ScaledToZero and ObservationGap in its report, the only reasons
 the enum of WindowReset.reason accepts. NotAvailable, StaleReport and ReportMismatch are the executor's
-reasons for its own window; it keeps them in request status with its own field (#683), never in a report.
+reasons for its own window; with PartialRollout they are the reasons of status.verification.lastReset of a
+RemediationRequest (VerificationReset), never of a report.
 
 - Underlying type: string
 
-Used by: [WindowReset](#windowreset).
+Used by: [VerificationReset](#verificationreset), [WindowReset](#windowreset).
 
 | Value | Description |
 | --- | --- |
@@ -1284,7 +1290,7 @@ Used by: [WindowReset](#windowreset).
 | `EvidenceMissing` | ResetEvidenceMissing: a pod without a status for every container, more pods than the bound, or a target that is not the one the report names. No evidence. |
 | `ScaledToZero` | ResetScaledToZero: the target's spec.replicas is 0. No evidence. |
 | `ObservationGap` | ResetObservationGap: no sample for more than two poll intervals, and a pod not in the baselines after it. No evidence. |
-| `NotAvailable` | ResetNotAvailable: the target reports fewer available replicas than desired (executor). No evidence. |
+| `NotAvailable` | ResetNotAvailable: the target reports other available replicas than desired, fewer or more (executor). No evidence. |
 | `StaleReport` | ResetStaleReport: the report is missing or its sample counter stopped rising (executor). No evidence. |
 | `ReportMismatch` | ResetReportMismatch: the report's spec names another request, merge commit, target or template revision (executor). No evidence. |
 
@@ -1517,6 +1523,39 @@ Used by: [VerificationReport](#verificationreport).
 | `lastTroubleReset` | [WindowReset](#windowreset) | No | lastTroubleReset is the last Restarted reset recorded as trouble. Once set it is kept, and its time never moves back. A report that records trouble ends its request Failed at the timeout, whatever its last reset.<br>Rule: lastTroubleReset.reason must be Restarted (`self.reason == 'Restarted'`) |
 | `oomKill` | [OOMKill](#oomkill) | No | oomKill is the first OOM kill of the action's container on a pod of the rollout. Once set it never changes. |
 | `baselines` | [PodBaseline](#podbaseline) array | No | baselines are the restart baselines of the pods, one per pod UID, at most 200. A baseline whose pod is gone from the pod list is pruned in the same write.<br>Maximum items: 200<br>List type: map<br>List key: `podUID` |
+
+### VerificationReset
+
+VerificationReset is a reset of the executor's own verification window (ADR-0030 section 4): a check of a
+Verifying request that was not good.
+
+
+Used by: [VerificationWindow](#verificationwindow).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `reason` | [ResetReason](#resetreason) | Yes | reason says why the window was reset: NotAvailable (the target reports other available replicas than desired, fewer or more, or a ScaledObject is not ready by the KedaReady rule), StaleReport (the verifier's report is missing, was never sampled, or its sample counter stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision or container) or PartialRollout (the report does not cover every desired replica). Every one is a reset of the no-evidence class.<br>One of `NotAvailable`, `StaleReport`, `ReportMismatch`, `PartialRollout` |
+| `time` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | time is when the reset was recorded, on the executor's clock. It is never earlier than windowStart at that moment or the previous reset, so the window is open only while windowStart is later than it. |
+
+### VerificationWindow
+
+VerificationWindow is the executor's own stable window of a Verifying request (ADR-0030 section 4), kept next
+to the verifier's window in the VerificationReport. Every time in it is on the executor's clock, and it is
+never compared with a time of the report. A restart of the executor loses nothing of it. A lastReset is
+counted: resets is at least 1 when it is set.
+
+
+Validation rules:
+
+- lastReset requires resets of at least 1: `!has(self.lastReset) || (has(self.resets) && self.resets >= 1)`
+
+Used by: [RemediationRequestStatus](#remediationrequeststatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `windowStart` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | windowStart is when the current window opened: the first good check after the last reset. It only moves forward. |
+| `lastReset` | [VerificationReset](#verificationreset) | No | lastReset is the last reset of the window. Kept once set; its time never moves back. |
+| `resets` | integer | No | resets counts the resets of the window: a bad check that closes an open window or names another reason than lastReset. The same reason again on a closed window is not counted and writes nothing. It never decreases, and it is at least 1 while lastReset is set.<br>Minimum: 0 |
 
 ### WindowReset
 

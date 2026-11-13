@@ -1,0 +1,28 @@
+# Argo CD v3.6.1 spike, kind cluster. spec.destination.server is another cluster; InvalidSpecError.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: other-server
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://other.invalid:6443
+  project: default
+  source:
+    path: apps/rec
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: main
+  syncPolicy:
+    automated: {}
+status:
+  conditions:
+  - lastTransitionTime: '2026-11-13T18:46:38Z'
+    message: 'error getting cluster by server "https://other.invalid:6443": rpc error: code = NotFound
+      desc = cluster "https://other.invalid:6443" not found'
+    type: InvalidSpecError
+  health:
+    lastTransitionTime: '2026-11-13T18:46:38Z'
+    status: Unknown
+  sync:
+    status: Unknown

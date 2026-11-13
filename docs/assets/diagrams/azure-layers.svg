@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 520" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Shadewright on Azure: environment layer and cluster layer</title>
+  <desc id="d">Two layers. The environment layer is deployed once and shared by several clusters: a Foundry account with the model deployments, a Key Vault with the GitHub App key, the analysis-record storage account, a Log Analytics workspace for the audit log, and the network access of each service: by default public endpoints restricted to the cluster's subnet or egress IPs with Entra ID only access, on request private endpoints with private DNS. The cluster layer is deployed once per cluster: a managed identity each for the analyzer and the executor, a federated credential for each that trusts the cluster's OIDC issuer and one ServiceAccount, the role assignments on the environment layer's resources, and an output of Helm values. The cluster layer is created and destroyed with its cluster, so recreating a cluster gives new identities and new client IDs. Each cluster layer reads the outputs of the environment layer. The existing AKS cluster and the virtual network are brought by the adopter, never created.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .h{fill:#f1edff;font-size:14.5px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12px}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .lanet{fill:#7d7999;font-size:12.5px;font-weight:600;letter-spacing:.14em}
+    </style>
+  </defs>
+  <rect width="1120" height="520" rx="18" fill="#0e0e16"/>
+  <rect class="lane" x="24" y="24" width="1072" height="226" rx="14"/>
+  <text class="lanet" x="44" y="52">ENVIRONMENT LAYER, ONCE, SHARED BY CLUSTERS</text>
+  <rect class="key" x="44" y="68" width="236" height="64" rx="10"/><text class="h" x="58" y="94">Foundry account</text><text class="s" x="58" y="115">model deployments, inference</text>
+  <rect class="key" x="300" y="68" width="236" height="64" rx="10"/><text class="h" x="314" y="94">Key Vault</text><text class="s" x="314" y="115">GitHub App key, sign only</text>
+  <rect class="key" x="556" y="68" width="236" height="64" rx="10"/><text class="h" x="570" y="94">Analysis storage</text><text class="s" x="570" y="115">records, versioned, expiring</text>
+  <rect class="key" x="812" y="68" width="256" height="64" rx="10"/><text class="h" x="826" y="94">Audit log</text><text class="s" x="826" y="115">Log Analytics, KeySign events</text>
+  <rect class="box" x="44" y="152" width="1024" height="76" rx="10"/><text class="h" x="58" y="178">Network access</text><text class="s" x="58" y="199">Default: public endpoints, Entra ID only, service firewall for the cluster's subnet or egress IPs. On request: private endpoints, DNS module, existing or policy.</text><text class="s" x="58" y="217">The audit log query endpoint stays public in both modes. Outputs: resource IDs, endpoint names and, in private mode, the zones and records the services expect.</text>
+  <rect class="lane" x="24" y="290" width="1072" height="170" rx="14"/>
+  <text class="lanet" x="44" y="318">CLUSTER LAYER, ONCE PER CLUSTER, CREATED AND DESTROYED WITH IT</text>
+  <rect class="box" x="44" y="334" width="236" height="64" rx="10"/><text class="h" x="58" y="360">Analyzer identity</text><text class="s" x="58" y="381">federated to its ServiceAccount</text>
+  <rect class="box" x="300" y="334" width="236" height="64" rx="10"/><text class="h" x="314" y="360">Executor identity</text><text class="s" x="314" y="381">federated to its ServiceAccount</text>
+  <rect class="box" x="556" y="334" width="236" height="64" rx="10"/><text class="h" x="570" y="360">Role assignments</text><text class="s" x="570" y="381">pinned role, scope, data actions</text>
+  <rect class="box" x="812" y="334" width="256" height="64" rx="10"/><text class="h" x="826" y="360">Helm values</text><text class="s" x="826" y="381">output for the chart</text>
+  <text class="lbl" x="44" y="428">Reads the environment layer's outputs. Trusts the cluster's OIDC issuer, passed in. One identity per component, never one token for both.</text>
+  <path class="f" d="M556 252V286" marker-end="url(#a)"/>
+  <text class="lbl" x="44" y="490">Brought by the adopter, never created: the AKS cluster, its VNet and subnets, hubs, firewalls and the private DNS zones of a hub.</text>
+</svg>

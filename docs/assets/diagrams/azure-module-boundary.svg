@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 530" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">What the Azure module creates and what the adopter brings</title>
+  <desc id="d">Left: what the module creates, always dedicated to Shadewright: Key Vault, Foundry account with model deployments, analysis-record storage, audit log workspace, service firewall rules, and in private mode the private endpoints and optionally private DNS zones, one managed identity per component with federated credentials and the role assignments, and the Helm values output. Right: what the adopter brings and passes in as variables: the existing AKS cluster's OIDC issuer URL, the cluster's subnet or egress IPs for the service firewalls, in private mode the subnet ID for the private endpoints, optionally the IDs of existing private DNS zones, a resource group, the region, a name prefix and tags, optionally role definitions created ahead of time by a platform team, and an admin principal with admin network CIDRs, which get Key Vault Crypto Officer for App key import and rotation and a place in the service firewalls. The module never creates the cluster, the network, hubs or firewalls, and never takes an existing Key Vault, Foundry account or storage account to use instead of its own.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .h{fill:#f1edff;font-size:14.5px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12px}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .lanet{fill:#7d7999;font-size:12.5px;font-weight:600;letter-spacing:.14em}
+    </style>
+  </defs>
+  <rect width="1120" height="530" rx="18" fill="#0e0e16"/>
+  <rect class="lane" x="24" y="24" width="540" height="482" rx="14"/>
+  <text class="lanet" x="44" y="52">THE MODULE CREATES</text>
+  <rect class="key" x="44" y="68" width="244" height="56" rx="10"/><text class="h" x="58" y="92">Key Vault</text><text class="s" x="58" y="111">dedicated, RBAC, Entra ID only</text>
+  <rect class="key" x="300" y="68" width="244" height="56" rx="10"/><text class="h" x="314" y="92">Foundry account</text><text class="s" x="314" y="111">and its model deployments</text>
+  <rect class="key" x="44" y="136" width="244" height="56" rx="10"/><text class="h" x="58" y="160">Analysis storage</text><text class="s" x="58" y="179">Entra ID only, versioned</text>
+  <rect class="key" x="300" y="136" width="244" height="56" rx="10"/><text class="h" x="314" y="160">Audit log workspace</text><text class="s" x="314" y="179">Key Vault AuditEvent, public query</text>
+  <rect class="box" x="44" y="204" width="244" height="56" rx="10"/><text class="h" x="58" y="228">Private endpoints</text><text class="s" x="58" y="247">private mode only, one per service</text>
+  <rect class="box" x="300" y="204" width="244" height="56" rx="10"/><text class="h" x="314" y="228">Private DNS zones</text><text class="s" x="314" y="247">private mode, DNS mode "module"</text>
+  <rect class="box" x="44" y="272" width="244" height="56" rx="10"/><text class="h" x="58" y="296">Managed identities</text><text class="s" x="58" y="315">analyzer, executor</text>
+  <rect class="box" x="300" y="272" width="244" height="56" rx="10"/><text class="h" x="314" y="296">Federated credentials</text><text class="s" x="314" y="315">one ServiceAccount each</text>
+  <rect class="box" x="44" y="340" width="244" height="56" rx="10"/><text class="h" x="58" y="364">Role assignments</text><text class="s" x="58" y="383">pinned, plus the admin grant</text>
+  <rect class="box" x="300" y="340" width="244" height="56" rx="10"/><text class="h" x="314" y="364">Outputs</text><text class="s" x="314" y="383">Helm values, zones, records</text>
+  <rect class="lane" x="596" y="24" width="500" height="482" rx="14"/>
+  <text class="lanet" x="616" y="52">THE ADOPTER BRINGS</text>
+  <rect class="ext" x="616" y="68" width="460" height="56" rx="10"/><text class="h" x="630" y="92">AKS cluster</text><text class="s" x="630" y="111">passed in as its OIDC issuer URL</text>
+  <rect class="ext" x="616" y="136" width="460" height="56" rx="10"/><text class="h" x="630" y="160">Cluster subnet or egress IPs</text><text class="s" x="630" y="179">for the service firewalls; private mode: endpoint subnet by ID</text>
+  <rect class="ext" x="616" y="204" width="460" height="56" rx="10"/><text class="h" x="630" y="228">Existing private DNS zones</text><text class="s" x="630" y="247">private mode, DNS mode "existing": IDs</text>
+  <rect class="ext" x="616" y="272" width="460" height="56" rx="10"/><text class="h" x="630" y="296">Resource group, region, prefix, tags</text><text class="s" x="630" y="315">our defaults, each overridable</text>
+  <rect class="ext" x="616" y="340" width="460" height="56" rx="10"/><text class="h" x="630" y="364">Role definitions (landing zone)</text><text class="s" x="630" y="383">optional: created ahead of time, passed in by ID, checked against ours</text>
+  <rect class="ext" x="616" y="408" width="460" height="56" rx="10"/><text class="h" x="630" y="432">Admin principal and CIDRs</text><text class="s" x="630" y="451">Key Vault Crypto Officer for key import; added to the firewalls</text>
+  <path class="f" d="M596 230H570" marker-end="url(#a)"/>
+  <text class="lbl" x="44" y="494">No bring-your-own Key Vault, Foundry account or storage account: each grant stays scoped to Shadewright's own resources.</text>
+</svg>

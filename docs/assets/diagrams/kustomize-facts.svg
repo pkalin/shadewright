@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 400" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Where each transformation fact lives and what proves it</title>
+  <desc id="d">Two columns. Facts that live in Git, such as a namespace field in a kustomization file, images in a kustomization file the placeholders in a manifest and a configMapGenerator with local inputs: they are covered by the base commit and are proven again by rendering the tree at the branch head before every commit. Only the value of a file namespace is also bound in the digest, because it decides identity. Facts that live only in the cluster, such as the Flux spec.targetNamespace and spec.postBuild of the Kustomization and the names of its substituteFrom references (no ConfigMap is read): the render cannot see them, so the source mapping records them in status.source, the plan digest covers them, and the freshness check maps again, compares the transforms entries and supersedes the request when they differ. Flux spec.images is context only: the entry records that the list is set, never its content. Both columns end at the same gate: a pull request that a person merges.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <style>
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:#241a3d;stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12px}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .lanet{fill:#7d7999;font-size:12.5px;font-weight:600;letter-spacing:.14em}
+    </style>
+  </defs>
+  <rect width="1120" height="400" rx="18" fill="#0e0e16"/>
+  <text class="lanet" x="40" y="44">FACTS IN GIT</text>
+  <text class="lanet" x="600" y="44">FACTS ONLY IN THE CLUSTER</text>
+
+  <rect class="ext" x="40" y="64" width="480" height="104" rx="14"/>
+  <text class="h" x="58" y="92">namespace: and images: in a kustomization file,</text>
+  <text class="h" x="58" y="112">placeholders in manifests, generators</text>
+  <text class="s" x="58" y="136">Read at the base commit, covered by baseCommit. Only a namespace:</text>
+  <text class="s" x="58" y="154">value is bound in the digest; images content is not (bumps stay valid).</text>
+
+  <rect class="key" x="600" y="64" width="480" height="104" rx="14"/>
+  <text class="h" x="618" y="92">Flux spec.targetNamespace, postBuild, images,</text>
+  <text class="h" x="618" y="112">the substituteFrom references (names only)</text>
+  <text class="s" x="618" y="136">Not in any file, so the render cannot see them.</text>
+  <text class="s" x="618" y="154">Recorded in status.source and the digest; images only as context.</text>
+
+  <rect class="box" x="40" y="206" width="480" height="76" rx="14"/>
+  <text class="h" x="58" y="234">Proof: render the tree at the branch head</text>
+  <text class="s" x="58" y="256">With and without the change. Only the edited field may differ.</text>
+  <text class="s" x="58" y="272">Already built for plain trees and in-repo transformers (semantic diff).</text>
+
+  <rect class="box" x="600" y="206" width="480" height="76" rx="14"/>
+  <text class="h" x="618" y="234">Proof: map again, compare the transforms</text>
+  <text class="s" x="618" y="256">The freshness check resolves the source again. Other transforms</text>
+  <text class="s" x="618" y="272">than recorded: the request is Superseded. Proposed (task 1a).</text>
+
+  <path class="f" d="M280 168V200" marker-end="url(#a)"/>
+  <path class="f" d="M840 168V200" marker-end="url(#a)"/>
+  <path class="f" d="M280 282V326H500" marker-end="url(#a)"/>
+  <path class="f" d="M840 282V326H620" marker-end="url(#a)"/>
+  <rect class="key" x="504" y="306" width="112" height="40" rx="20"/>
+  <text class="h" x="560" y="331" text-anchor="middle">PR, merge</text>
+  <text class="s" x="40" y="380">Neither column reads a Secret. No decision compares times from two clocks: Git facts are pinned by commit, cluster facts by UID and an equality check.</text>
+</svg>

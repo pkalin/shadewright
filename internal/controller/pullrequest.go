@@ -103,6 +103,10 @@ const (
 	// ReasonChangeRequestClosed: the pull request was closed without a merge, not by a close the request recorded,
 	// before or after the request recorded the pull request.
 	ReasonChangeRequestClosed = "ChangeRequestClosed"
+	// ReasonChangeRequestConflict: the Git host reports that the open pull request cannot be merged into the
+	// target branch because of a merge conflict, and the plan is still fresh. The pull request is left open for
+	// a person to resolve or close; it is not a rejection (ChangeRequestClosed).
+	ReasonChangeRequestConflict = "ChangeRequestConflict"
 	// ReasonChangeRequestMerged: the pull request was merged.
 	ReasonChangeRequestMerged = "ChangeRequestMerged"
 	// ReasonMergedWithForeignChange: Shadewright's pull request failed a check before it was recorded (#524),
@@ -141,6 +145,10 @@ var errStopped = errors.New("the pull request step stopped the request")
 
 // errClosed means the recorded pull request is closed without a merge; see prClosed.
 var errClosed = errors.New("the pull request is closed")
+
+// errConflicted means the Git host reports the recorded pull request open with a merge conflict; see
+// prConflicted.
+var errConflicted = errors.New("the pull request has a merge conflict")
 
 // pullRequestTimeout returns the configured deadline of the step.
 func (r *RemediationRequestReconciler) pullRequestTimeout() time.Duration {
@@ -995,6 +1003,10 @@ const (
 	// prClosed: closed without a merge. That is a rejection only if the plan is still fresh; a stale plan's
 	// own close that was cut short looks the same and ends Superseded.
 	prClosed
+	// prConflicted: open with Shadewright's head, and the Git host reports a merge conflict. With a fresh plan
+	// that is recorded, and ends the request (ChangeRequestConflict) only when seen again after a wait
+	// (conflicted); a stale plan is superseded as usual.
+	prConflicted
 	// prMergeCommitPending: merged, and the executor waits for the Git host to report the merge commit
 	// (awaitMergeCommit). Nothing else is done meanwhile: a merged change makes the plan look stale.
 	prMergeCommitPending
@@ -1021,6 +1033,8 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 		return prStopped, nil
 	case errors.Is(err, errClosed):
 		return prClosed, nil
+	case errors.Is(err, errConflicted):
+		return prConflicted, nil
 	case errors.Is(err, errMergeCommitPending):
 		return prMergeCommitPending, nil
 	}
@@ -1054,6 +1068,86 @@ func (r *RemediationRequestReconciler) rejected(ctx context.Context, rr *remedia
 	markClosed(rr, ReasonChangeRequestClosed, "was closed without a merge")
 	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 		ReasonChangeRequestClosed, "The pull request was closed without a merge; automation stopped"))
+}
+
+// conflictConfirmWait is how long, on the executor's clock, a merge conflict the Git host reports must last before
+// it ends the request. GitHub computes mergeability lazily: after the target branch moves (and moves back) it may
+// answer "dirty" for a pull request that merges cleanly, until it computes the answer again.
+const conflictConfirmWait = 2 * time.Minute
+
+// conflictWaitRemaining is what is left of conflictConfirmWait since the conflict was first seen, never negative.
+// ok is false when the recorded time lies more than mergeCommitClockSlack after now: the clock went back and the
+// wait can no longer be measured, so the caller starts it again rather than end the request on it. Inside the
+// slack the wait is at most conflictConfirmWait plus the slack.
+func conflictWaitRemaining(since, now time.Time) (left time.Duration, ok bool) {
+	if since.After(now.Add(mergeCommitClockSlack)) {
+		return 0, false
+	}
+	return max(since.Add(conflictConfirmWait).Sub(now), 0), true
+}
+
+// conflicted handles a fresh plan whose open pull request the Git host reports with a merge conflict (#680). A
+// first report is recorded in status.pullRequest.conflictSeen, with the time on the executor's clock, the
+// recorded head and the target branch head the freshness check read, and the request waits. It ends only on a
+// conflicted read at least conflictConfirmWait later on the same recorded head; a clock that went back records
+// the report anew. The target branch head is recorded as what the first report was about and decides nothing:
+// a branch that moves more often than the wait would otherwise start the wait again without end. A failed status write is returned for a retry and decides
+// nothing.
+//
+// At the end the pull request is left open: resolving the conflict pushes to its branch, which only a person may
+// do, and a close by a person later is seen by the lock on the target (checkHeld). PullRequestOpened keeps saying
+// it is open, so the request holds that lock until then.
+func (r *RemediationRequestReconciler) conflicted(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	fresh freshness.Result) (reconcile.Result, error) {
+	pr := rr.Status.PullRequest
+	if seen := pr.ConflictSeen; seen != nil && seen.HeadSHA == pr.HeadSHA {
+		left, ok := conflictWaitRemaining(seen.At.Time, r.now())
+		if ok && left == 0 {
+			return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
+				ReasonChangeRequestConflict, "The Git host reports that the pull request conflicts with the target "+
+					"branch; it is left open for a person to resolve or close, and automation stopped"))
+		}
+		if ok {
+			return reconcile.Result{RequeueAfter: max(min(left, r.pullRequestPollInterval()), stepDelay)}, nil
+		}
+	}
+	base := rr.DeepCopy()
+	pr.ConflictSeen = &remediationv1alpha1.ConflictSeen{
+		At: metav1.NewTime(r.now().Truncate(time.Second)), HeadSHA: pr.HeadSHA, TargetHead: fresh.Head,
+	}
+	if err := r.Status().Patch(ctx, rr, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return reconcile.Result{}, fmt.Errorf("record the merge conflict of RemediationRequest %s/%s: %w",
+			rr.Namespace, rr.Name, err)
+	}
+	logf.FromContext(ctx).Info("The Git host reports a merge conflict; waiting to see it again",
+		"remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", pr.Number, "wait", conflictConfirmWait)
+	return reconcile.Result{RequeueAfter: max(min(conflictConfirmWait, r.pullRequestPollInterval()), stepDelay)}, nil
+}
+
+// endLooked handles a fresh plan on what the look at its pull request found: closed without a merge (rejected)
+// or open with a merge conflict (conflicted).
+func (r *RemediationRequestReconciler) endLooked(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	outcome prOutcome, fresh freshness.Result) (reconcile.Result, error) {
+	if outcome == prConflicted {
+		return r.conflicted(ctx, rr, fresh)
+	}
+	return r.rejected(ctx, rr)
+}
+
+// clearConflictSeen removes status.pullRequest.conflictSeen after a look that read the pull request open with
+// the recorded head and without a merge conflict (prOpen): the earlier report was not confirmed. Any other
+// outcome, a failed look included, leaves it. A failed write is returned for a retry.
+func (r *RemediationRequestReconciler) clearConflictSeen(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, outcome prOutcome) error {
+	if outcome != prOpen || rr.Status.PullRequest == nil || rr.Status.PullRequest.ConflictSeen == nil {
+		return nil
+	}
+	base := rr.DeepCopy()
+	rr.Status.PullRequest.ConflictSeen = nil
+	if err := r.Status().Patch(ctx, rr, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return fmt.Errorf("clear the merge conflict of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	return nil
 }
 
 // watchStep is the look of watchPullRequest. It returns the provider to read the reviewer hints with when it
@@ -1106,6 +1200,11 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		// A head a hint steered, with hints off: never AwaitingApproval, and no hints read (afterHandoff stops
 		// such a request first; this holds for any caller).
 		return hintLook{}, r.hintsOffTakenOver(ctx, rr)
+	}
+	if cr.Conflicted {
+		// The freshness check decides first: a stale plan is superseded, a fresh one waits to see the conflict
+		// again (conflicted).
+		return hintLook{}, errConflicted
 	}
 	if rr.Status.Phase != remediationv1alpha1.PhasePRCreated {
 		if intent(rr) != nil {

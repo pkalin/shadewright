@@ -159,7 +159,7 @@ The executor records the lock in `status.holdsTarget` (#294, #376). It is set in
 
 Everything else keeps the lock (fail closed):
 
-- A request that stops with its pull request still open (`NeedsIntervention` after the head moved or a close was refused) keeps a second pull request off the target.
+- A request that stops with its pull request still open (`NeedsIntervention` after the head moved, after a confirmed merge conflict with reason `ChangeRequestConflict`, or after a refused close) keeps a second pull request off the target.
 - So does one that stopped without a recorded pull request, since one may have opened while the status write that would record it was lost.
 - An expiry whose cleanup the Git host refused ends with its own reason, `PullRequestDeadlineCleanupRefused`, and keeps the lock.
 - Any other state keeps the lock: a pull request the executor could not find (`ChangeRequestGone`), `Failed` and an unknown phase included.

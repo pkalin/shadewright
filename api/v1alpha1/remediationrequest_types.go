@@ -296,6 +296,7 @@ const (
 // PullRequestStatus records the pull request that carries the plan.
 // +kubebuilder:validation:XValidation:rule="!has(self.appliedObservedAt) || has(self.mergeCommitSHA)",message="appliedObservedAt needs mergeCommitSHA"
 // +kubebuilder:validation:XValidation:rule="!has(self.reviewCheck) || self.reviewCheck.head == self.headSHA",message="reviewCheck names the recorded head"
+// +kubebuilder:validation:XValidation:rule="!has(self.conflictSeen) || self.conflictSeen.headSHA == self.headSHA",message="conflictSeen names the recorded head"
 type PullRequestStatus struct {
 	// number of the pull request.
 	// +kubebuilder:validation:Minimum=1
@@ -355,6 +356,34 @@ type PullRequestStatus struct {
 	// head starts without it, so a state never outlives its head.
 	// +optional
 	ReviewCheck *ReviewCheck `json:"reviewCheck,omitempty"`
+
+	// conflictSeen records the first read in which the Git host reported this pull request open with a merge
+	// conflict while the plan was fresh. GitHub computes mergeability lazily and may report a stale conflict, so
+	// one read does not end the request: it ends NeedsIntervention with reason ChangeRequestConflict only on a
+	// later conflicted read, with the plan still fresh, at least two minutes after at, on the same head and target
+	// branch head. Any read that finds no conflict (an unknown answer included) removes it, and a new target
+	// branch head starts the wait again. Only the executor writes it.
+	// +optional
+	ConflictSeen *ConflictSeen `json:"conflictSeen,omitempty"`
+}
+
+// ConflictSeen is when and on which commits the executor first saw its pull request reported with a merge
+// conflict (PullRequestStatus.conflictSeen).
+type ConflictSeen struct {
+	// at is when the executor saw the conflict, on its own clock.
+	// +required
+	At metav1.Time `json:"at"`
+
+	// headSHA is the pull request's head at that read, always the recorded head.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	// +required
+	HeadSHA string `json:"headSHA"`
+
+	// targetHead is the head of the target branch the freshness check read with it. It is a record of what the
+	// first report was about; a later move of the target branch does not start the wait again.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	// +required
+	TargetHead string `json:"targetHead"`
 }
 
 // RolloutStatus is what the check after the merge records about the target's rollout. Only the executor writes

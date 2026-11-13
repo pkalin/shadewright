@@ -226,6 +226,7 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 		return reconcile.Result{}, nil, err
 	}
 	if err == nil && d.applied && recordApplied(rr, now) {
+		r.recordCountAtApplied(stepCtx, rr)
 		st := rolloutStatus(rr)
 		st.TargetGeneration = max(d.target.GetGeneration(), 0)
 		st.TemplateHash = rollout.TemplateHash(d.target)

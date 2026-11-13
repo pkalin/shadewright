@@ -174,6 +174,9 @@ func (r *RemediationRequestReconciler) afterReceipt(ctx context.Context, rr *rem
 				ReasonClearingNotChecked, "The verification timeout, measured from the applied time recorded "+
 					"before outcome verification started for this request, had already passed; nothing was verified")
 		}
+		// The Incident's count at the merge is taken only in the write that set Merged (stop). A reading that
+		// failed there stays absent: one taken later could describe a quiet period after the change arrived
+		// (ADR-0030 section 4).
 		if rr.Status.Phase == remediationv1alpha1.PhaseMerged {
 			if err := r.enterDelivery(ctx, rr, now); err != nil {
 				return reconcile.Result{}, err
@@ -297,6 +300,7 @@ func (r *RemediationRequestReconciler) deliveryStep(ctx, stepCtx context.Context
 		return reconcile.Result{RequeueAfter: time.Second}, nil, nil
 	}
 	if err == nil && d.applied && recordApplied(rr, now) {
+		r.recordCountAtApplied(stepCtx, rr)
 		st := rolloutStatus(rr)
 		st.TargetGeneration = max(d.target.GetGeneration(), 0)
 		st.TemplateHash = rollout.TemplateHash(d.target)
@@ -698,6 +702,7 @@ func (r *RemediationRequestReconciler) endVerification(ctx context.Context, rr *
 	}
 	r.reportCounters.forget(client.ObjectKeyFromObject(rr))
 	r.unwrittenResets.forget(client.ObjectKeyFromObject(rr))
+	r.mergeReadings.forget(client.ObjectKeyFromObject(rr))
 	if r.Recorder != nil {
 		r.Recorder.Event(rr, eventType, reason, message)
 	}

@@ -1503,19 +1503,10 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 			return freshness.WrapProvider("find the change request", err)
 		}
 	} else {
-		cr, err = lookUpRecorded(ctx, git, rr, string(repo.TargetBranch))
-		switch {
-		case deleting && providers.IsNotFound(err) && errors.Is(err, errRecordedNotFound):
-			var done bool
-			cr, done, err = closeAfterNotFound(ctx, git, rr)
-			if done || err != nil {
-				return err
-			}
-		case errors.Is(err, errRecordedNotFound):
-			// The cause is kept as text only: the provider's error in it is an answer here, never a refusal.
-			return fmt.Errorf("%w: %s", errChangeRequestNotOurs, err.Error())
-		case err != nil:
-			return freshness.WrapProvider("find the change request", err)
+		var done bool
+		cr, done, err = recordedToClose(ctx, git, rr, string(repo.TargetBranch), deleting)
+		if done || err != nil {
+			return err
 		}
 	}
 	ours, err := r.ownsMarker(ctx, cr.Body, rr)
@@ -1545,6 +1536,24 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 		return err
 	}
 	return nil
+}
+
+// recordedToClose reads the recorded pull request for closeOwn (lookUpRecorded). An answer that rules it out is
+// errChangeRequestNotOurs, except a 404 on deletion, which goes on to closeAfterNotFound. done is true, with no
+// error, when nothing is left to close.
+func recordedToClose(ctx context.Context, git providers.GitProvider, rr *remediationv1alpha1.RemediationRequest,
+	target string, deleting bool) (providers.ChangeRequest, bool, error) {
+	cr, err := lookUpRecorded(ctx, git, rr, target)
+	switch {
+	case deleting && providers.IsNotFound(err) && errors.Is(err, errRecordedNotFound):
+		return closeAfterNotFound(ctx, git, rr)
+	case errors.Is(err, errRecordedNotFound):
+		// The cause is kept as text only: the provider's error in it is an answer here, never a refusal.
+		return providers.ChangeRequest{}, false, fmt.Errorf("%w: %s", errChangeRequestNotOurs, err.Error())
+	case err != nil:
+		return providers.ChangeRequest{}, false, freshness.WrapProvider("find the change request", err)
+	}
+	return cr, false, nil
 }
 
 // closeAfterNotFound is the finalizer's read by the branch after the Git host answered 404 for the recorded

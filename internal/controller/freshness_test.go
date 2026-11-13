@@ -610,7 +610,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(err).NotTo(HaveOccurred())
 		for name, bend := range map[string]func(*providers.ChangeRequest){
 			"another number":      func(c *providers.ChangeRequest) { c.Number++ },
-			"another base branch": func(c *providers.ChangeRequest) { c.BaseBranch = "release" },
+			"another base branch": func(c *providers.ChangeRequest) { c.BaseBranch = "maintenance" },
 		} {
 			r := reconciler()
 			r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {

@@ -374,7 +374,8 @@ type ConflictSeen struct {
 	// +required
 	HeadSHA string `json:"headSHA"`
 
-	// targetHead is the head of the target branch the freshness check read with it.
+	// targetHead is the head of the target branch the freshness check read with it. It is a record of what the
+	// first report was about; a later move of the target branch does not start the wait again.
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
 	// +required
 	TargetHead string `json:"targetHead"`

@@ -1466,24 +1466,18 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			NotTo(Equal(ReasonChangeRequestConflict))
 	})
 
-	It("starts the wait for a merge conflict again when the target branch head moves (#680)", func() {
+	It("keeps the wait for a merge conflict when the target branch head moves (#680)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		Expect(git.SetConflicted(got.Status.PullRequest.Number, true)).To(Succeed())
 		Expect(reconcileOnce()).To(Succeed())
 		first := conflictSeen(fetch())
 		Expect(first).NotTo(BeNil())
 
-		// A commit that leaves the target file alone keeps the plan fresh, but the host's answer was for the old head.
+		// A commit that leaves the target file alone keeps the plan fresh. It does not start the wait again: a
+		// busy target branch would otherwise postpone the end for as long as it keeps moving.
 		_, err := git.Push(mainBranch, "apps/other/notes.yaml", []byte("a: b\n"))
 		Expect(err).NotTo(HaveOccurred())
 		clock = first.At.Add(conflictConfirmWait)
-		Expect(reconcileOnce()).To(Succeed())
-		got = fetch()
-		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
-		Expect(conflictSeen(got).TargetHead).NotTo(Equal(first.TargetHead))
-		Expect(conflictSeen(got).At.Time.Equal(clock)).To(BeTrue())
-
-		clock = clock.Add(conflictConfirmWait)
 		Expect(reconcileOnce()).To(Succeed())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 	})

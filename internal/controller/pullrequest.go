@@ -1076,8 +1076,9 @@ func conflictWaitRemaining(since, now time.Time) (left time.Duration, ok bool) {
 // conflicted handles a fresh plan whose open pull request the Git host reports with a merge conflict (#680). A
 // first report is recorded in status.pullRequest.conflictSeen, with the time on the executor's clock, the
 // recorded head and the target branch head the freshness check read, and the request waits. It ends only on a
-// conflicted read at least conflictConfirmWait later on the same two heads; another target branch head, or a
-// clock that went back, records the report anew. A failed status write is returned for a retry and decides
+// conflicted read at least conflictConfirmWait later on the same recorded head; a clock that went back records
+// the report anew. The target branch head is recorded as what the first report was about and decides nothing:
+// a branch that moves more often than the wait would otherwise start the wait again without end. A failed status write is returned for a retry and decides
 // nothing.
 //
 // At the end the pull request is left open: resolving the conflict pushes to its branch, which only a person may
@@ -1086,7 +1087,7 @@ func conflictWaitRemaining(since, now time.Time) (left time.Duration, ok bool) {
 func (r *RemediationRequestReconciler) conflicted(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	fresh freshness.Result) (reconcile.Result, error) {
 	pr := rr.Status.PullRequest
-	if seen := pr.ConflictSeen; seen != nil && seen.HeadSHA == pr.HeadSHA && seen.TargetHead == fresh.Head {
+	if seen := pr.ConflictSeen; seen != nil && seen.HeadSHA == pr.HeadSHA {
 		left, ok := conflictWaitRemaining(seen.At.Time, r.now())
 		if ok && left == 0 {
 			return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,

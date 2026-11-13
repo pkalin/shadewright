@@ -300,7 +300,7 @@ Used by: [PullRequestStatus](#pullrequeststatus).
 | --- | --- | --- | --- |
 | `at` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | at is when the executor saw the conflict, on its own clock. |
 | `headSHA` | string | Yes | headSHA is the pull request's head at that read, always the recorded head.<br>Pattern: `^[0-9a-f]{40}$` |
-| `targetHead` | string | Yes | targetHead is the head of the target branch the freshness check read with it.<br>Pattern: `^[0-9a-f]{40}$` |
+| `targetHead` | string | Yes | targetHead is the head of the target branch the freshness check read with it. It is a record of what the first report was about; a later move of the target branch does not start the wait again.<br>Pattern: `^[0-9a-f]{40}$` |
 
 ### GitBranch
 

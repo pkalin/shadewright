@@ -1107,8 +1107,9 @@ spec:
                         pattern: ^[0-9a-f]{40}$
                         type: string
                       targetHead:
-                        description: targetHead is the head of the target branch the
-                          freshness check read with it.
+                        description: |-
+                          targetHead is the head of the target branch the freshness check read with it. It is a record of what the
+                          first report was about; a later move of the target branch does not start the wait again.
                         pattern: ^[0-9a-f]{40}$
                         type: string
                     required:

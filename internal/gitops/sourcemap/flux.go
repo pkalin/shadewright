@@ -201,7 +201,7 @@ func kustomizationBuild(ks *unstructured.Unstructured) *Result {
 	}
 	// With spec.decryption, files may be SOPS-encrypted, even partly with plaintext fields left in, and
 	// editing them would break the SOPS MAC. Encrypted files are not supported.
-	if v, ok := field(ks.Object, "spec", "decryption"); ok && !empty(v) {
+	if kustomizationDecrypts(ks) {
 		r := needsIntervention(ReasonDecryption, "%s decrypts its manifests (spec.decryption)", ref)
 		return &r
 	}

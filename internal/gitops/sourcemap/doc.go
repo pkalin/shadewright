@@ -67,10 +67,14 @@ limitations under the License.
 // [FindManifestCandidate] is a separate, read-only lookup for reports, not part of the mapping: given a
 // workload, its labels and the live Kustomization, it searches the same files with the same walker and bounds
 // at the commit the Kustomization applied (status.lastAppliedRevision, parsed strictly), not at the branch
-// head, and returns a [ManifestCandidate] (file and commit) or a [Reason]. It takes no action, compares no
-// value, matches no settings repository and checks no policy, and when the Kustomization transforms its build
-// it still searches and names the transform fields in the candidate. A candidate never authorizes a change:
-// only [Resolver.Resolve] does.
+// head, and returns a [ManifestCandidate] (file and commit) or a [Reason]. Of the mapping's checks before
+// Git it keeps the Flux labels, spec.suspend, spec.kubeConfig, the inventory, a GitRepository source with a
+// valid reference and spec.path. It takes no action, compares no value, matches no settings repository,
+// checks no policy, and checks neither the Kustomization's readiness nor the GitRepository (options, ref,
+// readiness, fetched revision), which it does not read. When the Kustomization transforms its build or sets
+// spec.decryption it still searches and marks the candidate. It takes a file as absent only when the host read
+// the commit's tree without it (providers.ErrPathNotInTree) and no listing at that commit returned it; a plain
+// not found is a transient error. A candidate never authorizes a change: only [Resolver.Resolve] does.
 //
 // Everything read here is untrusted input: cluster objects, Flux status and Git contents. Paths are built
 // only from validated segments with package path, never by concatenating strings, and stay inside the

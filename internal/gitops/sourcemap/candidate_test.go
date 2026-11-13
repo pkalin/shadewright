@@ -98,6 +98,7 @@ func TestFindManifestCandidate(t *testing.T) {
 		revision   func(commit string) string
 		path       string
 		transforms []string
+		decryption bool
 		reason     sourcemap.Reason
 	}{
 		{name: "plain ScaledObject", path: soFile},
@@ -123,6 +124,39 @@ func TestFindManifestCandidate(t *testing.T) {
 			},
 			path:       soFile,
 			transforms: []string{"patches", "postBuild"},
+		},
+		{
+			name: "decryption is marked, not refused",
+			change: func(f *fixture) {
+				set(f.ks, map[string]any{"provider": "sops", "secretRef": map[string]any{"name": "sops-age"}}, "spec", "decryption")
+			},
+			path:       soFile,
+			decryption: true,
+		},
+		{
+			name:   "empty decryption is not marked",
+			change: func(f *fixture) { set(f.ks, map[string]any{}, "spec", "decryption") },
+			path:   soFile,
+		},
+		{
+			name:   "suspended",
+			change: func(f *fixture) { set(f.ks, true, "spec", "suspend") },
+			reason: sourcemap.ReasonKustomizationSuspended,
+		},
+		{
+			name:   "sourceRef without a name",
+			change: func(f *fixture) { set(f.ks, "", "spec", "sourceRef", "name") },
+			reason: sourcemap.ReasonUnsupportedSource,
+		},
+		{
+			name:   "sourceRef name is not a valid name",
+			change: func(f *fixture) { set(f.ks, "Fleet_1", "spec", "sourceRef", "name") },
+			reason: sourcemap.ReasonUnsupportedSource,
+		},
+		{
+			name:   "sourceRef namespace is not a valid name",
+			change: func(f *fixture) { set(f.ks, "flux.system", "spec", "sourceRef", "namespace") },
+			reason: sourcemap.ReasonUnsupportedSource,
 		},
 		{
 			name:   "Helm-managed",
@@ -254,8 +288,10 @@ func TestFindManifestCandidate(t *testing.T) {
 			if c == nil || res.Reason != "" || res.Message != "" {
 				t.Fatalf("result = %+v (%s), want a candidate", res, res.Message)
 			}
-			if c.Path != tc.path || c.Commit != head || !slices.Equal(c.Transforms, tc.transforms) {
-				t.Errorf("candidate = %+v, want %s at %s with transforms %v", c, tc.path, head, tc.transforms)
+			if c.Path != tc.path || c.Commit != head || !slices.Equal(c.Transforms, tc.transforms) ||
+				c.Decryption != tc.decryption {
+				t.Errorf("candidate = %+v, want %s at %s with transforms %v and decryption %t",
+					c, tc.path, head, tc.transforms, tc.decryption)
 			}
 		})
 	}
@@ -384,6 +420,67 @@ func TestFindManifestCandidateReturnsGitErrors(t *testing.T) {
 			}
 			if errors.Is(err, leaky) || strings.Contains(err.Error(), secret) {
 				t.Errorf("error %q carries the provider error", err)
+			}
+			if res.Candidate != nil || res.Reason != "" {
+				t.Errorf("result %+v returned with an error", res)
+			}
+		})
+	}
+}
+
+// failPath is a GitProvider whose ReadFile answers err for one path and reads every other path, and ListDir,
+// from git.
+type failPath struct {
+	readsAt
+	path string
+	err  error
+}
+
+func (f failPath) ReadFile(ctx context.Context, commit, path string, limit int) (providers.File, error) {
+	if path == f.path {
+		return providers.File{}, f.err
+	}
+	return f.readsAt.ReadFile(ctx, commit, path, limit)
+}
+
+// TestFindManifestCandidateNotFoundIsProven checks that a file is taken as absent only when the host read the
+// tree at the commit and the path is not in it, and the path is not one a listing at the same commit returned.
+// A plain not found, which a host also gives for a commit it does not have yet or while it fails, and a listed
+// file read as absent are errors for a retry, never a reason or a candidate.
+func TestFindManifestCandidateNotFoundIsProven(t *testing.T) {
+	notFound := errors.New("GitHub returned status 404: " + providers.ErrNotFound.Error())
+	plain := errors.Join(notFound, providers.ErrNotFound)
+	notInTree := errors.Join(notFound, providers.ErrPathNotInTree)
+	tests := []struct {
+		name   string
+		change func(f *fixture)
+		path   string
+		err    error
+	}{
+		{name: "manifest listed in the kustomization file", path: soFile, err: plain},
+		{name: "kustomization file", path: ksFile, err: plain},
+		{name: "existing .sourceignore", change: func(f *fixture) { f.files["apps/orders/.sourceignore"] = "*.md\n" },
+			path: "apps/orders/.sourceignore", err: plain},
+		{name: "absent .sourceignore", path: "apps/.sourceignore", err: plain},
+		{name: "manifest a listing returned", change: func(f *fixture) { delete(f.files, ksFile) },
+			path: soFile, err: notInTree},
+		{name: "kustomization file read as absent, then listed", path: ksFile, err: notInTree},
+		{name: "kustomization file a listing returned", change: func(f *fixture) {
+			set(f.ks, "apps", "spec", "path")
+		}, path: ksFile, err: notInTree},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture()
+			if tc.change != nil {
+				tc.change(f)
+			}
+			git, head := gitOf(t, f)
+			set(f.ks, applied(head), "status", "lastAppliedRevision")
+			res, err := sourcemap.FindManifestCandidate(context.Background(),
+				failPath{readsAt: readsAt{git: git, commit: head, t: t}, path: tc.path, err: tc.err}, candidateInput(t, f))
+			if !errors.Is(err, sourcemap.ErrTransient) {
+				t.Fatalf("result %+v (%s), error = %v, want %v", res, res.Message, err, sourcemap.ErrTransient)
 			}
 			if res.Candidate != nil || res.Reason != "" {
 				t.Errorf("result %+v returned with an error", res)

@@ -363,9 +363,28 @@ func checkRequestReuse(t *testing.T, c *Controller, ns string, got *remediationv
 	if _, err := c.createRequest(t.Context(), again, requestSpec(again, bigger)); err == nil {
 		t.Error("a request of the plan's name with another plan was accepted")
 	}
+	// A revert (spec.reverts) at the name of a plan holds another plan, even with the same action: the analysis
+	// loop never takes one up as its own (ADR-0030 section 8).
+	other := plan
+	other.Action = *plan.Action.DeepCopy()
+	other.Action.SetContainerMemoryLimit.Desired = resource.MustParse("640Mi")
+	otherName, err := requestName(again, requestSpec(again, other))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revert := &remediationv1alpha1.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: string(otherName)},
+		Spec: requestSpec(again, other)}
+	revert.Spec.Reverts = &remediationv1alpha1.RequestRef{Name: "remediation-failed",
+		UID: "15151515-1515-4515-8515-151515151515"}
+	if err := env.admin.Create(t.Context(), revert); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.createRequest(t.Context(), again, requestSpec(again, other)); err == nil {
+		t.Error("a revert at the plan's name was accepted as the plan's request")
+	}
 	list := &remediationv1alpha1.RemediationRequestList{}
-	if err := env.admin.List(t.Context(), list, client.InNamespace(ns)); err != nil || len(list.Items) != 2 {
-		t.Errorf("%d requests, want the proposal and the one made here (%v)", len(list.Items), err)
+	if err := env.admin.List(t.Context(), list, client.InNamespace(ns)); err != nil || len(list.Items) != 3 {
+		t.Errorf("%d requests, want the proposal and the two made here (%v)", len(list.Items), err)
 	}
 }
 

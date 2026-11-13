@@ -209,6 +209,35 @@ func TestBreakerUndecidedMergeDoesNotClose(t *testing.T) {
 	expectHeld(t, res, err, got, ReasonCircuitOpen)
 }
 
+// TestBreakerRevertIsNeverASuccess: a revert merged after three failures in a row does not close the breaker
+// (ADR-0030 section 8: it clears nothing, so the failure it reverts stays counted). With --verify-outcomes off it
+// stays Merged, and in Succeeded (written by hand) it is no success either; status.breakerCounts is false for it.
+func TestBreakerRevertIsNeverASuccess(t *testing.T) {
+	for _, c := range []struct {
+		phase  remediationv1alpha1.RemediationPhase
+		verify bool
+	}{
+		{remediationv1alpha1.PhaseMerged, false},
+		{remediationv1alpha1.PhaseSucceeded, false},
+		{remediationv1alpha1.PhaseSucceeded, true},
+	} {
+		t.Run(fmt.Sprintf("%s verify %v", c.phase, c.verify), func(t *testing.T) {
+			revert := otherRequest("revert", "uid-target-revert", c.phase, 5*time.Minute)
+			revert.Spec.Reverts = &remediationv1alpha1.RequestRef{Name: "f3",
+				UID: "33333333-3333-4333-8333-333333333333"}
+			revert.Status.MergeReceipt = &remediationv1alpha1.MergeReceipt{}
+			r, _, _, rr2 := halfOpenWorld(t, revert)
+			r.BreakerCooldown = time.Hour
+			r.VerifyOutcomes = c.verify
+			res, got, err := reconcileLimits(t, r, rr2)
+			expectHeld(t, res, err, got, ReasonCircuitOpen)
+			if countsForBreaker(revert) {
+				t.Fatalf("breakerCounts of a revert in %s = true, want false", c.phase)
+			}
+		})
+	}
+}
+
 // TestBreakerUndecidedProbeEndsWithVerificationOff: with --verify-outcomes off nothing moves a request on from
 // WaitingForDelivery or Verifying, so a probe found there would hold the breaker half-open for ever. The executor
 // ends it Inconclusive (VerificationDisabled), which the breaker reads like any Inconclusive probe: open again

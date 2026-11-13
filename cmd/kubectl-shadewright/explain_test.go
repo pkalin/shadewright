@@ -326,6 +326,42 @@ func TestExplainOutcomeLines(t *testing.T) {
 	}
 }
 
+// TestExplainRevert: a revert (spec.reverts) names the failed request it undoes, in the text and in the JSON,
+// and its Cleared line says RevertApplied.
+func TestExplainRevert(t *testing.T) {
+	rr := explainRequestObj(testRR, remediationv1alpha1.PhaseInconclusive, time.Hour,
+		cond(remediationv1alpha1.ConditionCleared, metav1.ConditionUnknown, remediationv1alpha1.ReasonRevertApplied,
+			"A revert is not checked for clearing", time.Minute),
+		cond(remediationv1alpha1.ConditionVerified, metav1.ConditionUnknown, remediationv1alpha1.ReasonRevertApplied,
+			"The revert was rolled out, configured and available", time.Minute))
+	rr.Spec.Reverts = &remediationv1alpha1.RequestRef{Name: "rr-failed", UID: testOldUID}
+	c := explainClient(t, rr, testIncident("incident-a", "a", testSubject, "OOM"), testSettings())
+	e, err := explain(context.Background(), c, testNS, testRR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, js := explainOut(t, e)
+	for _, want := range []string{
+		"Reverts:      rr-failed",
+		"Cleared:      Unknown, RevertApplied: A revert is not checked for clearing",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text lacks %q:\n%s", want, text)
+		}
+	}
+	var got struct {
+		Requests []struct {
+			Reverts string `json:"reverts"`
+		} `json:"requests"`
+	}
+	if err := json.Unmarshal([]byte(js), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Requests) != 1 || got.Requests[0].Reverts != "rr-failed" {
+		t.Errorf("JSON requests = %+v, want reverts rr-failed", got.Requests)
+	}
+}
+
 // TestExplainIncident explains an Incident: its requests, newest first, without the requests of another
 // Incident of the same name (another UID).
 func TestExplainIncident(t *testing.T) {

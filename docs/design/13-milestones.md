@@ -43,7 +43,7 @@ How a scenario is switched on and where it runs is decided in [ADR-0022](../adr/
 - **Done when:**
   - `Succeeded` appears only after the right revision is applied and stability criteria hold;
   - every failure has a clear status and escalation.
-- **Built so far:** the merge receipt (#678), `WaitingForDelivery` and `Verifying` (#681), the verifier and its report (#682, written only for requests in `Verifying`, so none on a default install), and the executor judging `Cleared` from that report and ending `Succeeded`, `Failed` or `Inconclusive` (#683), behind the executor flag `--verify-outcomes`, off by default until a lab run with a release candidate decides it. Not built: the revert (#96) and `ResolvedBeforeRollout` (#684).
+- **Built so far:** the merge receipt (#678), `WaitingForDelivery` and `Verifying` (#681), the verifier and its report (#682, written only for requests in `Verifying`, so none on a default install), and the executor judging `Cleared` from that report and ending `Succeeded`, `Failed` or `Inconclusive` (#683), behind the executor flag `--verify-outcomes`, off by default until a lab run with a release candidate decides it. The receiving side of the revert (#96, first part): `spec.reverts`, the executor's link check before the policy check (`InvalidRevert`), no report for a revert, and its end `Inconclusive` with `RevertApplied`. Not built: the analyzer's revert proposer (#96, second part) and `ResolvedBeforeRollout` (#684).
 
 **Stage 4: controlled auto-merge in the lab**
 

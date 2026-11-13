@@ -83,10 +83,12 @@ spec:
               requestUID:
                 description: requestUID is the UID of the RemediationRequest the report
                   is about.
+                maxLength: 36
                 pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
                 type: string
               targetUID:
                 description: targetUID is the UID of the target workload.
+                maxLength: 36
                 pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
                 type: string
               templateRevision:
@@ -118,6 +120,7 @@ spec:
                   properties:
                     podUID:
                       description: podUID is the UID of the pod.
+                      maxLength: 36
                       pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
                       type: string
                     restarts:
@@ -219,6 +222,7 @@ spec:
                     type: string
                   podUID:
                     description: podUID is the UID of the pod.
+                    maxLength: 36
                     pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
                     type: string
                 required:

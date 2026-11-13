@@ -419,6 +419,30 @@ func TestNoReportForRequestsItDoesNotSample(t *testing.T) {
 	}
 }
 
+// TestNoReportForARevert: a revert (spec.reverts) in Verifying, on a Deployment in a watched namespace that the
+// verifier would otherwise sample, gets no report and is not looked at again (ADR-0030 section 8).
+func TestNoReportForARevert(t *testing.T) {
+	w := newWorkload(t, watchedNS)
+	rr := testfixtures.MemoryLimitRequest(operatorNS, unique("rr"))
+	rr.Spec.TargetRef.Namespace = w.deploy.Namespace
+	rr.Spec.TargetRef.Name = w.deploy.Name
+	rr.Spec.TargetRef.UID = v1alpha1.UID(w.deploy.UID)
+	rr.Spec.Reverts = &v1alpha1.RequestRef{Name: "remediation-failed", UID: "00000000-0000-0000-0000-0000000000f1"}
+	mustCreate(t, rr)
+	setStatus(t, rr, v1alpha1.PhaseVerifying)
+	r := newReconciler(admin, admin, &clock{now: time.Now()})
+	res, err := reconcile(t, r, rr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("requeued after %v, want no requeue", res.RequeueAfter)
+	}
+	if _, ok := getReport(t, rr); ok {
+		t.Error("a report was created for a revert")
+	}
+}
+
 // TestNoReportForARequestBeingDeleted: a request in Verifying that a finalizer still holds is not sampled and
 // not looked at again.
 func TestNoReportForARequestBeingDeleted(t *testing.T) {

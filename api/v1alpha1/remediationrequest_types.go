@@ -149,6 +149,8 @@ type Verification struct {
 // +kubebuilder:validation:XValidation:rule="self.action.type != 'AdjustKedaMaxReplicas' || (self.targetRef.apiVersion.startsWith('keda.sh/') && self.targetRef.kind == 'ScaledObject')",message="AdjustKedaMaxReplicas can only target a keda.sh ScaledObject"
 // +kubebuilder:validation:XValidation:rule="self.action.type != 'SetContainerMemoryLimit' || (self.targetRef.apiVersion == 'apps/v1' && self.targetRef.kind in ['Deployment', 'StatefulSet'])",message="SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet"
 // +kubebuilder:validation:XValidation:rule="has(self.replaces) == has(self.chainRoot)",message="replaces and chainRoot are set together or not at all"
+// +kubebuilder:validation:XValidation:rule="!has(self.reverts) || (has(self.approvalRequired) && self.approvalRequired)",message="a revert (spec.reverts) requires approvalRequired: true"
+// +kubebuilder:validation:XValidation:rule="!has(self.reverts) || !has(self.replaces)",message="a revert (spec.reverts) never replaces another request"
 type RemediationRequestSpec struct {
 	// incidentRef is the incident this plan answers.
 	// +required
@@ -196,6 +198,21 @@ type RemediationRequestSpec struct {
 	// (shadewright/<chainRoot>), so every request of a chain works on the same branch and pull request.
 	// +optional
 	ChainRoot UID `json:"chainRoot,omitempty"`
+
+	// reverts names the request whose change this one undoes, by name and UID (ADR-0030 section 8). Set only on a
+	// revert. A deterministic revert proposer in the analyzer is planned (#96, second part) to create one for a
+	// request that ended Failed with Verified False; none is built, so no component creates a revert yet. A
+	// model proposal has no such field. A revert requires approvalRequired: true, never replaces another
+	// request, and is never changed after create (the spec is immutable). The executor checks
+	// the link before the policy check: the named request exists with this UID, ended Failed with Verified
+	// False, is not a revert itself, has the same Incident, target and action type (and container), and this
+	// request's previous and desired values are its desired and previous values; this request's name is
+	// RevertName of that UID, so a failed request has at most one revert at a time (a revert that was deleted can be created again; the proposer must cover that). Otherwise the request ends Denied
+	// with reason InvalidRevert before any Git write. A revert is never checked for clearing: the verifier
+	// writes no report for it, and once rolled out, configured and available for stableFor it ends
+	// Inconclusive with reason RevertApplied, never Succeeded.
+	// +optional
+	Reverts *RequestRef `json:"reverts,omitempty"`
 }
 
 // RemediationPhase summarizes where a request is. Conditions carry the reasons.
@@ -487,10 +504,11 @@ type RolloutStatus struct {
 // Verifying request that was not good.
 type VerificationReset struct {
 	// reason says why the window was reset: NotAvailable (the target reports other available replicas than
-	// desired, fewer or more, or a ScaledObject is not ready by the KedaReady rule), StaleReport (the verifier's report is
-	// missing, was never sampled, or its sample counter stopped rising), ReportMismatch (the report names another
-	// request, merge commit, target, template revision or container) or PartialRollout (the report does not cover
-	// every desired replica). Every one is a reset of the no-evidence class.
+	// desired, fewer or more, a revert's target desires no replica, or a ScaledObject is not ready by the
+	// KedaReady rule), StaleReport (the verifier's report is missing, was never sampled, or its sample counter
+	// stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision
+	// or container) or PartialRollout (the report does not cover every desired replica, or a revert is checked
+	// before RolledOut is True). Every one is a reset of the no-evidence class.
 	// +kubebuilder:validation:Enum=NotAvailable;StaleReport;ReportMismatch;PartialRollout
 	// +required
 	Reason ResetReason `json:"reason"`
@@ -503,7 +521,7 @@ type VerificationReset struct {
 
 // VerificationWindow is the executor's own stable window of a Verifying request (ADR-0030 section 4), kept next
 // to the verifier's window in the VerificationReport. Every time in it is on the executor's clock, and it is
-// never compared with a time of the report. A restart of the executor loses nothing of it. A lastReset is
+// never compared with a time of the report. No window counts time from before the executor process began reconciling, so after a restart or a leader change every open window needs a full stableFor again. A lastReset is
 // counted: resets is at least 1 when it is set.
 // +kubebuilder:validation:XValidation:rule="!has(self.lastReset) || (has(self.resets) && self.resets >= 1)",message="lastReset requires resets of at least 1"
 type VerificationWindow struct {

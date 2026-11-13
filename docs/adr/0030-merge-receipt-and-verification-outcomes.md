@@ -84,7 +84,7 @@ Each outcome has its own condition, so `kubectl shadewright explain` can show th
 | --- | --- | --- | --- |
 | Rolled out | `Delivered` and `RolledOut` | Flux reports the merge commit or a descendant applied (`Delivered`); every desired replica runs the applied template (`RolledOut`, built, with the partition rule below), and the target still names that template on every sample | the executor: `get` on the Kustomization and the target (held), the host's ancestry answer (held) |
 | Configured | `Configured` (new type) | The live target's field equals the desired value, read with the same field accessor the duplicate rule uses (`sourcemap.FieldFor`, `changeInEffect` in `duplicates.go`) | the executor: `get` on the target (held) |
-| Cleared | `Cleared` (new type) | Container status of the target's pods: no OOM kill of the action's container on a pod of the rollout, restart counts flat against durable baselines, every desired replica covered | the verifier lists the pods and writes a `VerificationReport`; the executor reads the report (section 7) |
+| Cleared | `Cleared` (new type) | Container status of the target's pods: no OOM kill of the action's container on a pod of the rollout, restart counts flat against durable baselines, every desired replica covered | the verifier lists the pods and writes a `VerificationReport`; the executor reads the report as its evidence and writes the condition (section 7) |
 
 **A partitioned StatefulSet.** The rollout evaluator (`statefulSet` in `internal/verification/rollout`) calls a rolling update with `partition` above 0 complete when only the pods above the partition run the update revision: three replicas, partition 2 and one updated pod give `Complete`, while two pods keep the old template. The owner chose that, so `RolledOut` keeps saying the rollout did what the strategy asks, with its own reason `RolloutPartitioned` and a message that names the pods left on the old revision, instead of "every pod runs the current template". It is not evidence for the change: cleared needs every desired replica on the applied revision, so a sample with pods left below the partition is not good (reason `PartialRollout`, no evidence class). If the owner lowers the partition inside the timeout, the window can still complete; otherwise the request ends `Inconclusive` with `PartialRollout`.
 
@@ -92,7 +92,7 @@ For a ScaledObject (`AdjustKedaMaxReplicas`), "rolled out" is `Delivered` plus `
 
 Who reads the outcomes:
 
-- the executor writes all of them and is the only writer of request status (invariant 6, unchanged); the verifier writes only its reports;
+- the executor writes all of them, `Cleared` included, and is the only writer of request status (invariant 6, unchanged); for `Cleared` the verifier's report is its evidence, and the verifier writes only its reports;
 - `kubectl shadewright explain` shows rolled out, configured and cleared as three lines (exit criterion 5);
 - the circuit breaker reads only the phase;
 - the analyzer reads `Failed` with `Verified` False to propose a revert (#96), and an Incident whose request ended without success moves to `Escalated` as it does today (design 3).
@@ -151,7 +151,7 @@ A pod that is not Ready is no evidence, not trouble, because a node that stopped
 
 **Final at once.** An OOM kill of the action's container on a pod of the rollout, with `lastState.terminated.reason` `OOMKilled`, is recorded once in the report (`oomKill`: pod UID, container name, finish time) and ends the request `Failed` with reason `OOMKilled`, whatever the window. No time decides it: a pod of the rollout is proven to run the applied template with the desired limit, so every kill it records happened under the new value. An OOM kill of another container is a `Restarted` reset. A revert (section 8) is exempt: the verifier writes no report for it, so this rule never applies to it. `Configured` False, `TargetGone`, `TargetReplaced` and `RolloutSuperseded` end the request `Inconclusive` at once.
 
-**Success.** A good executor check ends the request `Succeeded` when all of these hold: the report is good and no older than one poll interval by the executor's clock (the counter rule above); the report's span, `sampledAt - windowStart`, is at least `stableFor + nodeGrace`, both times written by the verifier; and the executor's own span, `now - windowStart` on its clock, is at least `stableFor + nodeGrace`. The same status write sets `Cleared` True (reason `NoRecurrence`) and `Verified` True.
+**Success.** A good executor check ends the request `Succeeded` when all of these hold: the report is good and no older than one poll interval by the executor's clock (the counter rule above); the report's span, `sampledAt - windowStart`, is at least `stableFor + nodeGrace`, both times written by the verifier; and the executor's own span, `now - windowStart` on its clock, is at least `stableFor + nodeGrace`. The same status write sets `Cleared` True (reason `NoRecurrence`) and `Verified` True. The executor is the only writer of `Cleared` (it writes request status) and the verifier's report is its evidence; #95b only changes the reason the executor writes, to `ResolvedBeforeRollout`, when the Incident it already reads shows the symptom stopped before `appliedObservedAt`.
 
 **What a quiet window proves.** Cleared means no OOM kill and no restart were observed over the window, with the pod set covered at every sample. Container status keeps only the last termination of a container, so history that went with a pod deleted between two samples (at most 30 seconds, longer across a gap) is lost; a gap with a new pod resets the window instead of trusting the new pod, and a restart while nobody watched still shows as a raised count. An OOM kill whose record was overwritten by a later termination is not reported as `OOMKilled`, but that later termination resets the window as `Restarted`.
 
@@ -198,6 +198,8 @@ stateDiagram-v2
 
 `Merged` and the rollout report under it are built; every state and arrow after `Merged` is planned. `Failed` exists for steps before the merge, and its use after the merge is planned. The deadline of a step after the merge never ends a request `Expired`: past the merge, the evidence decides between `Failed` and `Inconclusive`. `Expired` stays for steps before the merge, which narrows the "`Expired` on deadline" of #94 to those steps.
 
+Also before the merge: a pull request closed without a merge keeps ending `NeedsIntervention` with `ChangeRequestClosed` (decided 2026-11-13), because a person rejecting a proposal is a signal the circuit breaker counts as a failure, and the fix for #643 reads that phase and reason.
+
 ### 7. The verifier and its report
 
 Container status lives on Pods, which no Shadewright identity that writes request status can read today. A third component reads it: `shadewright-verifier`, its own binary (`cmd/verifier`), Deployment and ServiceAccount. It is deterministic code, has no model access, holds no Git App credentials and never writes request status. Later evidence sources (metrics for the KEDA backlog with #508 and #506, Argo CD health) attach to this identity, so each widens the grants of a component that can only withhold or report evidence, not of the one that writes to Git.
@@ -232,7 +234,7 @@ The report:
 
 A stopped or broken verifier therefore leaves the request without evidence, and it ends `Inconclusive` at the timeout, never `Succeeded`. The durable baselines (section 4) and the node freshness rule live in the report, so a restart of the verifier does not reset what it knew, and a restart of the executor loses nothing, since its own window is in request status.
 
-**What the verifier can cause.** Cleared is the only outcome the executor takes from the report. Delivery, the rollout, the template's freshness, the live value, availability and the target's UID come from the executor's own reads. An honest verifier can withhold success (no report, a reset) or report an OOM kill. A compromised verifier can do both falsely: a forged OOM record ends a request `Failed` and leads to a revert proposal, which needs a person's approval (`approvalRequired: true`) and passes policy.
+**What the verifier can cause.** The executor writes `Cleared` and takes only its evidence from the report; it is the only outcome whose evidence comes from the report. Delivery, the rollout, the template's freshness, the live value, availability and the target's UID come from the executor's own reads. An honest verifier can withhold success (no report, a reset) or report an OOM kill. A compromised verifier can do both falsely: a forged OOM record ends a request `Failed` and leads to a revert proposal, which needs a person's approval (`approvalRequired: true`) and passes policy.
 
 **Accepted risk: a forged success.** A compromised verifier can forge a quiet window and so a `Succeeded`, which clears older outcomes in the circuit breaker. This risk is accepted. It is bounded: the request must really be merged, delivered, rolled out on every desired replica, configured and available, by the executor's own reads; the forged report must carry the request's UID, merge commit, target UID and template revision; and the verifier makes no Git write, holds no Git App credentials and cannot change policy. A forged success therefore authorizes no change: it only lets the breaker allow more proposals, each still going through policy and a person's merge where policy asks for it. Writing the evidence from the analyzer instead would remove the third identity but put the verdict with the identity that talks to the model and reads untrusted cluster text (logs, events, messages) to build its prompt. The verifier has no model access and reads typed fields only, so it is the smaller and harder target, and this design keeps the evidence there.
 
@@ -251,7 +253,7 @@ A request that ends `Failed` after the merge has `Verified` False with one of `O
 - A revert never ends `Succeeded`. It requires rolled out, configured and available only, since the original symptom is expected to come back, and once these held for `stableFor` on the executor's clock it ends `Inconclusive` with reason `RevertApplied`. The circuit breaker reads that like any `Inconclusive`: not a failure outside a probe, and it clears nothing, so the failure it reverts stays counted. A revert that does not roll out ends `Failed` (`RolloutStuck` or `DeliveryFailed`) and counts as a failure. The Incident stays escalated for a person.
 - `Inconclusive` never leads to a revert.
 
-A revert of a memory increase is a decrease, and policies refuse decreases by default (`maxDecreasePercent` 0, design 5.3). Without a policy rule for reverts, the revert ends `Denied` with `DecreaseNotAllowed` and the person reverts by hand. Whether a policy may allow exactly the inverse of a failed request's change (and nothing wider) is a change to the policy decision; #96 decides it with an amendment and a red team, and it is the second point for the maintainer.
+A revert of a memory increase is a decrease, and policies refuse decreases by default (`maxDecreasePercent` 0, design 5.3). Without a policy rule for reverts, the revert ends `Denied` with `DecreaseNotAllowed` and the person reverts by hand. Whether a policy may allow exactly the inverse of a failed request's change (and nothing wider) is a change to the policy decision; #96 decides it with an amendment and a red team, and it is the fourth point for the maintainer.
 
 ### 9. Invariants
 
@@ -297,11 +299,11 @@ A revert of a memory increase is a decrease, and policies refuse decreases by de
 | #93c (new) The verifier component | `cmd/verifier` and its reconciler, which skips requests with `spec.reverts`; the grants of section 7 in the chart and `config/`; the Dockerfile target, the image build, signing, Trivy scan and release digests; `identity.svg`, `architecture.svg`, design 2 and invariant 6 in `AGENTS.md` | L | 2, after #93a and #94a (the report's `spec` takes the receipt's merge commit), parallel with #94b |
 | #93b (rest of #93) Executor wiring | `get` on `verificationreports`; `status.verification`; `Cleared`; the trust contract and the counter rule; `Verifying` to `Succeeded`, `Failed` (`OOMKilled`, `Restarted`) and `Inconclusive`; `explain` with three lines; design 9 and 10.11 | L | 3, after #94b and #93c |
 | #96 Revert proposal | `spec.reverts` with CEL; the analyzer's deterministic proposer and the test that a model proposal cannot set the link; the executor's link check and `InvalidRevert`; one revert per failure; no revert of a revert; the exemption from the OOM rule and `Cleared`; `RevertApplied`; the policy question of section 8 | L | 4, after #93b, which builds the `Verifying` verdicts that `RevertApplied` and the exemption change |
-| #95b (rest of #95) Resolved before the rollout | Read from the Incident the executor already gets whether the symptom stopped before `appliedObservedAt`; `Cleared` True then carries reason `ResolvedBeforeRollout` instead of `NoRecurrence`, so the attribution is visible | S | 4, after #93b, parallel with #96 |
+| #95b (rest of #95) Resolved before the rollout | The executor stays the only writer of `Cleared`, with the report as its evidence; this task only changes the reason it writes, to `ResolvedBeforeRollout` instead of `NoRecurrence`, when the Incident it already reads shows the symptom stopped before `appliedObservedAt`, so the attribution is visible | S | 4, after #93b, parallel with #96 |
 
 Order: #94a, #93a and #95a first; then #94b and #93c side by side; then #93b; then #96 and #95b side by side. #93 and #96 both list #94 under "Depends on"; with the split #93c depends on #93a and #94a, #93b on #94b and #93c, and #96 on #93b. #93c adds one L task to the milestone, #94a grows from M to L with the lookup by number and the new phase, and #93a from M to L with the report type; #93b no longer carries the pod grant or `Configured`.
 
-A close without a merge keeps ending `NeedsIntervention` with `ChangeRequestClosed` (decided 2026-11-13), because a person rejecting a proposal is a signal the circuit breaker counts as a failure, and the fix for #643 reads that phase and reason.
+A close without a merge keeps ending `NeedsIntervention` with `ChangeRequestClosed`; the decision and its reason are in section 6.
 
 ## Consequences
 
@@ -329,7 +331,15 @@ A close without a merge keeps ending `NeedsIntervention` with `ChangeRequestClos
 ## Points for the maintainer
 
 1. The third component, `shadewright-verifier`, and its grants (section 7), replacing the decision of 2026-11-13 to grant the executor `list` on `pods`; with it the executor's new `get` on `verificationreports`. Needed before #93c is built.
-2. The policy rule for reverts (section 8), decided in #96.
+2. The accepted risk of a forged quiet window (section 7): a compromised verifier can forge a `Succeeded` for a request that is really merged, delivered, rolled out, configured and available, which lets the circuit breaker clear older outcomes. It authorizes no change.
+3. KEDA requests cannot reach `Succeeded` in v0.5.0 (section 3): `Cleared` stays `Unknown` with reason `ClearingNotChecked` and they end `Inconclusive`, until metrics are evidence (#508, #506).
+4. The policy rule for reverts (section 8), left to #96: whether a policy may allow exactly the inverse of a failed request's change. Without it a revert of a memory increase ends `Denied` with `DecreaseNotAllowed`.
+5. The new values and intervals, each with the default its section defines:
+    - chart value `verifier.watchNamespaces`, default `null` (the chart uses `analyzer.watchNamespaces`), section 7;
+    - flag `--node-grace`, chart value `executor.verification.nodeGrace`, default 1 minute, to be at least the cluster's node monitor grace period, section 4;
+    - sampling and reconcile interval of 30 seconds while `Verifying`, 15 seconds once both spans are long enough, fixed, not settings, section 4;
+    - `spec.verification.stableFor`, default 3m, at least 1m, raised to the action's minimum (10 minutes for `SetContainerMemoryLimit`, 3 for `AdjustKedaMaxReplicas`), and `spec.verification.timeout`, default 10m, at most 24h, with the rollout deadline of 10 minutes, section 4;
+    - the delivery window of one hour after `mergedAt`, section 2.
 
 ## Amendments
 

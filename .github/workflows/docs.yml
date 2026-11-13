@@ -8,8 +8,13 @@ on:
     paths: ["docs/**", "overrides/**", "includes/**", "zensical.toml", "requirements-docs.in", "requirements-docs.txt", ".github/workflows/docs.yml"]
   pull_request:
     paths: ["docs/**", "overrides/**", "includes/**", "zensical.toml", "requirements-docs.in", "requirements-docs.txt", ".github/workflows/docs.yml"]
-  # A daily build refreshes the latest release and the star count in the top bar (step "Fetch release facts").
-  # Not a release trigger: that runs on the tag, and the github-pages environment deploys from main only.
+  # A release is published by the last job of the Chart workflow, which runs on the tag. A tag cannot deploy
+  # to the github-pages environment (main only), but workflow_run always runs on the default branch, so its
+  # completion rebuilds main with the new release in the top bar (#646). The build job skips a failed run.
+  workflow_run: # zizmor: ignore[dangerous-triggers] Chart runs only on v* tags; this checks out main and uses nothing from that run
+    workflows: [Chart]
+    types: [completed]
+  # A daily build refreshes the star count in the top bar (step "Fetch release facts").
   schedule:
     - cron: "17 5 * * *"
   workflow_dispatch:
@@ -23,6 +28,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

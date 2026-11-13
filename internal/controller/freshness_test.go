@@ -604,6 +604,42 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha))
 	})
 
+	It("binds the look-up of an unrecorded merge to the number it tried and to the target branch (#688)", func() {
+		markCleanup(forgetPullRequest)
+		_, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		for name, bend := range map[string]func(*providers.ChangeRequest){
+			"another number":      func(c *providers.ChangeRequest) { c.Number++ },
+			"another base branch": func(c *providers.ChangeRequest) { c.BaseBranch = "release" },
+		} {
+			r := reconciler()
+			r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+				return &bentAnswer{Git: git, bend: bend}, nil
+			}
+			closeErr := &closeConflictError{number: cr.Number, err: fmt.Errorf("close: %w", providers.ErrConflict)}
+			Expect(r.mergedUnrecorded(ctx, fetch(), closeErr)).To(BeIdenticalTo(error(closeErr)), name)
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), name)
+			Expect(got.Status.PullRequest).To(BeNil(), name)
+		}
+	})
+
+	It("does not retry an unrecorded merge whose number the Git host answers 404 for (#688)", func() {
+		markCleanup(forgetPullRequest)
+		_, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		git.SetFail(func(op string) error {
+			if op == opGet {
+				return fmt.Errorf("pull request: %w", providers.ErrNotFound)
+			}
+			return nil
+		})
+		defer git.SetFail(nil)
+		closeErr := &closeConflictError{number: cr.Number, err: fmt.Errorf("close: %w", providers.ErrConflict)}
+		Expect(reconciler().mergedUnrecorded(ctx, fetch(), closeErr)).To(BeIdenticalTo(error(closeErr)),
+			"like findRecorded, a 404 is an answer: no merged pull request of this request with that number")
+	})
+
 	It("still ends a fresh request whose pull request a person closed in NeedsIntervention", func() {
 		Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
 		_, err := reconcileOnce()
@@ -945,4 +981,19 @@ func (f sourceFunc) Resolve(ctx context.Context, in sourcemap.Input) (sourcemap.
 func (r *RemediationRequestReconciler) freshErr(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	_, err := r.ensureFresh(ctx, rr)
 	return err
+}
+
+// bentAnswer answers GetChangeRequest with what the fake holds, changed by bend: a Git host whose answer does not
+// match the question.
+type bentAnswer struct {
+	*fakegit.Git
+	bend func(*providers.ChangeRequest)
+}
+
+func (b *bentAnswer) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {
+	cr, err := b.Git.GetChangeRequest(ctx, n)
+	if err == nil {
+		b.bend(&cr)
+	}
+	return cr, err
 }

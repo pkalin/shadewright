@@ -403,7 +403,7 @@ func (r *RemediationRequestReconciler) refuseWaiting(ctx context.Context, rr *re
 		errors.Is(err, errRepositoryGone):
 		outcome = "; the settings no longer reach its repository, so the pull request was not closed"
 	case errors.Is(err, errChangeRequestNotOurs):
-		outcome = "; the recorded pull request is not the branch's own, so it was not closed"
+		outcome = "; the recorded pull request could not be confirmed as this request's, so it was not closed"
 	default:
 		return err
 	}
@@ -852,26 +852,32 @@ func (r *RemediationRequestReconciler) checkMerged(ctx context.Context, git prov
 
 // mergedUnrecorded ends a request whose stale plan's cleanup found its change request merged (closing a merged
 // one is a conflict) before any status recorded it: the merge of its own pull request is what made the plan
-// stale. It looks the pull request up again, by the number the close tried (ADR-0030 section 1: a newer pull
-// request on the same branch never stands in for it), and ends the request through endMerged. A look-up that
-// fails is returned with closeErr for a retry; one that finds no merged pull request of this request from its
-// branch returns closeErr.
+// stale. It reads the pull request again by the number the close tried (closeConflictError; ADR-0030 section 1:
+// a newer pull request on the same branch never stands in for it), binds the answer to that number, the request's
+// branch and its target branch as findRecorded does, and ends the request through endMerged. A look-up that fails
+// is returned with closeErr for a retry. An answer that rules that number out (404, another pull request, another
+// branch or base, as lookUpRecorded classes them), one without this request's marker or not merged, or a closeErr
+// without a number, returns closeErr.
 func (r *RemediationRequestReconciler) mergedUnrecorded(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	closeErr error) error {
+	tried, ok := errors.AsType[*closeConflictError](closeErr)
+	if !ok {
+		return closeErr
+	}
 	git, err := r.openPlanRepository(ctx, rr)
 	if err != nil {
 		return errors.Join(closeErr, err)
 	}
-	var cr providers.ChangeRequest
-	if tried, ok := errors.AsType[*closeConflictError](closeErr); ok {
-		cr, err = git.GetChangeRequest(ctx, tried.number)
-	} else {
-		cr, err = git.FindChangeRequest(ctx, freshness.BranchName(rr))
-	}
-	if err != nil {
+	// openPlanRepository returned, so the source is recorded and its target branch is the repository's.
+	cr, err := git.GetChangeRequest(ctx, tried.number)
+	switch {
+	case providers.IsNotFound(err), providers.IsUntrustedAnswer(err):
+		return closeErr
+	case err != nil:
 		return errors.Join(closeErr, freshness.WrapProvider("find the merged change request", err))
-	}
-	if cr.HeadBranch != freshness.BranchName(rr) || !hasMarker(cr.Body, rr) || cr.State != providers.ChangeRequestMerged {
+	case cr.Number != tried.number, cr.HeadBranch != freshness.BranchName(rr),
+		cr.BaseBranch != string(rr.Status.Source.TargetBranch),
+		!hasMarker(cr.Body, rr), cr.State != providers.ChangeRequestMerged:
 		return closeErr
 	}
 	return r.endMerged(ctx, git, rr, cr)
@@ -1437,8 +1443,9 @@ func (r *RemediationRequestReconciler) ignoreStopped(err error) error {
 // deletion: there is nothing this executor can close there. A request that stopped (NeedsIntervention,
 // Expired) may still have an open pull request of its own, so it is closed too, and so is the one of any
 // request that holds the lock on its target (status.holdsTarget), whatever its phase; a merged one refuses the
-// close with a conflict, and one without this request's marker is left alone. While writes are paused the
-// deletion waits, because closing is a write.
+// close with a conflict, and one without this request's marker is left alone. A 404 on the recorded number is
+// not taken alone as the end of the pull request (closeOnDeleteOf): the finalizer stays while the branch has an
+// open pull request that may be it. While writes are paused the deletion waits, because closing is a write.
 func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
@@ -1477,7 +1484,7 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	}
 	if closes {
 		cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
-		err := r.closeChangeRequest(cleanCtx, rr)
+		err := r.closeOnDeleteOf(cleanCtx, rr)
 		err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
 		cancel()
 		switch {

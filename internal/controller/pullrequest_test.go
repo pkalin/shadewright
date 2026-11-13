@@ -1550,16 +1550,27 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		expectClosedElsewhere(reconcileSecond())
 	})
 
-	It("frees the target of a stopped holder once its recorded pull request is closed, whatever else is on the branch (#688)", func() {
+	It("keeps the target of a stopped holder whose recorded pull request is closed while another one is open on its branch (#688)", func() {
 		got := stopHeadMoved()
 		n := got.Status.PullRequest.Number
 		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
-		// A newer pull request on the same branch, with this request's own marker.
+		// A newer pull request on the same branch, with this request's own marker: it may carry its commit.
 		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
 			BaseBranch: mainBranch, Title: "opened after the close", Body: pullRequestBody(got, "")})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(next.Number).NotTo(Equal(n))
+		before := fetch().ResourceVersion
 		res, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(heldRecheckInterval))
+		got = fetch()
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "another pull request is open on the branch")
+		Expect(got.ResourceVersion).To(Equal(before), "the read by branch changes nothing")
+		Expect(got.Status.PullRequest.Number).To(Equal(n))
+
+		// Once the branch has no open pull request, the closed recorded one releases the lock.
+		Expect(git.CloseChangeRequest(ctx, next.Number)).To(Succeed())
+		res, err = reconcileResult()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res).To(Equal(reconcile.Result{}), "a released lock is not looked at again")
 		got = fetch()
@@ -1567,6 +1578,22 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(got.Status.PullRequest.Number).To(Equal(n))
 		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
 			To(Equal(ReasonChangeRequestClosed))
+	})
+
+	It("keeps the target of a stopped holder when the read by its branch fails (#688)", func() {
+		got := stopHeadMoved()
+		Expect(git.CloseChangeRequest(ctx, got.Status.PullRequest.Number)).To(Succeed())
+		git.SetFail(func(op string) error {
+			if op == opFind {
+				return &providers.RetryableError{Err: errors.New("connection reset")}
+			}
+			return nil
+		})
+		res, err := reconcileResult()
+		git.SetFail(nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(heldRecheckInterval))
+		Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()), "a failed read keeps the lock")
 	})
 
 	It("closes a request's pull request by its recorded number, never a newer one of the branch (#688)", func() {
@@ -1658,6 +1685,43 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, live)).To(Succeed())
 		live.Spec.Paused = new(false)
 		Expect(k8sClient.Update(ctx, live)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+	})
+
+	It("closes the recorded pull request on deletion although the Git host answers 404 for its number (#688)", func() {
+		drive(remediationv1alpha1.PhaseAwaitingApproval)
+		git.SetFail(func(op string) error {
+			if op == opGet {
+				return fmt.Errorf("pull request: %w", providers.ErrNotFound)
+			}
+			return nil
+		})
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		git.SetFail(nil)
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed),
+			"the read by branch found it open, and it is the recorded one with this request's marker")
+	})
+
+	It("keeps the finalizer when the read by branch after a 404 fails (#688)", func() {
+		drive(remediationv1alpha1.PhaseAwaitingApproval)
+		git.SetFail(func(op string) error {
+			switch op {
+			case opGet:
+				return fmt.Errorf("pull request: %w", providers.ErrNotFound)
+			case opFind:
+				return &providers.RetryableError{Err: errors.New("connection reset")}
+			}
+			return nil
+		})
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		_ = reconcileOnce()
+		Consistently(gone, "300ms").Should(BeFalse(), "a 404 alone never finishes the cleanup")
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+		git.SetFail(nil)
 		Expect(reconcileOnce()).To(Succeed())
 		Eventually(gone).Should(BeTrue())
 		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))

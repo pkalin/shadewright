@@ -361,13 +361,13 @@ func (r *RemediationRequestReconciler) takeOver(ctx context.Context, rr, pred *r
 	branch := freshness.BranchName(rr)
 	// The predecessor's pull request is read by its recorded number (ADR-0030 section 1): a newer pull request on
 	// the shared branch never stands in for it.
-	cr, gone, err := findRecorded(ctx, git, pred)
+	cr, gone, err := findHanded(ctx, git, pred)
 	switch {
 	case err != nil:
 		return reconcile.Result{}, freshness.WrapProvider("find the change request", err)
 	case gone != "":
 		return reconcile.Result{}, r.endHandoff(ctx, rr, remediationv1alpha1.ReasonHandoffAborted,
-			"The pull request of the request it replaces cannot be found ("+gone+"); nothing was taken over")
+			"The pull request of the request it replaces is not its own any more ("+gone+"); nothing was taken over")
 	}
 	head, err := git.BranchHead(ctx, branch)
 	if err != nil {
@@ -565,17 +565,18 @@ func (r *RemediationRequestReconciler) expectedHandoffHead(ctx context.Context, 
 
 // afterUpdate reads the pull request after the branch update (ADR-0028 section 4 item 5), by the number the
 // predecessor recorded (ADR-0030 section 1): open, the replacement records it (step 4); merged with the new
-// commit as its head, the replacement owns the merge; merged with another head, or closed, the handoff is
-// abandoned.
+// commit as its head, the replacement owns the merge; merged with another head, closed, or not the predecessor's
+// any more, the handoff is abandoned. A 404 is read again (findHanded): the new commit is on the branch, and a
+// pull request that may still be open carries it.
 func (r *RemediationRequestReconciler) afterUpdate(ctx context.Context, git providers.GitProvider,
 	rr, pred *remediationv1alpha1.RemediationRequest, newHead string) (reconcile.Result, error) {
-	cr, gone, err := findRecorded(ctx, git, pred)
+	cr, gone, err := findHanded(ctx, git, pred)
 	switch {
 	case err != nil:
 		return reconcile.Result{}, freshness.WrapProvider("find the change request after the update", err)
 	case gone != "":
 		return reconcile.Result{}, r.endHandoff(ctx, rr, remediationv1alpha1.ReasonHandoffAborted,
-			"The pull request of the request it replaces cannot be found ("+gone+"); nothing was taken over")
+			"The pull request of the request it replaces is not its own any more ("+gone+"); nothing was taken over")
 	}
 	switch {
 	case cr.State == providers.ChangeRequestOpen,
@@ -584,6 +585,28 @@ func (r *RemediationRequestReconciler) afterUpdate(ctx context.Context, git prov
 	}
 	return reconcile.Result{}, r.endHandoff(ctx, rr, remediationv1alpha1.ReasonHandoffAborted,
 		"The pull request was "+closedOrMerged(cr)+" around the handoff with the old plan; nothing was taken over")
+}
+
+// findHanded is findRecorded for the handoff: it reads the predecessor's recorded pull request by its number. A
+// 404 alone never aborts a handoff, since it may be a passing fault of the Git host while the pull request is
+// open: it is returned as an error that keeps the provider's, for a retry within the handoff's deadline
+// (retryRecovery after the update, the request's deadline before it). Only a real answer (another pull request,
+// another branch or base branch) is gone, and the caller ends the handoff on it.
+func findHanded(ctx context.Context, git providers.GitProvider, pred *remediationv1alpha1.RemediationRequest) (
+	providers.ChangeRequest, string, error) {
+	src := pred.Status.Source
+	if pred.Status.PullRequest == nil || src == nil {
+		return providers.ChangeRequest{}, "", errors.New("no pull request or source recorded")
+	}
+	cr, err := lookUpRecorded(ctx, git, pred, string(src.TargetBranch))
+	g, ok := errors.AsType[*recordedGoneError](err)
+	switch {
+	case ok && providers.IsNotFound(err):
+		return providers.ChangeRequest{}, "", fmt.Errorf("%s; it is read again: %w", g.reason, g.cause)
+	case ok:
+		return providers.ChangeRequest{}, g.reason, nil
+	}
+	return cr, "", err
 }
 
 func closedOrMerged(cr providers.ChangeRequest) string {

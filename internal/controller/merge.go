@@ -198,37 +198,73 @@ func setVerifiedUnknown(rr *remediationv1alpha1.RemediationRequest, reason, mess
 // by branch would return the newest pull request of the branch, which after a merge may be another one (a
 // supersede chain shares its branch), so the merge of the recorded one would never be recorded.
 //
-// It returns, besides the pull request, why the recorded one is gone, when it is: the host has none with that
-// number (ErrNotFound), the one with that number is from another branch or to another target branch, or the host
-// answered with another pull request (ErrUntrustedAnswer). Each is final; the caller stops the request with the
-// cause in its message. Any other failure is returned as it is, for a retry, and never reads as gone.
+// It returns, besides the pull request, why the recorded one is gone, when it is (lookUpRecorded). Each is final;
+// the caller stops the request with the cause in its message. Any other failure is returned as it is, for a
+// retry, and never reads as gone.
 func findRecorded(ctx context.Context, git providers.GitProvider, rr *remediationv1alpha1.RemediationRequest) (
 	cr providers.ChangeRequest, gone string, err error) {
-	pr, src := rr.Status.PullRequest, rr.Status.Source
-	if pr == nil || src == nil {
+	src := rr.Status.Source
+	if rr.Status.PullRequest == nil || src == nil {
 		return providers.ChangeRequest{}, "", errors.New("no pull request or source recorded")
 	}
-	cr, err = git.GetChangeRequest(ctx, pr.Number)
+	cr, err = lookUpRecorded(ctx, git, rr, string(src.TargetBranch))
+	if g, ok := errors.AsType[*recordedGoneError](err); ok {
+		return providers.ChangeRequest{}, g.reason, nil
+	}
+	return cr, "", err
+}
+
+// recordedGoneError is lookUpRecorded's answer that rules the recorded pull request out. It wraps
+// errRecordedNotFound, and the provider's error when there was one, so providers.IsNotFound tells a 404 apart
+// from an answer about another pull request.
+type recordedGoneError struct {
+	reason string
+	cause  error
+}
+
+func (e *recordedGoneError) Error() string { return e.reason }
+
+func (e *recordedGoneError) Unwrap() []error {
+	if e.cause == nil {
+		return []error{errRecordedNotFound}
+	}
+	return []error{errRecordedNotFound, e.cause}
+}
+
+// lookUpRecorded reads the recorded pull request by its number and binds the answer to it: the number asked for,
+// the request's branch and target, the base branch the caller names (ADR-0030 section 1). A newer pull request on
+// the same branch (a supersede chain shares it) never stands in for it. An answer that rules the recorded one out
+// is a *recordedGoneError: the host has none with that number (ErrNotFound, kept in the chain), it answered with
+// another pull request (ErrUntrustedAnswer, or another number), or the one with that number is from another
+// branch or to another base branch. Whether that is final is the caller's call: a 404 may be a passing fault of
+// the host. Any other failure is returned as it is, for a retry. It does not check the marker.
+func lookUpRecorded(ctx context.Context, git providers.GitProvider, rr *remediationv1alpha1.RemediationRequest,
+	target string) (providers.ChangeRequest, error) {
+	pr := rr.Status.PullRequest
+	if pr == nil {
+		return providers.ChangeRequest{}, errors.New("no pull request recorded")
+	}
+	cr, err := git.GetChangeRequest(ctx, pr.Number)
 	switch {
 	case providers.IsNotFound(err):
-		return providers.ChangeRequest{}, fmt.Sprintf("the Git host has no pull request #%d of Shadewright to the "+
-			"target branch", pr.Number), nil
+		return providers.ChangeRequest{}, &recordedGoneError{cause: err, reason: fmt.Sprintf(
+			"the Git host has no pull request #%d of Shadewright to the target branch", pr.Number)}
 	case providers.IsUntrustedAnswer(err):
-		return providers.ChangeRequest{}, fmt.Sprintf("the Git host answered with another pull request than #%d",
-			pr.Number), nil
+		return providers.ChangeRequest{}, &recordedGoneError{cause: err, reason: fmt.Sprintf(
+			"the Git host answered with another pull request than #%d", pr.Number)}
 	case err != nil:
-		return providers.ChangeRequest{}, "", err
+		return providers.ChangeRequest{}, err
 	case cr.Number != pr.Number:
-		return providers.ChangeRequest{}, fmt.Sprintf("the Git host answered with another pull request than #%d",
-			pr.Number), nil
+		return providers.ChangeRequest{}, &recordedGoneError{reason: fmt.Sprintf(
+			"the Git host answered with another pull request than #%d", pr.Number)}
 	case cr.HeadBranch != freshness.BranchName(rr):
-		return providers.ChangeRequest{}, fmt.Sprintf("pull request #%d is from another branch than the request's",
-			pr.Number), nil
-	case cr.BaseBranch != string(src.TargetBranch):
-		return providers.ChangeRequest{}, fmt.Sprintf("pull request #%d targets another branch than the request's "+
-			"target branch", pr.Number), nil
+		return providers.ChangeRequest{}, &recordedGoneError{reason: fmt.Sprintf(
+			"pull request #%d is from another branch than the request's", pr.Number)}
+	case cr.BaseBranch != target:
+		return providers.ChangeRequest{}, &recordedGoneError{reason: fmt.Sprintf(
+			"pull request #%d targets another branch than the request's target branch", pr.Number)}
 	}
-	return cr, "", nil
+	return cr, nil
 }
 
 // settleReceipt runs on a Merged request before the check after the merge, and reports whether it ended the

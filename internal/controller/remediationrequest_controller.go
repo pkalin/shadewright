@@ -321,9 +321,10 @@ const (
 // recorded), so its change request cannot be closed safely.
 var errRepositoryGone = errors.New("the repository of the plan is not configured")
 
-// errChangeRequestNotOurs means a pull request is recorded, but the branch's pull request is not that number
-// with this request's marker (or there is none), so the recorded number is not closed.
-var errChangeRequestNotOurs = errors.New("the recorded change request is not the request's own")
+// errChangeRequestNotOurs means a pull request is recorded but cannot be confirmed as this request's: the Git host
+// has no pull request with that number or answered with another one, or it is from another branch or base branch,
+// or lacks this request's marker (lookUpRecorded, then the marker). The recorded number is not closed.
+var errChangeRequestNotOurs = errors.New("the recorded change request could not be confirmed as the request's own")
 
 // errHandoffInFlight means the request's intent to hand its pull request over stands (ADR-0028 section 4): the
 // replacement may hold the pull request, so nothing closes it until the intent is done or aborted.
@@ -1314,8 +1315,9 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 			"its change request, if any, was not closed"
 	case errors.Is(err, errChangeRequestNotOurs):
 		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, ReasonForeignChangeRequest
-		message = "The plan is stale and the pull request recorded for it is not the branch's pull request " +
-			"with this request's marker; it was not closed"
+		message = "The plan is stale and the pull request recorded for it could not be confirmed as this " +
+			"request's (the Git host has no such pull request or answered with another one, or it is from another " +
+			"branch or lacks this request's marker); it was not closed"
 	case errors.Is(err, errRepositoryGone):
 		// Nothing is closed: the only change request this plan could have is in a repository that cannot be
 		// reached through the settings any more, and closing a number elsewhere could close someone else's.
@@ -1434,12 +1436,25 @@ func (r *RemediationRequestReconciler) stillOwns(ctx context.Context, rr *remedi
 // for and nowhere else. A change request that is already closed, or that was never opened, is not an error; a
 // merged one is, because the change landed. It returns [errRepositoryGone] when that repository is not in the
 // settings, [errTargetBranchChanged] when its entry now names another target branch, [errChangeRequestNotOurs]
-// when a recorded pull request is not the branch's own, and [freshness.ErrPaused] when the settings read now
-// pause writes. A request with an outgoing handoff that stands or is done never closes anything: the pull
+// when a recorded pull request cannot be confirmed as this request's (lookUpRecorded, then the marker), and
+// [freshness.ErrPaused] when the settings read now pause writes. A request with an outgoing handoff that stands or is done never closes anything: the pull
 // request is, or may become, its replacement's ([errChangeRequestNotOurs] when handed over,
 // [errHandoffInFlight] while the intent stands), judged on the copy it was given and, right before the close,
 // on a fresh read (stillOwns).
 func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	return r.closeOwn(ctx, rr, false)
+}
+
+// closeOnDeleteOf is closeChangeRequest for the finalizer. A 404 on the recorded number is not taken as the end of
+// the pull request: the branch is read too (closeAfterNotFound), and the cleanup is finished only when it has no
+// open pull request.
+func (r *RemediationRequestReconciler) closeOnDeleteOf(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	return r.closeOwn(ctx, rr, true)
+}
+
+// closeOwn is closeChangeRequest; deleting is true for the finalizer (closeOnDeleteOf).
+func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	deleting bool) error {
 	if r.OpenRepository == nil {
 		return errors.New("cannot close the change request: no Git provider")
 	}
@@ -1476,29 +1491,43 @@ func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, r
 	// Without a recorded pull request it is found by the request's branch: it may exist although the status
 	// write that records it failed (design section 6). A recorded one is read by its number, so a newer pull
 	// request on the same branch never stands in for it (ADR-0030 section 1), and it is closed only when it is
-	// from the request's branch and carries this request's marker.
-	cr, err := lookUpOwn(ctx, git, rr)
+	// from the request's branch to the target branch and carries this request's marker.
 	recorded := rr.Status.PullRequest
-	switch {
-	case errors.Is(err, errRecordedNotFound):
-		return errChangeRequestNotOurs
-	case errors.Is(err, providers.ErrNotFound) && recorded == nil:
-		return nil
-	case errors.Is(err, providers.ErrNotFound):
-		return errChangeRequestNotOurs
-	case err != nil:
-		return freshness.WrapProvider("find the change request", err)
+	var cr providers.ChangeRequest
+	if recorded == nil {
+		cr, err = git.FindChangeRequest(ctx, freshness.BranchName(rr))
+		switch {
+		case providers.IsNotFound(err):
+			return nil
+		case err != nil:
+			return freshness.WrapProvider("find the change request", err)
+		}
+	} else {
+		cr, err = lookUpRecorded(ctx, git, rr, string(repo.TargetBranch))
+		switch {
+		case deleting && providers.IsNotFound(err) && errors.Is(err, errRecordedNotFound):
+			var done bool
+			cr, done, err = closeAfterNotFound(ctx, git, rr)
+			if done || err != nil {
+				return err
+			}
+		case errors.Is(err, errRecordedNotFound):
+			// The cause is kept as text only: the provider's error in it is an answer here, never a refusal.
+			return fmt.Errorf("%w: %s", errChangeRequestNotOurs, err.Error())
+		case err != nil:
+			return freshness.WrapProvider("find the change request", err)
+		}
 	}
 	ours, err := r.ownsMarker(ctx, cr.Body, rr)
 	if err != nil {
 		return err
 	}
-	if !ours || (recorded != nil && cr.Number != recorded.Number) {
+	if !ours {
 		if recorded == nil {
 			// Someone else's pull request on our branch name, or one of another plan: never ours to close.
 			return nil
 		}
-		return errChangeRequestNotOurs
+		return fmt.Errorf("%w: pull request #%d lacks this request's marker", errChangeRequestNotOurs, cr.Number)
 	}
 	if recorded == nil && cr.State == providers.ChangeRequestMerged {
 		// Ours, merged before any status recorded it (#524): nothing to close; the caller checks the merge.
@@ -1516,6 +1545,29 @@ func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, r
 		return err
 	}
 	return nil
+}
+
+// closeAfterNotFound is the finalizer's read by the branch after the Git host answered 404 for the recorded
+// number, which may be a passing fault: a 404 alone never finishes the cleanup. done is true, with no error, when
+// the branch has no open pull request (none at all, or its newest is closed or merged): nothing is left to close.
+// An open one is handled as the read by branch did before ADR-0030 section 1: it is returned to be closed when it
+// is the recorded number (the caller checks the marker), and any other is errChangeRequestNotOurs. A read that
+// fails is returned for a retry.
+func closeAfterNotFound(ctx context.Context, git providers.GitProvider, rr *remediationv1alpha1.RemediationRequest) (
+	providers.ChangeRequest, bool, error) {
+	cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
+	switch {
+	case providers.IsNotFound(err):
+		return providers.ChangeRequest{}, true, nil
+	case err != nil:
+		return providers.ChangeRequest{}, false, freshness.WrapProvider("find the change request of the branch", err)
+	case cr.State != providers.ChangeRequestOpen:
+		return providers.ChangeRequest{}, true, nil
+	case cr.Number != rr.Status.PullRequest.Number:
+		return providers.ChangeRequest{}, false, fmt.Errorf("%w: the Git host has no pull request #%d, and the "+
+			"branch's open pull request is #%d", errChangeRequestNotOurs, rr.Status.PullRequest.Number, cr.Number)
+	}
+	return cr, false, nil
 }
 
 // closeConflictError is closeChangeRequest's answer when the close of a pull request it found by the branch of a

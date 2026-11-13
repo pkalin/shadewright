@@ -167,7 +167,7 @@ A request that waits behind a holder of the same Incident whose pull request is 
 
 ### Stopped holders
 
-A stopped request that holds the lock is looked at every 10 minutes. Its pull request is found by its recorded number, or by its branch when none is recorded, and its marker (`AGENTS.md` invariant 5), and recorded when the status did not have it. The lock is released once the pull request is closed or merged, so a person who closes it frees the target without deleting the request. A newer pull request on the same branch does not keep it (#688, [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) section 1). A look-up that fails keeps the lock.
+A stopped request that holds the lock is looked at every 10 minutes. Its pull request is found by its recorded number, or by its branch when none is recorded, and its marker (`AGENTS.md` invariant 5), and recorded when the status did not have it. The lock is released once the pull request is closed or merged, so a person who closes it frees the target without deleting the request. A recorded pull request releases it only when a read by the branch finds no open pull request there either, since another one on a shared branch may carry the request's commit (#688, [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) section 1); that read only keeps the lock and changes nothing in the status. A look-up that fails keeps the lock, and so does a 404 for the recorded number.
 
 A request queued behind a stopped holder checks the limits every 10 minutes instead of every 30 seconds, and at once when the holder changes.
 

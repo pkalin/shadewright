@@ -645,7 +645,7 @@ Used by: [VerificationWindow](#verificationwindow).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `atMerge` | [IncidentCountReading](#incidentcountreading) | No | atMerge is the reading taken with the merge receipt, in the status write that sets Merged, or at the first later reconcile before the delivery whose read succeeds. Set once. |
+| `atMerge` | [IncidentCountReading](#incidentcountreading) | No | atMerge is the reading taken with the merge receipt, only in the status write that sets Merged; when that read fails it stays absent. Set once. |
 | `atApplied` | [IncidentCountReading](#incidentcountreading) | No | atApplied is the reading taken in the status write that sets status.pullRequest.appliedObservedAt. Set once, and never filled in after that write. |
 
 ### IncidentPhase

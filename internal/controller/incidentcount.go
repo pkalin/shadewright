@@ -56,10 +56,10 @@ const (
 
 // readIncidentCount reads the request's Incident (spec.incidentRef.name in the request's namespace) with the
 // executor's get, through the API reader and within the Incident read's own deadline, and returns its count.
-// It returns nil when no reading can be recorded: no name, a failed read (logged, never retried here: the
-// reading stays absent and nothing waits for it), an Incident without a UID, or a count outside what the schema
-// accepts, which would make the status write that carries it fail. A UID other than spec.incidentRef.uid is
-// recorded as read; the decision refuses it.
+// It returns nil when no reading can be recorded: no name, a failed read, an Incident without a UID, or a count
+// outside what the schema accepts, which would make the status write that carries it fail. Each of the last
+// three is logged and never retried: the reading stays absent and nothing waits for it. A UID other than
+// spec.incidentRef.uid is recorded as read; the decision refuses it.
 func (r *RemediationRequestReconciler) readIncidentCount(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, side incidentCountSide) *remediationv1alpha1.IncidentCountReading {
 	ref := rr.Spec.IncidentRef
@@ -76,7 +76,15 @@ func (r *RemediationRequestReconciler) readIncidentCount(ctx context.Context,
 			"error", err.Error())
 		return nil
 	}
-	if inc.UID == "" || inc.Status.Count < 0 || inc.Status.Count > remediationv1alpha1.MaxIncidentCount {
+	if inc.UID == "" {
+		logf.FromContext(ctx).Info("The Incident of RemediationRequest has no UID; the reading of its count stays "+
+			"absent", "remediationRequest", client.ObjectKeyFromObject(rr), "incident", ref.Name)
+		return nil
+	}
+	if inc.Status.Count < 0 || inc.Status.Count > remediationv1alpha1.MaxIncidentCount {
+		logf.FromContext(ctx).Info("The count of the Incident of RemediationRequest is outside the accepted range; "+
+			"the reading stays absent", "remediationRequest", client.ObjectKeyFromObject(rr), "incident", ref.Name,
+			"count", inc.Status.Count)
 		return nil
 	}
 	at := before.Truncate(time.Second)
@@ -91,23 +99,21 @@ func (r *RemediationRequestReconciler) readIncidentCount(ctx context.Context,
 		ReadAt: metav1.NewTime(at)}
 }
 
-// recordCountAtMerge records the reading at the merge in rr (not written yet) and reports whether it did. It
-// runs only for a request with a merge receipt, without the reading and before the applied time is recorded;
-// a reading already recorded is never replaced.
+// recordCountAtMerge records the reading at the merge in rr for the status write that sets Merged with the merge
+// receipt, the only write that takes it (a retry of that write after a conflict reads again). It runs only for a
+// request with a merge receipt, without the reading and before the applied time is recorded; a reading already
+// recorded is never replaced. A failed read leaves the reading absent for good: no later reconcile fills it in.
 func (r *RemediationRequestReconciler) recordCountAtMerge(ctx context.Context,
-	rr *remediationv1alpha1.RemediationRequest) bool {
+	rr *remediationv1alpha1.RemediationRequest) {
 	if rr.Status.MergeReceipt == nil || (rr.Status.PullRequest != nil && rr.Status.PullRequest.AppliedObservedAt != nil) {
-		return false
+		return
 	}
 	if v := rr.Status.Verification; v != nil && v.IncidentCount != nil && v.IncidentCount.AtMerge != nil {
-		return false
+		return
 	}
-	reading := r.readIncidentCount(ctx, rr, countAtMerge)
-	if reading == nil {
-		return false
+	if reading := r.readIncidentCount(ctx, rr, countAtMerge); reading != nil {
+		incidentCount(rr).AtMerge = reading
 	}
-	incidentCount(rr).AtMerge = reading
-	return true
 }
 
 // recordCountAtApplied records the reading at the applied time in rr, for the status write that sets

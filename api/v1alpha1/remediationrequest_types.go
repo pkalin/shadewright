@@ -509,8 +509,8 @@ type VerificationWindow struct {
 // section 4). A reading that could not be taken stays absent; atApplied is set only with atMerge.
 // +kubebuilder:validation:XValidation:rule="!has(self.atApplied) || has(self.atMerge)",message="atApplied requires atMerge"
 type IncidentCountReadings struct {
-	// atMerge is the reading taken with the merge receipt, in the status write that sets Merged, or at the
-	// first later reconcile before the delivery whose read succeeds. Set once.
+	// atMerge is the reading taken with the merge receipt, only in the status write that sets Merged; when
+	// that read fails it stays absent. Set once.
 	// +optional
 	AtMerge *IncidentCountReading `json:"atMerge,omitempty"`
 

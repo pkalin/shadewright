@@ -17,10 +17,17 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/incidents/aggregation"
@@ -80,5 +87,55 @@ func TestResolvedBeforeRollout(t *testing.T) {
 	noUID.Spec.IncidentRef.UID = ""
 	if _, got := resolvedBeforeRollout(noUID, stableFor); got {
 		t.Error("a request without spec.incidentRef.uid got ResolvedBeforeRollout")
+	}
+}
+
+// TestIncidentCountUnusableIsLogged: an Incident without a UID or with a count outside the accepted range gives
+// no reading, and each says so in the log with the Incident's name (and the count), so an absent reading is
+// never silent.
+func TestIncidentCountUnusableIsLogged(t *testing.T) {
+	const name = "incident-a"
+	cases := []struct {
+		name  string
+		uid   types.UID
+		count int64
+		want  []string
+	}{
+		{"no UID", "", 3, []string{"has no UID", name}},
+		{"a negative count", "uid-a", -1, []string{"outside the accepted range", name, `"count"=-1`}},
+		{"a count above the maximum", "uid-a", remediationv1alpha1.MaxIncidentCount + 1,
+			[]string{"outside the accepted range", name}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inc := &remediationv1alpha1.Incident{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name, UID: tc.uid}}
+			inc.Status.Count = tc.count
+			c := clientfake.NewClientBuilder().WithScheme(deadlineScheme(t)).WithObjects(inc).Build()
+			r := &RemediationRequestReconciler{Client: c}
+			rr := &remediationv1alpha1.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "rr"}}
+			rr.Spec.IncidentRef.Name = name
+			var mu sync.Mutex
+			var lines []string
+			ctx := logf.IntoContext(context.Background(), funcr.New(func(_, args string) {
+				mu.Lock()
+				defer mu.Unlock()
+				lines = append(lines, args)
+			}, funcr.Options{}))
+			if got := r.readIncidentCount(ctx, rr, countAtMerge); got != nil {
+				t.Fatalf("readIncidentCount = %+v, want no reading", got)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, l := range lines {
+				found := true
+				for _, w := range tc.want {
+					found = found && strings.Contains(l, w)
+				}
+				if found {
+					return
+				}
+			}
+			t.Fatalf("no log line with %q in %q", tc.want, lines)
+		})
 	}
 }

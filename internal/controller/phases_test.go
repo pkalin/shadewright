@@ -1467,13 +1467,23 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 			Expect(condition(rr, remediationv1alpha1.ConditionCleared).Status).To(Equal(metav1.ConditionTrue))
 			return rr
 		}
-		// waiting moves w's request to WaitingForDelivery at merged plus a minute, its delivery not seen yet.
-		waiting := func(w *phasesWorld) time.Time {
-			w.reader.ks = kustomization(ksStatus{applied: w.base})
-			at := w.merged.Add(time.Minute)
-			mustReconcileAt(w, at)
-			Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseWaitingForDelivery))
+		// setMerged writes Merged with the receipt through stop at merged plus ten seconds, as the merge does,
+		// and returns that time.
+		setMerged := func(w *phasesWorld) time.Time {
+			at := w.merged.Add(10 * time.Second)
+			w.now = at
+			Expect(w.r.stop(ctx, fetch(w), remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged, "merged")).
+				To(MatchError(errStopped))
 			return at
+		}
+		// waiting sets w's request Merged (setMerged), moves it to WaitingForDelivery at merged plus a minute,
+		// its delivery not seen yet, and returns the time of the write that set Merged.
+		waiting := func(w *phasesWorld) time.Time {
+			read := setMerged(w)
+			w.reader.ks = kustomization(ksStatus{applied: w.base})
+			mustReconcileAt(w, w.merged.Add(time.Minute))
+			Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseWaitingForDelivery))
+			return read
 		}
 
 		It("ends Succeeded with Cleared ResolvedBeforeRollout when the count did not move over the span", func() {
@@ -1514,11 +1524,7 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 
 		It("takes the reading at the merge in the status write that sets Merged", func() {
 			w, inc := incidentWorld(5)
-			rr := fetch(w)
-			at := w.merged.Add(10 * time.Second)
-			w.now = at
-			Expect(w.r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged, "merged")).
-				To(MatchError(errStopped))
+			at := setMerged(w)
 			m := readings(w).AtMerge
 			Expect(m).NotTo(BeNil())
 			Expect(m.UID).To(Equal(string(inc.UID)))
@@ -1528,28 +1534,26 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 
 		It("writes Merged without the reading when the Incident cannot be read there", func() {
 			w, _ := incidentWorld(5)
-			rr := fetch(w)
 			failIncident(w, true)
-			w.now = w.merged.Add(10 * time.Second)
-			Expect(w.r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged, "merged")).
-				To(MatchError(errStopped))
+			setMerged(w)
 			got := fetch(w)
 			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
 			Expect(readings(w)).To(BeNil())
 		})
 
-		It("takes a reading at the merge that failed at a later reconcile before the delivery", func() {
+		It("never takes the reading at the merge after the write that set Merged", func() {
 			w, _ := incidentWorld(3)
 			failIncident(w, true)
-			waiting(w)
-			Expect(readings(w)).To(BeNil(), "a failed read holds back neither the move nor the write")
+			read := setMerged(w)
 			failIncident(w, false)
-			later := w.merged.Add(2 * time.Minute)
-			mustReconcileAt(w, later)
-			m := readings(w).AtMerge
-			Expect(m).NotTo(BeNil())
-			Expect(m.ReadAt.Time).To(BeTemporally("==", later))
+			w.reader.ks = kustomization(ksStatus{applied: w.base})
+			mustReconcileAt(w, w.merged.Add(time.Minute))
 			Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseWaitingForDelivery))
+			mustReconcileAt(w, w.merged.Add(2*time.Minute))
+			Expect(readings(w)).To(BeNil(), "a reading taken after the merge write could follow the change")
+			rr := toSuccess(w, read.Add(span))
+			Expect(rr.Status.Verification.IncidentCount).To(BeNil())
+			Expect(condition(rr, remediationv1alpha1.ConditionCleared).Reason).To(Equal(ReasonNoRecurrence))
 		})
 
 		It("keeps NoRecurrence and never fills in the reading at the applied time when that read failed", func() {

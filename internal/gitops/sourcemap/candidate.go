@@ -18,6 +18,7 @@ package sourcemap
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -28,12 +29,14 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
-// CandidateInput is what [FindManifestCandidate] reads: the workload and the live Flux Kustomization its
-// labels name, both as read from the cluster and both untrusted.
+// CandidateInput is what [FindManifestCandidate] reads: the workload, the live Flux Kustomization its
+// labels name and, optionally, the GitRepository that Kustomization names, all as read from the cluster and
+// all untrusted.
 type CandidateInput struct {
-	// Target is the group, version and kind of the workload.
+	// Target is the group, version and kind of the workload. Only the kinds an action of the catalog may change
+	// are looked up.
 	Target schema.GroupVersionKind
-	// Namespace and Name are the workload's.
+	// Namespace and Name are the workload's. They identify it together with Target; no UID pins it.
 	Namespace, Name string
 	// Labels are the live workload's labels.
 	Labels map[string]string
@@ -41,6 +44,11 @@ type CandidateInput struct {
 	// spec.path, spec.sourceRef, spec.decryption, the transform fields, status.inventory and
 	// status.lastAppliedRevision are read; its conditions are not.
 	Kustomization *unstructured.Unstructured
+	// Source is the live GitRepository the Kustomization's spec.sourceRef names, when the caller has read it,
+	// or nil. Only its name, namespace and the spec fields the mapping refuses (spec.include, spec.suspend,
+	// spec.ignore, spec.recurseSubmodules, spec.sparseCheckout, a spec.ref that names more or other than a
+	// branch) are read; its URL, branch, conditions and fetched revision are not.
+	Source *unstructured.Unstructured
 }
 
 // ManifestCandidate is the file at the applied commit that holds the one plain document declaring a workload.
@@ -53,15 +61,26 @@ type ManifestCandidate struct {
 	Path string
 	// Commit is the full commit ID the file was read at: the one the Kustomization applied.
 	Commit string
-	// Transforms names the Kustomization spec fields that transform the build (for example "patches" or
-	// "postBuild"), in a fixed order; empty when it sets none. When set, the file is where the workload is
-	// declared, not what is live.
+	// Transforms names the Kustomization spec fields that transform the build and that the lookup searches
+	// through: "patches", "patchesStrategicMerge", "patchesJson6902", "images", "components" and "postBuild",
+	// in that order; empty when it sets none. When set, the file is where the workload is declared, not what is
+	// live. It never holds "namePrefix", "nameSuffix" or "targetNamespace": those change the name or namespace
+	// the declaration is found by, so the lookup stops on them with [ReasonKustomizationTransforms].
 	Transforms []string
 	// Decryption is true when the Kustomization sets spec.decryption: the file may be SOPS-encrypted, in whole
 	// or in part, so its values may be ciphertext where the live object holds plaintext. It is a field of its
 	// own, not an entry of Transforms, because decryption does not change which objects or fields the build
 	// produces, only the values, and the mapping refuses it with its own reason ([ReasonDecryption]).
 	Decryption bool
+	// SourceOptions names the GitRepository spec fields set that the mapping refuses ("spec.include",
+	// "spec.suspend", "spec.ignore", "spec.recurseSubmodules", "spec.sparseCheckout", and "spec.ref" when it
+	// names no branch or sets a field that takes precedence over it), in that order; empty when it sets none or
+	// was not given. When set, the artifact Flux applied may hold other files than the commit, so the file may
+	// not be what Flux read.
+	SourceOptions []string
+	// SourceUnchecked is true when no GitRepository was given, so its options were not checked and
+	// SourceOptions is empty for that reason alone.
+	SourceUnchecked bool
 }
 
 // CandidateResult is the outcome of [FindManifestCandidate]: a candidate, or the reason there is none.
@@ -76,21 +95,34 @@ type CandidateResult struct {
 
 // FindManifestCandidate finds the file that declares a workload at the revision its Kustomization applied,
 // for reports that ask where a workload comes from (triage, `doctor`, delivery verification). It is read-only
-// and calls git only through ReadFile and ListDir at that commit; git must be the repository the
-// Kustomization's GitRepository fetches, which the caller chooses.
+// and calls git only through ReadFile and ListDir at that commit.
 //
-// It shares the mapping's walker and declaration search, so the same files are searched with the same bounds
-// and stops, but it is not the mapping: it takes no action, compares no value, reads no branch head and checks
-// no policy, and it searches even when the Kustomization transforms or decrypts the build, marking the
-// candidate (Transforms, Decryption). It does not check the Kustomization's readiness, since the applied
-// revision stays a recorded fact while a newer one is reconciled or fails, nor the GitRepository (its
-// options, ref or readiness), which it does not read. Its result is never authorization to change anything
-// (invariant 1).
+// It checks: the workload's kind is one an action of the catalog may change; the Flux labels name a
+// Kustomization, and a HelmRelease label stops with [ReasonHelmManaged]; the Kustomization given is the one
+// the labels name; it is not suspended and does not apply to a remote cluster; its inventory lists the
+// workload; it sets none of spec.namePrefix, spec.nameSuffix and spec.targetNamespace (it stops with
+// [ReasonKustomizationTransforms], since the lookup does not invert them); its source is a GitRepository with a
+// valid reference; spec.path stays inside the repository; status.lastAppliedRevision names a full commit
+// ("<branch>@sha1:<commit>" or the digest alone). It searches through the other transform fields and through
+// spec.decryption and marks the candidate (Transforms, Decryption), and marks the options of the GitRepository
+// given (SourceOptions), or that none was given (SourceUnchecked); none of them is a refusal here.
+//
+// It does not check: the Kustomization's readiness, since the applied revision stays a recorded fact while a
+// newer one is reconciled or fails; the GitRepository's readiness or fetched revision; the repository URL and
+// branch, which it never compares: git must be the repository the Kustomization's GitRepository fetches, which
+// the caller chooses, and a wrong one gives a file Flux did not apply; any value in the file; the workload's
+// UID, since the target is identified by namespace, name and kind only. It shares the mapping's walker and
+// declaration search, so the same files are searched with the same bounds and stops, but it is not the
+// mapping: it takes no action, reads no branch head and checks no policy. Its result is never authorization to
+// change anything (invariant 1).
 //
 // A file is taken as absent only when the host read the tree at the commit and the path is not in it
 // ([providers.ErrPathNotInTree]) and no listing at that commit returned it; a plain [providers.ErrNotFound],
 // which a host also gives for a commit it does not have yet, is a transient error. This is stricter than the
-// mapping, which reads a branch head it has just resolved.
+// mapping, which reads a branch head it has just resolved. A host gives the same plain not found for a commit
+// that is gone for good (force pushed and garbage collected, a repository other than the one Flux fetches, a
+// sha256 commit the host does not serve), and the lookup cannot tell the two apart, so it never ends on one:
+// the caller must bound its retries.
 //
 // The error is non-nil only when a Git read fails, a [*TransientError] matching [ErrTransient] or a
 // [*RefusedError]; a failed read is never reported as "not found". Every other way to have no candidate is a
@@ -124,19 +156,27 @@ func FindManifestCandidate(ctx context.Context, git providers.GitProvider, in Ca
 	}
 	return CandidateResult{Candidate: &ManifestCandidate{
 		Path: decl.path, Commit: commit, Transforms: kustomizationTransformFields(ks), Decryption: kustomizationDecrypts(ks),
+		SourceOptions: sourceOptionFields(in.Source), SourceUnchecked: in.Source == nil,
 	}}, nil
 }
 
-// candidateDelivery checks the workload and its Kustomization as ADR-0012 steps 1 and 2 do for what a
-// candidate needs: valid names, the Flux labels naming this Kustomization, not suspended, a local cluster, the
-// workload in its inventory and a valid GitRepository source reference. Readiness and the GitRepository are not
-// checked; the transform fields and spec.decryption are marked in the candidate, not refused.
+// candidateDelivery checks the workload, its Kustomization and the GitRepository given as ADR-0012 steps 1 and
+// 2 do for what a candidate needs: a kind an action may change, valid names, the Flux labels naming this
+// Kustomization, not suspended, a local cluster, the workload in its inventory, no name or namespace
+// transform, a valid GitRepository source reference, and a GitRepository given, if any, that is the one it
+// names. Readiness is not checked; the other transform fields, spec.decryption and the GitRepository's options
+// are marked in the candidate, not refused.
 // It returns the identity, the Kustomization and its spec.path, or the reason there is no candidate.
 func candidateDelivery(in CandidateInput) (identity, *unstructured.Unstructured, string, *CandidateResult) {
 	id := identity{gvk: in.Target, namespace: in.Namespace, name: in.Name}
 	if in.Target.Version == "" || in.Target.Kind == "" ||
 		len(validation.IsDNS1123Label(in.Namespace)) > 0 || len(validation.IsDNS1123Subdomain(in.Name)) > 0 {
 		return id, nil, "", new(noCandidate(ReasonInvalidInput, "the workload must be a namespaced object with a valid name"))
+	}
+	// The kinds the mapping maps for an action, from the same allow-list; the kind is not quoted, since it is
+	// not validated.
+	if !actionKind(in.Target) {
+		return id, nil, "", new(noCandidate(ReasonInvalidInput, "the workload is of a kind no action of the catalog changes"))
 	}
 	if _, ok := in.Labels[LabelHelmReleaseName]; ok {
 		return id, nil, "", new(noCandidate(ReasonHelmManaged,
@@ -169,6 +209,14 @@ func candidateDelivery(in CandidateInput) (identity, *unstructured.Unstructured,
 		return id, nil, "", new(noCandidate(ReasonNotInInventory,
 			"%s, named by the labels on %s, does not list it in status.inventory", kustomizationRef(ks), id))
 	}
+	// These change the name or namespace the build gives a document, so a document is no longer found by the
+	// live name and namespace. The lookup does not invert them; the mapping stops on them with the same reason.
+	for _, f := range nameTransforms {
+		if v, ok := field(ks.Object, "spec", f); ok && !empty(v) {
+			return id, nil, "", new(noCandidate(ReasonKustomizationTransforms,
+				"%s sets spec.%s, so the manifests in Git do not carry the live name and namespace", kustomizationRef(ks), f))
+		}
+	}
 	kind, _, _ := unstructured.NestedString(ks.Object, "spec", "sourceRef", "kind")
 	srcName, _, _ := unstructured.NestedString(ks.Object, "spec", "sourceRef", "name")
 	srcNamespace, _, _ := unstructured.NestedString(ks.Object, "spec", "sourceRef", "namespace")
@@ -185,6 +233,11 @@ func candidateDelivery(in CandidateInput) (identity, *unstructured.Unstructured,
 		return id, nil, "", new(noCandidate(ReasonUnsupportedSource,
 			"spec.sourceRef of %s is not a valid object reference", kustomizationRef(ks)))
 	}
+	if in.Source != nil && (in.Source.GetName() != srcName || in.Source.GetNamespace() != srcNamespace) {
+		// The names are valid DNS names, so they can be quoted.
+		return id, nil, "", new(noCandidate(ReasonInvalidInput,
+			"the GitRepository given is not %s/%s, which %s names", srcNamespace, srcName, kustomizationRef(ks)))
+	}
 	path, found, err := unstructured.NestedString(ks.Object, "spec", "path")
 	if err != nil {
 		return id, nil, "", new(noCandidate(ReasonInvalidPath, "spec.path of %s is not a string", kustomizationRef(ks)))
@@ -200,9 +253,35 @@ func candidateDelivery(in CandidateInput) (identity, *unstructured.Unstructured,
 func kustomizationTransformFields(ks *unstructured.Unstructured) []string {
 	var set []string
 	for _, f := range kustomizationTransforms {
+		if slices.Contains(nameTransforms, f) {
+			continue
+		}
 		if v, ok := field(ks.Object, "spec", f); ok && !empty(v) {
 			set = append(set, f)
 		}
+	}
+	return set
+}
+
+// nameTransforms are the transform fields that change a document's name or namespace. The lookup stops on
+// them instead of searching through them; kustomizationTransformFields leaves them out.
+var nameTransforms = []string{"namePrefix", "nameSuffix", "targetNamespace"}
+
+// sourceOptionFields returns the GitRepository spec fields set that the mapping refuses ([CheckGitRepository]),
+// in a fixed order, or nil for a nil source. The names are the package's own constants, never text from the
+// cluster.
+func sourceOptionFields(src *unstructured.Unstructured) []string {
+	if src == nil {
+		return nil
+	}
+	var set []string
+	for _, f := range append([]string{"include"}, gitRepositoryOptions...) {
+		if v, ok := field(src.Object, "spec", f); ok && !empty(v) {
+			set = append(set, "spec."+f)
+		}
+	}
+	if _, stop := gitRefBranch(src, ""); stop != nil {
+		set = append(set, "spec.ref")
 	}
 	return set
 }

@@ -242,23 +242,33 @@ func CheckGitRepository(src *unstructured.Unstructured) (url, branch string, sto
 			return "", "", &r
 		}
 	}
-	gitRef, found, err := unstructured.NestedMap(src.Object, "spec", "ref")
-	branch, isString := gitRef["branch"].(string)
-	if err != nil || !found || !isString || branch == "" {
-		r := needsIntervention(ReasonSourceNotBranch, "%s does not track a branch in spec.ref.branch", ref)
-		return "", "", &r
+	branch, stop = gitRefBranch(src, ref)
+	if stop != nil {
+		return "", "", stop
 	}
-	for _, f := range gitRefOthers {
-		if v, ok := gitRef[f]; ok && !empty(v) {
-			r := needsIntervention(ReasonSourceNotBranch, "%s sets spec.ref.%s, which takes precedence over the branch", ref, f)
-			return "", "", &r
-		}
-	}
-	url, _, err = unstructured.NestedString(src.Object, "spec", "url")
+	url, _, err := unstructured.NestedString(src.Object, "spec", "url")
 	if err != nil {
 		url = ""
 	}
 	return url, branch, nil
+}
+
+// gitRefBranch returns the branch a GitRepository's spec.ref names, or a SourceNotBranch stop when spec.ref
+// names no branch or sets a field that takes precedence over it. ref names the GitRepository in the message.
+func gitRefBranch(src *unstructured.Unstructured, ref string) (string, *Result) {
+	gitRef, found, err := unstructured.NestedMap(src.Object, "spec", "ref")
+	branch, isString := gitRef["branch"].(string)
+	if err != nil || !found || !isString || branch == "" {
+		r := needsIntervention(ReasonSourceNotBranch, "%s does not track a branch in spec.ref.branch", ref)
+		return "", &r
+	}
+	for _, f := range gitRefOthers {
+		if v, ok := gitRef[f]; ok && !empty(v) {
+			r := needsIntervention(ReasonSourceNotBranch, "%s sets spec.ref.%s, which takes precedence over the branch", ref, f)
+			return "", &r
+		}
+	}
+	return branch, nil
 }
 
 // checkRevision requires the Kustomization to have applied the revision its GitRepository last fetched, so

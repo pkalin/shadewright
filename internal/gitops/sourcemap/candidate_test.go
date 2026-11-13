@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
@@ -99,7 +100,11 @@ func TestFindManifestCandidate(t *testing.T) {
 		path       string
 		transforms []string
 		decryption bool
-		reason     sourcemap.Reason
+		// source, when set, changes the fixture's GitRepository, which is then passed to the lookup; nil passes
+		// none, so the candidate is marked SourceUnchecked.
+		source        func(src *unstructured.Unstructured)
+		sourceOptions []string
+		reason        sourcemap.Reason
 	}{
 		{name: "plain ScaledObject", path: soFile},
 		{name: "plain Deployment", change: (*fixture).targetDeployment, path: "apps/orders/deployment.yaml"},
@@ -121,9 +126,83 @@ func TestFindManifestCandidate(t *testing.T) {
 				set(f.ks, map[string]any{"substitute": map[string]any{"x": "y"}}, "spec", "postBuild")
 				set(f.ks, []any{map[string]any{"patch": "[]"}}, "spec", "patches")
 				set(f.ks, "", "spec", "namePrefix")
+				set(f.ks, []any{map[string]any{"name": "x", "newTag": "2"}}, "spec", "images")
 			},
 			path:       soFile,
-			transforms: []string{"patches", "postBuild"},
+			transforms: []string{"patches", "images", "postBuild"},
+		},
+		{
+			// The live orders-worker would come from a document named worker; the lookup does not invert names.
+			name:   "namePrefix stops",
+			change: func(f *fixture) { set(f.ks, "orders-", "spec", "namePrefix") },
+			reason: sourcemap.ReasonKustomizationTransforms,
+		},
+		{
+			name:   "nameSuffix stops",
+			change: func(f *fixture) { set(f.ks, "-worker", "spec", "nameSuffix") },
+			reason: sourcemap.ReasonKustomizationTransforms,
+		},
+		{
+			// Without the stop, a file with no namespace is read as a near match and reported as ambiguous.
+			name:   "targetNamespace stops",
+			change: func(f *fixture) { set(f.ks, "orders", "spec", "targetNamespace") },
+			reason: sourcemap.ReasonKustomizationTransforms,
+		},
+		{
+			name: "a kind no action changes stops",
+			change: func(f *fixture) {
+				f.in.Target.APIVersion, f.in.Target.Kind = "v1", "Secret"
+				set(f.ks, []any{map[string]any{"id": "orders_orders-worker__Secret", "v": "v1"}}, "status", "inventory", "entries")
+				f.files[soFile] = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: orders-worker\n  namespace: orders\n"
+			},
+			reason: sourcemap.ReasonInvalidInput,
+		},
+		{
+			name: "a CronJob stops",
+			change: func(f *fixture) {
+				f.in.Target.APIVersion, f.in.Target.Kind = "batch/v1", "CronJob"
+				set(f.ks, []any{map[string]any{"id": "orders_orders-worker_batch_CronJob", "v": "v1"}}, "status", "inventory", "entries")
+				f.files[soFile] = "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: orders-worker\n  namespace: orders\n"
+			},
+			reason: sourcemap.ReasonInvalidInput,
+		},
+		{
+			name: "a Deployment of another version stops",
+			change: func(f *fixture) {
+				f.targetDeployment()
+				f.in.Target.APIVersion = "apps/v1beta2"
+			},
+			reason: sourcemap.ReasonInvalidInput,
+		},
+		{name: "plain GitRepository is checked", source: func(*unstructured.Unstructured) {}, path: soFile},
+		{
+			name: "GitRepository options are marked, not refused",
+			source: func(src *unstructured.Unstructured) {
+				set(src, []any{map[string]any{"repository": map[string]any{"name": "x"}}}, "spec", "include")
+				set(src, "*.md\n", "spec", "ignore")
+				set(src, true, "spec", "recurseSubmodules")
+				set(src, []any{"apps"}, "spec", "sparseCheckout")
+				set(src, "v1.0.0", "spec", "ref", "tag")
+			},
+			path:          soFile,
+			sourceOptions: []string{"spec.include", "spec.ignore", "spec.recurseSubmodules", "spec.sparseCheckout", "spec.ref"},
+		},
+		{
+			name:          "GitRepository without a branch is marked",
+			source:        func(src *unstructured.Unstructured) { unstructured.RemoveNestedField(src.Object, "spec", "ref") },
+			path:          soFile,
+			sourceOptions: []string{"spec.ref"},
+		},
+		{
+			name:          "suspended GitRepository is marked",
+			source:        func(src *unstructured.Unstructured) { set(src, true, "spec", "suspend") },
+			path:          soFile,
+			sourceOptions: []string{"spec.suspend"},
+		},
+		{
+			name:   "GitRepository the Kustomization does not name",
+			source: func(src *unstructured.Unstructured) { src.SetName("other") },
+			reason: sourcemap.ReasonInvalidInput,
 		},
 		{
 			name: "decryption is marked, not refused",
@@ -273,8 +352,13 @@ func TestFindManifestCandidate(t *testing.T) {
 			if f.ks != nil {
 				set(f.ks, rev, "status", "lastAppliedRevision")
 			}
+			in := candidateInput(t, f)
+			if tc.source != nil {
+				tc.source(f.src)
+				in.Source = f.src
+			}
 			res, err := sourcemap.FindManifestCandidate(context.Background(),
-				readsAt{git: git, commit: head, t: t}, candidateInput(t, f))
+				readsAt{git: git, commit: head, t: t}, in)
 			if err != nil {
 				t.Fatalf("error = %v", err)
 			}
@@ -292,6 +376,9 @@ func TestFindManifestCandidate(t *testing.T) {
 				c.Decryption != tc.decryption {
 				t.Errorf("candidate = %+v, want %s at %s with transforms %v and decryption %t",
 					c, tc.path, head, tc.transforms, tc.decryption)
+			}
+			if c.SourceUnchecked != (tc.source == nil) || !slices.Equal(c.SourceOptions, tc.sourceOptions) {
+				t.Errorf("candidate = %+v, want source unchecked %t and options %v", c, tc.source == nil, tc.sourceOptions)
 			}
 		})
 	}

@@ -43,7 +43,7 @@ How a scenario is switched on and where it runs is decided in [ADR-0022](../adr/
 - **Done when:**
   - `Succeeded` appears only after the right revision is applied and stability criteria hold;
   - every failure has a clear status and escalation.
-- **Built so far:** the merge receipt (#678), and `WaitingForDelivery` and `Verifying` ending `Failed` or `Inconclusive` (#681), behind the executor flag `--verify-outcomes`, off by default; the verifier writes its report (#682), and the executor reading it and the end `Succeeded` are not built yet (#683).
+- **Built so far:** the merge receipt (#678), and `WaitingForDelivery` and `Verifying` ending `Failed` or `Inconclusive` (#681), behind the executor flag `--verify-outcomes`, off by default; the verifier writes its report (#682) only for requests in `Verifying`, so none on a default install, and the executor reading it and the end `Succeeded` are not built yet (#683).
 
 **Stage 4: controlled auto-merge in the lab**
 

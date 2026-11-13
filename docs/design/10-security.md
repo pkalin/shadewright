@@ -261,7 +261,7 @@ The target: an audit trail of input references, model and tool versions, the pol
 
 ## 10.9. Verification
 
-**Planned (#92).** Metrics and health are watched after the change. A failed fix leads to escalation or a reviewed revert PR, never to further unbounded experiments. [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) sets the contract for v0.5.0: container status is the evidence for a cleared symptom, missing or stale data ends `Inconclusive` and never `Succeeded`, and a revert is a new request from the analyzer through the same policy and pull request path. The `VerificationReport` type and the checks that judge it (`internal/verification/clearing`) are built (#679); nothing writes or reads a report until the verifier (#682) and the executor's wiring (#683) are.
+**Planned (#92).** Metrics and health are watched after the change. A failed fix leads to escalation or a reviewed revert PR, never to further unbounded experiments. [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) sets the contract for v0.5.0: container status is the evidence for a cleared symptom, missing or stale data ends `Inconclusive` and never `Succeeded`, and a revert is a new request from the analyzer through the same policy and pull request path. The `VerificationReport` type and the checks that judge it (`internal/verification/clearing`) are built (#679); the verifier (#682) writes a report only for requests in `Verifying`, which they reach only with `--verify-outcomes` (off by default), and nothing reads a report until the executor's wiring (#683) is built.
 
 ## 10.10. Excluded from the MVP
 

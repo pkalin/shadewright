@@ -85,6 +85,7 @@ var troubleshootingSections = map[string][]string{
 	"BranchNotFound":                    {secRepository},
 	"ChainLinkInvalid":                  {secPhases},
 	"ChangeRequestClosed":               {secPullRequest},
+	"ChangeRequestConflict":             {secPullRequest},
 	"ChangeRequestGone":                 {secPullRequest},
 	"ChangeRequestMerged":               {secPullRequest},
 	"CheckNotAvailable":                 {secAfterMerge},

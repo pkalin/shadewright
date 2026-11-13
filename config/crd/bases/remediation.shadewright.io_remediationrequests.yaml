@@ -1087,6 +1087,36 @@ spec:
                       a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge.
                     format: date-time
                     type: string
+                  conflictSeen:
+                    description: |-
+                      conflictSeen records the first read in which the Git host reported this pull request open with a merge
+                      conflict while the plan was fresh. GitHub computes mergeability lazily and may report a stale conflict, so
+                      one read does not end the request: it ends NeedsIntervention with reason ChangeRequestConflict only on a
+                      later conflicted read, with the plan still fresh, at least two minutes after at, on the same head and target
+                      branch head. Any read that finds no conflict (an unknown answer included) removes it, and a new target
+                      branch head starts the wait again. Only the executor writes it.
+                    properties:
+                      at:
+                        description: at is when the executor saw the conflict, on
+                          its own clock.
+                        format: date-time
+                        type: string
+                      headSHA:
+                        description: headSHA is the pull request's head at that read,
+                          always the recorded head.
+                        pattern: ^[0-9a-f]{40}$
+                        type: string
+                      targetHead:
+                        description: |-
+                          targetHead is the head of the target branch the freshness check read with it. It is a record of what the
+                          first report was about; a later move of the target branch does not start the wait again.
+                        pattern: ^[0-9a-f]{40}$
+                        type: string
+                    required:
+                    - at
+                    - headSHA
+                    - targetHead
+                    type: object
                   headSHA:
                     description: headSHA is the commit Shadewright pushed. Any other
                       head stops automation.
@@ -1172,6 +1202,8 @@ spec:
                   rule: '!has(self.appliedObservedAt) || has(self.mergeCommitSHA)'
                 - message: reviewCheck names the recorded head
                   rule: '!has(self.reviewCheck) || self.reviewCheck.head == self.headSHA'
+                - message: conflictSeen names the recorded head
+                  rule: '!has(self.conflictSeen) || self.conflictSeen.headSHA == self.headSHA'
               queuedBehind:
                 description: |-
                   queuedBehind names the requests that held the lock on the target when the executor last held this one back

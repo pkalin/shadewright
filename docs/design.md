@@ -23,6 +23,7 @@ Status: draft for the MVP.
 - The Prometheus `MetricsSource` adapter, with its approved query templates, and the pod logs `LogSource` adapter, bounded and redacted. The analyzer creates both from its flags and gives them to the context builder.
 - The Microsoft Foundry `ModelProvider` adapter for OpenAI-format models (section 11.2), with bounded retries, workload identity and malformed output refused. The analysis loop uses it; the analyzer starts the loop only with `--triage-model`.
 - The missing reference check (section 4). It infers a missing Secret or ConfigMap without reading either.
+- The `VerificationReport` type and the stable window checks of ADR-0030 (`internal/verification/clearing`). Nothing creates or reads a report until the verifier (#93c) and the executor's wiring (#93b) are built.
 - The context builder (section 3.3). It makes a bounded, redacted context from them and the analyzer's reads. The analyzer creates it; the analysis loop calls it, and the analyzer starts the loop only with `--triage-model` (off by default, #76).
 
 **Built and wired into the analyzer**

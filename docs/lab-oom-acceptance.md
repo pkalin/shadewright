@@ -97,7 +97,7 @@ Expect `cluster/lab`; the Kustomization that applies `./clusters/lab` (`lab`, cr
 
 The fleet installs the agent: the Flux Kustomization `shadewright` (`clusters/lab/shadewright.yaml`) applies
 `infrastructure/shadewright-lab`, which patches the vendored install in `infrastructure/shadewright` (the
-operator's `config/default` and `config/watch`, built at the commit in its `VENDOR` file). It applies the four
+operator's `config/default` and `config/watch`, built at the commit in its `VENDOR` file). It applies the
 CRDs, the namespace `shadewright-system`, the analyzer and executor Deployments with their ServiceAccounts, RBAC and
 NetworkPolicies, and a RoleBinding that lets the analyzer watch the `demo` namespace. Both images are pinned by
 digest (also in `VENDOR`).
@@ -113,7 +113,8 @@ kubectl -n shadewright-system get deploy shadewright-executor -o jsonpath='{.spe
 Expect:
 
 - the Kustomization `shadewright` `Ready=True` (it waits for its Deployments);
-- the four CRDs (`incidents`, `remediationpolicies`, `remediationrequests`, `remediationsettings`);
+- the CRDs `incidents`, `remediationpolicies`, `remediationrequests` and `remediationsettings`, and
+  `verificationreports` when the vendored commit includes #679;
 - the Deployments `shadewright-analyzer` and `shadewright-executor` with all pods ready, and the ServiceAccounts
   `shadewright-analyzer` and `shadewright-executor`;
 - the `shadewright-executor` ServiceAccount annotated `azure.workload.identity/client-id` with the executor

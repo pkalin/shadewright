@@ -85,6 +85,7 @@ fi
 
 fail=0
 # can <sa> <expected yes|no> <kubectl auth can-i args...>
+# A subresource is named with --subresource: in "resource/x.group" can-i reads x.group as an object name.
 can() {
   local sa="$1" want="$2"
   shift 2
@@ -98,7 +99,7 @@ can() {
 
 # Executor: statuses of requests and reads of its targets; nothing on Secrets or Incidents but one get.
 can shadewright-executor yes get remediationrequests.remediation.shadewright.io -n "${NS}"
-can shadewright-executor yes patch remediationrequests/status.remediation.shadewright.io -n "${NS}"
+can shadewright-executor yes patch remediationrequests.remediation.shadewright.io --subresource=status -n "${NS}"
 can shadewright-executor yes get deployments.apps -n demo
 can shadewright-executor no create incidents.remediation.shadewright.io -n "${NS}"
 can shadewright-executor no update deployments.apps -n demo
@@ -127,9 +128,9 @@ can shadewright-verifier no list deployments.apps -n demo
 can shadewright-verifier yes list remediationrequests.remediation.shadewright.io -n "${NS}"
 can shadewright-verifier yes watch remediationrequests.remediation.shadewright.io -n "${NS}"
 can shadewright-verifier no patch remediationrequests.remediation.shadewright.io -n "${NS}"
-can shadewright-verifier no update remediationrequests/status.remediation.shadewright.io -n "${NS}"
+can shadewright-verifier no update remediationrequests.remediation.shadewright.io --subresource=status -n "${NS}"
 can shadewright-verifier yes create verificationreports.remediation.shadewright.io -n "${NS}"
-can shadewright-verifier yes update verificationreports/status.remediation.shadewright.io -n "${NS}"
+can shadewright-verifier yes update verificationreports.remediation.shadewright.io --subresource=status -n "${NS}"
 can shadewright-verifier no create incidents.remediation.shadewright.io -n "${NS}"
 can shadewright-verifier no get secrets -n "${NS}"
 can shadewright-verifier no get secrets -n demo

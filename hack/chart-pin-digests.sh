@@ -12,7 +12,8 @@ if [ "$#" -ne 4 ]; then
 fi
 chart="$1" executor="$2" analyzer="$3" verifier="$4"
 "$(dirname "$0")/chart-set-digests.sh" "${chart}/values.yaml" "${executor}" "${analyzer}" "${verifier}"
-rendered="$("${HELM:-helm}" template publish-check "${chart}" --set clusterId=publish-check)"
+# The verifier is rendered only with a namespace to watch, so the check names one.
+rendered="$("${HELM:-helm}" template publish-check "${chart}" --set clusterId=publish-check --set 'verifier.watchNamespaces={publish-check}')"
 # Each image must run its own digest (a swapped pair must not pass).
 for pair in "executor ${executor}" "analyzer ${analyzer}" "verifier ${verifier}"; do
   image="${pair%% *}" d="${pair#* }"

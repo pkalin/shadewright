@@ -28,7 +28,7 @@ stub_helm() { # executor, analyzer and verifier digest: a helm that renders thes
 
 cp -R ../dist/chart "${tmp}/chart"
 HELM="${HELM}" ./chart-pin-digests.sh "${tmp}/chart" "${ex}" "${an}" "${vf}" > /dev/null
-rendered="$("${HELM}" template t "${tmp}/chart" --set clusterId=t)"
+rendered="$("${HELM}" template t "${tmp}/chart" --set clusterId=t --set 'verifier.watchNamespaces={t}')"
 check "executor runs the given digest" "$(grep -qF "shadewright-executor@${ex}\"" <<<"${rendered}" && echo 0 || echo 1)"
 check "analyzer runs the given digest" "$(grep -qF "shadewright-analyzer@${an}\"" <<<"${rendered}" && echo 0 || echo 1)"
 check "verifier runs the given digest" "$(grep -qF "shadewright-verifier@${vf}\"" <<<"${rendered}" && echo 0 || echo 1)"

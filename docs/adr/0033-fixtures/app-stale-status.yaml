@@ -1,0 +1,102 @@
+# Argo CD v3.6.1 spike, kind cluster. skip-reconcile true, then spec.source.path was edited: spec says apps/rec, status.sync.comparedTo.source still says apps/other. This Application had two spec edits after creation and metadata.generation 14: the generation also moves with status writes (the CRD has no status subresource).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  annotations:
+    argocd.argoproj.io/skip-reconcile: 'true'
+  name: ignore-differences
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://kubernetes.default.svc
+  ignoreDifferences:
+  - jsonPointers:
+    - /data
+    kind: ConfigMap
+  project: default
+  source:
+    path: apps/rec
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: main
+  syncPolicy:
+    automated: {}
+status:
+  conditions:
+  - lastTransitionTime: '2026-11-13T18:56:43Z'
+    message: 'Failed to load target state: failed to generate manifest for source 1 of 1: rpc error: code
+      = Unknown desc = apps/other: app path does not exist'
+    type: ComparisonError
+  controllerNamespace: argocd
+  health:
+    lastTransitionTime: '2026-11-13T18:43:37Z'
+    status: Healthy
+  history:
+  - deployStartedAt: '2026-11-13T18:43:37Z'
+    deployedAt: '2026-11-13T18:43:38Z'
+    id: 0
+    initiatedBy:
+      automated: true
+    revision: 1f365bec17b6a6206ac0fa91ea81c5ad8c81c5e3
+    source:
+      path: apps/rec
+      repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+      targetRevision: main
+  operationState:
+    finishedAt: '2026-11-13T18:43:38Z'
+    message: successfully synced (all tasks run)
+    operation:
+      initiatedBy:
+        automated: true
+      retry:
+        limit: 5
+      sync:
+        revision: 1f365bec17b6a6206ac0fa91ea81c5ad8c81c5e3
+        source:
+          path: apps/rec
+          repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+          targetRevision: main
+    phase: Succeeded
+    startedAt: '2026-11-13T18:43:37Z'
+    syncResult:
+      resources:
+      - group: ''
+        hookPhase: Running
+        kind: ConfigMap
+        message: configmap/rec-top configured
+        name: rec-top
+        namespace: demo
+        status: Synced
+        syncPhase: Sync
+        version: v1
+      revision: 1f365bec17b6a6206ac0fa91ea81c5ad8c81c5e3
+      source:
+        path: apps/rec
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+  reconciledAt: '2026-11-13T18:56:43Z'
+  resourceHealthSource: appTree
+  resources:
+  - kind: ConfigMap
+    name: rec-top
+    namespace: demo
+    requiresPruning: true
+    status: Unknown
+    version: v1
+  sourceHydrator: {}
+  summary: {}
+  sync:
+    comparedTo:
+      destination:
+        namespace: demo
+        server: https://kubernetes.default.svc
+      ignoreDifferences:
+      - jsonPointers:
+        - /data
+        kind: ConfigMap
+      source:
+        path: apps/other
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+    revision: main
+    status: Unknown

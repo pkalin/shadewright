@@ -1,0 +1,42 @@
+# Argo CD v3.6.1 spike, kind cluster. spec.sourceHydrator instead of spec.source; ComparisonError and sync.revision env/hydrated (the core install here has no hydrator commit server).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hydrator
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://kubernetes.default.svc
+  project: default
+  sourceHydrator:
+    drySource:
+      path: apps/demo
+      repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+      targetRevision: main
+    syncSource:
+      path: hydrated/demo
+      targetBranch: env/hydrated
+status:
+  conditions:
+  - lastTransitionTime: '2026-11-13T18:36:07Z'
+    message: 'Failed to load target state: failed to generate manifest for source 1 of 1: rpc error: code
+      = Unknown desc = unable to resolve ''env/hydrated'' to a commit SHA: revision not found'
+    type: ComparisonError
+  controllerNamespace: argocd
+  health:
+    lastTransitionTime: '2026-11-13T18:36:07Z'
+    status: Healthy
+  reconciledAt: '2026-11-13T18:36:07Z'
+  resourceHealthSource: appTree
+  sync:
+    comparedTo:
+      destination:
+        namespace: demo
+        server: https://kubernetes.default.svc
+      source:
+        path: hydrated/demo
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: env/hydrated
+    revision: env/hydrated
+    status: Unknown

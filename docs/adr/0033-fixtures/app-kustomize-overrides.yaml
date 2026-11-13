@@ -1,0 +1,101 @@
+# Argo CD v3.6.1 spike, kind cluster. spec.source.kustomize.namePrefix set: the live object is named pre-web, not web.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kustomize-overrides
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    kustomize:
+      namePrefix: pre-
+    path: apps/demo
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: main
+  syncPolicy:
+    automated: {}
+status:
+  controllerNamespace: argocd
+  health:
+    lastTransitionTime: '2026-11-13T18:36:08Z'
+    message: Caused by apps/Deployment:demo/pre-web
+    status: Progressing
+  history:
+  - deployStartedAt: '2026-11-13T18:36:07Z'
+    deployedAt: '2026-11-13T18:36:07Z'
+    id: 0
+    initiatedBy:
+      automated: true
+    revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+    source:
+      kustomize:
+        namePrefix: pre-
+      path: apps/demo
+      repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+      targetRevision: main
+  operationState:
+    finishedAt: '2026-11-13T18:36:07Z'
+    message: successfully synced (all tasks run)
+    operation:
+      initiatedBy:
+        automated: true
+      retry:
+        limit: 5
+      sync:
+        revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+        source:
+          kustomize:
+            namePrefix: pre-
+          path: apps/demo
+          repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+          targetRevision: main
+    phase: Succeeded
+    startedAt: '2026-11-13T18:36:07Z'
+    syncResult:
+      resources:
+      - group: apps
+        hookPhase: Running
+        images:
+        - registry.k8s.io/pause:3.10
+        kind: Deployment
+        message: deployment.apps/pre-web created
+        name: pre-web
+        namespace: demo
+        status: Synced
+        syncPhase: Sync
+        version: v1
+      revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+      source:
+        kustomize:
+          namePrefix: pre-
+        path: apps/demo
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+  reconciledAt: '2026-11-13T18:36:07Z'
+  resourceHealthSource: appTree
+  resources:
+  - group: apps
+    kind: Deployment
+    name: pre-web
+    namespace: demo
+    status: Synced
+    version: v1
+  sourceHydrator: {}
+  sourceType: Kustomize
+  summary: {}
+  sync:
+    comparedTo:
+      destination:
+        namespace: demo
+        server: https://kubernetes.default.svc
+      source:
+        kustomize:
+          namePrefix: pre-
+        path: apps/demo
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+    revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+    status: Synced

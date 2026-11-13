@@ -120,6 +120,7 @@ nav = [
       { "0030 Merge receipt, verification" = "adr/0030-merge-receipt-and-verification-outcomes.md" },
       { "0031 Kustomize transformations" = "adr/0031-kustomize-transformations-in-the-source-mapping.md" },
       { "0032 Azure DevOps provider" = "adr/0032-azure-devops-as-a-second-git-provider.md" },
+      { "0033 Argo CD delivery" = "adr/0033-argo-cd-delivery-and-source-mapping.md" },
       { "Template" = "adr/template.md" },
     ] },
   ] },

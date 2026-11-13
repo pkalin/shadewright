@@ -1,0 +1,95 @@
+# Argo CD v3.6.1 spike, kind cluster. spec.ignoreDifferences hides /data of every ConfigMap from the comparison; comparedTo.ignoreDifferences repeats it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ignore-differences
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://kubernetes.default.svc
+  ignoreDifferences:
+  - jsonPointers:
+    - /data
+    kind: ConfigMap
+  project: default
+  source:
+    path: apps/rec
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: main
+  syncPolicy:
+    automated: {}
+status:
+  controllerNamespace: argocd
+  health:
+    lastTransitionTime: '2026-11-13T18:43:37Z'
+    status: Healthy
+  history:
+  - deployStartedAt: '2026-11-13T18:43:37Z'
+    deployedAt: '2026-11-13T18:43:38Z'
+    id: 0
+    initiatedBy:
+      automated: true
+    revision: 1f365bec17b6a6206ac0fa91ea81c5ad8c81c5e3
+    source:
+      path: apps/rec
+      repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+      targetRevision: main
+  operationState:
+    finishedAt: '2026-11-13T18:43:38Z'
+    message: successfully synced (all tasks run)
+    operation:
+      initiatedBy:
+        automated: true
+      retry:
+        limit: 5
+      sync:
+        revision: 1f365bec17b6a6206ac0fa91ea81c5ad8c81c5e3
+        source:
+          path: apps/rec
+          repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+          targetRevision: main
+    phase: Succeeded
+    startedAt: '2026-11-13T18:43:37Z'
+    syncResult:
+      resources:
+      - group: ''
+        hookPhase: Running
+        kind: ConfigMap
+        message: configmap/rec-top configured
+        name: rec-top
+        namespace: demo
+        status: Synced
+        syncPhase: Sync
+        version: v1
+      revision: 1f365bec17b6a6206ac0fa91ea81c5ad8c81c5e3
+      source:
+        path: apps/rec
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+  reconciledAt: '2026-11-13T18:54:33Z'
+  resourceHealthSource: appTree
+  resources:
+  - kind: ConfigMap
+    name: rec-top
+    namespace: demo
+    status: Synced
+    version: v1
+  sourceHydrator: {}
+  sourceType: Directory
+  summary: {}
+  sync:
+    comparedTo:
+      destination:
+        namespace: demo
+        server: https://kubernetes.default.svc
+      ignoreDifferences:
+      - jsonPointers:
+        - /data
+        kind: ConfigMap
+      source:
+        path: apps/rec
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: main
+    revision: 4bc16ed5d6f22f3cdf0970b3b7a3be8c1eca7493
+    status: Synced

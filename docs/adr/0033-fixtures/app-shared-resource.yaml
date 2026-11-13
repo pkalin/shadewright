@@ -1,0 +1,48 @@
+# Argo CD v3.6.1 spike, kind cluster. Two Applications claim Deployment/web: condition SharedResourceWarning. The same targetRevision release names a branch and a tag; see ADR-0033.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ambiguous
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    path: apps/demo
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: release
+status:
+  conditions:
+  - lastTransitionTime: '2026-11-13T18:45:18Z'
+    message: Deployment/web is part of applications argocd/ambiguous and demo
+    type: SharedResourceWarning
+  controllerNamespace: argocd
+  health:
+    lastTransitionTime: '2026-11-13T18:45:18Z'
+    status: Healthy
+  reconciledAt: '2026-11-13T18:56:46Z'
+  resourceHealthSource: appTree
+  resources:
+  - group: apps
+    kind: Deployment
+    name: web
+    namespace: demo
+    status: OutOfSync
+    version: v1
+  sourceType: Kustomize
+  summary:
+    images:
+    - registry.k8s.io/pause:3.10
+  sync:
+    comparedTo:
+      destination:
+        namespace: demo
+        server: https://kubernetes.default.svc
+      source:
+        path: apps/demo
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: release
+    revision: 958d54870c6de0a5897012e9ab086a70a17a1cf0
+    status: OutOfSync

@@ -7,7 +7,7 @@ title: Concepts
 The objects and parts you meet when you run Shadewright, and how they relate. This page summarises; the reasoning is in the [design](design.md), linked in each section. Fields are in the [API reference](reference/api.md).
 
 !!! note "Built and planned"
-    Only the executor's path from a `RemediationRequest` to a pull request that waits for a person is built end to end. The analyzer records Incidents; it diagnoses and proposes only when started with `--triage-model`, which is off by default and, until the evaluation gate ([#78](https://github.com/pkalin/shadewright/issues/78)) exists, meant for an evaluation run in the lab. So today a person (or a test) writes the `RemediationRequest`. Built parts are marked <span class="sw-status sw-built">built</span>, designed ones <span class="sw-status sw-planned">planned</span>. The [home page status](index.md#status) has the full list.
+    Only the executor's path from a `RemediationRequest` to a pull request that waits for a person is built end to end. The analyzer records Incidents; it diagnoses and proposes only when started with `--triage-model`, which is off by default and, until the analyzer checks the evaluation results and fails closed ([ADR-0025](adr/0025-analysis-claims-units-and-evaluation-manifest.md) decision 7), meant for an evaluation run in the lab. So today a person (or a test) writes the `RemediationRequest`. Built parts are marked <span class="sw-status sw-built">built</span>, designed ones <span class="sw-status sw-planned">planned</span>. The [home page status](index.md#status) has the full list.
 
 ## How the parts relate
 
@@ -29,17 +29,15 @@ flowchart LR
     person([A person reviews and merges])
     flux[GitOps controller]
     ev --> col --> inc
-    inc -.-> diag
-    diag -.-> rr
+    inc --> diag
+    diag --> rr
     rr --> pol
     cfg --> pol
     pol --> pr --> git
     git --> person --> flux
-    classDef planned stroke-dasharray: 5 5
-    class diag planned
 ```
 
-The dashed box is <span class="sw-status sw-planned">planned</span>: the analysis that turns an Incident into a request is not built ([design 3.3](design/3-observation-and-deduplication.md#33-analysis)). The rest is built. The full flow is in [design 2](design/2-architecture.md#2-architecture).
+All of it is built. The analysis that turns an Incident into a request runs only when the analyzer is started with `--triage-model`, so in a default install no request comes from it ([design 3.3](design/3-observation-and-deduplication.md#33-analysis)). The full flow is in [design 2](design/2-architecture.md#2-architecture).
 
 ## Incident <span class="sw-status sw-built">built</span>
 
@@ -72,10 +70,40 @@ There is no free-form command, no `exec` and no direct apply. See [design 5.1](d
 
 They are two binaries, two Deployments, two ServiceAccounts and two identities.
 
-- The **analyzer** reads the cluster and writes only Incidents, its analysis budget ConfigMap, the requests it proposes and the settings status. Model access, when it is built, belongs to it alone. It has no Git credential.
+- The **analyzer** reads the cluster and writes only Incidents, its analysis budget ConfigMap, the requests it proposes and the settings status. Model access belongs to it alone. It has no Git credential.
 - The **executor** reconciles requests, runs the policy check, and is the only component with the Git App. It cannot read Secrets and does not call a model.
 
 A model's output is therefore only ever a proposal that the analyzer writes as a request, and deterministic policy in the executor decides whether it may run. A slow model call also cannot block the executor. See [design 2.2](design/2-architecture.md#22-components) and [design 9](design/9-identity.md#9-identity).
+
+## Where the model sits in the loop
+
+Shadewright is a Kubernetes controller: it observes, decides and acts against a goal, with its state in CRDs and its limits in policy. A model takes part in one step of that loop, the diagnosis, because that step has to read text (events, logs, recent Git changes) and choose a fix that nobody wrote down in advance. Every other step is deterministic code:
+
+```mermaid
+flowchart TB
+    obs[Observe: collector, Incidents]
+    subgraph diagnose [Diagnose]
+        direction LR
+        rb[Runbook, when one matches]
+        model[Model, for the rest]
+    end
+    dec[Decide: policy in the executor]
+    act[Act: pull request, review, GitOps controller]
+    ver[Verify: deterministic checks, then observe again]
+    obs --> diagnose
+    rb -.-> dec
+    model -.-> dec
+    dec --> act
+    act -.-> ver
+    classDef planned stroke-dasharray: 5 5
+    class rb,ver planned
+```
+
+Dashed boxes are <span class="sw-status sw-planned">planned</span>: no runbook exists yet and the verifier is not built. The model path is <span class="sw-status sw-built">built</span> but off by default (`--triage-model`), and until the analyzer checks the evaluation results and fails closed, a run with a real model is a lab evaluation, not production use (see the note at the top). So the model never tries a fix, checks the result and tries again on its own. Its output is one proposal, and the loop around it stays the same as in any other controller.
+
+A known problem with a known fix belongs in a runbook, which makes no model call; the model is for incidents no runbook matched ([design 3.3](design/3-observation-and-deduplication.md#33-analysis)). No runbook ships yet, so today every analysis takes the model path.
+
+Autoscaling and reconcile loops need no model at all, and they already have controllers that own them (an HPA, KEDA, Flux). Shadewright changes their declarations in Git and never competes with them for the same fields ([design 7](design/7-existing-controllers.md#7-existing-controllers)).
 
 ## Observe-only mode <span class="sw-status sw-built">built</span>
 

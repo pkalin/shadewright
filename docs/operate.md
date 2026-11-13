@@ -10,5 +10,5 @@ What keeping Shadewright running takes: moving to a new release, stopping it, ro
 - [Emergency stop](emergency.md): pause the executor and stop the analysis, and what a pause does not undo.
 - [Identity rotation](identity-rotation.md): the GitHub App key, the installation, federated credentials and Key Vault key versions.
 - [Data handling](data-handling.md): what is stored, sent to the model, published and retained.
-- [Metrics](reference/metrics.md): what both components export.
+- [Metrics](reference/metrics.md): what the three components export.
 - [Lab runbook: the OOM scenario](lab-oom-acceptance.md): the acceptance run in the reference lab in Azure.

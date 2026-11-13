@@ -209,8 +209,22 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(verifyWatchLog).Should(Succeed())
 		})
 
+		It("should run the verifier as a separate pod and identity", func() {
+			verifyVerifierUp := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=verifier",
+					"-o", "jsonpath={.items[*].status.phase}{\" \"}{.items[*].spec.serviceAccountName}",
+					"-n", namespace,
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Running shadewright-verifier"), "verifier pod not running under its own ServiceAccount")
+			}
+			Eventually(verifyVerifierUp).Should(Succeed())
+		})
+
 		It("should give each binary its own leader election Lease", func() {
-			for _, lease := range []string{"shadewright-executor-leader-election", "shadewright-analyzer-leader-election"} {
+			for _, lease := range []string{"shadewright-executor-leader-election", "shadewright-analyzer-leader-election",
+				"shadewright-verifier-leader-election"} {
 				verifyHeld := func(g Gomega) {
 					cmd := exec.Command("kubectl", "get", "lease", lease, "-n", namespace,
 						"-o", "jsonpath={.spec.holderIdentity}")

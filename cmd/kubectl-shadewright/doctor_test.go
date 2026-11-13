@@ -158,7 +158,8 @@ func healthyObjects() []client.Object {
 		objs = append(objs, healthyCRD(name))
 	}
 	return append(objs, healthySettings(), watchingAnalyzer(testWatched), healthyDeployment("executor"),
-		healthySource(), healthyKustomization(), unrelated, workload(testWatched, "web", testFluxNS, testKs))
+		healthyDeployment("verifier"), healthySource(), healthyKustomization(), unrelated,
+		workload(testWatched, "web", testFluxNS, testKs))
 }
 
 // replace returns objs with each object of the same type, namespace and name as one of with replaced by it.
@@ -282,9 +283,9 @@ var errForbidden = apierrors.NewForbidden(schema.GroupResource{Resource: "x"}, "
 // TestDoctorAllPass runs every check on a healthy install: each passes and the diagnosis has not failed.
 func TestDoctorAllPass(t *testing.T) {
 	d := runChecks(t, healthyObjects(), nil)
-	// 4 CRDs, settings, kill switch, 2 Deployments, 1 repository, 1 GitRepository, 1 Kustomization, delivery.
-	if len(d.Checks) != 12 {
-		t.Fatalf("got %d checks, want 12: %+v", len(d.Checks), d.Checks)
+	// 4 CRDs, settings, kill switch, 3 Deployments, 1 repository, 1 GitRepository, 1 Kustomization, delivery.
+	if len(d.Checks) != 13 {
+		t.Fatalf("got %d checks, want 13: %+v", len(d.Checks), d.Checks)
 	}
 	for _, c := range d.Checks {
 		if c.Level != levelPass {
@@ -299,8 +300,12 @@ func TestDoctorAllPass(t *testing.T) {
 	}
 }
 
+// reasonUnavailable is the Available reason of a Deployment with too few replicas available.
+const reasonUnavailable = "MinimumReplicasUnavailable"
+
 // TestDoctorChecks makes each check fail, warn or be forbidden on an otherwise healthy install, and checks that
 // only that check changes level.
+
 func TestDoctorChecks(t *testing.T) {
 	notServed := healthyCRD(testCRDName)
 	notServed.Spec.Versions = []apiextensionsv1.CustomResourceDefinitionVersion{
@@ -327,7 +332,9 @@ func TestDoctorChecks(t *testing.T) {
 	unavailable := healthyDeployment("executor")
 	unavailable.Status.AvailableReplicas = 0
 	unavailable.Status.Conditions[0].Status = corev1.ConditionFalse
-	unavailable.Status.Conditions[0].Reason = "MinimumReplicasUnavailable"
+	unavailable.Status.Conditions[0].Reason = reasonUnavailable
+	unavailableVerifier := healthyDeployment("verifier")
+	unavailableVerifier.Status = *unavailable.Status.DeepCopy()
 	rollout := healthyDeployment("executor")
 	rollout.Status.ObservedGeneration = 1
 	scaledDown := healthyDeployment("executor")
@@ -434,8 +441,14 @@ func TestDoctorChecks(t *testing.T) {
 		"executor missing": {change: func(o []client.Object) []client.Object {
 			return without(o, func(x client.Object) bool { return x.GetName() == "shadewright-executor" })
 		}, check: chkExecutor, want: levelFail, detail: "no Deployment labelled control-plane=executor"},
+		"verifier not deployed": {change: func(o []client.Object) []client.Object {
+			return without(o, func(x client.Object) bool { return x.GetName() == "shadewright-verifier" })
+		}, check: "Deployment verifier", want: levelWarn, detail: "not deployed"},
+		"verifier unavailable": {change: func(o []client.Object) []client.Object {
+			return replace(o, unavailableVerifier)
+		}, check: "Deployment verifier shadewright-verifier", want: levelFail, detail: reasonUnavailable},
 		"executor unavailable": {change: func(o []client.Object) []client.Object { return replace(o, unavailable) },
-			check: chkExecutor, want: levelFail, detail: "MinimumReplicasUnavailable"},
+			check: chkExecutor, want: levelFail, detail: reasonUnavailable},
 		"executor rollout": {change: func(o []client.Object) []client.Object { return replace(o, rollout) },
 			check: chkExecutor, want: levelWarn, detail: "rollout"},
 		"executor scaled to 0": {change: func(o []client.Object) []client.Object { return replace(o, scaledDown) },
@@ -450,7 +463,7 @@ func TestDoctorChecks(t *testing.T) {
 			check: chkExecutor, want: levelWarn, detail: "only 1 of 3 replicas ready"},
 		"deployments forbidden": {funcs: forbiddenList(listKind("DeploymentList"), errForbidden),
 			check: chkExecutor, want: levelWarn, detail: msgForbidden,
-			also: map[string]string{"Deployment analyzer": levelWarn}},
+			also: map[string]string{"Deployment analyzer": levelWarn, "Deployment verifier": levelWarn}},
 
 		"repository incomplete": {change: func(o []client.Object) []client.Object { return replace(o, incomplete) },
 			check: "Repository " + testRepoName, want: levelFail,
@@ -695,7 +708,7 @@ func TestDoctorText(t *testing.T) {
 		"      Reported by the analyzer (shown only): platform none detected, generic active\n",
 		"FAIL  Flux Kustomization flux-system/apps: failing, Ready BuildFailed: badoutput\n      See " + doctorURL +
 			anchorFlux + "\n",
-		"9 passed, 2 warnings, 1 failed\n",
+		"10 passed, 2 warnings, 1 failed\n",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("text lacks %q:\n%s", want, text)

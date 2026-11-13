@@ -60,12 +60,17 @@ func TestStandbyReplicas(t *testing.T) {
 		set  []string
 		want map[string]int32 // component -> replicas
 	}{
-		{"default", nil, map[string]int32{executorComp: 1, analyzerComp: 1}},
-		{"explicit one", []string{"executor.replicas=1", "analyzer.replicas=1"},
-			map[string]int32{executorComp: 1, analyzerComp: 1}},
-		{"executor standby", []string{"executor.replicas=2"}, map[string]int32{executorComp: 2, analyzerComp: 1}},
-		{"analyzer standby", []string{"analyzer.replicas=2"}, map[string]int32{executorComp: 1, analyzerComp: 2}},
-		{"both", []string{"executor.replicas=2", "analyzer.replicas=3"}, map[string]int32{executorComp: 2, analyzerComp: 3}},
+		{"default", nil, map[string]int32{executorComp: 1, analyzerComp: 1, verifierComp: 1}},
+		{"explicit one", []string{"executor.replicas=1", "analyzer.replicas=1", "verifier.replicas=1"},
+			map[string]int32{executorComp: 1, analyzerComp: 1, verifierComp: 1}},
+		{"executor standby", []string{"executor.replicas=2"},
+			map[string]int32{executorComp: 2, analyzerComp: 1, verifierComp: 1}},
+		{"analyzer standby", []string{"analyzer.replicas=2"},
+			map[string]int32{executorComp: 1, analyzerComp: 2, verifierComp: 1}},
+		{"verifier standby", []string{"verifier.replicas=2"},
+			map[string]int32{executorComp: 1, analyzerComp: 1, verifierComp: 2}},
+		{"all", []string{"executor.replicas=2", "analyzer.replicas=3", "verifier.replicas=2"},
+			map[string]int32{executorComp: 2, analyzerComp: 3, verifierComp: 2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			deps, pdbs := chartObjects(t, tc.set...)

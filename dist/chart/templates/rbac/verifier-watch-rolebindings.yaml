@@ -1,0 +1,23 @@
+{{- /*
+One RoleBinding per watched namespace binds the read-only watch ClusterRole to the verifier. The list is the one
+--watch-namespaces gets: verifier.watchNamespaces, or analyzer.watchNamespaces while that is unset (null). An
+empty list renders no RoleBinding: the verifier reads no namespace.
+*/ -}}
+{{- range $ns := (include "shadewright.verifierWatchNamespaces" $ | fromJsonArray) }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "verifier-watch" "context" $) }}
+  namespace: {{ $ns | quote }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "verifier" "context" $) | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "shadewright.resourceName" (dict "suffix" "verifier-watch-role" "context" $) }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "shadewright.resourceName" (dict "suffix" "verifier" "context" $) }}
+  namespace: {{ $.Release.Namespace }}
+{{- end }}

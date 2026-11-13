@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Installs the Helm chart (dist/chart) with the metrics TLS trust profile on the current Kubernetes context (the Kind
-# cluster of the Chart workflow's chart-testing job, whose images were built from this checkout) and scrapes both
+# cluster of the Chart workflow's chart-testing job, whose images were built from this checkout) and scrapes all three
 # metrics Services the way Prometheus does, without the Prometheus Operator: from a Pod with a ServiceAccount token
 # that the endpoints' TokenReview and SubjectAccessReview accept (the ServiceAccount is bound to the chart's
 # metrics-reader ClusterRole), a CA file and a server name (resolved to the Service, so it is also the SNI and the
 # name the certificate is checked against). The test makes a throwaway CA and one serving certificate (its SAN is the
-# server name) with openssl, stores the certificate in the two Secrets the chart mounts, and checks that
-#   - both Pods become Ready (the mounted key is readable by the non-root user: mode 0444),
+# server name) with openssl, stores the certificate in the three Secrets the chart mounts, and checks that
+#   - all three Pods become Ready (the mounted key is readable by the non-root user: mode 0444),
 #   - the certificate each endpoint presents is the one the test issued (issuer = the test CA),
 #   - a scrape with the right CA and server name and a valid token answers 200 with metrics,
 #   - a scrape with another CA, and one with another server name, fail the TLS verification (curl exit 60),
@@ -65,12 +65,14 @@ openssl x509 -req -sha256 -in tls.csr -CA shadewright-test-ca.crt -CAkey shadewr
 
 # ---- Install with the profile on -------------------------------------------------------------------------------
 "${KUBECTL}" create namespace "${NS}" --dry-run=client -o yaml | "${KUBECTL}" apply -f -
-for c in executor analyzer; do
+for c in executor analyzer verifier; do
   "${KUBECTL}" -n "${NS}" create secret tls "${c}-metrics-tls" --cert=tls.crt --key=tls.key
 done
 "${HELM}" install "${REL}" "${CHART}" --namespace "${NS}" -f "${VALUES}" \
   --set executor.metricsTLS.secretName=executor-metrics-tls \
   --set analyzer.metricsTLS.secretName=analyzer-metrics-tls \
+  --set verifier.metricsTLS.secretName=verifier-metrics-tls \
+  --set 'verifier.watchNamespaces={default}' \
   --wait --timeout 5m
 
 # ---- The scraper: a ServiceAccount allowed to read /metrics, in a namespace the NetworkPolicy lets in ------------
@@ -173,7 +175,7 @@ scrape() {
   echo "${code} ${rc}"
 }
 
-for c in executor analyzer; do
+for c in executor analyzer verifier; do
   svc="${REL}-${c}-metrics-service"
 
   # The endpoint serves the certificate the test issued, not the one it makes for itself.

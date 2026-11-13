@@ -35,6 +35,7 @@ jobs:
           scopes: |
             api
             analyzer
+            verifier
             policy
             gitops
             platforms

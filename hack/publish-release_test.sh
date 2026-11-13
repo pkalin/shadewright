@@ -21,7 +21,7 @@ export PATH="${tmp}/bin:${PATH}"
 d="sha256:$(printf '1%.0s' {1..64})"
 fixture() {
   local tag="$1"
-  hack/release-verify-notes.sh pkalin/shadewright "${tag}" "$d" "$d" "$d" < /dev/null > "${tmp}/notes"
+  hack/release-verify-notes.sh pkalin/shadewright "${tag}" "$d" "$d" "$d" "$d" < /dev/null > "${tmp}/notes"
   jq -n --arg tag "${tag}" --rawfile body "${tmp}/notes" '
     {tagName: $tag, isDraft: true, body: $body, assets:
       [(["linux", "darwin"][] as $o | ["amd64", "arm64"][] as $a |
@@ -32,7 +32,7 @@ fixture() {
 }
 run_gate() {
   : > "${CALLS}"
-  hack/publish-release.sh pkalin/shadewright "$1" "$d" "$d" "$d" > "${tmp}/out" 2>&1
+  hack/publish-release.sh pkalin/shadewright "$1" "$d" "$d" "$d" "$d" > "${tmp}/out" 2>&1
 }
 refuse() {
   if run_gate v0.2.0; then echo "FAIL: accepted $1" >&2; exit 1; fi

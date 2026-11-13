@@ -22,7 +22,7 @@ image:
   # @section -- Images
   allowTag: false
 metrics:
-  # -- Serve the metrics endpoint of both components, with its two Services. When false there are no Services, no metrics RBAC and no metrics NetworkPolicy.
+  # -- Serve the metrics endpoint of the three components, with its three Services. When false there are no Services, no metrics RBAC and no metrics NetworkPolicy.
   # @section -- Metrics
   enabled: true
   # -- Metrics port, 1 to 65535. Passed as `--metrics-bind-address` and opened by the metrics NetworkPolicy.
@@ -68,7 +68,7 @@ networkPolicy:
   # @section -- Network policy
   enabled: true
   dns:
-    # -- How the analyzer, the executor and the `helm test` Pod may reach cluster DNS (port 53, UDP and TCP). `kubeDns` allows the `kube-dns` Pods of `kube-system` (label `k8s-app: kube-dns`, CoreDNS and kube-dns). `resolverCIDRs` allows only the addresses in `resolverCIDRs`: choose it when Pods query a resolver that is not a `kube-dns` Pod, such as NodeLocal DNSCache on a link-local address. Only `kubeDns` was tried on the lab CNI (Cilium).
+    # -- How the analyzer, the executor, the verifier and the `helm test` Pod may reach cluster DNS (port 53, UDP and TCP). `kubeDns` allows the `kube-dns` Pods of `kube-system` (label `k8s-app: kube-dns`, CoreDNS and kube-dns). `resolverCIDRs` allows only the addresses in `resolverCIDRs`: choose it when Pods query a resolver that is not a `kube-dns` Pod, such as NodeLocal DNSCache on a link-local address. Only `kubeDns` was tried on the lab CNI (Cilium).
     # @section -- Network policy
     mode: kubeDns
     # -- Resolver addresses for `mode: resolverCIDRs`, at least one IPv4 or IPv6 CIDR such as `169.254.20.10/32`, the default address of NodeLocal DNSCache (check the listen address of your node-local-dns DaemonSet; with kube-proxy in IPVS mode that is the kube-dns Service IP as well). Ignored in `kubeDns` mode.
@@ -341,6 +341,79 @@ analyzer:
   priorityClassName: ""
   # -- Image pull secrets of this component only, added to the global `imagePullSecrets`, a list of `{name: <secret>}` (at most 16).
   # @section -- Analyzer
+  imagePullSecrets: []
+
+## The verifier reads pod status and replica sets in the namespaces it watches and writes one VerificationReport
+## per request. It has no cloud identity, no model access and no Git credentials, and never writes request status
+## (ADR-0030 section 7).
+verifier:
+  # -- Number of Pods. 1 (the default) runs the one Pod. Above 1 the extra Pods are warm standbys: leader election keeps one of them active and the others idle, and when the leader's Pod fails a standby takes over after about one Lease duration (15 seconds by default). A standby costs an idle Pod and adds no throughput. Above 1 the chart also renders a PodDisruptionBudget (`minAvailable: 1`) and a preferred Pod anti-affinity by node, unless `affinity` sets `podAntiAffinity` itself.
+  # @section -- Verifier
+  replicas: 1
+  image:
+    # -- Repository of the verifier image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true.
+    # @section -- Images
+    repository: ghcr.io/pkalin/shadewright-verifier
+    # -- Digest of the verifier image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) fails to render unless `image.allowTag` is true, which runs the `appVersion` tag instead. The schema refuses a tag in this field.
+    # @default -- the release's digest in the published chart, empty in the source
+    # @section -- Images
+    digest: ""
+    # -- Image pull policy. One of `Always`, `IfNotPresent` or `Never`.
+    # @section -- Images
+    pullPolicy: IfNotPresent
+  # -- Namespaces whose pods and workloads the verifier reads (`--watch-namespaces`): `list` on `pods`, `get` on `deployments`, `replicasets` and `statefulsets`, through one read-only RoleBinding in each namespace (each must exist). `null` (the default) uses `analyzer.watchNamespaces`; a list, an empty one included, is used as it is, and an empty list watches none (never all). Names must be unique, at most 256, DNS labels (`*` is refused). The verifier is deployed only when this list (after the `null` fallback) is not empty: with none, the chart renders no verifier Deployment, ServiceAccount, Role, binding, PDB, metrics Service or metrics authentication subject, and a merged request can end only `Inconclusive`, never `Succeeded`. There is no separate `enabled` key.
+  # @default -- `null`, so `analyzer.watchNamespaces`
+  # @section -- Verifier
+  watchNamespaces: null
+  # -- Go memory limit (`GOMEMLIMIT`) of the container, such as `100MiB`. Empty (the default) sets 90 percent of `resources.limits.memory`, so it follows that limit. Set it for a limit the chart cannot read (not an integer or a whole number with a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix: the chart then refuses to render) or for another margin.
+  # @default -- 90 percent of `resources.limits.memory`
+  # @section -- Verifier
+  goMemLimit: ""
+  resources:
+    limits:
+      # -- CPU limit (optional; removing it with `null` lets the container use idle CPU).
+      # @section -- Verifier
+      cpu: 500m
+      # -- Memory limit. Required by the schema (a `null` override is refused), so the container's memory is never unbounded.
+      # @section -- Verifier
+      memory: 128Mi
+    requests:
+      # -- CPU request.
+      # @section -- Verifier
+      cpu: 10m
+      # -- Memory request.
+      # @section -- Verifier
+      memory: 64Mi
+  # -- Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--metrics-cert-path`, `--metrics-cert-name`, `--metrics-cert-key`, `--namespace` and `--watch-namespaces`.
+  # @section -- Verifier
+  extraArgs: []
+  metricsTLS:
+    # -- Name of an existing Secret of type `kubernetes.io/tls` (keys `tls.crt` and `tls.key`) in the release namespace that holds the serving certificate of the metrics endpoint. Empty (the default) keeps the certificate the binary generates for itself. Set, the chart mounts the Secret read-only and passes `--metrics-cert-path`; the key must be in the Secret, never in `values`. Needs `metrics.enabled` and `metrics.secure`. Issuance and renewal stay with you.
+    # @section -- Verifier
+    secretName: ""
+  # -- Further Pod labels. The chart refuses `control-plane`, `app.kubernetes.io/*`, `helm.sh/*` and `azure.workload.identity/*`: it sets them itself, and the verifier has no cloud identity.
+  # @section -- Verifier
+  podLabels: {}
+  # -- Further Pod annotations.
+  # @section -- Verifier
+  podAnnotations: {}
+  # -- Node selector of the Pod, at most 32 labels.
+  # @section -- Verifier
+  nodeSelector: {}
+  # -- Tolerations of the Pod, at most 32 Kubernetes toleration objects.
+  # @section -- Verifier
+  tolerations: []
+  # -- Affinity of the Pod, a Kubernetes affinity object (`nodeAffinity`, `podAffinity`, `podAntiAffinity`).
+  # @section -- Verifier
+  affinity: {}
+  # -- Topology spread constraints of the Pod, at most 8 Kubernetes `topologySpreadConstraints` objects.
+  # @section -- Verifier
+  topologySpreadConstraints: []
+  # -- Priority class of the Pod. Empty uses the cluster default.
+  # @section -- Verifier
+  priorityClassName: ""
+  # -- Image pull secrets of this component only, added to the global `imagePullSecrets`, a list of `{name: <secret>}` (at most 16).
+  # @section -- Verifier
   imagePullSecrets: []
 
 ## The helm test hook (templates/tests): a Pod that checks that the metrics Service of each component answers.

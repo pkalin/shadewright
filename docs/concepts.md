@@ -66,12 +66,13 @@ The closed list of changes Shadewright can make. Each action is an enum value wi
 
 There is no free-form command, no `exec` and no direct apply. See [design 5.1](design/5-api.md#51-remediationrequest) and [ADR-0003](adr/0003-gitops-only-typed-remediation.md).
 
-## The analyzer and the executor, and why they are separate
+## The analyzer, the executor and the verifier, and why they are separate
 
-They are two binaries, two Deployments, two ServiceAccounts and two identities.
+They are three binaries, three Deployments, three ServiceAccounts and three identities.
 
 - The **analyzer** reads the cluster and writes only Incidents, its analysis budget ConfigMap, the requests it proposes and the settings status. Model access belongs to it alone. It has no Git credential.
 - The **executor** reconciles requests, runs the policy check, and is the only component with the Git App. It cannot read Secrets and does not call a model.
+- The **verifier** (`shadewright-verifier`) samples the pods of a rollout after a merge and writes a `VerificationReport` per request. It has no model access, no Git App and no Secrets, and it never writes request status: its report is evidence that the executor reads, not a verdict. Reading the report is planned (#683).
 
 A model's output is therefore only ever a proposal that the analyzer writes as a request, and deterministic policy in the executor decides whether it may run. A slow model call also cannot block the executor. See [design 2.2](design/2-architecture.md#22-components) and [design 9](design/9-identity.md#9-identity).
 

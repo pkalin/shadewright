@@ -5,7 +5,8 @@
 # appVersion tag. It checks what the default install may do. The analyzer is Ready, watches no namespace,
 # holds no RoleBinding outside the operator namespace and cannot list Pods or events anywhere (it still lists
 # Nodes and reads discovery and the settings cluster-wide, and writes only in the operator namespace plus the
-# settings status). Neither ServiceAccount has an Azure workload identity, so the executor cannot reach Key
+# settings status). The verifier follows the analyzer: with no watched namespace it is not deployed at all (no
+# Deployment, ServiceAccount, role or binding). No ServiceAccount has an Azure workload identity, so the executor cannot reach Key
 # Vault to sign for the GitHub App. The cluster ID is the UID of kube-system. Then it runs helm test,
 # uninstalls and deletes the kept CRDs, so a later install on the same cluster (ct install) starts clean.
 # Usage:
@@ -42,6 +43,11 @@ check "cluster ID is the kube-system UID" grep -qxF -- "--cluster-id=${uid}" <<<
 check "the analyzer watches no namespace" grep -qxF -- "--watch-namespaces=" <<<"${args}"
 logs="$("${KUBECTL}" -n "${NS}" logs deployment/shadewright-analyzer)"
 check "the analyzer logs that it watches no namespaces" grep -q "Watching no namespaces" <<<"${logs}"
+verifier="$("${KUBECTL}" get deployments,serviceaccounts,roles,rolebindings,clusterroles,clusterrolebindings,leases \
+  --all-namespaces -l "app.kubernetes.io/instance=${REL},app.kubernetes.io/component=verifier" -o name)"
+check "the verifier is not deployed without a watched namespace" test -z "${verifier}"
+subjects="$("${KUBECTL}" get clusterrolebinding "${REL}-metrics-auth-rolebinding" -o jsonpath='{.subjects[*].name}' || true)"
+check "the metrics-auth binding does not name the verifier" test -z "$(grep -o shadewright-verifier <<<"${subjects}" || true)"
 bindings="$("${KUBECTL}" get rolebindings --all-namespaces -l "app.kubernetes.io/instance=${REL}" \
   -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' | sort -u)"
 check "no RoleBinding outside ${NS}" test -z "$(grep -vxF "${NS}" <<<"${bindings}" || true)"

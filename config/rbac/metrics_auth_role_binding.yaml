@@ -13,3 +13,6 @@ subjects:
 - kind: ServiceAccount
   name: analyzer
   namespace: system
+- kind: ServiceAccount
+  name: verifier
+  namespace: system

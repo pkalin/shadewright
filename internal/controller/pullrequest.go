@@ -669,7 +669,7 @@ func (r *RemediationRequestReconciler) checkPlanned(ctx context.Context, git pro
 func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest, ref *renderRefusal) error {
 	before := rr.Status.DeepCopy()
-	rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}
+	recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA})
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPROpened,
 		Status:             metav1.ConditionTrue,
@@ -830,7 +830,7 @@ func (r *RemediationRequestReconciler) endMerged(ctx context.Context, git provid
 	if err != nil {
 		return err
 	}
-	rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}
+	recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA})
 	if ref != nil {
 		return r.mergedForeign(ctx, rr, ref)
 	}
@@ -926,7 +926,7 @@ func (r *RemediationRequestReconciler) mergedForeign(ctx context.Context, rr *re
 func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest) error {
 	r.setPhase(rr, remediationv1alpha1.PhasePRCreated)
-	rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}
+	recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA})
 	rr.Status.Deadline = nil
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPROpened,
@@ -941,6 +941,14 @@ func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr
 	logf.FromContext(ctx).Info("Opened pull request for RemediationRequest", "remediationRequest",
 		client.ObjectKeyFromObject(rr), "pullRequest", cr.Number)
 	return nil
+}
+
+// recordNumber records pr as the request's pull request, in the status write the caller makes, and removes
+// status.goneSeen in the same write (#688): a pull request of this request was just found, so an older look that
+// saw a number missing confirms nothing any more, and a later 404 waits again.
+func recordNumber(rr *remediationv1alpha1.RemediationRequest, pr remediationv1alpha1.PullRequestStatus) {
+	rr.Status.PullRequest = &pr
+	rr.Status.GoneSeen = nil
 }
 
 // markClosed rewrites PullRequestOpened of a request whose recorded pull request is closed without a merge (or,
@@ -1425,9 +1433,23 @@ func (r *RemediationRequestReconciler) expire(ctx context.Context, rr *remediati
 	}
 	// The lock is not released here, even when the cleanup closed every pull request of the branch with this
 	// request's marker: one without the marker may be open on the branch and still deliver the change. The read
-	// of the branch after the stop (checkHeld, through openHolding) releases it.
-	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
-		ReasonPullRequestDeadline, "The pull request was not opened before the deadline"))
+	// of the branch after the stop (checkHeld, through openHolding) releases it. A repository that left the
+	// settings allows no such read: condition PullRequestUnreadable says so in the same status write, and the
+	// lock is kept until it is configured again or the request is deleted.
+	var gone, was *metav1.Condition
+	if errors.Is(err, errRepositoryGone) {
+		gone = repositoryGoneRead(rr)
+		if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable); c != nil {
+			was = c.DeepCopy()
+		}
+		putUnreadable(&rr.Status.Conditions, gone)
+	}
+	err = r.stop(ctx, rr, remediationv1alpha1.PhaseExpired, ReasonPullRequestDeadline,
+		"The pull request was not opened before the deadline")
+	if gone != nil && errors.Is(err, errStopped) {
+		r.unreadableEvent(rr, was, gone)
+	}
+	return reconcile.Result{}, r.ignoreStopped(err)
 }
 
 // retry maps a step error to a requeue: paused writes wait, a host that asked for a delay gets it, the rest

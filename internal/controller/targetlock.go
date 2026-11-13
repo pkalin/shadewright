@@ -169,10 +169,12 @@ func release(rr *remediationv1alpha1.RemediationRequest) {
 //     section 4, ADR-0030 section 1). When one does, the lock is kept and condition TargetHeld names it.
 //   - unknown (a read that failed, conflicting reads such as the recorded number read closed while the branch
 //     lists it open, or an answer about another pull request), or a repository that cannot be opened: the lock
-//     is kept and nothing is written.
+//     is kept and nothing else is written. A read the host refuses sets condition PullRequestUnreadable
+//     (changeOf), and so does a repository that left the settings (reason RepositoryUnavailable).
 //
 // TargetHeld is written when it changes. Every outcome but unknown is looked at again after heldRecheckInterval
-// while the lock is kept, and so is unknown; only the caller's cancellation is returned as an error.
+// while the lock is kept, and so is unknown; only the caller's cancellation and a failed write of
+// PullRequestUnreadable are returned as errors.
 func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if !ptr.Deref(rr.Status.HoldsTarget, false) || progresses(rr) {
@@ -196,6 +198,13 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		return reconcile.Result{}, err
 	}
 	rule := lockRule[v.state]
+	if errors.Is(err, errRepositoryGone) {
+		// No read can be made: the lock is kept, and condition PullRequestUnreadable says why (once), until the
+		// repository can be opened again (changeOf removes it then) or the request is deleted.
+		if werr := r.setUnreadable(ctx, rr, repositoryGoneRead(rr)); werr != nil {
+			return reconcile.Result{}, werr
+		}
+	}
 	if err != nil || v.state == changeUnknown {
 		if err == nil {
 			err = v.err
@@ -337,7 +346,7 @@ func (r *RemediationRequestReconciler) openHolding(ctx context.Context, rr *reme
 func recordFound(rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) {
 	if rr.Status.PullRequest == nil && shaPattern.MatchString(cr.HeadSHA) && cr.Number > 0 &&
 		strings.HasPrefix(cr.URL, "https://") && len(cr.URL) <= 2048 {
-		rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}
+		recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA})
 	}
 	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPROpened); c != nil &&
 		closedReasons[c.Reason] {

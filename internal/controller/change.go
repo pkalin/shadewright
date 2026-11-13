@@ -23,6 +23,9 @@ import (
 	"slices"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -39,9 +42,10 @@ import (
 //     retried with backoff and ends nothing, releases nothing and removes no finalizer.
 //   - changeOpen, changeMerged, changeClosed: the pull request was read in that state.
 //   - changeGone: the pull request is confirmed not to be this request's: a 404 that the listing of every pull
-//     request of the branch confirms, on two looks at least confirmWait apart (status.goneSeen), an answer about the recorded number itself that is from another branch or to
-//     another base branch, a recorded one without this request's marker when the caller asked for it, or, with no
-//     number to read, a branch that has no pull request with this request's marker.
+//     request of the branch confirms, on two looks at least confirmWait apart (status.goneSeen), an answer about
+//     the recorded number itself that is from another branch or to another base branch, a recorded one without
+//     this request's marker when the caller asked for it, or, with no number to read, a branch that has no pull
+//     request with this request's marker.
 type changeState int
 
 const (
@@ -155,21 +159,45 @@ func unknownChange(err error) changeVerdict {
 // (ListChangeRequests), since the newest may hide an older open or merged one, and sorts them by this request's
 // marker (own, foreign). The verdict's pr is the first own one that is open, else merged, else closed; each
 // caller reads own and open for what it needs. No own one is gone. A listing that fails, a 404 included, is
-// unknown, never an empty branch.
+// unknown, never an empty branch. A listing that finds a pull request with this request's marker removes
+// status.goneSeen, whatever number it names.
+//
+// Every verdict also keeps condition PullRequestUnreadable in line with the read (noteRead): set while the host
+// refuses it, removed by the next read that works.
 func (r *RemediationRequestReconciler) changeOf(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, q changeQuery) changeVerdict {
+	v, n := r.readChange(ctx, git, rr, q)
+	return r.noteRead(ctx, rr, n, v)
+}
+
+// readChange is changeOf without the condition; it also returns the number it read (0 for the listing).
+func (r *RemediationRequestReconciler) readChange(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, q changeQuery) (changeVerdict, int64) {
 	src := rr.Status.Source
 	if src == nil {
-		return unknownChange(errors.New("no source recorded"))
+		return unknownChange(errors.New("no source recorded")), 0
 	}
 	n := q.number
 	if n == 0 && rr.Status.PullRequest != nil {
 		n = rr.Status.PullRequest.Number
 	}
 	if n == 0 {
-		return r.changeOnBranch(ctx, git, rr)
+		v := r.changeOnBranch(ctx, git, rr)
+		if len(v.own) > 0 && rr.Status.GoneSeen != nil {
+			// A pull request of this request was found on its branch: an older mark confirms nothing any more.
+			if err := r.writeGoneSeen(ctx, rr, nil); err != nil {
+				return unknownChange(err), 0
+			}
+		}
+		return v, 0
 	}
-	v := r.confirmGone(ctx, rr, n, r.changeByNumber(ctx, git, rr, n, string(src.TargetBranch)))
+	return r.readByNumber(ctx, git, rr, q, n), n
+}
+
+// readByNumber is readChange for a number.
+func (r *RemediationRequestReconciler) readByNumber(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, q changeQuery, n int64) changeVerdict {
+	v := r.confirmGone(ctx, rr, n, r.changeByNumber(ctx, git, rr, n, string(rr.Status.Source.TargetBranch)))
 	if v.state == changeUnknown {
 		return v
 	}
@@ -244,9 +272,10 @@ func (r *RemediationRequestReconciler) changeByNumber(ctx context.Context, git p
 // the executor's clock and the number, and answers unknown (errGoneUnconfirmed, with the time left as the delay
 // to ask for); a later look that finds it missing again at least confirmWait after the mark answers gone. A mark
 // for another number, or one that lies more than mergeCommitClockSlack ahead of the clock (it went back), is
-// recorded anew. Any other answer about the number removes the mark; a failed read, which answers nothing, leaves
-// it. The mark is written
-// here, the one place, with a patch of status.goneSeen alone on a copy of rr, so the caller's unsaved changes to
+// recorded anew, never confirmed. Any other answer about the number removes the mark, and so does a read that
+// finds a pull request of this request (open, merged or closed, from its branch to its target branch) by any
+// number; a failed read, which answers nothing, leaves it. The mark is written here, the one place besides the
+// listing of the branch (readChange) and the status writes that record a pull request (recordNumber), with a patch of status.goneSeen alone on a copy of rr, so the caller's unsaved changes to
 // rr stay as they are; rr gets the new field and resourceVersion. A write that fails answers unknown with its
 // error, so nothing is decided on a mark that may not be there.
 func (r *RemediationRequestReconciler) confirmGone(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
@@ -255,9 +284,11 @@ func (r *RemediationRequestReconciler) confirmGone(ctx context.Context, rr *reme
 	ours := seen != nil && seen.Number == n
 	if !v.absent {
 		// A failed read is no answer and leaves the mark; an answer about the number that is not its absence (the
-		// pull request in any state, from another branch or base, or listed on the branch) removes it.
-		answered := v.state != changeUnknown || errors.Is(v.err, errUnconfirmedNotFound)
-		if ours && answered {
+		// pull request in any state, from another branch or base, or listed on the branch) removes it, and so does
+		// a pull request of this request found by another number.
+		answered := ours && (v.state != changeUnknown || errors.Is(v.err, errUnconfirmedNotFound))
+		found := seen != nil && (v.state == changeOpen || v.state == changeMerged || v.state == changeClosed)
+		if answered || found {
 			if err := r.writeGoneSeen(ctx, rr, nil); err != nil {
 				return unknownChange(err)
 			}
@@ -364,5 +395,146 @@ func (v changeVerdict) ownMerged() *providers.ChangeRequest {
 	}); i >= 0 {
 		return &v.own[i]
 	}
+	return nil
+}
+
+const (
+	// EventPullRequestUnreadable is the Warning Event recorded when condition PullRequestUnreadable is set, or
+	// its reason changes.
+	EventPullRequestUnreadable = "PullRequestUnreadable"
+	// EventPullRequestReadable is the Normal Event recorded when condition PullRequestUnreadable is removed.
+	EventPullRequestReadable = "PullRequestReadable"
+)
+
+// noteRead keeps condition PullRequestUnreadable in line with the read behind v (#688), so a person sees a read
+// the Git host refuses on every path, also while it is retried in a phase without a deadline or on a stopped
+// request that keeps its lock:
+//   - a read refused for good (refusal: 403 or 422) sets it, with the refusal's reason and a fixed message that
+//     names the read, never the host's answer;
+//   - a read that worked (any verdict but unknown, or unknown from answers the host gave: a 404 the branch does
+//     not confirm, contradicting reads, a first look that finds the number missing, an answer about another pull
+//     request) removes it;
+//   - any other failure (a server error, a timeout) leaves it, except reason RepositoryUnavailable, which the
+//     repository just opened disproves.
+//
+// Retrying is the caller's as before; noteRead changes no verdict except that a write of the condition that fails
+// answers unknown, so nothing is decided on a status that may not be there.
+func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	n int64, v changeVerdict) changeVerdict {
+	cur := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+	var want *metav1.Condition
+	switch reason, _, refused := refusal(v.err); {
+	case v.state == changeUnknown && refused:
+		want = refusedRead(rr, reason, v.err, n)
+	case v.state != changeUnknown, errors.Is(v.err, errUnconfirmedNotFound), errors.Is(v.err, errConflictingReads),
+		errors.Is(v.err, errGoneUnconfirmed), providers.IsUntrustedAnswer(v.err):
+	case cur != nil && cur.Reason == reasonRepositoryUnavailable:
+	default:
+		return v
+	}
+	if err := r.setUnreadable(ctx, rr, want); err != nil {
+		if v.state == changeUnknown {
+			return unknownChange(errors.Join(v.err, err))
+		}
+		return unknownChange(err)
+	}
+	return v
+}
+
+// refusedRead is condition PullRequestUnreadable for a read of the request's pull requests that the Git host
+// refused (reason GitForbidden or GitRejected). It names the read by its fixed operation text and the number.
+func refusedRead(rr *remediationv1alpha1.RemediationRequest, reason string, err error, n int64) *metav1.Condition {
+	what := "read the pull requests of the request"
+	if pe, ok := errors.AsType[*freshness.ProviderError](err); ok {
+		what = pe.Op
+	}
+	if n > 0 {
+		what = fmt.Sprintf("%s (pull request #%d)", what, n)
+	}
+	return &metav1.Condition{
+		Type:   remediationv1alpha1.ConditionPullRequestUnreadable,
+		Status: metav1.ConditionTrue,
+		Reason: reason,
+		Message: "The Git host refused (" + reason + ") to " + what + "; it is read again, and nothing is " +
+			"decided on it until a read works",
+		ObservedGeneration: rr.Generation,
+	}
+}
+
+// repositoryGoneRead is condition PullRequestUnreadable for a request whose plan's repository is not in
+// RemediationSettings any more, so none of its pull requests can be read.
+func repositoryGoneRead(rr *remediationv1alpha1.RemediationRequest) *metav1.Condition {
+	return &metav1.Condition{
+		Type:   remediationv1alpha1.ConditionPullRequestUnreadable,
+		Status: metav1.ConditionTrue,
+		Reason: reasonRepositoryUnavailable,
+		Message: "The repository of the plan is not in RemediationSettings any more, so the request's pull " +
+			"requests cannot be read; the target stays locked until it is configured again or the request is deleted",
+		ObservedGeneration: rr.Generation,
+	}
+}
+
+// putUnreadable sets condition PullRequestUnreadable to want in conds (nil removes it) and reports whether that
+// changed it.
+func putUnreadable(conds *[]metav1.Condition, want *metav1.Condition) bool {
+	if want == nil {
+		return meta.RemoveStatusCondition(conds, remediationv1alpha1.ConditionPullRequestUnreadable)
+	}
+	return meta.SetStatusCondition(conds, *want)
+}
+
+// unreadableEvent records the Event of a change of condition PullRequestUnreadable from was to want: a Warning when
+// it is set or its reason changes, a Normal one when it is removed, none otherwise (one per transition, never per
+// retry). Without a Recorder it records none.
+func (r *RemediationRequestReconciler) unreadableEvent(rr *remediationv1alpha1.RemediationRequest,
+	was, want *metav1.Condition) {
+	if r.Recorder == nil {
+		return
+	}
+	switch {
+	case want != nil && (was == nil || was.Reason != want.Reason):
+		r.Recorder.Event(rr, corev1.EventTypeWarning, EventPullRequestUnreadable, want.Message)
+	case want == nil && was != nil:
+		r.Recorder.Event(rr, corev1.EventTypeNormal, EventPullRequestReadable,
+			"The pull requests of the request can be read again")
+	}
+}
+
+// setUnreadable writes condition PullRequestUnreadable as want (nil removes it), alone, when it changes. The
+// patch is made against the request as the API server has it, at the resourceVersion of rr, so it never carries
+// a caller's unsaved status; a request changed since rr was read is a conflict, returned for a retry. rr gets the
+// condition and the new resourceVersion.
+func (r *RemediationRequestReconciler) setUnreadable(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	want *metav1.Condition) error {
+	was := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+	if was != nil {
+		was = was.DeepCopy()
+	}
+	if probe := slices.Clone(rr.Status.Conditions); !putUnreadable(&probe, want) {
+		return nil
+	}
+	live := &remediationv1alpha1.RemediationRequest{}
+	if err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+		return fmt.Errorf("read RemediationRequest %s/%s to record whether its pull requests can be read: %w",
+			rr.Namespace, rr.Name, err)
+	}
+	if live.UID != rr.UID || live.ResourceVersion != rr.ResourceVersion {
+		return fmt.Errorf("record whether the pull requests of RemediationRequest %s/%s can be read: %w",
+			rr.Namespace, rr.Name, apierrors.NewConflict(remediationv1alpha1.GroupVersion.WithResource(
+				"remediationrequests").GroupResource(), rr.Name, errors.New("it changed since it was read")))
+	}
+	base := live.DeepCopy()
+	putUnreadable(&live.Status.Conditions, want)
+	if err := r.Status().Patch(ctx, live, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return fmt.Errorf("record whether the pull requests of RemediationRequest %s/%s can be read: %w",
+			rr.Namespace, rr.Name, err)
+	}
+	rr.ResourceVersion = live.ResourceVersion
+	if c := meta.FindStatusCondition(live.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable); c != nil {
+		meta.SetStatusCondition(&rr.Status.Conditions, *c)
+	} else {
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+	}
+	r.unreadableEvent(rr, was, want)
 	return nil
 }

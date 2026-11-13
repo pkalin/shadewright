@@ -1934,6 +1934,118 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(got.Status.GoneSeen.At.Time).To(BeTemporally("==", clock.Truncate(time.Second)))
 	})
 
+	It("clears the mark of a missing pull request when the branch shows it and the adoption records it (#688)", func() {
+		// The open's status write is lost, so the pull request is on the branch but not recorded.
+		failStatus := true
+		r := reconciler()
+		r.Client = &statusFailer{Client: k8sClient, fail: func() bool { return failStatus && len(git.ChangeRequests()) > 0 }}
+		for range 10 {
+			_, _ = r.Reconcile(ctx, key())
+			if len(openRequests()) == 1 {
+				break
+			}
+		}
+		Expect(openRequests()).To(HaveLen(1))
+		failStatus = false
+		n := openRequests()[0].Number
+		// An old look saw that number missing (a lagging replica), long enough ago to confirm.
+		seenGone(n)
+		// The adoption alone: no read by number has looked at the pull request since.
+		got := drive(remediationv1alpha1.PhasePRCreated)
+		Expect(got.Status.PullRequest.Number).To(Equal(n))
+		Expect(got.Status.GoneSeen).To(BeNil(), "the look that found the pull request removed the mark")
+		// One lagging 404 now only records the mark anew and waits.
+		lost := reconciler()
+		lost.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return &lostChangeRequest{Git: git, n: n}, nil
+		}
+		_, _ = lost.Reconcile(ctx, key())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePRCreated), "one 404 is not enough")
+		Expect(got.Status.GoneSeen).NotTo(BeNil())
+		Expect(got.Status.GoneSeen.At.Time).To(BeTemporally("==", clock.Truncate(time.Second)))
+	})
+
+	It("removes the mark in the status write that records an adopted pull request (#688)", func() {
+		failStatus := true
+		r := reconciler()
+		r.Client = &statusFailer{Client: k8sClient, fail: func() bool { return failStatus && len(git.ChangeRequests()) > 0 }}
+		for range 10 {
+			_, _ = r.Reconcile(ctx, key())
+			if len(openRequests()) == 1 {
+				break
+			}
+		}
+		Expect(openRequests()).To(HaveLen(1))
+		failStatus = false
+		n := openRequests()[0].Number
+		seenGone(n)
+		got := fetch()
+		cr := openRequests()[0]
+		// The record alone, with the mark still in the status it was read with.
+		Expect(reconciler().recordPullRequest(ctx, got, cr)).To(Succeed())
+		got = fetch()
+		Expect(got.Status.PullRequest.Number).To(Equal(n))
+		Expect(got.Status.GoneSeen).To(BeNil(), "recording a pull request removes the mark in the same write")
+	})
+
+	It("says while the Git host refuses the read of the pull request, once, and clears it when a read works (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		recorder = record.NewFakeRecorder(20)
+		git.SetFail(func(op string) error {
+			if op == opGet {
+				return fmt.Errorf("status 403: secret body: %w", providers.ErrForbidden)
+			}
+			return nil
+		})
+		unreadable := func() *metav1.Condition {
+			return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+		}
+		for range 3 {
+			res, err := reconcileResult()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0), "the read is retried as before")
+			clock = clock.Add(time.Minute)
+		}
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "a refused read decides nothing")
+		c := unreadable()
+		Expect(c).NotTo(BeNil(), "a refused read is not silent")
+		Expect(c.Status).To(Equal(metav1.ConditionTrue))
+		Expect(c.Reason).To(Equal(ReasonGitForbidden))
+		Expect(c.Message).To(ContainSubstring(fmt.Sprintf("#%d", n)))
+		Expect(c.Message).NotTo(ContainSubstring("secret body"), "no answer of the host in the status")
+		Expect(recorder.Events).To(HaveLen(1), "one Event per transition, not per retry")
+		event := <-recorder.Events
+		Expect(event).To(HavePrefix(corev1.EventTypeWarning + " " + EventPullRequestUnreadable))
+		Expect(event).NotTo(ContainSubstring("secret body"))
+		git.SetFail(nil)
+		_, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(unreadable()).To(BeNil(), "the next read that works removes it")
+		Expect(recorder.Events).To(HaveLen(1))
+		Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeNormal + " " + EventPullRequestReadable))
+	})
+
+	It("records a mark for another number anew rather than confirm it (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		// A mark for another number, old enough to confirm that one.
+		seenGone(n + 100)
+		lost := reconciler()
+		lost.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return &lostChangeRequest{Git: git, n: n}, nil
+		}
+		res, err := lost.Reconcile(ctx, key())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "the old mark names another number")
+		Expect(got.Status.GoneSeen.Number).To(Equal(n))
+		Expect(got.Status.GoneSeen.At.Time).To(BeTemporally("==", clock.Truncate(time.Second)))
+	})
+
 	It("records the mark of a missing pull request again when its status write was lost, or the clock went back (#688)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		n := got.Status.PullRequest.Number
@@ -3145,6 +3257,53 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(fetch().Status.HoldsTarget).To(HaveValue(BeFalse()), "the read of the branch finds none open")
 			})
 
+			It("says why it keeps the lock after the deadline while its repository is not in the settings (#688)", func() {
+				recorder = record.NewFakeRecorder(20)
+				loseStatusWrites()
+				marked := openRequests()[0]
+				setRepositories := func(repos []remediationv1alpha1.GitRepository) {
+					GinkgoHelper()
+					live := &remediationv1alpha1.RemediationSettings{}
+					Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, live)).To(Succeed())
+					live.Spec.Repositories = repos
+					Expect(k8sClient.Update(ctx, live)).To(Succeed())
+				}
+				repos := settings.Spec.Repositories
+				setRepositories(nil)
+				clock = clock.Add(DefaultPullRequestTimeout + time.Minute)
+				Expect(reconcileOnce()).To(Succeed())
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
+				Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "its pull request may be open")
+				unreadable := func() *metav1.Condition {
+					return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+				}
+				c := unreadable()
+				Expect(c).NotTo(BeNil(), "the status says why the lock stays")
+				Expect(c.Status).To(Equal(metav1.ConditionTrue))
+				Expect(c.Reason).To(Equal(reasonRepositoryUnavailable))
+				since := c.LastTransitionTime
+				Expect(recorder.Events).To(HaveLen(1))
+				Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeWarning + " " + EventPullRequestUnreadable))
+				// The later looks keep the lock and the condition, with no new Event.
+				_, err := reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()))
+				Expect(unreadable().LastTransitionTime).To(Equal(since))
+				Expect(recorder.Events).To(BeEmpty())
+				// Once the repository is configured again the look works: the condition goes, and the open pull
+				// request of its own is recorded and keeps the lock.
+				setRepositories(repos)
+				_, err = reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(unreadable()).To(BeNil())
+				got = fetch()
+				Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()))
+				Expect(got.Status.PullRequest.Number).To(Equal(marked.Number))
+				Expect(recorder.Events).To(HaveLen(1))
+				Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeNormal + " " + EventPullRequestReadable))
+			})
+
 			It("keeps the lock after the deadline while an unmarked pull request is open on the branch (#688)", func() {
 				// Marked #1 is opened and its status write lost; a person closes it and opens #2, without the
 				// marker, from the same branch. The deadline's cleanup closes only marked ones: #2 may still be
@@ -3714,9 +3873,17 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		// outcome is what a caller did. closed names the pull requests it called the close on ("own", "another"; a
 		// close of a merged one is refused by the host and retried after the watch records the merge), lock and
 		// finalizer are "-" once the request is deleted, and result is how it asked to be called again: "requeue"
-		// with a delay, "error" for the error backoff, or "done".
+		// with a delay, "error" for the error backoff, or "done". cond is the reason of condition
+		// PullRequestUnreadable ("" without it), warnings the PullRequestUnreadable Warning Events recorded, seen the
+		// number status.goneSeen names (0 without it), class the class of a returned error ("" without one) and delay
+		// the delay asked for.
 		type outcome struct {
 			phase, closed, lock, finalizer, result string
+			cond                                   string
+			warnings                               int
+			seen                                   int64
+			class                                  string
+			delay                                  time.Duration
 		}
 		const (
 			held, released, kept, removed, none = "held", "released", "kept", "removed", "none"
@@ -3731,6 +3898,26 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			created  = string(remediationv1alpha1.PhasePRCreated)
 			checked  = string(remediationv1alpha1.PhasePolicyChecked)
 		)
+		// classOf names the class of an error a caller returned.
+		classOf := func(err error) string {
+			switch {
+			case errors.Is(err, errGoneUnconfirmed):
+				return "gone-wait"
+			case errors.Is(err, errUnconfirmedNotFound):
+				return "unconfirmed-404"
+			case errors.Is(err, errConflictingReads):
+				return "contradicting"
+			case providers.IsForbidden(err):
+				return "refused-403"
+			case providers.IsRetryable(err):
+				return "retryable"
+			case providers.IsConflict(err):
+				return "host-conflict"
+			case providers.IsNotFound(err):
+				return "not-found"
+			}
+			return "other: " + err.Error()
+		}
 		observe := func(own, other int64, res reconcile.Result, err error) outcome {
 			GinkgoHelper()
 			git.SetFail(nil)
@@ -3743,19 +3930,32 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				}
 				Expect(faulty.count(opClose)).To(Equal(len(closed)), "no other pull request is closed")
 			}
-			o := outcome{phase: deleted, closed: none, lock: "-", finalizer: "-", result: done}
+			o := outcome{phase: deleted, closed: none, lock: "-", finalizer: "-", result: done, delay: res.RequeueAfter}
 			if len(closed) > 0 {
 				o.closed = strings.Join(closed, ",")
 			}
 			switch {
 			case err != nil && !errors.Is(err, errStopped) && !errors.Is(err, ErrSuperseded):
-				o.result = failed
+				o.result, o.class = failed, classOf(err)
 			case res.RequeueAfter > 0:
 				o.result = requeue
+			}
+			for len(recorder.Events) > 0 {
+				if strings.HasPrefix(<-recorder.Events, corev1.EventTypeWarning+" "+EventPullRequestUnreadable+" ") {
+					o.warnings++
+				}
 			}
 			got := &remediationv1alpha1.RemediationRequest{}
 			if apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(request), got)) {
 				return o
+			}
+			if c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable); c != nil {
+				Expect(c.Status).To(Equal(metav1.ConditionTrue))
+				Expect(c.Message).NotTo(ContainSubstring("status 403"), "no answer of the host in the message")
+				o.cond = c.Reason
+			}
+			if got.Status.GoneSeen != nil {
+				o.seen = got.Status.GoneSeen.Number
 			}
 			o.phase, o.lock, o.finalizer = string(got.Status.Phase), released, removed
 			if holdsLock(got) {
@@ -3777,18 +3977,61 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			GinkgoHelper()
 			return observe(own, other, reconcile.Result{}, reconciler().cleanUpStale(ctx, fetch(), staleErr))
 		}
-		// o builds an outcome: phase, closed, lock, finalizer, result.
+		// o builds an outcome: phase, closed, lock, finalizer, result; the other fields follow from the verdict
+		// (expect).
 		o := func(phase, closed, lock, finalizer, result string) outcome {
-			return outcome{phase, closed, lock, finalizer, result}
+			return outcome{phase: phase, closed: closed, lock: lock, finalizer: finalizer, result: result}
 		}
 		na := outcome{phase: "n/a"}
-		callers := map[string]struct {
-			run  func(verdictCase) outcome
-			want map[verdictCase]outcome
-		}{
+		// delayOf is the delay a requeue asks for: a stopped holder looks again after heldRecheckInterval, a first look
+		// that finds the number missing after the confirmation wait, and the watch after its poll interval.
+		delayOf := func(vc verdictCase, base outcome) time.Duration {
+			switch {
+			case base.phase == stopped:
+				return heldRecheckInterval
+			case vc == goneFirstLook:
+				return confirmWait
+			}
+			return reconciler().pullRequestPollInterval()
+		}
+		// expect completes the outcome base of a cell with what follows from the verdict case vc: the condition and
+		// its one Warning Event for a refused read, the mark of a number seen missing (own is 0 without a recorded
+		// number; recorded is false for a caller without one), the class of a returned error, and the delay of a requeue.
+		expect := func(vc verdictCase, recorded bool, base outcome) outcome {
+			if base.phase == deleted {
+				return base
+			}
+			if vc == forbidden {
+				base.cond, base.warnings = ReasonGitForbidden, 1
+			}
+			if recorded && (vc == isGone || vc == goneOtherOpen || vc == goneFirstLook) {
+				base.seen = 9999
+			}
+			if base.result == failed {
+				base.class = map[verdictCase]string{failedRead: "retryable", forbidden: "refused-403",
+					unconfirmed404: "unconfirmed-404", contradicting: "contradicting", goneFirstLook: "gone-wait",
+					isMerged: "host-conflict"}[vc]
+				if vc == unconfirmed404 && !recorded {
+					// Without a recorded number the 404 is the listing's own, never an answer.
+					base.class = "not-found"
+				}
+			}
+			if base.result == requeue {
+				base.delay = delayOf(vc, base)
+			}
+			return base
+		}
+		// A caller is setup, which leaves the request and the Git host in a verdict case, and act, which runs the
+		// caller once and observes it.
+		type caller struct {
+			setup func(verdictCase) (own, other int64)
+			act   func(own, other int64) outcome
+			want  map[verdictCase]outcome
+		}
+		callers := map[string]caller{
 			"watch": {
-				run: func(c verdictCase) outcome {
-					own, other := recorded(c)
+				setup: recorded,
+				act: func(own, other int64) outcome {
 					res, err := reconcileResult()
 					return observe(own, other, res, err)
 				},
@@ -3806,8 +4049,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				},
 			},
 			"checkHeld": {
-				run: func(c verdictCase) outcome {
-					own, other := recordedIn(c, stopHeadMoved().Status.PullRequest.Number)
+				setup: func(c verdictCase) (int64, int64) {
+					return recordedIn(c, stopHeadMoved().Status.PullRequest.Number)
+				},
+				act: func(own, other int64) outcome {
 					res, err := reconcileResult()
 					return observe(own, other, res, err)
 				},
@@ -3825,7 +4070,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				},
 			},
 			"finalize": {
-				run: func(c verdictCase) outcome { return deleteOnce(recorded(c)) },
+				setup: recorded,
+				act:   deleteOnce,
 				want: map[verdictCase]outcome{
 					isOpen:         o(deleted, "own", "-", "-", done),
 					isMerged:       o(deleted, none, "-", "-", done),
@@ -3841,7 +4087,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			},
 			"cleanUpStale": {
 				// A recorded merge is the watch's to record, which runs first: the close is retried meanwhile.
-				run: func(c verdictCase) outcome { return cleanUp(recorded(c)) },
+				setup: recorded,
+				act:   cleanUp,
 				want: map[verdictCase]outcome{
 					isOpen:         o(stale, "own", held, kept, done),
 					isMerged:       o(awaiting, "own", held, kept, failed),
@@ -3856,8 +4103,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				},
 			},
 			"expire": {
-				run: func(c verdictCase) outcome {
-					own, other := recorded(c)
+				setup: recorded,
+				act: func(own, other int64) outcome {
 					res, err := reconciler().expire(ctx, fetch())
 					return observe(own, other, res, err)
 				},
@@ -3875,8 +4122,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				},
 			},
 			"refuseWaiting": {
-				run: func(c verdictCase) outcome {
-					own, other := recorded(c)
+				setup: recorded,
+				act: func(own, other int64) outcome {
 					err := reconciler().refuseWaiting(ctx, fetch(), &renderRefusal{reason: ReasonBranchDiverged, message: "m"})
 					return observe(own, other, reconcile.Result{}, err)
 				},
@@ -3894,8 +4141,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				},
 			},
 			"adoption": {
-				run: func(c verdictCase) outcome {
-					own, other := unrecorded(c)
+				setup: unrecorded,
+				act: func(own, other int64) outcome {
 					res, err := reconcileResult()
 					return observe(own, other, res, err)
 				},
@@ -3913,9 +4160,12 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				},
 			},
 			"expire without a recorded pull request": {
-				run: func(c verdictCase) outcome {
+				setup: func(c verdictCase) (int64, int64) {
 					own, other := unrecorded(c)
 					clock = fetch().Status.Deadline.Add(time.Minute)
+					return own, other
+				},
+				act: func(own, other int64) outcome {
 					res, err := reconcileResult()
 					return observe(own, other, res, err)
 				},
@@ -3933,7 +4183,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				},
 			},
 			"cleanUpStale without a recorded pull request": {
-				run: func(c verdictCase) outcome { return cleanUp(unrecorded(c)) },
+				setup: unrecorded,
+				act:   cleanUp,
 				want: map[verdictCase]outcome{
 					isOpen:         o(stale, "own", held, kept, done),
 					isMerged:       o(merged, none, released, kept, done),
@@ -3948,7 +4199,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				},
 			},
 			"finalize without a recorded pull request": {
-				run: func(c verdictCase) outcome { return deleteOnce(unrecorded(c)) },
+				setup: unrecorded,
+				act:   deleteOnce,
 				want: map[verdictCase]outcome{
 					isOpen:         o(deleted, "own", "-", "-", done),
 					isMerged:       o(deleted, none, "-", "-", done),
@@ -3985,11 +4237,21 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(c.want).To(HaveLen(len(cases)), caller)
 			}
 		})
-		DescribeTable("answers each verdict as its rule says", func(caller string, i int) {
-			c := callers[caller]
-			want, ok := c.want[cases[i]]
-			Expect(ok).To(BeTrue(), "no expected result for %s on %s", caller, name(cases[i]))
-			Expect(c.run(cases[i])).To(Equal(want))
+		DescribeTable("answers each verdict as its rule says", func(name string, i int) {
+			c, vc := callers[name], cases[i]
+			want, ok := c.want[vc]
+			Expect(ok).To(BeTrue(), "no expected result for %s on %s", name, vc.how)
+			recorder = record.NewFakeRecorder(50)
+			own, other := c.setup(vc)
+			// A caller without a recorded number has no cell for a first look that finds it missing.
+			recorded := c.want[goneFirstLook] != na
+			Expect(c.act(own, other)).To(Equal(expect(vc, recorded, want)))
+			if vc == goneFirstLook {
+				// The first look only waits; once the wait is over the same answer is the confirmed end, as when the
+				// number was seen missing before (isGone).
+				clock = clock.Add(confirmWait)
+				Expect(c.act(own, other)).To(Equal(expect(isGone, recorded, c.want[isGone])))
+			}
 		}, entries)
 	})
 

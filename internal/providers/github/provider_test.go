@@ -1492,7 +1492,7 @@ func TestListChangeRequestsRefused(t *testing.T) {
 	}
 }
 
-// TestListChangeRequestsContradicting checks that a pull request two pages list with a different state is an
+// TestListChangeRequestsContradicting checks that a pull request two pages list with a different state or head is an
 // error, never the first answer: the listing contradicts itself (#688).
 func TestListChangeRequestsContradicting(t *testing.T) {
 	h := newHarness(t,
@@ -1502,6 +1502,19 @@ func TestListChangeRequestsContradicting(t *testing.T) {
 	got, err := h.p.ListChangeRequests(ctx, branch, false)
 	if err == nil || got != nil || providers.IsNotFound(err) {
 		t.Fatalf("got %+v, %v; want an error", got, err)
+	}
+	assertSafe(t, err)
+
+	// The same state with another head (a push between the pages) contradicts too.
+	moved := strings.Replace(branchPull(12, stateOpen, branch, "acme/fleet", target), strings.Repeat("7", 40),
+		strings.Repeat("8", 40), 1)
+	h = newHarness(t,
+		listBranch("all", 1, 2, branchPull(14, stateOpen, branch, "acme/fleet", target),
+			branchPull(12, stateOpen, branch, "acme/fleet", target)),
+		listBranch("all", 2, 2, moved))
+	got, err = h.p.ListChangeRequests(ctx, branch, false)
+	if err == nil || got != nil || providers.IsNotFound(err) {
+		t.Fatalf("other head: got %+v, %v; want an error", got, err)
 	}
 	assertSafe(t, err)
 }

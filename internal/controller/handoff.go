@@ -659,7 +659,7 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 	if rr.Status.CommentCursor == nil && pred.Status.CommentCursor != nil {
 		rr.Status.CommentCursor = pred.Status.CommentCursor.DeepCopy()
 	}
-	rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: newHead}
+	recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: newHead})
 	rr.Status.Deadline = nil
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPROpened,

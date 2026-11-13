@@ -298,6 +298,15 @@ const (
 	// pull request is open on its branch and may still deliver its change; the message names that pull request.
 	// It is written when the executor finds that, not on every look, and removed when the lock is released.
 	ConditionTargetHeld = "TargetHeld"
+	// ConditionPullRequestUnreadable is True while the executor cannot read the request's pull requests (#688):
+	// with reason GitForbidden or GitRejected while the Git host refuses the read (403 or 422), and with reason
+	// RepositoryUnavailable while the repository of the plan is not in RemediationSettings any more. The message
+	// names the read; lastTransitionTime is when it started. Nothing is decided on such a read: it is retried,
+	// and a request that holds the lock on its target keeps it. The condition is removed by the next read that
+	// works (for RepositoryUnavailable, once the repository can be opened again). One Warning Event,
+	// PullRequestUnreadable, is recorded when it is set or its reason changes, and one Normal Event,
+	// PullRequestReadable, when it is removed.
+	ConditionPullRequestUnreadable = "PullRequestUnreadable"
 )
 
 // PullRequestStatus records the pull request that carries the plan.
@@ -675,10 +684,13 @@ type RemediationRequestStatus struct {
 	// goneSeen records the first look in which the Git host answered 404 for a pull request number of this
 	// request while the listing of every pull request of its branch had none with that number either (#688). One
 	// such look does not make the pull request gone: it is gone only on a later look, at least two minutes after
-	// at on the executor's clock, that finds the same, as for a merge conflict (pullRequest.conflictSeen). Any
-	// other answer about that number removes it (a read that fails answers nothing and leaves it), and a clock that went back more than a minute records it anew. It
-	// sits here rather than in pullRequest because the number read may not be recorded yet (the read after a
-	// close that a merge refused, before any status recorded the pull request). Only the executor writes it.
+	// at on the executor's clock, that finds the same number missing, as for a merge conflict
+	// (pullRequest.conflictSeen). Any other answer about that number, any look that finds a pull request of this
+	// request (by its number or on its branch), and any status write that records or adopts one remove it; a
+	// read that fails answers nothing and leaves it. A mark for another number than the one read, or one more
+	// than a minute ahead of the clock (it went back), is recorded anew, never confirmed. It sits here rather
+	// than in pullRequest because the number read may not be recorded yet (the read after a close that a merge
+	// refused, before any status recorded the pull request). Only the executor writes it.
 	// +optional
 	GoneSeen *GoneSeen `json:"goneSeen,omitempty"`
 

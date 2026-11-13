@@ -179,40 +179,42 @@ func mustCreate(t *testing.T, obj client.Object) {
 }
 
 // request creates a SetContainerMemoryLimit request on w's Deployment and moves its status to phase, with a
-// merge receipt and a recorded template revision unless noReceipt.
-func request(t *testing.T, w workload, phase v1alpha1.RemediationPhase, noReceipt bool) *v1alpha1.RemediationRequest {
+// merge receipt and a recorded template revision.
+func request(t *testing.T, w workload, phase v1alpha1.RemediationPhase) *v1alpha1.RemediationRequest {
 	t.Helper()
 	rr := testfixtures.MemoryLimitRequest(operatorNS, unique("rr"))
 	rr.Spec.TargetRef.Namespace = w.deploy.Namespace
 	rr.Spec.TargetRef.Name = w.deploy.Name
 	rr.Spec.TargetRef.UID = v1alpha1.UID(w.deploy.UID)
 	mustCreate(t, rr)
-	setStatus(t, rr, phase, noReceipt)
+	setStatus(t, rr, phase)
 	return rr
 }
 
-// setStatus moves a created request's status to phase, with a merge receipt and a recorded template revision
-// unless noReceipt.
-func setStatus(t *testing.T, rr *v1alpha1.RemediationRequest, phase v1alpha1.RemediationPhase, noReceipt bool) {
+// setStatus moves a created request's status to phase, with a merge receipt and a recorded template revision.
+func setStatus(t *testing.T, rr *v1alpha1.RemediationRequest, phase v1alpha1.RemediationPhase) {
 	t.Helper()
-	setStatusRollout(t, rr, phase, noReceipt, true)
+	setStatusRollout(t, rr, phase, true)
 }
 
 // setStatusRollout is setStatus, with status.rollout left unset unless withRollout.
-func setStatusRollout(t *testing.T, rr *v1alpha1.RemediationRequest, phase v1alpha1.RemediationPhase, noReceipt, withRollout bool) {
+func setStatusRollout(t *testing.T, rr *v1alpha1.RemediationRequest, phase v1alpha1.RemediationPhase, withRollout bool) {
 	t.Helper()
 	mergedAt := metav1.NewMicroTime(time.Now().Add(-10 * time.Minute).UTC().Truncate(time.Second))
 	rr.Status.Phase = phase
 	if withRollout {
 		rr.Status.Rollout = &v1alpha1.RolloutStatus{TemplateRevision: revision}
 	}
-	if !noReceipt {
-		rr.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: "https://github.com/example/fleet/pull/1",
-			HeadSHA: head, MergeCommitSHA: merge, MergedAt: &mergedAt}
-		rr.Status.MergeReceipt = &v1alpha1.MergeReceipt{
-			Repository:   v1alpha1.PlanRepository{URL: "https://github.com/example/fleet", InstallationID: 7},
-			TargetBranch: "main", PullRequest: 1, HeadSHA: head, MergeCommitSHA: merge, MergedAt: mergedAt,
-		}
+	rr.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: "https://github.com/example/fleet/pull/1",
+		HeadSHA: head, MergeCommitSHA: merge, MergedAt: &mergedAt}
+	if phase == v1alpha1.PhaseVerifying {
+		// The API requires the applied time in Verifying (a CEL rule); the executor writes it with the phase.
+		applied := metav1.NewTime(mergedAt.Add(time.Minute))
+		rr.Status.PullRequest.AppliedObservedAt = &applied
+	}
+	rr.Status.MergeReceipt = &v1alpha1.MergeReceipt{
+		Repository:   v1alpha1.PlanRepository{URL: "https://github.com/example/fleet", InstallationID: 7},
+		TargetBranch: "main", PullRequest: 1, HeadSHA: head, MergeCommitSHA: merge, MergedAt: mergedAt,
 	}
 	if err := admin.Status().Update(t.Context(), rr); err != nil {
 		t.Fatalf("writing the request status: %v", err)
@@ -314,7 +316,7 @@ func getReport(t *testing.T, rr *v1alpha1.RemediationRequest) (*v1alpha1.Verific
 // false; later reconciles write samples into the same report.
 func TestCreatesOneReportForAVerifyingRequest(t *testing.T) {
 	w := newWorkload(t, watchedNS)
-	rr := request(t, w, v1alpha1.PhaseVerifying, false)
+	rr := request(t, w, v1alpha1.PhaseVerifying)
 	clk := &clock{now: time.Now()}
 	r := newReconciler(admin, admin, clk)
 
@@ -376,20 +378,27 @@ func TestCreatesOneReportForAVerifyingRequest(t *testing.T) {
 	}
 }
 
-// TestNoReportForRequestsItDoesNotSample: a request that is not Verifying, one without a merge receipt, one on a
-// ScaledObject and one whose target is outside the watched namespaces get no report. Only the one without a
-// receipt, which the executor may still record, is looked at again.
+// TestNoReportForRequestsItDoesNotSample: a request that is not Verifying, one without a recorded template
+// revision, one on a ScaledObject and one whose target is outside the watched namespaces get no report. Only the
+// one without a template revision, which the executor may still record, is looked at again. A request in
+// Verifying without a merge receipt cannot be written: the API refuses it (a CEL rule).
 func TestNoReportForRequestsItDoesNotSample(t *testing.T) {
 	w := newWorkload(t, watchedNS)
 	outside := newWorkload(t, unwatched)
+	noRevision := testfixtures.MemoryLimitRequest(operatorNS, unique("rr"))
+	noRevision.Spec.TargetRef.Namespace = w.deploy.Namespace
+	noRevision.Spec.TargetRef.Name = w.deploy.Name
+	noRevision.Spec.TargetRef.UID = v1alpha1.UID(w.deploy.UID)
+	mustCreate(t, noRevision)
+	setStatusRollout(t, noRevision, v1alpha1.PhaseVerifying, false)
 	cases := map[string]*v1alpha1.RemediationRequest{
-		"Merged":              request(t, w, v1alpha1.PhaseMerged, false),
-		"no receipt":          request(t, w, v1alpha1.PhaseVerifying, true),
-		"unwatched namespace": request(t, outside, v1alpha1.PhaseVerifying, false),
+		"Merged":               request(t, w, v1alpha1.PhaseMerged),
+		"no template revision": noRevision,
+		"unwatched namespace":  request(t, outside, v1alpha1.PhaseVerifying),
 	}
 	so := testfixtures.RemediationRequest(operatorNS, unique("rr"))
 	mustCreate(t, so)
-	setStatus(t, so, v1alpha1.PhaseVerifying, false)
+	setStatus(t, so, v1alpha1.PhaseVerifying)
 	cases["ScaledObject"] = so
 	r := newReconciler(admin, admin, &clock{now: time.Now()})
 	for name, rr := range cases {
@@ -398,7 +407,7 @@ func TestNoReportForRequestsItDoesNotSample(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 		want := time.Duration(0)
-		if name == "no receipt" {
+		if name == "no template revision" {
 			want = clearing.PollInterval
 		}
 		if res.RequeueAfter != want {
@@ -414,7 +423,7 @@ func TestNoReportForRequestsItDoesNotSample(t *testing.T) {
 // not looked at again.
 func TestNoReportForARequestBeingDeleted(t *testing.T) {
 	w := newWorkload(t, watchedNS)
-	rr := request(t, w, v1alpha1.PhaseVerifying, false)
+	rr := request(t, w, v1alpha1.PhaseVerifying)
 	key := client.ObjectKeyFromObject(rr)
 	const hold = "test.shadewright.io/hold"
 	finalizers := func(v string) client.Patch {
@@ -449,7 +458,7 @@ func TestNoReportForARequestBeingDeleted(t *testing.T) {
 // write the verifier makes is on a VerificationReport, and the request is never written.
 func TestWritesOnlyVerificationReports(t *testing.T) {
 	w := newWorkload(t, watchedNS)
-	rr := request(t, w, v1alpha1.PhaseVerifying, false)
+	rr := request(t, w, v1alpha1.PhaseVerifying)
 	before := &v1alpha1.RemediationRequest{}
 	if err := admin.Get(t.Context(), client.ObjectKeyFromObject(rr), before); err != nil {
 		t.Fatal(err)
@@ -488,7 +497,7 @@ func TestWritesOnlyVerificationReports(t *testing.T) {
 // a Restarted reset, never as a new baseline.
 func TestRestartKeepsTheBaselines(t *testing.T) {
 	w := newWorkload(t, watchedNS)
-	rr := request(t, w, v1alpha1.PhaseVerifying, false)
+	rr := request(t, w, v1alpha1.PhaseVerifying)
 	clk := &clock{now: time.Now()}
 	first := newReconciler(admin, admin, clk)
 	for range 2 {
@@ -538,7 +547,7 @@ func (f failingReader) List(ctx context.Context, list client.ObjectList, opts ..
 // written, so the counter does not rise and the window does not move.
 func TestFailedReadIsRetriedAndNotASample(t *testing.T) {
 	w := newWorkload(t, watchedNS)
-	rr := request(t, w, v1alpha1.PhaseVerifying, false)
+	rr := request(t, w, v1alpha1.PhaseVerifying)
 	clk := &clock{now: time.Now()}
 	if _, err := reconcile(t, newReconciler(admin, admin, clk), rr); err != nil {
 		t.Fatal(err)
@@ -563,7 +572,7 @@ func TestFailedReadIsRetriedAndNotASample(t *testing.T) {
 // commit is left as it is, and not retried on a timer: its spec is immutable.
 func TestReportBoundToAnotherRolloutIsNotWritten(t *testing.T) {
 	w := newWorkload(t, watchedNS)
-	rr := request(t, w, v1alpha1.PhaseVerifying, false)
+	rr := request(t, w, v1alpha1.PhaseVerifying)
 	other := &v1alpha1.VerificationReport{
 		ObjectMeta: metav1.ObjectMeta{Namespace: operatorNS, Name: clearing.ReportName(rr.UID)},
 		Spec: v1alpha1.VerificationReportSpec{RequestUID: v1alpha1.UID(rr.UID), MergeCommitSHA: strings.Repeat("e", 40),

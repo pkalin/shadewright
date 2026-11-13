@@ -116,6 +116,21 @@ type RemediationRequestReconciler struct {
 	// answer to whether one commit is in the history of another. Nil disables that check: a request stops in
 	// Merged and nothing is read after it.
 	Delivery func(ancestry providers.AncestryChecker) (DeliveryVerifier, error)
+	// NodeGrace is how long past the stable window the verdict waits for a node that stopped reporting to have
+	// its pods marked not Ready (ADR-0030 section 4); it is part of the verification timeout. cmd/main.go sets it
+	// from --node-grace (chart value executor.verification.nodeGrace), which should be at least the cluster's
+	// node monitor grace period. Zero means [DefaultNodeGrace] (1 minute); SetupWithManager refuses a negative
+	// value.
+	NodeGrace time.Duration
+	// VerifyOutcomes turns on the phases after the merge (phases.go, ADR-0030): a Merged request with a merge
+	// receipt moves to WaitingForDelivery and Verifying and ends Failed or Inconclusive. It is off by default;
+	// cmd/main.go sets it from the executor flag --verify-outcomes (chart value executor.verification.enabled).
+	// Until the executor reads the verifier's report (#683) no request can end Succeeded, so with it on every
+	// merge would end Inconclusive or Failed and the circuit breaker would never close again. On, the breaker reads
+	// a Merged request with a merge receipt as undecided (verificationPending). Off, a Merged request keeps the
+	// rollout report of #532 and is a success for the breaker, and a request found in WaitingForDelivery or
+	// Verifying ends Inconclusive with reason VerificationDisabled.
+	VerifyOutcomes bool
 	// RolloutDeadline is how long after the merge commit is seen applied the target's rollout may take before it
 	// is reported stuck (RolledOut False, RolloutStuck). Zero means rollout.DefaultDeadline; it is bounded to
 	// [rollout.MinDeadline, rollout.MaxDeadline].
@@ -366,7 +381,14 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 func (r *RemediationRequestReconciler) afterStop(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	stepErr error) (ctrl.Result, error) {
 	res, err := r.checkHeld(ctx, rr)
-	if err != nil || rr.Status.Phase != remediationv1alpha1.PhaseMerged {
+	switch {
+	case err != nil:
+		return orStepErr(res, err, stepErr)
+	case rr.Status.Phase == remediationv1alpha1.PhaseWaitingForDelivery || rr.Status.Phase == remediationv1alpha1.PhaseVerifying:
+		// The phases after the merge (phases.go): they only read and write the request's own status and Events.
+		after, err := r.afterMerge(ctx, rr)
+		return orStepErr(earlier(res, after), err, stepErr)
+	case rr.Status.Phase != remediationv1alpha1.PhaseMerged:
 		return orStepErr(res, err, stepErr)
 	}
 	// A merge recorded without a receipt ends Inconclusive here, and one recorded before receipts existed is
@@ -374,8 +396,9 @@ func (r *RemediationRequestReconciler) afterStop(ctx context.Context, rr *remedi
 	if done, err := r.settleReceipt(ctx, rr); done || err != nil {
 		return orStepErr(res, err, stepErr)
 	}
-	// A merged request is followed until its rollout is reported (rollout.go); it only reads and writes its own
-	// status and one Event.
+	// A merged request with a merge receipt moves on to WaitingForDelivery (phases.go); one merged before
+	// receipts existed is followed until its rollout is reported (rollout.go). Both only read and write the
+	// request's own status and Events.
 	after, err := r.afterMerge(ctx, rr)
 	return orStepErr(earlier(res, after), err, stepErr)
 }
@@ -988,6 +1011,9 @@ func (r *RemediationRequestReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	}
 	if err := r.validatePullRequestPollInterval(); err != nil {
 		return err
+	}
+	if r.NodeGrace < 0 {
+		return errNegativeNodeGrace
 	}
 	requestPhases.setNamespace(r.Namespace)
 	if err := mgr.Add(requestPhases.source.Runnable(mgr.GetCache(), &remediationv1alpha1.RemediationRequest{})); err != nil {

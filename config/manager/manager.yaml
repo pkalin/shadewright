@@ -67,6 +67,11 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+          # The node grace of a verification verdict (ADR-0030 section 4): at least the cluster's node monitor
+          # grace period. The chart sets it from executor.verification.nodeGrace.
+          - --node-grace=1m
+          # Outcome verification after the merge (--verify-outcomes, ADR-0030) stays off until the executor reads
+          # the verifier's report (#683). The chart sets it from executor.verification.enabled.
         image: controller:latest
         env:
         - name: POD_NAMESPACE

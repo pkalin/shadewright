@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,6 +47,10 @@ const (
 	ConditionRolledOut = "RolledOut"
 	// ReasonRolloutComplete: every pod runs the current template and is ready.
 	ReasonRolloutComplete = "RolloutComplete"
+	// ReasonRolloutPartitioned: a StatefulSet's rolling update with a partition above 0 is complete as its
+	// strategy asks, but the pods below the partition stay on the old revision on purpose; the message names
+	// them (True). It is not evidence that every desired replica runs the applied template (ADR-0030 section 3).
+	ReasonRolloutPartitioned = "RolloutPartitioned"
 	// ReasonRolloutProgressing: the rollout has not completed, and the deadline has not passed.
 	ReasonRolloutProgressing = "RolloutProgressing"
 	// ReasonRolloutStuck: the rollout has not completed within the deadline. Shadewright reports it only.
@@ -167,7 +172,7 @@ type Result struct {
 	// Message explains the result; for Stuck it names what is still on the old revision and the manual step.
 	Message string
 	// OldPods are the pods inferred to be on the old revision (StatefulSet only), highest ordinal first, at
-	// most maxNamedPods.
+	// most maxNamedPods: those a stuck rollout left behind, or, for RolloutPartitioned, those below the partition.
 	OldPods []string
 }
 
@@ -240,6 +245,10 @@ func Evaluate(target client.Object, revision string, appliedAt, now time.Time, d
 			"on to template revision %q after revision %q, applied with the merge commit; this rollout is not "+
 			"judged any more", cur, revision)}, nil
 	}
+	if done && len(old) > 0 {
+		// Only a partitioned rolling update is complete with pods left on the old revision.
+		return Result{State: Complete, Reason: ReasonRolloutPartitioned, OldPods: old, Message: detail}, nil
+	}
 	if done {
 		return Result{State: Complete, Reason: ReasonRolloutComplete,
 			Message: "Every pod runs the current template and is ready"}, nil
@@ -282,10 +291,15 @@ func deployment(d *appsv1.Deployment) (bool, string) {
 }
 
 // statefulSet follows kubectl rollout status for a StatefulSet: every pod is ready, and the pods the update
-// strategy replaces run the update revision. It infers the pods on the old revision from the counts.
+// strategy replaces run the update revision. It infers the pods on the old revision from the counts. A
+// partitioned rolling update that is complete returns, with true, the pods below the partition, which stay on
+// the old revision on purpose, and a message that names them.
 func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 	want := replicas(ss.Spec.Replicas)
 	s := ss.Status
+	// The revisions are names the cluster reports; only capped copies go into a message, which becomes a condition
+	// message and an Event.
+	current, update := capRevision(s.CurrentRevision), capRevision(s.UpdateRevision)
 	if s.ObservedGeneration < ss.Generation {
 		return false, "the StatefulSet controller has not observed the new template yet", nil
 	}
@@ -311,7 +325,14 @@ func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 	case partition > 0:
 		// Pods below the partition stay on the old revision on purpose; only those above it must be updated.
 		if updated >= want-partition && allReady {
-			return true, "", nil
+			// The pods not updated are the lowest ordinals; with every pod updated none is left behind.
+			old, names := oldPods(ss.Name, start, want-1-updated, 0)
+			if len(old) == 0 {
+				return true, "", nil
+			}
+			return true, fmt.Sprintf("The rolling update is complete as its partition %d asks, but pods below the "+
+				"partition stay on the old revision %q on purpose: %s. They are no evidence for the change until "+
+				"the partition is lowered", partition, current, names), old
 		}
 	default:
 		if s.UpdateRevision == s.CurrentRevision && updated >= want && allReady {
@@ -320,7 +341,7 @@ func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 	}
 
 	notReady := fmt.Sprintf("%d of %d pods are not Ready, %d of %d run update revision %q", want-ready, want,
-		updated, want, s.UpdateRevision)
+		updated, want, update)
 	if onDelete {
 		return false, notReady + "; the update strategy is OnDelete, so the StatefulSet controller replaces a pod " +
 			"only after it is deleted. Shadewright does not delete pods: check the new template, then delete the " +
@@ -328,22 +349,11 @@ func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 	}
 	// A rolling update replaces pods from the highest ordinal down to the partition, so the pods not yet
 	// updated are the ordinal indexes from want-1-updated down to the partition.
-	var old []string
-	total := 0
-	for i := want - 1 - updated; i >= partition; i-- {
-		total++
-		if len(old) < maxNamedPods {
-			old = append(old, fmt.Sprintf("%s-%d", ss.Name, start+i))
-		}
-	}
+	old, names := oldPods(ss.Name, start, want-1-updated, partition)
 	msg := notReady
 	if len(old) > 0 {
-		names := strings.Join(old, ", ")
-		if total > len(old) {
-			names += fmt.Sprintf(" and %d more", total-len(old))
-		}
 		msg += fmt.Sprintf("; pods on the old revision %q (inferred by ordinal from the StatefulSet status): %s",
-			s.CurrentRevision, names)
+			current, names)
 	}
 	if ready >= want {
 		return false, msg, old
@@ -353,15 +363,49 @@ func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 		"not delete pods"
 	if updated > 0 {
 		msg += fmt.Sprintf(". If a pod on update revision %q is not Ready, the new template fails and deleting pods "+
-			"does not help: fix the template", s.UpdateRevision)
+			"does not help: fix the template", update)
 	}
 	if ready == 0 && partition == 0 && len(old) > 0 {
 		// Every pod is not Ready, so the lowest ordinal is certainly a pod that is not Ready on the old revision.
 		blocker := fmt.Sprintf("%s-%d", ss.Name, start)
 		return false, msg + fmt.Sprintf(". Check that the new template is correct, then delete %s yourself so it "+
-			"is recreated from update revision %q", blocker, s.UpdateRevision), old
+			"is recreated from update revision %q", blocker, update), old
 	}
 	return false, msg + fmt.Sprintf(". Find the pod that is not Ready (kubectl get pods -L "+
 		"controller-revision-hash); if it runs the old revision %q, check that the new template is correct and "+
-		"delete that pod yourself, never a Ready one", s.CurrentRevision), old
+		"delete that pod yourself, never a Ready one", current), old
+}
+
+// maxRevisionInMessage is the most bytes of a revision name a message carries. A ControllerRevision name is a
+// DNS subdomain of up to 253 characters; the name of a StatefulSet's revision is far shorter in practice.
+const maxRevisionInMessage = 80
+
+// capRevision returns rev cut to maxRevisionInMessage bytes, on a character boundary, with "..." when cut.
+func capRevision(rev string) string {
+	if len(rev) <= maxRevisionInMessage {
+		return rev
+	}
+	cut := maxRevisionInMessage
+	for cut > 0 && !utf8.RuneStart(rev[cut]) {
+		cut--
+	}
+	return rev[:cut] + "..."
+}
+
+// oldPods names the pods of the StatefulSet name with the ordinal indexes from high down to low (offset by
+// start), highest first, at most maxNamedPods, and a list of them for a message that counts the rest.
+func oldPods(name string, start, high, low int32) ([]string, string) {
+	var old []string
+	total := 0
+	for i := high; i >= low; i-- {
+		total++
+		if len(old) < maxNamedPods {
+			old = append(old, fmt.Sprintf("%s-%d", name, start+i))
+		}
+	}
+	names := strings.Join(old, ", ")
+	if total > len(old) {
+		names += fmt.Sprintf(" and %d more", total-len(old))
+	}
+	return old, names
 }

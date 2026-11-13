@@ -373,6 +373,51 @@ var _ = Describe("RemediationRequest", func() {
 				func(r *v1alpha1.RemediationRequest) { r.Status.Phase = v1alpha1.PhaseAwaitingApproval })
 		})
 
+		It("is required in WaitingForDelivery and Verifying", func() {
+			rr := fx.RemediationRequest("default", unique("rr"))
+			Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+			deleteAfterSpec(rr)
+			applied := metav1.NewTime(mergedAt.Add(time.Minute).Truncate(time.Second))
+			for _, phase := range []v1alpha1.RemediationPhase{v1alpha1.PhaseWaitingForDelivery, v1alpha1.PhaseVerifying} {
+				refused(rr, "phase "+string(phase), "status.phase WaitingForDelivery and Verifying require "+
+					"status.mergeReceipt", func(r *v1alpha1.RemediationRequest) {
+					r.Status.Phase = phase
+					r.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL,
+						HeadSHA: testHeadSHA, MergeCommitSHA: merge, MergedAt: &mergedAt, AppliedObservedAt: &applied}
+				})
+			}
+		})
+
+		// A receipt without a merge time would end the delivery window in year 1: the schema refuses it.
+		It("needs a merge time", func() {
+			rr := fx.RemediationRequest("default", unique("rr"))
+			Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+			deleteAfterSpec(rr)
+			refused(rr, "no mergedAt", "mergedAt", func(r *v1alpha1.RemediationRequest) {
+				r.Status.Phase = v1alpha1.PhaseMerged
+				r.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
+					MergeCommitSHA: merge, MergedAt: &mergedAt}
+				r.Status.MergeReceipt = receipt()
+				r.Status.MergeReceipt.MergedAt = metav1.MicroTime{}
+			})
+		})
+
+		It("is followed by Verifying only with an applied time", func() {
+			rr := merged()
+			refused(rr, "Verifying without appliedObservedAt", "status.phase Verifying requires "+
+				"status.pullRequest.appliedObservedAt", func(r *v1alpha1.RemediationRequest) {
+				r.Status.Phase = v1alpha1.PhaseVerifying
+			})
+			got := &v1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+			got.Status.Phase = v1alpha1.PhaseWaitingForDelivery
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "WaitingForDelivery needs no applied time")
+			applied := metav1.NewTime(mergedAt.Add(time.Minute).Truncate(time.Second))
+			got.Status.Phase = v1alpha1.PhaseVerifying
+			got.Status.PullRequest.AppliedObservedAt = &applied
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "Verifying with both in one write is allowed")
+		})
+
 		It("is written again unchanged", func() {
 			rr := merged()
 			got := &v1alpha1.RemediationRequest{}

@@ -62,8 +62,10 @@ func init() {
 
 // executorFlags are the executor's own flags that set fields of the RemediationRequest reconciler.
 type executorFlags struct {
-	pollInterval  time.Duration
-	reviewerHints bool
+	pollInterval   time.Duration
+	reviewerHints  bool
+	nodeGrace      time.Duration
+	verifyOutcomes bool
 }
 
 // bindExecutorFlags registers the executor's reconciler flags on fs.
@@ -79,6 +81,17 @@ func bindExecutorFlags(fs *flag.FlagSet) *executorFlags {
 			"(ADR-0028). Off by default. Turn it on only when the target branch of the GitOps repository requires "+
 			"the check shadewright/review with the Shadewright App as its source: without that rule the merge "+
 			"gate only informs and does not block.")
+	fs.DurationVar(&f.nodeGrace, "node-grace", controller.DefaultNodeGrace,
+		"How long past the stable window a verification verdict waits, so the pods of a node that stopped "+
+			"reporting are marked not Ready first (ADR-0030). Set it to at least the cluster's node monitor grace "+
+			"period (kube-controller-manager --node-monitor-grace-period). Part of the verification timeout; 0 uses "+
+			"the default, a negative value refuses to start.")
+	fs.BoolVar(&f.verifyOutcomes, "verify-outcomes", false,
+		"Move merged requests through WaitingForDelivery and Verifying to Failed or Inconclusive (ADR-0030). Off "+
+			"by default until the executor reads the verifier's report (#683): before that no request can end "+
+			"Succeeded, so every merge would end Inconclusive or Failed and the circuit breaker would not close "+
+			"again. Off, a merged request keeps Merged with its rollout report, and a request in "+
+			"WaitingForDelivery or Verifying ends Inconclusive (VerificationDisabled).")
 	return f
 }
 
@@ -95,6 +108,8 @@ func (f *executorFlags) newReconciler(c client.Client, s *runtime.Scheme, namesp
 		Recorder:                recorder,
 		PullRequestPollInterval: f.pollInterval,
 		ReviewerHints:           f.reviewerHints,
+		NodeGrace:               f.nodeGrace,
+		VerifyOutcomes:          f.verifyOutcomes,
 	}
 }
 
@@ -167,6 +182,7 @@ func main() {
 		hintsLog = append(hintsLog, "requiredCheck", "shadewright/review from the Shadewright App on the target branch")
 	}
 	setupLog.Info("Configured reviewer hints", hintsLog...)
+	setupLog.Info("Configured outcome verification", "enabled", ef.verifyOutcomes)
 	// After the merge the executor reads the Flux Kustomization that applies the target, with the get it holds
 	// for the source mapping, and asks the plan's Git host (a read) whether a later applied commit holds the
 	// merge commit; then it reports the target's rollout (#532).

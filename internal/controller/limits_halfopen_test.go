@@ -19,11 +19,13 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -132,23 +134,21 @@ func TestBreakerHalfOpenLetsOneProbeThrough(t *testing.T) {
 	expectProbe(t, got3, false)
 }
 
-// TestBreakerProbeOutcome checks what ends the half-open state: the probe's success (Merged or a later phase)
+// TestBreakerProbeOutcome checks what ends the half-open state: the probe's success (Merged or Succeeded)
 // closes the breaker, and anything else (a failure, or a final phase that is neither, such as Expired or
 // Denied) opens it again for a full cool-down from the end of the probe, after which the next request goes
 // through as the new probe.
 func TestBreakerProbeOutcome(t *testing.T) {
 	cases := map[remediationv1alpha1.RemediationPhase]bool{ // phase of the probe: whether it closes the breaker
-		remediationv1alpha1.PhaseMerged:             true,
-		remediationv1alpha1.PhaseWaitingForDelivery: true,
-		remediationv1alpha1.PhaseVerifying:          true,
-		remediationv1alpha1.PhaseSucceeded:          true,
-		remediationv1alpha1.PhaseFailed:             false,
-		remediationv1alpha1.PhaseNeedsIntervention:  false,
-		remediationv1alpha1.PhaseExpired:            false,
-		remediationv1alpha1.PhaseCancelled:          false,
-		remediationv1alpha1.PhaseSuperseded:         false,
-		remediationv1alpha1.PhaseDenied:             false,
-		remediationv1alpha1.PhaseInconclusive:       false,
+		remediationv1alpha1.PhaseMerged:            true,
+		remediationv1alpha1.PhaseSucceeded:         true,
+		remediationv1alpha1.PhaseFailed:            false,
+		remediationv1alpha1.PhaseNeedsIntervention: false,
+		remediationv1alpha1.PhaseExpired:           false,
+		remediationv1alpha1.PhaseCancelled:         false,
+		remediationv1alpha1.PhaseSuperseded:        false,
+		remediationv1alpha1.PhaseDenied:            false,
+		remediationv1alpha1.PhaseInconclusive:      false,
 	}
 	for phase, closes := range cases {
 		t.Run(string(phase), func(t *testing.T) {
@@ -161,6 +161,133 @@ func TestBreakerProbeOutcome(t *testing.T) {
 			ended := limitsNow.Add(2 * time.Minute)
 			endProbe(t, c, rr, phase, ended)
 			expectProbeEnd(t, r, rr2, ended, closes)
+		})
+	}
+}
+
+// TestBreakerUndecidedProbeStaysTheProbe: a probe in WaitingForDelivery or Verifying has not shown whether its
+// change works. It neither closes the breaker nor opens it again: it stays the probe, so the next request waits
+// (CircuitHalfOpen), also long after the cool-down and for a new reconciler, until the probe ends.
+func TestBreakerUndecidedProbeStaysTheProbe(t *testing.T) {
+	for _, phase := range []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseWaitingForDelivery,
+		remediationv1alpha1.PhaseVerifying} {
+		t.Run(string(phase), func(t *testing.T) {
+			r, c, rr, rr2 := halfOpenWorld(t)
+			_, got, err := reconcileLimits(t, r, rr)
+			expectAdmitted(t, err, got)
+
+			moved := limitsNow.Add(2 * time.Minute)
+			endProbe(t, c, rr, phase, moved)
+			for _, at := range []time.Time{moved, moved.Add(halfOpenCooldown), moved.Add(80 * time.Minute)} {
+				r.Now = func() time.Time { return at }
+				res, got2, err := reconcileLimits(t, r, rr2)
+				expectHeld(t, res, err, got2, ReasonCircuitHalfOpen)
+				expectProbe(t, got2, false)
+			}
+			// It ends Failed: the breaker opens again for a full cool-down from then.
+			ended := moved.Add(81 * time.Minute)
+			endProbe(t, c, rr, remediationv1alpha1.PhaseFailed, ended)
+			expectProbeEnd(t, r, rr2, ended, false)
+		})
+	}
+}
+
+// TestBreakerUndecidedMergeDoesNotClose: a request merged before three failures in a row, which then moves on to
+// WaitingForDelivery (a later lastPhaseTransitionTime), is not a success newer than those failures: the breaker
+// stays open.
+func TestBreakerUndecidedMergeDoesNotClose(t *testing.T) {
+	old := otherRequest("old-merge", "uid-target-old-merge", remediationv1alpha1.PhaseMerged, 40*time.Minute)
+	r, c, _, rr2 := halfOpenWorld(t, old)
+	r.BreakerCooldown = time.Hour
+	res, got, err := reconcileLimits(t, r, rr2)
+	expectHeld(t, res, err, got, ReasonCircuitOpen)
+	endProbe(t, c, old, remediationv1alpha1.PhaseWaitingForDelivery, limitsNow.Add(-time.Minute))
+	res, got, err = reconcileLimits(t, r, rr2)
+	expectHeld(t, res, err, got, ReasonCircuitOpen)
+	endProbe(t, c, old, remediationv1alpha1.PhaseVerifying, limitsNow.Add(-30*time.Second))
+	res, got, err = reconcileLimits(t, r, rr2)
+	expectHeld(t, res, err, got, ReasonCircuitOpen)
+}
+
+// TestBreakerUndecidedProbeEndsWithVerificationOff: with --verify-outcomes off nothing moves a request on from
+// WaitingForDelivery or Verifying, so a probe found there would hold the breaker half-open for ever. The executor
+// ends it Inconclusive (VerificationDisabled), which the breaker reads like any Inconclusive probe: open again
+// for a full cool-down from its end, after which the queued request goes through as the new probe.
+func TestBreakerUndecidedProbeEndsWithVerificationOff(t *testing.T) {
+	for _, phase := range []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseWaitingForDelivery,
+		remediationv1alpha1.PhaseVerifying} {
+		t.Run(string(phase), func(t *testing.T) {
+			ctx := context.Background()
+			r, c, rr, rr2 := halfOpenWorld(t)
+			r.VerifyOutcomes = false
+			_, got, err := reconcileLimits(t, r, rr)
+			expectAdmitted(t, err, got)
+			moved := limitsNow.Add(2 * time.Minute)
+			endProbe(t, c, rr, phase, moved)
+			r.Now = func() time.Time { return moved }
+			res, got2, err := reconcileLimits(t, r, rr2)
+			expectHeld(t, res, err, got2, ReasonCircuitHalfOpen)
+
+			ended := moved.Add(time.Minute)
+			r.Now = func() time.Time { return ended }
+			probe := &remediationv1alpha1.RemediationRequest{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(rr), probe); err != nil {
+				t.Fatal(err)
+			}
+			if res, err := r.afterMerge(ctx, probe); err != nil || res != (reconcile.Result{}) {
+				t.Fatalf("afterMerge = %+v, %v; want no requeue and no error", res, err)
+			}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(rr), probe); err != nil {
+				t.Fatal(err)
+			}
+			if probe.Status.Phase != remediationv1alpha1.PhaseInconclusive {
+				t.Fatalf("phase = %s, want Inconclusive", probe.Status.Phase)
+			}
+			if v := meta.FindStatusCondition(probe.Status.Conditions, remediationv1alpha1.ConditionVerified); v == nil ||
+				v.Status != metav1.ConditionUnknown || v.Reason != ReasonVerificationDisabled {
+				t.Fatalf("Verified = %+v, want Unknown with %s", v, ReasonVerificationDisabled)
+			}
+			expectProbeEnd(t, r, rr2, ended, false)
+		})
+	}
+}
+
+// TestBreakerMergedProbeWithReceipt: a probe that has just recorded its merge receipt is Merged until its next
+// reconcile moves it to WaitingForDelivery. With --verify-outcomes on its outcome is undecided in that gap, so
+// the next request waits (CircuitHalfOpen) instead of going through as an ordinary one; with the flag off the
+// request stays Merged, a success that closes the breaker, as before #681.
+func TestBreakerMergedProbeWithReceipt(t *testing.T) {
+	for _, verify := range []bool{true, false} {
+		t.Run(fmt.Sprintf("verify-outcomes=%v", verify), func(t *testing.T) {
+			ctx := context.Background()
+			r, c, rr, rr2 := halfOpenWorld(t)
+			r.VerifyOutcomes = verify
+			_, got, err := reconcileLimits(t, r, rr)
+			expectAdmitted(t, err, got)
+
+			// The status write of recordMerge: Merged with its merge receipt.
+			merged := limitsNow.Add(2 * time.Minute)
+			if err := c.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+				t.Fatal(err)
+			}
+			mt := metav1.NewMicroTime(merged)
+			rr.Status.Phase = remediationv1alpha1.PhaseMerged
+			rr.Status.LastPhaseTransitionTime = &mt
+			rr.Status.MergeReceipt = &remediationv1alpha1.MergeReceipt{TargetBranch: mainBranch, PullRequest: 56,
+				HeadSHA: strings.Repeat("c", 40), MergeCommitSHA: strings.Repeat("d", 40), MergedAt: mt}
+			classifyBreaker(rr)
+			if err := c.Status().Update(ctx, rr); err != nil {
+				t.Fatal(err)
+			}
+
+			r.Now = func() time.Time { return merged }
+			res, got2, err := reconcileLimits(t, r, rr2)
+			if verify {
+				expectHeld(t, res, err, got2, ReasonCircuitHalfOpen)
+				return
+			}
+			expectAdmitted(t, err, got2)
+			expectProbe(t, got2, false)
 		})
 	}
 }

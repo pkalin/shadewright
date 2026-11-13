@@ -27,6 +27,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -88,10 +90,18 @@ type DeliveryVerifier interface {
 // errTargetGone means the target the request names is gone or was replaced (another UID).
 var errTargetGone = errors.New("the target is gone or was replaced")
 
+// errTargetReplaced means the object the request names exists with another UID: it was deleted and created
+// again. It matches errTargetGone too, so a caller that does not tell them apart treats both alike.
+var errTargetReplaced = fmt.Errorf("%w: an object of that name has another UID", errTargetGone)
+
 // errDeliveryMoved means the GitOps controller applied another commit between its answer and the read of the
 // target after it, or another Kustomization took the target over in between, so the target read may show what
 // that commit or that Kustomization produced: nothing is recorded, the delivery is checked again at once.
 var errDeliveryMoved = errors.New("the delivery moved to another commit while it was checked")
+
+// errNoDeliveryVerifier means the executor runs without a delivery verifier (Delivery is nil), so the delivery
+// of a merge commit cannot be read. It does not clear by itself.
+var errNoDeliveryVerifier = errors.New("the executor has no delivery verifier")
 
 // maxPaused bounds the paused time added to the delivery window, so a corrupt pausedSeconds cannot overflow it.
 const maxPaused = 365 * 24 * time.Hour
@@ -134,13 +144,33 @@ func rolloutTarget(ref remediationv1alpha1.ObjectRef) client.Object {
 	return nil
 }
 
-// afterMerge runs the check after the merge on a Merged request; see the comment at the top of this file. It
-// returns when to look again (zero when the check is over or does not apply) and an error only for a failed read
-// or status write, which is retried with backoff.
+// afterMerge runs the phases after the merge of a request with a merge receipt (afterReceipt, phases.go) when
+// VerifyOutcomes is on, and otherwise the check after the merge of a Merged request; see the comment at the top
+// of this file. It returns when to look again (zero when the check is over or does not apply) and an error only
+// for a failed read or status write, which is retried with backoff.
 func (r *RemediationRequestReconciler) afterMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
-	if r.Delivery == nil || rr.Status.Phase != remediationv1alpha1.PhaseMerged || rr.Status.Source == nil ||
-		rr.Status.PullRequest == nil || rr.Status.PullRequest.MergeCommitSHA == "" || rolloutEnded(rr) {
+	switch rr.Status.Phase {
+	case remediationv1alpha1.PhaseWaitingForDelivery, remediationv1alpha1.PhaseVerifying:
+		if !r.VerifyOutcomes {
+			// Off, nothing moves such a request on, and the breaker would wait for it for ever (a probe in it
+			// still runs): it ends Inconclusive, read like any other Inconclusive end.
+			return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
+				ReasonVerificationDisabled, fmt.Sprintf("The executor runs without --verify-outcomes, so the "+
+					"outcome of a request in %s is not verified", rr.Status.Phase))
+		}
+		return r.afterReceipt(ctx, rr)
+	case remediationv1alpha1.PhaseMerged:
+		if r.VerifyOutcomes && rr.Status.MergeReceipt != nil {
+			return r.afterReceipt(ctx, rr)
+		}
+	default:
+		return reconcile.Result{}, nil
+	}
+	// With VerifyOutcomes off, and for a request merged before merge receipts existed (MergedBeforeVerification),
+	// the request keeps Merged and its rollout is reported once (#532).
+	if r.Delivery == nil || rr.Status.Source == nil || rr.Status.PullRequest == nil ||
+		rr.Status.PullRequest.MergeCommitSHA == "" || rolloutEnded(rr) {
 		return reconcile.Result{}, nil
 	}
 	now := r.now()
@@ -190,7 +220,7 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 		}
 	}
 	windowEnd := deliveryWindowEnd(rr, start, now)
-	d, err := r.delivered(stepCtx, rr)
+	d, err := r.delivered(stepCtx, rr, r.legacyQuery(rr))
 	err = boundErr(ctx, stepCtx, "delivery check", err)
 	if ctx.Err() != nil {
 		return reconcile.Result{}, nil, err
@@ -512,23 +542,46 @@ func (r *RemediationRequestReconciler) writeIf(ctx context.Context, rr *remediat
 	return nil
 }
 
-// delivery is what delivered found: whether the merge commit is applied, the commit the unit applied, and the
+// delivery is what delivered found: whether the merge commit is applied, the commit the unit applied, the
 // target (read again after an Applied answer, so it shows what the applied commit produced; nil when the first
-// read failed).
+// read failed), and, when the unit was read (checked), its outcome and status, so a caller can tell a failure
+// of the merge commit itself from one of a later commit, and a suspended unit.
 type delivery struct {
 	applied bool
 	commit  string
 	target  client.Object
+	checked bool
+	outcome providers.DeliveryOutcome
+	status  providers.DeliveryStatus
+}
+
+// deliveryQuery is what delivered asks about: the merge commit, the branch it was merged into and the Git host
+// that answers whether a later commit holds it. A request with a merge receipt asks about the receipt's
+// (receiptQuery); one merged before receipts existed about its recorded pull request and source (legacyQuery).
+type deliveryQuery struct {
+	commit, branch string
+	ancestry       providers.AncestryChecker
+}
+
+// legacyQuery is the question of a request merged before receipts existed: its recorded merge commit and target
+// branch, and the plan's repository opened through the live settings.
+func (r *RemediationRequestReconciler) legacyQuery(rr *remediationv1alpha1.RemediationRequest) deliveryQuery {
+	return deliveryQuery{commit: rr.Status.PullRequest.MergeCommitSHA, branch: string(rr.Status.Source.TargetBranch),
+		ancestry: planAncestry{r: r, rr: rr}}
 }
 
 // delivered reports whether the Flux Kustomization named by the target's labels applied the merge commit, or a
-// later commit of the target branch that holds it. Every outcome but Applied is false: Pending, Failed (Flux
-// may still retry; the phases of #94 report it), a target without Kustomization labels. A read that fails is an
-// error.
-func (r *RemediationRequestReconciler) delivered(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
-	delivery, error) {
+// later commit of the target branch that holds it. Every outcome but Applied is not applied: Pending, Failed
+// (Flux may still retry; the caller decides at the end of the window), a target without Kustomization labels.
+// A read that fails is an error.
+func (r *RemediationRequestReconciler) delivered(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	q deliveryQuery) (delivery, error) {
 	ref := rr.Spec.TargetRef
-	target := rolloutTarget(ref)
+	target := newTarget(ref)
+	if target == nil {
+		return delivery{}, fmt.Errorf("get %s %s/%s: the API version %q cannot be parsed", ref.Kind, ref.Namespace,
+			ref.Name, ref.APIVersion)
+	}
 	if err := r.readTarget(ctx, ref, target); err != nil {
 		return delivery{}, err
 	}
@@ -536,23 +589,26 @@ func (r *RemediationRequestReconciler) delivered(ctx context.Context, rr *remedi
 	if !ok {
 		return delivery{target: target}, nil
 	}
-	verifier, err := r.Delivery(planAncestry{r: r, rr: rr})
+	if r.Delivery == nil {
+		return delivery{target: target}, errNoDeliveryVerifier
+	}
+	verifier, err := r.Delivery(q.ancestry)
 	if err != nil {
 		return delivery{target: target}, fmt.Errorf("build the delivery verifier: %w", err)
 	}
 	unit := providers.DeliveryUnit{Kind: "Kustomization", Namespace: namespace, Name: name}
-	outcome, status, err := verifier.Verify(ctx, unit, rr.Status.PullRequest.MergeCommitSHA, string(rr.Status.Source.TargetBranch))
+	outcome, status, err := verifier.Verify(ctx, unit, q.commit, q.branch)
 	if err != nil {
 		return delivery{target: target}, fmt.Errorf("verify the delivery of the merge commit: %w", err)
 	}
 	if outcome != providers.DeliveryApplied {
-		return delivery{target: target}, nil
+		return delivery{target: target, checked: true, outcome: outcome, status: status}, nil
 	}
 	// The first read may predate the apply Flux just reported: read the target again, so the generation
 	// recorded is the one the applied commit produced. Then ask Flux again: had it applied another commit in
 	// between, the target could show that commit's template, so nothing is recorded and the delivery is checked
 	// again.
-	after := rolloutTarget(ref)
+	after := newTarget(ref)
 	if err := r.readTarget(ctx, ref, after); err != nil {
 		return delivery{target: target}, err
 	}
@@ -561,14 +617,31 @@ func (r *RemediationRequestReconciler) delivered(ctx context.Context, rr *remedi
 	if n2, ns2, ok2 := kustomizationOf(after); !ok2 || n2 != name || ns2 != namespace {
 		return delivery{target: target}, errDeliveryMoved
 	}
-	again, status2, err := verifier.Verify(ctx, unit, rr.Status.PullRequest.MergeCommitSHA, string(rr.Status.Source.TargetBranch))
+	again, status2, err := verifier.Verify(ctx, unit, q.commit, q.branch)
 	if err != nil {
 		return delivery{target: target}, fmt.Errorf("verify the delivery of the merge commit again: %w", err)
 	}
 	if again != providers.DeliveryApplied || status2.AppliedCommit != status.AppliedCommit {
 		return delivery{target: target}, errDeliveryMoved
 	}
-	return delivery{applied: true, commit: status.AppliedCommit, target: after}, nil
+	return delivery{applied: true, commit: status.AppliedCommit, target: after, checked: true, outcome: again,
+		status: status2}, nil
+}
+
+// newTarget returns an empty object to read the request's target into: a Deployment or StatefulSet
+// (rolloutTarget), or an unstructured object of the target's kind, read with the get the executor holds on the
+// target kinds; nil when the API version cannot be parsed.
+func newTarget(ref remediationv1alpha1.ObjectRef) client.Object {
+	if t := rolloutTarget(ref); t != nil {
+		return t
+	}
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return nil
+	}
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(gv.WithKind(ref.Kind))
+	return u
 }
 
 // readTarget reads the target into obj from the API server and checks that it is the object the request names
@@ -582,7 +655,7 @@ func (r *RemediationRequestReconciler) readTarget(ctx context.Context, ref remed
 	case err != nil:
 		return fmt.Errorf("get %s %s/%s: %w", ref.Kind, ref.Namespace, ref.Name, err)
 	case ref.UID != "" && string(obj.GetUID()) != string(ref.UID):
-		return fmt.Errorf("get %s %s/%s: %w (another UID)", ref.Kind, ref.Namespace, ref.Name, errTargetGone)
+		return fmt.Errorf("get %s %s/%s: %w", ref.Kind, ref.Namespace, ref.Name, errTargetReplaced)
 	}
 	return nil
 }

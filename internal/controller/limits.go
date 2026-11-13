@@ -65,9 +65,11 @@ import (
 //     without a success or a failure (Expired, Cancelled, Superseded, Denied): a probe ends the half-open
 //     state only with a success, anything else opens the breaker again for a full cool-down (fail closed);
 //   - half-open after that: one request at a time goes through as the probe, and the others wait
-//     (CircuitHalfOpen) while it runs. Its success (Merged or a later phase: WaitingForDelivery, Verifying,
-//     Succeeded) closes the breaker, since the failures in a row are counted after the latest success; its
-//     failure is the latest failure, so the breaker is open again for a full cool-down.
+//     (CircuitHalfOpen) while it runs. Its success (Merged or Succeeded) closes the breaker, since the failures
+//     in a row are counted after the latest success; its failure is the latest failure, so the breaker is open
+//     again for a full cool-down. WaitingForDelivery and Verifying are undecided (undecidedPhases): neither a
+//     success nor a failure, and a probe in one of them stays the probe until it ends. With VerifyOutcomes on,
+//     so is Merged with a merge receipt, on its way to WaitingForDelivery (verificationPending).
 //
 // The probe is marked: the policy check sets status.breakerProbe on a request it lets through while the
 // breaker is tripped, in the same status write as the allowed decision, under the mutex below, so a conflict
@@ -230,15 +232,17 @@ const (
 	outcomeFailure
 )
 
-// breakerOutcome classifies a request for the breaker. Merged and the phases after it (WaitingForDelivery,
-// Verifying, Succeeded) are successes: the change merged, and a failure found later moves the request to
-// Failed with a later transition time. Failed and
+// breakerOutcome classifies a request for the breaker. Merged and Succeeded are successes: the change merged, and
+// a failure found later moves the request to Failed with a later transition time. WaitingForDelivery and
+// Verifying are undecided, neither a success nor a failure: the move to them refreshes
+// lastPhaseTransitionTime, so a merge older than later failures would otherwise read as newer. Failed and
 // NeedsIntervention (a pull request closed without a merge included) are failures. Expired is neither: it
 // comes from Git host outages and deadlines, not from a bad change. Denied, Cancelled and Superseded say
 // nothing about whether the changes work, and a request without a plan digest never got through the policy
 // check, so neither counts. Nor does a request without lastPhaseTransitionTime (one that ended before the
 // field existed): it cannot be ordered. A request in Merged that carries the NoMergeReceipt mark (merge.go) is
-// read like the Inconclusive it ends in, never as a success.
+// read like the Inconclusive it ends in, never as a success. The limits read a request that is still undecided
+// (verificationPending, which depends on VerifyOutcomes) as no outcome over this.
 func breakerOutcome(rr *remediationv1alpha1.RemediationRequest) outcomeClass {
 	if rr.Status.PlanDigest == "" || rr.Status.LastPhaseTransitionTime == nil {
 		return outcomeNone
@@ -391,6 +395,8 @@ type limitsEntry struct {
 	// deleting is a request being deleted; ended is a request in one of endedPhases.
 	deleting bool
 	ended    bool
+	// pending is a request whose outcome the breaker does not know yet (verificationPending).
+	pending bool
 	// replaces is the UID of the request a replacement takes over (spec.replaces), set only once the executor
 	// admitted the replacement with its checked chain link (admittedPredecessor); empty for any other, so a
 	// spec.replaces nobody checked never frees a slot.
@@ -476,7 +482,7 @@ func chainPairs(seen map[types.UID]limitsEntry, self, predecessor types.UID) int
 
 // neutralProbe reports whether the entry is a probe that ended without a success or a failure.
 func (e limitsEntry) neutralProbe() bool {
-	return e.probe != nil && e.outcome == outcomeNone && ended(e.probe.Status.Phase)
+	return e.probe != nil && e.outcome == outcomeNone && ended(e.probe.Status.Phase) && !e.pending
 }
 
 // limitsSelectors are the three lists the limits read (#293, #390), in this order:
@@ -523,7 +529,10 @@ func (r *RemediationRequestReconciler) readLimits(ctx context.Context, namespace
 			e := limitsEntry{active: active(o), lock: holdsLock(o), target: o.Spec.TargetRef.UID,
 				outcome: breakerOutcome(o), counts: ptr.Deref(o.Status.BreakerCounts, false), name: o.Name,
 				resourceVersion: o.ResourceVersion, uid: o.UID, deleting: !o.DeletionTimestamp.IsZero(),
-				ended: ended(o.Status.Phase)}
+				ended: ended(o.Status.Phase), pending: r.verificationPending(o)}
+			if e.pending {
+				e.outcome = outcomeNone
+			}
 			e.replaces = admittedPredecessor(o)
 			if e.lock {
 				e.fix = &remediationv1alpha1.RemediationRequest{Spec: remediationv1alpha1.RemediationRequestSpec{
@@ -585,9 +594,10 @@ func (r *RemediationRequestReconciler) breaker(inRow []time.Time, lastFailure ti
 	reopened := lastFailure
 	for i := range probes {
 		p := &probes[i]
-		if !ended(p.Status.Phase) {
+		if !ended(p.Status.Phase) || r.verificationPending(p) {
 			// Still running, also while it is being deleted: until its finalizer is gone its pull request may
-			// still be open and merge.
+			// still be open and merge. A probe whose outcome is still undecided after the merge
+			// (verificationPending) runs too.
 			probing = true
 			continue
 		}
@@ -612,10 +622,29 @@ func (r *RemediationRequestReconciler) breaker(inRow []time.Time, lastFailure ti
 	return circuitHalfOpen, probing
 }
 
-// ended reports whether phase ends a probe: a final phase, or Merged or a later one, after which the executor
-// no longer writes to Git for the request. Any other phase, an unknown one included, runs (fail closed).
+// ended reports whether phase is a final phase, or Merged or a later one, after which the executor no longer
+// writes to Git for the request. Any other phase, an unknown one included, runs (fail closed). A probe in an
+// undecided phase (undecided) has ended its Git writes but not its probe.
 func ended(phase remediationv1alpha1.RemediationPhase) bool {
 	return slices.Contains(endedPhases, phase)
+}
+
+// undecided reports whether phase is one of undecidedPhases: after the merge, with the outcome not known yet.
+func undecided(phase remediationv1alpha1.RemediationPhase) bool {
+	return slices.Contains(undecidedPhases, phase)
+}
+
+// verificationPending reports whether the breaker reads rr as undecided, neither a success nor a failure: in
+// one of undecidedPhases, or, with VerifyOutcomes on, Merged with a merge receipt, which the next reconcile
+// moves to WaitingForDelivery (afterReceipt). Read as a success in that gap, a probe that has just merged would
+// close the breaker and let another request through as an ordinary one before its outcome is known. With
+// VerifyOutcomes off such a request stays Merged, a success as before #681. A Merged request without a receipt
+// is classified by breakerOutcome alone (noReceiptMerge). status.breakerCounts does not depend on the flag
+// (countsForBreaker reads Merged as a success), so a request merged while the flag was on is still read when
+// it is turned off.
+func (r *RemediationRequestReconciler) verificationPending(rr *remediationv1alpha1.RemediationRequest) bool {
+	return undecided(rr.Status.Phase) || (r.VerifyOutcomes && rr.Status.Phase == remediationv1alpha1.PhaseMerged &&
+		rr.Status.MergeReceipt != nil)
 }
 
 // The classes of the phases after the policy check. Every phase of the API is Pending, a phase before the
@@ -623,8 +652,11 @@ func ended(phase remediationv1alpha1.RemediationPhase) bool {
 var (
 	// successPhases are the breaker's successes: the change merged.
 	successPhases = []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseMerged,
-		remediationv1alpha1.PhaseWaitingForDelivery, remediationv1alpha1.PhaseVerifying,
 		remediationv1alpha1.PhaseSucceeded}
+	// undecidedPhases follow the merge while the executor verifies the outcome (ADR-0030 section 6): no success
+	// and no failure for the breaker, and a probe in one of them still runs. They make no Git write.
+	undecidedPhases = []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseWaitingForDelivery,
+		remediationv1alpha1.PhaseVerifying}
 	// failurePhases are the breaker's failures.
 	failurePhases = []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseFailed,
 		remediationv1alpha1.PhaseNeedsIntervention}
@@ -636,7 +668,7 @@ var (
 		remediationv1alpha1.PhaseInconclusive}
 	// endedPhases are the phases that end a probe (ended), and those the first list of the limits leaves out
 	// (limitsSelectors).
-	endedPhases = slices.Concat(successPhases, failurePhases, neutralPhases)
+	endedPhases = slices.Concat(successPhases, undecidedPhases, failurePhases, neutralPhases)
 )
 
 // waitForLimits holds back a request that a limit does not let through: it sets Queued True with the limit as

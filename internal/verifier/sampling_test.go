@@ -50,7 +50,7 @@ func TestRequestSampledOnceTheRolloutIsRecorded(t *testing.T) {
 	rr.Spec.TargetRef.UID = v1alpha1.UID(w.deploy.UID)
 	mustCreate(t, rr)
 	// The executor's first write in Verifying: the phase, before the template revision is recorded.
-	setStatusRollout(t, rr, v1alpha1.PhaseVerifying, false, false)
+	setStatusRollout(t, rr, v1alpha1.PhaseVerifying, false)
 	rollout := &v1alpha1.RolloutStatus{TemplateRevision: revision}
 	clk := &clock{now: time.Now()}
 	r := newReconciler(admin, admin, clk)
@@ -168,7 +168,7 @@ func (d deadlineStatus) Update(ctx context.Context, obj client.Object, opts ...c
 // cannot hold the single worker.
 func TestEveryAPICallHasADeadline(t *testing.T) {
 	w := newWorkload(t, watchedNS)
-	rr := request(t, w, v1alpha1.PhaseVerifying, false)
+	rr := request(t, w, v1alpha1.PhaseVerifying)
 	r := newReconciler(deadlineClient{admin}, deadlineReader{admin}, &clock{now: time.Now()})
 	if _, err := reconcile(t, r, rr); err != nil {
 		t.Fatalf("Reconcile = %v, want every call made with a deadline", err)
@@ -215,7 +215,7 @@ func (s slowReader) List(ctx context.Context, list client.ObjectList, opts ...cl
 // the owner reads returned, never before them (clearing.Input.Now).
 func TestSampleTimeIsTakenAfterTheReads(t *testing.T) {
 	w := newWorkload(t, watchedNS)
-	rr := request(t, w, v1alpha1.PhaseVerifying, false)
+	rr := request(t, w, v1alpha1.PhaseVerifying)
 	clk := &clock{now: time.Now().Truncate(time.Second)}
 	start := clk.now
 	r := newReconciler(admin, slowReader{Reader: admin, clk: clk, step: 3 * time.Second}, clk)
@@ -240,7 +240,7 @@ func TestSampleTimeIsTakenAfterTheReads(t *testing.T) {
 // as fresh, and the stale "no restart" never becomes evidence.
 func TestSlowObservationIsDiscarded(t *testing.T) {
 	w := newWorkload(t, watchedNS)
-	rr := request(t, w, v1alpha1.PhaseVerifying, false)
+	rr := request(t, w, v1alpha1.PhaseVerifying)
 	clk := &clock{now: time.Now().Truncate(time.Second)}
 	fast := newReconciler(admin, admin, clk)
 	for range 2 {
@@ -281,7 +281,7 @@ func TestSlowObservationIsDiscarded(t *testing.T) {
 // report with an empty status; the executor reads the missing report as StaleReport.
 func TestFailingListCreatesNoReport(t *testing.T) {
 	w := newWorkload(t, watchedNS)
-	rr := request(t, w, v1alpha1.PhaseVerifying, false)
+	rr := request(t, w, v1alpha1.PhaseVerifying)
 	r := newReconciler(admin, failingReader{admin}, &clock{now: time.Now()})
 	for range 2 {
 		if _, err := reconcile(t, r, rr); err == nil {
@@ -336,13 +336,13 @@ func TestEverySkipIsLogged(t *testing.T) {
 	missing.Spec.TargetRef.Namespace = watchedNS
 	missing.Spec.TargetRef.Name = unique("gone")
 	mustCreate(t, missing)
-	setStatus(t, missing, v1alpha1.PhaseVerifying, false)
+	setStatus(t, missing, v1alpha1.PhaseVerifying)
 
 	so := testfixtures.RemediationRequest(operatorNS, unique("rr"))
 	mustCreate(t, so)
-	setStatus(t, so, v1alpha1.PhaseVerifying, false)
+	setStatus(t, so, v1alpha1.PhaseVerifying)
 
-	notBound := request(t, w, v1alpha1.PhaseVerifying, false)
+	notBound := request(t, w, v1alpha1.PhaseVerifying)
 	other := &v1alpha1.VerificationReport{
 		ObjectMeta: metav1.ObjectMeta{Namespace: operatorNS, Name: clearing.ReportName(notBound.UID)},
 		Spec: v1alpha1.VerificationReportSpec{RequestUID: v1alpha1.UID(notBound.UID), MergeCommitSHA: strings.Repeat("e", 40),
@@ -358,7 +358,7 @@ func TestEverySkipIsLogged(t *testing.T) {
 		extra   []string
 	}{
 		{"missing target", missing, "TargetUIDUnknown", clearing.PollInterval, nil},
-		{"unwatched namespace", request(t, outside, v1alpha1.PhaseVerifying, false), "NamespaceNotWatched", 0, nil},
+		{"unwatched namespace", request(t, outside, v1alpha1.PhaseVerifying), "NamespaceNotWatched", 0, nil},
 		{"ScaledObject", so, "TargetKindNotSampled", 0, nil},
 		{"report not bound", notBound, "ReportNotBound", 0, []string{`"error"=`, clearing.ReportName(notBound.UID)}},
 	}

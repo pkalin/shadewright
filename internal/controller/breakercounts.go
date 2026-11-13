@@ -46,8 +46,9 @@ import (
 //   - a request that ended before the field existed gets it once from its status (backfill);
 //   - after a check of the limits, the executor sets it to false on the outcomes that ended before the latest
 //     request in Succeeded it read, and names that request in status.breakerClearedBy in the same write
-//     (staleOutcomes, clearStale). Only Succeeded is final: Merged, WaitingForDelivery and Verifying may still
-//     turn into Failed (#92), so they count as successes for the decision but clear nothing;
+//     (staleOutcomes, clearStale). Only Succeeded is final: Merged may still turn into Failed (#92), so it
+//     counts as a success for the decision but clears nothing, and WaitingForDelivery and Verifying are no
+//     outcome at all (undecidedPhases);
 //   - when the request in Succeeded is deleted, its finalizer sets breakerCounts back to true on every request
 //     that names it before the finalizer is removed (restoreCleared), so the outcomes it hid come back;
 //   - a request being deleted whose finalizer may still close a pull request (NeedsIntervention, Expired) gets

@@ -1291,6 +1291,47 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
 	})
 
+	// A counter is remembered at the time taken before its read. After a restart of the executor (no counter
+	// memory), a read that starts at t0 returns sample n a minute later; the verifier wrote n+1 at t0+1 s and
+	// stopped. The rise seen at t0+75 s is evidence up to 75 s old, more than one poll interval: no success.
+	It("judges a rise against the start of the previous slow read", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		t0, n := drive(w, start, start.Add(need), verification.PollInterval, 1, quiet(w, start))
+		w.r.reportCounters.forget(w.key)
+		putReport(w, n, t0, start, nil)
+		w.reader.fail = func(obj client.Object) error {
+			if _, ok := obj.(*remediationv1alpha1.VerificationReport); ok {
+				w.now = w.now.Add(time.Minute)
+			}
+			return nil
+		}
+		mustReconcileAt(w, t0)
+		w.reader.fail = nil
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
+		putReport(w, n+1, t0.Add(time.Second), start, nil)
+		mustReconcileAt(w, t0.Add(75*time.Second))
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying),
+			"a report up to 75 s old decided success")
+	})
+
+	// The same restart with fast reads every 15 s: the first check proves nothing, the next rise succeeds.
+	It("succeeds one fast check after a restart of the executor", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		t0, n := drive(w, start, start.Add(need), verification.PollInterval, 1, quiet(w, start))
+		w.r.reportCounters.forget(w.key)
+		putReport(w, n, t0, start, nil)
+		mustReconcileAt(w, t0)
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying), "a first check proves nothing")
+		t1 := t0.Add(verification.FastPollInterval)
+		putReport(w, n+1, t1, start, nil)
+		mustReconcileAt(w, t1)
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseSucceeded))
+	})
+
 	// ADR-0030 section 4: available replicas equal spec.replicas; more than desired is no quiet window.
 	It("resets the executor's window when more replicas are available than desired", func() {
 		w := newWorld(nil)

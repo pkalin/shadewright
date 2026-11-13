@@ -215,6 +215,9 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 	}
 
 	key := client.ObjectKeyFromObject(rr)
+	// The report's counter is remembered at the time taken before its read, a lower bound of when what the
+	// read returns was true; its freshness is judged at the time taken after it (below).
+	readAt := laterOf(now, r.now())
 	report, err := r.readReport(stepCtx, rr)
 	err = boundErr(ctx, stepCtx, "report read", err)
 	if apierrors.IsForbidden(err) {
@@ -222,9 +225,10 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 		logf.FromContext(ctx).Error(err, "The executor may not read the VerificationReport of RemediationRequest; "+
 			"it needs get on verificationreports in the operator namespace", "remediationRequest", key)
 	}
-	// Freshness, both spans and the timeout are judged at the end of this check's reads: a slow read must not
-	// let an old report count as fresh. The clock is never taken back.
-	now = laterOf(now, r.now())
+	// Freshness, both spans and the timeout are judged at the end of this check's reads, against counters
+	// remembered at the start of theirs: a slow read can make a report look older, never fresher. The clock is
+	// never taken back.
+	now = laterOf(readAt, r.now())
 	readFailed := false
 	switch {
 	case ctx.Err() != nil:
@@ -256,7 +260,7 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 	}
 	var fresh verification.Freshness
 	if sampled != nil {
-		fresh = r.reportCounters.counter(key).Observe(sampled.UID, sampled.Status.Sample, now)
+		fresh = r.reportCounters.counter(key).Observe(sampled.UID, sampled.Status.Sample, readAt, now)
 	}
 	contract := verification.CheckReport(sampled, exp, fresh)
 	rolledOut := meta.IsStatusConditionTrue(rr.Status.Conditions, rollout.ConditionRolledOut)

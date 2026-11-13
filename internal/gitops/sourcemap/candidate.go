@@ -234,15 +234,8 @@ func candidateDelivery(in CandidateInput) (identity, *unstructured.Unstructured,
 		return id, nil, "", new(noCandidate(ReasonUnsupportedSource,
 			"spec.sourceRef of %s is not a valid object reference", kustomizationRef(ks)))
 	}
-	if in.Source != nil && in.Source.GroupVersionKind().GroupKind() != GitRepositoryGVK.GroupKind() {
-		// An object of another kind with the same name has none of the options read below.
-		return id, nil, "", new(noCandidate(ReasonInvalidInput,
-			"the source given for %s is not a GitRepository", kustomizationRef(ks)))
-	}
-	if in.Source != nil && (in.Source.GetName() != srcName || in.Source.GetNamespace() != srcNamespace) {
-		// The names are valid DNS names, so they can be quoted.
-		return id, nil, "", new(noCandidate(ReasonInvalidInput,
-			"the GitRepository given is not %s/%s, which %s names", srcNamespace, srcName, kustomizationRef(ks)))
+	if refused := checkCandidateSource(in.Source, ks, srcName, srcNamespace); refused != nil {
+		return id, nil, "", refused
 	}
 	path, found, err := unstructured.NestedString(ks.Object, "spec", "path")
 	if err != nil {
@@ -252,6 +245,25 @@ func candidateDelivery(in CandidateInput) (identity, *unstructured.Unstructured,
 		path = ""
 	}
 	return id, ks, path, nil
+}
+
+// checkCandidateSource refuses a source object that is not the GitRepository the Kustomization names: an
+// object of another group or kind with the same name has none of the options read later, and one with
+// another name describes another repository. A nil source is not checked here; the result marks it.
+func checkCandidateSource(src, ks *unstructured.Unstructured, name, namespace string) *CandidateResult {
+	if src == nil {
+		return nil
+	}
+	if src.GroupVersionKind().GroupKind() != GitRepositoryGVK.GroupKind() {
+		return new(noCandidate(ReasonInvalidInput,
+			"the source given for %s is not a GitRepository", kustomizationRef(ks)))
+	}
+	if src.GetName() != name || src.GetNamespace() != namespace {
+		// The names are valid DNS names, so they can be quoted.
+		return new(noCandidate(ReasonInvalidInput,
+			"the GitRepository given is not %s/%s, which %s names", namespace, name, kustomizationRef(ks)))
+	}
+	return nil
 }
 
 // kustomizationTransformFields returns the transform fields the Kustomization sets, in the order of

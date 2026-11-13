@@ -1146,8 +1146,8 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		return r.startDeadline(ctx, rr)
 	case err != nil:
 		return r.refuseOrWait(ctx, rr, err)
-	case outcome == prClosed:
-		return r.rejected(ctx, rr)
+	case outcome == prClosed, outcome == prConflicted:
+		return r.endLooked(ctx, rr, outcome)
 	default:
 		if err := r.clearWaits(ctx, rr); err != nil {
 			return ctrl.Result{}, err

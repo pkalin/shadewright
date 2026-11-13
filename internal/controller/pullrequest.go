@@ -103,6 +103,10 @@ const (
 	// ReasonChangeRequestClosed: the pull request was closed without a merge, not by a close the request recorded,
 	// before or after the request recorded the pull request.
 	ReasonChangeRequestClosed = "ChangeRequestClosed"
+	// ReasonChangeRequestConflict: the Git host reports that the open pull request cannot be merged into the
+	// target branch because of a merge conflict, and the plan is still fresh. The pull request is left open for
+	// a person to resolve or close; it is not a rejection (ChangeRequestClosed).
+	ReasonChangeRequestConflict = "ChangeRequestConflict"
 	// ReasonChangeRequestMerged: the pull request was merged.
 	ReasonChangeRequestMerged = "ChangeRequestMerged"
 	// ReasonMergedWithForeignChange: Shadewright's pull request failed a check before it was recorded (#524),
@@ -141,6 +145,10 @@ var errStopped = errors.New("the pull request step stopped the request")
 
 // errClosed means the recorded pull request is closed without a merge; see prClosed.
 var errClosed = errors.New("the pull request is closed")
+
+// errConflicted means the Git host reports the recorded pull request open with a merge conflict; see
+// prConflicted.
+var errConflicted = errors.New("the pull request has a merge conflict")
 
 // pullRequestTimeout returns the configured deadline of the step.
 func (r *RemediationRequestReconciler) pullRequestTimeout() time.Duration {
@@ -982,6 +990,9 @@ const (
 	// prClosed: closed without a merge. That is a rejection only if the plan is still fresh; a stale plan's
 	// own close that was cut short looks the same and ends Superseded.
 	prClosed
+	// prConflicted: open with Shadewright's head, and the Git host reports a merge conflict. That ends the request
+	// (ChangeRequestConflict) only if the plan is still fresh; a stale plan is superseded as usual.
+	prConflicted
 	// prMergeCommitPending: merged, and the executor waits for the Git host to report the merge commit
 	// (awaitMergeCommit). Nothing else is done meanwhile: a merged change makes the plan look stale.
 	prMergeCommitPending
@@ -1008,6 +1019,8 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 		return prStopped, nil
 	case errors.Is(err, errClosed):
 		return prClosed, nil
+	case errors.Is(err, errConflicted):
+		return prConflicted, nil
 	case errors.Is(err, errMergeCommitPending):
 		return prMergeCommitPending, nil
 	}
@@ -1041,6 +1054,27 @@ func (r *RemediationRequestReconciler) rejected(ctx context.Context, rr *remedia
 	markClosed(rr, ReasonChangeRequestClosed, "was closed without a merge")
 	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 		ReasonChangeRequestClosed, "The pull request was closed without a merge; automation stopped"))
+}
+
+// endLooked ends a fresh request on what the look at its pull request found: closed without a merge (rejected)
+// or open with a merge conflict (conflicted).
+func (r *RemediationRequestReconciler) endLooked(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	outcome prOutcome) (reconcile.Result, error) {
+	if outcome == prConflicted {
+		return r.conflicted(ctx, rr)
+	}
+	return r.rejected(ctx, rr)
+}
+
+// conflicted ends a fresh request whose open pull request the Git host reports with a merge conflict (#680). The
+// pull request is left open: resolving the conflict pushes to its branch, which only a person may do, and a
+// close by a person later is seen by the lock on the target (checkHeld). PullRequestOpened keeps saying it is
+// open, so the request holds that lock until then.
+func (r *RemediationRequestReconciler) conflicted(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	reconcile.Result, error) {
+	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
+		ReasonChangeRequestConflict, "The Git host reports that the pull request conflicts with the target branch; "+
+			"it is left open for a person to resolve or close, and automation stopped"))
 }
 
 // watchStep is the look of watchPullRequest. It returns the provider to read the reviewer hints with when it
@@ -1093,6 +1127,10 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		// A head a hint steered, with hints off: never AwaitingApproval, and no hints read (afterHandoff stops
 		// such a request first; this holds for any caller).
 		return hintLook{}, r.hintsOffTakenOver(ctx, rr)
+	}
+	if cr.Conflicted {
+		// The freshness check decides first: a stale plan is superseded, a fresh one ends ChangeRequestConflict.
+		return hintLook{}, errConflicted
 	}
 	if rr.Status.Phase != remediationv1alpha1.PhasePRCreated {
 		if intent(rr) != nil {

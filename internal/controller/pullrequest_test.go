@@ -1389,6 +1389,57 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			got.Status.PullRequest.Number)), "the condition no longer says the pull request is open")
 	})
 
+	It("stops with ChangeRequestConflict, not as a rejection, when the Git host reports a merge conflict (#680)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		Expect(git.SetConflicted(n, true)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(approved.Reason).To(Equal(ReasonChangeRequestConflict))
+		Expect(approved.Reason).NotTo(Equal(ReasonChangeRequestClosed))
+		opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(opened.Reason).To(Equal(ReasonPullRequestOpened), "the pull request is left open")
+		Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen), "Shadewright does not close it")
+		Expect(got.Status.HoldsTarget).To(Equal(new(true)), "an open pull request keeps the lock on the target")
+		Expect(breakerOutcome(got)).To(Equal(outcomeFailure), "the circuit breaker counts it as NeedsIntervention")
+
+		// A person who closes it afterwards does not turn it into a rejection: the request has ended.
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+			To(Equal(ReasonChangeRequestConflict))
+	})
+
+	It("supersedes a stale plan whose pull request has a merge conflict, as without one (#680)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		_, err := git.Push(mainBranch, sourcePath, manifest("512Mi"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(git.SetConflicted(got.Status.PullRequest.Number, true)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+		Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+	})
+
+	It("decides nothing on a merge conflict while the freshness check cannot finish (#680)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		Expect(git.SetConflicted(got.Status.PullRequest.Number, true)).To(Succeed())
+		git.SetFail(func(op string) error {
+			if op == "ReadFile" || op == "BranchHead" {
+				return errors.New("git host down")
+			}
+			return nil
+		})
+		_, _ = reconcileResult()
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		git.SetFail(nil)
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+			To(Equal(ReasonChangeRequestConflict))
+	})
+
 	It("expires a request whose freshness check keeps failing", func() {
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
 		Expect(reconcileOnce()).To(Succeed()) // branch

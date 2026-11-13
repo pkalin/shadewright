@@ -209,6 +209,22 @@ func (k *mergeReadings) took(rr *remediationv1alpha1.RemediationRequest) bool {
 		c.ReadAt.Equal(&kept.reading.ReadAt)
 }
 
+// awaitsCountAtApplied reports whether the reading at the applied time can still be taken for rr: the change is
+// merged, the applied time is not recorded and the rollout check has not ended. Outside that the entry kept in
+// mergeReadings is of no use and is dropped, so a request that stays Merged for good (verification off) or
+// that another writer ended does not keep one until it is deleted.
+func awaitsCountAtApplied(rr *remediationv1alpha1.RemediationRequest) bool {
+	switch rr.Status.Phase {
+	case remediationv1alpha1.PhaseMerged, remediationv1alpha1.PhaseWaitingForDelivery:
+	default:
+		return false
+	}
+	if rr.Status.PullRequest != nil && rr.Status.PullRequest.AppliedObservedAt != nil {
+		return false
+	}
+	return !rolloutEnded(rr)
+}
+
 // forget drops the reading kept for the request with key.
 func (k *mergeReadings) forget(key types.NamespacedName) {
 	k.m.Delete(key)

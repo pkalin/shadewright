@@ -464,6 +464,9 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 				// by this executor or by another writer, and a reset kept for a lost write has no window left.
 				r.unwrittenResets.forget(req.NamespacedName)
 			}
+			if !awaitsCountAtApplied(rr) {
+				r.mergeReadings.forget(req.NamespacedName)
+			}
 			return r.afterStop(ctx, rr, stepErr)
 		}
 		res, err := r.recheck(ctx, rr)

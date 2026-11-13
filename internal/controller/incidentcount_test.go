@@ -205,3 +205,39 @@ func TestMergeReadingsTook(t *testing.T) {
 		t.Error("kept the entry of an earlier request after a request with another UID was seen")
 	}
 }
+
+// The entry kept for the reading at the applied time is of use only while that reading can still be taken.
+func TestAwaitsCountAtApplied(t *testing.T) {
+	at := metav1.Now()
+	merged := func(mut func(*remediationv1alpha1.RemediationRequest)) *remediationv1alpha1.RemediationRequest {
+		rr := &remediationv1alpha1.RemediationRequest{}
+		rr.Status.Phase = remediationv1alpha1.PhaseMerged
+		rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{}
+		if mut != nil {
+			mut(rr)
+		}
+		return rr
+	}
+	for name, tc := range map[string]struct {
+		rr   *remediationv1alpha1.RemediationRequest
+		want bool
+	}{
+		"merged, not applied": {merged(nil), true},
+		"waiting for delivery": {merged(func(rr *remediationv1alpha1.RemediationRequest) {
+			rr.Status.Phase = remediationv1alpha1.PhaseWaitingForDelivery
+		}), true},
+		"applied time recorded": {merged(func(rr *remediationv1alpha1.RemediationRequest) {
+			rr.Status.PullRequest.AppliedObservedAt = &at
+		}), false},
+		"rollout check ended, still Merged": {merged(func(rr *remediationv1alpha1.RemediationRequest) {
+			rr.Status.Rollout = &remediationv1alpha1.RolloutStatus{Ended: true}
+		}), false},
+		"ended by another writer": {merged(func(rr *remediationv1alpha1.RemediationRequest) {
+			rr.Status.Phase = remediationv1alpha1.PhaseSucceeded
+		}), false},
+	} {
+		if got := awaitsCountAtApplied(tc.rr); got != tc.want {
+			t.Errorf("%s: awaitsCountAtApplied = %v, want %v", name, got, tc.want)
+		}
+	}
+}

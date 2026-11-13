@@ -45,9 +45,10 @@ type CandidateInput struct {
 	// status.lastAppliedRevision are read; its conditions are not.
 	Kustomization *unstructured.Unstructured
 	// Source is the live GitRepository the Kustomization's spec.sourceRef names, when the caller has read it,
-	// or nil. An object of another group or kind is refused. Only its name, namespace and the spec fields the mapping refuses (spec.include, spec.suspend,
-	// spec.ignore, spec.recurseSubmodules, spec.sparseCheckout, a spec.ref that names more or other than a
-	// branch) are read; its URL, branch, conditions and fetched revision are not.
+	// or nil. An object of another group or kind is refused. Only its name, namespace and the spec fields
+	// the mapping refuses (spec.include, spec.suspend, spec.ignore, spec.recurseSubmodules,
+	// spec.sparseCheckout, a spec.ref that names more or other than a branch) are read; its URL, branch,
+	// conditions and fetched revision are not.
 	Source *unstructured.Unstructured
 }
 

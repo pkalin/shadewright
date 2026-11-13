@@ -195,9 +195,17 @@ func request(t *testing.T, w workload, phase v1alpha1.RemediationPhase, noReceip
 // unless noReceipt.
 func setStatus(t *testing.T, rr *v1alpha1.RemediationRequest, phase v1alpha1.RemediationPhase, noReceipt bool) {
 	t.Helper()
+	setStatusRollout(t, rr, phase, noReceipt, true)
+}
+
+// setStatusRollout is setStatus, with status.rollout left unset unless withRollout.
+func setStatusRollout(t *testing.T, rr *v1alpha1.RemediationRequest, phase v1alpha1.RemediationPhase, noReceipt, withRollout bool) {
+	t.Helper()
 	mergedAt := metav1.NewMicroTime(time.Now().Add(-10 * time.Minute).UTC().Truncate(time.Second))
 	rr.Status.Phase = phase
-	rr.Status.Rollout = &v1alpha1.RolloutStatus{TemplateRevision: revision}
+	if withRollout {
+		rr.Status.Rollout = &v1alpha1.RolloutStatus{TemplateRevision: revision}
+	}
 	if !noReceipt {
 		rr.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: "https://github.com/example/fleet/pull/1",
 			HeadSHA: head, MergeCommitSHA: merge, MergedAt: &mergedAt}
@@ -339,6 +347,9 @@ func TestCreatesOneReportForAVerifyingRequest(t *testing.T) {
 	if o.UID != rr.UID || o.Kind != "RemediationRequest" || o.Name != rr.Name || o.APIVersion != v1alpha1.GroupVersion.String() {
 		t.Errorf("owner reference %+v does not name the request", o)
 	}
+	if o.Controller == nil || !*o.Controller {
+		t.Errorf("controller = %v, want true", o.Controller)
+	}
 	if o.BlockOwnerDeletion == nil || *o.BlockOwnerDeletion {
 		t.Errorf("blockOwnerDeletion = %v, want false", o.BlockOwnerDeletion)
 	}
@@ -366,7 +377,8 @@ func TestCreatesOneReportForAVerifyingRequest(t *testing.T) {
 }
 
 // TestNoReportForRequestsItDoesNotSample: a request that is not Verifying, one without a merge receipt, one on a
-// ScaledObject and one whose target is outside the watched namespaces get no report.
+// ScaledObject and one whose target is outside the watched namespaces get no report. Only the one without a
+// receipt, which the executor may still record, is looked at again.
 func TestNoReportForRequestsItDoesNotSample(t *testing.T) {
 	w := newWorkload(t, watchedNS)
 	outside := newWorkload(t, unwatched)
@@ -385,8 +397,12 @@ func TestNoReportForRequestsItDoesNotSample(t *testing.T) {
 		if err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
-		if res.RequeueAfter != 0 {
-			t.Errorf("%s: requeued after %v, want no requeue", name, res.RequeueAfter)
+		want := time.Duration(0)
+		if name == "no receipt" {
+			want = clearing.PollInterval
+		}
+		if res.RequeueAfter != want {
+			t.Errorf("%s: requeued after %v, want %v", name, res.RequeueAfter, want)
 		}
 		if _, ok := getReport(t, rr); ok {
 			t.Errorf("%s: a report was created", name)
@@ -509,7 +525,7 @@ func TestFailedReadIsRetriedAndNotASample(t *testing.T) {
 }
 
 // TestReportBoundToAnotherRolloutIsNotWritten: a report under the request's name whose spec names another merge
-// commit is left as it is.
+// commit is left as it is, and not retried on a timer: its spec is immutable.
 func TestReportBoundToAnotherRolloutIsNotWritten(t *testing.T) {
 	w := newWorkload(t, watchedNS)
 	rr := request(t, w, v1alpha1.PhaseVerifying, false)
@@ -523,8 +539,8 @@ func TestReportBoundToAnotherRolloutIsNotWritten(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.RequeueAfter != clearing.PollInterval {
-		t.Errorf("RequeueAfter = %v, want the poll interval", res.RequeueAfter)
+	if res.RequeueAfter != 0 {
+		t.Errorf("RequeueAfter = %v, want no requeue", res.RequeueAfter)
 	}
 	got, _ := getReport(t, rr)
 	if got.Status.Sample != 0 {

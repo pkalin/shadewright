@@ -20,6 +20,7 @@ limitations under the License.
 package main
 
 import (
+	"errors"
 	"flag"
 	"os"
 	"strings"
@@ -58,7 +59,8 @@ func main() {
 			"VerificationReports are written. Defaults to the POD_NAMESPACE environment variable.")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
 		"Comma-separated namespaces whose pods the verifier may list (one RoleBinding of verifier-watch-role "+
-			"each). A request whose target is in another namespace gets no report. Empty: none.")
+			"each). A request whose target is in another namespace gets no report. Required: the verifier "+
+			"does not start without one.")
 	flag.Parse()
 
 	ctrl.SetLogger(cmdutil.NewLogger(&opts))
@@ -67,14 +69,10 @@ func main() {
 		setupLog.Error(nil, "The operator namespace is not set: use --namespace or POD_NAMESPACE")
 		os.Exit(1)
 	}
-	watched, err := cmdutil.ParseNamespaces(watchNamespaces)
+	watched, err := parseWatched(watchNamespaces)
 	if err != nil {
 		setupLog.Error(err, "Invalid --watch-namespaces")
 		os.Exit(1)
-	}
-	if len(watched) == 0 {
-		setupLog.Info("Watching no namespace: no request gets a VerificationReport; set --watch-namespaces",
-			"operatorNamespace", namespace)
 	}
 
 	mgrOpts := opts.ManagerOptions(setupLog, scheme, cmdutil.VerifierLease)
@@ -110,4 +108,21 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+// errNoWatchedNamespace is returned for an empty --watch-namespaces: a verifier that may read no pod could
+// write no report, so it does not start. The chart does not deploy it without a namespace.
+var errNoWatchedNamespace = errors.New("--watch-namespaces is empty: the verifier needs at least one namespace " +
+	"whose pods it may list, so it does not start without one")
+
+// parseWatched parses --watch-namespaces and refuses an empty list.
+func parseWatched(s string) ([]string, error) {
+	watched, err := cmdutil.ParseNamespaces(s)
+	if err != nil {
+		return nil, err
+	}
+	if len(watched) == 0 {
+		return nil, errNoWatchedNamespace
+	}
+	return watched, nil
 }

@@ -49,7 +49,9 @@ type ReplicaSetGetter func(name string) (*appsv1.ReplicaSet, error)
 
 // Input is what the verifier read for one sample.
 type Input struct {
-	// Now is the verifier's clock at the sample.
+	// Now is the verifier's clock at the sample, taken after every read of the sample returned (the target,
+	// the pod list and the ReplicaSets of [ReplicaSetNames]), so that sampledAt and windowStart never predate
+	// what the sample observed.
 	Now time.Time
 	// Target is the target as read now: an *appsv1.Deployment or an *appsv1.StatefulSet, nil when it does
 	// not exist.
@@ -59,7 +61,8 @@ type Input struct {
 	Pods []corev1.Pod
 	// Truncated is true when the list had more pods than the pages hold.
 	Truncated bool
-	// ReplicaSets reads the ReplicaSet a pod's controller reference names; used for a Deployment only.
+	// ReplicaSets reads the ReplicaSet a pod's controller reference names; used for a Deployment only, and
+	// only for the names [ReplicaSetNames] returns.
 	ReplicaSets ReplicaSetGetter
 	// MemoryLimit is the desired memory limit of the action's container for SetContainerMemoryLimit, nil for
 	// an action without one. A pod whose container has another limit is not a pod of the rollout.
@@ -334,6 +337,35 @@ func rolloutPods(spec v1alpha1.VerificationReportSpec, in Input) ([]podSample, b
 		pods = append(pods, observe(pod, spec.Container))
 	}
 	return pods, otherRevision, nil
+}
+
+// ReplicaSetNames returns the names of the ReplicaSets that [Sample] reads through in.ReplicaSets for this spec
+// and input, each once, in the order of the pods. A caller reads them all before it takes the time of the
+// sample, so that Input.Now is never earlier than a read it covers, and passes a getter over what it read. It
+// ignores in.Now and in.ReplicaSets.
+func ReplicaSetNames(spec v1alpha1.VerificationReportSpec, in Input) []string {
+	d, ok := in.Target.(*appsv1.Deployment)
+	if !ok {
+		return nil
+	}
+	if replicas, ok := targetReplicas(spec, in.Target); !ok || replicas == 0 {
+		return nil
+	}
+	var names []string
+	seen := map[string]bool{}
+	for i := range in.Pods {
+		pod := &in.Pods[i]
+		if pod.DeletionTimestamp != nil || pod.Namespace != d.Namespace {
+			continue
+		}
+		ref := ownership.PodController(pod)
+		if ref == nil || ref.Kind != ownership.KindReplicaSet || seen[ref.Name] {
+			continue
+		}
+		seen[ref.Name] = true
+		names = append(names, ref.Name)
+	}
+	return names
 }
 
 // ownedRevision proves that pod belongs to the target and returns the template revision it runs.

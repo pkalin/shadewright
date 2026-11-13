@@ -19,6 +19,7 @@ package clearing
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -525,5 +526,48 @@ func TestTerminationWithoutFinishTimeIsIncomplete(t *testing.T) {
 	ps[2].Status.ContainerStatuses[1].State.Terminated = &corev1.ContainerStateTerminated{Reason: reasonError, ExitCode: 1}
 	if r := sample(t, spec(), st, input(st.SampledAt.Add(PollInterval), 3, ps)); r.Reason != v1alpha1.ResetEvidenceMissing {
 		t.Fatalf("reason %q, want EvidenceMissing", r.Reason)
+	}
+}
+
+// TestReplicaSetNamesCoverEverySampleRead: ReplicaSetNames names every ReplicaSet Sample reads, each once, so a
+// caller can read them all before it takes the sample time; a terminating pod and a pod of another namespace
+// add no name, and a target scaled to zero or of another kind needs none.
+func TestReplicaSetNamesCoverEverySampleRead(t *testing.T) {
+	ps := pods(3)
+	old := pod(3, 0)
+	old.OwnerReferences = controllerRef("ReplicaSet", oldRSName, oldRSUID)
+	terminating := pod(4, 0)
+	terminating.OwnerReferences = controllerRef("ReplicaSet", "terminating-rs", "c0000000-0000-4000-8000-000000000001")
+	terminating.DeletionTimestamp = mt(time.Now())
+	elsewhere := pod(5, 0)
+	elsewhere.Namespace = "other"
+	elsewhere.OwnerReferences = controllerRef("ReplicaSet", "elsewhere-rs", "c0000000-0000-4000-8000-000000000002")
+	ps = append(ps, old, terminating, elsewhere)
+
+	in := input(time.Now(), 3, ps)
+	names := ReplicaSetNames(spec(), in)
+	if want := []string{rsName, oldRSName}; !slices.Equal(names, want) {
+		t.Errorf("ReplicaSetNames = %v, want %v", names, want)
+	}
+	read := map[string]bool{}
+	get := in.ReplicaSets
+	in.ReplicaSets = func(name string) (*appsv1.ReplicaSet, error) {
+		read[name] = true
+		return get(name)
+	}
+	sample(t, spec(), v1alpha1.VerificationReportStatus{}, in)
+	for name := range read {
+		if !slices.Contains(names, name) {
+			t.Errorf("Sample read ReplicaSet %q, which ReplicaSetNames does not name", name)
+		}
+	}
+
+	if got := ReplicaSetNames(spec(), input(time.Now(), 0, ps)); got != nil {
+		t.Errorf("ReplicaSetNames for a target scaled to zero = %v, want none", got)
+	}
+	sts := input(time.Now(), 3, ps)
+	sts.Target = &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns, UID: deployUID}}
+	if got := ReplicaSetNames(spec(), sts); got != nil {
+		t.Errorf("ReplicaSetNames for a StatefulSet = %v, want none", got)
 	}
 }

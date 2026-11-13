@@ -25,6 +25,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -59,28 +60,100 @@ type Reconciler struct {
 	Watched []string
 	// Now is the verifier's clock. Nil uses time.Now.
 	Now func() time.Time
+	// ReadTimeout bounds each call to the API server: every read and write gets a context with this deadline,
+	// so one hung call cannot hold the single worker past the gap threshold. Zero uses DefaultReadTimeout.
+	ReadTimeout time.Duration
 }
 
+const (
+	// DefaultReadTimeout is the deadline of one call to the API server.
+	DefaultReadTimeout = 10 * time.Second
+	// MaxObservation bounds one sample on the verifier's clock, from the start of its reads (the target, then
+	// the pod list) to the moment
+	// the status write is about to be sent. A sample that took longer is discarded: nothing is written and the
+	// counter does not rise, since pods listed that long ago are not evidence of the time the sample would
+	// carry. It is a third of clearing.GapAfter, so a discarded sample and its retry fit before a gap.
+	MaxObservation = 20 * time.Second
+)
+
+// skipReason says why a reconcile took no sample. It is a fixed string, never text read from the cluster.
+type skipReason string
+
+const (
+	// skipNotServed: the request is not in Verifying, or is a revert. Nothing to do and nothing logged.
+	skipNotServed skipReason = "NotServed"
+	// skipAwaitingInputs: Verifying, but the merge receipt or the rollout's template revision is not recorded
+	// yet. The executor writes them in a later status write; the request is looked at again every poll.
+	skipAwaitingInputs skipReason = "AwaitingInputs"
+	// skipKindNotSampled: the target is not an apps/v1 Deployment or StatefulSet (a ScaledObject has no pods
+	// of its own, ADR-0030 section 3).
+	skipKindNotSampled skipReason = "TargetKindNotSampled"
+	// skipNamespaceNotWatched: the target's namespace is not in --watch-namespaces, where the verifier holds
+	// no grant.
+	skipNamespaceNotWatched skipReason = "NamespaceNotWatched"
+	// skipTargetUIDUnknown: no report yet, the target does not exist and the request names no target UID, so
+	// there is nothing to bind a report to.
+	skipTargetUIDUnknown skipReason = "TargetUIDUnknown"
+	// skipReportNotBound: a report of the request's name exists but is bound to another request or rollout.
+	skipReportNotBound skipReason = "ReportNotBound"
+	// skipObservationTooLong: the reads of the sample took longer than MaxObservation.
+	skipObservationTooLong skipReason = "ObservationTooLong"
+)
+
 // SetupWithManager registers the reconciler. It watches RemediationRequests only and runs again on a change of
-// phase; while a request is Verifying it requeues itself every poll interval.
+// what decides whether a request is sampled; while a request is Verifying it requeues itself every poll interval.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("verifier").
-		For(&v1alpha1.RemediationRequest{}, builder.WithPredicates(phaseChanged())).
+		For(&v1alpha1.RemediationRequest{}, builder.WithPredicates(inputsChanged())).
 		Complete(r)
 }
 
-// phaseChanged lets through creates and the updates that change a request's phase, not every status write of
-// the executor: the sampling cadence comes from RequeueAfter, so a busy request is not sampled more often.
-func phaseChanged() predicate.Predicate {
+// inputsChanged lets through creates and the updates that change an input of sampled: the phase, the merge
+// receipt, or the rollout and its template revision. Other status writes of the executor are dropped: the
+// sampling cadence comes from RequeueAfter, so a busy request is not sampled more often.
+func inputsChanged() predicate.Predicate {
 	return predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			o, ok1 := e.ObjectOld.(*v1alpha1.RemediationRequest)
 			n, ok2 := e.ObjectNew.(*v1alpha1.RemediationRequest)
-			return !ok1 || !ok2 || o.Status.Phase != n.Status.Phase
+			if !ok1 || !ok2 {
+				return true
+			}
+			return o.Status.Phase != n.Status.Phase ||
+				!equality.Semantic.DeepEqual(o.Status.MergeReceipt, n.Status.MergeReceipt) ||
+				(o.Status.Rollout == nil) != (n.Status.Rollout == nil) ||
+				templateRevision(o) != templateRevision(n)
 		},
 		DeleteFunc: func(event.DeleteEvent) bool { return false },
 	}
+}
+
+// templateRevision is status.rollout.templateRevision, empty without a rollout.
+func templateRevision(rr *v1alpha1.RemediationRequest) string {
+	if rr.Status.Rollout == nil {
+		return ""
+	}
+	return rr.Status.Rollout.TemplateRevision
+}
+
+// call runs one API call with the read timeout.
+func (r *Reconciler) call(ctx context.Context, f func(context.Context) error) error {
+	d := r.ReadTimeout
+	if d <= 0 {
+		d = DefaultReadTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	return f(ctx)
+}
+
+// now reads the verifier's clock.
+func (r *Reconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // CacheOptions restricts the verifier's cache to RemediationRequests in the operator namespace, the only kind
@@ -95,32 +168,48 @@ func CacheOptions(namespace string) cache.Options {
 }
 
 // Reconcile takes one sample for a request in Verifying and writes it into the request's report, creating the
-// report on the first one. A failed read is returned as an error and retried: it is not a sample, and nothing
-// is written.
+// report with its first sample. A failed read is returned as an error and retried: it is not a sample, and
+// nothing is written. Every reconcile that takes no sample for a request in Verifying logs why, with a fixed
+// reason.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	if req.Namespace != r.Namespace {
 		return ctrl.Result{}, nil
 	}
+	log := logf.FromContext(ctx).WithValues("request", req.String())
 	rr := &v1alpha1.RemediationRequest{}
-	if err := r.Client.Get(ctx, req.NamespacedName, rr); err != nil {
+	if err := r.call(ctx, func(ctx context.Context) error { return r.Client.Get(ctx, req.NamespacedName, rr) }); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("reading the RemediationRequest: %w", err)
 	}
-	t, ok := r.sampled(rr)
-	if !ok {
+	t, why := r.sampled(rr)
+	switch why {
+	case "":
+	case skipNotServed:
+		return ctrl.Result{}, nil
+	case skipAwaitingInputs:
+		// The executor records the receipt and the template revision after it sets Verifying; look again.
+		log.V(1).Info("Took no sample of a RemediationRequest yet", "reason", string(why))
+		return ctrl.Result{RequeueAfter: clearing.PollInterval}, nil
+	default:
+		// Neither the request's target nor --watch-namespaces changes while the verifier runs: no requeue.
+		log.Info("Took no sample of a RemediationRequest", "reason", string(why))
 		return ctrl.Result{}, nil
 	}
-	log := logf.FromContext(ctx)
-	if err := r.sample(ctx, rr, t); err != nil {
-		if errors.Is(err, errNotOurs) {
-			// A report of this name exists but is bound to something else: it is not written into, and the
-			// executor's trust contract reads it as a mismatch. Look again at the next poll.
-			log.Info("Found a VerificationReport bound to another request or rollout; not writing it")
-			return ctrl.Result{RequeueAfter: clearing.PollInterval}, nil
-		}
+	why, err := r.sample(ctx, rr, t)
+	switch {
+	case err != nil:
 		return ctrl.Result{}, err
+	case why == skipReportNotBound:
+		// The report's spec is immutable, so it never becomes this request's: no time-based retry. A change of
+		// the request's receipt or rollout runs the reconcile again through the predicate. The executor's trust
+		// contract reads that report as ReportMismatch.
+		log.Error(errNotBound, "Took no sample of a RemediationRequest", "reason", string(why),
+			"verificationReport", clearing.ReportName(rr.UID))
+		return ctrl.Result{}, nil
+	case why != "":
+		log.Info("Took no sample of a RemediationRequest", "reason", string(why))
 	}
 	return ctrl.Result{RequeueAfter: clearing.PollInterval}, nil
 }
@@ -132,56 +221,64 @@ type target struct {
 	uid types.UID
 }
 
-// sampled reports whether the request is one the verifier samples, and returns its target: in Verifying, with
-// a merge receipt and a recorded template revision, a Deployment or StatefulSet target in a watched namespace.
-// A revert is never sampled (ADR-0030 section 8); see isRevert.
-func (r *Reconciler) sampled(rr *v1alpha1.RemediationRequest) (target, bool) {
+// sampled returns the request's target when the verifier samples it: in Verifying, with a merge receipt and a
+// recorded template revision, a Deployment or StatefulSet target in a watched namespace. Otherwise it returns
+// why not. A revert is never sampled (ADR-0030 section 8); see isRevert.
+func (r *Reconciler) sampled(rr *v1alpha1.RemediationRequest) (target, skipReason) {
 	st := &rr.Status
-	if st.Phase != v1alpha1.PhaseVerifying || st.MergeReceipt == nil || st.Rollout == nil ||
-		st.Rollout.TemplateRevision == "" || isRevert(rr) {
-		return target{}, false
+	if st.Phase != v1alpha1.PhaseVerifying || isRevert(rr) {
+		return target{}, skipNotServed
+	}
+	if st.MergeReceipt == nil || templateRevision(rr) == "" {
+		return target{}, skipAwaitingInputs
 	}
 	ref := rr.Spec.TargetRef
 	if ref.APIVersion != appsv1.SchemeGroupVersion.String() || (ref.Kind != ownership.KindDeployment && ref.Kind != ownership.KindStatefulSet) {
 		// A ScaledObject has no pods of its own: clearing is not checked for it (ADR-0030 section 3).
-		return target{}, false
+		return target{}, skipKindNotSampled
 	}
 	if !slices.Contains(r.Watched, ref.Namespace) {
-		return target{}, false
+		return target{}, skipNamespaceNotWatched
 	}
-	return target{kind: ref.Kind, namespace: ref.Namespace, name: ref.Name, uid: types.UID(ref.UID)}, true
+	return target{kind: ref.Kind, namespace: ref.Namespace, name: ref.Name, uid: types.UID(ref.UID)}, ""
 }
 
-// errNotOurs marks a report that exists under the request's report name but whose spec is not the one this
-// request and rollout give.
-var errNotOurs = errors.New("the VerificationReport is bound to another request or rollout")
+// errNotBound is logged for a report that exists under the request's report name but whose spec is not the
+// one this request and rollout give.
+var errNotBound = errors.New("the VerificationReport is bound to another request or rollout")
 
-// sample reads the report, the target, its pods and their ReplicaSets, applies one sample and writes it.
-func (r *Reconciler) sample(ctx context.Context, rr *v1alpha1.RemediationRequest, t target) error {
-	now := time.Now
-	if r.Now != nil {
-		now = r.Now
-	}
+// sample reads the report, the target, its pods and their ReplicaSets, takes the time, applies one sample and
+// writes it. The report is created only together with its first sample, after every read of that sample
+// succeeded, so a read that keeps failing leaves no report rather than one with an empty status: the
+// executor reads a missing report as StaleReport and ends the request Inconclusive at the timeout. It returns
+// a skip reason when it wrote nothing for a cause that is not an error.
+func (r *Reconciler) sample(ctx context.Context, rr *v1alpha1.RemediationRequest, t target) (skipReason, error) {
 	report := &v1alpha1.VerificationReport{}
 	key := client.ObjectKey{Namespace: r.Namespace, Name: clearing.ReportName(rr.UID)}
 	exists := true
-	if err := r.APIReader.Get(ctx, key, report); err != nil {
+	if err := r.call(ctx, func(ctx context.Context) error { return r.APIReader.Get(ctx, key, report) }); err != nil {
 		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("reading the VerificationReport: %w", err)
+			return "", fmt.Errorf("reading the VerificationReport: %w", err)
 		}
 		exists = false
 	}
 
+	// The observation starts with the read of the target: everything the sample covers is read after this.
+	start := r.now()
 	obj, err := r.readTarget(ctx, t)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	if !exists {
+	if exists {
+		if !boundTo(report, rr) {
+			return skipReportNotBound, nil
+		}
+	} else {
 		spec, ok := reportSpec(rr, t, obj)
 		if !ok {
 			// No target UID to bind the report to yet: no report, so no evidence. Look again at the next poll.
-			return nil
+			return skipTargetUIDUnknown, nil
 		}
 		report = &v1alpha1.VerificationReport{
 			ObjectMeta: metav1.ObjectMeta{
@@ -200,34 +297,49 @@ func (r *Reconciler) sample(ctx context.Context, rr *v1alpha1.RemediationRequest
 			},
 			Spec: spec,
 		}
-		if err := r.Client.Create(ctx, report); err != nil {
-			return fmt.Errorf("creating the VerificationReport: %w", err)
-		}
-	} else if !boundTo(report, rr) {
-		return errNotOurs
 	}
 
-	in := clearing.Input{Now: now(), MemoryLimit: memoryLimit(rr)}
+	in := clearing.Input{MemoryLimit: memoryLimit(rr)}
 	if obj != nil {
 		in.Target = obj
 		pods, truncated, err := r.listPods(ctx, obj)
 		if err != nil {
-			return err
+			return "", err
 		}
 		in.Pods, in.Truncated = pods, truncated
-		in.ReplicaSets = r.replicaSets(ctx, t.namespace)
+		rss, err := r.readReplicaSets(ctx, t.namespace, clearing.ReplicaSetNames(report.Spec, in))
+		if err != nil {
+			return "", err
+		}
+		in.ReplicaSets = rss
+	}
+	// The sample time is taken after every read returned, so sampledAt never predates what was observed.
+	in.Now = r.now()
+	if in.Now.Sub(start) > MaxObservation {
+		return skipObservationTooLong, nil
 	}
 	res, err := clearing.Sample(report.Spec, report.Status, in)
 	if err != nil {
-		return fmt.Errorf("sampling the pods of the rollout: %w", err)
+		return "", fmt.Errorf("sampling the pods of the rollout: %w", err)
+	}
+
+	if !exists {
+		if err := r.call(ctx, func(ctx context.Context) error { return r.Client.Create(ctx, report) }); err != nil {
+			return "", fmt.Errorf("creating the VerificationReport: %w", err)
+		}
+	}
+	if r.now().Sub(start) > MaxObservation {
+		// The create took the observation past its bound. The report stays without a sample; the next
+		// reconcile samples it again.
+		return skipObservationTooLong, nil
 	}
 	report.Status = res.Status
-	if err := r.Client.Status().Update(ctx, report); err != nil {
-		return fmt.Errorf("writing the VerificationReport status: %w", err)
+	if err := r.call(ctx, func(ctx context.Context) error { return r.Client.Status().Update(ctx, report) }); err != nil {
+		return "", fmt.Errorf("writing the VerificationReport status: %w", err)
 	}
 	logf.FromContext(ctx).V(1).Info("Wrote a VerificationReport sample", "sample", res.Status.Sample,
 		"reset", string(res.Reason), "podsCovered", res.Status.PodsCovered, "oomKilled", res.OOMKilled)
-	return nil
+	return "", nil
 }
 
 // isRevert reports whether the request is a revert of a failed request (spec.reverts, #96), which the verifier
@@ -248,7 +360,8 @@ func (r *Reconciler) readTarget(ctx context.Context, t target) (client.Object, e
 	default:
 		return nil, fmt.Errorf("target kind %q is not sampled", t.kind)
 	}
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: t.namespace, Name: t.name}, obj); err != nil {
+	key := client.ObjectKey{Namespace: t.namespace, Name: t.name}
+	if err := r.call(ctx, func(ctx context.Context) error { return r.APIReader.Get(ctx, key, obj) }); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
 		}
@@ -305,20 +418,36 @@ func memoryLimit(rr *v1alpha1.RemediationRequest) *resource.Quantity {
 	return nil
 }
 
-// replicaSets returns the ReplicaSet reader of a sample: one get by name in the target's namespace. A
-// ReplicaSet that does not exist is nil; any other failure is an error, and the sample is not taken.
-func (r *Reconciler) replicaSets(ctx context.Context, namespace string) clearing.ReplicaSetGetter {
-	return func(name string) (*appsv1.ReplicaSet, error) {
+// readReplicaSets reads the named ReplicaSets, one get each in the target's namespace, before the sample time
+// is taken, and returns a reader over what it read. A ReplicaSet that does not exist is nil; any other failure
+// is an error, and the sample is not taken. A name that was not read is an error too, never a missing owner.
+func (r *Reconciler) readReplicaSets(ctx context.Context, namespace string, names []string) (clearing.ReplicaSetGetter, error) {
+	read := make(map[string]*appsv1.ReplicaSet, len(names))
+	for _, name := range names {
 		rs := &appsv1.ReplicaSet{}
-		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, rs); err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil, nil
-			}
-			return nil, err
+		err := r.call(ctx, func(ctx context.Context) error {
+			return r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, rs)
+		})
+		switch {
+		case apierrors.IsNotFound(err):
+			read[name] = nil
+		case err != nil:
+			return nil, fmt.Errorf("reading the ReplicaSet of a Pod: %w", err)
+		default:
+			read[name] = rs
+		}
+	}
+	return func(name string) (*appsv1.ReplicaSet, error) {
+		rs, ok := read[name]
+		if !ok {
+			return nil, errReplicaSetNotRead
 		}
 		return rs, nil
-	}
+	}, nil
 }
+
+// errReplicaSetNotRead is returned when the sample asks for a ReplicaSet that was not read before it.
+var errReplicaSetNotRead = errors.New("the sample asked for a ReplicaSet that was not read before it")
 
 // listPods lists the pods the target's selector matches in its namespace, in pages of clearing.PageSize and
 // at most clearing.MaxPages pages. truncated is true when more pods remain. Each pod is trimmed to the fields
@@ -348,7 +477,7 @@ func (r *Reconciler) listPods(ctx context.Context, obj client.Object) ([]corev1.
 		if token != "" {
 			opts = append(opts, client.Continue(token))
 		}
-		if err := r.APIReader.List(ctx, list, opts...); err != nil {
+		if err := r.call(ctx, func(ctx context.Context) error { return r.APIReader.List(ctx, list, opts...) }); err != nil {
 			return nil, false, fmt.Errorf("listing the pods of the target: %w", err)
 		}
 		for i := range list.Items {

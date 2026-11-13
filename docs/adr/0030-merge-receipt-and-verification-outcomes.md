@@ -343,4 +343,4 @@ A close without a merge keeps ending `NeedsIntervention` with `ChangeRequestClos
 
 ## Amendments
 
-None.
+- 2026-11-13: building #93a (#679) changed four rules of sections 4 and 7. Native sidecars (init containers with `restartPolicy: Always`) count like containers for statuses, restarts and terminations. A current termination without a finish time makes a sample incomplete. An OOM kill of the action's container in a returned pod is judged before the 200 pod bound gives `EvidenceMissing`. Trouble is recorded durably in the report (`troubleResets`, `lastTroubleReset`), so a crash loop ends `Failed` at the timeout even when its last reset was `PodNotReady`, and recorded trouble counts in a matching report that is no longer fresh. The `class` of a reset left the report: it follows from the reason. The `VerificationReport` type and `internal/verification/clearing` are built; nothing writes or reads a report yet.

@@ -31,6 +31,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// oldestPod is the pod with the lowest ordinal of the StatefulSet in these tests.
+const oldestPod = "cache-0"
+
 const (
 	newRevision = "cache-7b9c"
 	blockedPod  = "cache-1"
@@ -71,7 +74,7 @@ func TestStatefulSetStuckPastDeadlineNamesThePod(t *testing.T) {
 	if res.State != Stuck || res.Reason != ReasonRolloutStuck {
 		t.Fatalf("got %v/%s, want Stuck/%s", res.State, res.Reason, ReasonRolloutStuck)
 	}
-	if !slices.Equal(res.OldPods, []string{blockedPod, "cache-0"}) {
+	if !slices.Equal(res.OldPods, []string{blockedPod, oldestPod}) {
 		t.Errorf("old pods %v, want [cache-1 cache-0]", res.OldPods)
 	}
 	for _, want := range []string{blockedPod, "1 of 2 pods are not Ready", "never a Ready one", "does not delete pods",
@@ -145,11 +148,11 @@ func TestStatefulSetCases(t *testing.T) {
 		"one of three updated": {func(s *appsv1.StatefulSet) {
 			s.Spec.Replicas = ptr.To[int32](3)
 			s.Status.UpdatedReplicas = 1
-		}, Stuck, []string{blockedPod, "cache-0"}},
+		}, Stuck, []string{blockedPod, oldestPod}},
 		"partition reached": {func(s *appsv1.StatefulSet) {
 			s.Spec.UpdateStrategy.RollingUpdate = &appsv1.RollingUpdateStatefulSetStrategy{Partition: ptr.To[int32](1)}
 			s.Status.UpdatedReplicas, s.Status.ReadyReplicas = 1, 2
-		}, Complete, nil},
+		}, Complete, []string{oldestPod}},
 		"partition reached, a pod not ready": {func(s *appsv1.StatefulSet) {
 			s.Spec.UpdateStrategy.RollingUpdate = &appsv1.RollingUpdateStatefulSetStrategy{Partition: ptr.To[int32](1)}
 			s.Status.UpdatedReplicas = 1
@@ -358,5 +361,36 @@ func TestTemplateHash(t *testing.T) {
 	}
 	if got := ObservedGeneration(&appsv1.StatefulSet{Status: appsv1.StatefulSetStatus{ObservedGeneration: 4}}); got != 4 {
 		t.Errorf("ObservedGeneration = %d, want 4", got)
+	}
+}
+
+// ADR-0030 section 3: a rolling update of three replicas with partition 2 and one updated pod is complete as
+// the strategy asks, with reason RolloutPartitioned (RolledOut True) and a message naming the two pods left on
+// the old revision, not "every pod runs the current template".
+func TestPartitionedStatefulSetNamesTheOldPods(t *testing.T) {
+	ss := cacheStatefulSet()
+	ss.Spec.Replicas = ptr.To[int32](3)
+	ss.Spec.UpdateStrategy.RollingUpdate = &appsv1.RollingUpdateStatefulSetStrategy{Partition: ptr.To[int32](2)}
+	ss.Status.Replicas, ss.Status.UpdatedReplicas, ss.Status.ReadyReplicas = 3, 1, 3
+	res, err := Evaluate(ss, "", applied, applied.Add(time.Minute), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != Complete || res.Reason != ReasonRolloutPartitioned ||
+		!slices.Equal(res.OldPods, []string{"cache-1", oldestPod}) {
+		t.Fatalf("got %+v, want Complete, RolloutPartitioned, old pods cache-1 and cache-0", res)
+	}
+	if !strings.Contains(res.Message, "cache-1, cache-0") || strings.Contains(res.Message, "Every pod") {
+		t.Errorf("message %q does not name the pods on the old revision", res.Message)
+	}
+	if c := res.Condition(1, applied); c.Status != metav1.ConditionTrue || c.Reason != ReasonRolloutPartitioned {
+		t.Errorf("condition %s/%s, want True/RolloutPartitioned", c.Status, c.Reason)
+	}
+
+	// Once the partition is lowered and every pod is updated, the rollout is plainly complete.
+	ss.Spec.UpdateStrategy.RollingUpdate.Partition = ptr.To[int32](0)
+	ss.Status.UpdatedReplicas, ss.Status.CurrentRevision = 3, ss.Status.UpdateRevision
+	if res, _ := Evaluate(ss, "", applied, applied.Add(time.Minute), 0); res.Reason != ReasonRolloutComplete {
+		t.Errorf("after the partition was lowered: %+v, want RolloutComplete", res)
 	}
 }

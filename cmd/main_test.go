@@ -26,17 +26,21 @@ import (
 )
 
 // TestExecutorFlagsConfigureTheReconciler: --reviewer-hints is off unless given, and the flags reach the
-// ReviewerHints and PullRequestPollInterval of the reconciler newReconciler builds, the one main runs.
+// ReviewerHints, PullRequestPollInterval and NodeGrace of the reconciler newReconciler builds, the one main runs.
 func TestExecutorFlagsConfigureTheReconciler(t *testing.T) {
 	cases := map[string]struct {
 		args      []string
 		wantHints bool
 		wantPoll  time.Duration
+		wantGrace time.Duration
 	}{
-		"defaults":           {nil, false, controller.DefaultPullRequestPollInterval},
-		"hints on":           {[]string{"--reviewer-hints"}, true, controller.DefaultPullRequestPollInterval},
-		"hints off":          {[]string{"--reviewer-hints=false"}, false, controller.DefaultPullRequestPollInterval},
-		"poll interval only": {[]string{"--pull-request-poll-interval=2m"}, false, 2 * time.Minute},
+		"defaults": {nil, false, controller.DefaultPullRequestPollInterval, time.Minute},
+		"hints on": {[]string{"--reviewer-hints"}, true, controller.DefaultPullRequestPollInterval, time.Minute},
+		"hints off": {[]string{"--reviewer-hints=false"}, false, controller.DefaultPullRequestPollInterval,
+			time.Minute},
+		"poll interval only": {[]string{"--pull-request-poll-interval=2m"}, false, 2 * time.Minute, time.Minute},
+		"node grace": {[]string{"--node-grace=90s"}, false, controller.DefaultPullRequestPollInterval,
+			90 * time.Second},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -55,6 +59,9 @@ func TestExecutorFlagsConfigureTheReconciler(t *testing.T) {
 			}
 			if r.PullRequestPollInterval != c.wantPoll {
 				t.Errorf("PullRequestPollInterval = %v, want %v", r.PullRequestPollInterval, c.wantPoll)
+			}
+			if r.NodeGrace != c.wantGrace {
+				t.Errorf("NodeGrace = %v, want %v", r.NodeGrace, c.wantGrace)
 			}
 		})
 	}

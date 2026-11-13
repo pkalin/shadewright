@@ -67,6 +67,9 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+          # The node grace of a verification verdict (ADR-0030 section 4): at least the cluster's node monitor
+          # grace period. The chart sets it from executor.verification.nodeGrace.
+          - --node-grace=1m
         image: controller:latest
         env:
         - name: POD_NAMESPACE

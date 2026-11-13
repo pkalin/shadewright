@@ -64,6 +64,7 @@ func init() {
 type executorFlags struct {
 	pollInterval  time.Duration
 	reviewerHints bool
+	nodeGrace     time.Duration
 }
 
 // bindExecutorFlags registers the executor's reconciler flags on fs.
@@ -79,6 +80,11 @@ func bindExecutorFlags(fs *flag.FlagSet) *executorFlags {
 			"(ADR-0028). Off by default. Turn it on only when the target branch of the GitOps repository requires "+
 			"the check shadewright/review with the Shadewright App as its source: without that rule the merge "+
 			"gate only informs and does not block.")
+	fs.DurationVar(&f.nodeGrace, "node-grace", controller.DefaultNodeGrace,
+		"How long past the stable window a verification verdict waits, so the pods of a node that stopped "+
+			"reporting are marked not Ready first (ADR-0030). Set it to at least the cluster's node monitor grace "+
+			"period (kube-controller-manager --node-monitor-grace-period). Part of the verification timeout; 0 uses "+
+			"the default, a negative value refuses to start.")
 	return f
 }
 
@@ -95,6 +101,7 @@ func (f *executorFlags) newReconciler(c client.Client, s *runtime.Scheme, namesp
 		Recorder:                recorder,
 		PullRequestPollInterval: f.pollInterval,
 		ReviewerHints:           f.reviewerHints,
+		NodeGrace:               f.nodeGrace,
 	}
 }
 

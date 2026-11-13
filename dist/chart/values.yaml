@@ -171,7 +171,11 @@ executor:
     # -- Turns reviewer hints on (ADR-0028): passes `--reviewer-hints`, so the executor reads `/shadewright reanalyze:` comments on the pull requests it opened and creates the check run `shadewright/review` on their heads. Off by default. Required repository rule first: the target branch of the GitOps repository must require the status check `shadewright/review` with the Shadewright GitHub App as its expected source (ADR-0028 section 5). Shadewright cannot verify that rule; without it the check only informs and a hint author can approve their own steered change. The App needs `checks: write`, which every token request names since #539; no Kubernetes RBAC changes.
     # @section -- Executor
     enabled: false
-  # -- Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--metrics-cert-path`, `--metrics-cert-name`, `--metrics-cert-key`, `--namespace`, `--watch-namespaces`, `--cluster-id`, `--max-incidents` and `--reviewer-hints` (use `reviewerHints.enabled`).
+  verification:
+    # -- How long past the stable window a verification verdict waits, so that the pods of a node that stopped reporting are marked not Ready first (ADR-0030 section 4): passes `--node-grace`. Set it to at least the cluster's node monitor grace period (`--node-monitor-grace-period` of kube-controller-manager, under a minute by default). It is part of the verification timeout, which is 21 minutes for a memory fix with the defaults. A Go duration such as `1m` or `90s`.
+    # @section -- Executor
+    nodeGrace: 1m
+  # -- Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--metrics-cert-path`, `--metrics-cert-name`, `--metrics-cert-key`, `--namespace`, `--watch-namespaces`, `--cluster-id`, `--max-incidents`, `--reviewer-hints` (use `reviewerHints.enabled`) and `--node-grace` (use `verification.nodeGrace`).
   # @section -- Executor
   extraArgs: []
   metricsTLS:

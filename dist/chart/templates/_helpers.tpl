@@ -151,7 +151,7 @@ leader election, the metrics authentication or the watched namespaces. Keep in s
 templates/workloads. "namespace" is not an arg of the chart but the Pods get it from POD_NAMESPACE.
 */}}
 {{- define "shadewright.reservedFlags" -}}
-leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies analysis-store-account analysis-store-container module-grants reviewer-hints
+leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies analysis-store-account analysis-store-container module-grants reviewer-hints node-grace
 {{- end }}
 
 {{/*
@@ -207,6 +207,8 @@ Takes a dict with .component ("executor" or "analyzer") and .context. Renders no
 {{- fail "analyzer.extraArgs may not set --reviewer-hints: it is an executor flag, turned on with executor.reviewerHints.enabled" -}}
 {{- else if eq $name "reviewer-hints" -}}
 {{- fail "executor.extraArgs may not set --reviewer-hints: use executor.reviewerHints.enabled" -}}
+{{- else if and (eq $name "node-grace") (eq $.component "executor") -}}
+{{- fail "executor.extraArgs may not set --node-grace: use executor.verification.nodeGrace" -}}
 {{- else if has $name $reserved -}}
 {{- fail (printf "%s.extraArgs may not set --%s: the chart sets it" $.component $name) -}}
 {{- end -}}

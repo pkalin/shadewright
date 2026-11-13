@@ -9,7 +9,7 @@ Status: draft for the MVP.
 - The YAML patchers.
 - The semantic diff check of section 8.2.
 - The GitHub and Key Vault adapters.
-- The pull request step of section 6: branch, commit and pull request, up to `Merged`, and after the merge the rollout report (`RolledOut`: whether the change reached the pods, or why not).
+- The pull request step of section 6: branch, commit and pull request, up to `Merged`, and after the merge the merge receipt, `WaitingForDelivery` and `Verifying` with the conditions `Delivered`, `Configured` and `RolledOut` (whether the change reached the pods, or why not), ending `Failed` or `Inconclusive`; `Succeeded` and the verifier's report are planned.
 - The kill switch of section 5.4: `spec.paused`, one gate right before every Git write.
 - The concurrency limit, the lock per target and the circuit breaker of section 10.7. Retry limits and cooldowns between attempts are not built.
 - The collector of section 3.1 and both levels of deduplication of section 3.2, with the Incident controller that keeps them in `Incident` objects.

@@ -254,8 +254,18 @@ const (
 	ConditionPolicyAllowed = "PolicyAllowed"
 	ConditionPROpened      = "PullRequestOpened"
 	ConditionApproved      = "Approved"
-	ConditionDelivered     = "Delivered"
-	ConditionVerified      = "Verified"
+	// ConditionDelivered is True once the GitOps controller was seen applying the merge commit, or a later
+	// commit of the receipt's target branch that holds it (ADR-0030 section 2); False, with reason
+	// DeliveryFailed, DeliveryBlocked, DeliverySuspended or DeliveryNotObserved, and Unknown with reason
+	// DeliveryNotChecked, when the delivery window ended without that.
+	ConditionDelivered = "Delivered"
+	// ConditionVerified sums up verification and decides the phase after the merge: False with the reason of a
+	// Failed request, Unknown with the reason of an Inconclusive one (ADR-0030 sections 3 and 5).
+	ConditionVerified = "Verified"
+	// ConditionConfigured is True while the live target's field holds the desired value of the action, read
+	// with the field accessor of the source mapping, and False with reason ValueChanged when it does not (a
+	// later commit overwrote it), which ends the request Inconclusive (ADR-0030 section 3).
+	ConditionConfigured = "Configured"
 	// ConditionPlanFresh is False, with the reason, when an input of the plan digest changed, the ScaledObject
 	// is no longer ready or the action's module was disabled, and the request was superseded (or stopped because its change request could not be closed). It is also False, with the
 	// stale reason and the phase unchanged, once the cleanup of a stale plan has started: it is written before
@@ -588,7 +598,12 @@ type RemediationRequestStatus struct {
 	// +optional
 	Rollout *RolloutStatus `json:"rollout,omitempty"`
 
-	// deadline is when the current step gives up.
+	// deadline is when the current step gives up, on the executor's clock. In WaitingForDelivery it is the end
+	// of the delivery window: one hour after mergeReceipt.mergedAt, extended by the time writes were paused. In
+	// Verifying it is the timeout, written on entering the phase: status.pullRequest.appliedObservedAt plus the
+	// larger of spec.verification.timeout and the rollout deadline plus the effective stableFor plus the
+	// executor's --node-grace. Past the merge a deadline never ends a request Expired: the evidence decides
+	// between Failed and Inconclusive (ADR-0030 sections 2, 4 and 6).
 	// +optional
 	Deadline *metav1.Time `json:"deadline,omitempty"`
 
@@ -627,9 +642,11 @@ type RemediationRequestStatus struct {
 	Handoff *Handoff `json:"handoff,omitempty"`
 
 	// conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
-	// Verified, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run
-	// the applied template; False with reason RolloutStuck or DeliveryNotObserved, Unknown while in progress and
-	// with reason KindNotChecked, RolloutSuperseded or RolloutNotDetermined when the check ends without a verdict).
+	// Verified, Configured, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's
+	// pods run the applied template; True with reason RolloutComplete, or RolloutPartitioned when a partitioned
+	// StatefulSet keeps pods on the old revision on purpose; False with reason RolloutStuck or
+	// DeliveryNotObserved, Unknown while in progress and with reason KindNotChecked, RolloutSuperseded or
+	// RolloutNotDetermined when the check ends without a verdict).
 	// +listType=map
 	// +listMapKey=type
 	// +optional

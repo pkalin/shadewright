@@ -66,6 +66,10 @@ spec:
         # Reviewer hints (ADR-0028): the target branch must require the check shadewright/review from the App.
         - --reviewer-hints
         {{- end }}
+        {{- with dig "verification" "nodeGrace" "" $c }}
+        # The node grace of a verification verdict (ADR-0030 section 4).
+        - --node-grace={{ . }}
+        {{- end }}
         {{- with $c.extraArgs }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

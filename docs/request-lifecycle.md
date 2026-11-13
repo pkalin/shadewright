@@ -6,7 +6,7 @@ title: The life of a request
 
 What a `RemediationRequest` goes through, what you see at each step, what moves it on and what you can do. This summarises [design 6](design/6-reconciliation.md#6-reconciliation); every condition reason is explained in [troubleshooting](troubleshooting.md).
 
-Only the steps up to `Merged` are built, with the merge receipt and the one end after the merge that needs no delivery check (`Inconclusive`, reason `NoMergeReceipt`). Delivery tracking and verification are <span class="sw-status sw-planned">planned</span>: after a merge the request stops at `Merged`.
+The steps up to `Verifying` are built: the merge receipt, the wait for delivery and the executor's own checks after it. The end `Succeeded` is <span class="sw-status sw-planned">planned</span>: it needs the verifier's evidence that the symptom cleared, so until then a request in `Verifying` ends `Failed` or `Inconclusive` at its timeout.
 
 ```mermaid
 stateDiagram-v2
@@ -30,13 +30,19 @@ stateDiagram-v2
     PRCreated --> NeedsIntervention: cannot continue alone
     AwaitingApproval --> NeedsIntervention: pull request closed, head moved or not found
     Merged --> Inconclusive: no merge receipt (NoMergeReceipt)
-    Merged --> WaitingForDelivery: planned
-    WaitingForDelivery --> Succeeded: planned
+    Merged --> WaitingForDelivery: next reconcile
+    WaitingForDelivery --> Verifying: Flux applied the merge commit
+    WaitingForDelivery --> Failed: Flux failed on the merge commit (DeliveryFailed)
+    WaitingForDelivery --> Inconclusive: not delivered within the hour, or the target is gone
+    Verifying --> Failed: rollout stuck at the timeout (RolloutStuck)
+    Verifying --> Inconclusive: value changed, template replaced, target gone, or the timeout
+    Verifying --> Succeeded: planned
     Denied --> [*]
     Superseded --> [*]
     Expired --> [*]
     NeedsIntervention --> [*]
     Merged --> [*]
+    Failed --> [*]
     Inconclusive --> [*]
 ```
 
@@ -48,16 +54,19 @@ stateDiagram-v2
 | `PolicyChecked` | Policy allowed it (`PolicyAllowed=True`, reason `WithinApprovedBounds`); the plan digest is fixed | The pull request step | Nothing. It expires after 30 minutes without a pull request |
 | `PRCreated` | The branch, commit and pull request exist | The executor records the review state | Open the pull request |
 | `AwaitingApproval` | `Approved=False`, reason `WaitingForReview` | A person merges the pull request, seen within about a minute (`--pull-request-poll-interval`) | [Approve](how-to/review-and-approve.md) or [reject](how-to/reject-a-proposal.md) |
-| `Merged` | The pull request was merged; `status.pullRequest.mergeCommitSHA` records the merge commit that delivery will be checked against (that commit or a later one of the target branch that holds it), and `status.mergeReceipt`, written in the same status write and never changed after, binds it to the repository, target branch, pull request number and head ([ADR-0030](adr/0030-merge-receipt-and-verification-outcomes.md)). The phase stays here today; `RolledOut` then reports whether the pods rolled out. A request merged before receipts existed gets `Verified=Unknown`, reason `MergedBeforeVerification`, once | Reads only: the Flux Kustomization and the target's rollout status (verification is planned) | Check your GitOps controller, then that the pods rolled out ([after the merge](#after-the-merge-did-it-reach-the-pods)) |
+| `Merged` | The pull request was merged; `status.pullRequest.mergeCommitSHA` records the merge commit that delivery will be checked against (that commit or a later one of the target branch that holds it), and `status.mergeReceipt`, written in the same status write and never changed after, binds it to the repository, target branch, pull request number and head ([ADR-0030](adr/0030-merge-receipt-and-verification-outcomes.md)). The next reconcile moves it to `WaitingForDelivery`. A request merged before receipts existed stays here, gets `Verified=Unknown`, reason `MergedBeforeVerification`, once, and `RolledOut` reports whether its pods rolled out | The next reconcile | Nothing |
+| `WaitingForDelivery` | Merged; the executor waits for the Flux Kustomization that applies the target to report the merge commit, or a later commit of the target branch that holds it, applied. `status.deadline` is one hour after the merge, extended by the time writes were paused. `Delivered=Unknown`, reason `DeliveryPending` | Flux applying it (to `Verifying`), or the end of the hour: the last read decides (`Failed` with `DeliveryFailed` when Flux failed on the merge commit itself, else `Inconclusive`) | Check your GitOps controller ([after the merge](#after-the-merge-did-it-reach-the-pods)) |
+| `Verifying` | Delivered (`Delivered=True`); every 30 seconds the executor reads the target again: `Configured` (the live field holds the desired value) and `RolledOut` (the pods run the applied template). `status.deadline` is the timeout, 21 minutes after the delivery for a memory fix with the defaults | A changed value, template or target ends it `Inconclusive` at once; at the timeout it ends `Failed` (`RolloutStuck`) when the rollout did not complete, and otherwise `Inconclusive` (`ClearingNotChecked`) until reading the verifier's evidence is built | Watch the symptom yourself: `Succeeded` is planned |
+| `Failed` | After the merge: Flux failed on the merge commit itself at the end of the delivery window (`DeliveryFailed`), or the rollout was still stuck at the timeout (`RolloutStuck`); `Verified=False` says which | Nothing, final. The circuit breaker counts it as a failure | Look at the merged change; revert it with a new request or by hand |
 | `Denied` | Policy or settings refuse the plan | Nothing, final | [Find the reason](how-to/find-why-refused.md), fix, apply a new request |
 | `NeedsIntervention` | The executor cannot continue safely alone: a pull request closed without a merge (`ChangeRequestClosed`), a moved head (`HeadMoved`), a render refusal, a ScaledObject that is not ready | Nothing, final | Read the reason, then apply a new request if the change is still wanted |
 | `Superseded` | A plan input changed before merge (policy, settings, target, file in Git). If a pull request was open, Shadewright closed it. Or, reason `AnotherRequestMerged`, another request of the same Incident, target and field was merged while this one waited, before it took the target lock or opened a pull request. Or, reason `AnotherRequestClosed`, the pull request of another request for the same target and field was closed without a merge while this one waited, so it opens none for that field | Nothing, final | Apply a new request; for `AnotherRequestMerged`, nothing: the merged request is the fix; for `AnotherRequestClosed`, nothing unless the change is still wanted: a new analysis proposes again if the symptom continues |
 | `Expired` | No pull request opened within 30 minutes of the decision | Nothing, final | Find why the Git calls failed, apply a new request |
-| `Inconclusive` | Merged, and neither success nor failure could be shown; `Verified=Unknown` says why. Built today for one reason: `NoMergeReceipt`, the Git host reported no full merge commit within five minutes of the executor first seeing the merge, so the merge cannot be checked | Nothing, final. The circuit breaker reads it like `Expired`; the Incident is escalated | Check by hand what the merge put on the target branch and whether it was applied ([troubleshooting](troubleshooting.md#merge-receipt)) |
+| `Inconclusive` | Merged, and neither success nor failure could be shown; `Verified=Unknown` says why: `NoMergeReceipt` (the Git host reported no full merge commit within five minutes of the executor first seeing the merge), `DeliveryNotObserved`, `DeliveryBlocked`, `DeliverySuspended`, `DeliveryNotChecked`, `TargetGone`, `TargetReplaced`, `ValueChanged`, `RolloutSuperseded` or `ClearingNotChecked` (see [troubleshooting](troubleshooting.md#after-the-merge)) | Nothing, final. The circuit breaker reads it like `Expired`; the Incident is escalated | Check by hand what the merge put on the target branch and whether it was applied ([troubleshooting](troubleshooting.md#merge-receipt)) |
 
-The API also defines `AutoMergeQueued`, `WaitingForDelivery`, `Verifying`, `Succeeded`, `Failed` and `Cancelled`. Nothing sets them yet (planned). Auto-merge is not built: even with a policy that has `approval: Optional` and a request with `approvalRequired: false`, a person decides.
+The API also defines `AutoMergeQueued`, `Succeeded` and `Cancelled`. Nothing sets them yet (planned). Auto-merge is not built: even with a policy that has `approval: Optional` and a request with `approvalRequired: false`, a person decides.
 
-Conditions give the reasons: `PolicyAllowed` (the policy check), `PullRequestOpened`, `Approved`, `PlanFresh` (the plan is still current, checked every five minutes before merge), `RolledOut` (after the merge) and `Verified` (after the merge, today only `Unknown` with `NoMergeReceipt` or `MergedBeforeVerification`). A pause adds `WritesPaused`, see [pause and resume](how-to/pause-and-resume.md).
+Conditions give the reasons: `PolicyAllowed` (the policy check), `PullRequestOpened`, `Approved`, `PlanFresh` (the plan is still current, checked every five minutes before merge), `Delivered`, `Configured` and `RolledOut` (after the merge) and `Verified` (after the merge: `False` for `Failed`, `Unknown` for `Inconclusive` and for `MergedBeforeVerification`). A pause adds `WritesPaused`, see [pause and resume](how-to/pause-and-resume.md).
 
 ## After the merge: did it reach the pods?
 

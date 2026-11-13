@@ -141,6 +141,16 @@
             }
           }
         },
+        "verification": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "nodeGrace": {
+              "type": "string",
+              "pattern": "^([0-9]+(ns|us|ms|s|m|h))+$"
+            }
+          }
+        },
         "extraArgs": {
           "type": "array",
           "items": {

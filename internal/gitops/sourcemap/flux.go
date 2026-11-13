@@ -75,29 +75,15 @@ func inventoryID(namespace, name string, gvk schema.GroupVersionKind) string {
 func checkKustomization(ks *unstructured.Unstructured, target schema.GroupVersionKind, ns, name string) (
 	srcNamespace, srcName, path string, stop *Result) {
 	ref := kustomizationRef(ks)
-	if r := kustomizationSuspended(ks); r != nil {
-		return "", "", "", r
-	}
-	if !fluxstatus.Ready(ks.Object) {
-		// A reconcile in progress (a merged revision being applied) is told apart from a failure, so the
-		// caller can wait for it; both stop the mapping here.
-		reason := ReasonKustomizationNotReady
-		if fluxstatus.Reconciling(ks.Object) {
-			reason = ReasonKustomizationReconciling
+	inventory := func() *Result {
+		if inInventory(ks, target, ns, name) {
+			return nil
 		}
-		r := needsIntervention(reason, "%s is not Ready for its current generation", ref)
-		return "", "", "", &r
-	}
-	// Checked before the inventory: a remote cluster's inventory entry could match a local object.
-	if r := kustomizationRemote(ks); r != nil {
-		return "", "", "", r
-	}
-	if !inInventory(ks, target, ns, name) {
 		r := denied(ReasonNotInInventory,
 			"%s, named by the labels on %s %s/%s, does not list it in status.inventory", ref, target.Kind, ns, name)
-		return "", "", "", &r
+		return &r
 	}
-	if r := kustomizationBuild(ks); r != nil {
+	if r := kustomizationRules(ks, inventory); r != nil {
 		return "", "", "", r
 	}
 	kind, _, _ := unstructured.NestedString(ks.Object, "spec", "sourceRef", "kind")
@@ -125,11 +111,50 @@ func checkKustomization(ks *unstructured.Unstructured, target schema.GroupVersio
 	return srcNamespace, srcName, path, nil
 }
 
-// KustomizationSpecRefusal applies the rules of ADR-0012 step 2 that read only a Kustomization's spec, in the
-// order the mapping applies them: spec.suspend, spec.kubeConfig, the fields that transform the build, and
-// spec.decryption. It returns the stop result the mapping would give, or nil when the spec passes them all.
-// The rules that need the target object (status.inventory) or the status (Ready) are not part of it. The
-// mapping and `kubectl shadewright doctor` both call these rules, so the two cannot drift apart.
+// KustomizationRefusal applies the rules of ADR-0012 step 2 to a Kustomization that need no target object, in
+// the sequence the mapping applies them: spec.suspend, Ready for the current generation, spec.kubeConfig, the
+// fields that transform the build, and spec.decryption. It returns the stop result the mapping would give first,
+// or nil when the Kustomization passes them all. Only the status.inventory rule, which the mapping applies
+// between spec.kubeConfig and the transforms, is left out. The mapping and `kubectl shadewright doctor` both
+// call kustomizationRules, so the reason doctor shows is the one the executor gives.
+func KustomizationRefusal(ks *unstructured.Unstructured) *Result {
+	return kustomizationRules(ks, nil)
+}
+
+// kustomizationRules is the sequence of the Kustomization rules of the mapping. inventory, when not nil, is the
+// status.inventory rule of a target object.
+func kustomizationRules(ks *unstructured.Unstructured, inventory func() *Result) *Result {
+	if r := kustomizationSuspended(ks); r != nil {
+		return r
+	}
+	if !fluxstatus.Ready(ks.Object) {
+		// A reconcile in progress (a merged revision being applied) is told apart from a failure, so the
+		// caller can wait for it; both stop the mapping here.
+		reason := ReasonKustomizationNotReady
+		if fluxstatus.Reconciling(ks.Object) {
+			reason = ReasonKustomizationReconciling
+		}
+		r := needsIntervention(reason, "%s is not Ready for its current generation", kustomizationRef(ks))
+		return &r
+	}
+	// Checked before the inventory: a remote cluster's inventory entry could match a local object.
+	if r := kustomizationRemote(ks); r != nil {
+		return r
+	}
+	if inventory != nil {
+		if r := inventory(); r != nil {
+			return r
+		}
+	}
+	return kustomizationBuild(ks)
+}
+
+// KustomizationSpecRefusal applies only the rules of ADR-0012 step 2 that read a Kustomization's spec:
+// spec.suspend, spec.kubeConfig, the fields that transform the build, and spec.decryption, in that order. It
+// returns the first stop result, or nil when the spec passes them all. It is not the mapping's sequence: the
+// mapping checks Ready between spec.suspend and spec.kubeConfig, so a caller that needs the reason the mapping
+// gives first calls [KustomizationRefusal]. Doctor's Flux check calls it to fail on a spec the executor refuses
+// whatever Flux does next.
 func KustomizationSpecRefusal(ks *unstructured.Unstructured) *Result {
 	if r := kustomizationSuspended(ks); r != nil {
 		return r

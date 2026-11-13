@@ -56,16 +56,13 @@ func FieldFor(action v1alpha1.Action, target v1alpha1.ObjectRef) (Field, error) 
 	if err != nil {
 		return Field{}, fmt.Errorf("invalid apiVersion")
 	}
+	if err := checkActionKind(action.Type, gv.WithKind(target.Kind)); err != nil {
+		return Field{}, err
+	}
 	switch action.Type {
 	case v1alpha1.ActionAdjustKedaMaxReplicas:
-		if gv.Group != "keda.sh" || target.Kind != "ScaledObject" {
-			return Field{}, fmt.Errorf("%s changes only a keda.sh ScaledObject", action.Type)
-		}
 		return Field{Steps: []Step{{Key: keySpec}, {Key: "maxReplicaCount"}}}, nil
 	case v1alpha1.ActionSetContainerMemoryLimit:
-		if target.APIVersion != "apps/v1" || (target.Kind != "Deployment" && target.Kind != "StatefulSet") {
-			return Field{}, fmt.Errorf("%s changes only an apps/v1 Deployment or StatefulSet", action.Type)
-		}
 		if action.SetContainerMemoryLimit == nil || action.SetContainerMemoryLimit.Container == "" {
 			return Field{}, fmt.Errorf("%s has no container", action.Type)
 		}
@@ -80,6 +77,35 @@ func FieldFor(action v1alpha1.Action, target v1alpha1.ObjectRef) (Field, error) 
 	default:
 		return Field{}, fmt.Errorf("unknown action type")
 	}
+}
+
+// checkActionKind is the allow-list of the kinds each action of the catalog may change: a keda.sh
+// ScaledObject for AdjustKedaMaxReplicas, an apps/v1 Deployment or StatefulSet for SetContainerMemoryLimit.
+// [FieldFor] checks a target against it, and [FindManifestCandidate] takes only a kind some action may change.
+func checkActionKind(action v1alpha1.ActionType, gvk schema.GroupVersionKind) error {
+	switch action {
+	case v1alpha1.ActionAdjustKedaMaxReplicas:
+		if gvk.Group != "keda.sh" || gvk.Kind != "ScaledObject" {
+			return fmt.Errorf("%s changes only a keda.sh ScaledObject", action)
+		}
+	case v1alpha1.ActionSetContainerMemoryLimit:
+		if gvk.Group != "apps" || gvk.Version != "v1" || (gvk.Kind != "Deployment" && gvk.Kind != "StatefulSet") {
+			return fmt.Errorf("%s changes only an apps/v1 Deployment or StatefulSet", action)
+		}
+	default:
+		return fmt.Errorf("unknown action type")
+	}
+	return nil
+}
+
+// actionKind reports whether some action of the catalog may change an object of this kind.
+func actionKind(gvk schema.GroupVersionKind) bool {
+	for _, a := range v1alpha1.ActionTypes() {
+		if checkActionKind(a, gvk) == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // String returns the field in a readable form, for example spec.template.spec.containers[name=web].resources.

@@ -1,0 +1,308 @@
+{{- if .Values.crd.enabled }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    {{- if .Values.crd.keep }}
+    "helm.sh/resource-policy": keep
+    {{- end }}
+    controller-gen.kubebuilder.io/version: v0.22.0
+  labels:
+    {{- include "shadewright.labels" (dict "component" "" "context" $) | nindent 4 }}
+  name: verificationreports.remediation.shadewright.io
+spec:
+  group: remediation.shadewright.io
+  names:
+    categories:
+    - shadewright
+    kind: VerificationReport
+    listKind: VerificationReportList
+    plural: verificationreports
+    shortNames:
+    - vr
+    singular: verificationreport
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.sample
+      name: Sample
+      type: integer
+    - jsonPath: .status.podsCovered
+      name: Covered
+      type: integer
+    - jsonPath: .status.desiredReplicas
+      name: Desired
+      type: integer
+    - jsonPath: .status.resets
+      name: Resets
+      type: integer
+    - jsonPath: .status.lastReset.reason
+      name: Last reset
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          VerificationReport is the verifier's evidence for one RemediationRequest in Verifying: whether the pods of
+          the rollout stayed up without a restart or an OOM kill over a window (ADR-0030 section 7). Only the verifier
+          writes it; the executor reads it as untrusted evidence, bound by spec to the request, and writes the
+          request's Cleared condition from it. Its name derives from the request UID.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec binds the report to the request.
+            properties:
+              container:
+                description: |-
+                  container is the name of the action's container, for an action that names one
+                  (SetContainerMemoryLimit). An OOM kill of this container ends the request Failed.
+                maxLength: 63
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              mergeCommitSHA:
+                description: mergeCommitSHA is the merge commit of the request's merge
+                  receipt.
+                maxLength: 40
+                minLength: 40
+                pattern: ^[0-9a-f]{40}$
+                type: string
+              requestUID:
+                description: requestUID is the UID of the RemediationRequest the report
+                  is about.
+                pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                type: string
+              targetUID:
+                description: targetUID is the UID of the target workload.
+                pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                type: string
+              templateRevision:
+                description: |-
+                  templateRevision is the template revision of the rollout, from the request's status.rollout: a
+                  Deployment's revision annotation or a StatefulSet's update revision.
+                maxLength: 253
+                minLength: 1
+                type: string
+            required:
+            - mergeCommitSHA
+            - requestUID
+            - targetUID
+            - templateRevision
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable
+              rule: self == oldSelf
+          status:
+            description: status is the verifier's window.
+            properties:
+              baselines:
+                description: |-
+                  baselines are the restart baselines of the pods, one per pod UID, at most 200. A baseline whose pod is
+                  gone from the pod list is pruned in the same write.
+                items:
+                  description: PodBaseline is the restart baseline of one pod of the
+                    rollout.
+                  properties:
+                    podUID:
+                      description: podUID is the UID of the pod.
+                      pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                      type: string
+                    restarts:
+                      description: |-
+                        restarts is the sum of the restart counts of the pod's containers and native sidecars (init containers
+                        with restartPolicy Always) when the baseline was last taken. A later sample that shows a higher sum is a
+                        Restarted reset.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                  required:
+                  - podUID
+                  - restarts
+                  type: object
+                maxItems: 200
+                type: array
+                x-kubernetes-list-map-keys:
+                - podUID
+                x-kubernetes-list-type: map
+              desiredReplicas:
+                description: desiredReplicas is the target's spec.replicas at the
+                  last sample.
+                format: int32
+                minimum: 0
+                type: integer
+              lastReset:
+                description: lastReset is the last reset of the window. Once set it
+                  is kept, and its time never moves back.
+                properties:
+                  reason:
+                    description: 'reason says why the window was reset: one of the
+                      reasons the verifier sets.'
+                    enum:
+                    - Restarted
+                    - PodNotReady
+                    - PartialRollout
+                    - EvidenceMissing
+                    - ScaledToZero
+                    - ObservationGap
+                    type: string
+                  time:
+                    description: |-
+                      time is when the reset was recorded, on the clock of the writer of the window. It is never earlier than
+                      the window's start at that moment or the previous reset, so a window is open only while windowStart is
+                      later than it.
+                    format: date-time
+                    type: string
+                required:
+                - reason
+                - time
+                type: object
+              lastTroubleReset:
+                description: |-
+                  lastTroubleReset is the last Restarted reset recorded as trouble. Once set it is kept, and its time never moves
+                  back. A report that records trouble ends its request Failed at the timeout, whatever its last reset.
+                properties:
+                  reason:
+                    description: 'reason says why the window was reset: one of the
+                      reasons the verifier sets.'
+                    enum:
+                    - Restarted
+                    - PodNotReady
+                    - PartialRollout
+                    - EvidenceMissing
+                    - ScaledToZero
+                    - ObservationGap
+                    type: string
+                  time:
+                    description: |-
+                      time is when the reset was recorded, on the clock of the writer of the window. It is never earlier than
+                      the window's start at that moment or the previous reset, so a window is open only while windowStart is
+                      later than it.
+                    format: date-time
+                    type: string
+                required:
+                - reason
+                - time
+                type: object
+                x-kubernetes-validations:
+                - message: lastTroubleReset.reason must be Restarted
+                  rule: self.reason == 'Restarted'
+              oomKill:
+                description: |-
+                  oomKill is the first OOM kill of the action's container on a pod of the rollout. Once set it never
+                  changes.
+                properties:
+                  container:
+                    description: container is the name of the container, the action's
+                      container.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  finishedAt:
+                    description: |-
+                      finishedAt is the finish time of the termination, written by the node's clock. It is shown, never
+                      compared: no time decides the OOM rule.
+                    format: date-time
+                    type: string
+                  podUID:
+                    description: podUID is the UID of the pod.
+                    pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                    type: string
+                required:
+                - container
+                - podUID
+                type: object
+              podsCovered:
+                description: |-
+                  podsCovered is the number of pods of the rollout at the last sample: pods whose ownership by the target
+                  was proven and that run the report's template revision.
+                format: int32
+                maximum: 200
+                minimum: 0
+                type: integer
+              resets:
+                description: resets counts the resets of the window. It never decreases.
+                format: int64
+                minimum: 0
+                type: integer
+              sample:
+                description: |-
+                  sample counts the samples written: the verifier raises it by one with every sample. It never decreases.
+                  The executor judges the age of the report by this counter on its own clock, never by sampledAt.
+                format: int64
+                minimum: 0
+                type: integer
+              sampledAt:
+                description: sampledAt is when the last sample was taken, on the verifier's
+                  clock.
+                format: date-time
+                type: string
+              troubleResets:
+                description: |-
+                  troubleResets counts the Restarted resets recorded as trouble over the life of the report: those with a
+                  restart count above its baseline after the window first opened (the first good sample). A Restarted reset
+                  before that, or one shown only by a termination time (a node's clock), is not counted. It never
+                  decreases: a later no-evidence reset does not hide that a restart was observed.
+                format: int64
+                minimum: 0
+                type: integer
+              windowStart:
+                description: |-
+                  windowStart is the time of the first good sample of the current window, on the verifier's clock. It
+                  only moves forward. The window is open while windowStart is later than lastReset.time; its span is
+                  sampledAt - windowStart.
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: status.sample never decreases
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.sample) || (has(self.status)
+            && has(self.status.sample) && self.status.sample >= oldSelf.status.sample)'
+        - message: status.windowStart only moves forward
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.windowStart) || (has(self.status)
+            && has(self.status.windowStart) && timestamp(self.status.windowStart)
+            >= timestamp(oldSelf.status.windowStart))'
+        - message: status.resets never decreases
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.resets) || (has(self.status)
+            && has(self.status.resets) && self.status.resets >= oldSelf.status.resets)'
+        - message: status.lastReset is kept once set and its time never moves back
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.lastReset) || (has(self.status)
+            && has(self.status.lastReset) && timestamp(self.status.lastReset.time)
+            >= timestamp(oldSelf.status.lastReset.time))'
+        - message: status.troubleResets never decreases
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.troubleResets) || (has(self.status)
+            && has(self.status.troubleResets) && self.status.troubleResets >= oldSelf.status.troubleResets)'
+        - message: status.lastTroubleReset is kept once set and its time never moves
+            back
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.lastTroubleReset) ||
+            (has(self.status) && has(self.status.lastTroubleReset) && timestamp(self.status.lastTroubleReset.time)
+            >= timestamp(oldSelf.status.lastTroubleReset.time))'
+        - message: status.oomKill is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.oomKill) || (has(self.status)
+            && has(self.status.oomKill) && self.status.oomKill == oldSelf.status.oomKill)'
+    served: true
+    storage: true
+    subresources:
+      status: {}
+{{- end }}

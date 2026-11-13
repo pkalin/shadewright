@@ -6,6 +6,7 @@ resources:
 - bases/remediation.shadewright.io_incidents.yaml
 - bases/remediation.shadewright.io_remediationpolicies.yaml
 - bases/remediation.shadewright.io_remediationsettings.yaml
+- bases/remediation.shadewright.io_verificationreports.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

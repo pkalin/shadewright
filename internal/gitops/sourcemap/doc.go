@@ -64,6 +64,26 @@ limitations under the License.
 // read every time, and cached reads count against [MaxReads] like any other. Errors carry no provider text ([TransientError], [RefusedError]), since it may
 // hold a repository URL with credentials.
 //
+// [FindManifestCandidate] is a separate, read-only lookup for reports, not part of the mapping: given a
+// workload, its labels, the live Kustomization and optionally the live GitRepository, it searches the same
+// files with the same walker and bounds at the commit the Kustomization applied, not at the branch head, and
+// returns a [ManifestCandidate] (file and commit) or a [Reason]. It checks: a kind an action of the catalog
+// may change (the allow-list [FieldFor] uses), the Flux labels (a HelmRelease label stops with
+// HelmManaged), that the Kustomization given is the one the labels name, spec.suspend, spec.kubeConfig, the
+// inventory, spec.namePrefix, spec.nameSuffix and spec.targetNamespace (each stops with
+// KustomizationTransforms, since the lookup does not invert them), a GitRepository source with a valid
+// reference, spec.path, and status.lastAppliedRevision in the form "<branch>@sha1:<commit>" or the digest
+// alone. It searches through the other transform fields and spec.decryption and marks the candidate, and marks
+// the GitRepository options the mapping refuses, or that no GitRepository was given. It does not check the
+// Kustomization's readiness, the GitRepository's readiness or fetched revision, the repository URL and branch
+// (the caller must pass the repository that GitRepository fetches; a wrong one gives a file Flux did not
+// apply), any value in the file, or the workload's UID (the target is identified by namespace, name and kind
+// only). It takes no action, matches no settings repository and checks no policy. It takes a file as absent
+// only when the host read the commit's tree without it (providers.ErrPathNotInTree) and no listing at that
+// commit returned it; a plain not found is a transient error, also for a commit that is gone for good, which
+// the host does not tell apart from one it does not have yet, so the caller must bound its retries. A
+// candidate never authorizes a change: only [Resolver.Resolve] does.
+//
 // Everything read here is untrusted input: cluster objects, Flux status and Git contents. Paths are built
 // only from validated segments with package path, never by concatenating strings, and stay inside the
 // repository. Flux source URLs are compared exactly and never copied into messages, since they may carry

@@ -40,4 +40,12 @@ resources:
   kind: RemediationSettings
   path: github.com/pkalin/shadewright/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: shadewright.io
+  group: remediation
+  kind: VerificationReport
+  path: github.com/pkalin/shadewright/api/v1alpha1
+  version: v1alpha1
 version: "3"

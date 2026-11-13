@@ -35,8 +35,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/analyzer/ownership"
 	"github.com/pkalin/shadewright/internal/groupversion"
+	"github.com/pkalin/shadewright/internal/ownership"
 )
 
 const (
@@ -233,11 +233,11 @@ func (r *ownerResolver) podSubject(ctx context.Context, pod *corev1.Pod) (
 	if !validRef(self) {
 		return remediationv1alpha1.ObjectRef{}, "", false, nil
 	}
-	// Only a reference marked controller is followed (GetControllerOf ignores the others), and only to a
-	// ReplicaSet or a StatefulSet: those are the controllers of pods. A Deployment is reached only as the
-	// controller of a ReplicaSet, never named by a pod directly.
-	ref := metav1.GetControllerOf(pod)
-	if ref == nil || (ref.Kind != kindReplicaSet && ref.Kind != kindStatefulSet) || len(pod.Labels) > maxLabels {
+	// Only a reference marked controller is followed, and only to an apps/v1 ReplicaSet or StatefulSet: those
+	// are the controllers of pods (ownership.PodController). A Deployment is reached only as the controller of
+	// a ReplicaSet, never named by a pod directly.
+	ref := ownership.PodController(pod)
+	if ref == nil || len(pod.Labels) > maxLabels {
 		return self, "", true, nil
 	}
 	r.mu.Lock()
@@ -310,14 +310,9 @@ func (r *ownerResolver) chain(ctx context.Context, ns string, ref metav1.OwnerRe
 // facts returns what is known about the referenced owner, from the cache or from one read. References to
 // kinds the analyzer cannot read are refused without a read and are not cached.
 func (r *ownerResolver) facts(ctx context.Context, ns string, ref metav1.OwnerReference) (ownerFacts, error) {
-	if ref.APIVersion != apiApps {
-		return ownerFacts{}, nil
-	}
-	switch ref.Kind {
-	case kindReplicaSet, kindDeployment, kindStatefulSet:
-	default:
-		// DaemonSets, Jobs and anything else: the analyzer has no grant to read them, so the reference
-		// cannot be verified and the pod stays the subject.
+	if !ownership.Followed(ref) {
+		// Another API group, DaemonSets, Jobs and anything else: the analyzer has no grant to read them, so
+		// the reference cannot be verified and the pod stays the subject.
 		return ownerFacts{}, nil
 	}
 	key := ownerKey{kind: ref.Kind, namespace: ns, name: ref.Name, uid: ref.UID}
@@ -338,7 +333,7 @@ func (r *ownerResolver) facts(ctx context.Context, ns string, ref metav1.OwnerRe
 
 // read gets the referenced object with a deadline (a get, never a list or a watch) and keeps only the
 // result of its UID check, its selector, its labels and, for a ReplicaSet, its controller reference to a
-// Deployment. The whole object, pod template included, is decoded for the moment of the read, because
+// Deployment, all decided by ownership.Verify, which the verification code shares. The whole object, pod template included, is decoded for the moment of the read, because
 // metadata alone has no selector; nothing else of it is kept. A NotFound is final for ownerMissTTL: the
 // read goes to the API server, not to a cache, and a controller exists before the pods it creates, so a
 // missing owner is not a lag to wait out.
@@ -366,19 +361,9 @@ func (r *ownerResolver) read(ctx context.Context, ns string, ref metav1.OwnerRef
 		}
 		return ownerFacts{}, fmt.Errorf("reading the owner of a Pod: %w", err)
 	}
-	if obj.GetUID() != ref.UID || len(obj.GetLabels()) > maxLabels {
-		return ownerFacts{}, nil
-	}
-	selector, ok := ownership.Selector(sel())
+	owner, ok := ownership.Verify(ref, obj, sel())
 	if !ok {
 		return ownerFacts{}, nil
 	}
-	facts := ownerFacts{found: true, selector: selector, labels: labels.Set(maps.Clone(obj.GetLabels()))}
-	if ref.Kind == kindReplicaSet {
-		if p := metav1.GetControllerOfNoCopy(obj); p != nil && p.APIVersion == apiApps && p.Kind == kindDeployment {
-			parent := *p
-			facts.parent = &parent
-		}
-	}
-	return facts, nil
+	return ownerFacts{found: true, selector: owner.Selector, labels: owner.Labels, parent: owner.Parent}, nil
 }

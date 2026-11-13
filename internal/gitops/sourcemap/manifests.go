@@ -88,10 +88,25 @@ type walker struct {
 	docs  int
 	// ignoreChecked holds the directories already checked for a .sourceignore file.
 	ignoreChecked map[string]bool
+	// strict takes a file as absent only when its absence is proven at the commit: the host read the tree and
+	// the path is not in it ([providers.ErrPathNotInTree]), and no listing at the same commit returned it as a
+	// file. A plain not found, or a listed file read as absent, is then a transient error. Only
+	// [FindManifestCandidate] sets it; the mapping keeps its own rules.
+	strict bool
+	// listed holds the files a listing returned, kept when strict. Every listed file the walker uses is read
+	// after its listing, so the read finds a disagreement.
+	listed map[string]bool
 }
 
 func newWalker(git providers.GitProvider, commit string, cache *ReadCache, repo [sha256.Size]byte) *walker {
 	return &walker{git: git, commit: commit, cache: cache, repo: repo, dirs: map[string]bool{}, seen: map[string]bool{}, ignoreChecked: map[string]bool{}}
+}
+
+// newStrictWalker is a walker that reads at a pinned commit and takes nothing as absent that is not proven so.
+func newStrictWalker(git providers.GitProvider, commit string) *walker {
+	w := newWalker(git, commit, nil, [sha256.Size]byte{})
+	w.strict, w.listed = true, map[string]bool{}
+	return w
 }
 
 // walk adds the files built from dir. A directory reached twice is read once.
@@ -340,6 +355,13 @@ func (w *walker) list(ctx context.Context, dir string) ([]providers.DirEntry, *R
 			"the build reads more than %d bytes in all; the listing of %s is over it", MaxTotalBytes, shown)), nil
 	}
 	w.bytes += cost
+	if w.strict {
+		for _, e := range entries {
+			if e.Type == providers.DirEntryFile {
+				w.listed[path.Join(dir, e.Name)] = true
+			}
+		}
+	}
 	return entries, nil, nil
 }
 
@@ -355,6 +377,13 @@ func (w *walker) read(ctx context.Context, p string) (providers.File, *Result, e
 	// so the mapping downloads, caches and parses at most MaxTotalBytes.
 	limit := min(MaxFileBytes, MaxTotalBytes-w.bytes)
 	f, err := w.cache.readFile(ctx, w.git, w.repo, w.commit, p, limit)
+	if w.strict && providers.IsNotFound(err) {
+		// A plain not found does not prove absence (the host may not have the commit yet, or be failing), and a
+		// file a listing at the same commit returned cannot be missing.
+		if !providers.IsPathNotInTree(err) || w.listed[p] {
+			return providers.File{}, nil, transient("read "+p, err)
+		}
+	}
 	if providers.IsNotFound(err) {
 		// A missing file costs nothing, so it is never refused for the budget.
 		r := needsIntervention(reasonFileNotFound, "%s does not exist", p)

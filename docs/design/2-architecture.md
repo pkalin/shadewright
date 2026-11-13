@@ -4,7 +4,7 @@
 
 [![Shadewright architecture: cluster signals become incidents; the analyzer proposes a typed RemediationRequest; deterministic policy decides; the controller opens a pull request; review and checks merge it; the GitOps controller (Flux) applies it; the verifier samples the rollout and writes a report as evidence.](../assets/diagrams/architecture.svg)](../assets/diagrams/architecture.svg "Open full size")
 
-The dashed boxes are the three identities: the analyzer can read and call the model, the executor can write request status and use the Git App, and the verifier can read the pods of a rollout and write its own report, with no model and no Git App. The `RemediationRequest` between the analyzer and the executor is the only thing the analyzer can hand over; the `VerificationReport` is the only thing the verifier hands over, and the executor is to read it as untrusted evidence (<span class="sw-status sw-planned">planned</span>, #683).
+The dashed boxes are the three identities: the analyzer can read and call the model, the executor can write request status and use the Git App, and the verifier can read the pods of a rollout and write its own report, with no model and no Git App. The `RemediationRequest` between the analyzer and the executor is the only thing the analyzer can hand over; the `VerificationReport` is the only thing the verifier hands over, and the executor reads it as untrusted evidence and decides `Cleared` (<span class="sw-status sw-built">built</span>, #683).
 
 The same flow as a sequence, from a symptom to a verified change. Steps marked *(planned)* are designed but not built yet.
 

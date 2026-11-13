@@ -64,6 +64,14 @@ limitations under the License.
 // read every time, and cached reads count against [MaxReads] like any other. Errors carry no provider text ([TransientError], [RefusedError]), since it may
 // hold a repository URL with credentials.
 //
+// [FindManifestCandidate] is a separate, read-only lookup for reports, not part of the mapping: given a
+// workload, its labels and the live Kustomization, it searches the same files with the same walker and bounds
+// at the commit the Kustomization applied (status.lastAppliedRevision, parsed strictly), not at the branch
+// head, and returns a [ManifestCandidate] (file and commit) or a [Reason]. It takes no action, compares no
+// value, matches no settings repository and checks no policy, and when the Kustomization transforms its build
+// it still searches and names the transform fields in the candidate. A candidate never authorizes a change:
+// only [Resolver.Resolve] does.
+//
 // Everything read here is untrusted input: cluster objects, Flux status and Git contents. Paths are built
 // only from validated segments with package path, never by concatenating strings, and stay inside the
 // repository. Flux source URLs are compared exactly and never copied into messages, since they may carry

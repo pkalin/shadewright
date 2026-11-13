@@ -35,5 +35,6 @@
 | [0031](0031-kustomize-transformations-in-the-source-mapping.md) | Kustomize and Flux transformations the source mapping may understand | Proposed |
 | [0032](0032-azure-devops-as-a-second-git-provider.md) | Azure DevOps as a second `GitProvider` | Proposed |
 | [0033](0033-argo-cd-delivery-and-source-mapping.md) | Argo CD delivery verification and source mapping | Proposed |
+| [0034](0034-declarative-pack-format.md) | A declarative pack format, compiled in first | Proposed |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

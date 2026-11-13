@@ -121,6 +121,7 @@ nav = [
       { "0031 Kustomize transformations" = "adr/0031-kustomize-transformations-in-the-source-mapping.md" },
       { "0032 Azure DevOps provider" = "adr/0032-azure-devops-as-a-second-git-provider.md" },
       { "0033 Argo CD delivery" = "adr/0033-argo-cd-delivery-and-source-mapping.md" },
+      { "0034 Declarative packs" = "adr/0034-declarative-pack-format.md" },
       { "Template" = "adr/template.md" },
     ] },
   ] },

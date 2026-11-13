@@ -656,6 +656,14 @@ func TestLimitsCircuitBreaker(t *testing.T) {
 		_, got, err := reconcileLimits(t, r, rr)
 		expectAdmitted(t, err, got)
 	})
+	// A merge recorded without a receipt is read as the Inconclusive it ends in, also in the reconcile before.
+	t.Run("a merge without a receipt does not close it", func(t *testing.T) {
+		m := o("m", remediationv1alpha1.PhaseMerged, time.Minute)
+		setVerified(m, metav1.ConditionUnknown, ReasonNoMergeReceipt, "no receipt")
+		r, _, rr, stub := limitsWorld(t, 20, append(failed(), m)...)
+		res, got, err := reconcileLimits(t, r, rr)
+		expectQueued(t, r, rr, res, err, got, stub, ReasonCircuitOpen)
+	})
 	t.Run("inconclusive does not close it", func(t *testing.T) {
 		others := append(failed(), o("i", remediationv1alpha1.PhaseInconclusive, time.Minute))
 		r, _, rr, stub := limitsWorld(t, 20, others...)

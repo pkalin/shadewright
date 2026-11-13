@@ -55,41 +55,59 @@ const (
 //     It records the pull request first, and calls recordMerge only after checkMerged found that the merged
 //     head held exactly the planned change; a merge with a foreign change never reaches it.
 //
-// A commit that does not pass the schema's pattern is not written, and a V(1) log line says so: the status then
-// holds neither the commit nor a receipt, instead of the whole write failing and the merge going unrecorded.
-// Without a receipt, for that or any other reason (the recorded plan repository, source or head does not match
-// the pull request), condition Verified is set Unknown with reason NoMergeReceipt in the same write, and the
-// next reconcile ends the request Inconclusive (settleReceipt). A receipt already recorded is never replaced.
+// The receipt is checked first and the merge commit written only with it: status.pullRequest.mergeCommitSHA is
+// set once and never changed, so a commit of a pull request that is not the recorded one (number, head, target
+// branch) is never written. A commit that is not a full commit ID is not written either, and a V(1) log line
+// says so. Without a receipt, for that or any other reason (no pull request recorded, cr not merged, the
+// recorded plan repository or source missing), condition Verified is set Unknown with reason NoMergeReceipt in
+// the same write, and the next reconcile ends the request Inconclusive (settleReceipt): the write that sets
+// Merged always carries the receipt or that mark, never neither. A receipt already recorded is never replaced.
 func recordMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) {
-	if rr.Status.PullRequest == nil || cr.State != providers.ChangeRequestMerged || rr.Status.MergeReceipt != nil {
+	if rr.Status.MergeReceipt != nil {
 		return
 	}
-	if shaPattern.MatchString(cr.MergeCommit) {
-		rr.Status.PullRequest.MergeCommitSHA = cr.MergeCommit
-	} else {
+	if !shaPattern.MatchString(cr.MergeCommit) {
 		logf.FromContext(ctx).V(1).Info("Refused the merge commit of RemediationRequest, which is not a full commit ID",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", cr.Number, "length", len(cr.MergeCommit))
 	}
 	if receipt := mergeReceipt(rr, cr); receipt != nil {
+		rr.Status.PullRequest.MergeCommitSHA = receipt.MergeCommitSHA
 		rr.Status.MergeReceipt = receipt
 		return
 	}
+	markNoMergeReceipt(rr)
+}
+
+// markNoMergeReceipt sets condition Verified Unknown with reason NoMergeReceipt in the status about to be written.
+func markNoMergeReceipt(rr *remediationv1alpha1.RemediationRequest) {
 	setVerified(rr, metav1.ConditionUnknown, ReasonNoMergeReceipt,
 		"The merge cannot be bound to a merge receipt: the Git host reported no full merge commit ID for the "+
 			"pull request, or it is not the recorded one; nothing after the merge can be checked")
 }
 
-// mergeReceipt builds the receipt of the merge of cr from the recorded state, without mergedAt (setPhase sets
-// it in the status write that sets Merged), or returns nil when the merge cannot be bound to one: no plan
-// repository or source recorded, a pull request that is not the recorded one (number, head, target branch), or
-// a merge commit that is not recorded (not a full commit ID).
+// noReceiptMerge reports whether rr is Merged without a receipt and carries the NoMergeReceipt mark: the next
+// reconcile ends it Inconclusive (settleReceipt), and until then it is read as that, never as a success.
+func noReceiptMerge(rr *remediationv1alpha1.RemediationRequest) bool {
+	if rr.Status.Phase != remediationv1alpha1.PhaseMerged || rr.Status.MergeReceipt != nil {
+		return false
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionVerified)
+	return c != nil && c.Reason == ReasonNoMergeReceipt
+}
+
+// mergeReceipt builds the receipt of the merge of cr from the recorded state and cr, without mergedAt (setPhase
+// sets it in the status write that sets Merged), or returns nil when the merge cannot be bound to one: cr not
+// merged, no pull request, plan repository or source recorded, a pull request that is not the recorded one
+// (number, head, target branch), a merge commit that is not a full commit ID, or one other than a merge commit
+// already recorded.
 func mergeReceipt(rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) *remediationv1alpha1.MergeReceipt {
 	st := rr.Status
 	pr := st.PullRequest
 	switch {
-	case st.PlanRepository == nil, st.Source == nil, pr == nil, pr.MergeCommitSHA == "",
-		pr.MergeCommitSHA != cr.MergeCommit, cr.Number != pr.Number, cr.HeadSHA != pr.HeadSHA,
-		!shaPattern.MatchString(pr.HeadSHA), cr.BaseBranch != string(st.Source.TargetBranch):
+	case cr.State != providers.ChangeRequestMerged, st.PlanRepository == nil, st.Source == nil, pr == nil,
+		!shaPattern.MatchString(cr.MergeCommit), pr.MergeCommitSHA != "" && pr.MergeCommitSHA != cr.MergeCommit,
+		cr.Number != pr.Number, cr.HeadSHA != pr.HeadSHA, !shaPattern.MatchString(pr.HeadSHA),
+		cr.BaseBranch != string(st.Source.TargetBranch):
 		return nil
 	}
 	return &remediationv1alpha1.MergeReceipt{
@@ -97,7 +115,7 @@ func mergeReceipt(rr *remediationv1alpha1.RemediationRequest, cr providers.Chang
 		TargetBranch:   st.Source.TargetBranch,
 		PullRequest:    pr.Number,
 		HeadSHA:        pr.HeadSHA,
-		MergeCommitSHA: pr.MergeCommitSHA,
+		MergeCommitSHA: cr.MergeCommit,
 	}
 }
 
@@ -140,9 +158,14 @@ func findRecorded(ctx context.Context, git providers.GitProvider, rr *remediatio
 //   - a receipt is recorded: nothing to do here (the phases after the merge are #681);
 //   - no receipt, and Verified says NoMergeReceipt (written with the merge): the request ends Inconclusive with
 //     that reason, in one status write;
-//   - no receipt and no Verified condition: the request was merged before receipts existed. It keeps Merged and
-//     gets Verified Unknown with reason MergedBeforeVerification, once; its phase, and so the circuit breaker's
-//     reading of it, does not change.
+//   - no receipt and no Verified condition: the request was merged before receipts existed, since every status
+//     write that sets Merged now carries the receipt or the NoMergeReceipt mark (recordMerge, and setPhase for
+//     any other path). It keeps Merged and gets Verified Unknown with reason MergedBeforeVerification, once; its
+//     phase, and so the circuit breaker's reading of it, does not change;
+//   - no receipt and Verified says MergedBeforeVerification: marked already, nothing to do;
+//   - no receipt and Verified with any other reason: a status the executor never writes. Like an unknown
+//     phase or answer elsewhere, it is never retried and never passes: the request ends Inconclusive with
+//     reason NoMergeReceipt, and the message names the reason it found.
 //
 // A status write that fails is returned for a retry; the next reconcile reads the same state and decides the same.
 func (r *RemediationRequestReconciler) settleReceipt(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
@@ -159,8 +182,15 @@ func (r *RemediationRequestReconciler) settleReceipt(ctx context.Context, rr *re
 			return false, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 		}
 		return false, nil
-	case verified.Reason != ReasonNoMergeReceipt:
+	case verified.Reason == ReasonMergedBeforeVerification:
 		return false, nil
+	case verified.Reason == ReasonNoMergeReceipt:
+	default:
+		logf.FromContext(ctx).Info("Found a merged RemediationRequest without a merge receipt and with an unknown "+
+			"Verified reason", "remediationRequest", client.ObjectKeyFromObject(rr), "reason", verified.Reason)
+		setVerified(rr, metav1.ConditionUnknown, ReasonNoMergeReceipt, fmt.Sprintf("The merge has no merge "+
+			"receipt, and condition Verified had reason %q, which the executor does not write; nothing after the "+
+			"merge can be checked", verified.Reason))
 	}
 	r.setPhase(rr, remediationv1alpha1.PhaseInconclusive)
 	settleLock(rr)

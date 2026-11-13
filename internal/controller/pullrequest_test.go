@@ -1164,6 +1164,28 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(*again).To(Equal(*verified), "written once")
 	})
 
+	It("ends a merged request without a receipt and with an unknown Verified reason Inconclusive (#678)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		_, err := git.Merge(got.Status.PullRequest.Number)
+		Expect(err).NotTo(HaveOccurred())
+		merged := metav1.NewMicroTime(clock)
+		got.Status.Phase = remediationv1alpha1.PhaseMerged
+		got.Status.LastPhaseTransitionTime = &merged
+		got.Status.PullRequest.MergedAt = &merged
+		got.Status.HoldsTarget = new(false)
+		got.Status.BreakerCounts = new(true)
+		setVerified(got, metav1.ConditionUnknown, "SomethingElse", "not written by this executor")
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+
+		clock = clock.Add(time.Minute)
+		_ = reconcileOnce()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseInconclusive), "never passes as merged")
+		verified := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionVerified)
+		Expect(verified.Reason).To(Equal(ReasonNoMergeReceipt))
+		Expect(verified.Message).To(ContainSubstring(`"SomethingElse"`))
+	})
+
 	It("retries the check of a merged pull request found after a lost open without closing it again (#524)", func() {
 		got := mergedAfterLostOpen(func(string) {
 			faulty.failOn(opCheckMerged, &providers.RetryableError{Err: errors.New("server error")})

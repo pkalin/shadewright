@@ -138,6 +138,12 @@ func TestRecordMergeWithoutAReceipt(t *testing.T) {
 			rr.Status.PlanRepository = nil
 		},
 		"no source": func(rr *remediationv1alpha1.RemediationRequest, _ *providers.ChangeRequest) { rr.Status.Source = nil },
+		"no pull request recorded": func(rr *remediationv1alpha1.RemediationRequest, _ *providers.ChangeRequest) {
+			rr.Status.PullRequest = nil
+		},
+		"not merged": func(_ *remediationv1alpha1.RemediationRequest, cr *providers.ChangeRequest) {
+			cr.State = providers.ChangeRequestOpen
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rr, cr := receiptRequest()
@@ -146,11 +152,38 @@ func TestRecordMergeWithoutAReceipt(t *testing.T) {
 			if rr.Status.MergeReceipt != nil {
 				t.Fatalf("receipt written: %+v", rr.Status.MergeReceipt)
 			}
+			// status.pullRequest.mergeCommitSHA is set once: a commit without a receipt is never written.
+			if pr := rr.Status.PullRequest; pr != nil && pr.MergeCommitSHA != "" {
+				t.Errorf("mergeCommitSHA written without a receipt: %q", pr.MergeCommitSHA)
+			}
 			c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionVerified)
 			if c == nil || c.Status != metav1.ConditionUnknown || c.Reason != ReasonNoMergeReceipt {
 				t.Fatalf("Verified = %+v, want Unknown %s", c, ReasonNoMergeReceipt)
 			}
 		})
+	}
+}
+
+// TestSetPhaseMergedCarriesReceiptOrMark checks that the write that sets Merged carries the receipt or the
+// NoMergeReceipt mark, never neither, also on a path that did not call recordMerge.
+func TestSetPhaseMergedCarriesReceiptOrMark(t *testing.T) {
+	r := &RemediationRequestReconciler{Now: func() time.Time { return limitsNow }}
+	rr, _ := receiptRequest()
+	rr.Status.PlanDigest = limitsDigest
+	r.setPhase(rr, remediationv1alpha1.PhaseMerged)
+	if !noReceiptMerge(rr) {
+		t.Fatalf("Merged without a receipt and without the mark: %+v", rr.Status.Conditions)
+	}
+	if rr.Status.BreakerCounts == nil || *rr.Status.BreakerCounts {
+		t.Errorf("breakerCounts = %v, want false: read like Inconclusive", rr.Status.BreakerCounts)
+	}
+
+	rr, cr := receiptRequest()
+	recordMerge(t.Context(), rr, cr)
+	r.setPhase(rr, remediationv1alpha1.PhaseMerged)
+	if rr.Status.MergeReceipt == nil || meta.FindStatusCondition(rr.Status.Conditions,
+		remediationv1alpha1.ConditionVerified) != nil {
+		t.Fatalf("receipt %+v, conditions %+v; want the receipt only", rr.Status.MergeReceipt, rr.Status.Conditions)
 	}
 }
 

@@ -237,12 +237,16 @@ const (
 // comes from Git host outages and deadlines, not from a bad change. Denied, Cancelled and Superseded say
 // nothing about whether the changes work, and a request without a plan digest never got through the policy
 // check, so neither counts. Nor does a request without lastPhaseTransitionTime (one that ended before the
-// field existed): it cannot be ordered.
+// field existed): it cannot be ordered. A request in Merged that carries the NoMergeReceipt mark (merge.go) is
+// read like the Inconclusive it ends in, never as a success.
 func breakerOutcome(rr *remediationv1alpha1.RemediationRequest) outcomeClass {
 	if rr.Status.PlanDigest == "" || rr.Status.LastPhaseTransitionTime == nil {
 		return outcomeNone
 	}
 	switch {
+	case noReceiptMerge(rr):
+		// Merged without a receipt: it ends Inconclusive at the next reconcile, and is read as that already.
+		return outcomeNone
 	case slices.Contains(successPhases, rr.Status.Phase):
 		return outcomeSuccess
 	case slices.Contains(failurePhases, rr.Status.Phase):
@@ -689,6 +693,12 @@ func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.Remediat
 		rr.Status.PullRequest != nil && rr.Status.PullRequest.MergedAt != nil {
 		// The receipt recordMerge built is completed with the time of this write (ADR-0030 section 1).
 		mr.MergedAt = *rr.Status.PullRequest.MergedAt
+	}
+	if phase == remediationv1alpha1.PhaseMerged && rr.Status.MergeReceipt == nil && !noReceiptMerge(rr) {
+		// The write that sets Merged carries the receipt or the NoMergeReceipt mark, never neither, also on a path
+		// that did not go through recordMerge: settleReceipt reads a request with neither as one merged before
+		// receipts existed.
+		markNoMergeReceipt(rr)
 	}
 	// The breaker's watermark is set in the same status write that ends the request (breakercounts.go).
 	classifyBreaker(rr)

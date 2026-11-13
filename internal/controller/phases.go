@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -49,9 +50,9 @@ import (
 // never the live settings' branch. Once the GitOps controller is seen applying the merge commit or a later commit
 // that holds it, one status write records the applied time and the rollout fields, sets Delivered True and moves
 // the request to Verifying with status.deadline at the timeout. Every reconcile in Verifying reads the target
-// again: Configured, the rollout (RolledOut) and the template's freshness. At the timeout, until the verifier's
-// report is read (#683), a request ends Failed with RolloutStuck when RolledOut is False, and Inconclusive with
-// ClearingNotChecked otherwise.
+// again: Configured, the rollout (RolledOut) and the template's freshness, and then judges Cleared from the
+// verifier's report (clearing.go): Succeeded, Failed (OOMKilled at once; RolloutStuck, KedaNotReady or Restarted
+// at the timeout) or Inconclusive.
 //
 // Every wait is measured on the executor's clock from a time it recorded itself (mergedAt, appliedObservedAt),
 // never from a time of the Git host or of Flux. A clock that went back by more than mergeCommitClockSlack ends
@@ -92,8 +93,8 @@ const (
 	// ReasonValueChanged: Configured False; the live target does not hold the desired value, for example a later
 	// commit overwrote it (Inconclusive at once).
 	ReasonValueChanged = "ValueChanged"
-	// ReasonClearingNotChecked: the request reached its timeout without evidence that the symptom cleared,
-	// which the executor does not read yet (#683), or the timeout could not be measured (Inconclusive).
+	// ReasonClearingNotChecked: clearing is not checked for the target (a ScaledObject, whose symptom container
+	// status does not show), or the timeout could not be measured (Inconclusive).
 	ReasonClearingNotChecked = verification.ReasonClearingNotChecked
 	// ReasonTargetNotChecked: the executor's own evidence on the target could not be read: the target could not
 	// be read until the end of the timeout and its grace with no rollout verdict recorded, or the action's field
@@ -467,9 +468,8 @@ func (r *RemediationRequestReconciler) enterVerifying(ctx context.Context, rr *r
 // fresh is the one just read with the delivery, must be the request's (TargetGone, TargetReplaced at once); its
 // field must hold the desired value (Configured; ValueChanged at once); and, for a Deployment or StatefulSet,
 // its template must still be the one recorded (RolloutSuperseded at once) while RolledOut follows the rollout.
-// These checks run on every reconcile, the last one included. At the timeout the request ends Failed with
-// RolloutStuck when RolledOut is False, and Inconclusive with ClearingNotChecked otherwise: until #683 reads the
-// verifier's report there is no evidence that the symptom cleared, so it never ends Succeeded.
+// These checks run on every reconcile, the last one included; clearStep then judges Cleared from the
+// verifier's report and decides the end.
 func (r *RemediationRequestReconciler) verifyStep(ctx, stepCtx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, now time.Time, fresh client.Object) (reconcile.Result, error) {
 	pr, ref := rr.Status.PullRequest, rr.Spec.TargetRef
@@ -548,29 +548,7 @@ func (r *RemediationRequestReconciler) verifyStep(ctx, stepCtx context.Context,
 		changed = ch || changed
 		stuck = result
 	}
-	if !now.Before(deadline) {
-		if c := stuckRecorded(rr); c != nil {
-			return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseFailed,
-				rollout.ReasonRolloutStuck, "The rollout did not complete by the verification timeout: "+c.Message)
-		}
-		if isScaledObject(ref) {
-			if state := kedaState(target); state != kedaready.Ready {
-				return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseFailed,
-					ReasonKedaNotReady, fmt.Sprintf("The ScaledObject is %s by the KedaReady rule at the verification "+
-						"timeout, so it does not scale on its metrics", state))
-			}
-		}
-		return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
-			ReasonClearingNotChecked, "The verification timeout passed without evidence that the symptom cleared: "+
-				"the executor does not read the verifier's report yet")
-	}
-	if err := r.writeIf(ctx, rr, changed); err != nil {
-		return reconcile.Result{}, err
-	}
-	if stuck != nil && r.Recorder != nil {
-		r.Recorder.Event(rr, corev1.EventTypeWarning, rollout.ReasonRolloutStuck, stuck.Message)
-	}
-	return reconcile.Result{RequeueAfter: pollAfter(deadline.Sub(now))}, nil
+	return r.clearStep(ctx, stepCtx, rr, target, now, deadline, changed, stuck)
 }
 
 // stuckRecorded returns the RolledOut condition when it records the rollout stuck (False, RolloutStuck), else nil.
@@ -698,6 +676,11 @@ func setCondition(rr *remediationv1alpha1.RemediationRequest, typ string, status
 // write: Warning for Failed, Normal otherwise.
 func (r *RemediationRequestReconciler) endVerification(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	phase remediationv1alpha1.RemediationPhase, reason, message string, conds ...metav1.Condition) error {
+	if rr.Status.Phase == remediationv1alpha1.PhaseVerifying &&
+		!slices.ContainsFunc(conds, func(c metav1.Condition) bool { return c.Type == remediationv1alpha1.ConditionCleared }) {
+		// Every end from Verifying says what became of the clearing (ADR-0030 section 3).
+		conds = append(conds, clearedAtEnd(rr, phase, reason, message))
+	}
 	for _, c := range conds {
 		meta.SetStatusCondition(&rr.Status.Conditions, c)
 	}
@@ -713,6 +696,7 @@ func (r *RemediationRequestReconciler) endVerification(ctx context.Context, rr *
 	if err := r.writeIf(ctx, rr, true); err != nil {
 		return err
 	}
+	r.reportCounters.forget(client.ObjectKeyFromObject(rr))
 	if r.Recorder != nil {
 		r.Recorder.Event(rr, eventType, reason, message)
 	}

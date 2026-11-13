@@ -88,6 +88,7 @@ var troubleshootingSections = map[string][]string{
 	"ChangeRequestConflict":             {secPullRequest},
 	"ChangeRequestGone":                 {secPullRequest},
 	"ChangeRequestMerged":               {secPullRequest},
+	"CheckNotAvailable":                 {secAfterMerge},
 	"CircuitHalfOpen":                   {secLimits},
 	"CircuitOpen":                       {secLimits},
 	"ClearingNotChecked":                {secAfterMerge},
@@ -103,6 +104,7 @@ var troubleshootingSections = map[string][]string{
 	"DeliverySuspended":                 {secAfterMerge},
 	"DesiredValueMissing":               {secRender},
 	"DirectionReversed":                 {secNotRequest},
+	"EvidenceMissing":                   {secAfterMerge},
 	"FieldNotFound":                     {secRequest, secRender},
 	"FileMissing":                       {secRender},
 	"FileNotInBuild":                    {secRender},
@@ -143,14 +145,20 @@ var troubleshootingSections = map[string][]string{
 	"NoFluxLabels":                      {secFlux},
 	"NoKustomizationFile":               {secFiles},
 	"NoMergeReceipt":                    {secReceipt},
+	"NoRecurrence":                      {secAfterMerge},
+	"NotAvailable":                      {secAfterMerge},
 	"NotInInventory":                    {secFlux},
+	"OOMKilled":                         {secAfterMerge},
 	"ObjectsAddedOrRemoved":             {secRender},
+	"ObservationGap":                    {secAfterMerge},
 	"OtherFieldChanged":                 {secRender},
 	"OtherObjectChanged":                {secRender},
+	"PartialRollout":                    {secAfterMerge},
 	"PatchRefused":                      {secPullRequest},
 	"PathNotAllowed":                    {secRepository},
 	"PlanChanged":                       {secFreshness},
 	"PlanIncomplete":                    {secPullRequest},
+	"PodNotReady":                       {secAfterMerge},
 	"PolicyChanged":                     {secFreshness},
 	"PolicyInvalid":                     {secPolicy},
 	"PolicyMismatch":                    {secPolicy},
@@ -165,12 +173,14 @@ var troubleshootingSections = map[string][]string{
 	"PullRequestRewriteRefused":         {secPullRequest},
 	"RemoteCluster":                     {secFlux},
 	"RenderFailed":                      {secRender},
+	"ReportMismatch":                    {secAfterMerge},
 	"RepositoryNotAllowed":              {secRepository},
 	"RepositoryNotConfigured":           {secRepository},
 	"RepositoryNotInPolicy":             {secRepository},
 	"RepositoryUnavailable":             {secPullRequest},
 	"RepositoryUnusable":                {secRepository},
 	"RequestNamespaceNotAllowed":        {secPolicy},
+	"Restarted":                         {secAfterMerge},
 	"ReviewCheckRefused":                {secPullRequest},
 	"ReviewListTooLong":                 {secPullRequest},
 	"RevisionMismatch":                  {secFlux},
@@ -182,6 +192,7 @@ var troubleshootingSections = map[string][]string{
 	"RolloutSuperseded":                 {secAfterMerge, secRollout},
 	"ScaledObjectNotReady":              {secPolicy, secFreshness},
 	"ScaledObjectReadinessUnknown":      {secPolicy},
+	"ScaledToZero":                      {secAfterMerge},
 	"SchemaInvalid":                     {secRender},
 	"SettingsChanged":                   {secFreshness},
 	"SettingsNotFound":                  {secRequest},
@@ -192,16 +203,17 @@ var troubleshootingSections = map[string][]string{
 	"SourceNotFound":                    {secFlux},
 	"SourceNotReady":                    {secFlux},
 	"SourceOptions":                     {secFlux},
+	"StaleReport":                       {secAfterMerge},
 	"TargetBranchChanged":               {secPullRequest},
 	"TargetChanged":                     {secRequest, secFreshness},
 	"TargetFileChanged":                 {secFreshness},
 	"TargetFileDiverged":                {secPullRequest},
 	"TargetGone":                        {secAfterMerge},
-	"TargetNotChecked":                  {secAfterMerge},
 	"TargetLabelsNotMatched":            {secPolicy},
 	"TargetLocked":                      {secLimits},
 	"TargetMismatch":                    {secRequest},
 	"TargetNamespaceNotAllowed":         {secPolicy},
+	"TargetNotChecked":                  {secAfterMerge},
 	"TargetNotFound":                    {secRequest, secRender},
 	"TargetReplaced":                    {secAfterMerge},
 	"TooLarge":                          {secFiles, secRender},
@@ -220,8 +232,11 @@ var troubleshootingSections = map[string][]string{
 var conditionSections = map[string]string{
 	remediationv1alpha1.ConditionPlanFresh: secFreshness,
 	remediationv1alpha1.ConditionQueued:    secLimits,
-	"RolledOut":                            secRollout,
+	conditionRolledOut:                     secRollout,
 }
+
+// conditionRolledOut is the executor's rollout condition type (rollout.ConditionRolledOut).
+const conditionRolledOut = "RolledOut"
 
 // troubleshootingLink returns the link to the section of the troubleshooting page that lists reason, preferring
 // the section of conditionType when the reason is listed in several. A reason the page does not list gets
@@ -308,8 +323,21 @@ type RequestExplanation struct {
 	HandoffFrom *HandoffReport `json:"handoffFrom,omitempty"`
 	// HandoffTo is status.handoff.to: the request that took the pull request over from this one.
 	HandoffTo *HandoffReport `json:"handoffTo,omitempty"`
+	// Outcome is the three outcomes of verification after the merge (ADR-0030 section 3): conditions RolledOut,
+	// Configured and Cleared. Set once any of them is reported.
+	Outcome *OutcomeReport `json:"outcome,omitempty"`
 	// Conditions is the condition timeline, oldest first.
 	Conditions []TimelineEntry `json:"conditions"`
+}
+
+// OutcomeReport is the three outcomes of verification, one condition each; nil when not reported.
+type OutcomeReport struct {
+	// RolledOut is condition RolledOut: every desired replica runs the applied template.
+	RolledOut *ConditionReport `json:"rolledOut,omitempty"`
+	// Configured is condition Configured: the live target holds the desired value.
+	Configured *ConditionReport `json:"configured,omitempty"`
+	// Cleared is condition Cleared: the symptom did not come back over a quiet window.
+	Cleared *ConditionReport `json:"cleared,omitempty"`
 }
 
 // StopReport is the condition that ended a request, with where the troubleshooting page explains it.
@@ -486,6 +514,11 @@ func explainRequest(rr *remediationv1alpha1.RemediationRequest,
 		PlanDigest: clean(st.PlanDigest, maxName),
 		ChainRoot:  clean(string(rr.Spec.ChainRoot), maxName),
 		Conditions: timeline(st.Conditions),
+	}
+	if o := (OutcomeReport{RolledOut: conditionReport(st.Conditions, conditionRolledOut),
+		Configured: conditionReport(st.Conditions, remediationv1alpha1.ConditionConfigured),
+		Cleared:    conditionReport(st.Conditions, remediationv1alpha1.ConditionCleared)}); o != (OutcomeReport{}) {
+		r.Outcome = &o
 	}
 	if st.LastPhaseTransitionTime != nil && !st.LastPhaseTransitionTime.IsZero() {
 		r.PhaseSince = &metav1.Time{Time: st.LastPhaseTransitionTime.Time}
@@ -683,6 +716,11 @@ func requestLines(p *printer, e *Explanation, r *RequestExplanation, now time.Ti
 	if pr := r.PullRequest; pr != nil {
 		p.line("  Pull request: %s", pullRequestLine(pr))
 	}
+	if o := r.Outcome; o != nil {
+		p.line("  Rolled out:   %s", outcomeLine(o.RolledOut))
+		p.line("  Configured:   %s", outcomeLine(o.Configured))
+		p.line("  Cleared:      %s", outcomeLine(o.Cleared))
+	}
 	if r.Replaces != "" || r.HandoffFrom != nil {
 		line := r.Replaces
 		if h := r.HandoffFrom; h != nil {
@@ -708,6 +746,18 @@ func requestLines(p *printer, e *Explanation, r *RequestExplanation, now time.Ti
 		}
 		p.line("%s", line)
 	}
+}
+
+// outcomeLine is one outcome line: the condition's status and reason, and its message when it has one.
+func outcomeLine(c *ConditionReport) string {
+	if c == nil {
+		return "not reported yet"
+	}
+	line := c.Status + ", " + c.Reason
+	if c.Message != "" {
+		line += ": " + c.Message
+	}
+	return line
 }
 
 func incidentSummary(e *Explanation, r *RequestExplanation) string {

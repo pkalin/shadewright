@@ -28,7 +28,8 @@ const MaxReportBaselines = 200
 // ResetReason says why a verification window was reset (ADR-0030 section 4). The verifier sets Restarted,
 // PodNotReady, PartialRollout, EvidenceMissing, ScaledToZero and ObservationGap in its report, the only reasons
 // the enum of WindowReset.reason accepts. NotAvailable, StaleReport and ReportMismatch are the executor's
-// reasons for its own window; it keeps them in request status with its own field (#683), never in a report.
+// reasons for its own window; with PartialRollout they are the reasons of status.verification.lastReset of a
+// RemediationRequest (VerificationReset), never of a report.
 type ResetReason string
 
 // The reset reasons.
@@ -50,7 +51,8 @@ const (
 	// ResetObservationGap: no sample for more than two poll intervals, and a pod not in the baselines after it.
 	// No evidence.
 	ResetObservationGap ResetReason = "ObservationGap"
-	// ResetNotAvailable: the target reports fewer available replicas than desired (executor). No evidence.
+	// ResetNotAvailable: the target reports other available replicas than desired, fewer or more (executor). No
+	// evidence.
 	ResetNotAvailable ResetReason = "NotAvailable"
 	// ResetStaleReport: the report is missing or its sample counter stopped rising (executor). No evidence.
 	ResetStaleReport ResetReason = "StaleReport"

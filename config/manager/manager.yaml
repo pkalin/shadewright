@@ -70,8 +70,8 @@ spec:
           # The node grace of a verification verdict (ADR-0030 section 4): at least the cluster's node monitor
           # grace period. The chart sets it from executor.verification.nodeGrace.
           - --node-grace=1m
-          # Outcome verification after the merge (--verify-outcomes, ADR-0030) stays off until the executor reads
-          # the verifier's report (#683). The chart sets it from executor.verification.enabled.
+          # Outcome verification after the merge (--verify-outcomes, ADR-0030) is off by default until a lab run
+          # with a release candidate decides it. The chart sets it from executor.verification.enabled.
         image: controller:latest
         env:
         - name: POD_NAMESPACE

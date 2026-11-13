@@ -87,11 +87,11 @@ func bindExecutorFlags(fs *flag.FlagSet) *executorFlags {
 			"period (kube-controller-manager --node-monitor-grace-period). Part of the verification timeout; 0 uses "+
 			"the default, a negative value refuses to start.")
 	fs.BoolVar(&f.verifyOutcomes, "verify-outcomes", false,
-		"Move merged requests through WaitingForDelivery and Verifying to Failed or Inconclusive (ADR-0030). Off "+
-			"by default until the executor reads the verifier's report (#683): before that no request can end "+
-			"Succeeded, so every merge would end Inconclusive or Failed and the circuit breaker would not close "+
-			"again. Off, a merged request keeps Merged with its rollout report, and a request in "+
-			"WaitingForDelivery or Verifying ends Inconclusive (VerificationDisabled).")
+		"Move merged requests through WaitingForDelivery and Verifying to Succeeded, Failed or Inconclusive "+
+			"(ADR-0030), judging Cleared from the verifier's VerificationReport. Off by default until a lab run "+
+			"with a release candidate decides the default. On without a verifier deployed, no report is written "+
+			"and every merge ends Inconclusive or Failed. Off, a merged request keeps Merged with its rollout "+
+			"report, and a request in WaitingForDelivery or Verifying ends Inconclusive (VerificationDisabled).")
 	return f
 }
 

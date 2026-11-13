@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 760" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Shadewright architecture</title>
-  <desc id="d">Events from the cluster become durable incidents. The analyzer, with read-only access and the model, proposes a typed RemediationRequest. A deterministic policy engine decides; the remediation controller opens a pull request on the Git host; after human review and required checks the change merges, the GitOps controller (Flux) applies it. The verifier, a third identity with no model access and no Git credential, then samples the pods of the rollout and writes a VerificationReport, which is evidence and never a verdict. Built so far: the collector, incidents, the policy engine, the remediation controller up to Merged (the pull request, the wait for approval, and observing a person's merge) and the verifier with its report; the analyzer and its model call, the model provider and the executor's reading of the report are planned, and so are the arrows into and out of them, drawn dashed.</desc>
+  <desc id="d">Events from the cluster become durable incidents. The analyzer, with read-only access and the model, proposes a typed RemediationRequest. A deterministic policy engine decides; the remediation controller opens a pull request on the Git host; after human review and required checks the change merges, the GitOps controller (Flux) applies it. The verifier, a third identity with no model access and no Git credential, then samples the pods of the rollout and writes a VerificationReport, which is evidence and never a verdict. Built so far: the collector, incidents, the policy engine, the remediation controller up to Merged (the pull request, the wait for approval, and observing a person's merge) the verifier with its report, and the executor reading that report as evidence for its verdict after the merge; the analyzer and its model call and the model provider are planned, and so are the arrows into and out of them, drawn dashed.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -132,7 +132,7 @@
   <path class="f" d="M600 526V568H500V604" marker-end="url(#a)"/>
   <text class="lbl" x="510" y="598">after merge</text>
   <path class="f" d="M542 642H572" marker-end="url(#a)"/>
-  <path class="fp" d="M740 610V566" marker-end="url(#a)"/>
+  <path class="f" d="M740 610V566" marker-end="url(#a)"/>
   <text class="lbl" x="732" y="598" text-anchor="end">executor reads</text>
 
   <!-- legend -->

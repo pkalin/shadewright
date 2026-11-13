@@ -30,11 +30,16 @@ import (
 // e0 is the executor's clock at its first check in a test. It is unrelated to the verifier's t0.
 var e0 = time.Date(2026, 11, 13, 17, 42, 7, 0, time.UTC)
 
+// observeAt records a check whose read took no time: it starts and ends at now.
+func observeAt(c *Counter, report types.UID, sample int64, now time.Time) Freshness {
+	return c.Observe(report, sample, now, now)
+}
+
 // fresh observes a report twice, the counter rising in between, and returns the freshness of the second.
 func fresh(r *v1alpha1.VerificationReport, now time.Time) Freshness {
 	var c Counter
-	c.Observe(r.UID, r.Status.Sample-1, now.Add(-FastPollInterval))
-	return c.Observe(r.UID, r.Status.Sample, now)
+	observeAt(&c, r.UID, r.Status.Sample-1, now.Add(-FastPollInterval))
+	return observeAt(&c, r.UID, r.Status.Sample, now)
 }
 
 // A report that is missing, stale or bound to something else, or that does not cover every desired replica,
@@ -100,40 +105,81 @@ func TestStaleOrMismatchedReportIsNoEvidence(t *testing.T) {
 func TestCounterRule(t *testing.T) {
 	const uid types.UID = "e0000000-0000-4000-8000-000000000001"
 	var c Counter
-	if f := c.Observe(uid, 5, e0); f.Fresh || f.Stale {
+	if f := observeAt(&c, uid, 5, e0); f.Fresh || f.Stale {
 		t.Fatalf("first check: %+v; a first check proves nothing", f)
 	}
-	if f := c.Observe(uid, 6, e0.Add(PollInterval)); !f.Fresh {
+	if f := observeAt(&c, uid, 6, e0.Add(PollInterval)); !f.Fresh {
 		t.Fatalf("counter rose since a check one poll interval earlier: %+v", f)
 	}
-	if f := c.Observe(uid, 6, e0.Add(PollInterval+FastPollInterval)); f.Fresh {
+	if f := observeAt(&c, uid, 6, e0.Add(PollInterval+FastPollInterval)); f.Fresh {
 		t.Fatalf("counter did not rise since the last check: %+v", f)
 	}
-	if f := c.Observe(uid, 7, e0.Add(3*PollInterval)); f.Fresh {
+	if f := observeAt(&c, uid, 7, e0.Add(3*PollInterval)); f.Fresh {
 		t.Fatalf("counter rose only against a check more than one poll interval earlier: %+v", f)
 	}
-	if f := c.Observe(uid, 7, e0.Add(3*PollInterval+StaleAfter)); f.Stale {
+	if f := observeAt(&c, uid, 7, e0.Add(3*PollInterval+StaleAfter)); f.Stale {
 		t.Fatalf("stale after exactly StaleAfter: %+v", f)
 	}
-	if f := c.Observe(uid, 7, e0.Add(3*PollInterval+StaleAfter+time.Second)); !f.Stale || f.Fresh {
+	if f := observeAt(&c, uid, 7, e0.Add(3*PollInterval+StaleAfter+time.Second)); !f.Stale || f.Fresh {
 		t.Fatalf("counter has not risen for more than StaleAfter: %+v", f)
 	}
 	// A report created again under another UID starts over, as a restart of the executor would.
-	if f := c.Observe("e0000000-0000-4000-8000-000000000002", 100, e0.Add(10*time.Minute)); f.Fresh || f.Stale {
+	if f := observeAt(&c, "e0000000-0000-4000-8000-000000000002", 100, e0.Add(10*time.Minute)); f.Fresh || f.Stale {
 		t.Fatalf("another report: %+v", f)
 	}
 	// The executor's clock going back proves no freshness.
 	var back Counter
-	back.Observe(uid, 1, e0)
-	if f := back.Observe(uid, 2, e0.Add(-time.Second)); f.Fresh {
+	observeAt(&back, uid, 1, e0)
+	if f := observeAt(&back, uid, 2, e0.Add(-time.Second)); f.Fresh {
 		t.Fatalf("a check before the previous one by the clock: %+v", f)
+	}
+}
+
+// A check is remembered at the time taken before its read: a read that started at e0 and returned 60 s later
+// read a counter that was true at e0 at the latest, so a rise seen at a check ending 75 s after e0 is 75 s old
+// evidence, not 15 s. A slow read can make a report look older, never fresher.
+func TestCounterSlowReadIsJudgedFromItsStart(t *testing.T) {
+	const uid types.UID = "e0000000-0000-4000-8000-000000000001"
+	var c Counter
+	if f := c.Observe(uid, 100, e0, e0.Add(60*time.Second)); f.Fresh || f.Stale {
+		t.Fatalf("first check: %+v", f)
+	}
+	if f := c.Observe(uid, 101, e0.Add(75*time.Second), e0.Add(75*time.Second)); f.Fresh {
+		t.Fatalf("a rise against a read that started 75 s earlier counts as fresh: %+v", f)
+	}
+	// With the memory kept, the next rise within one poll interval of the last read's start is fresh.
+	if f := c.Observe(uid, 102, e0.Add(90*time.Second), e0.Add(91*time.Second)); !f.Fresh {
+		t.Fatalf("a rise 16 s after the start of the previous read: %+v", f)
+	}
+
+	// A slow read of the rising check delays freshness too: the rise is judged at the end of its read.
+	var slow Counter
+	observeAt(&slow, uid, 1, e0)
+	if f := slow.Observe(uid, 2, e0.Add(FastPollInterval), e0.Add(PollInterval+time.Second)); f.Fresh {
+		t.Fatalf("a rise whose read ended more than one poll interval after the previous read began: %+v", f)
+	}
+
+	// Staleness counts from the start of the read that saw the last rise.
+	var stale Counter
+	observeAt(&stale, uid, 1, e0)
+	slowRise := e0.Add(FastPollInterval)
+	stale.Observe(uid, 2, slowRise, slowRise.Add(StaleAfter))
+	if f := observeAt(&stale, uid, 2, slowRise.Add(StaleAfter+time.Second)); !f.Stale {
+		t.Fatalf("no rise for more than StaleAfter since the read that saw the last one began: %+v", f)
+	}
+
+	// A start after the end (a clock read out of order) is taken as the end.
+	var odd Counter
+	observeAt(&odd, uid, 1, e0)
+	if f := odd.Observe(uid, 2, e0.Add(time.Hour), e0.Add(FastPollInterval)); !f.Fresh {
+		t.Fatalf("readAt after now: %+v", f)
 	}
 }
 
 func TestCounterRemembersABoundedNumberOfChecks(t *testing.T) {
 	var c Counter
 	for i := range 100 {
-		c.Observe("e0000000-0000-4000-8000-000000000001", int64(i), e0.Add(time.Duration(i)*time.Second))
+		observeAt(&c, "e0000000-0000-4000-8000-000000000001", int64(i), e0.Add(time.Duration(i)*time.Second))
 	}
 	if len(c.checks) > maxChecks {
 		t.Fatalf("remembers %d checks, bound %d", len(c.checks), maxChecks)
@@ -243,6 +289,11 @@ func TestTimeoutVerdict(t *testing.T) {
 		w.Reset(reason, e0)
 		return w
 	}
+	reopened := func(reason v1alpha1.ResetReason) Window {
+		w := execReset(reason)
+		w.Good(e0.Add(PollInterval))
+		return w
+	}
 	cases := []struct {
 		name    string
 		in      Timeout
@@ -255,11 +306,19 @@ func TestTimeoutVerdict(t *testing.T) {
 		{"last report reset restarted", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetRestarted)}, VerdictFailed, "Restarted"},
 		{"restarted outweighs the executor's own reset", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetRestarted),
 			Executor: execReset(v1alpha1.ResetStaleReport)}, VerdictFailed, "Restarted"},
-		{"pods not ready", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetPodNotReady)}, VerdictInconclusive, "PodNotReady"},
+		{"pods not ready", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetPodNotReady)}, VerdictInconclusive, string(v1alpha1.ResetPodNotReady)},
 		{"partial rollout", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetPartialRollout)}, VerdictInconclusive, "PartialRollout"},
 		{"more pods than the bound", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetEvidenceMissing)}, VerdictInconclusive, "EvidenceMissing"},
-		{"executor's own reset first", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetPodNotReady),
+		{"the report's pod-level reason before the executor's NotAvailable", Timeout{RolledOut: true,
+			Report: withReset(v1alpha1.ResetPodNotReady), Executor: execReset(v1alpha1.ResetNotAvailable)},
+			VerdictInconclusive, string(v1alpha1.ResetPodNotReady)},
+		{"a stale report's reason is no reason", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetPodNotReady),
+			Executor: execReset(v1alpha1.ResetStaleReport)}, VerdictInconclusive, "StaleReport"},
+		{"the executor's closed window when the report's is open", Timeout{RolledOut: true, Report: report(samples(t, 2)),
 			Executor: execReset(v1alpha1.ResetNotAvailable)}, VerdictInconclusive, "NotAvailable"},
+		{"an old reset of an open executor window does not hide the report's", Timeout{RolledOut: true,
+			Report: withReset(v1alpha1.ResetPodNotReady), Executor: reopened(v1alpha1.ResetStaleReport)},
+			VerdictInconclusive, string(v1alpha1.ResetPodNotReady)},
 		{"no report", Timeout{RolledOut: true}, VerdictInconclusive, "StaleReport"},
 		{"a restarted reset in a mismatched report", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetRestarted),
 			Expected: Expected{RequestUID: otherUID}, Executor: execReset(v1alpha1.ResetReportMismatch)}, VerdictInconclusive, "ReportMismatch"},
